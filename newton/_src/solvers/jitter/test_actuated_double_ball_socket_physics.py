@@ -64,8 +64,8 @@ Test catalogue
 
 ``TestLimitSpringDamper.test_prismatic_limit_spring_holds_weight``
     Sphere hangs from a vertical prismatic slider. The joint's limit
-    row is configured as a PD spring-damper (``hertz_limit < 0`` ->
-    ``kp = |hertz_limit|``, ``kd = |damping_ratio_limit|``). Gravity
+    row is configured as a PD spring-damper (``stiffness_limit`` /
+    ``damping_limit`` branch -> absolute gains ``kp``, ``kd``). Gravity
     loads the spring. Steady-state deflection must satisfy Hooke's
     law: :math:`\\Delta x = m g / k`. Damping is only there to kill the
     oscillation -- the identity holds independent of it.
@@ -1059,11 +1059,12 @@ class TestLinearOscillator(unittest.TestCase):
 
 
 class TestActuatorContactReaction(unittest.TestCase):
-    """Saturated-motor contact tests. The motor is in velocity mode
-    with a capped ``max_force_drive`` so once the sphere hits the
-    ground (blocking the commanded motion) the drive saturates at
-    exactly the specified force / torque. The ground contact then
-    carries weight + drive reaction.
+    """Saturated-motor contact tests. The motor is in PD velocity
+    mode (``stiffness_drive = 0``, ``damping_drive >> 0``) with a
+    capped ``max_force_drive``; once the sphere hits the ground
+    (blocking the commanded motion) the drive saturates at exactly
+    the specified force / torque. The ground contact then carries
+    weight + drive reaction.
     """
 
     MASS = 2.0
@@ -1126,6 +1127,19 @@ class TestActuatorContactReaction(unittest.TestCase):
             # sphere sits on the ground and v = 0, the drive is
             # saturated: it applies exactly ``F_motor`` along the
             # ``-z`` direction on body2 (the sphere).
+            # PD velocity servo: ``stiffness_drive = 0`` kills the
+            # spring term, ``damping_drive`` is the proportional gain
+            # on the velocity error ``jv + target_velocity``. We pick
+            # ``damping_drive`` far larger than the ``dt * max_force /
+            # v_error`` minimum needed to saturate on the first
+            # substep once the ground blocks motion: at
+            # ``v_target = 1 m/s`` and ``v_actual = 0`` the unclamped
+            # impulse magnitude is ``kd * (v_target) / (1 + kd/dt /
+            # (1/eff_inv))`` and saturates against ``F_motor * dt``
+            # for any ``kd`` above a few hundred here (m = 2 kg).
+            # ``1e4 N*s/m`` leaves 2+ orders of magnitude of headroom
+            # so the assertion on steady-state contact = m*g + F_motor
+            # is insensitive to the gain.
             builder.add_joint(
                 body1=builder.world_body,
                 body2=n2j[sphere],
@@ -1135,12 +1149,8 @@ class TestActuatorContactReaction(unittest.TestCase):
                 drive_mode=DriveMode.VELOCITY,
                 target_velocity=1.0,  # commanded motion along +axis (down)
                 max_force_drive=float(F_motor),
-                # Pure velocity motor (both gains zero = Jitter2
-                # rigid-velocity branch). The drive saturates at
-                # ``+/- F_motor`` once the sphere is blocked by the
-                # ground, delivering exactly the force we assert on.
                 stiffness_drive=0.0,
-                damping_drive=0.0,
+                damping_drive=1.0e4,
             )
 
         scene = _JitterScene(
@@ -1160,13 +1170,28 @@ class TestActuatorContactReaction(unittest.TestCase):
     ) -> _JitterScene:
         """Horizontal pendulum. Revolute hinge at ``(0, 0, z_hinge)``
         with axis ``+y``; sphere at ``(lever, 0, sphere_radius)`` --
-        resting on the ground at ``z = 0``. A VELOCITY drive commands
-        rotation that lowers the sphere further; saturated at torque
-        ``tau``.
+        resting on the ground at ``z = 0``. A POSITION drive with a
+        target well past the ground commands rotation that lowers the
+        sphere further, saturated at torque ``tau`` via
+        ``max_force_drive``.
 
-        z_hinge is chosen so that the arm is exactly horizontal at
-        rest: ``z_hinge = sphere_radius`` so the line from the hinge
-        to the bob is horizontal when the sphere sits on the ground.
+        Why a saturated POSITION drive and not a pure-velocity servo?
+        The ground contact effectively sets a time-varying kinematic
+        constraint on the joint's angular velocity: at rest the
+        velocity is zero, so a pure-velocity PD servo with the gains
+        needed to saturate against ``tau`` substep-synchronously
+        develops a large ``acc`` accumulator and oscillates between
+        "push harder" and "overshoot relieved" across PGS iterations.
+        A saturated POSITION drive avoids that -- once the target
+        can't be reached, the spring force ``k * (theta - target)``
+        is monotone in ``theta`` and the impulse cap bites *cleanly*:
+        every substep applies exactly ``tau * dt`` in the "press
+        toward target" direction and the contact carries
+        ``m*g + tau/lever`` in steady state. This is the contract
+        this test is actually checking (force-balance through the
+        lever), independent of which drive formulation produces it.
+
+        z_hinge = sphere_radius so the arm is horizontal at rest.
         """
         z_hinge = self.SPHERE_RADIUS  # horizontal arm at rest
 
@@ -1189,25 +1214,24 @@ class TestActuatorContactReaction(unittest.TestCase):
         mb.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
 
         def _factory(n2j, builder):
-            # Revolute axis ``+y``; anchor1/anchor2 one unit apart
-            # along ``+y`` at the hinge location. Drive the joint so
-            # the arm rotates about ``+y`` in the sense that *lowers*
-            # the ``+x``-side bob further (i.e. rotation about ``-y``,
-            # equivalently ``target_velocity < 0``). When saturated
-            # the drive applies torque ``tau`` in that rotation
-            # direction on body2 (the sphere).
+            # Saturated POSITION drive. ``target = pi/2`` is past the
+            # ground (~0.7 m below the current bob z), and the spring
+            # is stiff enough that the unclamped per-substep impulse
+            # ``k * theta_err * dt^2`` far exceeds ``tau * dt``; the
+            # drive saturates on every substep at ``tau * dt``,
+            # applying a constant torque ``+tau`` about the hinge
+            # axis in the direction that lowers the +x bob.
             builder.add_joint(
                 body1=builder.world_body,
                 body2=n2j[sphere],
                 anchor1=(0.0, 0.0, z_hinge),
                 anchor2=(0.0, 1.0, z_hinge),
                 mode=JointMode.REVOLUTE,
-                drive_mode=DriveMode.VELOCITY,
-                target_velocity=-1.0,  # rotate to press the +x bob down
+                drive_mode=DriveMode.POSITION,
+                target=float(math.pi / 2),  # positive theta about +y takes +x toward -z
                 max_force_drive=float(tau),
-                # Pure velocity motor -- saturates at torque ``tau``.
-                stiffness_drive=0.0,
-                damping_drive=0.0,
+                stiffness_drive=1.0e4,
+                damping_drive=1.0e2,
             )
 
         scene = _JitterScene(
@@ -1328,7 +1352,8 @@ class TestActuatorContactReaction(unittest.TestCase):
 
 class TestLimitSpringDamper(unittest.TestCase):
     """Equilibrium tests for the limit row configured as a PD spring-
-    damper (``hertz_limit < 0`` branch). No drive, no contacts -- the
+    damper (``stiffness_limit`` / ``damping_limit`` branch). No drive,
+    no contacts -- the
     entire force balance is carried by the limit row, so the measured
     deflection maps directly onto the spring stiffness.
 
@@ -1391,13 +1416,13 @@ class TestLimitSpringDamper(unittest.TestCase):
             \\Delta = \\text{slide}_{eq} - \\text{max\\_slack}
                    = \\frac{m g}{k}.
 
-        We pass ``stiffness`` as ``-hertz_limit`` (the PD branch of
+        We pass ``stiffness`` as ``stiffness_limit`` (the PD branch of
         the dual convention -- see :class:`JointDescriptor`) and
-        ``damping`` as ``-damping_ratio_limit``.
+        ``damping`` as ``damping_limit``.
         """
         # Tiny slack so the limit is effectively always active once
-        # the sphere starts to sag. Non-zero so ``min_value == max_value
-        # == 0`` doesn't disable the limit entirely.
+        # the sphere starts to sag. ``min_value < max_value`` so the
+        # limit row is enabled (``min_value > max_value`` disables it).
         self.MAX_SLACK = 1.0e-6
 
         mb = newton.ModelBuilder()
@@ -1418,12 +1443,11 @@ class TestLimitSpringDamper(unittest.TestCase):
                 drive_mode=DriveMode.OFF,
                 min_value=-self.MAX_SLACK,
                 max_value=self.MAX_SLACK,
-                # Dual-convention negative-hertz branch: this tells the
-                # limit row to treat ``|hertz_limit|`` as absolute
-                # stiffness ``kp`` [N/m] and ``|damping_ratio_limit|``
-                # as absolute damping ``kd`` [N*s/m].
-                hertz_limit=-float(stiffness),
-                damping_ratio_limit=-float(damping),
+                # Dual-convention PD branch: ``stiffness_limit`` is the
+                # absolute stiffness ``kp`` [N/m] and ``damping_limit``
+                # is the absolute damping ``kd`` [N*s/m].
+                stiffness_limit=float(stiffness),
+                damping_limit=float(damping),
             )
 
         scene = _JitterScene(
@@ -1487,8 +1511,8 @@ class TestLimitSpringDamper(unittest.TestCase):
                 drive_mode=DriveMode.OFF,
                 min_value=-self.MAX_SLACK,
                 max_value=self.MAX_SLACK,
-                hertz_limit=-float(stiffness),
-                damping_ratio_limit=-float(damping),
+                stiffness_limit=float(stiffness),
+                damping_limit=float(damping),
             )
 
         scene = _JitterScene(
@@ -1777,9 +1801,9 @@ class TestPrismaticUnitCubeLimitSpring(unittest.TestCase):
                 drive_mode=DriveMode.OFF,
                 min_value=-self.MAX_SLACK,
                 max_value=self.MAX_SLACK,
-                # Negative-hertz branch: |hertz_limit| -> kp, |damping_ratio_limit| -> kd.
-                hertz_limit=-float(stiffness),
-                damping_ratio_limit=-float(damping),
+                # PD branch: stiffness_limit -> kp, damping_limit -> kd.
+                stiffness_limit=float(stiffness),
+                damping_limit=float(damping),
             )
 
         scene = _JitterScene(
@@ -1945,7 +1969,8 @@ def _measure_oscillation(
 
 class TestLimitDampingDecay(unittest.TestCase):
     """Damped-harmonic-oscillator identity check on the
-    spring-damper limit row (``hertz_limit < 0`` PD branch).
+    spring-damper limit row (``stiffness_limit`` / ``damping_limit``
+    PD branch).
 
     For an underdamped 1-DoF system :math:`m \\ddot x + c \\dot x +
     k x = 0` the universal identity
@@ -2016,13 +2041,13 @@ class TestLimitDampingDecay(unittest.TestCase):
                 mode=JointMode.PRISMATIC,
                 drive_mode=DriveMode.OFF,
                 # Tiny window so the limit fires almost immediately
-                # (within one substep at the chosen v0). Both bounds
-                # non-zero so the limit row is enabled (the prepare
-                # guards on ``min_value != 0 OR max_value != 0``).
+                # (within one substep at the chosen v0). ``min_value <
+                # max_value`` so the limit row is enabled (the prepare
+                # disables it when ``min_value > max_value``).
                 min_value=-1.0e-6,
                 max_value=1.0e-6,
-                hertz_limit=-float(stiffness),
-                damping_ratio_limit=-float(damping),
+                stiffness_limit=float(stiffness),
+                damping_limit=float(damping),
             )
 
         scene = _JitterScene(
@@ -2086,8 +2111,8 @@ class TestLimitDampingDecay(unittest.TestCase):
                 drive_mode=DriveMode.OFF,
                 min_value=-1.0e-6,
                 max_value=1.0e-6,
-                hertz_limit=-float(stiffness),
-                damping_ratio_limit=-float(damping),
+                stiffness_limit=float(stiffness),
+                damping_limit=float(damping),
             )
 
         scene = _JitterScene(
@@ -2228,7 +2253,7 @@ class TestOneSidedLimits(unittest.TestCase):
     """Verify that a one-sided limit (one bound active, the other
     set far enough away to never trigger) really only acts on the
     intended side. The constraint kernel guards the limit row with
-    ``if min_value != 0.0 or max_value != 0.0``, then independently
+    ``if min_value <= max_value`` (enabled), then independently
     checks ``slide > max_value`` / ``slide < min_value`` so the
     "inactive" side just falls through to ``clamp = NONE`` and the
     iterate's ``if clamp != _CLAMP_NONE:`` skips the impulse
@@ -2297,8 +2322,8 @@ class TestOneSidedLimits(unittest.TestCase):
                 drive_mode=DriveMode.OFF,
                 min_value=float(min_value),
                 max_value=float(max_value),
-                hertz_limit=-float(stiffness),
-                damping_ratio_limit=-float(damping),
+                stiffness_limit=float(stiffness),
+                damping_limit=float(damping),
             )
 
         scene = _JitterScene(
@@ -2416,8 +2441,8 @@ class TestOneSidedLimits(unittest.TestCase):
                 drive_mode=DriveMode.OFF,
                 min_value=-self.WIDE_BOUND,
                 max_value=max_value,
-                hertz_limit=-float(k),
-                damping_ratio_limit=-float(c),
+                stiffness_limit=float(k),
+                damping_limit=float(c),
             )
             return handle
 
@@ -2501,8 +2526,8 @@ class TestOneSidedLimits(unittest.TestCase):
                 drive_mode=DriveMode.OFF,
                 min_value=-self.WIDE_BOUND,  # open: huge negative
                 max_value=max_angle,
-                hertz_limit=-float(k_theta),
-                damping_ratio_limit=-float(c_theta),
+                stiffness_limit=float(k_theta),
+                damping_limit=float(c_theta),
             )
 
         scene = _JitterScene(

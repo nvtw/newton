@@ -74,6 +74,14 @@ START_Z = 8.0
 # The torque cap is sized to bleed the swing over ~5 s without fighting
 # the (much larger) gravity-driven lever torque on the bridge.
 HINGE_AXIAL_DAMPING_TORQUE = 0.1  # [N*m]
+# PD damping gain for the hinge velocity servo [N*m*s/rad]. Large
+# enough that the effective time constant ``I_hinge / gain`` is far
+# below the solver substep so the servo saturates against
+# ``HINGE_AXIAL_DAMPING_TORQUE`` at any perceptible relative spin;
+# the torque cap is the thing that actually bounds steady-state
+# energy bleed, just like in the rigid-velocity-motor formulation
+# this replaced.
+HINGE_AXIAL_DAMPING_GAIN = 10.0  # [N*m*s/rad]
 
 
 class Example(DemoExample):
@@ -142,10 +150,17 @@ class Example(DemoExample):
         # hinges *and* the two world-anchored end hinges: without
         # damping at the ends the whole chain's pendulum-like
         # rigid-body swing mode is unopposed.
+        # PD velocity servo (``stiffness_drive = 0`` kills the spring;
+        # ``damping_drive`` is the per-rad/s torque gain). The torque
+        # cap bounds the steady-state impulse at large velocity
+        # errors, matching the old rigid-velocity-motor behaviour that
+        # this API used to fall through to.
         damper_kwargs = {
             "drive_mode": DriveMode.VELOCITY,
             "target_velocity": 0.0,
             "max_force_drive": HINGE_AXIAL_DAMPING_TORQUE,
+            "stiffness_drive": 0.0,
+            "damping_drive": HINGE_AXIAL_DAMPING_GAIN,
         }
         for i in range(1, NUM_PLANKS):
             ax = START_X + i * PLANK_STEP - PLANK_EDGE_INNER

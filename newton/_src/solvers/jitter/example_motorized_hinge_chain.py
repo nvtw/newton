@@ -103,7 +103,7 @@ class JointKind(enum.Enum):
 # Selects which constraint type every joint in the chain is built
 # with. Switch this to compare solver behaviour / robustness across
 # the four implementations of "hinge between two cubes".
-JOINT_KIND = JointKind.ACTUATED_DOUBLE_BALL_SOCKET
+JOINT_KIND = JointKind.DOUBLE_BALL_SOCKET
 
 # Selects how the motor drives the free axial spin. Only honoured by
 # the kinds that carry a motor row (``HINGE_JOINT``,

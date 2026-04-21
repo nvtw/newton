@@ -813,23 +813,23 @@ class JointDescriptor:
 
     Limit -- **dual convention**
     ----------------------------
-    The one-sided ``[min_value, max_value]`` limit row accepts two
-    parameter conventions controlled by the *sign* of
-    :attr:`hertz_limit`:
+    The unilateral ``[min_value, max_value]`` limit row accepts two
+    parameter conventions, auto-selected by whether either PD gain
+    is strictly positive (matching the standalone
+    :class:`AngularLimitDescriptor` / :class:`LinearLimitDescriptor`):
 
-      * ``hertz_limit >= 0`` -- Box2D mass-independent knobs
-        ``(hertz, damping_ratio_limit)``; interpretation identical to
-        the positional block.
-      * ``hertz_limit <  0`` -- PD spring-damper with
-        ``|hertz_limit|`` as stiffness ``kp`` and
-        ``|damping_ratio_limit|`` as damping ``kd`` (same SI units
-        as the drive row). Same implicit-Euler math as the drive row
-        above.
+      * ``stiffness_limit == damping_limit == 0`` -- Box2D
+        mass-independent knobs ``(hertz_limit, damping_ratio_limit)``;
+        interpretation identical to the positional block.
+      * ``stiffness_limit > 0`` or ``damping_limit > 0`` -- Jitter2
+        PD spring-damper with absolute SI gains, same implicit-Euler
+        math as the drive row above.
 
-    Leaving ``drive_mode = DriveMode.OFF`` *and*
+    ``min_value > max_value`` disables the limit row. Leaving
+    ``drive_mode = DriveMode.OFF`` *and*
     ``stiffness_drive == damping_drive == 0`` *and*
-    ``min_value == max_value == 0`` gives a *non-actuated* revolute
-    or prismatic joint. Ball-socket has no actuator row -- drive /
+    ``min_value > max_value`` gives a *non-actuated* revolute or
+    prismatic joint. Ball-socket has no actuator row -- drive /
     limit fields are required to stay at their defaults.
     """
 
@@ -846,10 +846,12 @@ class JointDescriptor:
     max_force_drive: float = 0.0
     stiffness_drive: float = 0.0
     damping_drive: float = 0.0
-    min_value: float = 0.0
-    max_value: float = 0.0
+    min_value: float = 1.0
+    max_value: float = -1.0
     hertz_limit: float = float(DEFAULT_HERTZ_LIMIT)
     damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO)
+    stiffness_limit: float = 0.0
+    damping_limit: float = 0.0
 
 
 @dataclass
@@ -1634,10 +1636,12 @@ class WorldBuilder:
         max_force_drive: float = 0.0,
         stiffness_drive: float = 0.0,
         damping_drive: float = 0.0,
-        min_value: float = 0.0,
-        max_value: float = 0.0,
+        min_value: float = 1.0,
+        max_value: float = -1.0,
         hertz_limit: float = float(DEFAULT_HERTZ_LIMIT),
         damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO),
+        stiffness_limit: float = 0.0,
+        damping_limit: float = 0.0,
     ) -> JointHandle:
         """Append a unified ball-socket / revolute / prismatic joint and return its handle.
 
@@ -1724,20 +1728,22 @@ class WorldBuilder:
                 revolute or [N*s/m] for prismatic. Default ``0``.
                 See :class:`JointDescriptor` for the full PD spec.
             min_value: Lower limit. Units [rad] for revolute, [m] for
-                prismatic. Must be 0 for ball-socket.
-            max_value: Upper limit. Same units as ``min_value``;
-                ``min_value == max_value == 0`` disables the limit.
-                Must be 0 for ball-socket.
-            hertz_limit: Limit row frequency knob with *dual*
-                interpretation: ``>= 0`` selects the Box2D
-                ``(hertz, damping_ratio)`` convention; strictly
-                negative selects the PD convention with
-                ``kp = |hertz_limit|`` and
-                ``kd = |damping_ratio_limit|``. See
-                :class:`JointDescriptor`.
-            damping_ratio_limit: Box2D damping ratio (``hertz_limit
-                >= 0``) or absolute damping ``kd`` (``hertz_limit <
-                0``). See ``hertz_limit``.
+                prismatic. ``min_value > max_value`` disables the
+                limit row (default). Must leave the limit disabled
+                for ball-socket.
+            max_value: Upper limit. Same units as ``min_value``.
+            hertz_limit: Box2D limit row frequency [Hz]. Consumed
+                only when ``stiffness_limit == damping_limit == 0``.
+            damping_ratio_limit: Box2D limit row damping ratio.
+                Consumed only when ``stiffness_limit ==
+                damping_limit == 0``.
+            stiffness_limit: Limit PD stiffness ``kp`` [N*m/rad]
+                (revolute) or [N/m] (prismatic). Default ``0``.
+            damping_limit: Limit PD damping ``kd`` [N*m*s/rad]
+                (revolute) or [N*s/m] (prismatic). Default ``0``.
+                ``stiffness_limit > 0`` *or* ``damping_limit > 0``
+                selects the PD path (same math as the drive row);
+                both zero falls back to the Box2D path.
 
         Returns:
             A :class:`JointHandle` whose ``cid`` field is rewritten in
@@ -1774,11 +1780,17 @@ class WorldBuilder:
                     "``target`` / ``target_velocity`` / ``max_force_drive`` must "
                     "be left at their defaults (0.0)."
                 )
-            if min_value != 0.0 or max_value != 0.0:
+            if min_value <= max_value:
                 raise ValueError(
                     "add_joint(mode=JointMode.BALL_SOCKET) has no limit row; "
-                    "``min_value`` / ``max_value`` must be left at their "
-                    "defaults (0.0)."
+                    "``min_value`` / ``max_value`` must stay at the "
+                    "limit-disabled defaults (``min_value > max_value``)."
+                )
+            if stiffness_limit != 0.0 or damping_limit != 0.0:
+                raise ValueError(
+                    "add_joint(mode=JointMode.BALL_SOCKET) has no limit row; "
+                    "``stiffness_limit`` / ``damping_limit`` must be left "
+                    "at their defaults (0.0)."
                 )
             # Internally stash anchor2 = anchor1 so the shared init kernel
             # (which unconditionally reads both anchors) has something valid
@@ -1792,6 +1804,26 @@ class WorldBuilder:
                     "argument; the line anchor1 -> anchor2 defines the joint axis."
                 )
             anchor2_effective = anchor2
+            # The unified joint's drive row is PD-only. VELOCITY mode
+            # recovers pure velocity tracking via
+            # ``stiffness_drive == 0, damping_drive > 0`` (the iterate
+            # collapses to ``lam = -(1 / (1/eff_inv + kd/dt)) *
+            # (jv + target_velocity)`` -- the canonical PD velocity
+            # servo). A zero-damping VELOCITY drive used to fall
+            # through to a rigid Jitter2-style pure-velocity motor;
+            # that path is gone, so reject it up front with a message
+            # that points the user at the replacement.
+            if drive_mode_enum is DriveMode.VELOCITY and damping_drive <= 0.0:
+                raise ValueError(
+                    f"add_joint(mode={mode_enum.name}, "
+                    "drive_mode=DriveMode.VELOCITY) requires "
+                    "``damping_drive > 0``; the unified joint no longer "
+                    "exposes a rigid pure-velocity motor. Set "
+                    "``stiffness_drive=0`` and ``damping_drive`` to the "
+                    "desired PD damping gain [N*s/m or N*m*s/rad] -- the "
+                    "iterate then reduces to a PD velocity servo with "
+                    "time constant tau = I_eff / damping_drive."
+                )
 
         descriptor = JointDescriptor(
             body1=body1,
@@ -1811,6 +1843,8 @@ class WorldBuilder:
             max_value=max_value,
             hertz_limit=hertz_limit,
             damping_ratio_limit=damping_ratio_limit,
+            stiffness_limit=stiffness_limit,
+            damping_limit=damping_limit,
         )
         handle = JointHandle(cid=-1)
         self._joint_descriptors.append(descriptor)
@@ -3058,6 +3092,12 @@ class WorldBuilder:
         damping_ratio_limit = np.asarray(
             [d.damping_ratio_limit for d in descs], dtype=np.float32
         )
+        stiffness_limit = np.asarray(
+            [d.stiffness_limit for d in descs], dtype=np.float32
+        )
+        damping_limit = np.asarray(
+            [d.damping_limit for d in descs], dtype=np.float32
+        )
 
         body1_d = wp.array(body1, dtype=wp.int32, device=device)
         body2_d = wp.array(body2, dtype=wp.int32, device=device)
@@ -3076,6 +3116,8 @@ class WorldBuilder:
         max_value_d = wp.array(max_value, dtype=wp.float32, device=device)
         hertz_limit_d = wp.array(hertz_limit, dtype=wp.float32, device=device)
         damping_ratio_limit_d = wp.array(damping_ratio_limit, dtype=wp.float32, device=device)
+        stiffness_limit_d = wp.array(stiffness_limit, dtype=wp.float32, device=device)
+        damping_limit_d = wp.array(damping_limit, dtype=wp.float32, device=device)
 
         wp.launch(
             actuated_double_ball_socket_initialize_kernel,
@@ -3101,6 +3143,8 @@ class WorldBuilder:
                 max_value_d,
                 hertz_limit_d,
                 damping_ratio_limit_d,
+                stiffness_limit_d,
+                damping_limit_d,
             ],
             device=device,
         )

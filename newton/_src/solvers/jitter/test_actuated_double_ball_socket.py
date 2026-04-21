@@ -101,8 +101,11 @@ def _build_revolute_scene(
     # responsive at 60 Hz*2 substeps), mildly overdamped.
     stiffness_drive: float = 200.0,
     damping_drive: float = 20.0,
-    min_value: float = 0.0,
-    max_value: float = 0.0,
+    # Default ``min > max`` disables the limit row (the sentinel the
+    # unified joint uses; matches the standalone angular_limit one).
+    # Individual tests that exercise the stop override both.
+    min_value: float = 1.0,
+    max_value: float = -1.0,
     hertz_limit: float = 30.0,
     damping_ratio_limit: float = 1.0,
 ):
@@ -163,8 +166,9 @@ def _build_prismatic_scene(
     # Unit-mass cube: omega_0 = sqrt(200) ~= 14 rad/s, ~70% damping.
     stiffness_drive: float = 200.0,
     damping_drive: float = 20.0,
-    min_value: float = 0.0,
-    max_value: float = 0.0,
+    # ``min > max`` -> limit row disabled; see :func:`_build_revolute_scene`.
+    min_value: float = 1.0,
+    max_value: float = -1.0,
     hertz_limit: float = 30.0,
     damping_ratio_limit: float = 1.0,
 ):

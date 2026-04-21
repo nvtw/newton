@@ -85,27 +85,60 @@ Drive + limits (shared plumbing)
 Three independent sub-blocks on the free DoF:
 
 * :data:`DRIVE_MODE_OFF`         -- no actuation, DoF is free.
-* :data:`DRIVE_MODE_POSITION`    -- soft spring towards ``target``
-                                    (rad or m); ``max_force_drive`` caps
-                                    the per-substep impulse when > 0,
+* :data:`DRIVE_MODE_POSITION`    -- PD spring-damper towards ``target``
+                                    (rad or m); gains
+                                    ``stiffness_drive`` and
+                                    ``damping_drive`` are required to
+                                    be set by the caller (both zero
+                                    means "drive off").
+                                    ``max_force_drive`` caps the
+                                    per-substep impulse when > 0,
                                     unlimited when 0.
-* :data:`DRIVE_MODE_VELOCITY`    -- soft tracking of ``target_velocity``
-                                    (rad/s or m/s); ``max_force_drive``
-                                    caps the per-substep impulse and
-                                    ``max_force_drive == 0`` disables
-                                    the drive.
+* :data:`DRIVE_MODE_VELOCITY`    -- PD velocity servo tracking
+                                    ``target_velocity`` (rad/s or
+                                    m/s). The spring term is disabled
+                                    (``stiffness_drive = 0``); the
+                                    caller must supply
+                                    ``damping_drive > 0``, which acts
+                                    as the proportional gain on
+                                    velocity error. The iterate
+                                    collapses to
+                                    ``lam = -(1/(1/eff_inv +
+                                    kd/dt))*(jv + v_target)`` --
+                                    i.e. the canonical PD velocity
+                                    servo with time constant ``tau =
+                                    I_eff / damping_drive``. There is
+                                    *no* rigid pure-velocity-motor
+                                    fallback.
 
-Plus a one-sided ``[min_value, max_value]`` spring-damper limit
-(``min_value == max_value == 0`` disables it). Drive and limit share
-the same scalar PGS row and can both be active at once; the limit is
-unilateral and always wins.
+All three modes share the same scalar PD row (:func:`pd_coefficients`
++ :func:`_axial_drive_limit_iterate`); the only difference is which of
+``target`` / ``target_velocity`` is folded into the bias. The
+standalone :mod:`constraint_angular_motor` / :mod:`constraint_linear_motor`
+constraints expose the same contract.
+
+Plus a unilateral ``[min_value, max_value]`` spring-damper limit
+(``min_value > max_value`` disables it) with a *dual* softness
+parameterisation:
+
+* ``stiffness_limit == damping_limit == 0`` -- Box2D
+  ``(hertz_limit, damping_ratio_limit)`` soft constraint.
+* either ``stiffness_limit > 0`` or ``damping_limit > 0`` -- Jitter2
+  PD spring-damper with absolute SI gains.
+
+Same discriminator as the standalone :mod:`constraint_angular_limit`
+and :mod:`constraint_linear_limit` modules. Drive (always PD) and
+limit share the same scalar PGS row and can both be active at once;
+the limit is unilateral and always wins.
 
 XPBD reference: this is the PGS analogue of Section 3.3.2 / 3.4.1 of
 *Detailed Rigid Body Simulation with Extended Position Based Dynamics*
-(M\u00fcller et al.). The revolute twist extraction is the same closed-form
-quaternion-error projection as :mod:`constraint_hinge_angle`; the
-prismatic slide reads directly off the world anchor positions so no
-quaternion math is needed.
+(M\u00fcller et al.). The revolute twist uses
+:func:`math_helpers.extract_rotation_angle` plus a revolution counter
+for unbounded cumulative angles (matching
+:mod:`constraint_angular_motor` / :mod:`constraint_angular_limit`);
+the prismatic slide reads directly off the world anchor positions so
+no quaternion math is needed there.
 """
 
 from __future__ import annotations
@@ -121,7 +154,6 @@ from newton._src.solvers.jitter.constraint_container import (
     constraint_bodies_make,
     constraint_set_type,
     pd_coefficients,
-    pd_coefficients_pure_velocity,
     read_float,
     read_int,
     read_mat33,
@@ -139,7 +171,12 @@ from newton._src.solvers.jitter.constraint_container import (
     write_vec4,
 )
 from newton._src.solvers.jitter.data_packing import dword_offset_of, num_dwords
-from newton._src.solvers.jitter.math_helpers import create_orthonormal
+from newton._src.solvers.jitter.math_helpers import (
+    create_orthonormal,
+    extract_rotation_angle,
+    revolution_tracker_angle,
+    revolution_tracker_update,
+)
 
 __all__ = [
     "ADBS_DWORDS",
@@ -181,10 +218,17 @@ JOINT_MODE_BALL_SOCKET = wp.constant(wp.int32(2))
 
 #: No actuation along the free DoF.
 DRIVE_MODE_OFF = wp.constant(wp.int32(0))
-#: Soft spring towards ``target`` (rad for revolute, m for prismatic).
+#: PD spring-damper towards ``target`` (rad for revolute, m for
+#: prismatic). Caller must supply ``stiffness_drive`` / ``damping_drive``
+#: as SI gains [N/m, N*s/m] or [N*m/rad, N*m*s/rad].
 DRIVE_MODE_POSITION = wp.constant(wp.int32(1))
-#: Soft tracking of ``target_velocity`` (rad/s or m/s). ``max_force_drive``
-#: caps the per-substep impulse (N*m*s or N*s).
+#: PD velocity servo tracking ``target_velocity`` (rad/s or m/s).
+#: The spring term is disabled (``stiffness_drive = 0``); caller must
+#: supply ``damping_drive > 0`` [N*s/m or N*m*s/rad], which acts as the
+#: proportional gain on velocity error. ``max_force_drive`` optionally
+#: clamps the per-substep impulse (N*s or N*m*s). There is no rigid
+#: pure-velocity-motor fallback when ``damping_drive == 0``;
+#: :meth:`WorldBuilder.add_joint` rejects that up front.
 DRIVE_MODE_VELOCITY = wp.constant(wp.int32(2))
 
 
@@ -299,13 +343,24 @@ class ActuatedDoubleBallSocketData:
     accumulated_impulse3: wp.vec3f
 
     # ---- Actuator + limit block --------------------------------------
-    # Body-local joint axis snapshots. Revolute uses ``axis_local2`` for
-    # the closed-form twist projection; prismatic uses both as the
-    # rest-pose reference for the slide extraction.
+    # Body-1-local joint axis snapshot. Used by revolute for a
+    # single-axis Jacobian (matching the standalone angular motor /
+    # angular limit's PD path) and by the world_wrench helper. The
+    # companion 5-DoF positional lock keeps body 2's axis parallel, so
+    # one axis is both simpler and more numerically stable than the
+    # old two-axis projection.
     axis_local1: wp.vec3f
-    axis_local2: wp.vec3f
-    q0: wp.quatf
     rest_length: wp.float32
+    # Rest relative orientation used by the revolute twist tracker:
+    # ``diff = q2 * inv_initial_orientation * q1^*`` is identity at
+    # finalize() time, and :func:`extract_rotation_angle` projected
+    # onto ``j = quat_rotate(q1, axis_local1)`` gives the in-branch
+    # twist in ``(-pi, pi]``. The revolution counter wraps that into
+    # an unbounded cumulative angle, matching the standalone angular
+    # motor / angular limit.
+    inv_initial_orientation: wp.quatf
+    revolution_counter: wp.int32
+    previous_quaternion_angle: wp.float32
     drive_mode: wp.int32
     # Setpoints: ``target`` is radians (revolute) or meters (prismatic);
     # ``target_velocity`` is rad/s or m/s.
@@ -319,36 +374,40 @@ class ActuatedDoubleBallSocketData:
     # :func:`pd_coefficients` for the implicit-Euler math.
     stiffness_drive: wp.float32
     damping_drive: wp.float32
-    # Limit window: rad (revolute) or m (prismatic). Equal values disable.
-    # ``hertz_limit >= 0`` -> Box2D (hertz, damping_ratio) soft constraint.
-    # ``hertz_limit <  0`` -> PD spring-damper, ``|hertz_limit| = kp``,
-    #   ``|damping_ratio_limit| = kd``.
+    # Limit window: rad (revolute) or m (prismatic). ``min_value >
+    # max_value`` disables the limit (matches the standalone
+    # angular_limit / linear_limit sentinel).
     min_value: wp.float32
     max_value: wp.float32
+    # Limit softness: dual parameterisation -- if either
+    # ``stiffness_limit`` or ``damping_limit`` is strictly positive the
+    # row uses the Jitter2 PD spring-damper path; otherwise it falls
+    # back to Box2D ``(hertz_limit, damping_ratio_limit)``. Same
+    # discriminator as the standalone angular_limit / linear_limit
+    # (``stiffness > 0 or damping > 0 -> PD``).
     hertz_limit: wp.float32
     damping_ratio_limit: wp.float32
-    # Cached per-substep coefficients and biases.
-    #
-    # Drive row (always PD):
-    #   bias_drive          -- Jitter2 ``bias = beta * C / dt``.
+    stiffness_limit: wp.float32
+    damping_limit: wp.float32
+    # Cached per-substep coefficients (drive row is always PD):
     #   gamma_drive         -- 1 / (kd + kp*dt).
+    #   bias_drive          -- Jitter2 ``beta * C / dt`` minus
+    #                          ``target_velocity``.
     #   eff_mass_drive_soft -- 1 / (J M^-1 J^T + gamma_drive).
-    #
-    # Limit row (dual-interpretation):
-    #   bias_limit          -- Box2D velocity-bias or Jitter2 bias.
-    #   mass_coeff_limit    -- Box2D mass_coeff, or gamma_limit if PD.
-    #   impulse_coeff_limit -- Box2D impulse_coeff, or
-    #                          eff_mass_limit_soft if PD.
-    #   limit_is_pd         -- 0 = Box2D, 1 = PD; set in prepare from
-    #                          the sign of ``hertz_limit``.
-    effective_mass_axial: wp.float32
+    # Cached scalar inverse effective mass for the axial row,
+    # ``J M^-1 J^T`` (used by the Box2D limit path).
+    eff_inv_axial: wp.float32
     bias_drive: wp.float32
-    bias_limit: wp.float32
     gamma_drive: wp.float32
     eff_mass_drive_soft: wp.float32
+    # Box2D-only limit cache (stiffness_limit == damping_limit == 0).
+    bias_limit_box2d: wp.float32
     mass_coeff_limit: wp.float32
     impulse_coeff_limit: wp.float32
-    limit_is_pd: wp.int32
+    # PD-only limit cache (stiffness_limit > 0 or damping_limit > 0).
+    pd_gamma_limit: wp.float32
+    pd_beta_limit: wp.float32
+    pd_mass_coeff_limit: wp.float32
     max_lambda_drive: wp.float32
     clamp: wp.int32
     # Cached world-frame joint axis from the most recent prepare-pass.
@@ -397,9 +456,16 @@ _OFF_ACC_IMP2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accum
 _OFF_ACC_IMP3 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse3"))
 
 _OFF_AXIS_LOCAL1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_local1"))
-_OFF_AXIS_LOCAL2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_local2"))
-_OFF_Q0 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "q0"))
 _OFF_REST_LENGTH = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "rest_length"))
+_OFF_INV_INITIAL_ORIENTATION = wp.constant(
+    dword_offset_of(ActuatedDoubleBallSocketData, "inv_initial_orientation")
+)
+_OFF_REVOLUTION_COUNTER = wp.constant(
+    dword_offset_of(ActuatedDoubleBallSocketData, "revolution_counter")
+)
+_OFF_PREVIOUS_QUATERNION_ANGLE = wp.constant(
+    dword_offset_of(ActuatedDoubleBallSocketData, "previous_quaternion_angle")
+)
 _OFF_DRIVE_MODE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "drive_mode"))
 _OFF_TARGET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target"))
 _OFF_TARGET_VELOCITY = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target_velocity"))
@@ -414,12 +480,22 @@ _OFF_HERTZ_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "he
 _OFF_DAMPING_RATIO_LIMIT = wp.constant(
     dword_offset_of(ActuatedDoubleBallSocketData, "damping_ratio_limit")
 )
-_OFF_EFF_AXIAL = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "effective_mass_axial"))
+_OFF_STIFFNESS_LIMIT = wp.constant(
+    dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_limit")
+)
+_OFF_DAMPING_LIMIT = wp.constant(
+    dword_offset_of(ActuatedDoubleBallSocketData, "damping_limit")
+)
+_OFF_EFF_INV_AXIAL = wp.constant(
+    dword_offset_of(ActuatedDoubleBallSocketData, "eff_inv_axial")
+)
 _OFF_BIAS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias_drive"))
-_OFF_BIAS_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias_limit"))
 _OFF_GAMMA_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "gamma_drive"))
 _OFF_EFF_MASS_DRIVE_SOFT = wp.constant(
     dword_offset_of(ActuatedDoubleBallSocketData, "eff_mass_drive_soft")
+)
+_OFF_BIAS_LIMIT_BOX2D = wp.constant(
+    dword_offset_of(ActuatedDoubleBallSocketData, "bias_limit_box2d")
 )
 _OFF_MASS_COEFF_LIMIT = wp.constant(
     dword_offset_of(ActuatedDoubleBallSocketData, "mass_coeff_limit")
@@ -427,7 +503,15 @@ _OFF_MASS_COEFF_LIMIT = wp.constant(
 _OFF_IMPULSE_COEFF_LIMIT = wp.constant(
     dword_offset_of(ActuatedDoubleBallSocketData, "impulse_coeff_limit")
 )
-_OFF_LIMIT_IS_PD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "limit_is_pd"))
+_OFF_PD_GAMMA_LIMIT = wp.constant(
+    dword_offset_of(ActuatedDoubleBallSocketData, "pd_gamma_limit")
+)
+_OFF_PD_BETA_LIMIT = wp.constant(
+    dword_offset_of(ActuatedDoubleBallSocketData, "pd_beta_limit")
+)
+_OFF_PD_MASS_COEFF_LIMIT = wp.constant(
+    dword_offset_of(ActuatedDoubleBallSocketData, "pd_mass_coeff_limit")
+)
 _OFF_MAX_LAMBDA_DRIVE = wp.constant(
     dword_offset_of(ActuatedDoubleBallSocketData, "max_lambda_drive")
 )
@@ -471,6 +555,8 @@ def actuated_double_ball_socket_initialize_kernel(
     max_value: wp.array[wp.float32],
     hertz_limit: wp.array[wp.float32],
     damping_ratio_limit: wp.array[wp.float32],
+    stiffness_limit: wp.array[wp.float32],
+    damping_limit: wp.array[wp.float32],
 ):
     """Pack one batch of unified joint descriptors.
 
@@ -513,12 +599,17 @@ def actuated_double_ball_socket_initialize_kernel(
         damping_drive: Drive PD damping ``kd`` [N*m*s/rad] (revolute)
             or [N*s/m] (prismatic). ``stiffness_drive ==
             damping_drive == 0`` disables the drive row.
-        min_value / max_value: Limit window [rad] or [m]; equal values
-            disable.
-        hertz_limit / damping_ratio_limit: Limit soft-constraint knobs.
-            ``hertz_limit >= 0`` -> Box2D (hertz, damping_ratio);
-            ``hertz_limit <  0`` -> PD spring-damper
-            (``kp = |hertz_limit|``, ``kd = |damping_ratio_limit|``).
+        min_value / max_value: Limit window [rad] or [m]. ``min_value
+            > max_value`` disables the limit (matches the standalone
+            angular_limit / linear_limit sentinel).
+        hertz_limit / damping_ratio_limit: Box2D limit soft-constraint
+            knobs; used iff ``stiffness_limit == damping_limit == 0``.
+        stiffness_limit / damping_limit: PD limit soft-constraint
+            gains (``kp``, ``kd``) in absolute SI units. When either
+            is strictly positive the limit uses the Jitter2
+            spring-damper path and ignores ``hertz_limit`` /
+            ``damping_ratio_limit``. Matches the standalone
+            angular_limit / linear_limit's dual-convention dispatch.
     """
     tid = wp.tid()
     cid = cid_offset + tid
@@ -550,9 +641,11 @@ def actuated_double_ball_socket_initialize_kernel(
         n_hat_init = wp.vec3f(1.0, 0.0, 0.0)
 
     axis_local1 = wp.quat_rotate_inv(orient1, n_hat_init)
-    axis_local2 = wp.quat_rotate_inv(orient2, n_hat_init)
-    # Rest relative orientation (used by revolute twist extraction).
-    q0 = wp.quat_inverse(orient2) * orient1
+    # Rest relative orientation used by the revolute twist tracker.
+    # ``diff = q2 * inv_initial_orientation * q1^*`` is the identity at
+    # finalize() time, so the revolution-counter starts in-branch at 0.
+    # Matches the standalone angular motor / angular limit exactly.
+    inv_initial_orientation = wp.quat_inverse(orient2) * orient1
 
     # ---- Anchor 3 auto-derivation (prismatic only) -------------------
     # Pick any unit perpendicular to the slide axis, offset anchor 1 by
@@ -607,9 +700,10 @@ def actuated_double_ball_socket_initialize_kernel(
 
     # Actuator block.
     write_vec3(constraints, _OFF_AXIS_LOCAL1, cid, axis_local1)
-    write_vec3(constraints, _OFF_AXIS_LOCAL2, cid, axis_local2)
-    write_quat(constraints, _OFF_Q0, cid, q0)
     write_float(constraints, _OFF_REST_LENGTH, cid, rest_length)
+    write_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid, inv_initial_orientation)
+    write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, 0)
+    write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, 0.0)
     write_int(constraints, _OFF_DRIVE_MODE, cid, drive_mode[tid])
     write_float(constraints, _OFF_TARGET, cid, target[tid])
     write_float(constraints, _OFF_TARGET_VELOCITY, cid, target_velocity[tid])
@@ -620,14 +714,18 @@ def actuated_double_ball_socket_initialize_kernel(
     write_float(constraints, _OFF_MAX_VALUE, cid, max_value[tid])
     write_float(constraints, _OFF_HERTZ_LIMIT, cid, hertz_limit[tid])
     write_float(constraints, _OFF_DAMPING_RATIO_LIMIT, cid, damping_ratio_limit[tid])
-    write_float(constraints, _OFF_EFF_AXIAL, cid, 0.0)
+    write_float(constraints, _OFF_STIFFNESS_LIMIT, cid, stiffness_limit[tid])
+    write_float(constraints, _OFF_DAMPING_LIMIT, cid, damping_limit[tid])
+    write_float(constraints, _OFF_EFF_INV_AXIAL, cid, 0.0)
     write_float(constraints, _OFF_BIAS_DRIVE, cid, 0.0)
-    write_float(constraints, _OFF_BIAS_LIMIT, cid, 0.0)
     write_float(constraints, _OFF_GAMMA_DRIVE, cid, 0.0)
     write_float(constraints, _OFF_EFF_MASS_DRIVE_SOFT, cid, 0.0)
+    write_float(constraints, _OFF_BIAS_LIMIT_BOX2D, cid, 0.0)
     write_float(constraints, _OFF_MASS_COEFF_LIMIT, cid, 1.0)
     write_float(constraints, _OFF_IMPULSE_COEFF_LIMIT, cid, 0.0)
-    write_int(constraints, _OFF_LIMIT_IS_PD, cid, 0)
+    write_float(constraints, _OFF_PD_GAMMA_LIMIT, cid, 0.0)
+    write_float(constraints, _OFF_PD_BETA_LIMIT, cid, 0.0)
+    write_float(constraints, _OFF_PD_MASS_COEFF_LIMIT, cid, 0.0)
     write_float(constraints, _OFF_MAX_LAMBDA_DRIVE, cid, 0.0)
     write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, n_hat_init)
@@ -640,28 +738,127 @@ def actuated_double_ball_socket_initialize_kernel(
 # ---------------------------------------------------------------------------
 
 
-@wp.func
-def _twist_error(
-    q1: wp.quatf,
-    q2: wp.quatf,
-    q0: wp.quatf,
-    axis_local2: wp.vec3f,
-) -> wp.float32:
-    """Closed-form signed axial twist between body 1 and body 2.
+# ---------------------------------------------------------------------------
+# Shared axial (drive + limit) iterate helper
+# ---------------------------------------------------------------------------
 
-    Projects the quaternion error ``q0 * q1^{-1} * q2`` onto the body-2
-    local hinge axis, with the standard short-rotation sign flip on
-    ``err.w < 0``. Returns approximately ``sin(theta/2)`` for small
-    ``theta``, matching the half-angle convention baked into the
-    Jacobian of :mod:`constraint_hinge_angle`.
+
+@wp.func
+def _axial_drive_limit_iterate(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    jv_axial: wp.float32,
+    clamp: wp.int32,
+) -> wp.float32:
+    """Scalar drive+limit PGS step for revolute/prismatic mode.
+
+    Both modes apply a single scalar impulse ``axial_lam`` along the
+    free DoF axis. Revolute applies it as an angular impulse about
+    ``n_hat``; prismatic as a linear impulse along ``n_hat``. The
+    actuator cache (drive PD scalars, limit Box2D *or* PD scalars, the
+    warm-started accumulated impulses) is identical across both modes,
+    so the iterate math collapses to a shared helper that returns the
+    net ``lam_drive + lam_limit`` and lets the caller spread it onto
+    the body velocities in the per-mode way.
+
+    Args:
+        constraints: Shared column-major constraint storage.
+        cid: Constraint id.
+        base_offset: Dword offset of the constraint within its column.
+        jv_axial: Pre-step axial velocity residual. Revolute passes
+            ``n . (w1 - w2)``; prismatic passes ``n . (v1_anchor -
+            v2_anchor)``. See the per-mode callers for the sign
+            conventions.
+        clamp: Pre-computed limit clamp state (``_CLAMP_NONE`` / ``_CLAMP_MIN``
+            / ``_CLAMP_MAX``) from prepare.
+
+    Returns:
+        Net per-iteration axial impulse ``lam_drive + lam_limit``.
     """
-    q1_inv = wp.quat_inverse(q1)
-    quat_e = q0 * q1_inv * q2
-    quat_e_xyz = wp.vec3f(quat_e[0], quat_e[1], quat_e[2])
-    err = wp.dot(axis_local2, quat_e_xyz)
-    if quat_e[3] < 0.0:
-        err = -err
-    return err
+    # Single-fetch of every actuator scalar; the compiler hoists the
+    # reads ahead of the branches so we don't pay for the ones that
+    # aren't consumed by the active path.
+    drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
+    max_lambda_drive = read_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid)
+    max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
+    bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
+    gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
+    eff_mass_drive_soft = read_float(
+        constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid
+    )
+    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
+
+    # ---- Drive row ----------------------------------------------------
+    # The drive row is a PD spring-damper only; prepare writes
+    # ``eff_mass_drive_soft == 0`` whenever both gains are zero (OFF
+    # mode, POSITION mode with zero gains, or VELOCITY mode with
+    # ``damping_drive == 0``), so the rigid pure-velocity-motor
+    # fallback never reaches the iterate. The ``eff_mass_drive_soft ==
+    # 0`` short-circuit below is the single disable gate.
+    drive_active = drive_mode != DRIVE_MODE_OFF
+    if eff_mass_drive_soft <= 0.0:
+        drive_active = False
+
+    lam_drive = float(0.0)
+    if drive_active:
+        # Jitter2 SpringConstraint iterate (negated once to match our
+        # ``jv = n . (w1 - w2)`` convention, which is -1 * the
+        # Jitter2 ``jv = n . (v2 - v1)`` convention):
+        #   lam = -M_eff_soft * (jv - bias + gamma * acc)
+        lam_drive = -eff_mass_drive_soft * (
+            jv_axial - bias_drive + gamma_drive * acc_drive
+        )
+        old_acc = acc_drive
+        acc_drive = acc_drive + lam_drive
+        if max_force_drive > 0.0:
+            acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
+        lam_drive = acc_drive - old_acc
+        write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
+
+    # ---- Limit row ----------------------------------------------------
+    lam_limit = float(0.0)
+    if clamp != _CLAMP_NONE:
+        stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
+        damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
+        acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
+        pd_mode_limit = stiffness_limit > 0.0 or damping_limit > 0.0
+        if pd_mode_limit:
+            # Jitter2 PD: same iterate form as the drive row. ``beta``
+            # is stored *positive* (``pd_coefficients`` returns it with
+            # the Jitter2 sign); iterate subtracts it from ``jv`` so
+            # we get ``lam = -M * (jv - bias_pd + gamma * acc)``.
+            pd_mass = read_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid)
+            pd_gamma = read_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid)
+            pd_beta = read_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid)
+            if pd_mass > 0.0:
+                lam_limit = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
+        else:
+            # Box2D soft-constraint path. ``bias_limit_box2d`` is
+            # prefolded as ``-C * bias_rate`` so the PGS step targets
+            # ``jv = -bias``.
+            eff_inv = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
+            bias_box = read_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid)
+            mc_limit = read_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid)
+            ic_limit = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
+            if eff_inv > 0.0:
+                eff_axial = 1.0 / eff_inv
+                lam_unsoft = -eff_axial * (jv_axial + bias_box)
+                lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
+        old_acc = acc_limit
+        acc_limit = acc_limit + lam_limit
+        # Unilateral clamp: the limit only pushes back toward the
+        # allowed range. Positive ``acc`` reduces the cumulative
+        # position (right thing at max stop); negative ``acc``
+        # increases it (right thing at min stop).
+        if clamp == _CLAMP_MAX:
+            acc_limit = wp.max(0.0, acc_limit)
+        else:
+            acc_limit = wp.min(0.0, acc_limit)
+        lam_limit = acc_limit - old_acc
+        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
+
+    return lam_drive + lam_limit
 
 
 # ---------------------------------------------------------------------------
@@ -965,80 +1162,81 @@ def _revolute_prepare_at(
     max_value = read_float(constraints, base_offset + _OFF_MAX_VALUE, cid)
     hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
     damping_ratio_limit = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LIMIT, cid)
+    stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
+    damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
 
-    axis_local2 = read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL2, cid)
-    q0 = read_quat(constraints, base_offset + _OFF_Q0, cid)
+    # Scalar inverse effective mass for the axial row. The axial
+    # impulse in the iterate is applied along ``n_hat`` (the anchor-
+    # derived axis) on both bodies, so the Jacobian rows are
+    # ``(0; +n_hat)`` and ``(0; -n_hat)`` and the unconstrained
+    # inverse effective mass is ``n . (I1^-1 + I2^-1) . n``. Identical
+    # to the standalone angular motor / angular limit's formula once
+    # the 5-DoF positional lock aligns both body axes with n_hat.
+    eff_inv = wp.dot(n_hat, inv_inertia1 @ n_hat) + wp.dot(n_hat, inv_inertia2 @ n_hat)
+    write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, eff_inv)
 
-    # Angular inverse effective mass for the spring/limit/drive scalar
-    # row, **with the linear-anchor constraint eliminated** (parallel-axis
-    # correction). Plain ``n . (I1^-1 + I2^-1) . n`` (the unconstrained
-    # form) ignores the fact that the soft drive/limit impulse is balanced
-    # by the hard anchor constraint -- this systematically under-counts the
-    # effective inertia for any body whose COM is offset from the hinge
-    # axis, which collapses the spring stiffness to a fraction of the
-    # commanded ``kp`` and is the textbook "spring is way too soft on a
-    # lever-bob" symptom. Box2D's 2D revolute joint hides the issue
-    # because in 2D every body's COM sits *on* the hinge axis; the 3D
-    # generalisation must include the parallel-axis term.
+    # Revolute twist tracker: ``diff = q2 * inv_init * q1^*`` is the
+    # identity at finalize() time, and :func:`extract_rotation_angle`
+    # projected onto the *body-1* axis returns the signed angle in
+    # ``(-pi, pi]``; the revolution counter extends that to an
+    # unbounded cumulative angle. Byte-for-byte identical to the
+    # standalone angular motor / angular limit prepare. We use the
+    # body-1 local-axis snapshot here rather than ``n_hat`` because
+    # the tracker output must remain well-defined even if anchors
+    # briefly coincide across a substep (`|a2 - a1| ~ 0` would zero
+    # out ``n_hat`` for a step).
+    j1 = wp.quat_rotate(
+        orientation1, read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
+    )
+    inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
+    diff = orientation2 * inv_init * wp.quat_inverse(orientation1)
+    new_q_angle = extract_rotation_angle(diff, j1)
+    old_counter = read_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid)
+    old_prev = read_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
+    new_counter, new_prev = revolution_tracker_update(new_q_angle, old_counter, old_prev)
+    write_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid, new_counter)
+    write_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid, new_prev)
+    cumulative_angle = revolution_tracker_angle(new_counter, new_prev)
+
+    # ---- Drive (PD only) ---------------------------------------------
+    # The unified joint exposes a *single* PD drive model; there is no
+    # rigid velocity-servo fallback (the Jitter2-style pure-velocity
+    # motor it replaces is a degenerate rigid constraint whose
+    # stability depends on substep size, not on any gain the user
+    # controls). Velocity tracking is recovered by setting
+    # ``stiffness_drive == 0`` and ``damping_drive > 0``: the iterate
+    # then reduces to ``lam = -(1 / (1/eff_inv + kd/dt)) * (jv +
+    # target_velocity)``, i.e. the canonical PD velocity servo with a
+    # well-defined time constant ``tau = I_eff / damping_drive``. See
+    # :mod:`constraint_angular_motor` for the same contract on the
+    # standalone motor side.
     #
-    # Per-body effective inertia about the hinge axis through the anchor:
-    #   I_hinge_i = I_com_i_axis + m_i * d_perp_i^2
-    # where I_com_i_axis = 1/(n . I_com_i^-1 . n) and d_perp_i is the
-    # perpendicular distance from body i's COM to the hinge axis. The
-    # combined inverse effective mass is 1/I_hinge_1 + 1/I_hinge_2 with
-    # static-body terms (mass = inertia = inf) contributing zero.
-    # Angular inverse effective mass: n . (I1^-1 + I2^-1) . n.
-    inv_inertia_sum = inv_inertia1 + inv_inertia2
-    eff_inv = wp.dot(n_hat, inv_inertia_sum @ n_hat)
-    if eff_inv < 1.0e-20:
-        eff_axial = 0.0
-    else:
-        eff_axial = 1.0 / eff_inv
-    write_float(constraints, base_offset + _OFF_EFF_AXIAL, cid, eff_axial)
-
-    # Twist projection: half-angle approximation, same as hinge_angle.
-    twist_err = _twist_error(orientation1, orientation2, q0, axis_local2)
-    # ``twist_err ~= sin(theta/2)`` for small ``theta``; the underlying
-    # row is the half-angle quaternion component so ``C = twist_err``
-    # is the constraint error the PD drives to zero (with an appropriate
-    # rescaling of the target; we fold the 2x factor into the target
-    # comparison by mapping ``target`` back to the half-angle domain).
-    twist_angle = 2.0 * twist_err
-
-    # ---- Drive (always PD) -------------------------------------------
-    # C_drive = actual - target. Position mode uses the twist angle;
-    # velocity mode has no position error -> C = 0 (pure damper term).
+    # ``C_drive = cumulative_angle - target`` for position mode; for
+    # velocity mode the spring term vanishes (``stiffness_drive = 0``
+    # kills the kp term inside :func:`pd_coefficients`) and only the
+    # damping row acts.
     drive_C = float(0.0)
     if drive_mode == DRIVE_MODE_POSITION:
-        drive_C = twist_angle - target
-    # Jitter2 AngularMotor.PrepareForIteration branch structure:
-    #   (kp > 0 || kd > 0)  -> PD spring-damper via pd_coefficients.
-    #   else                -> pure velocity motor (gamma=0, bias=0,
-    #                          M_eff = 1/M_inv) clamped by max_force.
-    # Velocity mode with both gains zero is the common "rigid servo"
-    # idiom; position mode with both gains zero is just "drive off".
+        drive_C = cumulative_angle - target
     if stiffness_drive > 0.0 or damping_drive > 0.0:
         gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients(
             stiffness_drive, damping_drive, drive_C, eff_inv, dt
         )
-    elif drive_mode == DRIVE_MODE_VELOCITY:
-        gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients_pure_velocity(
-            eff_inv
-        )
     else:
+        # Drive fully off (mode == OFF, or POSITION with zero gains,
+        # or VELOCITY with zero damping). The iterate sees
+        # ``eff_mass_drive_soft == 0`` and short-circuits.
         gamma_drive = wp.float32(0.0)
         bias_drive = wp.float32(0.0)
         eff_mass_drive_soft = wp.float32(0.0)
     # ``target_velocity`` is the body-2 side's commanded spin rate
     # about ``+n_hat`` (positive = body 2 spins in +n direction
-    # relative to body 1 -- i.e. the intuitive "child rotates at this
-    # rate" public-API convention, matching the legacy Box2D drive).
-    # Internally the Jitter2 iterate reduces the residual ``jv -
-    # v_target`` but our ``jv_axial = n . (w1 - w2)`` convention has
-    # the *opposite* sign, so we fold ``-target_velocity`` into the
-    # bias. The iterate then reads a single scalar ``bias_drive' =
-    # -v_target + bias_from_C`` and the kernel collapses to the
-    # legacy ``lam = -M_eff * (jv + v_target)`` at kp=kd=0.
+    # relative to body 1). Our ``jv_axial = n . (w1 - w2)`` sign
+    # convention is the negative of Jitter2's, so we fold
+    # ``-target_velocity`` into the bias; the iterate's
+    # ``jv - bias_drive`` then expands to ``n.(w1 - w2) +
+    # target_velocity`` -- i.e. exactly zero when body 2 spins at the
+    # commanded rate, which is the intuitive target-reached condition.
     bias_drive = bias_drive - target_velocity
     write_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid, gamma_drive)
     write_float(
@@ -1050,56 +1248,57 @@ def _revolute_prepare_at(
     write_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid, max_lambda_drive)
 
     # ---- Limit (dual convention) -------------------------------------
-    # Determine the limit clamp state. We compare the *full* twist angle
-    # (in rad, small-angle-linearised via ``2 * sin(theta/2)``) against
-    # the user's ``min_value`` / ``max_value`` directly -- projecting
-    # the bounds through ``sin(theta/2)`` would wrap for large
-    # ``|min|`` / ``|max|`` (``sin(-50) = +0.26`` at ``min = -100 rad``
-    # for the one-sided "wide-open" idiom), which silently flips the
-    # active side and injects a phantom restoring impulse *toward* the
-    # wrong bound. Comparing angles directly keeps the clamp gate
-    # monotone in the twist angle regardless of the bound magnitudes.
-    # ``limit_C`` (rad) goes into ``pd_coefficients`` / the Box2D
-    # softness, so the spring gains stay in N*m/rad without rescaling.
+    # Determine the limit clamp state. We compare the cumulative angle
+    # (from the revolution tracker) directly against the user's
+    # ``min_value`` / ``max_value`` to stay monotone for arbitrarily
+    # large ``|min|`` / ``|max|`` -- matches the standalone
+    # angular_limit's clamp selection exactly. ``min_value >
+    # max_value`` disables the limit row.
     clamp = _CLAMP_NONE
-    limit_C = float(0.0)  # position error of the active limit stop
-    if min_value != 0.0 or max_value != 0.0:
-        if twist_angle > max_value:
+    limit_C = float(0.0)
+    if min_value <= max_value:
+        if cumulative_angle > max_value:
             clamp = _CLAMP_MAX
-            limit_C = twist_angle - max_value
-        elif twist_angle < min_value:
+            limit_C = cumulative_angle - max_value
+        elif cumulative_angle < min_value:
             clamp = _CLAMP_MIN
-            limit_C = twist_angle - min_value
+            limit_C = cumulative_angle - min_value
     write_int(constraints, base_offset + _OFF_CLAMP, cid, clamp)
 
-    if hertz_limit < 0.0:
-        # PD spring-damper. Reuse the mass_coeff_limit / impulse_coeff_limit
-        # storage slots for ``gamma_limit`` / ``eff_mass_limit_soft``.
-        gamma_limit, bias_limit, eff_mass_limit_soft = pd_coefficients(
-            -hertz_limit, -damping_ratio_limit, limit_C, eff_inv, dt
+    # Dual-convention dispatch: PD path if either gain is strictly
+    # positive, else Box2D. Both branches populate both caches (with
+    # the inactive one zeroed) so iterate doesn't have to guard on
+    # stale state.
+    if stiffness_limit > 0.0 or damping_limit > 0.0:
+        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(
+            stiffness_limit, damping_limit, limit_C, eff_inv, dt
         )
-        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, gamma_limit)
-        write_float(
-            constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, eff_mass_limit_soft
-        )
-        write_int(constraints, base_offset + _OFF_LIMIT_IS_PD, cid, 1)
+        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
+        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
+        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
+        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, 0.0)
     else:
-        # Box2D (hertz, damping_ratio).
         br_limit, mc_limit, ic_limit = soft_constraint_coefficients(
             hertz_limit, damping_ratio_limit, dt
         )
-        # Legacy semantic: the velocity bias is ``-C * bias_rate`` so
-        # the unsoftened PGS step targets ``jv = -bias``; negate limit_C
-        # to match the prior sign.
-        bias_limit = -limit_C * br_limit
+        # Box2D sign convention: iterate drives ``jv == -bias``, so
+        # prefold the positional error with a flipped sign.
+        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
         write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
         write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
-        write_int(constraints, base_offset + _OFF_LIMIT_IS_PD, cid, 0)
-    write_float(constraints, base_offset + _OFF_BIAS_LIMIT, cid, bias_limit)
+        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, 0.0)
 
-    # Warm-start the axial impulses.
+    # Warm-start the axial impulses. Drop any lingering limit impulse
+    # when the limit is inactive, matching the standalone modules.
     acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
     acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
+    if clamp == _CLAMP_NONE:
+        acc_limit = 0.0
+        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
     axial_imp = acc_drive + acc_limit
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
@@ -1205,94 +1404,15 @@ def _revolute_iterate_at(
 
     # ---- Axial drive + limit scalar PGS rows -------------------------
     n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-    eff_axial = read_float(constraints, base_offset + _OFF_EFF_AXIAL, cid)
-    drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
-    max_lambda_drive = read_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid)
-    bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
-    bias_limit = read_float(constraints, base_offset + _OFF_BIAS_LIMIT, cid)
-    gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
-    eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
-    mc_limit = read_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid)
-    ic_limit = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
-    limit_is_pd = read_int(constraints, base_offset + _OFF_LIMIT_IS_PD, cid)
     clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
-    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
-    acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
-    max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
 
     # Angular rate: jv_axial = n . (w1 - w2). Sign convention matches
     # the warm-start below: ``+n_hat`` for body 1, ``-n_hat`` for body
     # 2, so positive lambda spins body 1 *forward* and body 2 *back*.
     jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-
-    drive_active = drive_mode != DRIVE_MODE_OFF
-    # Jitter2 PD short-circuit: both gains zero -> no drive impulse
-    # even if the caller set drive_mode != OFF. eff_mass_drive_soft == 0
-    # covers that case (pd_coefficients returns all-zero triple).
-    if eff_mass_drive_soft <= 0.0:
-        drive_active = False
-    # Pure-velocity-motor branch (kp = kd = 0) is rigid: it would
-    # apply infinite force if uncapped. Disable when the user gave us
-    # neither PD gains nor a force cap. PD-form velocity drives
-    # (kd > 0, max_force_drive == 0) stay active -- their softness
-    # bounds the per-substep impulse already.
-    if (
-        drive_mode == DRIVE_MODE_VELOCITY
-        and max_force_drive <= 0.0
-        and gamma_drive == 0.0
-    ):
-        drive_active = False
-
-    lam_drive = float(0.0)
-    if drive_active:
-        # Jitter2 SpringConstraint iterate (negated once to match our
-        # ``jv_axial = n . (w1 - w2)`` convention, which is -1 * the
-        # Jitter2 ``jv = n . (v2 - v1)`` convention):
-        #   lam = -M_eff_soft * (jv - bias + gamma * acc)
-        # The ``+ gamma * acc`` leakage (== ``softness * idt * acc``
-        # in Jitter2) is what makes the soft-constrained iterate
-        # converge to the implicit spring-damper step.
-        lam_drive = -eff_mass_drive_soft * (
-            jv_axial - bias_drive + gamma_drive * acc_drive
-        )
-        old_acc = acc_drive
-        acc_drive = acc_drive + lam_drive
-        # ``max_force_drive > 0`` caps the per-substep impulse for both
-        # drive modes (torque for revolute, force for prismatic); 0 means
-        # unlimited for POSITION and disables VELOCITY (guarded above).
-        if max_force_drive > 0.0:
-            acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
-        lam_drive = acc_drive - old_acc
-        write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
-
-    lam_limit = float(0.0)
-    if clamp != _CLAMP_NONE:
-        if limit_is_pd == 1:
-            # Jitter2-style PD: mc_limit stores gamma, ic_limit stores
-            # M_eff_softened. bias_limit is the beta*C/dt term. Same
-            # sign convention as the drive above.
-            gamma_limit = mc_limit
-            eff_mass_limit_soft = ic_limit
-            if eff_mass_limit_soft > 0.0:
-                lam_limit = -eff_mass_limit_soft * (
-                    jv_axial - bias_limit + gamma_limit * acc_limit
-                )
-        else:
-            # Box2D soft-constraint path (legacy).
-            if eff_axial > 0.0:
-                lam_unsoft = -eff_axial * (jv_axial + bias_limit)
-                lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
-        old_acc = acc_limit
-        acc_limit = acc_limit + lam_limit
-        if clamp == _CLAMP_MAX:
-            acc_limit = wp.max(0.0, acc_limit)
-        else:
-            acc_limit = wp.min(0.0, acc_limit)
-        lam_limit = acc_limit - old_acc
-        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
-
-    # Apply combined axial torque.
-    axial_lam = lam_drive + lam_limit
+    axial_lam = _axial_drive_limit_iterate(
+        constraints, cid, base_offset, jv_axial, clamp
+    )
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
@@ -1578,17 +1698,15 @@ def _prismatic_prepare_at(
     max_value = read_float(constraints, base_offset + _OFF_MAX_VALUE, cid)
     hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
     damping_ratio_limit = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LIMIT, cid)
+    stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
+    damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
 
     # Linear inverse effective mass at anchor 1 along n_hat:
     #   m_inv = n . B11 . n  (same quadratic form as the tangent block,
     #                         but projected onto n_hat instead of t).
     b11_n = b11 @ n_hat
     eff_inv = wp.dot(n_hat, b11_n)
-    if eff_inv < 1.0e-20:
-        eff_axial = 0.0
-    else:
-        eff_axial = 1.0 / eff_inv
-    write_float(constraints, base_offset + _OFF_EFF_AXIAL, cid, eff_axial)
+    write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, eff_inv)
 
     # Slide along n_hat measured at anchor 1. Starts at 0 at init (anchors
     # coincident), so this is directly the relative slide in meters.
@@ -1600,20 +1718,18 @@ def _prismatic_prepare_at(
     # "lam > 0 drives slide toward target".
     slide = wp.dot(n_hat, drift1)
 
-    # ---- Drive (always PD) -------------------------------------------
-    # Same branch structure as the revolute prepare; see the comment
-    # there for Jitter2's pure-velocity-motor fallback and for the
-    # ``-target_velocity`` sign convention.
+    # ---- Drive (PD only) ---------------------------------------------
+    # Same PD-only contract as the revolute prepare; see that docstring
+    # for the ``-target_velocity`` sign-fold explanation. Velocity
+    # tracking is recovered by ``stiffness_drive = 0`` +
+    # ``damping_drive > 0`` (explicit damping gain); there is no
+    # rigid-servo fallback.
     drive_C = float(0.0)
     if drive_mode == DRIVE_MODE_POSITION:
         drive_C = slide - target
     if stiffness_drive > 0.0 or damping_drive > 0.0:
         gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients(
             stiffness_drive, damping_drive, drive_C, eff_inv, dt
-        )
-    elif drive_mode == DRIVE_MODE_VELOCITY:
-        gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients_pure_velocity(
-            eff_inv
         )
     else:
         gamma_drive = wp.float32(0.0)
@@ -1630,9 +1746,11 @@ def _prismatic_prepare_at(
     write_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid, max_lambda_drive)
 
     # ---- Limit (dual convention) -------------------------------------
+    # ``min_value > max_value`` disables the limit row (matches the
+    # standalone linear_limit sentinel).
     clamp = _CLAMP_NONE
     limit_C = float(0.0)
-    if min_value != 0.0 or max_value != 0.0:
+    if min_value <= max_value:
         if slide > max_value:
             clamp = _CLAMP_MAX
             limit_C = slide - max_value
@@ -1641,28 +1759,36 @@ def _prismatic_prepare_at(
             limit_C = slide - min_value
     write_int(constraints, base_offset + _OFF_CLAMP, cid, clamp)
 
-    if hertz_limit < 0.0:
-        gamma_limit, bias_limit, eff_mass_limit_soft = pd_coefficients(
-            -hertz_limit, -damping_ratio_limit, limit_C, eff_inv, dt
+    # Dual-convention dispatch identical to the revolute prepare /
+    # standalone linear_limit: PD if either gain > 0, else Box2D.
+    if stiffness_limit > 0.0 or damping_limit > 0.0:
+        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(
+            stiffness_limit, damping_limit, limit_C, eff_inv, dt
         )
-        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, gamma_limit)
-        write_float(
-            constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, eff_mass_limit_soft
-        )
-        write_int(constraints, base_offset + _OFF_LIMIT_IS_PD, cid, 1)
+        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
+        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
+        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
+        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, 0.0)
     else:
         br_limit, mc_limit, ic_limit = soft_constraint_coefficients(
             hertz_limit, damping_ratio_limit, dt
         )
-        bias_limit = -limit_C * br_limit
+        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
         write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
         write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
-        write_int(constraints, base_offset + _OFF_LIMIT_IS_PD, cid, 0)
-    write_float(constraints, base_offset + _OFF_BIAS_LIMIT, cid, bias_limit)
+        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, 0.0)
 
-    # Warm-start the axial impulses (linear).
+    # Warm-start the axial impulses (linear). Drop any lingering
+    # limit impulse when the limit is inactive.
     acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
     acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
+    if clamp == _CLAMP_NONE:
+        acc_limit = 0.0
+        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
     axial_imp = acc_drive + acc_limit
     velocity1 = velocity1 + inv_mass1 * (n_hat * axial_imp)
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ wp.cross(r1_b1, n_hat * axial_imp)
@@ -1785,87 +1911,22 @@ def _prismatic_iterate_at(
 
     # ---- Linear drive + limit scalar rows along n_hat ----------------
     n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-    eff_axial = read_float(constraints, base_offset + _OFF_EFF_AXIAL, cid)
-    drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
-    max_lambda_drive = read_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid)
-    bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
-    bias_limit = read_float(constraints, base_offset + _OFF_BIAS_LIMIT, cid)
-    gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
-    eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
-    mc_limit = read_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid)
-    ic_limit = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
-    limit_is_pd = read_int(constraints, base_offset + _OFF_LIMIT_IS_PD, cid)
     clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
-    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
-    acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
-    max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
 
     # Linear relative rate at anchor 1 along n_hat:
     #   jv_axial = n . ((v1 + w1 x r1_b1) - (v2 + w2 x r1_b2)).
-    # Sign structure matches the warm-start below (`+v1 * n * lam`
+    # Sign structure matches the warm-start (`+v1 * n * lam`
     # / `-v2 * n * lam`): positive lam decreases slide.
     v1_anchor = velocity1 + wp.cross(angular_velocity1, r1_b1)
     v2_anchor = velocity2 + wp.cross(angular_velocity2, r1_b2)
     jv_axial = wp.dot(n_hat, v1_anchor - v2_anchor)
-
-    drive_active = drive_mode != DRIVE_MODE_OFF
-    if eff_mass_drive_soft <= 0.0:
-        drive_active = False
-    # Same pure-velocity-motor guard as the revolute iterate: only
-    # disable when *both* the PD gains and the force cap are absent.
-    # A PD velocity drive (kd > 0) is self-bounded by its softness
-    # and must stay active.
-    if (
-        drive_mode == DRIVE_MODE_VELOCITY
-        and max_force_drive <= 0.0
-        and gamma_drive == 0.0
-    ):
-        drive_active = False
-
-    lam_drive = float(0.0)
-    if drive_active:
-        # See the revolute iterate for the derivation of the
-        # ``+ gamma * acc`` sign (Jitter2 SpringConstraint conventions
-        # negated once to match our ``jv = n . (v1 - v2)`` rule).
-        lam_drive = -eff_mass_drive_soft * (
-            jv_axial - bias_drive + gamma_drive * acc_drive
-        )
-        old_acc = acc_drive
-        acc_drive = acc_drive + lam_drive
-        # ``max_force_drive > 0`` caps the per-substep impulse for both
-        # drive modes (torque for revolute, force for prismatic); 0 means
-        # unlimited for POSITION and disables VELOCITY (guarded above).
-        if max_force_drive > 0.0:
-            acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
-        lam_drive = acc_drive - old_acc
-        write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
-
-    lam_limit = float(0.0)
-    if clamp != _CLAMP_NONE:
-        if limit_is_pd == 1:
-            gamma_limit = mc_limit
-            eff_mass_limit_soft = ic_limit
-            if eff_mass_limit_soft > 0.0:
-                lam_limit = -eff_mass_limit_soft * (
-                    jv_axial - bias_limit + gamma_limit * acc_limit
-                )
-        else:
-            if eff_axial > 0.0:
-                lam_unsoft = -eff_axial * (jv_axial + bias_limit)
-                lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
-        old_acc = acc_limit
-        acc_limit = acc_limit + lam_limit
-        if clamp == _CLAMP_MAX:
-            acc_limit = wp.max(0.0, acc_limit)
-        else:
-            acc_limit = wp.min(0.0, acc_limit)
-        lam_limit = acc_limit - old_acc
-        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
+    axial_lam = _axial_drive_limit_iterate(
+        constraints, cid, base_offset, jv_axial, clamp
+    )
 
     # Apply the combined linear impulse: lam along n_hat, with body 1
     # getting +n_hat and body 2 getting -n_hat (mirror of revolute's
     # angular convention).
-    axial_lam = lam_drive + lam_limit
     axial_imp = n_hat * axial_lam
     velocity1 = velocity1 + inv_mass1 * axial_imp
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ wp.cross(r1_b1, axial_imp)

@@ -61,6 +61,11 @@ HALF_GAP = 1.1  # half-step along +X between the two plank centres
 
 MOTOR_TARGET_VELOCITY = 4.0  # [rad/s]
 MOTOR_MAX_TORQUE = 1.0  # [N*m]
+# PD damping gain [N*m*s/rad] for the velocity servo. Large enough
+# that the motor commands ``max_force`` at any perceptible velocity
+# error, so the chain's steady-state behaviour matches the legacy
+# rigid-velocity-motor formulation this replaced.
+MOTOR_DAMPING_GAIN = 10.0  # [N*m*s/rad]
 
 # ---------------------------------------------------------------------------
 # Scene B (hinge with +-120 deg limit)
@@ -133,6 +138,8 @@ class Example(DemoExample):
             drive_mode=DriveMode.VELOCITY,
             target_velocity=MOTOR_TARGET_VELOCITY,
             max_force_drive=MOTOR_MAX_TORQUE,
+            stiffness_drive=0.0,
+            damping_drive=MOTOR_DAMPING_GAIN,
         )
         # Coupling revolute along the same +X axis between b0 and b1.
         self.add_joint(

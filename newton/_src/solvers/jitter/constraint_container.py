@@ -76,7 +76,6 @@ __all__ = [
     "read_vec3",
     "read_vec4",
     "pd_coefficients",
-    "pd_coefficients_pure_velocity",
     "soft_constraint_coefficients",
     "write_float",
     "write_int",
@@ -763,22 +762,3 @@ def pd_coefficients(
     return gamma, bias, eff_mass_soft
 
 
-@wp.func
-def pd_coefficients_pure_velocity(
-    eff_mass_inv: wp.float32,
-):
-    """Jitter2 "pure velocity motor" triple when ``kp = kd = 0``.
-
-    Fallback for :attr:`DriveMode.VELOCITY` drives that don't specify
-    PD gains: the row becomes a *rigid* velocity constraint clamped
-    only by ``max_force_drive``. Matches Jitter2's
-    ``AngularMotor.PrepareForIteration`` branch when both stiffness
-    and damping are zero.
-
-    Returns ``(gamma, bias, eff_mass_soft)`` = ``(0, 0, 1/M_inv)`` so
-    the iterate collapses to
-    :math:`\\lambda = -M_{\\text{eff}}\\, (Jv - v_{\\text{target}})`.
-    """
-    if eff_mass_inv <= 0.0:
-        return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
-    return wp.float32(0.0), wp.float32(0.0), wp.float32(1.0) / eff_mass_inv
