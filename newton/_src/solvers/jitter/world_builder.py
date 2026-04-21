@@ -48,6 +48,10 @@ from newton._src.solvers.jitter.constraint_actuated_double_ball_socket import (
     JOINT_MODE_REVOLUTE,
     actuated_double_ball_socket_initialize_kernel,
 )
+from newton._src.solvers.jitter.constraint_angular_limit import (
+    AL_DWORDS,
+    angular_limit_initialize_kernel,
+)
 from newton._src.solvers.jitter.constraint_angular_motor import (
     AM_DWORDS,
     angular_motor_initialize_kernel,
@@ -74,6 +78,18 @@ from newton._src.solvers.jitter.constraint_double_ball_socket import (
     DBS_DWORDS,
     double_ball_socket_initialize_kernel,
 )
+from newton._src.solvers.jitter.constraint_double_ball_socket_prismatic import (
+    DBS_PRISMATIC_DWORDS,
+    double_ball_socket_prismatic_initialize_kernel,
+)
+from newton._src.solvers.jitter.constraint_linear_limit import (
+    LL_DWORDS,
+    linear_limit_initialize_kernel,
+)
+from newton._src.solvers.jitter.constraint_linear_motor import (
+    LM_DWORDS,
+    linear_motor_initialize_kernel,
+)
 from newton._src.solvers.jitter.constraint_hinge_angle import (
     HA_DWORDS,
     hinge_angle_initialize_kernel,
@@ -89,12 +105,14 @@ from newton._src.solvers.jitter.constraint_prismatic import (
 from newton._src.solvers.jitter.solver_jitter import World
 
 __all__ = [
+    "AngularLimitDescriptor",
     "AngularMotorDescriptor",
     "BallSocketDescriptor",
     "D6AxisDrive",
     "D6Descriptor",
     "D6Handle",
     "DoubleBallSocketDescriptor",
+    "DoubleBallSocketPrismaticDescriptor",
     "DriveMode",
     "HingeAngleDescriptor",
     "HingeJointDescriptor",
@@ -102,6 +120,8 @@ __all__ = [
     "JointDescriptor",
     "JointHandle",
     "JointMode",
+    "LinearLimitDescriptor",
+    "LinearMotorDescriptor",
     "PrismaticDescriptor",
     "PrismaticHandle",
     "RigidBodyDescriptor",
@@ -406,6 +426,35 @@ class DoubleBallSocketDescriptor:
 
 
 @dataclass
+class DoubleBallSocketPrismaticDescriptor:
+    """Plain-Python description of one standalone prismatic DBS lock.
+
+    Translational twin of :class:`DoubleBallSocketDescriptor`: locks
+    5 DoF so the only free relative motion is translation along the
+    line from ``anchor1`` to ``anchor2``. Rotation is locked entirely
+    via a 4+1 Schur-complement solve (two tangent rows per on-axis
+    anchor plus a scalar row at an auto-derived off-axis point); see
+    :class:`~newton._src.solvers.jitter.constraint_double_ball_socket_prismatic.DoubleBallSocketPrismaticData`
+    for the full derivation.
+
+    Both anchors are in *world* space at finalize() time. Pair with
+    :meth:`WorldBuilder.add_linear_motor` (velocity or PD-drive mode)
+    to build a motorised prismatic joint out of standalone pieces.
+
+    ``hertz`` / ``damping_ratio`` follow the Box2D v3 / Bepu soft-
+    constraint formulation and apply uniformly to all 5 lock rows.
+    ``hertz = 0`` (default) gives a rigid lock.
+    """
+
+    body1: int
+    body2: int
+    anchor1: tuple[float, float, float]
+    anchor2: tuple[float, float, float]
+    hertz: float = float(DEFAULT_HERTZ_LINEAR)
+    damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
+
+
+@dataclass
 class HingeAngleDescriptor:
     """Plain-Python description of one hinge-angle (2-DoF) constraint.
 
@@ -470,6 +519,132 @@ class AngularMotorDescriptor:
     hertz: float = float(DEFAULT_HERTZ_MOTOR)
     damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
     target_angle: float = 0.0
+    stiffness: float = 0.0
+    damping: float = 0.0
+
+
+@dataclass
+class LinearMotorDescriptor:
+    """Plain-Python description of one linear-motor constraint.
+
+    Translational twin of :class:`AngularMotorDescriptor`. Drives the
+    relative translation between ``body1`` and ``body2`` along ``axis``
+    (world space at construction time) in one of two modes:
+
+    * **Velocity target** (``stiffness == 0`` and ``damping == 0``):
+      Jitter2 default. Drives the linear-velocity difference along
+      ``axis`` to ``target_velocity`` [m/s] using at most ``max_force``
+      [N]. ``hertz`` / ``damping_ratio`` parametrise the Box2D /
+      Bepu soft-constraint velocity-tracking spring. ``max_force = 0``
+      disables the motor (no-op) on this path.
+
+    * **PD position target** (``stiffness > 0`` or ``damping > 0``):
+      Linear spring-damper that holds the slide at ``target_position``
+      [m], measured from the initial relative pose of
+      ``anchor1`` -> ``anchor2`` at finalize() time. ``stiffness`` is
+      in N/m, ``damping`` in N·s/m. ``target_velocity`` is then a
+      feed-forward slide velocity (usually 0); ``max_force`` still
+      caps the per-substep impulse. ``hertz`` / ``damping_ratio`` are
+      ignored on this path.
+
+    The anchors are used by the PD path to reconstruct the current
+    slide from world coordinates
+    (``slide_now = hat_n . (anchor2_world - anchor1_world)``). In
+    pure-velocity mode they can point to any two collocated world
+    points on the slide axis.
+    """
+
+    body1: int
+    body2: int
+    axis: tuple[float, float, float]
+    anchor1: tuple[float, float, float]
+    anchor2: tuple[float, float, float]
+    target_velocity: float = 0.0
+    max_force: float = 0.0
+    hertz: float = float(DEFAULT_HERTZ_MOTOR)
+    damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
+    target_position: float = 0.0
+    stiffness: float = 0.0
+    damping: float = 0.0
+
+
+@dataclass
+class AngularLimitDescriptor:
+    """Plain-Python description of one angular-limit constraint.
+
+    Clamps the relative twist between ``body1`` and ``body2`` around
+    ``axis`` (world space at finalize time) to ``[min_value,
+    max_value]`` (rad, measured from the initial relative pose).
+
+    Two soft-constraint conventions are supported, selected
+    automatically at init time:
+
+    * **Box2D / Bepu** (``stiffness == 0`` and ``damping == 0``): the
+      stop spring is parametrised by ``hertz`` [Hz] and
+      ``damping_ratio`` [dimensionless]. The effective mass of the row
+      is baked into the gains -- see
+      :func:`constraint_container.soft_constraint_coefficients`.
+    * **PD spring-damper** (``stiffness > 0`` or ``damping > 0``):
+      absolute SI gains with ``stiffness`` in N*m/rad and ``damping``
+      in N*m*s/rad, plugged through
+      :func:`constraint_container.pd_coefficients`. Produces the same
+      per-unit-inertia response regardless of body mass, at the cost
+      of the caller having to think in physical units.
+
+    The clamp is unilateral: the row only ever pushes the joint back
+    into ``[min_value, max_value]``, never out of it. Set
+    ``min_value > max_value`` to disable the row entirely; use a
+    large sentinel (e.g. ``min_value = -1e9``) to express a one-sided
+    limit on one direction only.
+    """
+
+    body1: int
+    body2: int
+    axis: tuple[float, float, float]
+    min_value: float
+    max_value: float
+    hertz: float = float(DEFAULT_HERTZ_LIMIT)
+    damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
+    stiffness: float = 0.0
+    damping: float = 0.0
+
+
+@dataclass
+class LinearLimitDescriptor:
+    """Plain-Python description of one linear-limit constraint.
+
+    Translational analogue of :class:`AngularLimitDescriptor`. Clamps
+    the relative slide along ``axis`` between two anchor points to
+    ``[min_value, max_value]`` (m, measured from the initial relative
+    slide at finalize time).
+
+    Same dual-convention soft plumbing:
+
+    * **Box2D / Bepu** (``stiffness == 0`` and ``damping == 0``):
+      ``hertz`` [Hz] and ``damping_ratio``.
+    * **PD spring-damper** (``stiffness > 0`` or ``damping > 0``):
+      ``stiffness`` [N/m] and ``damping`` [N*s/m].
+
+    The anchors serve exactly the same role as in
+    :class:`LinearMotorDescriptor`: the current slide is
+    reconstructed each substep as
+    ``slide = axis . (anchor2_world - anchor1_world)``. For a typical
+    prismatic joint ``anchor1 == anchor2`` at finalize, giving a rest
+    slide of zero.
+
+    Set ``min_value > max_value`` to disable the row; use a large
+    sentinel on either side for a one-sided stop.
+    """
+
+    body1: int
+    body2: int
+    axis: tuple[float, float, float]
+    anchor1: tuple[float, float, float]
+    anchor2: tuple[float, float, float]
+    min_value: float
+    max_value: float
+    hertz: float = float(DEFAULT_HERTZ_LIMIT)
+    damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
     stiffness: float = 0.0
     damping: float = 0.0
 
@@ -891,8 +1066,12 @@ class WorldBuilder:
         ]
         self._ball_sockets: list[BallSocketDescriptor] = []
         self._double_ball_sockets: list[DoubleBallSocketDescriptor] = []
+        self._double_ball_socket_prismatics: list[DoubleBallSocketPrismaticDescriptor] = []
         self._hinge_angles: list[HingeAngleDescriptor] = []
         self._angular_motors: list[AngularMotorDescriptor] = []
+        self._linear_motors: list[LinearMotorDescriptor] = []
+        self._angular_limits: list[AngularLimitDescriptor] = []
+        self._linear_limits: list[LinearLimitDescriptor] = []
         # Fused hinge-joint descriptors and their handles. The handle
         # list is parallel to the descriptor list -- finalize() walks
         # both to patch each handle with its global cid in place so the
@@ -1183,6 +1362,187 @@ class WorldBuilder:
             )
         )
         return len(self._angular_motors) - 1
+
+    def add_double_ball_socket_prismatic(
+        self,
+        body1: int,
+        body2: int,
+        anchor1: tuple[float, float, float],
+        anchor2: tuple[float, float, float],
+        hertz: float = float(DEFAULT_HERTZ_LINEAR),
+        damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
+    ) -> int:
+        """Append a standalone prismatic double-ball-socket lock and
+        return its (per-type) index.
+
+        Locks 5 DoF so the only free motion between ``body1`` and
+        ``body2`` is translation along the line from ``anchor1`` to
+        ``anchor2``; rotation is locked entirely (4+1 Schur solve, see
+        :class:`DoubleBallSocketPrismaticDescriptor`). Pair with
+        :meth:`add_linear_motor` to build a motorised prismatic joint
+        out of standalone pieces.
+
+        Args:
+            body1: First body index.
+            body2: Second body index.
+            anchor1: World-space first anchor [m]. Defines the slide
+                axis together with ``anchor2``.
+            anchor2: World-space second anchor [m]. Must not coincide
+                with ``anchor1``.
+            hertz: Soft-constraint stiffness target [Hz]; ``0`` gives
+                a rigid lock (default). Applies uniformly to all 5
+                lock rows.
+            damping_ratio: Non-dimensional damping ratio (1 is
+                critical). Only consumed when ``hertz > 0``.
+        """
+        self._validate_body(body1)
+        self._validate_body(body2)
+        self._double_ball_socket_prismatics.append(
+            DoubleBallSocketPrismaticDescriptor(
+                body1, body2, anchor1, anchor2, hertz, damping_ratio
+            )
+        )
+        return len(self._double_ball_socket_prismatics) - 1
+
+    def add_linear_motor(
+        self,
+        body1: int,
+        body2: int,
+        axis: tuple[float, float, float],
+        anchor1: tuple[float, float, float],
+        anchor2: tuple[float, float, float],
+        target_velocity: float = 0.0,
+        max_force: float = 0.0,
+        hertz: float = float(DEFAULT_HERTZ_MOTOR),
+        damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
+        target_position: float = 0.0,
+        stiffness: float = 0.0,
+        damping: float = 0.0,
+    ) -> int:
+        """Append a standalone linear motor and return its per-type
+        index. Translational twin of :meth:`add_angular_motor`.
+
+        ``axis`` is in world space and picks the translational
+        direction that the motor drives; ``anchor1`` / ``anchor2`` are
+        the world-space reference points used by the PD-position path
+        to reconstruct the current slide
+        (``slide_now = hat_axis . (anchor2_now - anchor1_now)``). In
+        pure-velocity mode they can point to any two collocated points
+        on the slide axis.
+
+        Modes:
+
+        * **Velocity target** (default): drive the relative linear
+          velocity along ``axis`` toward ``target_velocity`` [m/s]
+          using at most ``max_force`` [N]. ``hertz`` / ``damping_ratio``
+          parametrise the Box2D / Bepu velocity-tracking spring.
+        * **PD position target**: set ``stiffness`` > 0 (N/m) and/or
+          ``damping`` > 0 (N·s/m) to switch into a linear spring-damper
+          that holds the slide at ``target_position`` [m] measured
+          from the initial
+          ``hat_axis . (anchor2 - anchor1)`` offset at finalize() time.
+          ``max_force`` still caps the per-substep impulse.
+
+        See :class:`LinearMotorDescriptor` for the full contract.
+        """
+        self._validate_body(body1)
+        self._validate_body(body2)
+        self._linear_motors.append(
+            LinearMotorDescriptor(
+                body1,
+                body2,
+                axis,
+                anchor1,
+                anchor2,
+                target_velocity,
+                max_force,
+                hertz,
+                damping_ratio,
+                target_position,
+                stiffness,
+                damping,
+            )
+        )
+        return len(self._linear_motors) - 1
+
+    def add_angular_limit(
+        self,
+        body1: int,
+        body2: int,
+        axis: tuple[float, float, float],
+        min_value: float,
+        max_value: float,
+        hertz: float = float(DEFAULT_HERTZ_LIMIT),
+        damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
+        stiffness: float = 0.0,
+        damping: float = 0.0,
+    ) -> int:
+        """Append a standalone angular limit and return its per-type index.
+
+        Clamps the relative twist between ``body1`` and ``body2``
+        around ``axis`` (world space at finalize time) to
+        ``[min_value, max_value]`` (rad, measured from the initial
+        relative pose). See :class:`AngularLimitDescriptor` for the
+        dual softness conventions and sentinel rules for disabling
+        / one-siding the row.
+        """
+        self._validate_body(body1)
+        self._validate_body(body2)
+        self._angular_limits.append(
+            AngularLimitDescriptor(
+                body1,
+                body2,
+                axis,
+                min_value,
+                max_value,
+                hertz,
+                damping_ratio,
+                stiffness,
+                damping,
+            )
+        )
+        return len(self._angular_limits) - 1
+
+    def add_linear_limit(
+        self,
+        body1: int,
+        body2: int,
+        axis: tuple[float, float, float],
+        anchor1: tuple[float, float, float],
+        anchor2: tuple[float, float, float],
+        min_value: float,
+        max_value: float,
+        hertz: float = float(DEFAULT_HERTZ_LIMIT),
+        damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
+        stiffness: float = 0.0,
+        damping: float = 0.0,
+    ) -> int:
+        """Append a standalone linear limit and return its per-type index.
+
+        Translational analogue of :meth:`add_angular_limit`. Clamps
+        the slide along ``axis`` between ``anchor1`` and ``anchor2``
+        (world-space at finalize) to ``[min_value, max_value]`` (m,
+        measured from the initial slide). See
+        :class:`LinearLimitDescriptor` for the contract.
+        """
+        self._validate_body(body1)
+        self._validate_body(body2)
+        self._linear_limits.append(
+            LinearLimitDescriptor(
+                body1,
+                body2,
+                axis,
+                anchor1,
+                anchor2,
+                min_value,
+                max_value,
+                hertz,
+                damping_ratio,
+                stiffness,
+                damping,
+            )
+        )
+        return len(self._linear_limits) - 1
 
     def add_hinge_joint(
         self,
@@ -1785,8 +2145,12 @@ class WorldBuilder:
         ]
         self._ball_sockets = []
         self._double_ball_sockets = []
+        self._double_ball_socket_prismatics = []
         self._hinge_angles = []
         self._angular_motors = []
+        self._linear_motors = []
+        self._angular_limits = []
+        self._linear_limits = []
         self._hinge_joint_descriptors = []
         self._hinge_joint_handles = []
         self._joint_descriptors = []
@@ -1878,8 +2242,10 @@ class WorldBuilder:
 
             * cids ``[0, n_ball)``                              -> ball-sockets
             * cids ``[..., +n_dbs)``                            -> double-ball-sockets (5-DoF hinge lock)
+            * cids ``[..., +n_dbs_pris)``                       -> double-ball-socket prismatics (5-DoF slide lock)
             * cids ``[..., +n_hinge)``                          -> hinge-angles
             * cids ``[..., +n_motor)``                          -> angular-motors
+            * cids ``[..., +n_linear_motor)``                   -> linear-motors
             * cids ``[..., +n_hinge_joint)``                    -> fused hinge-joints
             * cids ``[..., +n_joint)``                          -> unified revolute/prismatic joints
             * cids ``[..., +n_prismatic)``                      -> legacy standalone prismatic joints
@@ -1893,8 +2259,12 @@ class WorldBuilder:
         """
         n_ball = len(self._ball_sockets)
         n_dbs = len(self._double_ball_sockets)
+        n_dbs_pris = len(self._double_ball_socket_prismatics)
         n_hinge = len(self._hinge_angles)
         n_motor = len(self._angular_motors)
+        n_linear_motor = len(self._linear_motors)
+        n_angular_limit = len(self._angular_limits)
+        n_linear_limit = len(self._linear_limits)
         n_hinge_joint = len(self._hinge_joint_descriptors)
         n_joint = len(self._joint_descriptors)
         n_prismatic = len(self._prismatic_descriptors)
@@ -1902,8 +2272,12 @@ class WorldBuilder:
         total = (
             n_ball
             + n_dbs
+            + n_dbs_pris
             + n_hinge
             + n_motor
+            + n_linear_motor
+            + n_angular_limit
+            + n_linear_limit
             + n_hinge_joint
             + n_joint
             + n_prismatic
@@ -1916,8 +2290,12 @@ class WorldBuilder:
         per_constraint_dwords = max(
             BS_DWORDS,
             DBS_DWORDS,
+            DBS_PRISMATIC_DWORDS,
             HA_DWORDS,
             AM_DWORDS,
+            LM_DWORDS,
+            AL_DWORDS,
+            LL_DWORDS,
             HJ_DWORDS,
             ADBS_DWORDS,
             PR_DWORDS,
@@ -1941,22 +2319,18 @@ class WorldBuilder:
 
         ball_socket_offset = 0
         double_ball_socket_offset = n_ball
-        hinge_angle_offset = n_ball + n_dbs
-        angular_motor_offset = n_ball + n_dbs + n_hinge
-        hinge_joint_offset = n_ball + n_dbs + n_hinge + n_motor
-        joint_offset = n_ball + n_dbs + n_hinge + n_motor + n_hinge_joint
-        prismatic_offset = (
-            n_ball + n_dbs + n_hinge + n_motor + n_hinge_joint + n_joint
+        double_ball_socket_prismatic_offset = n_ball + n_dbs
+        hinge_angle_offset = n_ball + n_dbs + n_dbs_pris
+        angular_motor_offset = n_ball + n_dbs + n_dbs_pris + n_hinge
+        linear_motor_offset = n_ball + n_dbs + n_dbs_pris + n_hinge + n_motor
+        angular_limit_offset = (
+            n_ball + n_dbs + n_dbs_pris + n_hinge + n_motor + n_linear_motor
         )
-        d6_offset = (
-            n_ball
-            + n_dbs
-            + n_hinge
-            + n_motor
-            + n_hinge_joint
-            + n_joint
-            + n_prismatic
-        )
+        linear_limit_offset = angular_limit_offset + n_angular_limit
+        hinge_joint_offset = linear_limit_offset + n_linear_limit
+        joint_offset = hinge_joint_offset + n_hinge_joint
+        prismatic_offset = joint_offset + n_joint
+        d6_offset = prismatic_offset + n_prismatic
 
         if n_ball > 0:
             self._init_ball_sockets(container, bodies, ball_socket_offset, device)
@@ -1964,10 +2338,20 @@ class WorldBuilder:
             self._init_double_ball_sockets(
                 container, bodies, double_ball_socket_offset, device
             )
+        if n_dbs_pris > 0:
+            self._init_double_ball_socket_prismatics(
+                container, bodies, double_ball_socket_prismatic_offset, device
+            )
         if n_hinge > 0:
             self._init_hinge_angles(container, bodies, hinge_angle_offset, device)
         if n_motor > 0:
             self._init_angular_motors(container, bodies, angular_motor_offset, device)
+        if n_linear_motor > 0:
+            self._init_linear_motors(container, bodies, linear_motor_offset, device)
+        if n_angular_limit > 0:
+            self._init_angular_limits(container, bodies, angular_limit_offset, device)
+        if n_linear_limit > 0:
+            self._init_linear_limits(container, bodies, linear_limit_offset, device)
         if n_hinge_joint > 0:
             self._init_hinge_joints(container, bodies, hinge_joint_offset, device)
         if n_joint > 0:
@@ -2073,6 +2457,66 @@ class WorldBuilder:
 
         wp.launch(
             double_ball_socket_initialize_kernel,
+            dim=n,
+            inputs=[
+                constraints,
+                bodies,
+                int(cid_offset),
+                body1_d,
+                body2_d,
+                anchor1_d,
+                anchor2_d,
+                hertz_d,
+                damping_ratio_d,
+            ],
+            device=device,
+        )
+
+    def _init_double_ball_socket_prismatics(
+        self,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        cid_offset: int,
+        device: wp.context.Device,
+    ) -> None:
+        """Pack standalone prismatic-DBS descriptors into ``constraints``.
+
+        Same shape as :meth:`_init_double_ball_sockets` -- the kernel
+        itself auto-derives the third off-axis anchor used for the
+        4+1 Schur rotation lock, so there is no extra per-descriptor
+        input.
+        """
+        n = len(self._double_ball_socket_prismatics)
+
+        body1 = np.asarray(
+            [d.body1 for d in self._double_ball_socket_prismatics], dtype=np.int32
+        )
+        body2 = np.asarray(
+            [d.body2 for d in self._double_ball_socket_prismatics], dtype=np.int32
+        )
+        anchor1 = np.asarray(
+            [d.anchor1 for d in self._double_ball_socket_prismatics], dtype=np.float32
+        )
+        anchor2 = np.asarray(
+            [d.anchor2 for d in self._double_ball_socket_prismatics], dtype=np.float32
+        )
+        hertz = np.asarray(
+            [d.hertz for d in self._double_ball_socket_prismatics], dtype=np.float32
+        )
+        damping_ratio = np.asarray(
+            [d.damping_ratio for d in self._double_ball_socket_prismatics],
+            dtype=np.float32,
+        )
+
+        body1_d = wp.array(body1, dtype=wp.int32, device=device)
+        body2_d = wp.array(body2, dtype=wp.int32, device=device)
+        anchor1_d = wp.array(anchor1, dtype=wp.vec3f, device=device)
+        anchor2_d = wp.array(anchor2, dtype=wp.vec3f, device=device)
+        hertz_d = wp.array(hertz, dtype=wp.float32, device=device)
+        damping_ratio_d = wp.array(damping_ratio, dtype=wp.float32, device=device)
+
+        wp.launch(
+            double_ball_socket_prismatic_initialize_kernel,
             dim=n,
             inputs=[
                 constraints,
@@ -2212,6 +2656,237 @@ class WorldBuilder:
                 hertz_d,
                 damping_ratio_d,
                 target_angle_d,
+                stiffness_d,
+                damping_d,
+            ],
+            device=device,
+        )
+
+    def _init_linear_motors(
+        self,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        cid_offset: int,
+        device: wp.context.Device,
+    ) -> None:
+        """Pack linear-motor descriptors into ``constraints``.
+
+        Translational twin of :meth:`_init_angular_motors`: the kernel
+        snapshots a separate axis per body (same world axis here, so
+        both bodies see the same reference direction), plus a pair of
+        world-space anchors for the PD-path slide reconstruction.
+        """
+        n = len(self._linear_motors)
+
+        body1 = np.asarray([d.body1 for d in self._linear_motors], dtype=np.int32)
+        body2 = np.asarray([d.body2 for d in self._linear_motors], dtype=np.int32)
+        axis = np.asarray([d.axis for d in self._linear_motors], dtype=np.float32)
+        anchor1 = np.asarray(
+            [d.anchor1 for d in self._linear_motors], dtype=np.float32
+        )
+        anchor2 = np.asarray(
+            [d.anchor2 for d in self._linear_motors], dtype=np.float32
+        )
+        target_velocity = np.asarray(
+            [d.target_velocity for d in self._linear_motors], dtype=np.float32
+        )
+        max_force = np.asarray(
+            [d.max_force for d in self._linear_motors], dtype=np.float32
+        )
+        hertz = np.asarray([d.hertz for d in self._linear_motors], dtype=np.float32)
+        damping_ratio = np.asarray(
+            [d.damping_ratio for d in self._linear_motors], dtype=np.float32
+        )
+        target_position = np.asarray(
+            [d.target_position for d in self._linear_motors], dtype=np.float32
+        )
+        stiffness = np.asarray(
+            [d.stiffness for d in self._linear_motors], dtype=np.float32
+        )
+        damping = np.asarray(
+            [d.damping for d in self._linear_motors], dtype=np.float32
+        )
+
+        body1_d = wp.array(body1, dtype=wp.int32, device=device)
+        body2_d = wp.array(body2, dtype=wp.int32, device=device)
+        axis1_d = wp.array(axis, dtype=wp.vec3f, device=device)
+        axis2_d = wp.array(axis, dtype=wp.vec3f, device=device)
+        anchor1_d = wp.array(anchor1, dtype=wp.vec3f, device=device)
+        anchor2_d = wp.array(anchor2, dtype=wp.vec3f, device=device)
+        target_velocity_d = wp.array(target_velocity, dtype=wp.float32, device=device)
+        max_force_d = wp.array(max_force, dtype=wp.float32, device=device)
+        hertz_d = wp.array(hertz, dtype=wp.float32, device=device)
+        damping_ratio_d = wp.array(damping_ratio, dtype=wp.float32, device=device)
+        target_position_d = wp.array(target_position, dtype=wp.float32, device=device)
+        stiffness_d = wp.array(stiffness, dtype=wp.float32, device=device)
+        damping_d = wp.array(damping, dtype=wp.float32, device=device)
+
+        wp.launch(
+            linear_motor_initialize_kernel,
+            dim=n,
+            inputs=[
+                constraints,
+                bodies,
+                int(cid_offset),
+                body1_d,
+                body2_d,
+                axis1_d,
+                axis2_d,
+                anchor1_d,
+                anchor2_d,
+                target_velocity_d,
+                max_force_d,
+                hertz_d,
+                damping_ratio_d,
+                target_position_d,
+                stiffness_d,
+                damping_d,
+            ],
+            device=device,
+        )
+
+    def _init_angular_limits(
+        self,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        cid_offset: int,
+        device: wp.context.Device,
+    ) -> None:
+        """Pack angular-limit descriptors into ``constraints``.
+
+        Mirrors :meth:`_init_angular_motors` but with the
+        ``(min_value, max_value)`` / ``(hertz, damping_ratio,
+        stiffness, damping)`` fields instead of the motor drive
+        inputs.
+        """
+        n = len(self._angular_limits)
+
+        body1 = np.asarray([d.body1 for d in self._angular_limits], dtype=np.int32)
+        body2 = np.asarray([d.body2 for d in self._angular_limits], dtype=np.int32)
+        axis = np.asarray([d.axis for d in self._angular_limits], dtype=np.float32)
+        min_value = np.asarray(
+            [d.min_value for d in self._angular_limits], dtype=np.float32
+        )
+        max_value = np.asarray(
+            [d.max_value for d in self._angular_limits], dtype=np.float32
+        )
+        hertz = np.asarray(
+            [d.hertz for d in self._angular_limits], dtype=np.float32
+        )
+        damping_ratio = np.asarray(
+            [d.damping_ratio for d in self._angular_limits], dtype=np.float32
+        )
+        stiffness = np.asarray(
+            [d.stiffness for d in self._angular_limits], dtype=np.float32
+        )
+        damping = np.asarray(
+            [d.damping for d in self._angular_limits], dtype=np.float32
+        )
+
+        body1_d = wp.array(body1, dtype=wp.int32, device=device)
+        body2_d = wp.array(body2, dtype=wp.int32, device=device)
+        axis1_d = wp.array(axis, dtype=wp.vec3f, device=device)
+        axis2_d = wp.array(axis, dtype=wp.vec3f, device=device)
+        min_value_d = wp.array(min_value, dtype=wp.float32, device=device)
+        max_value_d = wp.array(max_value, dtype=wp.float32, device=device)
+        hertz_d = wp.array(hertz, dtype=wp.float32, device=device)
+        damping_ratio_d = wp.array(damping_ratio, dtype=wp.float32, device=device)
+        stiffness_d = wp.array(stiffness, dtype=wp.float32, device=device)
+        damping_d = wp.array(damping, dtype=wp.float32, device=device)
+
+        wp.launch(
+            angular_limit_initialize_kernel,
+            dim=n,
+            inputs=[
+                constraints,
+                bodies,
+                int(cid_offset),
+                body1_d,
+                body2_d,
+                axis1_d,
+                axis2_d,
+                min_value_d,
+                max_value_d,
+                hertz_d,
+                damping_ratio_d,
+                stiffness_d,
+                damping_d,
+            ],
+            device=device,
+        )
+
+    def _init_linear_limits(
+        self,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        cid_offset: int,
+        device: wp.context.Device,
+    ) -> None:
+        """Pack linear-limit descriptors into ``constraints``.
+
+        Mirrors :meth:`_init_linear_motors` but drives the limit
+        fields instead of the motor fields.
+        """
+        n = len(self._linear_limits)
+
+        body1 = np.asarray([d.body1 for d in self._linear_limits], dtype=np.int32)
+        body2 = np.asarray([d.body2 for d in self._linear_limits], dtype=np.int32)
+        axis = np.asarray([d.axis for d in self._linear_limits], dtype=np.float32)
+        anchor1 = np.asarray(
+            [d.anchor1 for d in self._linear_limits], dtype=np.float32
+        )
+        anchor2 = np.asarray(
+            [d.anchor2 for d in self._linear_limits], dtype=np.float32
+        )
+        min_value = np.asarray(
+            [d.min_value for d in self._linear_limits], dtype=np.float32
+        )
+        max_value = np.asarray(
+            [d.max_value for d in self._linear_limits], dtype=np.float32
+        )
+        hertz = np.asarray(
+            [d.hertz for d in self._linear_limits], dtype=np.float32
+        )
+        damping_ratio = np.asarray(
+            [d.damping_ratio for d in self._linear_limits], dtype=np.float32
+        )
+        stiffness = np.asarray(
+            [d.stiffness for d in self._linear_limits], dtype=np.float32
+        )
+        damping = np.asarray(
+            [d.damping for d in self._linear_limits], dtype=np.float32
+        )
+
+        body1_d = wp.array(body1, dtype=wp.int32, device=device)
+        body2_d = wp.array(body2, dtype=wp.int32, device=device)
+        axis1_d = wp.array(axis, dtype=wp.vec3f, device=device)
+        axis2_d = wp.array(axis, dtype=wp.vec3f, device=device)
+        anchor1_d = wp.array(anchor1, dtype=wp.vec3f, device=device)
+        anchor2_d = wp.array(anchor2, dtype=wp.vec3f, device=device)
+        min_value_d = wp.array(min_value, dtype=wp.float32, device=device)
+        max_value_d = wp.array(max_value, dtype=wp.float32, device=device)
+        hertz_d = wp.array(hertz, dtype=wp.float32, device=device)
+        damping_ratio_d = wp.array(damping_ratio, dtype=wp.float32, device=device)
+        stiffness_d = wp.array(stiffness, dtype=wp.float32, device=device)
+        damping_d = wp.array(damping, dtype=wp.float32, device=device)
+
+        wp.launch(
+            linear_limit_initialize_kernel,
+            dim=n,
+            inputs=[
+                constraints,
+                bodies,
+                int(cid_offset),
+                body1_d,
+                body2_d,
+                axis1_d,
+                axis2_d,
+                anchor1_d,
+                anchor2_d,
+                min_value_d,
+                max_value_d,
+                hertz_d,
+                damping_ratio_d,
                 stiffness_d,
                 damping_d,
             ],

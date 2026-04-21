@@ -38,14 +38,18 @@ __all__ = [
     "CONSTRAINT_BODY1_OFFSET",
     "CONSTRAINT_BODY2_OFFSET",
     "CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET",
+    "CONSTRAINT_TYPE_ANGULAR_LIMIT",
     "CONSTRAINT_TYPE_ANGULAR_MOTOR",
     "CONSTRAINT_TYPE_BALL_SOCKET",
     "CONSTRAINT_TYPE_CONTACT",
     "CONSTRAINT_TYPE_D6",
     "CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET",
+    "CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET_PRISMATIC",
     "CONSTRAINT_TYPE_HINGE_ANGLE",
     "CONSTRAINT_TYPE_HINGE_JOINT",
     "CONSTRAINT_TYPE_INVALID",
+    "CONSTRAINT_TYPE_LINEAR_LIMIT",
+    "CONSTRAINT_TYPE_LINEAR_MOTOR",
     "CONSTRAINT_TYPE_OFFSET",
     "CONSTRAINT_TYPE_PRISMATIC",
     "DEFAULT_DAMPING_RATIO",
@@ -178,6 +182,45 @@ CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(8))
 #: without touching the persistent lambdas. See
 #: :mod:`constraint_contact` for the schema and per-iteration math.
 CONSTRAINT_TYPE_CONTACT = wp.constant(wp.int32(9))
+#: 1-DoF linear velocity / PD position drive -- the translational twin of
+#: :data:`CONSTRAINT_TYPE_ANGULAR_MOTOR`. Acts between two bodies at an
+#: anchor point along a world axis; velocity-target mode (Box2D-soft
+#: ``hertz`` / ``damping_ratio``) or PD position-target mode (absolute
+#: ``stiffness`` N/m / ``damping`` N*s/m) selected at prepare time by
+#: whether ``stiffness`` or ``damping`` is positive. Pair with
+#: :data:`CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET_PRISMATIC` for a motorised
+#: prismatic joint assembled from standalone pieces; the test harness
+#: exercises this path to isolate the motor from the integrated
+#: :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET` prismatic mode.
+#: See :mod:`constraint_linear_motor` for the math.
+CONSTRAINT_TYPE_LINEAR_MOTOR = wp.constant(wp.int32(10))
+#: Plain 5-DoF prismatic lock built from three ball-socket anchors:
+#: two on the slide axis (locking two translational DoFs perpendicular
+#: to it) plus one auto-derived point offset perpendicular to the axis
+#: (a single scalar row locking rotation about the axis). Same rank-5
+#: Schur idiom as :data:`CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET` but with a
+#: 4+1 block split instead of 3+2; the free DoF is translation along
+#: the slide axis. Pair with :data:`CONSTRAINT_TYPE_LINEAR_MOTOR` (in
+#: velocity or PD mode) for a motorised prismatic joint assembled from
+#: standalone pieces; compare to the fused
+#: :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET` prismatic path.
+#: See :mod:`constraint_double_ball_socket_prismatic` for the math.
+CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET_PRISMATIC = wp.constant(wp.int32(11))
+#: 1-DoF angular limit -- one-sided or two-sided spring-damper clamp on
+#: the relative twist angle between two bodies, along a fixed hinge
+#: axis. Tracks the cumulative unbounded angle via
+#: :func:`math_helpers.revolution_tracker_update`. Supports both
+#: :func:`soft_constraint_coefficients` (``hertz`` / ``damping_ratio``)
+#: and :func:`pd_coefficients` (``stiffness`` N*m/rad / ``damping``
+#: N*m*s/rad) conventions selected at descriptor time. See
+#: :mod:`constraint_angular_limit`.
+CONSTRAINT_TYPE_ANGULAR_LIMIT = wp.constant(wp.int32(12))
+#: 1-DoF linear limit -- translational twin of
+#: :data:`CONSTRAINT_TYPE_ANGULAR_LIMIT`. Clamps the relative slide
+#: between two bodies along a fixed axis to ``[min_value, max_value]``
+#: with a spring-damper penalty. Same dual convention (hertz /
+#: damping_ratio OR stiffness / damping). See :mod:`constraint_linear_limit`.
+CONSTRAINT_TYPE_LINEAR_LIMIT = wp.constant(wp.int32(13))
 
 #: Dword offsets of the three header fields. By contract these are
 #: 0 / 1 / 2 for every constraint schema (enforced by
