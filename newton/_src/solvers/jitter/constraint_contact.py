@@ -61,6 +61,7 @@ from newton._src.solvers.jitter.contact_container import (
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_set_local_p1,
     cc_set_normal_lambda,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
@@ -157,6 +158,12 @@ class _ContactSlotData:
     #: contacts so contacts that are strictly separating don't
     #: generate spurious corrective impulses.
     bias: wp.float32
+    #: Position-level tangent-row biases [m/s]. Kinetic slide is
+    #: zeroed by an anchor-reset at prepare; the remaining in-slop
+    #: drift goes in here so static friction pulls the body back to
+    #: the anchor proportional to its displacement.
+    bias_t1: wp.float32
+    bias_t2: wp.float32
 
 
 _SLOT_DWORDS: int = num_dwords(_ContactSlotData)
@@ -249,6 +256,8 @@ _OFF_SLOT_EFF_MASS_N = wp.constant(dword_offset_of(_ContactSlotData, "effective_
 _OFF_SLOT_EFF_MASS_T1 = wp.constant(dword_offset_of(_ContactSlotData, "effective_mass_t1"))
 _OFF_SLOT_EFF_MASS_T2 = wp.constant(dword_offset_of(_ContactSlotData, "effective_mass_t2"))
 _OFF_SLOT_BIAS = wp.constant(dword_offset_of(_ContactSlotData, "bias"))
+_OFF_SLOT_BIAS_T1 = wp.constant(dword_offset_of(_ContactSlotData, "bias_t1"))
+_OFF_SLOT_BIAS_T2 = wp.constant(dword_offset_of(_ContactSlotData, "bias_t2"))
 
 _SLOT_DWORDS_CONST = wp.constant(wp.int32(_SLOT_DWORDS))
 
@@ -490,6 +499,26 @@ def _slot_set_bias(c: ConstraintContainer, cid: wp.int32, base: wp.int32, v: wp.
     write_float(c, base + _OFF_SLOT_BIAS, cid, v)
 
 
+@wp.func
+def _slot_get_bias_t1(c: ConstraintContainer, cid: wp.int32, base: wp.int32) -> wp.float32:
+    return read_float(c, base + _OFF_SLOT_BIAS_T1, cid)
+
+
+@wp.func
+def _slot_set_bias_t1(c: ConstraintContainer, cid: wp.int32, base: wp.int32, v: wp.float32):
+    write_float(c, base + _OFF_SLOT_BIAS_T1, cid, v)
+
+
+@wp.func
+def _slot_get_bias_t2(c: ConstraintContainer, cid: wp.int32, base: wp.int32) -> wp.float32:
+    return read_float(c, base + _OFF_SLOT_BIAS_T2, cid)
+
+
+@wp.func
+def _slot_set_bias_t2(c: ConstraintContainer, cid: wp.int32, base: wp.int32, v: wp.float32):
+    write_float(c, base + _OFF_SLOT_BIAS_T2, cid, v)
+
+
 # ---------------------------------------------------------------------------
 # Math helpers
 # ---------------------------------------------------------------------------
@@ -628,6 +657,17 @@ def contact_prepare_for_iteration_at(
     bias_factor = wp.float32(0.2)
     penetration_slop = wp.float32(0.005)
 
+    # Friction-row position bias. Baumgarte the tangential drift
+    # between the stored (sticky) anchor and the current pose into
+    # the tangent row so static friction has a position-level
+    # restoring force -- bodies don't creep sideways at rest, so
+    # stacks don't quietly slide apart. The drift is clamped to
+    # ``friction_slop`` so a kinetically sliding body -- whose
+    # drift has long-since run past the slop -- doesn't get an
+    # unbounded pull-back force competing with the Coulomb cone.
+    friction_bias_factor = wp.float32(0.2)
+    friction_slop = wp.float32(0.001)
+
     # Accumulated warm-start impulse we'll apply to the bodies after
     # processing every active slot; batched so the body-velocity
     # scatter happens once, not 6x.
@@ -701,12 +741,29 @@ def contact_prepare_for_iteration_at(
         elif effective_gap < -penetration_slop:
             bias_val = bias_factor * (effective_gap + penetration_slop) * idt
 
+        # ---- Tangential drift for static friction ----
+        # Drift of body 2's contact anchor away from body 1's anchor,
+        # projected onto the stored tangent frame, clamped to the
+        # stiction slop. The clamp keeps a kinetically sliding body
+        # (whose drift is unbounded) from generating an unbounded
+        # position-restoring impulse -- within the Coulomb clamp the
+        # friction cone stays in charge. Within the stiction zone
+        # the bias is proportional to drift, giving position-level
+        # stabilisation so resting bodies don't creep.
+        p_diff = p2_world - p1_world
+        drift_t1 = wp.clamp(wp.dot(p_diff, t1_dir), -friction_slop, friction_slop)
+        drift_t2 = wp.clamp(wp.dot(p_diff, t2_dir), -friction_slop, friction_slop)
+        bias_t1_val = friction_bias_factor * drift_t1 * idt
+        bias_t2_val = friction_bias_factor * drift_t2 * idt
+
         _slot_set_r1(constraints, cid, base, r1)
         _slot_set_r2(constraints, cid, base, r2)
         _slot_set_eff_n(constraints, cid, base, eff_n)
         _slot_set_eff_t1(constraints, cid, base, eff_t1)
         _slot_set_eff_t2(constraints, cid, base, eff_t2)
         _slot_set_bias(constraints, cid, base, bias_val)
+        _slot_set_bias_t1(constraints, cid, base, bias_t1_val)
+        _slot_set_bias_t2(constraints, cid, base, bias_t2_val)
 
         # Warm-start impulse from the ContactContainer's *current*
         # buffers -- the gather kernel has already seeded them from
@@ -812,8 +869,12 @@ def contact_iterate_at(
         eff_t1 = _slot_get_eff_t1(constraints, cid, base)
         eff_t2 = _slot_get_eff_t2(constraints, cid, base)
         bias_val = _slot_get_bias(constraints, cid, base)
+        bias_t1_val = _slot_get_bias_t1(constraints, cid, base)
+        bias_t2_val = _slot_get_bias_t2(constraints, cid, base)
         if not use_bias:
             bias_val = wp.float32(0.0)
+            bias_t1_val = wp.float32(0.0)
+            bias_t2_val = wp.float32(0.0)
 
         # Relative velocity at the contact point (of body 2 seen from
         # body 1). ``v_contact = v2 + w2 x r2 - v1 - w1 x r1``.
@@ -846,7 +907,7 @@ def contact_iterate_at(
 
         # ---- Tangent 1 row ----
         jv_t1 = wp.dot(vel_rel, t1_dir)
-        d_lam_t1 = -eff_t1 * jv_t1
+        d_lam_t1 = -eff_t1 * (jv_t1 + bias_t1_val)
         lam_t1_old = cc_get_tangent1_lambda(cc, slot, cid)
         lam_t1_new = wp.clamp(lam_t1_old + d_lam_t1, -fric_limit, fric_limit)
         d_lam_t1 = lam_t1_new - lam_t1_old
@@ -862,7 +923,7 @@ def contact_iterate_at(
 
         # ---- Tangent 2 row ----
         jv_t2 = wp.dot(vel_rel, t2_dir)
-        d_lam_t2 = -eff_t2 * jv_t2
+        d_lam_t2 = -eff_t2 * (jv_t2 + bias_t2_val)
         lam_t2_old = cc_get_tangent2_lambda(cc, slot, cid)
         lam_t2_new = wp.clamp(lam_t2_old + d_lam_t2, -fric_limit, fric_limit)
         d_lam_t2 = lam_t2_new - lam_t2_old
