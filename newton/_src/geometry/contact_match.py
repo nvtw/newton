@@ -72,16 +72,11 @@ Per-frame call order (inside :class:`~newton.CollisionPipeline`)::
     matcher.build_report(...)  # optional; must precede save_sorted_state
     matcher.save_sorted_state(...)  # after sorting, replay, and report
 
-The ``build_report`` / ``save_sorted_state`` ordering is load-bearing:
-``save_sorted_state`` overwrites ``_prev_count`` with the current frame's
-count, while ``build_report`` reads the *old* ``_prev_count`` to bound the
-broken-contact enumeration.
-
-Sticky mode ordering: ``replay_matched`` must run after the sort so that
-``match_index[tid]`` points at the prev-frame sorted layout and the target
-rows are the final sorted ones, and before ``save_sorted_state`` so the
-record we carry forward is the post-replay record actually used this frame.  Swapping the two silently narrows the
-broken-contact scan to the current frame's active range.
+The ordering matters: ``save_sorted_state`` overwrites ``_prev_count`` with
+the current frame's count, while ``build_report`` reads the *old*
+``_prev_count`` to bound the broken-contact enumeration, and sticky
+``replay_matched`` must see the post-sort ``match_index`` and the pre-save
+``_prev_*`` buffers it reads from.
 """
 
 from __future__ import annotations
@@ -518,53 +513,43 @@ class ContactMatcher:
     :class:`~newton.Contacts` container; this class only owns cross-frame state.
 
     Pre-allocates all buffers at construction time for CUDA graph capture
-    compatibility.  The typical per-frame call sequence is::
+    compatibility.  See the module docstring for the per-frame call order and
+    the ordering constraints between :meth:`match`, :meth:`replay_matched`,
+    :meth:`build_report`, and :meth:`save_sorted_state`.
 
-        matcher.match(...)  # before ContactSorter.sort_full()
-        sorter.sort_full(...)  # match_index is permuted with contacts
-        matcher.replay_matched(...)  # sticky-only; overwrites matched rows
-        matcher.build_report(...)  # optional; must precede save_sorted_state
-        matcher.save_sorted_state(...)  # after sorting, replay, and report
-
-    The ``build_report`` → ``save_sorted_state`` order is required:
-    ``save_sorted_state`` overwrites ``_prev_count`` with the current frame's
-    count, while ``build_report`` reads the *old* ``_prev_count`` to bound
-    the broken-contact enumeration.
-
-    Memory is minimised by reusing the *sorter*'s existing scratch buffers
-    for the previous-frame world-space positions and normals.  The
-    matcher owns two small per-contact buffers in addition: the sorted
-    key cache (8 bytes/contact) and the per-prev claim word used by the
-    ``atomic_min`` race that keeps new→prev injective (8 bytes/contact).
-    When ``contact_report`` is disabled, the ``prev_was_matched`` flag
-    array (4 bytes) is also skipped.
+    Memory is minimised by reusing the sorter's existing scratch buffers for
+    the previous-frame world-space contact midpoints and normals.  The matcher
+    owns two small per-contact buffers in addition: the sorted key cache
+    (8 bytes/contact) and the per-prev claim word used by the ``atomic_min``
+    race that keeps new→prev injective (8 bytes/contact).  When
+    ``contact_report`` is disabled, the ``prev_was_matched`` flag array is
+    also skipped.
 
     .. note::
         Previous-frame state persists across :meth:`~newton.CollisionPipeline.collide`
-        calls — that is the whole point.  But in RL-style workflows where a
-        user resets or teleports all bodies between episodes, the stale
-        previous-frame data will produce spurious matches on the next frame.
-        Call :meth:`reset` after such discontinuities to zero ``_prev_count``
-        so the next frame starts fresh with all ``MATCH_NOT_FOUND``.
+        calls — that is the whole point.  In RL-style workflows where the user
+        resets or teleports bodies between episodes, call :meth:`reset` after
+        such discontinuities so the next frame starts fresh with all
+        :data:`MATCH_NOT_FOUND`.
 
     Args:
         capacity: Maximum number of contacts (must match :class:`ContactSorter`).
         sorter: The :class:`ContactSorter` whose scratch buffers will be
             reused for storing previous-frame positions and normals.
-        pos_threshold: World-space distance threshold [m].  Contacts whose
-            positions moved more than this between frames are considered broken.
+        pos_threshold: World-space distance threshold [m] between the
+            previous and current contact midpoints
+            ``0.5 * (world(point0) + world(point1))``.  Contacts whose midpoint
+            moved more than this between frames are considered broken.
         normal_dot_threshold: Minimum dot product between old and new contact
             normals.  Below this the contact is considered broken.
         contact_report: Allocate the ``prev_was_matched`` flag array needed
             to enumerate broken contacts in :meth:`build_report`.
         sticky: Allocate four extra per-contact ``wp.vec3`` buffers
             (``point0``/``point1``/``offset0``/``offset1``, body-frame) used
-            by :meth:`replay_matched` to overwrite matched contacts with
-            their previous-frame geometry.  The world-frame normal is
-            already persisted for matching so no extra allocation is
-            needed for it.  When ``False`` these attributes are ``None``,
-            no extra kernel launches are added, and the non-sticky launch
-            graph is identical to the pre-sticky design.
+            by :meth:`replay_matched`.  The world-frame normal is persisted
+            for matching regardless, so no extra allocation is needed for it.
+            When ``False`` these attributes are ``None`` and no extra kernel
+            launches are added.
         device: Device to allocate on.
     """
 
@@ -648,15 +633,11 @@ class ContactMatcher:
         """Clear cross-frame state so the next frame starts fresh.
 
         Use this after any discontinuity that invalidates the previous
-        frame's contacts — e.g. resetting an RL environment, teleporting
-        bodies, or loading a new scene.  After ``reset()`` the next call to
-        :meth:`match` produces all :data:`MATCH_NOT_FOUND` and
-        :meth:`build_report` reports zero broken contacts.
-
-        Zeroing ``_prev_count`` is sufficient to short-circuit both paths;
-        the previous-frame key and position buffers are not touched, but
-        they will not be read because both kernels gate on ``_prev_count``
-        / ``prev_count``.
+        frame's contacts (RL episode reset, teleported bodies, scene
+        reload).  After ``reset()`` the next :meth:`match` produces all
+        :data:`MATCH_NOT_FOUND` and :meth:`build_report` reports zero broken
+        contacts.  Zeroing ``_prev_count`` is sufficient because both kernels
+        gate on it.
         """
         self._prev_count.zero_()
 
@@ -768,21 +749,16 @@ class ContactMatcher:
     ) -> None:
         """Save current frame's sorted contacts for next-frame matching.
 
-        Must be called **after** :meth:`ContactSorter.sort_full`.
-
-        The world-space midpoint of ``sorted_point0`` and ``sorted_point1``
-        (both body-frame) is written into the sorter's scratch buffer
-        :attr:`ContactSorter.scratch_pos_world`, along with the sorted normal
-        into :attr:`ContactSorter.scratch_normal`.  Those scratch buffers are
-        idle between frames, so matching reuses them with zero extra memory.
-        Sorted keys go to an owned buffer since the sorter's key buffer is
-        overwritten by ``_prepare_sort`` each frame.
+        Must be called **after** :meth:`ContactSorter.sort_full`.  The
+        world-space midpoint of ``sorted_point0``/``sorted_point1`` and the
+        sorted normal are written into the sorter's scratch buffers
+        (:attr:`ContactSorter.scratch_pos_world` /
+        :attr:`ContactSorter.scratch_normal`), which are idle between frames.
 
         When the matcher was built with ``sticky=True``, the body-frame
-        ``point0``/``point1``/``offset0``/``offset1`` columns are also
-        persisted for :meth:`replay_matched` in the same kernel launch.
-        The ``sorted_offset0``/``sorted_offset1`` keyword args are required in
-        that case and ignored otherwise.
+        point/offset columns are also persisted for :meth:`replay_matched` in
+        the same kernel launch.  ``sorted_offset0`` / ``sorted_offset1`` are
+        required in that case and ignored otherwise.
 
         Args:
             sorted_keys: Sorted int64 keys (use :attr:`ContactSorter.sorted_keys_view`).
@@ -852,20 +828,12 @@ class ContactMatcher:
         """Overwrite matched rows with the saved previous-frame contact geometry.
 
         Only valid when the matcher was constructed with ``sticky=True``.  Must
-        be called **after** :meth:`ContactSorter.sort_full` (so ``match_index``
-        is permuted to the sorted layout and the target rows are the final
-        sorted ones) and **before** :meth:`save_sorted_state` (which overwrites
-        the prev-frame buffers with the current frame's post-replay record).
-
-        Unmatched rows (``match_index < 0`` -- :data:`MATCH_NOT_FOUND` or
-        :data:`MATCH_BROKEN`) are left untouched, so new contacts pass through
-        with their fresh narrow-phase geometry.
-
+        run **after** :meth:`ContactSorter.sort_full` and **before**
+        :meth:`save_sorted_state`.  Unmatched rows (``match_index < 0``) are
+        left untouched so new contacts keep their fresh narrow-phase geometry.
         Only ``point0``/``point1``/``offset0``/``offset1``/``normal`` are
-        restored.  Every other contact field (``shape0``/``shape1``,
-        ``margin0``/``margin1``, ...) is either key-derived or per-shape
-        constant and so already identical to the previous frame's value for
-        a matched contact.
+        restored; other fields (``shape0``/``shape1``, margins, ...) are
+        already identical for a matched contact.
 
         Args:
             contact_count: Single-element int array with the active contact count.

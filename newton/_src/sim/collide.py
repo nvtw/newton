@@ -464,22 +464,17 @@ class CollisionPipeline:
         """Frame-to-frame contact matching mode for :class:`CollisionPipeline`.
 
         Values:
-            DISABLED: No matching.  :attr:`Contacts.rigid_contact_match_index`
-                is not allocated and no cross-frame state is kept.
-            LATEST: Match current contacts against the previous frame, but use
-                the current frame's freshly generated contact geometry in the
-                returned :class:`Contacts` buffer.  ``match_index`` is populated
-                so solvers/users can correlate across frames.
-            STICKY: Match like ``LATEST``, then overwrite each matched contact's
-                body-frame ``point0``/``point1`` and ``offset0``/``offset1``
-                along with its world-frame ``normal`` with the saved
-                previous-frame values.  Remaining contact fields (shape
-                indices, per-shape margins) are key-derived or per-shape
-                constants and so are already identical for a matched contact.
-                Unmatched contacts (:data:`~newton.geometry.MATCH_NOT_FOUND` /
-                :data:`~newton.geometry.MATCH_BROKEN`) pass through unchanged.
-                Reduces small frame-to-frame geometric jitter on persistent
-                contacts — useful for stacking.
+            DISABLED: No matching; no cross-frame state is kept.
+            LATEST: Match current contacts against the previous frame and
+                populate :attr:`Contacts.rigid_contact_match_index`, but keep
+                the current frame's fresh narrow-phase geometry.
+            STICKY: Match like ``LATEST``, then overwrite each matched
+                contact's body-frame ``point0`` / ``point1`` / ``offset0`` /
+                ``offset1`` and world-frame ``normal`` with the saved
+                previous-frame values.  Reduces frame-to-frame jitter on
+                persistent contacts — useful for stacking.
+
+        See :ref:`Contact Matching` for details.
         """
 
         DISABLED = "disabled"
@@ -545,27 +540,24 @@ class CollisionPipeline:
             deterministic: Sort contacts after the narrow phase so that results
                 are independent of GPU thread scheduling.  Adds a radix sort +
                 gather pass.  Hydroelastic contacts are not yet covered.
-            contact_matching: Frame-to-frame contact matching mode.  Accepts a
-                bare string (``"disabled"`` / ``"latest"`` / ``"sticky"``) or
-                the equivalent :class:`CollisionPipeline.ContactMatching` enum
-                value.  Defaults to ``"disabled"``.  Any non-disabled mode
-                implies ``deterministic=True`` and populates
-                :attr:`Contacts.rigid_contact_match_index` each frame.  See
-                :class:`CollisionPipeline.ContactMatching` for a description of
-                each mode.
+            contact_matching: Frame-to-frame contact matching mode.  Accepts
+                a string (``"disabled"`` / ``"latest"`` / ``"sticky"``) or the
+                equivalent :class:`CollisionPipeline.ContactMatching` enum
+                value.  Any non-disabled mode implies ``deterministic=True``
+                and populates :attr:`Contacts.rigid_contact_match_index`.
+                Defaults to ``"disabled"``.
             contact_matching_pos_threshold: World-space distance threshold [m]
                 between the previous and current contact midpoints
-                ``0.5 * (world(point0) + world(point1))`` — symmetric in
-                shape 0 / shape 1.  Contacts whose midpoint moved more than
-                this between frames are considered broken.  Defaults to
-                ``0.005`` (0.5 cm).
+                ``0.5 * (world(point0) + world(point1))``.  Contacts whose
+                midpoint moves more than this are considered broken.  Defaults
+                to ``0.005``.
             contact_matching_normal_dot_threshold: Minimum dot product between
                 old and new contact normals for a match.
-            contact_report: Allocate buffers on the :class:`Contacts` container
-                (``rigid_contact_new_indices``, ``rigid_contact_new_count``,
-                ``rigid_contact_broken_indices``, ``rigid_contact_broken_count``)
-                populated each frame with new and broken contact indices.
-                Requires ``contact_matching`` to be a non-disabled mode.
+            contact_report: Allocate ``rigid_contact_new_indices`` /
+                ``rigid_contact_new_count`` / ``rigid_contact_broken_indices``
+                / ``rigid_contact_broken_count`` on the :class:`Contacts`
+                container, populated each frame.  Requires a non-disabled
+                ``contact_matching`` mode.
             verify_buffers: Run a ``dim=[1]`` diagnostic kernel at the end of
                 the narrow phase that prints warnings on any intermediate
                 candidate-pair or final rigid contact buffer overflow; see
