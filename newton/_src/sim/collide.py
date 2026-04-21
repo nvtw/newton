@@ -1106,20 +1106,31 @@ class CollisionPipeline:
                 device=self.device,
             )
 
-        # Sticky mode: overwrite matched rows with the saved previous-frame
-        # contact geometry.  Must run after sort_full (so match_index points at
-        # the sorted prev-frame layout *and* we target the final sorted rows)
-        # and before save_sorted_state (we save the record we actually used
-        # this frame, carrying the sticky history forward).
+        # Sticky mode: restore the creation-frame contact manifold
+        # (body-frame anchor pair + world-frame normal) on matched rows,
+        # and recompute the body-frame friction offsets from the
+        # persistent normal + current body transforms.  Must run after
+        # sort_full (so match_index points at the sorted prev-frame
+        # layout and we target the final sorted rows) and before
+        # save_sorted_state (we save the record we actually used this
+        # frame, carrying the sticky history forward).  See the
+        # rationale in ``contact_match.py`` above
+        # ``_replay_matched_kernel``.
         if self._matching_sticky:
             self._contact_matcher.replay_matched(
                 contact_count=contacts.rigid_contact_count,
                 match_index=contacts.rigid_contact_match_index,
                 point0=contacts.rigid_contact_point0,
                 point1=contacts.rigid_contact_point1,
+                normal=contacts.rigid_contact_normal,
                 offset0=contacts.rigid_contact_offset0,
                 offset1=contacts.rigid_contact_offset1,
-                normal=contacts.rigid_contact_normal,
+                shape0=contacts.rigid_contact_shape0,
+                shape1=contacts.rigid_contact_shape1,
+                margin0=contacts.rigid_contact_margin0,
+                margin1=contacts.rigid_contact_margin1,
+                body_q=state.body_q,
+                shape_body=model.shape_body,
                 device=self.device,
             )
 
@@ -1142,14 +1153,6 @@ class CollisionPipeline:
                     contacts.rigid_contact_broken_count,
                     device=self.device,
                 )
-            sticky_offsets: dict[str, wp.array] = (
-                {
-                    "sorted_offset0": contacts.rigid_contact_offset0,
-                    "sorted_offset1": contacts.rigid_contact_offset1,
-                }
-                if self._matching_sticky
-                else {}
-            )
             self._contact_matcher.save_sorted_state(
                 sorted_keys=self._contact_sorter.sorted_keys_view,
                 contact_count=contacts.rigid_contact_count,
@@ -1161,7 +1164,6 @@ class CollisionPipeline:
                 body_q=state.body_q,
                 shape_body=model.shape_body,
                 device=self.device,
-                **sticky_offsets,
             )
 
         # Differentiable contact augmentation: reconstruct world-space contact
