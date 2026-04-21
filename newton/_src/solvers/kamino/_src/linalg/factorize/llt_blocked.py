@@ -1,7 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""KAMINO: Linear Algebra: Blocked LLT (i.e. Cholesky) factorization using Warp's Tile API."""
+"""KAMINO: Linear Algebra: Blocked LLT (i.e. Cholesky) factorization using Warp's Tile API.
+
+Performance notes
+-----------------
+Compared to the original implementation, this version:
+  * Uses the 3-operand accumulator form of ``wp.tile_matmul(A, B, C, alpha=-1.0)``
+    which fuses the trailing/rhs update into a single FMA instead of computing
+    a temporary tile and doing a separate in-place subtract.
+  * Uses ``wp.tile_lower_solve_inplace`` / ``wp.tile_upper_solve_inplace`` and
+    ``wp.tile_cholesky_inplace`` so the factorize / triangular solves write
+    back into their input tile (no extra register / shared tile round-trip).
+
+Identity padding is retained in both factorize and solve kernels: in Kamino
+each block's flat storage region may be strictly larger than the active
+``n_i`` (because ``maxdim[i]`` can exceed ``dim[i]``), so the padded rows of
+``L_kk`` / ``b_i`` / ``y_i`` / ``x_i`` contain arbitrary values from
+neighboring (possibly active) blocks and must be masked before the
+triangular solves.
+"""
 
 from ctypes import sizeof
 from functools import cache
@@ -61,38 +79,6 @@ get_float32_array_offset_ptr = make_get_array_offset_ptr_func(wp.float32)
 """A Warp function to get the offset pointer of a float32 warp array."""
 
 
-# @wp.func
-# def tile_sum_func(a: wp.tile(dtype=float, shape=(TILE_M, TILE_N))):
-#     return wp.tile_sum(a) * 0.5
-# def make_tile_pad(block_size: int, dtype=float32):
-#     """Creates a function to pad a tile with identity values where the tile exceeds the matrix dimensions."""
-#     @wp.func
-#     def tile_pad(
-#         T: wp.tile(dtype=dtype, shape=(block_size, block_size)),
-#         i: int,
-#         j: int,
-#         n_i: int,
-#         n_j: int,
-#         tid_block: int,
-#         num_threads_per_block: int,
-#     ) -> None:
-#         """Pads a tile T with identity values where the tile exceeds the matrix dimensions."""
-#         if i + block_size > n_i or j + block_size > n_j:
-#             num_tile_elements = block_size * block_size
-#             num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
-#             for ii in range(num_iterations):
-#                 linear_index = tid_block + ii * num_threads_per_block
-#                 linear_index = linear_index % num_tile_elements
-#                 row = linear_index // block_size
-#                 col = linear_index % block_size
-#                 value = T[row, col]
-#                 if i + row >= n_i or j + col >= n_j:
-#                     value = wp.where(i + row == j + col, dtype(1), dtype(0))
-#                 T[row, col] = value
-
-#     return tile_pad
-
-
 ###
 # Kernels
 ###
@@ -125,7 +111,7 @@ def make_llt_blocked_factorize_kernel(block_size: int):
         A_i = wp.array(ptr=A_i_ptr, shape=(n_i, n_i), dtype=wp.float32)
         L_i = wp.array(ptr=L_i_ptr, shape=(n_i, n_i), dtype=wp.float32)
 
-        # Round up active_matrix_size to next multiple of block_size
+        # Round up the active dimension to the next multiple of block_size
         n_i_padded = ((n_i + block_size - 1) // block_size) * block_size
 
         # Process the matrix in blocks along its leading dimension.
@@ -133,10 +119,11 @@ def make_llt_blocked_factorize_kernel(block_size: int):
             end = k + block_size
 
             # Load current diagonal block A[k:end, k:end]
-            # and update with contributions from previously computed blocks.
             A_kk_tile = wp.tile_load(A_i, shape=(block_size, block_size), offset=(k, k), storage="shared")
 
-            # The following if pads the matrix if it is not divisible by block_size
+            # Identity-pad the tail of the last diagonal block so that the
+            # subsequent factorize / triangular solve operates on a valid
+            # square tile even when n_i is not a multiple of block_size.
             if k + block_size > n_i:
                 num_tile_elements = block_size * block_size
                 num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
@@ -150,24 +137,21 @@ def make_llt_blocked_factorize_kernel(block_size: int):
                         value = wp.where(row == col, float32(1), float32(0))
                     A_kk_tile[row, col] = value
 
-            # Update the diagonal block with contributions from previously computed blocks
-            if k > 0:
-                for j in range(0, k, block_size):
-                    L_block = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
-                    L_block_T = wp.tile_transpose(L_block)
-                    L_L_T_block = wp.tile_matmul(L_block, L_block_T)
-                    A_kk_tile -= L_L_T_block
+            # Trailing update: A_kk -= sum_{j<k} L_kj L_kj^T  (fused FMA).
+            for j in range(0, k, block_size):
+                L_block = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
+                L_block_T = wp.tile_transpose(L_block)
+                wp.tile_matmul(L_block, L_block_T, A_kk_tile, alpha=-1.0)
 
-            # Compute the Cholesky factorization for the block
-            L_kk_tile = wp.tile_cholesky(A_kk_tile)
-            wp.tile_store(L_i, L_kk_tile, offset=(k, k))
+            # In-place Cholesky factorization of the current diagonal block
+            wp.tile_cholesky_inplace(A_kk_tile)
+            wp.tile_store(L_i, A_kk_tile, offset=(k, k))
 
-            # Process the blocks below the current block
+            # Process the sub-diagonal blocks below the current diagonal block
             for i in range(end, n_i_padded, block_size):
-                # Load the current block A[i:end, k:end]
                 A_ik_tile = wp.tile_load(A_i, shape=(block_size, block_size), offset=(i, k), storage="shared")
 
-                # The following if pads the matrix if it is not divisible by block_size
+                # Identity-pad the tail of the last sub-diagonal block.
                 if i + block_size > n_i or k + block_size > n_i:
                     num_tile_elements = block_size * block_size
                     num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
@@ -181,22 +165,20 @@ def make_llt_blocked_factorize_kernel(block_size: int):
                             value = wp.where(i + row == k + col, float32(1), float32(0))
                         A_ik_tile[row, col] = value
 
-                # Update the block with contributions from previously computed blocks
-                if k > 0:
-                    for j in range(0, k, block_size):
-                        L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
-                        L_2_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
-                        L_T_tile = wp.tile_transpose(L_2_tile)
-                        L_L_T_tile = wp.tile_matmul(L_tile, L_T_tile)
-                        A_ik_tile -= L_L_T_tile
+                # Trailing update: A_ik -= sum_{j<k} L_ij L_kj^T  (fused FMA).
+                for j in range(0, k, block_size):
+                    L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
+                    L_2_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
+                    L_T_tile = wp.tile_transpose(L_2_tile)
+                    wp.tile_matmul(L_tile, L_T_tile, A_ik_tile, alpha=-1.0)
 
-                # Solve for the current block
-                t = wp.tile_transpose(A_ik_tile)
-                tmp = wp.tile_lower_solve(L_kk_tile, t)
-                sol_tile = wp.tile_transpose(tmp)
-                wp.tile_store(L_i, sol_tile, offset=(i, k))
+                # Solve L_kk * X^T = A_ik^T  =>  L_ik = X.
+                # (In-place triangular solve on the transposed tile.)
+                A_ik_T_tile = wp.tile_transpose(A_ik_tile)
+                wp.tile_lower_solve_inplace(A_kk_tile, A_ik_T_tile)
+                L_ik_tile = wp.tile_transpose(A_ik_T_tile)
+                wp.tile_store(L_i, L_ik_tile, offset=(i, k))
 
-    # Return the kernel function
     return llt_blocked_factorize_kernel
 
 
@@ -214,76 +196,94 @@ def make_llt_blocked_solve_kernel(block_size: int):
         y: wp.array(dtype=float32),
         x: wp.array(dtype=float32),
     ):
-        # Retrieve the thread index and thread-block configuration
         tid, tid_block = wp.tid()
         num_threads_per_block = wp.block_dim()
 
-        # Retrieve the matrix block dimensions and size
         n_i = dim[tid]
         L_i_start = mio[tid]
         v_i_start = vio[tid]
 
-        # Retrieve a pointer to the start of the i-th matrix in A
         L_i_ptr = get_float32_array_offset_ptr(L, L_i_start)
         b_i_ptr = get_float32_array_offset_ptr(b, v_i_start)
         y_i_ptr = get_float32_array_offset_ptr(y, v_i_start)
         x_i_ptr = get_float32_array_offset_ptr(x, v_i_start)
 
-        # Create a temporary warp array pointing to the i-th matrix
         L_i = wp.array(ptr=L_i_ptr, shape=(n_i, n_i), dtype=wp.float32)
         b_i = wp.array(ptr=b_i_ptr, shape=(n_i, 1), dtype=wp.float32)
         y_i = wp.array(ptr=y_i_ptr, shape=(n_i, 1), dtype=wp.float32)
         x_i = wp.array(ptr=x_i_ptr, shape=(n_i, 1), dtype=wp.float32)
 
-        # Round up n_i to next multiple of block_size
         n_i_padded = ((n_i + block_size - 1) // block_size) * block_size
 
-        # Forward substitution: solve L y = b
+        # Forward substitution: solve L * y = b
         for i in range(0, n_i_padded, block_size):
             rhs_tile = wp.tile_load(b_i, shape=(block_size, 1), offset=(i, 0))
-            if i > 0:
-                for j in range(0, i, block_size):
-                    L_block = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
-                    y_block = wp.tile_load(y_i, shape=(block_size, 1), offset=(j, 0))
-                    Ly_block = wp.tile_matmul(L_block, y_block)
-                    rhs_tile -= Ly_block
-            L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
-            y_tile = wp.tile_lower_solve(L_tile, rhs_tile)
-            wp.tile_store(y_i, y_tile, offset=(i, 0))
 
-        # Backward substitution: solve L^T x = y
-        for i in range(n_i_padded - block_size, -1, -block_size):
-            i_end = i + block_size
-            rhs_tile = wp.tile_load(y_i, shape=(block_size, 1), offset=(i, 0))
-            if i_end < n_i_padded:
-                for j in range(i_end, n_i_padded, block_size):
-                    L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(j, i))
-                    L_T_tile = wp.tile_transpose(L_tile)
-                    x_tile = wp.tile_load(x_i, shape=(block_size, 1), offset=(j, 0))
-                    L_T_x_tile = wp.tile_matmul(L_T_tile, x_tile)
-                    rhs_tile -= L_T_x_tile
-            L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
+            # Mask out any garbage values loaded past the active dimension
+            # (the flat rhs buffer may be larger than n_i).
+            if i + block_size > n_i:
+                num_tile_elements = block_size
+                num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
+                for ii in range(num_iterations):
+                    row = (tid_block + ii * num_threads_per_block) % num_tile_elements
+                    if i + row >= n_i:
+                        rhs_tile[row, 0] = float32(0)
 
-            # The following if pads the matrix if it is not divisible by block_size
+            for j in range(0, i, block_size):
+                L_block = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
+                y_block = wp.tile_load(y_i, shape=(block_size, 1), offset=(j, 0))
+                wp.tile_matmul(L_block, y_block, rhs_tile, alpha=-1.0)
+
+            L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
+            # Identity-pad the tail of the last diagonal block so the
+            # triangular solve produces 0 for the inactive rows.
             if i + block_size > n_i:
                 num_tile_elements = block_size * block_size
                 num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
                 for ii in range(num_iterations):
-                    linear_index = tid_block + ii * num_threads_per_block
-                    linear_index = linear_index % num_tile_elements
+                    linear_index = (tid_block + ii * num_threads_per_block) % num_tile_elements
                     row = linear_index // block_size
                     col = linear_index % block_size
                     value = L_tile[row, col]
                     if i + row >= n_i:
-                        value = wp.where(i + row == i + col, float32(1), float32(0))
+                        value = wp.where(row == col, float32(1), float32(0))
                     L_tile[row, col] = value
-            # wp.static(make_tile_pad(block_size=block_size, dtype=float32))(L_tile, i, i, n_i, n_i, tid_block, num_threads_per_block)
+
+            wp.tile_lower_solve_inplace(L_tile, rhs_tile)
+            wp.tile_store(y_i, rhs_tile, offset=(i, 0))
+
+        # Backward substitution: solve L^T * x = y
+        for i in range(n_i_padded - block_size, -1, -block_size):
+            i_end = i + block_size
+            rhs_tile = wp.tile_load(y_i, shape=(block_size, 1), offset=(i, 0))
+            # Note: y was freshly written by the forward pass so the tail rows
+            # of the last y-tile are already zero (see masking above). No
+            # additional rhs masking needed here.
+
+            for j in range(i_end, n_i_padded, block_size):
+                L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(j, i))
+                L_T_tile = wp.tile_transpose(L_tile)
+                x_tile = wp.tile_load(x_i, shape=(block_size, 1), offset=(j, 0))
+                wp.tile_matmul(L_T_tile, x_tile, rhs_tile, alpha=-1.0)
+
+            L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
+            # Identity-pad the tail of the last diagonal block.
+            if i + block_size > n_i:
+                num_tile_elements = block_size * block_size
+                num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
+                for ii in range(num_iterations):
+                    linear_index = (tid_block + ii * num_threads_per_block) % num_tile_elements
+                    row = linear_index // block_size
+                    col = linear_index % block_size
+                    value = L_tile[row, col]
+                    if i + row >= n_i:
+                        value = wp.where(row == col, float32(1), float32(0))
+                    L_tile[row, col] = value
 
             L_T_tile = wp.tile_transpose(L_tile)
-            x_tile = wp.tile_upper_solve(L_T_tile, rhs_tile)
-            wp.tile_store(x_i, x_tile, offset=(i, 0))
+            wp.tile_upper_solve_inplace(L_T_tile, rhs_tile)
+            wp.tile_store(x_i, rhs_tile, offset=(i, 0))
 
-    # Return the kernel function
     return llt_blocked_solve_kernel
 
 
@@ -300,72 +300,87 @@ def make_llt_blocked_solve_inplace_kernel(block_size: int):
         y: wp.array(dtype=float32),
         x: wp.array(dtype=float32),
     ):
-        # Retrieve the thread index and thread-block configuration
         tid, tid_block = wp.tid()
         num_threads_per_block = wp.block_dim()
 
-        # Retrieve the matrix block dimensions and size
         n_i = dim[tid]
         L_i_start = mio[tid]
         v_i_start = vio[tid]
 
-        # Retrieve a pointer to the start of the i-th matrix in A
         L_i_ptr = get_float32_array_offset_ptr(L, L_i_start)
         y_i_ptr = get_float32_array_offset_ptr(y, v_i_start)
         x_i_ptr = get_float32_array_offset_ptr(x, v_i_start)
 
-        # Create a temporary warp array pointing to the i-th matrix
         L_i = wp.array(ptr=L_i_ptr, shape=(n_i, n_i), dtype=wp.float32)
         y_i = wp.array(ptr=y_i_ptr, shape=(n_i, 1), dtype=wp.float32)
         x_i = wp.array(ptr=x_i_ptr, shape=(n_i, 1), dtype=wp.float32)
 
-        # Round up n_i to next multiple of block_size
         n_i_padded = ((n_i + block_size - 1) // block_size) * block_size
 
-        # Forward substitution: solve L y = b
+        # Forward substitution: solve L * y = b (b is initially stored in x).
         for i in range(0, n_i_padded, block_size):
             rhs_tile = wp.tile_load(x_i, shape=(block_size, 1), offset=(i, 0))
-            if i > 0:
-                for j in range(0, i, block_size):
-                    L_block = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
-                    y_block = wp.tile_load(y_i, shape=(block_size, 1), offset=(j, 0))
-                    Ly_block = wp.tile_matmul(L_block, y_block)
-                    rhs_tile -= Ly_block
-            L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
-            y_tile = wp.tile_lower_solve(L_tile, rhs_tile)
-            wp.tile_store(y_i, y_tile, offset=(i, 0))
 
-        # Backward substitution: solve L^T x = y
-        for i in range(n_i_padded - block_size, -1, -block_size):
-            i_end = i + block_size
-            rhs_tile = wp.tile_load(y_i, shape=(block_size, 1), offset=(i, 0))
-            if i_end < n_i_padded:
-                for j in range(i_end, n_i_padded, block_size):
-                    L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(j, i))
-                    L_T_tile = wp.tile_transpose(L_tile)
-                    x_tile = wp.tile_load(x_i, shape=(block_size, 1), offset=(j, 0))
-                    L_T_x_tile = wp.tile_matmul(L_T_tile, x_tile)
-                    rhs_tile -= L_T_x_tile
-            L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
+            # Mask out any garbage rhs values in the tail.
+            if i + block_size > n_i:
+                num_tile_elements = block_size
+                num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
+                for ii in range(num_iterations):
+                    row = (tid_block + ii * num_threads_per_block) % num_tile_elements
+                    if i + row >= n_i:
+                        rhs_tile[row, 0] = float32(0)
 
-            # The following if pads the matrix if it is not divisible by block_size
+            for j in range(0, i, block_size):
+                L_block = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
+                y_block = wp.tile_load(y_i, shape=(block_size, 1), offset=(j, 0))
+                wp.tile_matmul(L_block, y_block, rhs_tile, alpha=-1.0)
+
+            L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
+            # Identity-pad the tail of the last diagonal block.
             if i + block_size > n_i:
                 num_tile_elements = block_size * block_size
                 num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
                 for ii in range(num_iterations):
-                    linear_index = tid_block + ii * num_threads_per_block
-                    linear_index = linear_index % num_tile_elements
+                    linear_index = (tid_block + ii * num_threads_per_block) % num_tile_elements
                     row = linear_index // block_size
                     col = linear_index % block_size
                     value = L_tile[row, col]
                     if i + row >= n_i:
-                        value = wp.where(i + row == i + col, float32(1), float32(0))
+                        value = wp.where(row == col, float32(1), float32(0))
                     L_tile[row, col] = value
 
-            x_tile = wp.tile_upper_solve(wp.tile_transpose(L_tile), rhs_tile)
-            wp.tile_store(x_i, x_tile, offset=(i, 0))
+            wp.tile_lower_solve_inplace(L_tile, rhs_tile)
+            wp.tile_store(y_i, rhs_tile, offset=(i, 0))
 
-    # Return the kernel function
+        # Backward substitution: solve L^T * x = y
+        for i in range(n_i_padded - block_size, -1, -block_size):
+            i_end = i + block_size
+            rhs_tile = wp.tile_load(y_i, shape=(block_size, 1), offset=(i, 0))
+
+            for j in range(i_end, n_i_padded, block_size):
+                L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(j, i))
+                L_T_tile = wp.tile_transpose(L_tile)
+                x_tile = wp.tile_load(x_i, shape=(block_size, 1), offset=(j, 0))
+                wp.tile_matmul(L_T_tile, x_tile, rhs_tile, alpha=-1.0)
+
+            L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
+            # Identity-pad the tail of the last diagonal block.
+            if i + block_size > n_i:
+                num_tile_elements = block_size * block_size
+                num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
+                for ii in range(num_iterations):
+                    linear_index = (tid_block + ii * num_threads_per_block) % num_tile_elements
+                    row = linear_index // block_size
+                    col = linear_index % block_size
+                    value = L_tile[row, col]
+                    if i + row >= n_i:
+                        value = wp.where(row == col, float32(1), float32(0))
+                    L_tile[row, col] = value
+
+            L_T_tile = wp.tile_transpose(L_tile)
+            wp.tile_upper_solve_inplace(L_T_tile, rhs_tile)
+            wp.tile_store(x_i, rhs_tile, offset=(i, 0))
+
     return llt_blocked_solve_inplace_kernel
 
 
