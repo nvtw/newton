@@ -566,7 +566,7 @@ def _constraint_relax_fast_kernel(
 # body-invocation instead of ``num_colors``.
 
 
-_STRAGGLER_BLOCK_DIM: int = 128
+_STRAGGLER_BLOCK_DIM: int = 256
 
 
 @wp.func_native("""
