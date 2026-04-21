@@ -268,6 +268,10 @@ def _build_revolute_drive_adbs(
         max_force_drive=1.0e6,
         stiffness_drive=k,
         damping_drive=c,
+        # Match the reference's ``hertz=0.0`` (rigid lock) so the two
+        # worlds stay trajectory-identical rather than differing by the
+        # anchor's soft-spring response.
+        hertz=0.0,
     )
     return _finalize(b, device, gravity=gravity), bob
 
@@ -351,6 +355,7 @@ def _build_revolute_limit_adbs(
         max_value=max_angle,
         stiffness_limit=k_lim,
         damping_limit=c_lim,
+        hertz=0.0,
     )
     return _finalize(b, device, gravity=gravity), bob
 
@@ -416,6 +421,7 @@ def _build_prismatic_drive_adbs(
         max_force_drive=1.0e6,
         stiffness_drive=k,
         damping_drive=c,
+        hertz=0.0,
     )
     return _finalize(b, device, gravity=gravity), bob
 
@@ -499,6 +505,7 @@ def _build_prismatic_limit_adbs(
         max_value=max_pos,
         stiffness_limit=k_lim,
         damping_limit=c_lim,
+        hertz=0.0,
     )
     return _finalize(b, device, gravity=gravity), bob
 
@@ -707,6 +714,7 @@ class TestActuatedDBSvsStandalone(unittest.TestCase):
             max_force_drive=tau,
             stiffness_drive=0.0,
             damping_drive=c,
+            hertz=0.0,
         )
         world_adbs = _finalize(b_adbs, device, gravity=(0.0, -9.81, 0.0))
 
@@ -781,6 +789,7 @@ class TestActuatedDBSvsStandalone(unittest.TestCase):
             max_force_drive=F,
             stiffness_drive=0.0,
             damping_drive=c,
+            hertz=0.0,
         )
         world_adbs = _finalize(b_adbs, device, gravity=(9.81, 0.0, 0.0))
 

@@ -534,11 +534,17 @@ def ball_socket_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Composable ``IterateBallSocket`` (BallSocket.cs:199).
 
     See :func:`ball_socket_prepare_for_iteration_at` for the
     ``base_offset`` / ``body_pair`` contract.
+
+    ``use_bias`` toggles positional-drift correction per Box2D v3
+    TGS-soft: the main solve pass uses ``True`` (correct drift), the
+    relax pass uses ``False`` (enforce ``Jv = 0`` without re-injecting
+    position-error velocity).
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -558,7 +564,10 @@ def ball_socket_iterate_at(
     cr2 = wp.skew(r2)
 
     acc = read_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
-    bias = read_vec3(constraints, base_offset + _OFF_BIAS, cid)
+    if use_bias:
+        bias = read_vec3(constraints, base_offset + _OFF_BIAS, cid)
+    else:
+        bias = wp.vec3f(0.0, 0.0, 0.0)
     eff = read_mat33(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid)
     mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
     impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
@@ -624,6 +633,7 @@ def ball_socket_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Direct port of ``IterateBallSocket`` (BallSocket.cs:199).
 
@@ -632,7 +642,7 @@ def ball_socket_iterate(
     b1 = ball_socket_get_body1(constraints, cid)
     b2 = ball_socket_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    ball_socket_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
+    ball_socket_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
 
 
 @wp.func

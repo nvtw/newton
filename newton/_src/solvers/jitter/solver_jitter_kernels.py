@@ -263,9 +263,10 @@ def _constraint_iterate_kernel(
     contacts: ContactViews,
 ):
     """Dispatch the per-type ``iterate`` ``wp.func`` for each cid in the
-    current CSR colour. See
+    current CSR colour with positional bias ON (main solve pass). See
     :func:`_constraint_prepare_for_iteration_kernel` for the launch
-    contract and the cursor-decrement semantics.
+    contract and the cursor-decrement semantics, and
+    :func:`_constraint_relax_kernel` for the relaxation counterpart.
     """
     tid = wp.tid()
 
@@ -282,31 +283,99 @@ def _constraint_iterate_kernel(
 
         t = constraint_get_type(constraints, cid)
         if t == CONSTRAINT_TYPE_BALL_SOCKET:
-            ball_socket_iterate(constraints, cid, bodies, idt)
+            ball_socket_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_HINGE_ANGLE:
-            hinge_angle_iterate(constraints, cid, bodies, idt)
+            hinge_angle_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
-            angular_motor_iterate(constraints, cid, bodies, idt)
+            angular_motor_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_LINEAR_MOTOR:
-            linear_motor_iterate(constraints, cid, bodies, idt)
+            linear_motor_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_ANGULAR_LIMIT:
-            angular_limit_iterate(constraints, cid, bodies, idt)
+            angular_limit_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_LINEAR_LIMIT:
-            linear_limit_iterate(constraints, cid, bodies, idt)
+            linear_limit_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_HINGE_JOINT:
-            hinge_joint_iterate(constraints, cid, bodies, idt)
+            hinge_joint_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
-            double_ball_socket_iterate(constraints, cid, bodies, idt)
+            double_ball_socket_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET_PRISMATIC:
-            double_ball_socket_prismatic_iterate(constraints, cid, bodies, idt)
+            double_ball_socket_prismatic_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
-            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt)
+            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_PRISMATIC:
-            prismatic_iterate(constraints, cid, bodies, idt)
+            prismatic_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_D6:
-            d6_iterate(constraints, cid, bodies, idt)
+            d6_iterate(constraints, cid, bodies, idt, True)
         elif t == CONSTRAINT_TYPE_CONTACT:
-            contact_iterate(constraints, cid, bodies, idt, cc, contacts)
+            contact_iterate(constraints, cid, bodies, idt, cc, contacts, True)
+
+    if tid == 0:
+        color_cursor[0] = cursor - 1
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_relax_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+):
+    """Box2D v3 TGS-soft relaxation pass: dispatch each cid's iterate
+    with positional bias OFF.
+
+    Functionally identical to :func:`_constraint_iterate_kernel`
+    except every sub-iterate is called with ``use_bias=False`` so the
+    rigid-lock rows enforce ``Jv = 0`` without re-injecting
+    position-error velocity. This is the "relax" sub-step of the
+    Box2D v3 substep loop and is what prevents the soft-anchor
+    impulse-leak artefact that forced the rigid-default in
+    :data:`~newton._src.solvers.jitter.constraint_container.DEFAULT_HERTZ_LINEAR`.
+    """
+    tid = wp.tid()
+
+    cursor = color_cursor[0]
+    n_colors = num_colors[0]
+    c = n_colors - cursor
+
+    start = color_starts[c]
+    end = color_starts[c + 1]
+    count = end - start
+
+    if tid < count:
+        cid = element_ids_by_color[start + tid]
+
+        t = constraint_get_type(constraints, cid)
+        if t == CONSTRAINT_TYPE_BALL_SOCKET:
+            ball_socket_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_HINGE_ANGLE:
+            hinge_angle_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
+            angular_motor_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_LINEAR_MOTOR:
+            linear_motor_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_ANGULAR_LIMIT:
+            angular_limit_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_LINEAR_LIMIT:
+            linear_limit_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_HINGE_JOINT:
+            hinge_joint_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
+            double_ball_socket_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET_PRISMATIC:
+            double_ball_socket_prismatic_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_PRISMATIC:
+            prismatic_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_D6:
+            d6_iterate(constraints, cid, bodies, idt, False)
+        elif t == CONSTRAINT_TYPE_CONTACT:
+            contact_iterate(constraints, cid, bodies, idt, cc, contacts, False)
 
     if tid == 0:
         color_cursor[0] = cursor - 1

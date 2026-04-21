@@ -839,6 +839,7 @@ def double_ball_socket_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Composable PGS iteration step for the fused two-anchor hinge.
 
@@ -846,6 +847,13 @@ def double_ball_socket_iterate_at(
     (3x3 + 2x2 inverses), then applies the resulting impulse to both
     bodies. See :func:`ball_socket_iterate_at` for the
     ``base_offset`` / ``body_pair`` contract.
+
+    ``use_bias`` controls whether the positional drift bias is included
+    in the RHS (Box2D v3 TGS-soft ``useBias`` flag). The main solve
+    pass uses ``use_bias=True`` to correct drift; the relax pass uses
+    ``use_bias=False`` to enforce ``Jv = 0`` without re-injecting
+    position-error velocity, which is what prevents the "soft-anchor
+    impulse leak" that the rigid default was working around.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -874,8 +882,12 @@ def double_ball_socket_iterate_at(
     a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
     ut_ai = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
     s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
-    bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
-    bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
+    if use_bias:
+        bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
+        bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
+    else:
+        bias1 = wp.vec3f(0.0, 0.0, 0.0)
+        bias2 = wp.vec3f(0.0, 0.0, 0.0)
     mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
     impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
 
@@ -1005,12 +1017,13 @@ def double_ball_socket_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Direct iterate entry; see :func:`double_ball_socket_iterate_at`."""
     b1 = double_ball_socket_get_body1(constraints, cid)
     b2 = double_ball_socket_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    double_ball_socket_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
+    double_ball_socket_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
 
 
 @wp.func

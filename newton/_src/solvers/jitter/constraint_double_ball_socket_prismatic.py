@@ -606,11 +606,16 @@ def double_ball_socket_prismatic_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """PGS iterate for the standalone prismatic DBS.
 
     4+1 Schur-complement solve: eliminate the scalar anchor-3 row,
     then back-substitute the 4x4 tangent block. No axial row.
+
+    ``use_bias`` toggles the positional drift bias for the 5-DoF lock
+    (Box2D v3 TGS-soft ``useBias`` flag): ``True`` during the main
+    solve pass, ``False`` during the relax pass.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -643,9 +648,14 @@ def double_ball_socket_prismatic_iterate_at(
     k4_inv = read_mat44(constraints, base_offset + _OFF_K4_INV, cid)
     c_pris = read_vec4(constraints, base_offset + _OFF_C_PRIS, cid)
     s_scalar_inv = read_float(constraints, base_offset + _OFF_S_SCALAR_INV, cid)
-    bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
-    bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
-    bias3 = read_float(constraints, base_offset + _OFF_BIAS3, cid)
+    if use_bias:
+        bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
+        bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
+        bias3 = read_float(constraints, base_offset + _OFF_BIAS3, cid)
+    else:
+        bias1 = wp.vec3f(0.0, 0.0, 0.0)
+        bias2 = wp.vec3f(0.0, 0.0, 0.0)
+        bias3 = wp.float32(0.0)
     mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
     impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
 
@@ -755,11 +765,12 @@ def double_ball_socket_prismatic_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     b1 = double_ball_socket_prismatic_get_body1(constraints, cid)
     b2 = double_ball_socket_prismatic_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    double_ball_socket_prismatic_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
+    double_ball_socket_prismatic_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
 
 
 @wp.func

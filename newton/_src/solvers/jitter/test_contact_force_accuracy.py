@@ -425,6 +425,12 @@ class TestContactForceAccuracy(unittest.TestCase):
                 max_force_drive=1.0e6,
                 stiffness_drive=float(kp),
                 damping_drive=float(kd),
+                # Rigid anchor lock: this test is an analytic force-
+                # balance identity (contact = m*g + kp*(x - target)),
+                # which a soft 60 Hz anchor perturbs by bleeding ~10%
+                # of the drive impulse into the anchor spring. Use
+                # ``hertz=0`` so the force balance is tight.
+                hertz=0.0,
             )
 
         scene = _JitterScene(

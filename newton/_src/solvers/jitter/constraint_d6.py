@@ -1311,6 +1311,7 @@ def d6_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Composable PGS iteration step for the D6 joint.
 
@@ -1319,6 +1320,15 @@ def d6_iterate_at(
     first, then translation parts. See
     :func:`ball_socket_iterate_at` for the ``base_offset`` /
     ``body_pair`` contract.
+
+    ``use_bias`` is the Box2D v3 TGS-soft ``useBias`` flag. D6's
+    per-axis ``bias_v`` mixes motor targets and drift correction;
+    the flag is accepted for dispatcher-signature uniformity but
+    *not* currently gated here -- motor targets need to stay on in
+    the relax pass, and the fused (point / euler) blocks apply their
+    bias implicitly through ``total_lambda`` rather than a separate
+    additive term. Revisit if D6 drift correction later needs a
+    dedicated lock path.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -1643,12 +1653,13 @@ def d6_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Direct iterate entry; see :func:`d6_iterate_at`."""
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    d6_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
+    d6_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
 
 
 @wp.func

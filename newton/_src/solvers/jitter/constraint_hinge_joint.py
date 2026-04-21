@@ -421,21 +421,23 @@ def hinge_joint_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Run one PGS iteration of all three sub-constraints sequentially.
 
     Gauss-Seidel propagation: each sub-iteration sees the body
     velocities updated by the previous one, so the three corrections
     converge inside a single PGS sweep instead of needing three
-    partition launches.
+    partition launches. ``use_bias`` is forwarded to each sub-iterate
+    so the Box2D v3 TGS-soft relax pass zeroes the rigid-lock bias.
     """
     b1 = constraint_get_body1(constraints, cid)
     b2 = constraint_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
 
-    hinge_angle_iterate_at(constraints, cid, _HJ_HA_BASE_C, bodies, body_pair, idt)
-    ball_socket_iterate_at(constraints, cid, _HJ_BS_BASE_C, bodies, body_pair, idt)
-    angular_motor_iterate_at(constraints, cid, _HJ_AM_BASE_C, bodies, body_pair, idt)
+    hinge_angle_iterate_at(constraints, cid, _HJ_HA_BASE_C, bodies, body_pair, idt, use_bias)
+    ball_socket_iterate_at(constraints, cid, _HJ_BS_BASE_C, bodies, body_pair, idt, use_bias)
+    angular_motor_iterate_at(constraints, cid, _HJ_AM_BASE_C, bodies, body_pair, idt, use_bias)
 
 
 @wp.func

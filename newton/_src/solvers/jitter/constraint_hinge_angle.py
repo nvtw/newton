@@ -760,11 +760,14 @@ def hinge_angle_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Composable ``IterateHingeAngle`` (HingeAngle.cs:132).
 
     See :func:`ball_socket_iterate_at` for the ``base_offset`` /
-    ``body_pair`` contract.
+    ``body_pair`` contract. ``use_bias`` is the Box2D v3 TGS-soft
+    ``useBias`` flag: ``True`` for the main solve, ``False`` for the
+    relax pass.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -776,7 +779,10 @@ def hinge_angle_iterate_at(
 
     jacobian = read_mat33(constraints, base_offset + _OFF_JACOBIAN, cid)
     eff = read_mat33(constraints, base_offset + _OFF_EFFECTIVE_MASS, cid)
-    bias = read_vec3(constraints, base_offset + _OFF_BIAS, cid)
+    if use_bias:
+        bias = read_vec3(constraints, base_offset + _OFF_BIAS, cid)
+    else:
+        bias = wp.vec3f(0.0, 0.0, 0.0)
     acc = read_vec3(constraints, base_offset + _OFF_ACCUMULATED_IMPULSE, cid)
     mass_coeff_lock = read_float(constraints, base_offset + _OFF_MASS_COEFF_LOCK, cid)
     impulse_coeff_lock = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LOCK, cid)
@@ -863,6 +869,7 @@ def hinge_angle_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Direct port of ``IterateHingeAngle`` (HingeAngle.cs:132).
 
@@ -871,7 +878,7 @@ def hinge_angle_iterate(
     b1 = hinge_angle_get_body1(constraints, cid)
     b2 = hinge_angle_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    hinge_angle_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
+    hinge_angle_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
 
 
 @wp.func

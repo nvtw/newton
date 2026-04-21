@@ -563,6 +563,10 @@ class TestPendulumFrequency(unittest.TestCase):
                 # ``gamma = kd / (2 * m_eff)``.
                 stiffness_drive=0.0,
                 damping_drive=float(damping_gain),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -867,6 +871,10 @@ class TestLinearOscillator(unittest.TestCase):
                 max_force_drive=1.0e3,
                 stiffness_drive=float(self.K),
                 damping_drive=float(damping),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -1151,6 +1159,10 @@ class TestActuatorContactReaction(unittest.TestCase):
                 max_force_drive=float(F_motor),
                 stiffness_drive=0.0,
                 damping_drive=1.0e4,
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -1232,6 +1244,10 @@ class TestActuatorContactReaction(unittest.TestCase):
                 max_force_drive=float(tau),
                 stiffness_drive=1.0e4,
                 damping_drive=1.0e2,
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -1448,6 +1464,10 @@ class TestLimitSpringDamper(unittest.TestCase):
                 # is the absolute damping ``kd`` [N*s/m].
                 stiffness_limit=float(stiffness),
                 damping_limit=float(damping),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -1513,6 +1533,10 @@ class TestLimitSpringDamper(unittest.TestCase):
                 max_value=self.MAX_SLACK,
                 stiffness_limit=float(stiffness),
                 damping_limit=float(damping),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -1804,6 +1828,10 @@ class TestPrismaticUnitCubeLimitSpring(unittest.TestCase):
                 # PD branch: stiffness_limit -> kp, damping_limit -> kd.
                 stiffness_limit=float(stiffness),
                 damping_limit=float(damping),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -2048,6 +2076,10 @@ class TestLimitDampingDecay(unittest.TestCase):
                 max_value=1.0e-6,
                 stiffness_limit=float(stiffness),
                 damping_limit=float(damping),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -2113,6 +2145,10 @@ class TestLimitDampingDecay(unittest.TestCase):
                 max_value=1.0e-6,
                 stiffness_limit=float(stiffness),
                 damping_limit=float(damping),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -2324,6 +2360,10 @@ class TestOneSidedLimits(unittest.TestCase):
                 max_value=float(max_value),
                 stiffness_limit=float(stiffness),
                 damping_limit=float(damping),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -2443,6 +2483,7 @@ class TestOneSidedLimits(unittest.TestCase):
                 max_value=max_value,
                 stiffness_limit=float(k),
                 damping_limit=float(c),
+                hertz=0.0,
             )
             return handle
 
@@ -2528,6 +2569,10 @@ class TestOneSidedLimits(unittest.TestCase):
                 max_value=max_angle,
                 stiffness_limit=float(k_theta),
                 damping_limit=float(c_theta),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -2651,6 +2696,10 @@ class TestPDDriveImpulse(unittest.TestCase):
                 target=0.0,
                 stiffness_drive=float(kp),
                 damping_drive=float(kd),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -2732,6 +2781,10 @@ class TestPDDriveImpulse(unittest.TestCase):
                 target_velocity=0.0,  # damp to rest
                 stiffness_drive=0.0,
                 damping_drive=float(c),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(
@@ -2833,6 +2886,10 @@ class TestPDDriveImpulse(unittest.TestCase):
                 target=0.0,
                 stiffness_drive=float(kp),
                 damping_drive=float(kd),
+                # Rigid anchor lock: tests analytic identity; the
+                # default soft 60 Hz anchor would bleed ~10%% of the
+                # drive/limit impulse into the lock row.
+                hertz=0.0,
             )
 
         scene = _JitterScene(

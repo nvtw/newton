@@ -804,8 +804,14 @@ def linear_motor_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Composable ``IterateLinearMotor`` (LinearMotor.cs:163).
+
+    ``use_bias`` is the Box2D v3 TGS-soft ``useBias`` flag; a pure
+    velocity / PD linear motor has no positional drift bias to gate,
+    so the flag is accepted for dispatcher-signature uniformity but
+    ignored here.
 
     Dual-mode PGS update. The ``(stiffness, damping)`` check picks the
     Jitter2 ``(mass_coeff, impulse_coeff)`` velocity path or the
@@ -927,6 +933,7 @@ def linear_motor_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Direct port of ``IterateLinearMotor`` (LinearMotor.cs:163).
 
@@ -935,7 +942,7 @@ def linear_motor_iterate(
     b1 = linear_motor_get_body1(constraints, cid)
     b2 = linear_motor_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    linear_motor_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
+    linear_motor_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
 
 
 @wp.func

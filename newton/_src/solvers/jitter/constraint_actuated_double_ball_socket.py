@@ -151,8 +151,6 @@ from newton._src.solvers.jitter.constraint_container import (
     ConstraintBodies,
     ConstraintContainer,
     assert_constraint_header,
-    baumgarte_bias_scalar,
-    baumgarte_bias_vec3,
     constraint_bodies_make,
     constraint_set_type,
     pd_coefficients,
@@ -930,17 +928,7 @@ def _ball_socket_prepare_at(
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
-    # Positional bias: soft-constraint ``bias_rate * C`` when the user
-    # opted into a compliant anchor (``hertz > 0``), or a Box2D-v2-style
-    # Baumgarte drift correction when the anchor is rigid (``hertz <=
-    # 0``, the default). The rigid path keeps ``mass_coeff = 1`` and
-    # ``impulse_coeff = 0`` so it does *not* leak paired drive / limit
-    # impulses, unlike the compliant soft-anchor path.
-    drift1 = p1_b2 - p1_b1
-    if hertz > 0.0:
-        bias1 = drift1 * bias_rate
-    else:
-        bias1 = baumgarte_bias_vec3(drift1, dt)
+    bias1 = (p1_b2 - p1_b1) * bias_rate
     write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
 
     # 3-DoF positional warm-start (only the anchor-1 impulse).
@@ -965,6 +953,7 @@ def _ball_socket_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Ball-socket PGS iterate.
 
@@ -973,6 +962,10 @@ def _ball_socket_iterate_at(
     ``lam1 = mass_coeff * lam1_us - impulse_coeff * acc1`` and the
     usual ``acc1 += lam1`` warm-start update. No anchor-2 or anchor-3
     rows, no axial block.
+
+    ``use_bias=False`` zeroes ``bias1`` -- the Box2D v3 TGS-soft
+    relax-pass convention that enforces ``Jv = 0`` without
+    re-injecting positional drift as velocity.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -993,7 +986,10 @@ def _ball_socket_iterate_at(
     cr1_b2 = wp.skew(r1_b2)
 
     a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
-    bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
+    if use_bias:
+        bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
+    else:
+        bias1 = wp.vec3f(0.0, 0.0, 0.0)
     mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
     impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
 
@@ -1142,30 +1138,10 @@ def _revolute_prepare_at(
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
-    # Positional bias: soft-constraint ``bias_rate * C`` when ``hertz >
-    # 0`` (compliant anchor), or Box2D-v2-style Baumgarte drift
-    # correction when rigid (``hertz <= 0``, the default). Anchor 1
-    # contributes the full 3-vector drift; anchor 2 only contributes
-    # its component in the tangent plane (the axial component is the
-    # free DoF and is driven / limited by the scalar row below). The
-    # rigid path's Baumgarte term is *not* softened -- ``mass_coeff =
-    # 1`` and ``impulse_coeff = 0`` -- so it does not leak paired drive
-    # or limit impulses.
-    drift1 = p1_b2 - p1_b1
+    bias1 = (p1_b2 - p1_b1) * bias_rate
     drift2 = p2_b2 - p2_b1
-    if hertz > 0.0:
-        bias1 = drift1 * bias_rate
-        bias2_t1 = wp.dot(t1, drift2) * bias_rate
-        bias2_t2 = wp.dot(t2, drift2) * bias_rate
-    else:
-        bias1 = baumgarte_bias_vec3(drift1, dt)
-        # Project the anchor-2 drift onto the tangent plane first, then
-        # Baumgarte-smooth the projected 2-vector (embedded as a
-        # planar vec3 so we can reuse ``baumgarte_bias_vec3``).
-        drift2_tan = wp.vec3f(wp.dot(t1, drift2), wp.dot(t2, drift2), 0.0)
-        bias2_tan = baumgarte_bias_vec3(drift2_tan, dt)
-        bias2_t1 = bias2_tan[0]
-        bias2_t2 = bias2_tan[1]
+    bias2_t1 = wp.dot(t1, drift2) * bias_rate
+    bias2_t2 = wp.dot(t2, drift2) * bias_rate
     bias2 = wp.vec3f(bias2_t1, bias2_t2, 0.0)
     write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
     write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias2)
@@ -1349,12 +1325,15 @@ def _revolute_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Revolute-mode PGS iterate.
 
     3+2 Schur-complement positional solve plus the scalar angular
-    drive + limit rows. Byte-for-byte identical to the pre-unification
-    math -- only the name changed.
+    drive + limit rows. ``use_bias=False`` zeroes the anchor-1 and
+    anchor-2 drift biases for the Box2D v3 TGS-soft relax pass; the
+    axial drive / limit row is unaffected (its bias is a velocity /
+    limit target, not drift).
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -1383,8 +1362,12 @@ def _revolute_iterate_at(
     a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
     ut_ai = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
     s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
-    bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
-    bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
+    if use_bias:
+        bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
+        bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
+    else:
+        bias1 = wp.vec3f(0.0, 0.0, 0.0)
+        bias2 = wp.vec3f(0.0, 0.0, 0.0)
     mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
     impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
 
@@ -1675,28 +1658,14 @@ def _prismatic_prepare_at(
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
-    # Positional bias: soft-constraint ``bias_rate * C`` when ``hertz >
-    # 0`` (compliant anchor), else Box2D-v2 Baumgarte drift correction
-    # (see :func:`baumgarte_bias_vec3`). Anchors 1/2 contribute their
-    # tangent-plane projections; anchor 3 contributes a single scalar
-    # along ``t2`` (the 5th locked DoF of the prismatic's 2+2+1 triad).
-    # The rigid path keeps ``mass_coeff = 1``, ``impulse_coeff = 0``,
-    # so Baumgarte feeds drift into the iterate *without* softening
-    # the 5-DoF lock -- paired drive / limit rows are not leaked.
+    # Positional bias: tangent drift at each anchor, scalar drift at
+    # anchor 3 along t2.
     drift1 = p1_b2 - p1_b1
     drift2 = p2_b2 - p2_b1
     drift3 = p3_b2 - p3_b1
-    drift1_tan = wp.vec3f(wp.dot(t1, drift1), wp.dot(t2, drift1), 0.0)
-    drift2_tan = wp.vec3f(wp.dot(t1, drift2), wp.dot(t2, drift2), 0.0)
-    drift3_s = wp.dot(t2, drift3)
-    if hertz > 0.0:
-        bias1 = drift1_tan * bias_rate
-        bias2 = drift2_tan * bias_rate
-        bias3 = drift3_s * bias_rate
-    else:
-        bias1 = baumgarte_bias_vec3(drift1_tan, dt)
-        bias2 = baumgarte_bias_vec3(drift2_tan, dt)
-        bias3 = baumgarte_bias_scalar(drift3_s, dt)
+    bias1 = wp.vec3f(wp.dot(t1, drift1) * bias_rate, wp.dot(t2, drift1) * bias_rate, 0.0)
+    bias2 = wp.vec3f(wp.dot(t1, drift2) * bias_rate, wp.dot(t2, drift2) * bias_rate, 0.0)
+    bias3 = wp.dot(t2, drift3) * bias_rate
     write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
     write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias2)
     write_float(constraints, base_offset + _OFF_BIAS3, cid, bias3)
@@ -1855,12 +1824,16 @@ def _prismatic_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Prismatic-mode PGS iterate.
 
     4+1 Schur-complement positional solve (eliminate the scalar a3 row
     first, then the 4x4 tangent block) plus the scalar linear drive /
-    limit row along ``n_hat``.
+    limit row along ``n_hat``. ``use_bias=False`` zeroes the 5 lock
+    biases (anchor1 xy tangent, anchor2 xy tangent, anchor3 scalar)
+    for the Box2D v3 TGS-soft relax pass; the axial drive / limit row
+    is unaffected (it's a velocity / limit target, not drift).
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -1893,9 +1866,14 @@ def _prismatic_iterate_at(
     a4_inv = read_mat44(constraints, base_offset + _OFF_A4_INV, cid)
     c_pris = read_vec4(constraints, base_offset + _OFF_C_PRIS, cid)
     s_scalar_inv = read_float(constraints, base_offset + _OFF_S_SCALAR_INV, cid)
-    bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
-    bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
-    bias3 = read_float(constraints, base_offset + _OFF_BIAS3, cid)
+    if use_bias:
+        bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
+        bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
+        bias3 = read_float(constraints, base_offset + _OFF_BIAS3, cid)
+    else:
+        bias1 = wp.vec3f(0.0, 0.0, 0.0)
+        bias2 = wp.vec3f(0.0, 0.0, 0.0)
+        bias3 = wp.float32(0.0)
     mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
     impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
 
@@ -2023,15 +2001,24 @@ def actuated_double_ball_socket_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
-    """Composable PGS iteration step that dispatches on ``joint_mode``."""
+    """Composable PGS iteration step that dispatches on ``joint_mode``.
+
+    ``use_bias`` is the Box2D v3 TGS-soft ``useBias`` flag. During the
+    main solve pass pass ``True`` to apply positional drift correction
+    via the prepared lock biases; during the relax pass pass ``False``
+    so the anchor-lock rows enforce ``Jv = 0`` without re-injecting
+    position-error velocity (axial drive / limit / motor targets stay
+    on in both passes -- see the per-mode iterates).
+    """
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
-        _revolute_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt)
+        _revolute_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
     elif joint_mode == JOINT_MODE_PRISMATIC:
-        _prismatic_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt)
+        _prismatic_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
     else:
-        _ball_socket_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt)
+        _ball_socket_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
 
 
 @wp.func
@@ -2108,6 +2095,7 @@ def actuated_double_ball_socket_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Direct iterate entry; see
     :func:`actuated_double_ball_socket_iterate_at`.
@@ -2115,7 +2103,7 @@ def actuated_double_ball_socket_iterate(
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    actuated_double_ball_socket_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
+    actuated_double_ball_socket_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
 
 
 @wp.func

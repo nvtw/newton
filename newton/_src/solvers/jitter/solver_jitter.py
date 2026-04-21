@@ -61,6 +61,7 @@ from newton._src.solvers.jitter.solver_jitter_kernels import (
     _constraint_gather_wrenches_kernel,
     _constraint_iterate_kernel,
     _constraint_prepare_for_iteration_kernel,
+    _constraint_relax_kernel,
     _constraints_to_elements_kernel,
     _integrate_forces_kernel,
     _integrate_velocities_kernel,
@@ -138,7 +139,10 @@ class World:
                 contact columns the ingest pipeline emits.
             substeps: Sub-steps per :meth:`step`.
             solver_iterations: PGS iterations per substep.
-            velocity_relaxations: Relaxation passes (stub).
+            velocity_relaxations: Box2D v3 TGS-soft relax passes per
+                substep (``use_bias=False`` PGS sweeps that shed the
+                positional drift velocity without re-introducing it).
+                Default ``1`` matches Box2D v3.
             gravity: World gravity [m/s^2].
             max_contact_columns: Hard cap on
                 :data:`CONSTRAINT_TYPE_CONTACT` columns per step. Sizes
@@ -967,7 +971,40 @@ class World:
         )
 
     def _relax_velocities(self, relaxations: int) -> None:
-        """Mirrors ``RelaxVelocities``: extra PGS passes with relaxed bias."""
+        """Box2D v3 TGS-soft relaxation sub-step.
+
+        After the main solve has driven all constraints to
+        ``Jv + bias = 0``, each body's velocity contains a
+        positional-drift correction component. The relax pass runs
+        ``relaxations`` more PGS sweeps *without* the positional bias
+        so the lock rows converge to plain ``Jv = 0`` and shed any
+        residual position-error velocity. This is what prevents the
+        "soft-anchor impulse leak" that otherwise forces joints with
+        a COM-offset body to run at
+        :data:`~newton._src.solvers.jitter.constraint_container.DEFAULT_HERTZ_LINEAR`
+        ``= 0`` to keep drive / limit forces from bleeding into the
+        anchor. See :func:`_constraint_relax_kernel` for the
+        per-constraint dispatch and
+        :mod:`~newton._src.solvers.jitter.constraint_double_ball_socket`
+        for the per-joint ``use_bias`` handling.
+        """
+        if self._constraint_capacity == 0:
+            return
+        if relaxations <= 0:
+            return
+
+        idt = wp.float32(1.0 / self.substep_dt)
+        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+
+        for _ in range(relaxations):
+            self._partitioner.begin_sweep()
+            wp.capture_while(
+                self._partitioner.color_cursor,
+                self._capture_partition_sweep,
+                kernel=_constraint_relax_kernel,
+                idt=idt,
+                contact_views=contact_views,
+            )
 
     def _remove_broken_arbiters(self) -> None:
         """Mirrors ``RemoveBrokenArbiters``."""

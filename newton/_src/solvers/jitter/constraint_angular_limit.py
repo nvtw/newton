@@ -466,12 +466,22 @@ def angular_limit_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """PGS iterate.
 
     Dual-mode (Box2D or PD) unilateral scalar row. ``clamp``
     decides which side of the stop is active -- ``_CLAMP_NONE``
     leaves everything untouched.
+
+    ``use_bias`` is the Box2D v3 TGS-soft ``useBias`` flag. Limits
+    keep their bias in both passes (Box2D v3 only gates the
+    *compliant* soft-bias branch: when the limit is actively violated
+    the ``C > 0`` speculative bias stays on regardless, since letting
+    the relax pass skip penetration correction would leave the body
+    stuck inside the stop). For the in-range compliant branch we
+    currently keep the bias on too; flip to the gated behaviour if
+    limit ringing shows up in practice.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -577,11 +587,12 @@ def angular_limit_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    angular_limit_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
+    angular_limit_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
 
 
 @wp.func

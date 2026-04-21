@@ -817,8 +817,15 @@ def angular_motor_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Composable ``IterateAngularMotor`` (AngularMotor.cs:59).
+
+    ``use_bias`` is the Box2D v3 TGS-soft ``useBias`` flag. Pure
+    velocity / PD motors have no *positional* drift bias to gate (the
+    "bias" in a motor is a velocity target, not a drift correction),
+    so this flag is accepted for dispatcher-signature uniformity but
+    ignored here.
 
     Dual-mode PGS update. The ``(stiffness, damping)`` check picks the
     Jitter2 ``(mass_coeff, impulse_coeff)`` velocity path or the
@@ -936,6 +943,7 @@ def angular_motor_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Direct port of ``IterateAngularMotor`` (AngularMotor.cs:59).
 
@@ -944,7 +952,7 @@ def angular_motor_iterate(
     b1 = angular_motor_get_body1(constraints, cid)
     b2 = angular_motor_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    angular_motor_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
+    angular_motor_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
 
 
 @wp.func

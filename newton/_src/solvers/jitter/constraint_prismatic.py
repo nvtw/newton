@@ -1013,6 +1013,7 @@ def prismatic_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Composable PGS iteration step for the prismatic joint.
 
@@ -1020,6 +1021,11 @@ def prismatic_iterate_at(
     Schur complement (3x3 + 2x2 inverses), applies the resulting
     impulses to both bodies. See :func:`ball_socket_iterate_at` for
     the ``base_offset`` / ``body_pair`` contract.
+
+    ``use_bias`` toggles the rigid-lock positional drift bias
+    (Box2D v3 TGS-soft ``useBias`` flag): ``True`` during the main
+    solve pass, ``False`` during the relax pass so the lock's
+    ``Jv=0`` update does not re-inject position-error velocity.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -1044,8 +1050,12 @@ def prismatic_iterate_at(
     k_rot_inv = read_mat33(constraints, base_offset + _OFF_K_ROT_INV, cid)
     kt_ki = read_mat33(constraints, base_offset + _OFF_KT_KI, cid)
     s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
-    bias_rot = read_vec3(constraints, base_offset + _OFF_BIAS_ROT, cid)
-    bias_lin = read_vec3(constraints, base_offset + _OFF_BIAS_LIN, cid)
+    if use_bias:
+        bias_rot = read_vec3(constraints, base_offset + _OFF_BIAS_ROT, cid)
+        bias_lin = read_vec3(constraints, base_offset + _OFF_BIAS_LIN, cid)
+    else:
+        bias_rot = wp.vec3f(0.0, 0.0, 0.0)
+        bias_lin = wp.vec3f(0.0, 0.0, 0.0)
 
     mass_coeff_ang = read_float(constraints, base_offset + _OFF_MASS_COEFF_ANG, cid)
     impulse_coeff_ang = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_ANG, cid)
@@ -1190,12 +1200,13 @@ def prismatic_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """Direct iterate entry; see :func:`prismatic_iterate_at`."""
     b1 = prismatic_get_body1(constraints, cid)
     b2 = prismatic_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    prismatic_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
+    prismatic_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
 
 
 @wp.func

@@ -724,6 +724,7 @@ def contact_iterate_at(
     idt: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
+    use_bias: wp.bool,
 ):
     """One PGS sweep over every active slot of one contact column.
 
@@ -928,11 +929,12 @@ def contact_iterate(
     idt: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
+    use_bias: wp.bool,
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts)
+    contact_iterate_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias)
 
 
 @wp.func

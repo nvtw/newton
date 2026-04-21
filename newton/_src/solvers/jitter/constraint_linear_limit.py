@@ -375,11 +375,15 @@ def linear_limit_iterate_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     """PGS iterate.
 
     Dual-mode (Box2D or PD) unilateral scalar row. ``clamp``
-    determines whether the row contributes.
+    determines whether the row contributes. ``use_bias`` is the
+    Box2D v3 TGS-soft ``useBias`` flag; see
+    :func:`angular_limit_iterate_at` for why limits keep their bias
+    on in both passes.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -480,11 +484,12 @@ def linear_limit_iterate(
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
+    use_bias: wp.bool,
 ):
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    linear_limit_iterate_at(constraints, cid, 0, bodies, body_pair, idt)
+    linear_limit_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
 
 
 @wp.func
