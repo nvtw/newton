@@ -17,33 +17,33 @@ from newton._src.solvers.jitter.body import (
     MOTION_STATIC,
     BodyContainer,
 )
-from newton._src.solvers.jitter.constraint_actuated_double_ball_socket import (
+from newton._src.solvers.jitter.constraints.constraint_actuated_double_ball_socket import (
     actuated_double_ball_socket_iterate,
     actuated_double_ball_socket_prepare_for_iteration,
     actuated_double_ball_socket_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_angular_limit import (
+from newton._src.solvers.jitter.constraints.constraint_angular_limit import (
     angular_limit_iterate,
     angular_limit_prepare_for_iteration,
     angular_limit_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_angular_motor import (
+from newton._src.solvers.jitter.constraints.constraint_angular_motor import (
     angular_motor_iterate,
     angular_motor_prepare_for_iteration,
     angular_motor_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_ball_socket import (
+from newton._src.solvers.jitter.constraints.constraint_ball_socket import (
     ball_socket_iterate,
     ball_socket_prepare_for_iteration,
     ball_socket_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_contact import (
+from newton._src.solvers.jitter.constraints.constraint_contact import (
     ContactViews,
     contact_iterate,
     contact_prepare_for_iteration,
     contact_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_container import (
+from newton._src.solvers.jitter.constraints.constraint_container import (
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
     CONSTRAINT_TYPE_ANGULAR_LIMIT,
     CONSTRAINT_TYPE_ANGULAR_MOTOR,
@@ -62,48 +62,48 @@ from newton._src.solvers.jitter.constraint_container import (
     constraint_get_body2,
     constraint_get_type,
 )
-from newton._src.solvers.jitter.constraint_d6 import (
+from newton._src.solvers.jitter.constraints.constraint_d6 import (
     d6_iterate,
     d6_prepare_for_iteration,
     d6_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_double_ball_socket import (
+from newton._src.solvers.jitter.constraints.constraint_double_ball_socket import (
     double_ball_socket_iterate,
     double_ball_socket_prepare_for_iteration,
     double_ball_socket_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_double_ball_socket_prismatic import (
+from newton._src.solvers.jitter.constraints.constraint_double_ball_socket_prismatic import (
     double_ball_socket_prismatic_iterate,
     double_ball_socket_prismatic_prepare_for_iteration,
     double_ball_socket_prismatic_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_hinge_angle import (
+from newton._src.solvers.jitter.constraints.constraint_hinge_angle import (
     hinge_angle_iterate,
     hinge_angle_prepare_for_iteration,
     hinge_angle_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_hinge_joint import (
+from newton._src.solvers.jitter.constraints.constraint_hinge_joint import (
     hinge_joint_iterate,
     hinge_joint_prepare_for_iteration,
     hinge_joint_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_linear_limit import (
+from newton._src.solvers.jitter.constraints.constraint_linear_limit import (
     linear_limit_iterate,
     linear_limit_prepare_for_iteration,
     linear_limit_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_linear_motor import (
+from newton._src.solvers.jitter.constraints.constraint_linear_motor import (
     linear_motor_iterate,
     linear_motor_prepare_for_iteration,
     linear_motor_world_wrench,
 )
-from newton._src.solvers.jitter.constraint_prismatic import (
+from newton._src.solvers.jitter.constraints.constraint_prismatic import (
     prismatic_iterate,
     prismatic_prepare_for_iteration,
     prismatic_world_wrench,
 )
-from newton._src.solvers.jitter.contact_container import ContactContainer
-from newton._src.solvers.jitter.graph_coloring_common import (
+from newton._src.solvers.jitter.constraints.contact_container import ContactContainer
+from newton._src.solvers.jitter.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
     element_interaction_data_make,
 )
@@ -199,8 +199,8 @@ def _constraint_prepare_for_iteration_kernel(
 
     Follows PhoenX's "contacts are constraints" pattern: the contact
     branch takes the additional
-    :class:`~newton._src.solvers.jitter.contact_container.ContactContainer`
-    and :class:`~newton._src.solvers.jitter.constraint_contact.ContactViews`
+    :class:`~newton._src.solvers.jitter.constraints.contact_container.ContactContainer`
+    and :class:`~newton._src.solvers.jitter.constraints.constraint_contact.ContactViews`
     arguments; joint-only branches ignore them. The two extra struct
     arguments are essentially free for non-contact dispatch because
     Warp passes structs by reference.
@@ -339,7 +339,7 @@ def _constraint_relax_kernel(
     position-error velocity. This is the "relax" sub-step of the
     Box2D v3 substep loop and is what prevents the soft-anchor
     impulse-leak artefact that forced the rigid-default in
-    :data:`~newton._src.solvers.jitter.constraint_container.DEFAULT_HERTZ_LINEAR`.
+    :data:`~newton._src.solvers.jitter.constraints.constraint_container.DEFAULT_HERTZ_LINEAR`.
     """
     tid = wp.tid()
 

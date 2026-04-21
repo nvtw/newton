@@ -38,7 +38,7 @@ from newton._src.solvers.jitter.body import (
     MOTION_STATIC,
     BodyContainer,
 )
-from newton._src.solvers.jitter.constraint_actuated_double_ball_socket import (
+from newton._src.solvers.jitter.constraints.constraint_actuated_double_ball_socket import (
     ADBS_DWORDS,
     DRIVE_MODE_OFF,
     DRIVE_MODE_POSITION,
@@ -48,20 +48,20 @@ from newton._src.solvers.jitter.constraint_actuated_double_ball_socket import (
     JOINT_MODE_REVOLUTE,
     actuated_double_ball_socket_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_angular_limit import (
+from newton._src.solvers.jitter.constraints.constraint_angular_limit import (
     AL_DWORDS,
     angular_limit_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_angular_motor import (
+from newton._src.solvers.jitter.constraints.constraint_angular_motor import (
     AM_DWORDS,
     angular_motor_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_ball_socket import (
+from newton._src.solvers.jitter.constraints.constraint_ball_socket import (
     BS_DWORDS,
     ball_socket_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_contact import CONTACT_DWORDS
-from newton._src.solvers.jitter.constraint_container import (
+from newton._src.solvers.jitter.constraints.constraint_contact import CONTACT_DWORDS
+from newton._src.solvers.jitter.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_ANGULAR,
     DEFAULT_HERTZ_LIMIT,
@@ -70,35 +70,35 @@ from newton._src.solvers.jitter.constraint_container import (
     ConstraintContainer,
     constraint_container_zeros,
 )
-from newton._src.solvers.jitter.constraint_d6 import (
+from newton._src.solvers.jitter.constraints.constraint_d6 import (
     D6_DWORDS,
     d6_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_double_ball_socket import (
+from newton._src.solvers.jitter.constraints.constraint_double_ball_socket import (
     DBS_DWORDS,
     double_ball_socket_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_double_ball_socket_prismatic import (
+from newton._src.solvers.jitter.constraints.constraint_double_ball_socket_prismatic import (
     DBS_PRISMATIC_DWORDS,
     double_ball_socket_prismatic_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_linear_limit import (
+from newton._src.solvers.jitter.constraints.constraint_linear_limit import (
     LL_DWORDS,
     linear_limit_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_linear_motor import (
+from newton._src.solvers.jitter.constraints.constraint_linear_motor import (
     LM_DWORDS,
     linear_motor_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_hinge_angle import (
+from newton._src.solvers.jitter.constraints.constraint_hinge_angle import (
     HA_DWORDS,
     hinge_angle_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_hinge_joint import (
+from newton._src.solvers.jitter.constraints.constraint_hinge_joint import (
     HJ_DWORDS,
     hinge_joint_initialize_kernel,
 )
-from newton._src.solvers.jitter.constraint_prismatic import (
+from newton._src.solvers.jitter.constraints.constraint_prismatic import (
     PR_DWORDS,
     prismatic_initialize_kernel,
 )
@@ -404,7 +404,7 @@ class DoubleBallSocketDescriptor:
     ``anchor2``. Physically this is a 5-DoF hinge: position at both
     anchors is clamped so the only remaining free motion is rotation
     about the line ``anchor1 -> anchor2``. See
-    :class:`~newton._src.solvers.jitter.constraint_double_ball_socket.DoubleBallSocketData`
+    :class:`~newton._src.solvers.jitter.constraints.constraint_double_ball_socket.DoubleBallSocketData`
     for the full derivation.
 
     Both anchors are in *world* space at finalize() time; each is
@@ -434,7 +434,7 @@ class DoubleBallSocketPrismaticDescriptor:
     line from ``anchor1`` to ``anchor2``. Rotation is locked entirely
     via a 4+1 Schur-complement solve (two tangent rows per on-axis
     anchor plus a scalar row at an auto-derived off-axis point); see
-    :class:`~newton._src.solvers.jitter.constraint_double_ball_socket_prismatic.DoubleBallSocketPrismaticData`
+    :class:`~newton._src.solvers.jitter.constraints.constraint_double_ball_socket_prismatic.DoubleBallSocketPrismaticData`
     for the full derivation.
 
     Both anchors are in *world* space at finalize() time. Pair with
@@ -504,7 +504,7 @@ class AngularMotorDescriptor:
       ``stiffness`` is in N·m/rad, ``damping`` in N·m·s/rad. Unbounded
       angle tracking across 2*pi wraps uses PhoenX's
       ``FullRevolutionTracker`` (see
-      :mod:`newton._src.solvers.jitter.math_helpers`) so arbitrarily
+      :mod:`newton._src.solvers.jitter.helpers.math_helpers`) so arbitrarily
       large target angles are well-defined. ``target_velocity`` is then
       interpreted as an *additional* feed-forward angular velocity
       (usually 0); ``max_force`` still caps the per-substep impulse.
@@ -658,7 +658,7 @@ class HingeJointDescriptor:
     and an AngularMotor (drives the remaining axial DoF). All three
     sub-constraints live in *one* column of the shared
     :class:`ConstraintContainer` and are owned by a single PGS thread
-    -- see :mod:`newton._src.solvers.jitter.constraint_hinge_joint` for
+    -- see :mod:`newton._src.solvers.jitter.constraints.constraint_hinge_joint` for
     why this fuses better than three separate constraints.
 
     ``hinge_center`` and ``hinge_axis`` are in *world* space at
@@ -706,7 +706,7 @@ class HingeJointHandle:
 class DriveMode(IntEnum):
     """Drive mode for an actuated joint's free DoF.
 
-    See :mod:`newton._src.solvers.jitter.constraint_actuated_double_ball_socket`
+    See :mod:`newton._src.solvers.jitter.constraints.constraint_actuated_double_ball_socket`
     for the per-mode formulation. Values match the underlying
     ``DRIVE_MODE_*`` Warp constants exactly so they can be passed
     through ``np.int32`` arrays without translation.
@@ -726,7 +726,7 @@ class JointMode(IntEnum):
     formulation the runtime kernel uses and what units the drive /
     limit are in.
 
-    See :mod:`newton._src.solvers.jitter.constraint_actuated_double_ball_socket`
+    See :mod:`newton._src.solvers.jitter.constraints.constraint_actuated_double_ball_socket`
     for the per-mode math. Values match the underlying
     ``JOINT_MODE_*`` Warp constants exactly so they can be passed
     through ``np.int32`` arrays without translation.
@@ -875,7 +875,7 @@ class PrismaticDescriptor:
     """Plain-Python description of one *legacy* standalone prismatic joint.
 
     Represents a 5-DoF slider constraint implemented by
-    :mod:`newton._src.solvers.jitter.constraint_prismatic` -- 3
+    :mod:`newton._src.solvers.jitter.constraints.constraint_prismatic` -- 3
     rotational rows + 2 perpendicular-translation rows, solved as one
     PGS column via a 3x3 + 2x2 Schur complement with quaternion-error
     rotational rows (not pure point-matching).
@@ -989,7 +989,7 @@ class D6Descriptor:
     point/euler constraint when every axis in the block is rigid, or
     three independent 1-DoF axis/angle constraints otherwise (Jolt
     ``SixDOFConstraint`` style). See
-    :mod:`newton._src.solvers.jitter.constraint_d6` for the math.
+    :mod:`newton._src.solvers.jitter.constraints.constraint_d6` for the math.
 
     The 3 angular axes and 3 linear axes are interpreted in *body 1's
     local frame*: the joint frame "rides" body 1 rigidly. Position
@@ -1574,7 +1574,7 @@ class WorldBuilder:
         and AngularMotor (drives the axial velocity) into one column.
         The single-thread fused dispatch typically converges noticeably
         better than the same triple as three separate constraints --
-        see :mod:`newton._src.solvers.jitter.constraint_hinge_joint`
+        see :mod:`newton._src.solvers.jitter.constraints.constraint_hinge_joint`
         for the rationale.
 
         Mirrors Jitter2's ``HingeJoint`` constructor
@@ -1685,7 +1685,7 @@ class WorldBuilder:
 
         Drive and limit are independent and can be active
         simultaneously; the limit always wins because it's unilateral.
-        See :mod:`newton._src.solvers.jitter.constraint_actuated_double_ball_socket`
+        See :mod:`newton._src.solvers.jitter.constraints.constraint_actuated_double_ball_socket`
         for the derivation of all three modes.
 
         Args:
@@ -1869,7 +1869,7 @@ class WorldBuilder:
         (translation along ``axis``). The rotational block is
         quaternion-error; the translational block is a tangent-plane
         2-row point lock. See
-        :mod:`newton._src.solvers.jitter.constraint_prismatic` for the
+        :mod:`newton._src.solvers.jitter.constraints.constraint_prismatic` for the
         math.
 
         This entry point is kept alongside the newer unified
@@ -1940,7 +1940,7 @@ class WorldBuilder:
         when every axis in the block is rigid, or three independent
         1-DoF axis/angle constraints otherwise (Jolt
         ``SixDOFConstraint`` style). See
-        :mod:`newton._src.solvers.jitter.constraint_d6` for the math.
+        :mod:`newton._src.solvers.jitter.constraints.constraint_d6` for the math.
 
         The default call ``b.add_d6(b1, b2, anchor)`` (no per-axis
         overrides) is a 6-DoF *rigid weld*: all 6 axes default to
@@ -2123,7 +2123,7 @@ class WorldBuilder:
                 (``max_contact_pairs * ceil(max_contacts_per_pair /
                 6)``). Sets aside that many trailing cids in the
                 shared :class:`ConstraintContainer` and allocates the
-                parallel :class:`~newton._src.solvers.jitter.contact_container.ContactContainer`
+                parallel :class:`~newton._src.solvers.jitter.constraints.contact_container.ContactContainer`
                 for persistent lambdas. ``0`` disables the contact
                 code paths entirely.
             rigid_contact_max: Upper bound on the number of *contacts*

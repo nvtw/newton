@@ -33,28 +33,28 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.jitter.body import BodyContainer
-from newton._src.solvers.jitter.constraint_contact import (
+from newton._src.solvers.jitter.constraints.constraint_contact import (
     ContactViews,
     contact_pair_wrench_kernel,
     contact_per_contact_wrench_kernel,
     contact_views_make,
 )
-from newton._src.solvers.jitter.constraint_container import ConstraintContainer
-from newton._src.solvers.jitter.contact_container import (
+from newton._src.solvers.jitter.constraints.constraint_container import ConstraintContainer
+from newton._src.solvers.jitter.constraints.contact_container import (
     ContactContainer,
     contact_container_swap_prev_current,
     contact_container_zeros,
 )
-from newton._src.solvers.jitter.contact_ingest import (
+from newton._src.solvers.jitter.constraints.contact_ingest import (
     IngestScratch,
     gather_contact_warmstart,
     ingest_contacts,
     stamp_forward_contact_map,
 )
-from newton._src.solvers.jitter.graph_coloring_common import (
+from newton._src.solvers.jitter.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
 )
-from newton._src.solvers.jitter.graph_coloring_incremental import (
+from newton._src.solvers.jitter.graph_coloring.graph_coloring_incremental import (
     IncrementalContactPartitioner,
 )
 from newton._src.solvers.jitter.solver_jitter_kernels import (
@@ -1116,11 +1116,11 @@ class World:
         residual position-error velocity. This is what prevents the
         "soft-anchor impulse leak" that otherwise forces joints with
         a COM-offset body to run at
-        :data:`~newton._src.solvers.jitter.constraint_container.DEFAULT_HERTZ_LINEAR`
+        :data:`~newton._src.solvers.jitter.constraints.constraint_container.DEFAULT_HERTZ_LINEAR`
         ``= 0`` to keep drive / limit forces from bleeding into the
         anchor. See :func:`_constraint_relax_kernel` for the
         per-constraint dispatch and
-        :mod:`~newton._src.solvers.jitter.constraint_double_ball_socket`
+        :mod:`~newton._src.solvers.jitter.constraints.constraint_double_ball_socket`
         for the per-joint ``use_bias`` handling.
         """
         if self._constraint_capacity == 0:
