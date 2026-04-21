@@ -485,6 +485,10 @@ def _quat_relative_angle(q):
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestJointRevolute(unittest.TestCase):
     """Revolute-mode physics checks for :meth:`WorldBuilder.add_joint`."""
 
@@ -735,6 +739,10 @@ class TestJointRevolute(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestJointPrismatic(unittest.TestCase):
     """Prismatic-mode physics checks for :meth:`WorldBuilder.add_joint`."""
 
@@ -928,6 +936,10 @@ class TestJointPrismatic(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestJointBallSocket(unittest.TestCase):
     """Ball-socket-mode physics checks for :meth:`WorldBuilder.add_joint`."""
 

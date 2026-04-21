@@ -287,6 +287,10 @@ class _JitterScene:
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestContactForceAccuracy(unittest.TestCase):
     """Isolate the contact-force reporting bug on the simplest possible
     scenes: a sphere on a plane, with and without a predictable axial

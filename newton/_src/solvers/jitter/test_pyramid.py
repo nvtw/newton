@@ -61,6 +61,10 @@ def _run_pyramid(layers: int, frames: int) -> Example:
     return ex
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestPyramidSettle(unittest.TestCase):
     """End-to-end settle test for the Jitter contact solver.
 

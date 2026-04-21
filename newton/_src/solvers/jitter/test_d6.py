@@ -225,6 +225,10 @@ def _twist_about_z(q) -> float:
     return 2.0 * math.atan2(float(q[2]), float(q[3]))
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestD6(unittest.TestCase):
     """End-to-end physics checks for :func:`WorldBuilder.add_d6`."""
 

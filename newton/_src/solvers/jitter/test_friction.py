@@ -122,9 +122,10 @@ class _FrictionScene:
 
     Builds ``num_cubes`` unit cubes in a line, each with its own
     initial +X velocity, on a frictionless ``shape_plane`` ground.
-    Steps deterministically (eager -- no CUDA graph capture) so the
-    test's per-frame measurement path is free to read numpy arrays
-    without worrying about graph replay.
+    Supports both eager single-stepping (:meth:`step`) and a
+    graph-captured bulk :meth:`run_frames` that amortises Warp's
+    per-launch overhead over ``frames`` frames -- essential for the
+    multi-hundred-frame settle loops used by the friction tests.
     """
 
     def __init__(
@@ -249,6 +250,34 @@ class _FrictionScene:
         )
         self._sync_jitter_to_newton()
 
+    def run_frames(self, frames: int) -> None:
+        """Advance the scene by ``frames`` frames.
+
+        On CUDA this records a single :meth:`step` into a CUDA graph
+        after a warm-up frame and replays it for the remainder, matching
+        the :func:`_test_helpers.run_settle_loop` pattern used by every
+        other jitter simulation test. On CPU (and for very short
+        loops) falls back to plain eager stepping.
+        """
+        if frames <= 0:
+            return
+
+        use_graph = self.device.is_cuda and frames >= 40
+
+        if not use_graph:
+            for _ in range(frames):
+                self.step()
+            return
+
+        self.step()
+
+        with wp.ScopedCapture(device=self.device) as capture:
+            self.step()
+        graph = capture.graph
+
+        for _ in range(frames - 2):
+            wp.capture_launch(graph)
+
     # -- state queries ---------------------------------------------------
 
     def positions_world(self) -> np.ndarray:
@@ -270,6 +299,10 @@ class _FrictionScene:
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestKineticFrictionStopDistance(unittest.TestCase):
     """Cubes should decelerate at ``a = mu * g`` and stop at
     ``d = v0^2 / (2 mu g)``.
@@ -305,8 +338,7 @@ class TestKineticFrictionStopDistance(unittest.TestCase):
         total_time = t_stop_max * 2.5 + 2.0
         num_frames = int(np.ceil(total_time * FPS))
 
-        for _ in range(num_frames):
-            scene.step()
+        scene.run_frames(num_frames)
 
         positions = scene.positions_world()
         velocities = scene.velocities_world()
@@ -378,6 +410,10 @@ class TestKineticFrictionStopDistance(unittest.TestCase):
                     )
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestStaticFrictionNoDrift(unittest.TestCase):
     """A cube at rest on a flat floor must stay at rest.
 
@@ -408,8 +444,7 @@ class TestStaticFrictionNoDrift(unittest.TestCase):
         scene = _FrictionScene(
             initial_speeds=[0.0], mu=0.5, device=self.device
         )
-        for _ in range(3 * FPS):
-            scene.step()
+        scene.run_frames(3 * FPS)
         pos = scene.positions_world()[0]
         vel = scene.velocities_world()[0]
         horizontal_drift = float(np.hypot(pos[0], pos[1]))

@@ -26,6 +26,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.jitter._test_helpers import run_settle_loop
 from newton._src.solvers.jitter.scene_registry import Scene, scene
 from newton._src.solvers.jitter.world_builder import WorldBuilder
 
@@ -112,6 +113,10 @@ def build_equilibrium_chain_scene(device) -> Scene:
     )
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestMomentumConservation(unittest.TestCase):
     """Validate that ``gather_constraint_wrenches`` reports the analytic
     equilibrium reaction forces for the body-chain example."""
@@ -121,8 +126,7 @@ class TestMomentumConservation(unittest.TestCase):
         world = _build_equilibrium_chain(device)
 
         dt = 1.0 / FPS
-        for _ in range(SETTLE_FRAMES):
-            world.step(dt)
+        run_settle_loop(world, SETTLE_FRAMES, dt=dt)
 
         out = wp.zeros(NUM_CUBES, dtype=wp.spatial_vector, device=device)
         world.gather_constraint_wrenches(out)

@@ -481,6 +481,10 @@ def _add_pendulum_bob(
     return body
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestPendulumFrequency(unittest.TestCase):
     """Small-angle pendulum frequency tests. The only constraint in
     play is ``JointMode.REVOLUTE`` (with and without a velocity
@@ -767,6 +771,10 @@ class TestPendulumFrequency(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestLinearOscillator(unittest.TestCase):
     """Frequency + damped-decay identity for a linear spring-mass on
     the unified dual-ball-socket in :attr:`JointMode.PRISMATIC`.
@@ -1066,6 +1074,10 @@ class TestLinearOscillator(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestActuatorContactReaction(unittest.TestCase):
     """Saturated-motor contact tests. The motor is in PD velocity
     mode (``stiffness_drive = 0``, ``damping_drive >> 0``) with a
@@ -1366,6 +1378,10 @@ class TestActuatorContactReaction(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestLimitSpringDamper(unittest.TestCase):
     """Equilibrium tests for the limit row configured as a PD spring-
     damper (``stiffness_limit`` / ``damping_limit`` branch). No drive,
@@ -1769,6 +1785,10 @@ def _add_unit_cube(
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestPrismaticUnitCubeLimitSpring(unittest.TestCase):
     """A unit cube hung from a vertical prismatic slider whose limit
     row is configured as a spring-damper. The static deflection
@@ -1995,6 +2015,10 @@ def _measure_oscillation(
     return omega_d, gamma
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestLimitDampingDecay(unittest.TestCase):
     """Damped-harmonic-oscillator identity check on the
     spring-damper limit row (``stiffness_limit`` / ``damping_limit``
@@ -2285,6 +2309,10 @@ class TestLimitDampingDecay(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestOneSidedLimits(unittest.TestCase):
     """Verify that a one-sided limit (one bound active, the other
     set far enough away to never trigger) really only acts on the
@@ -2622,6 +2650,10 @@ class TestOneSidedLimits(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestPDDriveImpulse(unittest.TestCase):
     """Direct verification that the PD drive applies the impulse the
     math says it should -- no contacts, no gravity, no shape-density

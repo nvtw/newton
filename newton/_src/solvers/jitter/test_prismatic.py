@@ -117,6 +117,10 @@ def _quat_relative_angle(q):
     return 2.0 * math.acos(w)
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestPrismatic(unittest.TestCase):
     """End-to-end physics checks for :func:`WorldBuilder.add_prismatic`."""
 

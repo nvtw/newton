@@ -170,6 +170,10 @@ def build_hinge_joint_brake_scene(device) -> Scene:
     return Scene(world=world, body_half_extents=he, frame_dt=1.0 / FPS, substeps=SUBSTEPS)
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+)
 class TestHingeJoint(unittest.TestCase):
     """End-to-end physics checks for :func:`WorldBuilder.add_hinge_joint`."""
 
