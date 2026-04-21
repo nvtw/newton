@@ -589,14 +589,18 @@ def _constraint_iterate_fast_tail_kernel(
     cc: ContactContainer,
     contacts: ContactViews,
 ):
-    """Single-block main-solve dispatcher that loops small colours.
+    """Single-block main-solve dispatcher that sweeps all remaining
+    colours in one launch.
 
-    Launched with ``dim=block_dim, 1 block``. Processes as many
-    remaining colours as fit within the block and exits when it
-    encounters a colour larger than the block -- the per-colour
-    kernel (launched alongside this one) handles those. The cursor
-    is written back at exit so the outer ``wp.capture_while`` sees
-    the progress we made.
+    Launched with ``dim=block_dim, 1 block``. For each remaining
+    colour, threads cover the colour's cid range with a block-stride
+    loop: the colour may be larger than ``block_dim`` and still
+    be handled within this one kernel -- each thread just processes
+    ``ceil(count / block_dim)`` cids. A ``__syncthreads`` between
+    colours makes every body-velocity write from colour ``c``
+    visible to colour ``c+1`` before the next iteration. The cursor
+    is written back at the end so the outer ``wp.capture_while``
+    exits immediately.
     """
     tid = wp.tid()
 
@@ -608,16 +612,19 @@ def _constraint_iterate_fast_tail_kernel(
         start = color_starts[c]
         end = color_starts[c + 1]
         count = end - start
-        if count > _STRAGGLER_BLOCK_DIM:
-            break
 
-        if tid < count:
-            cid = element_ids_by_color[start + tid]
+        # Block-stride over the colour's cids. For ``count <=
+        # block_dim`` this loops once; for larger colours each
+        # thread processes ``ceil(count / block_dim)`` cids.
+        base = tid
+        while base < count:
+            cid = element_ids_by_color[start + base]
             t = constraint_get_type(constraints, cid)
             if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
                 actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
             elif t == CONSTRAINT_TYPE_CONTACT:
                 contact_iterate(constraints, cid, bodies, idt, cc, contacts, True)
+            base += _STRAGGLER_BLOCK_DIM
 
         _sync_threads()
         cursor -= 1
@@ -638,7 +645,7 @@ def _constraint_prepare_fast_tail_kernel(
     cc: ContactContainer,
     contacts: ContactViews,
 ):
-    """Single-block prepare dispatcher (straggler variant).
+    """Single-block prepare dispatcher that sweeps all remaining colours.
 
     See :func:`_constraint_iterate_fast_tail_kernel`.
     """
@@ -652,16 +659,16 @@ def _constraint_prepare_fast_tail_kernel(
         start = color_starts[c]
         end = color_starts[c + 1]
         count = end - start
-        if count > _STRAGGLER_BLOCK_DIM:
-            break
 
-        if tid < count:
-            cid = element_ids_by_color[start + tid]
+        base = tid
+        while base < count:
+            cid = element_ids_by_color[start + base]
             t = constraint_get_type(constraints, cid)
             if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
                 actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
             elif t == CONSTRAINT_TYPE_CONTACT:
                 contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
+            base += _STRAGGLER_BLOCK_DIM
 
         _sync_threads()
         cursor -= 1
@@ -682,7 +689,7 @@ def _constraint_relax_fast_tail_kernel(
     cc: ContactContainer,
     contacts: ContactViews,
 ):
-    """Single-block relax dispatcher (straggler variant).
+    """Single-block relax dispatcher that sweeps all remaining colours.
 
     See :func:`_constraint_iterate_fast_tail_kernel`.
     """
@@ -696,16 +703,16 @@ def _constraint_relax_fast_tail_kernel(
         start = color_starts[c]
         end = color_starts[c + 1]
         count = end - start
-        if count > _STRAGGLER_BLOCK_DIM:
-            break
 
-        if tid < count:
-            cid = element_ids_by_color[start + tid]
+        base = tid
+        while base < count:
+            cid = element_ids_by_color[start + base]
             t = constraint_get_type(constraints, cid)
             if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
                 actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
             elif t == CONSTRAINT_TYPE_CONTACT:
                 contact_iterate(constraints, cid, bodies, idt, cc, contacts, False)
+            base += _STRAGGLER_BLOCK_DIM
 
         _sync_threads()
         cursor -= 1

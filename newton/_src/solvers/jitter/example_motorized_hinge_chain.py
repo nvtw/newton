@@ -126,8 +126,50 @@ JOINT_KIND = JointKind.ACTUATED_DOUBLE_BALL_SOCKET
 # visibly twists the column into a helix.
 DRIVE_MODE = DriveMode.VELOCITY
 
-NUM_CUBES = 30
-HALF_EXTENT = 0.5
+# When ``True``, every frame reads the fused joint wrenches via
+# :meth:`World.gather_constraint_wrenches` and -- once the PGS
+# warm-start has had ``_VALIDATION_WARMUP_FRAMES`` frames to pump the
+# per-substep impulse up the chain -- asserts each joint's reaction
+# wrench on body 2 matches the analytic static-equilibrium prediction.
+#
+# With the chain hanging straight down along -y and every cube of unit
+# mass, joint ``k`` (connecting world/cube_{k-1} to cube_k) must hold
+# up cubes ``k..NUM_CUBES-1``, so its world-frame force on body 2 is::
+#
+#     fx, fz ~= 0
+#     fy(k) = (NUM_CUBES - k) * |gravity|
+#
+# and all three torque components ~= 0 because every anchor sits on the
+# y axis through each cube's centre of mass. The analytic prediction
+# only holds when the chain is *at rest*, i.e. any motor on the free
+# axial spin is applying zero steady-state torque. In practice that
+# means one of:
+#
+#   * :attr:`DriveMode.OFF`;
+#   * :attr:`DriveMode.VELOCITY` with ``TARGET_VELOCITY == 0.0``;
+#   * :attr:`DriveMode.POSITION` with ``TARGET_ANGLE == 0.0``
+#     (every cube starts with the same orientation ``_DIAGONAL_QUAT``,
+#     so the initial relative twist is already zero).
+#
+# ``__init__`` raises if the toggle is on and the configuration would
+# drive the chain out of equilibrium; leave ``False`` for any run with
+# a spinning / twisting motor.
+VALIDATE_JOINT_FORCES = False
+
+# Frames to let the PGS warm-start propagate the impulse up the chain
+# before checking against the analytic prediction. Gauss-Seidel pushes
+# info roughly one link per inner iteration, so long chains need
+# more frames before the top joint (which supports the full chain
+# weight) settles.
+_VALIDATION_WARMUP_FRAMES = 60
+
+# World gravity magnitude [m/s^2] used by the analytic prediction.
+# Must match the ``gravity`` passed to :meth:`WorldBuilder.finalize`
+# below (the default ``(0.0, -9.81, 0.0)``).
+_GRAVITY_MAGNITUDE = 9.81
+
+NUM_CUBES = 1000
+HALF_EXTENT = 0.05
 NUM_BODIES = NUM_CUBES + 1  # +1 for the static world anchor body
 NUM_HINGES = NUM_CUBES  # 1 world->cube0 + 9 cube_i->cube_(i+1)
 
@@ -343,6 +385,34 @@ class Example:
             device=self.device,
         )
 
+        # ---- Optional joint-force validation --------------------------
+        # Gather scratch + per-handle cid table for the vectorised
+        # per-frame check in :meth:`_validate_joint_forces`. The cid
+        # table lets us map joint index ``k`` (which knows which cubes
+        # it supports) to the constraint row the gather writes into.
+        self._frames_simulated = 0
+        if VALIDATE_JOINT_FORCES:
+            self._assert_equilibrium_config()
+            self._wrench_buffer = wp.zeros(
+                self.world.num_constraints,
+                dtype=wp.spatial_vector,
+                device=self.device,
+            )
+            self._hinge_cids = np.array(
+                [h.cid for h in self.hinge_handles], dtype=np.int64
+            )
+            # Analytic equilibrium prediction: joint k holds up
+            # (NUM_CUBES - k) unit-mass cubes.
+            k_vec = np.arange(NUM_HINGES, dtype=np.float64)
+            self._expected_fy = (NUM_CUBES - k_vec) * _GRAVITY_MAGNITUDE
+            # Tolerances scale with the largest force in the chain so
+            # the check is meaningful for both short chains and the
+            # default 1000-cube configuration (peak ~= 9810 N).
+            peak = float(NUM_CUBES * _GRAVITY_MAGNITUDE)
+            self._f_tol = max(0.01 * peak, 0.5)  # 1% of peak force
+            self._lateral_tol = max(0.01 * peak, 0.5)
+            self._torque_tol = max(0.01 * peak, 0.5)
+
         # ---- Rendering scratch ---------------------------------------
         self._xforms = wp.zeros(NUM_BODIES, dtype=wp.transform, device=self.device)
 
@@ -374,7 +444,81 @@ class Example:
         else:
             self.simulate()
 
+        if VALIDATE_JOINT_FORCES:
+            self._validate_joint_forces()
+
         self.sim_time += self.frame_dt
+        self._frames_simulated += 1
+
+    @staticmethod
+    def _assert_equilibrium_config():
+        """Reject configurations where the analytic prediction is not
+        valid (a non-zero velocity / position target would drive the
+        chain out of static equilibrium, so the per-joint reaction
+        force would no longer reduce to "weight of cubes below")."""
+        if DRIVE_MODE is DriveMode.VELOCITY and TARGET_VELOCITY != 0.0:
+            raise ValueError(
+                "VALIDATE_JOINT_FORCES requires TARGET_VELOCITY == 0.0 in "
+                "DriveMode.VELOCITY; the analytic prediction is only "
+                "defined for a chain at rest."
+            )
+        if DRIVE_MODE is DriveMode.POSITION and TARGET_ANGLE != 0.0:
+            raise ValueError(
+                "VALIDATE_JOINT_FORCES requires TARGET_ANGLE == 0.0 in "
+                "DriveMode.POSITION; the analytic prediction is only "
+                "defined for a chain at rest."
+            )
+
+    def _validate_joint_forces(self):
+        """Read every hinge's reaction wrench and -- once the PGS
+        warm-start has had time to propagate the impulse up the chain
+        -- assert it matches the analytic static-equilibrium value.
+
+        Issuing the gather unconditionally (even during warm-up)
+        matches the user request "requested in every frame"; only the
+        assertion block is gated on ``_VALIDATION_WARMUP_FRAMES``.
+        """
+        self.world.gather_constraint_wrenches(self._wrench_buffer)
+        if self._frames_simulated < _VALIDATION_WARMUP_FRAMES:
+            return
+
+        wrenches = self._wrench_buffer.numpy()[self._hinge_cids]  # (NUM_HINGES, 6)
+        assert np.isfinite(wrenches).all(), (
+            f"non-finite joint wrench at frame {self._frames_simulated}: "
+            f"{wrenches[~np.isfinite(wrenches).all(axis=1)]}"
+        )
+
+        fx = wrenches[:, 0]
+        fy = wrenches[:, 1]
+        fz = wrenches[:, 2]
+        torques = wrenches[:, 3:6]
+
+        err_fy = np.abs(fy - self._expected_fy)
+        max_err_fy = float(err_fy.max())
+        max_abs_fx = float(np.abs(fx).max())
+        max_abs_fz = float(np.abs(fz).max())
+        max_abs_t = float(np.abs(torques).max())
+
+        if max_err_fy >= self._f_tol:
+            worst = int(err_fy.argmax())
+            raise AssertionError(
+                f"frame {self._frames_simulated}: joint {worst} "
+                f"fy={fy[worst]:.4f} N, expected "
+                f"{self._expected_fy[worst]:.4f} N "
+                f"(|err|={err_fy[worst]:.4f} N > tol {self._f_tol:.4f} N)"
+            )
+        assert max_abs_fx < self._lateral_tol, (
+            f"frame {self._frames_simulated}: max |fx|={max_abs_fx:.4f} N "
+            f"> tol {self._lateral_tol:.4f} N (chain should be vertical)"
+        )
+        assert max_abs_fz < self._lateral_tol, (
+            f"frame {self._frames_simulated}: max |fz|={max_abs_fz:.4f} N "
+            f"> tol {self._lateral_tol:.4f} N (chain should be vertical)"
+        )
+        assert max_abs_t < self._torque_tol, (
+            f"frame {self._frames_simulated}: max |torque|={max_abs_t:.4f} N·m "
+            f"> tol {self._torque_tol:.4f} N·m (anchors should pass through COM)"
+        )
 
     def render(self):
         wp.launch(
