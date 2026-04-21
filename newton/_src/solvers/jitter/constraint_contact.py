@@ -495,23 +495,41 @@ def _slot_set_bias(c: ConstraintContainer, cid: wp.int32, base: wp.int32, v: wp.
 def _build_tangents(n: wp.vec3f):
     """Build an orthonormal tangent basis from a unit normal.
 
-    Uses the "most-orthogonal axis" pick (smallest-magnitude component
-    of ``n`` as the seed), same trick as Box2D / Bepu. Deterministic
-    given the same normal; two identical prepare calls on the same
-    contact produce byte-identical tangents.
+    Uses the branch-free construction from Duff et al. 2017,
+    "Building an Orthonormal Basis, Revisited": the basis varies
+    smoothly with ``n`` everywhere except at the single anti-pole
+    ``n.z = -1``. This matters for warm-starting friction impulses.
+
+    The earlier "most-orthogonal axis" pick flips the tangent basis
+    by 90 degrees when two abs-components of ``n`` straddle ``<=``
+    (e.g. a vertical contact normal going from ``(0, 0, 1)`` to
+    ``(1e-9, 0, 1)`` swaps ``t1`` from ``+Y`` to ``-X``). Because
+    ``lam_t1`` / ``lam_t2`` are scalars stored *in this basis*, a
+    basis flip between substeps or frames turns a warm-started
+    friction impulse into an impulse pointing along the sliding
+    direction -- the exact symptom of a pyramid quietly drifting
+    sideways even when the net tangential velocity is zero.
     """
-    ax = wp.abs(n[0])
-    ay = wp.abs(n[1])
-    az = wp.abs(n[2])
-    # Pick the world axis that's *least* aligned with n as the seed.
-    if ax <= ay and ax <= az:
-        seed = wp.vec3f(1.0, 0.0, 0.0)
-    elif ay <= az:
-        seed = wp.vec3f(0.0, 1.0, 0.0)
-    else:
-        seed = wp.vec3f(0.0, 0.0, 1.0)
-    t1 = wp.normalize(wp.cross(n, seed))
-    t2 = wp.cross(n, t1)
+    # Work in a frame where +Z is the principal axis so the
+    # singularity sits at n.z = -1 (anti-pole). We take the sign of
+    # n.z as the branch selector; the construction is otherwise
+    # branch-free and produces a continuous basis in a 4pi steradian
+    # region minus that anti-pole.
+    sign = wp.float32(1.0)
+    if n[2] < wp.float32(0.0):
+        sign = wp.float32(-1.0)
+    a = wp.float32(-1.0) / (sign + n[2])
+    b = n[0] * n[1] * a
+    t1 = wp.vec3f(
+        wp.float32(1.0) + sign * n[0] * n[0] * a,
+        sign * b,
+        -sign * n[0],
+    )
+    t2 = wp.vec3f(
+        b,
+        sign + n[1] * n[1] * a,
+        -n[1],
+    )
     return t1, t2
 
 
