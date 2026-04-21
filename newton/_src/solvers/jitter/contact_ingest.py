@@ -628,15 +628,73 @@ def _contact_warmstart_gather_kernel(
             prev_slot = prev_slot_of_contact[prev_k]
             prev_cid = prev_cid_of_contact[prev_k]
 
+        # Precompute the fresh narrow-phase data; we'll either use it
+        # wholesale (new contact, or matched-but-worse-penetration) or
+        # replace a prev-frame frame that's grown stale.
+        fresh_local_p0 = contacts.rigid_contact_point0[k]
+        fresh_local_p1 = contacts.rigid_contact_point1[k]
+        fresh_n = contacts.rigid_contact_normal[k]
+
+        fresh_r1 = wp.quat_rotate(bodies.orientation[b1], fresh_local_p0)
+        fresh_r2 = wp.quat_rotate(bodies.orientation[b2], fresh_local_p1)
+
         if prev_slot >= 0 and prev_cid >= 0:
-            # Matched -- carry the full PhoenX state forward.
+            # Matched. Decide whether to carry the prev frame forward
+            # or overwrite it with the fresh narrow-phase geometry.
+            # PhoenX pattern: if the narrow phase now sees a deeper
+            # penetration than the contact's stored anchors imply, the
+            # contact's frozen geometry has grown stale and the fresh
+            # detection is a better reflection of the current physical
+            # contact -- swap it in. This prevents slowly-drifting
+            # stacks from locking onto a frame that no longer matches
+            # the real geometry, which otherwise manifests as
+            # accumulated lateral drift over long runs.
+            prev_n = cc_get_prev_normal(cc, prev_slot, prev_cid)
+            prev_lp0 = cc_get_prev_local_p0(cc, prev_slot, prev_cid)
+            prev_lp1 = cc_get_prev_local_p1(cc, prev_slot, prev_cid)
+            prev_r1 = wp.quat_rotate(bodies.orientation[b1], prev_lp0)
+            prev_r2 = wp.quat_rotate(bodies.orientation[b2], prev_lp1)
+            prev_p1_world = bodies.position[b1] + prev_r1
+            prev_p2_world = bodies.position[b2] + prev_r2
+            # ``dot(p2 - p1, n)`` is positive when separated; the
+            # negation below makes ``penetration`` positive when
+            # bodies overlap (Phoenx's ``ComputeContactBias`` uses
+            # the same convention).
+            prev_penetration = -wp.dot(prev_p2_world - prev_p1_world, prev_n)
+
+            fresh_p1_world = bodies.position[b1] + fresh_r1
+            fresh_p2_world = bodies.position[b2] + fresh_r2
+            fresh_penetration = -wp.dot(fresh_p2_world - fresh_p1_world, fresh_n)
+
+            if fresh_penetration > prev_penetration:
+                # Overwrite: the fresh narrow-phase detection sees a
+                # deeper overlap than the stored frame can produce
+                # once the bodies have moved into their current pose.
+                # Carry the impulses forward for warm-start but rebuild
+                # normal / tangent / anchors.
+                dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
+                    bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
+                )
+                fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
+
+                cc_set_normal_lambda(cc, s, cid, cc_get_prev_normal_lambda(cc, prev_slot, prev_cid))
+                cc_set_tangent1_lambda(cc, s, cid, cc_get_prev_tangent1_lambda(cc, prev_slot, prev_cid))
+                cc_set_tangent2_lambda(cc, s, cid, cc_get_prev_tangent2_lambda(cc, prev_slot, prev_cid))
+                cc_set_normal(cc, s, cid, fresh_n)
+                cc_set_tangent1(cc, s, cid, fresh_t1)
+                cc_set_local_p0(cc, s, cid, fresh_local_p0)
+                cc_set_local_p1(cc, s, cid, fresh_local_p1)
+                continue
+
+            # Matched and prev frame still describes the contact
+            # accurately -- carry the full PhoenX state forward.
             cc_set_normal_lambda(cc, s, cid, cc_get_prev_normal_lambda(cc, prev_slot, prev_cid))
             cc_set_tangent1_lambda(cc, s, cid, cc_get_prev_tangent1_lambda(cc, prev_slot, prev_cid))
             cc_set_tangent2_lambda(cc, s, cid, cc_get_prev_tangent2_lambda(cc, prev_slot, prev_cid))
-            cc_set_normal(cc, s, cid, cc_get_prev_normal(cc, prev_slot, prev_cid))
+            cc_set_normal(cc, s, cid, prev_n)
             cc_set_tangent1(cc, s, cid, cc_get_prev_tangent1(cc, prev_slot, prev_cid))
-            cc_set_local_p0(cc, s, cid, cc_get_prev_local_p0(cc, prev_slot, prev_cid))
-            cc_set_local_p1(cc, s, cid, cc_get_prev_local_p1(cc, prev_slot, prev_cid))
+            cc_set_local_p0(cc, s, cid, prev_lp0)
+            cc_set_local_p1(cc, s, cid, prev_lp1)
             continue
 
         # New contact -- initialize PhoenX-style from the upstream
@@ -644,24 +702,18 @@ def _contact_warmstart_gather_kernel(
         # Newton's per-contact point arrays (both are already in body-
         # origin frame); the normal is world-frame; ``tangent1`` gets
         # anchored to the sliding direction.
-        local_p0 = contacts.rigid_contact_point0[k]
-        local_p1 = contacts.rigid_contact_point1[k]
-        n = contacts.rigid_contact_normal[k]
-
-        r1 = wp.quat_rotate(bodies.orientation[b1], local_p0)
-        r2 = wp.quat_rotate(bodies.orientation[b2], local_p1)
-        dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], r2)) - (
-            bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], r1)
+        dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
+            bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
         )
-        t1 = _build_tangent1_from_velocity(n, dv)
+        t1 = _build_tangent1_from_velocity(fresh_n, dv)
 
         cc_set_normal_lambda(cc, s, cid, wp.float32(0.0))
         cc_set_tangent1_lambda(cc, s, cid, wp.float32(0.0))
         cc_set_tangent2_lambda(cc, s, cid, wp.float32(0.0))
-        cc_set_normal(cc, s, cid, n)
+        cc_set_normal(cc, s, cid, fresh_n)
         cc_set_tangent1(cc, s, cid, t1)
-        cc_set_local_p0(cc, s, cid, local_p0)
-        cc_set_local_p1(cc, s, cid, local_p1)
+        cc_set_local_p0(cc, s, cid, fresh_local_p0)
+        cc_set_local_p1(cc, s, cid, fresh_local_p1)
 
 
 @wp.kernel
