@@ -1752,15 +1752,22 @@ Any non-disabled mode implies ``deterministic=True``.
 
 Each frame, the matcher binary-searches the current contacts against the
 previous frame's sorted keys, then verifies candidates against a world-space
-position distance threshold and a normal dot-product threshold.  The sort key
-encodes ``(shape_a, shape_b, sub_key)`` so only contacts between the same shape
-pair are compared.
+distance threshold and a normal dot-product threshold.  The sort key encodes
+``(shape_a, shape_b, sub_key)`` so only contacts between the same shape pair
+are compared.
+
+The distance metric is the world-space **contact midpoint**
+``0.5 * (world(point0) + world(point1))`` — symmetric in shape 0 and shape 1
+— which means swapping the two shapes of a pair does not change whether a
+contact matches.  It also means pure changes in penetration depth register
+as motion on both sides of the contact, not just one.
 
 **Thresholds**
 
-- ``contact_matching_pos_threshold`` — maximum world-space distance [m] a
-  contact may move between frames and still be considered the same contact.
-  Defaults to ``0.005`` m.
+- ``contact_matching_pos_threshold`` — maximum world-space distance [m]
+  between the previous and current contact midpoints for a match.  Contacts
+  that moved more than this between frames are considered broken.  Defaults
+  to ``0.005`` m.
 - ``contact_matching_normal_dot_threshold`` — minimum dot product between old
   and new contact normals.  Below this the contact is reported as broken even
   if the key and position match.

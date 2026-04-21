@@ -554,9 +554,11 @@ class CollisionPipeline:
                 :class:`CollisionPipeline.ContactMatching` for a description of
                 each mode.
             contact_matching_pos_threshold: World-space distance threshold [m]
-                for contact matching.  Contacts that moved more than this
-                between frames are considered broken.  Defaults to ``0.005``
-                (0.5 cm).
+                between the previous and current contact midpoints
+                ``0.5 * (world(point0) + world(point1))`` — symmetric in
+                shape 0 / shape 1.  Contacts whose midpoint moved more than
+                this between frames are considered broken.  Defaults to
+                ``0.005`` (0.5 cm).
             contact_matching_normal_dot_threshold: Minimum dot product between
                 old and new contact normals for a match.
             contact_report: Allocate buffers on the :class:`Contacts` container
@@ -1080,7 +1082,9 @@ class CollisionPipeline:
                 sort_keys=self._sort_key_array,
                 contact_count=contacts.rigid_contact_count,
                 point0=contacts.rigid_contact_point0,
+                point1=contacts.rigid_contact_point1,
                 shape0=contacts.rigid_contact_shape0,
+                shape1=contacts.rigid_contact_shape1,
                 normal=contacts.rigid_contact_normal,
                 body_q=state.body_q,
                 shape_body=model.shape_body,
@@ -1145,31 +1149,27 @@ class CollisionPipeline:
                     contacts.rigid_contact_broken_count,
                     device=self.device,
                 )
-            if self._matching_sticky:
-                self._contact_matcher.save_sorted_state(
-                    sorted_keys=self._contact_sorter.sorted_keys_view,
-                    contact_count=contacts.rigid_contact_count,
-                    sorted_point0=contacts.rigid_contact_point0,
-                    sorted_shape0=contacts.rigid_contact_shape0,
-                    sorted_normal=contacts.rigid_contact_normal,
-                    sorted_point1=contacts.rigid_contact_point1,
-                    sorted_offset0=contacts.rigid_contact_offset0,
-                    sorted_offset1=contacts.rigid_contact_offset1,
-                    body_q=state.body_q,
-                    shape_body=model.shape_body,
-                    device=self.device,
-                )
-            else:
-                self._contact_matcher.save_sorted_state(
-                    sorted_keys=self._contact_sorter.sorted_keys_view,
-                    contact_count=contacts.rigid_contact_count,
-                    sorted_point0=contacts.rigid_contact_point0,
-                    sorted_shape0=contacts.rigid_contact_shape0,
-                    sorted_normal=contacts.rigid_contact_normal,
-                    body_q=state.body_q,
-                    shape_body=model.shape_body,
-                    device=self.device,
-                )
+            sticky_offsets: dict[str, wp.array] = (
+                {
+                    "sorted_offset0": contacts.rigid_contact_offset0,
+                    "sorted_offset1": contacts.rigid_contact_offset1,
+                }
+                if self._matching_sticky
+                else {}
+            )
+            self._contact_matcher.save_sorted_state(
+                sorted_keys=self._contact_sorter.sorted_keys_view,
+                contact_count=contacts.rigid_contact_count,
+                sorted_point0=contacts.rigid_contact_point0,
+                sorted_point1=contacts.rigid_contact_point1,
+                sorted_shape0=contacts.rigid_contact_shape0,
+                sorted_shape1=contacts.rigid_contact_shape1,
+                sorted_normal=contacts.rigid_contact_normal,
+                body_q=state.body_q,
+                shape_body=model.shape_body,
+                device=self.device,
+                **sticky_offsets,
+            )
 
         # Differentiable contact augmentation: reconstruct world-space contact
         # quantities through body_q so that gradients flow via wp.Tape.
