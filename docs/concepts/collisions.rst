@@ -1708,20 +1708,15 @@ string or the equivalent :class:`CollisionPipeline.ContactMatching` enum):
   current frame's freshly generated contact geometry in the returned
   :class:`Contacts` buffer.
 - ``"sticky"`` — match like ``"latest"``, then overwrite each
-  matched contact's body-frame contact anchor points
-  (``point0`` / ``point1``) and body-frame friction offsets
-  (``offset0`` / ``offset1``) with the saved previous-frame values.
-  The world-frame ``normal`` is intentionally left as fresh
-  narrow-phase output — pinning it alongside body-frame offsets
-  that rotate with their bodies creates an inconsistent contact
-  basis (rotated offsets paired with a stale normal) and quickly
-  destabilises stacks during solver iteration.  The remaining
-  contact fields (``shape0`` / ``shape1``, ``margin0`` /
-  ``margin1``) are either key-derived or per-shape constants and
-  so are already identical for a matched contact.  Unmatched
-  contacts pass through with their fresh narrow-phase geometry.
-  Useful for scenarios where small frame-to-frame jitter on the
-  persistent contact **position** degrades friction behaviour.
+  matched contact's body-frame contact points (``point0``/``point1``),
+  offsets (``offset0``/``offset1``), and world-frame ``normal`` with the
+  saved previous-frame values.  The remaining contact fields
+  (``shape0``/``shape1``, ``margin0``/``margin1``) are either key-derived
+  or per-shape constants and so are already identical for a matched
+  contact — no extra state is kept for them.  Unmatched contacts pass
+  through with their fresh narrow-phase geometry.  Useful for stacking
+  scenarios where small frame-to-frame geometric jitter on persistent
+  contacts degrades stability.
 
 Any non-disabled mode implies ``deterministic=True``.
 
@@ -1779,54 +1774,16 @@ as motion on both sides of the contact, not just one.
 
 **Sticky mode**
 
-Replay of the matched previous-frame anchor geometry happens after the
-deterministic sort, so ``match_index`` already addresses the final sorted
-layout.  Unmatched rows (``MATCH_NOT_FOUND`` / ``MATCH_BROKEN``) are left
-untouched, so new and threshold-broken contacts keep their fresh
-narrow-phase geometry.  Because matching requires both a position delta
-below the threshold and a normal dot product above the threshold, the
-saved anchor geometry is guaranteed to be a close approximation of the
-current geometry and is safe to reuse.
-
-The body-frame anchor points ``point0`` / ``point1`` and their matching
-body-frame friction offsets ``offset0`` / ``offset1`` are pinned as a
-self-consistent set: the narrow phase derives each offset from the
-contact normal at creation time, so offsets must travel with their
-points to avoid introducing a spurious tangent error.  The world-frame
-``normal`` is deliberately kept fresh each frame — pinning it against
-body-frame offsets that rotate with their bodies produces a misaligned
-contact basis (rotated offsets paired with a stale normal) and quickly
-destabilises stacks whenever bodies pick up even a tiny rotation
-during solver iteration.
-
-Future impulse-warm-starting solvers should persist scalar impulse
-magnitudes in the current frame's contact basis (Bullet / PhysX style)
-rather than relying on a frozen world-space normal; the matcher's
-``contact_matching_normal_dot_threshold`` already guarantees the fresh
-normal is within a small rotation of the previous frame's, so projecting
-a saved magnitude through the fresh basis is stable.
-
-The extra per-contact buffers (four ``vec3`` columns for the body-frame
-anchor points and offsets) are only allocated when the mode is
-``"sticky"``; ``"latest"`` and ``"disabled"`` pay zero additional memory
-and launch no additional kernels.
-
-.. note::
-
-   Sticky mode is most useful for tracking contact identity (via
-   ``rigid_contact_match_index`` and the contact report) and for future
-   solvers that persist per-contact state such as warm-start impulses.
-   With the current :class:`~newton.solvers.SolverXPBD` kernel the
-   body-frame anchor points serve simultaneously as the penetration
-   probe and the friction anchor, so pinning them to the creation
-   frame introduces a small penetration-measurement lag that the
-   solver corrects every frame; this manifests as a residual velocity
-   jitter (typically tens of cm/s) around an otherwise settled
-   configuration.  Stacks remain stable and contacts are correctly
-   matched frame-to-frame, but they will not go fully to rest under
-   XPBD.  Separating friction anchors from penetration geometry on
-   the solver side is the principled fix and is out of scope for the
-   contact-matching module.
+Replay of the matched previous-frame geometry happens after the deterministic
+sort, so ``match_index`` already addresses the final sorted layout.  Unmatched
+rows (``MATCH_NOT_FOUND`` / ``MATCH_BROKEN``) are left untouched, so new and
+threshold-broken contacts keep their fresh narrow-phase geometry.  Because
+matching requires both a position delta below the threshold and a normal dot
+product above the threshold, the saved values are guaranteed to be a close
+approximation of the current geometry and are safe to reuse.  The extra
+per-contact buffers (four ``vec3`` columns for the body-frame points and
+offsets) are only allocated when the mode is ``"sticky"``; ``"latest"`` and
+``"disabled"`` pay zero additional memory and launch no additional kernels.
 
 .. _Contact Reports:
 

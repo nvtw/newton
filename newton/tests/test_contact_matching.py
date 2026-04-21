@@ -529,21 +529,15 @@ def test_contact_report_requires_matching(test, device):
 
 
 def test_sticky_matched_rows_replayed(test, device):
-    """STICKY mode: matched rows carry the previous-frame contact manifold
-    (body-frame anchor pair + world-frame normal) even when the narrow
-    phase's fresh output differs on a perturbed second frame.  Body-frame
-    friction offsets are recomputed from the persistent normal and the
-    current body transforms, so on a pure translation they numerically
-    match the frame-1 snapshot, but they are *not* a byte-for-byte copy
-    of it.
+    """STICKY mode: matched rows carry exact previous-frame geometry even when
+    the narrow phase's fresh output differs on a perturbed second frame.
 
     Frame 2 perturbs the bodies slightly (less than the match threshold) so
     the narrow phase produces a different-but-close contact record.  Sticky
-    replay must overwrite ``point0`` / ``point1`` / ``normal`` with the
-    previous frame's values, so after frame 2 those three columns equal
-    the frame-1 snapshot even though the narrow phase would have produced
-    something slightly different (which this test confirms by running a
-    parallel non-sticky pipeline on the same perturbed state).
+    replay must overwrite ``point0``/``point1``/``offset0``/``offset1`` with
+    the previous frame's values, so after frame 2 those columns equal the
+    frame-1 snapshot even though the narrow phase would have produced
+    something slightly different.
     """
     with wp.ScopedDevice(device):
         model, state = _build_simple_scene(device)
@@ -554,17 +548,13 @@ def test_sticky_matched_rows_replayed(test, device):
         test.assertGreater(count1, 0)
         snap_point0 = contacts.rigid_contact_point0.numpy()[:count1].copy()
         snap_point1 = contacts.rigid_contact_point1.numpy()[:count1].copy()
-        snap_normal = contacts.rigid_contact_normal.numpy()[:count1].copy()
         snap_offset0 = contacts.rigid_contact_offset0.numpy()[:count1].copy()
         snap_offset1 = contacts.rigid_contact_offset1.numpy()[:count1].copy()
+        snap_normal = contacts.rigid_contact_normal.numpy()[:count1].copy()
 
         # Perturb every body by 1 mm in x -- well below the 5 mm default
         # pos threshold so every contact still matches, but enough for the
         # narrow phase to produce a detectably different fresh record.
-        # Pure translation only, so body orientations stay identity --
-        # that way the recomputed sticky offsets equal the frame-1 offsets
-        # (both ``R^T * margin * n_persistent`` with ``R = I``) and we can
-        # assert numerical equality on offsets too.
         q = state.body_q.numpy()
         for i in range(len(q)):
             q[i][0] += 0.001
@@ -576,9 +566,8 @@ def test_sticky_matched_rows_replayed(test, device):
         # pass trivially.
         pipeline_fresh = newton.CollisionPipeline(model, broad_phase="nxn")
         contacts_fresh = pipeline_fresh.contacts()
-        count_fresh = _collide_once(pipeline_fresh, state, contacts_fresh)
-        fresh_point0 = contacts_fresh.rigid_contact_point0.numpy()[:count_fresh]
-        fresh_normal = contacts_fresh.rigid_contact_normal.numpy()[:count_fresh]
+        _collide_once(pipeline_fresh, state, contacts_fresh)
+        fresh_point0 = contacts_fresh.rigid_contact_point0.numpy()[:count1]
 
         count2 = _collide_once(pipeline, state, contacts)
         test.assertEqual(count1, count2)
@@ -595,12 +584,12 @@ def test_sticky_matched_rows_replayed(test, device):
             "Precondition: perturbation must change fresh narrow-phase point0",
         )
 
-        # Sticky contract (persistent fields):
-        # ``point0`` / ``point1`` / ``normal`` are replayed byte-for-byte
-        # from the frame-1 snapshot.
+        # Sticky contract: replayed fields equal the frame-1 snapshot.
         for field, prev in (
             ("point0", snap_point0),
             ("point1", snap_point1),
+            ("offset0", snap_offset0),
+            ("offset1", snap_offset1),
             ("normal", snap_normal),
         ):
             current = getattr(contacts, f"rigid_contact_{field}").numpy()[:count2]
@@ -609,44 +598,6 @@ def test_sticky_matched_rows_replayed(test, device):
                 prev,
                 err_msg=f"Sticky mode: matched rows must carry prev-frame {field} byte-for-byte",
             )
-
-        # ``offset0`` / ``offset1`` are *recomputed* from
-        # ``margin_i * n_persistent`` rotated into the current body frame.
-        # Under this test's pure-translation perturbation the body
-        # orientations stay identity, so numerically the recomputed
-        # offsets match the frame-1 offsets exactly -- this is what a
-        # non-rotating stack should produce.
-        for field, prev in (
-            ("offset0", snap_offset0),
-            ("offset1", snap_offset1),
-        ):
-            current = getattr(contacts, f"rigid_contact_{field}").numpy()[:count2]
-            np.testing.assert_allclose(
-                current,
-                prev,
-                atol=1e-6,
-                err_msg=(
-                    f"Sticky mode: under pure translation, recomputed {field} must equal "
-                    "the frame-1 value (persistent normal + identity orientation)"
-                ),
-            )
-
-        # Non-sticky sanity: the fresh pipeline on the perturbed state
-        # produced the same normals as frame 1 for this scene (pure
-        # vertical contacts, unchanged by a horizontal perturbation).
-        # Confirm sticky replay really did pin the normal (so the test
-        # assertion above was non-trivial even though ``fresh_normal``
-        # happens to equal the snap here).
-        test.assertEqual(count2, count_fresh)
-        np.testing.assert_array_equal(
-            fresh_normal,
-            snap_normal,
-            err_msg=(
-                "Precondition: for a pure horizontal perturbation the fresh "
-                "normal is expected to match frame 1; the sticky replay then "
-                "pins it to the same value by persisting, not by keeping it fresh."
-            ),
-        )
 
 
 def test_sticky_unmatched_rows_pass_through(test, device):
@@ -707,14 +658,7 @@ def test_sticky_unmatched_rows_pass_through(test, device):
 
 
 def test_sticky_disabled_no_sticky_buffers(test, device):
-    """LATEST and DISABLED modes must not allocate sticky buffers.
-
-    Sticky mode persists only the body-frame anchor pair
-    (``_prev_point0`` / ``_prev_point1``); the world-frame normal is
-    reused from the sorter's ``scratch_normal`` and the body-frame
-    offsets are recomputed fresh each frame, so neither has a dedicated
-    ``_prev_*`` buffer on the matcher.
-    """
+    """LATEST and DISABLED modes must not allocate sticky buffers."""
     with wp.ScopedDevice(device):
         model, _state = _build_simple_scene(device)
 
@@ -723,6 +667,8 @@ def test_sticky_disabled_no_sticky_buffers(test, device):
         test.assertFalse(p_latest._contact_matcher.is_sticky)
         test.assertIsNone(p_latest._contact_matcher._prev_point0)
         test.assertIsNone(p_latest._contact_matcher._prev_point1)
+        test.assertIsNone(p_latest._contact_matcher._prev_offset0)
+        test.assertIsNone(p_latest._contact_matcher._prev_offset1)
 
         p_off = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="disabled")
         test.assertIsNone(p_off._contact_matcher)
@@ -731,6 +677,8 @@ def test_sticky_disabled_no_sticky_buffers(test, device):
         test.assertTrue(p_sticky._contact_matcher.is_sticky)
         test.assertIsNotNone(p_sticky._contact_matcher._prev_point0)
         test.assertIsNotNone(p_sticky._contact_matcher._prev_point1)
+        test.assertIsNotNone(p_sticky._contact_matcher._prev_offset0)
+        test.assertIsNotNone(p_sticky._contact_matcher._prev_offset1)
 
 
 # ---------------------------------------------------------------------------

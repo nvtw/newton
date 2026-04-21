@@ -338,20 +338,18 @@ class _SaveStateData:
 
     ``src_point0`` / ``src_point1`` and their shape indices are consumed every
     frame to compute the symmetric world-space midpoint written into
-    ``dst_pos_world``.  The ``dst_point*_body`` columns are only written when
-    ``has_sticky != 0``; when sticky is disabled the matcher passes dummy
-    arrays for those slots and the kernel's ``if has_sticky`` guard skips the
-    extra writes, so sticky-only columns need zero allocation in the
-    non-sticky path.  The sticky mode does *not* persist ``offset0`` /
-    ``offset1``: those are derived quantities (``margin * n_world`` rotated
-    into the body frame) and are recomputed fresh in
-    :func:`_replay_matched_kernel` from the persistent ``point0`` / ``point1``
-    and ``normal``.
+    ``dst_pos_world``.  ``src_offset*`` and the ``dst_*_body`` columns are
+    only consumed when ``has_sticky != 0``; when sticky is disabled the
+    matcher passes dummy arrays for those slots and the kernel's
+    ``if has_sticky`` guard skips the extra writes, so sticky-only columns
+    need zero allocation in the non-sticky path.
     """
 
     src_keys: wp.array[wp.int64]
     src_point0: wp.array[wp.vec3]
     src_point1: wp.array[wp.vec3]
+    src_offset0: wp.array[wp.vec3]
+    src_offset1: wp.array[wp.vec3]
     src_shape0: wp.array[wp.int32]
     src_shape1: wp.array[wp.int32]
     src_normal: wp.array[wp.vec3]
@@ -365,6 +363,8 @@ class _SaveStateData:
     dst_normal: wp.array[wp.vec3]
     dst_point0_body: wp.array[wp.vec3]
     dst_point1_body: wp.array[wp.vec3]
+    dst_offset0_body: wp.array[wp.vec3]
+    dst_offset1_body: wp.array[wp.vec3]
     dst_count: wp.array[wp.int32]
 
     has_sticky: int
@@ -404,63 +404,25 @@ def _save_sorted_state_kernel(data: _SaveStateData):
         if data.has_sticky != 0:
             data.dst_point0_body[i] = p0
             data.dst_point1_body[i] = p1
+            data.dst_offset0_body[i] = data.src_offset0[i]
+            data.dst_offset1_body[i] = data.src_offset1[i]
 
 
 # ------------------------------------------------------------------
 # Sticky-mode replay (matched rows only)
 # ------------------------------------------------------------------
 #
-# Sticky mode pins the **creation-frame contact manifold** for matched
-# rows so the solver sees the same body-local anchor pair and the same
-# world-frame normal from frame to frame.  Concretely, three fields are
-# overwritten from the previous frame's saved record:
+# Sticky mode preserves only the fields that actually change across frames
+# for a matched contact: the body-frame contact points (``point0``/``point1``)
+# and offsets (``offset0``/``offset1``), plus the world-frame normal (which
+# is already persisted for matching in ``prev_normal``, no extra allocation).
 #
-# - ``point0`` / ``point1`` -- body-A and body-B local anchors.  These
-#   rotate with their bodies through the current ``body_q`` each frame,
-#   so the world-space anchors
-#   ``bx_a = transform(X_wb_a, point0)``,
-#   ``bx_b = transform(X_wb_b, point1)``
-#   track the original surface location under arbitrary body motion.
-#   This is exactly the same data model Jolt/Bullet/PhysX/PhoenX use
-#   for persistent contact manifolds.
-# - ``normal`` -- world-frame contact normal captured at creation.
-#   Because the matcher only accepts a prev<->new pair when their
-#   normals are within ``normal_dot_threshold``, the persistent normal
-#   is guaranteed to be a small rotation of what the narrow phase
-#   would have produced this frame.
-#
-# The fourth pair of contact-geometry fields, ``offset0`` / ``offset1``,
-# is **not** persisted.  Those offsets are *derived*: the narrow phase
-# writes ``offset_i = transform_vector(X_bw_i, margin_i * n_world)`` --
-# i.e. the normal-direction thickness padding, re-expressed in the body
-# frame as of that frame.  Persisting them directly and later
-# transforming them back through the *current* body frame would
-# reintroduce whichever normal was current when we saved, not the
-# persistent normal we actually want to use.  Instead,
-# :func:`_replay_matched_kernel` **recomputes** ``offset0`` /
-# ``offset1`` on every frame from the persistent ``normal`` and the
-# per-shape ``margin0`` / ``margin1`` using the *current* body
-# transform, with exactly the same formula as
-# :func:`~newton._src.sim.collide.write_contact`::
-#
-#     offset0 = transform_vector(X_bw_a,  margin0 * n_persistent)
-#     offset1 = transform_vector(X_bw_b, -margin1 * n_persistent)
-#
-# This keeps the friction offsets self-consistent with the persistent
-# normal: after rotating both quantities back to world space the
-# offsets collapse to ``+/-margin * n_persistent`` by construction,
-# contributing exactly zero tangential component to the solver's
-# friction delta -- which is the invariant we need for stable
-# static-friction behaviour in XPBD.
-#
-# The remaining non-geometric fields are either key-derived or
-# per-shape constants and so are already identical for a matched
-# contact on the new frame:
+# Everything else is either key-derived or a per-shape constant that does
+# not change between frames, so the new frame's values are already correct:
 #
 # - ``shape0`` / ``shape1``  : implied by the sort key; identical by
 #   construction for matched contacts.
-# - ``margin0`` / ``margin1``: ``radius_eff + margin``, per-shape constant
-#   (and consumed below to recompute ``offset0`` / ``offset1``).
+# - ``margin0`` / ``margin1``: ``radius_eff + margin``, per-shape constant.
 # - ``stiffness`` / ``damping`` / ``friction``: per-shape constants, and
 #   contact matching for hydroelastic contacts (the only path that writes
 #   these) is not supported anyway.
@@ -473,25 +435,17 @@ class _ReplayData:
     match_index: wp.array[wp.int32]
     contact_count: wp.array[wp.int32]
 
-    # Persistent (prev-frame) state
     prev_point0: wp.array[wp.vec3]
     prev_point1: wp.array[wp.vec3]
+    prev_offset0: wp.array[wp.vec3]
+    prev_offset1: wp.array[wp.vec3]
     prev_normal: wp.array[wp.vec3]
 
-    # Per-contact inputs needed to recompute offsets fresh
-    shape0: wp.array[wp.int32]
-    shape1: wp.array[wp.int32]
-    margin0: wp.array[float]
-    margin1: wp.array[float]
-    body_q: wp.array[wp.transform]
-    shape_body: wp.array[wp.int32]
-
-    # Outputs -- overwritten in-place for matched rows
     point0: wp.array[wp.vec3]
     point1: wp.array[wp.vec3]
-    normal: wp.array[wp.vec3]
     offset0: wp.array[wp.vec3]
     offset1: wp.array[wp.vec3]
+    normal: wp.array[wp.vec3]
 
 
 @wp.kernel(enable_backward=False)
@@ -502,83 +456,11 @@ def _replay_matched_kernel(data: _ReplayData):
     idx = data.match_index[tid]
     if idx < wp.int32(0):
         return  # MATCH_NOT_FOUND or MATCH_BROKEN -- keep new-frame data.
-
-    # Resolve current body transforms once: needed below both to
-    # evaluate the "keep deeper" guard and to recompute body-frame
-    # friction offsets.
-    bid0 = data.shape_body[data.shape0[tid]]
-    if bid0 == -1:
-        X_wb_a = wp.transform_identity()
-    else:
-        X_wb_a = data.body_q[bid0]
-
-    bid1 = data.shape_body[data.shape1[tid]]
-    if bid1 == -1:
-        X_wb_b = wp.transform_identity()
-    else:
-        X_wb_b = data.body_q[bid1]
-
-    thickness = data.margin0[tid] + data.margin1[tid]
-
-    # "Drift guard": the solver penetration depth is
-    #     d = dot(n, bx_b - bx_a) - thickness
-    # with d < 0 meaning penetration.  Compute d for the fresh
-    # narrow-phase manifold point and for the persistent manifold
-    # point rotated through the current body transforms.
-    #
-    # If the persistent contact is *deeper* than the fresh one
-    # (d_old < d_new), the persistent anchors have drifted into the
-    # body: rotating the stored body-local anchors through the new
-    # body_q no longer matches the actual surface.  Replaying such a
-    # drifted contact hands XPBD a phantom penetration bigger than the
-    # real one, which is what blows up pyramid stacks.  In that case
-    # discard the persistent record and keep the fresh narrow-phase
-    # values (effectively behaving like LATEST for that row, but with
-    # the match bookkeeping still intact for the report).
-    #
-    # If the fresh contact is deeper (d_new < d_old), the persistent
-    # anchor is the less penetrating of the two and is safe to use as
-    # a sticky anchor -- it preserves frame-to-frame geometry without
-    # over-correcting.  This is analogous to PhoenX's manifold
-    # reduction keeping the "deepest" candidate per normal bin: we
-    # keep whichever of the two candidates (fresh vs persistent)
-    # reports the larger penetration.
-    p0_new = data.point0[tid]
-    p1_new = data.point1[tid]
-    n_new = data.normal[tid]
-    bx_a_new = wp.transform_point(X_wb_a, p0_new)
-    bx_b_new = wp.transform_point(X_wb_b, p1_new)
-    d_new = wp.dot(n_new, bx_b_new - bx_a_new) - thickness
-
-    p0_old = data.prev_point0[idx]
-    p1_old = data.prev_point1[idx]
-    n_old = data.prev_normal[idx]
-    bx_a_old = wp.transform_point(X_wb_a, p0_old)
-    bx_b_old = wp.transform_point(X_wb_b, p1_old)
-    d_old = wp.dot(n_old, bx_b_old - bx_a_old) - thickness
-
-    if d_old < d_new:
-        # Persistent contact has drifted to a deeper-than-real
-        # penetration: its rotated anchors no longer reflect the
-        # actual surface geometry.  Keep the fresh narrow-phase
-        # manifold (already in contacts.point0/1/normal/offset0/1).
-        return
-
-    # Otherwise the persistent contact is shallower (or equal) than
-    # the fresh one -- replay its body-local anchors and world-frame
-    # normal to pin the manifold across frames.
-    data.point0[tid] = p0_old
-    data.point1[tid] = p1_old
-    data.normal[tid] = n_old
-
-    # Recompute body-frame friction offsets from (margin, n_persistent,
-    # current body_q).  This matches the formula used by the narrow
-    # phase's write_contact() so the offsets stay self-consistent with
-    # the persistent normal after rotating back to world space.
-    X_bw_a = wp.transform_inverse(X_wb_a)
-    X_bw_b = wp.transform_inverse(X_wb_b)
-    data.offset0[tid] = wp.transform_vector(X_bw_a, data.margin0[tid] * n_old)
-    data.offset1[tid] = wp.transform_vector(X_bw_b, -data.margin1[tid] * n_old)
+    data.point0[tid] = data.prev_point0[idx]
+    data.point1[tid] = data.prev_point1[idx]
+    data.offset0[tid] = data.prev_offset0[idx]
+    data.offset1[tid] = data.prev_offset1[idx]
+    data.normal[tid] = data.prev_normal[idx]
 
 
 # ------------------------------------------------------------------
@@ -662,22 +544,12 @@ class ContactMatcher:
             normals.  Below this the contact is considered broken.
         contact_report: Allocate the ``prev_was_matched`` flag array needed
             to enumerate broken contacts in :meth:`build_report`.
-        sticky: Allocate two extra per-contact ``wp.vec3`` buffers
-            (``point0`` / ``point1``, body-frame) used by
-            :meth:`replay_matched` to pin the matched-set contact
-            anchor geometry from the frame a contact was first
-            created.  The world-frame ``normal`` is persisted too but
-            reuses the sorter's existing ``scratch_normal`` buffer (no
-            extra allocation -- it already stores the previous frame's
-            normals for the matching dot-product check).  The
-            body-frame ``offset0`` / ``offset1`` are **not** persisted;
-            they are recomputed fresh each frame inside
-            :func:`_replay_matched_kernel` from ``margin_i *
-            n_persistent`` rotated through the current body frames
-            (see the module-level comment above that kernel for the
-            rationale).  When ``False`` the ``_prev_point*``
-            attributes are ``None`` and no extra kernel launches are
-            added.
+        sticky: Allocate four extra per-contact ``wp.vec3`` buffers
+            (``point0``/``point1``/``offset0``/``offset1``, body-frame) used
+            by :meth:`replay_matched`.  The world-frame normal is persisted
+            for matching regardless, so no extra allocation is needed for it.
+            When ``False`` these attributes are ``None`` and no extra kernel
+            launches are added.
         device: Device to allocate on.
     """
 
@@ -720,29 +592,23 @@ class ContactMatcher:
                 # Dummy single-element array so the Warp struct is always valid.
                 self._prev_was_matched = wp.zeros(1, dtype=wp.int32)
 
-            # Sticky-mode buffers.  We persist the body-frame contact
-            # anchor points (``point0`` / ``point1``) and the world-
-            # frame contact normal across frames.  The normal reuses
-            # the sorter's ``scratch_normal``, which already stores
-            # the previous frame's sorted normal for the matcher's
-            # dot-product gate, so no extra allocation is needed.
-            # ``offset0`` / ``offset1`` are *not* persisted -- they
-            # are derived from ``margin * n_world`` in the body frame
-            # and are recomputed fresh each frame inside
-            # :func:`_replay_matched_kernel` from the persistent
-            # normal and the current body transforms.  Shape indices,
-            # margins, and per-shape properties are either key-derived
-            # or per-shape constants and so identical on the next
-            # frame for a matched contact.  See the module-level
-            # comment above ``_replay_matched_kernel`` for the full
-            # rationale.
+            # Sticky-mode buffers.  Only the body-frame point/offset pairs
+            # need preserving -- shape indices, margins, and per-shape
+            # properties are either key-derived or per-shape constants and
+            # so identical on the next frame for a matched contact.  The
+            # world-frame normal is already persisted in the sorter's
+            # scratch_normal for matching and is reused directly here.
             self._sticky = sticky
             if sticky:
                 self._prev_point0 = wp.zeros(capacity, dtype=wp.vec3)
                 self._prev_point1 = wp.zeros(capacity, dtype=wp.vec3)
+                self._prev_offset0 = wp.zeros(capacity, dtype=wp.vec3)
+                self._prev_offset1 = wp.zeros(capacity, dtype=wp.vec3)
             else:
                 self._prev_point0 = None
                 self._prev_point1 = None
+                self._prev_offset0 = None
+                self._prev_offset1 = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -877,6 +743,8 @@ class ContactMatcher:
         body_q: wp.array,
         shape_body: wp.array,
         *,
+        sorted_offset0: wp.array | None = None,
+        sorted_offset1: wp.array | None = None,
         device: Devicelike = None,
     ) -> None:
         """Save current frame's sorted contacts for next-frame matching.
@@ -888,14 +756,9 @@ class ContactMatcher:
         :attr:`ContactSorter.scratch_normal`), which are idle between frames.
 
         When the matcher was built with ``sticky=True``, the body-frame
-        contact anchor points (``sorted_point0`` / ``sorted_point1``) are
-        also persisted for :meth:`replay_matched` in the same kernel
-        launch.  The world-frame normal is already persisted into the
-        sorter's ``scratch_normal`` (needed anyway for the matcher's
-        normal-dot gate) and is reused by :meth:`replay_matched`.  The
-        body-frame ``offset0`` / ``offset1`` are *not* persisted -- they
-        are recomputed from the persistent normal and current body
-        transforms inside :func:`_replay_matched_kernel`.
+        point/offset columns are also persisted for :meth:`replay_matched` in
+        the same kernel launch.  ``sorted_offset0`` / ``sorted_offset1`` are
+        required in that case and ignored otherwise.
 
         Args:
             sorted_keys: Sorted int64 keys (use :attr:`ContactSorter.sorted_keys_view`).
@@ -907,6 +770,8 @@ class ContactMatcher:
             sorted_normal: Sorted contact normals.
             body_q: Body transforms (current frame).
             shape_body: Shape-to-body index map.
+            sorted_offset0, sorted_offset1: Required when sticky is enabled;
+                ignored otherwise.
             device: Device to launch on.
         """
         data = _SaveStateData()
@@ -926,14 +791,24 @@ class ContactMatcher:
         data.dst_count = self._prev_count
 
         if self._sticky:
+            if sorted_offset0 is None or sorted_offset1 is None:
+                raise ValueError("save_sorted_state requires sorted_offset0/offset1 when sticky is enabled")
+            data.src_offset0 = sorted_offset0
+            data.src_offset1 = sorted_offset1
             data.dst_point0_body = self._prev_point0
             data.dst_point1_body = self._prev_point1
+            data.dst_offset0_body = self._prev_offset0
+            data.dst_offset1_body = self._prev_offset1
             data.has_sticky = 1
         else:
             # The struct requires a valid array for every field -- the
             # kernel guards with has_sticky==0 and never reads/writes them.
+            data.src_offset0 = sorted_point0
+            data.src_offset1 = sorted_point0
             data.dst_point0_body = self._sorter.scratch_pos_world
             data.dst_point1_body = self._sorter.scratch_pos_world
+            data.dst_offset0_body = self._sorter.scratch_pos_world
+            data.dst_offset1_body = self._sorter.scratch_pos_world
             data.has_sticky = 0
 
         wp.launch(_save_sorted_state_kernel, dim=self._capacity, inputs=[data], device=device)
@@ -945,50 +820,26 @@ class ContactMatcher:
         *,
         point0: wp.array,
         point1: wp.array,
-        normal: wp.array,
         offset0: wp.array,
         offset1: wp.array,
-        shape0: wp.array,
-        shape1: wp.array,
-        margin0: wp.array,
-        margin1: wp.array,
-        body_q: wp.array,
-        shape_body: wp.array,
+        normal: wp.array,
         device: Devicelike = None,
     ) -> None:
-        """Overwrite matched rows with the saved previous-frame contact manifold.
+        """Overwrite matched rows with the saved previous-frame contact geometry.
 
         Only valid when the matcher was constructed with ``sticky=True``.  Must
         run **after** :meth:`ContactSorter.sort_full` and **before**
         :meth:`save_sorted_state`.  Unmatched rows (``match_index < 0``) are
         left untouched so new contacts keep their fresh narrow-phase geometry.
-
-        For each matched row the kernel restores the body-frame anchor pair
-        ``point0`` / ``point1`` and the world-frame ``normal`` from the prior
-        frame's saved record, then **recomputes** the body-frame friction
-        offsets ``offset0`` / ``offset1`` from ``margin_i * n_persistent``
-        rotated through the *current* body transforms -- the same formula
-        used by the narrow phase.  This keeps offsets self-consistent with
-        the persistent normal and avoids the spurious tangent error that
-        would result from pairing a stale stored offset with a freshly
-        rotated body.  See the module-level comment above
-        :func:`_replay_matched_kernel` for the full rationale.
+        Only ``point0``/``point1``/``offset0``/``offset1``/``normal`` are
+        restored; other fields (``shape0``/``shape1``, margins, ...) are
+        already identical for a matched contact.
 
         Args:
             contact_count: Single-element int array with the active contact count.
             match_index: Sorted match_index array (from :class:`Contacts`).
-            point0, point1: Current-frame sorted body-frame contact anchor
-                points (overwritten on matched rows).
-            normal: Current-frame sorted world-frame contact normal
-                (overwritten on matched rows with the creation-frame normal).
-            offset0, offset1: Current-frame sorted body-frame friction
-                offsets (recomputed from persistent normal + current
-                body transforms on matched rows).
-            shape0, shape1: Sorted shape indices for the two sides.
-            margin0, margin1: Sorted per-contact offset magnitudes
-                ``radius_eff + margin`` for the two sides.
-            body_q: Body transforms (current frame).
-            shape_body: Shape-to-body index map.
+            point0, point1, offset0, offset1, normal: Current-frame sorted
+                contact record to be overwritten on matched rows.
             device: Device to launch on.
         """
         if not self._sticky:
@@ -999,21 +850,15 @@ class ContactMatcher:
         data.contact_count = contact_count
         data.prev_point0 = self._prev_point0
         data.prev_point1 = self._prev_point1
-        # The persistent world-frame normal lives in the sorter's
-        # scratch_normal (written by save_sorted_state and already used
-        # by the matcher's dot-product gate); reuse it directly.
+        data.prev_offset0 = self._prev_offset0
+        data.prev_offset1 = self._prev_offset1
+        # Normal was already persisted as world-space for matching.
         data.prev_normal = self._sorter.scratch_normal
-        data.shape0 = shape0
-        data.shape1 = shape1
-        data.margin0 = margin0
-        data.margin1 = margin1
-        data.body_q = body_q
-        data.shape_body = shape_body
         data.point0 = point0
         data.point1 = point1
-        data.normal = normal
         data.offset0 = offset0
         data.offset1 = offset1
+        data.normal = normal
 
         wp.launch(_replay_matched_kernel, dim=self._capacity, inputs=[data], device=device)
 
