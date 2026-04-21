@@ -418,7 +418,11 @@ def llt_blocked_solve(
     y: wp.array(dtype=float32),
     x: wp.array(dtype=float32),
     num_blocks: int = 1,
-    block_dim: int = 64,
+    # 128 threads per tile-block (4 warps) hides the gemm+trsm latency better than
+    # 64 across the entire size range tested in ``benchmark_llt_blocked.py``. Callers
+    # may override for batch sweeps with very small matrices where 64 is marginally
+    # faster.
+    block_dim: int = 128,
     device: wp.DeviceLike = None,
 ):
     """
@@ -450,7 +454,9 @@ def llt_blocked_solve_inplace(
     y: wp.array(dtype=float32),
     x: wp.array(dtype=float32),
     num_blocks: int = 1,
-    block_dim: int = 64,
+    # See ``llt_blocked_solve`` for rationale; 128 threads/tile-block is the best
+    # default across size ranges.
+    block_dim: int = 128,
     device: wp.DeviceLike = None,
 ):
     """

@@ -15,9 +15,9 @@ Optional flags:
 
     --sizes 32 64 128 256 512 1024    # override size list
     --num-iters 50                    # iterations per timed loop
-    --block-size 16                   # tile block size used by the kernels
-    --block-dim-factor 64             # threads per tile-block for factorize
-    --block-dim-solve 64              # threads per tile-block for solve
+    --block-size 32                   # tile block size used by the kernels
+    --block-dim-factor 128            # threads per tile-block for factorize
+    --block-dim-solve 128             # threads per tile-block for solve
     --device cuda:0                   # warp device override
 """
 
@@ -309,17 +309,17 @@ def main(argv=None):
         default=[32, 70, 128, 192, 257, 320, 401, 1000],
         help="Matrix sizes to benchmark.",
     )
-    parser.add_argument("--block-size", type=int, default=16, help="Tile block size.")
+    parser.add_argument("--block-size", type=int, default=32, help="Tile block size.")
     parser.add_argument(
         "--block-dim-factor",
         type=int,
-        default=64,
+        default=128,
         help="Threads per tile-block for factorize.",
     )
     parser.add_argument(
         "--block-dim-solve",
         type=int,
-        default=64,
+        default=128,
         help="Threads per tile-block for solve.",
     )
     parser.add_argument("--num-iters", type=int, default=50, help="Iterations per timed loop.")
