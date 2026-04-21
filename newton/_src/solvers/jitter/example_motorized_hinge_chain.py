@@ -126,7 +126,7 @@ JOINT_KIND = JointKind.ACTUATED_DOUBLE_BALL_SOCKET
 # visibly twists the column into a helix.
 DRIVE_MODE = DriveMode.VELOCITY
 
-NUM_CUBES = 10
+NUM_CUBES = 30
 HALF_EXTENT = 0.5
 NUM_BODIES = NUM_CUBES + 1  # +1 for the static world anchor body
 NUM_HINGES = NUM_CUBES  # 1 world->cube0 + 9 cube_i->cube_(i+1)
@@ -203,7 +203,7 @@ class Example:
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 8
+        self.sim_substeps = 30
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.viewer = viewer
@@ -339,7 +339,7 @@ class Example:
         # full step and is reused across substeps + PGS iterations.
         self.world = b.finalize(
             substeps=self.sim_substeps,
-            solver_iterations=8,
+            solver_iterations=4,
             device=self.device,
         )
 

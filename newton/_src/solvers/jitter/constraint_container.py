@@ -583,42 +583,50 @@ def constraint_bodies_make(b1: wp.int32, b2: wp.int32) -> ConstraintBodies:
 # impulse leak away over time so the joint asymptotes to the spring-
 # damper response instead of the perfectly-rigid one.
 #
-# Recommended hertz: keep it at ~ (substep_rate / 4) or below
-# (Nyquist + a safety factor). For a 60Hz frame rate at 8 substeps that's
-# substep_rate = 480Hz, so hertz <= 120 stays comfortably stable. The
-# defaults below sit at hertz = 60 / 30 / 30, well inside that envelope
-# and rigid-feeling.
+# User contract: ``hertz`` is the *requested* spring frequency, clamped
+# inside :func:`soft_constraint_coefficients` to the per-substep Nyquist
+# rate ``f_nyq = 1 / (2 * dt)``. Asking for more stiffness than the
+# integrator can resolve therefore yields the maximally-rigid lock the
+# current ``dt`` supports (``omega * dt == pi``), not an aliased /
+# under-damped mess. This makes joint feel substep-independent by
+# default: doubling the substep count makes locks *more* rigid (higher
+# Nyquist), never softer.
+#
+# The defaults below sit at a large finite value so that, at any
+# realistic ``dt``, they always hit the Nyquist clamp and produce the
+# stiffest resolvable lock. Users who want a genuinely compliant
+# spring-damper pass a small ``hertz`` (below the Nyquist rate) and
+# get honest compliant behaviour.
 
 #: Critically damped by default -- no overshoot, no underdamped ringing.
 DEFAULT_DAMPING_RATIO = wp.constant(wp.float32(1.0))
-#: Linear (positional) joint stiffness target. Matches the Box2D v3
-#: default (60 Hz) and, together with the solver's Box2D v3 TGS-soft
-#: relax pass (``_constraint_relax_kernel``), closes positional drift
-#: without bleeding drive / limit / spring impulse into the anchor.
+#: Linear (positional) joint stiffness target. Set so high that
+#: :func:`soft_constraint_coefficients` always clamps it to the
+#: per-substep Nyquist rate, producing a maximally-rigid lock at any
+#: ``dt``. Together with the solver's Box2D v3 TGS-soft relax pass
+#: (``_constraint_relax_kernel``) this closes positional drift without
+#: bleeding drive / limit / spring impulse into the anchor.
 #:
-#: Historical note: this used to default to ``0`` (rigid PGS) because
-#: a soft anchor with no relax pass would leak up to ~70% of a paired
-#: drive impulse on bodies whose COM is offset from the anchor (the
-#: lever-bob setup). The Box2D v3 "solve-with-bias then solve-without-
-#: bias" substep loop implemented in :meth:`~newton._src.solvers.jitter.solver_jitter.World._relax_velocities`
-#: eliminates that leak, so we can default to a finite, drift-closing
-#: stiffness again. Users who want a truly rigid anchor (no drift
-#: correction) can still pass ``hertz=0`` explicitly.
-DEFAULT_HERTZ_LINEAR = wp.constant(wp.float32(60.0))
-#: Angular (rotational lock) joint stiffness. Same reasoning as
-#: :data:`DEFAULT_HERTZ_LINEAR`: 60 Hz closes angular drift, and the
-#: relax pass prevents impulse leakage from motors / limits into the
-#: rotational lock. Override per-joint with ``hertz=0`` for a fully
-#: rigid lock or with a lower value for a compliant rotational joint.
-DEFAULT_HERTZ_ANGULAR = wp.constant(wp.float32(60.0))
-#: Hinge / cone limit stiffness. Same conservative value as the angular
-#: hinge so a body hitting its limit doesn't bounce.
-DEFAULT_HERTZ_LIMIT = wp.constant(wp.float32(30.0))
+#: Override per-joint with a lower finite ``hertz`` for a genuinely
+#: compliant spring (e.g. a mount with visible sag), or with
+#: ``hertz=0`` for a "no drift correction at all" rigid PGS row.
+DEFAULT_HERTZ_LINEAR = wp.constant(wp.float32(1.0e9))
+#: Angular (rotational lock) joint stiffness. Same Nyquist-clamp
+#: contract as :data:`DEFAULT_HERTZ_LINEAR`: defaults to maximally
+#: rigid at the current substep, override with a lower finite value
+#: for a compliant rotational joint or ``hertz=0`` for no drift
+#: correction.
+DEFAULT_HERTZ_ANGULAR = wp.constant(wp.float32(1.0e9))
+#: Hinge / cone limit stiffness. Defaults to Nyquist-rigid so a body
+#: hitting its limit doesn't visibly bounce; override with a lower
+#: ``hertz`` for a soft, ringing end-stop.
+DEFAULT_HERTZ_LIMIT = wp.constant(wp.float32(1.0e9))
 #: Velocity-target motors don't carry a positional bias, so hertz here
 #: only modulates the impulse-coefficient (how aggressively the motor
-#: clamps to the target velocity). Slightly higher than the angular lock
-#: so motors feel responsive without ringing.
-DEFAULT_HERTZ_MOTOR = wp.constant(wp.float32(60.0))
+#: clamps to the target velocity). Defaults to Nyquist-rigid so a
+#: velocity motor reaches its target inside one substep; override with
+#: a lower ``hertz`` for a softer response.
+DEFAULT_HERTZ_MOTOR = wp.constant(wp.float32(1.0e9))
 
 
 @wp.func
@@ -629,11 +637,20 @@ def soft_constraint_coefficients(
 ):
     """Map ``(hertz, damping_ratio, dt)`` to PGS soft-constraint coefficients.
 
-    Direct port of the formulation in
-    https://box2d.org/posts/2024/02/solver2d/ ("Soft Constraints",
-    pseudo-code block) which Erin Catto credits to Ross Nordby of Bepu.
-    The inputs are the user-facing knobs (independent of mass and
-    time step); the outputs feed straight into the PGS update.
+    Based on the Box2D v3 / Bepu / Nordby formulation from
+    https://box2d.org/posts/2024/02/solver2d/ ("Soft Constraints"), with
+    one deviation: the requested angular frequency ``omega = 2*pi*hertz``
+    is *clamped at the per-substep Nyquist rate* ``omega_nyq = pi / dt``
+    before being fed into the coefficient math. Consequently asking for
+    more stiffness than the current ``dt`` can resolve simply yields the
+    stiffest resolvable lock (``omega * dt == pi``, i.e. the spring
+    advances half a cycle per step), never an aliased response. This
+    makes the user contract substep-independent: a "rigid lock" stays
+    rigid regardless of substep count, and increasing the substep count
+    only makes it *more* rigid (higher Nyquist, larger ``mass_coeff``).
+
+    Inputs are the user-facing knobs (independent of mass); outputs
+    feed straight into the PGS update.
 
     Returns ``(bias_rate, mass_coeff, impulse_coeff)``:
 
@@ -644,18 +661,28 @@ def soft_constraint_coefficients(
       * ``impulse_coeff``[-]   -- damps the accumulated impulse term
         ("softness leak"), also in ``[0, 1]``.
 
-    As ``hertz -> infinity`` (or ``dt -> 0``) ``mass_coeff -> 1`` and
-    ``impulse_coeff -> 0``, recovering the rigid-constraint PGS update.
-    Lowering ``hertz`` makes the joint progressively softer.
+    Lowering ``hertz`` below the Nyquist rate ``1 / (2 * dt)`` makes the
+    joint progressively softer (genuine spring compliance); raising it
+    above hits the Nyquist clamp and plateaus at the stiffest
+    resolvable response.
 
-    Setting ``hertz <= 0`` produces a *rigid* constraint:
-    ``bias_rate = 0``, ``mass_coeff = 1``, ``impulse_coeff = 0`` --
-    exactly the un-softened plain-PGS update.
+    Setting ``hertz <= 0`` produces a *rigid* constraint with *no drift
+    correction*: ``bias_rate = 0``, ``mass_coeff = 1``,
+    ``impulse_coeff = 0`` -- exactly the un-softened plain-PGS update.
+    Use this when you want rigid PGS without the Box2D drift-closing
+    bias (e.g. when drift is already handled externally).
     """
     if hertz <= 0.0:
         return wp.float32(0.0), wp.float32(1.0), wp.float32(0.0)
 
-    omega = 2.0 * 3.14159265358979 * hertz
+    # Clamp omega at the per-substep Nyquist rate: the fastest spring
+    # the integrator can resolve is one with half a cycle per step,
+    # i.e. ``omega * dt == pi``. Requests beyond that alias, so we
+    # saturate to the maximally-rigid response the current ``dt``
+    # supports. See the block comment above for the full rationale.
+    omega_request = 2.0 * 3.14159265358979 * hertz
+    omega_nyquist = 3.14159265358979 / dt
+    omega = wp.min(omega_request, omega_nyquist)
     a1 = 2.0 * damping_ratio + omega * dt
     a2 = dt * omega * a1
     a3 = 1.0 / (1.0 + a2)
