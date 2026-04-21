@@ -969,6 +969,24 @@ def _revolute_prepare_at(
     axis_local2 = read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL2, cid)
     q0 = read_quat(constraints, base_offset + _OFF_Q0, cid)
 
+    # Angular inverse effective mass for the spring/limit/drive scalar
+    # row, **with the linear-anchor constraint eliminated** (parallel-axis
+    # correction). Plain ``n . (I1^-1 + I2^-1) . n`` (the unconstrained
+    # form) ignores the fact that the soft drive/limit impulse is balanced
+    # by the hard anchor constraint -- this systematically under-counts the
+    # effective inertia for any body whose COM is offset from the hinge
+    # axis, which collapses the spring stiffness to a fraction of the
+    # commanded ``kp`` and is the textbook "spring is way too soft on a
+    # lever-bob" symptom. Box2D's 2D revolute joint hides the issue
+    # because in 2D every body's COM sits *on* the hinge axis; the 3D
+    # generalisation must include the parallel-axis term.
+    #
+    # Per-body effective inertia about the hinge axis through the anchor:
+    #   I_hinge_i = I_com_i_axis + m_i * d_perp_i^2
+    # where I_com_i_axis = 1/(n . I_com_i^-1 . n) and d_perp_i is the
+    # perpendicular distance from body i's COM to the hinge axis. The
+    # combined inverse effective mass is 1/I_hinge_1 + 1/I_hinge_2 with
+    # static-body terms (mass = inertia = inf) contributing zero.
     # Angular inverse effective mass: n . (I1^-1 + I2^-1) . n.
     inv_inertia_sum = inv_inertia1 + inv_inertia2
     eff_inv = wp.dot(n_hat, inv_inertia_sum @ n_hat)
@@ -1032,23 +1050,26 @@ def _revolute_prepare_at(
     write_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid, max_lambda_drive)
 
     # ---- Limit (dual convention) -------------------------------------
-    # Determine the limit clamp state on the twist *half-angle* (the
-    # quaternion row is expressed in ``sin(theta/2)``, so we also map
-    # min_value / max_value into the same domain).
+    # Determine the limit clamp state. We compare the *full* twist angle
+    # (in rad, small-angle-linearised via ``2 * sin(theta/2)``) against
+    # the user's ``min_value`` / ``max_value`` directly -- projecting
+    # the bounds through ``sin(theta/2)`` would wrap for large
+    # ``|min|`` / ``|max|`` (``sin(-50) = +0.26`` at ``min = -100 rad``
+    # for the one-sided "wide-open" idiom), which silently flips the
+    # active side and injects a phantom restoring impulse *toward* the
+    # wrong bound. Comparing angles directly keeps the clamp gate
+    # monotone in the twist angle regardless of the bound magnitudes.
+    # ``limit_C`` (rad) goes into ``pd_coefficients`` / the Box2D
+    # softness, so the spring gains stay in N*m/rad without rescaling.
     clamp = _CLAMP_NONE
     limit_C = float(0.0)  # position error of the active limit stop
     if min_value != 0.0 or max_value != 0.0:
-        sin_half_min = wp.sin(min_value * 0.5)
-        sin_half_max = wp.sin(max_value * 0.5)
-        if twist_err > sin_half_max:
+        if twist_angle > max_value:
             clamp = _CLAMP_MAX
-            # ``twist_err - sin_half_max`` is the half-angle violation;
-            # scale by 2 to match the angle-domain used elsewhere so
-            # stiffness / damping stay in N*m/rad.
-            limit_C = (twist_err - sin_half_max) * 2.0
-        elif twist_err < sin_half_min:
+            limit_C = twist_angle - max_value
+        elif twist_angle < min_value:
             clamp = _CLAMP_MIN
-            limit_C = (twist_err - sin_half_min) * 2.0
+            limit_C = twist_angle - min_value
     write_int(constraints, base_offset + _OFF_CLAMP, cid, clamp)
 
     if hertz_limit < 0.0:
@@ -1210,7 +1231,16 @@ def _revolute_iterate_at(
     # covers that case (pd_coefficients returns all-zero triple).
     if eff_mass_drive_soft <= 0.0:
         drive_active = False
-    if drive_mode == DRIVE_MODE_VELOCITY and max_force_drive <= 0.0:
+    # Pure-velocity-motor branch (kp = kd = 0) is rigid: it would
+    # apply infinite force if uncapped. Disable when the user gave us
+    # neither PD gains nor a force cap. PD-form velocity drives
+    # (kd > 0, max_force_drive == 0) stay active -- their softness
+    # bounds the per-substep impulse already.
+    if (
+        drive_mode == DRIVE_MODE_VELOCITY
+        and max_force_drive <= 0.0
+        and gamma_drive == 0.0
+    ):
         drive_active = False
 
     lam_drive = float(0.0)
@@ -1781,7 +1811,15 @@ def _prismatic_iterate_at(
     drive_active = drive_mode != DRIVE_MODE_OFF
     if eff_mass_drive_soft <= 0.0:
         drive_active = False
-    if drive_mode == DRIVE_MODE_VELOCITY and max_force_drive <= 0.0:
+    # Same pure-velocity-motor guard as the revolute iterate: only
+    # disable when *both* the PD gains and the force cap are absent.
+    # A PD velocity drive (kd > 0) is self-bounded by its softness
+    # and must stay active.
+    if (
+        drive_mode == DRIVE_MODE_VELOCITY
+        and max_force_drive <= 0.0
+        and gamma_drive == 0.0
+    ):
         drive_active = False
 
     lam_drive = float(0.0)

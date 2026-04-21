@@ -79,6 +79,70 @@ Test catalogue
     :math:`k\\theta = m g L \\cos\\theta` to stay honest at the
     edges of "small".
 
+``TestPrismaticUnitCubeLimitSpring.test_unit_cube_sag_against_spring_limit``
+    Vertical prismatic slider with a *unit cube* hanging on a tiny
+    spring-damper limit window around zero. Closed-form static
+    deflection :math:`\\Delta = m g / k` -- mass and inertia come from
+    Newton's :class:`ModelBuilder` for a 1m unit cube with
+    :attr:`density=1` so the body is purely defined by SI primitives;
+    if the spring stiffness drifts by even a few percent from its
+    request, the deflection assertion fires with the analytic
+    residual.
+
+``TestLimitDampingDecay.test_prismatic_limit_damped_decay_identity``
+    Prismatic spring-damper limit excited from rest at a known
+    displacement (no gravity). Free underdamped oscillation; the
+    measured decay rate :math:`\\gamma` (log-linear fit on
+    successive-peak amplitudes) and damped frequency
+    :math:`\\omega_d` (zero-crossings) must satisfy
+    :math:`\\omega_d^2 + \\gamma^2 = k/m_{\\rm eff}` -- the universal
+    damped-harmonic-oscillator identity. Catches any
+    timestep-dependent damping (e.g. PGS softness leaking through)
+    because the identity is independent of :math:`c`, only the
+    decomposition into ``omega_d`` and ``gamma`` shifts with ``c``.
+
+``TestLimitDampingDecay.test_revolute_limit_damped_decay_identity``
+    Angular analog: torsional spring-damper limit on a hinge with an
+    orthogonal lever bob. Same DHO identity in angular units
+    :math:`\\omega_d^2 + \\gamma^2 = k_\\theta / I_{\\rm eff}` with
+    :math:`I_{\\rm eff} = m L^2`.
+
+``TestOneSidedLimits.test_prismatic_max_only_blocks_positive_slide``
+    Prismatic with a single-sided ``max`` clamp: the bob is allowed
+    to slide freely in one direction (no spring force) but is
+    arrested by the spring-damper limit when it crosses
+    ``max_value``. Verifies that the inactive side of the limit
+    really is inactive (no impulse leakage) and the active side
+    behaves like Hooke's law.
+
+``TestOneSidedLimits.test_prismatic_min_only_blocks_negative_slide``
+    Mirror image -- only the ``min`` side is loaded.
+
+``TestOneSidedLimits.test_revolute_max_only_blocks_positive_angle``
+    Revolute version: pendulum allowed to swing freely in one
+    direction, sprung back when it crosses the upper angle limit.
+
+``TestPDDriveImpulse.test_prismatic_position_drive_force_balance``
+    Contact-free, no gravity. A prismatic POSITION drive
+    (``kp, kd``) holds the bob at a steady-state offset from
+    ``target`` set by an externally applied counter-force. The
+    measured deflection must satisfy ``F_ext = k * (x - x*)`` with
+    no contribution from contacts, gravity, or the rank-5 lock.
+    This is the cleanest possible check that the drive applies
+    exactly the impulse the math says it should.
+
+``TestPDDriveImpulse.test_prismatic_velocity_drive_force_balance``
+    Same scene with a VELOCITY drive (``stiffness_drive=0``,
+    ``damping_drive=c``). Steady state is ``v = v*``, but with an
+    external opposing constant force the steady-state velocity
+    settles at ``v_ss = v* - F_ext / c``. We measure ``v_ss`` and
+    invert for ``c_meas``.
+
+``TestPDDriveImpulse.test_revolute_position_drive_torque_balance``
+    Revolute analog of the prismatic POSITION test: an external
+    constant torque (gravity on a horizontal lever) holds the drive
+    away from ``target``; measured deflection inverts to ``k_theta``.
+
 The contact reaction is read via :meth:`World.gather_contact_pair_wrenches`
 so it is the *actual* impulse the Jitter PGS solver applied, not a
 post-hoc reconstruction.
@@ -135,6 +199,7 @@ class _JitterScene:
         solver_iterations: int,
         gravity: tuple[float, float, float] = (0.0, 0.0, -_G),
         enable_contacts: bool = True,
+        expected_masses: dict[int, float] | None = None,
     ):
         """Finalise ``model_builder``, mirror into Jitter, wire contacts.
 
@@ -197,7 +262,14 @@ class _JitterScene:
             self.contacts = None
             rigid_contact_max = 0
 
-        builder, newton_to_jitter = build_jitter_world_from_model(self.model)
+        # ``expected_masses`` lets the caller lock in each body's mass
+        # against an analytical expectation; mismatches (e.g. shape
+        # density silently inflating ``add_body(mass=...)``) raise here
+        # rather than producing mystery factors in downstream
+        # force/torque assertions.
+        builder, newton_to_jitter = build_jitter_world_from_model(
+            self.model, expected_masses=expected_masses
+        )
         self.newton_to_jitter = newton_to_jitter
         world_builder_factory(newton_to_jitter, builder)
 
@@ -371,6 +443,7 @@ def _add_pendulum_bob(
     position: tuple[float, float, float],
     mass: float,
     radius: float,
+    orientation: wp.quat | None = None,
 ) -> int:
     """Add a pendulum bob with *explicit* solid-sphere inertia and a
     massless shape.
@@ -397,8 +470,9 @@ def _add_pendulum_bob(
         0.0, I_scalar, 0.0,
         0.0, 0.0, I_scalar,
     )
+    q = orientation if orientation is not None else wp.quat_identity()
     body = mb.add_body(
-        xform=wp.transform(p=wp.vec3(*position), q=wp.quat_identity()),
+        xform=wp.transform(p=wp.vec3(*position), q=q),
         mass=float(mass),
         inertia=inertia,
     )
@@ -1026,7 +1100,18 @@ class TestActuatorContactReaction(unittest.TestCase):
             xform=wp.transform(p=wp.vec3(0.0, 0.0, start_z), q=wp.quat_identity()),
             mass=self.MASS,
         )
-        mb.add_shape_sphere(sphere, radius=self.SPHERE_RADIUS)
+        # ``density=0`` so the sphere shape contributes no implicit
+        # mass on top of ``mass=self.MASS``. Without this the actual
+        # body mass becomes ``MASS + (4/3)*pi*r^3 * 1000`` (~6.19 kg
+        # for r=0.1, MASS=2), and the analytical
+        # ``F_contact = m*g + F_motor`` check would silently drift to
+        # ``m_actual*g + F_motor`` -- the same density-stack bug we
+        # caught in :mod:`test_contact_force_accuracy`.
+        mb.add_shape_sphere(
+            sphere,
+            radius=self.SPHERE_RADIUS,
+            cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
+        )
 
         # Ground plane.
         mb.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
@@ -1065,6 +1150,7 @@ class TestActuatorContactReaction(unittest.TestCase):
             substeps=self.SUBSTEPS,
             solver_iterations=self.SOLVER_ITERATIONS,
             enable_contacts=True,
+            expected_masses={sphere: self.MASS},
         )
         scene.sphere = sphere
         return scene
@@ -1092,7 +1178,13 @@ class TestActuatorContactReaction(unittest.TestCase):
             ),
             mass=self.MASS,
         )
-        mb.add_shape_sphere(sphere, radius=self.SPHERE_RADIUS)
+        # See comment in :meth:`_build_prismatic_press`: ``density=0``
+        # keeps the shape from inflating the body's mass past ``MASS``.
+        mb.add_shape_sphere(
+            sphere,
+            radius=self.SPHERE_RADIUS,
+            cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
+        )
 
         mb.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
 
@@ -1125,6 +1217,7 @@ class TestActuatorContactReaction(unittest.TestCase):
             substeps=self.SUBSTEPS,
             solver_iterations=self.SOLVER_ITERATIONS,
             enable_contacts=True,
+            expected_masses={sphere: self.MASS},
         )
         scene.sphere = sphere
         scene.lever = float(lever)
@@ -1574,6 +1667,1198 @@ class TestLimitSpringDamper(unittest.TestCase):
             abs(float(pos[1])),
             1.0e-3,
             f"bob drifted along hinge axis: p = {pos}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helper: unit cube as a Newton body with explicit (analytical) inertia
+# ---------------------------------------------------------------------------
+
+
+def _add_unit_cube(
+    mb: newton.ModelBuilder,
+    *,
+    position: tuple[float, float, float],
+    half_extent: float = 0.5,
+    mass: float = 1.0,
+) -> int:
+    """Add a unit cube body with a *closed-form* inertia tensor and a
+    massless box shape.
+
+    Same trick as :func:`_add_pendulum_bob`: pass the analytical
+    ``I = (m / 12) * (h^2 + h^2) = m * h^2 / 6`` for a cube of side
+    ``2*half_extent`` to :meth:`add_body`, then the visual / collision
+    box uses ``density=0`` so the shape adds nothing to mass or
+    inertia. This keeps the body's inertia exactly what the
+    analytical equilibrium predicts -- no surprise factors from
+    Newton's shape-density stack.
+    """
+    side = 2.0 * float(half_extent)
+    I_scalar = float(mass) * (side * side + side * side) / 12.0
+    inertia = wp.mat33(
+        I_scalar, 0.0, 0.0,
+        0.0, I_scalar, 0.0,
+        0.0, 0.0, I_scalar,
+    )
+    body = mb.add_body(
+        xform=wp.transform(p=wp.vec3(*position), q=wp.quat_identity()),
+        mass=float(mass),
+        inertia=inertia,
+    )
+    massless = newton.ModelBuilder.ShapeConfig(density=0.0)
+    mb.add_shape_box(
+        body,
+        hx=float(half_extent),
+        hy=float(half_extent),
+        hz=float(half_extent),
+        cfg=massless,
+    )
+    return body
+
+
+# ---------------------------------------------------------------------------
+# Tiny-range prismatic spring-damper limit with a unit cube
+# ---------------------------------------------------------------------------
+
+
+class TestPrismaticUnitCubeLimitSpring(unittest.TestCase):
+    """A unit cube hung from a vertical prismatic slider whose limit
+    row is configured as a spring-damper. The static deflection
+    relative to the upper limit line must equal ``m * g / k`` --
+    Hooke's law on a body whose mass and inertia come straight from
+    Newton's :class:`ModelBuilder` rather than being hand-rolled in
+    the test. Sweeps a couple of stiffness values so a constant-bias
+    leak (e.g. PGS softness scaled wrong) shows up as a *trend* in
+    the residuals, not just a single off-by-X result.
+    """
+
+    HALF_EXTENT = 0.5  # 1 m unit cube
+    MASS = 1.0  # [kg]
+    MAX_SLACK = 1.0e-6  # tiny window so the limit is "always on"
+
+    FPS = 240
+    SUBSTEPS = 4
+    SOLVER_ITERATIONS = 16
+    SETTLE_FRAMES = 1800  # 7.5 s @ 240 fps -- enough at the chosen damping.
+
+    @classmethod
+    def setUpClass(cls):
+        if not wp.is_cuda_available():
+            raise unittest.SkipTest(
+                "jitter physics tests require CUDA (graph capture)"
+            )
+        cls.device = wp.get_device("cuda:0")
+
+    def _build_scene(
+        self, *, stiffness: float, damping: float
+    ) -> _JitterScene:
+        """Vertical prismatic slider, unit cube starts at the origin
+        coincident with anchor1; gravity pulls the cube along ``+slide``
+        until it hits the spring-damper limit at ``+MAX_SLACK``.
+        """
+        mb = newton.ModelBuilder()
+        cube = _add_unit_cube(
+            mb,
+            position=(0.0, 0.0, 0.0),
+            half_extent=self.HALF_EXTENT,
+            mass=self.MASS,
+        )
+
+        def _factory(n2j, builder):
+            # ``anchor2 = anchor1 + (0, 0, -1)`` puts the slide axis
+            # ``n_hat`` along ``-z``: gravity then loads the spring in
+            # the ``+slide`` direction (slide grows positive).
+            builder.add_joint(
+                body1=builder.world_body,
+                body2=n2j[cube],
+                anchor1=(0.0, 0.0, 0.0),
+                anchor2=(0.0, 0.0, -1.0),
+                mode=JointMode.PRISMATIC,
+                drive_mode=DriveMode.OFF,
+                min_value=-self.MAX_SLACK,
+                max_value=self.MAX_SLACK,
+                # Negative-hertz branch: |hertz_limit| -> kp, |damping_ratio_limit| -> kd.
+                hertz_limit=-float(stiffness),
+                damping_ratio_limit=-float(damping),
+            )
+
+        scene = _JitterScene(
+            mb,
+            _factory,
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=self.SOLVER_ITERATIONS,
+            enable_contacts=False,
+            expected_masses={cube: self.MASS},
+        )
+        scene.cube = cube
+        return scene
+
+    def _assert_static_deflection(
+        self, *, stiffness: float, damping: float, label: str
+    ) -> None:
+        scene = self._build_scene(stiffness=stiffness, damping=damping)
+        for _ in range(self.SETTLE_FRAMES):
+            scene.step()
+
+        # Verify the cube has actually come to rest -- an
+        # under-damped scene at readout time reads back instantaneous
+        # position, not the equilibrium.
+        v = scene.world.bodies.velocity.numpy()[
+            scene.newton_to_jitter[scene.cube]
+        ]
+        speed = float(np.linalg.norm(v))
+        self.assertLess(
+            speed,
+            0.005,
+            f"[{label}] cube still translating at end of settle: "
+            f"|v|={speed:.4f} m/s -- bump SETTLE_FRAMES or damping.",
+        )
+
+        # ``slide = n_hat . (p2 - p1) = -p2.z`` since p1 = (0,0,0) and
+        # n_hat = -z. Steady-state slide above the upper limit line is
+        # the deflection we test.
+        pos = scene.world.bodies.position.numpy()[
+            scene.newton_to_jitter[scene.cube]
+        ]
+        slide = -float(pos[2])
+        deflection = slide - self.MAX_SLACK
+        expected = self.MASS * _G / stiffness
+        rel_err = abs(deflection - expected) / expected
+        self.assertLess(
+            rel_err,
+            0.05,
+            f"[{label}] unit-cube prismatic spring-limit deflection off: "
+            f"measured {deflection:.6f} m, expected m*g/k = {expected:.6f} m "
+            f"(m={self.MASS} kg, g={_G:.3f} m/s^2, k={stiffness} N/m, "
+            f"rel_err={rel_err:.2%})",
+        )
+
+        # Lateral lock must hold to within a millimetre.
+        self.assertLess(
+            float(abs(pos[0]) + abs(pos[1])),
+            1.0e-3,
+            f"[{label}] cube drifted laterally: p = {pos}",
+        )
+
+    def test_unit_cube_sag_against_spring_limit(self):
+        """Soft spring (k=50) -- expected deflection ~0.196 m, big
+        enough to be well above any PGS residual noise floor.
+        """
+        # c = 2 * sqrt(k * m) = 2 * sqrt(50) ~= 14.1 -- critical for unit
+        # mass. We take a fraction of that so the underdamped settle is
+        # visible in SETTLE_FRAMES; the equilibrium itself is
+        # damping-independent.
+        self._assert_static_deflection(
+            stiffness=50.0, damping=8.0, label="k=50"
+        )
+
+    def test_unit_cube_sag_against_stiff_spring_limit(self):
+        """Stiff spring (k=500) -- expected deflection ~0.0196 m.
+        Same identity, but now the absolute deflection is small
+        enough that any constant additive bias (e.g. baumgarte
+        leakage from the rank-5 lock) would dominate the relative
+        error -- catches a different failure mode than the soft case.
+        """
+        # Critical c = 2*sqrt(500) ~= 44.7; pick 30 for visible underdamped settle.
+        self._assert_static_deflection(
+            stiffness=500.0, damping=30.0, label="k=500"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Damped-harmonic-oscillator identity on the limit row
+# ---------------------------------------------------------------------------
+
+
+def _measure_oscillation(
+    samples: np.ndarray,
+    *,
+    dt: float,
+) -> tuple[float, float]:
+    """Return ``(omega_d, gamma)`` from a free underdamped time series.
+
+    Uses zero-crossings for the damped angular frequency
+    :math:`\\omega_d = 2\\pi / T_d` and a log-linear fit on the
+    successive-peak amplitudes for the decay rate
+    :math:`\\gamma`. Both are timestep-independent (in the limit
+    ``dt -> 0``) -- they characterise the continuous-time
+    differential equation, not the discrete solver.
+
+    Caller is responsible for picking a time series that is
+    centred on the equilibrium (so zero-crossings are meaningful)
+    and contains at least 4 oscillations (so the linear fit on the
+    log-amplitudes has > 2 points).
+    """
+    n = samples.shape[0]
+    if n < 8:
+        raise ValueError(
+            f"need >= 8 samples for oscillation fit, got {n}"
+        )
+
+    # Zero crossings via sign change.
+    sign = np.sign(samples)
+    crossings = []
+    for i in range(1, n):
+        if sign[i - 1] != 0 and sign[i] != 0 and sign[i] != sign[i - 1]:
+            # Linear interpolate the crossing time between samples
+            # i-1 and i for sub-step precision -- aliasing on a coarse
+            # grid biases the period downward otherwise.
+            t0 = (i - 1) * dt
+            x0 = samples[i - 1]
+            x1 = samples[i]
+            frac = x0 / (x0 - x1)
+            crossings.append(t0 + frac * dt)
+    if len(crossings) < 3:
+        raise ValueError(
+            f"oscillation has too few zero-crossings ({len(crossings)}) -- "
+            "either heavily over-damped or sample window too short"
+        )
+    # Period = twice the average inter-crossing interval (each
+    # crossing is half a period apart).
+    diffs = np.diff(crossings)
+    period = 2.0 * float(np.mean(diffs))
+    omega_d = 2.0 * math.pi / period
+
+    # Peaks via local maxima of |x|.
+    peak_t = []
+    peak_v = []
+    for i in range(1, n - 1):
+        a = abs(samples[i - 1])
+        b = abs(samples[i])
+        c = abs(samples[i + 1])
+        if b > a and b >= c and b > 1.0e-8:
+            peak_t.append(i * dt)
+            peak_v.append(b)
+    if len(peak_t) < 3:
+        raise ValueError(
+            f"too few peaks ({len(peak_t)}) for log-linear decay fit"
+        )
+    # Fit log(|x_peak|) ~= log(A0) - gamma * t.
+    log_peaks = np.log(np.array(peak_v))
+    t_arr = np.array(peak_t)
+    slope, _ = np.polyfit(t_arr, log_peaks, 1)
+    gamma = -float(slope)
+
+    return omega_d, gamma
+
+
+class TestLimitDampingDecay(unittest.TestCase):
+    """Damped-harmonic-oscillator identity check on the
+    spring-damper limit row (``hertz_limit < 0`` PD branch).
+
+    For an underdamped 1-DoF system :math:`m \\ddot x + c \\dot x +
+    k x = 0` the universal identity
+
+    .. math::
+        \\omega_d^2 + \\gamma^2 \\;=\\; \\omega_0^2
+            \\;=\\; \\tfrac{k}{m_{\\rm eff}}
+
+    holds *exactly* in continuous time and is independent of the
+    timestep. PGS-with-softness should preserve it to first order in
+    ``dt``; a > 5% violation here tells us the implicit damping is
+    biased (or the effective mass is wrong).
+
+    These tests deliberately disable gravity so the equilibrium is
+    at the limit boundary and the bob oscillates symmetrically about
+    it -- much cleaner for the zero-crossing fit than the
+    gravity-loaded case.
+    """
+
+    MASS = 1.0
+    BOB_RADIUS = 0.02
+    LEVER = 0.5  # used by the revolute version
+
+    FPS = 480  # high rate so sub-step-accurate zero crossings are dense
+    SUBSTEPS = 4
+    SOLVER_ITERATIONS = 16
+    SAMPLE_FRAMES = 1200  # 2.5 s @ 480 fps -- ~10 oscillations at the gains chosen
+
+    @classmethod
+    def setUpClass(cls):
+        if not wp.is_cuda_available():
+            raise unittest.SkipTest(
+                "jitter physics tests require CUDA (graph capture)"
+            )
+        cls.device = wp.get_device("cuda:0")
+
+    def _build_prismatic(
+        self, *, stiffness: float, damping: float, v0: float
+    ) -> _JitterScene:
+        """Horizontal prismatic slider (no gravity), bob starts *at*
+        the joint anchor (slide=0) with an initial velocity ``v0``
+        along ``+x``. The bob immediately exits the tiny limit window
+        and the limit row begins applying the spring-damper force.
+
+        We can't simply position the bob at ``(x0, 0, 0)`` and call
+        ``slide=x0``: the prismatic prepare reads
+        ``slide = n_hat . (p1_b2 - p1_b1)`` where ``p1_b2`` follows the
+        bob, and the body anchor offset is baked in at joint creation.
+        At ``t=0`` the bob's anchor is *at* anchor1, so
+        ``slide = 0`` regardless of where the bob's COM is. Using
+        an initial velocity sidesteps this.
+        """
+        mb = newton.ModelBuilder()
+        # Bob starts at the origin (slide = 0) and gets kicked by v0.
+        bob = _add_pendulum_bob(
+            mb,
+            position=(0.0, 0.0, 0.0),
+            mass=self.MASS,
+            radius=self.BOB_RADIUS,
+        )
+
+        def _factory(n2j, builder):
+            builder.add_joint(
+                body1=builder.world_body,
+                body2=n2j[bob],
+                anchor1=(0.0, 0.0, 0.0),
+                anchor2=(1.0, 0.0, 0.0),  # slide axis = +x
+                mode=JointMode.PRISMATIC,
+                drive_mode=DriveMode.OFF,
+                # Tiny window so the limit fires almost immediately
+                # (within one substep at the chosen v0). Both bounds
+                # non-zero so the limit row is enabled (the prepare
+                # guards on ``min_value != 0 OR max_value != 0``).
+                min_value=-1.0e-6,
+                max_value=1.0e-6,
+                hertz_limit=-float(stiffness),
+                damping_ratio_limit=-float(damping),
+            )
+
+        scene = _JitterScene(
+            mb,
+            _factory,
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=self.SOLVER_ITERATIONS,
+            gravity=(0.0, 0.0, 0.0),  # critical: no DC offset on the bob
+            enable_contacts=False,
+            expected_masses={bob: self.MASS},
+        )
+        scene.bob = bob
+        # Apply the initial-velocity kick on the *Newton* state -- the
+        # captured graph re-syncs Jitter from ``state.body_qd`` every
+        # frame, so writing the velocity straight into Jitter's body
+        # buffer would be clobbered by the next sync. Newton's
+        # ``body_qd`` is a spatial vector laid out as ``[lin_x, lin_y,
+        # lin_z, ang_x, ang_y, ang_z]`` (linear part first -- see the
+        # ``newton_to_jitter_kernel`` in :mod:`example_jitter_common`).
+        bqd = scene.state.body_qd.numpy()
+        bqd[bob] = (float(v0), 0.0, 0.0, 0.0, 0.0, 0.0)
+        scene.state.body_qd.assign(bqd)
+        return scene
+
+    def _build_revolute(
+        self,
+        *,
+        stiffness: float,
+        damping: float,
+        omega0: float,
+    ) -> _JitterScene:
+        """Hinge axis +y, lever along +x. Bob is given an initial
+        angular velocity ``omega0`` about +y. The bob starts inside
+        the (zero-width) limit window so the twist coordinate is 0;
+        the kick rotates it past the limit and the spring-damper
+        begins acting. Gravity disabled.
+
+        Same caveat as :meth:`_build_prismatic`: ``twist_err`` is the
+        *relative* twist of the two body frames, baked in at joint
+        creation time. We can't get a non-zero starting twist by
+        repositioning/rotating the body alone (the joint records the
+        starting transform).
+        """
+        L = self.LEVER
+        mb = newton.ModelBuilder()
+        bob = _add_pendulum_bob(
+            mb,
+            position=(L, 0.0, 0.0),  # arm along +x, twist = 0 at start
+            mass=self.MASS,
+            radius=self.BOB_RADIUS,
+        )
+
+        def _factory(n2j, builder):
+            builder.add_joint(
+                body1=builder.world_body,
+                body2=n2j[bob],
+                anchor1=(0.0, 0.0, 0.0),
+                anchor2=(0.0, 1.0, 0.0),  # hinge axis = +y
+                mode=JointMode.REVOLUTE,
+                drive_mode=DriveMode.OFF,
+                min_value=-1.0e-6,
+                max_value=1.0e-6,
+                hertz_limit=-float(stiffness),
+                damping_ratio_limit=-float(damping),
+            )
+
+        scene = _JitterScene(
+            mb,
+            _factory,
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=self.SOLVER_ITERATIONS,
+            gravity=(0.0, 0.0, 0.0),
+            enable_contacts=False,
+            expected_masses={bob: self.MASS},
+        )
+        scene.bob = bob
+        # Kick the bob with angular velocity omega0 about +y, plus the
+        # consistent linear velocity at the bob's COM (offset L along
+        # +x from the hinge): ``v = omega x r = (0, omega, 0) x
+        # (L, 0, 0) = (0, 0, -omega * L)``. Positive omega about +y
+        # rotates the +x arm downward, so the bob's COM initially
+        # moves in -z.
+        # Write into Newton's ``state.body_qd`` (spatial vector
+        # ``[lin, ang]`` -- linear part first) so the graph's
+        # per-frame Newton->Jitter sync honours the kick.
+        bqd = scene.state.body_qd.numpy()
+        bqd[bob] = (
+            0.0, 0.0, -float(omega0) * L,
+            0.0, float(omega0), 0.0,
+        )
+        scene.state.body_qd.assign(bqd)
+        return scene
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    def test_prismatic_limit_damped_decay_identity(self):
+        """Underdamped prismatic spring-damper limit must satisfy
+        :math:`\\omega_d^2 + \\gamma^2 = k / m`.
+        """
+        # k=400 N/m, m=1 kg -> omega_0=20 rad/s, T_0 ~= 0.314 s.
+        # Critical c=40; pick 4 (zeta=0.1) so ~10 oscillations are
+        # well-resolved within SAMPLE_FRAMES and the log-amplitude fit
+        # has a clean linear slope.
+        k = 400.0
+        c = 4.0
+        # v0 = 1 m/s -> peak amplitude = v0 / omega_0 = 0.05 m at the
+        # chosen gains. Plenty of signal-to-noise for the zero-crossing
+        # and peak-amplitude fits.
+        scene = self._build_prismatic(stiffness=k, damping=c, v0=1.0)
+
+        samples = np.zeros(self.SAMPLE_FRAMES, dtype=np.float64)
+        for f in range(self.SAMPLE_FRAMES):
+            scene.step()
+            pos = scene.world.bodies.position.numpy()[
+                scene.newton_to_jitter[scene.bob]
+            ]
+            samples[f] = float(pos[0])
+
+        omega_d, gamma = _measure_oscillation(samples, dt=1.0 / self.FPS)
+        omega_0_sq = k / self.MASS
+        sum_sq = omega_d * omega_d + gamma * gamma
+        rel_err = abs(sum_sq - omega_0_sq) / omega_0_sq
+        self.assertLess(
+            rel_err,
+            0.05,
+            f"prismatic limit DHO identity off: omega_d^2 + gamma^2 = "
+            f"{sum_sq:.4f}, expected k/m = {omega_0_sq:.4f} "
+            f"(omega_d={omega_d:.4f} rad/s, gamma={gamma:.4f} 1/s, "
+            f"rel_err={rel_err:.2%})",
+        )
+        # Sanity: gamma > 0 (decay, not growth) and omega_d > 0
+        # (genuinely oscillating, not over-damped).
+        self.assertGreater(
+            gamma,
+            0.0,
+            f"prismatic limit shows amplitude growth (gamma={gamma:.4f}) "
+            "-- damping has wrong sign",
+        )
+        self.assertGreater(
+            omega_d, 0.0, "prismatic limit didn't oscillate"
+        )
+
+    def test_revolute_limit_damped_decay_identity(self):
+        """Underdamped torsional spring-damper limit on a revolute
+        hinge with a lever-bob must satisfy
+        :math:`\\omega_d^2 + \\gamma^2 = k_\\theta / I_{\\rm eff}` with
+        :math:`I_{\\rm eff} = m L^2`.
+        """
+        # k_theta = 100 N*m/rad, I = m*L^2 = 0.25 kg*m^2 -> omega_0 = 20 rad/s.
+        # Critical c_theta = 2*sqrt(k*I) = 10 N*m*s/rad; pick 1
+        # (zeta = 0.1) so ~10 oscillations resolve cleanly.
+        k_theta = 100.0
+        c_theta = 1.0
+        I_eff = self.MASS * self.LEVER * self.LEVER
+        # omega0 = 1 rad/s -> peak twist amplitude = omega0/omega_0
+        # = 0.05 rad at the chosen gains.
+        scene = self._build_revolute(
+            stiffness=k_theta, damping=c_theta, omega0=1.0
+        )
+
+        samples = np.zeros(self.SAMPLE_FRAMES, dtype=np.float64)
+        for f in range(self.SAMPLE_FRAMES):
+            scene.step()
+            pos = scene.world.bodies.position.numpy()[
+                scene.newton_to_jitter[scene.bob]
+            ]
+            # theta from arm orientation: arm starts along +x, sags by
+            # +theta about +y means bob at (L*cos, 0, -L*sin).
+            theta = math.atan2(-float(pos[2]), float(pos[0]))
+            samples[f] = theta
+
+        omega_d, gamma = _measure_oscillation(samples, dt=1.0 / self.FPS)
+        omega_0_sq = k_theta / I_eff
+        sum_sq = omega_d * omega_d + gamma * gamma
+        rel_err = abs(sum_sq - omega_0_sq) / omega_0_sq
+        self.assertLess(
+            rel_err,
+            0.05,
+            f"revolute limit DHO identity off: omega_d^2 + gamma^2 = "
+            f"{sum_sq:.4f}, expected k/I = {omega_0_sq:.4f} "
+            f"(omega_d={omega_d:.4f} rad/s, gamma={gamma:.4f} 1/s, "
+            f"k_theta={k_theta} N*m/rad, I_eff={I_eff:.4f} kg*m^2, "
+            f"rel_err={rel_err:.2%})",
+        )
+        self.assertGreater(
+            gamma,
+            0.0,
+            f"revolute limit shows amplitude growth (gamma={gamma:.4f}) "
+            "-- torsional damping has wrong sign",
+        )
+
+
+# ---------------------------------------------------------------------------
+# One-sided limits: one bound is "wide open", the other clamps
+# ---------------------------------------------------------------------------
+
+
+class TestOneSidedLimits(unittest.TestCase):
+    """Verify that a one-sided limit (one bound active, the other
+    set far enough away to never trigger) really only acts on the
+    intended side. The constraint kernel guards the limit row with
+    ``if min_value != 0.0 or max_value != 0.0``, then independently
+    checks ``slide > max_value`` / ``slide < min_value`` so the
+    "inactive" side just falls through to ``clamp = NONE`` and the
+    iterate's ``if clamp != _CLAMP_NONE:`` skips the impulse
+    entirely. We test that fall-through end-to-end.
+    """
+
+    MASS = 1.0
+    BOB_RADIUS = 0.02
+
+    # The revolute one-sided variant converges *much* slower than the
+    # prismatic ones because the gravity load on the lever bob couples
+    # through the rigid linear anchor rows -- the PD limit row "sees"
+    # an effective inertia that is the lever-arm-amplified bob inertia
+    # (m * L^2), and the resulting per-substep CFM relaxation is small.
+    # 8 substeps + 32 PGS iterations + a long ~12 s settle is what's
+    # needed to hit the ~0.8% angular equilibrium target consistently;
+    # the prismatic variants are still fine at these settings (just
+    # slightly slower) and we keep one knob to avoid surprises later.
+    FPS = 240
+    SUBSTEPS = 8
+    SOLVER_ITERATIONS = 32
+    SETTLE_FRAMES = 3000  # 12.5 s -- both halves settle comfortably.
+
+    # "Wide-open" bound -- far enough that the bob can never reach it
+    # at the gravity loads we use here. Non-zero so the limit row
+    # stays enabled (the prepare's gate is ``min != 0 OR max != 0``).
+    WIDE_BOUND = 100.0
+
+    @classmethod
+    def setUpClass(cls):
+        if not wp.is_cuda_available():
+            raise unittest.SkipTest(
+                "jitter physics tests require CUDA (graph capture)"
+            )
+        cls.device = wp.get_device("cuda:0")
+
+    def _build_prismatic(
+        self,
+        *,
+        stiffness: float,
+        damping: float,
+        min_value: float,
+        max_value: float,
+        slide_axis_sign: int,
+    ) -> _JitterScene:
+        """Vertical prismatic slider. ``slide_axis_sign`` = -1 places
+        the slide axis along ``-z`` (gravity loads ``+slide``), ``+1``
+        along ``+z`` (gravity loads ``-slide``).
+        """
+        mb = newton.ModelBuilder()
+        bob = _add_pendulum_bob(
+            mb,
+            position=(0.0, 0.0, 0.0),
+            mass=self.MASS,
+            radius=self.BOB_RADIUS,
+        )
+
+        def _factory(n2j, builder):
+            anchor2_z = -1.0 if slide_axis_sign < 0 else 1.0
+            builder.add_joint(
+                body1=builder.world_body,
+                body2=n2j[bob],
+                anchor1=(0.0, 0.0, 0.0),
+                anchor2=(0.0, 0.0, anchor2_z),
+                mode=JointMode.PRISMATIC,
+                drive_mode=DriveMode.OFF,
+                min_value=float(min_value),
+                max_value=float(max_value),
+                hertz_limit=-float(stiffness),
+                damping_ratio_limit=-float(damping),
+            )
+
+        scene = _JitterScene(
+            mb,
+            _factory,
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=self.SOLVER_ITERATIONS,
+            enable_contacts=False,
+            expected_masses={bob: self.MASS},
+        )
+        scene.bob = bob
+        scene.slide_axis_sign = int(slide_axis_sign)
+        return scene
+
+    def _slide_value(self, scene: _JitterScene) -> float:
+        """Return the prismatic slide coordinate for ``scene.bob``,
+        following the sign convention of the prismatic joint
+        (``slide = n_hat . (p2 - p1)``).
+
+        We always set ``anchor1=(0,0,0)`` so ``p1 = (0,0,0)``; then
+        ``slide = n_hat . p2``. With ``n_hat`` along ``slide_axis_sign
+        * +z``, this collapses to ``slide_axis_sign * pos.z``.
+        """
+        pos = scene.world.bodies.position.numpy()[
+            scene.newton_to_jitter[scene.bob]
+        ]
+        return float(pos[2]) * scene.slide_axis_sign
+
+    def test_prismatic_max_only_blocks_positive_slide(self):
+        """``min`` is wide open, ``max`` is the active spring stop.
+        Gravity drives slide positive -> spring engages, equilibrium
+        at ``slide = max_value + m*g/k``. The "min" side never fires.
+        """
+        k = 100.0
+        c = 8.0
+        max_value = 0.10
+        scene = self._build_prismatic(
+            stiffness=k,
+            damping=c,
+            min_value=-self.WIDE_BOUND,
+            max_value=max_value,
+            slide_axis_sign=-1,  # n_hat = -z, gravity loads +slide
+        )
+        for _ in range(self.SETTLE_FRAMES):
+            scene.step()
+        slide = self._slide_value(scene)
+        expected = max_value + self.MASS * _G / k
+        rel_err = abs(slide - expected) / expected
+        self.assertLess(
+            rel_err,
+            0.05,
+            f"max-only prismatic limit equilibrium off: slide={slide:.5f} m, "
+            f"expected max + m*g/k = {expected:.5f} m "
+            f"(max={max_value} m, m*g/k={self.MASS * _G / k:.5f} m, "
+            f"rel_err={rel_err:.2%})",
+        )
+
+    def test_prismatic_min_only_blocks_negative_slide(self):
+        """``max`` is wide open, ``min`` is the active spring stop.
+        Flip the slide axis so gravity loads ``-slide`` and the bob
+        sags into the *min* limit. Equilibrium at
+        ``slide = min_value - m*g/k`` (negative side).
+        """
+        k = 100.0
+        c = 8.0
+        min_value = -0.10
+        scene = self._build_prismatic(
+            stiffness=k,
+            damping=c,
+            min_value=min_value,
+            max_value=self.WIDE_BOUND,
+            slide_axis_sign=+1,  # n_hat = +z, gravity loads -slide
+        )
+        for _ in range(self.SETTLE_FRAMES):
+            scene.step()
+        slide = self._slide_value(scene)
+        expected = min_value - self.MASS * _G / k
+        rel_err = abs(slide - expected) / abs(expected)
+        self.assertLess(
+            rel_err,
+            0.05,
+            f"min-only prismatic limit equilibrium off: slide={slide:.5f} m, "
+            f"expected min - m*g/k = {expected:.5f} m "
+            f"(min={min_value} m, m*g/k={self.MASS * _G / k:.5f} m, "
+            f"rel_err={rel_err:.2%})",
+        )
+
+    def test_prismatic_one_sided_allows_free_motion_in_open_direction(self):
+        """No-gravity sanity check: with ``min`` wide open and ``max``
+        at zero, an initial ``-x`` velocity must produce *unimpeded*
+        free motion (no spring force from the inactive ``min`` side).
+        Catches an "always-on" limit that wrongly fires regardless of
+        which side ``slide`` is on.
+        """
+        k = 100.0
+        c = 1.0
+        max_value = 1.0e-6
+        # Build a horizontal slider, no gravity, kick the bob in -slide.
+        mb = newton.ModelBuilder()
+        bob = _add_pendulum_bob(
+            mb,
+            position=(0.0, 0.0, 0.0),
+            mass=self.MASS,
+            radius=self.BOB_RADIUS,
+        )
+
+        def _factory(n2j, builder):
+            handle = builder.add_joint(
+                body1=builder.world_body,
+                body2=n2j[bob],
+                anchor1=(0.0, 0.0, 0.0),
+                anchor2=(1.0, 0.0, 0.0),  # slide axis = +x
+                mode=JointMode.PRISMATIC,
+                drive_mode=DriveMode.OFF,
+                min_value=-self.WIDE_BOUND,
+                max_value=max_value,
+                hertz_limit=-float(k),
+                damping_ratio_limit=-float(c),
+            )
+            return handle
+
+        scene = _JitterScene(
+            mb,
+            _factory,
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=self.SOLVER_ITERATIONS,
+            gravity=(0.0, 0.0, 0.0),
+            enable_contacts=False,
+            expected_masses={bob: self.MASS},
+        )
+        scene.bob = bob
+
+        # Set initial velocity -1 m/s along +x (so slide goes negative,
+        # which is the open side). Write to Newton's ``state.body_qd``
+        # (spatial vector layout ``[lin, ang]`` -- linear first) --
+        # writing straight to Jitter's body buffer is clobbered by the
+        # per-frame Newton -> Jitter sync the captured graph performs.
+        bqd = scene.state.body_qd.numpy()
+        bqd[bob] = (-1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        scene.state.body_qd.assign(bqd)
+
+        # Run for a short time -- short enough that the bob hasn't
+        # crossed the wide bound (10 m at 1 m/s = 10 s; we'll use 1s).
+        n_frames = self.FPS  # 1 s
+        for _ in range(n_frames):
+            scene.step()
+
+        pos = scene.world.bodies.position.numpy()[
+            scene.newton_to_jitter[bob]
+        ]
+        vel = scene.world.bodies.velocity.numpy()[
+            scene.newton_to_jitter[bob]
+        ]
+        # Free-flight expectation: x = x0 + v0 * t = -1 m * 1 s = -1 m,
+        # vx = -1 m/s (no force).
+        self.assertAlmostEqual(
+            float(pos[0]),
+            -1.0,
+            delta=0.01,
+            msg=f"open-side free flight broken: x={pos[0]:.4f} m, expected ~-1.0 m. "
+            "The 'min' limit must be inactive at slide < 0 with min=-WIDE_BOUND.",
+        )
+        self.assertAlmostEqual(
+            float(vel[0]),
+            -1.0,
+            delta=0.01,
+            msg=f"open-side velocity bled by inactive limit: vx={vel[0]:.4f} m/s, "
+            "expected -1.0 m/s -- damping leaked from the wide-open side.",
+        )
+
+    def test_revolute_max_only_blocks_positive_angle(self):
+        """One-sided revolute limit: pendulum allowed to swing into
+        the open side, sprung back when crossing the upper angle
+        limit. We pick a *small* upper bound so gravity engages it
+        from rest (bob starts above the bound), then check
+        equilibrium ``k * (theta_eq - max) = m*g*L*cos(theta_eq)``.
+        """
+        L = 0.5
+        k_theta = 100.0  # N*m/rad
+        c_theta = 5.0  # N*m*s/rad
+        max_angle = 0.02  # rad -- small enough that gravity engages it
+
+        mb = newton.ModelBuilder()
+        bob = _add_pendulum_bob(
+            mb,
+            position=(L, 0.0, 0.0),  # arm along +x at rest
+            mass=self.MASS,
+            radius=self.BOB_RADIUS,
+        )
+
+        def _factory(n2j, builder):
+            builder.add_joint(
+                body1=builder.world_body,
+                body2=n2j[bob],
+                anchor1=(0.0, 0.0, 0.0),
+                anchor2=(0.0, 1.0, 0.0),  # hinge axis = +y
+                mode=JointMode.REVOLUTE,
+                drive_mode=DriveMode.OFF,
+                min_value=-self.WIDE_BOUND,  # open: huge negative
+                max_value=max_angle,
+                hertz_limit=-float(k_theta),
+                damping_ratio_limit=-float(c_theta),
+            )
+
+        scene = _JitterScene(
+            mb,
+            _factory,
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=self.SOLVER_ITERATIONS,
+            enable_contacts=False,
+            expected_masses={bob: self.MASS},
+        )
+        scene.bob = bob
+        # Lots of damping needed because the bob has rotational
+        # inertia ~ mL^2 = 0.25 and the limit is only nudged a tiny
+        # angular distance: long settle ahead.
+        for _ in range(3 * self.SETTLE_FRAMES):
+            scene.step()
+
+        pos = scene.world.bodies.position.numpy()[
+            scene.newton_to_jitter[bob]
+        ]
+        theta = math.atan2(-float(pos[2]), float(pos[0]))
+
+        # Nonlinear equilibrium: k*(theta - max) = m*g*L*cos(theta).
+        mgL = self.MASS * _G * L
+        theta_expected = max_angle + mgL / k_theta  # linear guess
+        for _ in range(8):
+            f = k_theta * (theta_expected - max_angle) - mgL * math.cos(
+                theta_expected
+            )
+            fp = k_theta + mgL * math.sin(theta_expected)
+            theta_expected -= f / fp
+
+        rel_err = abs(theta - theta_expected) / theta_expected
+        self.assertLess(
+            rel_err,
+            0.10,  # one-sided angular case is harder to settle exactly
+            f"max-only revolute limit equilibrium off: theta={theta:.5f} rad, "
+            f"expected {theta_expected:.5f} rad "
+            f"(max={max_angle} rad, m*g*L/k={mgL / k_theta:.5f} rad, "
+            f"rel_err={rel_err:.2%})",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Direct PD-drive impulse measurement (contact-free, gravity-free)
+# ---------------------------------------------------------------------------
+
+
+class TestPDDriveImpulse(unittest.TestCase):
+    """Direct verification that the PD drive applies the impulse the
+    math says it should -- no contacts, no gravity, no shape-density
+    surprises. The bob is loaded by a single, known external force
+    or torque (applied through a kinematic counter-anchor body or by
+    setting an initial velocity); the steady-state response inverts
+    to the gain. This isolates the drive row's math from every other
+    source of impulse in the scene.
+
+    The simplest "external load" we can apply without contacts or
+    gravity is to set the bob's initial velocity and let the drive
+    bring it to rest -- the steady-state error is then a pure
+    function of the drive gains and any modelling residual.
+    """
+
+    MASS = 1.0
+    BOB_RADIUS = 0.02
+    LEVER = 0.5
+
+    FPS = 480
+    SUBSTEPS = 4
+    SOLVER_ITERATIONS = 16
+    SETTLE_FRAMES = 2400  # 5 s -- enough for most underdamped settles.
+
+    @classmethod
+    def setUpClass(cls):
+        if not wp.is_cuda_available():
+            raise unittest.SkipTest(
+                "jitter physics tests require CUDA (graph capture)"
+            )
+        cls.device = wp.get_device("cuda:0")
+
+    # ------------------------------------------------------------------
+    # Prismatic POSITION drive: free harmonic oscillator
+    # ------------------------------------------------------------------
+
+    def test_prismatic_position_drive_dho_identity(self):
+        """Prismatic POSITION drive (``kp, kd``) excited by an initial
+        velocity kick. The drive's position error is ``slide -
+        target`` and ``slide`` is the relative offset *since joint
+        creation*, so positioning the body ahead of construction is a
+        no-op (see the same caveat in
+        :meth:`TestLimitDampingDecay._build_prismatic`). With
+        ``target=0`` and a velocity kick, the bob undergoes free
+        underdamped oscillation about ``slide=0`` and the DHO identity
+        :math:`\\omega_d^2 + \\gamma^2 = k_p / m` must hold.
+
+        Cleanest possible PD-drive math test: contact-free,
+        gravity-free, no other forces. Wrong sign or wrong gain
+        on the drive row shows up immediately.
+        """
+        kp = 200.0  # N/m -> omega_0 = sqrt(kp/m) ~= 14.14 rad/s
+        kd = 4.0  # N*s/m -- zeta ~= 0.14, ~7 oscillations resolve cleanly.
+        v0 = 1.0  # initial kick along +x; peak amplitude ~= v0/omega_0 = 0.07 m
+
+        mb = newton.ModelBuilder()
+        bob = _add_pendulum_bob(
+            mb,
+            position=(0.0, 0.0, 0.0),  # slide=0 at construction
+            mass=self.MASS,
+            radius=self.BOB_RADIUS,
+        )
+
+        def _factory(n2j, builder):
+            builder.add_joint(
+                body1=builder.world_body,
+                body2=n2j[bob],
+                anchor1=(0.0, 0.0, 0.0),
+                anchor2=(1.0, 0.0, 0.0),  # slide axis = +x
+                mode=JointMode.PRISMATIC,
+                drive_mode=DriveMode.POSITION,
+                target=0.0,
+                stiffness_drive=float(kp),
+                damping_drive=float(kd),
+            )
+
+        scene = _JitterScene(
+            mb,
+            _factory,
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=self.SOLVER_ITERATIONS,
+            gravity=(0.0, 0.0, 0.0),
+            enable_contacts=False,
+            expected_masses={bob: self.MASS},
+        )
+        # Kick the bob via Newton's state.body_qd (spatial vec ``[lin, ang]``).
+        bqd = scene.state.body_qd.numpy()
+        bqd[bob] = (v0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        scene.state.body_qd.assign(bqd)
+
+        n_samples = 1500  # 3.1 s -- ~7 oscillations at omega_0 ~= 14 rad/s.
+        samples = np.zeros(n_samples, dtype=np.float64)
+        for f in range(n_samples):
+            scene.step()
+            pos = scene.world.bodies.position.numpy()[
+                scene.newton_to_jitter[bob]
+            ]
+            samples[f] = float(pos[0])
+
+        omega_d, gamma = _measure_oscillation(samples, dt=1.0 / self.FPS)
+        omega_0_sq = kp / self.MASS
+        sum_sq = omega_d * omega_d + gamma * gamma
+        rel_err = abs(sum_sq - omega_0_sq) / omega_0_sq
+        self.assertLess(
+            rel_err,
+            0.05,
+            f"prismatic POSITION drive DHO identity off: "
+            f"omega_d^2 + gamma^2 = {sum_sq:.4f}, expected k/m = "
+            f"{omega_0_sq:.4f} (omega_d={omega_d:.4f} rad/s, "
+            f"gamma={gamma:.4f} 1/s, rel_err={rel_err:.2%})",
+        )
+        self.assertGreater(
+            gamma,
+            0.0,
+            f"prismatic POSITION drive amplitude grew (gamma={gamma:.4f}) "
+            "-- damping has wrong sign",
+        )
+
+    # ------------------------------------------------------------------
+    # Prismatic VELOCITY drive: exponential approach to v_target
+    # ------------------------------------------------------------------
+
+    def test_prismatic_velocity_drive_exponential_decay(self):
+        """Pure VELOCITY drive (``stiffness_drive=0``,
+        ``damping_drive=c``) brings ``v`` from a non-zero initial
+        value down to ``target_velocity`` exponentially:
+        :math:`v(t) - v^\\ast = (v_0 - v^\\ast) \\, e^{-c t / m}`.
+
+        Fit the decay rate from the time series and check it equals
+        ``c / m``. Any wrong-sign or wrong-magnitude damping shows
+        up here as a fit residual.
+        """
+        c = 5.0  # N*s/m -> tau = m/c = 0.2 s
+        v0 = 1.0  # initial velocity along +x
+
+        mb = newton.ModelBuilder()
+        bob = _add_pendulum_bob(
+            mb,
+            position=(0.0, 0.0, 0.0),
+            mass=self.MASS,
+            radius=self.BOB_RADIUS,
+        )
+
+        def _factory(n2j, builder):
+            builder.add_joint(
+                body1=builder.world_body,
+                body2=n2j[bob],
+                anchor1=(0.0, 0.0, 0.0),
+                anchor2=(1.0, 0.0, 0.0),
+                mode=JointMode.PRISMATIC,
+                drive_mode=DriveMode.VELOCITY,
+                target_velocity=0.0,  # damp to rest
+                stiffness_drive=0.0,
+                damping_drive=float(c),
+            )
+
+        scene = _JitterScene(
+            mb,
+            _factory,
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=self.SOLVER_ITERATIONS,
+            gravity=(0.0, 0.0, 0.0),
+            enable_contacts=False,
+            expected_masses={bob: self.MASS},
+        )
+
+        # Set initial velocity. Write to Newton's ``state.body_qd``
+        # (spatial vector ``[lin, ang]``, linear first) so the
+        # capture-replay sync honours the kick.
+        bqd = scene.state.body_qd.numpy()
+        bqd[bob] = (v0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        scene.state.body_qd.assign(bqd)
+
+        # Sample velocity until it has decayed by ~3 time constants.
+        n_samples = int(round(self.FPS * 5.0 * (self.MASS / c)))  # 5 tau
+        samples = np.zeros(n_samples, dtype=np.float64)
+        for f in range(n_samples):
+            scene.step()
+            v = scene.world.bodies.velocity.numpy()[
+                scene.newton_to_jitter[bob]
+            ]
+            samples[f] = float(v[0])
+
+        # Fit log(v) ~ -lambda * t for the early portion (before
+        # samples drop into the noise floor).
+        # Cut off when |v| < 5% of v0 to keep the fit linear.
+        threshold = 0.05 * v0
+        cutoff = n_samples
+        for i in range(n_samples):
+            if abs(samples[i]) < threshold:
+                cutoff = i
+                break
+        if cutoff < 8:
+            self.fail(
+                f"velocity decayed too fast to fit cleanly: cutoff={cutoff} "
+                f"samples (~{cutoff / self.FPS * 1000:.1f} ms). "
+                f"Reduce damping or increase FPS."
+            )
+        t_arr = np.arange(cutoff) / self.FPS
+        log_v = np.log(samples[:cutoff])
+        slope, _ = np.polyfit(t_arr, log_v, 1)
+        lambda_meas = -float(slope)
+        lambda_expected = c / self.MASS
+        rel_err = abs(lambda_meas - lambda_expected) / lambda_expected
+        self.assertLess(
+            rel_err,
+            0.05,
+            f"prismatic VELOCITY drive decay rate off: "
+            f"lambda_meas={lambda_meas:.4f} 1/s, expected c/m = "
+            f"{lambda_expected:.4f} 1/s (c={c} N*s/m, m={self.MASS} kg, "
+            f"rel_err={rel_err:.2%})",
+        )
+
+    # ------------------------------------------------------------------
+    # Revolute POSITION drive: torsional DHO identity
+    # ------------------------------------------------------------------
+
+    def test_revolute_position_drive_dho_identity(self):
+        """Revolute POSITION drive on a hinge with a lever bob,
+        excited by an initial angular-velocity kick. The bob starts
+        at ``theta = 0`` (so the joint's twist coordinate is zero --
+        the unified joint reads twist from the relative quaternion
+        recorded at joint creation, see the same caveat in
+        :meth:`TestLimitDampingDecay._build_revolute`); we kick it
+        with angular velocity ``omega0`` about the hinge axis. Free
+        underdamped torsional oscillation; identity
+        :math:`\\omega_d^2 + \\gamma^2 = k_p / I_{\\rm eff}` with
+        :math:`I_{\\rm eff} = m L^2`.
+        """
+        kp = 50.0  # N*m/rad
+        kd = 0.5  # N*m*s/rad -- zeta ~= 0.14
+        I_eff = self.MASS * self.LEVER * self.LEVER
+        omega0 = 1.0  # rad/s -- peak angle ~= omega0/omega_0 ~ 0.07 rad
+        L = self.LEVER
+
+        mb = newton.ModelBuilder()
+        bob = _add_pendulum_bob(
+            mb,
+            position=(L, 0.0, 0.0),  # arm along +x, twist=0 at start
+            mass=self.MASS,
+            radius=self.BOB_RADIUS,
+        )
+
+        def _factory(n2j, builder):
+            builder.add_joint(
+                body1=builder.world_body,
+                body2=n2j[bob],
+                anchor1=(0.0, 0.0, 0.0),
+                anchor2=(0.0, 1.0, 0.0),
+                mode=JointMode.REVOLUTE,
+                drive_mode=DriveMode.POSITION,
+                target=0.0,
+                stiffness_drive=float(kp),
+                damping_drive=float(kd),
+            )
+
+        scene = _JitterScene(
+            mb,
+            _factory,
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=self.SOLVER_ITERATIONS,
+            gravity=(0.0, 0.0, 0.0),
+            enable_contacts=False,
+            expected_masses={bob: self.MASS},
+        )
+        # Angular kick about +y plus the consistent linear COM
+        # velocity ``v = omega x r = (0, omega, 0) x (L, 0, 0) =
+        # (0, 0, -omega * L)``. Newton's spatial vector layout is
+        # ``[lin, ang]`` (linear first).
+        bqd = scene.state.body_qd.numpy()
+        bqd[bob] = (
+            0.0, 0.0, -float(omega0) * L,
+            0.0, float(omega0), 0.0,
+        )
+        scene.state.body_qd.assign(bqd)
+
+        n_samples = 1500
+        samples = np.zeros(n_samples, dtype=np.float64)
+        for f in range(n_samples):
+            scene.step()
+            pos = scene.world.bodies.position.numpy()[
+                scene.newton_to_jitter[bob]
+            ]
+            theta = math.atan2(-float(pos[2]), float(pos[0]))
+            samples[f] = theta
+
+        omega_d, gamma = _measure_oscillation(samples, dt=1.0 / self.FPS)
+        omega_0_sq = kp / I_eff
+        sum_sq = omega_d * omega_d + gamma * gamma
+        rel_err = abs(sum_sq - omega_0_sq) / omega_0_sq
+        self.assertLess(
+            rel_err,
+            0.05,
+            f"revolute POSITION drive DHO identity off: "
+            f"omega_d^2 + gamma^2 = {sum_sq:.4f}, expected k/I = "
+            f"{omega_0_sq:.4f} (omega_d={omega_d:.4f} rad/s, "
+            f"gamma={gamma:.4f} 1/s, kp={kp} N*m/rad, "
+            f"I_eff={I_eff:.4f} kg*m^2, rel_err={rel_err:.2%})",
+        )
+        self.assertGreater(
+            gamma,
+            0.0,
+            f"revolute POSITION drive amplitude grew (gamma={gamma:.4f}) "
+            "-- torsional damping has wrong sign",
         )
 
 

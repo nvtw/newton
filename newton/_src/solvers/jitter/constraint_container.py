@@ -42,6 +42,7 @@ __all__ = [
     "CONSTRAINT_TYPE_BALL_SOCKET",
     "CONSTRAINT_TYPE_CONTACT",
     "CONSTRAINT_TYPE_D6",
+    "CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET",
     "CONSTRAINT_TYPE_HINGE_ANGLE",
     "CONSTRAINT_TYPE_HINGE_JOINT",
     "CONSTRAINT_TYPE_INVALID",
@@ -123,6 +124,16 @@ CONSTRAINT_TYPE_ANGULAR_MOTOR = wp.constant(wp.int32(3))
 #: the partitioner colour one hinge per partition (instead of three),
 #: dramatically improving convergence on heavily-loaded chains.
 CONSTRAINT_TYPE_HINGE_JOINT = wp.constant(wp.int32(4))
+#: Plain 5-DoF double-ball-socket hinge lock. A pair of BallSocket rows
+#: sharing one column, anchored at two world-space points along the
+#: hinge axis. Locks all relative linear DoFs; the single remaining
+#: free DoF is rotation about the line through the two anchors. Pair
+#: with :data:`CONSTRAINT_TYPE_ANGULAR_MOTOR` (in velocity or PD mode)
+#: for a motorised revolute joint assembled from standalone pieces --
+#: the test harness exercises this path to isolate the motor from the
+#: integrated :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET`. See
+#: :mod:`constraint_double_ball_socket` for the rank-5 Schur derivation.
+CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(5))
 #: Legacy 5-DoF prismatic (slider) joint. Historically :mod:`constraint_prismatic`
 #: used a mixed quaternion-error + tangent-translation formulation (3 rotational
 #: rows + 2 tangent rows, 3x3 + 2x2 Schur). Kept around so users can compare
@@ -538,13 +549,21 @@ def constraint_bodies_make(b1: wp.int32, b2: wp.int32) -> ConstraintBodies:
 
 #: Critically damped by default -- no overshoot, no underdamped ringing.
 DEFAULT_DAMPING_RATIO = wp.constant(wp.float32(1.0))
-#: Linear (positional) joint stiffness target. Translates to ~1mm sag
-#: under 100N for a unit-mass body at 60Hz substep rate.
-DEFAULT_HERTZ_LINEAR = wp.constant(wp.float32(60.0))
-#: Angular (rotational lock) joint stiffness. Lower than the linear knob
-#: because the angular Jacobian already inflates the response (skew-r
-#: lever arms multiply impulses), so the same hertz value would over-shoot.
-DEFAULT_HERTZ_ANGULAR = wp.constant(wp.float32(30.0))
+#: Linear (positional) joint stiffness target. ``0`` means *rigid* (the
+#: PGS-default unsoftened update) -- matches Box2D / Jitter2 behaviour
+#: where joint anchors are hard constraints, not soft springs. A soft
+#: positional anchor at 60 Hz used to "leak" up to 70% of a paired
+#: drive/limit/spring impulse on bodies whose COM is offset from the
+#: hinge axis (the canonical lever-bob setup), which silently collapsed
+#: the effective stiffness to a fraction of the commanded ``kp``. Users
+#: who want a soft anchor (rope, breakable joint, compliant mount) can
+#: still set ``hertz`` to a positive value explicitly.
+DEFAULT_HERTZ_LINEAR = wp.constant(wp.float32(0.0))
+#: Angular (rotational lock) joint stiffness. Same rigid default as the
+#: linear knob, for the same reason (a soft rotational lock leaks angular
+#: impulse from drive / limit rows). Override per-joint if a compliant
+#: rotational lock is intentional.
+DEFAULT_HERTZ_ANGULAR = wp.constant(wp.float32(0.0))
 #: Hinge / cone limit stiffness. Same conservative value as the angular
 #: hinge so a body hitting its limit doesn't bounce.
 DEFAULT_HERTZ_LIMIT = wp.constant(wp.float32(30.0))
