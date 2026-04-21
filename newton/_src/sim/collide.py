@@ -834,21 +834,6 @@ class CollisionPipeline:
         return self._rigid_contact_max
 
     @property
-    def sticky_replayed_count(self):
-        """Device-side count of matched rows whose body-frame anchor pair
-        and world-frame normal were replayed 1:1 from the previous frame
-        in the most recent :meth:`collide` call.
-
-        Returns a single-element ``wp.array[wp.int32]`` when the pipeline
-        was constructed with ``contact_matching="sticky"``, and ``None``
-        otherwise.  Matched rows that failed the replay's drift guard
-        keep their fresh narrow-phase data and are *not* included.
-        """
-        if self._contact_matcher is None:
-            return None
-        return self._contact_matcher.replayed_count
-
-    @property
     def soft_contact_max(self) -> int:
         """Maximum soft contact buffer capacity used by this pipeline."""
         return self._soft_contact_max
