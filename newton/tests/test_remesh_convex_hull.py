@@ -333,7 +333,7 @@ class TestRemeshConvexHullNeverRaises(unittest.TestCase):
             with self.subTest(case=i, shape=pts.shape):
                 try:
                     verts, faces = remesh_convex_hull(pts)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     self.fail(f"remesh_convex_hull raised on degenerate case {i}: {exc!r}")
                 _assert_mesh_shape(self, verts, faces)
 
