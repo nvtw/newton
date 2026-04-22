@@ -818,7 +818,27 @@ def contact_prepare_for_iteration_at(
         drift_t2_raw = wp.dot(p_diff, t2_dir)
         slip_threshold = wp.float32(0.002)
         drift_sq = drift_t1_raw * drift_t1_raw + drift_t2_raw * drift_t2_raw
-        if drift_sq > slip_threshold * slip_threshold:
+
+        # Break sticky on EITHER of two conditions (solver2d pattern):
+        #   * tangent drift past slip threshold (bodies slid past
+        #     static regime)
+        #   * stored contact normal has rotated > ~18 degrees from
+        #     the fresh narrow-phase normal (body rotation has aged
+        #     the stored tangent basis -- the pair has physically
+        #     re-oriented, so the stored anchor no longer reflects
+        #     where the bodies actually press against each other).
+        # Both triggers fall through to the same reset: re-anchor to
+        # the fresh narrow-phase contact point. Solver2d's sticky
+        # solver keeps separate thresholds for these -- ``|nA . nB| <
+        # 0.98`` for rotation, ``|separation| > 2 * slop`` for normal
+        # break -- and the user empirically suggested decoupling the
+        # break conditions. Using 0.95 (18 deg) as a permissive bound
+        # so the reset rarely fires on steady contacts but catches
+        # rolling pairs (nut-on-bolt SDF, tumbling stacks) before the
+        # stale normal injects spurious pullback torques.
+        fresh_n = contacts.rigid_contact_normal[k]
+        normal_aligned = wp.dot(n, fresh_n)
+        if drift_sq > slip_threshold * slip_threshold or normal_aligned < wp.float32(0.95):
             # Solver2d-style "break sticky": the stored anchor has
             # drifted past the static regime so reset it to the
             # current narrow-phase contact point. Using the fresh
