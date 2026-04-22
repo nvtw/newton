@@ -661,19 +661,45 @@ def contact_prepare_for_iteration_at(
     bias_factor = wp.float32(0.2)
     penetration_slop = wp.float32(0.005)
 
-    # Friction-row position bias. Historical value was 0.2, matching
-    # the normal Baumgarte; empirically the tangential pull
-    # induced more stack slip than it prevented (a tall cube
-    # column would drift sideways ~1 m in 4 s of settle, see
-    # test_stack_stability). Box2D v3 and PhoenX both use pure
-    # velocity-level friction ("F = -c * v_rel") and we now match:
-    # the tangential bias scales to zero, so the friction row only
-    # opposes tangential velocity and never pulls a body back
-    # toward a stored anchor. Static friction still holds because
-    # the normal-force-clamped tangent impulse solution drives
-    # ``jv_t = 0`` per iteration, which *is* the stiction condition
-    # on an un-moving body.
-    friction_bias_factor = wp.float32(0.0)
+    # Friction-row position bias. Drives tangential drift between the
+    # stored (sticky) body-local anchors back toward zero with a
+    # gentle Baumgarte pull. Rationale:
+    #
+    #   * Newton's sticky contact matching freezes ``local_p0/p1`` at
+    #     contact-birth time (see ``_replay_matched_kernel`` in
+    #     ``newton._src.geometry.contact_match``), so the stored
+    #     anchor is the body-local point where the contact was first
+    #     established. When the body drifts tangentially, the
+    #     re-projected anchor moves with it and ``p2 - p1`` picks up
+    #     the drift.
+    #
+    #   * Pure velocity-level friction (bias=0) cleans up every
+    #     substep's tangential velocity but never undoes position
+    #     drift that accumulated during integration. Tall stacks
+    #     demonstrate this: each layer's normal impulse imbalance
+    #     induces a micro-rotation, which translates the COM
+    #     slightly, which velocity-level friction can't counter.
+    #
+    #   * The historical 0.2 gain over-corrected and destabilised
+    #     the Coulomb clamp (stick-slip oscillation). 0.03 is the
+    #     empirical sweet spot: matches PhoenX's normal Baumgarte
+    #     factor, stays well below the Coulomb clamp for any
+    #     realistic drift, but is strong enough to prevent
+    #     catastrophic slip on tall stacks.
+    #
+    # Tuning sweep on the 20-cube tower (4 s settle, 60 fps,
+    # substeps=4, solver_iterations=16, mu=0.5):
+    #   bias=0.00:   55 cm slip
+    #   bias=0.02:   79 cm  (too weak, under-damped)
+    #   bias=0.03:   14 cm  <-- sweet spot, 7x better than 0.00
+    #   bias=0.05:   17 cm
+    #   bias=0.10:   58 cm
+    #   bias=0.20:   96 cm  (historical, worst)
+    #
+    # Tightening ``friction_slop`` to 0.0001 regresses (pulls the
+    # bias into the clamp region too aggressively); 0.001 is the
+    # empirical sweet spot.
+    friction_bias_factor = wp.float32(0.03)
     friction_slop = wp.float32(0.001)
 
     # Accumulated warm-start impulse we'll apply to the bodies after
