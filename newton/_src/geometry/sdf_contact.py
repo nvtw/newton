@@ -978,7 +978,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 edge_range_tri = shape_edge_range[tri_shape]
                 num_edges = get_edge_count(tri_type, edge_range_tri, hfd_tri)
 
-                wp.tile_store_masked(progress, 0, 0, t == 0)
+                wp.tile_scatter_masked(progress, 0, 0, t == 0)
 
                 if wp.static(enable_heightfields):
                     sdf_is_heightfield = sdf_type == GeoType.HFIELD
@@ -1045,13 +1045,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         idx = wp.tile_stack_push(edge_stack, edge_idx, add_edge)
                         wp.tile_stack_push(sdf_stack, midpoint_sdf, add_edge)
                         old_progress = wp.tile_extract(progress, 0)
-                        wp.tile_store_masked(progress, 0, old_progress + capacity, t == 0)
+                        wp.tile_scatter_masked(progress, 0, old_progress + capacity, t == 0)
 
                         overflowed = add_edge and idx == -1
                         rewind_val = wp.where(overflowed, edge_idx, 2147483647)
                         min_rewind = wp.tile_extract(wp.tile_min(wp.tile(rewind_val)), 0)
                         if min_rewind < 2147483647:
-                            wp.tile_store_masked(progress, 0, min_rewind, t == 0)
+                            wp.tile_scatter_masked(progress, 0, min_rewind, t == 0)
                     # -- end: find interesting edges --
 
                     my_edge_idx, edge_slot = wp.tile_stack_pop(edge_stack)
@@ -1317,7 +1317,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 edge_start = block_in_pair * chunk_size
                 edge_end = wp.min(edge_start + chunk_size, num_edges)
 
-                wp.tile_store_masked(progress, 0, edge_start, t == 0)
+                wp.tile_scatter_masked(progress, 0, edge_start, t == 0)
 
                 if wp.static(enable_heightfields):
                     sdf_is_heightfield = sdf_type == GeoType.HFIELD
@@ -1384,13 +1384,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         idx = wp.tile_stack_push(edge_stack, edge_idx, add_edge)
                         wp.tile_stack_push(sdf_stack, midpoint_sdf, add_edge)
                         old_progress = wp.tile_extract(progress, 0)
-                        wp.tile_store_masked(progress, 0, old_progress + capacity, t == 0)
+                        wp.tile_scatter_masked(progress, 0, old_progress + capacity, t == 0)
 
                         overflowed = add_edge and idx == -1
                         rewind_val = wp.where(overflowed, edge_idx, 2147483647)
                         min_rewind = wp.tile_extract(wp.tile_min(wp.tile(rewind_val)), 0)
                         if min_rewind < 2147483647:
-                            wp.tile_store_masked(progress, 0, min_rewind, t == 0)
+                            wp.tile_scatter_masked(progress, 0, min_rewind, t == 0)
                     # -- end: find interesting edges --
 
                     my_edge_idx, edge_slot = wp.tile_stack_pop(edge_stack)
