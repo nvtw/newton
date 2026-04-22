@@ -661,15 +661,19 @@ def contact_prepare_for_iteration_at(
     bias_factor = wp.float32(0.2)
     penetration_slop = wp.float32(0.005)
 
-    # Friction-row position bias. Baumgarte the tangential drift
-    # between the stored (sticky) anchor and the current pose into
-    # the tangent row so static friction has a position-level
-    # restoring force -- bodies don't creep sideways at rest, so
-    # stacks don't quietly slide apart. The drift is clamped to
-    # ``friction_slop`` so a kinetically sliding body -- whose
-    # drift has long-since run past the slop -- doesn't get an
-    # unbounded pull-back force competing with the Coulomb cone.
-    friction_bias_factor = wp.float32(0.2)
+    # Friction-row position bias. Historical value was 0.2, matching
+    # the normal Baumgarte; empirically the tangential pull
+    # induced more stack slip than it prevented (a tall cube
+    # column would drift sideways ~1 m in 4 s of settle, see
+    # test_stack_stability). Box2D v3 and PhoenX both use pure
+    # velocity-level friction ("F = -c * v_rel") and we now match:
+    # the tangential bias scales to zero, so the friction row only
+    # opposes tangential velocity and never pulls a body back
+    # toward a stored anchor. Static friction still holds because
+    # the normal-force-clamped tangent impulse solution drives
+    # ``jv_t = 0`` per iteration, which *is* the stiction condition
+    # on an un-moving body.
+    friction_bias_factor = wp.float32(0.0)
     friction_slop = wp.float32(0.001)
 
     # Accumulated warm-start impulse we'll apply to the bodies after
