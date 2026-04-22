@@ -386,9 +386,8 @@ def llt_blocked_factorize(
     A: wp.array(dtype=float32),
     L: wp.array(dtype=float32),
     num_blocks: int = 1,
-    # 128 threads (4 warps) gives the best factor throughput for large matrices with
-    # this kernel layout; small matrices prefer 64. See ``benchmark_llt_blocked.py``
-    # for per-size numbers. Callers may override.
+    # Empirically, 128 threads (4 warps) gives the best factor throughput for large
+    # matrices with this kernel layout; small matrices prefer 64. Callers may override.
     # TODO: Rename this to be clearer that this is the number of threads per TILE block and not matrix block
     block_dim: int = 128,
     device: wp.DeviceLike = None,
@@ -418,10 +417,9 @@ def llt_blocked_solve(
     y: wp.array(dtype=float32),
     x: wp.array(dtype=float32),
     num_blocks: int = 1,
-    # 128 threads per tile-block (4 warps) hides the gemm+trsm latency better than
-    # 64 across the entire size range tested in ``benchmark_llt_blocked.py``. Callers
-    # may override for batch sweeps with very small matrices where 64 is marginally
-    # faster.
+    # Empirically, 128 threads per tile-block (4 warps) hides the gemm+trsm latency
+    # better than 64 across the tested size range. Callers may override for batch
+    # sweeps with very small matrices where 64 is marginally faster.
     block_dim: int = 128,
     device: wp.DeviceLike = None,
 ):
