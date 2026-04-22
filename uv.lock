@@ -3111,7 +3111,7 @@ requires-dist = [
     { name = "usd-core", marker = "python_full_version < '3.14' and platform_machine != 'aarch64' and extra == 'importers'", specifier = ">=25.5" },
     { name = "usd-exchange", marker = "python_full_version < '3.13' and platform_machine == 'aarch64' and extra == 'importers'", specifier = ">=2.2.0" },
     { name = "viser", marker = "extra == 'docs'", specifier = ">=1.0.16" },
-    { name = "warp-lang", specifier = ">=1.13.0.dev20260421", index = "https://pypi.nvidia.com/" },
+    { name = "warp-lang", specifier = ">=1.13.0.dev20260421,<1.13.0.dev20260422", index = "https://pypi.nvidia.com/" },
 ]
 provides-extras = ["sim", "importers", "remesh", "examples", "torch-cu12", "torch-cu13", "dev", "docs", "notebook"]
 

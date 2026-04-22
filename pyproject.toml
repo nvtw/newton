@@ -28,7 +28,12 @@ description = "A GPU-accelerated physics engine for robotics simulation"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "warp-lang>=1.13.0.dev20260421",
+    # Pin to the last known-good nightly: 1.13.0.dev20260422 introduced a CPU
+    # graph-capture regression (heap corruption / segfault during Python GC
+    # inside capture_while on CPU) landed in PR GH-1349 "Add graph capture for
+    # APIC serialization and CPU replay". Tracked in https://github.com/NVIDIA/warp/issues/1385.
+    # Bump the upper bound once a fixed nightly ships.
+    "warp-lang>=1.13.0.dev20260421,<1.13.0.dev20260422",
 ]
 
 [project.optional-dependencies]
