@@ -12,7 +12,7 @@
 - Add `Mesh.is_watertight` property (cached) that reports whether every geometric edge is shared by exactly two triangles
 - Add `deterministic` flag to `CollisionPipeline` and `NarrowPhase` for GPU-thread-scheduling-independent contact ordering via radix sort and deterministic fingerprint tiebreaking in contact reduction
 - Add fast parity-based SDF construction path for watertight meshes in `SDF.create_from_mesh`, using `wp.mesh_query_point_sign_parity` instead of winding numbers; selected via the new `sign_method` argument (`"auto"` — the default — picks parity when `Mesh.is_watertight` is true, or `"parity"` / `"winding"` to force either strategy)
-- Enable full CPU execution of the collision pipeline, including mesh–mesh and mesh–heightfield SDF contacts that were previously CUDA-only. Contact reduction (`reduce_contacts`) also runs on CPU. Internally, hand-rolled `__shared__`/`__syncthreads()` shims in mesh–SDF narrow-phase kernels were replaced with portable `wp.tile_stack` / `wp.tile_zeros` primitives (requires the newer `warp-lang` nightly)
+- Enable full CPU execution of the collision pipeline, including mesh–mesh and mesh–heightfield SDF contacts that were previously CUDA-only; contact reduction (`reduce_contacts`) also runs on CPU
 - Add `ViewerBase.log_arrows()` for arrow rendering (wide line + arrowhead) in the GL viewer with a dedicated geometry shader
 - Add `enable_multiccd` parameter to `SolverMuJoCo` for multi-CCD contact generation (up to 4 contact points per geom pair)
 - Add `ViewerViser.log_scalar()` for live scalar time-series plots via uPlot
