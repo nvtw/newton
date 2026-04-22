@@ -26,6 +26,7 @@
 - Bump `warp-lang` dependency to `>=1.13.0.dev20260421,<1.13.0.dev20260422` (nightly) and allow pre-release resolution via `[tool.uv] prerelease = "allow"`; replace removed `warp.types.scalar_types` usage in `docs/generate_api.py` with public `warp.types.type_is_scalar`. Upper bound excludes the `dev20260422` build which introduced a CPU graph-capture regression (heap corruption / segfault during Python GC inside `capture_while` on CPU) tracked in [NVIDIA/warp#1385](https://github.com/NVIDIA/warp/issues/1385); relax once a fixed nightly ships
 - Pin `mujoco` and `mujoco-warp` dependencies to `~=3.6.0`
 - Update default environment map texture in GL viewer (source: https://polyhaven.com/a/brown_photostudio_02)
+- Inline a `wp.vec3`-specialized point-to-triangle squared-distance helper in the implicit-MPM rasterized collider, removing the dependency on Warp's internal `warp.fem.geometry.closest_point`
 - Bump `mujoco` and `mujoco-warp` dependencies to `~=3.7.0` (`mujoco-warp` requires `>=3.7.0.1`)
 - Increase conveyor rail roughness in `example_basic_conveyor` to reduce mirror-like reflections
 - Migrate all raycast logic to `geometry.raycast`, all raycast functions now return distance and normal information
@@ -48,6 +49,7 @@
 - Fix box support-map sign flips from quaternion rotation noise (~1e-14) producing invalid GJK/MPR contacts for face-touching boxes with non-trivial base rotations
 - Fix USD import of multi-DOF joints from MuJoCo-converted assets where multiple revolute joints between the same two bodies caused false cycle detection; merge them into D6 joints with correct DOF label mapping for MjcActuator target resolution
 - Fix MJCF importer creating finite planes from MuJoCo visual half-sizes instead of infinite planes
+- Fix MJCF importer in `compiler.angle="degree"` mode: (1) stop multiplying joint `damping`/`stiffness` by `180/π` (MuJoCo stores these in `N·m·s/rad` and `N·m/rad` regardless of `angle`); (2) stop `deg2rad`-scaling the default `±MAXVAL` sentinel for joints without an explicit `range=`, which was turning unlimited hinges into bounded joints with `~1.75e8 rad` range
 - Fix ViewerViser mesh popping artifacts caused by viser's automatic LOD simplification creating holes in complex geometry
 - Fix degenerate zero-area triangles in SDF marching-cubes isosurface extraction by clamping edge interpolation away from cube corners and guarding against near-zero cross products
 
