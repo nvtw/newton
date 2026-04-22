@@ -26,6 +26,7 @@ descriptor indices start at 1.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -373,6 +374,12 @@ class RigidBodyDescriptor:
     affected_by_gravity: bool = True
     velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
     angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    #: Index of the world this body belongs to. Single-world scenes
+    #: leave this at 0; multi-world builders pick a value in
+    #: ``[0, num_worlds)``. Decides which gravity vector the body
+    #: experiences and which per-world CSR slice its constraints
+    #: get bucketed into at solve time.
+    world_id: int = 0
 
 
 @dataclass
@@ -1050,21 +1057,40 @@ class WorldBuilder:
     The builder is single-use; call :meth:`finalize` exactly once.
     """
 
-    def __init__(self):
-        # Body 0 is the static world body; user calls to add_*_body
-        # start at index 1. We seed it with the canonical static
-        # defaults (origin, identity rotation, MOTION_STATIC, zero
-        # inverse mass *and* zero inverse inertia, no gravity). The
-        # zero inertia is critical: constraints attached to the world
-        # body read ``inverse_inertia_world[0]`` for their effective-
-        # mass terms, and a non-zero value would split the impulse as
-        # if the world body were dynamic.
+    def __init__(self, num_worlds: int = 1):
+        """Construct a builder for ``num_worlds`` independent worlds.
+
+        Default ``num_worlds = 1`` preserves the single-world API
+        exactly: one static world body at index 0, user bodies start
+        at index 1. For ``num_worlds > 1`` the builder seeds *one
+        static world body per world* at indices ``[0, num_worlds)``
+        so each world has its own anchor -- otherwise a constraint
+        attached to the world body would route to world 0's
+        per-world CSR slice regardless of the dynamic body's world.
+        Retrieve a world's static anchor with :meth:`world_body_of`.
+
+        Args:
+            num_worlds: Number of independent worlds this builder
+                will populate. Must be >= 1.
+        """
+        if num_worlds < 1:
+            raise ValueError(
+                f"num_worlds must be >= 1 (got {num_worlds})"
+            )
+        self._num_worlds: int = int(num_worlds)
+        # One static "world body" per world. Each is the canonical
+        # zero-mass / zero-inertia / no-gravity anchor so constraints
+        # targeting ``world_body_of(w)`` read a clean zero for their
+        # effective-mass term. The ``world_id`` field is what the
+        # solver's per-world CSR bucketing keys off of.
         self._bodies: list[RigidBodyDescriptor] = [
             RigidBodyDescriptor(
                 inverse_mass=0.0,
                 inverse_inertia=((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
                 affected_by_gravity=False,
+                world_id=w,
             )
+            for w in range(self._num_worlds)
         ]
         self._ball_sockets: list[BallSocketDescriptor] = []
         self._double_ball_sockets: list[DoubleBallSocketDescriptor] = []
@@ -1108,9 +1134,33 @@ class WorldBuilder:
     # ------------------------------------------------------------------
 
     @property
+    def num_worlds(self) -> int:
+        """Number of independent worlds this builder was constructed for."""
+        return self._num_worlds
+
+    @property
     def world_body(self) -> int:
-        """Index of the auto-created static world body."""
+        """Index of world 0's auto-created static world body.
+
+        For multi-world builders this is still the *first* world's
+        anchor; use :meth:`world_body_of` to pick a different one.
+        """
         return 0
+
+    def world_body_of(self, world_id: int) -> int:
+        """Body index of world ``world_id``'s static anchor.
+
+        The builder seeds one static body per world at construction
+        time; this helper exposes them as ``0, 1, ..., num_worlds - 1``.
+        Constraints attaching to "the world" in a specific world
+        should pass this index (not a shared global one) so the
+        multi-world CSR bucketing routes them to the correct slice.
+        """
+        if not (0 <= world_id < self._num_worlds):
+            raise IndexError(
+                f"world_id {world_id} out of range [0, {self._num_worlds})"
+            )
+        return world_id
 
     def add_body(self, descriptor: RigidBodyDescriptor) -> int:
         """Append a fully-formed descriptor and return its body index.
@@ -1122,9 +1172,19 @@ class WorldBuilder:
         quaternions, etc.) raise :class:`ValueError` here rather than
         producing silent corruption deep inside the solver. Valid
         descriptors are passed through unchanged.
+
+        ``descriptor.world_id`` is additionally range-checked against
+        the builder's ``num_worlds`` so an out-of-range assignment
+        fails at :meth:`add_body` time rather than producing an
+        out-of-bounds read inside the per-world CSR bucketing.
         """
         next_index = len(self._bodies)
         _validate_body_descriptor(descriptor, next_index)
+        if not (0 <= descriptor.world_id < self._num_worlds):
+            raise ValueError(
+                f"body {next_index} has world_id {descriptor.world_id} out of "
+                f"range [0, {self._num_worlds})"
+            )
         self._bodies.append(descriptor)
         return next_index
 
@@ -1132,8 +1192,14 @@ class WorldBuilder:
         self,
         position: tuple[float, float, float] = (0.0, 0.0, 0.0),
         orientation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+        world_id: int = 0,
     ) -> int:
-        """Append a static body (zero inverse mass / inertia, no integration)."""
+        """Append a static body (zero inverse mass / inertia, no integration).
+
+        ``world_id`` assigns the body to one of the builder's worlds
+        (must be in ``[0, num_worlds)``). Single-world scenes leave
+        this at the default 0.
+        """
         return self.add_body(
             RigidBodyDescriptor(
                 position=position,
@@ -1142,6 +1208,7 @@ class WorldBuilder:
                 inverse_mass=0.0,
                 inverse_inertia=((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
                 affected_by_gravity=False,
+                world_id=world_id,
             )
         )
 
@@ -1151,6 +1218,7 @@ class WorldBuilder:
         orientation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
         velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
         angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        world_id: int = 0,
     ) -> int:
         """Append a kinematic body: integrates its user-set velocities but
         ignores forces/contacts (matches Jitter ``MotionType.Kinematic``)."""
@@ -1164,6 +1232,7 @@ class WorldBuilder:
                 affected_by_gravity=False,
                 velocity=velocity,
                 angular_velocity=angular_velocity,
+                world_id=world_id,
             )
         )
 
@@ -1182,6 +1251,7 @@ class WorldBuilder:
         affected_by_gravity: bool = True,
         velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
         angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        world_id: int = 0,
     ) -> int:
         """Append a fully dynamic body. ``inverse_inertia`` is in the
         *body* frame; the solver rotates it to world space each step."""
@@ -1197,6 +1267,7 @@ class WorldBuilder:
                 affected_by_gravity=affected_by_gravity,
                 velocity=velocity,
                 angular_velocity=angular_velocity,
+                world_id=world_id,
             )
         )
 
@@ -2094,7 +2165,8 @@ class WorldBuilder:
         substeps: int = 1,
         solver_iterations: int = 8,
         velocity_relaxations: int = 1,
-        gravity: tuple[float, float, float] = (0.0, -9.81, 0.0),
+        gravity: tuple[float, float, float]
+        | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         max_contact_columns: int = 0,
         rigid_contact_max: int = 0,
         num_shapes: int = 0,
@@ -2169,17 +2241,22 @@ class WorldBuilder:
             collision_filter_pairs=self._collision_filter_pairs,
             default_friction=default_friction,
             enable_all_constraints=enable_all_constraints,
+            num_worlds=self._num_worlds,
             device=device,
         )
 
         # Reset internal state so the builder can't accidentally leak
-        # references into a second finalize call.
+        # references into a second finalize call. Re-seed the
+        # per-world static anchors so ``world_body_of`` keeps working
+        # if the caller wants to rebuild after finalize.
         self._bodies = [
             RigidBodyDescriptor(
                 inverse_mass=0.0,
                 inverse_inertia=((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
                 affected_by_gravity=False,
+                world_id=w,
             )
+            for w in range(self._num_worlds)
         ]
         self._ball_sockets = []
         self._double_ball_sockets = []
@@ -2230,6 +2307,7 @@ class WorldBuilder:
         angular_damping = np.ones(n, dtype=np.float32)
         affected_by_gravity = np.ones(n, dtype=np.int32)
         motion_type = np.full(n, int(MOTION_STATIC), dtype=np.int32)
+        world_id_arr = np.zeros(n, dtype=np.int32)
 
         for i, b in enumerate(self._bodies):
             positions[i] = b.position
@@ -2247,6 +2325,7 @@ class WorldBuilder:
             angular_damping[i] = b.angular_damping
             affected_by_gravity[i] = 1 if b.affected_by_gravity else 0
             motion_type[i] = int(b.motion_type)
+            world_id_arr[i] = int(b.world_id)
 
         c = BodyContainer()
         c.position = wp.array(positions, dtype=wp.vec3f, device=device)
@@ -2264,10 +2343,7 @@ class WorldBuilder:
         c.angular_damping = wp.array(angular_damping, dtype=wp.float32, device=device)
         c.affected_by_gravity = wp.array(affected_by_gravity, dtype=wp.int32, device=device)
         c.motion_type = wp.array(motion_type, dtype=wp.int32, device=device)
-        # Single-world scenes: every body is in world 0. Multi-world
-        # callers override this array after finalize() (stage 4 wires
-        # per-body world assignment through the builder).
-        c.world_id = wp.zeros(n, dtype=wp.int32, device=device)
+        c.world_id = wp.array(world_id_arr, dtype=wp.int32, device=device)
         return c
 
     def _build_constraint_container(
