@@ -36,6 +36,7 @@ from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraints.constraint_contact import (
     ContactViews,
     contact_pair_wrench_kernel,
+    contact_per_contact_error_kernel,
     contact_per_contact_wrench_kernel,
     contact_views_make,
 )
@@ -59,6 +60,7 @@ from newton._src.solvers.jitter.graph_coloring.graph_coloring_incremental import
 )
 from newton._src.solvers.jitter.solver_jitter_kernels import (
     _STRAGGLER_BLOCK_DIM,
+    _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
     _constraint_iterate_fast_tail_kernel,
     _constraint_iterate_kernel,
@@ -965,6 +967,118 @@ class World:
                 idt,
             ],
             outputs=[wrenches, body1, body2, contact_count],
+            device=self.device,
+        )
+
+    def gather_constraint_errors(self, out: wp.array) -> None:
+        """Write position-level constraint residuals into ``out``.
+
+        Each ``out[cid]`` is a :class:`wp.spatial_vector` holding the
+        ``C`` value every constraint row drives toward zero, in the
+        *same sign convention* the solver's internal ``bias`` term
+        uses (i.e. ``error * bias_rate`` matches the velocity-
+        correction bias the PGS sees). Per-type layout:
+
+          * ``spatial_top``    = linear residual [m]
+          * ``spatial_bottom`` = angular residual [rad]
+
+        Joints with fewer than 6 effective rows leave unused slots at
+        zero. Limit rows (``angular_limit`` / ``linear_limit`` and the
+        limit half of composite joints) report zero when strictly
+        inside their ``[min_value, max_value]`` window. Contact cids
+        report zero here; per-slot contact residuals are surfaced by
+        :meth:`gather_contact_errors`.
+
+        The values are recomputed on the fly from the current body
+        pose and the persisted per-type state (local anchors, rest
+        quaternions, revolution tracker, etc.) -- no additional
+        storage, no dependency on the most recent
+        :meth:`prepare_for_iteration`. Safe to call before the first
+        :meth:`step` (returns the initial-pose error, which is zero
+        for a well-posed joint configuration).
+
+        Graph-capture safe: single flat dispatch kernel launched at
+        :attr:`constraint_capacity`, no host readbacks.
+
+        Args:
+            out: Output buffer of dtype :class:`wp.spatial_vector`
+                and length at least :attr:`num_constraints` (the
+                joint count). Must live on :attr:`device`. Entries
+                beyond :attr:`num_constraints` (the contact cid
+                trailing range) are still written (contact branch
+                returns zero); callers reading only the joint range
+                can slice ``out[:self.num_constraints]``.
+        """
+        if self._constraint_capacity == 0:
+            return
+        wp.launch(
+            _constraint_gather_errors_kernel,
+            dim=self._constraint_capacity,
+            inputs=[
+                self.constraints,
+                self.bodies,
+                wp.int32(self._constraint_capacity),
+            ],
+            outputs=[out],
+            device=self.device,
+        )
+
+    def gather_contact_errors(self, out: wp.array) -> None:
+        """Per-individual-contact position-level residual.
+
+        Writes one :class:`wp.vec3f` per rigid contact index ``k``
+        used by the upstream :class:`Contacts` buffer -- i.e.
+        ``out[k]`` corresponds 1:1 with
+        ``contacts.rigid_contact_normal[k]`` /
+        ``rigid_contact_point0[k]`` / etc., matching the indexing of
+        :meth:`gather_contact_wrenches`.
+
+        Components are the raw (un-slop-clamped) position residuals
+        the prepare kernel turns into PGS bias:
+
+          * ``out[k][0]``: signed separation along the stored contact
+            normal [m] (positive when strictly separating; negative
+            when penetrating; zero when resting at the sum of the
+            two shape margins).
+          * ``out[k][1]``: tangential drift of body 2's anchor past
+            body 1's anchor along the stored ``tangent1`` [m]
+            (un-clamped -- the prepare kernel clamps to
+            ``friction_slop`` for the bias but the raw drift is more
+            useful as a diagnostic).
+          * ``out[k][2]``: same along ``tangent2 = cross(normal,
+            tangent1)``.
+
+        Inactive indices (``k >= rigid_contact_count[0]`` or slots
+        masked out of the packed column) keep whatever was in the
+        buffer on entry, so the output must be zeroed first to get a
+        clean per-contact slice. See
+        :func:`contact_per_slot_error_at` for the formulas.
+
+        Args:
+            out: :class:`wp.array` of ``wp.vec3f`` of length at least
+                :attr:`rigid_contact_max`, on :attr:`device`.
+
+        Graph-capture safe: launches one kernel at a fixed dim equal
+        to the contact cid capacity; nothing reads back to the host.
+        """
+        if self.max_contact_columns == 0:
+            out.zero_()
+            return
+        out.zero_()
+        if self._contact_views is None:
+            return
+        wp.launch(
+            contact_per_contact_error_kernel,
+            dim=self.max_contact_columns,
+            inputs=[
+                self.constraints,
+                self.bodies,
+                self._contact_container,
+                self._contact_views,
+                wp.int32(self.joint_constraint_count),
+                wp.int32(self._constraint_capacity),
+            ],
+            outputs=[out],
             device=self.device,
         )
 

@@ -67,6 +67,7 @@ from newton._src.solvers.jitter.constraints.constraint_angular_motor import (
     AngularMotorData,
     angular_motor_iterate_at,
     angular_motor_prepare_for_iteration_at,
+    angular_motor_world_error_at,
     angular_motor_world_wrench_at,
 )
 from newton._src.solvers.jitter.constraints.constraint_ball_socket import (
@@ -74,6 +75,7 @@ from newton._src.solvers.jitter.constraints.constraint_ball_socket import (
     BallSocketData,
     ball_socket_iterate_at,
     ball_socket_prepare_for_iteration_at,
+    ball_socket_world_error_at,
     ball_socket_world_wrench_at,
 )
 from newton._src.solvers.jitter.constraints.constraint_container import (
@@ -96,6 +98,7 @@ from newton._src.solvers.jitter.constraints.constraint_hinge_angle import (
     HingeAngleData,
     hinge_angle_iterate_at,
     hinge_angle_prepare_for_iteration_at,
+    hinge_angle_world_error_at,
     hinge_angle_world_wrench_at,
 )
 from newton._src.solvers.jitter.helpers.data_packing import dword_offset_of
@@ -108,6 +111,7 @@ __all__ = [
     "hinge_joint_initialize_kernel",
     "hinge_joint_iterate",
     "hinge_joint_prepare_for_iteration",
+    "hinge_joint_world_error",
     "hinge_joint_world_wrench",
 ]
 
@@ -470,3 +474,35 @@ def hinge_joint_world_wrench(
     )
 
     return f_bs + f_ha + f_am, t_bs + t_ha + t_am
+
+
+@wp.func
+def hinge_joint_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+) -> wp.spatial_vector:
+    """Combined position-level constraint residual for a fused hinge joint.
+
+    Sums the three sub-constraints into one :class:`wp.spatial_vector`:
+
+      * ``spatial_top`` = BallSocket anchor error ``p2 - p1`` [m].
+      * ``spatial_bottom`` = HingeAngle (err_x, err_y, err_z_limit)
+        with the angular-motor's PD position error folded into the
+        z component (motor and limit share the axial axis; reporting
+        the sum gives the full axial deviation from target when both
+        are active).
+
+    Residuals are computed from the persisted sub-block state in the
+    same way as the stand-alone :func:`*_world_error_at` funcs, so the
+    values match what each sub-constraint would report in isolation.
+    """
+    b1 = constraint_get_body1(constraints, cid)
+    b2 = constraint_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    e_bs = ball_socket_world_error_at(constraints, cid, _HJ_BS_BASE_C, bodies, body_pair)
+    e_ha = hinge_angle_world_error_at(constraints, cid, _HJ_HA_BASE_C, bodies, body_pair)
+    e_am = angular_motor_world_error_at(constraints, cid, _HJ_AM_BASE_C)
+    lin = wp.spatial_top(e_bs) + wp.spatial_top(e_ha) + wp.spatial_top(e_am)
+    ang = wp.spatial_bottom(e_bs) + wp.spatial_bottom(e_ha) + wp.spatial_bottom(e_am)
+    return wp.spatial_vector(lin, ang)

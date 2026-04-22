@@ -113,6 +113,8 @@ __all__ = [
     "d6_iterate_at",
     "d6_prepare_for_iteration",
     "d6_prepare_for_iteration_at",
+    "d6_world_error",
+    "d6_world_error_at",
     "d6_world_wrench",
     "d6_world_wrench_at",
 ]
@@ -1677,3 +1679,79 @@ def d6_world_wrench(
     reported wrench, decomposed in the world frame.
     """
     return d6_world_wrench_at(constraints, cid, 0, idt)
+
+
+@wp.func
+def d6_world_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+) -> wp.spatial_vector:
+    """Position-level constraint residual for a D6 joint.
+
+    Mirrors the per-axis ``c_err`` expressions in
+    :func:`d6_prepare_for_iteration_at` regardless of dispatch mode
+    (POINT vs AXIS, EULER vs ANGLE):
+
+      * Linear row ``k``: ``c_err_lin_k = dot(p2 - p1, e_k_world)``
+        [m] -- the anchor separation projected onto the k-th
+        constraint axis.
+      * Angular row ``k``: ``c_err_ang_k = 2 * dot(e_k_world,
+        diff_xyz)`` [rad] where ``diff = q2 * q_inv_init * q1^*``
+        sign-fixed to the short-rotation branch.
+
+    Output: :class:`wp.spatial_vector` with ``spatial_top`` =
+    ``(c_err_lin_0, c_err_lin_1, c_err_lin_2)`` and
+    ``spatial_bottom`` = ``(c_err_ang_0, c_err_ang_1, c_err_ang_2)``.
+    Values are in the *constraint frame* (the D6's constraint axes),
+    matching the per-axis convention the solver uses internally.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+    pos1 = bodies.position[b1]
+    pos2 = bodies.position[b2]
+
+    la_b1 = read_vec3(constraints, base_offset + _OFF_LA_B1, cid)
+    la_b2 = read_vec3(constraints, base_offset + _OFF_LA_B2, cid)
+    q_const_to_b1 = read_quat(constraints, base_offset + _OFF_Q_CONST_TO_B1, cid)
+    q_inv_init = read_quat(constraints, base_offset + _OFF_Q_INV_INIT, cid)
+
+    r1 = wp.quat_rotate(q1, la_b1)
+    r2 = wp.quat_rotate(q2, la_b2)
+    u = (pos2 + r2) - (pos1 + r1)
+
+    q_world_const = q1 * q_const_to_b1
+    e0 = wp.quat_rotate(q_world_const, wp.vec3f(1.0, 0.0, 0.0))
+    e1 = wp.quat_rotate(q_world_const, wp.vec3f(0.0, 1.0, 0.0))
+    e2 = wp.quat_rotate(q_world_const, wp.vec3f(0.0, 0.0, 1.0))
+
+    lin_err = wp.vec3f(wp.dot(u, e0), wp.dot(u, e1), wp.dot(u, e2))
+
+    diff = q2 * q_inv_init * wp.quat_inverse(q1)
+    sign = wp.float32(1.0)
+    if diff[3] < 0.0:
+        sign = wp.float32(-1.0)
+    diff_xyz = wp.vec3f(diff[0] * sign, diff[1] * sign, diff[2] * sign)
+    ang_err = wp.vec3f(
+        2.0 * wp.dot(e0, diff_xyz),
+        2.0 * wp.dot(e1, diff_xyz),
+        2.0 * wp.dot(e2, diff_xyz),
+    )
+    return wp.spatial_vector(lin_err, ang_err)
+
+
+@wp.func
+def d6_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+) -> wp.spatial_vector:
+    """Direct wrapper around :func:`d6_world_error_at`."""
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    return d6_world_error_at(constraints, cid, 0, bodies, body_pair)

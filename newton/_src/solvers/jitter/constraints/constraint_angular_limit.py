@@ -110,6 +110,8 @@ __all__ = [
     "angular_limit_iterate_at",
     "angular_limit_prepare_for_iteration",
     "angular_limit_prepare_for_iteration_at",
+    "angular_limit_world_error",
+    "angular_limit_world_error_at",
     "angular_limit_world_wrench",
     "angular_limit_world_wrench_at",
 ]
@@ -611,3 +613,45 @@ def angular_limit_world_wrench(
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
     return angular_limit_world_wrench_at(constraints, cid, 0, bodies, body_pair, idt)
+
+
+@wp.func
+def angular_limit_world_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+) -> wp.spatial_vector:
+    """Position-level constraint residual for an angular limit.
+
+    Reads the persisted revolution-tracker state (updated every
+    ``prepare_for_iteration``) to recover the unbounded relative
+    twist angle, then returns ``cumulative_angle - max_value`` when
+    clamped at the upper stop, ``cumulative_angle - min_value``
+    when clamped at the lower stop, and zero when strictly within
+    ``[min_value, max_value]``. This matches the ``limit_C``
+    expression the prepare kernel feeds into the bias / PD gains.
+
+    Output: :class:`wp.spatial_vector` with ``spatial_top`` = zero,
+    ``spatial_bottom`` = ``(0, 0, limit_C)``.
+    """
+    counter = read_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid)
+    prev = read_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
+    min_value = read_float(constraints, base_offset + _OFF_MIN_VALUE, cid)
+    max_value = read_float(constraints, base_offset + _OFF_MAX_VALUE, cid)
+    cumulative_angle = revolution_tracker_angle(counter, prev)
+    limit_c = wp.float32(0.0)
+    if min_value <= max_value:
+        if cumulative_angle > max_value:
+            limit_c = cumulative_angle - max_value
+        elif cumulative_angle < min_value:
+            limit_c = cumulative_angle - min_value
+    return wp.spatial_vector(wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, limit_c))
+
+
+@wp.func
+def angular_limit_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+) -> wp.spatial_vector:
+    """Direct wrapper around :func:`angular_limit_world_error_at`."""
+    return angular_limit_world_error_at(constraints, cid, 0)

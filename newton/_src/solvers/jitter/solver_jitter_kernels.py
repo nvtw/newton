@@ -20,27 +20,32 @@ from newton._src.solvers.jitter.body import (
 from newton._src.solvers.jitter.constraints.constraint_actuated_double_ball_socket import (
     actuated_double_ball_socket_iterate,
     actuated_double_ball_socket_prepare_for_iteration,
+    actuated_double_ball_socket_world_error,
     actuated_double_ball_socket_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_angular_limit import (
     angular_limit_iterate,
     angular_limit_prepare_for_iteration,
+    angular_limit_world_error,
     angular_limit_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_angular_motor import (
     angular_motor_iterate,
     angular_motor_prepare_for_iteration,
+    angular_motor_world_error,
     angular_motor_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_ball_socket import (
     ball_socket_iterate,
     ball_socket_prepare_for_iteration,
+    ball_socket_world_error,
     ball_socket_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_contact import (
     ContactViews,
     contact_iterate,
     contact_prepare_for_iteration,
+    contact_world_error,
     contact_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_container import (
@@ -65,41 +70,49 @@ from newton._src.solvers.jitter.constraints.constraint_container import (
 from newton._src.solvers.jitter.constraints.constraint_d6 import (
     d6_iterate,
     d6_prepare_for_iteration,
+    d6_world_error,
     d6_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_double_ball_socket import (
     double_ball_socket_iterate,
     double_ball_socket_prepare_for_iteration,
+    double_ball_socket_world_error,
     double_ball_socket_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_double_ball_socket_prismatic import (
     double_ball_socket_prismatic_iterate,
     double_ball_socket_prismatic_prepare_for_iteration,
+    double_ball_socket_prismatic_world_error,
     double_ball_socket_prismatic_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_hinge_angle import (
     hinge_angle_iterate,
     hinge_angle_prepare_for_iteration,
+    hinge_angle_world_error,
     hinge_angle_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_hinge_joint import (
     hinge_joint_iterate,
     hinge_joint_prepare_for_iteration,
+    hinge_joint_world_error,
     hinge_joint_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_linear_limit import (
     linear_limit_iterate,
     linear_limit_prepare_for_iteration,
+    linear_limit_world_error,
     linear_limit_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_linear_motor import (
     linear_motor_iterate,
     linear_motor_prepare_for_iteration,
+    linear_motor_world_error,
     linear_motor_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.constraint_prismatic import (
     prismatic_iterate,
     prismatic_prepare_for_iteration,
+    prismatic_world_error,
     prismatic_world_wrench,
 )
 from newton._src.solvers.jitter.constraints.contact_container import ContactContainer
@@ -110,6 +123,7 @@ from newton._src.solvers.jitter.graph_coloring.graph_coloring_common import (
 
 __all__ = [
     "_STRAGGLER_BLOCK_DIM",
+    "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
     "_constraint_iterate_fast_tail_kernel",
     "_constraint_iterate_kernel",
@@ -700,6 +714,70 @@ def _constraint_gather_wrenches_kernel(
         force, torque = contact_world_wrench(constraints, cid, idt, cc, contacts)
 
     out[cid] = wp.spatial_vector(force, torque)
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_gather_errors_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    num_constraints: wp.int32,
+    # out
+    out: wp.array[wp.spatial_vector],
+):
+    """Dispatch the per-type ``world_error`` ``wp.func`` for every
+    constraint and write the result into ``out[cid]``.
+
+    ``out`` carries the position-level constraint residual packed into
+    a :class:`wp.spatial_vector`: ``spatial_top`` = linear residual
+    [m], ``spatial_bottom`` = angular residual [rad, half-sin
+    approximation where applicable]. Per-type layout is documented on
+    each ``*_world_error_at`` ``wp.func``; inactive limit rows return
+    zero and the contact branch returns zero at the cid level
+    (per-slot residuals are surfaced separately via
+    :func:`contact_per_contact_error_kernel`).
+
+    Computed on the fly from current body pose + persisted per-type
+    state (local anchors, rest quaternions, revolution tracker, etc.)
+    -- no additional storage. One thread per cid, no partitioning
+    required (pure read, no body mutation), which also makes this
+    kernel safe to call before the first :meth:`World.step`."""
+    cid = wp.tid()
+    if cid >= num_constraints:
+        return
+
+    t = constraint_get_type(constraints, cid)
+    zero = wp.spatial_vector(
+        wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0)
+    )
+    err = zero
+    if t == CONSTRAINT_TYPE_BALL_SOCKET:
+        err = ball_socket_world_error(constraints, cid, bodies)
+    elif t == CONSTRAINT_TYPE_HINGE_ANGLE:
+        err = hinge_angle_world_error(constraints, cid, bodies)
+    elif t == CONSTRAINT_TYPE_ANGULAR_MOTOR:
+        err = angular_motor_world_error(constraints, cid)
+    elif t == CONSTRAINT_TYPE_LINEAR_MOTOR:
+        err = linear_motor_world_error(constraints, cid)
+    elif t == CONSTRAINT_TYPE_ANGULAR_LIMIT:
+        err = angular_limit_world_error(constraints, cid)
+    elif t == CONSTRAINT_TYPE_LINEAR_LIMIT:
+        err = linear_limit_world_error(constraints, cid, bodies)
+    elif t == CONSTRAINT_TYPE_HINGE_JOINT:
+        err = hinge_joint_world_error(constraints, cid, bodies)
+    elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET:
+        err = double_ball_socket_world_error(constraints, cid, bodies)
+    elif t == CONSTRAINT_TYPE_DOUBLE_BALL_SOCKET_PRISMATIC:
+        err = double_ball_socket_prismatic_world_error(constraints, cid, bodies)
+    elif t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+        err = actuated_double_ball_socket_world_error(constraints, cid, bodies)
+    elif t == CONSTRAINT_TYPE_PRISMATIC:
+        err = prismatic_world_error(constraints, cid, bodies)
+    elif t == CONSTRAINT_TYPE_D6:
+        err = d6_world_error(constraints, cid, bodies)
+    elif t == CONSTRAINT_TYPE_CONTACT:
+        err = contact_world_error(constraints, cid)
+
+    out[cid] = err
 
 
 @wp.func

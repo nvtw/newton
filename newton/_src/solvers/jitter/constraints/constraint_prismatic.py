@@ -181,6 +181,8 @@ __all__ = [
     "prismatic_set_s_inv",
     "prismatic_set_t1",
     "prismatic_set_t2",
+    "prismatic_world_error",
+    "prismatic_world_error_at",
     "prismatic_world_wrench",
     "prismatic_world_wrench_at",
 ]
@@ -1223,3 +1225,71 @@ def prismatic_world_wrench(
     body 2's COM plus the angular block accumulated impulse / dt.
     """
     return prismatic_world_wrench_at(constraints, cid, 0, idt)
+
+
+@wp.func
+def prismatic_world_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+) -> wp.spatial_vector:
+    """Position-level constraint residual for a prismatic (slider) joint.
+
+    Mirrors the prepare math: the angular residual is the
+    short-rotation branch of ``quat_e.xyz`` (where ``quat_e = q0 *
+    q1^* * q2``); the linear residual is the perpendicular component
+    of the world-space anchor separation ``p2 - p1`` projected onto
+    the current tangent basis ``(t1, t2)`` (the axial component
+    along the slide axis is the free DoF and is intentionally
+    dropped).
+
+    Output: :class:`wp.spatial_vector` with ``spatial_top`` = linear
+    residual reconstructed in world frame as
+    ``t1 * dot(t1, p2 - p1) + t2 * dot(t2, p2 - p1)`` [m], and
+    ``spatial_bottom`` = angular residual (``quat_e.xyz`` sign-fixed)
+    [rad, half-sin approximation].
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+    pos1 = bodies.position[b1]
+    pos2 = bodies.position[b2]
+    la_b1 = read_vec3(constraints, base_offset + _OFF_LA_B1, cid)
+    la_b2 = read_vec3(constraints, base_offset + _OFF_LA_B2, cid)
+    axis_local = read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL_B1, cid)
+    q0 = read_quat(constraints, base_offset + _OFF_Q0, cid)
+
+    r1 = wp.quat_rotate(q1, la_b1)
+    r2 = wp.quat_rotate(q2, la_b2)
+    p1 = pos1 + r1
+    p2 = pos2 + r2
+
+    n_hat = wp.quat_rotate(q1, axis_local)
+    t1 = create_orthonormal(n_hat)
+    t2 = wp.cross(n_hat, t1)
+    drift = p2 - p1
+    lin = wp.dot(t1, drift) * t1 + wp.dot(t2, drift) * t2
+
+    q1_inv = wp.quat_inverse(q1)
+    quat_e = q0 * q1_inv * q2
+    sign = wp.float32(1.0)
+    if quat_e[3] < 0.0:
+        sign = wp.float32(-1.0)
+    ang = wp.vec3f(quat_e[0] * sign, quat_e[1] * sign, quat_e[2] * sign)
+    return wp.spatial_vector(lin, ang)
+
+
+@wp.func
+def prismatic_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+) -> wp.spatial_vector:
+    """Direct wrapper around :func:`prismatic_world_error_at`."""
+    b1 = prismatic_get_body1(constraints, cid)
+    b2 = prismatic_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    return prismatic_world_error_at(constraints, cid, 0, bodies, body_pair)

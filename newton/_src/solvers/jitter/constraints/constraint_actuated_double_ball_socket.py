@@ -192,6 +192,8 @@ __all__ = [
     "actuated_double_ball_socket_iterate_at",
     "actuated_double_ball_socket_prepare_for_iteration",
     "actuated_double_ball_socket_prepare_for_iteration_at",
+    "actuated_double_ball_socket_world_error",
+    "actuated_double_ball_socket_world_error_at",
     "actuated_double_ball_socket_world_wrench",
     "actuated_double_ball_socket_world_wrench_at",
 ]
@@ -2118,3 +2120,137 @@ def actuated_double_ball_socket_world_wrench(
     :func:`actuated_double_ball_socket_world_wrench_at` for details.
     """
     return actuated_double_ball_socket_world_wrench_at(constraints, cid, 0, idt)
+
+
+@wp.func
+def actuated_double_ball_socket_world_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+) -> wp.spatial_vector:
+    """Position-level constraint residual for the unified joint.
+
+    Covers all three joint modes (REVOLUTE, PRISMATIC, BALL_SOCKET)
+    plus the optional actuator axis. Output layout:
+
+      * ``spatial_top`` = world-frame anchor 1 drift ``p1_b2 -
+        p1_b1`` (fully constrained in revolute and ball-socket modes;
+        in prismatic mode the tangential components are the
+        constraint rows, the axial component is the free DoF).
+      * ``spatial_bottom`` = ``(drift_t1_anchor2, drift_t2_anchor2,
+        actuator_residual)``. The two tangent drifts at anchor 2 are
+        the extra 2 positional rows in revolute / prismatic modes
+        (zero in ball-socket mode). The actuator residual collapses
+        three contributions:
+
+        - drive row in ``DRIVE_MODE_POSITION``: ``cumulative_angle -
+          target`` (revolute) or ``slide - target`` (prismatic);
+        - limit row when clamped: ``cumulative_angle - limit`` or
+          ``slide - limit``;
+        - otherwise zero.
+
+        When both the drive and the limit are active in the same
+        substep their residuals add -- callers wanting to distinguish
+        them should read the fields directly; this surfaces the net
+        position error along the free DoF, which is what the PGS
+        actually targets.
+
+    Revolute mode uses the persisted revolution tracker state (same
+    as :func:`angular_limit_world_error_at`). Prismatic mode
+    recomputes the slide from the current body pose. Ball-socket
+    mode reports anchor 1 drift only.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+    pos1 = bodies.position[b1]
+    pos2 = bodies.position[b2]
+
+    joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
+
+    la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
+    la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
+    p1_b1 = pos1 + wp.quat_rotate(q1, la1_b1)
+    p1_b2 = pos2 + wp.quat_rotate(q2, la1_b2)
+    anchor1_drift = p1_b2 - p1_b1
+
+    # Anchor 2 tangent drift (revolute / prismatic only). Project onto
+    # the persisted tangent basis written by the last prepare pass; the
+    # basis is stable across substeps.
+    drift_t1 = wp.float32(0.0)
+    drift_t2 = wp.float32(0.0)
+    if joint_mode != JOINT_MODE_BALL_SOCKET:
+        la2_b1 = read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
+        la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
+        p2_b1 = pos1 + wp.quat_rotate(q1, la2_b1)
+        p2_b2 = pos2 + wp.quat_rotate(q2, la2_b2)
+        t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
+        t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
+        anchor2_drift = p2_b2 - p2_b1
+        drift_t1 = wp.dot(t1, anchor2_drift)
+        drift_t2 = wp.dot(t2, anchor2_drift)
+
+    # Actuator residual (drive position error OR active limit C).
+    actuator_err = wp.float32(0.0)
+    drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
+    min_value = read_float(constraints, base_offset + _OFF_MIN_VALUE, cid)
+    max_value = read_float(constraints, base_offset + _OFF_MAX_VALUE, cid)
+    target = read_float(constraints, base_offset + _OFF_TARGET, cid)
+
+    if joint_mode == JOINT_MODE_REVOLUTE:
+        counter = read_int(
+            constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid
+        )
+        prev = read_float(
+            constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid
+        )
+        cumulative = revolution_tracker_angle(counter, prev)
+        if drive_mode == DRIVE_MODE_POSITION:
+            actuator_err = actuator_err + (cumulative - target)
+        if min_value <= max_value:
+            if cumulative > max_value:
+                actuator_err = actuator_err + (cumulative - max_value)
+            elif cumulative < min_value:
+                actuator_err = actuator_err + (cumulative - min_value)
+    elif joint_mode == JOINT_MODE_PRISMATIC:
+        # Recompute slide from anchors + rest_length (same expression
+        # as _prismatic_prepare_at). The axial sign matches the
+        # prepare convention: slide > 0 when anchor 2 on body 2 has
+        # moved past its rest position along the world axis.
+        axis_local1 = read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
+        rest_length = read_float(constraints, base_offset + _OFF_REST_LENGTH, cid)
+        la2_b1 = read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
+        la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
+        p2_b1 = pos1 + wp.quat_rotate(q1, la2_b1)
+        p2_b2 = pos2 + wp.quat_rotate(q2, la2_b2)
+        n_hat = wp.quat_rotate(q1, axis_local1)
+        slide = wp.dot(n_hat, p2_b2 - p2_b1) - rest_length
+        if drive_mode == DRIVE_MODE_POSITION:
+            actuator_err = actuator_err + (slide - target)
+        if min_value <= max_value:
+            if slide > max_value:
+                actuator_err = actuator_err + (slide - max_value)
+            elif slide < min_value:
+                actuator_err = actuator_err + (slide - min_value)
+
+    return wp.spatial_vector(
+        anchor1_drift, wp.vec3f(drift_t1, drift_t2, actuator_err)
+    )
+
+
+@wp.func
+def actuated_double_ball_socket_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+) -> wp.spatial_vector:
+    """Direct wrapper around :func:`actuated_double_ball_socket_world_error_at`."""
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    return actuated_double_ball_socket_world_error_at(
+        constraints, cid, 0, bodies, body_pair
+    )

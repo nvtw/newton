@@ -173,6 +173,8 @@ __all__ = [
     "angular_motor_set_stiffness",
     "angular_motor_set_target_angle",
     "angular_motor_set_velocity",
+    "angular_motor_world_error",
+    "angular_motor_world_error_at",
     "angular_motor_world_wrench",
     "angular_motor_world_wrench_at",
 ]
@@ -974,3 +976,38 @@ def angular_motor_world_wrench(
     b2 = angular_motor_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
     return angular_motor_world_wrench_at(constraints, cid, 0, bodies, body_pair, idt)
+
+
+@wp.func
+def angular_motor_world_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+) -> wp.spatial_vector:
+    """Position-level constraint residual for an angular motor.
+
+    PD mode: returns the cached ``position_error = cumulative_angle -
+    target_angle`` [rad] (the same ``C`` fed into
+    :func:`pd_coefficients`), packed into the z component of the
+    angular slot so limits / hinge-angle stack consistently on the
+    third axis.
+
+    Velocity mode: returns zero. The constraint equation in velocity
+    mode is ``jv = target_velocity`` -- a velocity-level residual --
+    with no position-level C to report; callers that want the velocity
+    residual should read the body angular velocities directly.
+
+    Output: :class:`wp.spatial_vector` with ``spatial_top`` = zero,
+    ``spatial_bottom`` = ``(0, 0, position_error_or_0)``.
+    """
+    err = read_float(constraints, base_offset + _OFF_POSITION_ERROR, cid)
+    return wp.spatial_vector(wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, err))
+
+
+@wp.func
+def angular_motor_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+) -> wp.spatial_vector:
+    """Direct wrapper around :func:`angular_motor_world_error_at`."""
+    return angular_motor_world_error_at(constraints, cid, 0)

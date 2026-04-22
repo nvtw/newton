@@ -101,6 +101,8 @@ __all__ = [
     "ball_socket_set_mass_coeff",
     "ball_socket_set_r1",
     "ball_socket_set_r2",
+    "ball_socket_world_error",
+    "ball_socket_world_error_at",
     "ball_socket_world_wrench",
     "ball_socket_world_wrench_at",
 ]
@@ -659,3 +661,48 @@ def ball_socket_world_wrench(
     ``r2`` from the most recent ``prepare_for_iteration``.
     """
     return ball_socket_world_wrench_at(constraints, cid, 0, idt)
+
+
+@wp.func
+def ball_socket_world_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+) -> wp.spatial_vector:
+    """Position-level constraint residual C = p2 - p1 (world frame).
+
+    ``p_i = body_i.position + R_i * local_anchor_i`` matches the same
+    expression the prepare kernel folds into ``bias``; error × bias_rate
+    recovers the velocity-correction bias the solver sees. Returns the
+    error as :class:`wp.spatial_vector` with ``spatial_top`` = positional
+    residual [m] and ``spatial_bottom`` = zero (ball-socket has no
+    angular rows).
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+    la1 = read_vec3(constraints, base_offset + _OFF_LA1, cid)
+    la2 = read_vec3(constraints, base_offset + _OFF_LA2, cid)
+    p1 = bodies.position[b1] + wp.quat_rotate(bodies.orientation[b1], la1)
+    p2 = bodies.position[b2] + wp.quat_rotate(bodies.orientation[b2], la2)
+    c = p2 - p1
+    return wp.spatial_vector(c, wp.vec3f(0.0, 0.0, 0.0))
+
+
+@wp.func
+def ball_socket_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+) -> wp.spatial_vector:
+    """Position-level constraint residual for a stand-alone ball-socket.
+
+    Thin wrapper around :func:`ball_socket_world_error_at`; reads the
+    body pair from this column's header and forwards with
+    ``base_offset = 0``. See that func for the output layout.
+    """
+    b1 = ball_socket_get_body1(constraints, cid)
+    b2 = ball_socket_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    return ball_socket_world_error_at(constraints, cid, 0, bodies, body_pair)

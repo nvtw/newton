@@ -81,7 +81,9 @@ __all__ = [
     "contact_iterate",
     "contact_iterate_at",
     "contact_pair_wrench_kernel",
+    "contact_per_contact_error_kernel",
     "contact_per_contact_wrench_kernel",
+    "contact_per_slot_error_at",
     "contact_per_slot_wrench_at",
     "contact_prepare_for_iteration",
     "contact_prepare_for_iteration_at",
@@ -91,6 +93,8 @@ __all__ = [
     "contact_set_contact_first",
     "contact_set_friction",
     "contact_views_make",
+    "contact_world_error",
+    "contact_world_error_at",
     "contact_world_wrench",
     "contact_world_wrench_at",
 ]
@@ -1182,3 +1186,143 @@ def contact_pair_wrench_kernel(
     body1[tid] = b1
     body2[tid] = b2
     contact_count[tid] = count
+
+
+# ---------------------------------------------------------------------------
+# Per-slot contact constraint error
+# ---------------------------------------------------------------------------
+#
+# Mirrors the prepare kernel's ``effective_gap`` / tangent-drift
+# computation but without the slop clamp so callers get the raw
+# position-level residuals. Consumed by ``World.gather_contact_errors``.
+
+
+@wp.func
+def contact_per_slot_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    slot: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    cc: ContactContainer,
+    contacts: ContactViews,
+) -> wp.vec3f:
+    """Position-level residual for one active contact slot.
+
+    Computes the same quantities the prepare kernel folds into
+    ``bias`` / ``bias_t1`` / ``bias_t2``, but without the
+    penetration_slop / friction_slop clamps so the raw residuals are
+    surfaced:
+
+      * ``gap = dot(p2_world - p1_world, n) - (margin0 + margin1)``
+        -- signed separation along the stored normal, positive when
+        strictly separating, negative when penetrating.
+      * ``drift_t1 = dot(p2_world - p1_world, t1)`` -- unprojected
+        tangential drift along the stored ``t1`` basis vector.
+      * ``drift_t2 = dot(p2_world - p1_world, t2)`` where
+        ``t2 = cross(n, t1)``.
+
+    Anchor points are rebuilt from the persisted body-local anchors
+    in the :class:`ContactContainer` and the current body pose --
+    same refresh the prepare kernel performs each substep.
+
+    Caller must have already verified the slot is active.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+    position1 = bodies.position[b1]
+    position2 = bodies.position[b2]
+    orientation1 = bodies.orientation[b1]
+    orientation2 = bodies.orientation[b2]
+
+    contact_first = contact_get_contact_first(constraints, cid)
+    k = contact_first + slot
+
+    n = cc_get_normal(cc, slot, cid)
+    t1_dir = cc_get_tangent1(cc, slot, cid)
+    t2_dir = wp.cross(n, t1_dir)
+    local_p0 = cc_get_local_p0(cc, slot, cid)
+    local_p1 = cc_get_local_p1(cc, slot, cid)
+
+    p1_world = position1 + wp.quat_rotate(orientation1, local_p0)
+    p2_world = position2 + wp.quat_rotate(orientation2, local_p1)
+    p_diff = p2_world - p1_world
+
+    margin_sum = contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
+    gap = wp.dot(p_diff, n) - margin_sum
+    drift_t1 = wp.dot(p_diff, t1_dir)
+    drift_t2 = wp.dot(p_diff, t2_dir)
+    return wp.vec3f(gap, drift_t1, drift_t2)
+
+
+@wp.kernel(enable_backward=False)
+def contact_per_contact_error_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    cid_base: wp.int32,
+    cid_capacity: wp.int32,
+    # out
+    out: wp.array[wp.vec3f],
+):
+    """Scatter per-slot residuals into a per-rigid-contact output array.
+
+    Companion to :func:`contact_per_contact_wrench_kernel`: same launch
+    contract, same index mapping. Each thread iterates the 6 slots of
+    its contact column; active slots write
+    ``out[contact_first + slot] = (gap, drift_t1, drift_t2)``
+    computed by :func:`contact_per_slot_error_at`. Inactive slots
+    leave ``out`` untouched, so the caller is expected to zero the
+    buffer before the launch.
+    """
+    tid = wp.tid()
+    cid = cid_base + tid
+    if cid >= cid_capacity:
+        return
+    if constraint_get_type(constraints, cid) != CONSTRAINT_TYPE_CONTACT:
+        return
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    active_mask = contact_get_active_mask(constraints, cid)
+    contact_first = contact_get_contact_first(constraints, cid)
+    for slot in range(CONTACT_MAX_SLOTS):
+        if (active_mask & (wp.int32(1) << slot)) == 0:
+            continue
+        out[contact_first + slot] = contact_per_slot_error_at(
+            constraints, cid, 0, slot, bodies, body_pair, cc, contacts
+        )
+
+
+@wp.func
+def contact_world_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+) -> wp.spatial_vector:
+    """Per-column constraint residual placeholder for contact cids.
+
+    Contact columns report zero through the per-constraint dispatcher
+    because meaningful contact residuals are per-*slot* (up to 6 per
+    column) and live in a separate output array populated by
+    :func:`contact_per_contact_error_kernel` /
+    :meth:`World.gather_contact_errors`. Returning zero here keeps the
+    :func:`_constraint_gather_errors_kernel` branch uniform with the
+    other constraint types without contaminating the output with an
+    arbitrary aggregate (sum? max? penetration-only?) that callers
+    would have to un-pack anyway.
+    """
+    return wp.spatial_vector(
+        wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0)
+    )
+
+
+@wp.func
+def contact_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+) -> wp.spatial_vector:
+    """Direct wrapper around :func:`contact_world_error_at`."""
+    return contact_world_error_at(constraints, cid, 0)

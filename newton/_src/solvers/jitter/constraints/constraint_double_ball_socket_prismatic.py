@@ -104,6 +104,8 @@ __all__ = [
     "double_ball_socket_prismatic_set_body2",
     "double_ball_socket_prismatic_set_damping_ratio",
     "double_ball_socket_prismatic_set_hertz",
+    "double_ball_socket_prismatic_world_error",
+    "double_ball_socket_prismatic_world_error_at",
     "double_ball_socket_prismatic_world_wrench",
     "double_ball_socket_prismatic_world_wrench_at",
 ]
@@ -780,3 +782,58 @@ def double_ball_socket_prismatic_world_wrench(
     idt: wp.float32,
 ):
     return double_ball_socket_prismatic_world_wrench_at(constraints, cid, 0, idt)
+
+
+@wp.func
+def double_ball_socket_prismatic_world_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+) -> wp.spatial_vector:
+    """Position-level constraint residual for the standalone prismatic DBS.
+
+    The 5 constrained scalar rows are:
+      * anchors 1 and 2 projected onto the tangent plane (4 rows);
+      * anchor 3 projected along ``t2`` only (1 scalar row -- the
+        rotation-about-axis lock).
+
+    Output layout packs the per-anchor *world-frame* drifts:
+      * ``spatial_top`` = ``p1_b2 - p1_b1`` (anchor 1 full drift,
+        tangential components are the two constrained rows; axial
+        component is the free slide DoF).
+      * ``spatial_bottom`` = ``p2_b2 - p2_b1`` (same convention).
+
+    Anchor 3's scalar residual isn't surfaced here (only 6 slots in a
+    :class:`wp.spatial_vector`); at rest it tracks the other anchors
+    and isn't independently diagnostic.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+    p1 = bodies.position[b1]
+    p2 = bodies.position[b2]
+    la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
+    la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
+    la2_b1 = read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
+    la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
+    p1_b1 = p1 + wp.quat_rotate(q1, la1_b1)
+    p1_b2 = p2 + wp.quat_rotate(q2, la1_b2)
+    p2_b1 = p1 + wp.quat_rotate(q1, la2_b1)
+    p2_b2 = p2 + wp.quat_rotate(q2, la2_b2)
+    return wp.spatial_vector(p1_b2 - p1_b1, p2_b2 - p2_b1)
+
+
+@wp.func
+def double_ball_socket_prismatic_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+) -> wp.spatial_vector:
+    """Direct wrapper around :func:`double_ball_socket_prismatic_world_error_at`."""
+    b1 = double_ball_socket_prismatic_get_body1(constraints, cid)
+    b2 = double_ball_socket_prismatic_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    return double_ball_socket_prismatic_world_error_at(constraints, cid, 0, bodies, body_pair)

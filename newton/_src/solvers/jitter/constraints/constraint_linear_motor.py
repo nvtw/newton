@@ -148,6 +148,8 @@ __all__ = [
     "linear_motor_set_stiffness",
     "linear_motor_set_target_position",
     "linear_motor_set_velocity",
+    "linear_motor_world_error",
+    "linear_motor_world_error_at",
     "linear_motor_world_wrench",
     "linear_motor_world_wrench_at",
 ]
@@ -963,3 +965,32 @@ def linear_motor_world_wrench(
     b2 = linear_motor_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
     return linear_motor_world_wrench_at(constraints, cid, 0, bodies, body_pair, idt)
+
+
+@wp.func
+def linear_motor_world_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+) -> wp.spatial_vector:
+    """Position-level constraint residual for a linear motor.
+
+    PD mode: returns the cached ``position_error = (slide_now -
+    rest_offset) - target_position`` [m] in the x component of the
+    linear slot. Velocity mode: zero. See
+    :func:`angular_motor_world_error_at` for the rationale.
+
+    Output: :class:`wp.spatial_vector` with ``spatial_top`` =
+    ``(position_error_or_0, 0, 0)`` and ``spatial_bottom`` = zero.
+    """
+    err = read_float(constraints, base_offset + _OFF_POSITION_ERROR, cid)
+    return wp.spatial_vector(wp.vec3f(err, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0))
+
+
+@wp.func
+def linear_motor_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+) -> wp.spatial_vector:
+    """Direct wrapper around :func:`linear_motor_world_error_at`."""
+    return linear_motor_world_error_at(constraints, cid, 0)

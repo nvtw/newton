@@ -125,6 +125,8 @@ __all__ = [
     "hinge_angle_set_max_angle",
     "hinge_angle_set_min_angle",
     "hinge_angle_set_q0",
+    "hinge_angle_world_error",
+    "hinge_angle_world_error_at",
     "hinge_angle_world_wrench",
     "hinge_angle_world_wrench_at",
 ]
@@ -896,3 +898,75 @@ def hinge_angle_world_wrench(
     frame, so no extra rotation is required.
     """
     return hinge_angle_world_wrench_at(constraints, cid, 0, idt)
+
+
+@wp.func
+def hinge_angle_world_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+) -> wp.spatial_vector:
+    """Position-level constraint residual for a hinge-angle column.
+
+    Mirrors the expression the prepare kernel uses to build ``bias``:
+    projects ``quat0 = q0 * q1^* * q2`` (the rest-frame error
+    quaternion) onto the body-frame hinge axis and its two
+    perpendiculars. Rows 0/1 track the two perpendicular-to-axis
+    angular DoFs; row 2 is the axial limit residual, which is zero
+    when the joint is strictly inside ``[min_angle, max_angle]``.
+    The same quat0.W sign-flip guard as prepare is applied so the
+    short-rotation branch is always selected.
+
+    Output: :class:`wp.spatial_vector` with ``spatial_top`` = zero
+    (hinge-angle has no positional rows) and ``spatial_bottom`` =
+    angular residual [rad, half-sin approximation] ``(err_x, err_y,
+    err_z_limit_active_or_0)``.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+
+    axis = read_vec3(constraints, base_offset + _OFF_AXIS, cid)
+    q0 = read_quat(constraints, base_offset + _OFF_Q0, cid)
+    min_angle = read_float(constraints, base_offset + _OFF_MIN_ANGLE, cid)
+    max_angle = read_float(constraints, base_offset + _OFF_MAX_ANGLE, cid)
+
+    p0 = create_orthonormal(axis)
+    p1 = wp.cross(axis, p0)
+    q1_inv = wp.quat_inverse(q1)
+    quat0 = q0 * q1_inv * q2
+    quat0_xyz = wp.vec3f(quat0[0], quat0[1], quat0[2])
+    err_x = wp.dot(p0, quat0_xyz)
+    err_y = wp.dot(p1, quat0_xyz)
+    err_z = wp.dot(axis, quat0_xyz)
+    if quat0[3] < 0.0:
+        err_x = -err_x
+        err_y = -err_y
+        err_z = -err_z
+    if err_z > max_angle:
+        err_z = err_z - max_angle
+    elif err_z < min_angle:
+        err_z = err_z - min_angle
+    else:
+        err_z = 0.0
+    return wp.spatial_vector(wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(err_x, err_y, err_z))
+
+
+@wp.func
+def hinge_angle_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+) -> wp.spatial_vector:
+    """Direct wrapper around :func:`hinge_angle_world_error_at`.
+
+    Reads body1/body2 from this column's header and forwards with
+    ``base_offset = 0``.
+    """
+    b1 = hinge_angle_get_body1(constraints, cid)
+    b2 = hinge_angle_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    return hinge_angle_world_error_at(constraints, cid, 0, bodies, body_pair)

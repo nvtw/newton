@@ -149,6 +149,8 @@ __all__ = [
     "double_ball_socket_set_t1",
     "double_ball_socket_set_t2",
     "double_ball_socket_set_ut_ai",
+    "double_ball_socket_world_error",
+    "double_ball_socket_world_error_at",
     "double_ball_socket_world_wrench",
     "double_ball_socket_world_wrench_at",
 ]
@@ -1040,3 +1042,55 @@ def double_ball_socket_world_wrench(
     ``r1_b2`` / ``r2_b2`` from the most recent ``prepare_for_iteration``.
     """
     return double_ball_socket_world_wrench_at(constraints, cid, 0, idt)
+
+
+@wp.func
+def double_ball_socket_world_error_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+) -> wp.spatial_vector:
+    """Position-level constraint residual for a 5-DoF double ball-socket.
+
+    Matches the prepare expressions: ``e1 = p1_b2 - p1_b1`` (full
+    3-vector at anchor 1 -- constrained in all three directions) and
+    ``e2 = p2_b2 - p2_b1`` (3-vector at anchor 2 whose *tangential*
+    components -- the ``t1, t2`` projections -- are the two additional
+    constrained rows; the axial component along ``n_hat`` is free).
+    Reporting the full 3-vector at anchor 2 keeps the output uniform
+    across constraint types; the axial component of ``e2`` is a
+    diagnostic, not a constraint violation.
+
+    Output: :class:`wp.spatial_vector` with ``spatial_top`` = anchor 1
+    residual [m], ``spatial_bottom`` = anchor 2 residual [m].
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+    p1 = bodies.position[b1]
+    p2 = bodies.position[b2]
+    la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
+    la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
+    la2_b1 = read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
+    la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
+    p1_b1 = p1 + wp.quat_rotate(q1, la1_b1)
+    p1_b2 = p2 + wp.quat_rotate(q2, la1_b2)
+    p2_b1 = p1 + wp.quat_rotate(q1, la2_b1)
+    p2_b2 = p2 + wp.quat_rotate(q2, la2_b2)
+    return wp.spatial_vector(p1_b2 - p1_b1, p2_b2 - p2_b1)
+
+
+@wp.func
+def double_ball_socket_world_error(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+) -> wp.spatial_vector:
+    """Direct wrapper around :func:`double_ball_socket_world_error_at`."""
+    b1 = double_ball_socket_get_body1(constraints, cid)
+    b2 = double_ball_socket_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    return double_ball_socket_world_error_at(constraints, cid, 0, bodies, body_pair)
