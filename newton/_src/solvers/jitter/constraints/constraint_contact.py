@@ -778,17 +778,32 @@ def contact_prepare_for_iteration_at(
         # ---- Tangential drift for static friction ----
         # Drift of body 2's contact anchor away from body 1's anchor,
         # projected onto the stored tangent frame, clamped to the
-        # stiction slop. The clamp keeps a kinetically sliding body
-        # (whose drift is unbounded) from generating an unbounded
-        # position-restoring impulse -- within the Coulomb clamp the
-        # friction cone stays in charge. Within the stiction zone
-        # the bias is proportional to drift, giving position-level
-        # stabilisation so resting bodies don't creep.
+        # stiction slop.
         p_diff = p2_world - p1_world
         drift_t1 = wp.clamp(wp.dot(p_diff, t1_dir), -friction_slop, friction_slop)
         drift_t2 = wp.clamp(wp.dot(p_diff, t2_dir), -friction_slop, friction_slop)
-        bias_t1_val = friction_bias_factor * drift_t1 * idt
-        bias_t2_val = friction_bias_factor * drift_t2 * idt
+
+        # Load-scaled static friction: contacts under heavier normal
+        # load get a stronger anchor pull. Physically motivated --
+        # static friction scales linearly with normal force; the
+        # bottom of a tall stack has much more normal load than the
+        # top and should hold its anchor that much tighter. We read
+        # the warm-started ``lam_n`` (previous substep's converged
+        # impulse) as a proxy for the pair's normal load;
+        # ``lam_n_ref`` = eff_n normalises so a "typical" contact
+        # gets scale 1.0 and heavier contacts get proportionally more.
+        #
+        # The ``1.0 + ...`` floor means every contact gets at least
+        # the baseline bias even if it just formed (``lam_n == 0``,
+        # no warm-start available); ``min(boost, 4.0)`` caps runaway
+        # when the warm-start impulse is spuriously large.
+        lam_n_ws = cc_get_normal_lambda(cc, slot, cid)
+        lam_n_ref = wp.float32(1.0) / wp.max(eff_n * idt, wp.float32(1.0e-6))
+        load_boost = wp.min(
+            wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0)
+        )
+        bias_t1_val = friction_bias_factor * drift_t1 * idt * load_boost
+        bias_t2_val = friction_bias_factor * drift_t2 * idt * load_boost
 
         _slot_set_r1(constraints, cid, base, r1)
         _slot_set_r2(constraints, cid, base, r2)
@@ -950,6 +965,22 @@ def contact_iterate_at(
         fric_limit = mu * lam_n_new
 
         # ---- Tangent rows: solve from pre-normal vel_rel ----
+        # We trust the Coulomb clamp to do the static/dynamic regime
+        # switch implicitly: when the body is stationary the position
+        # bias dominates ``jv_t + bias`` and drives the anchor back;
+        # once the body slides fast enough that ``|jv_t + bias|``
+        # would exceed the cone, the clamp naturally caps the impulse
+        # and the residual (kinetic friction) is the cone's surface.
+        #
+        # An explicit mode switch (only apply bias when not clamped,
+        # velocity-only when clamped) was tried and regressed tall
+        # stacks severely -- once the bottom cubes saturate their
+        # cone, dropping the bias entirely loses the position-level
+        # pull direction and lateral drift accumulates unbounded.
+        # Reducing the bias on kinetic-regime iterations helps some
+        # stacks but the tuning sweet spot is harder to find than
+        # the always-on bias with a small gain (0.03), so we keep
+        # the simpler formulation.
         d_lam_t1 = -eff_t1 * (jv_t1 + bias_t1_val)
         lam_t1_old = cc_get_tangent1_lambda(cc, slot, cid)
         lam_t1_new = wp.clamp(lam_t1_old + d_lam_t1, -fric_limit, fric_limit)
