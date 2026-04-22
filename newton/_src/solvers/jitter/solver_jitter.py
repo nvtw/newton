@@ -103,6 +103,46 @@ def _sync_num_active_constraints_kernel(
     num_active_constraints[0] = joint_constraint_count + num_contact_columns[0]
 
 
+def _build_gravity_array(
+    gravity, num_worlds: int, device
+) -> wp.array[wp.vec3f]:
+    """Turn the user's ``gravity`` argument into a length-``num_worlds``
+    ``wp.array[wp.vec3f]``.
+
+    Accepts a single 3-tuple (broadcast to every world -- the common
+    identical-env rollout case) or an iterable of ``num_worlds``
+    3-tuples (one per world). Rejects mismatched lengths with a
+    :class:`ValueError`. Kept at module scope so the :class:`World`
+    constructor stays readable and the coercion can be reused if a
+    future entry point wants to rebind gravity at runtime.
+    """
+    g_list = list(gravity) if hasattr(gravity, "__iter__") else None
+    if (
+        g_list is not None
+        and len(g_list) == 3
+        and not hasattr(g_list[0], "__iter__")
+    ):
+        vec = (float(g_list[0]), float(g_list[1]), float(g_list[2]))
+        data = [vec] * num_worlds
+    else:
+        if g_list is None:
+            raise ValueError("gravity must be a tuple or an iterable of tuples")
+        if len(g_list) != num_worlds:
+            raise ValueError(
+                f"gravity length {len(g_list)} != num_worlds {num_worlds}"
+            )
+        data = []
+        for row in g_list:
+            r = tuple(row)
+            if len(r) != 3:
+                raise ValueError(
+                    f"per-world gravity entry must be 3 components; got {len(r)}"
+                )
+            data.append((float(r[0]), float(r[1]), float(r[2])))
+    arr_np = np.asarray(data, dtype=np.float32)
+    return wp.array(arr_np, dtype=wp.vec3f, device=device)
+
+
 class World:
     """Warp port of Jitter2's ``World`` driver.
 
@@ -127,7 +167,8 @@ class World:
         substeps: int = 1,
         solver_iterations: int = 8,
         velocity_relaxations: int = 1,
-        gravity: tuple[float, float, float] = (0.0, -9.81, 0.0),
+        gravity: tuple[float, float, float]
+        | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         max_contact_columns: int = 0,
         rigid_contact_max: int = 0,
         num_shapes: int = 0,
@@ -135,6 +176,7 @@ class World:
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         enable_all_constraints: bool = False,
+        num_worlds: int = 1,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built containers.
@@ -151,7 +193,10 @@ class World:
                 substep (``use_bias=False`` PGS sweeps that shed the
                 positional drift velocity without re-introducing it).
                 Default ``1`` matches Box2D v3.
-            gravity: World gravity [m/s^2].
+            gravity: World gravity [m/s^2]. A single 3-tuple applies
+                to every world (the common single-world and identical-
+                world cases); pass an iterable of 3-tuples -- one per
+                world -- to give each world its own gravity vector.
             max_contact_columns: Hard cap on
                 :data:`CONSTRAINT_TYPE_CONTACT` columns per step. Sizes
                 the trailing cid range, persistent
@@ -197,7 +242,14 @@ class World:
         self.substeps = int(substeps)
         self.solver_iterations = int(solver_iterations)
         self.velocity_relaxations = int(velocity_relaxations)
-        self.gravity = wp.vec3f(float(gravity[0]), float(gravity[1]), float(gravity[2]))
+        self.num_worlds: int = int(num_worlds)
+        if self.num_worlds <= 0:
+            raise ValueError(
+                f"num_worlds must be >= 1 (got {self.num_worlds})"
+            )
+        self.gravity: wp.array[wp.vec3f] = _build_gravity_array(
+            gravity, self.num_worlds, self.device
+        )
         self.default_friction = float(default_friction)
 
         # ----- Dispatcher selection ------------------------------------

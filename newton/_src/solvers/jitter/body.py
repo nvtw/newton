@@ -88,6 +88,12 @@ class RigidBodyData:
         * ``angular_damping``        per-body multiplier applied in _update_bodies
         * ``affected_by_gravity``    0/1; gated in _update_bodies
         * ``motion_type``            see ``MOTION_*`` constants
+
+    Multi-world:
+        * ``world_id``               per-body world index (0 for
+          single-world scenes). Used by :func:`_update_bodies_kernel`
+          to pick the per-world gravity vector and (later) by the
+          constraint dispatcher to pick the per-world CSR slice.
     """
 
     position: wp.vec3f
@@ -111,6 +117,7 @@ class RigidBodyData:
 
     affected_by_gravity: wp.int32
     motion_type: wp.int32
+    world_id: wp.int32
 
 
 @wp.struct
@@ -147,6 +154,7 @@ class BodyContainer:
 
     affected_by_gravity: wp.array[wp.int32]
     motion_type: wp.array[wp.int32]
+    world_id: wp.array[wp.int32]
 
 
 @wp.func
@@ -173,6 +181,7 @@ def body_container_get(c: BodyContainer, i: wp.int32) -> RigidBodyData:
     b.angular_damping = c.angular_damping[i]
     b.affected_by_gravity = c.affected_by_gravity[i]
     b.motion_type = c.motion_type[i]
+    b.world_id = c.world_id[i]
     return b
 
 
@@ -200,6 +209,7 @@ def body_container_set(c: BodyContainer, i: wp.int32, b: RigidBodyData):
     c.angular_damping[i] = b.angular_damping
     c.affected_by_gravity[i] = b.affected_by_gravity
     c.motion_type[i] = b.motion_type
+    c.world_id[i] = b.world_id
 
 
 def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyContainer:
@@ -235,4 +245,8 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.angular_damping = wp.full(num_bodies, value=1.0, dtype=wp.float32, device=device)
     c.affected_by_gravity = wp.full(num_bodies, value=1, dtype=wp.int32, device=device)
     c.motion_type = wp.full(num_bodies, value=int(MOTION_STATIC), dtype=wp.int32, device=device)
+    # world_id defaults to 0 -- single-world scenes leave this
+    # untouched and the multi-world dispatcher collapses to the same
+    # single-block behaviour as before the refactor.
+    c.world_id = wp.zeros(num_bodies, dtype=wp.int32, device=device)
     return c

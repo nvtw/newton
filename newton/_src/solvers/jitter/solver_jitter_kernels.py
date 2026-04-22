@@ -804,7 +804,7 @@ def _rotation_quaternion(omega: wp.vec3f, dt: wp.float32) -> wp.quatf:
 @wp.kernel(enable_backward=False)
 def _update_bodies_kernel(
     bodies: BodyContainer,
-    gravity: wp.vec3f,
+    gravity: wp.array[wp.vec3f],
     substep_dt: wp.float32,
 ):
     """Mirrors Jitter2's ``RigidBody.Update`` (called once per *step*).
@@ -824,6 +824,12 @@ def _update_bodies_kernel(
 
     Static bodies are skipped (their inertia / mass are already zero by
     construction).
+
+    Multi-world: ``gravity`` is indexed by the body's ``world_id`` so
+    each world can run its own gravity vector (e.g. a weightless
+    env next to one at earth-g). Single-world scenes pass a length-1
+    array with all ``world_id == 0`` and recover the scalar-gravity
+    behaviour at zero cost.
     """
     i = wp.tid()
     if bodies.motion_type[i] != MOTION_DYNAMIC:
@@ -842,7 +848,7 @@ def _update_bodies_kernel(
     dv = f * (inv_mass * substep_dt)
     dw = (inv_inertia_world * t) * substep_dt
     if bodies.affected_by_gravity[i] != 0:
-        dv = dv + gravity * substep_dt
+        dv = dv + gravity[bodies.world_id[i]] * substep_dt
     bodies.delta_velocity[i] = dv
     bodies.delta_angular_velocity[i] = dw
 

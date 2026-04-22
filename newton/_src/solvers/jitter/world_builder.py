@@ -2264,6 +2264,10 @@ class WorldBuilder:
         c.angular_damping = wp.array(angular_damping, dtype=wp.float32, device=device)
         c.affected_by_gravity = wp.array(affected_by_gravity, dtype=wp.int32, device=device)
         c.motion_type = wp.array(motion_type, dtype=wp.int32, device=device)
+        # Single-world scenes: every body is in world 0. Multi-world
+        # callers override this array after finalize() (stage 4 wires
+        # per-body world assignment through the builder).
+        c.world_id = wp.zeros(n, dtype=wp.int32, device=device)
         return c
 
     def _build_constraint_container(
