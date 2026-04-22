@@ -11,9 +11,33 @@ from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sample_sdf_heightfield
 from .contact_reduction_global import GlobalContactReducerData, export_and_reduce_contact_centered
 
-# Stack capacity for the cooperative edge selection buffer.
-# Must be >= block_dim so that one full batch always fits.
-STACK_CAPACITY = 256
+# Launch-side block size for the mesh-SDF narrow-phase kernels. Must match
+# the ``block_dim`` used in ``wp.launch_tiled`` for
+# ``mesh_sdf_collision_kernel`` and ``mesh_sdf_collision_global_reduce_kernel``.
+MESH_SDF_BLOCK_DIM = 256
+
+# Capacity of the cooperative edge-selection tile stack. Sized to
+# ``2 * MESH_SDF_BLOCK_DIM`` so that after an iteration leaves the stack
+# with up to ``MESH_SDF_BLOCK_DIM`` accepted edges, the next cooperative
+# push from ``MESH_SDF_BLOCK_DIM`` threads can always fit without overflow
+# — the stack can never overrun regardless of how many edges pass the
+# culling test.
+STACK_CAPACITY = 2 * MESH_SDF_BLOCK_DIM
+
+
+@wp.struct
+class EdgeCullResult:
+    """Packed result from the mesh-SDF midphase edge-culling pass.
+
+    Stores the edge index together with the midpoint SDF value computed
+    during culling, so a single cooperative stack can carry both values
+    atomically. Splitting them across two separate stacks would break
+    the pairing because ``wp.tile_stack_pop`` races for slots
+    independently on each stack.
+    """
+
+    edge_idx: int
+    midpoint_sdf: float
 
 
 @wp.func
@@ -523,108 +547,8 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         enable_heightfields: When False, all heightfield code paths are compiled out.
 
     Returns:
-        Tuple of ``(find_interesting_edges, do_edge_sdf_collision)``.
+        The ``do_edge_sdf_collision`` function.
     """
-
-    @wp.func
-    def find_interesting_edges_func(
-        thread_id: int,
-        mesh_scale: wp.vec3,
-        mesh_to_sdf_transform: wp.transform,
-        mesh_id: wp.uint64,
-        mesh_edge_indices: wp.array[wp.vec2i],
-        edge_range: wp.vec2i,
-        texture_sdf: TextureSDFData,
-        sdf_mesh_id: wp.uint64,
-        edge_stack: Any,
-        sdf_stack: Any,
-        progress: Any,
-        contact_distance: float,
-        use_bvh_for_sdf: bool,
-        inv_sdf_scale: wp.vec3,
-        edge_end: int,
-        edge_shape_type: int,
-        sdf_shape_type: int,
-        hfd_edge: HeightfieldData,
-        hfd_sdf: HeightfieldData,
-        elevation_data: wp.array[wp.float32],
-    ):
-        """Midphase edge culling for mesh-SDF collision.
-
-        Cooperatively fills ``edge_stack`` with edge indices whose bounding
-        sphere is close enough to the SDF to potentially generate contacts,
-        caching the midpoint SDF value in ``sdf_stack`` so that Brent's
-        method can skip its initial evaluation.  ``progress`` (a 1-element
-        shared tile) tracks the next edge index to process so that separate
-        batches resume where the previous one left off.
-
-        Stops once either the stack is full (``wp.tile_stack_count(edge_stack)
-        >= wp.block_dim()``) or all edges in ``[0, edge_end)`` have been
-        considered.  On overflow the progress counter is rewound to the
-        smallest dropped edge index so the next call re-examines it.
-        """
-        if wp.static(enable_heightfields):
-            sdf_is_heightfield = sdf_shape_type == GeoType.HFIELD
-        else:
-            sdf_is_heightfield = False
-
-        sdf_aabb_lower = texture_sdf.sdf_box_lower
-        sdf_aabb_upper = texture_sdf.sdf_box_upper
-
-        capacity = wp.block_dim()
-
-        while wp.tile_extract(progress, 0) < edge_end and wp.tile_stack_count(edge_stack) < capacity:
-            base_edge_idx = wp.tile_extract(progress, 0)
-            edge_idx = base_edge_idx + thread_id
-            add_edge = False
-            midpoint_sdf = float(0.0)
-
-            if edge_idx < edge_end:
-                if wp.static(enable_heightfields):
-                    if edge_shape_type == GeoType.HFIELD:
-                        v0_scaled, v1_scaled = get_edge_from_heightfield(
-                            hfd_edge, elevation_data, mesh_scale, mesh_to_sdf_transform, edge_idx
-                        )
-                    else:
-                        v0_scaled, v1_scaled = get_edge_from_mesh(
-                            mesh_id, mesh_edge_indices, edge_range, mesh_scale, mesh_to_sdf_transform, edge_idx
-                        )
-                else:
-                    v0_scaled, v1_scaled = get_edge_from_mesh(
-                        mesh_id, mesh_edge_indices, edge_range, mesh_scale, mesh_to_sdf_transform, edge_idx
-                    )
-                v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
-                v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
-                bsphere_center, bsphere_radius = get_edge_bounding_sphere(v0_cull, v1_cull)
-
-                threshold = bsphere_radius + contact_distance
-
-                if sdf_is_heightfield:
-                    midpoint_sdf = sample_sdf_heightfield(hfd_sdf, elevation_data, bsphere_center)
-                    add_edge = midpoint_sdf <= threshold
-                elif use_bvh_for_sdf:
-                    midpoint_sdf = sample_sdf_using_mesh(sdf_mesh_id, bsphere_center, 1.01 * threshold)
-                    add_edge = midpoint_sdf <= threshold
-                else:
-                    culling_radius = threshold
-                    clamped = wp.min(wp.max(bsphere_center, sdf_aabb_lower), sdf_aabb_upper)
-                    aabb_dist_sq = wp.length_sq(bsphere_center - clamped)
-                    if aabb_dist_sq > culling_radius * culling_radius:
-                        add_edge = False
-                    else:
-                        midpoint_sdf = texture_sample_sdf(texture_sdf, bsphere_center)
-                        add_edge = midpoint_sdf <= culling_radius
-
-            idx = wp.tile_stack_push(edge_stack, edge_idx, add_edge)
-            wp.tile_stack_push(sdf_stack, midpoint_sdf, add_edge)
-            old_progress = wp.tile_extract(progress, 0)
-            wp.tile_scatter_masked(progress, 0, old_progress + capacity, thread_id == 0)
-
-            overflowed = add_edge and idx == -1
-            rewind_val = wp.where(overflowed, edge_idx, 2147483647)
-            min_rewind = wp.tile_extract(wp.tile_min(wp.tile(rewind_val)), 0)
-            if min_rewind < 2147483647:
-                wp.tile_scatter_masked(progress, 0, min_rewind, thread_id == 0)
 
     @wp.func
     def _sample_sdf_at_t(
@@ -809,7 +733,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
 
         return best_f, p
 
-    return find_interesting_edges_func, do_edge_sdf_collision_func
+    return do_edge_sdf_collision_func
 
 
 @wp.kernel(enable_backward=False)
@@ -946,7 +870,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     enable_heightfields: bool = True,
     reduce_contacts: bool = False,
 ):
-    find_interesting_edges, do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields)
+    do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields)
 
     # Derive a stable module name from the factory arguments so that
     # identical configurations share the compiled CUDA kernel.  This is
@@ -983,8 +907,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
         pair_count = wp.min(shape_pairs_mesh_mesh_count[0], shape_pairs_mesh_mesh.shape[0])
 
-        edge_stack = wp.tile_stack(capacity=STACK_CAPACITY, dtype=int)
-        sdf_stack = wp.tile_stack(capacity=STACK_CAPACITY, dtype=float)
+        edge_stack = wp.tile_stack(capacity=STACK_CAPACITY, dtype=EdgeCullResult)
         progress = wp.tile_zeros(shape=1, dtype=int, storage="shared")
 
         # Strided loop over pairs
@@ -1080,32 +1003,79 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 wp.tile_scatter_masked(progress, 0, 0, t == 0)
 
-                while wp.tile_extract(progress, 0) < num_edges:
-                    find_interesting_edges(
-                        t,
-                        mesh_scale_tri,
-                        X_mesh_to_sdf,
-                        mesh_id_tri,
-                        mesh_edge_indices,
-                        edge_range_tri,
-                        texture_sdf,
-                        mesh_id_sdf,
-                        edge_stack,
-                        sdf_stack,
-                        progress,
-                        contact_threshold_unscaled,
-                        use_bvh_for_sdf,
-                        inv_sdf_scale,
-                        num_edges,
-                        tri_type,
-                        sdf_type,
-                        hfd_tri,
-                        hfd_sdf,
-                        heightfield_elevations,
-                    )
+                if wp.static(enable_heightfields):
+                    sdf_is_heightfield = sdf_type == GeoType.HFIELD
+                else:
+                    sdf_is_heightfield = False
+                sdf_aabb_lower = texture_sdf.sdf_box_lower
+                sdf_aabb_upper = texture_sdf.sdf_box_upper
 
-                    my_edge_idx, edge_slot = wp.tile_stack_pop(edge_stack)
-                    cached_sdf_val, _sdf_slot = wp.tile_stack_pop(sdf_stack)
+                while wp.tile_extract(progress, 0) < num_edges:
+                    # -- begin: find interesting edges (inlined) --
+                    capacity = wp.block_dim()
+                    while wp.tile_extract(progress, 0) < num_edges and wp.tile_stack_count(edge_stack) < capacity:
+                        base_edge_idx = wp.tile_extract(progress, 0)
+                        edge_idx = base_edge_idx + t
+                        add_edge = False
+                        midpoint_sdf = float(0.0)
+
+                        if edge_idx < num_edges:
+                            if wp.static(enable_heightfields):
+                                if tri_type == GeoType.HFIELD:
+                                    v0_scaled, v1_scaled = get_edge_from_heightfield(
+                                        hfd_tri, heightfield_elevations, mesh_scale_tri, X_mesh_to_sdf, edge_idx
+                                    )
+                                else:
+                                    v0_scaled, v1_scaled = get_edge_from_mesh(
+                                        mesh_id_tri,
+                                        mesh_edge_indices,
+                                        edge_range_tri,
+                                        mesh_scale_tri,
+                                        X_mesh_to_sdf,
+                                        edge_idx,
+                                    )
+                            else:
+                                v0_scaled, v1_scaled = get_edge_from_mesh(
+                                    mesh_id_tri,
+                                    mesh_edge_indices,
+                                    edge_range_tri,
+                                    mesh_scale_tri,
+                                    X_mesh_to_sdf,
+                                    edge_idx,
+                                )
+                            v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
+                            v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
+                            bsphere_center, bsphere_radius = get_edge_bounding_sphere(v0_cull, v1_cull)
+
+                            threshold = bsphere_radius + contact_threshold_unscaled
+
+                            if sdf_is_heightfield:
+                                midpoint_sdf = sample_sdf_heightfield(hfd_sdf, heightfield_elevations, bsphere_center)
+                                add_edge = midpoint_sdf <= threshold
+                            elif use_bvh_for_sdf:
+                                midpoint_sdf = sample_sdf_using_mesh(mesh_id_sdf, bsphere_center, 1.01 * threshold)
+                                add_edge = midpoint_sdf <= threshold
+                            else:
+                                culling_radius = threshold
+                                clamped = wp.min(wp.max(bsphere_center, sdf_aabb_lower), sdf_aabb_upper)
+                                aabb_dist_sq = wp.length_sq(bsphere_center - clamped)
+                                if aabb_dist_sq > culling_radius * culling_radius:
+                                    add_edge = False
+                                else:
+                                    midpoint_sdf = texture_sample_sdf(texture_sdf, bsphere_center)
+                                    add_edge = midpoint_sdf <= culling_radius
+
+                        cull_result = EdgeCullResult()
+                        cull_result.edge_idx = edge_idx
+                        cull_result.midpoint_sdf = midpoint_sdf
+                        wp.tile_stack_push(edge_stack, cull_result, add_edge)
+                        old_progress = wp.tile_extract(progress, 0)
+                        wp.tile_scatter_masked(progress, 0, old_progress + capacity, t == 0)
+                    # -- end: find interesting edges --
+
+                    popped, edge_slot = wp.tile_stack_pop(edge_stack)
+                    my_edge_idx = popped.edge_idx
+                    cached_sdf_val = popped.midpoint_sdf
                     has_edge = edge_slot >= 0
 
                     if has_edge:
@@ -1209,7 +1179,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             writer_func(contact_data, writer_data, -1)
 
                     wp.tile_stack_clear(edge_stack)
-                    wp.tile_stack_clear(sdf_stack)
 
     # Return early if contact reduction is disabled
     if not reduce_contacts:
@@ -1257,8 +1226,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         pair_count = wp.min(shape_pairs_mesh_mesh_count[0], shape_pairs_mesh_mesh.shape[0])
         total_combos = block_offsets[pair_count]
 
-        edge_stack = wp.tile_stack(capacity=STACK_CAPACITY, dtype=int)
-        sdf_stack = wp.tile_stack(capacity=STACK_CAPACITY, dtype=float)
+        edge_stack = wp.tile_stack(capacity=STACK_CAPACITY, dtype=EdgeCullResult)
         progress = wp.tile_zeros(shape=1, dtype=int, storage="shared")
 
         for combo_idx in range(block_id, total_combos, total_num_blocks):
@@ -1369,32 +1337,79 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 wp.tile_scatter_masked(progress, 0, edge_start, t == 0)
 
-                while wp.tile_extract(progress, 0) < edge_end:
-                    find_interesting_edges(
-                        t,
-                        mesh_scale_tri,
-                        X_mesh_to_sdf,
-                        mesh_id_tri,
-                        mesh_edge_indices,
-                        edge_range_tri,
-                        texture_sdf,
-                        mesh_id_sdf,
-                        edge_stack,
-                        sdf_stack,
-                        progress,
-                        contact_threshold_unscaled,
-                        use_bvh_for_sdf,
-                        inv_sdf_scale,
-                        edge_end,
-                        tri_type,
-                        sdf_type,
-                        hfd_tri,
-                        hfd_sdf,
-                        heightfield_elevations,
-                    )
+                if wp.static(enable_heightfields):
+                    sdf_is_heightfield = sdf_type == GeoType.HFIELD
+                else:
+                    sdf_is_heightfield = False
+                sdf_aabb_lower = texture_sdf.sdf_box_lower
+                sdf_aabb_upper = texture_sdf.sdf_box_upper
 
-                    my_edge_idx, edge_slot = wp.tile_stack_pop(edge_stack)
-                    cached_sdf_val, _sdf_slot = wp.tile_stack_pop(sdf_stack)
+                while wp.tile_extract(progress, 0) < edge_end:
+                    # -- begin: find interesting edges (inlined) --
+                    capacity = wp.block_dim()
+                    while wp.tile_extract(progress, 0) < edge_end and wp.tile_stack_count(edge_stack) < capacity:
+                        base_edge_idx = wp.tile_extract(progress, 0)
+                        edge_idx = base_edge_idx + t
+                        add_edge = False
+                        midpoint_sdf = float(0.0)
+
+                        if edge_idx < edge_end:
+                            if wp.static(enable_heightfields):
+                                if tri_type == GeoType.HFIELD:
+                                    v0_scaled, v1_scaled = get_edge_from_heightfield(
+                                        hfd_tri, heightfield_elevations, mesh_scale_tri, X_mesh_to_sdf, edge_idx
+                                    )
+                                else:
+                                    v0_scaled, v1_scaled = get_edge_from_mesh(
+                                        mesh_id_tri,
+                                        mesh_edge_indices,
+                                        edge_range_tri,
+                                        mesh_scale_tri,
+                                        X_mesh_to_sdf,
+                                        edge_idx,
+                                    )
+                            else:
+                                v0_scaled, v1_scaled = get_edge_from_mesh(
+                                    mesh_id_tri,
+                                    mesh_edge_indices,
+                                    edge_range_tri,
+                                    mesh_scale_tri,
+                                    X_mesh_to_sdf,
+                                    edge_idx,
+                                )
+                            v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
+                            v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
+                            bsphere_center, bsphere_radius = get_edge_bounding_sphere(v0_cull, v1_cull)
+
+                            threshold = bsphere_radius + contact_threshold_unscaled
+
+                            if sdf_is_heightfield:
+                                midpoint_sdf = sample_sdf_heightfield(hfd_sdf, heightfield_elevations, bsphere_center)
+                                add_edge = midpoint_sdf <= threshold
+                            elif use_bvh_for_sdf:
+                                midpoint_sdf = sample_sdf_using_mesh(mesh_id_sdf, bsphere_center, 1.01 * threshold)
+                                add_edge = midpoint_sdf <= threshold
+                            else:
+                                culling_radius = threshold
+                                clamped = wp.min(wp.max(bsphere_center, sdf_aabb_lower), sdf_aabb_upper)
+                                aabb_dist_sq = wp.length_sq(bsphere_center - clamped)
+                                if aabb_dist_sq > culling_radius * culling_radius:
+                                    add_edge = False
+                                else:
+                                    midpoint_sdf = texture_sample_sdf(texture_sdf, bsphere_center)
+                                    add_edge = midpoint_sdf <= culling_radius
+
+                        cull_result = EdgeCullResult()
+                        cull_result.edge_idx = edge_idx
+                        cull_result.midpoint_sdf = midpoint_sdf
+                        wp.tile_stack_push(edge_stack, cull_result, add_edge)
+                        old_progress = wp.tile_extract(progress, 0)
+                        wp.tile_scatter_masked(progress, 0, old_progress + capacity, t == 0)
+                    # -- end: find interesting edges --
+
+                    popped, edge_slot = wp.tile_stack_pop(edge_stack)
+                    my_edge_idx = popped.edge_idx
+                    cached_sdf_val = popped.midpoint_sdf
                     has_edge = edge_slot >= 0
 
                     if has_edge:
@@ -1498,6 +1513,5 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             )
 
                     wp.tile_stack_clear(edge_stack)
-                    wp.tile_stack_clear(sdf_stack)
 
     return mesh_sdf_collision_global_reduce_kernel

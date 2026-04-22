@@ -42,6 +42,7 @@ from ..geometry.contact_reduction_global import (
 from ..geometry.contact_sort import ContactSorter
 from ..geometry.flags import ShapeFlags
 from ..geometry.sdf_contact import (
+    MESH_SDF_BLOCK_DIM,
     compute_block_counts_from_weights,
     compute_mesh_mesh_block_offsets_scan,
     create_narrow_phase_process_mesh_mesh_contacts_kernel,
@@ -1510,7 +1511,9 @@ class NarrowPhase:
             writer_func = contact_writer_warp_func
 
         self.tile_size_mesh_convex = 128
-        self.tile_size_mesh_mesh = 256
+        # Must match the tile stack capacity in sdf_contact.py, re-use
+        # the single source of truth so the two can't drift.
+        self.tile_size_mesh_mesh = MESH_SDF_BLOCK_DIM
         self.tile_size_mesh_plane = 512
         self.block_dim = 128
 
