@@ -61,6 +61,7 @@ from newton._src.solvers.jitter.constraints.contact_container import (
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_set_local_p0,
     cc_set_local_p1,
     cc_set_normal_lambda,
     cc_set_tangent1_lambda,
@@ -699,7 +700,7 @@ def contact_prepare_for_iteration_at(
     # Tightening ``friction_slop`` to 0.0001 regresses (pulls the
     # bias into the clamp region too aggressively); 0.001 is the
     # empirical sweet spot.
-    friction_bias_factor = wp.float32(0.03)
+    friction_bias_factor = wp.float32(0.08)
     friction_slop = wp.float32(0.001)
 
     # Accumulated warm-start impulse we'll apply to the bodies after
@@ -804,11 +805,47 @@ def contact_prepare_for_iteration_at(
 
         # ---- Tangential drift for static friction ----
         # Drift of body 2's contact anchor away from body 1's anchor,
-        # projected onto the stored tangent frame, clamped to the
-        # stiction slop.
+        # projected onto the stored tangent frame. Solver2d-style
+        # "sticky friction": if the drift has grown past the slip
+        # threshold the bodies have physically slid past the static
+        # regime, so reset the anchor to the current midpoint (breaks
+        # the persistent friction anchor, equivalent to solver2d's
+        # ``frictionPersisted = false``). Fresh anchor -> zero drift
+        # this step, and the tangent lambdas are cleared so the
+        # tangent row starts from scratch in the kinetic regime.
         p_diff = p2_world - p1_world
-        drift_t1 = wp.clamp(wp.dot(p_diff, t1_dir), -friction_slop, friction_slop)
-        drift_t2 = wp.clamp(wp.dot(p_diff, t2_dir), -friction_slop, friction_slop)
+        drift_t1_raw = wp.dot(p_diff, t1_dir)
+        drift_t2_raw = wp.dot(p_diff, t2_dir)
+        slip_threshold = wp.float32(0.002)
+        drift_sq = drift_t1_raw * drift_t1_raw + drift_t2_raw * drift_t2_raw
+        if drift_sq > slip_threshold * slip_threshold:
+            # Solver2d-style "break sticky": the stored anchor has
+            # drifted past the static regime so reset it to the
+            # current narrow-phase contact point. Using the fresh
+            # narrow-phase anchors (not a midpoint of drifted points)
+            # puts the new anchor exactly where the bodies actually
+            # touch this frame, so drift is truly zero going into
+            # iterate. Tangent lambdas are preserved: their world-
+            # space impulse lam_t * t_dir is physically meaningful
+            # regardless of anchor position and kinetic friction needs
+            # the warm-start to reach Coulomb saturation within
+            # iteration budget.
+            fresh_lp0 = contacts.rigid_contact_point0[k]
+            fresh_lp1 = contacts.rigid_contact_point1[k]
+            cc_set_local_p0(cc, slot, cid, fresh_lp0)
+            cc_set_local_p1(cc, slot, cid, fresh_lp1)
+            p1_world = position1 + wp.quat_rotate(orientation1, fresh_lp0)
+            p2_world = position2 + wp.quat_rotate(orientation2, fresh_lp1)
+            r1 = p1_world - position1
+            r2 = p2_world - position2
+            eff_n = _effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+            eff_t1 = _effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+            eff_t2 = _effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+            p_diff = p2_world - p1_world
+            drift_t1_raw = wp.dot(p_diff, t1_dir)
+            drift_t2_raw = wp.dot(p_diff, t2_dir)
+        drift_t1 = wp.clamp(drift_t1_raw, -friction_slop, friction_slop)
+        drift_t2 = wp.clamp(drift_t2_raw, -friction_slop, friction_slop)
         bias_t1_val = friction_bias_factor * drift_t1 * idt * load_boost
         bias_t2_val = friction_bias_factor * drift_t2 * idt * load_boost
 
