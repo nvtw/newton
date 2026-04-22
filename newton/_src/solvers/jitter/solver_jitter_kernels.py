@@ -531,8 +531,8 @@ def _find_color_of_position(
 
 @wp.kernel(enable_backward=False)
 def _world_csr_count_kernel(
-    constraints: ConstraintContainer,
     bodies: BodyContainer,
+    elements: wp.array[ElementInteractionData],
     element_ids_by_color: wp.array[wp.int32],
     color_starts: wp.array[wp.int32],
     num_colors_arr: wp.array[wp.int32],
@@ -543,10 +543,14 @@ def _world_csr_count_kernel(
 
     Launch dim = partitioner capacity. Each thread ``tid`` maps to
     position ``tid`` in the global ``element_ids_by_color`` buffer;
-    a binary search locates its colour, and the constraint's body 1
-    (which must be a dynamic body whenever the constraint is active
-    -- the ``_constraints_to_elements_kernel`` enforces this by
-    surfacing only non-static bodies) provides the world id.
+    a binary search locates its colour, and the constraint's primary
+    element body (slot 0 of the ``ElementInteractionData`` vec8i,
+    which ``_constraints_to_elements_kernel`` already compacts to
+    the dynamic body when one of the pair is static) provides the
+    world id. Reading the compacted body means worlds that share a
+    common static body (e.g. a single-process ``world_body``) still
+    route their contacts to the *dynamic* body's world rather than
+    to the static body's world id.
     """
     tid = wp.tid()
     n_colors = num_colors_arr[0]
@@ -557,13 +561,10 @@ def _world_csr_count_kernel(
         return
     c = _find_color_of_position(color_starts, n_colors, tid)
     cid = element_ids_by_color[tid]
-    b1 = constraint_get_body1(constraints, cid)
-    if b1 < 0:
-        # Purely-static constraint. Shouldn't reach the coloring
-        # (``_constraints_to_elements_kernel`` drops those), but
-        # belt-and-braces skip just in case.
+    b_primary = elements[cid].bodies[0]
+    if b_primary < 0:
         return
-    w = bodies.world_id[b1]
+    w = bodies.world_id[b_primary]
     wp.atomic_add(world_color_counts, w, c, wp.int32(1))
 
 
@@ -622,8 +623,8 @@ def _world_csr_prefix_offsets_kernel(
 
 @wp.kernel(enable_backward=False)
 def _world_csr_scatter_kernel(
-    constraints: ConstraintContainer,
     bodies: BodyContainer,
+    elements: wp.array[ElementInteractionData],
     element_ids_by_color: wp.array[wp.int32],
     color_starts: wp.array[wp.int32],
     num_colors_arr: wp.array[wp.int32],
@@ -643,7 +644,9 @@ def _world_csr_scatter_kernel(
     world_color_starts[w, c] + local_slot]``. Within-colour ordering
     is non-deterministic but that doesn't affect PGS convergence
     (the partitioner already guarantees no two elements in the same
-    colour share a body).
+    colour share a body). See :func:`_world_csr_count_kernel` for
+    why the primary body comes from ``elements[cid].bodies[0]``
+    rather than the constraint container header.
     """
     tid = wp.tid()
     n_colors = num_colors_arr[0]
@@ -654,10 +657,10 @@ def _world_csr_scatter_kernel(
         return
     c = _find_color_of_position(color_starts, n_colors, tid)
     cid = element_ids_by_color[tid]
-    b1 = constraint_get_body1(constraints, cid)
-    if b1 < 0:
+    b_primary = elements[cid].bodies[0]
+    if b_primary < 0:
         return
-    w = bodies.world_id[b1]
+    w = bodies.world_id[b_primary]
     local_slot = wp.atomic_add(world_color_cursor, w, c, wp.int32(1))
     dst = world_csr_offsets[w] + world_color_starts[w, c] + local_slot
     world_element_ids_by_color[dst] = cid

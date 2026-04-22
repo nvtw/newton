@@ -1223,8 +1223,8 @@ class World:
             _world_csr_count_kernel,
             dim=cap,
             inputs=[
-                self.constraints,
                 self.bodies,
+                self._elements,
                 self._partitioner.element_ids_by_color,
                 self._partitioner.color_starts,
                 self._partitioner.num_colors,
@@ -1258,8 +1258,8 @@ class World:
             _world_csr_scatter_kernel,
             dim=cap,
             inputs=[
-                self.constraints,
                 self.bodies,
+                self._elements,
                 self._partitioner.element_ids_by_color,
                 self._partitioner.color_starts,
                 self._partitioner.num_colors,
