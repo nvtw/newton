@@ -74,6 +74,41 @@ class Collider:
 
 
 @wp.func
+def _point_triangle_sq_dist(q: wp.vec3, e1: wp.vec3, e2: wp.vec3) -> float:
+    # Squared distance from point q to the triangle with one vertex at the origin
+    # and edges e1, e2. Equivalent to the (sq_dist) output of the former
+    # warp.fem.geometry.closest_point.project_on_tri_at_origin helper, which was
+    # removed from the public API; inlined here to avoid depending on warp._src.
+    e1e1 = wp.dot(e1, e1)
+    e1e2 = wp.dot(e1, e2)
+    e2e2 = wp.dot(e2, e2)
+
+    det = e1e1 * e2e2 - e1e2 * e1e2
+
+    if det > e1e1 * e2e2 * 1.0e-6:
+        e1p = wp.dot(e1, q)
+        e2p = wp.dot(e2, q)
+
+        s = (e2e2 * e1p - e1e2 * e2p) / det
+        t = (e1e1 * e2p - e1e2 * e1p) / det
+
+        if s >= 0.0 and t >= 0.0 and s + t <= 1.0:
+            return wp.length_sq(q - s * e1 - t * e2)
+
+    # Fall back to the minimum over the three edges.
+    s1 = wp.clamp(wp.dot(q, e1) / e1e1, 0.0, 1.0)
+    d1 = wp.length_sq(q - s1 * e1)
+    s2 = wp.clamp(wp.dot(q, e2) / e2e2, 0.0, 1.0)
+    d2 = wp.length_sq(q - s2 * e2)
+    e12 = e2 - e1
+    len_sq_12 = wp.length_sq(e12)
+    s12 = wp.clamp(wp.dot(q - e1, e12) / len_sq_12, 0.0, 1.0)
+    d12 = wp.length_sq(q - e1 - s12 * e12)
+
+    return wp.min(wp.min(d1, d2), d12)
+
+
+@wp.func
 def get_average_face_normal(
     mesh_id: wp.uint64,
     point: wp.vec3,
@@ -103,7 +138,7 @@ def get_average_face_normal(
         V1 = points[vidx[face_index * 3 + 1]]
         V2 = points[vidx[face_index * 3 + 2]]
 
-        sq_dist, _coords = fem.geometry.closest_point.project_on_tri_at_origin(point - V0, V1 - V0, V2 - V0)
+        sq_dist = _point_triangle_sq_dist(point - V0, V1 - V0, V2 - V0)
         if sq_dist < eps_sq:
             face_normal += wp.mesh_eval_face_normal(mesh_id, face_index)
 
