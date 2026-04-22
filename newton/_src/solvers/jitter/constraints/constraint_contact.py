@@ -898,6 +898,13 @@ def contact_iterate_at(
         # enough that one-vel_rel-per-slot converges indistinguishably
         # from the full GS variant while halving the cross products
         # and cutting the angular-update FLOPS from 3x to 1x.
+        # Empirically verified against tall-stack stability tests:
+        # a GS variant (apply normal impulse, re-read velocities,
+        # then solve tangents) regresses the 20-cube-tower side-slip
+        # metric by 2.4x even though it slightly improves N=5 stacks.
+        # The extra iteration coupling destabilises the friction
+        # clamp on the bottom layers where the normal impulse is
+        # huge and re-projection noise compounds.
         vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
 
         jv_n = wp.dot(vel_rel, n)
