@@ -380,5 +380,93 @@ class TestStackStability(unittest.TestCase):
         self.assertTrue(np.isfinite(m["top_drop"]))
 
 
+def _run_long_settle(num_cubes: int, n_frames: int = 1800) -> dict:
+    """Long-settle diagnostic: run a tall stack for 30 s and measure
+    the *instantaneous* lateral drift rate during the last 10 s.
+
+    This is the autoresearch target metric -- a settled stack should
+    have ~zero drift rate in steady state; any sustained drift rate
+    indicates a momentum leak in the friction solve. Returns a dict
+    with (num_cubes, final_slip_max_xy, drift_rate_mm_s, v_rms).
+    """
+    fps = 60
+    scene = _StackScene(num_cubes=num_cubes, fps=fps)
+
+    initial_positions = scene.body_positions()
+
+    # Sample position at two checkpoints in the tail of the settle
+    # window and take the difference as the drift rate estimate.
+    # Tail window = last 10 s (600 frames).
+    tail_frames = 600
+    checkpoint_start_frame = n_frames - tail_frames
+    pos_at_start = None
+
+    for frame in range(n_frames):
+        scene.step()
+        if frame == checkpoint_start_frame:
+            pos_at_start = scene.body_positions().copy()
+
+    final_positions = scene.body_positions()
+    final_velocities = scene.body_velocities()
+
+    # Drift rate: max per-cube |XY displacement over the tail window|
+    # divided by the tail duration. Reported in mm/s.
+    tail_xy_drift = np.linalg.norm(
+        (final_positions[:, :2] - pos_at_start[:, :2]), axis=1
+    )
+    drift_rate_m_s = float(np.max(tail_xy_drift)) / (tail_frames / fps)
+    drift_rate_mm_s = drift_rate_m_s * 1000.0
+
+    xy_slip = np.linalg.norm(
+        (final_positions[:, :2] - initial_positions[:, :2]), axis=1
+    )
+    horiz_speed = np.linalg.norm(final_velocities[:, :2], axis=1)
+
+    return {
+        "num_cubes": num_cubes,
+        "n_frames": n_frames,
+        "final_slip_max_xy_m": float(np.max(xy_slip)),
+        "drift_rate_mm_s": drift_rate_mm_s,
+        "v_rms_horizontal_m_s": float(np.sqrt(np.mean(horiz_speed**2))),
+    }
+
+
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Long-settle test runs on CUDA only.",
+)
+class TestStackStabilityLongSettle(unittest.TestCase):
+    """30-second settle on a 20-cube tower.
+
+    The autoresearch target: instantaneous drift rate in the last
+    10 s must approach zero for a truly rock-solid static friction
+    solve. Currently reports ~20 mm/s, target < 1 mm/s (strict
+    target < 0.1 mm/s).
+    """
+
+    N_FRAMES = 1800  # 30 s at 60 fps
+
+    @classmethod
+    def setUpClass(cls):
+        if not wp.is_cuda_available():
+            raise unittest.SkipTest("requires CUDA")
+
+    def test_stack_20_long_settle(self):
+        m = _run_long_settle(20, n_frames=self.N_FRAMES)
+        # Emit a machine-parseable line the autoresearch verify
+        # pipeline can grep for.
+        print(
+            f"[long-settle N=20] "
+            f"drift_rate_mm_s={m['drift_rate_mm_s']:.4f} "
+            f"final_slip_m={m['final_slip_max_xy_m']:.4f} "
+            f"v_rms_m_s={m['v_rms_horizontal_m_s']:.4f} "
+            f"n_frames={m['n_frames']}"
+        )
+        # Loose upper bounds -- goal is to drive these down in
+        # subsequent autoresearch iterations, not to fail immediately.
+        self.assertTrue(np.isfinite(m["drift_rate_mm_s"]))
+        self.assertTrue(np.isfinite(m["final_slip_max_xy_m"]))
+
+
 if __name__ == "__main__":
     unittest.main()
