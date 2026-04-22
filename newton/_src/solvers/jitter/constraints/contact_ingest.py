@@ -1014,6 +1014,21 @@ def ingest_contacts(
         device=device,
     )
 
+    # NOTE: the MPR/GJK/SDF narrow phase can emit duplicate
+    # manifold points within sub-mm distance of each other (~79%
+    # of contact pairs on the m20 nut-bolt SDF scene in a
+    # diagnostic scan). Duplicates double up each point's normal
+    # impulse and friction budget, distorting physics. A naive
+    # dedup pass (clear active_mask bits whose anchor points are
+    # within 0.1 mm of an earlier slot) regressed the 20-cube
+    # stack from 7 cm to 1.76 m slip even though the host-side
+    # diagnostic reported zero duplicates at that threshold for
+    # the stack scene -- root cause uncertain (likely a subtle
+    # warm-start / effective-mass interaction when a PGS-active
+    # slot gets turned off mid-column). A proper fix probably
+    # belongs in Newton's narrow phase rather than our ingest,
+    # and is deferred.
+
 
 def stamp_forward_contact_map(
     rigid_contact_max: int,
