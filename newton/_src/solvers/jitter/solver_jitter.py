@@ -58,6 +58,9 @@ from newton._src.solvers.jitter.graph_coloring.graph_coloring_common import (
 from newton._src.solvers.jitter.graph_coloring.graph_coloring_incremental import (
     IncrementalContactPartitioner,
 )
+from newton._src.solvers.jitter.graph_coloring.graph_coloring_incremental import (
+    MAX_COLORS,
+)
 from newton._src.solvers.jitter.solver_jitter_kernels import (
     _STRAGGLER_BLOCK_DIM,
     _constraint_gather_errors_kernel,
@@ -72,6 +75,10 @@ from newton._src.solvers.jitter.solver_jitter_kernels import (
     _integrate_forces_kernel,
     _integrate_velocities_kernel,
     _update_bodies_kernel,
+    _world_csr_count_kernel,
+    _world_csr_prefix_offsets_kernel,
+    _world_csr_scan_kernel,
+    _world_csr_scatter_kernel,
     pack_body_xforms_kernel,
 )
 
@@ -283,6 +290,14 @@ class World:
         #   for fast-path workloads -- one launch per sweep instead
         #   of ``num_colors``.
         self.enable_all_constraints: bool = bool(enable_all_constraints)
+        if self.enable_all_constraints and int(num_worlds) > 1:
+            raise NotImplementedError(
+                "enable_all_constraints=True (full per-colour dispatcher) "
+                "does not yet support num_worlds > 1. Use the fast-path "
+                "dispatcher (enable_all_constraints=False) for multi-world "
+                "rollouts, or open an issue if you need the full "
+                "dispatcher multi-world."
+            )
         if self.enable_all_constraints:
             self._prepare_kernel = _constraint_prepare_for_iteration_kernel
             self._iterate_kernel = _constraint_iterate_kernel
@@ -317,6 +332,38 @@ class World:
             max_num_nodes=max(1, self.num_bodies),
             device=self.device,
             use_tile_scan=True,
+        )
+
+        # ----- Per-world CSR bucketing buffers -------------------------
+        # Populated by :meth:`_build_world_csr` after the global JP
+        # pass. The fast-path dispatcher consumes these in place of the
+        # global CSR so each block can walk its own world's colours
+        # without filtering the full element list. For a single-world
+        # scene these collapse to "one bucket containing everything".
+        #
+        # ``_world_color_counts`` / ``_world_color_cursor`` are pure
+        # scratch (zeroed every build). The observed layout is
+        # ``(num_worlds, MAX_COLORS + 1)``: column ``c`` holds colour
+        # ``c``'s per-world count / write cursor.
+        cap = max(1, self._constraint_capacity)
+        nw = self.num_worlds
+        self._world_element_ids_by_color: wp.array[wp.int32] = wp.zeros(
+            cap, dtype=wp.int32, device=self.device
+        )
+        self._world_color_starts: wp.array2d[wp.int32] = wp.zeros(
+            (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
+        )
+        self._world_csr_offsets: wp.array[wp.int32] = wp.zeros(
+            nw + 1, dtype=wp.int32, device=self.device
+        )
+        self._world_num_colors: wp.array[wp.int32] = wp.zeros(
+            nw, dtype=wp.int32, device=self.device
+        )
+        self._world_color_counts: wp.array2d[wp.int32] = wp.zeros(
+            (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
+        )
+        self._world_color_cursor: wp.array2d[wp.int32] = wp.zeros(
+            (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
         )
 
         # ----- Contact infrastructure (optional) -----------------------
@@ -568,10 +615,15 @@ class World:
         # active constraint set changed through contact ingest);
         # ``build_csr`` drives JP to completion and materialises the
         # flat element_ids_by_color / color_starts / num_colors
-        # layout the sweep kernels consume.
+        # layout the sweep kernels consume. ``_build_world_csr``
+        # then buckets the global CSR into per-world slices so the
+        # multi-block dispatcher's blocks can each walk one world's
+        # colours. For a single-world scene this collapses to a
+        # memcpy plus a single-world prefix scan.
         if self._constraint_capacity > 0:
             self._partitioner.reset(self._elements, self._num_active_constraints)
             self._partitioner.build_csr()
+            self._build_world_csr()
 
         # Sub-stepping: picking, integrate forces, solve, integrate
         # velocities, relax. Picking is applied first so its spring
@@ -1138,6 +1190,87 @@ class World:
     # Coloring helpers (private)
     # ------------------------------------------------------------------
 
+    def _build_world_csr(self) -> None:
+        """Bucket the partitioner's global CSR into per-world slices.
+
+        Runs once per :meth:`step` after
+        :meth:`IncrementalContactPartitioner.build_csr`. Sequence:
+
+        1. Zero ``_world_color_counts`` (atomic increment target).
+        2. Launch :func:`_world_csr_count_kernel` at
+           ``dim = constraint_capacity``. Each element finds its body
+           1 (hence its world) via ``bodies.world_id`` and bumps
+           ``_world_color_counts[w, c]`` atomically.
+        3. Launch :func:`_world_csr_scan_kernel` at ``dim = num_worlds``.
+           Serial per-world scan of ``_world_color_counts`` into
+           ``_world_color_starts`` (exclusive prefix, with the total
+           in position ``n_colors``) and writes
+           ``_world_num_colors[w]``.
+        4. Launch :func:`_world_csr_prefix_offsets_kernel` (single
+           thread) to prefix-scan per-world totals into
+           ``_world_csr_offsets``. Cheap even at 1000+ worlds.
+        5. Zero ``_world_color_cursor`` and launch
+           :func:`_world_csr_scatter_kernel` at ``dim =
+           constraint_capacity`` to place each element into its
+           per-(world, colour) slot in ``_world_element_ids_by_color``.
+
+        All five launches are fixed-size and fully device-side, so
+        the build is graph-capture compatible end-to-end.
+        """
+        self._world_color_counts.zero_()
+        cap = self._constraint_capacity
+        wp.launch(
+            _world_csr_count_kernel,
+            dim=cap,
+            inputs=[
+                self.constraints,
+                self.bodies,
+                self._partitioner.element_ids_by_color,
+                self._partitioner.color_starts,
+                self._partitioner.num_colors,
+            ],
+            outputs=[self._world_color_counts],
+            device=self.device,
+        )
+        wp.launch(
+            _world_csr_scan_kernel,
+            dim=self.num_worlds,
+            inputs=[
+                self._world_color_counts,
+                self._partitioner.num_colors,
+            ],
+            outputs=[self._world_color_starts, self._world_num_colors],
+            device=self.device,
+        )
+        wp.launch(
+            _world_csr_prefix_offsets_kernel,
+            dim=1,
+            inputs=[
+                self._world_color_starts,
+                self._partitioner.num_colors,
+                wp.int32(self.num_worlds),
+            ],
+            outputs=[self._world_csr_offsets],
+            device=self.device,
+        )
+        self._world_color_cursor.zero_()
+        wp.launch(
+            _world_csr_scatter_kernel,
+            dim=cap,
+            inputs=[
+                self.constraints,
+                self.bodies,
+                self._partitioner.element_ids_by_color,
+                self._partitioner.color_starts,
+                self._partitioner.num_colors,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_color_cursor,
+            ],
+            outputs=[self._world_element_ids_by_color],
+            device=self.device,
+        )
+
     def _rebuild_elements(self) -> None:
         """Project every active constraint's body pair into ``_elements``.
 
@@ -1201,24 +1334,28 @@ class World:
         idt: wp.float32,
         contact_views: ContactViews | None,
     ) -> None:
-        """Launch the fast-path prepare kernel once.
+        """Launch the fast-path prepare kernel with one block per world.
 
         Prepare is once-per-substep (effective masses + warm-start
-        scatter); the kernel walks every colour internally, so a
-        single ``wp.launch`` replaces the old capture_while pattern.
+        scatter); each world's block walks its world's colours
+        internally, so a single ``wp.launch`` at
+        ``dim = num_worlds * BLOCK_DIM`` covers every world in one
+        launch. For a single-world scene this reduces to a single
+        block and matches the prior launch cost exactly.
         """
         views = contact_views if contact_views is not None else self._contact_views_placeholder
         wp.launch(
             kernel,
-            dim=_STRAGGLER_BLOCK_DIM,
+            dim=self.num_worlds * _STRAGGLER_BLOCK_DIM,
             block_dim=_STRAGGLER_BLOCK_DIM,
             inputs=[
                 self.constraints,
                 self.bodies,
                 idt,
-                self._partitioner.element_ids_by_color,
-                self._partitioner.color_starts,
-                self._partitioner.num_colors,
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
                 self._contact_container,
                 views,
             ],
@@ -1233,26 +1370,29 @@ class World:
         contact_views: ContactViews | None,
     ) -> None:
         """Launch an iterate / relax kernel that loops
-        ``num_iterations`` sweeps internally.
+        ``num_iterations`` sweeps internally, one block per world.
 
-        Replaces ``num_iterations`` separate ``wp.capture_while`` /
-        ``wp.launch`` calls with a single launch whose outer loop
-        is driven by a kernel scalar parameter. For the 40-layer
-        pyramid (20 PGS iters) this collapses 20 launches per
-        substep to 1, saving ~19 * launch_overhead per substep.
+        Replaces ``num_iterations`` separate launches with a single
+        one; the outer loop is driven by the kernel-scalar
+        ``num_iterations`` argument and the colour sweep is
+        per-world (each block owns one ``world_id``). For the
+        40-layer pyramid (20 PGS iters, single world) this keeps the
+        original "20 launches collapsed to 1" win while extending it
+        to ``num_worlds * 20 -> 1`` in multi-world rollouts.
         """
         views = contact_views if contact_views is not None else self._contact_views_placeholder
         wp.launch(
             kernel,
-            dim=_STRAGGLER_BLOCK_DIM,
+            dim=self.num_worlds * _STRAGGLER_BLOCK_DIM,
             block_dim=_STRAGGLER_BLOCK_DIM,
             inputs=[
                 self.constraints,
                 self.bodies,
                 idt,
-                self._partitioner.element_ids_by_color,
-                self._partitioner.color_starts,
-                self._partitioner.num_colors,
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
                 self._contact_container,
                 views,
                 wp.int32(num_iterations),

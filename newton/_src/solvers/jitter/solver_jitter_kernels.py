@@ -136,6 +136,10 @@ __all__ = [
     "_integrate_velocities_kernel",
     "_rotation_quaternion",
     "_update_bodies_kernel",
+    "_world_csr_count_kernel",
+    "_world_csr_prefix_offsets_kernel",
+    "_world_csr_scan_kernel",
+    "_world_csr_scatter_kernel",
     "pack_body_xforms_kernel",
 ]
 
@@ -455,37 +459,253 @@ __syncthreads();
 def _sync_threads(): ...
 
 
+# ---------------------------------------------------------------------------
+# Per-world CSR bucketing
+# ---------------------------------------------------------------------------
+#
+# The incremental partitioner produces *one* global Jones-Plassmann
+# coloring over every active constraint regardless of world. Because
+# worlds share no bodies (they're disjoint connected components), the
+# coloring is independent per world -- which is exactly the property
+# that lets us re-segment the global CSR into per-world slices in a
+# cheap post-pass instead of running JP once per world.
+#
+# The three kernels below take the global ``(element_ids_by_color,
+# color_starts, num_colors)`` output and produce::
+#
+#   world_element_ids_by_color[capacity]      (flat, bucketed by world)
+#   world_color_starts[num_worlds, MAX_COLORS + 1]
+#       (exclusive-prefix offsets per world, relative to that world's
+#        block in ``world_element_ids_by_color``)
+#   world_csr_offsets[num_worlds + 1]
+#       (exclusive-prefix offsets into ``world_element_ids_by_color``;
+#        world ``w`` owns the ``[world_csr_offsets[w],
+#        world_csr_offsets[w + 1])`` range)
+#   world_num_colors[num_worlds]
+#       (highest non-empty colour index per world -- used as the inner
+#        loop bound in the per-world dispatcher so blocks don't spin
+#        through empty trailing colours)
+#
+# Pass 1 (``_world_csr_count_kernel``): one thread per element in the
+# global CSR, binary-search its colour, bump ``world_color_counts[w, c]``
+# atomically.
+#
+# Pass 2 (``_world_csr_scan_kernel``): one thread per world, serial
+# prefix scan of ``world_color_counts[w, :]`` -> ``world_color_starts``
+# + ``world_num_colors``. Serial scan is fine because the fan-out is
+# per-colour (<= 1024 iterations per thread) and the launch is fully
+# parallel across worlds.
+#
+# Pass 3 (``_world_csr_prefix_offsets_kernel``): single-thread kernel
+# that scans the per-world totals into ``world_csr_offsets``. ``O(W)``
+# sequentially; cheap for ``W = 1e3 .. 1e4``.
+#
+# Pass 4 (``_world_csr_scatter_kernel``): one thread per element again,
+# atomic-cursor into the per-(world, colour) slot.
+
+
+@wp.func
+def _find_color_of_position(
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.int32,
+    pos: wp.int32,
+) -> wp.int32:
+    """Binary search: return ``c`` such that
+    ``color_starts[c] <= pos < color_starts[c + 1]``.
+
+    ``color_starts`` is the global CSR produced by
+    :meth:`IncrementalContactPartitioner.build_csr`. The search keeps
+    the classic invariant ``color_starts[lo] <= pos`` and runs in
+    ``O(log num_colors)``.
+    """
+    lo = wp.int32(0)
+    hi = num_colors
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if color_starts[mid] <= pos:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo - 1
+
+
+@wp.kernel(enable_backward=False)
+def _world_csr_count_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors_arr: wp.array[wp.int32],
+    # out
+    world_color_counts: wp.array2d[wp.int32],
+):
+    """Atomic count of per-(world, colour) constraint elements.
+
+    Launch dim = partitioner capacity. Each thread ``tid`` maps to
+    position ``tid`` in the global ``element_ids_by_color`` buffer;
+    a binary search locates its colour, and the constraint's body 1
+    (which must be a dynamic body whenever the constraint is active
+    -- the ``_constraints_to_elements_kernel`` enforces this by
+    surfacing only non-static bodies) provides the world id.
+    """
+    tid = wp.tid()
+    n_colors = num_colors_arr[0]
+    if n_colors == 0:
+        return
+    total_elements = color_starts[n_colors]
+    if tid >= total_elements:
+        return
+    c = _find_color_of_position(color_starts, n_colors, tid)
+    cid = element_ids_by_color[tid]
+    b1 = constraint_get_body1(constraints, cid)
+    if b1 < 0:
+        # Purely-static constraint. Shouldn't reach the coloring
+        # (``_constraints_to_elements_kernel`` drops those), but
+        # belt-and-braces skip just in case.
+        return
+    w = bodies.world_id[b1]
+    wp.atomic_add(world_color_counts, w, c, wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def _world_csr_scan_kernel(
+    world_color_counts: wp.array2d[wp.int32],
+    num_colors_arr: wp.array[wp.int32],
+    # out
+    world_color_starts: wp.array2d[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+):
+    """Serial prefix scan of ``world_color_counts`` per world.
+
+    One thread per world. Writes ``world_color_starts[w, 0 .. n_colors]``
+    (exclusive-prefix, with the total at position ``n_colors``) and
+    ``world_num_colors[w]`` (highest non-empty colour + 1, used as the
+    outer loop bound in the dispatcher so blocks short-circuit on
+    the trailing empty tail of the global colouring).
+    """
+    w = wp.tid()
+    n_colors = num_colors_arr[0]
+    acc = wp.int32(0)
+    highest = wp.int32(0)
+    for c in range(n_colors):
+        world_color_starts[w, c] = acc
+        count = world_color_counts[w, c]
+        if count > 0:
+            highest = c + 1
+        acc += count
+    world_color_starts[w, n_colors] = acc
+    world_num_colors[w] = highest
+
+
+@wp.kernel(enable_backward=False)
+def _world_csr_prefix_offsets_kernel(
+    world_color_starts: wp.array2d[wp.int32],
+    num_colors_arr: wp.array[wp.int32],
+    num_worlds: wp.int32,
+    # out
+    world_csr_offsets: wp.array[wp.int32],
+):
+    """Single-thread prefix scan of per-world totals into
+    ``world_csr_offsets`` (length ``num_worlds + 1``). Cheap because
+    the work is proportional to ``num_worlds`` (1e3 .. 1e4 adds) and
+    the surrounding kernels dwarf it."""
+    tid = wp.tid()
+    if tid != 0:
+        return
+    n_colors = num_colors_arr[0]
+    acc = wp.int32(0)
+    world_csr_offsets[0] = wp.int32(0)
+    for w in range(num_worlds):
+        acc += world_color_starts[w, n_colors]
+        world_csr_offsets[w + 1] = acc
+
+
+@wp.kernel(enable_backward=False)
+def _world_csr_scatter_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors_arr: wp.array[wp.int32],
+    world_color_starts: wp.array2d[wp.int32],
+    world_csr_offsets: wp.array[wp.int32],
+    # scratch (caller zeroes; atomic cursors -- one per (world, colour))
+    world_color_cursor: wp.array2d[wp.int32],
+    # out
+    world_element_ids_by_color: wp.array[wp.int32],
+):
+    """Write each global-CSR element into its per-world slot.
+
+    Runs after :func:`_world_csr_scan_kernel` has populated
+    ``world_color_starts``. Each thread atomically bumps
+    ``world_color_cursor[w, c]`` to get a unique within-colour index,
+    then writes to ``world_element_ids_by_color[world_csr_offsets[w] +
+    world_color_starts[w, c] + local_slot]``. Within-colour ordering
+    is non-deterministic but that doesn't affect PGS convergence
+    (the partitioner already guarantees no two elements in the same
+    colour share a body).
+    """
+    tid = wp.tid()
+    n_colors = num_colors_arr[0]
+    if n_colors == 0:
+        return
+    total_elements = color_starts[n_colors]
+    if tid >= total_elements:
+        return
+    c = _find_color_of_position(color_starts, n_colors, tid)
+    cid = element_ids_by_color[tid]
+    b1 = constraint_get_body1(constraints, cid)
+    if b1 < 0:
+        return
+    w = bodies.world_id[b1]
+    local_slot = wp.atomic_add(world_color_cursor, w, c, wp.int32(1))
+    dst = world_csr_offsets[w] + world_color_starts[w, c] + local_slot
+    world_element_ids_by_color[dst] = cid
+
+
 @wp.kernel(enable_backward=False)
 def _constraint_iterate_fast_tail_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
     idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
+    world_element_ids_by_color: wp.array[wp.int32],
+    world_color_starts: wp.array2d[wp.int32],
+    world_csr_offsets: wp.array[wp.int32],
+    world_num_colors: wp.array[wp.int32],
     cc: ContactContainer,
     contacts: ContactViews,
     num_iterations: wp.int32,
 ):
-    """Single-block main-solve dispatcher: runs ``num_iterations``
-    PGS sweeps in one kernel launch.
+    """Multi-block main-solve dispatcher: one block per world, each
+    block runs ``num_iterations`` PGS sweeps over its world's CSR.
 
-    Launched with ``dim=block_dim, 1 block``. Internally:
+    Launched with ``dim = num_worlds * BLOCK_DIM, block_dim =
+    BLOCK_DIM``. Inside each block:
 
-    * Outer loop runs ``num_iterations`` times (Python-side
-      ``solver_iterations`` passed in as a kernel scalar). This
-      replaces the Python ``for _ in range(iterations): wp.launch(...)``
-      loop -- one launch per sweep becomes one launch for the entire
-      solve.
-    * Middle loop walks every colour (``0 .. num_colors``) with a
-      ``__syncthreads`` between colours so body-velocity writes
-      from colour ``c`` propagate to colour ``c+1``. The final
-      sync of iteration ``i`` also guards the first colour of
-      iteration ``i+1``, so no extra iteration-boundary sync is
-      needed.
-    * Inner block-stride loop covers colours larger than
-      ``block_dim``; each thread processes ``ceil(count / block_dim)``
-      cids.
+    * ``world_id = tid / BLOCK_DIM`` -- block-id interpretation;
+    * ``local_tid = tid % BLOCK_DIM`` -- lane within the block,
+      same role as ``tid`` had in the single-block version.
+
+    Per-world CSR layout (built by :func:`_world_csr_count_kernel`
+    / :func:`_world_csr_scan_kernel` / :func:`_world_csr_scatter_kernel`
+    after the global JP pass):
+
+    * ``world_element_ids_by_color`` -- flat, bucketed by world;
+      world ``w`` owns ``[world_csr_offsets[w], world_csr_offsets[w+1])``.
+    * ``world_color_starts[w, c]`` -- exclusive-prefix offsets within
+      world ``w``'s slice. Colour ``c`` for world ``w`` spans
+      ``[world_csr_offsets[w] + world_color_starts[w, c],
+        world_csr_offsets[w] + world_color_starts[w, c + 1])``.
+    * ``world_num_colors[w]`` -- highest non-empty colour index in
+      world ``w``; the inner loop stops there so blocks don't spin
+      through the (possibly many) trailing empty colours.
+
+    Loop structure matches the previous single-block version:
+    outer iteration count, middle colour sweep with
+    ``__syncthreads`` between colours, inner block-stride lane
+    loop. Because each block owns one world's bodies and the
+    partitioner guarantees no two elements in the same colour share
+    a body, the per-lane RMW on body velocities stays race-free.
 
     Prepare is kept in a separate kernel (see
     :func:`_constraint_prepare_fast_tail_kernel`) even though it
@@ -493,22 +713,29 @@ def _constraint_iterate_fast_tail_kernel(
     here and the register-pressure bump pushed occupancy down
     enough to slow the iterate phase by ~15 %. Separate kernels
     give each one a tighter register budget and better occupancy.
+
+    Single-world scenes degenerate to ``num_worlds = 1`` and the
+    launch fires a single block at ``dim = BLOCK_DIM`` -- same wall
+    clock as the pre-multi-world kernel.
     """
     tid = wp.tid()
+    local_tid = tid % _STRAGGLER_BLOCK_DIM
+    world_id = tid / _STRAGGLER_BLOCK_DIM
 
-    n_colors = num_colors[0]
+    n_colors = world_num_colors[world_id]
+    world_base = world_csr_offsets[world_id]
 
     it = wp.int32(0)
     while it < num_iterations:
         c = wp.int32(0)
         while c < n_colors:
-            start = color_starts[c]
-            end = color_starts[c + 1]
+            start = world_base + world_color_starts[world_id, c]
+            end = world_base + world_color_starts[world_id, c + 1]
             count = end - start
 
-            base = tid
+            base = local_tid
             while base < count:
-                cid = element_ids_by_color[start + base]
+                cid = world_element_ids_by_color[start + base]
                 t = constraint_get_type(constraints, cid)
                 if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
                     actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
@@ -527,32 +754,37 @@ def _constraint_prepare_fast_tail_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
     idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
+    world_element_ids_by_color: wp.array[wp.int32],
+    world_color_starts: wp.array2d[wp.int32],
+    world_csr_offsets: wp.array[wp.int32],
+    world_num_colors: wp.array[wp.int32],
     cc: ContactContainer,
     contacts: ContactViews,
 ):
-    """Single-block prepare dispatcher: one sweep over all colours.
+    """Multi-block prepare dispatcher: one block per world, one sweep
+    over the world's colours.
 
-    Prepare is a once-per-substep pass (compute effective masses,
-    velocity bias, apply warm-start impulse) so no outer iteration
-    loop is needed -- see :func:`_constraint_iterate_fast_tail_kernel`
-    for the block-stride + per-colour sync pattern.
+    Prepare is once-per-substep (compute effective masses, velocity
+    bias, apply warm-start impulse) so no outer iteration loop. See
+    :func:`_constraint_iterate_fast_tail_kernel` for the
+    world-block / per-colour sync pattern.
     """
     tid = wp.tid()
+    local_tid = tid % _STRAGGLER_BLOCK_DIM
+    world_id = tid / _STRAGGLER_BLOCK_DIM
 
-    n_colors = num_colors[0]
+    n_colors = world_num_colors[world_id]
+    world_base = world_csr_offsets[world_id]
 
     c = wp.int32(0)
     while c < n_colors:
-        start = color_starts[c]
-        end = color_starts[c + 1]
+        start = world_base + world_color_starts[world_id, c]
+        end = world_base + world_color_starts[world_id, c + 1]
         count = end - start
 
-        base = tid
+        base = local_tid
         while base < count:
-            cid = element_ids_by_color[start + base]
+            cid = world_element_ids_by_color[start + base]
             t = constraint_get_type(constraints, cid)
             if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
                 actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
@@ -569,15 +801,16 @@ def _constraint_relax_fast_tail_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
     idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
+    world_element_ids_by_color: wp.array[wp.int32],
+    world_color_starts: wp.array2d[wp.int32],
+    world_csr_offsets: wp.array[wp.int32],
+    world_num_colors: wp.array[wp.int32],
     cc: ContactContainer,
     contacts: ContactViews,
     num_iterations: wp.int32,
 ):
-    """Single-block relax dispatcher: runs ``num_iterations`` relax
-    sweeps (use_bias=False) in one kernel launch.
+    """Multi-block relax dispatcher: runs ``num_iterations`` relax
+    sweeps (use_bias=False) per world.
 
     See :func:`_constraint_iterate_fast_tail_kernel` for the outer
     iteration / colour-sync pattern. Uses ``use_bias=False`` to match
@@ -585,20 +818,23 @@ def _constraint_relax_fast_tail_kernel(
     speculative separation, just ``Jv = 0``.
     """
     tid = wp.tid()
+    local_tid = tid % _STRAGGLER_BLOCK_DIM
+    world_id = tid / _STRAGGLER_BLOCK_DIM
 
-    n_colors = num_colors[0]
+    n_colors = world_num_colors[world_id]
+    world_base = world_csr_offsets[world_id]
 
     it = wp.int32(0)
     while it < num_iterations:
         c = wp.int32(0)
         while c < n_colors:
-            start = color_starts[c]
-            end = color_starts[c + 1]
+            start = world_base + world_color_starts[world_id, c]
+            end = world_base + world_color_starts[world_id, c + 1]
             count = end - start
 
-            base = tid
+            base = local_tid
             while base < count:
-                cid = element_ids_by_color[start + base]
+                cid = world_element_ids_by_color[start + base]
                 t = constraint_get_type(constraints, cid)
                 if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
                     actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
