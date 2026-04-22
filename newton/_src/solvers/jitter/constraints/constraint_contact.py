@@ -761,6 +761,33 @@ def contact_prepare_for_iteration_at(
         margin_sum = contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
         effective_gap = gap - margin_sum
 
+        # Load-scaled contact correction: contacts under heavier
+        # normal load get stronger position-level correction on both
+        # the normal and tangent rows. Physically motivated -- at the
+        # bottom of a tall stack each contact supports many cubes of
+        # weight, and needs a correspondingly tighter position lock
+        # than a lightly-loaded contact elsewhere in the scene. We
+        # read the warm-started ``lam_n`` (previous substep's
+        # converged impulse) as a proxy for the pair's normal load;
+        # ``lam_n_ref = 1 / (eff_n * idt)`` is a "typical" contact
+        # impulse so a reference-load contact gets boost 1.0 and
+        # heavier contacts get proportionally more. The 4x cap
+        # prevents warm-start noise from producing runaway
+        # corrections.
+        #
+        # Applied uniformly to both normal and tangent biases so
+        # static friction and penetration correction scale together
+        # at the bottom of stacks. For light contacts (nut-on-bolt
+        # SDF manifold, single objects on a plane) ``lam_n_ws`` is
+        # small, ``load_boost ~ 1.0``, and the formulation reduces
+        # to the un-boosted baseline -- which is what those cases
+        # need to avoid over-correction.
+        lam_n_ws = cc_get_normal_lambda(cc, slot, cid)
+        lam_n_ref = wp.float32(1.0) / wp.max(eff_n * idt, wp.float32(1.0e-6))
+        load_boost = wp.min(
+            wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0)
+        )
+
         # Unified bias: one scalar that encodes both speculative
         # separation and Baumgarte-style penetration pushout. With a
         # slop dead-zone so idle resting contacts don't drift the
@@ -773,7 +800,7 @@ def contact_prepare_for_iteration_at(
         if effective_gap > penetration_slop:
             bias_val = bias_factor * effective_gap * idt
         elif effective_gap < -penetration_slop:
-            bias_val = bias_factor * (effective_gap + penetration_slop) * idt
+            bias_val = bias_factor * (effective_gap + penetration_slop) * idt * load_boost
 
         # ---- Tangential drift for static friction ----
         # Drift of body 2's contact anchor away from body 1's anchor,
@@ -782,26 +809,6 @@ def contact_prepare_for_iteration_at(
         p_diff = p2_world - p1_world
         drift_t1 = wp.clamp(wp.dot(p_diff, t1_dir), -friction_slop, friction_slop)
         drift_t2 = wp.clamp(wp.dot(p_diff, t2_dir), -friction_slop, friction_slop)
-
-        # Load-scaled static friction: contacts under heavier normal
-        # load get a stronger anchor pull. Physically motivated --
-        # static friction scales linearly with normal force; the
-        # bottom of a tall stack has much more normal load than the
-        # top and should hold its anchor that much tighter. We read
-        # the warm-started ``lam_n`` (previous substep's converged
-        # impulse) as a proxy for the pair's normal load;
-        # ``lam_n_ref`` = eff_n normalises so a "typical" contact
-        # gets scale 1.0 and heavier contacts get proportionally more.
-        #
-        # The ``1.0 + ...`` floor means every contact gets at least
-        # the baseline bias even if it just formed (``lam_n == 0``,
-        # no warm-start available); ``min(boost, 4.0)`` caps runaway
-        # when the warm-start impulse is spuriously large.
-        lam_n_ws = cc_get_normal_lambda(cc, slot, cid)
-        lam_n_ref = wp.float32(1.0) / wp.max(eff_n * idt, wp.float32(1.0e-6))
-        load_boost = wp.min(
-            wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0)
-        )
         bias_t1_val = friction_bias_factor * drift_t1 * idt * load_boost
         bias_t2_val = friction_bias_factor * drift_t2 * idt * load_boost
 
