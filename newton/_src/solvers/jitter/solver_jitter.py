@@ -61,6 +61,7 @@ from newton._src.solvers.jitter.graph_coloring.graph_coloring_incremental import
 from newton._src.solvers.jitter.graph_coloring.graph_coloring_incremental import (
     MAX_COLORS,
 )
+from newton._src.solvers.jitter.materials import MaterialData
 from newton._src.solvers.jitter.solver_jitter_kernels import (
     _STRAGGLER_BLOCK_DIM,
     _constraint_gather_errors_kernel,
@@ -409,6 +410,53 @@ class World:
         self._collision_filter_keys: wp.array[wp.int64]
         self._set_collision_filter_pairs_impl(collision_filter_pairs or ())
 
+        # ----- Material system -----------------------------------------
+        # Optional per-shape material index + material table. The
+        # contact ingest pack kernel consumes these to compute a
+        # per-pair effective friction coefficient (replacing the
+        # constant ``default_friction``). When unset (``None``) the
+        # ingest falls back to ``default_friction`` for every pair,
+        # identical to the pre-material behaviour; see
+        # :meth:`set_materials`.
+        self._shape_material: wp.array[wp.int32] | None = None
+        self._materials: wp.array[MaterialData] | None = None
+
+    # ------------------------------------------------------------------
+    # Material system
+    # ------------------------------------------------------------------
+
+    def set_materials(
+        self,
+        materials: wp.array | None,
+        shape_material: wp.array | None,
+    ) -> None:
+        """Install per-shape materials for the contact friction path.
+
+        Both arrays are handed directly to the contact ingest kernel
+        without copying; the caller retains ownership. Pass
+        ``materials = None`` (or a zero-sized array) to revert to the
+        ``default_friction`` fallback for every pair. See
+        :mod:`newton._src.solvers.jitter.materials` for the struct
+        layout and combine-mode conventions.
+
+        Not graph-capture-safe: the new array pointers are picked up
+        by the next :meth:`step` call, but the captured graph (if
+        any) still references the previous pointers. Call this
+        outside any :func:`wp.ScopedCapture` block when the material
+        set changes.
+
+        Args:
+            materials: ``wp.array[MaterialData]`` materials table.
+                Element 0 is conventionally the default material.
+                ``None`` or a zero-sized array disables the lookup.
+            shape_material: ``wp.array[wp.int32]`` of shape
+                ``(num_shapes,)`` giving each shape's material
+                index. ``None`` falls back to ``default_friction``
+                for every pair.
+        """
+        self._materials = materials
+        self._shape_material = shape_material
+
     # ------------------------------------------------------------------
     # Placeholder ContactViews helper
     # ------------------------------------------------------------------
@@ -739,6 +787,8 @@ class World:
             num_bodies=self.num_bodies,
             filter_keys=self._collision_filter_keys,
             filter_count=self._collision_filter_count,
+            shape_material=self._shape_material,
+            materials=self._materials,
         )
 
         # ---- Warm-start + per-slot frame initialisation ----

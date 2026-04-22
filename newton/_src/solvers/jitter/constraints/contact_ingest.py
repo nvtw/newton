@@ -80,6 +80,10 @@ from newton._src.solvers.jitter.helpers.scan_and_sort import (
     RLE_SENTINEL_INT32,
     runlength_encode_variable_length,
 )
+from newton._src.solvers.jitter.materials import (
+    MaterialData,
+    resolve_friction_in_kernel,
+)
 
 __all__ = [
     "IngestScratch",
@@ -446,6 +450,8 @@ def _contact_pack_columns_kernel(
     pair_shape_a: wp.array[wp.int32],
     pair_shape_b: wp.array[wp.int32],
     shape_body: wp.array[wp.int32],
+    shape_material: wp.array[wp.int32],
+    materials: wp.array[MaterialData],
     num_contact_columns: wp.array[wp.int32],
     cid_base: wp.int32,
     default_friction: wp.float32,
@@ -466,6 +472,14 @@ def _contact_pack_columns_kernel(
     k*6 + slot_count)`` and the active mask is ``(1 << slot_count)
     - 1``. Contacts live at ``cid in [cid_base, cid_base +
     num_contact_columns)``.
+
+    Friction resolution uses the per-shape materials table via
+    :func:`resolve_friction_in_kernel`, combining the two materials
+    under whichever ``friction_combine_mode`` is stricter. Callers
+    that don't wire the materials table (``materials`` size 0, or
+    ``shape_material[s]`` out-of-range) fall back to
+    ``default_friction`` unchanged -- pre-material scenes behave
+    identically.
     """
     tid = wp.tid()
     if tid >= num_contact_columns[0]:
@@ -493,13 +507,24 @@ def _contact_pack_columns_kernel(
     b1 = shape_body[sa]
     b2 = shape_body[sb]
 
+    # Resolve the pair's effective friction. ``shape_material`` has
+    # size ``num_shapes``; if the caller passed an empty sentinel
+    # (size-1 array of -1) we fall through to ``default_friction``.
+    mat_a = wp.int32(-1)
+    mat_b = wp.int32(-1)
+    if shape_material.shape[0] > sa:
+        mat_a = shape_material[sa]
+    if shape_material.shape[0] > sb:
+        mat_b = shape_material[sb]
+    mu_eff = resolve_friction_in_kernel(materials, mat_a, mat_b, default_friction)
+
     # Header.
     write_int(constraints, CONSTRAINT_TYPE_OFFSET, cid, CONSTRAINT_TYPE_CONTACT)
     write_int(constraints, CONSTRAINT_BODY1_OFFSET, cid, b1)
     write_int(constraints, CONSTRAINT_BODY2_OFFSET, cid, b2)
 
     # Contact-specific header bits.
-    contact_set_friction(constraints, cid, default_friction)
+    contact_set_friction(constraints, cid, mu_eff)
     contact_set_active_mask(constraints, cid, active_mask)
     contact_set_contact_first(constraints, cid, start_contact)
 
@@ -790,6 +815,8 @@ def ingest_contacts(
     num_bodies: int = 0,
     filter_keys: wp.array | None = None,
     filter_count: int = 0,
+    shape_material: wp.array | None = None,
+    materials: wp.array | None = None,
 ) -> None:
     """Materialise contact columns for one step.
 
@@ -819,9 +846,12 @@ def ingest_contacts(
         max_contact_columns: Hard cap on the number of contact
             columns this step can emit. Excess contacts are
             silently dropped by the final clamp.
-        default_friction: Friction coefficient written into every
-            contact column header. Per-pair lookups into the
-            material tables are a future improvement.
+        default_friction: Fallback friction coefficient when no
+            material table is provided (or a shape's material index
+            is out of range). Wired into every contact column's
+            header when ``materials`` is ``None`` / empty or when
+            either shape in a pair doesn't have a valid material
+            assignment.
         device: Warp device for the launches.
         num_bodies: Total body count in the owning :class:`World`.
             Used to pack the ``(min_body, max_body)`` pair into an
@@ -834,6 +864,19 @@ def ingest_contacts(
         filter_count: Number of valid entries at the start of
             ``filter_keys``. ``0`` short-circuits the filter and
             matches the legacy (no-filter) behaviour exactly.
+        shape_material: Optional ``wp.array[int32]`` of shape
+            ``(num_shapes,)`` giving each shape's material index
+            into ``materials``. ``None`` or any out-of-range index
+            falls back to ``default_friction`` for that pair. A
+            size-1 sentinel array ``[-1]`` is also accepted so
+            graph-captured callers can hand a valid pointer when
+            no materials are configured.
+        shape_material: See ``shape_material``.
+        materials: Optional ``wp.array[MaterialData]`` material
+            table (see :mod:`newton._src.solvers.jitter.materials`).
+            Empty or ``None`` means "use ``default_friction``
+            everywhere". Entry 0 is conventionally the default
+            material and is what unassigned shapes resolve to.
     """
     rigid_contact_max = int(contacts.rigid_contact_max)
 
@@ -942,7 +985,14 @@ def ingest_contacts(
 
     # Step 5: write the contact column headers + ranges. Launches
     # at max_contact_columns and gates internally on
-    # num_contact_columns[0].
+    # num_contact_columns[0]. The materials / shape_material
+    # sentinels keep the kernel signature constant across scenes
+    # that do / don't wire the material system.
+    if shape_material is None:
+        shape_material = wp.array([-1], dtype=wp.int32, device=device)
+    if materials is None:
+        materials = wp.zeros(0, dtype=MaterialData, device=device)
+
     wp.launch(
         kernel=_contact_pack_columns_kernel,
         dim=max(1, max_contact_columns),
@@ -954,6 +1004,8 @@ def ingest_contacts(
             scratch.pair_shape_a,
             scratch.pair_shape_b,
             shape_body,
+            shape_material,
+            materials,
             scratch.num_contact_columns,
             int(cid_base),
             float(default_friction),
