@@ -9,7 +9,6 @@ from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, SHAPE_PAIR_INDEX_MASK
 from ..geometry.sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_grad
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sample_sdf_heightfield
-
 from .contact_reduction_global import GlobalContactReducerData, export_and_reduce_contact_centered
 
 # Stack capacity for the cooperative edge selection buffer.
@@ -1005,13 +1004,21 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     )
                                 else:
                                     v0_scaled, v1_scaled = get_edge_from_mesh(
-                                        mesh_id_tri, mesh_edge_indices, edge_range_tri,
-                                        mesh_scale_tri, X_mesh_to_sdf, edge_idx
+                                        mesh_id_tri,
+                                        mesh_edge_indices,
+                                        edge_range_tri,
+                                        mesh_scale_tri,
+                                        X_mesh_to_sdf,
+                                        edge_idx,
                                     )
                             else:
                                 v0_scaled, v1_scaled = get_edge_from_mesh(
-                                    mesh_id_tri, mesh_edge_indices, edge_range_tri,
-                                    mesh_scale_tri, X_mesh_to_sdf, edge_idx
+                                    mesh_id_tri,
+                                    mesh_edge_indices,
+                                    edge_range_tri,
+                                    mesh_scale_tri,
+                                    X_mesh_to_sdf,
+                                    edge_idx,
                                 )
                             v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
                             v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
@@ -1020,14 +1027,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             threshold = bsphere_radius + contact_threshold_unscaled
 
                             if sdf_is_heightfield:
-                                midpoint_sdf = sample_sdf_heightfield(
-                                    hfd_sdf, heightfield_elevations, bsphere_center
-                                )
+                                midpoint_sdf = sample_sdf_heightfield(hfd_sdf, heightfield_elevations, bsphere_center)
                                 add_edge = midpoint_sdf <= threshold
                             elif use_bvh_for_sdf:
-                                midpoint_sdf = sample_sdf_using_mesh(
-                                    mesh_id_sdf, bsphere_center, 1.01 * threshold
-                                )
+                                midpoint_sdf = sample_sdf_using_mesh(mesh_id_sdf, bsphere_center, 1.01 * threshold)
                                 add_edge = midpoint_sdf <= threshold
                             else:
                                 culling_radius = threshold
@@ -1340,13 +1343,21 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     )
                                 else:
                                     v0_scaled, v1_scaled = get_edge_from_mesh(
-                                        mesh_id_tri, mesh_edge_indices, edge_range_tri,
-                                        mesh_scale_tri, X_mesh_to_sdf, edge_idx
+                                        mesh_id_tri,
+                                        mesh_edge_indices,
+                                        edge_range_tri,
+                                        mesh_scale_tri,
+                                        X_mesh_to_sdf,
+                                        edge_idx,
                                     )
                             else:
                                 v0_scaled, v1_scaled = get_edge_from_mesh(
-                                    mesh_id_tri, mesh_edge_indices, edge_range_tri,
-                                    mesh_scale_tri, X_mesh_to_sdf, edge_idx
+                                    mesh_id_tri,
+                                    mesh_edge_indices,
+                                    edge_range_tri,
+                                    mesh_scale_tri,
+                                    X_mesh_to_sdf,
+                                    edge_idx,
                                 )
                             v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
                             v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
@@ -1355,14 +1366,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             threshold = bsphere_radius + contact_threshold_unscaled
 
                             if sdf_is_heightfield:
-                                midpoint_sdf = sample_sdf_heightfield(
-                                    hfd_sdf, heightfield_elevations, bsphere_center
-                                )
+                                midpoint_sdf = sample_sdf_heightfield(hfd_sdf, heightfield_elevations, bsphere_center)
                                 add_edge = midpoint_sdf <= threshold
                             elif use_bvh_for_sdf:
-                                midpoint_sdf = sample_sdf_using_mesh(
-                                    mesh_id_sdf, bsphere_center, 1.01 * threshold
-                                )
+                                midpoint_sdf = sample_sdf_using_mesh(mesh_id_sdf, bsphere_center, 1.01 * threshold)
                                 add_edge = midpoint_sdf <= threshold
                             else:
                                 culling_radius = threshold
