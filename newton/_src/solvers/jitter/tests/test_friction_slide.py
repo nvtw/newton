@@ -311,28 +311,83 @@ class TestKineticSlideDeceleration(unittest.TestCase):
             "t_stop_analytic": v0 / (mu * _G),
         }
 
-    def test_kinetic_mu_0p5_v_5(self):
-        m = self._measure(0.5, 5.0)
-        print(
-            f"[kinetic mu=0.5 v0=5]   t_stop={m['t_stop']}  "
-            f"final_vx={m['final_vx']:+.4f}  analytic_t={m['t_stop_analytic']:.4f} s"
+    def _assert_analytical_match(
+        self, m: dict, t_stop_tol: float = 0.10, final_v_tol: float = 0.05
+    ) -> None:
+        """Tight analytical-agreement check.
+
+        The block's deceleration on a flat plane is the classical
+        ``a = -mu * g`` (Coulomb kinetic friction), so ``t_stop =
+        v0 / (mu * g)`` to 1-dt precision. After ``t_stop`` the
+        block must be at rest -- positive velocity means the
+        friction row failed to stop it, negative means overshoot
+        (impossible under a well-behaved Coulomb clamp). Bounds
+        are tight on purpose so any regression in the friction
+        formulation fails loudly.
+
+        Args:
+            m: Result dict from :meth:`_measure`.
+            t_stop_tol: Relative tolerance for ``t_stop`` vs
+                analytic. 10% catches ~2-substep drift at 60 fps;
+                plenty of headroom for soft-constraint ring-down.
+            final_v_tol: Residual speed after ``t_stop_analytic``,
+                in m/s. Tight -- a clean kinetic friction solve
+                parks the block at 0 within a few mm/s.
+        """
+        self.assertIsNotNone(
+            m["t_stop"], f"block never stopped (vx still {m['final_vx']:+.4f})"
         )
-        # Block should have fully decelerated within the analytic
-        # stop time plus a 50% fudge for PGS softness / overshoot.
-        self.assertLess(m["final_vx"], 0.5)
-        if m["t_stop"] is not None:
-            self.assertLess(m["t_stop"], m["t_stop_analytic"] * 2.0)
+        self.assertLess(
+            abs(m["t_stop"] - m["t_stop_analytic"]) / m["t_stop_analytic"],
+            t_stop_tol,
+            f"t_stop {m['t_stop']:.4f}s mismatches analytical "
+            f"{m['t_stop_analytic']:.4f}s by more than {t_stop_tol * 100:.0f}%",
+        )
+        self.assertLess(
+            abs(m["final_vx"]),
+            final_v_tol,
+            f"residual velocity {m['final_vx']:+.4f} m/s > {final_v_tol} m/s",
+        )
 
     def test_kinetic_mu_0p1_v_2(self):
+        """mu=0.1 v0=2: slow deceleration (a = -0.981 m/s^2); ~2 s stop."""
         m = self._measure(0.1, 2.0)
-        # t_analytic = 2 / 0.981 = 2.04 s; still within 3s window.
         print(
-            f"[kinetic mu=0.1 v0=2]   t_stop={m['t_stop']}  "
-            f"final_vx={m['final_vx']:+.4f}  analytic_t={m['t_stop_analytic']:.4f} s"
+            f"[kinetic mu=0.1 v0=2] t_stop={m['t_stop']:.4f}s  "
+            f"analytic={m['t_stop_analytic']:.4f}s  "
+            f"err={abs(m['t_stop'] - m['t_stop_analytic']):.4f}s"
         )
-        # Low-friction case: sanity-check the block's velocity kept
-        # decreasing (no weird solver acceleration).
-        self.assertLess(m["final_vx"], m["v0"])
+        self._assert_analytical_match(m)
+
+    def test_kinetic_mu_0p3_v_3(self):
+        """mu=0.3 v0=3: mid-range; analytic ~1.02 s."""
+        m = self._measure(0.3, 3.0)
+        print(
+            f"[kinetic mu=0.3 v0=3] t_stop={m['t_stop']:.4f}s  "
+            f"analytic={m['t_stop_analytic']:.4f}s  "
+            f"err={abs(m['t_stop'] - m['t_stop_analytic']):.4f}s"
+        )
+        self._assert_analytical_match(m)
+
+    def test_kinetic_mu_0p5_v_5(self):
+        """mu=0.5 v0=5: faster deceleration; analytic ~1.02 s."""
+        m = self._measure(0.5, 5.0)
+        print(
+            f"[kinetic mu=0.5 v0=5] t_stop={m['t_stop']:.4f}s  "
+            f"analytic={m['t_stop_analytic']:.4f}s  "
+            f"err={abs(m['t_stop'] - m['t_stop_analytic']):.4f}s"
+        )
+        self._assert_analytical_match(m)
+
+    def test_kinetic_mu_0p7_v_4(self):
+        """mu=0.7 v0=4: high-friction; analytic ~0.58 s (tight stop)."""
+        m = self._measure(0.7, 4.0)
+        print(
+            f"[kinetic mu=0.7 v0=4] t_stop={m['t_stop']:.4f}s  "
+            f"analytic={m['t_stop_analytic']:.4f}s  "
+            f"err={abs(m['t_stop'] - m['t_stop_analytic']):.4f}s"
+        )
+        self._assert_analytical_match(m)
 
 
 if __name__ == "__main__":
