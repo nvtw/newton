@@ -418,6 +418,202 @@ class TestPhoenXContactForce(unittest.TestCase):
 @unittest.skipUnless(
     wp.is_cuda_available(), "PhoenX contact-force tests require CUDA"
 )
+class TestPhoenXContactMomentumConservation(unittest.TestCase):
+    """Conservation checks ported from jitter's
+    :mod:`test_contact_momentum_conservation`.
+
+    All four tests drive the contact iterate's body-1/body-2
+    impulse symmetry: any asymmetric application would leak
+    momentum or spontaneously spin a cube at rest.
+    """
+
+    MASS = 1.0
+    BOX_HALF = 0.5
+    FPS = 120
+    SUBSTEPS = 4
+    SOLVER_ITERATIONS = 16
+
+    def _make_scene(self, *, friction: float = 0.5) -> _PhoenXScene:
+        return _PhoenXScene(
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=self.SOLVER_ITERATIONS,
+            friction=friction,
+        )
+
+    def test_resting_cube_no_spontaneous_spin(self) -> None:
+        """Cube initialized with zero omega stays with zero omega.
+
+        Any asymmetric contact torque application would cause
+        measurable drift. Tolerance is 1e-5 rad/s (measured is
+        ~1e-10 on current hardware, so this leaves 5 orders of
+        magnitude of cross-GPU FP headroom).
+        """
+        scene = self._make_scene()
+        scene.add_ground_plane()
+        he = self.BOX_HALF
+        cube = scene.add_box(
+            position=(0.0, 0.0, he + 1.0e-3),
+            half_extents=(he, he, he),
+            mass=self.MASS,
+        )
+        scene.finalize()
+        for _ in range(self.FPS):  # 1 s
+            scene.step()
+        # Angular velocity lives on the BodyContainer; slot 0 is the
+        # static world anchor so the cube is at slot 1.
+        w = scene.bodies.angular_velocity.numpy()[cube + 1]
+        w_mag = float(np.linalg.norm(w))
+        self.assertLess(
+            w_mag,
+            1.0e-5,
+            f"cube spontaneously spinning: |omega|={w_mag:.6f} rad/s "
+            f"(omega={w})",
+        )
+
+    def test_pair_collision_angular_momentum(self) -> None:
+        """Two cubes approach head-on; total angular momentum about
+        the origin stays ~0 throughout.
+
+        Analytically ``L = 0`` at init and at every instant (symmetric
+        head-on collision). Any angular leak is a per-slot impulse-
+        arm miscalculation.
+        """
+        scene = self._make_scene()
+        he = self.BOX_HALF
+        v0 = 1.0
+        separation = 0.2
+        x_off = he + separation * 0.5
+        left = scene.add_box(
+            position=(-x_off, 0.0, 0.0), half_extents=(he, he, he), mass=self.MASS
+        )
+        right = scene.add_box(
+            position=(x_off, 0.0, 0.0), half_extents=(he, he, he), mass=self.MASS
+        )
+        scene.finalize()
+        # Zero gravity so only contacts can generate torque.
+        scene.world.gravity.fill_(wp.vec3f(0.0, 0.0, 0.0))
+        scene.set_body_velocity(left, (v0, 0.0, 0.0))
+        scene.set_body_velocity(right, (-v0, 0.0, 0.0))
+
+        L_scale = abs(x_off) * self.MASS * v0
+
+        # Step through pre-collision / collision / post-collision
+        # windows and verify each checkpoint's angular momentum.
+        for tag, frames in (
+            ("pre-collision", int(0.05 * self.FPS)),
+            ("collision", int(0.2 * self.FPS)),
+            ("post-collision", int(0.5 * self.FPS)),
+        ):
+            for _ in range(frames):
+                scene.step()
+            positions = scene.bodies.position.numpy()
+            velocities = scene.bodies.velocity.numpy()
+            angular_velocities = scene.bodies.angular_velocity.numpy()
+            # L_total = sum over bodies of (r_i x m v_i + I w_i).
+            # Identity inertia assumed (add_box with mass=) so the
+            # angular inertia is m * (he^2 + he^2) / 3.
+            I_diag = self.MASS * (he * he + he * he) / 3.0
+            L = np.zeros(3, dtype=np.float64)
+            for slot in (left + 1, right + 1):
+                r = positions[slot].astype(np.float64)
+                v = velocities[slot].astype(np.float64)
+                w = angular_velocities[slot].astype(np.float64)
+                L += np.cross(r, self.MASS * v) + I_diag * w
+            L_mag = float(np.linalg.norm(L))
+            self.assertLess(
+                L_mag,
+                1.0e-3 * L_scale,
+                f"[{tag}] total angular momentum {L_mag:.6f} kg m^2/s "
+                f"(L_scale ref {L_scale:.3f})",
+            )
+
+
+@unittest.skipUnless(
+    wp.is_cuda_available(), "PhoenX contact-force tests require CUDA"
+)
+class TestPhoenXPyramidSettle(unittest.TestCase):
+    """Settle-and-assert pyramid tests ported from
+    :mod:`test_pyramid.TestPyramidSettle`.
+
+    The jitter version uses the :mod:`example_pyramid`
+    :class:`Example` directly -- we construct equivalent pyramids
+    through :class:`_PhoenXScene` since PhoenX doesn't share the
+    jitter example wiring.
+    """
+
+    BOX_HALF = 0.5
+    BOX_SPACING = 2.01 * 0.5
+    MASS = 1.0
+    SETTLE_FRAMES = 180  # 3 s @ 60 fps
+
+    def _build_pyramid(self, layers: int) -> tuple[_PhoenXScene, list[int]]:
+        scene = _PhoenXScene(fps=60, substeps=4, solver_iterations=16)
+        scene.add_ground_plane()
+        box_ids: list[int] = []
+        for level in range(layers):
+            num_in_row = layers - level
+            row_width = (num_in_row - 1) * self.BOX_SPACING
+            for i in range(num_in_row):
+                x = -row_width * 0.5 + i * self.BOX_SPACING
+                z = level * self.BOX_SPACING + self.BOX_HALF + 1.0e-3
+                box_ids.append(
+                    scene.add_box(
+                        position=(x, 0.0, z),
+                        half_extents=(self.BOX_HALF, self.BOX_HALF, self.BOX_HALF),
+                        mass=self.MASS,
+                    )
+                )
+        scene.finalize()
+        return scene, box_ids
+
+    def _assert_settled(
+        self, scene: _PhoenXScene, box_ids: list[int]
+    ) -> None:
+        """A settled pyramid has bounded positions and near-zero
+        velocities. Mirrors :meth:`example_pyramid.Example.test_final`'s
+        budgets (10 cm position slack, 0.5 m/s velocity slack).
+        """
+        positions = scene.bodies.position.numpy()
+        velocities = scene.bodies.velocity.numpy()
+        for newton_idx in box_ids:
+            slot = newton_idx + 1
+            p = positions[slot]
+            v = velocities[slot]
+            self.assertTrue(
+                np.isfinite(p).all() and np.isfinite(v).all(),
+                f"body {newton_idx} non-finite",
+            )
+            self.assertLess(
+                float(np.linalg.norm(v)),
+                0.5,
+                f"body {newton_idx} |v|={np.linalg.norm(v):.3f} m/s",
+            )
+
+    def test_3_layer_pyramid(self) -> None:
+        """3-layer pyramid (6 cubes) settles cleanly."""
+        scene, box_ids = self._build_pyramid(3)
+        for _ in range(self.SETTLE_FRAMES):
+            scene.step()
+        self._assert_settled(scene, box_ids)
+
+    def test_10_layer_pyramid(self) -> None:
+        """10-layer pyramid (55 cubes) settles cleanly.
+
+        Stability bar for multi-body contact with significant
+        normal-load gradient (top cube weighs 1 mg, bottom-row
+        cubes carry 9 cubes of load). A regression in warm-start
+        / friction propagation makes this topple.
+        """
+        scene, box_ids = self._build_pyramid(10)
+        for _ in range(self.SETTLE_FRAMES):
+            scene.step()
+        self._assert_settled(scene, box_ids)
+
+
+@unittest.skipUnless(
+    wp.is_cuda_available(), "PhoenX contact-force tests require CUDA"
+)
 class TestPhoenXPyramidForceBalance(unittest.TestCase):
     """Strongest per-body contact-force check: settle a pyramid and
     demand that ``F_up - F_down == m*g`` for every cube.

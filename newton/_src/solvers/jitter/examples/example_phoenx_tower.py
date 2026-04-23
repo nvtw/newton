@@ -89,107 +89,12 @@ FULL_ROTATION_STEP = 2.0 * HALF_ROTATION_STEP
 PLANK_DENSITY = 1000.0
 
 
-# ---------------------------------------------------------------------------
-# Newton state <-> PhoenX BodyContainer sync kernels
-# ---------------------------------------------------------------------------
-
-
-@wp.kernel(enable_backward=False)
-def _newton_to_phoenx_kernel(
-    body_q: wp.array[wp.transform],
-    body_qd: wp.array[wp.spatial_vector],
-    body_com: wp.array[wp.vec3],
-    # out (written at [1:1+n], leaving the static world body at index 0 alone)
-    position: wp.array[wp.vec3],
-    orientation: wp.array[wp.quat],
-    velocity: wp.array[wp.vec3],
-    angular_velocity: wp.array[wp.vec3],
-):
-    """Push Newton body state into PhoenX's :class:`BodyContainer`.
-
-    Newton's ``body_q`` is the body-origin transform and ``body_com``
-    is a body-local COM offset; PhoenX's ``position`` is the COM in
-    world space, so we rotate ``body_com`` and add it.
-    """
-    i = wp.tid()
-    q = body_q[i]
-    pos_body = wp.transform_get_translation(q)
-    rot = wp.transform_get_rotation(q)
-    position[i] = pos_body + wp.quat_rotate(rot, body_com[i])
-    orientation[i] = rot
-    qd = body_qd[i]
-    velocity[i] = wp.vec3f(qd[0], qd[1], qd[2])
-    angular_velocity[i] = wp.vec3f(qd[3], qd[4], qd[5])
-
-
-@wp.kernel(enable_backward=False)
-def _phoenx_to_newton_kernel(
-    position: wp.array[wp.vec3],
-    orientation: wp.array[wp.quat],
-    velocity: wp.array[wp.vec3],
-    angular_velocity: wp.array[wp.vec3],
-    body_com: wp.array[wp.vec3],
-    # out
-    body_q: wp.array[wp.transform],
-    body_qd: wp.array[wp.spatial_vector],
-):
-    """Reverse of :func:`_newton_to_phoenx_kernel`."""
-    i = wp.tid()
-    rot = orientation[i]
-    com_world = wp.quat_rotate(rot, body_com[i])
-    pos_body = position[i] - com_world
-    body_q[i] = wp.transform(pos_body, rot)
-    body_qd[i] = wp.spatial_vector(velocity[i], angular_velocity[i])
-
-
-# Body-container initialisation kernel. Runs once at scene build time.
-@wp.kernel(enable_backward=False)
-def _init_phoenx_bodies_kernel(
-    body_q: wp.array[wp.transform],
-    body_qd: wp.array[wp.spatial_vector],
-    body_com: wp.array[wp.vec3],
-    body_inv_mass: wp.array[wp.float32],
-    body_inv_inertia: wp.array[wp.mat33f],
-    # out (indexed at [1 + tid] -- static world body stays at slot 0)
-    position: wp.array[wp.vec3],
-    orientation: wp.array[wp.quat],
-    velocity: wp.array[wp.vec3],
-    angular_velocity: wp.array[wp.vec3],
-    inverse_mass: wp.array[wp.float32],
-    inverse_inertia: wp.array[wp.mat33f],
-    inverse_inertia_world: wp.array[wp.mat33f],
-    motion_type: wp.array[wp.int32],
-):
-    """Copy a finalised Newton model's body state into PhoenX layout.
-
-    The static world body is parked at slot 0 (Jitter / PhoenX
-    convention); Newton body ``i`` lands at slot ``i + 1``. Dynamic
-    bodies get :data:`MOTION_DYNAMIC`; zero-inverse-mass bodies stay
-    static. ``inverse_inertia_world`` is seeded with the rotated
-    body-frame inertia so the first substep's effective-mass
-    computation starts correct.
-    """
-    i = wp.tid()
-    dst = i + 1
-    q = body_q[i]
-    pos_body = wp.transform_get_translation(q)
-    rot = wp.transform_get_rotation(q)
-    position[dst] = pos_body + wp.quat_rotate(rot, body_com[i])
-    orientation[dst] = rot
-    qd = body_qd[i]
-    velocity[dst] = wp.vec3f(qd[0], qd[1], qd[2])
-    angular_velocity[dst] = wp.vec3f(qd[3], qd[4], qd[5])
-
-    inv_m = body_inv_mass[i]
-    inv_I = body_inv_inertia[i]
-    inverse_mass[dst] = inv_m
-    inverse_inertia[dst] = inv_I
-    r = wp.quat_to_matrix(rot)
-    inverse_inertia_world[dst] = r * inv_I * wp.transpose(r)
-    if inv_m > 0.0:
-        motion_type[dst] = wp.int32(MOTION_DYNAMIC)
-    else:
-        motion_type[dst] = wp.int32(MOTION_STATIC)
+# State-mirroring kernels shared with other PhoenX examples.
+from newton._src.solvers.jitter.examples.example_phoenx_common import (
+    init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
+    newton_to_phoenx_kernel as _newton_to_phoenx_kernel,
+    phoenx_to_newton_kernel as _phoenx_to_newton_kernel,
+)
 
 
 class Example:
