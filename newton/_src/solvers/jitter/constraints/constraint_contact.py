@@ -799,11 +799,32 @@ def contact_prepare_for_iteration_at(
         #                              to effective_gap/dt (speculative)
         #   * -slop < eg <= slop    -> bias = 0, resting contact
         #   * effective_gap < -slop -> bias < 0, Baumgarte pushout
+        #
+        # A naive ``bias = bias_factor * gap * idt`` blows up for deep
+        # penetration: at ``idt = 1/substep_dt`` and substep_dt=1/1200,
+        # a 10 cm penetration injects 24 m/s -- which with only 3 PGS
+        # iterations can't converge in a single substep, and the
+        # leftover velocity cascades through the substep loop and
+        # launches bodies into orbit. Box2D v3's solver2d post
+        # (https://box2d.org/posts/2024/02/solver2d/) addresses this
+        # by capping the pushout speed; we do the same with
+        # ``max_push_speed``. The cap is conservative -- 2 m/s lets
+        # the solver fully resolve a 20 cm gap in ~100 ms (6 frames
+        # @ 60 Hz), which is fast enough to feel responsive but slow
+        # enough that deep penetration from a user-picked plank
+        # yanked hard through its neighbours can't explode the stack.
+        # The speculative-closing bias is capped at a looser value so
+        # objects approaching a contact still benefit from a tight
+        # bias that keeps the closest-point calculation meaningful.
+        max_push_speed = wp.float32(2.0)
+        max_approach_speed = wp.float32(10.0)
         bias_val = wp.float32(0.0)
         if effective_gap > penetration_slop:
             bias_val = bias_factor * effective_gap * idt
+            bias_val = wp.min(bias_val, max_approach_speed)
         elif effective_gap < -penetration_slop:
             bias_val = bias_factor * (effective_gap + penetration_slop) * idt * load_boost
+            bias_val = wp.max(bias_val, -max_push_speed)
 
         # ---- Tangential drift for static friction ----
         # Drift of body 2's contact anchor away from body 1's anchor,

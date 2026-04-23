@@ -197,21 +197,115 @@ class _PhoenXScene:
         *,
         orientation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
         density: float = 1000.0,
+        mass: float | None = None,
     ) -> int:
-        """Add a dynamic box; returns the Newton body index."""
-        body = self.mb.add_body(
-            xform=wp.transform(
-                p=wp.vec3(*position),
-                q=wp.quat(*orientation),
-            ),
-        )
-        self.mb.add_shape_box(
-            body,
-            hx=half_extents[0],
-            hy=half_extents[1],
-            hz=half_extents[2],
-            cfg=newton.ModelBuilder.ShapeConfig(density=density),
-        )
+        """Add a dynamic box; returns the Newton body index.
+
+        If ``mass`` is provided, the body is created with an
+        analytically-correct inertia tensor for a uniform-density
+        box (``I_xx = m/3 * (hy² + hz²)`` etc.) and the shape is
+        added with ``density=0`` so Newton's shape-inertia path
+        doesn't double-count. Without this the ``density=0`` path
+        leaves the body with zero inertia, which Newton's inertia
+        validator then corrects to a near-zero-but-not-zero
+        substitute (``inv_I ≈ 1e6``); the resulting body is
+        effectively a point mass with infinite angular mass and
+        stacks refuse to settle. Use ``mass`` when a test needs an
+        exact analytical mass for a contact-force comparison; use
+        ``density`` otherwise.
+        """
+        if mass is not None:
+            hx, hy, hz = (
+                float(half_extents[0]),
+                float(half_extents[1]),
+                float(half_extents[2]),
+            )
+            ixx = float(mass) / 3.0 * (hy * hy + hz * hz)
+            iyy = float(mass) / 3.0 * (hx * hx + hz * hz)
+            izz = float(mass) / 3.0 * (hx * hx + hy * hy)
+            body = self.mb.add_body(
+                xform=wp.transform(
+                    p=wp.vec3(*position),
+                    q=wp.quat(*orientation),
+                ),
+                mass=float(mass),
+                inertia=((ixx, 0.0, 0.0), (0.0, iyy, 0.0), (0.0, 0.0, izz)),
+            )
+            self.mb.add_shape_box(
+                body,
+                hx=half_extents[0],
+                hy=half_extents[1],
+                hz=half_extents[2],
+                cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
+            )
+        else:
+            body = self.mb.add_body(
+                xform=wp.transform(
+                    p=wp.vec3(*position),
+                    q=wp.quat(*orientation),
+                ),
+            )
+            self.mb.add_shape_box(
+                body,
+                hx=half_extents[0],
+                hy=half_extents[1],
+                hz=half_extents[2],
+                cfg=newton.ModelBuilder.ShapeConfig(density=density),
+            )
+        self._newton_body_ids.append(body)
+        return body
+
+    def add_sphere(
+        self,
+        position: tuple[float, float, float],
+        radius: float,
+        *,
+        mass: float | None = None,
+        density: float = 1000.0,
+    ) -> int:
+        """Add a dynamic sphere; returns the Newton body index.
+
+        Sphere-on-plane is the classic analytical contact-force test
+        (single-point manifold, trivial expected F=mg). See
+        :meth:`add_box` for ``mass`` vs ``density`` semantics.
+        """
+        if mass is not None:
+            # Solid-sphere inertia: I = 2/5 * m * r^2 along every axis.
+            # Same rationale as :meth:`add_box`: supply explicit
+            # inertia when passing ``mass`` so Newton's validator
+            # doesn't corrupt a zero-inertia body into an
+            # effectively-massless angular body.
+            r = float(radius)
+            i_sphere = 0.4 * float(mass) * r * r
+            body = self.mb.add_body(
+                xform=wp.transform(
+                    p=wp.vec3(*position),
+                    q=wp.quat_identity(),
+                ),
+                mass=float(mass),
+                inertia=(
+                    (i_sphere, 0.0, 0.0),
+                    (0.0, i_sphere, 0.0),
+                    (0.0, 0.0, i_sphere),
+                ),
+            )
+            self.mb.add_shape_sphere(
+                body,
+                radius=float(radius),
+                cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
+            )
+        else:
+            body = self.mb.add_body(
+                xform=wp.transform(
+                    p=wp.vec3(*position),
+                    q=wp.quat_identity(),
+                ),
+            )
+            self.mb.add_shape_sphere(
+                body,
+                radius=float(radius),
+                cfg=newton.ModelBuilder.ShapeConfig(density=density),
+            )
         self._newton_body_ids.append(body)
         return body
 
@@ -365,6 +459,144 @@ class _PhoenXScene:
 
     def body_velocity(self, newton_idx: int) -> np.ndarray:
         return self.bodies.velocity.numpy()[newton_idx + 1].copy()
+
+    def set_body_velocity(
+        self,
+        newton_idx: int,
+        velocity: tuple[float, float, float],
+    ) -> None:
+        """Overwrite ``state.body_qd`` (linear only) for one body.
+
+        Used by slam / impact tests to prime the scene with a known
+        initial velocity. Must be called after :meth:`finalize` (so
+        ``state.body_qd`` exists) and before the first :meth:`step`;
+        the velocity is picked up by the first ``_sync_newton_to_phoenx``
+        at the start of :meth:`step`.
+        """
+        body_qd_np = self.state.body_qd.numpy()
+        body_qd_np[newton_idx, 0] = float(velocity[0])
+        body_qd_np[newton_idx, 1] = float(velocity[1])
+        body_qd_np[newton_idx, 2] = float(velocity[2])
+        self.state.body_qd.assign(body_qd_np)
+
+    # -- contact force reporting --
+
+    def gather_contact_wrench_on_body(
+        self, newton_idx: int
+    ) -> tuple[np.ndarray, int, int]:
+        """Return ``(force[3], n_pairs, n_contact_points)`` for one
+        Newton body, summed from the per-pair wrench API.
+
+        Sign convention: every column's wrench is reported as the
+        force body 2 felt from body 1. Entries where ``newton_idx``
+        is body 2 contribute verbatim; entries where it is body 1
+        contribute with the sign flipped. Inactive columns
+        (``pair_count == 0``) are skipped.
+
+        Returns:
+            force: 3-vector [N] -- net contact force on
+                ``newton_idx`` from every contact pair involving it
+                during the last substep.
+            n_pairs: number of distinct contact columns that
+                contributed.
+            n_contact_points: sum of ``pair_count`` across those
+                columns -- the actual number of contact manifold
+                points folded into ``force``.
+        """
+        n_cols = self.world.max_contact_columns
+        if n_cols == 0:
+            return np.zeros(3, dtype=np.float32), 0, 0
+        pair_w = wp.zeros(n_cols, dtype=wp.spatial_vector, device=self.device)
+        pair_b1 = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
+        pair_b2 = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
+        pair_count = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
+        self.world.gather_contact_pair_wrenches(
+            pair_w, pair_b1, pair_b2, pair_count
+        )
+        pw = pair_w.numpy()[:, :3]
+        b1 = pair_b1.numpy()
+        b2 = pair_b2.numpy()
+        cnt = pair_count.numpy()
+
+        phoenx_slot = int(newton_idx) + 1  # slot 0 is the static world
+        total = np.zeros(3, dtype=np.float32)
+        npairs = 0
+        npoints = 0
+        for i in range(n_cols):
+            if cnt[i] <= 0:
+                continue
+            if b2[i] == phoenx_slot:
+                total += pw[i]
+                npairs += 1
+                npoints += int(cnt[i])
+            elif b1[i] == phoenx_slot:
+                total -= pw[i]
+                npairs += 1
+                npoints += int(cnt[i])
+        return total, npairs, npoints
+
+    def active_rigid_contact_count(self) -> int:
+        """Raw narrow-phase contact count, pre-ingest. Compared
+        against the summed ``n_contact_points`` from
+        :meth:`gather_contact_wrench_on_body` to detect ingest
+        duplication / loss.
+        """
+        return int(self.contacts.rigid_contact_count.numpy()[0])
+
+    def gather_pair_wrenches_raw(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return the raw per-pair wrench arrays: ``(force_xyz,
+        body1_slot, body2_slot, pair_count)``.
+
+        ``body{1,2}_slot`` are PhoenX slot indices (slot 0 = static
+        world). Inactive columns have ``pair_count == 0``. Callers
+        that want per-body sums can use
+        :meth:`gather_contact_wrench_on_body` instead; this raw view
+        is useful for per-body up/down decomposition (pyramid force
+        balance) where we need to distinguish "pairs where this
+        body is body1" from "pairs where this body is body2".
+        """
+        n_cols = self.world.max_contact_columns
+        if n_cols == 0:
+            return (
+                np.zeros((0, 3), dtype=np.float32),
+                np.zeros(0, dtype=np.int32),
+                np.zeros(0, dtype=np.int32),
+                np.zeros(0, dtype=np.int32),
+            )
+        pair_w = wp.zeros(n_cols, dtype=wp.spatial_vector, device=self.device)
+        pair_b1 = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
+        pair_b2 = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
+        pair_count = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
+        self.world.gather_contact_pair_wrenches(
+            pair_w, pair_b1, pair_b2, pair_count
+        )
+        return (
+            pair_w.numpy()[:, :3],
+            pair_b1.numpy(),
+            pair_b2.numpy(),
+            pair_count.numpy(),
+        )
+
+    def gather_per_contact_wrenches(self) -> np.ndarray:
+        """Return the per-rigid-contact 3-vector force array.
+
+        Indexed by ``rigid_contact_index`` -- row ``k`` is the
+        force body 2 of the ``k``-th contact felt from that contact
+        in the last substep. Inactive indices (``k >=
+        rigid_contact_count[0]``) are zeroed because
+        :meth:`PhoenXWorld.gather_contact_wrenches` pre-zeroes the
+        output; callers that want only the active prefix slice
+        down to ``active_rigid_contact_count()``.
+        """
+        per = wp.zeros(
+            self.world.rigid_contact_max,
+            dtype=wp.spatial_vector,
+            device=self.device,
+        )
+        self.world.gather_contact_wrenches(per)
+        return per.numpy()[:, :3]
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +849,149 @@ class TestPhoenXSolverStacking(unittest.TestCase):
                 z_max_expected,
                 f"plank {pid} rose above its spawn layer (z={p[2]:.2f})",
             )
+
+
+@unittest.skipUnless(
+    wp.is_cuda_available(), "PhoenX solver requires CUDA for graph-captured stepping"
+)
+class TestPhoenXSolverRobustness(unittest.TestCase):
+    """Stress tests for the PhoenX solver's Baumgarte / bias handling.
+
+    The tower example used to explode any time a user-picked plank
+    was yanked hard enough to deeply penetrate its neighbours: the
+    contact prepare kernel computed ``bias = 0.2 * penetration /
+    substep_dt`` which at substep_dt=1/1200 s turned a 10 cm
+    penetration into a 24 m/s velocity correction, and with only 3
+    PGS iterations that correction couldn't be resolved in one
+    substep. Sub-sequent substeps saw the injected velocity but
+    with a new (post-integration) penetration that was even larger,
+    producing runaway.
+
+    These tests deliberately cause deep penetration / high-velocity
+    contact to verify the solver stays bounded; they failed at
+    factor-of-1000 velocity amplifications on the pre-fix code.
+    """
+
+    def test_slam_two_boxes_head_on(self) -> None:
+        """Two boxes launched at each other at 20 m/s.
+
+        Pre-fix: the pair's velocity would amplify past 100 m/s and
+        NaN out within ~10 frames. Post-fix: the normal row clamps
+        the relative velocity and the pair either rebounds (inelastic
+        collision with warm-start) or stops; either way the peak
+        velocity never exceeds a few times the impact speed.
+        """
+        scene = _PhoenXScene(substeps=20, solver_iterations=3)
+        scene.add_ground_plane()
+        left = scene.add_box(position=(-2.0, 0.0, 0.5), half_extents=(0.5, 0.5, 0.5))
+        right = scene.add_box(position=(2.0, 0.0, 0.5), half_extents=(0.5, 0.5, 0.5))
+        scene.finalize()
+        scene.set_body_velocity(left, (20.0, 0.0, 0.0))
+        scene.set_body_velocity(right, (-20.0, 0.0, 0.0))
+
+        peak_v = 0.0
+        for _ in range(120):
+            scene.step()
+            v_left = scene.body_velocity(left)
+            v_right = scene.body_velocity(right)
+            peak_v = max(
+                peak_v,
+                float(np.linalg.norm(v_left)),
+                float(np.linalg.norm(v_right)),
+            )
+            self.assertTrue(
+                np.isfinite(v_left).all() and np.isfinite(v_right).all(),
+                "velocity went non-finite",
+            )
+
+        # Even with a perfectly elastic rebound the pair can never
+        # exceed the 20 m/s impact speed (momentum conservation).
+        # We allow a 2x margin for Baumgarte-generated overshoot and
+        # any normal-row divergence.
+        self.assertLess(peak_v, 40.0, f"peak velocity {peak_v:.1f} m/s blew past 2x impact speed")
+
+    def test_slam_ball_into_stack(self) -> None:
+        """A heavy box launched horizontally into a 3-cube vertical
+        stack. Common picking-demo scenario: yanking a plank sideways
+        into its neighbour drives the neighbour's COM past the next
+        plank's face, producing a multi-body cascade.
+
+        The test verifies the stack responds but doesn't explode
+        (velocities stay bounded, no NaNs).
+        """
+        scene = _PhoenXScene(substeps=20, solver_iterations=3)
+        scene.add_ground_plane()
+        he = 0.5
+        gap = 5.0e-3
+        stack_ids: list[int] = []
+        z = he + 0.05
+        for _ in range(3):
+            stack_ids.append(
+                scene.add_box(position=(0.0, 0.0, z), half_extents=(he, he, he))
+            )
+            z += 2 * he + gap
+        slammer = scene.add_box(
+            position=(-4.0, 0.0, he + 0.05), half_extents=(he, he, he)
+        )
+        scene.finalize()
+        scene.set_body_velocity(slammer, (15.0, 0.0, 0.0))
+
+        peak_v = 0.0
+        peak_z = 0.0
+        peak_r = 0.0
+        for _ in range(240):
+            scene.step()
+            for b in [*stack_ids, slammer]:
+                v = scene.body_velocity(b)
+                p = scene.body_position(b)
+                self.assertTrue(
+                    np.isfinite(v).all() and np.isfinite(p).all(),
+                    f"body {b} went non-finite",
+                )
+                peak_v = max(peak_v, float(np.linalg.norm(v)))
+                peak_z = max(peak_z, float(p[2]))
+                peak_r = max(peak_r, float(np.linalg.norm(p)))
+
+        # Impact speed 15 m/s; with a 1:1 mass ratio the stack can
+        # pick up roughly the impact speed and then shed it through
+        # friction+contacts. 3x impact speed is a generous cap that
+        # still catches explosions (pre-fix runs hit 2000+ m/s).
+        self.assertLess(peak_v, 45.0, f"peak velocity {peak_v:.1f} m/s indicates explosion")
+        # No cube should end up more than 20 m from the origin --
+        # deflation goes through the ground plane (z stays bounded)
+        # and sliding drifts ~a few meters at worst.
+        self.assertLess(peak_r, 20.0, f"peak radius {peak_r:.2f} m indicates ejected body")
+        self.assertLess(peak_z, 10.0, f"peak height {peak_z:.2f} m indicates upward blow-up")
+
+    def test_dropped_box_deep_penetration(self) -> None:
+        """A box spawned intersecting the ground plane by half its
+        half-extent should *not* explode on the first step.
+
+        Worst case for the Baumgarte bias: penetration is large
+        (he/2 = 25 cm for a 0.5 m cube) and the initial velocity is
+        zero, so a naive ``bias = 0.2 * 0.25 / substep_dt`` injects
+        60 m/s of velocity in one substep. The solver must either
+        cap the bias or spread the resolution over many substeps;
+        either way the cube's settled velocity must stay bounded.
+        """
+        scene = _PhoenXScene(substeps=20, solver_iterations=3)
+        scene.add_ground_plane()
+        he = 0.5
+        # Spawn so the cube's bottom face sits 25 cm below z=0.
+        box = scene.add_box(position=(0.0, 0.0, he * 0.5), half_extents=(he, he, he))
+        scene.finalize()
+
+        peak_v = 0.0
+        for _ in range(120):
+            scene.step()
+            v = scene.body_velocity(box)
+            p = scene.body_position(box)
+            self.assertTrue(np.isfinite(v).all() and np.isfinite(p).all())
+            peak_v = max(peak_v, float(np.linalg.norm(v)))
+
+        # Pre-fix peak was ~3000 m/s. Post-fix should keep it under
+        # a few m/s (just the gravity + pushout transient).
+        self.assertLess(peak_v, 20.0, f"peak velocity {peak_v:.1f} m/s indicates bias runaway")
 
 
 if __name__ == "__main__":
