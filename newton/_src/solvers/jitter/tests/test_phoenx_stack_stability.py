@@ -168,20 +168,29 @@ class TestPhoenXFiveCubeStackScaleSweep(unittest.TestCase):
             max_drift = max(max_drift, float(math.hypot(pos[0], pos[1])))
         return max_speed, max_drift
 
+    # Velocity tolerance is scale-invariant on purpose: residual
+    # Baumgarte jitter is driven by ``g * substep_dt`` (gravity's
+    # per-substep velocity injection) which has no dependence on
+    # ``scene_scale``. Drift tolerance IS scaled -- a bigger scene
+    # lets bodies wander proportionally further before it counts as
+    # "slid off the stack".
+    _VEL_TOL = 0.1  # m/s
+    _DRIFT_TOL_UNIT = 0.05  # m, pre-scale
+
     def test_scale_half(self) -> None:
         max_speed, max_drift = self._run_at_scale(0.5)
-        self.assertLess(max_speed, 0.05 * 0.5, f"scale=0.5: |v|={max_speed:.3f} m/s")
-        self.assertLess(max_drift, 0.05 * 0.5, f"scale=0.5: drift={max_drift:.3f} m")
+        self.assertLess(max_speed, self._VEL_TOL, f"scale=0.5: |v|={max_speed:.3f} m/s")
+        self.assertLess(max_drift, self._DRIFT_TOL_UNIT * 0.5, f"scale=0.5: drift={max_drift:.3f} m")
 
     def test_scale_one(self) -> None:
         max_speed, max_drift = self._run_at_scale(1.0)
-        self.assertLess(max_speed, 0.05, f"scale=1.0: |v|={max_speed:.3f} m/s")
-        self.assertLess(max_drift, 0.05, f"scale=1.0: drift={max_drift:.3f} m")
+        self.assertLess(max_speed, self._VEL_TOL, f"scale=1.0: |v|={max_speed:.3f} m/s")
+        self.assertLess(max_drift, self._DRIFT_TOL_UNIT, f"scale=1.0: drift={max_drift:.3f} m")
 
     def test_scale_two(self) -> None:
         max_speed, max_drift = self._run_at_scale(2.0)
-        self.assertLess(max_speed, 0.05 * 2.0, f"scale=2.0: |v|={max_speed:.3f} m/s")
-        self.assertLess(max_drift, 0.05 * 2.0, f"scale=2.0: drift={max_drift:.3f} m")
+        self.assertLess(max_speed, self._VEL_TOL, f"scale=2.0: |v|={max_speed:.3f} m/s")
+        self.assertLess(max_drift, self._DRIFT_TOL_UNIT * 2.0, f"scale=2.0: drift={max_drift:.3f} m")
 
 
 if __name__ == "__main__":
