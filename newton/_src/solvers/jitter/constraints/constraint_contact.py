@@ -775,8 +775,31 @@ def contact_prepare_for_iteration_at(
         # ``UpdatePosition``: the contact is rigidly attached to its
         # body-frame anchor, so the world-frame lever arm tracks any
         # rotation the body has undergone since the contact was born.
-        p1_world = position1 + wp.quat_rotate(orientation1, local_p0)
-        p2_world = position2 + wp.quat_rotate(orientation2, local_p1)
+        #
+        # Newton's narrow-phase convention: ``rigid_contact_point0/1``
+        # is the body-local anchor *without* the surface offset. Each
+        # shape carries an additional ``margin`` (radius + skin) so the
+        # actual surface contact lies at
+        # ``point0 + margin0 * normal_in_body_frame_0`` for shape 0,
+        # and ``point1 - margin1 * normal_in_body_frame_1`` for shape 1
+        # (normal points 0 -> 1, so shape 1's surface lies on the
+        # *negative* normal side of its anchor). For convex primitives
+        # like a sphere the anchor is the body centre and the margin
+        # equals the radius -- without this shift the lever arm
+        # ``r2 = p2 - position2`` collapses to zero and friction
+        # contributes no torque, which is the bug that kept e.g. the
+        # nut-on-bolt test from spinning. Mirror what XPBD does in its
+        # friction path (``bx_b += transform_vector(X_wb, offset_b)``).
+        p1_world = (
+            position1
+            + wp.quat_rotate(orientation1, local_p0)
+            + contacts.rigid_contact_margin0[k] * n
+        )
+        p2_world = (
+            position2
+            + wp.quat_rotate(orientation2, local_p1)
+            - contacts.rigid_contact_margin1[k] * n
+        )
 
         r1 = p1_world - position1
         r2 = p2_world - position2
@@ -789,16 +812,11 @@ def contact_prepare_for_iteration_at(
             t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
         )
 
-        # Signed separation along the *stored* normal. Under PhoenX's
-        # rigid-contact model the normal is fixed frame-to-frame, so
-        # the gap is measured against the original contact plane.
-        # Bodies that have since translated / rotated carry their
-        # anchors with them via the re-projection above; the gap
-        # therefore reflects the distance between the pair's original
-        # contact anchors in the current world pose.
-        gap = wp.dot(p2_world - p1_world, n)
-        margin_sum = contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
-        effective_gap = gap - margin_sum
+        # Signed separation along the *stored* normal. Now that
+        # ``p1_world`` / ``p2_world`` already include the per-shape
+        # margin shift to the actual surface, the gap *is* the
+        # effective gap -- no extra margin subtraction needed.
+        effective_gap = wp.dot(p2_world - p1_world, n)
 
         # Load-scaled contact correction: contacts under heavier
         # normal load get stronger position-level correction on both
@@ -941,8 +959,20 @@ def contact_prepare_for_iteration_at(
             if coulomb_saturated:
                 cc_set_tangent1_lambda(cc, slot, cid, wp.float32(0.0))
                 cc_set_tangent2_lambda(cc, slot, cid, wp.float32(0.0))
-            p1_world = position1 + wp.quat_rotate(orientation1, fresh_lp0)
-            p2_world = position2 + wp.quat_rotate(orientation2, fresh_lp1)
+            # Mirror the surface-shift applied above so the reset
+            # path lands on the actual surface contact point, not the
+            # body-frame anchor (matters for sphere/SDF primitives
+            # where the anchor is the body centre).
+            p1_world = (
+                position1
+                + wp.quat_rotate(orientation1, fresh_lp0)
+                + contacts.rigid_contact_margin0[k] * n
+            )
+            p2_world = (
+                position2
+                + wp.quat_rotate(orientation2, fresh_lp1)
+                - contacts.rigid_contact_margin1[k] * n
+            )
             r1 = p1_world - position1
             r2 = p2_world - position2
             eff_n = _effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
