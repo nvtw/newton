@@ -13,7 +13,7 @@ The caller-visible API is identical to :class:`LLTBlockedSolver`:
 
 .. code-block:: python
 
-    solver = LLTBlockedNDSolver(operator=operator, block_size=32, dtype=float32)
+    solver = LLTBlockedRCMSolver(operator=operator, block_size=32, dtype=float32)
     solver.compute(A)          # factorizes; reordering is internal
     solver.solve(b, x)         # or: solver.solve_inplace(x)
 
@@ -30,19 +30,19 @@ from ...core.types import FloatType, float32, int32, override
 from ..core import DenseLinearOperatorData, DenseSquareMultiLinearInfo
 from ..linear import DirectSolver
 from . import rcm_batch as _rcm_batch
-from .llt_blocked_nd import (
-    llt_blocked_nd_factorize,
-    llt_blocked_nd_fused_permute_and_tp,
-    llt_blocked_nd_permute_vector,
-    llt_blocked_nd_solve,
-    llt_blocked_nd_solve_inplace,
-    llt_blocked_nd_symbolic_fill_in,
-    make_llt_blocked_nd_factorize_kernel,
-    make_llt_blocked_nd_fused_permute_and_tp_kernel,
-    make_llt_blocked_nd_permute_vector_kernel,
-    make_llt_blocked_nd_solve_inplace_kernel,
-    make_llt_blocked_nd_solve_kernel,
-    make_llt_blocked_nd_symbolic_fill_in_kernel,
+from .llt_blocked_rcm import (
+    llt_blocked_rcm_factorize,
+    llt_blocked_rcm_fused_permute_and_tp,
+    llt_blocked_rcm_permute_vector,
+    llt_blocked_rcm_solve,
+    llt_blocked_rcm_solve_inplace,
+    llt_blocked_rcm_symbolic_fill_in,
+    make_llt_blocked_rcm_factorize_kernel,
+    make_llt_blocked_rcm_fused_permute_and_tp_kernel,
+    make_llt_blocked_rcm_permute_vector_kernel,
+    make_llt_blocked_rcm_solve_inplace_kernel,
+    make_llt_blocked_rcm_solve_kernel,
+    make_llt_blocked_rcm_symbolic_fill_in_kernel,
 )
 
 
@@ -50,7 +50,7 @@ from .llt_blocked_nd import (
 # Module interface
 ###
 
-__all__ = ["LLTBlockedNDSolver"]
+__all__ = ["LLTBlockedRCMSolver"]
 
 
 ###
@@ -60,7 +60,7 @@ __all__ = ["LLTBlockedNDSolver"]
 wp.set_module_options({"enable_backward": False})
 
 
-class LLTBlockedNDSolver(DirectSolver):
+class LLTBlockedRCMSolver(DirectSolver):
     """RCM-reordered, semi-sparse Blocked LLT (Cholesky) solver.
 
     Same public API as :class:`newton._src.solvers.kamino._src.linalg.linear.LLTBlockedSolver`.
@@ -148,9 +148,9 @@ class LLTBlockedNDSolver(DirectSolver):
         self._rcm_max_bfs_iters = rcm_max_bfs_iters
 
         # Build kernels (cached by block_size / max_dim at allocate time).
-        self._factorize_kernel = make_llt_blocked_nd_factorize_kernel(block_size)
-        self._solve_kernel = make_llt_blocked_nd_solve_kernel(block_size)
-        self._solve_inplace_kernel = make_llt_blocked_nd_solve_inplace_kernel(block_size)
+        self._factorize_kernel = make_llt_blocked_rcm_factorize_kernel(block_size)
+        self._solve_kernel = make_llt_blocked_rcm_solve_kernel(block_size)
+        self._solve_inplace_kernel = make_llt_blocked_rcm_solve_inplace_kernel(block_size)
         # Auxiliary kernels resolved in _allocate_impl once we know max_dim.
         self._permute_vector_kernel = None
         self._fused_permute_and_tp_kernel = None
@@ -219,12 +219,12 @@ class LLTBlockedNDSolver(DirectSolver):
         self._max_dim = int(info.max_dimension)
 
         # Resolve auxiliary kernels now that max_dim is known.
-        self._permute_vector_kernel = make_llt_blocked_nd_permute_vector_kernel(self._max_dim)
-        self._fused_permute_and_tp_kernel = make_llt_blocked_nd_fused_permute_and_tp_kernel(
+        self._permute_vector_kernel = make_llt_blocked_rcm_permute_vector_kernel(self._max_dim)
+        self._fused_permute_and_tp_kernel = make_llt_blocked_rcm_fused_permute_and_tp_kernel(
             self._block_size, self._max_dim
         )
         max_n_tiles = (self._max_dim + self._block_size - 1) // self._block_size
-        self._symbolic_fill_in_kernel = make_llt_blocked_nd_symbolic_fill_in_kernel(max_n_tiles)
+        self._symbolic_fill_in_kernel = make_llt_blocked_rcm_symbolic_fill_in_kernel(max_n_tiles)
 
         # Per-block tile-pattern layout: n_tiles_i^2 entries per block.
         # Computed on host once from info.dimensions (a cheap list).
@@ -320,7 +320,7 @@ class LLTBlockedNDSolver(DirectSolver):
         #    own (r, c) entry, so there is no data race on A_hat; tile-pattern
         #    bits are OR'd via atomic_max.
         self._tile_pattern.zero_()
-        llt_blocked_nd_fused_permute_and_tp(
+        llt_blocked_rcm_fused_permute_and_tp(
             kernel=self._fused_permute_and_tp_kernel,
             dim=info.dim,
             mio=info.mio,
@@ -338,7 +338,7 @@ class LLTBlockedNDSolver(DirectSolver):
         )
 
         # 3. Inflate the tile pattern by block symbolic Cholesky fill-in.
-        llt_blocked_nd_symbolic_fill_in(
+        llt_blocked_rcm_symbolic_fill_in(
             kernel=self._symbolic_fill_in_kernel,
             dim=info.dim,
             tpo=self._tpo,
@@ -349,7 +349,7 @@ class LLTBlockedNDSolver(DirectSolver):
         )
 
         # 4. Numeric factorization with tile-pattern skips.
-        llt_blocked_nd_factorize(
+        llt_blocked_rcm_factorize(
             kernel=self._factorize_kernel,
             dim=info.dim,
             mio=info.mio,
@@ -372,7 +372,7 @@ class LLTBlockedNDSolver(DirectSolver):
         num_blocks = info.num_blocks
 
         # Permute b -> b_hat.
-        llt_blocked_nd_permute_vector(
+        llt_blocked_rcm_permute_vector(
             kernel=self._permute_vector_kernel,
             dim=info.dim,
             vio=info.vio,
@@ -385,7 +385,7 @@ class LLTBlockedNDSolver(DirectSolver):
         )
 
         # Solve L L^T x_hat = b_hat.
-        llt_blocked_nd_solve(
+        llt_blocked_rcm_solve(
             kernel=self._solve_kernel,
             dim=info.dim,
             mio=info.mio,
@@ -405,7 +405,7 @@ class LLTBlockedNDSolver(DirectSolver):
         # Our permute_vector kernel computes ``dst[r] = src[P[r]]``, so using
         # inv_P as P and (x_hat, x) as (src, dst) yields the desired inverse
         # permutation on x.
-        llt_blocked_nd_permute_vector(
+        llt_blocked_rcm_permute_vector(
             kernel=self._permute_vector_kernel,
             dim=info.dim,
             vio=info.vio,
@@ -423,7 +423,7 @@ class LLTBlockedNDSolver(DirectSolver):
         num_blocks = info.num_blocks
 
         # Permute x -> x_hat (x is the RHS here).
-        llt_blocked_nd_permute_vector(
+        llt_blocked_rcm_permute_vector(
             kernel=self._permute_vector_kernel,
             dim=info.dim,
             vio=info.vio,
@@ -436,7 +436,7 @@ class LLTBlockedNDSolver(DirectSolver):
         )
 
         # In-place solve on x_hat (x_hat starts as the permuted RHS; y is scratch).
-        llt_blocked_nd_solve_inplace(
+        llt_blocked_rcm_solve_inplace(
             kernel=self._solve_inplace_kernel,
             dim=info.dim,
             mio=info.mio,
@@ -452,7 +452,7 @@ class LLTBlockedNDSolver(DirectSolver):
         )
 
         # Un-permute x_hat -> x.
-        llt_blocked_nd_permute_vector(
+        llt_blocked_rcm_permute_vector(
             kernel=self._permute_vector_kernel,
             dim=info.dim,
             vio=info.vio,

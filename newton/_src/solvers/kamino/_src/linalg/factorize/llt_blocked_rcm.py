@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""KAMINO: Linear Algebra: ND-reordered, semi-sparse Blocked LLT (Cholesky).
+"""KAMINO: Linear Algebra: RCM-reordered, semi-sparse Blocked LLT (Cholesky).
 
 This module mirrors :mod:`llt_blocked` (flat-batched layout, Tile API kernels)
 but adds:
@@ -15,7 +15,7 @@ but adds:
   then inflated by a classical block symbolic Cholesky fill-in step - both
   steps are CUDA-graph capturable (fixed launch dimensions).
 
-The caller-facing wrapper (:class:`llt_blocked_nd_solver.LLTBlockedNDSolver`)
+The caller-facing wrapper (:class:`llt_blocked_rcm_solver.LLTBlockedRCMSolver`)
 hides all of this behind the same public API as :class:`LLTBlockedSolver`.
 
 Layout conventions (same as llt_blocked):
@@ -41,18 +41,18 @@ from ...core.types import float32, int32
 ###
 
 __all__ = [
-    "llt_blocked_nd_factorize",
-    "llt_blocked_nd_fused_permute_and_tp",
-    "llt_blocked_nd_permute_vector",
-    "llt_blocked_nd_solve",
-    "llt_blocked_nd_solve_inplace",
-    "llt_blocked_nd_symbolic_fill_in",
-    "make_llt_blocked_nd_factorize_kernel",
-    "make_llt_blocked_nd_fused_permute_and_tp_kernel",
-    "make_llt_blocked_nd_permute_vector_kernel",
-    "make_llt_blocked_nd_solve_inplace_kernel",
-    "make_llt_blocked_nd_solve_kernel",
-    "make_llt_blocked_nd_symbolic_fill_in_kernel",
+    "llt_blocked_rcm_factorize",
+    "llt_blocked_rcm_fused_permute_and_tp",
+    "llt_blocked_rcm_permute_vector",
+    "llt_blocked_rcm_solve",
+    "llt_blocked_rcm_solve_inplace",
+    "llt_blocked_rcm_symbolic_fill_in",
+    "make_llt_blocked_rcm_factorize_kernel",
+    "make_llt_blocked_rcm_fused_permute_and_tp_kernel",
+    "make_llt_blocked_rcm_permute_vector_kernel",
+    "make_llt_blocked_rcm_solve_inplace_kernel",
+    "make_llt_blocked_rcm_solve_kernel",
+    "make_llt_blocked_rcm_symbolic_fill_in_kernel",
 ]
 
 
@@ -94,7 +94,7 @@ get_float32_array_offset_ptr = make_get_array_offset_ptr_func(wp.float32)
 
 
 @cache
-def make_llt_blocked_nd_permute_vector_kernel(max_dim: int):
+def make_llt_blocked_rcm_permute_vector_kernel(max_dim: int):
     """Per-(block, row) kernel: ``b_hat[r] = b[P[r]]`` (or inverse).
 
     Launched over ``(num_blocks, max_dim)``. Uses ``vio[b]`` for offsets.
@@ -121,7 +121,7 @@ def make_llt_blocked_nd_permute_vector_kernel(max_dim: int):
 
 
 @cache
-def make_llt_blocked_nd_fused_permute_and_tp_kernel(block_size: int, max_dim: int):
+def make_llt_blocked_rcm_fused_permute_and_tp_kernel(block_size: int, max_dim: int):
     """Fused kernel: builds ``inv_P``, permutes ``A -> A_hat``, and reduces
     ``|A_hat|`` into the tile pattern in a single launch.
 
@@ -188,7 +188,7 @@ def make_llt_blocked_nd_fused_permute_and_tp_kernel(block_size: int, max_dim: in
 
 
 @cache
-def make_llt_blocked_nd_symbolic_fill_in_kernel(max_n_tiles: int):
+def make_llt_blocked_rcm_symbolic_fill_in_kernel(max_n_tiles: int):
     """Per-block kernel (launch dim = num_blocks) that performs block symbolic
     Cholesky fill-in on ``tile_pattern`` in place.
 
@@ -246,7 +246,7 @@ def make_llt_blocked_nd_symbolic_fill_in_kernel(max_n_tiles: int):
 
 
 @cache
-def make_llt_blocked_nd_factorize_kernel(block_size: int):
+def make_llt_blocked_rcm_factorize_kernel(block_size: int):
     """Clone of :func:`llt_blocked.make_llt_blocked_factorize_kernel` with tile
     skipping. Reads tile pattern from ``tile_pattern`` indexed by ``tpo[tid]``.
 
@@ -257,7 +257,7 @@ def make_llt_blocked_nd_factorize_kernel(block_size: int):
     """
 
     @wp.kernel
-    def llt_blocked_nd_factorize_kernel(
+    def llt_blocked_rcm_factorize_kernel(
         # Inputs:
         dim: wp.array(dtype=int32),
         mio: wp.array(dtype=int32),
@@ -358,15 +358,15 @@ def make_llt_blocked_nd_factorize_kernel(block_size: int):
                 sol_tile = wp.tile_transpose(t)
                 wp.tile_store(L_i, sol_tile, offset=(i, k))
 
-    return llt_blocked_nd_factorize_kernel
+    return llt_blocked_rcm_factorize_kernel
 
 
 @cache
-def make_llt_blocked_nd_solve_kernel(block_size: int):
+def make_llt_blocked_rcm_solve_kernel(block_size: int):
     """Clone of :func:`llt_blocked.make_llt_blocked_solve_kernel` with tile skipping."""
 
     @wp.kernel
-    def llt_blocked_nd_solve_kernel(
+    def llt_blocked_rcm_solve_kernel(
         # Inputs:
         dim: wp.array(dtype=int32),
         mio: wp.array(dtype=int32),
@@ -452,11 +452,11 @@ def make_llt_blocked_nd_solve_kernel(block_size: int):
             wp.tile_upper_solve_inplace(wp.tile_transpose(L_diag), rhs_tile)
             wp.tile_store(x_i, rhs_tile, offset=(i, 0))
 
-    return llt_blocked_nd_solve_kernel
+    return llt_blocked_rcm_solve_kernel
 
 
 @cache
-def make_llt_blocked_nd_solve_inplace_kernel(block_size: int):
+def make_llt_blocked_rcm_solve_inplace_kernel(block_size: int):
     """Clone of :func:`llt_blocked.make_llt_blocked_solve_inplace_kernel` with tile skipping.
 
     Takes ``x`` as in/out; forward substitution reads from ``x`` (as b) and
@@ -464,7 +464,7 @@ def make_llt_blocked_nd_solve_inplace_kernel(block_size: int):
     """
 
     @wp.kernel
-    def llt_blocked_nd_solve_inplace_kernel(
+    def llt_blocked_rcm_solve_inplace_kernel(
         # Inputs:
         dim: wp.array(dtype=int32),
         mio: wp.array(dtype=int32),
@@ -546,7 +546,7 @@ def make_llt_blocked_nd_solve_inplace_kernel(block_size: int):
             wp.tile_upper_solve_inplace(wp.tile_transpose(L_diag), rhs_tile)
             wp.tile_store(x_i, rhs_tile, offset=(i, 0))
 
-    return llt_blocked_nd_solve_inplace_kernel
+    return llt_blocked_rcm_solve_inplace_kernel
 
 
 ###
@@ -554,7 +554,7 @@ def make_llt_blocked_nd_solve_inplace_kernel(block_size: int):
 ###
 
 
-def llt_blocked_nd_permute_vector(
+def llt_blocked_rcm_permute_vector(
     kernel,
     dim: wp.array(dtype=int32),
     vio: wp.array(dtype=int32),
@@ -574,7 +574,7 @@ def llt_blocked_nd_permute_vector(
     )
 
 
-def llt_blocked_nd_fused_permute_and_tp(
+def llt_blocked_rcm_fused_permute_and_tp(
     kernel,
     dim: wp.array(dtype=int32),
     mio: wp.array(dtype=int32),
@@ -603,7 +603,7 @@ def llt_blocked_nd_fused_permute_and_tp(
     )
 
 
-def llt_blocked_nd_symbolic_fill_in(
+def llt_blocked_rcm_symbolic_fill_in(
     kernel,
     dim: wp.array(dtype=int32),
     tpo: wp.array(dtype=int32),
@@ -621,7 +621,7 @@ def llt_blocked_nd_symbolic_fill_in(
     )
 
 
-def llt_blocked_nd_factorize(
+def llt_blocked_rcm_factorize(
     kernel,
     dim: wp.array(dtype=int32),
     mio: wp.array(dtype=int32),
@@ -633,7 +633,7 @@ def llt_blocked_nd_factorize(
     block_dim: int = 128,
     device: wp.DeviceLike = None,
 ):
-    """Launches the ND-reordered semi-sparse blocked Cholesky factorization."""
+    """Launches the RCM-reordered semi-sparse blocked Cholesky factorization."""
     wp.launch_tiled(
         kernel=kernel,
         dim=num_blocks,
@@ -643,7 +643,7 @@ def llt_blocked_nd_factorize(
     )
 
 
-def llt_blocked_nd_solve(
+def llt_blocked_rcm_solve(
     kernel,
     dim: wp.array(dtype=int32),
     mio: wp.array(dtype=int32),
@@ -658,7 +658,7 @@ def llt_blocked_nd_solve(
     block_dim: int = 128,
     device: wp.DeviceLike = None,
 ):
-    """Launches the ND-reordered semi-sparse blocked Cholesky solve kernel."""
+    """Launches the RCM-reordered semi-sparse blocked Cholesky solve kernel."""
     wp.launch_tiled(
         kernel=kernel,
         dim=num_blocks,
@@ -668,7 +668,7 @@ def llt_blocked_nd_solve(
     )
 
 
-def llt_blocked_nd_solve_inplace(
+def llt_blocked_rcm_solve_inplace(
     kernel,
     dim: wp.array(dtype=int32),
     mio: wp.array(dtype=int32),
@@ -682,7 +682,7 @@ def llt_blocked_nd_solve_inplace(
     block_dim: int = 128,
     device: wp.DeviceLike = None,
 ):
-    """Launches the ND-reordered semi-sparse in-place solve kernel."""
+    """Launches the RCM-reordered semi-sparse in-place solve kernel."""
     wp.launch_tiled(
         kernel=kernel,
         dim=num_blocks,
