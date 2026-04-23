@@ -155,13 +155,24 @@ class TestLinAlgLLTBlockedND(unittest.TestCase):
         ref.solve(b_wp, x_wp)
         return ref
 
-    def _run_nd_solver(self, operator, A_wp, b_wp, x_wp):
-        """Factorize with LLTBlockedNDSolver and solve the system."""
+    def _run_nd_solver(self, operator, A_wp, b_wp, x_wp, reorder_algorithm=None):
+        """Factorize with LLTBlockedNDSolver and solve the system.
+
+        If ``reorder_algorithm`` is None, uses the class-level default
+        (``self.reorder_algorithm``); otherwise forwards explicitly.
+        """
+        kw: dict = {}
+        algo = reorder_algorithm if reorder_algorithm is not None else getattr(
+            self, "reorder_algorithm", None
+        )
+        if algo is not None:
+            kw["reorder_algorithm"] = algo
         nd = LLTBlockedNDSolver(
             operator=operator,
             block_size=self.block_size,
             dtype=float32,
             device=self.default_device,
+            **kw,
         )
         nd.compute(A_wp)
         nd.solve(b_wp, x_wp)
@@ -468,6 +479,31 @@ class TestLinAlgLLTBlockedND(unittest.TestCase):
 
         self._check_matches("rebind_A1", x_ref_1.numpy(), x_nd_1.numpy(), [A1], [b], dims, vio)
         self._check_matches("rebind_A2", x_ref_2.numpy(), x_nd_2.numpy(), [A2], [b], dims, vio)
+
+
+class TestLinAlgLLTBlockedRCM(TestLinAlgLLTBlockedND):
+    """Same suite, but using the kernel-based RCM reordering backend.
+
+    RCM is a bandwidth-reducing (not strictly fill-reducing) permutation, but
+    on well-conditioned sparse SPD inputs it produces an equivalent
+    factorization (up to round-off) and must agree with the reference to the
+    same tolerances. This test enforces parity of the factorize+solve result
+    across backends.
+    """
+
+    reorder_algorithm = "rcm"
+
+
+class TestLinAlgLLTBlockedRCMBatch(TestLinAlgLLTBlockedND):
+    """Same suite for the batched RCM backend (one launch per stage over all
+    blocks; see :mod:`rcm_batch`).
+
+    The batched variant is the production path: it reduces per-block launch
+    overhead dramatically while producing identical permutations. Correctness
+    must be identical to the per-block RCM path.
+    """
+
+    reorder_algorithm = "rcm_batch"
 
 
 if __name__ == "__main__":

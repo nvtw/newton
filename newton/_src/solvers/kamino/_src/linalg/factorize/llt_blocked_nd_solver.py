@@ -29,6 +29,8 @@ from ...core.types import FloatType, float32, int32, override
 from ..core import DenseLinearOperatorData, DenseSquareMultiLinearInfo
 from ..linear import DirectSolver
 from . import nested_dissection as _nd
+from . import rcm as _rcm
+from . import rcm_batch as _rcm_batch
 from .llt_blocked_nd import (
     llt_blocked_nd_build_inv_P,
     llt_blocked_nd_build_tile_pattern,
@@ -105,6 +107,21 @@ class LLTBlockedNDSolver(DirectSolver):
         # ND-specific options
         nd_tol: float = 0.0,
         nd_power_iters=None,
+        # Reordering backend.
+        # - 'rcm_batch' (default): kernel-based Reverse Cuthill-McKee with all
+        #   blocks processed in a single batched launch per stage. Much lower
+        #   per-call overhead than 'spectral' and wins on bandwidth-structured
+        #   matrices (up to ~2x vs LLTBlockedSolver), ties elsewhere.
+        # - 'rcm'      : per-block RCM (see :mod:`rcm`); same algorithm, one
+        #   recorded launch set per block. Kept for diagnostics / single-block
+        #   use; prefer 'rcm_batch' for multi-block workloads.
+        # - 'spectral' : nested_dissection (spectral bisection via power
+        #   iteration). Fill-reducing but high launch-count per block. Kept
+        #   as an opt-in for research / dense-matrix experiments.
+        reorder_algorithm: str = "rcm_batch",
+        # For 'rcm' only: cap on BFS steps per block. None => auto
+        # (``2*ceil(sqrt(n)) + 4``).
+        rcm_max_bfs_iters: int | None = None,
         dtype: FloatType = float32,
         device: wp.DeviceLike | None = None,
         **kwargs: dict[str, Any],
@@ -150,6 +167,13 @@ class LLTBlockedNDSolver(DirectSolver):
         # ND options
         self._nd_tol: float = nd_tol
         self._nd_power_iters = nd_power_iters if nd_power_iters is not None else 'auto'
+        if reorder_algorithm not in ("spectral", "rcm", "rcm_batch"):
+            raise ValueError(
+                "reorder_algorithm must be 'spectral', 'rcm', or 'rcm_batch'; "
+                f"got {reorder_algorithm!r}"
+            )
+        self._reorder_algorithm: str = reorder_algorithm
+        self._rcm_max_bfs_iters = rcm_max_bfs_iters
 
         # Build kernels (cached by block_size / max_dim at allocate time).
         self._factorize_kernel = make_llt_blocked_nd_factorize_kernel(block_size)
@@ -312,6 +336,28 @@ class LLTBlockedNDSolver(DirectSolver):
         # Resolve Warp dtype for ND (matches A's dtype).
         nd_dtype = self._dtype
 
+        # Fast path for 'rcm_batch': a single callback covers all blocks.
+        if self._reorder_algorithm == "rcm_batch":
+            with wp.ScopedDevice(self._device):
+                cb = _rcm_batch.create_rcm_batch_launch(
+                    A_flat=A,
+                    perm_flat=self._P,
+                    dims=info.dim,
+                    mio=info.mio,
+                    vio=info.vio,
+                    num_blocks=info.num_blocks,
+                    max_dim=int(info.max_dimension),
+                    tol=self._nd_tol,
+                    max_bfs_iters=self._rcm_max_bfs_iters,
+                    use_cuda_graph=False,
+                    device=self._device,
+                )
+            self._nd_callbacks = [cb]
+            self._nd_scratches = [None]
+            self._A_views = [(A, self._P)]  # keep references alive
+            self._A_views_attached_to = A
+            return
+
         # The ND module's get_array_ptr equivalent is only available through
         # creating a wp.array view with an explicit ptr. We obtain A's device
         # pointer via the Warp array's ``ptr`` attribute.
@@ -324,12 +370,6 @@ class LLTBlockedNDSolver(DirectSolver):
                 mat_off = int(mio_host[b])
                 vec_off = int(vio_host[b])
 
-                A_view = wp.array(
-                    ptr=A_base_ptr + mat_off * elem_size,
-                    shape=(n_i, n_i),
-                    dtype=nd_dtype,
-                    device=self._device,
-                )
                 P_view = wp.array(
                     ptr=self._P.ptr + vec_off * wp.types.type_size_in_bytes(self._P.dtype),
                     shape=(n_i,),
@@ -337,21 +377,49 @@ class LLTBlockedNDSolver(DirectSolver):
                     device=self._device,
                 )
 
-                scratch = _nd.allocate_nd_scratch(n_i, device=self._device, dtype=nd_dtype)
-                cb = _nd.create_nested_dissection_launch(
-                    A_view,
-                    P_view,
-                    tol=self._nd_tol,
-                    power_iters=self._nd_power_iters,
-                    dtype=nd_dtype,
-                    device=self._device,
-                    use_cuda_graph=False,  # captured as part of the outer graph if any
-                    scratch=scratch,
-                )
-
-                self._A_views.append((A_view, P_view))
-                self._nd_scratches.append(scratch)
-                self._nd_callbacks.append(cb)
+                if self._reorder_algorithm == "spectral":
+                    A_view = wp.array(
+                        ptr=A_base_ptr + mat_off * elem_size,
+                        shape=(n_i, n_i),
+                        dtype=nd_dtype,
+                        device=self._device,
+                    )
+                    scratch = _nd.allocate_nd_scratch(n_i, device=self._device, dtype=nd_dtype)
+                    cb = _nd.create_nested_dissection_launch(
+                        A_view,
+                        P_view,
+                        tol=self._nd_tol,
+                        power_iters=self._nd_power_iters,
+                        dtype=nd_dtype,
+                        device=self._device,
+                        use_cuda_graph=False,  # captured as part of the outer graph if any
+                        scratch=scratch,
+                    )
+                    # 'scratch' holds the live ND buffers; keep a ref.
+                    self._A_views.append((A_view, P_view))
+                    self._nd_scratches.append(scratch)
+                    self._nd_callbacks.append(cb)
+                else:  # 'rcm'
+                    # RCM wants a flat (n*n,) array view.
+                    A_view = wp.array(
+                        ptr=A_base_ptr + mat_off * elem_size,
+                        shape=(n_i * n_i,),
+                        dtype=nd_dtype,
+                        device=self._device,
+                    )
+                    cb = _rcm.create_rcm_launch(
+                        A_view,
+                        P_view,
+                        tol=self._nd_tol,
+                        max_bfs_iters=self._rcm_max_bfs_iters,
+                        use_cuda_graph=False,  # captured under outer graph
+                        device=self._device,
+                    )
+                    # RCM allocates its own scratch inside create_rcm_launch;
+                    # the closure keeps it alive via the captured launches.
+                    self._A_views.append((A_view, P_view))
+                    self._nd_scratches.append(None)
+                    self._nd_callbacks.append(cb)
 
         self._A_views_attached_to = A
 
