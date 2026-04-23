@@ -86,7 +86,7 @@ JOINT_KIND = JointKind.ACTUATED_DOUBLE_BALL_SOCKET
 #     ``TARGET_ANGLE`` [rad] with a critically-damped soft spring.
 DRIVE_MODE = DriveMode.VELOCITY
 
-NUM_CUBES = 1000
+NUM_CUBES = 250
 HALF_EXTENT = 0.05
 NUM_BODIES = NUM_CUBES + 1  # +1 for the static world anchor body at slot 0
 NUM_HINGES = NUM_CUBES  # 1 world->cube0 + (N-1) cube_{k-1}->cube_k
@@ -253,7 +253,7 @@ class Example:
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 30
+        self.sim_substeps =50
         self.solver_iterations = 4
 
         self.viewer = viewer
@@ -291,7 +291,7 @@ class Example:
             substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,
             velocity_iterations=1,
-            gravity=(0.0, -9.81, 0.0),  # match the jitter variant's -y gravity
+            gravity=(0.0, 0.0, -9.81),  # match the jitter variant's -y gravity
             max_contact_columns=max_contact_columns,
             rigid_contact_max=0,
             num_shapes=0,

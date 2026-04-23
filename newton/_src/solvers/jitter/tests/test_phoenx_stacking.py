@@ -95,6 +95,13 @@ class _PhoenXScene:
         self.friction = float(friction)
 
         self.mb = newton.ModelBuilder()
+        # Pick up the PhoenX contact-ahead-of-impact default so every
+        # shape added to the scene detects contacts a few cm before
+        # penetration. Keeps the scene-level contact settings in one
+        # place and lets the tests exercise the same defaults that
+        # user-facing PhoenX scenes pick up via ``make_phoenx_shape_cfg``.
+        from newton._src.solvers.jitter.solver_phoenx import DEFAULT_SHAPE_GAP
+        self.mb.default_shape_cfg.gap = DEFAULT_SHAPE_GAP
         self._newton_body_ids: list[int] = []
         self._finalized = False
 

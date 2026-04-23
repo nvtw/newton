@@ -122,7 +122,50 @@ from newton._src.solvers.jitter.solver_jitter_kernels import (
     pack_body_xforms_kernel,
 )
 
-__all__ = ["PhoenXWorld", "pack_body_xforms_kernel"]
+__all__ = [
+    "DEFAULT_SHAPE_GAP",
+    "PhoenXWorld",
+    "make_phoenx_shape_cfg",
+    "pack_body_xforms_kernel",
+]
+
+
+#: Default contact-detection gap [m] for shapes in PhoenX scenes. The
+#: value is deliberately generous -- 5 cm is large relative to
+#: everyday objects but gives the broad phase a comfortable lead so
+#: contacts are emitted a few frames *before* impact. PhoenX's
+#: speculative-approach branch then decelerates closing bodies while
+#: they still have a gap, which is much easier to stabilise than
+#: correcting penetration after the fact.
+#:
+#: Set on ``ModelBuilder.default_shape_cfg.gap`` via
+#: :func:`make_phoenx_shape_cfg` (or directly) so every dynamic shape
+#: in a PhoenX scene picks it up without having to plumb the constant
+#: through every ``add_shape_*`` call site.
+#:
+#: Scale-sensitivity note: this is a world-space length. Scenes that
+#: want a different characteristic length (e.g. millimetre-scale MEMS
+#: or kilometre-scale vehicles) should override the default rather
+#: than rely on it.
+DEFAULT_SHAPE_GAP: float = 0.05
+
+
+def make_phoenx_shape_cfg(**overrides):
+    """Return a ``ModelBuilder.ShapeConfig`` with PhoenX defaults.
+
+    Presets ``gap = DEFAULT_SHAPE_GAP`` so contacts are detected a
+    few cm ahead of impact -- PhoenX's speculative branch handles
+    those cleanly and it avoids the penetration-resolution
+    transients that hurt stability. All other fields fall through
+    to Newton's defaults; any keyword passed to ``overrides``
+    wins over the PhoenX default.
+    """
+    import newton as _newton  # local import: avoids top-level cycle
+
+    cfg = _newton.ModelBuilder.ShapeConfig(gap=DEFAULT_SHAPE_GAP)
+    for k, v in overrides.items():
+        setattr(cfg, k, v)
+    return cfg
 
 
 @wp.kernel(enable_backward=False)

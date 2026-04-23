@@ -100,10 +100,17 @@ def _load_mesh_with_sdf(mesh_file: str, gap: float) -> tuple[newton.Mesh, wp.vec
     """Load a trimesh, center its bounding box at the origin, and bake
     an SDF inside the configured narrow band.
 
+    The SDF is baked from unscaled mesh vertices; any ``scene_scale``
+    the caller applies ends up as a runtime shape scale in
+    :meth:`add_shape_mesh`, and the runtime narrow-phase rescales SDF
+    distances / gradients by ``min_scale`` on each query. Keeping the
+    SDF in mesh units preserves the asset's authored resolution
+    regardless of ``scene_scale``.
+
     Returns the :class:`newton.Mesh` and the pre-centering world
     offset so the caller can compensate by shifting the shape origin
     (the SDF is generated around the mesh's local origin, not its
-    original AABB centre).
+    original AABB centre). ``center_vec`` is in mesh (unscaled) units.
     """
     import trimesh  # noqa: PLC0415 -- deferred: heavy dep, only on call.
 
@@ -150,6 +157,16 @@ class Example:
         self.solver_iterations = 10
         self._frame: int = 0
 
+        # Scene-wide geometric scale. ``1.0`` matches the M20 bolt
+        # assembly from the IsaacGymEnvs asset pack verbatim. Setting
+        # this to e.g. ``10.0`` produces an oversized nut/bolt pair in
+        # the same physical layout -- useful for exercising the solver
+        # at non-default length scales (contact thicknesses, SDF
+        # narrow band, picking AABB, camera distance all track).
+        # Matches the ``scene_scale`` knob in
+        # :mod:`newton.examples.contacts.example_nut_bolt_sdf`.
+        self.scene_scale = float(getattr(args, "scene_scale", 1.0))
+
         self.viewer = viewer
         self.device = wp.get_device()
         if not self.device.is_cuda:
@@ -166,26 +183,36 @@ class Example:
 
         bolt_file = str(asset_path / f"factory_bolt_{ASSEMBLY_STR}.obj")
         nut_file = str(asset_path / f"factory_nut_{ASSEMBLY_STR}_subdiv_3x.obj")
+        # SDF / gap stay in mesh (unscaled) units; the shape scale on
+        # ``add_shape_mesh`` applies uniformly at contact-query time.
         bolt_mesh, bolt_center = _load_mesh_with_sdf(bolt_file, gap=SHAPE_CFG.gap)
         nut_mesh, nut_center = _load_mesh_with_sdf(nut_file, gap=SHAPE_CFG.gap)
+        shape_cfg = SHAPE_CFG
 
         # ---- Build the Newton scene: bolt (static) + nut (dynamic) ----
         mb = newton.ModelBuilder()
-        mb.default_shape_cfg.gap = SHAPE_CFG.gap
+        mb.default_shape_cfg.gap = shape_cfg.gap
 
-        # Static bolt -- we force its mass / inertia to zero in-place
-        # after finalize() so the shape-derived density still
-        # contributes to the nut's inertia but the bolt stays pinned.
+        # Static bolt. The mesh is kept in mesh-local (unscaled)
+        # units; the shape scale scales it up at runtime. The shape
+        # xform places the scaled mesh back where the asset author
+        # had it, which means the body-frame offset is
+        # ``scale * bolt_center``.
         bolt_body = mb.add_body(
             xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()),
             label="bolt",
         )
+        scaled_bolt_center = wp.vec3(
+            bolt_center[0] * self.scene_scale,
+            bolt_center[1] * self.scene_scale,
+            bolt_center[2] * self.scene_scale,
+        )
         mb.add_shape_mesh(
             bolt_body,
             mesh=bolt_mesh,
-            xform=wp.transform(bolt_center, wp.quat_identity()),
-            scale=(1.0, 1.0, 1.0),
-            cfg=SHAPE_CFG,
+            xform=wp.transform(scaled_bolt_center, wp.quat_identity()),
+            scale=(self.scene_scale, self.scene_scale, self.scene_scale),
+            cfg=shape_cfg,
         )
 
         # Dynamic nut, 4 cm above the bolt head with a pi/8 rotation
@@ -193,16 +220,21 @@ class Example:
         # (without this the two SDFs line up perfectly and the nut
         # slides straight down a single groove).
         nut_xform = wp.transform(
-            wp.vec3(0.0, 0.0, 0.041),
+            wp.vec3(0.0, 0.0, 0.041 * self.scene_scale),
             wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi / 8),
         )
         nut_body = mb.add_body(xform=nut_xform, label="nut")
+        scaled_nut_center = wp.vec3(
+            nut_center[0] * self.scene_scale,
+            nut_center[1] * self.scene_scale,
+            nut_center[2] * self.scene_scale,
+        )
         mb.add_shape_mesh(
             nut_body,
             mesh=nut_mesh,
-            xform=wp.transform(nut_center, wp.quat_identity()),
-            scale=(1.0, 1.0, 1.0),
-            cfg=SHAPE_CFG,
+            xform=wp.transform(scaled_nut_center, wp.quat_identity()),
+            scale=(self.scene_scale, self.scene_scale, self.scene_scale),
+            cfg=shape_cfg,
         )
         self._bolt_body = bolt_body
         self._nut_body = nut_body
@@ -310,7 +342,11 @@ class Example:
         self._xforms = wp.zeros(num_phoenx_bodies, dtype=wp.transform, device=self.device)
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
-            pos=wp.vec3(0.25, -0.25, 0.15),
+            pos=wp.vec3(
+                0.25 * self.scene_scale,
+                -0.25 * self.scene_scale,
+                0.15 * self.scene_scale,
+            ),
             pitch=-25.0,
             yaw=135.0,
         )
@@ -319,9 +355,19 @@ class Example:
         # Half-extents for the ray cast; slot 0 (world anchor) stays
         # at zero so rays ignore it. The bolt and nut use loose AABB
         # half-extents so the picking ray latches onto either body.
+        # The AABBs scale with the geometry so the ray still hits at
+        # non-default scene scales.
         half_extents_np = np.zeros((num_phoenx_bodies, 3), dtype=np.float32)
-        half_extents_np[bolt_body + 1] = (0.02, 0.02, 0.04)
-        half_extents_np[nut_body + 1] = (0.025, 0.025, 0.015)
+        half_extents_np[bolt_body + 1] = (
+            0.02 * self.scene_scale,
+            0.02 * self.scene_scale,
+            0.04 * self.scene_scale,
+        )
+        half_extents_np[nut_body + 1] = (
+            0.025 * self.scene_scale,
+            0.025 * self.scene_scale,
+            0.015 * self.scene_scale,
+        )
         self._half_extents = wp.array(
             half_extents_np, dtype=wp.vec3f, device=self.device
         )
@@ -429,14 +475,29 @@ class Example:
                 - np.asarray(self._nut_initial_xy, dtype=np.float32)
             )
         )
-        assert nut_xy_dist < 0.1, (
+        max_drift = 0.1 * self.scene_scale
+        assert nut_xy_dist < max_drift, (
             f"nut flew off-axis: xy_dist={nut_xy_dist:.4f} m "
-            f"(pos={tuple(float(x) for x in nut_pos)})"
+            f"(max={max_drift:.4f} m at scene_scale={self.scene_scale}; "
+            f"pos={tuple(float(x) for x in nut_pos)})"
         )
 
     @staticmethod
     def create_parser():
-        return newton.examples.create_parser()
+        parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--scene-scale",
+            type=float,
+            default=2.0,
+            help=(
+                "Uniform geometric scale applied to the nut/bolt assembly "
+                "(positions, mesh scale, SDF narrow band, contact gap, "
+                "picking AABB, and camera). 1.0 matches the original "
+                "M20 asset size; larger / smaller values produce a "
+                "geometrically similar scene at a different length scale."
+            ),
+        )
+        return parser
 
 
 if __name__ == "__main__":

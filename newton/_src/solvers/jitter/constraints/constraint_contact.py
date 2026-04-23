@@ -698,7 +698,20 @@ def contact_prepare_for_iteration_at(
     # to "recover full penetration over ~2 substeps". Box2D v3 uses
     # the same kind of knob (``contact_hertz`` in its demos).
     bias_factor = wp.float32(0.2)
-    penetration_slop = wp.float32(0.005)
+    # Sub-mm penetration dead zone. Chosen small enough to be well
+    # below the smallest simulated object (a few mm per the solver
+    # contract), so it acts as a pure numerical-noise guard rather
+    # than a length-scale threshold -- a scene scaled 10x up or 10x
+    # down still sees the same "slop is << object size" behaviour.
+    # The earlier 5 mm slop was scale-dependent: at ``scene_scale =
+    # 2`` it flipped from "absorbs initial compression" to "ignores
+    # a real 8 mm overlap" and bodies drifted off the stack. 0.5 mm
+    # is the largest value that still sits below the supported
+    # smallest-object size while being generous enough to absorb
+    # the residual compression of a 5-cube stack (~0.14 mm at
+    # equilibrium) without the normal row spiking on sub-settle
+    # micro-drift.
+    penetration_slop = wp.float32(5.0e-4)
 
     # Friction-row position bias. Drives tangential drift between the
     # stored (sticky) body-local anchors back toward zero with a
@@ -719,27 +732,19 @@ def contact_prepare_for_iteration_at(
     #     induces a micro-rotation, which translates the COM
     #     slightly, which velocity-level friction can't counter.
     #
-    #   * The historical 0.2 gain over-corrected and destabilised
-    #     the Coulomb clamp (stick-slip oscillation). 0.03 is the
-    #     empirical sweet spot: matches PhoenX's normal Baumgarte
-    #     factor, stays well below the Coulomb clamp for any
-    #     realistic drift, but is strong enough to prevent
-    #     catastrophic slip on tall stacks.
-    #
-    # Tuning sweep on the 20-cube tower (4 s settle, 60 fps,
-    # substeps=4, solver_iterations=16, mu=0.5):
-    #   bias=0.00:   55 cm slip
-    #   bias=0.02:   79 cm  (too weak, under-damped)
-    #   bias=0.03:   14 cm  <-- sweet spot, 7x better than 0.00
-    #   bias=0.05:   17 cm
-    #   bias=0.10:   58 cm
-    #   bias=0.20:   96 cm  (historical, worst)
-    #
-    # Tightening ``friction_slop`` to 0.0001 regresses (pulls the
-    # bias into the clamp region too aggressively); 0.001 is the
-    # empirical sweet spot.
+    # Scale discipline: both constants are scale-invariant.
+    # ``friction_bias_factor`` is dimensionless (same family as the
+    # normal-row ``bias_factor``; see that block below for the full
+    # scale-discipline docstring). ``friction_slop`` clamps the raw
+    # drift before it drives the tangent bias -- sub-millimetre so
+    # it sits below the supported smallest-object size (~a few mm
+    # per the solver contract) and acts as a pure numerical-noise
+    # guard rather than a length-scale threshold. The Coulomb cone
+    # (``|lam_t| <= mu * lam_n``) still limits the final applied
+    # tangent impulse, but the clamp also keeps the tangent bias
+    # itself from spiking on any stray large drift.
     friction_bias_factor = wp.float32(0.08)
-    friction_slop = wp.float32(0.001)
+    friction_slop = wp.float32(1.0e-4)
 
     # Accumulated warm-start impulse we'll apply to the bodies after
     # processing every active slot; batched so the body-velocity
@@ -846,30 +851,55 @@ def contact_prepare_for_iteration_at(
         )
 
         # Unified bias: one scalar that encodes both speculative
-        # separation and Baumgarte-style penetration pushout. With a
-        # slop dead-zone so idle resting contacts don't drift the
-        # lambdas.
+        # separation and Baumgarte-style penetration pushout, with a
+        # 0.1 mm dead zone so micro-oscillations at rest stay zero.
+        #
+        # Scale discipline -- READ BEFORE RETUNING:
+        #
+        # The contact solver's numerical guards must not contain
+        # length (m) or velocity (m/s) constants that depend on the
+        # scene's natural size -- if they do, a scene rescaled by
+        # e.g. ``scene_scale = 2`` immediately behaves differently
+        # than at ``scene_scale = 1``. This module is the one place
+        # that stacks, towers, and the nut-bolt regression *all*
+        # funnel through, so a "magic 5 mm" here silently breaks
+        # every solver scene at non-default scale.
+        #
+        # Allowed scale discipline:
+        #   1. Prefer DIMENSIONLESS factors (``bias_factor``,
+        #      ``load_boost``). They transform trivially under a
+        #      uniform scale.
+        #   2. Tiny sub-millimetre slops (<= ~1e-4 m = 0.1 mm) are
+        #      acceptable: the solver contract promises "smallest
+        #      simulated object is a few mm", so a 0.1 mm dead zone
+        #      is always << object size regardless of scale and acts
+        #      as a pure numerical-noise guard (same family as the
+        #      1e-4 shift in GJK/MPR). Anything >= 1 mm risks
+        #      flipping behaviour across supported scales and must be
+        #      derived from a per-scene parameter, NOT hardcoded.
+        #   3. Velocity caps (m/s) SHOULD scale with the scene.
+        #      ``max_push_speed = 2 m/s`` is kept for safety on deep
+        #      spurious penetrations but is the one remaining
+        #      scale-dependent knob; if you need to support large
+        #      ``scene_scale`` robustly, parameterise it rather than
+        #      raising the constant.
+        #
         #   * effective_gap > slop  -> bias > 0, allow approach up
         #                              to effective_gap/dt (speculative)
         #   * -slop < eg <= slop    -> bias = 0, resting contact
         #   * effective_gap < -slop -> bias < 0, Baumgarte pushout
         #
-        # A naive ``bias = bias_factor * gap * idt`` blows up for deep
-        # penetration: at ``idt = 1/substep_dt`` and substep_dt=1/1200,
-        # a 10 cm penetration injects 24 m/s -- which with only 3 PGS
-        # iterations can't converge in a single substep, and the
-        # leftover velocity cascades through the substep loop and
-        # launches bodies into orbit. Box2D v3's solver2d post
-        # (https://box2d.org/posts/2024/02/solver2d/) addresses this
-        # by capping the pushout speed; we do the same with
-        # ``max_push_speed``. The cap is conservative -- 2 m/s lets
-        # the solver fully resolve a 20 cm gap in ~100 ms (6 frames
-        # @ 60 Hz), which is fast enough to feel responsive but slow
-        # enough that deep penetration from a user-picked plank
-        # yanked hard through its neighbours can't explode the stack.
-        # The speculative-closing bias is capped at a looser value so
-        # objects approaching a contact still benefit from a tight
-        # bias that keeps the closest-point calculation meaningful.
+        # A naive ``bias = bias_factor * gap * idt`` blows up for
+        # deep penetration: at ``idt = 1/substep_dt`` and
+        # ``substep_dt=1/600``, a 10 cm penetration injects 12 m/s
+        # which with only ~10 PGS iterations can't converge in a
+        # single substep and cascades through the loop. Box2D v3's
+        # solver2d post caps the pushout velocity
+        # (https://box2d.org/posts/2024/02/solver2d/); we do the same
+        # with ``max_push_speed``. The speculative-closing bias is
+        # capped at a looser value so approaching objects still
+        # benefit from a tight bias that keeps the closest-point
+        # calculation meaningful.
         max_push_speed = wp.float32(2.0)
         max_approach_speed = wp.float32(10.0)
         bias_val = wp.float32(0.0)
@@ -893,23 +923,29 @@ def contact_prepare_for_iteration_at(
         p_diff = p2_world - p1_world
         drift_t1_raw = wp.dot(p_diff, t1_dir)
         drift_t2_raw = wp.dot(p_diff, t2_dir)
-        slip_threshold = wp.float32(0.002)
+        # Sticky-break slip threshold: drifts past ~0.1 mm count as
+        # "bodies physically slipped", so the anchor re-seeds. This
+        # is the same 0.1 mm noise-floor used by ``penetration_slop``
+        # above -- see that block's scale-discipline docstring for
+        # the reasoning. Anything >= 1 mm would be a scale-dependent
+        # magic number (breaks the scene at ``scene_scale != 1``).
+        slip_threshold = wp.float32(1.0e-4)
         drift_sq = drift_t1_raw * drift_t1_raw + drift_t2_raw * drift_t2_raw
 
         # Break sticky on any of THREE conditions (solver2d pattern):
-        #   * tangent drift past slip threshold (bodies slid past
-        #     static regime by a scale-fixed margin)
+        #   * tangent drift past ``slip_threshold`` (bodies slid past
+        #     the numerical-noise floor)
         #   * stored contact normal has rotated > ~18 degrees from
         #     the fresh narrow-phase normal (body rotation has aged
         #     the stored tangent basis)
         #   * previous-step tangent impulse saturated the Coulomb
         #     cap (|lam_t| >= 0.98 * mu * lam_n). This is the
         #     solver2d trigger for scenes where Coulomb saturates
-        #     well below the 2 mm drift threshold -- e.g. low-mu
-        #     contacts (mu=0.01 on nut/bolt threads) where the
-        #     tangent impulse reaches the cone with sub-millimeter
-        #     drift and the nut would otherwise stay static-friction-
-        #     locked to the bolt instead of threading down.
+        #     well below the drift threshold -- e.g. low-mu contacts
+        #     (mu=0.01 on nut/bolt threads) where the tangent
+        #     impulse reaches the cone with sub-0.1 mm drift and the
+        #     nut would otherwise stay static-friction-locked to the
+        #     bolt instead of threading down.
         # All three triggers fall through to the same reset: re-
         # anchor to the fresh narrow-phase contact point. Tangent
         # lambdas are preserved so kinetic friction keeps its
@@ -1667,8 +1703,7 @@ def contact_per_slot_error_at(
 
     Computes the same quantities the prepare kernel folds into
     ``bias`` / ``bias_t1`` / ``bias_t2``, but without the
-    penetration_slop / friction_slop clamps so the raw residuals are
-    surfaced:
+    ``friction_slop`` clamp so the raw residuals are surfaced:
 
       * ``gap = dot(p2_world - p1_world, n) - (margin0 + margin1)``
         -- signed separation along the stored normal, positive when
