@@ -821,26 +821,41 @@ def contact_prepare_for_iteration_at(
         slip_threshold = wp.float32(0.002)
         drift_sq = drift_t1_raw * drift_t1_raw + drift_t2_raw * drift_t2_raw
 
-        # Break sticky on EITHER of two conditions (solver2d pattern):
+        # Break sticky on any of THREE conditions (solver2d pattern):
         #   * tangent drift past slip threshold (bodies slid past
-        #     static regime)
+        #     static regime by a scale-fixed margin)
         #   * stored contact normal has rotated > ~18 degrees from
         #     the fresh narrow-phase normal (body rotation has aged
-        #     the stored tangent basis -- the pair has physically
-        #     re-oriented, so the stored anchor no longer reflects
-        #     where the bodies actually press against each other).
-        # Both triggers fall through to the same reset: re-anchor to
-        # the fresh narrow-phase contact point. Solver2d's sticky
-        # solver keeps separate thresholds for these -- ``|nA . nB| <
-        # 0.98`` for rotation, ``|separation| > 2 * slop`` for normal
-        # break -- and the user empirically suggested decoupling the
-        # break conditions. Using 0.95 (18 deg) as a permissive bound
-        # so the reset rarely fires on steady contacts but catches
-        # rolling pairs (nut-on-bolt SDF, tumbling stacks) before the
-        # stale normal injects spurious pullback torques.
+        #     the stored tangent basis)
+        #   * previous-step tangent impulse saturated the Coulomb
+        #     cap (|lam_t| >= 0.98 * mu * lam_n). This is the
+        #     solver2d trigger for scenes where Coulomb saturates
+        #     well below the 2 mm drift threshold -- e.g. low-mu
+        #     contacts (mu=0.01 on nut/bolt threads) where the
+        #     tangent impulse reaches the cone with sub-millimeter
+        #     drift and the nut would otherwise stay static-friction-
+        #     locked to the bolt instead of threading down.
+        # All three triggers fall through to the same reset: re-
+        # anchor to the fresh narrow-phase contact point. Tangent
+        # lambdas are preserved so kinetic friction keeps its
+        # warm-start.
         fresh_n = contacts.rigid_contact_normal[k]
         normal_aligned = wp.dot(n, fresh_n)
-        if drift_sq > slip_threshold * slip_threshold or normal_aligned < wp.float32(0.95):
+        lam_t1_prev = cc_get_tangent1_lambda(cc, slot, cid)
+        lam_t2_prev = cc_get_tangent2_lambda(cc, slot, cid)
+        lam_n_prev = cc_get_normal_lambda(cc, slot, cid)
+        fric_limit_prev = contact_get_friction(constraints, cid) * lam_n_prev
+        cone_margin = wp.float32(0.98)
+        lam_t_mag_sq = lam_t1_prev * lam_t1_prev + lam_t2_prev * lam_t2_prev
+        coulomb_saturated = (
+            lam_n_prev > wp.float32(0.0)
+            and lam_t_mag_sq >= (cone_margin * fric_limit_prev) * (cone_margin * fric_limit_prev)
+        )
+        if (
+            drift_sq > slip_threshold * slip_threshold
+            or normal_aligned < wp.float32(0.95)
+            or coulomb_saturated
+        ):
             # Solver2d-style "break sticky": the stored anchor has
             # drifted past the static regime so reset it to the
             # current narrow-phase contact point. Using the fresh
@@ -856,6 +871,19 @@ def contact_prepare_for_iteration_at(
             fresh_lp1 = contacts.rigid_contact_point1[k]
             cc_set_local_p0(cc, slot, cid, fresh_lp0)
             cc_set_local_p1(cc, slot, cid, fresh_lp1)
+            # Coulomb-saturation reset is a true kinetic break: the
+            # previous step's lam_t was at the cone boundary and its
+            # direction is the PAST slip direction, which on a
+            # rotating contact (nut-on-bolt threads, rolling ball)
+            # is likely the OPPOSITE of the current slip direction.
+            # Zero the tangent lambdas so fresh kinetic friction
+            # re-accumulates along the current slip axis. The
+            # drift / normal-rotation triggers still preserve lambda
+            # (those are gentler breaks where the old direction is
+            # still approximately right).
+            if coulomb_saturated:
+                cc_set_tangent1_lambda(cc, slot, cid, wp.float32(0.0))
+                cc_set_tangent2_lambda(cc, slot, cid, wp.float32(0.0))
             p1_world = position1 + wp.quat_rotate(orientation1, fresh_lp0)
             p2_world = position2 + wp.quat_rotate(orientation2, fresh_lp1)
             r1 = p1_world - position1
