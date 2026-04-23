@@ -54,17 +54,20 @@ def _build_ramp_scene(
     """Build a tilted-ramp scene.
 
     Layout (Newton +Z-up):
-    * Ground plane at z=0 is *not* added -- with a tilted ramp we
-      only want contact between the small cube and the ramp, so the
-      ground plane would only add spurious "cube flew off the ramp
-      and hit the floor" contacts at the end of long runs.
-    * Large flat box as ramp: half-extents ``(5, 5, 0.25)`` so it
-      looks like a 10 x 10 m tile 0.5 m thick. Rotated by
-      ``theta`` about +Y and shifted so its top face is roughly
-      level with z=0 at the origin.
-    * Small dynamic box: ``(0.25, 0.25, 0.25)`` half-extents placed
-      just above the ramp's top face at the origin. Settles on the
-      ramp within a handful of frames.
+
+    * A large static box as the ramp, rotated by ``theta`` about
+      +Y so its top face normal points in ``(sin(theta), 0,
+      cos(theta))``.
+    * A small *dynamic* cube **rotated by the same angle** and
+      positioned so its bottom face sits flush against the ramp's
+      top face (small 1 mm gap). If we left the cube at identity
+      orientation the cube's horizontal bottom face would only
+      touch the ramp along its uphill edge and the cube would
+      *tumble* forward off the edge rather than slide -- exactly
+      what we're **not** trying to test. Aligning the cube with
+      the slope means the only free degree of freedom is the
+      slide; any spin / tip that shows up comes from the solver,
+      not the initial pose.
 
     Returns ``(scene, small_box_body_id)``.
     """
@@ -74,33 +77,36 @@ def _build_ramp_scene(
         solver_iterations=solver_iterations,
         friction=mu,
     )
-    # Static ramp: half-height 0.25, tilted by theta about +Y so its
-    # top face normal is ``(sin(theta), 0, cos(theta))``. We want the
-    # cube to land at roughly (0, 0, z_cube) where z_cube = ramp top
-    # face height at x=0. For a ramp tilted about the origin, top
-    # face at x=0 sits at z = -ramp_half_height*cos(theta) +
-    # ramp_half_height = ramp_half_height * (1 - cos(theta)). For
-    # small tilt this is near zero; we shift the ramp down so its
-    # top centre is near z=-0.05 and place the cube so it lands on
-    # the tilted face.
     ramp_quat = _ramp_quat_about_y(theta_rad)
     ramp_half = (5.0, 5.0, 0.25)
-    # Position the ramp so its top face sits near z=0 at x=0: the
-    # ramp's top face at x=0 is at ``z = ramp_center_z +
-    # ramp_half[2] * cos(theta)`` (dominant term for small tilt).
-    ramp_center_z = -ramp_half[2] * math.cos(theta_rad)
+    ramp_center = (0.0, 0.0, -ramp_half[2] * math.cos(theta_rad))
     scene.add_static_box(
-        position=(0.0, 0.0, ramp_center_z),
+        position=ramp_center,
         half_extents=ramp_half,
         orientation=ramp_quat,
     )
-    # Small cube placed slightly above the ramp top-face at x=0 so
-    # it drops a few mm onto the ramp. Its bottom face sits above
-    # the tilted top face by a small gap.
     cube_he = 0.25
+    # Place the cube so its bottom face sits 1 mm above the ramp's
+    # top face, centred on the ramp's top-face centre. Ramp tilt
+    # about +Y means the top-face centre is at ``ramp_center +
+    # ramp_half[2] * (sin(theta), 0, cos(theta))`` (the ramp's +Z
+    # in body frame rotated into world).
+    n_top = (math.sin(theta_rad), 0.0, math.cos(theta_rad))
+    top_centre = (
+        ramp_center[0] + ramp_half[2] * n_top[0],
+        ramp_center[1] + ramp_half[2] * n_top[1],
+        ramp_center[2] + ramp_half[2] * n_top[2],
+    )
+    cube_gap = 1.0e-3
+    cube_pos = (
+        top_centre[0] + (cube_he + cube_gap) * n_top[0],
+        top_centre[1] + (cube_he + cube_gap) * n_top[1],
+        top_centre[2] + (cube_he + cube_gap) * n_top[2],
+    )
     cube_box = scene.add_box(
-        position=(0.0, 0.0, cube_he + 1.0e-2),
+        position=cube_pos,
         half_extents=(cube_he, cube_he, cube_he),
+        orientation=ramp_quat,  # align with ramp tilt
     )
     scene.finalize()
     return scene, cube_box
