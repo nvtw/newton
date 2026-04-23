@@ -39,18 +39,25 @@ API
     from newton._src.solvers.kamino._src.linalg.factorize.rcm_batch import (
         create_rcm_batch_launch,
     )
+
     launch = create_rcm_batch_launch(
-        A_flat=A, perm_flat=P,
-        dims=dims, mio=mio, vio=vio,
-        num_blocks=B, max_dim=max(dims_host),
-        tol=0.0, use_cuda_graph=True,
+        A_flat=A,
+        perm_flat=P,
+        dims=dims,
+        mio=mio,
+        vio=vio,
+        num_blocks=B,
+        max_dim=max(dims_host),
+        tol=0.0,
+        use_cuda_graph=True,
     )
     launch()  # one zero-arg callable; CUDA-graph capturable
 """
 
 import ctypes
-from functools import lru_cache
-from typing import Callable
+import math
+from collections.abc import Callable
+from functools import cache
 
 import warp as wp
 
@@ -62,9 +69,7 @@ def create_cuda_graph_callback(callback: Callable[[], None], device=None, stream
     graph = capture.graph
     if stream is not None:
         if stream.device != graph.device:
-            raise RuntimeError(
-                f"Cannot launch graph from device {graph.device} on stream from device {stream.device}"
-            )
+            raise RuntimeError(f"Cannot launch graph from device {graph.device} on stream from device {stream.device}")
         device = stream.device
     else:
         device = graph.device
@@ -100,14 +105,14 @@ def allocate_rcm_batch_scratch(total_vec: int, num_blocks: int, device) -> dict:
       block id ``b`` instead of a global ``[0]``.
     """
     return {
-        "degree":        wp.empty(total_vec, dtype=wp.int32, device=device),
-        "level":         wp.empty(total_vec, dtype=wp.int32, device=device),
-        "order_buf":     wp.empty(total_vec, dtype=wp.int32, device=device),
-        "head":          wp.empty(num_blocks, dtype=wp.int32, device=device),
-        "root":          wp.empty(num_blocks, dtype=wp.int32, device=device),
+        "degree": wp.empty(total_vec, dtype=wp.int32, device=device),
+        "level": wp.empty(total_vec, dtype=wp.int32, device=device),
+        "order_buf": wp.empty(total_vec, dtype=wp.int32, device=device),
+        "head": wp.empty(num_blocks, dtype=wp.int32, device=device),
+        "root": wp.empty(num_blocks, dtype=wp.int32, device=device),
         # Single-element BFS iteration counter, shared across all blocks.
         # Written by one thread per ``bfs_step_kernel`` launch; read by all.
-        "iter_counter":  wp.empty(1, dtype=wp.int32, device=device),
+        "iter_counter": wp.empty(1, dtype=wp.int32, device=device),
     }
 
 
@@ -116,7 +121,7 @@ def allocate_rcm_batch_scratch(total_vec: int, num_blocks: int, device) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@lru_cache(maxsize=None)
+@cache
 def _make_rcm_batch_kernels(dtype):
     """Kernels are parameterized by `dtype` only. `max_dim` / `num_blocks`
     are passed as runtime ints so the same module can serve any shape.
@@ -128,15 +133,15 @@ def _make_rcm_batch_kernels(dtype):
     def init_and_degree_kernel(
         num_blocks: int,
         tol: dtype,  # type: ignore[valid-type]
-        A: wp.array(dtype=dtype),                   # type: ignore[valid-type]
-        dims: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
-        mio: wp.array(dtype=wp.int32),              # type: ignore[valid-type]
-        vio: wp.array(dtype=wp.int32),              # type: ignore[valid-type]
-        degree: wp.array(dtype=wp.int32),           # type: ignore[valid-type]
-        level: wp.array(dtype=wp.int32),            # type: ignore[valid-type]
-        head: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
-        root: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
-        iter_counter: wp.array(dtype=wp.int32),     # type: ignore[valid-type]
+        A: wp.array(dtype=dtype),  # type: ignore[valid-type]
+        dims: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        mio: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        vio: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        degree: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        level: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        head: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        root: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        iter_counter: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
     ):
         """Launch dims: ``(num_blocks, max_dim)``.
 
@@ -181,13 +186,13 @@ def _make_rcm_batch_kernels(dtype):
     @wp.kernel(module=module)
     def select_and_seed_kernel(
         num_blocks: int,
-        dims: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
-        vio: wp.array(dtype=wp.int32),              # type: ignore[valid-type]
-        degree: wp.array(dtype=wp.int32),           # type: ignore[valid-type]
-        level: wp.array(dtype=wp.int32),            # type: ignore[valid-type]
-        order_buf: wp.array(dtype=wp.int32),        # type: ignore[valid-type]
-        head: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
-        root: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
+        dims: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        vio: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        degree: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        level: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        order_buf: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        head: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        root: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
     ):
         """Launch dims: ``(num_blocks,)``. Fused root-selection + BFS seed.
 
@@ -222,15 +227,15 @@ def _make_rcm_batch_kernels(dtype):
     @wp.kernel(module=module)
     def bfs_step_kernel(
         num_blocks: int,
-        tol: dtype,                                 # type: ignore[valid-type]
-        A: wp.array(dtype=dtype),                   # type: ignore[valid-type]
-        dims: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
-        mio: wp.array(dtype=wp.int32),              # type: ignore[valid-type]
-        vio: wp.array(dtype=wp.int32),              # type: ignore[valid-type]
-        level: wp.array(dtype=wp.int32),            # type: ignore[valid-type]
-        order_buf: wp.array(dtype=wp.int32),        # type: ignore[valid-type]
-        head: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
-        iter_counter: wp.array(dtype=wp.int32),     # type: ignore[valid-type]
+        tol: dtype,  # type: ignore[valid-type]
+        A: wp.array(dtype=dtype),  # type: ignore[valid-type]
+        dims: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        mio: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        vio: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        level: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        order_buf: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        head: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        iter_counter: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
     ):
         """Launch dims: ``(num_blocks, max_dim)``. One BFS expansion step.
 
@@ -286,11 +291,11 @@ def _make_rcm_batch_kernels(dtype):
     @wp.kernel(module=module)
     def append_unreached_kernel(
         num_blocks: int,
-        dims: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
-        vio: wp.array(dtype=wp.int32),              # type: ignore[valid-type]
-        level: wp.array(dtype=wp.int32),            # type: ignore[valid-type]
-        order_buf: wp.array(dtype=wp.int32),        # type: ignore[valid-type]
-        head: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
+        dims: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        vio: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        level: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        order_buf: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        head: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
     ):
         """Launch dims: ``(num_blocks,)``. Appends any vertex with
         ``level == -1`` to each block's ``order_buf`` segment in ascending
@@ -311,10 +316,10 @@ def _make_rcm_batch_kernels(dtype):
     @wp.kernel(module=module)
     def reverse_into_perm_kernel(
         num_blocks: int,
-        dims: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
-        vio: wp.array(dtype=wp.int32),              # type: ignore[valid-type]
-        order_buf: wp.array(dtype=wp.int32),        # type: ignore[valid-type]
-        perm: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
+        dims: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        vio: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        order_buf: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
+        perm: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
     ):
         """Launch dims: ``(num_blocks, max_dim)``. ``perm[i] = order_buf[n-1-i]``."""
         b, i = wp.tid()
@@ -355,7 +360,6 @@ def _default_bfs_iters(max_dim: int) -> int:
     launches are then eaten by the extra tiles the factorize/solve kernels
     no longer skip.
     """
-    import math
     return 2 * int(math.ceil(math.sqrt(max_dim))) + 4
 
 
@@ -406,45 +410,73 @@ def create_rcm_batch_launch(
         K["init_and_degree"],
         dim=(num_blocks, max_dim),
         inputs=[
-            num_blocks, float(tol), A_flat,
-            dims, mio, vio,
-            scratch["degree"], scratch["level"],
-            scratch["head"], scratch["root"], scratch["iter_counter"],
+            num_blocks,
+            float(tol),
+            A_flat,
+            dims,
+            mio,
+            vio,
+            scratch["degree"],
+            scratch["level"],
+            scratch["head"],
+            scratch["root"],
+            scratch["iter_counter"],
         ],
-        device=device, stream=stream, record_cmd=True,
+        device=device,
+        stream=stream,
+        record_cmd=True,
     )
     select_and_seed_launch = wp.launch(
         K["select_and_seed"],
         dim=(num_blocks,),
         inputs=[
-            num_blocks, dims, vio,
-            scratch["degree"], scratch["level"], scratch["order_buf"],
-            scratch["head"], scratch["root"],
+            num_blocks,
+            dims,
+            vio,
+            scratch["degree"],
+            scratch["level"],
+            scratch["order_buf"],
+            scratch["head"],
+            scratch["root"],
         ],
-        device=device, stream=stream, record_cmd=True,
+        device=device,
+        stream=stream,
+        record_cmd=True,
     )
     bfs_step_launch = wp.launch(
         K["bfs_step"],
         dim=(num_blocks, max_dim),
         inputs=[
-            num_blocks, float(tol), A_flat,
-            dims, mio, vio,
-            scratch["level"], scratch["order_buf"], scratch["head"],
+            num_blocks,
+            float(tol),
+            A_flat,
+            dims,
+            mio,
+            vio,
+            scratch["level"],
+            scratch["order_buf"],
+            scratch["head"],
             scratch["iter_counter"],
         ],
-        device=device, stream=stream, record_cmd=True,
+        device=device,
+        stream=stream,
+        record_cmd=True,
     )
     append_unreached_launch = wp.launch(
         K["append_unreached"],
         dim=(num_blocks,),
         inputs=[num_blocks, dims, vio, scratch["level"], scratch["order_buf"], scratch["head"]],
-        device=device, stream=stream, record_cmd=True,
+        device=device,
+        stream=stream,
+        record_cmd=True,
     )
     reverse_launch = wp.launch(
         K["reverse_into_perm"],
         dim=(num_blocks, max_dim),
         inputs=[num_blocks, dims, vio, scratch["order_buf"], perm_flat],
-        device=device, stream=stream, record_cmd=True,
+        device=device,
+        stream=stream,
+        record_cmd=True,
     )
 
     def callback():

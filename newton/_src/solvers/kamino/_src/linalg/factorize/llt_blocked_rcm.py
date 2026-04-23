@@ -229,10 +229,9 @@ def make_llt_blocked_rcm_symbolic_fill_in_kernel(max_n_tiles: int):
                     # Scan k = 0..j-1 for a filled (i,k) and (j,k) pair.
                     filled = int(0)
                     for k in range(j):
-                        if (
-                            tile_pattern[tp_off + i * n_tiles + k] != int(0)
-                            and tile_pattern[tp_off + j * n_tiles + k] != int(0)
-                        ):
+                        if tile_pattern[tp_off + i * n_tiles + k] != int(0) and tile_pattern[
+                            tp_off + j * n_tiles + k
+                        ] != int(0):
                             filled = int(1)
                     if filled == int(1):
                         tile_pattern[tp_off + i * n_tiles + j] = int(1)

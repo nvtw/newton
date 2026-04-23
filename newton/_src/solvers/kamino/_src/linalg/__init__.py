@@ -9,6 +9,12 @@ from .core import (
     DenseRectangularMultiLinearInfo,
     DenseSquareMultiLinearInfo,
 )
+
+# Import the RCM-reordered semi-sparse blocked LLT solver here (rather than
+# from .linear) to avoid a circular import: .factorize.llt_blocked_rcm_solver
+# imports DirectSolver from .linear, so .linear cannot import it back.
+# At this point .linear has been fully resolved, so the downstream import is safe.
+from .factorize.llt_blocked_rcm_solver import LLTBlockedRCMSolver
 from .linear import (
     ConjugateGradientSolver,
     ConjugateResidualSolver,
@@ -22,12 +28,6 @@ from .linear import (
     LLTSequentialSolver,
 )
 
-# Import the RCM-reordered semi-sparse blocked LLT solver here (rather than
-# from .linear) to avoid a circular import: .factorize.llt_blocked_rcm_solver
-# imports DirectSolver from .linear, so .linear cannot import it back.
-# At this point .linear has been fully resolved, so the downstream import is safe.
-from .factorize.llt_blocked_rcm_solver import LLTBlockedRCMSolver
-
 # Register the reordering solver in the name<->type maps so it can be selected
 # via the string "LLTBRCM" in ConstrainedDynamicsConfig.linear_solver_type.
 LinearSolverNameToType["LLTBRCM"] = LLTBlockedRCMSolver
@@ -37,8 +37,7 @@ LinearSolverTypeToName[LLTBlockedRCMSolver] = "LLTBRCM"
 # matters because `delassus.py` performs a runtime
 # `issubclass(solver, LinearSolverType)` check and would otherwise reject it.
 LinearSolverType = (
-    LLTSequentialSolver | LLTBlockedSolver | LLTBlockedRCMSolver
-    | ConjugateGradientSolver | ConjugateResidualSolver
+    LLTSequentialSolver | LLTBlockedSolver | LLTBlockedRCMSolver | ConjugateGradientSolver | ConjugateResidualSolver
 )
 
 ###

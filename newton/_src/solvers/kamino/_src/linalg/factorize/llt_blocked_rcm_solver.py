@@ -14,8 +14,8 @@ The caller-visible API is identical to :class:`LLTBlockedSolver`:
 .. code-block:: python
 
     solver = LLTBlockedRCMSolver(operator=operator, block_size=32, dtype=float32)
-    solver.compute(A)          # factorizes; reordering is internal
-    solver.solve(b, x)         # or: solver.solve_inplace(x)
+    solver.compute(A)  # factorizes; reordering is internal
+    solver.solve(b, x)  # or: solver.solve_inplace(x)
 
 The reordering ``P`` and its inverse ``inv_P`` are stored on the solver next
 to the factorization buffer ``L``. They are exposed as read-only properties
@@ -44,7 +44,6 @@ from .llt_blocked_rcm import (
     make_llt_blocked_rcm_solve_kernel,
     make_llt_blocked_rcm_symbolic_fill_in_kernel,
 )
-
 
 ###
 # Module interface
