@@ -16,6 +16,7 @@
 - Enable full CPU execution of the collision pipeline, including mesh–mesh and mesh–heightfield SDF contacts that were previously CUDA-only; contact reduction (`reduce_contacts`) also runs on CPU. The previous `"NarrowPhase running on CPU: mesh-mesh contacts will be skipped"` warning is no longer emitted — CPU runs now execute the same kernels as CUDA.
 - Add `ViewerBase.log_arrows()` for arrow rendering (wide line + arrowhead) in the GL viewer with a dedicated geometry shader
 - Add `enable_multiccd` parameter to `SolverMuJoCo` for multi-CCD contact generation (up to 4 contact points per geom pair)
+- Support `<joint type="ball"/>` in the MJCF importer, and preserve authored damping, stiffness, and frictionloss when exporting ball joints to MuJoCo specs (previously silently dropped)
 - Add `ViewerViser.log_scalar()` for live scalar time-series plots via uPlot
 - Honor `UsdGeomImageable` visibility (including inherited `invisible`) on USD prims imported via `ModelBuilder.add_usd()`; visual shapes, gaussian splats, and collider shapes are imported with `ShapeFlags.VISIBLE` cleared when the prim is effectively invisible, while collision behavior is preserved
 
