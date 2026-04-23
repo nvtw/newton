@@ -259,7 +259,7 @@ def write_module_page(mod_name: str) -> None:
 
             # unpack the warp scalar value, we can remove this
             # when the warp.types.scalar_base supports __str__()
-            if wp.types.type_is_scalar(type(value)):
+            if wp.types.is_scalar(value):
                 value = getattr(value, "value", value)
 
             lines.extend(
