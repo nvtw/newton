@@ -380,7 +380,7 @@ class PhoenXWorld:
         constraints: ConstraintContainer,
         substeps: int = 1,
         solver_iterations: int = 8,
-        velocity_iterations: int = 0,
+        velocity_iterations: int = 1,
         position_iterations: int = 0,
         gravity: tuple[float, float, float]
         | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
@@ -416,9 +416,13 @@ class PhoenXWorld:
             velocity_iterations: Box2D-v3-style TGS-soft relaxation
                 sweeps (``use_bias=False``) per substep, matching
                 PhoenX's ``SolverManager.VelocityIterations``.
-                Defaults to ``0`` (PhoenX's default); raise to 1 to
-                shed positional-bias drift velocity the way
-                :mod:`solver_jitter` does by default.
+                Defaults to ``1`` -- the relax pass is what sheds the
+                positional-bias drift velocity the main solve
+                injected, keeping the next substep's ``Jv`` clean.
+                Dropping it to ``0`` recovers the raw C# PhoenX
+                behaviour but tends to accumulate Baumgarte drift in
+                tall stacks and joint chains; both :mod:`solver_jitter`
+                and Box2D v3 ship with 1 relax sweep by default.
             position_iterations: Extra XPBD-style position correction
                 sweeps for contact tangent drift. Not present in the
                 C# original -- carried over from

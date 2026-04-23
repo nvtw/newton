@@ -488,7 +488,7 @@ class Example:
         parser.add_argument(
             "--scene-scale",
             type=float,
-            default=2.0,
+            default=1.0,
             help=(
                 "Uniform geometric scale applied to the nut/bolt assembly "
                 "(positions, mesh scale, SDF narrow band, contact gap, "
