@@ -861,15 +861,24 @@ def contact_prepare_for_iteration_at(
         )
 
         # Soft-constraint bias: ``bias = effective_gap * bias_rate``.
-        # ``bias_rate`` has units 1/s (derived from hertz+damping), so
-        # the formulation is entirely scale-invariant -- no
-        # length-in-metres slop, no velocity-in-metres cap, no
-        # load_boost multiplier (the softness itself keeps the
-        # impulse from runaway growth via ``impulse_coeff``).
-        # Resting contacts converge to ``effective_gap ~ 0`` and the
-        # bias vanishes smoothly; penetration and speculative approach
-        # both use the same symmetric formula.
+        # ``bias_rate`` has units 1/s (derived from hertz+damping) so
+        # the formulation is scale-invariant in length -- resting
+        # contacts converge to ``effective_gap ~ 0`` -> bias ~ 0 with
+        # no length-scale slop.
+        #
+        # Recovery-speed cap: same idea as Box2D v3's
+        # ``maxPushSpeed`` (solver2d post). Prevents a pathologically
+        # deep initial penetration (dropped-through-ground tests, SDF
+        # corner cases) from injecting tens of m/s of bias in a
+        # single substep. The cap IS a velocity in m/s and therefore
+        # the one remaining scale-sensitive knob; scale up with the
+        # scene if you're simulating at ``scene_scale >> 1``.
+        # ``max_approach_speed`` plays the symmetric role for the
+        # speculative-closing branch.
+        max_push_speed = wp.float32(2.0)
+        max_approach_speed = wp.float32(10.0)
         bias_val = effective_gap * bias_rate
+        bias_val = wp.clamp(bias_val, -max_push_speed, max_approach_speed)
 
         # ---- Tangential drift for static friction ----
         # Drift of body 2's contact anchor away from body 1's anchor,
