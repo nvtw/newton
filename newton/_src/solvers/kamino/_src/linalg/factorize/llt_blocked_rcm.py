@@ -101,7 +101,7 @@ def make_llt_blocked_rcm_permute_vector_kernel(max_dim: int):
     """
     del max_dim
 
-    @wp.kernel
+    @wp.kernel(enable_backward=False)
     def permute_vector_kernel(
         dim: wp.array(dtype=int32),
         vio: wp.array(dtype=int32),
@@ -142,7 +142,7 @@ def make_llt_blocked_rcm_fused_permute_and_tp_kernel(block_size: int, max_dim: i
     """
     del max_dim
 
-    @wp.kernel
+    @wp.kernel(enable_backward=False)
     def fused_permute_and_tp_kernel(
         dim: wp.array(dtype=int32),
         mio: wp.array(dtype=int32),
@@ -204,7 +204,7 @@ def make_llt_blocked_rcm_symbolic_fill_in_kernel(max_n_tiles: int):
     """
     del max_n_tiles  # kept for cache key; kernel itself uses dynamic n_tiles from dim
 
-    @wp.kernel
+    @wp.kernel(enable_backward=False)
     def symbolic_fill_in_kernel(
         dim: wp.array(dtype=int32),
         tpo: wp.array(dtype=int32),
@@ -255,7 +255,7 @@ def make_llt_blocked_rcm_factorize_kernel(block_size: int):
     is zero (no need to write it).
     """
 
-    @wp.kernel
+    @wp.kernel(enable_backward=False)
     def llt_blocked_rcm_factorize_kernel(
         # Inputs:
         dim: wp.array(dtype=int32),
@@ -364,7 +364,7 @@ def make_llt_blocked_rcm_factorize_kernel(block_size: int):
 def make_llt_blocked_rcm_solve_kernel(block_size: int):
     """Clone of :func:`llt_blocked.make_llt_blocked_solve_kernel` with tile skipping."""
 
-    @wp.kernel
+    @wp.kernel(enable_backward=False)
     def llt_blocked_rcm_solve_kernel(
         # Inputs:
         dim: wp.array(dtype=int32),
@@ -462,7 +462,7 @@ def make_llt_blocked_rcm_solve_inplace_kernel(block_size: int):
     writes ``y``, backward substitution reads ``y`` and writes ``x``.
     """
 
-    @wp.kernel
+    @wp.kernel(enable_backward=False)
     def llt_blocked_rcm_solve_inplace_kernel(
         # Inputs:
         dim: wp.array(dtype=int32),
