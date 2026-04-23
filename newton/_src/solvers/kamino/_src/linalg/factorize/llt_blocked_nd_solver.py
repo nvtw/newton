@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""KAMINO: Linear Algebra: ND-reordered semi-sparse Blocked LLT solver.
+"""KAMINO: Linear Algebra: RCM-reordered semi-sparse Blocked LLT solver.
 
 Mirrors :class:`LLTBlockedSolver` from :mod:`linalg.linear` but transparently
-computes and applies a per-block fill-reducing nested-dissection permutation,
-and uses a per-block tile-granularity zero-block mask ("semi-sparse") to skip
-work on guaranteed-zero tiles during factorize and solve.
+computes and applies a per-block fill-reducing Reverse Cuthill-McKee (RCM)
+permutation, and uses a per-block tile-granularity zero-block mask
+("semi-sparse") to skip work on guaranteed-zero tiles during factorize and
+solve.
 
 The caller-visible API is identical to :class:`LLTBlockedSolver`:
 
@@ -28,7 +29,6 @@ import warp as wp
 from ...core.types import FloatType, float32, int32, override
 from ..core import DenseLinearOperatorData, DenseSquareMultiLinearInfo
 from ..linear import DirectSolver
-from . import nested_dissection as _nd
 from . import rcm as _rcm
 from . import rcm_batch as _rcm_batch
 from .llt_blocked_nd import (
@@ -66,15 +66,17 @@ wp.set_module_options({"enable_backward": False})
 
 
 class LLTBlockedNDSolver(DirectSolver):
-    """ND-reordered, semi-sparse Blocked LLT (Cholesky) solver.
+    """RCM-reordered, semi-sparse Blocked LLT (Cholesky) solver.
 
     Same public API as :class:`newton._src.solvers.kamino._src.linalg.linear.LLTBlockedSolver`.
     Internally:
 
     1. ``compute(A)`` / ``_factorize_impl``:
 
-       a. Runs one nested-dissection launch per block to compute per-block
-          permutations ``P_i`` (stored concatenated in ``self._P``).
+       a. Runs GPU-native RCM to compute per-block permutations ``P_i``
+          (concatenated in ``self._P``). The default backend is the
+          *batched* RCM which processes all blocks in a single set of
+          launches; see ``reorder_algorithm`` for the per-block alternative.
        b. Builds ``inv_P`` from ``P``.
        c. Permutes ``A -> A_hat`` (``A_hat_i = P_i A_i P_i^T``).
        d. Builds a tile-level sparsity mask for each block by thresholding
@@ -104,20 +106,18 @@ class LLTBlockedNDSolver(DirectSolver):
         atol: float | None = None,
         rtol: float | None = None,
         ftol: float | None = None,
-        # ND-specific options
-        nd_tol: float = 0.0,
-        nd_power_iters=None,
+        # Reordering options
+        # Threshold below which ``|A[i,j]|`` is treated as a non-edge by the
+        # RCM adjacency scan and by the tile-pattern builder.
+        reorder_tol: float = 0.0,
         # Reordering backend.
         # - 'rcm_batch' (default): kernel-based Reverse Cuthill-McKee with all
         #   blocks processed in a single batched launch per stage. Much lower
-        #   per-call overhead than 'spectral' and wins on bandwidth-structured
+        #   per-call overhead than 'rcm' and wins on bandwidth-structured
         #   matrices (up to ~2x vs LLTBlockedSolver), ties elsewhere.
         # - 'rcm'      : per-block RCM (see :mod:`rcm`); same algorithm, one
         #   recorded launch set per block. Kept for diagnostics / single-block
         #   use; prefer 'rcm_batch' for multi-block workloads.
-        # - 'spectral' : nested_dissection (spectral bisection via power
-        #   iteration). Fill-reducing but high launch-count per block. Kept
-        #   as an opt-in for research / dense-matrix experiments.
         reorder_algorithm: str = "rcm_batch",
         # For 'rcm' only: cap on BFS steps per block. None => auto
         # (``2*ceil(sqrt(n)) + 4``).
@@ -132,10 +132,11 @@ class LLTBlockedNDSolver(DirectSolver):
             block_size: tile block size passed to the kernel factories.
             solve_block_dim: thread-block size for solve kernels.
             factortize_block_dim: thread-block size for factorize kernel.
-            nd_tol: threshold below which an off-diagonal entry is treated as zero
-                by the ND partitioner and by the tile-pattern builder.
-            nd_power_iters: number of power iterations per ND level. ``None``
-                forwards to the ND module's default ('auto').
+            reorder_tol: threshold below which an off-diagonal entry is
+                treated as a non-edge by the RCM adjacency scan and by the
+                tile-pattern builder.
+            reorder_algorithm: 'rcm_batch' (default) or 'rcm'. See class doc.
+            rcm_max_bfs_iters: BFS depth cap for the RCM backends.
         """
         # LLT-specific internal data
         self._L: wp.array | None = None
@@ -149,13 +150,12 @@ class LLTBlockedNDSolver(DirectSolver):
         self._tile_pattern: wp.array | None = None
         self._tpo: wp.array | None = None
         self._max_dim: int = 0
-        # Per-block ND launch callbacks (one per block). Each is a closure
-        # that calls a recorded ND launch writing a slice of self._P.
-        self._nd_callbacks: list = []
-        # ND scratch must be kept alive to keep the recorded launches valid.
-        self._nd_scratches: list = []
-        # Views into flat A used by the ND launches. These wp.array views are
-        # bound at finalize() time and must outlive the recorded launches.
+        # RCM launch callbacks (one per block for 'rcm'; exactly one for
+        # 'rcm_batch'). Each is a closure that replays a recorded launch set.
+        self._reorder_callbacks: list = []
+        # Views into flat A used by the per-block launches. These wp.array
+        # views are bound at finalize()/factorize() time and must outlive the
+        # recorded launches.
         self._A_views: list = []
         self._A_views_attached_to: wp.array | None = None
 
@@ -164,12 +164,11 @@ class LLTBlockedNDSolver(DirectSolver):
         self._solve_block_dim: int = solve_block_dim
         self._factortize_block_dim: int = factortize_block_dim
 
-        # ND options
-        self._nd_tol: float = nd_tol
-        self._nd_power_iters = nd_power_iters if nd_power_iters is not None else 'auto'
-        if reorder_algorithm not in ("spectral", "rcm", "rcm_batch"):
+        # Reordering options
+        self._reorder_tol: float = reorder_tol
+        if reorder_algorithm not in ("rcm", "rcm_batch"):
             raise ValueError(
-                "reorder_algorithm must be 'spectral', 'rcm', or 'rcm_batch'; "
+                "reorder_algorithm must be 'rcm' or 'rcm_batch'; "
                 f"got {reorder_algorithm!r}"
             )
         self._reorder_algorithm: str = reorder_algorithm
@@ -215,14 +214,14 @@ class LLTBlockedNDSolver(DirectSolver):
 
     @property
     def P(self) -> wp.array:
-        """Concatenated per-block ND permutation (int32[total_vec_size])."""
+        """Concatenated per-block RCM permutation (int32[total_vec_size])."""
         if self._P is None:
             raise ValueError("Permutation array has not been allocated!")
         return self._P
 
     @property
     def inv_P(self) -> wp.array:
-        """Concatenated per-block inverse ND permutation (int32[total_vec_size])."""
+        """Concatenated per-block inverse RCM permutation (int32[total_vec_size])."""
         if self._inv_P is None:
             raise ValueError("Inverse permutation array has not been allocated!")
         return self._inv_P
@@ -284,16 +283,10 @@ class LLTBlockedNDSolver(DirectSolver):
             self._tile_pattern = wp.zeros(shape=(total_tp_size,), dtype=int32)
             self._tpo = wp.array(tp_offsets[:-1], dtype=int32)
 
-        # Pre-build per-block ND recorded launches. Each ND launch receives
-        # 2-D views into self._A_hat's per-block slice (we compute P on
-        # A_hat? no - we compute P on the *input* A to get a fill-reducing
-        # ordering for A; then we permute A -> A_hat using P and factorize
-        # A_hat). So the ND views live over the user's A buffer which is
-        # supplied at factorize time. We therefore (re)build these closures
-        # lazily in _factorize_impl on first call, keyed off the A ptr
-        # identity; if the user hands us a different A buffer we rebuild.
-        self._nd_callbacks = []
-        self._nd_scratches = []
+        # Per-block views/launches are (re)built lazily in
+        # ``_ensure_reorder_launches_bound`` the first time a concrete A
+        # buffer arrives, and rebound only if its device pointer changes.
+        self._reorder_callbacks = []
         self._A_views = []
         self._A_views_attached_to = None
 
@@ -311,32 +304,25 @@ class LLTBlockedNDSolver(DirectSolver):
         self._tile_pattern.zero_()
         self._has_factors = False
 
-    def _ensure_nd_launches_bound(self, A: wp.array) -> None:
-        """Build the per-block ND recorded launches, bound to the current A buffer.
+    def _ensure_reorder_launches_bound(self, A: wp.array) -> None:
+        """Build the reordering launch callbacks, bound to the current A buffer.
 
-        Because each ND launch captures a ``wp.array2d`` *view* of A over a
-        single block, the view (and the ND scratch it was created against)
-        must be alive for as long as the launches are reused. We rebind only
-        when A's underlying pointer changes (rare - typically finalize() /
-        factorize() pass the same array).
+        For ``rcm_batch`` the callback is a single per-batch launch set;
+        for ``rcm`` we allocate one callback per block because each block's
+        matrix lives at a different offset. Callbacks capture ``wp.array``
+        views of ``A`` that must stay alive for as long as they are reused,
+        so we rebind only when ``A.ptr`` changes.
         """
         if self._A_views_attached_to is A:
             return
 
         info = self._operator.info
         dims = list(info.dimensions)
-        # mio, vio are on device; read once to host for per-block view setup.
-        mio_host = info.mio.numpy()
-        vio_host = info.vio.numpy()
 
-        self._nd_callbacks = []
-        self._nd_scratches = []
+        self._reorder_callbacks = []
         self._A_views = []
 
-        # Resolve Warp dtype for ND (matches A's dtype).
-        nd_dtype = self._dtype
-
-        # Fast path for 'rcm_batch': a single callback covers all blocks.
+        # Batched RCM: a single callback covers all blocks.
         if self._reorder_algorithm == "rcm_batch":
             with wp.ScopedDevice(self._device):
                 cb = _rcm_batch.create_rcm_batch_launch(
@@ -347,20 +333,19 @@ class LLTBlockedNDSolver(DirectSolver):
                     vio=info.vio,
                     num_blocks=info.num_blocks,
                     max_dim=int(info.max_dimension),
-                    tol=self._nd_tol,
+                    tol=self._reorder_tol,
                     max_bfs_iters=self._rcm_max_bfs_iters,
                     use_cuda_graph=False,
                     device=self._device,
                 )
-            self._nd_callbacks = [cb]
-            self._nd_scratches = [None]
+            self._reorder_callbacks = [cb]
             self._A_views = [(A, self._P)]  # keep references alive
             self._A_views_attached_to = A
             return
 
-        # The ND module's get_array_ptr equivalent is only available through
-        # creating a wp.array view with an explicit ptr. We obtain A's device
-        # pointer via the Warp array's ``ptr`` attribute.
+        # Per-block RCM: one callback per block over a (n*n,) view of A.
+        mio_host = info.mio.numpy()
+        vio_host = info.vio.numpy()
         A_base_ptr = A.ptr
         elem_size = wp.types.type_size_in_bytes(A.dtype)
 
@@ -376,50 +361,24 @@ class LLTBlockedNDSolver(DirectSolver):
                     dtype=int32,
                     device=self._device,
                 )
-
-                if self._reorder_algorithm == "spectral":
-                    A_view = wp.array(
-                        ptr=A_base_ptr + mat_off * elem_size,
-                        shape=(n_i, n_i),
-                        dtype=nd_dtype,
-                        device=self._device,
-                    )
-                    scratch = _nd.allocate_nd_scratch(n_i, device=self._device, dtype=nd_dtype)
-                    cb = _nd.create_nested_dissection_launch(
-                        A_view,
-                        P_view,
-                        tol=self._nd_tol,
-                        power_iters=self._nd_power_iters,
-                        dtype=nd_dtype,
-                        device=self._device,
-                        use_cuda_graph=False,  # captured as part of the outer graph if any
-                        scratch=scratch,
-                    )
-                    # 'scratch' holds the live ND buffers; keep a ref.
-                    self._A_views.append((A_view, P_view))
-                    self._nd_scratches.append(scratch)
-                    self._nd_callbacks.append(cb)
-                else:  # 'rcm'
-                    # RCM wants a flat (n*n,) array view.
-                    A_view = wp.array(
-                        ptr=A_base_ptr + mat_off * elem_size,
-                        shape=(n_i * n_i,),
-                        dtype=nd_dtype,
-                        device=self._device,
-                    )
-                    cb = _rcm.create_rcm_launch(
-                        A_view,
-                        P_view,
-                        tol=self._nd_tol,
-                        max_bfs_iters=self._rcm_max_bfs_iters,
-                        use_cuda_graph=False,  # captured under outer graph
-                        device=self._device,
-                    )
-                    # RCM allocates its own scratch inside create_rcm_launch;
-                    # the closure keeps it alive via the captured launches.
-                    self._A_views.append((A_view, P_view))
-                    self._nd_scratches.append(None)
-                    self._nd_callbacks.append(cb)
+                A_view = wp.array(
+                    ptr=A_base_ptr + mat_off * elem_size,
+                    shape=(n_i * n_i,),
+                    dtype=A.dtype,
+                    device=self._device,
+                )
+                cb = _rcm.create_rcm_launch(
+                    A_view,
+                    P_view,
+                    tol=self._reorder_tol,
+                    max_bfs_iters=self._rcm_max_bfs_iters,
+                    use_cuda_graph=False,  # captured under outer graph
+                    device=self._device,
+                )
+                # RCM allocates its own scratch inside create_rcm_launch; the
+                # closure keeps it alive via the captured launches.
+                self._A_views.append((A_view, P_view))
+                self._reorder_callbacks.append(cb)
 
         self._A_views_attached_to = A
 
@@ -428,13 +387,13 @@ class LLTBlockedNDSolver(DirectSolver):
         info = self._operator.info
         num_blocks = info.num_blocks
 
-        # Bind / rebind ND views to the current A buffer.
-        self._ensure_nd_launches_bound(A)
+        # Bind / rebind views to the current A buffer.
+        self._ensure_reorder_launches_bound(A)
 
-        # 1. Compute per-block P by running each ND callback. These are
+        # 1. Compute per-block P by running each reorder callback. These are
         #    recorded Warp launches internally and are safe to replay under
         #    CUDA graph capture initiated by the caller.
-        for cb in self._nd_callbacks:
+        for cb in self._reorder_callbacks:
             cb()
 
         # 2. Build inv_P.
@@ -463,14 +422,14 @@ class LLTBlockedNDSolver(DirectSolver):
             device=self._device,
         )
 
-        # 4. Build tile-pattern from |A_hat| > nd_tol and inflate by symbolic fill-in.
+        # 4. Build tile-pattern from |A_hat| > reorder_tol and inflate by symbolic fill-in.
         self._tile_pattern.zero_()
         llt_blocked_nd_build_tile_pattern(
             kernel=self._build_tile_pattern_kernel,
             dim=info.dim,
             mio=info.mio,
             tpo=self._tpo,
-            tol=self._nd_tol,
+            tol=self._reorder_tol,
             A_hat=self._A_hat,
             tile_pattern=self._tile_pattern,
             num_blocks=num_blocks,

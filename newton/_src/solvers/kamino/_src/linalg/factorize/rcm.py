@@ -3,9 +3,9 @@
 
 """GPU Reverse Cuthill-McKee (RCM) reordering for dense SPD matrices.
 
-Alternative to ``nested_dissection.py`` for producing a bandwidth-reducing
-permutation that, for sparse SPD matrices, tends to produce very good
-tile-granularity skip patterns for :class:`LLTBlockedNDSolver`.
+Produces a bandwidth-reducing permutation that, for sparse SPD matrices,
+tends to produce very good tile-granularity skip patterns for
+:class:`LLTBlockedNDSolver`.
 
 Design goals
 ------------
@@ -15,7 +15,7 @@ Design goals
   depth upper bound is ``n``, so we launch exactly ``n`` BFS-step kernels.
   After the BFS has finished, subsequent BFS-step kernels are cheap no-ops.
 - Input is a dense ``(n, n)`` SPD matrix. Adjacency is discovered implicitly
-  by thresholding ``|A_ij| > tol`` (same convention as ``nested_dissection``).
+  by thresholding ``|A_ij| > tol``.
 - Output is a permutation ``perm`` of ``[0..n)`` such that the bandwidth of
   ``A[perm][:, perm]`` is typically much smaller than the bandwidth of ``A``.
 
@@ -70,11 +70,7 @@ import warp as wp
 
 
 def create_cuda_graph_callback(callback: Callable[[], None], device=None, stream=None) -> Callable[[], None]:
-    """Capture ``callback`` into a CUDA graph and return a zero-arg replay fn.
-
-    Inlined copy of the same helper in :mod:`nested_dissection`. Kept local so
-    the two modules stay independently self-contained.
-    """
+    """Capture ``callback`` into a CUDA graph and return a zero-arg replay fn."""
     with wp.ScopedCapture(device=device, stream=stream) as capture:
         callback()
 
@@ -170,7 +166,7 @@ def _make_rcm_kernels(dtype, n: int):
         level[i] = int(-1)
 
         # Compute degree by scanning the row. Abs-threshold `tol` matches the
-        # convention used elsewhere (nested_dissection, build_tile_pattern).
+        # convention used elsewhere (build_tile_pattern).
         d = int(0)
         base = i * n_in
         for j in range(n_in):

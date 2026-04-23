@@ -3,9 +3,9 @@
 
 """Unit tests for the LLTBlockedNDSolver.
 
-These tests compare the ND-reordered semi-sparse blocked LLT solver to the
+These tests compare the RCM-reordered semi-sparse blocked LLT solver to the
 existing dense blocked LLT solver (:class:`LLTBlockedSolver`) on identical
-inputs. Because the ND reordering and the tile-pattern-aware kernels are
+inputs. Because the reordering and the tile-pattern-aware kernels are
 supposed to be a transparent optimization (same result, different execution
 plan), the two solvers must produce identical numerical outputs up to
 round-off. The tests check:
@@ -482,28 +482,13 @@ class TestLinAlgLLTBlockedND(unittest.TestCase):
 
 
 class TestLinAlgLLTBlockedRCM(TestLinAlgLLTBlockedND):
-    """Same suite, but using the kernel-based RCM reordering backend.
+    """Same suite, but forcing the per-block RCM reordering backend.
 
-    RCM is a bandwidth-reducing (not strictly fill-reducing) permutation, but
-    on well-conditioned sparse SPD inputs it produces an equivalent
-    factorization (up to round-off) and must agree with the reference to the
-    same tolerances. This test enforces parity of the factorize+solve result
-    across backends.
+    The base suite uses the solver default (``rcm_batch``); this subclass
+    pins the per-block variant so both RCM code paths are covered.
     """
 
     reorder_algorithm = "rcm"
-
-
-class TestLinAlgLLTBlockedRCMBatch(TestLinAlgLLTBlockedND):
-    """Same suite for the batched RCM backend (one launch per stage over all
-    blocks; see :mod:`rcm_batch`).
-
-    The batched variant is the production path: it reduces per-block launch
-    overhead dramatically while producing identical permutations. Correctness
-    must be identical to the per-block RCM path.
-    """
-
-    reorder_algorithm = "rcm_batch"
 
 
 if __name__ == "__main__":

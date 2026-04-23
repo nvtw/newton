@@ -22,20 +22,22 @@ from .linear import (
     LLTSequentialSolver,
 )
 
-# Import the ND-reordered semi-sparse blocked LLT solver here (rather than
+# Import the RCM-reordered semi-sparse blocked LLT solver here (rather than
 # from .linear) to avoid a circular import: .factorize.llt_blocked_nd_solver
 # imports DirectSolver from .linear, so .linear cannot import it back.
 # At this point .linear has been fully resolved, so the downstream import is safe.
 from .factorize.llt_blocked_nd_solver import LLTBlockedNDSolver
 
-# Register the ND solver in the name<->type maps so it can be selected via
-# the string "LLTBND" in ConstrainedDynamicsConfig.linear_solver_type.
+# Register the reordering solver in the name<->type maps so it can be selected
+# via the string "LLTBND" in ConstrainedDynamicsConfig.linear_solver_type.
+# (The class name keeps the historical "ND" suffix for backwards-compatibility;
+# internally the reordering is now Reverse Cuthill-McKee.)
 LinearSolverNameToType["LLTBND"] = LLTBlockedNDSolver
 LinearSolverTypeToName[LLTBlockedNDSolver] = "LLTBND"
 
-# Widen the LinearSolverType alias to include the ND solver. This matters
-# because `delassus.py` performs a runtime `issubclass(solver, LinearSolverType)`
-# check and would otherwise reject the ND solver class.
+# Widen the LinearSolverType alias to include the reordering solver. This
+# matters because `delassus.py` performs a runtime
+# `issubclass(solver, LinearSolverType)` check and would otherwise reject it.
 LinearSolverType = (
     LLTSequentialSolver | LLTBlockedSolver | LLTBlockedNDSolver
     | ConjugateGradientSolver | ConjugateResidualSolver

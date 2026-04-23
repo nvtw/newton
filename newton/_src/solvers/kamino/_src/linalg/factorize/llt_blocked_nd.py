@@ -6,8 +6,8 @@
 This module mirrors :mod:`llt_blocked` (flat-batched layout, Tile API kernels)
 but adds:
 
-- Transparent per-block fill-reducing reordering using the GPU-native nested
-  dissection launch from :mod:`.nested_dissection` (vendored from socu).
+- Transparent per-block fill-reducing reordering using the GPU-native
+  Reverse Cuthill-McKee launches from :mod:`.rcm` / :mod:`.rcm_batch`.
 - A tile-granularity *zero-block mask* (the "semi-sparse" part): every inner
   tile_load / tile_matmul in the numeric factorize + solve kernels is gated on
   a per-block ``tile_pattern`` so that tiles which are guaranteed to be zero
