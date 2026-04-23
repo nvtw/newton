@@ -1511,10 +1511,19 @@ class NarrowPhase:
             writer_func = contact_writer_warp_func
 
         self.tile_size_mesh_convex = 128
-        # Must match the tile stack capacity in sdf_contact.py, re-use
-        # the single source of truth so the two can't drift.
+        # Must match ``MESH_SDF_BLOCK_DIM`` in sdf_contact.py: the mesh-SDF
+        # kernels assume ``wp.block_dim()`` equals that constant so the
+        # tile-stack overflow margin (``STACK_CAPACITY = 2 *
+        # MESH_SDF_BLOCK_DIM``) is correctly sized. Re-use the constant
+        # rather than duplicating the value so the two can't drift.
         self.tile_size_mesh_mesh = MESH_SDF_BLOCK_DIM
+        assert self.tile_size_mesh_mesh == MESH_SDF_BLOCK_DIM, (
+            "mesh-SDF tile launches must use block_dim == MESH_SDF_BLOCK_DIM"
+        )
         self.tile_size_mesh_plane = 512
+        # Generic block dim for non-tile-stack kernels (primitive /
+        # GJK-MPR / export). Not used for the mesh-SDF tile launches,
+        # which use ``self.tile_size_mesh_mesh`` above.
         self.block_dim = 128
 
         # Create the appropriate kernel variants
@@ -1668,7 +1677,11 @@ class NarrowPhase:
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
 
-        # Dynamic block allocation for mesh-mesh and mesh-plane contacts
+        # Dynamic block allocation for mesh-mesh and mesh-plane contacts.
+        # On CUDA we target ~4 blocks per SM for good occupancy; on CPU
+        # there is no SM notion so we pick 64 as a modest parallelism
+        # target that splits pair work across OpenMP threads without
+        # over-subscribing on small scenes.
         if self.reduce_contacts:
             target_blocks = device_obj.sm_count * 4 if device_obj.is_cuda else 64
             n = max_candidate_pairs + 1
