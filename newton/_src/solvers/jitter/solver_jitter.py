@@ -68,6 +68,7 @@ from newton._src.solvers.jitter.solver_jitter_kernels import (
     _constraint_gather_wrenches_kernel,
     _constraint_iterate_fast_tail_kernel,
     _constraint_iterate_kernel,
+    _constraint_position_iterate_fast_tail_kernel,
     _constraint_prepare_fast_tail_kernel,
     _constraint_prepare_for_iteration_kernel,
     _constraint_relax_fast_tail_kernel,
@@ -175,6 +176,7 @@ class World:
         substeps: int = 1,
         solver_iterations: int = 8,
         velocity_relaxations: int = 1,
+        position_iterations: int = 0,
         gravity: tuple[float, float, float]
         | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         max_contact_columns: int = 0,
@@ -250,6 +252,7 @@ class World:
         self.substeps = int(substeps)
         self.solver_iterations = int(solver_iterations)
         self.velocity_relaxations = int(velocity_relaxations)
+        self.position_iterations = int(position_iterations)
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
             raise ValueError(
@@ -683,6 +686,7 @@ class World:
             self._integrate_forces()
             self._solve_velocities(self.solver_iterations)
             self._integrate_velocities()
+            self._position_iterate(self.position_iterations)
             self._relax_velocities(self.velocity_relaxations)
 
         # Post-solve bookkeeping.
@@ -1458,6 +1462,51 @@ class World:
             _integrate_velocities_kernel,
             dim=self.num_bodies,
             inputs=[self.bodies, wp.float32(self.substep_dt)],
+            device=self.device,
+        )
+
+    def _position_iterate(self, iterations: int) -> None:
+        """XPBD-style position-iteration pass for contact tangent drift.
+
+        Runs between :meth:`_integrate_velocities` and
+        :meth:`_relax_velocities`. Directly shifts body positions to
+        cancel tangent drift in static contacts, bypassing the
+        Nyquist-rate ceiling of the velocity-level Baumgarte bias
+        (which caps drift reduction at ~0.61 per step). Multiple
+        iterations are required because corrections cascade across
+        colors of the partitioner -- one iteration shifts each body
+        toward its first contact's anchor, the next balances against
+        the neighbor, and so on until the stack equilibrates at zero
+        drift.
+
+        Only fast-path (single_block_sweep=True) is wired; the
+        multi-kernel dispatcher path returns early since the multi-
+        world / graph-captured case currently always takes the fast
+        path. See
+        :func:`_constraint_position_iterate_fast_tail_kernel` and
+        :func:`contact_position_iterate_at` for the algorithm.
+        """
+        if self._constraint_capacity == 0:
+            return
+        if iterations <= 0:
+            return
+        if not self._single_block_sweep:
+            return
+
+        wp.launch(
+            _constraint_position_iterate_fast_tail_kernel,
+            dim=self.num_worlds * _STRAGGLER_BLOCK_DIM,
+            block_dim=_STRAGGLER_BLOCK_DIM,
+            inputs=[
+                self.constraints,
+                self.bodies,
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
+                self._contact_container,
+                wp.int32(iterations),
+            ],
             device=self.device,
         )
 

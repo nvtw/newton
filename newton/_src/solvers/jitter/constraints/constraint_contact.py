@@ -86,6 +86,8 @@ __all__ = [
     "contact_per_contact_wrench_kernel",
     "contact_per_slot_error_at",
     "contact_per_slot_wrench_at",
+    "contact_position_iterate",
+    "contact_position_iterate_at",
     "contact_prepare_for_iteration",
     "contact_prepare_for_iteration_at",
     "contact_set_active_mask",
@@ -1159,6 +1161,155 @@ def contact_iterate(
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
     contact_iterate_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias)
+
+
+@wp.func
+def contact_position_iterate_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    cc: ContactContainer,
+):
+    """XPBD-style position iteration for contact tangent drift.
+
+    One sweep of a position-level PGS on the tangent rows of every
+    active slot in one column. Directly modifies body positions and
+    orientations (not velocities) so static-friction drift converges
+    to zero within the iteration budget, bypassing the Nyquist-rate
+    ceiling that velocity-level Baumgarte hits (~0.61/step).
+
+    Algorithm per slot (Muller / Macklin XPBD, alpha=0 rigid):
+        C_t_k = dot(p2_world - p1_world, t_k_dir)
+        d_lam_k = -C_t_k * eff_t_k  (position impulse, kg*m)
+        pos_imp = d_lam_1 * t1 + d_lam_2 * t2
+        dx_1 = -inv_mass1 * pos_imp
+        dx_2 = +inv_mass2 * pos_imp
+        domega_1 = -inv_inertia1 * (r1 x pos_imp)
+        domega_2 = +inv_inertia2 * (r2 x pos_imp)
+
+    Per-body deltas accumulate across slots of the column and apply
+    once at the end -- prevents the same body from being teleported
+    multiple times by a 6-slot manifold.
+
+    Gated on drift below the slip threshold: kinetic-regime pairs
+    (drift > slip_threshold) are filtered out here and handled by the
+    anchor-reset + velocity bias path. No Coulomb clamp in this pass
+    because the static gate ensures we never would have saturated the
+    cone anyway.
+
+    Graph coloring guarantees body writes are race-free across
+    threads in one kernel launch; sequential colors serialise so
+    iteration k+1 reads iteration k's positions and converges the
+    cascade.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    active_mask = contact_get_active_mask(constraints, cid)
+    if active_mask == 0:
+        return
+
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    if inv_mass1 + inv_mass2 < wp.float32(1.0e-12):
+        return
+
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    position1 = bodies.position[b1]
+    position2 = bodies.position[b2]
+    orientation1 = bodies.orientation[b1]
+    orientation2 = bodies.orientation[b2]
+    v1 = bodies.velocity[b1]
+    v2 = bodies.velocity[b2]
+    w1 = bodies.angular_velocity[b1]
+    w2 = bodies.angular_velocity[b2]
+
+    slip_threshold = wp.float32(0.002)
+    # Rest gate: 5 mm/s tangential contact velocity. A cube sliding at
+    # 5 cm/s has a per-substep drift of 0.2 mm (well below slip_threshold)
+    # but is kinetic, not static -- position correction on such a
+    # pair would inject an opposing position-space impulse that
+    # fights the kinetic friction velocity solve and breaks analytic
+    # stop distance. Gating on velocity identifies the regime
+    # properly.
+    rest_vel_thresh = wp.float32(0.005)
+
+    d_pos1 = wp.vec3f(0.0, 0.0, 0.0)
+    d_pos2 = wp.vec3f(0.0, 0.0, 0.0)
+    d_omega1 = wp.vec3f(0.0, 0.0, 0.0)
+    d_omega2 = wp.vec3f(0.0, 0.0, 0.0)
+
+    for slot in range(CONTACT_MAX_SLOTS):
+        if (active_mask & (wp.int32(1) << slot)) == 0:
+            continue
+
+        n = cc_get_normal(cc, slot, cid)
+        t1_dir = cc_get_tangent1(cc, slot, cid)
+        t2_dir = wp.cross(n, t1_dir)
+        local_p0 = cc_get_local_p0(cc, slot, cid)
+        local_p1 = cc_get_local_p1(cc, slot, cid)
+
+        p1_world = position1 + wp.quat_rotate(orientation1, local_p0)
+        p2_world = position2 + wp.quat_rotate(orientation2, local_p1)
+        r1 = p1_world - position1
+        r2 = p2_world - position2
+
+        p_diff = p2_world - p1_world
+        drift_t1 = wp.dot(p_diff, t1_dir)
+        drift_t2 = wp.dot(p_diff, t2_dir)
+
+        drift_sq = drift_t1 * drift_t1 + drift_t2 * drift_t2
+        if drift_sq > slip_threshold * slip_threshold:
+            continue
+
+        vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
+        vel_t1 = wp.dot(vel_rel, t1_dir)
+        vel_t2 = wp.dot(vel_rel, t2_dir)
+        if vel_t1 * vel_t1 + vel_t2 * vel_t2 > rest_vel_thresh * rest_vel_thresh:
+            continue
+
+        eff_t1 = _effective_mass_scalar(
+            t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
+        )
+        eff_t2 = _effective_mass_scalar(
+            t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
+        )
+
+        d_lam_t1 = -drift_t1 * eff_t1
+        d_lam_t2 = -drift_t2 * eff_t2
+        pos_imp = d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
+
+        d_pos1 = d_pos1 - inv_mass1 * pos_imp
+        d_pos2 = d_pos2 + inv_mass2 * pos_imp
+        d_omega1 = d_omega1 - inv_inertia1 @ wp.cross(r1, pos_imp)
+        d_omega2 = d_omega2 + inv_inertia2 @ wp.cross(r2, pos_imp)
+
+    bodies.position[b1] = position1 + d_pos1
+    bodies.position[b2] = position2 + d_pos2
+
+    dq1 = wp.quat(d_omega1[0], d_omega1[1], d_omega1[2], wp.float32(0.0))
+    new_q1 = orientation1 + wp.float32(0.5) * (dq1 * orientation1)
+    bodies.orientation[b1] = wp.normalize(new_q1)
+
+    dq2 = wp.quat(d_omega2[0], d_omega2[1], d_omega2[2], wp.float32(0.0))
+    new_q2 = orientation2 + wp.float32(0.5) * (dq2 * orientation2)
+    bodies.orientation[b2] = wp.normalize(new_q2)
+
+
+@wp.func
+def contact_position_iterate(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    cc: ContactContainer,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_position_iterate_at(constraints, cid, 0, bodies, body_pair, cc)
 
 
 @wp.func

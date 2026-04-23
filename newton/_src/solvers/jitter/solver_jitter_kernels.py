@@ -44,6 +44,7 @@ from newton._src.solvers.jitter.constraints.constraint_ball_socket import (
 from newton._src.solvers.jitter.constraints.constraint_contact import (
     ContactViews,
     contact_iterate,
+    contact_position_iterate,
     contact_prepare_for_iteration,
     contact_world_error,
     contact_world_wrench,
@@ -126,6 +127,7 @@ __all__ = [
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
     "_constraint_iterate_fast_tail_kernel",
+    "_constraint_position_iterate_fast_tail_kernel",
     "_constraint_iterate_kernel",
     "_constraint_prepare_fast_tail_kernel",
     "_constraint_prepare_for_iteration_kernel",
@@ -797,6 +799,69 @@ def _constraint_prepare_fast_tail_kernel(
 
         _sync_threads()
         c += 1
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_position_iterate_fast_tail_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    world_element_ids_by_color: wp.array[wp.int32],
+    world_color_starts: wp.array2d[wp.int32],
+    world_csr_offsets: wp.array[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+    cc: ContactContainer,
+    num_iterations: wp.int32,
+):
+    """Multi-block XPBD position-iteration dispatcher for contact
+    tangent drift.
+
+    Runs ``num_iterations`` full-color sweeps per world AFTER
+    ``integrate_velocities`` and BEFORE ``relax_velocities``. Each
+    iteration calls :func:`contact_position_iterate` on every
+    contact cid: reads current body positions/orientations, computes
+    the tangent drift, and applies an XPBD position impulse to the
+    two bodies (no velocity touched). Multiple iterations are needed
+    because corrections from different contacts cascade across
+    colors -- the first iteration shifts bodies toward the first
+    contact's anchor, the next iteration sees the updated positions
+    and balances against the neighbouring contact, and so on until
+    the stack equilibrates at zero drift.
+
+    Static regime only: each slot's position iterate is gated by
+    drift-below-slip-threshold internally, so sliding pairs are
+    skipped and the Coulomb-clamped velocity friction handles them.
+    See :func:`contact_position_iterate_at` for per-slot math.
+
+    Mirrors :func:`_constraint_iterate_fast_tail_kernel` 's
+    world-block / per-color sync pattern.
+    """
+    tid = wp.tid()
+    local_tid = tid % _STRAGGLER_BLOCK_DIM
+    world_id = tid / _STRAGGLER_BLOCK_DIM
+
+    n_colors = world_num_colors[world_id]
+    world_base = world_csr_offsets[world_id]
+
+    it = wp.int32(0)
+    while it < num_iterations:
+        c = wp.int32(0)
+        while c < n_colors:
+            start = world_base + world_color_starts[world_id, c]
+            end = world_base + world_color_starts[world_id, c + 1]
+            count = end - start
+
+            base = local_tid
+            while base < count:
+                cid = world_element_ids_by_color[start + base]
+                t = constraint_get_type(constraints, cid)
+                if t == CONSTRAINT_TYPE_CONTACT:
+                    contact_position_iterate(constraints, cid, bodies, cc)
+                base += _STRAGGLER_BLOCK_DIM
+
+            _sync_threads()
+            c += 1
+
+        it += 1
 
 
 @wp.kernel(enable_backward=False)
