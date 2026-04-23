@@ -545,7 +545,32 @@ def contact_prepare_for_iteration_at(
             wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0)
         )
 
-        bias_val = effective_gap * bias_rate
+        # Speculative vs penetrating bias (Box2D v3 / solver2d model).
+        # For a *separated* contact (``gap > 0``) we want the row to only
+        # fire when the relative closing velocity would actually push
+        # the bodies past each other within this substep -- i.e. when
+        # ``-jv_n > gap / dt``. The target closing velocity is therefore
+        # ``gap / dt = gap * idt``, so bodies closing slower than that
+        # see no impulse (the clamp below fires) and bodies closing
+        # faster get decelerated to exactly the rate that reaches zero
+        # gap at the end of the substep. Using the softened ``bias_rate
+        # ~ 0.6 / dt`` here instead (as the old code did) set the target
+        # at ``gap * bias_rate``, which is slower than the "just-close-
+        # in-one-step" rate and creates a soft spring that stops falling
+        # bodies mid-air at the speculative gap distance -- the "honey"
+        # artefact when a dropping mesh hits the speculative detection
+        # shell and decelerates like it's in fluid.
+        #
+        # For a *penetrating* contact (``gap < 0``) we want the soft
+        # Baumgarte push-apart the old formula produces, so we keep the
+        # soft bias rate there. ``bias_val`` is always non-negative for
+        # separated contacts and always non-positive for penetrating
+        # contacts after the clamp; iterate() reads the sign to pick
+        # rigid vs soft PGS coefficients.
+        if effective_gap > wp.float32(0.0):
+            bias_val = effective_gap * idt
+        else:
+            bias_val = effective_gap * bias_rate
         bias_val = wp.clamp(bias_val, -max_push_speed, max_approach_speed)
 
         # Sticky-friction drift + break. Mirrors solver2d:
@@ -716,8 +741,23 @@ def contact_iterate_at(
         bias_val = cc_get_bias(cc, k)
         bias_t1_val = cc_get_bias_t1(cc, k)
         bias_t2_val = cc_get_bias_t2(cc, k)
+        # ``bias_val > 0`` marks a speculative contact (see
+        # :func:`contact_prepare_for_iteration_at`); in that regime
+        # Box2D's ``s > 0`` branch runs unconditionally of ``useBias``,
+        # so the relax pass (``use_bias=False``) MUST keep the
+        # ``gap * inv_dt`` bias, otherwise the row degenerates into a
+        # pure ``-eff_n * jv_n`` push on every closing body -- which
+        # applies a *large* decelerating impulse to anything falling
+        # toward the surface while still separated. That's the honey
+        # artefact: a speculative-contact shell that decelerates the
+        # body even though the main solve correctly kept it rigid.
+        # For penetrating contacts (``bias_val <= 0``) the relax pass
+        # DOES zero the Baumgarte bias so the row settles on ``Jv = 0``
+        # instead of re-injecting positional drift velocity.
+        is_speculative = bias_val > wp.float32(0.0)
         if not use_bias:
-            bias_val = wp.float32(0.0)
+            if not is_speculative:
+                bias_val = wp.float32(0.0)
             bias_t1_val = wp.float32(0.0)
             bias_t2_val = wp.float32(0.0)
 
@@ -732,10 +772,36 @@ def contact_iterate_at(
         jv_t1 = wp.dot(vel_rel, t1_dir)
         jv_t2 = wp.dot(vel_rel, t2_dir)
 
-        # Normal row: Box2D v3 soft-constraint solve + clamp.
+        # Normal row: Box2D v3 soft-constraint solve + clamp. Three
+        # regimes, matching ``b2SolveOverflowContacts`` and
+        # ``b2SolveContactsTask`` in Box2D v3:
+        #
+        # 1. Speculative (``is_speculative``, i.e. ``effective_gap > 0``
+        #    at prepare time): rigid PGS (``mass_coeff = 1``,
+        #    ``impulse_coeff = 0``) + bias ``gap * inv_dt`` -- runs
+        #    unconditionally of ``use_bias`` so the relax pass keeps
+        #    capping closing at ``gap / dt`` instead of degenerating
+        #    into a pure ``-eff_n * jv_n`` brake.
+        # 2. Penetrating + main solve (``!is_speculative`` and
+        #    ``use_bias``): soft PGS with the Box2D rollover
+        #    (``mass_coeff``, ``impulse_coeff`` from
+        #    :func:`soft_constraint_coefficients`).
+        # 3. Penetrating + relax (``!is_speculative`` and not
+        #    ``use_bias``): rigid PGS with zero bias -- pure
+        #    ``Jv = 0`` enforcement without the positional-bias
+        #    velocity that the main solve just injected.
+        if is_speculative:
+            mass_coeff_n = wp.float32(1.0)
+            impulse_coeff_n = wp.float32(0.0)
+        elif use_bias:
+            mass_coeff_n = mass_coeff
+            impulse_coeff_n = impulse_coeff
+        else:
+            mass_coeff_n = wp.float32(1.0)
+            impulse_coeff_n = wp.float32(0.0)
         d_lam_n_us = -eff_n * (jv_n + bias_val)
         lam_n_old = cc_get_normal_lambda(cc, k)
-        d_lam_n = mass_coeff * d_lam_n_us - impulse_coeff * lam_n_old
+        d_lam_n = mass_coeff_n * d_lam_n_us - impulse_coeff_n * lam_n_old
         lam_n_new = wp.max(lam_n_old + d_lam_n, wp.float32(0.0))
         d_lam_n = lam_n_new - lam_n_old
 
