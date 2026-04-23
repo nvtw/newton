@@ -98,11 +98,16 @@ def allocate_rcm_batch_scratch(total_vec: int, num_blocks: int, device) -> dict:
     """Preallocate device-side scratch used by the batched RCM launch.
 
     Sizing:
-    - Per-vertex arrays are sized by the union of all block vector offsets
-      (``total_vec = sum(dims)``). Each block's slice is ``[vio[b] : vio[b]+dims[b])``.
-    - Per-block arrays (``head``, ``alive``, ``discovered``, ``root``,
-      ``current_level``) are sized ``(num_blocks,)`` and are indexed by
-      block id ``b`` instead of a global ``[0]``.
+    - Per-vertex arrays (``degree``, ``level``, ``order_buf``) are sized by
+      the union of all block vector offsets (``total_vec = sum(dims)``).
+      Each block's slice is ``[vio[b] : vio[b]+dims[b])``.
+    - Per-block arrays (``head``, ``root``) are sized ``(num_blocks,)``
+      and are indexed by block id ``b``.
+
+    The BFS "current level" scalar is *not* allocated here: it is a
+    host-side loop counter baked into each pre-recorded ``bfs_step``
+    launch, so there is no device-side counter and no intra-launch race
+    hazard.
     """
     return {
         "degree": wp.empty(total_vec, dtype=wp.int32, device=device),
@@ -110,9 +115,6 @@ def allocate_rcm_batch_scratch(total_vec: int, num_blocks: int, device) -> dict:
         "order_buf": wp.empty(total_vec, dtype=wp.int32, device=device),
         "head": wp.empty(num_blocks, dtype=wp.int32, device=device),
         "root": wp.empty(num_blocks, dtype=wp.int32, device=device),
-        # Single-element BFS iteration counter, shared across all blocks.
-        # Written by one thread per ``bfs_step_kernel`` launch; read by all.
-        "iter_counter": wp.empty(1, dtype=wp.int32, device=device),
     }
 
 
@@ -141,14 +143,12 @@ def _make_rcm_batch_kernels(dtype):
         level: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
         head: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
         root: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
-        iter_counter: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
     ):
         """Launch dims: ``(num_blocks, max_dim)``.
 
         Thread ``(b, i)`` computes ``degree[vio[b] + i]`` for vertex ``i`` in
         block ``b`` (if ``i < dims[b]``). Thread ``(b, 0)`` also initializes
-        the per-block scalars; thread ``(0, 0)`` resets the global BFS iter
-        counter.
+        the per-block scalars.
         """
         b, i = wp.tid()
         if b >= num_blocks:
@@ -178,10 +178,6 @@ def _make_rcm_batch_kernels(dtype):
         if i == 0:
             head[b] = int(0)
             root[b] = int(0)
-
-        # Global: reset the shared BFS iteration counter.
-        if b == int(0) and i == int(0):
-            iter_counter[0] = int(0)
 
     @wp.kernel(module=module)
     def select_and_seed_kernel(
@@ -227,6 +223,7 @@ def _make_rcm_batch_kernels(dtype):
     @wp.kernel(module=module)
     def bfs_step_kernel(
         num_blocks: int,
+        cur: int,
         tol: dtype,  # type: ignore[valid-type]
         A: wp.array(dtype=dtype),  # type: ignore[valid-type]
         dims: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
@@ -235,25 +232,22 @@ def _make_rcm_batch_kernels(dtype):
         level: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
         order_buf: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
         head: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
-        iter_counter: wp.array(dtype=wp.int32),  # type: ignore[valid-type]
     ):
         """Launch dims: ``(num_blocks, max_dim)``. One BFS expansion step.
 
-        Fused with the per-iteration bookkeeping that used to live in a
-        separate ``post_step`` kernel launch:
-        - The "current BFS level" is stored in ``iter_counter[0]`` and read
-          by every thread; thread ``(0, 0)`` atomically increments it at the
-          end so the next launch sees ``cur + 1``. Because launches are
-          grid-wide syncs, all threads of the next launch see the updated
-          value.
-        - The ``alive`` / ``discovered`` arrays are dropped entirely: when a
-          block saturates, no thread in it has ``level == cur`` so the
-          kernel does no work for that block. Kernel launch overhead is
-          fixed either way, so skipping via an ``alive`` flag saved no time.
+        The "current BFS level" ``cur`` is passed as a **scalar kernel
+        argument** rather than being stored in device memory. The host
+        pre-records one launch per iteration with a distinct integer
+        ``cur`` baked into each, so every thread in a given launch
+        observes the same value. This removes the previous device-side
+        ``iter_counter`` scratch array, the per-step 1-thread increment
+        launch, and any possibility of an intra-launch race on the
+        counter.
 
-        This halves the number of kernels launched per BFS iteration (one
-        fused step instead of bfs_step + post_step), roughly halving the
-        dominant per-factorize overhead for small multi-block workloads.
+        The ``alive`` / ``discovered`` arrays are dropped entirely: when a
+        block saturates, no thread in it has ``level == cur`` so the kernel
+        does no work for that block. Kernel launch overhead is fixed either
+        way, so skipping via an ``alive`` flag saved no time.
         """
         b, i = wp.tid()
         if b >= num_blocks:
@@ -262,15 +256,8 @@ def _make_rcm_batch_kernels(dtype):
         if i >= n_b:
             return
 
-        cur = iter_counter[0]
-
         vb = vio[b]
         mb = mio[b]
-
-        # Advance the iteration counter exactly once per launch. Done by a
-        # single canonical thread; the write is visible next launch.
-        if b == int(0) and i == int(0):
-            iter_counter[0] = cur + int(1)
 
         if level[vb + i] != cur:
             return
@@ -420,7 +407,6 @@ def create_rcm_batch_launch(
             scratch["level"],
             scratch["head"],
             scratch["root"],
-            scratch["iter_counter"],
         ],
         device=device,
         stream=stream,
@@ -443,25 +429,33 @@ def create_rcm_batch_launch(
         stream=stream,
         record_cmd=True,
     )
-    bfs_step_launch = wp.launch(
-        K["bfs_step"],
-        dim=(num_blocks, max_dim),
-        inputs=[
-            num_blocks,
-            float(tol),
-            A_flat,
-            dims,
-            mio,
-            vio,
-            scratch["level"],
-            scratch["order_buf"],
-            scratch["head"],
-            scratch["iter_counter"],
-        ],
-        device=device,
-        stream=stream,
-        record_cmd=True,
-    )
+    # Pre-record one bfs_step launch per iteration, each with its own
+    # ``cur`` scalar baked in at record time. This removes the need for a
+    # device-side iteration counter (and its per-step 1-thread increment
+    # launch) and is race-free by construction: every thread in a given
+    # launch sees the same compile-time-constant-looking level.
+    bfs_step_launches = [
+        wp.launch(
+            K["bfs_step"],
+            dim=(num_blocks, max_dim),
+            inputs=[
+                num_blocks,
+                int(cur),
+                float(tol),
+                A_flat,
+                dims,
+                mio,
+                vio,
+                scratch["level"],
+                scratch["order_buf"],
+                scratch["head"],
+            ],
+            device=device,
+            stream=stream,
+            record_cmd=True,
+        )
+        for cur in range(max_bfs_iters)
+    ]
     append_unreached_launch = wp.launch(
         K["append_unreached"],
         dim=(num_blocks,),
@@ -482,8 +476,8 @@ def create_rcm_batch_launch(
     def callback():
         init_and_degree_launch.launch()
         select_and_seed_launch.launch()
-        for _ in range(max_bfs_iters):
-            bfs_step_launch.launch()
+        for step in bfs_step_launches:
+            step.launch()
         append_unreached_launch.launch()
         reverse_launch.launch()
 

@@ -94,7 +94,7 @@ class LLTBlockedRCMSolver(DirectSolver):
         operator: DenseLinearOperatorData | None = None,
         block_size: int = 32,
         solve_block_dim: int = 128,
-        factortize_block_dim: int = 128,
+        factorize_block_dim: int = 128,
         atol: float | None = None,
         rtol: float | None = None,
         ftol: float | None = None,
@@ -113,7 +113,7 @@ class LLTBlockedRCMSolver(DirectSolver):
             operator: optional operator; if provided, :meth:`finalize` is called during init.
             block_size: tile block size passed to the kernel factories.
             solve_block_dim: thread-block size for solve kernels.
-            factortize_block_dim: thread-block size for factorize kernel.
+            factorize_block_dim: thread-block size for factorize kernel.
             reorder_tol: threshold below which an off-diagonal entry is
                 treated as a non-edge by the RCM adjacency scan and by the
                 tile-pattern builder.
@@ -140,7 +140,7 @@ class LLTBlockedRCMSolver(DirectSolver):
         # Cache the fixed block/tile dimensions
         self._block_size: int = block_size
         self._solve_block_dim: int = solve_block_dim
-        self._factortize_block_dim: int = factortize_block_dim
+        self._factorize_block_dim: int = factorize_block_dim
 
         # Reordering options
         self._reorder_tol: float = reorder_tol
@@ -357,7 +357,7 @@ class LLTBlockedRCMSolver(DirectSolver):
             tile_pattern=self._tile_pattern,
             L=self._L,
             num_blocks=num_blocks,
-            block_dim=self._factortize_block_dim,
+            block_dim=self._factorize_block_dim,
             device=self._device,
         )
 
