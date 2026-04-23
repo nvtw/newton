@@ -46,6 +46,10 @@ from newton._src.solvers.jitter.constraints.constraint_container import (
 from newton._src.solvers.jitter.constraints.contact_matching_config import (
     JITTER_CONTACT_MATCHING,
 )
+from newton._src.solvers.jitter.picking import (
+    JitterPicking,
+    register_with_viewer_gl,
+)
 from newton._src.solvers.jitter.solver_phoenx import PhoenXWorld
 
 # ---- Tower geometry (matches ``Common.BuildTower``) ----
@@ -83,23 +87,6 @@ FULL_ROTATION_STEP = 2.0 * HALF_ROTATION_STEP
 # sets time scale; what matters for stability is uniform density
 # across all planks.
 PLANK_DENSITY = 1000.0
-
-# Wrecking-ball parameters. A heavy sphere spawned above the rim of
-# the tower and given an initial +Z velocity towards the top layer
-# -- without this the balanced ring tower sits in near-static
-# equilibrium and the viewer shows no motion. The ball is big and
-# dense enough (radius 2 m, ``PLANK_DENSITY * 8`` kg/m^3) to smash
-# through the upper rings; lower it / lighten it if you want a
-# gentler demo.
-BALL_RADIUS = 2.0
-BALL_DENSITY = PLANK_DENSITY * 8.0
-# Spawn so the ball's COM clears the tower top then drops; the
-# initial velocity aims it at the centre of the topmost ring from
-# the outside so it hits the tower on its way down. Z offset above
-# the tower top so its first few contacts happen in mid-air, not at
-# spawn.
-BALL_SPAWN = (30.0, 0.0, 48.0)
-BALL_VELOCITY = (-18.0, 0.0, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -307,21 +294,6 @@ class Example:
                 self._plank_newton_ids.append(body)
                 orientation_rad += FULL_ROTATION_STEP
 
-        # Wrecking ball -- see ``BALL_*`` constants for the rationale.
-        # The initial velocity is applied after finalize() since
-        # ``add_body`` doesn't expose a velocity argument.
-        self._ball_newton_id = builder.add_body(
-            xform=wp.transform(
-                p=wp.vec3(*BALL_SPAWN),
-                q=wp.quat_identity(),
-            ),
-        )
-        builder.add_shape_sphere(
-            self._ball_newton_id,
-            radius=BALL_RADIUS,
-            cfg=newton.ModelBuilder.ShapeConfig(density=BALL_DENSITY),
-        )
-
         # Finalise the Newton side.
         self.model = builder.finalize()
         print(
@@ -345,17 +317,6 @@ class Example:
         # the :func:`_init_phoenx_bodies_kernel` seed reads the
         # final transforms.
         self.model.body_q.assign(self.state.body_q)
-
-        # Apply the wrecking-ball's initial velocity. ``add_body`` only
-        # accepts a transform, so the linear velocity has to be written
-        # into ``state.body_qd`` directly. The init kernel below copies
-        # ``body_qd`` straight into the PhoenX body container, so the
-        # ball arrives with the correct velocity from substep 1.
-        body_qd_np = self.state.body_qd.numpy()
-        body_qd_np[self._ball_newton_id, 0] = BALL_VELOCITY[0]
-        body_qd_np[self._ball_newton_id, 1] = BALL_VELOCITY[1]
-        body_qd_np[self._ball_newton_id, 2] = BALL_VELOCITY[2]
-        self.state.body_qd.assign(body_qd_np)
 
         # Build the PhoenX body container. Slot 0 stays as the static
         # world anchor (zero mass / inertia, MOTION_STATIC by default);
@@ -436,13 +397,28 @@ class Example:
         )
 
         # Viewer set-up: single fixed camera outside the tower aiming
-        # roughly at mid-height. No picking.
+        # roughly at mid-height.
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
             pos=wp.vec3(55.0, 0.0, 22.0),
             pitch=-10.0,
             yaw=180.0,
         )
+
+        # Picking: register one half-extent triple per PhoenX body.
+        # Slot 0 is the static world anchor -- leave it at zero so
+        # right-click rays skip it. Every plank gets the same
+        # ``(PLANK_HX, PLANK_HY, PLANK_HZ)`` half-extents (picking
+        # does body-local OBB raycast, so the per-body orientation
+        # already accounts for each plank's ring-tangent heading).
+        half_extents_np = np.zeros((self.world.num_bodies, 3), dtype=np.float32)
+        for newton_idx in self._plank_newton_ids:
+            half_extents_np[newton_idx + 1] = (PLANK_HX, PLANK_HY, PLANK_HZ)
+        self._half_extents = wp.array(
+            half_extents_np, dtype=wp.vec3f, device=self.device
+        )
+        self.picking = JitterPicking(self.world, self._half_extents)
+        register_with_viewer_gl(self.viewer, self.picking)
 
         # CUDA graph capture for the per-frame step pipeline. Falls
         # back to direct :meth:`simulate` on CPU or when capture is
@@ -464,6 +440,14 @@ class Example:
             contacts=self.contacts,
             collision_pipeline=self.collision_pipeline,
         )
+        # Picking PD force is accumulated into ``bodies.force`` once
+        # per frame, before :meth:`PhoenXWorld.step` -- the solver's
+        # per-substep ``_phoenx_apply_external_forces_kernel`` picks
+        # it up each substep, and the tail ``_clear_forces`` zeroes
+        # it for the next frame. Calling this unconditionally keeps
+        # the simulate graph capture invariant (the kernel gates on
+        # ``pick_body[0] < 0`` internally).
+        self.picking.apply_force()
         self.world.step(
             dt=self.frame_dt,
             contacts=self.contacts,

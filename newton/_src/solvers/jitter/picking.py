@@ -60,7 +60,7 @@ __all__ = [
 # (not per simulation step) so the trip through ``wp.launch`` is fine.
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _raycast_obb_kernel(
     bodies: BodyContainer,
     half_extents: wp.array[wp.vec3f],
@@ -145,7 +145,7 @@ def _raycast_obb_kernel(
         _spinlock_release(lock)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _update_pick_target_kernel(
     ray_start: wp.vec3f,
     ray_dir: wp.vec3f,
@@ -161,7 +161,7 @@ def _update_pick_target_kernel(
     out_target[0] = ray_start + ray_dir * pick_dist[0]
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _apply_pick_force_kernel(
     bodies: BodyContainer,
     pick_body: wp.array[wp.int32],
