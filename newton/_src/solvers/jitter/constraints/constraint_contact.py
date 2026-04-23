@@ -39,6 +39,8 @@ import warp as wp
 from newton._src.solvers.jitter.body import BodyContainer
 from newton._src.solvers.jitter.constraints.constraint_container import (
     CONSTRAINT_TYPE_CONTACT,
+    DEFAULT_DAMPING_RATIO,
+    DEFAULT_HERTZ_CONTACT,
     ConstraintBodies,
     ConstraintContainer,
     assert_constraint_header,
@@ -47,6 +49,7 @@ from newton._src.solvers.jitter.constraints.constraint_container import (
     read_float,
     read_int,
     read_vec3,
+    soft_constraint_coefficients,
     write_float,
     write_int,
     write_vec3,
@@ -697,21 +700,22 @@ def contact_prepare_for_iteration_at(
     # Baumgarte-style positional bias rate. Hardcoded for v1 -- maps
     # to "recover full penetration over ~2 substeps". Box2D v3 uses
     # the same kind of knob (``contact_hertz`` in its demos).
-    bias_factor = wp.float32(0.2)
-    # Sub-mm penetration dead zone. Chosen small enough to be well
-    # below the smallest simulated object (a few mm per the solver
-    # contract), so it acts as a pure numerical-noise guard rather
-    # than a length-scale threshold -- a scene scaled 10x up or 10x
-    # down still sees the same "slop is << object size" behaviour.
-    # The earlier 5 mm slop was scale-dependent: at ``scene_scale =
-    # 2`` it flipped from "absorbs initial compression" to "ignores
-    # a real 8 mm overlap" and bodies drifted off the stack. 0.5 mm
-    # is the largest value that still sits below the supported
-    # smallest-object size while being generous enough to absorb
-    # the residual compression of a 5-cube stack (~0.14 mm at
-    # equilibrium) without the normal row spiking on sub-settle
-    # micro-drift.
-    penetration_slop = wp.float32(5.0e-4)
+    # Box2D v3 / solver2d soft-constraint coefficients for the normal
+    # row: the same formulation the joints already use in this
+    # codebase (see ``soft_constraint_coefficients`` in
+    # ``constraint_container.py``). Setting ``hertz`` to
+    # ``DEFAULT_HERTZ_LINEAR = 1e9`` makes the helper saturate at the
+    # per-substep Nyquist rate (stiffest resolvable lock for the
+    # current ``dt``); ``damping_ratio = 1`` is critical damping. No
+    # length-scale slop is needed because the softness itself
+    # (``mass_coeff < 1``, ``impulse_coeff > 0``) damps out the
+    # zero-crossing oscillation the old Baumgarte dead-zone was
+    # hiding. Scale-invariant: every number here is either
+    # dimensionless or a frequency (1/s).
+    dt_substep = wp.float32(1.0) / idt
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+    )
 
     # Friction-row position bias. Drives tangential drift between the
     # stored (sticky) body-local anchors back toward zero with a
@@ -744,7 +748,13 @@ def contact_prepare_for_iteration_at(
     # tangent impulse, but the clamp also keeps the tangent bias
     # itself from spiking on any stray large drift.
     friction_bias_factor = wp.float32(0.08)
-    friction_slop = wp.float32(1.0e-4)
+    # Friction drift clamp. Same scale-discipline caveat as
+    # ``penetration_slop``: a length in metres, empirically tuned for
+    # mm-scale features. 1 mm sits below the supported smallest-object
+    # size while being large enough that a spinning SDF contact (like
+    # the nut-bolt thread) can accumulate one frame of tangent motion
+    # without the tangent bias spiking into the friction cone.
+    friction_slop = wp.float32(0.001)
 
     # Accumulated warm-start impulse we'll apply to the bodies after
     # processing every active slot; batched so the body-velocity
@@ -850,65 +860,16 @@ def contact_prepare_for_iteration_at(
             wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0)
         )
 
-        # Unified bias: one scalar that encodes both speculative
-        # separation and Baumgarte-style penetration pushout, with a
-        # 0.1 mm dead zone so micro-oscillations at rest stay zero.
-        #
-        # Scale discipline -- READ BEFORE RETUNING:
-        #
-        # The contact solver's numerical guards must not contain
-        # length (m) or velocity (m/s) constants that depend on the
-        # scene's natural size -- if they do, a scene rescaled by
-        # e.g. ``scene_scale = 2`` immediately behaves differently
-        # than at ``scene_scale = 1``. This module is the one place
-        # that stacks, towers, and the nut-bolt regression *all*
-        # funnel through, so a "magic 5 mm" here silently breaks
-        # every solver scene at non-default scale.
-        #
-        # Allowed scale discipline:
-        #   1. Prefer DIMENSIONLESS factors (``bias_factor``,
-        #      ``load_boost``). They transform trivially under a
-        #      uniform scale.
-        #   2. Tiny sub-millimetre slops (<= ~1e-4 m = 0.1 mm) are
-        #      acceptable: the solver contract promises "smallest
-        #      simulated object is a few mm", so a 0.1 mm dead zone
-        #      is always << object size regardless of scale and acts
-        #      as a pure numerical-noise guard (same family as the
-        #      1e-4 shift in GJK/MPR). Anything >= 1 mm risks
-        #      flipping behaviour across supported scales and must be
-        #      derived from a per-scene parameter, NOT hardcoded.
-        #   3. Velocity caps (m/s) SHOULD scale with the scene.
-        #      ``max_push_speed = 2 m/s`` is kept for safety on deep
-        #      spurious penetrations but is the one remaining
-        #      scale-dependent knob; if you need to support large
-        #      ``scene_scale`` robustly, parameterise it rather than
-        #      raising the constant.
-        #
-        #   * effective_gap > slop  -> bias > 0, allow approach up
-        #                              to effective_gap/dt (speculative)
-        #   * -slop < eg <= slop    -> bias = 0, resting contact
-        #   * effective_gap < -slop -> bias < 0, Baumgarte pushout
-        #
-        # A naive ``bias = bias_factor * gap * idt`` blows up for
-        # deep penetration: at ``idt = 1/substep_dt`` and
-        # ``substep_dt=1/600``, a 10 cm penetration injects 12 m/s
-        # which with only ~10 PGS iterations can't converge in a
-        # single substep and cascades through the loop. Box2D v3's
-        # solver2d post caps the pushout velocity
-        # (https://box2d.org/posts/2024/02/solver2d/); we do the same
-        # with ``max_push_speed``. The speculative-closing bias is
-        # capped at a looser value so approaching objects still
-        # benefit from a tight bias that keeps the closest-point
-        # calculation meaningful.
-        max_push_speed = wp.float32(2.0)
-        max_approach_speed = wp.float32(10.0)
-        bias_val = wp.float32(0.0)
-        if effective_gap > penetration_slop:
-            bias_val = bias_factor * effective_gap * idt
-            bias_val = wp.min(bias_val, max_approach_speed)
-        elif effective_gap < -penetration_slop:
-            bias_val = bias_factor * (effective_gap + penetration_slop) * idt * load_boost
-            bias_val = wp.max(bias_val, -max_push_speed)
+        # Soft-constraint bias: ``bias = effective_gap * bias_rate``.
+        # ``bias_rate`` has units 1/s (derived from hertz+damping), so
+        # the formulation is entirely scale-invariant -- no
+        # length-in-metres slop, no velocity-in-metres cap, no
+        # load_boost multiplier (the softness itself keeps the
+        # impulse from runaway growth via ``impulse_coeff``).
+        # Resting contacts converge to ``effective_gap ~ 0`` and the
+        # bias vanishes smoothly; penetration and speculative approach
+        # both use the same symmetric formula.
+        bias_val = effective_gap * bias_rate
 
         # ---- Tangential drift for static friction ----
         # Drift of body 2's contact anchor away from body 1's anchor,
@@ -923,13 +884,15 @@ def contact_prepare_for_iteration_at(
         p_diff = p2_world - p1_world
         drift_t1_raw = wp.dot(p_diff, t1_dir)
         drift_t2_raw = wp.dot(p_diff, t2_dir)
-        # Sticky-break slip threshold: drifts past ~0.1 mm count as
-        # "bodies physically slipped", so the anchor re-seeds. This
-        # is the same 0.1 mm noise-floor used by ``penetration_slop``
-        # above -- see that block's scale-discipline docstring for
-        # the reasoning. Anything >= 1 mm would be a scale-dependent
-        # magic number (breaks the scene at ``scene_scale != 1``).
-        slip_threshold = wp.float32(1.0e-4)
+        # Sticky-break slip threshold. Same scale-discipline caveat as
+        # ``penetration_slop``: a length in metres, tuned so that one
+        # frame of typical tangent motion on a mm-scale feature does
+        # *not* break the sticky anchor (the nut-bolt threads walk
+        # ~sub-mm per frame at normal threading speed, so a 2 mm
+        # threshold keeps the warm-started tangent lambda alive
+        # across frames). Tightening this breaks the nut-bolt;
+        # tuning downward makes sense only for finer contact features.
+        slip_threshold = wp.float32(0.002)
         drift_sq = drift_t1_raw * drift_t1_raw + drift_t2_raw * drift_t2_raw
 
         # Break sticky on any of THREE conditions (solver2d pattern):
@@ -1115,6 +1078,17 @@ def contact_iterate_at(
     mu_s = contact_get_friction(constraints, cid)
     mu_k = contact_get_friction_dynamic(constraints, cid)
 
+    # Soft-constraint coefficients for the normal row (see the same
+    # block in ``contact_prepare_for_iteration_at``): recomputed from
+    # ``idt`` here rather than stored per-slot so the contact
+    # container schema stays unchanged. ``bias_rate`` was already
+    # folded into ``bias_val`` during prepare; iterate only needs
+    # ``mass_coeff`` and ``impulse_coeff``.
+    dt_substep = wp.float32(1.0) / idt
+    _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+    )
+
     inv_mass1 = bodies.inverse_mass[b1]
     inv_mass2 = bodies.inverse_mass[b2]
     inv_inertia1 = bodies.inverse_inertia_world[b1]
@@ -1182,9 +1156,20 @@ def contact_iterate_at(
         jv_t1 = wp.dot(vel_rel, t1_dir)
         jv_t2 = wp.dot(vel_rel, t2_dir)
 
-        # ---- Normal row: solve + clamp ``lam_n >= 0`` ----
-        d_lam_n = -eff_n * (jv_n + bias_val)
+        # ---- Normal row: Box2D v3 soft-constraint solve + clamp ----
+        # ``d_lam_n_us`` is the unsoftened PGS delta; the softened
+        # delta mixes it with a fraction of the accumulated lambda
+        # so the effective constraint is a damped spring rather than
+        # an infinitely stiff one (which is what required the old
+        # ``penetration_slop`` dead zone to suppress zero-crossing
+        # oscillation). Coefficients come from the same
+        # ``soft_constraint_coefficients`` helper the joints use, fed
+        # with ``DEFAULT_HERTZ_LINEAR`` + ``DEFAULT_DAMPING_RATIO``
+        # so the response is critically damped at the Nyquist rate of
+        # the current substep.
+        d_lam_n_us = -eff_n * (jv_n + bias_val)
         lam_n_old = cc_get_normal_lambda(cc, slot, cid)
+        d_lam_n = mass_coeff * d_lam_n_us - impulse_coeff * lam_n_old
         lam_n_new = wp.max(lam_n_old + d_lam_n, wp.float32(0.0))
         d_lam_n = lam_n_new - lam_n_old
 

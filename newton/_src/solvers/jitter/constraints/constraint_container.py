@@ -54,6 +54,7 @@ __all__ = [
     "CONSTRAINT_TYPE_PRISMATIC",
     "DEFAULT_DAMPING_RATIO",
     "DEFAULT_HERTZ_ANGULAR",
+    "DEFAULT_HERTZ_CONTACT",
     "DEFAULT_HERTZ_LIMIT",
     "DEFAULT_HERTZ_LINEAR",
     "DEFAULT_HERTZ_MOTOR",
@@ -627,6 +628,16 @@ DEFAULT_HERTZ_LIMIT = wp.constant(wp.float32(1.0e9))
 #: velocity motor reaches its target inside one substep; override with
 #: a lower ``hertz`` for a softer response.
 DEFAULT_HERTZ_MOTOR = wp.constant(wp.float32(1.0e9))
+#: Contact-pair stiffness. Unlike joints, contacts can have very deep
+#: initial penetrations (dropped bodies spawned through a ground, SDF
+#: thread engagements etc.) and a Nyquist-rigid response turns those
+#: into catastrophic first-substep impulses. 30 Hz is the Box2D v3
+#: solver2d default (https://box2d.org/posts/2024/02/solver2d/) --
+#: stiff enough that the closing gap resolves in a handful of substeps
+#: but soft enough that a 25 cm initial overlap doesn't inject 90 m/s
+#: of corrective bias. Critical damping (``DEFAULT_DAMPING_RATIO = 1``)
+#: then suppresses oscillation without any positional slop.
+DEFAULT_HERTZ_CONTACT = wp.constant(wp.float32(30.0))
 
 
 @wp.func
