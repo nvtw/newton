@@ -469,11 +469,12 @@ class CollisionPipeline:
         - ``LATEST``: Match current contacts against the previous frame and
           populate :attr:`Contacts.rigid_contact_match_index`, but keep the
           current frame's fresh narrow-phase geometry.
-        - ``STICKY``: Match like ``LATEST``, then overwrite each matched
-          contact's body-frame ``point0`` / ``point1`` / ``offset0`` /
-          ``offset1`` and world-frame ``normal`` with the saved
-          previous-frame values.  Reduces frame-to-frame jitter on
-          persistent contacts — useful for stacking.
+        - ``STICKY`` (experimental): Match like ``LATEST``, then overwrite
+          each matched contact's body-frame ``point0`` / ``point1`` /
+          ``offset0`` / ``offset1`` and world-frame ``normal`` with the
+          saved previous-frame values.  Reduces frame-to-frame jitter on
+          persistent contacts — useful for stacking.  The way sticky
+          contacts are updated may change in the future without warning.
 
         See :ref:`Contact Matching` for details.
         """

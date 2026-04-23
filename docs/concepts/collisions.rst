@@ -1707,8 +1707,8 @@ string or the equivalent :class:`CollisionPipeline.ContactMatching` enum):
   frame and populate :attr:`Contacts.rigid_contact_match_index`, but keep the
   current frame's freshly generated contact geometry in the returned
   :class:`Contacts` buffer.
-- ``"sticky"`` — match like ``"latest"``, then overwrite each
-  matched contact's body-frame contact points (``point0``/``point1``),
+- ``"sticky"`` (experimental) — match like ``"latest"``, then overwrite
+  each matched contact's body-frame contact points (``point0``/``point1``),
   offsets (``offset0``/``offset1``), and world-frame ``normal`` with the
   saved previous-frame values.  The remaining contact fields
   (``shape0``/``shape1``, ``margin0``/``margin1``) are either key-derived
@@ -1717,6 +1717,10 @@ string or the equivalent :class:`CollisionPipeline.ContactMatching` enum):
   through with their fresh narrow-phase geometry.  Useful for stacking
   scenarios where small frame-to-frame geometric jitter on persistent
   contacts degrades stability.
+
+  .. warning::
+     Sticky mode is experimental.  The way sticky contacts are updated
+     across frames may change in the future without warning.
 
 Any non-disabled mode implies ``deterministic=True``.
 
