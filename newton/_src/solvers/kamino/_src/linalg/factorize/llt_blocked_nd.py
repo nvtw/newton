@@ -44,6 +44,7 @@ __all__ = [
     "llt_blocked_nd_build_inv_P",
     "llt_blocked_nd_build_tile_pattern",
     "llt_blocked_nd_factorize",
+    "llt_blocked_nd_fused_permute_and_tp",
     "llt_blocked_nd_permute_matrix",
     "llt_blocked_nd_permute_vector",
     "llt_blocked_nd_solve",
@@ -52,6 +53,7 @@ __all__ = [
     "make_llt_blocked_nd_build_inv_P_kernel",
     "make_llt_blocked_nd_build_tile_pattern_kernel",
     "make_llt_blocked_nd_factorize_kernel",
+    "make_llt_blocked_nd_fused_permute_and_tp_kernel",
     "make_llt_blocked_nd_permute_matrix_kernel",
     "make_llt_blocked_nd_permute_vector_kernel",
     "make_llt_blocked_nd_solve_inplace_kernel",
@@ -181,6 +183,73 @@ def make_llt_blocked_nd_build_inv_P_kernel(max_dim: int):
         inv_P[vec_off + P[vec_off + r]] = r
 
     return build_inv_P_kernel
+
+
+@cache
+def make_llt_blocked_nd_fused_permute_and_tp_kernel(block_size: int, max_dim: int):
+    """Fused kernel: builds ``inv_P``, permutes ``A -> A_hat``, and reduces
+    ``|A_hat|`` into the tile pattern in a single launch.
+
+    Launch dims: ``(num_blocks, max_dim, max_dim)``. Each thread ``(b, r, c)``:
+
+    1. If ``c == 0``: writes ``inv_P[P[r]] = r`` for block ``b``.
+    2. Computes ``v = A[P[r], P[c]]`` and writes it into ``A_hat[r, c]``.
+    3. If ``|v| > tol``: atomically ORs ``1`` into the tile-pattern slot
+       ``(r // block_size, c // block_size)`` for this block.
+
+    Replaces three prior launches (``build_inv_P`` + ``permute_matrix`` +
+    ``build_tile_pattern``) with one. The data dependency is safe because each
+    thread writes and reads only *its own* ``A_hat[r, c]`` slot.
+
+    Callers must zero ``tile_pattern`` before invoking this (no change vs. the
+    un-fused build_tile_pattern call). ``max_dim`` is baked in for the cache
+    key.
+    """
+    del max_dim
+
+    @wp.kernel
+    def fused_permute_and_tp_kernel(
+        dim: wp.array(dtype=int32),
+        mio: wp.array(dtype=int32),
+        vio: wp.array(dtype=int32),
+        tpo: wp.array(dtype=int32),
+        tol: float,
+        P: wp.array(dtype=int32),
+        A: wp.array(dtype=float32),
+        A_hat: wp.array(dtype=float32),
+        inv_P: wp.array(dtype=int32),
+        tile_pattern: wp.array(dtype=int32),
+    ):
+        b, r, c = wp.tid()
+        n_i = dim[b]
+        if r >= n_i or c >= n_i:
+            return
+        mat_off = mio[b]
+        vec_off = vio[b]
+        tp_off = tpo[b]
+        n_tiles = (n_i + block_size - 1) // block_size
+
+        p_r = P[vec_off + r]
+        p_c = P[vec_off + c]
+
+        # 1. inv_P: a single thread column does this per row.
+        if c == int(0):
+            inv_P[vec_off + p_r] = r
+
+        # 2. Permuted value.
+        v = A[mat_off + p_r * n_i + p_c]
+        A_hat[mat_off + r * n_i + c] = v
+
+        # 3. Tile-pattern OR (via atomic_max on 0/1).
+        av = v
+        if av < float(0):
+            av = -av
+        if av > tol:
+            tr = r // block_size
+            tc = c // block_size
+            wp.atomic_max(tile_pattern, tp_off + tr * n_tiles + tc, int(1))
+
+    return fused_permute_and_tp_kernel
 
 
 @cache
@@ -675,6 +744,35 @@ def llt_blocked_nd_build_tile_pattern(
         kernel=kernel,
         dim=(num_blocks, max_dim, max_dim),
         inputs=[dim, mio, tpo, float(tol), A_hat, tile_pattern],
+        device=device,
+    )
+
+
+def llt_blocked_nd_fused_permute_and_tp(
+    kernel,
+    dim: wp.array(dtype=int32),
+    mio: wp.array(dtype=int32),
+    vio: wp.array(dtype=int32),
+    tpo: wp.array(dtype=int32),
+    tol: float,
+    P: wp.array(dtype=int32),
+    A: wp.array(dtype=float32),
+    A_hat: wp.array(dtype=float32),
+    inv_P: wp.array(dtype=int32),
+    tile_pattern: wp.array(dtype=int32),
+    num_blocks: int,
+    max_dim: int,
+    device: wp.DeviceLike = None,
+):
+    """Launches the fused (inv_P + permute_matrix + build_tile_pattern) kernel.
+
+    Callers must zero ``tile_pattern`` before invoking this (the tile-pattern
+    contribution is an atomic OR, not an overwrite).
+    """
+    wp.launch(
+        kernel=kernel,
+        dim=(num_blocks, max_dim, max_dim),
+        inputs=[dim, mio, vio, tpo, float(tol), P, A, A_hat, inv_P, tile_pattern],
         device=device,
     )
 

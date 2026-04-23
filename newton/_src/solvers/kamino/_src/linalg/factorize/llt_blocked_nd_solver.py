@@ -32,18 +32,14 @@ from ..linear import DirectSolver
 from . import rcm as _rcm
 from . import rcm_batch as _rcm_batch
 from .llt_blocked_nd import (
-    llt_blocked_nd_build_inv_P,
-    llt_blocked_nd_build_tile_pattern,
     llt_blocked_nd_factorize,
-    llt_blocked_nd_permute_matrix,
+    llt_blocked_nd_fused_permute_and_tp,
     llt_blocked_nd_permute_vector,
     llt_blocked_nd_solve,
     llt_blocked_nd_solve_inplace,
     llt_blocked_nd_symbolic_fill_in,
-    make_llt_blocked_nd_build_inv_P_kernel,
-    make_llt_blocked_nd_build_tile_pattern_kernel,
     make_llt_blocked_nd_factorize_kernel,
-    make_llt_blocked_nd_permute_matrix_kernel,
+    make_llt_blocked_nd_fused_permute_and_tp_kernel,
     make_llt_blocked_nd_permute_vector_kernel,
     make_llt_blocked_nd_solve_inplace_kernel,
     make_llt_blocked_nd_solve_kernel,
@@ -179,10 +175,8 @@ class LLTBlockedNDSolver(DirectSolver):
         self._solve_kernel = make_llt_blocked_nd_solve_kernel(block_size)
         self._solve_inplace_kernel = make_llt_blocked_nd_solve_inplace_kernel(block_size)
         # Auxiliary kernels resolved in _allocate_impl once we know max_dim.
-        self._permute_matrix_kernel = None
         self._permute_vector_kernel = None
-        self._build_inv_P_kernel = None
-        self._build_tile_pattern_kernel = None
+        self._fused_permute_and_tp_kernel = None
         self._symbolic_fill_in_kernel = None
 
         # Initialize base class members
@@ -248,10 +242,10 @@ class LLTBlockedNDSolver(DirectSolver):
         self._max_dim = int(info.max_dimension)
 
         # Resolve auxiliary kernels now that max_dim is known.
-        self._permute_matrix_kernel = make_llt_blocked_nd_permute_matrix_kernel(self._max_dim)
         self._permute_vector_kernel = make_llt_blocked_nd_permute_vector_kernel(self._max_dim)
-        self._build_inv_P_kernel = make_llt_blocked_nd_build_inv_P_kernel(self._max_dim)
-        self._build_tile_pattern_kernel = make_llt_blocked_nd_build_tile_pattern_kernel(self._block_size, self._max_dim)
+        self._fused_permute_and_tp_kernel = make_llt_blocked_nd_fused_permute_and_tp_kernel(
+            self._block_size, self._max_dim
+        )
         max_n_tiles = (self._max_dim + self._block_size - 1) // self._block_size
         self._symbolic_fill_in_kernel = make_llt_blocked_nd_symbolic_fill_in_kernel(max_n_tiles)
 
@@ -396,46 +390,29 @@ class LLTBlockedNDSolver(DirectSolver):
         for cb in self._reorder_callbacks:
             cb()
 
-        # 2. Build inv_P.
-        llt_blocked_nd_build_inv_P(
-            kernel=self._build_inv_P_kernel,
-            dim=info.dim,
-            vio=info.vio,
-            P=self._P,
-            inv_P=self._inv_P,
-            num_blocks=num_blocks,
-            max_dim=self._max_dim,
-            device=self._device,
-        )
-
-        # 3. Permute A -> A_hat (symmetric).
-        llt_blocked_nd_permute_matrix(
-            kernel=self._permute_matrix_kernel,
+        # 2. Fused: build inv_P, permute A -> A_hat, and reduce |A_hat| into the
+        #    raw tile pattern in a single launch. Each thread writes only its
+        #    own (r, c) entry, so there is no data race on A_hat; tile-pattern
+        #    bits are OR'd via atomic_max.
+        self._tile_pattern.zero_()
+        llt_blocked_nd_fused_permute_and_tp(
+            kernel=self._fused_permute_and_tp_kernel,
             dim=info.dim,
             mio=info.mio,
             vio=info.vio,
+            tpo=self._tpo,
+            tol=self._reorder_tol,
             P=self._P,
             A=A,
             A_hat=self._A_hat,
-            num_blocks=num_blocks,
-            max_dim=self._max_dim,
-            device=self._device,
-        )
-
-        # 4. Build tile-pattern from |A_hat| > reorder_tol and inflate by symbolic fill-in.
-        self._tile_pattern.zero_()
-        llt_blocked_nd_build_tile_pattern(
-            kernel=self._build_tile_pattern_kernel,
-            dim=info.dim,
-            mio=info.mio,
-            tpo=self._tpo,
-            tol=self._reorder_tol,
-            A_hat=self._A_hat,
+            inv_P=self._inv_P,
             tile_pattern=self._tile_pattern,
             num_blocks=num_blocks,
             max_dim=self._max_dim,
             device=self._device,
         )
+
+        # 3. Inflate the tile pattern by block symbolic Cholesky fill-in.
         llt_blocked_nd_symbolic_fill_in(
             kernel=self._symbolic_fill_in_kernel,
             dim=info.dim,
@@ -446,7 +423,7 @@ class LLTBlockedNDSolver(DirectSolver):
             device=self._device,
         )
 
-        # 5. Numeric factorization with tile-pattern skips.
+        # 4. Numeric factorization with tile-pattern skips.
         llt_blocked_nd_factorize(
             kernel=self._factorize_kernel,
             dim=info.dim,
