@@ -179,17 +179,25 @@ def _make_rcm_batch_kernels(dtype):
             iter_counter[0] = int(0)
 
     @wp.kernel(module=module)
-    def select_root_kernel(
+    def select_and_seed_kernel(
         num_blocks: int,
         dims: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
         vio: wp.array(dtype=wp.int32),              # type: ignore[valid-type]
         degree: wp.array(dtype=wp.int32),           # type: ignore[valid-type]
+        level: wp.array(dtype=wp.int32),            # type: ignore[valid-type]
+        order_buf: wp.array(dtype=wp.int32),        # type: ignore[valid-type]
+        head: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
         root: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
     ):
-        """Launch dims: ``(num_blocks,)``.
+        """Launch dims: ``(num_blocks,)``. Fused root-selection + BFS seed.
 
         One thread per block does a serialized argmin over that block's
-        degree slice. Fine for the intended ``n <= ~1000`` regime.
+        ``degree`` slice to pick a minimum-degree root, stores it into
+        ``root[b]``, then seeds the BFS frontier for that block by writing
+        ``level[vb + r] = 0`` and appending ``r`` to the block's
+        ``order_buf`` segment (head advances by one). Fine for the intended
+        ``n <= ~1000`` regime; merging the two removes one kernel launch
+        at the start of every reorder call.
         """
         b = wp.tid()
         if b >= num_blocks:
@@ -204,26 +212,12 @@ def _make_rcm_batch_kernels(dtype):
                 best_deg = d
                 best_idx = i
         root[b] = best_idx
-
-    @wp.kernel(module=module)
-    def init_frontier_kernel(
-        num_blocks: int,
-        vio: wp.array(dtype=wp.int32),              # type: ignore[valid-type]
-        root: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
-        level: wp.array(dtype=wp.int32),            # type: ignore[valid-type]
-        order_buf: wp.array(dtype=wp.int32),        # type: ignore[valid-type]
-        head: wp.array(dtype=wp.int32),             # type: ignore[valid-type]
-    ):
-        """Launch dims: ``(num_blocks,)``. Seed BFS for each block."""
-        b = wp.tid()
-        if b >= num_blocks:
-            return
-        vb = vio[b]
-        r = root[b]
-        level[vb + r] = int(0)
-        # Atomically claim the first slot in this block's order_buf segment.
+        level[vb + best_idx] = int(0)
+        # Atomically claim the first slot; at kernel entry head[b] is 0 and
+        # only this thread touches it for block ``b``, so the atomic is
+        # effectively a plain write to slot 0.
         slot = wp.atomic_add(head, b, int(1))
-        order_buf[vb + slot] = r
+        order_buf[vb + slot] = best_idx
 
     @wp.kernel(module=module)
     def bfs_step_kernel(
@@ -334,8 +328,7 @@ def _make_rcm_batch_kernels(dtype):
 
     return {
         "init_and_degree": init_and_degree_kernel,
-        "select_root": select_root_kernel,
-        "init_frontier": init_frontier_kernel,
+        "select_and_seed": select_and_seed_kernel,
         "bfs_step": bfs_step_kernel,
         "append_unreached": append_unreached_kernel,
         "reverse_into_perm": reverse_into_perm_kernel,
@@ -420,17 +413,14 @@ def create_rcm_batch_launch(
         ],
         device=device, stream=stream, record_cmd=True,
     )
-    select_root_launch = wp.launch(
-        K["select_root"],
+    select_and_seed_launch = wp.launch(
+        K["select_and_seed"],
         dim=(num_blocks,),
-        inputs=[num_blocks, dims, vio, scratch["degree"], scratch["root"]],
-        device=device, stream=stream, record_cmd=True,
-    )
-    init_frontier_launch = wp.launch(
-        K["init_frontier"],
-        dim=(num_blocks,),
-        inputs=[num_blocks, vio, scratch["root"],
-                scratch["level"], scratch["order_buf"], scratch["head"]],
+        inputs=[
+            num_blocks, dims, vio,
+            scratch["degree"], scratch["level"], scratch["order_buf"],
+            scratch["head"], scratch["root"],
+        ],
         device=device, stream=stream, record_cmd=True,
     )
     bfs_step_launch = wp.launch(
@@ -459,8 +449,7 @@ def create_rcm_batch_launch(
 
     def callback():
         init_and_degree_launch.launch()
-        select_root_launch.launch()
-        init_frontier_launch.launch()
+        select_and_seed_launch.launch()
         for _ in range(max_bfs_iters):
             bfs_step_launch.launch()
         append_unreached_launch.launch()
