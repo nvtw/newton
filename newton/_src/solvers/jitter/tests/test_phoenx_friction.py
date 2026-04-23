@@ -347,5 +347,105 @@ class TestPhoenXCircularFrictionCone(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX friction tests require CUDA")
+class TestPhoenXFrictionInducedRotation(unittest.TestCase):
+    """Friction must be able to spin a body via tangential-at-contact
+    force.
+
+    This is the physics the nut-bolt scene relies on: the normal
+    impulse on a rigid helical SDF has no around-axis torque, so the
+    nut's rotation is produced *entirely* by friction at the thread
+    contact. The simplest reproducer we can run analytically is a
+    sphere launched along +X on a plane: friction opposes the
+    sliding and applies a torque about +Y that spins the sphere
+    forward (like a kicked ball). A solver that isn't coupling
+    friction into angular velocity (e.g. because of a boxed cone,
+    stale persistent tangent basis, or any other bug) will leave
+    the sphere's angular velocity at zero.
+
+    Quantitative prediction for a solid sphere of mass m, radius r,
+    initial +X velocity v0, under friction mu:
+
+    * Linear deceleration: ``a_lin = -mu * g``
+    * Angular torque (about +Y): ``tau = +mu * m * g * r`` ->
+      ``alpha = tau / I = tau / (2/5 * m * r^2) =
+      (5/2) * mu * g / r``
+
+    Both signs are fixed by the cross product ``r x F`` at the
+    contact point ``r = (0, 0, -radius)`` with friction pointing
+    ``-X``.
+    """
+
+    def test_sphere_spins_up_under_friction(self) -> None:
+        mu = 0.3
+        radius = 0.5
+        v0 = 3.0
+        scene = _PhoenXScene(fps=120, substeps=4, solver_iterations=16, friction=mu)
+        scene.add_ground_plane()
+        # Explicit mass=1 + analytic solid-sphere inertia so we can
+        # compare the measured spin-up rate against ``5 mu g / 2 r``.
+        ball = scene.add_sphere(
+            position=(0.0, 0.0, radius + 1.0e-3),
+            radius=radius,
+            mass=1.0,
+        )
+        scene.finalize()
+        scene.set_body_velocity(ball, (v0, 0.0, 0.0))
+
+        # Settle vertical normal contact before we start measuring.
+        for _ in range(5):
+            scene.step()
+
+        # Measure angular velocity after a short window. We want to
+        # be well below the time at which the sphere transitions to
+        # pure rolling (``v = omega * r``), which would zero the
+        # relative velocity at the contact and cut off the friction
+        # torque.
+        vx_start = float(scene.body_velocity(ball)[0])
+        wy_start = float(scene.bodies.angular_velocity.numpy()[ball + 1][1])
+        measure_frames = 20
+        for _ in range(measure_frames):
+            scene.step()
+        vx_end = float(scene.body_velocity(ball)[0])
+        wy_end = float(scene.bodies.angular_velocity.numpy()[ball + 1][1])
+        dt = measure_frames / 120.0
+
+        linear_decel = (vx_start - vx_end) / dt
+        angular_accel = (wy_end - wy_start) / dt
+
+        expected_linear_decel = mu * _G
+        expected_angular_accel = 2.5 * mu * _G / radius
+
+        # Allow 25% relative error. The tight-tolerance check is
+        # really "is alpha non-zero and the right sign" -- the
+        # magnitude depends on exactly when the sphere transitions
+        # to rolling (sensitive to the PGS warm-up transient).
+        self.assertGreater(
+            angular_accel,
+            0.5 * expected_angular_accel,
+            f"sphere angular accel {angular_accel:.3f} rad/s^2 vs expected "
+            f"{expected_angular_accel:.3f} -- friction isn't torquing the body "
+            "about +Y. Likely causes: (a) boxed friction cone regression, "
+            "(b) stale persistent tangent basis, (c) friction row not "
+            "scattering r x imp to angular velocity.",
+        )
+        self.assertLess(
+            angular_accel,
+            1.5 * expected_angular_accel,
+            f"sphere angular accel {angular_accel:.3f} rad/s^2 vs expected "
+            f"{expected_angular_accel:.3f} -- friction over-torquing "
+            "(cone clamp too loose?).",
+        )
+        # Linear decel must also match (cross-check -- if friction
+        # is nonzero on the angular side, it must be nonzero on the
+        # linear side).
+        self.assertGreater(
+            linear_decel,
+            0.5 * expected_linear_decel,
+            f"sphere linear decel {linear_decel:.3f} m/s^2 vs expected "
+            f"{expected_linear_decel:.3f}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

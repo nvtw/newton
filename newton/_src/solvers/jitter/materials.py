@@ -53,6 +53,7 @@ __all__ = [
     "material_table_from_list",
     "pack_material_data",
     "resolve_friction_in_kernel",
+    "resolve_friction_static_in_kernel",
 ]
 
 
@@ -261,3 +262,36 @@ def resolve_friction_in_kernel(
     mb = materials[mat_b]
     mode = wp.max(ma.friction_combine_mode, mb.friction_combine_mode)
     return _combine_values(ma.dynamic_friction, mb.dynamic_friction, mode)
+
+
+@wp.func
+def resolve_friction_static_in_kernel(
+    materials: wp.array[MaterialData],
+    mat_a: wp.int32,
+    mat_b: wp.int32,
+    default_friction: wp.float32,
+) -> wp.float32:
+    """Compute the effective per-pair *static* friction coefficient.
+
+    Twin of :func:`resolve_friction_in_kernel` -- same combine-mode
+    selection but reads each material's ``static_friction`` instead
+    of ``dynamic_friction``. The solver uses this as the "stick"
+    threshold in the contact iterate: when the raw tangent impulse
+    magnitude stays inside ``mu_static * lam_n`` the contact is in
+    the static regime; once it breaches that threshold the impulse
+    is clamped to ``mu_dynamic * lam_n`` (kinetic regime).
+
+    Falls back to ``default_friction`` when no materials are
+    registered, so pre-material scenes get ``mu_static ==
+    mu_dynamic == default_friction`` and the two-regime clamp
+    collapses to the single-coefficient circular cone.
+    """
+    if materials.shape[0] == 0:
+        return default_friction
+    mat_count = materials.shape[0]
+    if mat_a < 0 or mat_a >= mat_count or mat_b < 0 or mat_b >= mat_count:
+        return default_friction
+    ma = materials[mat_a]
+    mb = materials[mat_b]
+    mode = wp.max(ma.friction_combine_mode, mb.friction_combine_mode)
+    return _combine_values(ma.static_friction, mb.static_friction, mode)

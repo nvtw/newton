@@ -168,6 +168,33 @@ class _PhoenXScene:
         self._newton_body_ids.append(body)
         return body
 
+    def add_static_box(
+        self,
+        position: tuple[float, float, float],
+        half_extents: tuple[float, float, float],
+        *,
+        orientation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+    ) -> int:
+        """Add a box-shape attached to the static world body at slot 0.
+
+        Instead of creating a new Newton body the shape is attached
+        to Newton body index ``-1`` (the world anchor), which on the
+        PhoenX side maps to slot 0 (the static anchor). Useful for
+        building ramps / walls / arenas that are not themselves
+        dynamic but need rigid-box collision geometry, which Newton's
+        :func:`add_shape_plane` alone can't express (plane is always
+        horizontal and unbounded).
+        """
+        # ``body = -1`` attaches the shape to Newton's world body.
+        self.mb.add_shape_box(
+            -1,
+            xform=wp.transform(p=wp.vec3(*position), q=wp.quat(*orientation)),
+            hx=half_extents[0],
+            hy=half_extents[1],
+            hz=half_extents[2],
+        )
+        return -1
+
     def add_sphere(
         self,
         position: tuple[float, float, float],

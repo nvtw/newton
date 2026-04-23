@@ -48,6 +48,7 @@ from newton._src.solvers.jitter.constraints.constraint_contact import (
     contact_set_active_mask,
     contact_set_contact_first,
     contact_set_friction,
+    contact_set_friction_dynamic,
 )
 from newton._src.solvers.jitter.constraints.constraint_container import (
     CONSTRAINT_BODY1_OFFSET,
@@ -83,6 +84,7 @@ from newton._src.solvers.jitter.helpers.scan_and_sort import (
 from newton._src.solvers.jitter.materials import (
     MaterialData,
     resolve_friction_in_kernel,
+    resolve_friction_static_in_kernel,
 )
 
 __all__ = [
@@ -507,16 +509,23 @@ def _contact_pack_columns_kernel(
     b1 = shape_body[sa]
     b2 = shape_body[sb]
 
-    # Resolve the pair's effective friction. ``shape_material`` has
-    # size ``num_shapes``; if the caller passed an empty sentinel
-    # (size-1 array of -1) we fall through to ``default_friction``.
+    # Resolve the pair's effective static + kinetic friction.
+    # ``shape_material`` has size ``num_shapes``; if the caller passed
+    # an empty sentinel (size-1 array of -1) both coefficients fall
+    # back to ``default_friction`` so pre-material scenes behave
+    # identically to before the two-regime plumbing was added.
     mat_a = wp.int32(-1)
     mat_b = wp.int32(-1)
     if shape_material.shape[0] > sa:
         mat_a = shape_material[sa]
     if shape_material.shape[0] > sb:
         mat_b = shape_material[sb]
-    mu_eff = resolve_friction_in_kernel(materials, mat_a, mat_b, default_friction)
+    mu_static = resolve_friction_static_in_kernel(
+        materials, mat_a, mat_b, default_friction
+    )
+    mu_dynamic = resolve_friction_in_kernel(
+        materials, mat_a, mat_b, default_friction
+    )
 
     # Header.
     write_int(constraints, CONSTRAINT_TYPE_OFFSET, cid, CONSTRAINT_TYPE_CONTACT)
@@ -524,7 +533,8 @@ def _contact_pack_columns_kernel(
     write_int(constraints, CONSTRAINT_BODY2_OFFSET, cid, b2)
 
     # Contact-specific header bits.
-    contact_set_friction(constraints, cid, mu_eff)
+    contact_set_friction(constraints, cid, mu_static)
+    contact_set_friction_dynamic(constraints, cid, mu_dynamic)
     contact_set_active_mask(constraints, cid, active_mask)
     contact_set_contact_first(constraints, cid, start_contact)
 

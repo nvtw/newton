@@ -135,11 +135,19 @@ class Example:
     """
 
     def __init__(self, viewer, args):
+        # Timing + iteration budget matches the XPBD nut-bolt scene in
+        # :mod:`newton.examples.contacts.example_nut_bolt_sdf` so the
+        # two solvers can be compared head-to-head: fps=120, 5
+        # substeps, 10 solver iterations per substep. XPBD also runs
+        # with ``angular_damping=0`` (no rotational drag); PhoenX
+        # keeps damping multipliers at 1.0 by default
+        # (``body_container_zeros``), so neither solver introduces
+        # any rotational damping on this scene.
         self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.sim_substeps = 5
-        self.solver_iterations = 16
+        self.solver_iterations = 10
         self._frame: int = 0
 
         self.viewer = viewer

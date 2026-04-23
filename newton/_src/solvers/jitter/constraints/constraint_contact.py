@@ -79,6 +79,7 @@ __all__ = [
     "contact_get_body2",
     "contact_get_contact_first",
     "contact_get_friction",
+    "contact_get_friction_dynamic",
     "contact_iterate",
     "contact_iterate_at",
     "contact_pair_wrench_kernel",
@@ -95,6 +96,7 @@ __all__ = [
     "contact_set_body2",
     "contact_set_contact_first",
     "contact_set_friction",
+    "contact_set_friction_dynamic",
     "contact_views_make",
     "contact_world_error",
     "contact_world_error_at",
@@ -204,11 +206,22 @@ class ContactConstraintData:
     #: Body index of body 2.
     body2: wp.int32
 
-    #: Coulomb friction coefficient for the pair. Pulled from the
-    #: upstream material system at ingest time (today: fixed default
-    #: because the Jitter solver doesn't yet wire through
-    #: ``shape_material_mu``).
+    #: Static Coulomb friction coefficient for the pair. This is the
+    #: "stick" threshold -- if the per-iteration raw tangent impulse
+    #: magnitude stays inside ``mu_static * lam_n`` the contact is in
+    #: the static-friction regime and no slip occurs. Resolved at
+    #: ingest time from the material table (see
+    #: :func:`materials.resolve_frictions_in_kernel`); falls back to
+    #: ``default_friction`` when no materials are installed.
     friction: wp.float32
+    #: Kinetic (dynamic) Coulomb friction coefficient. Used as the
+    #: tangent-row clamp once the static threshold has been crossed
+    #: and the contact is slipping. Typically ``<=`` static friction
+    #: so a sliding body decelerates less than it would have
+    #: resisted starting the slide. When materials aren't configured
+    #: with separate values this ends up equal to ``friction`` and
+    #: the two-regime clamp collapses to the single-coefficient case.
+    friction_dynamic: wp.float32
 
     #: Bitmask of active slots (bit ``k`` set iff slot ``k`` holds a
     #: real contact). Used by the per-iteration loop to skip inactive
@@ -248,6 +261,9 @@ assert_constraint_header(ContactConstraintData)
 _OFF_BODY1 = wp.constant(dword_offset_of(ContactConstraintData, "body1"))
 _OFF_BODY2 = wp.constant(dword_offset_of(ContactConstraintData, "body2"))
 _OFF_FRICTION = wp.constant(dword_offset_of(ContactConstraintData, "friction"))
+_OFF_FRICTION_DYNAMIC = wp.constant(
+    dword_offset_of(ContactConstraintData, "friction_dynamic")
+)
 _OFF_ACTIVE_MASK = wp.constant(dword_offset_of(ContactConstraintData, "active_mask"))
 _OFF_CONTACT_FIRST = wp.constant(dword_offset_of(ContactConstraintData, "contact_first"))
 
@@ -402,7 +418,27 @@ def contact_set_body2(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
 
 @wp.func
 def contact_get_friction(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    """Static Coulomb friction coefficient of this contact column."""
     return read_float(c, _OFF_FRICTION, cid)
+
+
+@wp.func
+def contact_get_friction_dynamic(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    """Kinetic (dynamic) Coulomb friction coefficient of this contact
+    column -- the clamp once the static threshold has been exceeded.
+    """
+    return read_float(c, _OFF_FRICTION_DYNAMIC, cid)
+
+
+@wp.func
+def contact_set_friction_dynamic(
+    c: ConstraintContainer, cid: wp.int32, v: wp.float32
+):
+    """Set the kinetic (dynamic) friction coefficient. Used by the
+    contact ingest pipeline; kernels should prefer
+    :func:`contact_get_friction_dynamic`.
+    """
+    write_float(c, _OFF_FRICTION_DYNAMIC, cid, v)
 
 
 @wp.func
@@ -998,7 +1034,20 @@ def contact_iterate_at(
         return
 
     contact_first = contact_get_contact_first(constraints, cid)
-    mu = contact_get_friction(constraints, cid)
+    # Two-regime Coulomb friction:
+    #   * ``mu_s`` gates the slide transition -- if the per-iteration
+    #     raw tangent impulse stays inside ``mu_s * lam_n`` the pair
+    #     is "stuck" and the raw value is accepted verbatim.
+    #   * ``mu_k`` is the clamp applied once the slide starts -- when
+    #     the raw impulse breaches ``mu_s * lam_n`` we clamp
+    #     magnitude-wise to ``mu_k * lam_n``. With ``mu_k <= mu_s``
+    #     (PhysX / Material validation enforces this) a body that
+    #     overcomes static friction settles into kinetic friction.
+    #     When the two coefficients are equal (the common default),
+    #     the two-regime clamp collapses to the single-coefficient
+    #     circular cone.
+    mu_s = contact_get_friction(constraints, cid)
+    mu_k = contact_get_friction_dynamic(constraints, cid)
 
     inv_mass1 = bodies.inverse_mass[b1]
     inv_mass2 = bodies.inverse_mass[b2]
@@ -1073,11 +1122,14 @@ def contact_iterate_at(
         lam_n_new = wp.max(lam_n_old + d_lam_n, wp.float32(0.0))
         d_lam_n = lam_n_new - lam_n_old
 
-        # Friction budget uses the *new* normal accum so the
-        # tangent clamp matches the post-normal solution (PhoenX's
+        # Friction budgets use the *new* normal accum so the tangent
+        # clamp matches the post-normal solution (PhoenX's
         # ``ApplyMax(...); maxTangentImpulse = friction *
-        # accumulatedNormalImpulse;`` pattern).
-        fric_limit = mu * lam_n_new
+        # accumulatedNormalImpulse;`` pattern). ``fric_limit_static``
+        # is the "stick" budget; ``fric_limit_kinetic`` is what we
+        # clamp to once the static threshold is breached.
+        fric_limit_static = mu_s * lam_n_new
+        fric_limit_kinetic = mu_k * lam_n_new
 
         # ---- Tangent rows: solve from pre-normal vel_rel ----
         # We trust the Coulomb clamp to do the static/dynamic regime
@@ -1117,20 +1169,31 @@ def contact_iterate_at(
         lam_t2_old = cc_get_tangent2_lambda(cc, slot, cid)
         lam_t1_raw = lam_t1_old + d_lam_t1
         lam_t2_raw = lam_t2_old + d_lam_t2
-        # Circular-cone projection. If the raw 2D impulse magnitude
-        # exceeds the Coulomb budget we rescale both components by
-        # the same factor so the post-clamp direction matches the
-        # pre-clamp (slip) direction -- this is what aligns the
-        # friction impulse with the actual slip and matches XPBD's
-        # ``lambda_fr = max(lambda_fr, -lambda_n * mu)`` along the
-        # single slip direction.
+        # Two-regime circular cone. The raw 2D impulse
+        # ``(lam_t1_raw, lam_t2_raw)`` is the tangent PGS row wants
+        # to apply this iteration.
+        #   1. If its magnitude sits inside the static budget
+        #      (``mu_s * lam_n``) the contact is stuck -- accept the
+        #      raw value as-is.
+        #   2. Otherwise the contact is slipping. Rescale the raw
+        #      impulse to the kinetic budget (``mu_k * lam_n``),
+        #      preserving its direction so the friction impulse stays
+        #      aligned with slip. This matches XPBD's
+        #      ``lambda_fr = max(lambda_fr, -lambda_n * mu)`` along
+        #      the single slip direction, promoted to 2D.
+        # When ``mu_k == mu_s`` (the default for scenes that haven't
+        # configured separate static + kinetic coefficients on the
+        # material table) the two-regime clamp collapses to the
+        # single-coefficient circular cone.
         lam_t_sq = lam_t1_raw * lam_t1_raw + lam_t2_raw * lam_t2_raw
-        fric_limit_sq = fric_limit * fric_limit
-        if lam_t_sq > fric_limit_sq and lam_t_sq > wp.float32(1.0e-30):
-            inv_mag = fric_limit / wp.sqrt(lam_t_sq)
+        static_limit_sq = fric_limit_static * fric_limit_static
+        if lam_t_sq > static_limit_sq and lam_t_sq > wp.float32(1.0e-30):
+            # Kinetic regime.
+            inv_mag = fric_limit_kinetic / wp.sqrt(lam_t_sq)
             lam_t1_new = lam_t1_raw * inv_mag
             lam_t2_new = lam_t2_raw * inv_mag
         else:
+            # Static regime: raw value sits inside the stick budget.
             lam_t1_new = lam_t1_raw
             lam_t2_new = lam_t2_raw
         d_lam_t1 = lam_t1_new - lam_t1_old
