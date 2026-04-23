@@ -1023,16 +1023,19 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 # Cooperative edge-culling + processing. Each outer
                 # iteration (a) fills the tile stack with up to
-                # ``block_dim`` accepted edges via cooperative pushes and
+                # ``block_dim`` accepted edges via cooperative pushes,
                 # (b) fully drains the stack, processing every accepted
-                # edge through ``do_edge_sdf_collision``. Draining is
-                # essential: a single ``tile_stack_pop`` only removes
-                # ``block_dim`` items, so if the inner push loop overshot
-                # (the push gate caps pre-push count at ``block_dim - 1``
-                # but the cooperative push itself adds up to ``block_dim``
-                # more) the remainder must be popped before we advance
-                # the progress counter — otherwise those edges would be
-                # silently dropped by ``tile_stack_clear`` below.
+                # edge through ``do_edge_sdf_collision``, and
+                # (c) explicitly clears the stack as a defensive,
+                # uniformly-called cooperative barrier before the next
+                # outer iteration. Draining is essential: a single
+                # ``tile_stack_pop`` only removes ``block_dim`` items, so
+                # if the inner push loop overshot (the push gate caps
+                # pre-push count at ``block_dim - 1`` but the cooperative
+                # push itself adds up to ``block_dim`` more) the
+                # remainder must be popped before we advance the progress
+                # counter — otherwise those edges would be silently
+                # dropped by the trailing ``tile_stack_clear``.
                 # This block is duplicated in
                 # ``mesh_sdf_collision_global_reduce_kernel`` (different
                 # edge range and contact writer) — keep the two in sync.
@@ -1101,7 +1104,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     # removes up to ``block_dim`` items per call, so we
                     # loop until empty — a single pop followed by
                     # ``tile_stack_clear`` would silently discard any
-                    # accepted edges that overflowed the prior push.
+                    # accepted edges that overflowed the prior push. The
+                    # trailing ``tile_stack_clear`` (after this drain) is
+                    # a defensive no-op barrier; see the comment block
+                    # above the outer ``while``.
                     while wp.tile_stack_count(edge_stack) > 0:
                         popped, edge_slot = wp.tile_stack_pop(edge_stack)
                         my_edge_idx = popped.edge_idx
@@ -1211,6 +1217,16 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 contact_data.sort_sub_key = (my_edge_idx << 2) | (mode << 1)
 
                                 writer_func(contact_data, writer_data, -1)
+
+                    # Defensive cooperative reset before the next outer
+                    # iteration. The drain loop above already left the
+                    # stack empty, so this is logically a no-op, but it
+                    # is a uniformly-called barrier that pairs cleanly
+                    # with the inner push loop and matches the original
+                    # ``push -> pop -> clear`` pattern that empirically
+                    # avoided a deadlock in deterministic mesh-mesh
+                    # scenes (see ``example_basic_shapes6_determinism``).
+                    wp.tile_stack_clear(edge_stack)
 
     # Return early if contact reduction is disabled
     if not reduce_contacts:
@@ -1449,6 +1465,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     # Drain the stack completely — see the matching loop
                     # in ``mesh_sdf_collision_kernel`` for why a single
                     # pop would silently drop overflowed accepted edges.
+                    # The trailing ``tile_stack_clear`` is a defensive
+                    # no-op barrier (see that same comment block).
                     while wp.tile_stack_count(edge_stack) > 0:
                         popped, edge_slot = wp.tile_stack_pop(edge_stack)
                         my_edge_idx = popped.edge_idx
@@ -1558,5 +1576,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     voxel_res_tri,
                                     reducer_data,
                                 )
+
+                    # Defensive cooperative reset before the next outer
+                    # iteration — see the matching ``tile_stack_clear``
+                    # call in ``mesh_sdf_collision_kernel`` for
+                    # rationale.
+                    wp.tile_stack_clear(edge_stack)
 
     return mesh_sdf_collision_global_reduce_kernel
