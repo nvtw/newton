@@ -480,8 +480,12 @@ class PhoenXWorld:
         self.max_contact_columns: int = int(max_contact_columns)
         self.rigid_contact_max: int = int(rigid_contact_max)
         if self.max_contact_columns > 0 and self.rigid_contact_max == 0:
-            # 6 = ContactContainer.MAX_SLOTS -- we support up to 6
-            # contacts per pair (the PhoenX C# original caps at 4).
+            # Per-pair design: one column per shape pair covers an
+            # arbitrary number of contacts, so the default contact-buffer
+            # size is just a generous multiple of the column count. Keep
+            # the legacy 6x multiplier as a conservative default -- real
+            # scenes should set ``rigid_contact_max`` explicitly from
+            # ``Contacts.rigid_contact_max``.
             self.rigid_contact_max = self.max_contact_columns * 6
         self.num_shapes: int = int(num_shapes)
         self.num_joints: int = int(num_joints)
@@ -564,22 +568,22 @@ class PhoenXWorld:
         )
 
         # ----- Contact infrastructure -----
+        # ContactContainer is now keyed by contact index ``k`` (not by
+        # (slot, cid)) so it sizes to ``rigid_contact_max`` -- the
+        # inner axis of every per-contact field.
         if self.max_contact_columns > 0:
             self._contact_container: ContactContainer = contact_container_zeros(
-                self.max_contact_columns, device=self.device
+                self.rigid_contact_max, device=self.device
             )
             self._ingest_scratch: IngestScratch | None = IngestScratch(
                 rigid_contact_max=self.rigid_contact_max,
                 max_contact_columns=self.max_contact_columns,
                 device=self.device,
             )
-            self._slot_of_contact_cur = wp.full(
-                self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
-            )
+            # Per-pair design: forward map stamps only cid (no slot) --
+            # prev-frame state is indexed directly by the contact's
+            # sorted-buffer index ``k``.
             self._cid_of_contact_cur = wp.full(
-                self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
-            )
-            self._slot_of_contact_prev = wp.full(
                 self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
             )
             self._cid_of_contact_prev = wp.full(
@@ -588,9 +592,7 @@ class PhoenXWorld:
         else:
             self._contact_container = contact_container_zeros(1, device=self.device)
             self._ingest_scratch = None
-            self._slot_of_contact_cur = None
             self._cid_of_contact_cur = None
-            self._slot_of_contact_prev = None
             self._cid_of_contact_prev = None
 
         self._contact_views: ContactViews | None = None
@@ -1014,12 +1016,8 @@ class PhoenXWorld:
             shape_body=shape_body,
         )
 
-        # Swap lambda buffers + forward maps (pointer swap, O(1)).
+        # Swap lambda buffers + forward map (pointer swap, O(1)).
         contact_container_swap_prev_current(self._contact_container)
-        self._slot_of_contact_cur, self._slot_of_contact_prev = (
-            self._slot_of_contact_prev,
-            self._slot_of_contact_cur,
-        )
         self._cid_of_contact_cur, self._cid_of_contact_prev = (
             self._cid_of_contact_prev,
             self._cid_of_contact_cur,
@@ -1052,7 +1050,6 @@ class PhoenXWorld:
             cid_base=self.num_joints,
             scratch=self._ingest_scratch,
             rigid_contact_match_index=contacts.rigid_contact_match_index,
-            prev_slot_of_contact=self._slot_of_contact_prev,
             prev_cid_of_contact=self._cid_of_contact_prev,
             bodies=self.bodies,
             contacts=self._contact_views,
@@ -1064,7 +1061,6 @@ class PhoenXWorld:
             rigid_contact_max=self.rigid_contact_max,
             cid_base=self.num_joints,
             scratch=self._ingest_scratch,
-            slot_of_contact=self._slot_of_contact_cur,
             cid_of_contact=self._cid_of_contact_cur,
             device=self.device,
         )

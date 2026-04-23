@@ -102,6 +102,16 @@ class RigidBodyData:
 
     orientation: wp.quatf
 
+    #: Body-local offset from the body-origin frame (the frame Newton's
+    #: narrow phase expresses contact anchors in) to the body's centre
+    #: of mass. :attr:`position` tracks the *COM* in world space, so
+    #: when a contact anchor from the narrow phase is used as a lever
+    #: arm about the COM the kernel must subtract ``body_com`` before
+    #: adding it to :attr:`position`. Zero for shapes whose mesh origin
+    #: coincides with the COM (boxes, spheres); non-zero for asymmetric
+    #: meshes (bunny, nut, etc.).
+    body_com: wp.vec3f
+
     inverse_inertia_world: wp.mat33f
     inverse_inertia: wp.mat33f
 
@@ -139,6 +149,11 @@ class BodyContainer:
 
     orientation: wp.array[wp.quatf]
 
+    #: Per-body local-frame offset from the body-origin frame to the
+    #: COM. See :attr:`RigidBodyData.body_com` for the convention
+    #: rationale.
+    body_com: wp.array[wp.vec3f]
+
     inverse_inertia_world: wp.array[wp.mat33f]
     inverse_inertia: wp.array[wp.mat33f]
 
@@ -170,6 +185,7 @@ def body_container_get(c: BodyContainer, i: wp.int32) -> RigidBodyData:
     b.velocity = c.velocity[i]
     b.angular_velocity = c.angular_velocity[i]
     b.orientation = c.orientation[i]
+    b.body_com = c.body_com[i]
     b.inverse_inertia_world = c.inverse_inertia_world[i]
     b.inverse_inertia = c.inverse_inertia[i]
     b.inverse_mass = c.inverse_mass[i]
@@ -198,6 +214,7 @@ def body_container_set(c: BodyContainer, i: wp.int32, b: RigidBodyData):
     c.velocity[i] = b.velocity
     c.angular_velocity[i] = b.angular_velocity
     c.orientation[i] = b.orientation
+    c.body_com[i] = b.body_com
     c.inverse_inertia_world[i] = b.inverse_inertia_world
     c.inverse_inertia[i] = b.inverse_inertia
     c.inverse_mass[i] = b.inverse_mass
@@ -234,6 +251,12 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.velocity = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.angular_velocity = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.orientation = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
+    # body_com defaults to zero -- safe for symmetric primitives (boxes,
+    # spheres). Non-zero meshes (bunny, nut, etc.) must overwrite this
+    # from ``model.body_com`` via the solver's init / sync kernels so
+    # the contact lever arm maths in :mod:`constraint_contact` uses the
+    # correct origin-to-COM offset.
+    c.body_com = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.inverse_inertia_world = wp.zeros(num_bodies, dtype=wp.mat33f, device=device)
     c.inverse_inertia = wp.zeros(num_bodies, dtype=wp.mat33f, device=device)
     c.inverse_mass = wp.zeros(num_bodies, dtype=wp.float32, device=device)

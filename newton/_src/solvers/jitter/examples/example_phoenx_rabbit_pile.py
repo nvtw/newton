@@ -159,17 +159,29 @@ class Example:
         # non-axis-aligned tilts break the symmetry of perfectly
         # aligned SDFs (otherwise two neighbouring bunnies would fall
         # together without sliding past each other).
+        #
+        # The bunny mesh's scaled bounding box is roughly
+        # 0.32 m x 0.32 m at :data:`BUNNY_SCALE` = 0.2, and the
+        # mesh origin sits ~12 cm from the geometric centre; pairing
+        # a random tilt of up to 0.4 rad on top of that can sweep a
+        # vertex up to ~0.36 m away from the transform origin. Pick
+        # the grid spacing + vertical stagger above those bounds so
+        # bunnies never spawn intersecting each other or piercing the
+        # ground plane.
+        horizontal_spacing = 0.75  # > 2 * max_radius
+        vertical_spacing = 0.8     # > 2 * max_radius
+        base_z = 0.45              # > max_radius so lowest tilt doesn't dip below z = 0
         rng = np.random.default_rng(seed=42)
         side = int(np.ceil(self.num_bunnies**0.5))
         bunny_ids: list[int] = []
         for i in range(self.num_bunnies):
             row = i // side
             col = i % side
-            x = (col - 0.5 * (side - 1)) * 0.4
-            y = (row - 0.5 * (side - 1)) * 0.4
+            x = (col - 0.5 * (side - 1)) * horizontal_spacing
+            y = (row - 0.5 * (side - 1)) * horizontal_spacing
             # Stagger vertically in layers so bunnies don't all
             # spawn intersecting at t=0.
-            z = 0.3 + (i // side) * 0.6
+            z = base_z + (i // side) * vertical_spacing
             yaw = float(rng.uniform(-np.pi, np.pi))
             tilt_axis = wp.vec3(*rng.normal(size=3).astype(np.float32))
             tilt_axis = tilt_axis / (float(np.linalg.norm([*tilt_axis])) + 1e-9)
@@ -233,6 +245,7 @@ class Example:
                 bodies.inverse_inertia,
                 bodies.inverse_inertia_world,
                 bodies.motion_type,
+                bodies.body_com,
             ],
             device=self.device,
         )

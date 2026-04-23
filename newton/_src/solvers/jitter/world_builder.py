@@ -2332,6 +2332,12 @@ class WorldBuilder:
         c.velocity = wp.array(velocities, dtype=wp.vec3f, device=device)
         c.angular_velocity = wp.array(angular_velocities, dtype=wp.vec3f, device=device)
         c.orientation = wp.array(orientations, dtype=wp.quatf, device=device)
+        # Jitter's world_builder currently assumes each body's mesh
+        # origin coincides with its COM (box / sphere / capsule
+        # primitives), so ``body_com = 0`` is a safe default. Callers
+        # that plumb meshes with non-zero origin-to-COM offsets through
+        # the builder must set ``bodies.body_com`` directly.
+        c.body_com = wp.zeros(n, dtype=wp.vec3f, device=device)
         c.inverse_inertia_world = wp.array(inverse_inertia_world, dtype=wp.mat33f, device=device)
         c.inverse_inertia = wp.array(inverse_inertia, dtype=wp.mat33f, device=device)
         c.inverse_mass = wp.array(inverse_mass, dtype=wp.float32, device=device)

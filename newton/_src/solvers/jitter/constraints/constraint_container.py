@@ -165,21 +165,19 @@ CONSTRAINT_TYPE_D6 = wp.constant(wp.int32(7))
 #: displacements [m] in prismatic mode. See
 #: :mod:`constraint_actuated_double_ball_socket` for the math.
 CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(8))
-#: Rigid-rigid contact constraint -- packs up to **6 contacts** belonging to
-#: one ``(shape_a, shape_b)`` pair into a single PGS column. Newton's
-#: CollisionPipeline sorts contacts by ``(shape_a, shape_b)`` (see
+#: Rigid-rigid contact constraint -- one column covers one whole
+#: ``(shape_a, shape_b)`` pair. Newton's CollisionPipeline sorts contacts
+#: by ``(shape_a, shape_b)`` (see
 #: :func:`newton._src.geometry.contact_data.make_contact_sort_key`), so each
-#: column just records a contiguous range ``[contact_first, contact_first +
-#: contact_count)`` into the sorted ``Contacts`` buffer plus a per-slot
-#: ``active_mask`` bit set (slots 0..5). Pairs with > 6 contacts are split
-#: across ``N = ceil(count / 6)`` adjacent columns; pairs with < 6 contacts
-#: leave the trailing slots with ``active_mask = 0`` so the PGS loop
-#: early-outs on them without any branch divergence penalty (all lanes in
-#: a warp see the same ``active_mask`` because each lane owns its own cid).
-#: Persistent state (warm-start accumulated impulses) lives in a parallel
-#: :class:`ContactContainer` keyed by the same cid; the column itself is
-#: pure geometry + header, so contacts can be fully re-ingested each step
-#: without touching the persistent lambdas. See
+#: column records the pair's contiguous range ``[contact_first,
+#: contact_first + contact_count)`` into the sorted ``Contacts`` buffer.
+#: The PGS loop walks that range serially inside a single ``wp.func``
+#: call, which is Gauss-Seidel within the pair by construction. Persistent
+#: warm-start state (accumulated impulses + the frozen contact frame +
+#: body-local anchors) lives in a parallel :class:`ContactContainer`
+#: keyed directly by the contact index ``k`` in the sorted buffer; the
+#: column itself is pure header, so contacts can be fully re-ingested
+#: each step without touching the persistent lambdas. See
 #: :mod:`constraint_contact` for the schema and per-iteration math.
 CONSTRAINT_TYPE_CONTACT = wp.constant(wp.int32(9))
 #: 1-DoF linear velocity / PD position drive -- the translational twin of

@@ -264,6 +264,7 @@ class Example:
                 bodies.inverse_inertia,
                 bodies.inverse_inertia_world,
                 bodies.motion_type,
+                bodies.body_com,
             ],
             device=self.device,
         )

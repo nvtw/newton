@@ -13,30 +13,35 @@ contiguous. Ingest therefore reduces to:
 
 1. Segment the sorted active prefix of ``Contacts`` into shape-pair
    runs (``pair_first[p]``, ``pair_count[p]``, ``pair_shape_a/b[p]``).
-2. For each pair ``p``, emit ``ceil(pair_count[p] / 6)`` adjacent
-   contact columns with the appropriate ``[contact_first,
-   contact_count]`` range and ``active_mask``.
+2. Emit one contact column per non-filtered shape pair, with that
+   pair's ``[contact_first, contact_count]`` range stamped into the
+   column header.
 3. Populate the :class:`ConstraintContainer` header
    (``constraint_type``, ``body1``, ``body2``) so the generic
    dispatcher routes each column to
    :func:`contact_prepare_for_iteration_at`.
 
+The per-pair design replaces the previous 6-slot-per-column split:
+before, a pair with ``pair_count > 6`` was fragmented across
+``ceil(pair_count / 6)`` adjacent columns that the graph colourer then
+had to assign to different colours (all columns share the same body
+pair). The per-pair scheme puts every contact of a pair into one
+column, loops them in a single kernel, and gets Gauss-Seidel within
+the pair for free.
+
 The number of output columns is produced as a *device-side* scalar
 (``IngestScratch.num_contact_columns``) and never read back to the
 host during the step, which keeps the whole ingest sequence
 graph-capture compatible. All kernels launch at fixed sizes
-(``rigid_contact_max`` or ``max_contact_columns``) and gate
-internally on the device-held counters. The only host reads happen
-outside the captured region, in :meth:`World.step`, to decide how
-many constraints to feed to the graph-coloring partitioner and the
-iterate kernels.
+(``rigid_contact_max`` or ``max_contact_columns``) and gate internally
+on the device-held counters.
 
 Segmenting uses an ``(shape_a * num_shapes + shape_b)`` int32 key +
 the graph-capture-safe
 :func:`scan_and_sort.runlength_encode_variable_length` wrapper. The
-int32 fits safely because Newton scenes with
-``num_shapes >= 46340`` would overflow the key; the caller should
-bound ``num_shapes`` accordingly at world construction time.
+int32 fits safely because Newton scenes with ``num_shapes >= 46340``
+would overflow the key; the caller should bound ``num_shapes``
+accordingly at world construction time.
 """
 
 from __future__ import annotations
@@ -44,8 +49,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.jitter.constraints.constraint_contact import (
-    CONTACT_MAX_SLOTS,
-    contact_set_active_mask,
+    contact_set_contact_count,
     contact_set_contact_first,
     contact_set_friction,
     contact_set_friction_dynamic,
@@ -104,16 +108,15 @@ __all__ = [
 class IngestScratch:
     """Pre-allocated device buffers the ingest pipeline reuses each step.
 
-    Sized to the upstream ``Contacts.rigid_contact_max`` (for per-
-    contact arrays) and to ``max_contact_columns`` (for per-column
-    arrays). Per-pair arrays are sized to ``rigid_contact_max`` too
-    because in the worst case (every contact is its own shape pair)
+    Sized to the upstream ``Contacts.rigid_contact_max`` (per-contact
+    arrays) and to ``max_contact_columns`` (per-column arrays).
+    Per-pair arrays are sized to ``rigid_contact_max`` too because in
+    the worst case (every contact is its own shape pair)
     ``num_pairs == rigid_contact_max``.
 
     All scratch lives on ``device`` and is never resized after
-    construction -- the shapes drive the launch sizes of every
-    ingest kernel, which is what keeps the sequence graph-capture
-    safe.
+    construction -- the shapes drive the launch sizes of every ingest
+    kernel, which is what keeps the sequence graph-capture safe.
     """
 
     __slots__ = (
@@ -145,11 +148,11 @@ class IngestScratch:
         n_pairs_max = max(1, self.rigid_contact_max)
         n_cols_max = max(1, self.max_contact_columns)
 
-        # Per-contact pair key. Bounded by ``rigid_contact_max``.
+        # Per-contact pair key.
         self.keys = wp.zeros(self.rigid_contact_max, dtype=wp.int32, device=device)
 
-        # Output slot for RLE's unique-values array (keeps ``keys``
-        # intact so callers can re-RLE / re-inspect if needed).
+        # RLE unique-values output (keeps ``keys`` intact so callers can
+        # re-RLE / re-inspect if needed).
         self.run_values = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
 
         # Per-pair arrays.
@@ -157,17 +160,18 @@ class IngestScratch:
         self.pair_count = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
         self.pair_shape_a = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
         self.pair_shape_b = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
+        # 0 or 1 per pair in the new per-pair design -- the column-count
+        # is binary (filtered pairs emit zero columns, everyone else
+        # emits exactly one). Kept as ``int32`` so the same
+        # :func:`wp.utils.array_scan` step that the old ceil-based code
+        # used still applies.
         self.pair_columns = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
         self.pair_col_offset = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
 
         # Per-output-column arrays.
         self.pair_source_idx = wp.zeros(n_cols_max, dtype=wp.int32, device=device)
 
-        # Device-held scalars. ``num_pairs`` is filled by the RLE pass;
-        # ``num_contact_columns`` is filled by the total-columns
-        # reduction kernel. Both are consumed by subsequent kernels
-        # via a ``tid >= counter[0]`` gate, never read back host-side
-        # inside the captured step.
+        # Device-held scalars.
         self.num_pairs = wp.zeros(1, dtype=wp.int32, device=device)
         self.num_contact_columns = wp.zeros(1, dtype=wp.int32, device=device)
 
@@ -195,15 +199,7 @@ def _contact_key_kernel(
     # out
     keys: wp.array[wp.int32],
 ):
-    """Fill the per-contact key array for the RLE pass.
-
-    The active prefix (``tid < rigid_contact_count[0]``) gets
-    packed keys ``shape_a * num_shapes + shape_b``; the tail is
-    zeroed and will be re-stamped with the sentinel by the RLE
-    wrapper (:func:`runlength_encode_variable_length`) -- we don't
-    stamp the sentinel here because the RLE wrapper needs to re-
-    stamp it anyway to keep the mask/RLE pair self-contained.
-    """
+    """Fill the per-contact key array for the RLE pass."""
     tid = wp.tid()
     count = rigid_contact_count[0]
     if tid < count:
@@ -211,9 +207,6 @@ def _contact_key_kernel(
         sb = rigid_contact_shape1[tid]
         keys[tid] = sa * num_shapes + sb
     else:
-        # Stamp zero so the subsequent RLE-wrapper sentinel overwrite
-        # can't accidentally leave stale data from a previous step
-        # masquerading as a real key.
         keys[tid] = wp.int32(0)
 
 
@@ -225,12 +218,7 @@ def _body_pair_filtered(
 ) -> wp.int32:
     """Binary search ``filter_keys[0:filter_count]`` for ``key``.
 
-    Returns ``1`` if found, ``0`` otherwise. ``filter_keys`` is a
-    sorted int64 array of packed
-    ``min(body_a, body_b) * num_bodies + max(body_a, body_b)`` keys;
-    ``filter_count == 0`` short-circuits without touching the array
-    (which still carries a size-1 sentinel so the pointer is
-    non-null).
+    Returns ``1`` if found, ``0`` otherwise.
     """
     if filter_count <= wp.int32(0):
         return wp.int32(0)
@@ -263,22 +251,15 @@ def _pair_metadata_kernel(
     pair_shape_b: wp.array[wp.int32],
     pair_columns: wp.array[wp.int32],
 ):
-    """Unpack ``run_values`` into per-pair shapes + column counts.
+    """Unpack ``run_values`` into per-pair shapes + clear the column tail.
 
-    ``pair_count`` is already the RLE ``run_lengths`` output; the RLE
-    wrapper wrote it directly into ``scratch.pair_count`` so there's
-    nothing to do for it here.
-
-    Launches at ``dim == rigid_contact_max`` (the max possible pair
-    count); threads past ``num_pairs[0]`` zero out the corresponding
-    ``pair_columns`` entry so the subsequent exclusive scan produces
-    a stable total (equal to the inclusive tail of the active
-    prefix) regardless of leftover data from a previous step.
+    ``pair_columns`` is cleared for threads past ``num_pairs[0]`` so the
+    subsequent exclusive scan produces a stable total regardless of
+    leftover data from a previous step.
     """
     tid = wp.tid()
     n = num_pairs[0]
     if tid >= n:
-        # Clear tail so the downstream scan is deterministic.
         pair_columns[tid] = wp.int32(0)
         return
     key = run_values[tid]
@@ -286,15 +267,10 @@ def _pair_metadata_kernel(
     sb = key - sa * num_shapes
     pair_shape_a[tid] = sa
     pair_shape_b[tid] = sb
-    # Number of 6-slot contact columns needed for this pair.
-    # ``pair_count[tid]`` already holds the run length written by
-    # the RLE wrapper; read it directly.
-    # (Kernel can't both read and write the same array at the same
-    # index, so we don't take pair_count as an output.)
 
 
 @wp.kernel(enable_backward=False)
-def _pair_columns_from_count_kernel(
+def _pair_columns_binary_kernel(
     pair_count: wp.array[wp.int32],
     pair_shape_a: wp.array[wp.int32],
     pair_shape_b: wp.array[wp.int32],
@@ -306,23 +282,13 @@ def _pair_columns_from_count_kernel(
     # out
     pair_columns: wp.array[wp.int32],
 ):
-    """Compute ``pair_columns[p] = ceil(pair_count[p] / 6)`` for active pairs,
-    collapsing filtered body pairs to zero columns.
+    """Emit exactly one contact column per non-filtered shape pair.
 
-    For each active shape pair (``tid < num_pairs[0]``) we resolve
-    the two body ids via ``shape_body[pair_shape_{a,b}[p]]``, pack
-    them into the canonical ``(min, max)`` int64 key, and check the
-    sorted ``filter_keys`` array. Filtered pairs get
-    ``pair_columns[p] = 0`` so the downstream exclusive scan treats
-    them as taking zero output columns; :func:`_pair_source_idx_kernel`
-    then never maps any output column to that pair, so no contact
-    constraint is allocated or warm-started, and the dispatcher
-    never sees it.
-
-    Split out from :func:`_pair_metadata_kernel` because that kernel
-    already has ``pair_columns`` bound as an output for the tail
-    clear; keeping the filter test here makes both kernels'
-    access patterns read-only except for one output array.
+    Per-pair design: every non-filtered pair with at least one contact
+    gets a single column covering its entire
+    ``[pair_first, pair_first + pair_count)`` range. Body-pair-filtered
+    pairs collapse to zero columns so the downstream exclusive scan
+    treats them as invisible (no ingest, no warm-start, no dispatch).
     """
     tid = wp.tid()
     n = num_pairs[0]
@@ -342,8 +308,12 @@ def _pair_columns_from_count_kernel(
     if _body_pair_filtered(filter_keys, filter_count, body_key) == wp.int32(1):
         pair_columns[tid] = wp.int32(0)
         return
-    length = pair_count[tid]
-    pair_columns[tid] = (length + CONTACT_MAX_SLOTS - 1) // CONTACT_MAX_SLOTS
+    # Zero-contact runs can't happen here (RLE produces positive
+    # counts), but guard anyway for defensive robustness.
+    if pair_count[tid] > wp.int32(0):
+        pair_columns[tid] = wp.int32(1)
+    else:
+        pair_columns[tid] = wp.int32(0)
 
 
 @wp.kernel(enable_backward=False)
@@ -355,10 +325,9 @@ def _pair_first_kernel(
 ):
     """Exclusive prefix sum of ``run_lengths`` -> ``pair_first``.
 
-    Single-thread O(num_pairs) scan. ``num_pairs`` is small in
-    practice (100s not millions) so the serial cost is negligible
-    compared to launching a proper device scan, and this keeps the
-    ingest sequence free of extra scratch allocations.
+    Single-thread O(num_pairs) scan. ``num_pairs`` is small in practice
+    (100s, not millions); launching a proper device scan just for this
+    would cost more in kernel overhead than the serial scan itself.
     """
     tid = wp.tid()
     if tid != 0:
@@ -384,16 +353,7 @@ def _total_contact_columns_kernel(
     # out
     num_contact_columns: wp.array[wp.int32],
 ):
-    """Derive ``num_contact_columns = sum(pair_columns)`` on-device.
-
-    The exclusive scan of ``pair_columns`` has already been written
-    to ``pair_col_offset`` by :func:`wp.utils.array_scan` before
-    this kernel is launched, so we just read the last element of
-    the scan + ``pair_columns[num_pairs - 1]`` and clamp against
-    the caller's hard cap. Single-thread kernel; output is a
-    device-held 1-element array consumed by all downstream
-    ingest / gather kernels as their active-length gate.
-    """
+    """Derive ``num_contact_columns = sum(pair_columns)`` on-device."""
     tid = wp.tid()
     if tid != 0:
         return
@@ -418,11 +378,12 @@ def _pair_source_idx_kernel(
     # out
     pair_source_idx: wp.array[wp.int32],
 ):
-    """For each output column ``o``, write which pair ``p`` it comes from.
+    """Write ``pair_source_idx[o] = p`` for every output column ``o``.
 
-    Serial on one thread because ``num_pairs`` is small and the
-    expansion is trivially bounded by ``max_columns``. No race, no
-    atomics; clamps every write to ``[0, max_columns)``.
+    With the per-pair design ``pair_columns[p]`` is either 0 (filtered)
+    or 1, so the inner ``for k in range(cols)`` loop runs at most once
+    per pair. Kept as a single-thread kernel because ``num_pairs`` is
+    small (100s) and the launch overhead dominates the serial cost.
     """
     tid = wp.tid()
     if tid != 0:
@@ -446,7 +407,6 @@ def _pair_source_idx_kernel(
 @wp.kernel(enable_backward=False)
 def _contact_pack_columns_kernel(
     pair_source_idx: wp.array[wp.int32],
-    pair_col_offset: wp.array[wp.int32],
     pair_first: wp.array[wp.int32],
     pair_count: wp.array[wp.int32],
     pair_shape_a: wp.array[wp.int32],
@@ -460,28 +420,16 @@ def _contact_pack_columns_kernel(
     # out
     constraints: ConstraintContainer,
 ):
-    """Materialise one contact column.
+    """Materialise one contact column -- one thread per output column.
 
-    Launched at ``dim == max_contact_columns`` (host-known) and
-    gates internally on ``tid >= num_contact_columns[0]`` so the
-    launch size is captureable in a graph independently of the
-    per-step column count.
+    Launched at ``dim == max_contact_columns`` and gates internally on
+    ``num_contact_columns[0]`` so the launch size is captureable in a
+    graph independently of the per-step column count.
 
-    Thread ``tid`` owns output column ``tid``. Looks up which pair
-    ``p`` it belongs to via ``pair_source_idx``, then its sub-
-    column index within that pair as ``tid - pair_col_offset[p]``.
-    The contact range is ``[pair_first[p] + k*6, pair_first[p] +
-    k*6 + slot_count)`` and the active mask is ``(1 << slot_count)
-    - 1``. Contacts live at ``cid in [cid_base, cid_base +
-    num_contact_columns)``.
-
-    Friction resolution uses the per-shape materials table via
-    :func:`resolve_friction_in_kernel`, combining the two materials
-    under whichever ``friction_combine_mode`` is stricter. Callers
-    that don't wire the materials table (``materials`` size 0, or
-    ``shape_material[s]`` out-of-range) fall back to
-    ``default_friction`` unchanged -- pre-material scenes behave
-    identically.
+    Each thread owns output column ``tid``. Looks up its source pair
+    ``p`` via ``pair_source_idx`` and writes the header + range. The
+    contact range is ``[pair_first[p], pair_first[p] + pair_count[p])``
+    -- one column now covers an entire shape pair.
     """
     tid = wp.tid()
     if tid >= num_contact_columns[0]:
@@ -489,31 +437,15 @@ def _contact_pack_columns_kernel(
     cid = cid_base + tid
 
     p = pair_source_idx[tid]
-    col_in_pair = tid - pair_col_offset[p]
-    total_in_pair = pair_count[p]
-    start_contact = pair_first[p] + col_in_pair * CONTACT_MAX_SLOTS
+    count = pair_count[p]
+    first = pair_first[p]
 
-    # Number of active slots in *this* column. Full 6 for interior
-    # columns; the tail column gets what's left.
-    remaining = total_in_pair - col_in_pair * CONTACT_MAX_SLOTS
-    slot_count = remaining
-    if slot_count > CONTACT_MAX_SLOTS:
-        slot_count = CONTACT_MAX_SLOTS
-    active_mask = (wp.int32(1) << slot_count) - wp.int32(1)
-
-    # Resolve shape -> body once; both shapes within a pair map to
-    # the same two bodies for every contact in the pair by
-    # construction.
     sa = pair_shape_a[p]
     sb = pair_shape_b[p]
     b1 = shape_body[sa]
     b2 = shape_body[sb]
 
-    # Resolve the pair's effective static + kinetic friction.
-    # ``shape_material`` has size ``num_shapes``; if the caller passed
-    # an empty sentinel (size-1 array of -1) both coefficients fall
-    # back to ``default_friction`` so pre-material scenes behave
-    # identically to before the two-regime plumbing was added.
+    # Friction resolution via the per-shape materials table.
     mat_a = wp.int32(-1)
     mat_b = wp.int32(-1)
     if shape_material.shape[0] > sa:
@@ -527,16 +459,14 @@ def _contact_pack_columns_kernel(
         materials, mat_a, mat_b, default_friction
     )
 
-    # Header.
     write_int(constraints, CONSTRAINT_TYPE_OFFSET, cid, CONSTRAINT_TYPE_CONTACT)
     write_int(constraints, CONSTRAINT_BODY1_OFFSET, cid, b1)
     write_int(constraints, CONSTRAINT_BODY2_OFFSET, cid, b2)
 
-    # Contact-specific header bits.
     contact_set_friction(constraints, cid, mu_static)
     contact_set_friction_dynamic(constraints, cid, mu_dynamic)
-    contact_set_active_mask(constraints, cid, active_mask)
-    contact_set_contact_first(constraints, cid, start_contact)
+    contact_set_contact_first(constraints, cid, first)
+    contact_set_contact_count(constraints, cid, count)
 
 
 # ---------------------------------------------------------------------------
@@ -548,28 +478,17 @@ def _contact_pack_columns_kernel(
 def _build_tangent1_from_velocity(n: wp.vec3f, dv: wp.vec3f) -> wp.vec3f:
     """Build a unit tangent1 from the tangential relative velocity.
 
-    Mirrors PhoenX's ``RigidRigidContactManifoldFunctions::Initialize``
-    tangent frame: project the contact-point relative velocity onto the
-    contact plane and normalise. When there's no meaningful tangential
-    slide, fall back to a branch-free orthonormal seed (Duff et al.
-    2017) so the basis still varies smoothly with ``n``.
-
-    Aligning ``tangent1`` with the sliding direction means the friction
-    row pre-soaks the instantaneous direction impulses need to oppose
-    -- a fresh contact with tangential velocity immediately gets a
-    non-zero friction budget along the "right" axis instead of two
-    arbitrary orthogonal rows fighting each other for the first few
-    iterations.
+    PhoenX's ``RRContactManifoldFunctions::Initialize`` tangent frame:
+    project the contact-point relative velocity onto the contact plane
+    and normalise. When there's no meaningful tangential slide, fall
+    back to a branch-free orthonormal seed (Duff et al. 2017) so the
+    basis still varies smoothly with ``n``.
     """
     v_n = wp.dot(dv, n) * n
     v_t = dv - v_n
     len_sq = wp.dot(v_t, v_t)
     if len_sq > wp.float32(1.0e-12):
         return v_t / wp.sqrt(len_sq)
-    # No slide -- fall back to a smooth orthonormal seed. Same Duff
-    # 2017 construction used by ``_build_tangents``, repeated here
-    # because this func lives in a different module and we want zero
-    # cross-module dependency for this hot kernel.
     sign = wp.float32(1.0)
     if n[2] < wp.float32(0.0):
         sign = wp.float32(-1.0)
@@ -584,13 +503,11 @@ def _build_tangent1_from_velocity(n: wp.vec3f, dv: wp.vec3f) -> wp.vec3f:
 @wp.kernel(enable_backward=False)
 def _contact_warmstart_gather_kernel(
     pair_source_idx: wp.array[wp.int32],
-    pair_col_offset: wp.array[wp.int32],
     pair_first: wp.array[wp.int32],
     pair_count: wp.array[wp.int32],
     pair_shape_a: wp.array[wp.int32],
     pair_shape_b: wp.array[wp.int32],
     rigid_contact_match_index: wp.array[wp.int32],
-    prev_slot_of_contact: wp.array[wp.int32],
     prev_cid_of_contact: wp.array[wp.int32],
     num_contact_columns: wp.array[wp.int32],
     cid_base: wp.int32,
@@ -598,212 +515,185 @@ def _contact_warmstart_gather_kernel(
     contacts: ContactViews,
     cc: ContactContainer,
 ):
-    """Seed this frame's ``cc.*`` slots from the prev frame (PhoenX model).
+    """Seed this frame's ``cc`` slots from the prev frame (PhoenX model).
 
-    For each active slot of each current-frame contact column:
+    One thread per output column. For each contact ``k`` in the
+    column's range:
 
-    * ``k = pair_first[p] + col_in_pair * 6 + slot`` is the contact's
-      sorted-buffer index.
-    * ``prev_k = rigid_contact_match_index[k]`` is the index in the
-      *previous* frame's sorted buffer that the matcher paired us
-      with, or :data:`MATCH_NOT_FOUND` / :data:`MATCH_BROKEN` (both
-      ``< 0``).
-    * When the matcher found a valid previous slot, copy **every**
-      persistent field (``lambdas, normal, tangent1, local_p0,
-      local_p1``) across from ``cc.prev_*``. This gives the PGS a
-      fixed-frame warm-start: the contact's ``(n, t1, t2)`` basis is
-      the one the previous frame's solution was written in, so the
-      scalar impulses stay physically meaningful.
-    * When there's no match -- contact is new or the prev point was
-      already claimed -- do PhoenX's ``Initialize`` dance: pull
-      ``normal`` and body-local anchors from the upstream buffer,
-      derive ``tangent1`` from the tangential relative velocity at
-      contact, and zero the impulses.
+      * ``prev_k = rigid_contact_match_index[k]`` is the index in the
+        *previous* frame's sorted buffer that the matcher paired this
+        contact with, or :data:`MATCH_NOT_FOUND` / :data:`MATCH_BROKEN`
+        (``< 0``) for unmatched.
+      * When matched, copy every persistent field (``lambdas, normal,
+        tangent1, local_p0, local_p1``) across from ``cc.prev_*[prev_k]``.
+        This is the fixed-frame warm-start: the scalar impulses stay
+        physically meaningful because the ``(n, t1, t2)`` basis they
+        were written in is the same basis used to interpret them.
+      * When unmatched, run PhoenX's ``Initialize`` dance: pull
+        ``normal`` + body-local anchors from the upstream buffer,
+        derive ``tangent1`` from the tangential relative velocity,
+        and zero the impulses.
+
+    With the per-pair design, prev-frame data is keyed directly by
+    the contact's sorted-buffer index ``prev_k`` -- we only need a
+    ``prev_cid_of_contact`` gate to distinguish "prev contact was
+    covered by an active column" from "stale entry" and avoid reading
+    a prev slot that belonged to an already-overwritten frame.
     """
     tid = wp.tid()
     if tid >= num_contact_columns[0]:
         return
-    cid = cid_base + tid
+    _ = cid_base
 
     p = pair_source_idx[tid]
-    col_in_pair = tid - pair_col_offset[p]
-    total_in_pair = pair_count[p]
-    remaining = total_in_pair - col_in_pair * CONTACT_MAX_SLOTS
-    slot_count = remaining
-    if slot_count > CONTACT_MAX_SLOTS:
-        slot_count = CONTACT_MAX_SLOTS
-    start_contact = pair_first[p] + col_in_pair * CONTACT_MAX_SLOTS
+    count = pair_count[p]
+    start_contact = pair_first[p]
 
-    # Resolve this column's body pair once -- both bodies are shared by
-    # every slot in the column.
     sa = pair_shape_a[p]
     sb = pair_shape_b[p]
     b1 = contacts.shape_body[sa]
     b2 = contacts.shape_body[sb]
 
-    for s in range(CONTACT_MAX_SLOTS):
-        if s >= slot_count:
-            # Inactive slot -- zero everything so a stray read from
-            # the prepare/iterate kernels degrades into a no-op.
-            cc_set_normal_lambda(cc, s, cid, wp.float32(0.0))
-            cc_set_tangent1_lambda(cc, s, cid, wp.float32(0.0))
-            cc_set_tangent2_lambda(cc, s, cid, wp.float32(0.0))
-            cc_set_normal(cc, s, cid, wp.vec3f(0.0, 0.0, 0.0))
-            cc_set_tangent1(cc, s, cid, wp.vec3f(0.0, 0.0, 0.0))
-            cc_set_local_p0(cc, s, cid, wp.vec3f(0.0, 0.0, 0.0))
-            cc_set_local_p1(cc, s, cid, wp.vec3f(0.0, 0.0, 0.0))
-            continue
+    for i in range(count):
+        k = start_contact + i
 
-        k = start_contact + s
-
-        prev_slot = wp.int32(-1)
-        prev_cid = wp.int32(-1)
         prev_k = rigid_contact_match_index[k]
+        prev_valid = wp.int32(0)
         if prev_k >= 0:
-            prev_slot = prev_slot_of_contact[prev_k]
-            prev_cid = prev_cid_of_contact[prev_k]
+            if prev_cid_of_contact[prev_k] >= 0:
+                prev_valid = wp.int32(1)
 
-        # Precompute the fresh narrow-phase data; we'll either use it
-        # wholesale (new contact, or matched-but-worse-penetration) or
-        # replace a prev-frame frame that's grown stale.
         fresh_local_p0 = contacts.rigid_contact_point0[k]
         fresh_local_p1 = contacts.rigid_contact_point1[k]
         fresh_n = contacts.rigid_contact_normal[k]
 
-        fresh_r1 = wp.quat_rotate(bodies.orientation[b1], fresh_local_p0)
-        fresh_r2 = wp.quat_rotate(bodies.orientation[b2], fresh_local_p1)
+        # The narrow phase gives anchors in each body's *origin* frame
+        # but :attr:`BodyContainer.position` is the body *COM*; subtract
+        # ``body_com`` when building the world-space lever arm so
+        # asymmetric meshes (bunny, nut) don't appear shifted by
+        # ``|body_com|`` relative to where the narrow phase saw them.
+        body_com1 = bodies.body_com[b1]
+        body_com2 = bodies.body_com[b2]
+        fresh_r1 = wp.quat_rotate(bodies.orientation[b1], fresh_local_p0 - body_com1)
+        fresh_r2 = wp.quat_rotate(bodies.orientation[b2], fresh_local_p1 - body_com2)
 
-        if prev_slot >= 0 and prev_cid >= 0:
-            # Matched. Decide whether to carry the prev frame forward
-            # or overwrite it with the fresh narrow-phase geometry.
-            # PhoenX pattern: if the narrow phase now sees a deeper
-            # penetration than the contact's stored anchors imply, the
-            # contact's frozen geometry has grown stale and the fresh
-            # detection is a better reflection of the current physical
-            # contact -- swap it in. This prevents slowly-drifting
-            # stacks from locking onto a frame that no longer matches
-            # the real geometry, which otherwise manifests as
-            # accumulated lateral drift over long runs.
-            prev_n = cc_get_prev_normal(cc, prev_slot, prev_cid)
-            prev_lp0 = cc_get_prev_local_p0(cc, prev_slot, prev_cid)
-            prev_lp1 = cc_get_prev_local_p1(cc, prev_slot, prev_cid)
-            prev_r1 = wp.quat_rotate(bodies.orientation[b1], prev_lp0)
-            prev_r2 = wp.quat_rotate(bodies.orientation[b2], prev_lp1)
+        if prev_valid == wp.int32(1):
+            prev_n = cc_get_prev_normal(cc, prev_k)
+            prev_lp0 = cc_get_prev_local_p0(cc, prev_k)
+            prev_lp1 = cc_get_prev_local_p1(cc, prev_k)
+            prev_r1 = wp.quat_rotate(bodies.orientation[b1], prev_lp0 - body_com1)
+            prev_r2 = wp.quat_rotate(bodies.orientation[b2], prev_lp1 - body_com2)
             prev_p1_world = bodies.position[b1] + prev_r1
             prev_p2_world = bodies.position[b2] + prev_r2
-            # ``dot(p2 - p1, n)`` is positive when separated; the
-            # negation below makes ``penetration`` positive when
-            # bodies overlap (Phoenx's ``ComputeContactBias`` uses
-            # the same convention).
             prev_penetration = -wp.dot(prev_p2_world - prev_p1_world, prev_n)
 
             fresh_p1_world = bodies.position[b1] + fresh_r1
             fresh_p2_world = bodies.position[b2] + fresh_r2
-            fresh_penetration = -wp.dot(fresh_p2_world - fresh_p1_world, fresh_n)
+            fresh_penetration = -wp.dot(
+                fresh_p2_world - fresh_p1_world, fresh_n
+            )
 
             if fresh_penetration > prev_penetration:
-                # Overwrite: the fresh narrow-phase detection sees a
-                # deeper overlap than the stored frame can produce
-                # once the bodies have moved into their current pose.
-                # Carry the impulses forward for warm-start but rebuild
-                # normal / tangent / anchors.
-                dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
-                    bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
+                # Prev frame has grown stale -- overwrite anchors /
+                # normal / tangent but carry impulses forward.
+                dv = (
+                    bodies.velocity[b2]
+                    + wp.cross(bodies.angular_velocity[b2], fresh_r2)
+                ) - (
+                    bodies.velocity[b1]
+                    + wp.cross(bodies.angular_velocity[b1], fresh_r1)
                 )
                 fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
 
-                cc_set_normal_lambda(cc, s, cid, cc_get_prev_normal_lambda(cc, prev_slot, prev_cid))
-                cc_set_tangent1_lambda(cc, s, cid, cc_get_prev_tangent1_lambda(cc, prev_slot, prev_cid))
-                cc_set_tangent2_lambda(cc, s, cid, cc_get_prev_tangent2_lambda(cc, prev_slot, prev_cid))
-                cc_set_normal(cc, s, cid, fresh_n)
-                cc_set_tangent1(cc, s, cid, fresh_t1)
-                cc_set_local_p0(cc, s, cid, fresh_local_p0)
-                cc_set_local_p1(cc, s, cid, fresh_local_p1)
+                cc_set_normal_lambda(
+                    cc, k, cc_get_prev_normal_lambda(cc, prev_k)
+                )
+                cc_set_tangent1_lambda(
+                    cc, k, cc_get_prev_tangent1_lambda(cc, prev_k)
+                )
+                cc_set_tangent2_lambda(
+                    cc, k, cc_get_prev_tangent2_lambda(cc, prev_k)
+                )
+                cc_set_normal(cc, k, fresh_n)
+                cc_set_tangent1(cc, k, fresh_t1)
+                cc_set_local_p0(cc, k, fresh_local_p0)
+                cc_set_local_p1(cc, k, fresh_local_p1)
                 continue
 
-            # Matched and prev frame still describes the contact
-            # accurately -- carry the full PhoenX state forward.
-            cc_set_normal_lambda(cc, s, cid, cc_get_prev_normal_lambda(cc, prev_slot, prev_cid))
-            cc_set_tangent1_lambda(cc, s, cid, cc_get_prev_tangent1_lambda(cc, prev_slot, prev_cid))
-            cc_set_tangent2_lambda(cc, s, cid, cc_get_prev_tangent2_lambda(cc, prev_slot, prev_cid))
-            cc_set_normal(cc, s, cid, prev_n)
-            cc_set_tangent1(cc, s, cid, cc_get_prev_tangent1(cc, prev_slot, prev_cid))
-            cc_set_local_p0(cc, s, cid, prev_lp0)
-            cc_set_local_p1(cc, s, cid, prev_lp1)
+            # Prev frame still describes the contact accurately --
+            # carry the full PhoenX state forward.
+            cc_set_normal_lambda(
+                cc, k, cc_get_prev_normal_lambda(cc, prev_k)
+            )
+            cc_set_tangent1_lambda(
+                cc, k, cc_get_prev_tangent1_lambda(cc, prev_k)
+            )
+            cc_set_tangent2_lambda(
+                cc, k, cc_get_prev_tangent2_lambda(cc, prev_k)
+            )
+            cc_set_normal(cc, k, prev_n)
+            cc_set_tangent1(cc, k, cc_get_prev_tangent1(cc, prev_k))
+            cc_set_local_p0(cc, k, prev_lp0)
+            cc_set_local_p1(cc, k, prev_lp1)
             continue
 
-        # New contact -- initialize PhoenX-style from the upstream
-        # narrow-phase output. Body-local anchors map straight from
-        # Newton's per-contact point arrays (both are already in body-
-        # origin frame); the normal is world-frame; ``tangent1`` gets
-        # anchored to the sliding direction.
-        dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
-            bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
+        # New contact -- PhoenX ``Initialize``.
+        dv = (
+            bodies.velocity[b2]
+            + wp.cross(bodies.angular_velocity[b2], fresh_r2)
+        ) - (
+            bodies.velocity[b1]
+            + wp.cross(bodies.angular_velocity[b1], fresh_r1)
         )
         t1 = _build_tangent1_from_velocity(fresh_n, dv)
 
-        cc_set_normal_lambda(cc, s, cid, wp.float32(0.0))
-        cc_set_tangent1_lambda(cc, s, cid, wp.float32(0.0))
-        cc_set_tangent2_lambda(cc, s, cid, wp.float32(0.0))
-        cc_set_normal(cc, s, cid, fresh_n)
-        cc_set_tangent1(cc, s, cid, t1)
-        cc_set_local_p0(cc, s, cid, fresh_local_p0)
-        cc_set_local_p1(cc, s, cid, fresh_local_p1)
+        cc_set_normal_lambda(cc, k, wp.float32(0.0))
+        cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+        cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+        cc_set_normal(cc, k, fresh_n)
+        cc_set_tangent1(cc, k, t1)
+        cc_set_local_p0(cc, k, fresh_local_p0)
+        cc_set_local_p1(cc, k, fresh_local_p1)
 
 
 @wp.kernel(enable_backward=False)
 def _reset_forward_map_kernel(
     # out
-    slot_of_contact: wp.array[wp.int32],
     cid_of_contact: wp.array[wp.int32],
 ):
-    """Clear the forward map to ``-1`` before every stamp pass.
-
-    Separate tiny kernel so the caller doesn't need a graph-
-    breaking ``fill_`` between steps.
-    """
+    """Clear the forward map to ``-1`` before every stamp pass."""
     tid = wp.tid()
-    slot_of_contact[tid] = wp.int32(-1)
     cid_of_contact[tid] = wp.int32(-1)
 
 
 @wp.kernel(enable_backward=False)
-def _stamp_slot_cid_of_contact_kernel(
+def _stamp_cid_of_contact_kernel(
     pair_source_idx: wp.array[wp.int32],
-    pair_col_offset: wp.array[wp.int32],
     pair_first: wp.array[wp.int32],
     pair_count: wp.array[wp.int32],
     num_contact_columns: wp.array[wp.int32],
     cid_base: wp.int32,
     # out
-    slot_of_contact: wp.array[wp.int32],
     cid_of_contact: wp.array[wp.int32],
 ):
-    """For each contact in this frame's sorted buffer, stamp ``(slot, cid)``.
+    """For each contact ``k`` in this frame's sorted buffer, stamp ``cid``.
 
-    This is the "forward" map the *next* frame will consult when it
-    swaps ``(slot_of_contact, cid_of_contact)`` into the "prev" role
-    and looks up its own ``rigid_contact_match_index[k] = prev_k``.
-    Written during ingest once the column layout is known.
-
-    Entries not covered by any column keep the ``-1`` written by
-    :func:`_reset_forward_map_kernel`.
+    The "forward" map the *next* frame consults when it swaps
+    ``cid_of_contact`` into the "prev" role and looks up its own
+    ``rigid_contact_match_index[k] = prev_k``. Written during ingest
+    once the column layout is known. Per-pair design: no ``slot`` to
+    stamp -- the next frame's gather indexes prev state directly by
+    the contact index ``k``.
     """
     tid = wp.tid()
     if tid >= num_contact_columns[0]:
         return
     p = pair_source_idx[tid]
-    col_in_pair = tid - pair_col_offset[p]
-    total_in_pair = pair_count[p]
-    remaining = total_in_pair - col_in_pair * CONTACT_MAX_SLOTS
-    slot_count = remaining
-    if slot_count > CONTACT_MAX_SLOTS:
-        slot_count = CONTACT_MAX_SLOTS
-    start_contact = pair_first[p] + col_in_pair * CONTACT_MAX_SLOTS
+    count = pair_count[p]
+    start_contact = pair_first[p]
     cid = cid_base + tid
-    for s in range(slot_count):
-        slot_of_contact[start_contact + s] = s
-        cid_of_contact[start_contact + s] = cid
+    for i in range(count):
+        cid_of_contact[start_contact + i] = cid
 
 
 # ---------------------------------------------------------------------------
@@ -831,62 +721,35 @@ def ingest_contacts(
     """Materialise contact columns for one step.
 
     Graph-capture safe: no host readbacks, all kernel launches have
-    sizes known at host time (``rigid_contact_max`` /
-    ``max_contact_columns``), and all step-varying counts are
-    kept on-device in :attr:`IngestScratch.num_pairs` /
+    sizes known at host time, and all step-varying counts are kept
+    on-device in :attr:`IngestScratch.num_pairs` /
     :attr:`IngestScratch.num_contact_columns`.
 
-    After the call, ``scratch.num_contact_columns[0]`` holds the
-    number of columns emitted; the caller reads this *outside* the
-    captured region (e.g. right before the next step) to resize
-    the partitioner's active length.
-
     Args:
-        contacts: Newton :class:`Contacts` buffer. Must have been
-            built with a non-disabled ``contact_matching`` mode
-            (``"sticky"`` recommended for stable stacking).
+        contacts: Newton :class:`Contacts` buffer. Must have been built
+            with a non-disabled ``contact_matching`` mode.
         shape_body: ``model.shape_body`` array.
-        num_shapes: Total shape count in the owning Newton model;
-            only used to pack the (shape_a, shape_b) key into int32.
+        num_shapes: Total shape count; used to pack the ``(shape_a,
+            shape_b)`` key into int32.
         constraints: Shared constraint storage. Contact columns are
             written at ``cid in [cid_base, cid_base +
             num_contact_columns)``.
         scratch: Reusable per-step scratch.
-        cid_base: First cid in the container reserved for contacts.
-        max_contact_columns: Hard cap on the number of contact
-            columns this step can emit. Excess contacts are
-            silently dropped by the final clamp.
-        default_friction: Fallback friction coefficient when no
-            material table is provided (or a shape's material index
-            is out of range). Wired into every contact column's
-            header when ``materials`` is ``None`` / empty or when
-            either shape in a pair doesn't have a valid material
-            assignment.
+        cid_base: First cid reserved for contacts.
+        max_contact_columns: Hard cap on the number of contact columns
+            this step can emit. The cap is now the number of distinct
+            shape pairs rather than ``ceil(contact_count / 6)``, so
+            it sizes much more tightly than the old design.
+        default_friction: Fallback friction coefficient.
         device: Warp device for the launches.
-        num_bodies: Total body count in the owning :class:`World`.
-            Used to pack the ``(min_body, max_body)`` pair into an
-            int64 key for the body-pair filter lookup.
+        num_bodies: Total body count. Used to pack the
+            ``(min_body, max_body)`` pair into an int64 key for the
+            body-pair filter.
         filter_keys: Sorted ``wp.int64`` array of packed canonical
-            body-pair keys to ignore. May carry a trailing sentinel;
-            only the first ``filter_count`` entries are searched. The
-            array must always be non-null (size-1 sentinel array when
-            no filters are registered) to satisfy the kernel binding.
-        filter_count: Number of valid entries at the start of
-            ``filter_keys``. ``0`` short-circuits the filter and
-            matches the legacy (no-filter) behaviour exactly.
-        shape_material: Optional ``wp.array[int32]`` of shape
-            ``(num_shapes,)`` giving each shape's material index
-            into ``materials``. ``None`` or any out-of-range index
-            falls back to ``default_friction`` for that pair. A
-            size-1 sentinel array ``[-1]`` is also accepted so
-            graph-captured callers can hand a valid pointer when
-            no materials are configured.
-        shape_material: See ``shape_material``.
-        materials: Optional ``wp.array[MaterialData]`` material
-            table (see :mod:`newton._src.solvers.jitter.materials`).
-            Empty or ``None`` means "use ``default_friction``
-            everywhere". Entry 0 is conventionally the default
-            material and is what unassigned shapes resolve to.
+            body-pair keys to ignore.
+        filter_count: Number of valid entries in ``filter_keys``.
+        shape_material: Optional per-shape material index.
+        materials: Optional material table.
     """
     rigid_contact_max = int(contacts.rigid_contact_max)
 
@@ -904,9 +767,7 @@ def ingest_contacts(
         device=device,
     )
 
-    # Step 2: graph-capture-safe RLE. Writes run_values into
-    # scratch.run_values, run_lengths into scratch.pair_count, and
-    # total run count into scratch.num_pairs.
+    # Step 2: RLE.
     runlength_encode_variable_length(
         values=scratch.keys,
         active_length=contacts.rigid_contact_count,
@@ -916,8 +777,8 @@ def ingest_contacts(
         sentinel=RLE_SENTINEL_INT32,
     )
 
-    # Step 3a: unpack run_values -> pair_{shape_a, shape_b},
-    # clear pair_columns tail.
+    # Step 3a: unpack run_values -> pair_{shape_a, shape_b}, clear
+    # pair_columns tail.
     wp.launch(
         kernel=_pair_metadata_kernel,
         dim=rigid_contact_max,
@@ -926,10 +787,8 @@ def ingest_contacts(
         device=device,
     )
 
-    # Step 3b: pair_columns[p] = ceil(pair_count[p] / 6), or 0 for
-    # pairs that the body-pair collision filter excludes. Filtered
-    # pairs take zero output columns so the downstream scan + pack
-    # never touches them.
+    # Step 3b: pair_columns[p] = 1 for non-filtered pairs with
+    # pair_count > 0, else 0.
     if filter_keys is None:
         raise ValueError(
             "ingest_contacts: filter_keys must be non-None (use a size-1 "
@@ -937,7 +796,7 @@ def ingest_contacts(
             "signature has no null-pointer path)."
         )
     wp.launch(
-        kernel=_pair_columns_from_count_kernel,
+        kernel=_pair_columns_binary_kernel,
         dim=rigid_contact_max,
         inputs=[
             scratch.pair_count,
@@ -993,11 +852,7 @@ def ingest_contacts(
         device=device,
     )
 
-    # Step 5: write the contact column headers + ranges. Launches
-    # at max_contact_columns and gates internally on
-    # num_contact_columns[0]. The materials / shape_material
-    # sentinels keep the kernel signature constant across scenes
-    # that do / don't wire the material system.
+    # Step 5: write the contact column headers + ranges.
     if shape_material is None:
         shape_material = wp.array([-1], dtype=wp.int32, device=device)
     if materials is None:
@@ -1008,7 +863,6 @@ def ingest_contacts(
         dim=max(1, max_contact_columns),
         inputs=[
             scratch.pair_source_idx,
-            scratch.pair_col_offset,
             scratch.pair_first,
             scratch.pair_count,
             scratch.pair_shape_a,
@@ -1024,59 +878,39 @@ def ingest_contacts(
         device=device,
     )
 
-    # NOTE: the MPR/GJK/SDF narrow phase can emit duplicate
-    # manifold points within sub-mm distance of each other (~79%
-    # of contact pairs on the m20 nut-bolt SDF scene in a
-    # diagnostic scan). Duplicates double up each point's normal
-    # impulse and friction budget, distorting physics. A naive
-    # dedup pass (clear active_mask bits whose anchor points are
-    # within 0.1 mm of an earlier slot) regressed the 20-cube
-    # stack from 7 cm to 1.76 m slip even though the host-side
-    # diagnostic reported zero duplicates at that threshold for
-    # the stack scene -- root cause uncertain (likely a subtle
-    # warm-start / effective-mass interaction when a PGS-active
-    # slot gets turned off mid-column). A proper fix probably
-    # belongs in Newton's narrow phase rather than our ingest,
-    # and is deferred.
-
 
 def stamp_forward_contact_map(
     rigid_contact_max: int,
     cid_base: int,
     scratch: IngestScratch,
-    slot_of_contact: wp.array,
     cid_of_contact: wp.array,
     device: wp.DeviceLike = None,
 ) -> None:
-    """Fill the forward (sorted-index -> (slot, cid)) lookup.
+    """Fill the forward (sorted-index -> cid) lookup.
 
-    Called after :func:`ingest_contacts`; the two output arrays are
-    consumed by the *next* step's warm-start gather as the "prev"
-    side of the match map. Graph-capture safe: resets the entire
-    map (size ``rigid_contact_max``) on every call, then stamps
-    active slots gated on ``scratch.num_contact_columns[0]``.
+    Called after :func:`ingest_contacts`; the output array is consumed
+    by the *next* step's warm-start gather as the "prev" side of the
+    match map. Per-pair design: one lookup per contact ``k``; no slot
+    because prev state is indexed by ``k`` directly.
     """
-    # Reset the full table to -1.
     wp.launch(
         kernel=_reset_forward_map_kernel,
         dim=rigid_contact_max,
         inputs=[],
-        outputs=[slot_of_contact, cid_of_contact],
+        outputs=[cid_of_contact],
         device=device,
     )
-    # Stamp the active slots.
     wp.launch(
-        kernel=_stamp_slot_cid_of_contact_kernel,
+        kernel=_stamp_cid_of_contact_kernel,
         dim=max(1, scratch.max_contact_columns),
         inputs=[
             scratch.pair_source_idx,
-            scratch.pair_col_offset,
             scratch.pair_first,
             scratch.pair_count,
             scratch.num_contact_columns,
             int(cid_base),
         ],
-        outputs=[slot_of_contact, cid_of_contact],
+        outputs=[cid_of_contact],
         device=device,
     )
 
@@ -1085,36 +919,29 @@ def gather_contact_warmstart(
     cid_base: int,
     scratch: IngestScratch,
     rigid_contact_match_index: wp.array,
-    prev_slot_of_contact: wp.array,
     prev_cid_of_contact: wp.array,
     bodies: BodyContainer,
     contacts: ContactViews,
     cc: ContactContainer,
     device: wp.DeviceLike = None,
 ) -> None:
-    """Copy prev-frame state into ``cc`` for matched slots; initialise
-    PhoenX-style for unmatched slots.
+    """Copy prev-frame state into ``cc`` for matched contacts; initialise
+    PhoenX-style for unmatched contacts.
 
     Called after the pointer-swap (``cc.prev_lambdas`` now holds last
     step's persistent state; ``cc.lambdas`` is scratch) but before
-    :func:`contact_prepare_for_iteration_at`. The kernel handles both
-    the warm-start carry and the "new contact" initialise pass in one
-    launch so the full per-slot frame
-    (``lam_n, lam_t1, lam_t2, normal, tangent1, local_p0, local_p1``)
-    is populated before the first prepare sees the column.
+    :func:`contact_prepare_for_iteration_at`.
     """
     wp.launch(
         kernel=_contact_warmstart_gather_kernel,
         dim=max(1, scratch.max_contact_columns),
         inputs=[
             scratch.pair_source_idx,
-            scratch.pair_col_offset,
             scratch.pair_first,
             scratch.pair_count,
             scratch.pair_shape_a,
             scratch.pair_shape_b,
             rigid_contact_match_index,
-            prev_slot_of_contact,
             prev_cid_of_contact,
             scratch.num_contact_columns,
             int(cid_base),

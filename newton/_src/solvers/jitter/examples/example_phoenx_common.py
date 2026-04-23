@@ -106,6 +106,7 @@ def init_phoenx_bodies_kernel(
     inverse_inertia: wp.array[wp.mat33f],
     inverse_inertia_world: wp.array[wp.mat33f],
     motion_type: wp.array[wp.int32],
+    body_com_out: wp.array[wp.vec3],
 ):
     """Copy a finalised Newton model's body state into PhoenX layout.
 
@@ -115,17 +116,27 @@ def init_phoenx_bodies_kernel(
     zero-inverse-mass bodies stay :data:`MOTION_STATIC`.
     ``inverse_inertia_world`` is seeded with ``R * I * R^T`` so the
     first substep's effective-mass computation starts correct.
+
+    ``body_com_out`` is Newton's per-body origin-to-COM offset copied
+    into the PhoenX body container at slot ``i + 1``. The contact
+    kernels need this to resolve body-origin-relative anchors
+    (Newton's narrow-phase convention) against the COM-relative
+    lever arm the solver operates on. Without it, asymmetric meshes
+    (bunny, nut, etc.) appear to sink into contact surfaces by
+    ``|body_com|`` because the stored anchor is off by that offset.
     """
     i = wp.tid()
     dst = i + 1
     q = body_q[i]
     pos_body = wp.transform_get_translation(q)
     rot = wp.transform_get_rotation(q)
-    position[dst] = pos_body + wp.quat_rotate(rot, body_com[i])
+    com_local = body_com[i]
+    position[dst] = pos_body + wp.quat_rotate(rot, com_local)
     orientation[dst] = rot
     qd = body_qd[i]
     velocity[dst] = wp.vec3f(qd[0], qd[1], qd[2])
     angular_velocity[dst] = wp.vec3f(qd[3], qd[4], qd[5])
+    body_com_out[dst] = com_local
 
     inv_m = body_inv_mass[i]
     inv_I = body_inv_inertia[i]

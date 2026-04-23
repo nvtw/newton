@@ -1,60 +1,51 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Persistent warm-start state for contact constraints.
+"""Persistent + per-substep state for contact constraints.
 
-The Jitter solver packs contact geometry into the shared
-:class:`newton._src.solvers.jitter.constraints.constraint_container.ConstraintContainer`
-as :data:`CONSTRAINT_TYPE_CONTACT` columns. Each column represents one
-``(shape_a, shape_b)`` shape-pair slice of up to six contacts from the
-upstream Newton :class:`newton._src.sim.contacts.Contacts` buffer. The
-column stores only *per-substep derived* quantities (lever arms,
-effective masses, bias); everything persistent across frames lives in
-this module's :class:`ContactContainer`.
+Every contact in the upstream Newton :class:`Contacts` buffer is addressed
+by its sorted-buffer index ``k``. A :data:`CONSTRAINT_TYPE_CONTACT` column
+in the shared :class:`ConstraintContainer` represents one whole
+``(shape_a, shape_b)`` shape-pair and stores the range
+``[contact_first, contact_first + contact_count)`` into that buffer; the
+solver kernels then loop over the range serially (Gauss-Seidel within a
+pair), reading / writing all per-contact state through the ``k``-indexed
+buffers in this module.
 
-Persistent state (PhoenX's rigid-rigid contact model):
+Two flavours of per-contact state live here:
 
-* ``lam_n`` / ``lam_t1`` / ``lam_t2`` -- the accumulated normal and
-  tangential impulses. Warm-started into the next step's PGS so the
-  solver starts from a converged guess.
-* ``normal`` -- the world-frame contact normal. Fixed for the lifetime
-  of the contact; Newton's narrow phase recomputes a fresh normal every
-  frame but we only honour the fresh value for *new* contacts. Matched
-  contacts keep their original normal so the ``(n, t1, t2)`` frame
-  they accumulated their impulses against stays meaningful.
-* ``tangent1`` -- world-frame tangent, computed from the tangential
-  relative velocity at contact creation (PhoenX's
-  ``RRContactManifoldFunctions::Initialize``). ``tangent2`` is derived
-  at use as ``cross(tangent1, normal)``.
-* ``local_p0`` / ``local_p1`` -- body-1 / body-2 frame anchor points.
-  Rotated by the current body orientation every substep to produce the
-  world-frame lever arms ``r1`` / ``r2``.
+* :attr:`ContactContainer.lambdas` -- persistent PhoenX state
+  (accumulated normal + tangent impulses, the contact's frozen
+  ``(normal, tangent1)`` frame, the body-local anchors ``local_p0`` /
+  ``local_p1``). Double-buffered against :attr:`prev_lambdas` so the
+  warm-start gather can read last step's finished state while the new
+  step scribbles its own.
+* :attr:`ContactContainer.derived` -- per-substep derived quantities
+  (world-frame lever arms ``r1`` / ``r2``, scalar effective masses,
+  velocity bias terms). Rebuilt every ``prepare_for_iteration`` from
+  the persistent state + the current body pose, then consumed by
+  iterate and position-iterate sweeps. Not double-buffered.
 
-Two reasons this state is split out of the :class:`ConstraintContainer`
-column instead of packed inline:
+Two storage buffers beat one fused buffer because the persistent state
+needs the pointer-swap trick for warm-start double-buffering, while the
+derived buffer is pure scratch and swapping it would be wasted motion.
+Both share the same ``[dword, k]`` 2D layout (``k`` on the inner,
+contiguous axis) so a warp of threads walking adjacent contacts issues
+one coalesced transaction per field load.
 
-1. Double-buffering. Warm-start needs both the previous step's finished
-   state and a place to write this step's new state. Pointer-swapping
-   the two dword-packed ``wp.array2d`` references in
-   :func:`contact_container_swap_prev_current` is far cheaper than
-   shuffling dwords inside a packed column.
-2. Column stability. Ingest fully rewrites every contact column each
-   step (cids may even change when pairs appear / disappear). If the
-   persistent state lived inside the column it'd be clobbered before
-   the warm-start gather could read it; a parallel buffer lets the
-   gather read the (now swapped-in) *prev* buffer freely while ingest
-   scribbles the new geometry.
+Per-contact dword budgets:
 
-Storage mirrors :class:`ConstraintContainer`'s dword-packed column-major
-layout: a single ``wp.array2d[wp.float32]`` of shape
-``(CC_DWORDS, num_cols)`` with ``cid`` on the inner (contiguous) axis.
-Per slot we pack 15 dwords (``3 lambdas + normal(3) + tangent1(3) +
-local_p0(3) + local_p1(3)``), tiled 6 times for the 6 slots → 90 dwords
-per column. A warp full of threads walking the same slot field across
-consecutive cids issues one 128-byte transaction per load.
-``MAX_SLOTS = 6`` is the "up to 6 contacts per convex-convex pair"
-limit from Newton's narrow phase; pairs that report more contacts are
-split across multiple columns at ingest time (see
-:mod:`constraint_contact`).
+* :data:`CC_DWORDS_PER_CONTACT` = 15 -- ``lam_n, lam_t1, lam_t2,
+  normal(3), tangent1(3), local_p0(3), local_p1(3)``.
+* :data:`CC_DERIVED_DWORDS_PER_CONTACT` = 12 -- ``r1(3), r2(3),
+  eff_n, eff_t1, eff_t2, bias, bias_t1, bias_t2``.
+
+Previous 6-slot-per-column layout (``MAX_SLOTS = 6``) was retired in
+favour of the variable-size per-pair scheme -- the old design split
+dense SDF manifolds across multiple adjacent columns, forcing the graph
+colourer to separate them into different colours and replacing the
+intra-pair Gauss-Seidel sweep with an inter-colour serial pass; the
+per-contact scheme eliminates both the artificial split and the
+coloring churn.
 """
 
 from __future__ import annotations
@@ -62,11 +53,16 @@ from __future__ import annotations
 import warp as wp
 
 __all__ = [
-    "CC_DWORDS",
-    "CC_DWORDS_PER_SLOT",
-    "CC_LAMBDA_DWORDS_PER_SLOT",
-    "MAX_SLOTS",
+    "CC_DERIVED_DWORDS_PER_CONTACT",
+    "CC_DWORDS_PER_CONTACT",
+    "CC_LAMBDA_DWORDS_PER_CONTACT",
     "ContactContainer",
+    "cc_get_bias",
+    "cc_get_bias_t1",
+    "cc_get_bias_t2",
+    "cc_get_eff_n",
+    "cc_get_eff_t1",
+    "cc_get_eff_t2",
     "cc_get_local_p0",
     "cc_get_local_p1",
     "cc_get_normal",
@@ -78,13 +74,23 @@ __all__ = [
     "cc_get_prev_tangent1",
     "cc_get_prev_tangent1_lambda",
     "cc_get_prev_tangent2_lambda",
+    "cc_get_r1",
+    "cc_get_r2",
     "cc_get_tangent1",
     "cc_get_tangent1_lambda",
     "cc_get_tangent2_lambda",
+    "cc_set_bias",
+    "cc_set_bias_t1",
+    "cc_set_bias_t2",
+    "cc_set_eff_n",
+    "cc_set_eff_t1",
+    "cc_set_eff_t2",
     "cc_set_local_p0",
     "cc_set_local_p1",
     "cc_set_normal",
     "cc_set_normal_lambda",
+    "cc_set_r1",
+    "cc_set_r2",
     "cc_set_tangent1",
     "cc_set_tangent1_lambda",
     "cc_set_tangent2_lambda",
@@ -93,33 +99,21 @@ __all__ = [
 ]
 
 
-#: Maximum number of contact slots per contact column. Matches Newton's
-#: narrow-phase convex-convex upper bound; also the width of
-#: ``active_mask`` in :class:`ContactConstraintData`. Keep in sync with
-#: the schema in :mod:`constraint_contact`.
-MAX_SLOTS: int = 6
+#: Dwords of persistent impulse per contact: normal + two tangent lambdas.
+CC_LAMBDA_DWORDS_PER_CONTACT: int = 3
 
-#: Dwords of persistent impulse per contact slot: ``(normal_lambda,
-#: tangent1_lambda, tangent2_lambda)``. Kept separate from the full
-#: per-slot width so ingest zero-fill loops can mention "the impulse
-#: triple" without magic numbers.
-CC_LAMBDA_DWORDS_PER_SLOT: int = 3
+#: Total persistent dwords per contact: ``lam_n, lam_t1, lam_t2`` +
+#: ``normal(3)`` + ``tangent1(3)`` + ``local_p0(3)`` + ``local_p1(3)``.
+#: Mirrors PhoenX's rigid-rigid contact per-point footprint.
+CC_DWORDS_PER_CONTACT: int = 15
 
-#: Total persistent dwords per contact slot:
-#: ``lam_n, lam_t1, lam_t2`` + ``normal(3)`` + ``tangent1(3)``
-#: + ``local_p0(3)`` + ``local_p1(3)`` = 15. Matches PhoenX's
-#: rigid-rigid contact per-point footprint.
-CC_DWORDS_PER_SLOT: int = 15
-
-#: Total dwords of persistent state per contact column.
-#: ``CC_DWORDS_PER_SLOT * MAX_SLOTS = 90`` with the current fixed-width
-#: 6-slot layout.
-CC_DWORDS: int = CC_DWORDS_PER_SLOT * MAX_SLOTS
+#: Per-contact derived dwords filled by ``prepare_for_iteration``:
+#: ``r1(3), r2(3), eff_n, eff_t1, eff_t2, bias, bias_t1, bias_t2``.
+CC_DERIVED_DWORDS_PER_CONTACT: int = 12
 
 
-# Module-level constants for warp kernels. ``wp.constant`` so they
-# embed as compile-time literals in the emitted PTX.
-_CC_DWORDS_PER_SLOT = wp.constant(CC_DWORDS_PER_SLOT)
+# Module-level constants for Warp kernels. ``wp.constant`` so they embed
+# as compile-time literals in the emitted PTX.
 _CC_OFF_NORMAL_LAMBDA = wp.constant(0)
 _CC_OFF_TANGENT1_LAMBDA = wp.constant(1)
 _CC_OFF_TANGENT2_LAMBDA = wp.constant(2)
@@ -136,249 +130,342 @@ _CC_OFF_LOCAL_P1_X = wp.constant(12)
 _CC_OFF_LOCAL_P1_Y = wp.constant(13)
 _CC_OFF_LOCAL_P1_Z = wp.constant(14)
 
+_CC_OFF_R1_X = wp.constant(0)
+_CC_OFF_R1_Y = wp.constant(1)
+_CC_OFF_R1_Z = wp.constant(2)
+_CC_OFF_R2_X = wp.constant(3)
+_CC_OFF_R2_Y = wp.constant(4)
+_CC_OFF_R2_Z = wp.constant(5)
+_CC_OFF_EFF_N = wp.constant(6)
+_CC_OFF_EFF_T1 = wp.constant(7)
+_CC_OFF_EFF_T2 = wp.constant(8)
+_CC_OFF_BIAS = wp.constant(9)
+_CC_OFF_BIAS_T1 = wp.constant(10)
+_CC_OFF_BIAS_T2 = wp.constant(11)
+
 
 @wp.struct
 class ContactContainer:
-    """Persistent per-contact warm-start state.
+    """Per-contact warm-start + derived state.
 
-    Stores two dword-packed buffers, :attr:`lambdas` (the "current"
-    step's accumulating impulses) and :attr:`prev_lambdas` (the
-    previous step's finished impulses read by the warm-start gather).
-    Both have shape ``(CC_DWORDS, num_contact_columns)`` with ``cid``
-    on the inner (contiguous) axis. Access via the
-    ``cc_{get,set}_{normal,tangent1,tangent2}_lambda`` helpers -- the
-    dword offset for slot ``s`` is ``s * CC_LAMBDA_DWORDS_PER_SLOT +
-    {0, 1, 2}``.
-
-    Inactive slots keep their zero-init values so any stray read from
-    an unused slot degrades into a no-op warm-start impulse of zero.
-
-    Double-buffering: :func:`contact_container_swap_prev_current` is
-    called once at the very top of :meth:`World.step`, after which
-    :attr:`prev_lambdas` holds last step's finished impulses (fed into
-    the warm-start gather) and :attr:`lambdas` is the scratch buffer
-    the gather then seeds and the iterate kernel fills in.
+    All three buffers have shape ``(dwords, rigid_contact_max)`` with
+    the contact index ``k`` on the inner (contiguous) axis. ``k`` is the
+    same index Newton's :class:`Contacts` buffer uses for its per-contact
+    arrays (``rigid_contact_point0[k]`` etc.) so the solver kernels and
+    the narrow phase speak the same coordinates.
     """
 
-    #: Dword-packed current-step impulses. Shape ``(CC_DWORDS,
-    #: num_cols)``; dword ``s * 3 + {0, 1, 2}`` of column ``cid`` holds
-    #: the normal / tangent1 / tangent2 lambda for slot ``s``.
+    #: Persistent dword-packed current-step state. Fields packed in the
+    #: order ``lam_n, lam_t1, lam_t2, normal.xyz, tangent1.xyz,
+    #: local_p0.xyz, local_p1.xyz``. Shape
+    #: ``(CC_DWORDS_PER_CONTACT, rigid_contact_max)``.
     lambdas: wp.array2d[wp.float32]
-    #: Dword-packed previous-step impulses, same layout as
-    #: :attr:`lambdas`. Read by the warm-start gather kernel; swapped
-    #: with :attr:`lambdas` each step.
+    #: Persistent dword-packed previous-step state. Same layout as
+    #: :attr:`lambdas`; swapped once per :meth:`step` so the warm-start
+    #: gather can read last frame's impulses/frame while ingest
+    #: scribbles the new step's state.
     prev_lambdas: wp.array2d[wp.float32]
+    #: Per-substep derived scratch. Fields packed in the order
+    #: ``r1.xyz, r2.xyz, eff_n, eff_t1, eff_t2, bias, bias_t1,
+    #: bias_t2``. Not double-buffered -- ``prepare_for_iteration``
+    #: fills every field before ``iterate`` reads it.
+    derived: wp.array2d[wp.float32]
 
 
 # ---------------------------------------------------------------------------
-# Accessors
+# Persistent (lambdas) accessors -- keyed by contact index k.
 # ---------------------------------------------------------------------------
-#
-# Slot ``s`` occupies dwords ``[s * 15, s * 15 + 15)`` of a column, laid
-# out as ``[lam_n, lam_t1, lam_t2, n.xyz, t1.xyz, lp0.xyz, lp1.xyz]``.
-# ``cid`` on the inner axis for coalesced access across a warp.
-
-
-# ---- Impulses (current) ----
 
 
 @wp.func
-def cc_get_normal_lambda(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.float32:
-    return cc.lambdas[slot * _CC_DWORDS_PER_SLOT + _CC_OFF_NORMAL_LAMBDA, cid]
+def cc_get_normal_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.lambdas[_CC_OFF_NORMAL_LAMBDA, k]
 
 
 @wp.func
-def cc_set_normal_lambda(cc: ContactContainer, slot: wp.int32, cid: wp.int32, v: wp.float32):
-    cc.lambdas[slot * _CC_DWORDS_PER_SLOT + _CC_OFF_NORMAL_LAMBDA, cid] = v
+def cc_set_normal_lambda(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.lambdas[_CC_OFF_NORMAL_LAMBDA, k] = v
 
 
 @wp.func
-def cc_get_tangent1_lambda(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.float32:
-    return cc.lambdas[slot * _CC_DWORDS_PER_SLOT + _CC_OFF_TANGENT1_LAMBDA, cid]
+def cc_get_tangent1_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.lambdas[_CC_OFF_TANGENT1_LAMBDA, k]
 
 
 @wp.func
-def cc_set_tangent1_lambda(cc: ContactContainer, slot: wp.int32, cid: wp.int32, v: wp.float32):
-    cc.lambdas[slot * _CC_DWORDS_PER_SLOT + _CC_OFF_TANGENT1_LAMBDA, cid] = v
+def cc_set_tangent1_lambda(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.lambdas[_CC_OFF_TANGENT1_LAMBDA, k] = v
 
 
 @wp.func
-def cc_get_tangent2_lambda(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.float32:
-    return cc.lambdas[slot * _CC_DWORDS_PER_SLOT + _CC_OFF_TANGENT2_LAMBDA, cid]
+def cc_get_tangent2_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.lambdas[_CC_OFF_TANGENT2_LAMBDA, k]
 
 
 @wp.func
-def cc_set_tangent2_lambda(cc: ContactContainer, slot: wp.int32, cid: wp.int32, v: wp.float32):
-    cc.lambdas[slot * _CC_DWORDS_PER_SLOT + _CC_OFF_TANGENT2_LAMBDA, cid] = v
-
-
-# ---- Impulses (prev) ----
+def cc_set_tangent2_lambda(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.lambdas[_CC_OFF_TANGENT2_LAMBDA, k] = v
 
 
 @wp.func
-def cc_get_prev_normal_lambda(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.float32:
-    return cc.prev_lambdas[slot * _CC_DWORDS_PER_SLOT + _CC_OFF_NORMAL_LAMBDA, cid]
-
-
-@wp.func
-def cc_get_prev_tangent1_lambda(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.float32:
-    return cc.prev_lambdas[slot * _CC_DWORDS_PER_SLOT + _CC_OFF_TANGENT1_LAMBDA, cid]
-
-
-@wp.func
-def cc_get_prev_tangent2_lambda(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.float32:
-    return cc.prev_lambdas[slot * _CC_DWORDS_PER_SLOT + _CC_OFF_TANGENT2_LAMBDA, cid]
-
-
-# ---- Contact frame + body-local anchors (current) ----
-
-
-@wp.func
-def cc_get_normal(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.vec3f:
-    base = slot * _CC_DWORDS_PER_SLOT
+def cc_get_normal(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.lambdas[base + _CC_OFF_NORMAL_X, cid],
-        cc.lambdas[base + _CC_OFF_NORMAL_Y, cid],
-        cc.lambdas[base + _CC_OFF_NORMAL_Z, cid],
+        cc.lambdas[_CC_OFF_NORMAL_X, k],
+        cc.lambdas[_CC_OFF_NORMAL_Y, k],
+        cc.lambdas[_CC_OFF_NORMAL_Z, k],
     )
 
 
 @wp.func
-def cc_set_normal(cc: ContactContainer, slot: wp.int32, cid: wp.int32, v: wp.vec3f):
-    base = slot * _CC_DWORDS_PER_SLOT
-    cc.lambdas[base + _CC_OFF_NORMAL_X, cid] = v[0]
-    cc.lambdas[base + _CC_OFF_NORMAL_Y, cid] = v[1]
-    cc.lambdas[base + _CC_OFF_NORMAL_Z, cid] = v[2]
+def cc_set_normal(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
+    cc.lambdas[_CC_OFF_NORMAL_X, k] = v[0]
+    cc.lambdas[_CC_OFF_NORMAL_Y, k] = v[1]
+    cc.lambdas[_CC_OFF_NORMAL_Z, k] = v[2]
 
 
 @wp.func
-def cc_get_tangent1(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.vec3f:
-    base = slot * _CC_DWORDS_PER_SLOT
+def cc_get_tangent1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.lambdas[base + _CC_OFF_TANGENT1_X, cid],
-        cc.lambdas[base + _CC_OFF_TANGENT1_Y, cid],
-        cc.lambdas[base + _CC_OFF_TANGENT1_Z, cid],
+        cc.lambdas[_CC_OFF_TANGENT1_X, k],
+        cc.lambdas[_CC_OFF_TANGENT1_Y, k],
+        cc.lambdas[_CC_OFF_TANGENT1_Z, k],
     )
 
 
 @wp.func
-def cc_set_tangent1(cc: ContactContainer, slot: wp.int32, cid: wp.int32, v: wp.vec3f):
-    base = slot * _CC_DWORDS_PER_SLOT
-    cc.lambdas[base + _CC_OFF_TANGENT1_X, cid] = v[0]
-    cc.lambdas[base + _CC_OFF_TANGENT1_Y, cid] = v[1]
-    cc.lambdas[base + _CC_OFF_TANGENT1_Z, cid] = v[2]
+def cc_set_tangent1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
+    cc.lambdas[_CC_OFF_TANGENT1_X, k] = v[0]
+    cc.lambdas[_CC_OFF_TANGENT1_Y, k] = v[1]
+    cc.lambdas[_CC_OFF_TANGENT1_Z, k] = v[2]
 
 
 @wp.func
-def cc_get_local_p0(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.vec3f:
-    base = slot * _CC_DWORDS_PER_SLOT
+def cc_get_local_p0(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.lambdas[base + _CC_OFF_LOCAL_P0_X, cid],
-        cc.lambdas[base + _CC_OFF_LOCAL_P0_Y, cid],
-        cc.lambdas[base + _CC_OFF_LOCAL_P0_Z, cid],
+        cc.lambdas[_CC_OFF_LOCAL_P0_X, k],
+        cc.lambdas[_CC_OFF_LOCAL_P0_Y, k],
+        cc.lambdas[_CC_OFF_LOCAL_P0_Z, k],
     )
 
 
 @wp.func
-def cc_set_local_p0(cc: ContactContainer, slot: wp.int32, cid: wp.int32, v: wp.vec3f):
-    base = slot * _CC_DWORDS_PER_SLOT
-    cc.lambdas[base + _CC_OFF_LOCAL_P0_X, cid] = v[0]
-    cc.lambdas[base + _CC_OFF_LOCAL_P0_Y, cid] = v[1]
-    cc.lambdas[base + _CC_OFF_LOCAL_P0_Z, cid] = v[2]
+def cc_set_local_p0(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
+    cc.lambdas[_CC_OFF_LOCAL_P0_X, k] = v[0]
+    cc.lambdas[_CC_OFF_LOCAL_P0_Y, k] = v[1]
+    cc.lambdas[_CC_OFF_LOCAL_P0_Z, k] = v[2]
 
 
 @wp.func
-def cc_get_local_p1(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.vec3f:
-    base = slot * _CC_DWORDS_PER_SLOT
+def cc_get_local_p1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.lambdas[base + _CC_OFF_LOCAL_P1_X, cid],
-        cc.lambdas[base + _CC_OFF_LOCAL_P1_Y, cid],
-        cc.lambdas[base + _CC_OFF_LOCAL_P1_Z, cid],
+        cc.lambdas[_CC_OFF_LOCAL_P1_X, k],
+        cc.lambdas[_CC_OFF_LOCAL_P1_Y, k],
+        cc.lambdas[_CC_OFF_LOCAL_P1_Z, k],
     )
 
 
 @wp.func
-def cc_set_local_p1(cc: ContactContainer, slot: wp.int32, cid: wp.int32, v: wp.vec3f):
-    base = slot * _CC_DWORDS_PER_SLOT
-    cc.lambdas[base + _CC_OFF_LOCAL_P1_X, cid] = v[0]
-    cc.lambdas[base + _CC_OFF_LOCAL_P1_Y, cid] = v[1]
-    cc.lambdas[base + _CC_OFF_LOCAL_P1_Z, cid] = v[2]
+def cc_set_local_p1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
+    cc.lambdas[_CC_OFF_LOCAL_P1_X, k] = v[0]
+    cc.lambdas[_CC_OFF_LOCAL_P1_Y, k] = v[1]
+    cc.lambdas[_CC_OFF_LOCAL_P1_Z, k] = v[2]
 
 
-# ---- Contact frame + body-local anchors (prev) ----
+# ---- prev-step views ------------------------------------------------
 
 
 @wp.func
-def cc_get_prev_normal(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.vec3f:
-    base = slot * _CC_DWORDS_PER_SLOT
+def cc_get_prev_normal_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.prev_lambdas[_CC_OFF_NORMAL_LAMBDA, k]
+
+
+@wp.func
+def cc_get_prev_tangent1_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.prev_lambdas[_CC_OFF_TANGENT1_LAMBDA, k]
+
+
+@wp.func
+def cc_get_prev_tangent2_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.prev_lambdas[_CC_OFF_TANGENT2_LAMBDA, k]
+
+
+@wp.func
+def cc_get_prev_normal(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.prev_lambdas[base + _CC_OFF_NORMAL_X, cid],
-        cc.prev_lambdas[base + _CC_OFF_NORMAL_Y, cid],
-        cc.prev_lambdas[base + _CC_OFF_NORMAL_Z, cid],
+        cc.prev_lambdas[_CC_OFF_NORMAL_X, k],
+        cc.prev_lambdas[_CC_OFF_NORMAL_Y, k],
+        cc.prev_lambdas[_CC_OFF_NORMAL_Z, k],
     )
 
 
 @wp.func
-def cc_get_prev_tangent1(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.vec3f:
-    base = slot * _CC_DWORDS_PER_SLOT
+def cc_get_prev_tangent1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.prev_lambdas[base + _CC_OFF_TANGENT1_X, cid],
-        cc.prev_lambdas[base + _CC_OFF_TANGENT1_Y, cid],
-        cc.prev_lambdas[base + _CC_OFF_TANGENT1_Z, cid],
+        cc.prev_lambdas[_CC_OFF_TANGENT1_X, k],
+        cc.prev_lambdas[_CC_OFF_TANGENT1_Y, k],
+        cc.prev_lambdas[_CC_OFF_TANGENT1_Z, k],
     )
 
 
 @wp.func
-def cc_get_prev_local_p0(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.vec3f:
-    base = slot * _CC_DWORDS_PER_SLOT
+def cc_get_prev_local_p0(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.prev_lambdas[base + _CC_OFF_LOCAL_P0_X, cid],
-        cc.prev_lambdas[base + _CC_OFF_LOCAL_P0_Y, cid],
-        cc.prev_lambdas[base + _CC_OFF_LOCAL_P0_Z, cid],
+        cc.prev_lambdas[_CC_OFF_LOCAL_P0_X, k],
+        cc.prev_lambdas[_CC_OFF_LOCAL_P0_Y, k],
+        cc.prev_lambdas[_CC_OFF_LOCAL_P0_Z, k],
     )
 
 
 @wp.func
-def cc_get_prev_local_p1(cc: ContactContainer, slot: wp.int32, cid: wp.int32) -> wp.vec3f:
-    base = slot * _CC_DWORDS_PER_SLOT
+def cc_get_prev_local_p1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.prev_lambdas[base + _CC_OFF_LOCAL_P1_X, cid],
-        cc.prev_lambdas[base + _CC_OFF_LOCAL_P1_Y, cid],
-        cc.prev_lambdas[base + _CC_OFF_LOCAL_P1_Z, cid],
+        cc.prev_lambdas[_CC_OFF_LOCAL_P1_X, k],
+        cc.prev_lambdas[_CC_OFF_LOCAL_P1_Y, k],
+        cc.prev_lambdas[_CC_OFF_LOCAL_P1_Z, k],
     )
+
+
+# ---------------------------------------------------------------------------
+# Derived (per-substep scratch) accessors -- keyed by contact index k.
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def cc_get_r1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
+    return wp.vec3f(
+        cc.derived[_CC_OFF_R1_X, k],
+        cc.derived[_CC_OFF_R1_Y, k],
+        cc.derived[_CC_OFF_R1_Z, k],
+    )
+
+
+@wp.func
+def cc_set_r1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
+    cc.derived[_CC_OFF_R1_X, k] = v[0]
+    cc.derived[_CC_OFF_R1_Y, k] = v[1]
+    cc.derived[_CC_OFF_R1_Z, k] = v[2]
+
+
+@wp.func
+def cc_get_r2(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
+    return wp.vec3f(
+        cc.derived[_CC_OFF_R2_X, k],
+        cc.derived[_CC_OFF_R2_Y, k],
+        cc.derived[_CC_OFF_R2_Z, k],
+    )
+
+
+@wp.func
+def cc_set_r2(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
+    cc.derived[_CC_OFF_R2_X, k] = v[0]
+    cc.derived[_CC_OFF_R2_Y, k] = v[1]
+    cc.derived[_CC_OFF_R2_Z, k] = v[2]
+
+
+@wp.func
+def cc_get_eff_n(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.derived[_CC_OFF_EFF_N, k]
+
+
+@wp.func
+def cc_set_eff_n(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.derived[_CC_OFF_EFF_N, k] = v
+
+
+@wp.func
+def cc_get_eff_t1(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.derived[_CC_OFF_EFF_T1, k]
+
+
+@wp.func
+def cc_set_eff_t1(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.derived[_CC_OFF_EFF_T1, k] = v
+
+
+@wp.func
+def cc_get_eff_t2(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.derived[_CC_OFF_EFF_T2, k]
+
+
+@wp.func
+def cc_set_eff_t2(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.derived[_CC_OFF_EFF_T2, k] = v
+
+
+@wp.func
+def cc_get_bias(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.derived[_CC_OFF_BIAS, k]
+
+
+@wp.func
+def cc_set_bias(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.derived[_CC_OFF_BIAS, k] = v
+
+
+@wp.func
+def cc_get_bias_t1(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.derived[_CC_OFF_BIAS_T1, k]
+
+
+@wp.func
+def cc_set_bias_t1(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.derived[_CC_OFF_BIAS_T1, k] = v
+
+
+@wp.func
+def cc_get_bias_t2(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.derived[_CC_OFF_BIAS_T2, k]
+
+
+@wp.func
+def cc_set_bias_t2(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.derived[_CC_OFF_BIAS_T2, k] = v
+
+
+# ---------------------------------------------------------------------------
+# Host-side factories.
+# ---------------------------------------------------------------------------
 
 
 def contact_container_zeros(
-    max_contact_columns: int,
+    rigid_contact_max: int,
     device: wp.DeviceLike = None,
 ) -> ContactContainer:
     """Allocate a zero-initialised :class:`ContactContainer`.
 
     Args:
-        max_contact_columns: Upper bound on the number of contact
-            columns (``CONSTRAINT_TYPE_CONTACT`` constraints) the
-            solver will ever pack per step. This is the user-supplied
-            cap passed down through :meth:`World.__init__`; the
-            container never resizes at run time.
+        rigid_contact_max: Upper bound on the number of individual
+            contacts in the upstream Newton ``Contacts`` buffer; sizes
+            the inner (``k``) axis of all three storage buffers. Must
+            match ``Contacts.rigid_contact_max`` of the buffer the
+            solver will ingest every step.
         device: Warp device.
     """
-    # Always allocate at least 1 column so the wp.array2d shape is
-    # non-degenerate; the ingest/gather kernels gate on bounds anyway.
-    cols = max(1, int(max_contact_columns))
+    # Always allocate at least 1 slot so the ``wp.array2d`` shape is
+    # non-degenerate; kernels gate on the per-step active-count counter
+    # anyway.
+    n = max(1, int(rigid_contact_max))
     cc = ContactContainer()
-    cc.lambdas = wp.zeros((CC_DWORDS, cols), dtype=wp.float32, device=device)
-    cc.prev_lambdas = wp.zeros((CC_DWORDS, cols), dtype=wp.float32, device=device)
+    cc.lambdas = wp.zeros(
+        (CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device
+    )
+    cc.prev_lambdas = wp.zeros(
+        (CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device
+    )
+    cc.derived = wp.zeros(
+        (CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device
+    )
     return cc
 
 
 def contact_container_swap_prev_current(cc: ContactContainer) -> None:
-    """Pointer-swap the prev/current lambda buffers in place.
+    """Pointer-swap the prev/current persistent lambda buffers in place.
 
-    Called once at the very top of :meth:`World.step`. After the swap,
+    Called once at the top of :meth:`World.step`. After the swap,
     :attr:`ContactContainer.lambdas` is the scratch buffer that the
-    warm-start gather will seed from :attr:`prev_lambdas` and the
-    iterate kernel will then fill in; :attr:`prev_lambdas` holds last
-    step's finished impulses ready to be read by gather. No device-side
-    copy.
+    warm-start gather seeds from :attr:`prev_lambdas`; the iterate
+    kernels then read + write ``lambdas`` in place. The derived buffer
+    is not swapped -- it's per-substep scratch rebuilt by prepare every
+    substep.
     """
     cc.lambdas, cc.prev_lambdas = cc.prev_lambdas, cc.lambdas

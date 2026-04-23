@@ -371,22 +371,19 @@ class World:
         )
 
         # ----- Contact infrastructure (optional) -----------------------
+        # ContactContainer is keyed by contact index ``k`` (not
+        # (slot, cid)) under the per-pair contact design, so it sizes
+        # to ``rigid_contact_max``.
         if self.max_contact_columns > 0:
             self._contact_container: ContactContainer = contact_container_zeros(
-                self.max_contact_columns, device=self.device
+                self.rigid_contact_max, device=self.device
             )
             self._ingest_scratch: IngestScratch | None = IngestScratch(
                 rigid_contact_max=self.rigid_contact_max,
                 max_contact_columns=self.max_contact_columns,
                 device=self.device,
             )
-            self._slot_of_contact_cur = wp.full(
-                self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
-            )
             self._cid_of_contact_cur = wp.full(
-                self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
-            )
-            self._slot_of_contact_prev = wp.full(
                 self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
             )
             self._cid_of_contact_prev = wp.full(
@@ -395,9 +392,7 @@ class World:
         else:
             self._contact_container = contact_container_zeros(1, device=self.device)
             self._ingest_scratch = None
-            self._slot_of_contact_cur = None
             self._cid_of_contact_cur = None
-            self._slot_of_contact_prev = None
             self._cid_of_contact_prev = None
 
         self._contact_views: ContactViews | None = None
@@ -762,16 +757,14 @@ class World:
             shape_body=shape_body,
         )
 
-        # ---- Swap lambda buffers & forward maps ----
+        # ---- Swap lambda buffers & forward map ----
         # After this, cc.prev_lambdas holds last step's finished
         # lambdas; cc.lambdas is scratch for this step. Same for
-        # (slot_of_contact, cid_of_contact) -- prev holds last step's
-        # map, cur is the clean slate the stamp kernel will fill.
+        # cid_of_contact -- prev holds last step's map, cur is the
+        # clean slate the stamp kernel will fill. The per-pair contact
+        # design indexes prev state by the contact index ``k`` alone,
+        # so there is no slot map to swap.
         contact_container_swap_prev_current(self._contact_container)
-        self._slot_of_contact_cur, self._slot_of_contact_prev = (
-            self._slot_of_contact_prev,
-            self._slot_of_contact_cur,
-        )
         self._cid_of_contact_cur, self._cid_of_contact_prev = (
             self._cid_of_contact_prev,
             self._cid_of_contact_cur,
@@ -808,7 +801,6 @@ class World:
             cid_base=self.joint_constraint_count,
             scratch=self._ingest_scratch,
             rigid_contact_match_index=contacts.rigid_contact_match_index,
-            prev_slot_of_contact=self._slot_of_contact_prev,
             prev_cid_of_contact=self._cid_of_contact_prev,
             bodies=self.bodies,
             contacts=self._contact_views,
@@ -821,7 +813,6 @@ class World:
             rigid_contact_max=self.rigid_contact_max,
             cid_base=self.joint_constraint_count,
             scratch=self._ingest_scratch,
-            slot_of_contact=self._slot_of_contact_cur,
             cid_of_contact=self._cid_of_contact_cur,
             device=self.device,
         )

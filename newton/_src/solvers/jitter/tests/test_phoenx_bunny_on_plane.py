@@ -77,25 +77,28 @@ def _load_bunny_mesh() -> newton.Mesh:
 
 
 def _min_vertex_world_z(
-    mesh: newton.Mesh, position: np.ndarray, orientation: np.ndarray
+    mesh: newton.Mesh, body_q: np.ndarray
 ) -> float:
     """Return the minimum world-space z coordinate over every mesh vertex.
 
-    Transforms every vertex of ``mesh`` (body-local coordinates) into
-    world space using the given pose and returns the minimum z. The
-    bunny is dropped onto a z = 0 ground plane so this is exactly the
-    penetration metric: ``>= 0`` means no vertex has pierced the plane.
+    ``body_q`` is Newton's 7-component pose ``(px, py, pz, qx, qy, qz,
+    qw)`` -- the body-*origin* transform that the narrow phase and the
+    viewer both use to place the mesh in world space. We deliberately
+    read from ``state.body_q`` rather than PhoenX's COM-based
+    ``bodies.position`` so the test sees exactly what a user watching
+    the viewer would see; a mismatch between the two (caused by the
+    contact kernels treating a body-origin anchor as COM-relative)
+    would make the mesh visually dip into the plane even though the
+    COM looks stable.
     """
     verts = np.asarray(mesh.vertices, dtype=np.float64)
-
+    position = np.asarray(body_q[:3], dtype=np.float64)
     qx, qy, qz, qw = (
-        float(orientation[0]),
-        float(orientation[1]),
-        float(orientation[2]),
-        float(orientation[3]),
+        float(body_q[3]),
+        float(body_q[4]),
+        float(body_q[5]),
+        float(body_q[6]),
     )
-    # Rotation matrix from quaternion (x, y, z, w) -- Newton's
-    # convention, matching :func:`wp.quat_rotate`.
     xx, yy, zz = qx * qx, qy * qy, qz * qz
     xy, xz, yz = qx * qy, qx * qz, qy * qz
     wx, wy, wz = qw * qx, qw * qy, qw * qz
@@ -107,7 +110,7 @@ def _min_vertex_world_z(
         ],
         dtype=np.float64,
     )
-    world = verts @ rot.T + np.asarray(position, dtype=np.float64).reshape(1, 3)
+    world = verts @ rot.T + position.reshape(1, 3)
     return float(world[:, 2].min())
 
 
@@ -148,24 +151,26 @@ class TestPhoenXBunnyOnPlane(unittest.TestCase):
         for _ in range(300):  # 2.5 s at 120 Hz
             scene.step()
 
-        pos = scene.body_position(body)
-        # Orientation stored on the PhoenX body container as (x, y, z, w).
-        orientation_arr = scene.bodies.orientation.numpy()[body + 1]
-        min_z = _min_vertex_world_z(mesh, pos, orientation_arr)
+        body_q = scene.state.body_q.numpy()[body]
+        min_z = _min_vertex_world_z(mesh, body_q)
 
         self.assertTrue(
-            np.isfinite(pos).all(),
-            f"bunny position non-finite after settle: pos={pos}",
+            np.isfinite(body_q).all(),
+            f"bunny body_q non-finite after settle: body_q={body_q}",
         )
-        # Tolerance: 0.5 mm. In practice the per-pair contact schema
-        # keeps the minimum vertex z pinned to within a few
-        # micrometres of the plane (verified on an RTX PRO 6000); the
-        # half-millimetre bound is a ~100x FP-noise buffer that still
-        # catches the failure mode -- a regression to the old
-        # multi-column split sank the bunny by tens of mm because the
-        # graph colourer fragmented the per-triangle manifold across
-        # colour classes and the normal-impulse budget couldn't
-        # distribute evenly within a single PGS iteration.
+        # Tolerance: 0.5 mm. In practice the contact kernels -- once
+        # the body-origin vs COM convention is handled correctly (see
+        # :class:`BodyContainer.body_com` and
+        # :func:`contact_prepare_for_iteration_at`) -- keep the
+        # minimum vertex z pinned within a few micrometres of the
+        # plane. A regression that reverts the origin/COM fix would
+        # make the rendered mesh dip by ``|body_com|`` (~10 cm on the
+        # bunny asset); a regression that reverts the per-pair
+        # contact column split would fragment the dense manifold
+        # across colour classes and sink the mesh by tens of mm. The
+        # half-mm bound is a ~100x FP-noise buffer that trips on
+        # either failure mode well before a user would see it in the
+        # viewer.
         tolerance_m = 0.0005
         self.assertGreaterEqual(
             min_z,
