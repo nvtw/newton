@@ -552,5 +552,171 @@ class TestPhoenXActuatedDoubleBallSocket(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(
+    wp.is_cuda_available(), "PhoenX joint tests require CUDA"
+)
+class TestPhoenXChainConvergence(unittest.TestCase):
+    """Multi-joint chain test: validates that the step loop order
+    (``solve -> integrate_positions -> relax``) converges under
+    heavy multi-link load.
+
+    A 30-link vertical chain settles under gravity and stays bounded
+    (``|v| < 5 m/s``) after 1 s. Before the step-order fix a 50-link
+    chain hit ``v_max > 2000 m/s``; 30 links at the same config is
+    a cheaper regression that still catches the ordering bug if it
+    regresses.
+    """
+
+    def test_30_link_chain_stays_bounded(self) -> None:
+        import math
+
+        from newton._src.solvers.jitter.body import (
+            MOTION_DYNAMIC,
+            MOTION_STATIC,
+            body_container_zeros,
+        )
+        from newton._src.solvers.jitter.constraints.constraint_container import (
+            DEFAULT_DAMPING_RATIO,
+            DEFAULT_HERTZ_LINEAR,
+        )
+        from newton._src.solvers.jitter.solver_phoenx import PhoenXWorld
+        from newton._src.solvers.jitter.world_builder import DriveMode, JointMode
+
+        device = wp.get_device("cuda:0")
+        num_cubes = 30
+        half_extent = 0.05
+        diag = half_extent * math.sqrt(2.0)
+        half_angle = math.pi / 8.0
+        diag_q = (0.0, 0.0, math.sin(half_angle), math.cos(half_angle))
+
+        num_bodies = num_cubes + 1
+        bodies = body_container_zeros(num_bodies, device=device)
+        pos = np.zeros((num_bodies, 3), dtype=np.float32)
+        ori = np.zeros((num_bodies, 4), dtype=np.float32)
+        ori[0] = (0.0, 0.0, 0.0, 1.0)
+        inv_m = np.zeros(num_bodies, dtype=np.float32)
+        inv_I = np.zeros((num_bodies, 3, 3), dtype=np.float32)
+        motion = np.full(num_bodies, int(MOTION_STATIC), dtype=np.int32)
+        for j in range(num_cubes):
+            pos[j + 1] = (0.0, -(2 * j + 1) * diag, 0.0)
+            ori[j + 1] = diag_q
+            inv_m[j + 1] = 1.0
+            inv_I[j + 1] = np.eye(3, dtype=np.float32)
+            motion[j + 1] = int(MOTION_DYNAMIC)
+        bodies.position.assign(pos)
+        bodies.orientation.assign(ori)
+        bodies.inverse_mass.assign(inv_m)
+        bodies.inverse_inertia.assign(inv_I)
+        bodies.inverse_inertia_world.assign(inv_I)
+        bodies.motion_type.assign(motion)
+
+        num_joints = num_cubes
+        constraints = PhoenXWorld.make_constraint_container(
+            num_joints=num_joints, max_contact_columns=0, device=device
+        )
+        world = PhoenXWorld(
+            bodies=bodies,
+            constraints=constraints,
+            substeps=30,
+            solver_iterations=4,
+            velocity_iterations=1,
+            gravity=(0.0, -_G, 0.0),
+            max_contact_columns=0,
+            rigid_contact_max=0,
+            num_shapes=0,
+            num_joints=num_joints,
+            device=device,
+        )
+
+        body1 = np.array([0 if k == 0 else k for k in range(num_joints)], dtype=np.int32)
+        body2 = np.array([k + 1 for k in range(num_joints)], dtype=np.int32)
+        a1 = np.zeros((num_joints, 3), dtype=np.float32)
+        a2 = np.zeros((num_joints, 3), dtype=np.float32)
+        for k in range(num_joints):
+            y = -k * 2.0 * diag
+            a1[k] = (0.0, y, -half_extent)
+            a2[k] = (0.0, y, half_extent)
+
+        def _f(v: float) -> wp.array:
+            return wp.array(
+                np.full(num_joints, v, dtype=np.float32),
+                dtype=wp.float32,
+                device=device,
+            )
+
+        def _i(v: int) -> wp.array:
+            return wp.array(
+                np.full(num_joints, v, dtype=np.int32),
+                dtype=wp.int32,
+                device=device,
+            )
+
+        # Use DEFAULT_HERTZ_LINEAR (= 1e9, essentially rigid) so
+        # the chain doesn't stretch under load like a 50-spring
+        # series would. Matches jitter's WorldBuilder default.
+        rigid_hertz = float(DEFAULT_HERTZ_LINEAR)
+        rigid_zeta = float(DEFAULT_DAMPING_RATIO)
+        world.initialize_actuated_double_ball_socket_joints(
+            body1=wp.array(body1, dtype=wp.int32, device=device),
+            body2=wp.array(body2, dtype=wp.int32, device=device),
+            anchor1=wp.array(a1, dtype=wp.vec3f, device=device),
+            anchor2=wp.array(a2, dtype=wp.vec3f, device=device),
+            hertz=_f(rigid_hertz),
+            damping_ratio=_f(rigid_zeta),
+            joint_mode=_i(int(JointMode.REVOLUTE)),
+            drive_mode=_i(int(DriveMode.OFF)),
+            target=_f(0.0),
+            target_velocity=_f(0.0),
+            max_force_drive=_f(0.0),
+            stiffness_drive=_f(0.0),
+            damping_drive=_f(0.0),
+            min_value=_f(1.0),
+            max_value=_f(-1.0),
+            hertz_limit=_f(rigid_hertz),
+            damping_ratio_limit=_f(rigid_zeta),
+            stiffness_limit=_f(0.0),
+            damping_limit=_f(0.0),
+        )
+
+        peak_v = 0.0
+        for _ in range(60):
+            world.step(dt=1.0 / 60.0, contacts=None, shape_body=None)
+            v = bodies.velocity.numpy()[1:]
+            peak_v = max(peak_v, float(np.linalg.norm(v, axis=1).max()))
+        final_pos = bodies.position.numpy()[1:]
+
+        # Every dynamic body must stay finite + bounded.
+        self.assertTrue(
+            np.isfinite(final_pos).all(),
+            "non-finite positions in the chain -- solver NaN'd",
+        )
+        # With rigid joints (DEFAULT_HERTZ_LINEAR = 1e9) and the
+        # correct TGS-soft step order, peak velocity stays well
+        # under 2 m/s on a 30-link chain. The pre-hertz-fix
+        # behaviour with ``hertz = 60`` and 50 links drifted the
+        # bottom cube by >1 m; the pre-step-order-fix code hit
+        # >2000 m/s at 50 cubes. 2 m/s is a tight bound that
+        # catches either regression.
+        self.assertLess(
+            peak_v,
+            2.0,
+            f"chain peak velocity {peak_v:.3f} m/s -- either the step "
+            "order (solve -> integrate_positions -> relax) regressed, or "
+            "the joint hertz is too soft (use DEFAULT_HERTZ_LINEAR).",
+        )
+        # Bottom cube must hang near its rest position (50 rigid
+        # links of length 2*diag = ~7 m). Allow 3 cm of slack.
+        bottom_y = float(final_pos[-1, 1])
+        expected_bottom = -(2 * num_cubes - 1) * math.sqrt(2.0) * half_extent
+        drift = bottom_y - expected_bottom
+        self.assertLess(
+            abs(drift),
+            0.03,
+            f"chain bottom drifted {drift:+.4f} m from expected "
+            f"{expected_bottom:.4f} -- joints too stiff or chain not "
+            "converging.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

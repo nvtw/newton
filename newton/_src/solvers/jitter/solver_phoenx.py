@@ -866,15 +866,36 @@ class PhoenXWorld:
             self._build_world_csr()
 
         # ---- Phase 3: substep loop ----
-        # ``for (int i = 0; i < numSubsteps; i++)`` in World.Step.cs.
-        # Mass splitting is intentionally skipped per the port scope
-        # (no mass-splitting prepare / broadcast / average passes);
-        # full graph colouring alone is enough for contact-only work.
+        # ``for (int i = 0; i < numSubsteps; i++)`` in World.Step.cs
+        # with Box2D-v3 / jitter's TGS-soft ordering (solve ->
+        # integrate_positions -> relax). The ordering diverges from
+        # the strict C# read "prepare + iterate + velocity_iterate +
+        # integrate" because without mass splitting the correct
+        # place for the ``use_bias=False`` relax pass is *after*
+        # position integration, not before it. Running relax before
+        # integrate throws away the positional bias's contribution
+        # to position correction -- which is critical for tall
+        # stacks and long joint chains where the top constraint
+        # carries order-of-the-full-load forces and needs each
+        # substep's position update to make dent in the penetration
+        # / drift.
         for _ in range(self.substeps):
             self._integrate_forces()
             self._integrate_gravity()
-            self._solve_substep()
+            # Main PGS solve with positional bias ON; produces
+            # velocities that include the bias correction.
+            self._solve_main()
+            # Advance positions using the biased velocity so the
+            # bias actually translates into reduced penetration /
+            # joint drift.
             self._integrate_positions()
+            # Optional XPBD contact tangent-drift passes (contacts
+            # only).
+            self._position_iterate()
+            # Relax the positional-bias-induced drift velocity so
+            # the next substep's solve starts from a clean ``Jv =
+            # 0`` state -- Box2D v3 TGS-soft relax pass.
+            self._relax_velocities()
 
         # ---- Phase 4: per-step bookkeeping ----
         # ``Solver.UpdateInertia`` from the tail of ``Scene.Step``.
@@ -1145,46 +1166,30 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _solve_substep(self) -> None:
-        """Port of :func:`SolverManager.SolveSubstep`.
+    def _solve_main(self) -> None:
+        """Per-substep main PGS solve: prepare + iterate(bias=True).
 
-        Without mass splitting, the C# ``RunMethodParallelPrepare`` /
-        ``RunMethodParallelIterate`` calls collapse to a single PGS
-        prepare + iterate pair on the full graph colouring. The
-        ``AverageAndBroadcast`` step that reconciles per-constraint
-        body copies is a no-op because we run one global body state.
+        Equivalent to PhoenX C#'s ``SolveSubstep`` body *minus* the
+        ``velocity_iterations`` (relax) loop. With mass splitting
+        dropped (per the port scope), the relax pass has to run
+        *after* :meth:`_integrate_positions` to avoid throwing away
+        the positional bias's contribution to penetration recovery;
+        :meth:`_relax_velocities` handles that below.
 
-        Order:
-
-        1. One ``prepare`` sweep -- computes effective masses and
-           applies the warm-start impulse.
-        2. ``solver_iterations`` iterate sweeps (``use_bias=True``).
-        3. Optional ``position_iterations`` XPBD tangent-drift
-           sweeps (not in C# PhoenX; carried over from
-           :mod:`solver_jitter`'s fast-path).
-        4. ``velocity_iterations`` relax sweeps (``use_bias=False``)
-           -- PhoenX's ``SolverVelocityIterations``.
-
-        All sweeps run on the single-block fast-path dispatcher (one
-        block per world, block-stride lane loop inside each colour);
-        this is "full graph coloring" mode in the sense
-        :mod:`solver_jitter` uses the phrase -- one JP colouring,
-        full per-colour serialisation inside the kernel.
+        Prepare runs once per substep (effective masses + warm-start
+        scatter); iterate runs ``solver_iterations`` times on the
+        same colouring. Both use the shared fast-path tail kernels
+        so joints and contacts sweep in the same launches.
         """
         if self._constraint_capacity == 0:
             return
-
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = (
             self._contact_views
             if self._contact_views is not None
             else self._contact_views_placeholder
         )
-
-        # Prepare (once per substep).
         self._launch_fast_prepare(idt, contact_views)
-
-        # Main iterate sweeps with positional bias ON.
         self._launch_fast_iter(
             _constraint_iterate_fast_tail_kernel,
             self.solver_iterations,
@@ -1192,35 +1197,55 @@ class PhoenXWorld:
             contact_views,
         )
 
-        # XPBD position iterations for contact tangent drift (not
-        # present in PhoenX; optional).
-        if self.position_iterations > 0:
-            wp.launch(
-                _constraint_position_iterate_fast_tail_kernel,
-                dim=self.num_worlds * _STRAGGLER_BLOCK_DIM,
-                block_dim=_STRAGGLER_BLOCK_DIM,
-                inputs=[
-                    self.constraints,
-                    self.bodies,
-                    self._world_element_ids_by_color,
-                    self._world_color_starts,
-                    self._world_csr_offsets,
-                    self._world_num_colors,
-                    self._contact_container,
-                    wp.int32(self.position_iterations),
-                ],
-                device=self.device,
-            )
+    def _position_iterate(self) -> None:
+        """XPBD-style position iteration for contact tangent drift.
 
-        # Relax sweeps (use_bias=False) -- PhoenX's
-        # ``SolverVelocityIterations`` passes.
-        if self.velocity_iterations > 0:
-            self._launch_fast_iter(
-                _constraint_relax_fast_tail_kernel,
-                self.velocity_iterations,
-                idt,
-                contact_views,
-            )
+        Contacts-only (joints have no XPBD position path). No-op
+        when ``position_iterations == 0``. Runs on the fast-path
+        dispatcher, same CSR as the main solve.
+        """
+        if self._constraint_capacity == 0 or self.position_iterations <= 0:
+            return
+        wp.launch(
+            _constraint_position_iterate_fast_tail_kernel,
+            dim=self.num_worlds * _STRAGGLER_BLOCK_DIM,
+            block_dim=_STRAGGLER_BLOCK_DIM,
+            inputs=[
+                self.constraints,
+                self.bodies,
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
+                self._contact_container,
+                wp.int32(self.position_iterations),
+            ],
+            device=self.device,
+        )
+
+    def _relax_velocities(self) -> None:
+        """Box2D v3 TGS-soft relax pass: iterate with bias=False.
+
+        Runs *after* position integration so it removes the drift
+        velocity the positional bias injected during the main solve
+        without having first thrown that bias away. This is the
+        same order :mod:`solver_jitter`'s step uses. No-op when
+        ``velocity_iterations == 0``.
+        """
+        if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
+            return
+        idt = wp.float32(1.0 / self.substep_dt)
+        contact_views = (
+            self._contact_views
+            if self._contact_views is not None
+            else self._contact_views_placeholder
+        )
+        self._launch_fast_iter(
+            _constraint_relax_fast_tail_kernel,
+            self.velocity_iterations,
+            idt,
+            contact_views,
+        )
 
     def _launch_fast_prepare(
         self,
