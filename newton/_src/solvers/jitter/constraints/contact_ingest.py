@@ -184,7 +184,7 @@ def allocate_ingest_scratch(
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _contact_key_kernel(
     rigid_contact_count: wp.array[wp.int32],
     rigid_contact_shape0: wp.array[wp.int32],
@@ -251,7 +251,7 @@ def _body_pair_filtered(
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _pair_metadata_kernel(
     run_values: wp.array[wp.int32],
     num_pairs: wp.array[wp.int32],
@@ -291,7 +291,7 @@ def _pair_metadata_kernel(
     # index, so we don't take pair_count as an output.)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _pair_columns_from_count_kernel(
     pair_count: wp.array[wp.int32],
     pair_shape_a: wp.array[wp.int32],
@@ -344,7 +344,7 @@ def _pair_columns_from_count_kernel(
     pair_columns[tid] = (length + CONTACT_MAX_SLOTS - 1) // CONTACT_MAX_SLOTS
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _pair_first_kernel(
     run_lengths: wp.array[wp.int32],
     num_pairs: wp.array[wp.int32],
@@ -373,7 +373,7 @@ def _pair_first_kernel(
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _total_contact_columns_kernel(
     pair_col_offset: wp.array[wp.int32],
     pair_columns: wp.array[wp.int32],
@@ -407,7 +407,7 @@ def _total_contact_columns_kernel(
     num_contact_columns[0] = total
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _pair_source_idx_kernel(
     pair_col_offset: wp.array[wp.int32],
     pair_columns: wp.array[wp.int32],
@@ -441,7 +441,7 @@ def _pair_source_idx_kernel(
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _contact_pack_columns_kernel(
     pair_source_idx: wp.array[wp.int32],
     pair_col_offset: wp.array[wp.int32],
@@ -571,7 +571,7 @@ def _build_tangent1_from_velocity(n: wp.vec3f, dv: wp.vec3f) -> wp.vec3f:
     )
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _contact_warmstart_gather_kernel(
     pair_source_idx: wp.array[wp.int32],
     pair_col_offset: wp.array[wp.int32],
@@ -741,7 +741,7 @@ def _contact_warmstart_gather_kernel(
         cc_set_local_p1(cc, s, cid, fresh_local_p1)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _reset_forward_map_kernel(
     # out
     slot_of_contact: wp.array[wp.int32],
@@ -757,7 +757,7 @@ def _reset_forward_map_kernel(
     cid_of_contact[tid] = wp.int32(-1)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _stamp_slot_cid_of_contact_kernel(
     pair_source_idx: wp.array[wp.int32],
     pair_col_offset: wp.array[wp.int32],
