@@ -253,12 +253,10 @@ class LLTBlockedRCMSolver(DirectSolver):
             self._tile_pattern = wp.zeros(shape=(total_tp_size,), dtype=int32)
             self._tpo = wp.array(tp_offsets[:-1], dtype=int32)
 
-        # Per-block views/launches are (re)built lazily in
-        # ``_ensure_reorder_launches_bound`` the first time a concrete A
-        # buffer arrives, and rebound only if its device pointer changes.
-        self._reorder_callbacks = []
-        self._A_views = []
-        self._A_views_attached_to = None
+        # The batched-RCM launch callback (``self._reorder_callback``) is
+        # (re)built lazily in ``_ensure_reorder_launches_bound`` the first
+        # time a concrete A buffer arrives, and rebound only if its device
+        # pointer changes.
 
         self._has_factors = False
 

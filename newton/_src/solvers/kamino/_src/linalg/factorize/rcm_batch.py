@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
 """Batched GPU Reverse Cuthill-McKee reordering across a list of SPD blocks.
@@ -54,7 +54,6 @@ API
     launch()  # one zero-arg callable; CUDA-graph capturable
 """
 
-import ctypes
 import math
 from collections.abc import Callable
 from functools import cache
@@ -67,21 +66,8 @@ def create_cuda_graph_callback(callback: Callable[[], None], device=None, stream
     with wp.ScopedCapture(device=device, stream=stream) as capture:
         callback()
     graph = capture.graph
-    if stream is not None:
-        if stream.device != graph.device:
-            raise RuntimeError(f"Cannot launch graph from device {graph.device} on stream from device {stream.device}")
-        device = stream.device
-    else:
-        device = graph.device
-        stream = device.stream
-    if graph.graph_exec is None:
-        g = ctypes.c_void_p()
-        result = wp._src.context.runtime.core.wp_cuda_graph_create_exec(
-            graph.device.context, stream.cuda_stream, graph.graph, ctypes.byref(g)
-        )
-        if not result:
-            raise RuntimeError(f"Graph creation error: {wp._src.context.runtime.get_error_string()}")
-        graph.graph_exec = g
+    if stream is not None and stream.device != graph.device:
+        raise RuntimeError(f"Cannot launch graph from device {graph.device} on stream from device {stream.device}")
 
     def graph_callback():
         wp.capture_launch(graph)
