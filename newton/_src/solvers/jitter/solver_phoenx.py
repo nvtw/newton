@@ -72,7 +72,12 @@ from newton._src.solvers.jitter.body import (
     MOTION_STATIC,
     BodyContainer,
 )
+from newton._src.solvers.jitter.constraints.constraint_actuated_double_ball_socket import (
+    ADBS_DWORDS,
+    actuated_double_ball_socket_initialize_kernel,
+)
 from newton._src.solvers.jitter.constraints.constraint_contact import (
+    CONTACT_DWORDS,
     ContactViews,
     contact_pair_wrench_kernel,
     contact_per_contact_error_kernel,
@@ -81,6 +86,7 @@ from newton._src.solvers.jitter.constraints.constraint_contact import (
 )
 from newton._src.solvers.jitter.constraints.constraint_container import (
     ConstraintContainer,
+    constraint_container_zeros,
 )
 from newton._src.solvers.jitter.constraints.contact_container import (
     ContactContainer,
@@ -117,6 +123,26 @@ from newton._src.solvers.jitter.solver_jitter_kernels import (
 )
 
 __all__ = ["PhoenXWorld", "pack_body_xforms_kernel"]
+
+
+@wp.kernel(enable_backward=False)
+def _sync_num_active_constraints_kernel(
+    num_contact_columns: wp.array[wp.int32],
+    joint_constraint_count: wp.int32,
+    # out
+    num_active_constraints: wp.array[wp.int32],
+):
+    """Fuse the ingest pipeline's device-held ``num_contact_columns``
+    into ``num_active_constraints = num_joints + num_contact_columns``
+    on-device.
+
+    Single-thread kernel so the active-count update stays inside a
+    graph capture. Copies the jitter port's helper verbatim.
+    """
+    tid = wp.tid()
+    if tid != 0:
+        return
+    num_active_constraints[0] = joint_constraint_count + num_contact_columns[0]
 
 
 # ---------------------------------------------------------------------------
@@ -283,18 +309,26 @@ def _build_gravity_array(
 
 
 class PhoenXWorld:
-    """Warp port of PhoenX's ``Scene.Step`` driver, contacts-only.
+    """Warp port of PhoenX's ``Scene.Step`` driver, contacts + optional
+    actuated double-ball-socket joints.
 
-    The solver owns a :class:`BodyContainer`, a shared contact-only
+    The solver owns a :class:`BodyContainer`, a shared
     :class:`ConstraintContainer`, and the per-step contact ingest /
     warm-start infrastructure. Calling :meth:`step` advances every
     rigid body by ``dt`` seconds using the same phased loop as
     ``PhoenX/src/PhoenX/World.Step.cs``.
 
     Construction mirrors :class:`~newton._src.solvers.jitter.World`
-    for the contact-only subset (no joint arguments). Direct
-    construction is supported; a dedicated builder is not provided
-    because the initial body state is all the caller needs.
+    for the contact-plus-unified-joint subset. The only supported
+    joint type is
+    :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET`, which
+    materialises ball-socket / revolute / prismatic joints with
+    optional PD drives and limits (see
+    :meth:`initialize_actuated_double_ball_socket_joints` and
+    :class:`~newton._src.solvers.jitter.world_builder.JointMode`).
+    Direct construction is supported; a dedicated builder is not
+    provided because the solver only needs the initial body + joint
+    state.
     """
 
     def __init__(
@@ -310,12 +344,13 @@ class PhoenXWorld:
         max_contact_columns: int = 0,
         rigid_contact_max: int = 0,
         num_shapes: int = 0,
+        num_joints: int = 0,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         num_worlds: int = 1,
         device: wp.context.Devicelike = None,
     ):
-        """Take ownership of a pre-built body and contact-constraint container.
+        """Take ownership of a pre-built body and constraint container.
 
         Args:
             bodies: :class:`BodyContainer` with the rigid bodies to
@@ -323,9 +358,15 @@ class PhoenXWorld:
                 mass, and inertia; the solver only reads / writes
                 velocity, position, orientation, forces and the
                 rotated inertia.
-            constraints: Shared :class:`ConstraintContainer`. Only
-                contact columns will be populated; the first cid is
-                always used for contacts (no joint reservation).
+            constraints: Shared :class:`ConstraintContainer`. Joint
+                columns (when ``num_joints > 0``) live at cids
+                ``[0, num_joints)``; contact columns occupy cids
+                ``[num_joints, num_joints + max_contact_columns)``.
+                The container's per-constraint dword width must be at
+                least ``max(CONTACT_DWORDS, ADBS_DWORDS)`` if joints
+                are used; :meth:`make_constraint_container` handles
+                the sizing for callers that don't want to compute
+                that themselves.
             substeps: Number of substeps per :meth:`step` call.
             solver_iterations: PGS iterations per substep, matching
                 PhoenX's ``SolverManager.Iterations``.
@@ -357,6 +398,13 @@ class PhoenXWorld:
                 to pack ``(shape_a, shape_b)`` into a 32-bit key for
                 contact matching. Must satisfy
                 ``num_shapes * num_shapes < 2**31``.
+            num_joints: Number of actuated-double-ball-socket joint
+                columns reserved at the head of ``constraints`` (cids
+                ``[0, num_joints)``). The caller is responsible for
+                populating these columns via
+                :meth:`initialize_actuated_double_ball_socket_joints`
+                before the first :meth:`step`. Leaves ``0`` for a
+                contacts-only scene.
             collision_filter_pairs: Optional iterable of
                 ``(body_a, body_b)`` pairs whose contacts must be
                 dropped on ingest. Pairs are canonicalised to
@@ -389,6 +437,9 @@ class PhoenXWorld:
             # contacts per pair (the PhoenX C# original caps at 4).
             self.rigid_contact_max = self.max_contact_columns * 6
         self.num_shapes: int = int(num_shapes)
+        self.num_joints: int = int(num_joints)
+        if self.num_joints < 0:
+            raise ValueError(f"num_joints must be >= 0 (got {self.num_joints})")
 
         self.substeps = int(substeps)
         if self.substeps <= 0:
@@ -418,20 +469,24 @@ class PhoenXWorld:
         self.inv_step_dt: float = 0.0
         self.substep_dt: float = 0.0
 
-        # Contacts-only: every cid is a contact column so joint
-        # reservation is zero. ``_constraint_capacity`` is the launch
-        # dimension for all partitioner / dispatcher kernels.
-        self._constraint_capacity: int = max(1, self.max_contact_columns)
+        # Joint columns occupy ``[0, num_joints)``; contact columns
+        # follow at ``[num_joints, num_joints + max_contact_columns)``.
+        # ``_constraint_capacity`` is the launch dimension for every
+        # partitioner / dispatcher kernel and bounds
+        # ``num_active_constraints`` from above.
+        self._constraint_capacity: int = max(
+            1, self.num_joints + self.max_contact_columns
+        )
 
         # ----- Partitioner + per-world CSR buffers -----
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
             self._constraint_capacity, dtype=ElementInteractionData, device=self.device
         )
-        # 0 cids are active before the first ingest. Updated
-        # device-side by the ingest pipeline at the start of each
-        # step (see :meth:`_ingest_and_warmstart_contacts`).
-        self._num_active_constraints: wp.array[int] = wp.zeros(
-            1, dtype=wp.int32, device=self.device
+        # Joints are the only cids active before the first ingest;
+        # the contact range stays empty until the first step's
+        # ``_ingest_and_warmstart_contacts`` bumps the count.
+        self._num_active_constraints: wp.array[int] = wp.array(
+            [self.num_joints], dtype=wp.int32, device=self.device
         )
         self._partitioner = IncrementalContactPartitioner(
             max_num_interactions=self._constraint_capacity,
@@ -518,6 +573,151 @@ class PhoenXWorld:
         """
         self._materials = materials
         self._shape_material = shape_material
+
+    # ------------------------------------------------------------------
+    # Joint initialisation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def required_constraint_dwords(num_joints: int) -> int:
+        """Return the minimum per-constraint dword width the
+        :class:`ConstraintContainer` handed to :class:`PhoenXWorld`
+        must carry.
+
+        ``CONTACT_DWORDS`` if the scene is contacts-only;
+        ``max(CONTACT_DWORDS, ADBS_DWORDS)`` when any joint columns
+        are reserved. Callers that roll their own container can use
+        this instead of importing the two dword constants directly.
+        """
+        if int(num_joints) > 0:
+            return max(int(CONTACT_DWORDS), int(ADBS_DWORDS))
+        return int(CONTACT_DWORDS)
+
+    @staticmethod
+    def make_constraint_container(
+        num_joints: int,
+        max_contact_columns: int,
+        device: wp.context.Devicelike = None,
+    ) -> ConstraintContainer:
+        """Factory for a correctly-sized :class:`ConstraintContainer`.
+
+        Produces a zero-initialised container with capacity
+        ``num_joints + max_contact_columns`` and the per-constraint
+        dword width the solver requires (see
+        :meth:`required_constraint_dwords`). Use this from the
+        caller's scene-construction code; then pass the resulting
+        container to :class:`PhoenXWorld.__init__` and call
+        :meth:`initialize_actuated_double_ball_socket_joints` before
+        the first step.
+        """
+        cap = max(1, int(num_joints) + int(max_contact_columns))
+        return constraint_container_zeros(
+            num_constraints=cap,
+            num_dwords=PhoenXWorld.required_constraint_dwords(num_joints),
+            device=device,
+        )
+
+    def initialize_actuated_double_ball_socket_joints(
+        self,
+        body1: wp.array,
+        body2: wp.array,
+        anchor1: wp.array,
+        anchor2: wp.array,
+        hertz: wp.array,
+        damping_ratio: wp.array,
+        joint_mode: wp.array,
+        drive_mode: wp.array,
+        target: wp.array,
+        target_velocity: wp.array,
+        max_force_drive: wp.array,
+        stiffness_drive: wp.array,
+        damping_drive: wp.array,
+        min_value: wp.array,
+        max_value: wp.array,
+        hertz_limit: wp.array,
+        damping_ratio_limit: wp.array,
+        stiffness_limit: wp.array,
+        damping_limit: wp.array,
+    ) -> None:
+        """Pack ``num_joints`` actuated double-ball-socket joint columns.
+
+        One-shot launch of
+        :func:`actuated_double_ball_socket_initialize_kernel` over
+        cids ``[0, num_joints)``. All input arrays must be length
+        ``num_joints``, live on ``device``, and carry the dtypes the
+        kernel expects (see the kernel signature in
+        :mod:`constraint_actuated_double_ball_socket`). The solver's
+        fast-path dispatcher already routes
+        :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET` through
+        :func:`actuated_double_ball_socket_prepare_for_iteration` /
+        :func:`actuated_double_ball_socket_iterate`, so no further
+        wiring is required after this call returns.
+
+        Call exactly once, after :meth:`__init__` and before the
+        first :meth:`step`. ``num_joints == 0`` is a no-op.
+
+        Args:
+            body1, body2: Body indices for each joint's two bodies.
+                ``wp.array[wp.int32]`` of length ``num_joints``.
+            anchor1, anchor2: World-space joint anchors at joint
+                finalisation time. ``wp.array[wp.vec3f]``. The line
+                from ``anchor1`` to ``anchor2`` is the joint axis
+                for revolute / prismatic modes.
+            hertz, damping_ratio: Positional Schur block soft-
+                constraint frequency [Hz] and dimensionless damping
+                ratio.
+            joint_mode: One of
+                :data:`~newton._src.solvers.jitter.world_builder.JointMode`
+                enum values per joint. ``wp.array[wp.int32]``.
+            drive_mode: One of
+                :data:`~newton._src.solvers.jitter.world_builder.DriveMode`
+                enum values per joint. ``wp.array[wp.int32]``.
+            target, target_velocity: Per-joint position / velocity
+                drive setpoints ([rad, rad/s] for revolute,
+                [m, m/s] for prismatic).
+            max_force_drive, stiffness_drive, damping_drive: Drive
+                impulse cap and PD gains. ``stiffness_drive ==
+                damping_drive == 0`` turns the drive row off.
+            min_value, max_value: Limit window (``min > max``
+                disables the limit row).
+            hertz_limit, damping_ratio_limit: Limit soft-constraint
+                knobs (used when both PD gains are zero).
+            stiffness_limit, damping_limit: Limit PD gains (absolute
+                SI). Either strictly positive selects the PD
+                formulation over the ``(hertz_limit,
+                damping_ratio_limit)`` one.
+        """
+        if self.num_joints <= 0:
+            return
+        wp.launch(
+            actuated_double_ball_socket_initialize_kernel,
+            dim=self.num_joints,
+            inputs=[
+                self.constraints,
+                self.bodies,
+                wp.int32(0),  # cid_offset -- joints start at cid 0
+                body1,
+                body2,
+                anchor1,
+                anchor2,
+                hertz,
+                damping_ratio,
+                joint_mode,
+                drive_mode,
+                target,
+                target_velocity,
+                max_force_drive,
+                stiffness_drive,
+                damping_drive,
+                min_value,
+                max_value,
+                hertz_limit,
+                damping_ratio_limit,
+                stiffness_limit,
+                damping_limit,
+            ],
+            device=self.device,
+        )
 
     def set_collision_filter_pairs(
         self, pairs: Iterable[tuple[int, int]]
@@ -712,7 +912,11 @@ class PhoenXWorld:
            equals the number of contact columns emitted.
         """
         if contacts is None or self.max_contact_columns == 0 or self._ingest_scratch is None:
-            self._num_active_constraints.zero_()
+            # No contacts this step: fall back to the joint-only active
+            # count. Joints live at cids ``[0, num_joints)`` and
+            # :meth:`initialize_actuated_double_ball_socket_joints`
+            # has already populated them.
+            self._num_active_constraints.fill_(self.num_joints)
             self._contact_views = None
             return
 
@@ -754,15 +958,18 @@ class PhoenXWorld:
         )
 
         # Materialise this step's contact columns. ``cid_base = 0``
-        # because this port reserves no joint range at the head of
-        # the cid array.
+        # Contact columns are written starting at ``cid_base =
+        # num_joints`` so joint columns at ``[0, num_joints)`` stay
+        # untouched. The sync kernel below then picks up the ingest
+        # pipeline's ``num_contact_columns`` and adds the joint
+        # count on-device.
         ingest_contacts(
             contacts=contacts,
             shape_body=shape_body,
             num_shapes=self.num_shapes,
             constraints=self.constraints,
             scratch=self._ingest_scratch,
-            cid_base=0,
+            cid_base=self.num_joints,
             max_contact_columns=self.max_contact_columns,
             default_friction=self.default_friction,
             device=self.device,
@@ -774,7 +981,7 @@ class PhoenXWorld:
         )
 
         gather_contact_warmstart(
-            cid_base=0,
+            cid_base=self.num_joints,
             scratch=self._ingest_scratch,
             rigid_contact_match_index=contacts.rigid_contact_match_index,
             prev_slot_of_contact=self._slot_of_contact_prev,
@@ -787,32 +994,37 @@ class PhoenXWorld:
 
         stamp_forward_contact_map(
             rigid_contact_max=self.rigid_contact_max,
-            cid_base=0,
+            cid_base=self.num_joints,
             scratch=self._ingest_scratch,
             slot_of_contact=self._slot_of_contact_cur,
             cid_of_contact=self._cid_of_contact_cur,
             device=self.device,
         )
 
-        # Sync ``num_active_constraints[0] = num_contact_columns[0]``
-        # on-device so the partitioner / dispatcher see the right
-        # extent without a host readback.
+        # Fuse joint count + ingested contact column count into
+        # ``_num_active_constraints`` on-device so the partitioner /
+        # dispatcher see the right extent without a host readback.
         self._sync_num_active_constraints()
 
     def _sync_num_active_constraints(self) -> None:
-        """Copy the ingest pipeline's ``num_contact_columns`` into
-        ``_num_active_constraints`` on-device.
+        """Fuse joint count + contact column count on-device.
 
-        The ingest kernel writes ``num_contact_columns[0]`` to the
-        number of columns it emitted. Because we reserve no joint
-        range, that is also the full active-constraint count, so
-        a direct copy suffices. Kept out of :meth:`step` so the
-        ingest path can be unit-tested in isolation.
+        Launches :func:`_sync_num_active_constraints_kernel` with
+        ``joint_constraint_count = self.num_joints``; the kernel
+        writes ``num_active_constraints[0] = num_joints +
+        num_contact_columns[0]``. Kept out of :meth:`step` so the
+        ingest path can be unit-tested in isolation, and graph-
+        capture safe (one-thread launch, all device arrays).
         """
-        wp.copy(
-            self._num_active_constraints,
-            self._ingest_scratch.num_contact_columns,
-            count=1,
+        wp.launch(
+            _sync_num_active_constraints_kernel,
+            dim=1,
+            inputs=[
+                self._ingest_scratch.num_contact_columns,
+                wp.int32(self.num_joints),
+            ],
+            outputs=[self._num_active_constraints],
+            device=self.device,
         )
 
     def _rebuild_elements(self) -> None:
