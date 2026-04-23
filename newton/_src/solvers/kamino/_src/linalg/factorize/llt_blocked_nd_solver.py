@@ -29,7 +29,6 @@ import warp as wp
 from ...core.types import FloatType, float32, int32, override
 from ..core import DenseLinearOperatorData, DenseSquareMultiLinearInfo
 from ..linear import DirectSolver
-from . import rcm as _rcm
 from . import rcm_batch as _rcm_batch
 from .llt_blocked_nd import (
     llt_blocked_nd_factorize,
@@ -69,10 +68,8 @@ class LLTBlockedNDSolver(DirectSolver):
 
     1. ``compute(A)`` / ``_factorize_impl``:
 
-       a. Runs GPU-native RCM to compute per-block permutations ``P_i``
-          (concatenated in ``self._P``). The default backend is the
-          *batched* RCM which processes all blocks in a single set of
-          launches; see ``reorder_algorithm`` for the per-block alternative.
+       a. Runs GPU-native batched RCM to compute per-block permutations
+          ``P_i`` (concatenated in ``self._P``) in a single set of launches.
        b. Builds ``inv_P`` from ``P``.
        c. Permutes ``A -> A_hat`` (``A_hat_i = P_i A_i P_i^T``).
        d. Builds a tile-level sparsity mask for each block by thresholding
@@ -106,17 +103,7 @@ class LLTBlockedNDSolver(DirectSolver):
         # Threshold below which ``|A[i,j]|`` is treated as a non-edge by the
         # RCM adjacency scan and by the tile-pattern builder.
         reorder_tol: float = 0.0,
-        # Reordering backend.
-        # - 'rcm_batch' (default): kernel-based Reverse Cuthill-McKee with all
-        #   blocks processed in a single batched launch per stage. Much lower
-        #   per-call overhead than 'rcm' and wins on bandwidth-structured
-        #   matrices (up to ~2x vs LLTBlockedSolver), ties elsewhere.
-        # - 'rcm'      : per-block RCM (see :mod:`rcm`); same algorithm, one
-        #   recorded launch set per block. Kept for diagnostics / single-block
-        #   use; prefer 'rcm_batch' for multi-block workloads.
-        reorder_algorithm: str = "rcm_batch",
-        # For 'rcm' only: cap on BFS steps per block. None => auto
-        # (``2*ceil(sqrt(n)) + 4``).
+        # Cap on BFS steps per block. None => auto (``2*ceil(sqrt(n)) + 4``).
         rcm_max_bfs_iters: int | None = None,
         dtype: FloatType = float32,
         device: wp.DeviceLike | None = None,
@@ -131,8 +118,7 @@ class LLTBlockedNDSolver(DirectSolver):
             reorder_tol: threshold below which an off-diagonal entry is
                 treated as a non-edge by the RCM adjacency scan and by the
                 tile-pattern builder.
-            reorder_algorithm: 'rcm_batch' (default) or 'rcm'. See class doc.
-            rcm_max_bfs_iters: BFS depth cap for the RCM backends.
+            rcm_max_bfs_iters: BFS depth cap for the batched RCM pass.
         """
         # LLT-specific internal data
         self._L: wp.array | None = None
@@ -146,14 +132,11 @@ class LLTBlockedNDSolver(DirectSolver):
         self._tile_pattern: wp.array | None = None
         self._tpo: wp.array | None = None
         self._max_dim: int = 0
-        # RCM launch callbacks (one per block for 'rcm'; exactly one for
-        # 'rcm_batch'). Each is a closure that replays a recorded launch set.
-        self._reorder_callbacks: list = []
-        # Views into flat A used by the per-block launches. These wp.array
-        # views are bound at finalize()/factorize() time and must outlive the
-        # recorded launches.
-        self._A_views: list = []
-        self._A_views_attached_to: wp.array | None = None
+        # Batched-RCM launch callback: closure that replays a recorded launch
+        # set over all blocks. Rebound whenever the caller-owned ``A`` buffer
+        # pointer changes.
+        self._reorder_callback = None
+        self._reorder_attached_to: wp.array | None = None
 
         # Cache the fixed block/tile dimensions
         self._block_size: int = block_size
@@ -162,12 +145,6 @@ class LLTBlockedNDSolver(DirectSolver):
 
         # Reordering options
         self._reorder_tol: float = reorder_tol
-        if reorder_algorithm not in ("rcm", "rcm_batch"):
-            raise ValueError(
-                "reorder_algorithm must be 'rcm' or 'rcm_batch'; "
-                f"got {reorder_algorithm!r}"
-            )
-        self._reorder_algorithm: str = reorder_algorithm
         self._rcm_max_bfs_iters = rcm_max_bfs_iters
 
         # Build kernels (cached by block_size / max_dim at allocate time).
@@ -299,82 +276,31 @@ class LLTBlockedNDSolver(DirectSolver):
         self._has_factors = False
 
     def _ensure_reorder_launches_bound(self, A: wp.array) -> None:
-        """Build the reordering launch callbacks, bound to the current A buffer.
+        """(Re)build the batched-RCM launch callback bound to the current A buffer.
 
-        For ``rcm_batch`` the callback is a single per-batch launch set;
-        for ``rcm`` we allocate one callback per block because each block's
-        matrix lives at a different offset. Callbacks capture ``wp.array``
-        views of ``A`` that must stay alive for as long as they are reused,
-        so we rebind only when ``A.ptr`` changes.
+        The callback captures ``wp.array`` views of ``A`` that must stay
+        alive for as long as the recorded launches are reused, so we only
+        rebind when the caller hands us a different ``A``.
         """
-        if self._A_views_attached_to is A:
+        if self._reorder_attached_to is A:
             return
 
         info = self._operator.info
-        dims = list(info.dimensions)
-
-        self._reorder_callbacks = []
-        self._A_views = []
-
-        # Batched RCM: a single callback covers all blocks.
-        if self._reorder_algorithm == "rcm_batch":
-            with wp.ScopedDevice(self._device):
-                cb = _rcm_batch.create_rcm_batch_launch(
-                    A_flat=A,
-                    perm_flat=self._P,
-                    dims=info.dim,
-                    mio=info.mio,
-                    vio=info.vio,
-                    num_blocks=info.num_blocks,
-                    max_dim=int(info.max_dimension),
-                    tol=self._reorder_tol,
-                    max_bfs_iters=self._rcm_max_bfs_iters,
-                    use_cuda_graph=False,
-                    device=self._device,
-                )
-            self._reorder_callbacks = [cb]
-            self._A_views = [(A, self._P)]  # keep references alive
-            self._A_views_attached_to = A
-            return
-
-        # Per-block RCM: one callback per block over a (n*n,) view of A.
-        mio_host = info.mio.numpy()
-        vio_host = info.vio.numpy()
-        A_base_ptr = A.ptr
-        elem_size = wp.types.type_size_in_bytes(A.dtype)
-
         with wp.ScopedDevice(self._device):
-            for b in range(info.num_blocks):
-                n_i = int(dims[b])
-                mat_off = int(mio_host[b])
-                vec_off = int(vio_host[b])
-
-                P_view = wp.array(
-                    ptr=self._P.ptr + vec_off * wp.types.type_size_in_bytes(self._P.dtype),
-                    shape=(n_i,),
-                    dtype=int32,
-                    device=self._device,
-                )
-                A_view = wp.array(
-                    ptr=A_base_ptr + mat_off * elem_size,
-                    shape=(n_i * n_i,),
-                    dtype=A.dtype,
-                    device=self._device,
-                )
-                cb = _rcm.create_rcm_launch(
-                    A_view,
-                    P_view,
-                    tol=self._reorder_tol,
-                    max_bfs_iters=self._rcm_max_bfs_iters,
-                    use_cuda_graph=False,  # captured under outer graph
-                    device=self._device,
-                )
-                # RCM allocates its own scratch inside create_rcm_launch; the
-                # closure keeps it alive via the captured launches.
-                self._A_views.append((A_view, P_view))
-                self._reorder_callbacks.append(cb)
-
-        self._A_views_attached_to = A
+            self._reorder_callback = _rcm_batch.create_rcm_batch_launch(
+                A_flat=A,
+                perm_flat=self._P,
+                dims=info.dim,
+                mio=info.mio,
+                vio=info.vio,
+                num_blocks=info.num_blocks,
+                max_dim=int(info.max_dimension),
+                tol=self._reorder_tol,
+                max_bfs_iters=self._rcm_max_bfs_iters,
+                use_cuda_graph=False,
+                device=self._device,
+            )
+        self._reorder_attached_to = A
 
     @override
     def _factorize_impl(self, A: wp.array) -> None:
@@ -384,11 +310,10 @@ class LLTBlockedNDSolver(DirectSolver):
         # Bind / rebind views to the current A buffer.
         self._ensure_reorder_launches_bound(A)
 
-        # 1. Compute per-block P by running each reorder callback. These are
-        #    recorded Warp launches internally and are safe to replay under
+        # 1. Compute per-block P via the batched RCM callback. The callback
+        #    is a set of recorded Warp launches and is safe to replay under
         #    CUDA graph capture initiated by the caller.
-        for cb in self._reorder_callbacks:
-            cb()
+        self._reorder_callback()
 
         # 2. Fused: build inv_P, permute A -> A_hat, and reduce |A_hat| into the
         #    raw tile pattern in a single launch. Each thread writes only its

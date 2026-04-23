@@ -7,7 +7,7 @@ This module mirrors :mod:`llt_blocked` (flat-batched layout, Tile API kernels)
 but adds:
 
 - Transparent per-block fill-reducing reordering using the GPU-native
-  Reverse Cuthill-McKee launches from :mod:`.rcm` / :mod:`.rcm_batch`.
+  batched Reverse Cuthill-McKee launches from :mod:`.rcm_batch`.
 - A tile-granularity *zero-block mask* (the "semi-sparse" part): every inner
   tile_load / tile_matmul in the numeric factorize + solve kernels is gated on
   a per-block ``tile_pattern`` so that tiles which are guaranteed to be zero
@@ -41,20 +41,14 @@ from ...core.types import float32, int32
 ###
 
 __all__ = [
-    "llt_blocked_nd_build_inv_P",
-    "llt_blocked_nd_build_tile_pattern",
     "llt_blocked_nd_factorize",
     "llt_blocked_nd_fused_permute_and_tp",
-    "llt_blocked_nd_permute_matrix",
     "llt_blocked_nd_permute_vector",
     "llt_blocked_nd_solve",
     "llt_blocked_nd_solve_inplace",
     "llt_blocked_nd_symbolic_fill_in",
-    "make_llt_blocked_nd_build_inv_P_kernel",
-    "make_llt_blocked_nd_build_tile_pattern_kernel",
     "make_llt_blocked_nd_factorize_kernel",
     "make_llt_blocked_nd_fused_permute_and_tp_kernel",
-    "make_llt_blocked_nd_permute_matrix_kernel",
     "make_llt_blocked_nd_permute_vector_kernel",
     "make_llt_blocked_nd_solve_inplace_kernel",
     "make_llt_blocked_nd_solve_kernel",
@@ -100,43 +94,6 @@ get_float32_array_offset_ptr = make_get_array_offset_ptr_func(wp.float32)
 
 
 @cache
-def make_llt_blocked_nd_permute_matrix_kernel(max_dim: int):
-    """Per-(block, row, col) kernel: ``A_hat[r, c] = A[P[r], P[c]]``.
-
-    Launched over ``(num_blocks, max_dim, max_dim)`` via ``wp.launch``.
-    Threads outside the active ``n_i x n_i`` region write 0.
-    ``max_dim`` is a compile-time constant to keep launch shapes fixed.
-    """
-    # max_dim is baked into the name; the kernel itself does not use it,
-    # but caching on it ensures we reuse launches when the same max_dim is requested.
-    del max_dim
-
-    @wp.kernel
-    def permute_matrix_kernel(
-        # Per-block metadata
-        dim: wp.array(dtype=int32),
-        mio: wp.array(dtype=int32),
-        vio: wp.array(dtype=int32),
-        P: wp.array(dtype=int32),
-        # Inputs / outputs
-        A: wp.array(dtype=float32),
-        A_hat: wp.array(dtype=float32),
-    ):
-        b, r, c = wp.tid()
-        n_i = dim[b]
-        if r >= n_i or c >= n_i:
-            return
-        mat_off = mio[b]
-        vec_off = vio[b]
-        p_r = P[vec_off + r]
-        p_c = P[vec_off + c]
-        # A and A_hat are row-major (n_i x n_i) stored contiguously.
-        A_hat[mat_off + r * n_i + c] = A[mat_off + p_r * n_i + p_c]
-
-    return permute_matrix_kernel
-
-
-@cache
 def make_llt_blocked_nd_permute_vector_kernel(max_dim: int):
     """Per-(block, row) kernel: ``b_hat[r] = b[P[r]]`` (or inverse).
 
@@ -164,28 +121,6 @@ def make_llt_blocked_nd_permute_vector_kernel(max_dim: int):
 
 
 @cache
-def make_llt_blocked_nd_build_inv_P_kernel(max_dim: int):
-    """Per-(block, row) kernel: ``inv_P[P[r]] = r`` (block-local inversion)."""
-    del max_dim
-
-    @wp.kernel
-    def build_inv_P_kernel(
-        dim: wp.array(dtype=int32),
-        vio: wp.array(dtype=int32),
-        P: wp.array(dtype=int32),
-        inv_P: wp.array(dtype=int32),
-    ):
-        b, r = wp.tid()
-        n_i = dim[b]
-        if r >= n_i:
-            return
-        vec_off = vio[b]
-        inv_P[vec_off + P[vec_off + r]] = r
-
-    return build_inv_P_kernel
-
-
-@cache
 def make_llt_blocked_nd_fused_permute_and_tp_kernel(block_size: int, max_dim: int):
     """Fused kernel: builds ``inv_P``, permutes ``A -> A_hat``, and reduces
     ``|A_hat|`` into the tile pattern in a single launch.
@@ -197,13 +132,13 @@ def make_llt_blocked_nd_fused_permute_and_tp_kernel(block_size: int, max_dim: in
     3. If ``|v| > tol``: atomically ORs ``1`` into the tile-pattern slot
        ``(r // block_size, c // block_size)`` for this block.
 
-    Replaces three prior launches (``build_inv_P`` + ``permute_matrix`` +
-    ``build_tile_pattern``) with one. The data dependency is safe because each
-    thread writes and reads only *its own* ``A_hat[r, c]`` slot.
+    Folds what used to be three separate launches into one. The data
+    dependency is safe because each thread writes and reads only *its own*
+    ``A_hat[r, c]`` slot.
 
-    Callers must zero ``tile_pattern`` before invoking this (no change vs. the
-    un-fused build_tile_pattern call). ``max_dim`` is baked in for the cache
-    key.
+    Callers must zero ``tile_pattern`` before invoking this (the tile-pattern
+    contribution is an atomic OR, not an overwrite). ``max_dim`` is baked in
+    for the cache key.
     """
     del max_dim
 
@@ -250,45 +185,6 @@ def make_llt_blocked_nd_fused_permute_and_tp_kernel(block_size: int, max_dim: in
             wp.atomic_max(tile_pattern, tp_off + tr * n_tiles + tc, int(1))
 
     return fused_permute_and_tp_kernel
-
-
-@cache
-def make_llt_blocked_nd_build_tile_pattern_kernel(block_size: int, max_dim: int):
-    """Per-(block, row, col) kernel that reduces ``|A_hat|`` to a 0/1 tile pattern.
-
-    Writes a 1 into ``tile_pattern[tile_row, tile_col]`` if any entry in that
-    tile satisfies ``|A_hat_ij| > tol``. Uses ``wp.atomic_max`` to OR the bits.
-    The ``tile_pattern`` array is zeroed separately before this kernel runs.
-    """
-    del max_dim
-
-    @wp.kernel
-    def build_tile_pattern_kernel(
-        dim: wp.array(dtype=int32),
-        mio: wp.array(dtype=int32),
-        tpo: wp.array(dtype=int32),
-        tol: float,
-        A_hat: wp.array(dtype=float32),
-        tile_pattern: wp.array(dtype=int32),
-    ):
-        b, r, c = wp.tid()
-        n_i = dim[b]
-        if r >= n_i or c >= n_i:
-            return
-        mat_off = mio[b]
-        tp_off = tpo[b]
-        n_tiles = (n_i + block_size - 1) // block_size
-
-        v = A_hat[mat_off + r * n_i + c]
-        if v < float(0):
-            v = -v
-        if v > tol:
-            tr = r // block_size
-            tc = c // block_size
-            # atomic OR emulated via atomic_max on 0/1 values.
-            wp.atomic_max(tile_pattern, tp_off + tr * n_tiles + tc, int(1))
-
-    return build_tile_pattern_kernel
 
 
 @cache
@@ -658,33 +554,6 @@ def make_llt_blocked_nd_solve_inplace_kernel(block_size: int):
 ###
 
 
-def llt_blocked_nd_permute_matrix(
-    kernel,
-    dim: wp.array(dtype=int32),
-    mio: wp.array(dtype=int32),
-    vio: wp.array(dtype=int32),
-    P: wp.array(dtype=int32),
-    A: wp.array(dtype=float32),
-    A_hat: wp.array(dtype=float32),
-    num_blocks: int,
-    max_dim: int,
-    device: wp.DeviceLike = None,
-):
-    """Launches the per-block symmetric permutation kernel ``A_hat = P A P^T``.
-
-    Args:
-        kernel: output of :func:`make_llt_blocked_nd_permute_matrix_kernel`.
-        num_blocks: number of matrix blocks in the batch.
-        max_dim:    maximum ``n_i`` across blocks (launch dim upper bound).
-    """
-    wp.launch(
-        kernel=kernel,
-        dim=(num_blocks, max_dim, max_dim),
-        inputs=[dim, mio, vio, P, A, A_hat],
-        device=device,
-    )
-
-
 def llt_blocked_nd_permute_vector(
     kernel,
     dim: wp.array(dtype=int32),
@@ -701,49 +570,6 @@ def llt_blocked_nd_permute_vector(
         kernel=kernel,
         dim=(num_blocks, max_dim),
         inputs=[dim, vio, P, src, dst],
-        device=device,
-    )
-
-
-def llt_blocked_nd_build_inv_P(
-    kernel,
-    dim: wp.array(dtype=int32),
-    vio: wp.array(dtype=int32),
-    P: wp.array(dtype=int32),
-    inv_P: wp.array(dtype=int32),
-    num_blocks: int,
-    max_dim: int,
-    device: wp.DeviceLike = None,
-):
-    """Launches the inverse-permutation build kernel."""
-    wp.launch(
-        kernel=kernel,
-        dim=(num_blocks, max_dim),
-        inputs=[dim, vio, P, inv_P],
-        device=device,
-    )
-
-
-def llt_blocked_nd_build_tile_pattern(
-    kernel,
-    dim: wp.array(dtype=int32),
-    mio: wp.array(dtype=int32),
-    tpo: wp.array(dtype=int32),
-    tol: float,
-    A_hat: wp.array(dtype=float32),
-    tile_pattern: wp.array(dtype=int32),
-    num_blocks: int,
-    max_dim: int,
-    device: wp.DeviceLike = None,
-):
-    """Launches the tile-pattern reduction kernel (writes 0/1 bits).
-
-    Callers must zero ``tile_pattern`` before invoking this (tile_pattern.zero_()).
-    """
-    wp.launch(
-        kernel=kernel,
-        dim=(num_blocks, max_dim, max_dim),
-        inputs=[dim, mio, tpo, float(tol), A_hat, tile_pattern],
         device=device,
     )
 
