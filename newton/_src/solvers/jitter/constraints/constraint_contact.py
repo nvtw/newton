@@ -1096,14 +1096,44 @@ def contact_iterate_at(
         # stacks but the tuning sweet spot is harder to find than
         # the always-on bias with a small gain (0.03), so we keep
         # the simpler formulation.
+        #
+        # Friction cone: we use a **circular** cone
+        # ``sqrt(lam_t1^2 + lam_t2^2) <= mu * lam_n`` (matching XPBD,
+        # MuJoCo, Bullet 3, PhysX). The earlier boxed variant
+        # clamped each axis independently, which allows a diagonal
+        # friction impulse of up to ``mu * sqrt(2) * lam_n`` -- a
+        # 41 % over-shoot. For non-rotating stacks the difference is
+        # cosmetic (the tangent basis tends to align with the slip
+        # axis and the box/cone only differ on the corner), but for
+        # rotating contacts (e.g. a nut on a helical SDF) the
+        # extra corner budget lets the two tangent rows fight each
+        # other and cancels out rotation the normal row should
+        # drive. Circular-cone clamping keeps friction isotropic in
+        # the tangent plane, which is the property the nut-bolt
+        # threading relies on.
         d_lam_t1 = -eff_t1 * (jv_t1 + bias_t1_val)
-        lam_t1_old = cc_get_tangent1_lambda(cc, slot, cid)
-        lam_t1_new = wp.clamp(lam_t1_old + d_lam_t1, -fric_limit, fric_limit)
-        d_lam_t1 = lam_t1_new - lam_t1_old
-
         d_lam_t2 = -eff_t2 * (jv_t2 + bias_t2_val)
+        lam_t1_old = cc_get_tangent1_lambda(cc, slot, cid)
         lam_t2_old = cc_get_tangent2_lambda(cc, slot, cid)
-        lam_t2_new = wp.clamp(lam_t2_old + d_lam_t2, -fric_limit, fric_limit)
+        lam_t1_raw = lam_t1_old + d_lam_t1
+        lam_t2_raw = lam_t2_old + d_lam_t2
+        # Circular-cone projection. If the raw 2D impulse magnitude
+        # exceeds the Coulomb budget we rescale both components by
+        # the same factor so the post-clamp direction matches the
+        # pre-clamp (slip) direction -- this is what aligns the
+        # friction impulse with the actual slip and matches XPBD's
+        # ``lambda_fr = max(lambda_fr, -lambda_n * mu)`` along the
+        # single slip direction.
+        lam_t_sq = lam_t1_raw * lam_t1_raw + lam_t2_raw * lam_t2_raw
+        fric_limit_sq = fric_limit * fric_limit
+        if lam_t_sq > fric_limit_sq and lam_t_sq > wp.float32(1.0e-30):
+            inv_mag = fric_limit / wp.sqrt(lam_t_sq)
+            lam_t1_new = lam_t1_raw * inv_mag
+            lam_t2_new = lam_t2_raw * inv_mag
+        else:
+            lam_t1_new = lam_t1_raw
+            lam_t2_new = lam_t2_raw
+        d_lam_t1 = lam_t1_new - lam_t1_old
         d_lam_t2 = lam_t2_new - lam_t2_old
 
         cc_set_normal_lambda(cc, slot, cid, lam_n_new)

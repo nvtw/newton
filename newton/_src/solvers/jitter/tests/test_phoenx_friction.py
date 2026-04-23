@@ -23,6 +23,7 @@ harness; CUDA-only same as the jitter originals.
 
 from __future__ import annotations
 
+import math
 import unittest
 
 import numpy as np
@@ -280,6 +281,69 @@ class TestKineticSlideDeceleration(unittest.TestCase):
             0.05,
             f"cube did not stop: vx_final={vx_final:.4f} m/s after "
             f"{t_stop * 1.5:.3f} s",
+        )
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX friction tests require CUDA")
+class TestPhoenXCircularFrictionCone(unittest.TestCase):
+    """Validate the circular-cone friction clamp (vs the older
+    boxed per-axis clamp) matches the XPBD / MuJoCo convention.
+
+    The test pushes a cube at 45 degrees (equal force on +X and
+    +Y) against a plane with ``mu = 0.4`` and weight ``w = m g``.
+    Analytic slide threshold:
+
+    * Circular cone (XPBD / MuJoCo / our fix): the tangent impulse
+      magnitude is capped at ``mu * lam_n``. Push of ``|F| = 0.5 *
+      m * g`` (diagonal, so ``F_x = F_y = 0.5 / sqrt(2) * m * g``)
+      exceeds the circular cone (``mu * m g = 0.4 * m g < 0.5 * m g``),
+      so the cube **must slide**.
+    * Boxed cone (prior behaviour): each axis independently
+      clamps at ``mu * lam_n``, so the diagonal budget is ``mu *
+      sqrt(2) * lam_n = 0.566 * m g``. Push of ``0.5 * m * g`` would
+      fit inside the box and the cube would stay put -- the wrong
+      answer.
+
+    With the fix applied the cube slides; this test will fail the
+    moment anyone reverts to boxed clamping.
+    """
+
+    def test_diagonal_push_slides_at_circular_cone_threshold(self) -> None:
+        mu = 0.4
+        # Diagonal push magnitude = 0.5 * m * g (above circular cone
+        # but below boxed cone).
+        F_total = 0.5 * 1000.0 * _G  # 1 m^3, density=1000 -> 1000 kg
+        F_diag = F_total / math.sqrt(2.0)
+
+        scene = _PhoenXScene(fps=60, substeps=4, solver_iterations=16, friction=mu)
+        scene.add_ground_plane()
+        he = 0.5
+        box = scene.add_box(
+            position=(0.0, 0.0, he + 1.0e-3),
+            half_extents=(he, he, he),
+            density=1000.0,
+        )
+        scene.finalize()
+        # Settle vertical first.
+        for _ in range(10):
+            scene.step()
+        # Apply diagonal push every frame.
+        for _ in range(120):
+            scene.apply_body_force(box, force=(F_diag, F_diag, 0.0))
+            scene.step()
+        pos = scene.body_position(box)
+        dist = math.hypot(float(pos[0]), float(pos[1]))
+        # Circular-cone cube slides a significant distance
+        # (typically > 1 m in 2 s under the 0.5-mg net push at the
+        # mu=0.4 friction drag). A boxed-cone implementation would
+        # hold the cube at the origin (|dist| ~ 0).
+        self.assertGreater(
+            dist,
+            0.5,
+            f"diagonal push failed to slide cube: dist={dist:.3f} m -- "
+            "likely boxed-cone regression (mu=0.4 * sqrt(2) = 0.566 > 0.5 "
+            "push_ratio so the old clamp holds the cube; circular cone "
+            "correctly lets it slide).",
         )
 
 

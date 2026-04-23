@@ -32,9 +32,20 @@ from newton._src.solvers.jitter.constraints.constraint_contact import (
 from newton._src.solvers.jitter.constraints.constraint_container import (
     constraint_container_zeros,
 )
-from newton._src.solvers.jitter.constraints.contact_matching_config import (
-    JITTER_CONTACT_MATCHING,
-)
+# Contact matching mode. The shared jitter/phoenx default is
+# ``"sticky"`` -- it pins each matched contact's body-frame anchors
+# and world-frame normal to their first-frame values, which kills
+# stack jitter but also freezes the contact normal. On the nut-bolt
+# scene, the first frame's contacts land on the bolt head's flat
+# top (vertical normal), so sticky mode keeps that vertical normal
+# even once the nut should be threading -- the normal-row impulse
+# ends up pure-vertical and produces no torque about +Z.
+# ``"latest"`` keeps matching (so warm-start still works) but uses
+# each frame's fresh narrow-phase normal, which tilts along the
+# helical SDF surface and naturally rotates the nut. XPBD and
+# MuJoCo's solver don't go through this matching layer at all, so
+# this is a PhoenX-specific sticky-vs-fresh tradeoff.
+_CONTACT_MATCHING = "latest"
 from newton._src.solvers.jitter.examples.example_phoenx_common import (
     init_phoenx_bodies_kernel,
     newton_to_phoenx_kernel,
@@ -55,10 +66,20 @@ ASSEMBLY_STR = "m20_loose"
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 
-# Shape config. Matches the jitter nut-bolt knobs; the ``ke`` / ``kd``
-# stiffness terms are no-ops for the jitter / PhoenX contact solver
-# (they're a MuJoCo/SemiImplicit penalty-solver knob) but we keep
-# them so every nut/bolt example uses the same ``ShapeConfig`` cell.
+# Shape config. Matches the XPBD / MuJoCo nut-bolt knobs verbatim
+# so the three solvers can be compared side-by-side on the same
+# scene. The ``ke`` / ``kd`` stiffness terms are no-ops for jitter
+# / PhoenX (they're a MuJoCo/SemiImplicit penalty-solver knob).
+#
+# ``mu = 0.01`` is *deliberate*: for a rigid nut on a rigid helical
+# bolt SDF, the contact normals are purely radial + axial (they
+# have no component in the tangent-around-axis direction), so the
+# *normal impulse alone* produces zero torque about +Z. The nut
+# rotates because Coulomb friction opposes the axial slip along
+# the helix surface -- and the helix's tangent direction has a
+# rotational component, so the friction force has one too. Set
+# ``mu = 0`` and the nut sinks straight down the bolt without
+# threading; this is physically correct.
 SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
     margin=0.0,
     mu=0.01,
@@ -201,7 +222,7 @@ class Example:
 
         # ---- Collision pipeline ---------------------------------------
         self.collision_pipeline = newton.CollisionPipeline(
-            self.model, contact_matching=JITTER_CONTACT_MATCHING
+            self.model, contact_matching=_CONTACT_MATCHING
         )
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
