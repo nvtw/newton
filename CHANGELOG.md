@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add heatmap rendering for scalar arrays logged through `ViewerGL.log_array()`
 - Add `SolverXPBD.update_contacts()` to populate `contacts.force` with per-contact spatial forces (linear force and torque) derived from XPBD constraint impulses
 - Raise process priority automatically in `--benchmark` mode for more stable measurements; add `--realtime` for maximum priority.
 - Import per-shape authored color from USD stages into `ModelBuilder.shape_color`
@@ -14,6 +15,7 @@
 - Add fast parity-based SDF construction path for watertight meshes in `SDF.create_from_mesh`, using `wp.mesh_query_point_sign_parity` instead of winding numbers; selected via the new `sign_method` argument (`"auto"` — the default — picks parity when `Mesh.is_watertight` is true, or `"parity"` / `"winding"` to force either strategy)
 - Add `ViewerBase.log_arrows()` for arrow rendering (wide line + arrowhead) in the GL viewer with a dedicated geometry shader
 - Add `enable_multiccd` parameter to `SolverMuJoCo` for multi-CCD contact generation (up to 4 contact points per geom pair)
+- Support `<joint type="ball"/>` in the MJCF importer, and preserve authored damping, stiffness, and frictionloss when exporting ball joints to MuJoCo specs (previously silently dropped)
 - Add `ViewerViser.log_scalar()` for live scalar time-series plots via uPlot
 - Honor `UsdGeomImageable` visibility (including inherited `invisible`) on USD prims imported via `ModelBuilder.add_usd()`; visual shapes, gaussian splats, and collider shapes are imported with `ShapeFlags.VISIBLE` cleared when the prim is effectively invisible, while collision behavior is preserved
 
@@ -47,9 +49,11 @@
 - Fix box support-map sign flips from quaternion rotation noise (~1e-14) producing invalid GJK/MPR contacts for face-touching boxes with non-trivial base rotations
 - Fix USD import of multi-DOF joints from MuJoCo-converted assets where multiple revolute joints between the same two bodies caused false cycle detection; merge them into D6 joints with correct DOF label mapping for MjcActuator target resolution
 - Fix MJCF importer creating finite planes from MuJoCo visual half-sizes instead of infinite planes
+- Fix USD import of joint limit stiffness/damping from `MjcJointAPI`: `SchemaResolverMjc` now reads the schema-correct `mjc:solreflimit` attribute instead of the generic `mjc:solref`, which was never authored on joints
 - Fix MJCF importer in `compiler.angle="degree"` mode: (1) stop multiplying joint `damping`/`stiffness` by `180/π` (MuJoCo stores these in `N·m·s/rad` and `N·m/rad` regardless of `angle`); (2) stop `deg2rad`-scaling the default `±MAXVAL` sentinel for joints without an explicit `range=`, which was turning unlimited hinges into bounded joints with `~1.75e8 rad` range
 - Fix ViewerViser mesh popping artifacts caused by viser's automatic LOD simplification creating holes in complex geometry
 - Fix degenerate zero-area triangles in SDF marching-cubes isosurface extraction by clamping edge interpolation away from cube corners and guarding against near-zero cross products
+- Fix multi-world coordinate conversion using the wrong body center of mass for replicated worlds
 - Fix MJCF importer ignoring `<default><equality/></default>` attribute defaults (e.g. `solref`, `solimp`) for `<connect>`/`<weld>`/`<joint>` equality constraints
 - Remove incorrect body-level `mjc:damping` -> `rigid_body_linear_damping` mapping from `SchemaResolverMjc`; `mjc:damping` is defined on `MjcJointAPI`, not on bodies
 
