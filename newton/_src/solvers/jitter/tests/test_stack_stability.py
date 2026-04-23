@@ -71,14 +71,19 @@ class _StackScene:
         *,
         num_cubes: int,
         half_extent: float = 0.5,
-        # Rely on Newton's default shape density (1000 kg/m^3) so the
-        # cube mass scales with volume -- matches :mod:`example_pyramid`
-        # and keeps the current bias-factor calibration in range. A
-        # unit-mass variant would need a stiffer normal bias to stay
-        # equilibrated (see the diagnostic script in
-        # ``debug_stack2.py`` for the derivation); kept out of the
-        # default path here so the baseline doesn't require tuning
-        # knobs the user hasn't asked for.
+        # Density-derived mass keeps parity with the pyramid example.
+        # The baseline bias-factor calibration was tuned at 1000
+        # kg/m^3 so that's the default, but varying density + size
+        # lets us confirm we're not overfitting to unit cubes.
+        density: float = 1000.0,
+        # Per-layer overrides. When non-None, ``half_extents[i]`` and
+        # ``densities[i]`` drive cube i's geometry / mass. Use this
+        # to build a mixed stack where the bottom supports heavier
+        # blocks, or a tapered tower, without plumbing per-layer
+        # arguments through every call site. Length must equal
+        # ``num_cubes``. Falls back to the scalar defaults when None.
+        half_extents: list[float] | None = None,
+        densities: list[float] | None = None,
         gap: float = 5.0e-3,
         friction: float = 0.5,
         fps: int = 60,
@@ -89,11 +94,23 @@ class _StackScene:
         self.device = wp.get_device("cuda:0")
         self.num_cubes = int(num_cubes)
         self.half_extent = float(half_extent)
-        # Density-derived mass keeps parity with the pyramid example;
-        # derived here so the momentum metric can scale by it.
-        density = 1000.0
-        volume = (2.0 * self.half_extent) ** 3
-        self.cube_mass = float(density * volume)
+        if half_extents is None:
+            half_extents = [self.half_extent] * self.num_cubes
+        if densities is None:
+            densities = [float(density)] * self.num_cubes
+        assert len(half_extents) == self.num_cubes
+        assert len(densities) == self.num_cubes
+        self.per_cube_half_extents = [float(x) for x in half_extents]
+        self.per_cube_densities = [float(x) for x in densities]
+        # Default cube mass for diagnostic printing (first cube's mass).
+        volume_0 = (2.0 * self.per_cube_half_extents[0]) ** 3
+        self.cube_mass = float(self.per_cube_densities[0] * volume_0)
+        # Per-cube masses -- the momentum diagnostic scales each by
+        # its own mass, not the uniform ``cube_mass``.
+        self.per_cube_masses = [
+            float(d * (2.0 * h) ** 3)
+            for d, h in zip(self.per_cube_densities, self.per_cube_half_extents)
+        ]
         self.fps = int(fps)
         self.substeps = int(substeps)
         self.frame_dt = 1.0 / self.fps
@@ -108,8 +125,14 @@ class _StackScene:
         rng = np.random.default_rng(0)
         newton_body_ids: list[int] = []
         expected_masses: dict[int, float] = {}
+        # Stack cubes on top of each other. Each layer's bottom sits
+        # on the previous layer's top + gap. ``z_centre = bottom +
+        # half_extent[i]``.
+        z_bottom = 0.0
         for row in range(self.num_cubes):
-            z = self.half_extent + row * (2.0 * self.half_extent + gap)
+            he = self.per_cube_half_extents[row]
+            dens = self.per_cube_densities[row]
+            z = z_bottom + he
             offset = (
                 rng.normal(scale=seed_jitter, size=2)
                 if seed_jitter > 0
@@ -121,17 +144,16 @@ class _StackScene:
                     q=wp.quat_identity(),
                 ),
             )
-            # Default density (1000 kg/m^3) so the effective-mass
-            # scaling matches the pyramid example and the baseline
-            # stays in the calibrated regime.
             mb.add_shape_box(
                 body,
-                hx=self.half_extent,
-                hy=self.half_extent,
-                hz=self.half_extent,
+                hx=he,
+                hy=he,
+                hz=he,
+                cfg=newton.ModelBuilder.ShapeConfig(density=dens),
             )
             newton_body_ids.append(body)
-            expected_masses[body] = self.cube_mass
+            expected_masses[body] = float(dens * (2.0 * he) ** 3)
+            z_bottom = z + he + gap
         self.newton_body_ids = newton_body_ids
 
         self.model = mb.finalize()
@@ -256,7 +278,14 @@ class _StackScene:
 
 
 def _run_stack_and_measure(
-    num_cubes: int, *, n_frames: int = 240, seed_jitter: float = 0.0
+    num_cubes: int,
+    *,
+    n_frames: int = 240,
+    seed_jitter: float = 0.0,
+    half_extent: float = 0.5,
+    density: float = 1000.0,
+    half_extents: list[float] | None = None,
+    densities: list[float] | None = None,
 ) -> dict:
     """Settle a ``num_cubes``-tall stack and return diagnostic metrics.
 
@@ -277,18 +306,27 @@ def _run_stack_and_measure(
       all cubes in the last frame. A stable stack should settle to
       <~ 1 mm/s.
     """
-    scene = _StackScene(num_cubes=num_cubes, seed_jitter=seed_jitter)
+    scene = _StackScene(
+        num_cubes=num_cubes,
+        seed_jitter=seed_jitter,
+        half_extent=half_extent,
+        density=density,
+        half_extents=half_extents,
+        densities=densities,
+    )
 
     initial_positions = scene.body_positions()
     initial_top_z = float(initial_positions[-1, 2])
 
+    masses = np.asarray(scene.per_cube_masses, dtype=np.float32).reshape(-1, 1)
     peak_horizontal_momentum = 0.0
     for frame in range(n_frames):
         scene.step()
         # Sample horizontal momentum during the settled tail.
         if frame >= n_frames // 2:
             vels = scene.body_velocities()
-            p_xy = np.sum(vels[:, :2] * scene.cube_mass, axis=0)
+            # Per-cube momentum: each cube's mass * its velocity.
+            p_xy = np.sum(vels[:, :2] * masses, axis=0)
             mag = float(np.linalg.norm(p_xy))
             if mag > peak_horizontal_momentum:
                 peak_horizontal_momentum = mag
@@ -466,6 +504,119 @@ class TestStackStabilityLongSettle(unittest.TestCase):
         # subsequent autoresearch iterations, not to fail immediately.
         self.assertTrue(np.isfinite(m["drift_rate_mm_s"]))
         self.assertTrue(np.isfinite(m["final_slip_max_xy_m"]))
+
+
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "Varied-cube stack stability tests run on CUDA only.",
+)
+class TestStackStabilityVariedCubes(unittest.TestCase):
+    """Don't overfit to unit cubes with default density.
+
+    Runs the 4-second stack diagnostic on a variety of cube sizes and
+    masses so that regressions introduced by a friction tune show up
+    across the configuration space, not just on the baseline 1m,
+    1000 kg/m^3 column. Each test prints the same ``[stack N=...]``
+    line as the default tests plus a second ``[stack-varied ...]``
+    line with the configuration identifier.
+    """
+
+    N_FRAMES = 240
+
+    @classmethod
+    def setUpClass(cls):
+        if not wp.is_cuda_available():
+            raise unittest.SkipTest("requires CUDA")
+
+    def _run_and_print(
+        self,
+        label: str,
+        num_cubes: int,
+        *,
+        half_extent: float = 0.5,
+        density: float = 1000.0,
+        half_extents: list[float] | None = None,
+        densities: list[float] | None = None,
+    ) -> dict:
+        m = _run_stack_and_measure(
+            num_cubes,
+            n_frames=self.N_FRAMES,
+            half_extent=half_extent,
+            density=density,
+            half_extents=half_extents,
+            densities=densities,
+        )
+        print(
+            f"[stack-varied {label}] "
+            f"slip_max={m['final_slip_max_xy']:.4f} m  "
+            f"slip_mean={m['final_slip_mean_xy']:.4f} m  "
+            f"top_drop={m['top_drop']:+.4f} m  "
+            f"p_xy_peak={m['peak_horizontal_momentum']:.4f}  "
+            f"v_rms={m['rms_horizontal_velocity']:.4f} m/s"
+        )
+        return m
+
+    def test_small_cubes(self):
+        """10 cm cubes, 1000 kg/m^3 -- 1 kg each. Gravity load on
+        the bottom contact is ~100x smaller than the 1m baseline,
+        which stresses whether the bias calibration scales cleanly
+        with mass."""
+        m = self._run_and_print(
+            "N=10 he=0.05 rho=1000", 10, half_extent=0.05
+        )
+        self.assertTrue(np.isfinite(m["final_slip_max_xy"]))
+
+    def test_large_cubes(self):
+        """2 m cubes, 1000 kg/m^3 -- 8000 kg each. Larger moment
+        arms, larger load per contact."""
+        m = self._run_and_print(
+            "N=10 he=1.0 rho=1000", 10, half_extent=1.0
+        )
+        self.assertTrue(np.isfinite(m["final_slip_max_xy"]))
+
+    def test_light_cubes(self):
+        """1 m cubes at 100 kg/m^3 -- 100 kg each (10x lighter than
+        baseline). Normal impulse is 10x smaller; sticky-friction
+        thresholds (drift / slop / slip_threshold) mustn't scale
+        with mass or a light tower will creep."""
+        m = self._run_and_print(
+            "N=10 he=0.5 rho=100", 10, density=100.0
+        )
+        self.assertTrue(np.isfinite(m["final_slip_max_xy"]))
+
+    def test_heavy_cubes(self):
+        """1 m cubes at 10000 kg/m^3 -- 10 metric tonnes each."""
+        m = self._run_and_print(
+            "N=10 he=0.5 rho=10000", 10, density=10000.0
+        )
+        self.assertTrue(np.isfinite(m["final_slip_max_xy"]))
+
+    def test_mixed_size_tapered(self):
+        """Tapered tower: bottom cube 1 m, shrinking by 10% per
+        layer so the top is about 35 cm. Mixed-geometry stress test
+        for the flat-manifold averaging / sticky-anchor logic."""
+        num_cubes = 10
+        half_extents = [0.5 * (0.9 ** i) for i in range(num_cubes)]
+        m = self._run_and_print(
+            "N=10 tapered",
+            num_cubes,
+            half_extents=half_extents,
+        )
+        self.assertTrue(np.isfinite(m["final_slip_max_xy"]))
+
+    def test_mixed_density_heavy_top(self):
+        """Bottom cubes light (100 kg/m^3), top cubes heavy
+        (10000 kg/m^3). Loads the middle of the stack without
+        increasing cube count -- surfaces asymmetric-load bugs in
+        the normal-impulse Coulomb budget."""
+        num_cubes = 10
+        densities = [100.0] * (num_cubes // 2) + [10000.0] * (num_cubes - num_cubes // 2)
+        m = self._run_and_print(
+            "N=10 light-under-heavy",
+            num_cubes,
+            densities=densities,
+        )
+        self.assertTrue(np.isfinite(m["final_slip_max_xy"]))
 
 
 if __name__ == "__main__":
