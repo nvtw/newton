@@ -526,7 +526,7 @@ class CollisionPipeline:
                 between the previous and current contact midpoints
                 ``0.5 * (world(point0) + world(point1))``.  Contacts whose
                 midpoint moves more than this are considered broken.  Defaults
-                to ``0.005``.
+                to ``0.0005``.
             contact_matching_normal_dot_threshold: Minimum dot product between
                 old and new contact normals for a match.
             contact_report: Allocate ``rigid_contact_new_indices`` /

@@ -1740,7 +1740,7 @@ Any non-disabled mode implies ``deterministic=True``.
     pipeline = newton.CollisionPipeline(
         model,
         contact_matching="latest",
-        contact_matching_pos_threshold=0.005,      # metres (default 0.005)
+        contact_matching_pos_threshold=0.005,      # metres (default 0.0005)
         contact_matching_normal_dot_threshold=0.9,  # cos(~25°)
     )
     contacts = pipeline.contacts()
@@ -1770,7 +1770,7 @@ as motion on both sides of the contact, not just one.
 - ``contact_matching_pos_threshold`` — maximum world-space distance [m]
   between the previous and current contact midpoints for a match.  Contacts
   that moved more than this between frames are considered broken.  Defaults
-  to ``0.005`` m.
+  to ``0.0005`` m.
 - ``contact_matching_normal_dot_threshold`` — minimum dot product between old
   and new contact normals.  Below this the contact is reported as broken even
   if the key and position match.

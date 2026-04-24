@@ -647,7 +647,7 @@ class ContactMatcher:
         return self._sticky
 
     @property
-    def prev_contact_count(self) -> wp.array:
+    def prev_contact_count(self) -> wp.array[wp.int32]:
         """Device-side previous frame contact count (single-element int32)."""
         return self._prev_count
 
@@ -669,16 +669,16 @@ class ContactMatcher:
 
     def match(
         self,
-        sort_keys: wp.array,
-        contact_count: wp.array,
-        point0: wp.array,
-        point1: wp.array,
-        shape0: wp.array,
-        shape1: wp.array,
-        normal: wp.array,
-        body_q: wp.array,
-        shape_body: wp.array,
-        match_index_out: wp.array,
+        sort_keys: wp.array[wp.int64],
+        contact_count: wp.array[wp.int32],
+        point0: wp.array[wp.vec3],
+        point1: wp.array[wp.vec3],
+        shape0: wp.array[wp.int32],
+        shape1: wp.array[wp.int32],
+        normal: wp.array[wp.vec3],
+        body_q: wp.array[wp.transform],
+        shape_body: wp.array[wp.int32],
+        match_index_out: wp.array[wp.int32],
         *,
         device: Devicelike = None,
     ) -> None:
@@ -755,18 +755,18 @@ class ContactMatcher:
 
     def save_sorted_state(
         self,
-        sorted_keys: wp.array,
-        contact_count: wp.array,
-        sorted_point0: wp.array,
-        sorted_point1: wp.array,
-        sorted_shape0: wp.array,
-        sorted_shape1: wp.array,
-        sorted_normal: wp.array,
-        body_q: wp.array,
-        shape_body: wp.array,
+        sorted_keys: wp.array[wp.int64],
+        contact_count: wp.array[wp.int32],
+        sorted_point0: wp.array[wp.vec3],
+        sorted_point1: wp.array[wp.vec3],
+        sorted_shape0: wp.array[wp.int32],
+        sorted_shape1: wp.array[wp.int32],
+        sorted_normal: wp.array[wp.vec3],
+        body_q: wp.array[wp.transform],
+        shape_body: wp.array[wp.int32],
         *,
-        sorted_offset0: wp.array | None = None,
-        sorted_offset1: wp.array | None = None,
+        sorted_offset0: wp.array[wp.vec3] | None = None,
+        sorted_offset1: wp.array[wp.vec3] | None = None,
         device: Devicelike = None,
     ) -> None:
         """Save current frame's sorted contacts for next-frame matching.
@@ -839,14 +839,14 @@ class ContactMatcher:
 
     def replay_matched(
         self,
-        contact_count: wp.array,
-        match_index: wp.array,
+        contact_count: wp.array[wp.int32],
+        match_index: wp.array[wp.int32],
         *,
-        point0: wp.array,
-        point1: wp.array,
-        offset0: wp.array,
-        offset1: wp.array,
-        normal: wp.array,
+        point0: wp.array[wp.vec3],
+        point1: wp.array[wp.vec3],
+        offset0: wp.array[wp.vec3],
+        offset1: wp.array[wp.vec3],
+        normal: wp.array[wp.vec3],
         device: Devicelike = None,
     ) -> None:
         """Overwrite matched rows with the saved previous-frame contact geometry.
@@ -890,12 +890,12 @@ class ContactMatcher:
 
     def build_report(
         self,
-        match_index: wp.array,
-        contact_count: wp.array,
-        new_indices: wp.array,
-        new_count: wp.array,
-        broken_indices: wp.array,
-        broken_count: wp.array,
+        match_index: wp.array[wp.int32],
+        contact_count: wp.array[wp.int32],
+        new_indices: wp.array[wp.int32],
+        new_count: wp.array[wp.int32],
+        broken_indices: wp.array[wp.int32],
+        broken_count: wp.array[wp.int32],
         *,
         device: Devicelike = None,
     ) -> None:
