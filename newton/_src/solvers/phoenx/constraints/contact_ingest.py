@@ -296,29 +296,6 @@ def _pair_columns_binary_kernel(
         pair_columns[tid] = wp.int32(0)
 
 
-@wp.kernel(enable_backward=False)
-def _pair_first_kernel(
-    run_lengths: wp.array[wp.int32],
-    num_pairs: wp.array[wp.int32],
-    # out
-    pair_first: wp.array[wp.int32],
-):
-    """Exclusive prefix sum of ``run_lengths`` -> ``pair_first``.
-
-    Single-thread O(num_pairs) scan. ``num_pairs`` is small in practice
-    (100s, not millions); launching a proper device scan just for this
-    would cost more in kernel overhead than the serial scan itself.
-    """
-    tid = wp.tid()
-    if tid != 0:
-        return
-    n = num_pairs[0]
-    acc = wp.int32(0)
-    for i in range(n):
-        pair_first[i] = acc
-        acc += run_lengths[i]
-
-
 # ---------------------------------------------------------------------------
 # Step 3: total column count & per-output-column pair map.
 # ---------------------------------------------------------------------------
@@ -360,22 +337,28 @@ def _pair_source_idx_kernel(
 ):
     """Write ``pair_source_idx[o] = p`` for every output column ``o``.
 
-    With the per-pair design ``pair_columns[p]`` is either 0 (filtered)
-    or 1, so the inner ``for k in range(cols)`` loop runs at most once
-    per pair. Kept as a single-thread kernel because ``num_pairs`` is
-    small (100s) and the launch overhead dominates the serial cost.
+    One thread per pair ``p``. With the per-pair design,
+    ``pair_columns[p]`` is either 0 (filtered) or 1, so each thread
+    makes at most one write to ``pair_source_idx[pair_col_offset[p]]``.
+    ``pair_col_offset`` is an exclusive prefix of ``pair_columns``, so
+    the destination slot is unique to that pair -- two threads never
+    race on the same output index, which makes this fully
+    deterministic (no atomics, no cross-thread data dependency).
+
+    Launched with ``dim=num_pairs_upper_bound`` (host-side cap). Threads
+    past the live ``num_pairs[0]`` early-return via the bound check.
+    Originally a single-thread kernel; profiling H1 @ 256 worlds
+    showed 247 us on one thread -- parallel over ~10k pairs drops
+    this to a rounding error.
     """
     tid = wp.tid()
-    if tid != 0:
+    if tid >= num_pairs[0]:
         return
-    n = num_pairs[0]
-    for p in range(n):
-        off = pair_col_offset[p]
-        cols = pair_columns[p]
-        for k in range(cols):
-            o = off + k
-            if o < max_columns:
-                pair_source_idx[o] = p
+    if pair_columns[tid] == 0:
+        return
+    o = pair_col_offset[tid]
+    if o < max_columns:
+        pair_source_idx[o] = tid
 
 
 # ---------------------------------------------------------------------------
@@ -766,14 +749,16 @@ def ingest_contacts(
         device=device,
     )
 
-    # Step 3c: exclusive scan pair_count -> pair_first.
-    wp.launch(
-        kernel=_pair_first_kernel,
-        dim=1,
-        inputs=[scratch.pair_count, scratch.num_pairs],
-        outputs=[scratch.pair_first],
-        device=device,
-    )
+    # Step 3c: exclusive scan pair_count -> pair_first. The scan runs
+    # over the full ``rigid_contact_max`` length; within the active
+    # prefix ``[0, num_pairs[0])`` the result is correct regardless
+    # of the (stale-from-previous-frame) tail, and downstream
+    # consumers only read the active prefix. Using Warp's
+    # deterministic ``array_scan`` (same primitive the
+    # ``pair_col_offset`` scan below uses) is much faster than the
+    # single-thread serial scan this used to do, and keeps the
+    # pipeline deterministic.
+    wp.utils.array_scan(scratch.pair_count, scratch.pair_first, inclusive=False)
 
     # Step 3d: exclusive scan of pair_columns -> pair_col_offset.
     wp.utils.array_scan(scratch.pair_columns, scratch.pair_col_offset, inclusive=False)
@@ -792,10 +777,14 @@ def ingest_contacts(
         device=device,
     )
 
-    # Step 4: build the per-column -> pair map.
+    # Step 4: build the per-column -> pair map. One thread per
+    # candidate pair; each does at most one conditional write to a
+    # unique slot (pair_col_offset is a binary exclusive-prefix so
+    # no two pairs share the same offset). Fully deterministic --
+    # no atomics, no cross-thread data dependency.
     wp.launch(
         kernel=_pair_source_idx_kernel,
-        dim=1,
+        dim=scratch.pair_columns.shape[0],
         inputs=[
             scratch.pair_col_offset,
             scratch.pair_columns,
