@@ -27,7 +27,6 @@ import warp as wp
 
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
-    MOTION_STATIC,
     BodyContainer,
 )
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
@@ -191,9 +190,7 @@ def _phoenx_clear_forces_kernel(
     bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
 
 
-def _build_gravity_array(
-    gravity, num_worlds: int, device
-) -> wp.array[wp.vec3f]:
+def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]:
     """Coerce ``gravity`` into a ``wp.array[wp.vec3f]`` of length
     ``num_worlds``. Accepts a single 3-tuple (broadcast) or an
     iterable of ``num_worlds`` 3-tuples."""
@@ -205,16 +202,12 @@ def _build_gravity_array(
         if g_list is None:
             raise ValueError("gravity must be a tuple or an iterable of tuples")
         if len(g_list) != num_worlds:
-            raise ValueError(
-                f"gravity length {len(g_list)} != num_worlds {num_worlds}"
-            )
+            raise ValueError(f"gravity length {len(g_list)} != num_worlds {num_worlds}")
         data = []
         for row in g_list:
             r = tuple(row)
             if len(r) != 3:
-                raise ValueError(
-                    f"per-world gravity entry must be 3 components; got {len(r)}"
-                )
+                raise ValueError(f"per-world gravity entry must be 3 components; got {len(r)}")
             data.append((float(r[0]), float(r[1]), float(r[2])))
     arr_np = np.asarray(data, dtype=np.float32)
     return wp.array(arr_np, dtype=wp.vec3f, device=device)
@@ -241,8 +234,7 @@ class PhoenXWorld:
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
         position_iterations: int = 0,
-        gravity: tuple[float, float, float]
-        | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
+        gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         max_contact_columns: int = 0,
         rigid_contact_max: int = 0,
         num_shapes: int = 0,
@@ -320,22 +312,16 @@ class PhoenXWorld:
             raise ValueError(f"substeps must be >= 1 (got {self.substeps})")
         self.solver_iterations = int(solver_iterations)
         if self.solver_iterations < 1:
-            raise ValueError(
-                f"solver_iterations must be >= 1 (got {self.solver_iterations})"
-            )
+            raise ValueError(f"solver_iterations must be >= 1 (got {self.solver_iterations})")
         self.velocity_iterations = int(velocity_iterations)
         if self.velocity_iterations < 0:
-            raise ValueError(
-                f"velocity_iterations must be >= 0 (got {self.velocity_iterations})"
-            )
+            raise ValueError(f"velocity_iterations must be >= 0 (got {self.velocity_iterations})")
         self.position_iterations = int(position_iterations)
 
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
             raise ValueError(f"num_worlds must be >= 1 (got {self.num_worlds})")
-        self.gravity: wp.array[wp.vec3f] = _build_gravity_array(
-            gravity, self.num_worlds, self.device
-        )
+        self.gravity: wp.array[wp.vec3f] = _build_gravity_array(gravity, self.num_worlds, self.device)
         self.default_friction = float(default_friction)
 
         # ----- Step time bookkeeping -----
@@ -344,18 +330,14 @@ class PhoenXWorld:
         self.substep_dt: float = 0.0
 
         # Joint cids at ``[0, num_joints)``; contact cids follow.
-        self._constraint_capacity: int = max(
-            1, self.num_joints + self.max_contact_columns
-        )
+        self._constraint_capacity: int = max(1, self.num_joints + self.max_contact_columns)
 
         # ----- Partitioner + per-world CSR buffers -----
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
             self._constraint_capacity, dtype=ElementInteractionData, device=self.device
         )
         # Joints are the only active cids until the first ingest.
-        self._num_active_constraints: wp.array[int] = wp.array(
-            [self.num_joints], dtype=wp.int32, device=self.device
-        )
+        self._num_active_constraints: wp.array[int] = wp.array([self.num_joints], dtype=wp.int32, device=self.device)
         self._partitioner = IncrementalContactPartitioner(
             max_num_interactions=self._constraint_capacity,
             max_num_nodes=max(1, self.num_bodies),
@@ -365,18 +347,12 @@ class PhoenXWorld:
 
         cap = self._constraint_capacity
         nw = self.num_worlds
-        self._world_element_ids_by_color: wp.array[wp.int32] = wp.zeros(
-            cap, dtype=wp.int32, device=self.device
-        )
+        self._world_element_ids_by_color: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
         self._world_color_starts: wp.array2d[wp.int32] = wp.zeros(
             (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
         )
-        self._world_csr_offsets: wp.array[wp.int32] = wp.zeros(
-            nw + 1, dtype=wp.int32, device=self.device
-        )
-        self._world_num_colors: wp.array[wp.int32] = wp.zeros(
-            nw, dtype=wp.int32, device=self.device
-        )
+        self._world_csr_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
+        self._world_num_colors: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
         self._world_color_counts: wp.array2d[wp.int32] = wp.zeros(
             (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
         )
@@ -398,12 +374,8 @@ class PhoenXWorld:
             )
             # Forward map stamps cid (no slot); prev-frame state is
             # keyed by the contact's sorted-buffer index ``k``.
-            self._cid_of_contact_cur = wp.full(
-                self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
-            )
-            self._cid_of_contact_prev = wp.full(
-                self.rigid_contact_max, -1, dtype=wp.int32, device=self.device
-            )
+            self._cid_of_contact_cur = wp.full(self.rigid_contact_max, -1, dtype=wp.int32, device=self.device)
+            self._cid_of_contact_prev = wp.full(self.rigid_contact_max, -1, dtype=wp.int32, device=self.device)
         else:
             self._contact_container = contact_container_zeros(1, device=self.device)
             self._ingest_scratch = None
@@ -420,6 +392,12 @@ class PhoenXWorld:
         # ----- Optional material table -----
         self._shape_material: wp.array[wp.int32] | None = None
         self._materials: wp.array[MaterialData] | None = None
+        # Optional internally-stored shape_body. Set by
+        # :class:`WorldBuilder` via :meth:`set_shape_body` when shapes
+        # were declared through the builder API. When set, ``step()``
+        # reads from here if the caller doesn't pass ``shape_body``
+        # explicitly (Newton-Model callers still pass it through).
+        self._shape_body_internal: wp.array[wp.int32] | None = None
 
     # ------------------------------------------------------------------
     # Material system / collision filters / placeholder contact views
@@ -435,6 +413,16 @@ class PhoenXWorld:
         ``wp.array[int32]`` mapping shape index -> material index."""
         self._materials = materials
         self._shape_material = shape_material
+
+    def set_shape_body(self, shape_body: wp.array | None) -> None:
+        """Install the shape -> body map used by contact ingest.
+
+        Populated by :class:`WorldBuilder` after shapes are declared;
+        once set, :meth:`step` doesn't need ``shape_body=...`` from
+        the caller. Pass ``None`` to clear (e.g. when switching to a
+        Newton-Model-driven flow that supplies the array per step).
+        """
+        self._shape_body_internal = shape_body
 
     # ------------------------------------------------------------------
     # Joint initialisation
@@ -552,17 +540,13 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def set_collision_filter_pairs(
-        self, pairs: Iterable[tuple[int, int]]
-    ) -> None:
+    def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
         """Replace the registered body-pair contact filter. Pairs are
         canonicalised ``(min, max)`` and deduped; self-pairs rejected;
         contact lookup is a device-side binary search."""
         self._set_collision_filter_pairs_impl(pairs)
 
-    def _set_collision_filter_pairs_impl(
-        self, pairs: Iterable[tuple[int, int]]
-    ) -> None:
+    def _set_collision_filter_pairs_impl(self, pairs: Iterable[tuple[int, int]]) -> None:
         nb = int(self.num_bodies)
         packed: list[int] = []
         seen: set[tuple[int, int]] = set()
@@ -570,14 +554,10 @@ class PhoenXWorld:
             a_i = int(a)
             b_i = int(b)
             if a_i == b_i:
-                raise ValueError(
-                    f"collision filter pair must have two distinct bodies "
-                    f"(got both = {a_i})"
-                )
+                raise ValueError(f"collision filter pair must have two distinct bodies (got both = {a_i})")
             if not (0 <= a_i < nb and 0 <= b_i < nb):
                 raise IndexError(
-                    f"collision filter pair ({a_i}, {b_i}) out of range "
-                    f"[0, {nb}) for this World's body count"
+                    f"collision filter pair ({a_i}, {b_i}) out of range [0, {nb}) for this World's body count"
                 )
             lo = min(a_i, b_i)
             hi = max(a_i, b_i)
@@ -702,9 +682,13 @@ class PhoenXWorld:
                 "stacking)."
             )
         if shape_body is None:
+            shape_body = self._shape_body_internal
+        if shape_body is None:
             raise ValueError(
-                "step(dt, contacts=...) requires shape_body=model.shape_body to "
-                "resolve contact shape ids to rigid-body ids."
+                "step(dt, contacts=...) requires shape_body to resolve contact "
+                "shape ids to rigid-body ids. Pass it explicitly (e.g. "
+                "``model.shape_body``), or register shapes via "
+                "``WorldBuilder.add_shape_*`` so it gets installed at finalize."
             )
 
         self._contact_views = contact_views_make(
@@ -884,11 +868,7 @@ class PhoenXWorld:
         if self._constraint_capacity == 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
-        contact_views = (
-            self._contact_views
-            if self._contact_views is not None
-            else self._contact_views_placeholder
-        )
+        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         self._launch_fast_prepare(idt, contact_views)
         self._launch_fast_iter(
             _constraint_iterate_fast_tail_kernel,
@@ -925,11 +905,7 @@ class PhoenXWorld:
         if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
-        contact_views = (
-            self._contact_views
-            if self._contact_views is not None
-            else self._contact_views_placeholder
-        )
+        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         self._launch_fast_iter(
             _constraint_relax_fast_tail_kernel,
             self.velocity_iterations,
@@ -1047,11 +1023,7 @@ class PhoenXWorld:
         out.zero_()
         if self.substep_dt <= 0.0:
             return
-        contact_views = (
-            self._contact_views
-            if self._contact_views is not None
-            else self._contact_views_placeholder
-        )
+        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = wp.float32(1.0 / self.substep_dt)
         wp.launch(
             _constraint_gather_wrenches_kernel,

@@ -756,6 +756,228 @@ def _axial_drive_limit_iterate(
 
 
 # ---------------------------------------------------------------------------
+# Shared anchor-1 positional prepare helper
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _anchor1_positional_prepare_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+):
+    """Anchor-1 3-row positional lock prepare. Shared by BALL_SOCKET
+    and CABLE modes (which use a standalone anchor-1 lock as their
+    only positional constraint).
+
+    Reads the body-local snapshots ``la1_b{1,2}``, rotates them into
+    world frame, rebuilds the 3x3 effective mass ``a1`` and its
+    inverse, folds Box2D soft-constraint coefficients from
+    ``hertz / damping_ratio`` into ``bias1`` + ``mass_coeff`` +
+    ``impulse_coeff``, and applies the anchor-1 warm-start to the
+    body velocities. Writes ``r1_b{1,2}``, ``a1_inv``, ``bias_rate``,
+    ``mass_coeff``, ``impulse_coeff``, ``bias1`` to the column.
+
+    Returns ``(r1_b1, r1_b2, cr1_b1, cr1_b2, velocity1,
+    angular_velocity1, velocity2, angular_velocity2)`` so callers can
+    continue with additional positional / angular rows (cable's bend
+    + twist block, etc.) before committing body velocities.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    orient1 = bodies.orientation[b1]
+    orient2 = bodies.orientation[b2]
+    position1 = bodies.position[b1]
+    position2 = bodies.position[b2]
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
+    la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
+    r1_b1 = wp.quat_rotate(orient1, la1_b1)
+    r1_b2 = wp.quat_rotate(orient2, la1_b2)
+    write_vec3(constraints, base_offset + _OFF_R1_B1, cid, r1_b1)
+    write_vec3(constraints, base_offset + _OFF_R1_B2, cid, r1_b2)
+
+    p1_b1 = position1 + r1_b1
+    p1_b2 = position2 + r1_b2
+
+    cr1_b1 = wp.skew(r1_b1)
+    cr1_b2 = wp.skew(r1_b2)
+    eye3 = wp.identity(3, dtype=wp.float32)
+    a1 = inv_mass1 * eye3
+    a1 = a1 + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1))
+    a1 = a1 + inv_mass2 * eye3
+    a1 = a1 + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
+    a1_inv = wp.inverse(a1)
+    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
+
+    hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
+    damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
+    dt = 1.0 / idt
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
+    write_float(constraints, base_offset + _OFF_BIAS_RATE, cid, bias_rate)
+    write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
+    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
+    bias1 = (p1_b2 - p1_b1) * bias_rate
+    write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
+
+    # 3-DoF positional warm-start (only the anchor-1 impulse).
+    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+    velocity1 = bodies.velocity[b1] - inv_mass1 * acc1
+    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (cr1_b1 @ acc1)
+    velocity2 = bodies.velocity[b2] + inv_mass2 * acc1
+    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (cr1_b2 @ acc1)
+
+    return r1_b1, r1_b2, cr1_b1, cr1_b2, velocity1, angular_velocity1, velocity2, angular_velocity2
+
+
+# ---------------------------------------------------------------------------
+# Shared axial (drive + limit) prepare helper
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _axial_drive_limit_prepare_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    cumulative_value: wp.float32,
+    eff_inv: wp.float32,
+    dt: wp.float32,
+) -> wp.float32:
+    """Shared drive + limit prepare for the axial scalar row.
+
+    Both revolute and prismatic drive / limit rows are scalar
+    position-error PDs with optional Box2D fallback on the limit
+    side. The only per-mode difference is what ``cumulative_value``
+    means (cumulative_angle [rad] vs slide [m]) and how the caller
+    spreads the warm-start axial impulse onto the body velocities
+    (pure torque vs linear impulse with lever arm). This helper does
+    everything in between: reads gain / target / limit scalars,
+    computes drive_C, calls :func:`pd_coefficients`, decides the PD
+    vs Box2D limit path, writes all coefficient slots, selects the
+    clamp state, and returns the warm-start ``axial_imp =
+    acc_drive + acc_limit`` (with ``acc_limit`` zeroed when the
+    limit is inactive, matching the standalone modules).
+
+    Pairs with :func:`_axial_drive_limit_iterate`.
+    """
+    drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
+    target = read_float(constraints, base_offset + _OFF_TARGET, cid)
+    target_velocity = read_float(constraints, base_offset + _OFF_TARGET_VELOCITY, cid)
+    max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
+    stiffness_drive = read_float(constraints, base_offset + _OFF_STIFFNESS_DRIVE, cid)
+    damping_drive = read_float(constraints, base_offset + _OFF_DAMPING_DRIVE, cid)
+    min_value = read_float(constraints, base_offset + _OFF_MIN_VALUE, cid)
+    max_value = read_float(constraints, base_offset + _OFF_MAX_VALUE, cid)
+    hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
+    damping_ratio_limit = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LIMIT, cid)
+    stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
+    damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
+
+    write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, eff_inv)
+
+    # ---- Drive (PD only) ---------------------------------------------
+    drive_C = float(0.0)
+    if drive_mode == DRIVE_MODE_POSITION:
+        drive_C = cumulative_value - target
+    if stiffness_drive > 0.0 or damping_drive > 0.0:
+        gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients(
+            stiffness_drive, damping_drive, drive_C, eff_inv, dt
+        )
+    else:
+        gamma_drive = wp.float32(0.0)
+        bias_drive = wp.float32(0.0)
+        eff_mass_drive_soft = wp.float32(0.0)
+    bias_drive = bias_drive - target_velocity
+    write_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid, gamma_drive)
+    write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, eff_mass_drive_soft)
+    write_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid, bias_drive)
+
+    max_lambda_drive = max_force_drive * dt
+    write_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid, max_lambda_drive)
+
+    # ---- Limit (dual convention) -------------------------------------
+    clamp = _CLAMP_NONE
+    limit_C = float(0.0)
+    if min_value <= max_value:
+        if cumulative_value > max_value:
+            clamp = _CLAMP_MAX
+            limit_C = cumulative_value - max_value
+        elif cumulative_value < min_value:
+            clamp = _CLAMP_MIN
+            limit_C = cumulative_value - min_value
+    write_int(constraints, base_offset + _OFF_CLAMP, cid, clamp)
+
+    if stiffness_limit > 0.0 or damping_limit > 0.0:
+        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(stiffness_limit, damping_limit, limit_C, eff_inv, dt)
+        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
+        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
+        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
+        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, 0.0)
+    else:
+        br_limit, mc_limit, ic_limit = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
+        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
+        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
+        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
+        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, 0.0)
+
+    # Warm-start: sum of drive + limit accumulated impulses, with
+    # ``acc_limit`` forcibly zeroed when the limit is inactive.
+    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
+    acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
+    if clamp == _CLAMP_NONE:
+        acc_limit = 0.0
+        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
+    return acc_drive + acc_limit
+
+
+# ---------------------------------------------------------------------------
+# Shared tangent-basis-from-anchor-3 helper
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _tangent_basis_from_anchor3(
+    n_hat: wp.vec3f,
+    r1_b1: wp.vec3f,
+    r3_b1: wp.vec3f,
+):
+    """Anchor-3-aligned tangent basis perpendicular to ``n_hat``.
+
+    ``t1`` is the component of the anchor-1 -> anchor-3 lever arm
+    (body-1 frame, rotated into world) perpendicular to ``n_hat``;
+    ``t2 = n_hat x t1``. Using anchor-3 as the reference (rather
+    than an arbitrary ``create_orthonormal``) makes the scalar
+    anchor-3 row the exact tangential velocity gate for rotation
+    about ``n_hat`` -- needed for Gauss-Seidel convergence in chains
+    with shared bodies. Falls back to ``create_orthonormal(n_hat)``
+    if anchor-3 has drifted onto the slide axis (shouldn't happen in
+    practice since ``rest_length > 0``).
+    """
+    anchor3_offset_b1 = r3_b1 - r1_b1
+    t1_raw = anchor3_offset_b1 - wp.dot(anchor3_offset_b1, n_hat) * n_hat
+    t1_len2 = wp.dot(t1_raw, t1_raw)
+    if t1_len2 > 1.0e-20:
+        t1 = t1_raw / wp.sqrt(t1_len2)
+    else:
+        t1 = create_orthonormal(n_hat)
+    t2 = wp.cross(n_hat, t1)
+    return t1, t2
+
+
+# ---------------------------------------------------------------------------
 # Ball-socket mode math
 # ---------------------------------------------------------------------------
 
@@ -772,66 +994,24 @@ def _ball_socket_prepare_at(
     """Ball-socket prepare pass.
 
     Strict subset of :func:`_revolute_prepare_at`: only the 3-row
-    anchor-1 lock is built. No anchor 2, no tangent basis, no axial
-    row, no Schur complement -- the effective mass is just the
-    anchor-1 3x3 block ``A1`` and the positional solve is a single
-    direct inverse. Warm-starts the 3-row positional impulse.
+    anchor-1 lock is built. Delegates to
+    :func:`_anchor1_positional_prepare_at` for the shared 3-row
+    assemble + warm-start; then commits the warm-started velocities
+    to body storage.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    orientation1 = bodies.orientation[b1]
-    orientation2 = bodies.orientation[b2]
-    position1 = bodies.position[b1]
-    position2 = bodies.position[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
-
-    la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
-    la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
-
-    r1_b1 = wp.quat_rotate(orientation1, la1_b1)
-    r1_b2 = wp.quat_rotate(orientation2, la1_b2)
-
-    write_vec3(constraints, base_offset + _OFF_R1_B1, cid, r1_b1)
-    write_vec3(constraints, base_offset + _OFF_R1_B2, cid, r1_b2)
-
-    p1_b1 = position1 + r1_b1
-    p1_b2 = position2 + r1_b2
-
-    cr1_b1 = wp.skew(r1_b1)
-    cr1_b2 = wp.skew(r1_b2)
-
-    eye3 = wp.identity(3, dtype=wp.float32)
-
-    a1 = inv_mass1 * eye3
-    a1 = a1 + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1))
-    a1 = a1 + inv_mass2 * eye3
-    a1 = a1 + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
-
-    a1_inv = wp.inverse(a1)
-    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
-
-    hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
-    damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
-    dt = 1.0 / idt
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
-    write_float(constraints, base_offset + _OFF_BIAS_RATE, cid, bias_rate)
-    write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
-    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
-
-    bias1 = (p1_b2 - p1_b1) * bias_rate
-    write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
-
-    # 3-DoF positional warm-start (only the anchor-1 impulse).
-    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-
-    velocity1 = bodies.velocity[b1] - inv_mass1 * acc1
-    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (cr1_b1 @ acc1)
-    velocity2 = bodies.velocity[b2] + inv_mass2 * acc1
-    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (cr1_b2 @ acc1)
+    (
+        _r1_b1,
+        _r1_b2,
+        _cr1_b1,
+        _cr1_b2,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+    ) = _anchor1_positional_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
 
     bodies.velocity[b1] = velocity1
     bodies.angular_velocity[b1] = angular_velocity1
@@ -1064,39 +1244,18 @@ def _revolute_prepare_at(
     angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (cr1_b2 @ acc1 + cr2_b2 @ acc2)
 
     # ---- Axial drive + limit block (angular) ------------------------
-    drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
-    target = read_float(constraints, base_offset + _OFF_TARGET, cid)
-    target_velocity = read_float(constraints, base_offset + _OFF_TARGET_VELOCITY, cid)
-    max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
-    stiffness_drive = read_float(constraints, base_offset + _OFF_STIFFNESS_DRIVE, cid)
-    damping_drive = read_float(constraints, base_offset + _OFF_DAMPING_DRIVE, cid)
-    min_value = read_float(constraints, base_offset + _OFF_MIN_VALUE, cid)
-    max_value = read_float(constraints, base_offset + _OFF_MAX_VALUE, cid)
-    hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
-    damping_ratio_limit = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LIMIT, cid)
-    stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
-    damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
-
-    # Scalar inverse effective mass for the axial row. The axial
-    # impulse in the iterate is applied along ``n_hat`` (the anchor-
-    # derived axis) on both bodies, so the Jacobian rows are
-    # ``(0; +n_hat)`` and ``(0; -n_hat)`` and the unconstrained
-    # inverse effective mass is ``n . (I1^-1 + I2^-1) . n``. Identical
-    # to the standalone angular motor / angular limit's formula once
-    # the 5-DoF positional lock aligns both body axes with n_hat.
+    # Angular effective mass: the axial impulse is a pure torque along
+    # ``n_hat``, so ``m_inv = n . (I1^-1 + I2^-1) . n``.
     eff_inv = wp.dot(n_hat, inv_inertia1 @ n_hat) + wp.dot(n_hat, inv_inertia2 @ n_hat)
-    write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, eff_inv)
 
     # Revolute twist tracker: ``diff = q2 * inv_init * q1^*`` is the
-    # identity at finalize() time, and :func:`extract_rotation_angle`
-    # projected onto the *body-1* axis returns the signed angle in
+    # identity at finalize() time; :func:`extract_rotation_angle`
+    # projected onto the body-1 axis returns the signed angle in
     # ``(-pi, pi]``; the revolution counter extends that to an
-    # unbounded cumulative angle. Byte-for-byte identical to the
-    # standalone angular motor / angular limit prepare. We use the
-    # body-1 local-axis snapshot here rather than ``n_hat`` because
-    # the tracker output must remain well-defined even if anchors
-    # briefly coincide across a substep (`|a2 - a1| ~ 0` would zero
-    # out ``n_hat`` for a step).
+    # unbounded cumulative angle. We use the body-1 local-axis
+    # snapshot here (rather than ``n_hat``) because the tracker
+    # output must remain well-defined even if anchors briefly
+    # coincide (``|a2 - a1| ~ 0`` would zero out ``n_hat``).
     j1 = wp.quat_rotate(orientation1, read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid))
     inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
     diff = orientation2 * inv_init * wp.quat_inverse(orientation1)
@@ -1108,102 +1267,12 @@ def _revolute_prepare_at(
     write_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid, new_prev)
     cumulative_angle = revolution_tracker_angle(new_counter, new_prev)
 
-    # ---- Drive (PD only) ---------------------------------------------
-    # The unified joint exposes a *single* PD drive model; there is no
-    # rigid velocity-servo fallback (the Jitter2-style pure-velocity
-    # motor it replaces is a degenerate rigid constraint whose
-    # stability depends on substep size, not on any gain the user
-    # controls). Velocity tracking is recovered by setting
-    # ``stiffness_drive == 0`` and ``damping_drive > 0``: the iterate
-    # then reduces to ``lam = -(1 / (1/eff_inv + kd/dt)) * (jv +
-    # target_velocity)``, i.e. the canonical PD velocity servo with a
-    # well-defined time constant ``tau = I_eff / damping_drive``. See
-    # :mod:`constraint_angular_motor` for the same contract on the
-    # standalone motor side.
-    #
-    # ``C_drive = cumulative_angle - target`` for position mode; for
-    # velocity mode the spring term vanishes (``stiffness_drive = 0``
-    # kills the kp term inside :func:`pd_coefficients`) and only the
-    # damping row acts.
-    drive_C = float(0.0)
-    if drive_mode == DRIVE_MODE_POSITION:
-        drive_C = cumulative_angle - target
-    if stiffness_drive > 0.0 or damping_drive > 0.0:
-        gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients(
-            stiffness_drive, damping_drive, drive_C, eff_inv, dt
-        )
-    else:
-        # Drive fully off (mode == OFF, or POSITION with zero gains,
-        # or VELOCITY with zero damping). The iterate sees
-        # ``eff_mass_drive_soft == 0`` and short-circuits.
-        gamma_drive = wp.float32(0.0)
-        bias_drive = wp.float32(0.0)
-        eff_mass_drive_soft = wp.float32(0.0)
-    # ``target_velocity`` is the body-2 side's commanded spin rate
-    # about ``+n_hat`` (positive = body 2 spins in +n direction
-    # relative to body 1). Our ``jv_axial = n . (w1 - w2)`` sign
-    # convention is the negative of Jitter2's, so we fold
-    # ``-target_velocity`` into the bias; the iterate's
-    # ``jv - bias_drive`` then expands to ``n.(w1 - w2) +
-    # target_velocity`` -- i.e. exactly zero when body 2 spins at the
-    # commanded rate, which is the intuitive target-reached condition.
-    bias_drive = bias_drive - target_velocity
-    write_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid, gamma_drive)
-    write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, eff_mass_drive_soft)
-    write_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid, bias_drive)
-
-    max_lambda_drive = max_force_drive * dt
-    write_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid, max_lambda_drive)
-
-    # ---- Limit (dual convention) -------------------------------------
-    # Determine the limit clamp state. We compare the cumulative angle
-    # (from the revolution tracker) directly against the user's
-    # ``min_value`` / ``max_value`` to stay monotone for arbitrarily
-    # large ``|min|`` / ``|max|`` -- matches the standalone
-    # angular_limit's clamp selection exactly. ``min_value >
-    # max_value`` disables the limit row.
-    clamp = _CLAMP_NONE
-    limit_C = float(0.0)
-    if min_value <= max_value:
-        if cumulative_angle > max_value:
-            clamp = _CLAMP_MAX
-            limit_C = cumulative_angle - max_value
-        elif cumulative_angle < min_value:
-            clamp = _CLAMP_MIN
-            limit_C = cumulative_angle - min_value
-    write_int(constraints, base_offset + _OFF_CLAMP, cid, clamp)
-
-    # Dual-convention dispatch: PD path if either gain is strictly
-    # positive, else Box2D. Both branches populate both caches (with
-    # the inactive one zeroed) so iterate doesn't have to guard on
-    # stale state.
-    if stiffness_limit > 0.0 or damping_limit > 0.0:
-        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(stiffness_limit, damping_limit, limit_C, eff_inv, dt)
-        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
-        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
-        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
-        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, 0.0)
-    else:
-        br_limit, mc_limit, ic_limit = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
-        # Box2D sign convention: iterate drives ``jv == -bias``, so
-        # prefold the positional error with a flipped sign.
-        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
-        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
-        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
-        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, 0.0)
-
-    # Warm-start the axial impulses. Drop any lingering limit impulse
-    # when the limit is inactive, matching the standalone modules.
-    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
-    acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
-    if clamp == _CLAMP_NONE:
-        acc_limit = 0.0
-        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
-    axial_imp = acc_drive + acc_limit
+    # Shared drive / limit prepare writes gamma_drive, bias_drive,
+    # eff_mass_drive_soft, max_lambda_drive, clamp, PD-or-Box2D limit
+    # coefficients. Returns the warm-start axial impulse (sum of the
+    # drive + limit accumulated impulses, with the limit one gated on
+    # the clamp state). Pure torque on both bodies along ``n_hat``.
+    axial_imp = _axial_drive_limit_prepare_at(constraints, cid, base_offset, cumulative_angle, eff_inv, dt)
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
 
@@ -1427,25 +1496,11 @@ def _prismatic_prepare_at(
         n_hat = wp.vec3f(1.0, 0.0, 0.0)
     write_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid, n_hat)
 
-    # Tangent basis: t1 must be aligned with the anchor3 lever arm's
-    # component perpendicular to n_hat, so that rotation of body 2 around
-    # n_hat produces motion at anchor 3 along t2 with full gain. Using an
-    # arbitrary perpendicular (``create_orthonormal``) yields a ``cos(alpha)``
-    # gain mismatch that breaks Gauss-Seidel convergence in chains with
-    # two or more joints sharing a body. We use body 1's view of the
-    # anchor1 -> anchor3 direction (projected perpendicular to n_hat) as
-    # the t1 reference; this makes the anchor-3 scalar row the exact
-    # tangential velocity gate for rotation about n_hat.
-    anchor3_offset_b1 = r3_b1 - r1_b1
-    t1_raw = anchor3_offset_b1 - wp.dot(anchor3_offset_b1, n_hat) * n_hat
-    t1_len2 = wp.dot(t1_raw, t1_raw)
-    if t1_len2 > 1.0e-20:
-        t1 = t1_raw / wp.sqrt(t1_len2)
-    else:
-        # Fallback: anchor3 has drifted onto the axis (shouldn't happen
-        # since rest_length > 0 and bodies can't collapse).
-        t1 = create_orthonormal(n_hat)
-    t2 = wp.cross(n_hat, t1)
+    # Tangent basis aligned with the anchor-1 -> anchor-3 lever arm
+    # (projected perpendicular to ``n_hat``). See
+    # :func:`_tangent_basis_from_anchor3` for why this specific choice
+    # is necessary for Gauss-Seidel convergence in shared-body chains.
+    t1, t2 = _tangent_basis_from_anchor3(n_hat, r1_b1, r3_b1)
     write_vec3(constraints, base_offset + _OFF_T1, cid, t1)
     write_vec3(constraints, base_offset + _OFF_T2, cid, t2)
 
@@ -1599,102 +1654,23 @@ def _prismatic_prepare_at(
     )
 
     # ---- Axial drive + limit block (linear) --------------------------
-    drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
-    target = read_float(constraints, base_offset + _OFF_TARGET, cid)
-    target_velocity = read_float(constraints, base_offset + _OFF_TARGET_VELOCITY, cid)
-    max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
-    stiffness_drive = read_float(constraints, base_offset + _OFF_STIFFNESS_DRIVE, cid)
-    damping_drive = read_float(constraints, base_offset + _OFF_DAMPING_DRIVE, cid)
-    min_value = read_float(constraints, base_offset + _OFF_MIN_VALUE, cid)
-    max_value = read_float(constraints, base_offset + _OFF_MAX_VALUE, cid)
-    hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
-    damping_ratio_limit = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LIMIT, cid)
-    stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
-    damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
-
     # Linear inverse effective mass at anchor 1 along n_hat:
     #   m_inv = n . B11 . n  (same quadratic form as the tangent block,
     #                         but projected onto n_hat instead of t).
-    b11_n = b11 @ n_hat
-    eff_inv = wp.dot(n_hat, b11_n)
-    write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, eff_inv)
+    eff_inv = wp.dot(n_hat, b11 @ n_hat)
 
-    # Slide along n_hat measured at anchor 1. Starts at 0 at init (anchors
-    # coincident), so this is directly the relative slide in meters.
-    # Sign convention: iterate applies ``+v1 * n * lam`` and
-    # ``-v2 * n * lam`` (with lever-arm angular terms), so positive
-    # lambda *decreases* the slide (body 2 is pushed back along +n,
-    # body 1 pushed forward). ``slide = p2 - p1`` along n_hat, so
-    # C_drive = slide - target has the correct sign for
-    # "lam > 0 drives slide toward target".
+    # Slide along n_hat measured at anchor 1. Starts at 0 at init
+    # (anchors coincident), so this is directly the relative slide
+    # in meters. Sign convention: positive ``lam`` decreases the
+    # slide (see :func:`_prismatic_iterate_at`).
     slide = wp.dot(n_hat, drift1)
 
-    # ---- Drive (PD only) ---------------------------------------------
-    # Same PD-only contract as the revolute prepare; see that docstring
-    # for the ``-target_velocity`` sign-fold explanation. Velocity
-    # tracking is recovered by ``stiffness_drive = 0`` +
-    # ``damping_drive > 0`` (explicit damping gain); there is no
-    # rigid-servo fallback.
-    drive_C = float(0.0)
-    if drive_mode == DRIVE_MODE_POSITION:
-        drive_C = slide - target
-    if stiffness_drive > 0.0 or damping_drive > 0.0:
-        gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients(
-            stiffness_drive, damping_drive, drive_C, eff_inv, dt
-        )
-    else:
-        gamma_drive = wp.float32(0.0)
-        bias_drive = wp.float32(0.0)
-        eff_mass_drive_soft = wp.float32(0.0)
-    bias_drive = bias_drive - target_velocity
-    write_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid, gamma_drive)
-    write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, eff_mass_drive_soft)
-    write_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid, bias_drive)
-
-    max_lambda_drive = max_force_drive * dt
-    write_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid, max_lambda_drive)
-
-    # ---- Limit (dual convention) -------------------------------------
-    # ``min_value > max_value`` disables the limit row (matches the
-    # standalone linear_limit sentinel).
-    clamp = _CLAMP_NONE
-    limit_C = float(0.0)
-    if min_value <= max_value:
-        if slide > max_value:
-            clamp = _CLAMP_MAX
-            limit_C = slide - max_value
-        elif slide < min_value:
-            clamp = _CLAMP_MIN
-            limit_C = slide - min_value
-    write_int(constraints, base_offset + _OFF_CLAMP, cid, clamp)
-
-    # Dual-convention dispatch identical to the revolute prepare /
-    # standalone linear_limit: PD if either gain > 0, else Box2D.
-    if stiffness_limit > 0.0 or damping_limit > 0.0:
-        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(stiffness_limit, damping_limit, limit_C, eff_inv, dt)
-        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
-        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
-        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
-        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, 0.0)
-    else:
-        br_limit, mc_limit, ic_limit = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
-        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
-        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
-        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
-        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, 0.0)
-
-    # Warm-start the axial impulses (linear). Drop any lingering
-    # limit impulse when the limit is inactive.
-    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
-    acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
-    if clamp == _CLAMP_NONE:
-        acc_limit = 0.0
-        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
-    axial_imp = acc_drive + acc_limit
+    # Shared drive / limit prepare. Returns the warm-start axial
+    # impulse (drive + limit acc; limit gated on clamp state).
+    # Prismatic applies it as a linear impulse at anchor 1 (with the
+    # corresponding lever-arm torque on both bodies), the only
+    # per-mode difference from the revolute warm-start.
+    axial_imp = _axial_drive_limit_prepare_at(constraints, cid, base_offset, slide, eff_inv, dt)
     velocity1 = velocity1 + inv_mass1 * (n_hat * axial_imp)
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ wp.cross(r1_b1, n_hat * axial_imp)
     velocity2 = velocity2 - inv_mass2 * (n_hat * axial_imp)
@@ -1903,51 +1879,22 @@ def _cable_prepare_at(
 
     orient1 = bodies.orientation[b1]
     orient2 = bodies.orientation[b2]
-    position1 = bodies.position[b1]
-    position2 = bodies.position[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
     inv_inertia1 = bodies.inverse_inertia_world[b1]
     inv_inertia2 = bodies.inverse_inertia_world[b2]
     inv_inertia_sum = inv_inertia1 + inv_inertia2
 
     # ---- Anchor-1 positional block (ball-socket) ---------------------
-    la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
-    la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
-    r1_b1 = wp.quat_rotate(orient1, la1_b1)
-    r1_b2 = wp.quat_rotate(orient2, la1_b2)
-    write_vec3(constraints, base_offset + _OFF_R1_B1, cid, r1_b1)
-    write_vec3(constraints, base_offset + _OFF_R1_B2, cid, r1_b2)
-
-    p1_b1 = position1 + r1_b1
-    p1_b2 = position2 + r1_b2
-
-    cr1_b1 = wp.skew(r1_b1)
-    cr1_b2 = wp.skew(r1_b2)
-    eye3 = wp.identity(3, dtype=wp.float32)
-    a1 = inv_mass1 * eye3
-    a1 = a1 + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1))
-    a1 = a1 + inv_mass2 * eye3
-    a1 = a1 + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
-    a1_inv = wp.inverse(a1)
-    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
-
-    hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
-    damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
+    (
+        _r1_b1,
+        _r1_b2,
+        _cr1_b1,
+        _cr1_b2,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+    ) = _anchor1_positional_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
     dt = 1.0 / idt
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
-    write_float(constraints, base_offset + _OFF_BIAS_RATE, cid, bias_rate)
-    write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
-    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
-    bias1 = (p1_b2 - p1_b1) * bias_rate
-    write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
-
-    # Anchor-1 warm-start (velocity-level) -- same as ball-socket.
-    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-    velocity1 = bodies.velocity[b1] - inv_mass1 * acc1
-    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (cr1_b1 @ acc1)
-    velocity2 = bodies.velocity[b2] + inv_mass2 * acc1
-    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (cr1_b2 @ acc1)
 
     # ---- Angular block: Darboux vector in world frame ----------------
     # ``q_align = q_wc * inv_init * q_wp^{-1}`` -- same construction
@@ -2258,18 +2205,10 @@ def _fixed_prepare_at(
         n_hat = wp.vec3f(1.0, 0.0, 0.0)
     write_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid, n_hat)
 
-    # PRISMATIC's tangent-basis choice: ``t1`` aligned with the
-    # anchor-3 offset (body-1 view, projected perpendicular to
-    # ``n_hat``). Makes the anchor-3 scalar row a unit-gain gate for
-    # rotation about ``n_hat``.
-    anchor3_offset_b1 = r3_b1 - r1_b1
-    t1_raw = anchor3_offset_b1 - wp.dot(anchor3_offset_b1, n_hat) * n_hat
-    t1_len2 = wp.dot(t1_raw, t1_raw)
-    if t1_len2 > 1.0e-20:
-        t1 = t1_raw / wp.sqrt(t1_len2)
-    else:
-        t1 = create_orthonormal(n_hat)
-    t2 = wp.cross(n_hat, t1)
+    # PRISMATIC's tangent-basis choice (shared helper):
+    # :func:`_tangent_basis_from_anchor3`. Makes the anchor-3 scalar
+    # row a unit-gain gate for rotation about ``n_hat``.
+    t1, t2 = _tangent_basis_from_anchor3(n_hat, r1_b1, r3_b1)
     write_vec3(constraints, base_offset + _OFF_T1, cid, t1)
     write_vec3(constraints, base_offset + _OFF_T2, cid, t2)
 

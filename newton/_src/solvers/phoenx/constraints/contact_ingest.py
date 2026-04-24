@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    ContactViews,
     contact_set_contact_count,
     contact_set_contact_first,
     contact_set_friction,
@@ -36,8 +38,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     write_int,
 )
-from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.constraints.constraint_contact import ContactViews
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_prev_local_p0,
@@ -272,6 +272,12 @@ def _pair_columns_binary_kernel(
     sb = pair_shape_b[tid]
     ba = shape_body[sa]
     bb = shape_body[sb]
+    # Drop self-contacts: two shapes on the same body (compound
+    # geometry) produce no constraint. Also covers the static-vs-static
+    # degenerate case where both shapes resolve to slot 0 (world).
+    if ba == bb:
+        pair_columns[tid] = wp.int32(0)
+        return
     if ba <= bb:
         lo = ba
         hi = bb
@@ -426,12 +432,8 @@ def _contact_pack_columns_kernel(
         mat_a = shape_material[sa]
     if shape_material.shape[0] > sb:
         mat_b = shape_material[sb]
-    mu_static = resolve_friction_static_in_kernel(
-        materials, mat_a, mat_b, default_friction
-    )
-    mu_dynamic = resolve_friction_in_kernel(
-        materials, mat_a, mat_b, default_friction
-    )
+    mu_static = resolve_friction_static_in_kernel(materials, mat_a, mat_b, default_friction)
+    mu_dynamic = resolve_friction_in_kernel(materials, mat_a, mat_b, default_friction)
 
     write_int(constraints, CONSTRAINT_TYPE_OFFSET, cid, CONSTRAINT_TYPE_CONTACT)
     write_int(constraints, CONSTRAINT_BODY1_OFFSET, cid, b1)
@@ -563,31 +565,19 @@ def _contact_warmstart_gather_kernel(
 
             fresh_p1_world = bodies.position[b1] + fresh_r1
             fresh_p2_world = bodies.position[b2] + fresh_r2
-            fresh_penetration = -wp.dot(
-                fresh_p2_world - fresh_p1_world, fresh_n
-            )
+            fresh_penetration = -wp.dot(fresh_p2_world - fresh_p1_world, fresh_n)
 
             if fresh_penetration > prev_penetration:
                 # Prev frame has grown stale -- overwrite anchors /
                 # normal / tangent but carry impulses forward.
-                dv = (
-                    bodies.velocity[b2]
-                    + wp.cross(bodies.angular_velocity[b2], fresh_r2)
-                ) - (
-                    bodies.velocity[b1]
-                    + wp.cross(bodies.angular_velocity[b1], fresh_r1)
+                dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
+                    bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
                 )
                 fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
 
-                cc_set_normal_lambda(
-                    cc, k, cc_get_prev_normal_lambda(cc, prev_k)
-                )
-                cc_set_tangent1_lambda(
-                    cc, k, cc_get_prev_tangent1_lambda(cc, prev_k)
-                )
-                cc_set_tangent2_lambda(
-                    cc, k, cc_get_prev_tangent2_lambda(cc, prev_k)
-                )
+                cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
+                cc_set_tangent1_lambda(cc, k, cc_get_prev_tangent1_lambda(cc, prev_k))
+                cc_set_tangent2_lambda(cc, k, cc_get_prev_tangent2_lambda(cc, prev_k))
                 cc_set_normal(cc, k, fresh_n)
                 cc_set_tangent1(cc, k, fresh_t1)
                 cc_set_local_p0(cc, k, fresh_local_p0)
@@ -596,15 +586,9 @@ def _contact_warmstart_gather_kernel(
 
             # Prev frame still describes the contact accurately --
             # carry the full PhoenX state forward.
-            cc_set_normal_lambda(
-                cc, k, cc_get_prev_normal_lambda(cc, prev_k)
-            )
-            cc_set_tangent1_lambda(
-                cc, k, cc_get_prev_tangent1_lambda(cc, prev_k)
-            )
-            cc_set_tangent2_lambda(
-                cc, k, cc_get_prev_tangent2_lambda(cc, prev_k)
-            )
+            cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
+            cc_set_tangent1_lambda(cc, k, cc_get_prev_tangent1_lambda(cc, prev_k))
+            cc_set_tangent2_lambda(cc, k, cc_get_prev_tangent2_lambda(cc, prev_k))
             cc_set_normal(cc, k, prev_n)
             cc_set_tangent1(cc, k, cc_get_prev_tangent1(cc, prev_k))
             cc_set_local_p0(cc, k, prev_lp0)
@@ -612,12 +596,8 @@ def _contact_warmstart_gather_kernel(
             continue
 
         # New contact -- PhoenX ``Initialize``.
-        dv = (
-            bodies.velocity[b2]
-            + wp.cross(bodies.angular_velocity[b2], fresh_r2)
-        ) - (
-            bodies.velocity[b1]
-            + wp.cross(bodies.angular_velocity[b1], fresh_r1)
+        dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
+            bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
         )
         t1 = _build_tangent1_from_velocity(fresh_n, dv)
 
