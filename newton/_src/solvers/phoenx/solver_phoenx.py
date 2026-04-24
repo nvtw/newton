@@ -127,43 +127,36 @@ def _sync_num_active_constraints_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _phoenx_apply_external_forces_kernel(
-    bodies: BodyContainer,
-    substep_dt: wp.float32,
-):
-    """``v += f / m * dt``, ``w += I^-1 * tau * dt`` for dynamic
-    bodies. Force accumulators are NOT cleared here --
-    :func:`_phoenx_clear_forces_kernel` runs once at the end of
-    :meth:`PhoenXWorld.step`."""
-    i = wp.tid()
-    if bodies.motion_type[i] != MOTION_DYNAMIC:
-        return
-    if bodies.inverse_mass[i] == 0.0:
-        return
-    inv_mass = bodies.inverse_mass[i]
-    inv_inertia_world = bodies.inverse_inertia_world[i]
-    f = bodies.force[i]
-    t = bodies.torque[i]
-    bodies.velocity[i] = bodies.velocity[i] + f * (inv_mass * substep_dt)
-    bodies.angular_velocity[i] = bodies.angular_velocity[i] + (inv_inertia_world * t) * substep_dt
-
-
-@wp.kernel(enable_backward=False)
-def _phoenx_integrate_gravity_kernel(
+def _phoenx_apply_forces_and_gravity_kernel(
     bodies: BodyContainer,
     gravity: wp.array[wp.vec3f],
     substep_dt: wp.float32,
 ):
-    """``v += gravity[world_id] * dt`` for dynamic gravity-affected bodies."""
+    """Fused per-body velocity update at the top of every substep.
+
+    Combines the old ``apply_external_forces`` and ``integrate_gravity``
+    passes. Both kernels had the same dim / same gate / same per-body
+    velocity read-modify-write, so running two launches instead of one
+    only paid extra CUDA launch overhead (~4us each at 256 worlds, i.e.
+    ~32us / frame at substeps=4). Force accumulators are NOT cleared
+    here -- :func:`_phoenx_clear_forces_kernel` runs once at the end
+    of :meth:`PhoenXWorld.step`.
+    """
     i = wp.tid()
     if bodies.motion_type[i] != MOTION_DYNAMIC:
         return
     if bodies.inverse_mass[i] == 0.0:
         return
-    if bodies.affected_by_gravity[i] == 0:
-        return
-    w = bodies.world_id[i]
-    bodies.velocity[i] = bodies.velocity[i] + gravity[w] * substep_dt
+    v = bodies.velocity[i]
+    w = bodies.angular_velocity[i]
+    inv_mass = bodies.inverse_mass[i]
+    inv_inertia_world = bodies.inverse_inertia_world[i]
+    v = v + bodies.force[i] * (inv_mass * substep_dt)
+    w = w + (inv_inertia_world * bodies.torque[i]) * substep_dt
+    if bodies.affected_by_gravity[i] != 0:
+        v = v + gravity[bodies.world_id[i]] * substep_dt
+    bodies.velocity[i] = v
+    bodies.angular_velocity[i] = w
 
 
 @wp.kernel(enable_backward=False)
@@ -772,8 +765,7 @@ class PhoenXWorld:
         for k in range(self.substeps):
             if picking is not None:
                 picking.apply_force()
-            self._integrate_forces()
-            self._integrate_gravity()
+            self._integrate_forces_and_gravity()
             self._solve_main()
             self._integrate_positions()
             self._position_iterate()
@@ -986,24 +978,14 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _integrate_forces(self) -> None:
-        """Apply per-body force / torque accumulators to velocity.
-        Runs every substep."""
+    def _integrate_forces_and_gravity(self) -> None:
+        """Apply per-body force / torque accumulators AND gravity in one
+        per-substep kernel launch (replaces two sequential launches with
+        identical dim / gating)."""
         if self.num_bodies == 0:
             return
         wp.launch(
-            _phoenx_apply_external_forces_kernel,
-            dim=self.num_bodies,
-            inputs=[self.bodies, wp.float32(self.substep_dt)],
-            device=self.device,
-        )
-
-    def _integrate_gravity(self) -> None:
-        """``v += gravity[world_id] * dt`` per substep."""
-        if self.num_bodies == 0:
-            return
-        wp.launch(
-            _phoenx_integrate_gravity_kernel,
+            _phoenx_apply_forces_and_gravity_kernel,
             dim=self.num_bodies,
             inputs=[self.bodies, self.gravity, wp.float32(self.substep_dt)],
             device=self.device,
