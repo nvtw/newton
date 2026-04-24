@@ -232,6 +232,11 @@ def _apply_joint_control_kernel(
     # Per-joint lookup tables (length = model.joint_count).
     joint_idx_to_cid: wp.array[wp.int32],
     joint_idx_to_dof_start: wp.array[wp.int32],
+    # Per-ADBS-cid init offset; indexed by the cid each joint maps to.
+    # PhoenX's revolution tracker is init-relative, so Newton's
+    # absolute ``target_pos`` must be shifted by -joint_q_at_init
+    # before being written into the ADBS column.
+    joint_q_at_init_per_cid: wp.array[wp.float32],
     # Newton Model + Control (per-DOF).
     joint_target_mode: wp.array[wp.int32],
     joint_target_ke: wp.array[wp.float32],
@@ -277,7 +282,10 @@ def _apply_joint_control_kernel(
     tm = joint_target_mode[dof]
     stiffness = joint_target_ke[dof]
     damping = joint_target_kd[dof]
-    target = control_target_pos[dof]
+    # ``target`` is absolute in Newton but PhoenX's cumulative angle
+    # tracks displacement from init -- offset by the per-cid init
+    # coordinate so targets line up.
+    target = control_target_pos[dof] - joint_q_at_init_per_cid[cid]
     target_vel = control_target_vel[dof]
     effort = joint_effort_limit[dof]
 
@@ -442,6 +450,18 @@ class SolverPhoenX(SolverBase):
                 ],
                 device=self.device,
             )
+
+        # ---- Sync model.body_q with model.joint_q ---------------------
+        # The adapter snapshots body-local joint anchors from
+        # ``model.body_q``; if the caller set non-zero ``builder.joint_q``
+        # before ``finalize()`` (as URDF rigs and the Anymal walking
+        # example do), ``model.body_q`` is still at the URDF rest pose
+        # and FK hasn't run yet. Without this FK pass every joint
+        # anchor would be baked at the wrong configuration and the
+        # constraint columns would pull bodies back to the rest pose
+        # on every step.
+        if int(model.body_count) > 0 and int(model.joint_count) > 0:
+            newton.eval_fk(model, model.joint_q, model.joint_qd, model)
 
         # ---- Build the joint (ADBS) column layout ----------------------
         self._adbs: AdbsInitArrays = build_adbs_init_arrays(model, device=self.device)
@@ -619,6 +639,7 @@ class SolverPhoenX(SolverBase):
             inputs=[
                 self._adbs.joint_idx_to_cid,
                 self._adbs.joint_idx_to_dof_start,
+                self._adbs.joint_q_at_init,
                 model.joint_target_mode,
                 model.joint_target_ke,
                 model.joint_target_kd,

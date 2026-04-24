@@ -123,6 +123,7 @@ class AdbsInitArrays:
         damping_limit: wp.array,
         joint_idx_to_cid: wp.array,
         joint_idx_to_dof_start: wp.array,
+        joint_q_at_init: wp.array,
         num_joint_columns: int,
     ):
         self.body1 = body1
@@ -146,6 +147,13 @@ class AdbsInitArrays:
         self.damping_limit = damping_limit
         self.joint_idx_to_cid = joint_idx_to_cid
         self.joint_idx_to_dof_start = joint_idx_to_dof_start
+        #: Per-ADBS-column initial Newton joint coordinate. PhoenX's
+        #: revolution tracker measures *displacement from init*, so
+        #: Newton's absolute ``target_pos`` and limit arrays must be
+        #: offset by this value before being written into the ADBS
+        #: column. Length equals ``num_joint_columns``; indexed by
+        #: the ADBS cid.
+        self.joint_q_at_init = joint_q_at_init
         self.num_joint_columns = num_joint_columns
 
     def to_initialize_kwargs(self) -> dict:
@@ -249,6 +257,7 @@ def build_adbs_init_arrays(
             stiffness_limit=empty_f, damping_limit=empty_f,
             joint_idx_to_cid=joint_idx_to_cid,
             joint_idx_to_dof_start=joint_idx_to_dof_start,
+            joint_q_at_init=empty_f,
             num_joint_columns=0,
         )
 
@@ -257,9 +266,11 @@ def build_adbs_init_arrays(
     joint_parent = model.joint_parent.numpy()
     joint_child = model.joint_child.numpy()
     joint_X_p = model.joint_X_p.numpy()  # (N, 7) float32
+    joint_q_start = model.joint_q_start.numpy()
     joint_qd_start = model.joint_qd_start.numpy()
     joint_axis = model.joint_axis.numpy() if model.joint_axis is not None else np.zeros((0, 3), dtype=np.float32)
     body_q = model.body_q.numpy()  # (body_count, 7)
+    joint_q_arr = model.joint_q.numpy() if model.joint_q is not None else np.zeros(0, dtype=np.float32)
 
     # Per-DOF arrays (may be None on minimal models).
     def _pull_dof_f(arr):
@@ -383,12 +394,14 @@ def build_adbs_init_arrays(
                 drive_mode = _newton_target_mode_to_adbs_drive_mode(
                     int(target_mode[qd_start]), stiff_drive, damp_drive
                 )
-            # Limits (PhoenX PD path if either gain is > 0).
+            # Limits (PhoenX PD path if either gain is > 0). PhoenX's
+            # cumulative angle is relative to the init pose, not
+            # absolute; subtract the init joint coord so the limit
+            # window means the same angle range as Newton's
+            # absolute [limit_lower, limit_upper].
             if limit_lower is not None and limit_upper is not None:
                 lo = float(limit_lower[qd_start])
                 hi = float(limit_upper[qd_start])
-                # Newton convention: lo > hi means disabled; PhoenX
-                # matches.
                 if lo <= hi:
                     min_val = lo
                     max_val = hi
@@ -399,6 +412,24 @@ def build_adbs_init_arrays(
         else:  # pragma: no cover -- defensive
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
+        # Read the init joint coordinate for this joint's first DOF.
+        # For REVOLUTE / PRISMATIC this is a single-coord, single-DOF
+        # joint. For BALL / FIXED the drive/limit path is unused; we
+        # still publish an entry so the per-joint array has the same
+        # length as the ADBS column array.
+        q_start_idx = int(joint_q_start[j])
+        if jtype in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC) and len(joint_q_arr) > q_start_idx:
+            init_q = float(joint_q_arr[q_start_idx])
+        else:
+            init_q = 0.0
+
+        # Offset limit window by ``init_q`` so Newton's absolute limit
+        # range is interpreted correctly against PhoenX's rotation-
+        # from-init cumulative angle.
+        if min_val <= max_val:
+            min_val -= init_q
+            max_val -= init_q
+
         descriptors.append({
             "body1": phoenx_parent,
             "body2": phoenx_child,
@@ -408,7 +439,13 @@ def build_adbs_init_arrays(
             "damping_ratio": float(DEFAULT_DAMPING_RATIO),
             "joint_mode": phoenx_mode,
             "drive_mode": drive_mode,
-            "target": target_val,
+            # Per-joint ``target`` likewise needs the init-offset so
+            # Newton's absolute drive target lines up with PhoenX's
+            # cumulative-angle-from-init. The per-step control kernel
+            # redoes this offset each frame as the user updates
+            # ``control.joint_target_pos``; we only set it here for
+            # the very first step (before any control update fires).
+            "target": target_val - init_q,
             "target_velocity": target_vel_val,
             "max_force_drive": max_force,
             "stiffness_drive": stiff_drive,
@@ -419,6 +456,7 @@ def build_adbs_init_arrays(
             "damping_ratio_limit": damping_ratio_limit_val,
             "stiffness_limit": stiff_limit,
             "damping_limit": damp_limit,
+            "joint_q_at_init": init_q,
         })
         joint_idx_to_cid_np[j] = len(descriptors) - 1
 
@@ -459,5 +497,6 @@ def build_adbs_init_arrays(
         damping_limit=_stack_f("damping_limit"),
         joint_idx_to_cid=wp.array(joint_idx_to_cid_np, dtype=wp.int32, device=device),
         joint_idx_to_dof_start=wp.array(joint_idx_to_dof_start_np, dtype=wp.int32, device=device),
+        joint_q_at_init=_stack_f("joint_q_at_init"),
         num_joint_columns=num_cols,
     )
