@@ -60,7 +60,6 @@ __all__ = [
     "_rotation_quaternion",
     "_set_kinematic_pose_batch_kernel",
     "_world_csr_count_kernel",
-    "_world_csr_prefix_offsets_kernel",
     "_world_csr_scan_kernel",
     "_world_csr_scatter_kernel",
     "pack_body_xforms_kernel",
@@ -154,10 +153,19 @@ def _world_csr_scan_kernel(
     # out
     world_color_starts: wp.array2d[wp.int32],
     world_num_colors: wp.array[wp.int32],
+    world_totals_shifted: wp.array[wp.int32],
 ):
     """Per-world serial prefix scan -> ``world_color_starts`` +
     ``world_num_colors`` (highest non-empty colour index). One thread
-    per world."""
+    per world.
+
+    Additionally stages the per-world total into
+    ``world_totals_shifted[w + 1]`` (and ``[0] = 0`` from thread 0)
+    so an inclusive ``wp.utils.array_scan`` over the result produces
+    ``world_csr_offsets`` directly -- replaces a serial O(num_worlds)
+    prefix kernel that scaled poorly past 256 worlds (206 us at 1024
+    worlds). The scan writes under O(log num_worlds) kernel work.
+    """
     w = wp.tid()
     n_colors = num_colors_arr[0]
     acc = wp.int32(0)
@@ -170,27 +178,13 @@ def _world_csr_scan_kernel(
         acc += count
     world_color_starts[w, n_colors] = acc
     world_num_colors[w] = highest
-
-
-@wp.kernel(enable_backward=False)
-def _world_csr_prefix_offsets_kernel(
-    world_color_starts: wp.array2d[wp.int32],
-    num_colors_arr: wp.array[wp.int32],
-    num_worlds: wp.int32,
-    # out
-    world_csr_offsets: wp.array[wp.int32],
-):
-    """Single-thread prefix scan of per-world totals into
-    ``world_csr_offsets`` (length ``num_worlds + 1``)."""
-    tid = wp.tid()
-    if tid != 0:
-        return
-    n_colors = num_colors_arr[0]
-    acc = wp.int32(0)
-    world_csr_offsets[0] = wp.int32(0)
-    for w in range(num_worlds):
-        acc += world_color_starts[w, n_colors]
-        world_csr_offsets[w + 1] = acc
+    # Shifted staging: ``shifted[w + 1] = total_w``; thread 0 stamps
+    # ``[0] = 0`` so the downstream inclusive scan lands
+    # ``world_csr_offsets[0] = 0`` and
+    # ``world_csr_offsets[w + 1] = sum(totals[0..w])``.
+    world_totals_shifted[w + 1] = acc
+    if w == 0:
+        world_totals_shifted[0] = wp.int32(0)
 
 
 @wp.kernel(enable_backward=False)

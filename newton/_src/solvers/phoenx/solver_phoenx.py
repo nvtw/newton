@@ -79,7 +79,6 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _kinematic_prepare_step_kernel,
     _set_kinematic_pose_batch_kernel,
     _world_csr_count_kernel,
-    _world_csr_prefix_offsets_kernel,
     _world_csr_scan_kernel,
     _world_csr_scatter_kernel,
     pack_body_xforms_kernel,
@@ -356,6 +355,11 @@ class PhoenXWorld:
             (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
         )
         self._world_csr_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
+        # Shifted staging buffer for the cross-world prefix scan. Sized
+        # ``num_worlds + 1`` so the inclusive scan input/output lengths
+        # match and the scan result lands directly in
+        # ``world_csr_offsets``.
+        self._world_totals_shifted: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._world_num_colors: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
         self._world_color_counts: wp.array2d[wp.int32] = wp.zeros(
             (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
@@ -956,20 +960,14 @@ class PhoenXWorld:
                 self._world_color_counts,
                 self._partitioner.num_colors,
             ],
-            outputs=[self._world_color_starts, self._world_num_colors],
+            outputs=[self._world_color_starts, self._world_num_colors, self._world_totals_shifted],
             device=self.device,
         )
-        wp.launch(
-            _world_csr_prefix_offsets_kernel,
-            dim=1,
-            inputs=[
-                self._world_color_starts,
-                self._partitioner.num_colors,
-                wp.int32(self.num_worlds),
-            ],
-            outputs=[self._world_csr_offsets],
-            device=self.device,
-        )
+        # Cross-world prefix: inclusive scan of the shifted per-world
+        # totals produces ``world_csr_offsets[0] = 0`` and
+        # ``world_csr_offsets[w + 1] = sum(totals[0..w])``. Replaces a
+        # single-thread serial scan that grew to 206 us at 1024 worlds.
+        wp.utils.array_scan(self._world_totals_shifted, self._world_csr_offsets, inclusive=True)
         self._world_color_cursor.zero_()
         wp.launch(
             _world_csr_scatter_kernel,
