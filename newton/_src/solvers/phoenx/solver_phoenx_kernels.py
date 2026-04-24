@@ -841,27 +841,33 @@ def _constraint_relax_fast_tail_kernel(
     n_colors = world_num_colors[world_id]
     world_base = world_csr_offsets[world_id]
 
-    it = wp.int32(0)
-    while it < num_iterations:
-        c = wp.int32(0)
-        while c < n_colors:
-            start = world_base + world_color_starts[world_id, c]
-            end = world_base + world_color_starts[world_id, c + 1]
-            count = end - start
+    # Dispatch via the register-cached ``*_iterate_multi`` path with
+    # ``num_sweeps = num_iterations`` so each cid gets one body +
+    # constraint data load amortised over the whole relax sweep.
+    # ``velocity_iterations`` is typically 1 so there's no real
+    # cross-colour feedback to preserve -- running the full relax in
+    # one multi call is equivalent to the classic outer-inner split.
+    c = wp.int32(0)
+    while c < n_colors:
+        start = world_base + world_color_starts[world_id, c]
+        end = world_base + world_color_starts[world_id, c + 1]
+        count = end - start
 
-            base = local_tid
-            while base < count:
-                cid = world_element_ids_by_color[start + base]
-                if cid < num_joints:
-                    actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
-                else:
-                    contact_iterate(constraints, cid, bodies, idt, cc, contacts, False)
-                base += _STRAGGLER_BLOCK_DIM
+        base = local_tid
+        while base < count:
+            cid = world_element_ids_by_color[start + base]
+            if cid < num_joints:
+                actuated_double_ball_socket_iterate_multi(
+                    constraints, cid, bodies, idt, False, num_iterations
+                )
+            else:
+                contact_iterate_multi(
+                    constraints, cid, bodies, idt, cc, contacts, False, num_iterations
+                )
+            base += _STRAGGLER_BLOCK_DIM
 
-            _sync_warp()
-            c += 1
-
-        it += 1
+        _sync_warp()
+        c += 1
 
 
 @wp.kernel(enable_backward=False)
