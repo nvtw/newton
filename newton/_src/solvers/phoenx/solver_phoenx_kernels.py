@@ -49,6 +49,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 __all__ = [
     "_PER_WORLD_COLORING_BLOCK_DIM",
     "_STRAGGLER_BLOCK_DIM",
+    "_choose_fast_tail_worlds_per_block",
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
     "_constraint_iterate_fast_tail_kernel",
@@ -74,12 +75,55 @@ __all__ = [
 _STRAGGLER_BLOCK_DIM: int = 32
 
 
+def _choose_fast_tail_worlds_per_block(num_worlds: int) -> int:
+    """How many worlds to cohabit one physical block in the fast-tail
+    kernels. Each world always owns exactly one warp (32 threads), so
+    the returned block size ``32 * wpb`` keeps ``__syncwarp()`` valid
+    regardless of ``wpb``.
+
+    Tuned on RTX PRO 6000 (sm_120), 188 SMs. Overridable via
+    ``NEWTON_PHOENX_WORLDS_PER_BLOCK`` for A/B tests:
+
+    * ``num_worlds < 512``: pack lightly (``wpb=1..2``) so blocks
+      stay spread across SMs. Heavy packing at small world counts
+      drops blocks below ~1 per SM and tanks throughput (g1/h1 at
+      256 worlds regresses 8-13% at ``wpb=8``).
+    * ``num_worlds >= 512``: pack more aggressively to amortize
+      block launch cost and improve instruction-level parallelism;
+      +10-16% env_fps at 1024-4096 worlds.
+    * ``num_worlds >= 4096``: ``wpb=8`` wins by another few % on h1
+      but we stay at 4 -- single-knob simplicity and the large-world
+      case is already GPU-bound."""
+    import os as _os  # noqa: PLC0415
+
+    override = _os.environ.get("NEWTON_PHOENX_WORLDS_PER_BLOCK")
+    if override is not None:
+        return max(1, int(override))
+    if num_worlds < 512:
+        return 2
+    return 4
+
+
+#: Upper bound on the block size the fast-tail launches will ever use.
+#: Exposed for downstream code that wants to bound padded launch dim
+#: without calling :func:`_choose_fast_tail_worlds_per_block` per-launch.
+_FAST_TAIL_MAX_BLOCK_DIM: int = _STRAGGLER_BLOCK_DIM * 8
+
+
 @wp.func_native("""
 #if defined(__CUDA_ARCH__)
 __syncthreads();
 #endif
 """)
 def _sync_threads(): ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncwarp();
+#endif
+""")
+def _sync_warp(): ...
 
 
 # ---------------------------------------------------------------------------
@@ -516,12 +560,23 @@ def _constraint_iterate_fast_tail_kernel(
     cc: ContactContainer,
     contacts: ContactViews,
     num_iterations: wp.int32,
+    num_worlds: wp.int32,
 ):
     """Main-solve dispatcher: ``num_iterations`` PGS sweeps per world,
-    positional bias ON."""
+    positional bias ON.
+
+    One warp per world; worlds don't share bodies, so per-colour sync is
+    warp-local (``__syncwarp``) and several worlds can cohabit one
+    128-thread block without risking cross-world ``__syncthreads``
+    deadlocks when their ``num_colors`` differ.
+    """
     tid = wp.tid()
     local_tid = tid % _STRAGGLER_BLOCK_DIM
     world_id = tid / _STRAGGLER_BLOCK_DIM
+    # Padding lanes (launch dim rounded up to the block size) fall past
+    # the world count -- early-out before any OOB reads.
+    if world_id >= num_worlds:
+        return
 
     n_colors = world_num_colors[world_id]
     world_base = world_csr_offsets[world_id]
@@ -544,7 +599,7 @@ def _constraint_iterate_fast_tail_kernel(
                     contact_iterate(constraints, cid, bodies, idt, cc, contacts, True)
                 base += _STRAGGLER_BLOCK_DIM
 
-            _sync_threads()
+            _sync_warp()
             c += 1
 
         it += 1
@@ -561,12 +616,15 @@ def _constraint_prepare_fast_tail_kernel(
     world_num_colors: wp.array[wp.int32],
     cc: ContactContainer,
     contacts: ContactViews,
+    num_worlds: wp.int32,
 ):
     """Prepare dispatcher: one sweep per world. Computes effective
     masses, velocity bias, applies warm-start impulse."""
     tid = wp.tid()
     local_tid = tid % _STRAGGLER_BLOCK_DIM
     world_id = tid / _STRAGGLER_BLOCK_DIM
+    if world_id >= num_worlds:
+        return
 
     n_colors = world_num_colors[world_id]
     world_base = world_csr_offsets[world_id]
@@ -587,7 +645,7 @@ def _constraint_prepare_fast_tail_kernel(
                 contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
             base += _STRAGGLER_BLOCK_DIM
 
-        _sync_threads()
+        _sync_warp()
         c += 1
 
 
@@ -601,6 +659,7 @@ def _constraint_position_iterate_fast_tail_kernel(
     world_num_colors: wp.array[wp.int32],
     cc: ContactContainer,
     num_iterations: wp.int32,
+    num_worlds: wp.int32,
 ):
     """XPBD position-iteration dispatcher for contact tangent drift.
 
@@ -612,6 +671,8 @@ def _constraint_position_iterate_fast_tail_kernel(
     tid = wp.tid()
     local_tid = tid % _STRAGGLER_BLOCK_DIM
     world_id = tid / _STRAGGLER_BLOCK_DIM
+    if world_id >= num_worlds:
+        return
 
     n_colors = world_num_colors[world_id]
     world_base = world_csr_offsets[world_id]
@@ -632,7 +693,7 @@ def _constraint_position_iterate_fast_tail_kernel(
                     contact_position_iterate(constraints, cid, bodies, cc)
                 base += _STRAGGLER_BLOCK_DIM
 
-            _sync_threads()
+            _sync_warp()
             c += 1
 
         it += 1
@@ -650,12 +711,15 @@ def _constraint_relax_fast_tail_kernel(
     cc: ContactContainer,
     contacts: ContactViews,
     num_iterations: wp.int32,
+    num_worlds: wp.int32,
 ):
     """Box2D v3 TGS-soft relax dispatcher: ``num_iterations`` sweeps
     with positional bias OFF (enforces ``Jv = 0``)."""
     tid = wp.tid()
     local_tid = tid % _STRAGGLER_BLOCK_DIM
     world_id = tid / _STRAGGLER_BLOCK_DIM
+    if world_id >= num_worlds:
+        return
 
     n_colors = world_num_colors[world_id]
     world_base = world_csr_offsets[world_id]
@@ -678,7 +742,7 @@ def _constraint_relax_fast_tail_kernel(
                     contact_iterate(constraints, cid, bodies, idt, cc, contacts, False)
                 base += _STRAGGLER_BLOCK_DIM
 
-            _sync_threads()
+            _sync_warp()
             c += 1
 
         it += 1

@@ -68,6 +68,7 @@ from newton._src.solvers.phoenx.materials import MaterialData
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
     _STRAGGLER_BLOCK_DIM,
+    _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
     _constraint_iterate_fast_tail_kernel,
@@ -1179,8 +1180,8 @@ class PhoenXWorld:
             return
         wp.launch(
             _constraint_position_iterate_fast_tail_kernel,
-            dim=self.num_worlds * _STRAGGLER_BLOCK_DIM,
-            block_dim=_STRAGGLER_BLOCK_DIM,
+            dim=self._fast_tail_launch_dim(),
+            block_dim=self._fast_tail_block_dim(),
             inputs=[
                 self.constraints,
                 self.bodies,
@@ -1190,6 +1191,7 @@ class PhoenXWorld:
                 self._world_num_colors,
                 self._contact_container,
                 wp.int32(self.position_iterations),
+                wp.int32(self.num_worlds),
             ],
             device=self.device,
         )
@@ -1208,16 +1210,39 @@ class PhoenXWorld:
             contact_views,
         )
 
+    def _fast_tail_block_dim(self) -> int:
+        """Resolve the fast-tail block size for this solver instance.
+
+        Always ``_STRAGGLER_BLOCK_DIM * wpb`` so each world owns exactly
+        one warp (``__syncwarp`` correctness). ``wpb`` depends on
+        ``num_worlds`` -- see :func:`_choose_fast_tail_worlds_per_block`.
+        """
+        return _STRAGGLER_BLOCK_DIM * _choose_fast_tail_worlds_per_block(self.num_worlds)
+
+    def _fast_tail_launch_dim(self) -> int:
+        """Launch dim for the fast-tail kernels, padded up to the block
+        size so we can use a block_dim wider than a single warp.
+
+        One warp per world -> ``num_worlds * 32`` rounded up to the
+        configured block size. Padding lanes early-exit via the
+        ``world_id >= num_worlds`` guard inside the kernel, so the tail
+        block stays correct regardless of whether ``num_worlds``
+        divides the worlds-per-block.
+        """
+        block_dim = self._fast_tail_block_dim()
+        raw = self.num_worlds * _STRAGGLER_BLOCK_DIM
+        return ((raw + block_dim - 1) // block_dim) * block_dim
+
     def _launch_fast_prepare(
         self,
         idt: wp.float32,
         contact_views: ContactViews,
     ) -> None:
-        """Launch the prepare kernel, one block per world."""
+        """Launch the prepare kernel, one warp per world."""
         wp.launch(
             _constraint_prepare_fast_tail_kernel,
-            dim=self.num_worlds * _STRAGGLER_BLOCK_DIM,
-            block_dim=_STRAGGLER_BLOCK_DIM,
+            dim=self._fast_tail_launch_dim(),
+            block_dim=self._fast_tail_block_dim(),
             inputs=[
                 self.constraints,
                 self.bodies,
@@ -1228,6 +1253,7 @@ class PhoenXWorld:
                 self._world_num_colors,
                 self._contact_container,
                 contact_views,
+                wp.int32(self.num_worlds),
             ],
             device=self.device,
         )
@@ -1240,11 +1266,11 @@ class PhoenXWorld:
         contact_views: ContactViews,
     ) -> None:
         """Launch an iterate / relax kernel that runs
-        ``num_iterations`` sweeps internally, one block per world."""
+        ``num_iterations`` sweeps internally, one warp per world."""
         wp.launch(
             kernel,
-            dim=self.num_worlds * _STRAGGLER_BLOCK_DIM,
-            block_dim=_STRAGGLER_BLOCK_DIM,
+            dim=self._fast_tail_launch_dim(),
+            block_dim=self._fast_tail_block_dim(),
             inputs=[
                 self.constraints,
                 self.bodies,
@@ -1256,6 +1282,7 @@ class PhoenXWorld:
                 self._contact_container,
                 contact_views,
                 wp.int32(num_iterations),
+                wp.int32(self.num_worlds),
             ],
             device=self.device,
         )
