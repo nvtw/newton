@@ -1699,8 +1699,7 @@ Contact Matching
 
 Contact matching tracks contacts across frames, identifying which contacts
 persist, which are new, and which have broken.  The ``contact_matching``
-argument on :class:`~CollisionPipeline` selects one of three modes (bare
-string or the equivalent :class:`CollisionPipeline.ContactMatching` enum):
+argument on :class:`~CollisionPipeline` selects one of three modes:
 
 - ``"disabled"`` (default) — no matching, no extra buffers.
 - ``"latest"`` — match current contacts against the previous

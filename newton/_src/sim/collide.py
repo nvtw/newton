@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from enum import Enum
 from typing import Literal
 
 import numpy as np
@@ -460,29 +459,6 @@ class CollisionPipeline:
         usefulness on your workflow before relying on them in optimization loops.
     """
 
-    class ContactMatching(str, Enum):
-        """Frame-to-frame contact matching mode for :class:`CollisionPipeline`.
-
-        The available modes are:
-
-        - ``DISABLED``: No matching; no cross-frame state is kept.
-        - ``LATEST``: Match current contacts against the previous frame and
-          populate :attr:`Contacts.rigid_contact_match_index`, but keep the
-          current frame's fresh narrow-phase geometry.
-        - ``STICKY`` (experimental): Match like ``LATEST``, then overwrite
-          each matched contact's body-frame ``point0`` / ``point1`` /
-          ``offset0`` / ``offset1`` and world-frame ``normal`` with the
-          saved previous-frame values.  Reduces frame-to-frame jitter on
-          persistent contacts — useful for stacking.  The way sticky
-          contacts are updated may change in the future without warning.
-
-        See :ref:`Contact Matching` for details.
-        """
-
-        DISABLED = "disabled"
-        LATEST = "latest"
-        STICKY = "sticky"
-
     def __init__(
         self,
         model: Model,
@@ -502,8 +478,7 @@ class CollisionPipeline:
         narrow_phase: NarrowPhase | None = None,
         sdf_hydroelastic_config: HydroelasticSDF.Config | None = None,
         deterministic: bool = False,
-        contact_matching: Literal["disabled", "latest", "sticky"]
-        | CollisionPipeline.ContactMatching = ContactMatching.DISABLED,
+        contact_matching: Literal["disabled", "latest", "sticky"] = "disabled",
         contact_matching_pos_threshold: float = 0.0005,
         contact_matching_normal_dot_threshold: float = 0.995,
         contact_report: bool = False,
@@ -542,11 +517,10 @@ class CollisionPipeline:
             deterministic: Sort contacts after the narrow phase so that results
                 are independent of GPU thread scheduling.  Adds a radix sort +
                 gather pass.  Hydroelastic contacts are not yet covered.
-            contact_matching: Frame-to-frame contact matching mode.  Accepts
-                a string (``"disabled"`` / ``"latest"`` / ``"sticky"``) or the
-                equivalent :class:`CollisionPipeline.ContactMatching` enum
-                value.  Any non-disabled mode implies ``deterministic=True``
-                and populates :attr:`Contacts.rigid_contact_match_index`.
+            contact_matching: Frame-to-frame contact matching mode.  One of
+                ``"disabled"``, ``"latest"``, or ``"sticky"``.  Any
+                non-disabled mode implies ``deterministic=True`` and
+                populates :attr:`Contacts.rigid_contact_match_index`.
                 Defaults to ``"disabled"``.
             contact_matching_pos_threshold: World-space distance threshold [m]
                 between the previous and current contact midpoints
@@ -573,14 +547,10 @@ class CollisionPipeline:
             rigid-contact autodiff via ``rigid_contact_diff_*`` is **experimental**;
             see :meth:`collide`.
         """
-        try:
-            contact_matching_mode = CollisionPipeline.ContactMatching(contact_matching)
-        except ValueError as exc:
-            allowed = ", ".join(repr(m.value) for m in CollisionPipeline.ContactMatching)
+        if contact_matching not in ("disabled", "latest", "sticky"):
             raise ValueError(
-                f"contact_matching must be a CollisionPipeline.ContactMatching value "
-                f"(one of {allowed}), got {contact_matching!r}"
-            ) from exc
+                f"contact_matching must be one of 'disabled', 'latest', 'sticky', got {contact_matching!r}"
+            )
 
         if contact_matching_pos_threshold < 0.0:
             raise ValueError(
@@ -590,8 +560,8 @@ class CollisionPipeline:
             raise ValueError(
                 f"contact_matching_normal_dot_threshold must be in [-1, 1], got {contact_matching_normal_dot_threshold}"
             )
-        matching_enabled = contact_matching_mode != CollisionPipeline.ContactMatching.DISABLED
-        matching_sticky = contact_matching_mode == CollisionPipeline.ContactMatching.STICKY
+        matching_enabled = contact_matching != "disabled"
+        matching_sticky = contact_matching == "sticky"
         if contact_report and not matching_enabled:
             raise ValueError('contact_report=True requires contact_matching != "disabled"')
 
@@ -812,7 +782,7 @@ class CollisionPipeline:
             self._sort_key_array = wp.zeros(0, dtype=wp.int64, device=device)
             self._contact_sorter = None
 
-        self.contact_matching = contact_matching_mode
+        self.contact_matching = contact_matching
         self._matching_enabled = matching_enabled
         self._matching_sticky = matching_sticky
         self.contact_report = contact_report

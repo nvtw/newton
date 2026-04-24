@@ -11,8 +11,6 @@ import warp as wp
 import newton
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
-ContactMatching = newton.CollisionPipeline.ContactMatching
-
 
 class TestContactMatching(unittest.TestCase):
     pass
@@ -380,7 +378,7 @@ def test_deterministic_implied(test, device):
         model, _state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
         test.assertTrue(pipeline.deterministic)
-        test.assertEqual(pipeline.contact_matching, ContactMatching.LATEST)
+        test.assertEqual(pipeline.contact_matching, "latest")
 
 
 def test_matching_disabled_no_allocation(test, device):
@@ -392,7 +390,7 @@ def test_matching_disabled_no_allocation(test, device):
         test.assertIsNone(contacts.rigid_contact_match_index)
         test.assertIsNone(contacts.rigid_contact_new_indices)
         test.assertIsNone(contacts.rigid_contact_broken_indices)
-        test.assertEqual(pipeline.contact_matching, ContactMatching.DISABLED)
+        test.assertEqual(pipeline.contact_matching, "disabled")
 
 
 def test_match_index_valid_after_sort(test, device):
@@ -480,21 +478,6 @@ def test_box_on_plane_multiple_contacts(test, device):
             np.arange(count2, dtype=np.int32),
             err_msg="Box multi-contact stable scene must produce identity match",
         )
-
-
-def test_enum_mode_accepted(test, device):
-    """The contact_matching argument must also accept the ContactMatching enum."""
-    with wp.ScopedDevice(device):
-        model, _state = _build_simple_scene(device)
-
-        p_latest = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=ContactMatching.LATEST)
-        test.assertEqual(p_latest.contact_matching, ContactMatching.LATEST)
-
-        p_sticky = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=ContactMatching.STICKY)
-        test.assertEqual(p_sticky.contact_matching, ContactMatching.STICKY)
-
-        p_off = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=ContactMatching.DISABLED)
-        test.assertEqual(p_off.contact_matching, ContactMatching.DISABLED)
 
 
 def test_invalid_mode_raises(test, device):
@@ -732,7 +715,6 @@ add_function_test(
 add_function_test(
     TestContactMatching, "test_box_on_plane_multiple_contacts", test_box_on_plane_multiple_contacts, devices=devices
 )
-add_function_test(TestContactMatching, "test_enum_mode_accepted", test_enum_mode_accepted, devices=devices)
 add_function_test(TestContactMatching, "test_invalid_mode_raises", test_invalid_mode_raises, devices=devices)
 add_function_test(
     TestContactMatching, "test_contact_report_requires_matching", test_contact_report_requires_matching, devices=devices
