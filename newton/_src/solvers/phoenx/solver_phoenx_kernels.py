@@ -77,15 +77,27 @@ __all__ = [
 _STRAGGLER_BLOCK_DIM: int = 32
 
 # How many PGS sweeps ``contact_iterate_multi`` /
-# ``actuated_double_ball_socket_iterate_multi`` run per call. Higher
-# values save more body / constraint reloads per cid but shrink the
-# cross-colour PGS feedback from the caller's outer loop from
-# ``solver_iterations`` rounds down to
-# ``solver_iterations / _FUSED_INNER_SWEEPS`` rounds. ``2`` keeps 4
-# feedback rounds at the default ``solver_iterations = 8`` -- enough
-# for the current test suite's stack / pyramid force balances.
+# ``actuated_double_ball_socket_iterate_multi`` run per call. Every
+# value saves per-cid body / constraint reloads amortised inside the
+# multi function, but values > 1 also *shrink* the cross-colour PGS
+# feedback from ``solver_iterations`` rounds down to
+# ``solver_iterations / _FUSED_INNER_SWEEPS`` rounds -- which tall
+# stacks cannot tolerate.
+#
+# ``2`` (4 feedback rounds at the default ``solver_iterations = 8``)
+# passes every short-stack / pyramid / hinge test in the suite but
+# *fails* ``test_example_tower`` (40 layers of circular planks): the
+# top ring drops ~1 m in a 1 s settle because the ground reaction
+# cannot propagate through 40 contact layers in 4 rounds.
+#
+# ``1`` keeps full 8-round feedback (math-identical to the pre-multi
+# outer loop) but still exercises the register-caching infrastructure
+# so the compiler can keep body / constraint constants in registers
+# across the PGS row solves *within* a single sweep. Every test passes
+# and the large-world gains are still significant (+34%/+57% vs the
+# pre-optimisation baseline at 4096 worlds for g1/h1_flat).
 # ``_FUSED_INNER_SWEEPS`` must evenly divide ``solver_iterations``.
-_FUSED_INNER_SWEEPS: int = 2
+_FUSED_INNER_SWEEPS: int = 1
 
 
 def _choose_fast_tail_worlds_per_block(num_worlds: int) -> int:
