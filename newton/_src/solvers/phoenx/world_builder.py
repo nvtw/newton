@@ -32,11 +32,11 @@ from newton._src.solvers.phoenx.body import (
     BodyContainer,
 )
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
-    ADBS_DWORDS,
     DRIVE_MODE_OFF,
     DRIVE_MODE_POSITION,
     DRIVE_MODE_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_CABLE,
     JOINT_MODE_FIXED,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
@@ -45,17 +45,16 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_LIMIT,
     DEFAULT_HERTZ_LINEAR,
-    ConstraintContainer,
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 __all__ = [
+    "WORLD_BODY",
     "DriveMode",
     "JointDescriptor",
     "JointHandle",
     "JointMode",
     "RigidBodyDescriptor",
-    "WORLD_BODY",
     "WorldBuilder",
 ]
 
@@ -102,12 +101,20 @@ class JointMode(IntEnum):
       (rotations free, no drive/limit).
     * :attr:`FIXED` -- 6-DoF weld along ``anchor1 -> anchor2``
       (no drive/limit).
+    * :attr:`CABLE` -- ball-socket with per-component soft angular
+      stiffness / damping: bend about the two axes perpendicular to
+      ``anchor1 -> anchor2`` and twist along it. ``bend_stiffness``
+      and ``twist_stiffness`` (plus their damping pair) are stored
+      in the ADBS column's drive / limit slots, which are otherwise
+      unused in cable mode; the actuator / limit dwords share
+      storage, so no column widening.
     """
 
     REVOLUTE = int(JOINT_MODE_REVOLUTE)
     PRISMATIC = int(JOINT_MODE_PRISMATIC)
     BALL_SOCKET = int(JOINT_MODE_BALL_SOCKET)
     FIXED = int(JOINT_MODE_FIXED)
+    CABLE = int(JOINT_MODE_CABLE)
 
 
 # ---------------------------------------------------------------------------
@@ -222,9 +229,7 @@ def _validate_body_descriptor(desc: RigidBodyDescriptor, body_index: int) -> Non
     q = desc.orientation
     qnorm = math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3])
     if abs(qnorm - 1.0) > _QUAT_NORM_TOL:
-        raise ValueError(
-            prefix + f"orientation quaternion must be unit-norm (got |q|={qnorm:.6f})"
-        )
+        raise ValueError(prefix + f"orientation quaternion must be unit-norm (got |q|={qnorm:.6f})")
 
     mt = int(desc.motion_type)
     if mt == int(MOTION_DYNAMIC) and desc.inverse_mass == 0.0:
@@ -235,9 +240,7 @@ def _validate_body_descriptor(desc: RigidBodyDescriptor, body_index: int) -> Non
         if desc.velocity != (0.0, 0.0, 0.0) or desc.angular_velocity != (0.0, 0.0, 0.0):
             raise ValueError(prefix + "STATIC body must have zero velocities")
     if mt not in (int(MOTION_STATIC), int(MOTION_KINEMATIC), int(MOTION_DYNAMIC)):
-        raise ValueError(
-            prefix + f"unknown motion_type {mt} (expected STATIC/KINEMATIC/DYNAMIC)"
-        )
+        raise ValueError(prefix + f"unknown motion_type {mt} (expected STATIC/KINEMATIC/DYNAMIC)")
 
 
 # ---------------------------------------------------------------------------
@@ -295,9 +298,7 @@ class WorldBuilder:
     def world_body_of(self, world_id: int) -> int:
         """Body index of world ``world_id``'s static anchor."""
         if not (0 <= world_id < self._num_worlds):
-            raise IndexError(
-                f"world_id {world_id} out of range [0, {self._num_worlds})"
-            )
+            raise IndexError(f"world_id {world_id} out of range [0, {self._num_worlds})")
         return world_id
 
     def add_body(self, descriptor: RigidBodyDescriptor) -> int:
@@ -306,8 +307,7 @@ class WorldBuilder:
         _validate_body_descriptor(descriptor, next_index)
         if not (0 <= descriptor.world_id < self._num_worlds):
             raise ValueError(
-                f"body {next_index} has world_id {descriptor.world_id} out of "
-                f"range [0, {self._num_worlds})"
+                f"body {next_index} has world_id {descriptor.world_id} out of range [0, {self._num_worlds})"
             )
         self._bodies.append(descriptor)
         return next_index
@@ -415,6 +415,11 @@ class WorldBuilder:
         damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO),
         stiffness_limit: float = 0.0,
         damping_limit: float = 0.0,
+        # CABLE mode only -- per-component angular stiffness / damping.
+        bend_stiffness: float = 0.0,
+        twist_stiffness: float = 0.0,
+        bend_damping: float = 0.0,
+        twist_damping: float = 0.0,
     ) -> JointHandle:
         """Append an actuated double-ball-socket joint and return its handle.
 
@@ -431,11 +436,26 @@ class WorldBuilder:
           ``anchor1 -> anchor2``. Drive / limit interpret values as
           displacements [m] along the axis and ``max_force_drive`` as
           force [N].
+        * :attr:`JointMode.FIXED` -- 6-DoF weld along ``anchor1 ->
+          anchor2``. No drive / limit; every positional and
+          rotational DoF is locked.
+        * :attr:`JointMode.CABLE` -- rigid ball-socket at ``anchor1``
+          plus three soft angular rows measuring the Darboux vector
+          of the child body relative to its rest pose. Pass
+          ``bend_stiffness`` [N*m/rad] and ``twist_stiffness``
+          [N*m/rad] for the two axes perpendicular to ``anchor1 ->
+          anchor2`` and the axis along it respectively, plus the
+          matching ``bend_damping`` / ``twist_damping`` [N*m*s/rad].
+          The rest pose is the configuration at :meth:`finalize` time.
+          No ``drive_mode`` / ``target`` / ``limit`` -- cable angular
+          behaviour is entirely defined by the four stiffness /
+          damping scalars.
 
         ``stiffness_drive == damping_drive == 0`` disables the drive
-        row; ``min_value > max_value`` disables the limit row. Setting
-        either limit PD gain positive selects the PD formulation over
-        the Box2D ``(hertz_limit, damping_ratio_limit)`` path.
+        row (REVOLUTE / PRISMATIC); ``min_value > max_value`` disables
+        the limit row. Setting either limit PD gain positive selects
+        the PD formulation over the Box2D ``(hertz_limit,
+        damping_ratio_limit)`` path.
 
         Returns:
             A :class:`JointHandle` whose ``cid`` field is rewritten in
@@ -449,14 +469,9 @@ class WorldBuilder:
 
         if mode_enum is JointMode.BALL_SOCKET:
             if anchor2 is not None:
-                raise ValueError(
-                    "add_joint(mode=BALL_SOCKET) must not receive an ``anchor2``"
-                )
+                raise ValueError("add_joint(mode=BALL_SOCKET) must not receive an ``anchor2``")
             if drive_mode_enum is not DriveMode.OFF:
-                raise ValueError(
-                    "add_joint(mode=BALL_SOCKET) has no drive row; "
-                    "leave drive_mode=DriveMode.OFF"
-                )
+                raise ValueError("add_joint(mode=BALL_SOCKET) has no drive row; leave drive_mode=DriveMode.OFF")
             if target != 0.0 or target_velocity != 0.0 or max_force_drive != 0.0:
                 raise ValueError(
                     "add_joint(mode=BALL_SOCKET) has no drive row; leave "
@@ -469,8 +484,7 @@ class WorldBuilder:
                 )
             if stiffness_limit != 0.0 or damping_limit != 0.0:
                 raise ValueError(
-                    "add_joint(mode=BALL_SOCKET) has no limit row; leave "
-                    "stiffness_limit/damping_limit at 0"
+                    "add_joint(mode=BALL_SOCKET) has no limit row; leave stiffness_limit/damping_limit at 0"
                 )
             anchor2_effective: tuple[float, float, float] = tuple(anchor1)  # type: ignore[assignment]
         elif mode_enum is JointMode.FIXED:
@@ -480,25 +494,64 @@ class WorldBuilder:
                     "anchor1 -> anchor2 defines the weld's body-frame axis"
                 )
             if drive_mode_enum is not DriveMode.OFF:
-                raise ValueError(
-                    "add_joint(mode=FIXED) has no drive row; leave "
-                    "drive_mode=DriveMode.OFF"
-                )
+                raise ValueError("add_joint(mode=FIXED) has no drive row; leave drive_mode=DriveMode.OFF")
             if target != 0.0 or target_velocity != 0.0 or max_force_drive != 0.0:
                 raise ValueError(
-                    "add_joint(mode=FIXED) has no drive row; leave "
-                    "target/target_velocity/max_force_drive at defaults"
+                    "add_joint(mode=FIXED) has no drive row; leave target/target_velocity/max_force_drive at defaults"
                 )
             if min_value <= max_value:
                 raise ValueError(
-                    "add_joint(mode=FIXED) has no limit row; leave "
-                    "min_value/max_value at defaults (min > max disables)"
+                    "add_joint(mode=FIXED) has no limit row; leave min_value/max_value at defaults (min > max disables)"
+                )
+            if stiffness_limit != 0.0 or damping_limit != 0.0:
+                raise ValueError("add_joint(mode=FIXED) has no limit row; leave stiffness_limit/damping_limit at 0")
+            anchor2_effective = anchor2
+        elif mode_enum is JointMode.CABLE:
+            if anchor2 is None:
+                raise ValueError(
+                    "add_joint(mode=CABLE) requires ``anchor2``; the line "
+                    "anchor1 -> anchor2 defines the cable's reference "
+                    "(twist) axis and the plane perpendicular to it is "
+                    "the bend plane"
+                )
+            if drive_mode_enum is not DriveMode.OFF:
+                raise ValueError(
+                    "add_joint(mode=CABLE) has no drive row; leave "
+                    "drive_mode=DriveMode.OFF (use bend_stiffness / "
+                    "twist_stiffness instead of the drive)"
+                )
+            if target != 0.0 or target_velocity != 0.0 or max_force_drive != 0.0:
+                raise ValueError(
+                    "add_joint(mode=CABLE) has no drive row; leave target/target_velocity/max_force_drive at defaults"
+                )
+            if min_value <= max_value:
+                raise ValueError(
+                    "add_joint(mode=CABLE) has no limit row; leave min_value/max_value at defaults (min > max disables)"
+                )
+            if stiffness_drive != 0.0 or damping_drive != 0.0:
+                raise ValueError(
+                    "add_joint(mode=CABLE) does not use stiffness_drive / "
+                    "damping_drive directly -- pass bend_stiffness / "
+                    "bend_damping (they share the same column slots, set "
+                    "one or the other)"
                 )
             if stiffness_limit != 0.0 or damping_limit != 0.0:
                 raise ValueError(
-                    "add_joint(mode=FIXED) has no limit row; leave "
-                    "stiffness_limit/damping_limit at 0"
+                    "add_joint(mode=CABLE) does not use stiffness_limit / "
+                    "damping_limit directly -- pass twist_stiffness / "
+                    "twist_damping (they share the same column slots, set "
+                    "one or the other)"
                 )
+            if bend_stiffness < 0.0 or twist_stiffness < 0.0 or bend_damping < 0.0 or twist_damping < 0.0:
+                raise ValueError("add_joint(mode=CABLE) requires non-negative bend / twist stiffness and damping")
+            # Route the user-facing cable kwargs into the descriptor's
+            # existing drive / limit slots: the ADBS column reuses those
+            # dwords for bend / twist gains in cable mode and nothing
+            # else touches them.
+            stiffness_drive = float(bend_stiffness)
+            damping_drive = float(bend_damping)
+            stiffness_limit = float(twist_stiffness)
+            damping_limit = float(twist_damping)
             anchor2_effective = anchor2
         else:
             if anchor2 is None:
@@ -515,6 +568,14 @@ class WorldBuilder:
                     f"add_joint(mode={mode_enum.name}, drive_mode=VELOCITY) "
                     "requires damping_drive > 0 (PD velocity servo)."
                 )
+
+        if mode_enum is not JointMode.CABLE and (
+            bend_stiffness != 0.0 or twist_stiffness != 0.0 or bend_damping != 0.0 or twist_damping != 0.0
+        ):
+            raise ValueError(
+                f"add_joint(mode={mode_enum.name}): bend/twist stiffness / "
+                "damping are only meaningful for JointMode.CABLE"
+            )
 
         descriptor = JointDescriptor(
             body1=body1,
@@ -548,12 +609,8 @@ class WorldBuilder:
         self._validate_body(body_a)
         self._validate_body(body_b)
         if body_a == body_b:
-            raise ValueError(
-                f"add_collision_filter_pair: bodies must differ (got both = {body_a})"
-            )
-        self._collision_filter_pairs.add(
-            (min(int(body_a), int(body_b)), max(int(body_a), int(body_b)))
-        )
+            raise ValueError(f"add_collision_filter_pair: bodies must differ (got both = {body_a})")
+        self._collision_filter_pairs.add((min(int(body_a), int(body_b)), max(int(body_a), int(body_b))))
 
     # ------------------------------------------------------------------
     # Finalisation
@@ -565,8 +622,7 @@ class WorldBuilder:
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
         position_iterations: int = 0,
-        gravity: tuple[float, float, float]
-        | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
+        gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         max_contact_columns: int = 0,
         rigid_contact_max: int = 0,
         num_shapes: int = 0,
@@ -636,9 +692,7 @@ class WorldBuilder:
 
     def _validate_body(self, idx: int) -> None:
         if not (0 <= idx < len(self._bodies)):
-            raise IndexError(
-                f"body index {idx} out of range [0, {len(self._bodies)})"
-            )
+            raise IndexError(f"body index {idx} out of range [0, {len(self._bodies)})")
 
     def _build_body_container(self, device: wp.context.Device) -> BodyContainer:
         """Pack descriptors into a :class:`BodyContainer`. One
@@ -738,24 +792,24 @@ class WorldBuilder:
             stiffness_limit[i] = float(d.stiffness_limit)
             damping_limit[i] = float(d.damping_limit)
 
-        return dict(
-            body1=wp.array(body1, dtype=wp.int32, device=device),
-            body2=wp.array(body2, dtype=wp.int32, device=device),
-            anchor1=wp.array(anchor1, dtype=wp.vec3f, device=device),
-            anchor2=wp.array(anchor2, dtype=wp.vec3f, device=device),
-            hertz=wp.array(hertz, dtype=wp.float32, device=device),
-            damping_ratio=wp.array(damping_ratio, dtype=wp.float32, device=device),
-            joint_mode=wp.array(joint_mode, dtype=wp.int32, device=device),
-            drive_mode=wp.array(drive_mode, dtype=wp.int32, device=device),
-            target=wp.array(target, dtype=wp.float32, device=device),
-            target_velocity=wp.array(target_velocity, dtype=wp.float32, device=device),
-            max_force_drive=wp.array(max_force_drive, dtype=wp.float32, device=device),
-            stiffness_drive=wp.array(stiffness_drive, dtype=wp.float32, device=device),
-            damping_drive=wp.array(damping_drive, dtype=wp.float32, device=device),
-            min_value=wp.array(min_value, dtype=wp.float32, device=device),
-            max_value=wp.array(max_value, dtype=wp.float32, device=device),
-            hertz_limit=wp.array(hertz_limit, dtype=wp.float32, device=device),
-            damping_ratio_limit=wp.array(damping_ratio_limit, dtype=wp.float32, device=device),
-            stiffness_limit=wp.array(stiffness_limit, dtype=wp.float32, device=device),
-            damping_limit=wp.array(damping_limit, dtype=wp.float32, device=device),
-        )
+        return {
+            "body1": wp.array(body1, dtype=wp.int32, device=device),
+            "body2": wp.array(body2, dtype=wp.int32, device=device),
+            "anchor1": wp.array(anchor1, dtype=wp.vec3f, device=device),
+            "anchor2": wp.array(anchor2, dtype=wp.vec3f, device=device),
+            "hertz": wp.array(hertz, dtype=wp.float32, device=device),
+            "damping_ratio": wp.array(damping_ratio, dtype=wp.float32, device=device),
+            "joint_mode": wp.array(joint_mode, dtype=wp.int32, device=device),
+            "drive_mode": wp.array(drive_mode, dtype=wp.int32, device=device),
+            "target": wp.array(target, dtype=wp.float32, device=device),
+            "target_velocity": wp.array(target_velocity, dtype=wp.float32, device=device),
+            "max_force_drive": wp.array(max_force_drive, dtype=wp.float32, device=device),
+            "stiffness_drive": wp.array(stiffness_drive, dtype=wp.float32, device=device),
+            "damping_drive": wp.array(damping_drive, dtype=wp.float32, device=device),
+            "min_value": wp.array(min_value, dtype=wp.float32, device=device),
+            "max_value": wp.array(max_value, dtype=wp.float32, device=device),
+            "hertz_limit": wp.array(hertz_limit, dtype=wp.float32, device=device),
+            "damping_ratio_limit": wp.array(damping_ratio_limit, dtype=wp.float32, device=device),
+            "stiffness_limit": wp.array(stiffness_limit, dtype=wp.float32, device=device),
+            "damping_limit": wp.array(damping_limit, dtype=wp.float32, device=device),
+        }

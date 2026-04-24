@@ -286,6 +286,13 @@ ba = "ba"
 iz = "iz"
 HAA = "HAA"
 lod = "lod"
+# PhoenX is the name of Newton's rigid body solver.
+Phoen = "Phoen"
+PhoenX = "PhoenX"
+phoenx = "phoenx"
+# Short for "prismatic" in the PhoenX ADBS joint column.
+pris = "pris"
+PRIS = "PRIS"
 # MuJoCo Menagerie brand/product names
 Pincher = "Pincher"
 Robotis = "Robotis"

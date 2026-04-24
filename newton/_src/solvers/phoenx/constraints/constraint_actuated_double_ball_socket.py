@@ -79,14 +79,15 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
 
 __all__ = [
     "ADBS_DWORDS",
-    "ActuatedDoubleBallSocketData",
     "DRIVE_MODE_OFF",
     "DRIVE_MODE_POSITION",
     "DRIVE_MODE_VELOCITY",
     "JOINT_MODE_BALL_SOCKET",
+    "JOINT_MODE_CABLE",
     "JOINT_MODE_FIXED",
     "JOINT_MODE_PRISMATIC",
     "JOINT_MODE_REVOLUTE",
+    "ActuatedDoubleBallSocketData",
     "actuated_double_ball_socket_initialize_kernel",
     "actuated_double_ball_socket_iterate",
     "actuated_double_ball_socket_iterate_at",
@@ -118,6 +119,31 @@ JOINT_MODE_BALL_SOCKET = wp.constant(wp.int32(2))
 #: Gauss-Seidel. No drive, no limit. All three anchors are snapshotted
 #: in the column at init regardless of mode, so no extra state.
 JOINT_MODE_FIXED = wp.constant(wp.int32(3))
+#: Cable (soft ball-socket) joint: rigid 3-row point lock at anchor1
+#: (same as BALL_SOCKET) plus three soft angular rows with
+#: independent per-component stiffness and damping -- ``k_bend`` on
+#: the two axes perpendicular to the reference direction
+#: ``anchor1 -> anchor2`` and ``k_twist`` along it. Each row uses the
+#: same Box2D-style soft PD formulation the axial drive / limit uses
+#: (``pd_coefficients`` -> ``(gamma, bias, eff_mass_soft)``), so
+#: warm-starting, substep Nyquist clamping, and relax-pass semantics
+#: are all reused without new plumbing.
+#:
+#: Column slot reuse (unchanged ``ADBS_DWORDS``):
+#:   * ``inv_initial_orientation`` -- rest relative orientation (the
+#:     init kernel already computes and stores exactly this quaternion
+#:     for REVOLUTE; CABLE reuses it verbatim).
+#:   * ``axis_local1`` -- reference direction in body-1 local frame
+#:     (init kernel already snapshots this from ``anchor2 - anchor1``).
+#:   * ``stiffness_drive`` / ``damping_drive`` -> ``k_bend`` / ``d_bend``.
+#:   * ``stiffness_limit`` / ``damping_limit`` -> ``k_twist`` / ``d_twist``.
+#:   * ``ut_ai`` (3x3 mat33) -> 3 cached world-frame row directions
+#:     ``(d_bend1_world, d_bend2_world, d_twist_world)``.
+#:   * ``s_inv`` (3x3 mat33) -> 3 cached PD coefficient triples
+#:     ``(gamma, bias, eff_mass_soft)``.
+#:   * ``acc_imp2`` (vec3) -> per-row accumulated impulses
+#:     ``(acc_bend1, acc_bend2, acc_twist)``.
+JOINT_MODE_CABLE = wp.constant(wp.int32(4))
 
 
 # ---------------------------------------------------------------------------
@@ -365,72 +391,36 @@ _OFF_ACC_IMP3 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accum
 
 _OFF_AXIS_LOCAL1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_local1"))
 _OFF_REST_LENGTH = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "rest_length"))
-_OFF_INV_INITIAL_ORIENTATION = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "inv_initial_orientation")
-)
-_OFF_REVOLUTION_COUNTER = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "revolution_counter")
-)
-_OFF_PREVIOUS_QUATERNION_ANGLE = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "previous_quaternion_angle")
-)
+_OFF_INV_INITIAL_ORIENTATION = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "inv_initial_orientation"))
+_OFF_REVOLUTION_COUNTER = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "revolution_counter"))
+_OFF_PREVIOUS_QUATERNION_ANGLE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "previous_quaternion_angle"))
 _OFF_DRIVE_MODE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "drive_mode"))
 _OFF_TARGET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target"))
 _OFF_TARGET_VELOCITY = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target_velocity"))
 _OFF_MAX_FORCE_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_force_drive"))
-_OFF_STIFFNESS_DRIVE = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_drive")
-)
+_OFF_STIFFNESS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_drive"))
 _OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_drive"))
 _OFF_MIN_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "min_value"))
 _OFF_MAX_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_value"))
 _OFF_HERTZ_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "hertz_limit"))
-_OFF_DAMPING_RATIO_LIMIT = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "damping_ratio_limit")
-)
-_OFF_STIFFNESS_LIMIT = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_limit")
-)
-_OFF_DAMPING_LIMIT = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "damping_limit")
-)
-_OFF_EFF_INV_AXIAL = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "eff_inv_axial")
-)
+_OFF_DAMPING_RATIO_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_ratio_limit"))
+_OFF_STIFFNESS_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_limit"))
+_OFF_DAMPING_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_limit"))
+_OFF_EFF_INV_AXIAL = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "eff_inv_axial"))
 _OFF_BIAS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias_drive"))
 _OFF_GAMMA_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "gamma_drive"))
-_OFF_EFF_MASS_DRIVE_SOFT = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "eff_mass_drive_soft")
-)
-_OFF_BIAS_LIMIT_BOX2D = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "bias_limit_box2d")
-)
-_OFF_MASS_COEFF_LIMIT = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "mass_coeff_limit")
-)
-_OFF_IMPULSE_COEFF_LIMIT = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "impulse_coeff_limit")
-)
-_OFF_PD_GAMMA_LIMIT = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "pd_gamma_limit")
-)
-_OFF_PD_BETA_LIMIT = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "pd_beta_limit")
-)
-_OFF_PD_MASS_COEFF_LIMIT = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "pd_mass_coeff_limit")
-)
-_OFF_MAX_LAMBDA_DRIVE = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "max_lambda_drive")
-)
+_OFF_EFF_MASS_DRIVE_SOFT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "eff_mass_drive_soft"))
+_OFF_BIAS_LIMIT_BOX2D = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias_limit_box2d"))
+_OFF_MASS_COEFF_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "mass_coeff_limit"))
+_OFF_IMPULSE_COEFF_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "impulse_coeff_limit"))
+_OFF_PD_GAMMA_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "pd_gamma_limit"))
+_OFF_PD_BETA_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "pd_beta_limit"))
+_OFF_PD_MASS_COEFF_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "pd_mass_coeff_limit"))
+_OFF_MAX_LAMBDA_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_lambda_drive"))
 _OFF_CLAMP = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "clamp"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_world"))
-_OFF_ACC_DRIVE = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_drive")
-)
-_OFF_ACC_LIMIT = wp.constant(
-    dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_limit")
-)
+_OFF_ACC_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_drive"))
+_OFF_ACC_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_limit"))
 
 #: Total dword count of one unified joint constraint.
 ADBS_DWORDS: int = num_dwords(ActuatedDoubleBallSocketData)
@@ -692,9 +682,7 @@ def _axial_drive_limit_iterate(
     max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
     bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
     gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
-    eff_mass_drive_soft = read_float(
-        constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid
-    )
+    eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
     acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
 
     # ---- Drive row ----------------------------------------------------
@@ -714,9 +702,7 @@ def _axial_drive_limit_iterate(
         # ``jv = n . (w1 - w2)`` convention, which is -1 * the
         # Jitter2 ``jv = n . (v2 - v1)`` convention):
         #   lam = -M_eff_soft * (jv - bias + gamma * acc)
-        lam_drive = -eff_mass_drive_soft * (
-            jv_axial - bias_drive + gamma_drive * acc_drive
-        )
+        lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
         old_acc = acc_drive
         acc_drive = acc_drive + lam_drive
         if max_force_drive > 0.0:
@@ -1010,9 +996,15 @@ def _revolute_prepare_at(
     b_mat = b_mat + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
 
     t_mat = wp.mat33f(
-        t1[0], t2[0], 0.0,
-        t1[1], t2[1], 0.0,
-        t1[2], t2[2], 0.0,
+        t1[0],
+        t2[0],
+        0.0,
+        t1[1],
+        t2[1],
+        0.0,
+        t1[2],
+        t2[2],
+        0.0,
     )
     tt = wp.transpose(t_mat)
 
@@ -1024,14 +1016,22 @@ def _revolute_prepare_at(
     s_mat = d_mat - ut_ai @ u_mat
 
     s22 = wp.mat22f(
-        s_mat[0, 0], s_mat[0, 1],
-        s_mat[1, 0], s_mat[1, 1],
+        s_mat[0, 0],
+        s_mat[0, 1],
+        s_mat[1, 0],
+        s_mat[1, 1],
     )
     s22_inv = wp.inverse(s22)
     s_inv_packed = wp.mat33f(
-        s22_inv[0, 0], s22_inv[0, 1], 0.0,
-        s22_inv[1, 0], s22_inv[1, 1], 0.0,
-        0.0,           0.0,           0.0,
+        s22_inv[0, 0],
+        s22_inv[0, 1],
+        0.0,
+        s22_inv[1, 0],
+        s22_inv[1, 1],
+        0.0,
+        0.0,
+        0.0,
+        0.0,
     )
 
     write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
@@ -1059,13 +1059,9 @@ def _revolute_prepare_at(
     acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
 
     velocity1 = bodies.velocity[b1] - inv_mass1 * (acc1 + acc2)
-    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (
-        cr1_b1 @ acc1 + cr2_b1 @ acc2
-    )
+    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (cr1_b1 @ acc1 + cr2_b1 @ acc2)
     velocity2 = bodies.velocity[b2] + inv_mass2 * (acc1 + acc2)
-    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (
-        cr1_b2 @ acc1 + cr2_b2 @ acc2
-    )
+    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (cr1_b2 @ acc1 + cr2_b2 @ acc2)
 
     # ---- Axial drive + limit block (angular) ------------------------
     drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
@@ -1101,9 +1097,7 @@ def _revolute_prepare_at(
     # the tracker output must remain well-defined even if anchors
     # briefly coincide across a substep (`|a2 - a1| ~ 0` would zero
     # out ``n_hat`` for a step).
-    j1 = wp.quat_rotate(
-        orientation1, read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
-    )
+    j1 = wp.quat_rotate(orientation1, read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid))
     inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
     diff = orientation2 * inv_init * wp.quat_inverse(orientation1)
     new_q_angle = extract_rotation_angle(diff, j1)
@@ -1155,9 +1149,7 @@ def _revolute_prepare_at(
     # commanded rate, which is the intuitive target-reached condition.
     bias_drive = bias_drive - target_velocity
     write_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid, gamma_drive)
-    write_float(
-        constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, eff_mass_drive_soft
-    )
+    write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, eff_mass_drive_soft)
     write_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid, bias_drive)
 
     max_lambda_drive = max_force_drive * dt
@@ -1186,9 +1178,7 @@ def _revolute_prepare_at(
     # the inactive one zeroed) so iterate doesn't have to guard on
     # stale state.
     if stiffness_limit > 0.0 or damping_limit > 0.0:
-        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(
-            stiffness_limit, damping_limit, limit_C, eff_inv, dt
-        )
+        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(stiffness_limit, damping_limit, limit_C, eff_inv, dt)
         write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
         write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
         write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
@@ -1196,9 +1186,7 @@ def _revolute_prepare_at(
         write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, 0.0)
         write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, 0.0)
     else:
-        br_limit, mc_limit, ic_limit = soft_constraint_coefficients(
-            hertz_limit, damping_ratio_limit, dt
-        )
+        br_limit, mc_limit, ic_limit = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
         # Box2D sign convention: iterate drives ``jv == -bias``, so
         # prefold the positional error with a flipped sign.
         write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
@@ -1299,8 +1287,10 @@ def _revolute_iterate_at(
     ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
 
     s_inv_22 = wp.mat22f(
-        s_inv_packed[0, 0], s_inv_packed[0, 1],
-        s_inv_packed[1, 0], s_inv_packed[1, 1],
+        s_inv_packed[0, 0],
+        s_inv_packed[0, 1],
+        s_inv_packed[1, 0],
+        s_inv_packed[1, 1],
     )
     lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
     lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
@@ -1333,9 +1323,7 @@ def _revolute_iterate_at(
     # the warm-start below: ``+n_hat`` for body 1, ``-n_hat`` for body
     # 2, so positive lambda spins body 1 *forward* and body 2 *back*.
     jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-    axial_lam = _axial_drive_limit_iterate(
-        constraints, cid, base_offset, jv_axial, clamp
-    )
+    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp)
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
@@ -1477,24 +1465,12 @@ def _prismatic_prepare_at(
     eye3 = wp.identity(3, dtype=wp.float32)
     m_diag = (inv_mass1 + inv_mass2) * eye3
 
-    b11 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1)) + cr1_b2 @ (
-        inv_inertia2 @ wp.transpose(cr1_b2)
-    )
-    b22 = m_diag + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1)) + cr2_b2 @ (
-        inv_inertia2 @ wp.transpose(cr2_b2)
-    )
-    b33 = m_diag + cr3_b1 @ (inv_inertia1 @ wp.transpose(cr3_b1)) + cr3_b2 @ (
-        inv_inertia2 @ wp.transpose(cr3_b2)
-    )
-    b12 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1)) + cr1_b2 @ (
-        inv_inertia2 @ wp.transpose(cr2_b2)
-    )
-    b13 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr3_b1)) + cr1_b2 @ (
-        inv_inertia2 @ wp.transpose(cr3_b2)
-    )
-    b23 = m_diag + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr3_b1)) + cr2_b2 @ (
-        inv_inertia2 @ wp.transpose(cr3_b2)
-    )
+    b11 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1)) + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
+    b22 = m_diag + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1)) + cr2_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
+    b33 = m_diag + cr3_b1 @ (inv_inertia1 @ wp.transpose(cr3_b1)) + cr3_b2 @ (inv_inertia2 @ wp.transpose(cr3_b2))
+    b12 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1)) + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
+    b13 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr3_b1)) + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr3_b2))
+    b23 = m_diag + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr3_b1)) + cr2_b2 @ (inv_inertia2 @ wp.transpose(cr3_b2))
 
     # ---- Project to tangent basis ------------------------------------
     # T_2x3 = [t1; t2]; each 2x2 block for (anchor i, anchor j) is
@@ -1527,10 +1503,22 @@ def _prismatic_prepare_at(
     # K4 is symmetric (K_ij = K_ji because B_ii is symmetric and the
     # (a2,a1) block equals the transpose of the (a1,a2) block).
     k4 = wp.mat44f(
-        k4_00, k4_01, k4_02, k4_03,
-        k4_01, k4_11, k4_12, k4_13,
-        k4_02, k4_12, k4_22, k4_23,
-        k4_03, k4_13, k4_23, k4_33,
+        k4_00,
+        k4_01,
+        k4_02,
+        k4_03,
+        k4_01,
+        k4_11,
+        k4_12,
+        k4_13,
+        k4_02,
+        k4_12,
+        k4_22,
+        k4_23,
+        k4_03,
+        k4_13,
+        k4_23,
+        k4_33,
     )
 
     # c-vector: coupling of the 4 tangent rows with the a3 scalar row
@@ -1660,9 +1648,7 @@ def _prismatic_prepare_at(
         eff_mass_drive_soft = wp.float32(0.0)
     bias_drive = bias_drive - target_velocity
     write_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid, gamma_drive)
-    write_float(
-        constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, eff_mass_drive_soft
-    )
+    write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, eff_mass_drive_soft)
     write_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid, bias_drive)
 
     max_lambda_drive = max_force_drive * dt
@@ -1685,9 +1671,7 @@ def _prismatic_prepare_at(
     # Dual-convention dispatch identical to the revolute prepare /
     # standalone linear_limit: PD if either gain > 0, else Box2D.
     if stiffness_limit > 0.0 or damping_limit > 0.0:
-        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(
-            stiffness_limit, damping_limit, limit_C, eff_inv, dt
-        )
+        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(stiffness_limit, damping_limit, limit_C, eff_inv, dt)
         write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
         write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
         write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
@@ -1695,9 +1679,7 @@ def _prismatic_prepare_at(
         write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, 0.0)
         write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, 0.0)
     else:
-        br_limit, mc_limit, ic_limit = soft_constraint_coefficients(
-            hertz_limit, damping_ratio_limit, dt
-        )
+        br_limit, mc_limit, ic_limit = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
         write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
         write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
         write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
@@ -1852,9 +1834,7 @@ def _prismatic_iterate_at(
     v1_anchor = velocity1 + wp.cross(angular_velocity1, r1_b1)
     v2_anchor = velocity2 + wp.cross(angular_velocity2, r1_b2)
     jv_axial = wp.dot(n_hat, v1_anchor - v2_anchor)
-    axial_lam = _axial_drive_limit_iterate(
-        constraints, cid, base_offset, jv_axial, clamp
-    )
+    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp)
 
     # Apply the combined linear impulse: lam along n_hat, with body 1
     # getting +n_hat and body 2 getting -n_hat (mirror of revolute's
@@ -1864,6 +1844,332 @@ def _prismatic_iterate_at(
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ wp.cross(r1_b1, axial_imp)
     velocity2 = velocity2 - inv_mass2 * axial_imp
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ wp.cross(r1_b2, axial_imp)
+
+    bodies.velocity[b1] = velocity1
+    bodies.angular_velocity[b1] = angular_velocity1
+    bodies.velocity[b2] = velocity2
+    bodies.angular_velocity[b2] = angular_velocity2
+
+
+# ---------------------------------------------------------------------------
+# Cable (soft ball-socket) mode
+# ---------------------------------------------------------------------------
+#
+# Rigid 3-row point lock at anchor1 (verbatim ball-socket) plus three
+# independent soft angular rows:
+#   * 2x "bend" rows about the axes perpendicular to
+#     ``n_hat = anchor1 -> anchor2``;
+#   * 1x "twist" row along ``n_hat``.
+#
+# Each scalar row uses the exact Box2D-style soft PD coefficient
+# plumbing the axial drive / limit row already uses
+# (``pd_coefficients(stiffness, damping, position_error, eff_inv, dt)``
+# returning ``(gamma, bias, eff_mass_soft)``), so substep Nyquist
+# clamping, warm-start, and the relax-pass bias-off path are all free.
+# The iterate applies the three rows in Gauss-Seidel order --
+# identical pattern to :func:`_axial_drive_limit_iterate`.
+#
+# Cable measures deflection via a Darboux vector: the log-map of the
+# alignment quaternion
+#     q_align = q_wc * inv_init * q_wp^{-1}
+# where ``inv_init = q_wc_rest^{-1} * q_wp_rest`` is the same
+# quantity REVOLUTE already snapshots in ``_OFF_INV_INITIAL_ORIENTATION``.
+# Under small deflection (|kappa| << pi, the expected cable regime)
+# the log-map collapses to ``2 * q_align.xyz`` and the angular
+# Jacobian rows are simply world-frame unit directions in a basis
+# aligned with the reference axis; the small-angle formulation keeps
+# the iterate cheap and matches PGS's row-at-a-time updates.
+
+
+@wp.func
+def _cable_prepare_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+):
+    """Cable-mode prepare pass: anchor-1 3-row point lock
+    (ball-socket) plus three soft angular rows (bend x2, twist x1).
+
+    Caches per-row world-frame Jacobian directions in ``ut_ai`` and
+    per-row soft-PD coefficients ``(gamma, bias, eff_mass_soft)`` in
+    ``s_inv``. The anchor-1 positional block uses the same
+    ``a1_inv`` cache ball-socket uses.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    orient1 = bodies.orientation[b1]
+    orient2 = bodies.orientation[b2]
+    position1 = bodies.position[b1]
+    position2 = bodies.position[b2]
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    inv_inertia_sum = inv_inertia1 + inv_inertia2
+
+    # ---- Anchor-1 positional block (ball-socket) ---------------------
+    la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
+    la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
+    r1_b1 = wp.quat_rotate(orient1, la1_b1)
+    r1_b2 = wp.quat_rotate(orient2, la1_b2)
+    write_vec3(constraints, base_offset + _OFF_R1_B1, cid, r1_b1)
+    write_vec3(constraints, base_offset + _OFF_R1_B2, cid, r1_b2)
+
+    p1_b1 = position1 + r1_b1
+    p1_b2 = position2 + r1_b2
+
+    cr1_b1 = wp.skew(r1_b1)
+    cr1_b2 = wp.skew(r1_b2)
+    eye3 = wp.identity(3, dtype=wp.float32)
+    a1 = inv_mass1 * eye3
+    a1 = a1 + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1))
+    a1 = a1 + inv_mass2 * eye3
+    a1 = a1 + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
+    a1_inv = wp.inverse(a1)
+    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
+
+    hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
+    damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
+    dt = 1.0 / idt
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
+    write_float(constraints, base_offset + _OFF_BIAS_RATE, cid, bias_rate)
+    write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
+    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
+    bias1 = (p1_b2 - p1_b1) * bias_rate
+    write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
+
+    # Anchor-1 warm-start (velocity-level) -- same as ball-socket.
+    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+    velocity1 = bodies.velocity[b1] - inv_mass1 * acc1
+    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (cr1_b1 @ acc1)
+    velocity2 = bodies.velocity[b2] + inv_mass2 * acc1
+    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (cr1_b2 @ acc1)
+
+    # ---- Angular block: Darboux vector in world frame ----------------
+    # ``q_align = q_wc * inv_init * q_wp^{-1}`` -- same construction
+    # the REVOLUTE twist tracker uses (diff quaternion is identity at
+    # finalize). The small-angle log-map is simply ``2 * q_align.xyz``;
+    # for the moderate deflections a cable sees that's within 1 % of
+    # the full log-map and saves an ``atan2`` per iteration.
+    inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
+    q_align = orient2 * inv_init * wp.quat_inverse(orient1)
+    # Canonicalise to the shortest-path hemisphere so the bias and
+    # the log-map agree on sign across the ``w = 0`` branch cut.
+    if q_align[3] < 0.0:
+        q_align = -q_align
+    kappa_world = wp.vec3f(2.0 * q_align[0], 2.0 * q_align[1], 2.0 * q_align[2])
+
+    # ---- Reference axis + bend basis in world frame ------------------
+    axis_local1 = read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
+    n_hat_world = wp.quat_rotate(orient1, axis_local1)
+    # Normalize defensively -- should already be unit from init.
+    n_len2 = wp.dot(n_hat_world, n_hat_world)
+    if n_len2 > 1.0e-20:
+        n_hat_world = n_hat_world / wp.sqrt(n_len2)
+    else:
+        n_hat_world = wp.vec3f(1.0, 0.0, 0.0)
+
+    # Two unit vectors perpendicular to n_hat_world. ``create_orthonormal``
+    # is deterministic in n_hat, so the basis is stable across substeps
+    # as long as the parent body's world rotation evolves smoothly.
+    e1_world = create_orthonormal(n_hat_world)
+    # Project out any drift along n_hat, then renormalise (cheap).
+    e1_world = e1_world - wp.dot(e1_world, n_hat_world) * n_hat_world
+    e1_len2 = wp.dot(e1_world, e1_world)
+    if e1_len2 > 1.0e-20:
+        e1_world = e1_world / wp.sqrt(e1_len2)
+    else:
+        e1_world = create_orthonormal(n_hat_world)
+    e2_world = wp.cross(n_hat_world, e1_world)
+
+    # ---- Per-row stiffness / damping setup ---------------------------
+    # Bend params live in the drive slot (currently unused in cable
+    # mode); twist params live in the limit slot. Keeping the two
+    # pairs distinct lets users set a stiff rope (high twist, low
+    # bend) or the opposite.
+    k_bend = read_float(constraints, base_offset + _OFF_STIFFNESS_DRIVE, cid)
+    d_bend = read_float(constraints, base_offset + _OFF_DAMPING_DRIVE, cid)
+    k_twist = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
+    d_twist = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
+
+    # Per-row scalar PD plumbing. Each row i is a scalar constraint
+    # C_i(q) = kappa . d_i with Jacobian J_i_world = d_i_world; the
+    # unsoftened inverse effective mass is
+    # ``d_i . (I1^{-1} + I2^{-1}) . d_i``. ``pd_coefficients`` folds
+    # the stiffness / damping / substep into
+    # ``(gamma, bias, eff_mass_soft)`` using the same Box2D idiom
+    # :func:`_axial_drive_limit_iterate` uses for the drive row.
+    kappa_b1 = wp.dot(kappa_world, e1_world)
+    kappa_b2 = wp.dot(kappa_world, e2_world)
+    kappa_t = wp.dot(kappa_world, n_hat_world)
+
+    eff_inv_b1 = wp.dot(e1_world, inv_inertia_sum @ e1_world)
+    eff_inv_b2 = wp.dot(e2_world, inv_inertia_sum @ e2_world)
+    eff_inv_t = wp.dot(n_hat_world, inv_inertia_sum @ n_hat_world)
+
+    gamma_b1, bias_b1, eff_soft_b1 = pd_coefficients(k_bend, d_bend, kappa_b1, eff_inv_b1, dt)
+    gamma_b2, bias_b2, eff_soft_b2 = pd_coefficients(k_bend, d_bend, kappa_b2, eff_inv_b2, dt)
+    gamma_t, bias_t, eff_soft_t = pd_coefficients(k_twist, d_twist, kappa_t, eff_inv_t, dt)
+
+    # ---- Cache row directions + coefficients -------------------------
+    # ``ut_ai`` (mat33) holds the three world-frame row directions,
+    # one per row (e1, e2, n_hat).  ``s_inv`` (mat33) holds the three
+    # ``(gamma, bias, eff_mass_soft)`` triples.  Neither slot is used
+    # by any other joint mode, so stamping them here doesn't collide
+    # with REVOLUTE / PRISMATIC / FIXED state.
+    dirs_mat = wp.mat33f(
+        e1_world[0],
+        e1_world[1],
+        e1_world[2],
+        e2_world[0],
+        e2_world[1],
+        e2_world[2],
+        n_hat_world[0],
+        n_hat_world[1],
+        n_hat_world[2],
+    )
+    coeffs_mat = wp.mat33f(
+        gamma_b1,
+        bias_b1,
+        eff_soft_b1,
+        gamma_b2,
+        bias_b2,
+        eff_soft_b2,
+        gamma_t,
+        bias_t,
+        eff_soft_t,
+    )
+    write_mat33(constraints, base_offset + _OFF_UT_AI, cid, dirs_mat)
+    write_mat33(constraints, base_offset + _OFF_S_INV, cid, coeffs_mat)
+
+    # Angular warm-start: fold the previous-substep's accumulated
+    # impulses back into the body velocities so the iterate starts
+    # from the converged state. Matches the axial drive warm-start
+    # exactly.
+    acc_kappa = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    angular_impulse_world = e1_world * acc_kappa[0] + e2_world * acc_kappa[1] + n_hat_world * acc_kappa[2]
+    angular_velocity1 = angular_velocity1 + inv_inertia1 @ angular_impulse_world
+    angular_velocity2 = angular_velocity2 - inv_inertia2 @ angular_impulse_world
+
+    bodies.velocity[b1] = velocity1
+    bodies.angular_velocity[b1] = angular_velocity1
+    bodies.velocity[b2] = velocity2
+    bodies.angular_velocity[b2] = angular_velocity2
+
+
+@wp.func
+def _cable_iterate_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+    use_bias: wp.bool,
+):
+    """Cable-mode PGS iterate: ball-socket anchor-1 solve + three
+    soft angular rows. ``use_bias=False`` zeros the anchor-1 drift
+    bias and the three per-row biases for the relax pass; the rows'
+    ``gamma * acc`` softness term stays on in both passes (Box2D
+    TGS-soft convention)."""
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    velocity1 = bodies.velocity[b1]
+    velocity2 = bodies.velocity[b2]
+    angular_velocity1 = bodies.angular_velocity[b1]
+    angular_velocity2 = bodies.angular_velocity[b2]
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    # ---- Anchor-1 3-row positional block -----------------------------
+    r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
+    r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
+    cr1_b1 = wp.skew(r1_b1)
+    cr1_b2 = wp.skew(r1_b2)
+    a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
+    if use_bias:
+        bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
+    else:
+        bias1 = wp.vec3f(0.0, 0.0, 0.0)
+    mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
+    impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
+
+    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+    jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
+    lam1_us = -(a1_inv @ (jv1 + bias1))
+    lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+
+    velocity1 = velocity1 - inv_mass1 * lam1
+    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1)
+    velocity2 = velocity2 + inv_mass2 * lam1
+    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
+
+    # ---- 3 soft angular rows -----------------------------------------
+    dirs_mat = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
+    coeffs_mat = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
+    acc_kappa = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+
+    d_bend1 = wp.vec3f(dirs_mat[0, 0], dirs_mat[0, 1], dirs_mat[0, 2])
+    d_bend2 = wp.vec3f(dirs_mat[1, 0], dirs_mat[1, 1], dirs_mat[1, 2])
+    d_twist = wp.vec3f(dirs_mat[2, 0], dirs_mat[2, 1], dirs_mat[2, 2])
+
+    gamma_b1 = coeffs_mat[0, 0]
+    bias_b1 = coeffs_mat[0, 1]
+    eff_soft_b1 = coeffs_mat[0, 2]
+    gamma_b2 = coeffs_mat[1, 0]
+    bias_b2 = coeffs_mat[1, 1]
+    eff_soft_b2 = coeffs_mat[1, 2]
+    gamma_t = coeffs_mat[2, 0]
+    bias_t = coeffs_mat[2, 1]
+    eff_soft_t = coeffs_mat[2, 2]
+
+    # NOTE: ``use_bias`` intentionally has NO effect on the three soft
+    # bend / twist biases. The ``use_bias=False`` gate is a Box2D v3
+    # TGS-soft relax-pass convention that zeros the *positional drift
+    # correction* biases on rigid constraint rows (e.g. the anchor-1
+    # point lock above). The bend / twist rows are soft spring-damper
+    # rows whose bias IS the spring force (:math:`k \theta`) -- zeroing
+    # it during relax would cancel out the accumulated spring impulse
+    # via ``-eff_soft * gamma * acc`` and make the joint quasi-static.
+    # :func:`_axial_drive_limit_iterate` follows the same rule for the
+    # revolute / prismatic drive: the PD bias stays on in the relax
+    # pass.
+
+    # Row 1: bend about e1.
+    # Sign convention matches :func:`_axial_drive_limit_iterate`:
+    # ``jv = d . (w1 - w2)`` and positive ``lam`` spins body 1 faster
+    # about ``d`` -- i.e. restores the child toward the rest pose
+    # when ``kappa > 0``.
+    jv_b1 = wp.dot(d_bend1, angular_velocity1 - angular_velocity2)
+    lam_b1 = -eff_soft_b1 * (jv_b1 - bias_b1 + gamma_b1 * acc_kappa[0])
+    torque_b1 = d_bend1 * lam_b1
+    angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque_b1
+    angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque_b1
+
+    # Row 2: bend about e2 (use updated body velocities -- in-row GS).
+    jv_b2 = wp.dot(d_bend2, angular_velocity1 - angular_velocity2)
+    lam_b2 = -eff_soft_b2 * (jv_b2 - bias_b2 + gamma_b2 * acc_kappa[1])
+    torque_b2 = d_bend2 * lam_b2
+    angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque_b2
+    angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque_b2
+
+    # Row 3: twist about n_hat.
+    jv_t = wp.dot(d_twist, angular_velocity1 - angular_velocity2)
+    lam_t = -eff_soft_t * (jv_t - bias_t + gamma_t * acc_kappa[2])
+    torque_t = d_twist * lam_t
+    angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque_t
+    angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque_t
+
+    new_acc = wp.vec3f(acc_kappa[0] + lam_b1, acc_kappa[1] + lam_b2, acc_kappa[2] + lam_t)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, new_acc)
 
     bodies.velocity[b1] = velocity1
     bodies.angular_velocity[b1] = angular_velocity1
@@ -1993,9 +2299,15 @@ def _fixed_prepare_at(
     b_mat = b_mat + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
 
     t_mat = wp.mat33f(
-        t1[0], t2[0], 0.0,
-        t1[1], t2[1], 0.0,
-        t1[2], t2[2], 0.0,
+        t1[0],
+        t2[0],
+        0.0,
+        t1[1],
+        t2[1],
+        0.0,
+        t1[2],
+        t2[2],
+        0.0,
     )
     tt = wp.transpose(t_mat)
 
@@ -2007,14 +2319,22 @@ def _fixed_prepare_at(
     s_mat = d_mat - ut_ai @ u_mat
 
     s22 = wp.mat22f(
-        s_mat[0, 0], s_mat[0, 1],
-        s_mat[1, 0], s_mat[1, 1],
+        s_mat[0, 0],
+        s_mat[0, 1],
+        s_mat[1, 0],
+        s_mat[1, 1],
     )
     s22_inv = wp.inverse(s22)
     s_inv_packed = wp.mat33f(
-        s22_inv[0, 0], s22_inv[0, 1], 0.0,
-        s22_inv[1, 0], s22_inv[1, 1], 0.0,
-        0.0,           0.0,           0.0,
+        s22_inv[0, 0],
+        s22_inv[0, 1],
+        0.0,
+        s22_inv[1, 0],
+        s22_inv[1, 1],
+        0.0,
+        0.0,
+        0.0,
+        0.0,
     )
 
     write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
@@ -2172,8 +2492,10 @@ def _fixed_iterate_at(
     ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
 
     s_inv_22 = wp.mat22f(
-        s_inv_packed[0, 0], s_inv_packed[0, 1],
-        s_inv_packed[1, 0], s_inv_packed[1, 1],
+        s_inv_packed[0, 0],
+        s_inv_packed[0, 1],
+        s_inv_packed[1, 0],
+        s_inv_packed[1, 1],
     )
     lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
     lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
@@ -2251,6 +2573,8 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
         _prismatic_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
     elif joint_mode == JOINT_MODE_FIXED:
         _fixed_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
+    elif joint_mode == JOINT_MODE_CABLE:
+        _cable_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
     else:
         _ball_socket_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
 
@@ -2281,6 +2605,8 @@ def actuated_double_ball_socket_iterate_at(
         _prismatic_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
     elif joint_mode == JOINT_MODE_FIXED:
         _fixed_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
+    elif joint_mode == JOINT_MODE_CABLE:
+        _cable_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
     else:
         _ball_socket_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
 
@@ -2319,11 +2645,7 @@ def actuated_double_ball_socket_world_wrench_at(
         torque = torque - n_hat * ((acc_drive + acc_limit) * idt)
     elif joint_mode == JOINT_MODE_PRISMATIC:
         force = (acc1 + acc2 + acc3) * idt
-        torque = (
-            wp.cross(r1_b2, acc1 * idt)
-            + wp.cross(r2_b2, acc2 * idt)
-            + wp.cross(r3_b2, acc3 * idt)
-        )
+        torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)
         # Axial block is a linear force along -n_hat.
         axial_force = n_hat * ((acc_drive + acc_limit) * idt)
         force = force - axial_force
@@ -2331,11 +2653,24 @@ def actuated_double_ball_socket_world_wrench_at(
     elif joint_mode == JOINT_MODE_FIXED:
         # All three anchor impulses contribute; no axial block.
         force = (acc1 + acc2 + acc3) * idt
-        torque = (
-            wp.cross(r1_b2, acc1 * idt)
-            + wp.cross(r2_b2, acc2 * idt)
-            + wp.cross(r3_b2, acc3 * idt)
-        )
+        torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)
+    elif joint_mode == JOINT_MODE_CABLE:
+        # Anchor-1 3-row lock plus three soft angular rows. The
+        # angular rows are stored as per-row scalar impulses along
+        # the cached world-frame directions in ``ut_ai``; each row
+        # contributes a pure torque on body 2.
+        dirs_mat = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
+        acc_kappa = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+        d_bend1 = wp.vec3f(dirs_mat[0, 0], dirs_mat[0, 1], dirs_mat[0, 2])
+        d_bend2 = wp.vec3f(dirs_mat[1, 0], dirs_mat[1, 1], dirs_mat[1, 2])
+        d_twist = wp.vec3f(dirs_mat[2, 0], dirs_mat[2, 1], dirs_mat[2, 2])
+        # Anchor-1 linear impulse + lever-arm torque (same as
+        # ball-socket), plus the three pure-torque contributions.
+        force = acc1 * idt
+        torque = wp.cross(r1_b2, acc1 * idt)
+        # Soft-angular sign follows the iterate: positive ``lam``
+        # rotates body 1 toward ``+d``, so body 2 sees ``-lam * d``.
+        torque = torque - (d_bend1 * acc_kappa[0] + d_bend2 * acc_kappa[1] + d_twist * acc_kappa[2]) * idt
     else:
         # Ball-socket: only the anchor-1 impulse.
         force = acc1 * idt
@@ -2356,9 +2691,7 @@ def actuated_double_ball_socket_prepare_for_iteration(
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    actuated_double_ball_socket_prepare_for_iteration_at(
-        constraints, cid, 0, bodies, body_pair, idt
-    )
+    actuated_double_ball_socket_prepare_for_iteration_at(constraints, cid, 0, bodies, body_pair, idt)
 
 
 @wp.func
@@ -2471,12 +2804,8 @@ def actuated_double_ball_socket_world_error_at(
     target = read_float(constraints, base_offset + _OFF_TARGET, cid)
 
     if joint_mode == JOINT_MODE_REVOLUTE:
-        counter = read_int(
-            constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid
-        )
-        prev = read_float(
-            constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid
-        )
+        counter = read_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid)
+        prev = read_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
         cumulative = revolution_tracker_angle(counter, prev)
         if drive_mode == DRIVE_MODE_POSITION:
             actuator_err = actuator_err + (cumulative - target)
@@ -2515,10 +2844,34 @@ def actuated_double_ball_socket_world_error_at(
         p3_b2 = pos2 + wp.quat_rotate(q2, la3_b2)
         t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
         actuator_err = wp.dot(t2, p3_b2 - p3_b1)
+    elif joint_mode == JOINT_MODE_CABLE:
+        # Decompose the Darboux log-map about the reference axis.
+        # ``drift_t1`` = bend-e1 component, ``drift_t2`` = bend-e2,
+        # ``actuator_err`` = twist about the reference axis. All
+        # three are in radians.
+        inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
+        q_align = q2 * inv_init * wp.quat_inverse(q1)
+        if q_align[3] < 0.0:
+            q_align = -q_align
+        kappa = wp.vec3f(2.0 * q_align[0], 2.0 * q_align[1], 2.0 * q_align[2])
+        axis_local1 = read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
+        n_hat_world = wp.quat_rotate(q1, axis_local1)
+        n_len2 = wp.dot(n_hat_world, n_hat_world)
+        if n_len2 > 1.0e-20:
+            n_hat_world = n_hat_world / wp.sqrt(n_len2)
+        else:
+            n_hat_world = wp.vec3f(1.0, 0.0, 0.0)
+        e1_world = create_orthonormal(n_hat_world)
+        e1_world = e1_world - wp.dot(e1_world, n_hat_world) * n_hat_world
+        e1_len2 = wp.dot(e1_world, e1_world)
+        if e1_len2 > 1.0e-20:
+            e1_world = e1_world / wp.sqrt(e1_len2)
+        e2_world = wp.cross(n_hat_world, e1_world)
+        drift_t1 = wp.dot(kappa, e1_world)
+        drift_t2 = wp.dot(kappa, e2_world)
+        actuator_err = wp.dot(kappa, n_hat_world)
 
-    return wp.spatial_vector(
-        anchor1_drift, wp.vec3f(drift_t1, drift_t2, actuator_err)
-    )
+    return wp.spatial_vector(anchor1_drift, wp.vec3f(drift_t1, drift_t2, actuator_err))
 
 
 @wp.func
@@ -2531,6 +2884,4 @@ def actuated_double_ball_socket_world_error(
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    return actuated_double_ball_socket_world_error_at(
-        constraints, cid, 0, bodies, body_pair
-    )
+    return actuated_double_ball_socket_world_error_at(constraints, cid, 0, bodies, body_pair)
