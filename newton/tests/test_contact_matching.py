@@ -11,8 +11,6 @@ import warp as wp
 import newton
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
-ContactMatching = newton.CollisionPipeline.ContactMatching
-
 
 class TestContactMatching(unittest.TestCase):
     pass
@@ -189,7 +187,7 @@ def test_broken_pos_threshold_all_contacts(test, device):
         test.assertGreater(count1, 0)
 
         # Shift all dynamic bodies along x by 0.2 m — well above the default
-        # (0.005 m) pos_threshold but small enough to keep them on the plane.
+        # (0.0005 m) pos_threshold but small enough to keep them on the plane.
         q = state.body_q.numpy()
         for i in range(len(q)):
             q[i][0] += 0.2
@@ -226,7 +224,7 @@ def test_within_pos_threshold_still_matches(test, device):
     """Moving spheres less than pos_threshold must still produce matches.
 
     Uses the default :attr:`CollisionPipeline.contact_matching_pos_threshold`
-    (0.005 m) so the test follows any future retune of the default.
+    (0.0005 m) so the test follows any future retune of the default.
     """
     with wp.ScopedDevice(device):
         model, state = _build_simple_scene(device)
@@ -240,11 +238,11 @@ def test_within_pos_threshold_still_matches(test, device):
         count1 = _collide_once(pipeline, state, contacts)
         test.assertGreater(count1, 0)
 
-        # Shift all dynamic bodies along x by 0.002 m — below the default
-        # (0.005 m) pos_threshold.
+        # Shift all dynamic bodies along x by 0.0002 m — below the default
+        # (0.0005 m) pos_threshold.
         q = state.body_q.numpy()
         for i in range(len(q)):
-            q[i][0] += 0.002
+            q[i][0] += 0.0002
         state.body_q = wp.array(q, dtype=wp.transform, device=device)
 
         count2 = _collide_once(pipeline, state, contacts)
@@ -380,7 +378,7 @@ def test_deterministic_implied(test, device):
         model, _state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
         test.assertTrue(pipeline.deterministic)
-        test.assertEqual(pipeline.contact_matching, ContactMatching.LATEST)
+        test.assertEqual(pipeline.contact_matching, "latest")
 
 
 def test_matching_disabled_no_allocation(test, device):
@@ -392,7 +390,7 @@ def test_matching_disabled_no_allocation(test, device):
         test.assertIsNone(contacts.rigid_contact_match_index)
         test.assertIsNone(contacts.rigid_contact_new_indices)
         test.assertIsNone(contacts.rigid_contact_broken_indices)
-        test.assertEqual(pipeline.contact_matching, ContactMatching.DISABLED)
+        test.assertEqual(pipeline.contact_matching, "disabled")
 
 
 def test_match_index_valid_after_sort(test, device):
@@ -482,21 +480,6 @@ def test_box_on_plane_multiple_contacts(test, device):
         )
 
 
-def test_enum_mode_accepted(test, device):
-    """The contact_matching argument must also accept the ContactMatching enum."""
-    with wp.ScopedDevice(device):
-        model, _state = _build_simple_scene(device)
-
-        p_latest = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=ContactMatching.LATEST)
-        test.assertEqual(p_latest.contact_matching, ContactMatching.LATEST)
-
-        p_sticky = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=ContactMatching.STICKY)
-        test.assertEqual(p_sticky.contact_matching, ContactMatching.STICKY)
-
-        p_off = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=ContactMatching.DISABLED)
-        test.assertEqual(p_off.contact_matching, ContactMatching.DISABLED)
-
-
 def test_invalid_mode_raises(test, device):
     """Invalid contact_matching values must raise ValueError."""
     with wp.ScopedDevice(device):
@@ -552,12 +535,12 @@ def test_sticky_matched_rows_replayed(test, device):
         snap_offset1 = contacts.rigid_contact_offset1.numpy()[:count1].copy()
         snap_normal = contacts.rigid_contact_normal.numpy()[:count1].copy()
 
-        # Perturb every body by 1 mm in x -- well below the 5 mm default
+        # Perturb every body by 0.1 mm in x -- well below the 0.5 mm default
         # pos threshold so every contact still matches, but enough for the
         # narrow phase to produce a detectably different fresh record.
         q = state.body_q.numpy()
         for i in range(len(q)):
-            q[i][0] += 0.001
+            q[i][0] += 0.0001
         state.body_q = wp.array(q, dtype=wp.transform, device=device)
 
         # Also run the narrow phase on a fresh (non-sticky) pipeline with
@@ -732,7 +715,6 @@ add_function_test(
 add_function_test(
     TestContactMatching, "test_box_on_plane_multiple_contacts", test_box_on_plane_multiple_contacts, devices=devices
 )
-add_function_test(TestContactMatching, "test_enum_mode_accepted", test_enum_mode_accepted, devices=devices)
 add_function_test(TestContactMatching, "test_invalid_mode_raises", test_invalid_mode_raises, devices=devices)
 add_function_test(
     TestContactMatching, "test_contact_report_requires_matching", test_contact_report_requires_matching, devices=devices

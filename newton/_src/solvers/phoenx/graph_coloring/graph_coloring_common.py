@@ -31,7 +31,7 @@ _TAG_MASK = wp.constant(wp.int64((1 << 62) - 1))
 
 MAX_BODIES = wp.constant(8)
 
-vec8i = wp.vec(length=8, dtype=wp.int32)
+vec8i = wp.types.vector(length=8, dtype=wp.int32)
 
 
 @wp.struct

@@ -1699,16 +1699,15 @@ Contact Matching
 
 Contact matching tracks contacts across frames, identifying which contacts
 persist, which are new, and which have broken.  The ``contact_matching``
-argument on :class:`~CollisionPipeline` selects one of three modes (bare
-string or the equivalent :class:`CollisionPipeline.ContactMatching` enum):
+argument on :class:`~CollisionPipeline` selects one of three modes:
 
 - ``"disabled"`` (default) — no matching, no extra buffers.
 - ``"latest"`` — match current contacts against the previous
   frame and populate :attr:`Contacts.rigid_contact_match_index`, but keep the
   current frame's freshly generated contact geometry in the returned
   :class:`Contacts` buffer.
-- ``"sticky"`` — match like ``"latest"``, then overwrite each
-  matched contact's body-frame contact points (``point0``/``point1``),
+- ``"sticky"`` (experimental) — match like ``"latest"``, then overwrite
+  each matched contact's body-frame contact points (``point0``/``point1``),
   offsets (``offset0``/``offset1``), and world-frame ``normal`` with the
   saved previous-frame values.  The remaining contact fields
   (``shape0``/``shape1``, ``margin0``/``margin1``) are either key-derived
@@ -1717,6 +1716,10 @@ string or the equivalent :class:`CollisionPipeline.ContactMatching` enum):
   through with their fresh narrow-phase geometry.  Useful for stacking
   scenarios where small frame-to-frame geometric jitter on persistent
   contacts degrades stability.
+
+  .. warning::
+     Sticky mode is experimental.  The way sticky contacts are updated
+     across frames may change in the future without warning.
 
 Any non-disabled mode implies ``deterministic=True``.
 
@@ -1737,7 +1740,7 @@ Any non-disabled mode implies ``deterministic=True``.
     pipeline = newton.CollisionPipeline(
         model,
         contact_matching="latest",
-        contact_matching_pos_threshold=0.005,      # metres (default 0.005)
+        contact_matching_pos_threshold=0.005,      # metres (default 0.0005)
         contact_matching_normal_dot_threshold=0.9,  # cos(~25°)
     )
     contacts = pipeline.contacts()
@@ -1767,7 +1770,7 @@ as motion on both sides of the contact, not just one.
 - ``contact_matching_pos_threshold`` — maximum world-space distance [m]
   between the previous and current contact midpoints for a match.  Contacts
   that moved more than this between frames are considered broken.  Defaults
-  to ``0.005`` m.
+  to ``0.0005`` m.
 - ``contact_matching_normal_dot_threshold`` — minimum dot product between old
   and new contact normals.  Below this the contact is reported as broken even
   if the key and position match.
