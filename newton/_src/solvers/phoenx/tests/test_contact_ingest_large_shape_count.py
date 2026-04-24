@@ -30,7 +30,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.constraints.contact_ingest import (
     _contact_pair_boundary_kernel,
-    _pair_counts_from_starts_kernel,
+    _pair_counts_and_columns_kernel,
     _scatter_pair_starts_kernel,
 )
 
@@ -103,11 +103,31 @@ def _run_pair_detection(
         outputs=[pair_shape_a, pair_shape_b, pair_first, pair_columns, num_pairs],
         device=device,
     )
+
+    # The fused pair_counts+columns kernel needs a shape->body map and
+    # a (possibly empty) body-pair filter. For this correctness test
+    # each shape id maps to its own body and no pairs are filtered --
+    # the test is only probing the pair_count derivation, which is
+    # independent of the filter output.
+    max_shape = int(max(int(shape0_np.max()) if shape0_np.size else 0, int(shape1_np.max()) if shape1_np.size else 0))
+    shape_body_np = np.arange(max_shape + 2, dtype=np.int32)
+    shape_body_arr = wp.from_numpy(shape_body_np, dtype=wp.int32, device=device)
+    filter_keys_arr = wp.array([-1], dtype=wp.int64, device=device)
     wp.launch(
-        _pair_counts_from_starts_kernel,
+        _pair_counts_and_columns_kernel,
         dim=capacity,
-        inputs=[count_arr, num_pairs, pair_first],
-        outputs=[pair_count],
+        inputs=[
+            count_arr,
+            num_pairs,
+            pair_first,
+            pair_shape_a,
+            pair_shape_b,
+            shape_body_arr,
+            int(len(shape_body_np)),
+            filter_keys_arr,
+            0,
+        ],
+        outputs=[pair_count, pair_columns],
         device=device,
     )
 
@@ -218,11 +238,24 @@ class TestContactIngestLargeShapeCount(unittest.TestCase):
             outputs=[pair_shape_a, pair_shape_b, pair_first, pair_columns, num_pairs],
             device=device,
         )
+        shape_body_np = np.arange(int(shape0_pad.max()) + 2, dtype=np.int32)
+        shape_body_arr = wp.from_numpy(shape_body_np, dtype=wp.int32, device=device)
+        filter_keys_arr = wp.array([-1], dtype=wp.int64, device=device)
         wp.launch(
-            _pair_counts_from_starts_kernel,
+            _pair_counts_and_columns_kernel,
             dim=capacity,
-            inputs=[count_arr, num_pairs, pair_first],
-            outputs=[pair_count],
+            inputs=[
+                count_arr,
+                num_pairs,
+                pair_first,
+                pair_shape_a,
+                pair_shape_b,
+                shape_body_arr,
+                int(len(shape_body_np)),
+                filter_keys_arr,
+                0,
+            ],
+            outputs=[pair_count, pair_columns],
             device=device,
         )
         self.assertEqual(int(num_pairs.numpy()[0]), 2)

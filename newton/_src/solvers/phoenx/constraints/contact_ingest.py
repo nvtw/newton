@@ -291,26 +291,38 @@ def _scatter_pair_starts_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _pair_counts_from_starts_kernel(
+def _pair_counts_and_columns_kernel(
     rigid_contact_count: wp.array[wp.int32],
     num_pairs: wp.array[wp.int32],
     pair_first: wp.array[wp.int32],
+    pair_shape_a: wp.array[wp.int32],
+    pair_shape_b: wp.array[wp.int32],
+    shape_body: wp.array[wp.int32],
+    num_bodies: wp.int32,
+    filter_keys: wp.array[wp.int64],
+    filter_count: wp.int32,
     # out
     pair_count: wp.array[wp.int32],
+    pair_columns: wp.array[wp.int32],
 ):
-    """Compute per-pair contact counts from the adjacent ``pair_first``
-    positions: ``pair_count[p] = pair_first[p + 1] - pair_first[p]``,
-    with the last pair picking up ``rigid_contact_count[0] -
-    pair_first[last]``.
+    """Per-pair: derive ``pair_count`` from adjacent ``pair_first`` and
+    emit ``pair_columns = 1`` iff the pair is not self-contact /
+    body-pair-filtered.
 
-    Replaces the old exclusive scan of ``pair_count -> pair_first``; we
-    compute ``pair_first`` directly at scatter time and derive
-    ``pair_count`` from it instead.
+    Fuses the old ``_pair_counts_from_starts`` + ``_pair_columns_binary``
+    kernels: they both launched at ``dim=rigid_contact_max``, both
+    gated on ``tid < num_pairs[0]``, and their outputs had no
+    cross-dependency (the binary kernel's ``pair_count > 0`` check
+    used to guard zero-run pairs, but the adjacency-mark pipeline
+    never produces those so the check was defensive-only and is
+    dropped here).
     """
     tid = wp.tid()
     n = num_pairs[0]
     if tid >= n:
         return
+
+    # pair_count from adjacent pair_first values.
     cur = pair_first[tid]
     if tid + wp.int32(1) < n:
         nxt = pair_first[tid + wp.int32(1)]
@@ -318,39 +330,11 @@ def _pair_counts_from_starts_kernel(
         nxt = rigid_contact_count[0]
     pair_count[tid] = nxt - cur
 
-
-@wp.kernel(enable_backward=False)
-def _pair_columns_binary_kernel(
-    pair_count: wp.array[wp.int32],
-    pair_shape_a: wp.array[wp.int32],
-    pair_shape_b: wp.array[wp.int32],
-    num_pairs: wp.array[wp.int32],
-    shape_body: wp.array[wp.int32],
-    num_bodies: wp.int32,
-    filter_keys: wp.array[wp.int64],
-    filter_count: wp.int32,
-    # out
-    pair_columns: wp.array[wp.int32],
-):
-    """Emit exactly one contact column per non-filtered shape pair.
-
-    Per-pair design: every non-filtered pair with at least one contact
-    gets a single column covering its entire
-    ``[pair_first, pair_first + pair_count)`` range. Body-pair-filtered
-    pairs collapse to zero columns so the downstream exclusive scan
-    treats them as invisible (no ingest, no warm-start, no dispatch).
-    """
-    tid = wp.tid()
-    n = num_pairs[0]
-    if tid >= n:
-        return
+    # pair_columns: 1 iff distinct dynamic bodies + not body-pair-filtered.
     sa = pair_shape_a[tid]
     sb = pair_shape_b[tid]
     ba = shape_body[sa]
     bb = shape_body[sb]
-    # Drop self-contacts: two shapes on the same body (compound
-    # geometry) produce no constraint. Also covers the static-vs-static
-    # degenerate case where both shapes resolve to slot 0 (world).
     if ba == bb:
         pair_columns[tid] = wp.int32(0)
         return
@@ -364,12 +348,7 @@ def _pair_columns_binary_kernel(
     if _body_pair_filtered(filter_keys, filter_count, body_key) == wp.int32(1):
         pair_columns[tid] = wp.int32(0)
         return
-    # Zero-contact runs can't happen here (RLE produces positive
-    # counts), but guard anyway for defensive robustness.
-    if pair_count[tid] > wp.int32(0):
-        pair_columns[tid] = wp.int32(1)
-    else:
-        pair_columns[tid] = wp.int32(0)
+    pair_columns[tid] = wp.int32(1)
 
 
 # ---------------------------------------------------------------------------
@@ -816,31 +795,23 @@ def ingest_contacts(
     )
 
     # Step 3b: derive per-pair contact counts from adjacent pair_first
-    # values. Replaces the old RLE ``run_lengths`` output.
+    # AND compute the 0/1 pair_columns flag in one pass. Fused from two
+    # back-to-back per-pair kernels that had identical launch geometry.
     wp.launch(
-        kernel=_pair_counts_from_starts_kernel,
-        dim=rigid_contact_max,
-        inputs=[contacts.rigid_contact_count, scratch.num_pairs, scratch.pair_first],
-        outputs=[scratch.pair_count],
-        device=device,
-    )
-
-    # Step 3c: pair_columns[p] = 1 for non-filtered pairs with
-    # pair_count > 0, else 0.
-    wp.launch(
-        kernel=_pair_columns_binary_kernel,
+        kernel=_pair_counts_and_columns_kernel,
         dim=rigid_contact_max,
         inputs=[
-            scratch.pair_count,
+            contacts.rigid_contact_count,
+            scratch.num_pairs,
+            scratch.pair_first,
             scratch.pair_shape_a,
             scratch.pair_shape_b,
-            scratch.num_pairs,
             shape_body,
             int(num_bodies),
             filter_keys,
             int(filter_count),
         ],
-        outputs=[scratch.pair_columns],
+        outputs=[scratch.pair_count, scratch.pair_columns],
         device=device,
     )
 
