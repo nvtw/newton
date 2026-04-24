@@ -24,7 +24,55 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
+
+
+#: Voxel resolution used for the mesh-cube SDF determinism test.
+#: 128 is a realistic mid-range setting -- enough voxels per cube face
+#: (16 across a 0.2 m edge) that the SDF narrow phase sees genuine
+#: trilinear-interp contacts rather than degenerate corner-point hits.
+_SDF_RESOLUTION = 128
+
+
+def _cube_mesh(half_extent: float) -> newton.Mesh:
+    """Triangulated axis-aligned cube, 8 verts + 12 tris, CCW outward.
+
+    Built from scratch so the test has no asset dependency.
+    """
+    h = float(half_extent)
+    verts = np.array(
+        [
+            [-h, -h, -h],  # 0: ---
+            [+h, -h, -h],  # 1: +--
+            [-h, +h, -h],  # 2: -+-
+            [+h, +h, -h],  # 3: ++-
+            [-h, -h, +h],  # 4: --+
+            [+h, -h, +h],  # 5: +-+
+            [-h, +h, +h],  # 6: -++
+            [+h, +h, +h],  # 7: +++
+        ],
+        dtype=np.float32,
+    )
+    # 12 triangles, CCW when viewed from outside (normal = outward).
+    faces = np.array(
+        [
+            # -Z face (bottom)
+            0, 2, 1,  1, 2, 3,
+            # +Z face (top)
+            4, 5, 6,  5, 7, 6,
+            # -Y face (front)
+            0, 1, 4,  1, 5, 4,
+            # +Y face (back)
+            2, 6, 3,  3, 6, 7,
+            # -X face (left)
+            0, 4, 2,  2, 4, 6,
+            # +X face (right)
+            1, 3, 5,  3, 7, 5,
+        ],
+        dtype=np.int32,
+    )
+    return newton.Mesh(verts, faces)
 
 
 def _build_free_fall_scene() -> _PhoenXScene:
@@ -48,40 +96,80 @@ def _build_box_on_plane_scene() -> _PhoenXScene:
     return scene
 
 
-def _build_pyramid_scene(layers: int) -> _PhoenXScene:
-    """A ``layers``-layer square pyramid on a ground plane.
+def _pyramid_layout(layers: int, half_extent: float) -> list[tuple[float, float, float]]:
+    """Per-body centre positions for a ``layers``-layer square pyramid.
 
-    Layer 0 (bottom) has ``layers * layers`` boxes; each layer above
-    has one fewer box per side. Total box count is
-    ``sum(k^2 for k in 1..layers)`` -- 1, 5, 14, 30, 55 for 1..5
-    layers. Adjacent boxes touch on a single face + one side each, so
-    every layer's settled contact graph has many same-body-pair
-    columns and exercises the Jones-Plassmann colouring under load.
+    Layer 0 (bottom) has ``layers * layers`` cells; each layer above
+    has one fewer cell per side. Total count is
+    ``sum(k^2 for k in 1..layers)`` -- 1 / 5 / 14 / 30 / 55 for 1..5
+    layers. Adjacent bodies touch on a single face + one side; every
+    layer's settled contact graph has many same-body-pair columns and
+    exercises the Jones-Plassmann colouring under load.
+    """
+    edge = 2.0 * half_extent
+    # Small gap so bodies never spawn intersecting. Initial-penetration
+    # hard contacts can inject non-deterministic ordering from the
+    # narrow phase's write-cursor atomics on full manifolds; a clean
+    # spawn keeps the test focused on the solver pipeline.
+    spawn_gap = 0.002
+    out: list[tuple[float, float, float]] = []
+    for k in range(layers):
+        side = layers - k
+        base_z = (k + 0.5) * edge + k * spawn_gap
+        offset = -0.5 * (side - 1) * edge
+        for row in range(side):
+            for col in range(side):
+                out.append((offset + col * edge, offset + row * edge, base_z))
+    return out
+
+
+def _build_pyramid_scene(layers: int) -> _PhoenXScene:
+    """Primitive-cube pyramid -- exercises the box-vs-box /
+    box-vs-plane narrow phase."""
+    scene = _PhoenXScene(fps=60, substeps=10, solver_iterations=8)
+    scene.add_ground_plane()
+    half_extent = 0.1
+    for pos in _pyramid_layout(layers, half_extent):
+        scene.add_box(position=pos, half_extents=(half_extent, half_extent, half_extent))
+    scene.finalize()
+    return scene
+
+
+def _build_mesh_sdf_pyramid_scene(layers: int) -> _PhoenXScene:
+    """Mesh-cube pyramid with a 128-voxel SDF per shape.
+
+    Every body is the same mesh-cube shape backed by an SDF built at
+    :data:`_SDF_RESOLUTION`. Exercises the mesh-SDF-vs-mesh-SDF and
+    mesh-SDF-vs-plane narrow phases -- a different code path from
+    :func:`_build_pyramid_scene` even though the geometry matches.
+    The mesh and its SDF are built once and shared by every body;
+    Warp ``Mesh`` / ``SDF`` instances are stateless GPU buffers and
+    can back any number of shapes.
     """
     scene = _PhoenXScene(fps=60, substeps=10, solver_iterations=8)
     scene.add_ground_plane()
 
     half_extent = 0.1
-    edge = 2.0 * half_extent
-    # Small gap so bodies don't spawn intersecting (hard contacts on
-    # initial penetration can inject nondeterministic ordering from the
-    # narrow phase's write-cursor atomics; a clean spawn avoids that
-    # altogether and keeps the scene focused on the solver itself).
-    spawn_gap = 0.002
+    cube_mesh = _cube_mesh(half_extent)
+    # Narrow band = one edge; ``margin`` = half an edge so the SDF
+    # covers every point the narrow phase could ever query.
+    cube_mesh.build_sdf(
+        max_resolution=_SDF_RESOLUTION,
+        narrow_band_range=(-half_extent, half_extent),
+        margin=half_extent,
+    )
 
-    for k in range(layers):
-        side = layers - k
-        base_z = (k + 0.5) * edge + k * spawn_gap
-        # Centre each layer in world XY.
-        offset = -0.5 * (side - 1) * edge
-        for row in range(side):
-            for col in range(side):
-                x = offset + col * edge
-                y = offset + row * edge
-                scene.add_box(
-                    position=(x, y, base_z),
-                    half_extents=(half_extent, half_extent, half_extent),
-                )
+    for pos in _pyramid_layout(layers, half_extent):
+        body = scene.mb.add_body(
+            xform=wp.transform(p=wp.vec3(*pos), q=wp.quat_identity()),
+        )
+        scene.mb.add_shape_mesh(
+            body,
+            mesh=cube_mesh,
+            cfg=newton.ModelBuilder.ShapeConfig(density=1000.0),
+        )
+        scene._newton_body_ids.append(body)
+
     scene.finalize()
     return scene
 
@@ -213,6 +301,23 @@ class TestPhoenXDeterminism(unittest.TestCase):
             self,
             lambda: _build_pyramid_scene(4),
             scene_name="pyramid_4",
+            frames=60,
+        )
+
+    def test_mesh_sdf_pyramid_3_layers(self) -> None:
+        """14-body pyramid of mesh-cubes with per-shape 128-voxel SDFs.
+
+        Covers the mesh-SDF narrow-phase path on top of the solver.
+        Two independent scenes each build their own mesh + SDF but
+        use the same deterministic construction (Warp's SDF builder
+        is deterministic given identical vertex / face arrays), so
+        every downstream contact -- and therefore every downstream
+        solver step -- must match bit-exactly.
+        """
+        _run_and_compare(
+            self,
+            lambda: _build_mesh_sdf_pyramid_scene(3),
+            scene_name="mesh_sdf_pyramid_3",
             frames=60,
         )
 
