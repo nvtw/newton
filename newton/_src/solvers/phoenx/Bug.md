@@ -80,7 +80,16 @@ pipeline works entirely off adjacency:
 
 No key packing, no `runlength_encode_variable_length` dependency,
 scales cleanly to any shape count representable in int32
-(~2×10⁹ shapes). Measured at h1_flat 1024 worlds (55 297 shapes):
+(~2×10⁹ shapes).
+
+Why not just switch the key to `int64`? Warp 1.13's
+`wp.utils.array_scan` and `wp.utils.runlength_encode` are both
+CUB-backed and reject int64 at runtime (`"Unsupported data type:
+int64"`). So any int64-key alternative would need a hand-rolled
+int64 RLE anyway — and at that point the adjacency-mark approach is
+strictly simpler code.
+
+Measured at h1_flat 1024 worlds (55 297 shapes):
 9 colours, 6400 ground contacts, total kernel time 2.34 ms/step —
 versus pre-fix runs that either silently produced ~0 ground
 contacts + 8000+ colours or took 10+ seconds when the downstream
