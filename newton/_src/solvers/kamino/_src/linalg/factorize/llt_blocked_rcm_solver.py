@@ -62,7 +62,7 @@ wp.set_module_options({"enable_backward": False})
 class LLTBlockedRCMSolver(DirectSolver):
     """RCM-reordered, semi-sparse Blocked LLT (Cholesky) solver.
 
-    Same public API as :class:`newton._src.solvers.kamino._src.linalg.linear.LLTBlockedSolver`.
+    Same public API as :class:`LLTBlockedSolver`.
     Internally:
 
     1. ``compute(A)`` / ``_factorize_impl``:
@@ -119,6 +119,12 @@ class LLTBlockedRCMSolver(DirectSolver):
                 tile-pattern builder.
             rcm_max_bfs_iters: BFS depth cap for the batched RCM pass.
         """
+        # The underlying kernels (factorize / solve / permute / tile-pattern)
+        # are hard-coded to float32, so reject any other dtype up front
+        # instead of failing later at kernel launch with a shape/type error.
+        if dtype != float32:
+            raise NotImplementedError("LLTBlockedRCMSolver currently supports only float32.")
+
         # LLT-specific internal data
         self._L: wp.array | None = None
         self._y: wp.array | None = None
