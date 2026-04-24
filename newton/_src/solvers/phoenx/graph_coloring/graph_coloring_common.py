@@ -779,6 +779,8 @@ def incremental_tile_compact_csr_and_advance_kernel(
     element_ids_by_color: wp.array[int],
     color_starts: wp.array[int],
     interaction_id_to_partition: wp.array[int],
+    max_colors: int,
+    overflow_flag: wp.array[int],
 ):
     """CSR variant of :func:`incremental_tile_compact_remaining_and_advance_kernel`.
 
@@ -807,6 +809,19 @@ def incremental_tile_compact_csr_and_advance_kernel(
 
     n = num_remaining[0]
     cc = current_color[0]
+    # Overflow guard. ``color_starts`` is sized ``max_colors + 1`` so
+    # the largest writable end-offset slot is ``color_starts[max_colors]``
+    # -- i.e. valid ``cc`` values are ``0 .. max_colors - 1``. If the
+    # coloring exhausts the budget, raise an overflow flag, force the
+    # outer ``capture_while`` to terminate by zeroing ``num_remaining``,
+    # and early-return before any buffer writes. The host side of
+    # ``build_csr`` reads the flag after the capture_while exits and
+    # raises a descriptive error so this cannot silently corrupt memory.
+    if cc >= max_colors:
+        if lane == 0:
+            overflow_flag[0] = 1
+            num_remaining[0] = 0
+        return
     # Base offset into the CSR buffer for this colour. Every lane
     # captures it into a register up front so the later survivor scan's
     # implicit block sync double-duties as a read barrier for it.

@@ -22,7 +22,10 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring import (
     ElementInteractionData,
     maximal_independent_set_partitioning,
 )
-from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import IncrementalContactPartitioner
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import (
+    MAX_COLORS,
+    IncrementalContactPartitioner,
+)
 
 
 def _build_elements_array(elements_bodies: list[list[int]], capacity: int) -> wp.array:
@@ -342,7 +345,9 @@ def _generate_stress_workload(
 
 def _make_stress_elements_array(bodies_np: np.ndarray, device) -> wp.array:
     num_elements = bodies_np.shape[0]
-    struct_dtype = np.dtype({"names": ["bodies"], "formats": [(np.int32, int(MAX_BODIES))], "offsets": [0], "itemsize": 32})
+    struct_dtype = np.dtype(
+        {"names": ["bodies"], "formats": [(np.int32, int(MAX_BODIES))], "offsets": [0], "itemsize": 32}
+    )
     arr = np.zeros(num_elements, dtype=struct_dtype)
     arr["bodies"] = bodies_np
     return wp.from_numpy(arr, dtype=ElementInteractionData, device=device)
@@ -648,9 +653,7 @@ class TestIncrementalGraphColoring(unittest.TestCase):
         )
         device = wp.get_preferred_device()
         result = _run_incremental_to_completion(bodies_np, num_bodies=2_000, device=device)
-        self._validate_incremental_partitions(
-            bodies_np, result["partitions"], result["interaction_id_to_partition"]
-        )
+        self._validate_incremental_partitions(bodies_np, result["partitions"], result["interaction_id_to_partition"])
 
     def test_stress_determinism(self):
         bodies_np = _generate_stress_workload(
@@ -886,6 +889,81 @@ class TestIncrementalGraphColoring(unittest.TestCase):
         )
         # Number of colours used should also match.
         self.assertEqual(inc["launches"], int(batch.num_partitions.numpy()[0]))
+
+
+class TestMaxColorsOverflowGuard(unittest.TestCase):
+    """Regression test for ``Bug.md`` #2: partitioner buffer overrun.
+
+    The compact-csr kernel used to silently write past ``color_starts[MAX_COLORS]``
+    when the coloring exceeded the budget. The guard now early-returns from the
+    kernel, zeros ``num_remaining`` to force the capture_while to terminate,
+    sets an overflow flag, and ``build_csr`` raises a descriptive ``RuntimeError``
+    on the host after the loop exits.
+    """
+
+    def test_hub_graph_exceeding_max_colors_raises(self) -> None:
+        """Hub clique with more edges than ``MAX_COLORS`` must raise.
+
+        Every element shares body 0 -- the graph is fully conflicting, so JP
+        assigns one element per colour and the total colour count equals the
+        element count. Picking ``num_elements = MAX_COLORS + 100`` guarantees
+        the overflow guard fires.
+        """
+        device = wp.get_preferred_device()
+        num_elements = int(MAX_COLORS) + 100
+        # Single-body-hub clique: element i references body 0 + body (i + 1).
+        bodies_np = np.full((num_elements, int(MAX_BODIES)), -1, dtype=np.int32)
+        bodies_np[:, 0] = 0
+        bodies_np[:, 1] = np.arange(1, num_elements + 1, dtype=np.int32)
+
+        elements_arr = _make_stress_elements_array(bodies_np, device)
+        num_elements_arr = wp.array([num_elements], dtype=wp.int32, device=device)
+
+        p = IncrementalContactPartitioner(
+            max_num_interactions=num_elements,
+            max_num_nodes=num_elements + 1,
+            device=device,
+            seed=0,
+            use_tile_scan=True,
+        )
+        p.reset(elements_arr, num_elements_arr)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            p.build_csr()
+        msg = str(ctx.exception)
+        self.assertIn("MAX_COLORS", msg)
+        # And the cap is not exceeded in the reported colour count.
+        observed_colors = int(p.num_colors.numpy()[0])
+        self.assertLessEqual(
+            observed_colors,
+            int(MAX_COLORS),
+            msg=(f"num_colors={observed_colors} should not exceed MAX_COLORS={int(MAX_COLORS)} after the guard fires"),
+        )
+
+    def test_budget_graph_below_max_colors_does_not_raise(self) -> None:
+        """Sanity check: a hub clique with fewer elements than MAX_COLORS
+        still colours cleanly -- the guard only fires on actual overflow.
+        """
+        device = wp.get_preferred_device()
+        num_elements = int(MAX_COLORS) - 50
+        bodies_np = np.full((num_elements, int(MAX_BODIES)), -1, dtype=np.int32)
+        bodies_np[:, 0] = 0
+        bodies_np[:, 1] = np.arange(1, num_elements + 1, dtype=np.int32)
+
+        elements_arr = _make_stress_elements_array(bodies_np, device)
+        num_elements_arr = wp.array([num_elements], dtype=wp.int32, device=device)
+
+        p = IncrementalContactPartitioner(
+            max_num_interactions=num_elements,
+            max_num_nodes=num_elements + 1,
+            device=device,
+            seed=0,
+            use_tile_scan=True,
+        )
+        p.reset(elements_arr, num_elements_arr)
+        p.build_csr()  # must not raise
+
+        self.assertEqual(int(p.num_colors.numpy()[0]), num_elements)
 
 
 if __name__ == "__main__":

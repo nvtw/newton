@@ -206,6 +206,15 @@ class IncrementalContactPartitioner:
         # per-colour streaming mode.
         self._num_colors = wp.zeros(1, dtype=wp.int32, device=device)
 
+        # Overflow detector for the :data:`MAX_COLORS` cap. The compact
+        # kernel sets ``[0] = 1`` and forces ``num_remaining[0] = 0`` if
+        # the colour count would exceed the allocated ``color_starts``
+        # range, preventing an out-of-bounds write. :meth:`build_csr`
+        # reads the flag on the host after ``capture_while`` exits and
+        # raises a descriptive error -- turning what used to be silent
+        # memory corruption (see ``Bug.md`` #2) into a loud failure.
+        self._overflow_flag = wp.zeros(1, dtype=wp.int32, device=device)
+
         # Sweep cursor used by :meth:`begin_sweep` / the PGS kernels.
         # Holds the number of colours still to process in the current
         # sweep; decremented by the constraint kernel after it finishes
@@ -519,6 +528,11 @@ class IncrementalContactPartitioner:
                 self._num_elements,
             ],
         )
+        # Reset the MAX_COLORS overflow flag for this build. If the
+        # capture_while loop hits the cap, the compact kernel sets this
+        # to 1 and we raise below, turning a previously-silent buffer
+        # overrun into a clear error.
+        self._overflow_flag.zero_()
 
         # Reset per-element state that the JP coloring loop consumes.
         # This mirrors what reset() does after the adjacency rebuild;
@@ -544,11 +558,41 @@ class IncrementalContactPartitioner:
         # JP MIS pass over the current compact remaining-ids list,
         # (2) append the just-committed elements to
         # ``element_ids_by_color`` at ``color_starts[cc]`` and advance
-        # loop state. Terminates when ``num_remaining`` hits zero.
+        # loop state. Terminates when ``num_remaining`` hits zero, OR
+        # when the compact kernel zeros ``num_remaining`` after hitting
+        # the ``MAX_COLORS`` cap.
         wp.capture_while(
             self._num_remaining,
             self._capture_build_csr_step,
         )
+
+        # Host-side check: if the compact kernel tripped the overflow
+        # guard the flag will be 1. The ``.numpy()`` readback is a sync
+        # point (adds ~10 us per step at 256 worlds) but it is the only
+        # way to convert a graph-captured overflow into a Python-land
+        # exception. Skip the readback when we're already inside a
+        # user-owned graph capture -- the D2H copy would fail with
+        # "legacy stream depending on a capturing blocking stream".
+        # The kernel-side early-exit still protects the buffer; the
+        # user just won't see a Python raise until the next uncaptured
+        # step. Without this check, a coloring that exceeded
+        # ``MAX_COLORS`` silently returned corrupted state -- see the
+        # Bug #2 entry in ``Bug.md``.
+        device = self._overflow_flag.device
+        if device.is_cuda and device.is_capturing:
+            return
+        if int(self._overflow_flag.numpy()[0]) != 0:
+            raise RuntimeError(
+                "PhoenX graph coloring exceeded MAX_COLORS "
+                f"(={MAX_COLORS}). The constraint graph requires more "
+                "partitions than the fixed-size color_starts buffer can "
+                "hold. This usually indicates a pathological contact "
+                "graph (e.g. a super-hub body touching many contacts) "
+                "or an upstream ingest bug that cross-links worlds. "
+                "Inspect `bodies[0]` frequency in the element table to "
+                "diagnose; raising MAX_COLORS is a stop-gap, not a "
+                "fix."
+            )
 
     def _capture_build_csr_step(self) -> None:
         """Body of the ``build_csr`` capture_while: one JP colour round."""
@@ -580,6 +624,8 @@ class IncrementalContactPartitioner:
                 self._element_ids_by_color,
                 self._color_starts,
                 self._interaction_id_to_partition,
+                int(MAX_COLORS),
+                self._overflow_flag,
             ],
             block_dim=int(TILE_SCAN_BLOCK_DIM),
         )
