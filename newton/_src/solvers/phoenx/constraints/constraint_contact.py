@@ -92,6 +92,8 @@ __all__ = [
     "contact_get_friction_dynamic",
     "contact_iterate",
     "contact_iterate_at",
+    "contact_iterate_at_multi",
+    "contact_iterate_multi",
     "contact_pair_wrench_kernel",
     "contact_per_contact_error_kernel",
     "contact_per_contact_wrench_kernel",
@@ -1025,6 +1027,166 @@ def contact_iterate(
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
     contact_iterate_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias)
+
+
+@wp.func
+def contact_iterate_at_multi(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    num_sweeps: wp.int32,
+):
+    """``num_sweeps`` PGS sweeps on one contact column with body
+    velocity / inertia registers held across sweeps.
+
+    Cids in the same graph colour don't share bodies, so running
+    ``num_sweeps`` sweeps on cid A before moving to cid B within the
+    same colour is equivalent to round-robin. Between colours the
+    cross-colour PGS feedback drops from ``num_iterations`` rounds to
+    ``num_iterations / num_sweeps`` rounds; the caller must keep the
+    outer loop so stacks can converge. ``num_sweeps == 2`` keeps 4
+    outer rounds at the default solver_iterations = 8 and tolerates
+    the contact-force tests.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    contact_first = contact_get_contact_first(constraints, cid)
+    contact_count = contact_get_contact_count(constraints, cid)
+    if contact_count == 0:
+        return
+
+    mu_s = contact_get_friction(constraints, cid)
+    mu_k = contact_get_friction_dynamic(constraints, cid)
+
+    dt_substep = wp.float32(1.0) / idt
+    _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+    )
+
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    v1 = bodies.velocity[b1]
+    v2 = bodies.velocity[b2]
+    w1 = bodies.angular_velocity[b1]
+    w2 = bodies.angular_velocity[b2]
+
+    it = wp.int32(0)
+    while it < num_sweeps:
+        for i in range(contact_count):
+            k = contact_first + i
+
+            r1 = cc_get_r1(cc, k)
+            r2 = cc_get_r2(cc, k)
+            n = cc_get_normal(cc, k)
+            t1_dir = cc_get_tangent1(cc, k)
+            t2_dir = wp.cross(n, t1_dir)
+            eff_n = cc_get_eff_n(cc, k)
+            eff_t1 = cc_get_eff_t1(cc, k)
+            eff_t2 = cc_get_eff_t2(cc, k)
+            bias_val = cc_get_bias(cc, k)
+            bias_t1_val = cc_get_bias_t1(cc, k)
+            bias_t2_val = cc_get_bias_t2(cc, k)
+            is_speculative = bias_val > wp.float32(0.0)
+            if not use_bias:
+                if not is_speculative:
+                    bias_val = wp.float32(0.0)
+                bias_t1_val = wp.float32(0.0)
+                bias_t2_val = wp.float32(0.0)
+
+            vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
+            jv_n = wp.dot(vel_rel, n)
+            jv_t1 = wp.dot(vel_rel, t1_dir)
+            jv_t2 = wp.dot(vel_rel, t2_dir)
+
+            pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
+            lam_n_old = cc_get_normal_lambda(cc, k)
+            if pd_eff_soft_n > wp.float32(0.0):
+                pd_gamma_n = cc_get_pd_gamma(cc, k)
+                pd_bias_n = cc_get_pd_bias(cc, k)
+                d_lam_n_us = -pd_eff_soft_n * (jv_n - pd_bias_n + pd_gamma_n * lam_n_old)
+                lam_n_new = wp.max(lam_n_old + d_lam_n_us, wp.float32(0.0))
+                d_lam_n = lam_n_new - lam_n_old
+            else:
+                if is_speculative:
+                    mass_coeff_n = wp.float32(1.0)
+                    impulse_coeff_n = wp.float32(0.0)
+                elif use_bias:
+                    mass_coeff_n = mass_coeff
+                    impulse_coeff_n = impulse_coeff
+                else:
+                    mass_coeff_n = wp.float32(1.0)
+                    impulse_coeff_n = wp.float32(0.0)
+                d_lam_n_us = -eff_n * (jv_n + bias_val)
+                d_lam_n = mass_coeff_n * d_lam_n_us - impulse_coeff_n * lam_n_old
+                lam_n_new = wp.max(lam_n_old + d_lam_n, wp.float32(0.0))
+                d_lam_n = lam_n_new - lam_n_old
+
+            fric_limit_static = mu_s * lam_n_new
+            fric_limit_kinetic = mu_k * lam_n_new
+
+            d_lam_t1 = -eff_t1 * (jv_t1 + bias_t1_val)
+            d_lam_t2 = -eff_t2 * (jv_t2 + bias_t2_val)
+            lam_t1_old = cc_get_tangent1_lambda(cc, k)
+            lam_t2_old = cc_get_tangent2_lambda(cc, k)
+            lam_t1_raw = lam_t1_old + d_lam_t1
+            lam_t2_raw = lam_t2_old + d_lam_t2
+
+            lam_t_sq = lam_t1_raw * lam_t1_raw + lam_t2_raw * lam_t2_raw
+            static_limit_sq = fric_limit_static * fric_limit_static
+            if lam_t_sq > static_limit_sq and lam_t_sq > wp.float32(1.0e-30):
+                inv_mag = fric_limit_kinetic / wp.sqrt(lam_t_sq)
+                lam_t1_new = lam_t1_raw * inv_mag
+                lam_t2_new = lam_t2_raw * inv_mag
+            else:
+                lam_t1_new = lam_t1_raw
+                lam_t2_new = lam_t2_raw
+            d_lam_t1 = lam_t1_new - lam_t1_old
+            d_lam_t2 = lam_t2_new - lam_t2_old
+
+            cc_set_normal_lambda(cc, k, lam_n_new)
+            cc_set_tangent1_lambda(cc, k, lam_t1_new)
+            cc_set_tangent2_lambda(cc, k, lam_t2_new)
+
+            imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
+            v1 -= inv_mass1 * imp
+            v2 += inv_mass2 * imp
+            w1 -= inv_inertia1 @ wp.cross(r1, imp)
+            w2 += inv_inertia2 @ wp.cross(r2, imp)
+        it += 1
+
+    bodies.velocity[b1] = v1
+    bodies.velocity[b2] = v2
+    bodies.angular_velocity[b1] = w1
+    bodies.angular_velocity[b2] = w2
+
+
+@wp.func
+def contact_iterate_multi(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    num_sweeps: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_iterate_at_multi(
+        constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias, num_sweeps
+    )
 
 
 @wp.func

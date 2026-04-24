@@ -91,6 +91,7 @@ __all__ = [
     "actuated_double_ball_socket_initialize_kernel",
     "actuated_double_ball_socket_iterate",
     "actuated_double_ball_socket_iterate_at",
+    "actuated_double_ball_socket_iterate_multi",
     "actuated_double_ball_socket_prepare_for_iteration",
     "actuated_double_ball_socket_prepare_for_iteration_at",
     "actuated_double_ball_socket_world_error",
@@ -2516,6 +2517,253 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
         _cable_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
     else:
         _ball_socket_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
+
+
+@wp.func
+def _revolute_iterate_at_multi(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+    use_bias: wp.bool,
+    num_sweeps: wp.int32,
+):
+    """Register-cached multi-sweep revolute iterate.
+
+    Equivalent to calling :func:`_revolute_iterate_at` ``num_sweeps``
+    times with the same arguments, but every per-cid constant
+    (constraint body anchors, tangent basis, ``a1_inv``, ``ut_ai``,
+    ``s_inv`` Schur complement, drift biases, soft-constraint
+    coefficients, axial drive / limit params) and both bodies' full
+    kinematic state are loaded ONCE and held in registers across
+    sweeps. Accumulated impulses (``acc1``, ``acc2_world``, plus drive
+    / limit ``acc``) update in registers and are written back at the
+    end. Body velocities are written back once.
+
+    Assumes the kernel wraps this in an outer loop that sweeps all
+    colours per outer iteration -- ``num_sweeps`` trades some
+    cross-colour PGS feedback for register caching. ``num_sweeps = 2``
+    keeps 4 outer rounds (at the default ``solver_iterations = 8``)
+    which the current test suite tolerates for joints.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    # ---- Body state (hoisted out of the sweep loop) ------------------
+    velocity1 = bodies.velocity[b1]
+    velocity2 = bodies.velocity[b2]
+    angular_velocity1 = bodies.angular_velocity[b1]
+    angular_velocity2 = bodies.angular_velocity[b2]
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    # ---- Constraint constants ----------------------------------------
+    r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
+    r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
+    r2_b1 = read_vec3(constraints, base_offset + _OFF_R2_B1, cid)
+    r2_b2 = read_vec3(constraints, base_offset + _OFF_R2_B2, cid)
+    t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
+    t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
+
+    cr1_b1 = wp.skew(r1_b1)
+    cr1_b2 = wp.skew(r1_b2)
+    cr2_b1 = wp.skew(r2_b1)
+    cr2_b2 = wp.skew(r2_b2)
+
+    a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
+    ut_ai = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
+    s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
+    s_inv_22 = wp.mat22f(
+        s_inv_packed[0, 0],
+        s_inv_packed[0, 1],
+        s_inv_packed[1, 0],
+        s_inv_packed[1, 1],
+    )
+    if use_bias:
+        bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
+        bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
+    else:
+        bias1 = wp.vec3f(0.0, 0.0, 0.0)
+        bias2 = wp.vec3f(0.0, 0.0, 0.0)
+    bias2_tan = wp.vec2f(bias2[0], bias2[1])
+    mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
+    impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
+
+    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+    acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+
+    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
+    clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
+
+    # ---- Axial drive + limit constants -------------------------------
+    drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
+    max_lambda_drive = read_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid)
+    max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
+    bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
+    gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
+    eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
+    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
+
+    drive_active = drive_mode != DRIVE_MODE_OFF
+    if eff_mass_drive_soft <= wp.float32(0.0):
+        drive_active = False
+
+    acc_limit = wp.float32(0.0)
+    pd_mode_limit = False
+    pd_mass = wp.float32(0.0)
+    pd_gamma = wp.float32(0.0)
+    pd_beta = wp.float32(0.0)
+    eff_axial = wp.float32(0.0)
+    bias_box = wp.float32(0.0)
+    mc_limit = wp.float32(0.0)
+    ic_limit = wp.float32(0.0)
+    limit_active = clamp != _CLAMP_NONE
+    if limit_active:
+        acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
+        stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
+        damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
+        pd_mode_limit = stiffness_limit > wp.float32(0.0) or damping_limit > wp.float32(0.0)
+        if pd_mode_limit:
+            pd_mass = read_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid)
+            pd_gamma = read_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid)
+            pd_beta = read_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid)
+        else:
+            eff_inv = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
+            if eff_inv > wp.float32(0.0):
+                eff_axial = wp.float32(1.0) / eff_inv
+            bias_box = read_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid)
+            mc_limit = read_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid)
+            ic_limit = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
+
+    # ---- Sweep loop (all state register-resident) --------------------
+    it = wp.int32(0)
+    while it < num_sweeps:
+        # Positional PGS: anchor-1 (3 rows) + anchor-2 tangent (2 rows)
+        acc2_t1 = wp.dot(t1, acc2_world)
+        acc2_t2 = wp.dot(t2, acc2_world)
+        acc2_tan = wp.vec2f(acc2_t1, acc2_t2)
+
+        jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
+        jv2_world = -velocity1 + cr2_b1 @ angular_velocity1 + velocity2 - cr2_b2 @ angular_velocity2
+        jv2_t1 = wp.dot(t1, jv2_world)
+        jv2_t2 = wp.dot(t2, jv2_world)
+        jv2 = wp.vec2f(jv2_t1, jv2_t2)
+
+        rhs1 = jv1 + bias1
+        rhs2 = jv2 + bias2_tan
+
+        ut_ai_rhs1_3 = ut_ai @ rhs1
+        ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
+
+        lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
+        lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
+
+        lam2_world = lam2[0] * t1 + lam2[1] * t2
+        lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
+
+        u_lam2_us = (inv_mass1 + inv_mass2) * lam2_us_world
+        u_lam2_us = u_lam2_us + cr1_b1 @ (inv_inertia1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
+        u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
+
+        lam1_us = -(a1_inv @ (rhs1 + u_lam2_us))
+        lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+
+        total_lin = lam1 + lam2_world
+
+        velocity1 = velocity1 - inv_mass1 * total_lin
+        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1 + cr2_b1 @ lam2_world)
+        velocity2 = velocity2 + inv_mass2 * total_lin
+        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1 + cr2_b2 @ lam2_world)
+
+        acc1 = acc1 + lam1
+        acc2_world = acc2_world + lam2_world
+
+        # Axial drive + limit scalar PGS
+        jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
+
+        lam_drive = wp.float32(0.0)
+        if drive_active:
+            lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
+            old_acc = acc_drive
+            acc_drive = acc_drive + lam_drive
+            if max_force_drive > wp.float32(0.0):
+                acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
+            lam_drive = acc_drive - old_acc
+
+        lam_limit = wp.float32(0.0)
+        if limit_active:
+            if pd_mode_limit:
+                if pd_mass > wp.float32(0.0):
+                    lam_limit = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
+            else:
+                if eff_axial > wp.float32(0.0):
+                    lam_unsoft = -eff_axial * (jv_axial + bias_box)
+                    lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
+            old_acc_l = acc_limit
+            acc_limit = acc_limit + lam_limit
+            if clamp == _CLAMP_MAX:
+                acc_limit = wp.max(wp.float32(0.0), acc_limit)
+            else:
+                acc_limit = wp.min(wp.float32(0.0), acc_limit)
+            lam_limit = acc_limit - old_acc_l
+
+        axial_lam = lam_drive + lam_limit
+        angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
+        angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
+
+        it += 1
+
+    # ---- Writeback ---------------------------------------------------
+    bodies.velocity[b1] = velocity1
+    bodies.angular_velocity[b1] = angular_velocity1
+    bodies.velocity[b2] = velocity2
+    bodies.angular_velocity[b2] = angular_velocity2
+
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world)
+    if drive_active:
+        write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
+    if limit_active:
+        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
+
+
+@wp.func
+def actuated_double_ball_socket_iterate_multi(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    use_bias: wp.bool,
+    num_sweeps: wp.int32,
+):
+    """Multi-sweep ADBS iterate dispatcher.
+
+    Revolute -- by far the most common mode in G1/H1 -- takes the
+    register-cached :func:`_revolute_iterate_at_multi` path; every
+    other mode falls back to a plain loop of per-sweep dispatches.
+    The fallback sees no register-caching win but still honours the
+    same ``num_sweeps`` contract, so the kernel can call this uniformly
+    regardless of mode.
+    """
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    joint_mode = read_int(constraints, _OFF_JOINT_MODE, cid)
+    if joint_mode == JOINT_MODE_REVOLUTE:
+        _revolute_iterate_at_multi(
+            constraints, cid, 0, bodies, body_pair, idt, use_bias, num_sweeps
+        )
+    else:
+        it = wp.int32(0)
+        while it < num_sweeps:
+            actuated_double_ball_socket_iterate_at(
+                constraints, cid, 0, bodies, body_pair, idt, use_bias
+            )
+            it += 1
 
 
 @wp.func

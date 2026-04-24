@@ -19,6 +19,7 @@ from newton._src.solvers.phoenx.body import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     actuated_double_ball_socket_iterate,
+    actuated_double_ball_socket_iterate_multi,
     actuated_double_ball_socket_prepare_for_iteration,
     actuated_double_ball_socket_world_error,
     actuated_double_ball_socket_world_wrench,
@@ -26,6 +27,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactViews,
     contact_iterate,
+    contact_iterate_multi,
     contact_position_iterate,
     contact_prepare_for_iteration,
     contact_world_error,
@@ -73,6 +75,17 @@ __all__ = [
 
 
 _STRAGGLER_BLOCK_DIM: int = 32
+
+# How many PGS sweeps ``contact_iterate_multi`` /
+# ``actuated_double_ball_socket_iterate_multi`` run per call. Higher
+# values save more body / constraint reloads per cid but shrink the
+# cross-colour PGS feedback from the caller's outer loop from
+# ``solver_iterations`` rounds down to
+# ``solver_iterations / _FUSED_INNER_SWEEPS`` rounds. ``2`` keeps 4
+# feedback rounds at the default ``solver_iterations = 8`` -- enough
+# for the current test suite's stack / pyramid force balances.
+# ``_FUSED_INNER_SWEEPS`` must evenly divide ``solver_iterations``.
+_FUSED_INNER_SWEEPS: int = 2
 
 
 def _choose_fast_tail_worlds_per_block(num_worlds: int) -> int:
@@ -712,8 +725,19 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
         c += 1
 
     # ---- Iterate phase -------------------------------------------
-    it = wp.int32(0)
-    while it < num_iterations:
+    # Split ``num_iterations`` into
+    # ``outer_iters = num_iterations / _FUSED_INNER_SWEEPS`` outer
+    # rounds of cross-colour PGS feedback, each running
+    # ``_FUSED_INNER_SWEEPS`` sweeps on every cid with body state and
+    # per-cid constraint constants held in registers (``*_iterate_multi``
+    # functions). For revolute joints (the common G1 / H1 case) and
+    # contacts, the register-resident path eliminates
+    # ``(_FUSED_INNER_SWEEPS - 1)`` redundant body / constraint reads
+    # per cid per outer iteration.
+    inner_sweeps = wp.int32(_FUSED_INNER_SWEEPS)
+    outer_iters = num_iterations / inner_sweeps
+    it_outer = wp.int32(0)
+    while it_outer < outer_iters:
         c = wp.int32(0)
         while c < n_colors:
             start = world_base + world_color_starts[world_id, c]
@@ -724,15 +748,19 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
             while base < count:
                 cid = world_element_ids_by_color[start + base]
                 if cid < num_joints:
-                    actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
+                    actuated_double_ball_socket_iterate_multi(
+                        constraints, cid, bodies, idt, True, inner_sweeps
+                    )
                 else:
-                    contact_iterate(constraints, cid, bodies, idt, cc, contacts, True)
+                    contact_iterate_multi(
+                        constraints, cid, bodies, idt, cc, contacts, True, inner_sweeps
+                    )
                 base += _STRAGGLER_BLOCK_DIM
 
             _sync_warp()
             c += 1
 
-        it += 1
+        it_outer += 1
 
 
 @wp.kernel(enable_backward=False)
