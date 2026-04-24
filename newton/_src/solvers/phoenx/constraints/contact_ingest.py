@@ -1,47 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Convert Newton's sorted ``Contacts`` buffer into Jitter contact columns.
+"""Convert Newton's sorted ``Contacts`` buffer into PhoenX contact columns.
 
-Called once per :meth:`World.step` to materialise that step's
-:data:`CONSTRAINT_TYPE_CONTACT` columns inside the shared
-:class:`ConstraintContainer`. The upstream Newton
-:class:`newton._src.sim.contacts.Contacts` buffer is already sorted by
-``(shape_a, shape_b)`` when ``contact_matching`` is on (the
-:func:`newton._src.geometry.contact_data.make_contact_sort_key`
-invariant), so all contacts belonging to one shape-pair are
-contiguous. Ingest therefore reduces to:
+Called once per :meth:`PhoenXWorld.step`. Newton's
+:class:`~newton._src.sim.contacts.Contacts` is already sorted by
+``(shape_a, shape_b)`` (contacts for one pair are contiguous), so
+ingest segments that prefix via ``(shape_a * num_shapes + shape_b)``
+run-length encoding and emits one :data:`CONSTRAINT_TYPE_CONTACT`
+column per non-filtered shape pair with the pair's
+``[contact_first, contact_first + contact_count)`` stamped into the
+header.
 
-1. Segment the sorted active prefix of ``Contacts`` into shape-pair
-   runs (``pair_first[p]``, ``pair_count[p]``, ``pair_shape_a/b[p]``).
-2. Emit one contact column per non-filtered shape pair, with that
-   pair's ``[contact_first, contact_count]`` range stamped into the
-   column header.
-3. Populate the :class:`ConstraintContainer` header
-   (``constraint_type``, ``body1``, ``body2``) so the generic
-   dispatcher routes each column to
-   :func:`contact_prepare_for_iteration_at`.
-
-The per-pair design replaces the previous 6-slot-per-column split:
-before, a pair with ``pair_count > 6`` was fragmented across
-``ceil(pair_count / 6)`` adjacent columns that the graph colourer then
-had to assign to different colours (all columns share the same body
-pair). The per-pair scheme puts every contact of a pair into one
-column, loops them in a single kernel, and gets Gauss-Seidel within
-the pair for free.
-
-The number of output columns is produced as a *device-side* scalar
-(``IngestScratch.num_contact_columns``) and never read back to the
-host during the step, which keeps the whole ingest sequence
-graph-capture compatible. All kernels launch at fixed sizes
-(``rigid_contact_max`` or ``max_contact_columns``) and gate internally
-on the device-held counters.
-
-Segmenting uses an ``(shape_a * num_shapes + shape_b)`` int32 key +
-the graph-capture-safe
-:func:`scan_and_sort.runlength_encode_variable_length` wrapper. The
-int32 fits safely because Newton scenes with ``num_shapes >= 46340``
-would overflow the key; the caller should bound ``num_shapes``
-accordingly at world construction time.
+Fully graph-capture-safe: ``num_contact_columns`` is a device-side
+scalar, never host-read during the step; all kernels launch at fixed
+sizes (``rigid_contact_max`` / ``max_contact_columns``) and gate
+internally on device-held counters. ``num_shapes < 46340`` keeps the
+packed int32 key safe.
 """
 
 from __future__ import annotations

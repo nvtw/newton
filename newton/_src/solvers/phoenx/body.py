@@ -1,39 +1,12 @@
-"""Rigid-body data for the Jitter port.
+"""Rigid-body SoA storage for :class:`PhoenXWorld`.
 
-Mirrors the relevant subset of ``Jitter2.Dynamics.RigidBodyData`` (see
-``C:/git3/jitterphysics2/src/Jitter2/Dynamics/RigidBody.cs``). Only the
-fields that the constraint solver actually touches are included today;
-add more (forces, deltas, friction, ...) as additional Jitter modules are
-ported.
-
-In Jitter, ``JHandle<RigidBodyData>`` indirects into a ``PartitionedBuffer``
-(an array-of-structs). In this port we replace the handle with a plain
-``int`` body id and store the bodies in a :class:`BodyContainer`, which is
-**struct-of-arrays** (one ``wp.array`` per field). On the GPU this gives:
-
-* coalesced loads/stores when many threads in a warp touch the same
-  field (each field array is contiguous, so 32 lanes' worth of, say,
-  ``position`` fall into one or two 128-byte transactions);
-* cheap partial reads when a kernel only needs a subset of fields (e.g.
-  an integration kernel that only touches position/velocity does not
-  pull inertia tensors through the cache);
-* trivial extension when new per-body quantities are added (just append a
-  field to ``BodyContainer`` -- no padding/alignment changes for the rest).
-
-The trade-off is that gathering a *full* :class:`RigidBodyData` value
-(which the constraint kernels do per thread for body1/body2) costs one
-load per field. Constraints touch ~6 fields each, scattered by the graph
-colorer, so neither layout coalesces perfectly; SoA still wins because of
-the partial-access benefit and because each field load is a contiguous
-16-byte (vec3/quat) or 36-byte (mat33) read instead of a strided ~96-byte
-AoS struct load.
-
+Struct-of-arrays: one ``wp.array`` per field, indexed by body id. SoA
+gives coalesced per-field loads (32 lanes -> 1-2 128-byte transactions)
+and cheap partial reads when a kernel only touches a subset of fields.
 Use :func:`body_container_get` / :func:`body_container_set` inside
-``@wp.func`` / ``@wp.kernel`` code to pack/unpack a single body, and
-:func:`body_container_zeros` from the host to allocate a container.
-
-All physical quantities are stored in single precision (``float32``),
-matching the rest of Newton's solver stack.
+``@wp.func``/``@wp.kernel`` to pack/unpack a single body;
+:func:`body_container_zeros` on the host to allocate.
+All quantities are single precision (``float32``).
 """
 
 import warp as wp

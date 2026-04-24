@@ -159,8 +159,23 @@ def _build_n_pendulums(
 
 
 def _run_frames(world: PhoenXWorld, n_frames: int) -> None:
-    for _ in range(n_frames):
-        world.step(dt=1.0 / _FPS, contacts=None, shape_body=None)
+    """Advance ``world`` by ``n_frames`` joint-only steps, CUDA-graph
+    captured on the first call so each additional frame is one graph
+    replay rather than a dozen eager launches."""
+    dt = 1.0 / _FPS
+    device = wp.get_device()
+    if not device.is_cuda or n_frames < 4:
+        for _ in range(n_frames):
+            world.step(dt=dt, contacts=None, shape_body=None)
+        return
+    # Warm-up outside the capture so kernel JIT + lazy scratch
+    # allocations complete; capture the next step; replay the rest.
+    world.step(dt=dt, contacts=None, shape_body=None)
+    with wp.ScopedCapture(device=device) as capture:
+        world.step(dt=dt, contacts=None, shape_body=None)
+    graph = capture.graph
+    for _ in range(n_frames - 2):
+        wp.capture_launch(graph)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX multi-world tests require CUDA")

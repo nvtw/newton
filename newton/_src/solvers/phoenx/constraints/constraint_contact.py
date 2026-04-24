@@ -1,32 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Rigid-rigid contact constraint for the Jitter / PhoenX solvers.
+"""Rigid-rigid contact constraint for :class:`PhoenXWorld`.
 
-One :data:`CONSTRAINT_TYPE_CONTACT` column represents one whole
-``(shape_a, shape_b)`` shape-pair and stores just the range
-``[contact_first, contact_first + contact_count)`` into the upstream
-sorted :class:`newton._src.sim.contacts.Contacts` buffer. Every
-per-contact quantity -- persistent warm-start state (lambdas, the
-contact frame, body-local anchors) and per-substep derived quantities
-(lever arms, effective masses, bias) -- lives in the parallel
-:class:`newton._src.solvers.phoenx.constraints.contact_container.ContactContainer`
-indexed by the contact's sorted-buffer index ``k``.
+One :data:`CONSTRAINT_TYPE_CONTACT` column covers one whole
+``(shape_a, shape_b)`` pair, storing only the contiguous index range
+``[contact_first, contact_first + contact_count)`` into the sorted
+:class:`newton._src.sim.contacts.Contacts` buffer. Per-contact
+persistent state (lambdas, contact frame, body-local anchors) and
+per-substep derived quantities (lever arms, effective masses, bias)
+live in :class:`ContactContainer` keyed by the contact's
+sorted-buffer index ``k``. The PGS loop walks each pair's contact
+range serially inside one kernel call, which is Gauss-Seidel within
+the pair by construction.
 
-This replaces the previous 6-slot-per-column layout. The old layout
-capped each column at six contacts and split dense pairs across multiple
-adjacent columns; because the graph colourer then had to assign those
-adjacent columns to different colours (they share the same body pair),
-intra-pair Gauss-Seidel was replaced with an inter-colour serial pass
-that also inflated the number of PGS launches. The per-pair design
-loops over every contact serially inside one kernel call, which is
-literally Gauss-Seidel within the pair, and drops the colouring churn.
-
-Friction: two-tangent pyramidal PGS. Each contact contributes three
-scalar rows -- normal (non-penetration, ``lambda_n >= 0``) plus two
-independent tangential rows (each clamped to the current
-``[-mu * lambda_n, +mu * lambda_n]``). Matches what Box2D v3 and
-solver2d do in their "simple friction" mode; the full Coulomb cone is
-approximated by the circular clamp inside the iterate kernel.
+Friction: two-tangent pyramidal PGS. Each contact contributes a
+normal row (``lambda_n >= 0``) plus two tangential rows clamped to
+``[-mu * lambda_n, +mu * lambda_n]``. Same "simple friction" pattern
+as Box2D v3; the full Coulomb cone is approximated by the circular
+clamp inside the iterate kernel.
 """
 
 from __future__ import annotations

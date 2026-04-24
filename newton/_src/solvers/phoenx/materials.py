@@ -1,36 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Per-shape material system for the jitter solver.
+"""Per-shape material system for :class:`PhoenXWorld`.
 
-PhysX-style materials: each shape carries a material index, the
-material table holds ``(static_friction, dynamic_friction,
-restitution, friction_combine_mode, restitution_combine_mode)``, and
-contact pairs resolve an effective friction / restitution by
-combining the two shape materials via the stricter of the two
-combine modes (PhysX rule: ``max(mode_a, mode_b)`` wins, with
-AVERAGE < MIN < MULTIPLY < MAX).
+PhysX-style: each shape carries a material index, the table holds
+``(static_friction, dynamic_friction, restitution,
+friction_combine_mode, restitution_combine_mode)``, and contact pairs
+resolve an effective friction / restitution by combining the two
+materials with the stricter combine mode
+(``max(mode_a, mode_b)`` wins; AVERAGE < MIN < MULTIPLY < MAX).
 
-The combine modes match PhysX's ``PxCombineMode``:
+Combine modes (PhysX ``PxCombineMode``):
 
 * :data:`COMBINE_AVERAGE` -- ``(a + b) / 2`` (default).
-* :data:`COMBINE_MIN`     -- ``min(a, b)``; the "slippier of the two
-  surfaces wins" policy, useful for e.g. ice-on-rubber where the ice
-  dominates.
-* :data:`COMBINE_MULTIPLY`-- ``a * b``; matches classical
-  "coefficient product" intuition; tends toward 0 when either
-  surface is slippery.
-* :data:`COMBINE_MAX`     -- ``max(a, b)``; the "grippier surface
-  wins" policy; sticky tape on any floor behaves like tape.
+* :data:`COMBINE_MIN` -- slippier surface wins.
+* :data:`COMBINE_MULTIPLY` -- ``a * b``; coefficient product.
+* :data:`COMBINE_MAX` -- grippier surface wins.
 
-Material 0 is reserved as a default (``mu_s = mu_k = 0.5``,
-``restitution = 0``, ``COMBINE_AVERAGE``) so shapes that never get
-an explicit material assignment fall back to the same behaviour the
-pre-material code path gave them.
-
-Kept isolated from :mod:`solver_phoenx_kernels` so the solver
-module's kernel cache isn't churned by material-table edits, and so
-callers can swap the material table at run-time via
-:meth:`World.set_material_table` without re-building anything else.
+Material 0 is reserved as the default (``mu = 0.5``, ``e = 0``,
+``COMBINE_AVERAGE``) so un-assigned shapes behave like the
+pre-material code path.
 """
 
 from __future__ import annotations

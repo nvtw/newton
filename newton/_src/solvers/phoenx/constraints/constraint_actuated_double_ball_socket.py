@@ -1,144 +1,43 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Unified ball-socket / revolute / prismatic joint with optional drive + limits.
-
-Despite the legacy module name, this file implements a *single* joint
-constraint that covers ball-socket, revolute, and prismatic behaviour
-via a runtime ``joint_mode`` tag. The old standalone
-``constraint_double_ball_socket`` and ``constraint_prismatic`` modules
-were folded in here -- their combined feature set (rank-3/5 lock +
-optional scalar drive / limit row) is a superset of any one of them.
-Keeping one constraint type means one dispatcher arm, one graph-
-colouring tag, and the same body-data loads shared across the
-positional lock and the actuator row.
-
-The three modes differ only in which DoF are locked and what "axial
-drive / axial limit" means -- everything else (soft-constraint plumbing,
-warm-starting, Schur block structure) is shared.
+"""Unified ball-socket / revolute / prismatic joint with optional PD
+drive and limit on the free DoF. Runtime ``joint_mode`` picks the
+locked DoF set; everything else (soft-constraint plumbing,
+warm-starting, Schur blocks) is shared.
 
 Ball-socket (:data:`JOINT_MODE_BALL_SOCKET`)
---------------------------------------------
-Locks only the 3 translational DoF at ``anchor1``; all 3 rotational
-DoF are free. Pure point-matching formulation, same anchor-1 math as
-the revolute / prismatic modes -- a single 3-row point-match constraint
-solved as one 3x3 direct solve (no Schur complement needed because
-there are no anchor-2 / anchor-3 rows).
-
-``anchor2`` is not used; the public API does not take it. No drive, no
-limit, no axial row -- a pair of bodies pinned together at one world
-point, free to rotate independently around it.
-
-See :func:`_ball_socket_prepare_at` for the math.
+    3-row point lock at ``anchor1``; all 3 rotations free; no drive
+    / limit. ``anchor2`` unused.
 
 Revolute (:data:`JOINT_MODE_REVOLUTE`)
---------------------------------------
-Locks 3 translational + 2 rotational DoF via a pair of ball-socket
-anchors on the hinge axis. Pure point-matching formulation:
-
-* Anchor 1 contributes a full 3-row lock: ``p1_b2 == p1_b1``.
-* Anchor 2 contributes a 2-row lock projected onto the tangent basis
-  ``(t1, t2)`` perpendicular to the hinge axis -- the axial row of
-  anchor 2 is the analytical null-space of the 6-row stack, so
-  dropping it yields a clean rank-5 system without rank deficiency.
-
-Solved as a 3x3 + 2x2 Schur complement; see :func:`_revolute_prepare_at`
-for the math.
-
-The optional scalar row drives / limits the *relative twist* about the
-hinge axis ``n_hat = (anchor2 - anchor1) / |...|``; ``target`` /
-``min_value`` / ``max_value`` are in radians, ``max_force_drive`` is in
-N*m.
+    5-DoF hinge about ``n_hat = anchor2 - anchor1``. Anchor 1: full
+    3-row lock. Anchor 2: 2-row tangent-plane lock (axial row is the
+    analytical null-space of the 6-row stack). Solved as a 3x3 + 2x2
+    Schur. Drive / limit act on the twist about ``n_hat``; ``target``,
+    ``min_value``, ``max_value`` are in rad, ``max_force_drive`` in N*m.
 
 Prismatic (:data:`JOINT_MODE_PRISMATIC`)
-----------------------------------------
-Locks 3 rotational + 2 translational DoF via three ball-socket anchors,
-all with tangent-plane projections. Pure point-matching formulation
-(no quaternion math):
+    5-DoF slider along ``n_hat``. Anchors 1+2 each contribute 2
+    tangent rows; a third auto-derived off-axis anchor contributes
+    one scalar row along ``t2`` that kills rotation about ``n_hat``.
+    Basis ``(t1, t2)`` is rebuilt per substep so the scalar row is a
+    unit-gain tangential velocity gate (avoids ``cos(alpha)``
+    mismatches in block-GS chains). Solved as a 4x4 + 1x1 Schur.
+    Drive / limit act on the slide; units are m and N.
 
-* Anchor 1: 2 tangent rows -- the bodies' anchor-1 points can only
-  separate along the slide axis ``n_hat``.
-* Anchor 2: 2 tangent rows -- same lock at the second on-axis anchor.
-* Anchor 3: 1 scalar row along ``t2`` -- anchor 3 is auto-derived at
-  init as ``anchor1 + rest_length * t_ref`` with ``t_ref`` an arbitrary
-  unit perpendicular to ``n_hat``. Projecting onto ``t2`` kills the
-  last rotational DoF (rotation about ``n_hat``).
+Drive row -- always PD. ``DRIVE_MODE_POSITION`` / ``DRIVE_MODE_VELOCITY``
+decide whether the bias folds in ``target`` or ``target_velocity``;
+both require caller-supplied ``stiffness_drive`` and/or
+``damping_drive`` (``DRIVE_MODE_VELOCITY`` further requires
+``damping_drive > 0``). ``max_force_drive > 0`` caps the per-substep
+impulse; ``0`` means unlimited (POSITION) or disables the drive
+(VELOCITY). Both gains zero disables the drive row entirely.
 
-  The tangent basis ``(t1, t2)`` is rebuilt every substep so that
-  ``t1`` points along the projection of the *current* anchor1 -> anchor3
-  vector perpendicular to ``n_hat``. That choice makes the anchor-3
-  scalar row the exact tangential velocity gate for rotation about
-  ``n_hat`` (unit gain) and is essential for block Gauss-Seidel
-  convergence in multi-joint chains: an arbitrary perpendicular would
-  introduce a ``cos(alpha)`` mismatch between joints sharing a body
-  and diverge the outer solver iterations.
-
-This yields a rank-5 system solved as a 4x4 + 1x1 Schur complement; the
-4x4 block is the stack of the two anchor-tangent pairs, the 1x1 is the
-scalar anchor-3 row. See :func:`_prismatic_prepare_at` for the math.
-
-The optional scalar row now drives / limits the *relative slide* along
-``n_hat``; ``target`` / ``min_value`` / ``max_value`` are in meters,
-``max_force_drive`` is in N.
-
-Drive + limits (shared plumbing)
---------------------------------
-Three independent sub-blocks on the free DoF:
-
-* :data:`DRIVE_MODE_OFF`         -- no actuation, DoF is free.
-* :data:`DRIVE_MODE_POSITION`    -- PD spring-damper towards ``target``
-                                    (rad or m); gains
-                                    ``stiffness_drive`` and
-                                    ``damping_drive`` are required to
-                                    be set by the caller (both zero
-                                    means "drive off").
-                                    ``max_force_drive`` caps the
-                                    per-substep impulse when > 0,
-                                    unlimited when 0.
-* :data:`DRIVE_MODE_VELOCITY`    -- PD velocity servo tracking
-                                    ``target_velocity`` (rad/s or
-                                    m/s). The spring term is disabled
-                                    (``stiffness_drive = 0``); the
-                                    caller must supply
-                                    ``damping_drive > 0``, which acts
-                                    as the proportional gain on
-                                    velocity error. The iterate
-                                    collapses to
-                                    ``lam = -(1/(1/eff_inv +
-                                    kd/dt))*(jv + v_target)`` --
-                                    i.e. the canonical PD velocity
-                                    servo with time constant ``tau =
-                                    I_eff / damping_drive``. There is
-                                    *no* rigid pure-velocity-motor
-                                    fallback.
-
-All three modes share the same scalar PD row (:func:`pd_coefficients`
-+ :func:`_axial_drive_limit_iterate`); the only difference is which of
-``target`` / ``target_velocity`` is folded into the bias. The
-standalone :mod:`constraint_angular_motor` / :mod:`constraint_linear_motor`
-constraints expose the same contract.
-
-Plus a unilateral ``[min_value, max_value]`` spring-damper limit
-(``min_value > max_value`` disables it) with a *dual* softness
-parameterisation:
-
-* ``stiffness_limit == damping_limit == 0`` -- Box2D
-  ``(hertz_limit, damping_ratio_limit)`` soft constraint.
-* either ``stiffness_limit > 0`` or ``damping_limit > 0`` -- Jitter2
-  PD spring-damper with absolute SI gains.
-
-Same discriminator as the standalone :mod:`constraint_angular_limit`
-and :mod:`constraint_linear_limit` modules. Drive (always PD) and
-limit share the same scalar PGS row and can both be active at once;
-the limit is unilateral and always wins.
-
-XPBD reference: this is the PGS analogue of Section 3.3.2 / 3.4.1 of
-*Detailed Rigid Body Simulation with Extended Position Based Dynamics*
-(M\u00fcller et al.). The revolute twist uses
-:func:`math_helpers.extract_rotation_angle` plus a revolution counter
-for unbounded cumulative angles (matching
-:mod:`constraint_angular_motor` / :mod:`constraint_angular_limit`);
-the prismatic slide reads directly off the world anchor positions so
-no quaternion math is needed there.
+Limit row -- unilateral ``[min_value, max_value]`` spring-damper
+(``min_value > max_value`` disables). Dual softness: both PD gains zero
+uses Box2D ``(hertz_limit, damping_ratio_limit)``; either gain
+positive selects PD with absolute SI gains. Drive and limit share the
+same scalar PGS row; the limit is unilateral and always wins.
 """
 
 from __future__ import annotations

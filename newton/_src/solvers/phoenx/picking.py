@@ -1,40 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Self-contained picking helper for Jitter examples.
+"""Self-contained picking helper for :class:`PhoenXWorld` examples.
 
-Mirrors :class:`newton._src.viewer.picking.Picking`'s public surface
-(``pick`` / ``update`` / ``release`` / ``is_picking``) but operates
-directly on a :class:`World` (i.e. on :class:`BodyContainer`) instead
-of on a :class:`newton.Model` / :class:`newton.State`. This lets the
-Jitter sample apps wire the standard GL-viewer mouse handlers without
-having to construct a Newton ``Model`` they will never simulate.
-
-How it plugs in
----------------
-
-The GL viewer keeps per-event callback lists on its underlying
-``opengl`` renderer; the *viewer's* own handlers are appended first
-during :meth:`ViewerGL.__init__` and silently no-op when
-``viewer.picking is None`` (no model). We therefore
-:func:`register_with_viewer_gl` *additional* callbacks that talk to a
-:class:`Picking` instance; this avoids touching ``viewer.picking``
-or ``viewer._last_state`` at all.
-
-How it picks
-------------
-
-* Bodies are abstracted to per-body axis-aligned half-extents in their
-  *body* frame, so we get OBB-style picking after composing with each
-  body's world transform. Sphere/capsule support is left as a follow-up
-  -- the sample only needs boxes.
-* A fixed-size ``wp.array`` device buffer carries all picking state
-  (one int + a few vec3s). All operations are kernel launches so the
-  whole flow stays graph-capture-friendly if the example wants to
-  capture the per-frame pick application.
-* Force model matches Newton's own picking kernel (PD spring on the
-  picked point + clamp to multiple of g * mass). Output is *added* to
-  :attr:`BodyContainer.force` / :attr:`BodyContainer.torque` so it
-  composes with gravity and any user-applied forces.
+Mirrors :class:`newton._src.viewer.picking.Picking` but operates
+directly on a :class:`BodyContainer` instead of on a
+:class:`newton.Model` / :class:`newton.State`. Pick model: per-body
+OBB raycast against the body-frame half-extents, then a PD spring on
+the picked point clamped to a multiple of ``g * mass``. All state
+lives in a fixed-size device buffer so the whole flow is
+graph-capture-friendly. :func:`register_with_viewer_gl` appends the
+mouse callbacks to the GL viewer without touching its own picking
+state.
 """
 
 from __future__ import annotations

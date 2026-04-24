@@ -293,10 +293,21 @@ class _PendulumScene:
         )
 
     def step(self) -> None:
-        # Pure Python per-frame path (no graph capture; these tests
-        # run for at most a few hundred frames and the kernel-launch
-        # overhead is negligible compared with the warm-up compile
-        # cost).
+        # CUDA graph capture on first call; eager on CPU. The graph is
+        # recorded after a warm-up ``_simulate`` so kernel JIT + lazy
+        # scratch allocations complete outside the capture scope.
+        if getattr(self, "_graph", None) is None and self.device.is_cuda:
+            self._simulate()  # warm-up
+            with wp.ScopedCapture(device=self.device) as capture:
+                self._simulate()
+            self._graph = capture.graph
+            return
+        if self._graph is not None:
+            wp.capture_launch(self._graph)
+        else:
+            self._simulate()
+
+    def _simulate(self) -> None:
         wp.launch(
             _newton_to_phoenx_kernel,
             dim=self.model.body_count,

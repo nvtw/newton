@@ -447,83 +447,35 @@ def constraint_bodies_make(b1: wp.int32, b2: wp.int32) -> ConstraintBodies:
 # Soft-constraint coefficients (Box2D v3 / Bepu / Nordby formulation)
 # ---------------------------------------------------------------------------
 #
-# All bilateral joints in this solver share one formulation of "softness":
-# the user specifies an undamped natural frequency ``hertz`` (Hz) and a
-# non-dimensional ``damping_ratio`` (1 = critically damped) and the per-
-# substep PGS coefficients are computed from those plus the current
-# substep ``dt``. This makes the joint behaviour
+# User specifies an undamped natural frequency ``hertz`` (Hz) and a
+# non-dimensional ``damping_ratio`` (1 = critically damped); per-substep
+# PGS coefficients fall out from ``(hertz, damping_ratio, dt)``. Mass-
+# and substep-independent; requested ``omega = 2*pi*hertz`` is clamped
+# at the per-substep Nyquist rate so asking for more stiffness than the
+# integrator can resolve yields the stiffest resolvable lock, never an
+# aliased response. Defaults below sit above any realistic Nyquist so
+# they always clamp, producing maximally-rigid locks; pass a smaller
+# finite ``hertz`` for honest spring compliance.
 #
-#   * mass-independent  (the body inertia drops out of the spring math),
-#   * time-step-independent (recomputed every prepare from the actual dt),
-#
-# which is the textbook fix for the "world-anchor joint goes unstable
-# when you halve the substep" failure mode of plain Baumgarte / fixed-
-# CFM solvers. See Box2D's solver2d post for the derivation:
-# https://box2d.org/posts/2024/02/solver2d/  (the "Soft Constraints"
-# section). The three returned coefficients plug straight into PGS:
-#
-#     incremental_lambda = -mass_coeff * effective_mass * (jv + bias_rate * separation)
-#                          - impulse_coeff * accumulated_impulse
-#
-# Equivalently, the second term replaces the legacy ``softness * idt *
-# accumulated_impulse`` "softness vector" -- it lets the accumulated
-# impulse leak away over time so the joint asymptotes to the spring-
-# damper response instead of the perfectly-rigid one.
-#
-# User contract: ``hertz`` is the *requested* spring frequency, clamped
-# inside :func:`soft_constraint_coefficients` to the per-substep Nyquist
-# rate ``f_nyq = 1 / (2 * dt)``. Asking for more stiffness than the
-# integrator can resolve therefore yields the maximally-rigid lock the
-# current ``dt`` supports (``omega * dt == pi``), not an aliased /
-# under-damped mess. This makes joint feel substep-independent by
-# default: doubling the substep count makes locks *more* rigid (higher
-# Nyquist), never softer.
-#
-# The defaults below sit at a large finite value so that, at any
-# realistic ``dt``, they always hit the Nyquist clamp and produce the
-# stiffest resolvable lock. Users who want a genuinely compliant
-# spring-damper pass a small ``hertz`` (below the Nyquist rate) and
-# get honest compliant behaviour.
+# See https://box2d.org/posts/2024/02/solver2d/ ("Soft Constraints") for
+# the derivation.
 
 #: Critically damped by default -- no overshoot, no underdamped ringing.
 DEFAULT_DAMPING_RATIO = wp.constant(wp.float32(1.0))
-#: Linear (positional) joint stiffness target. Set so high that
-#: :func:`soft_constraint_coefficients` always clamps it to the
-#: per-substep Nyquist rate, producing a maximally-rigid lock at any
-#: ``dt``. Together with the solver's Box2D v3 TGS-soft relax pass
-#: (``_constraint_relax_kernel``) this closes positional drift without
-#: bleeding drive / limit / spring impulse into the anchor.
-#:
-#: Override per-joint with a lower finite ``hertz`` for a genuinely
-#: compliant spring (e.g. a mount with visible sag), or with
-#: ``hertz=0`` for a "no drift correction at all" rigid PGS row.
+#: Linear joint stiffness; Nyquist-clamped -> maximally rigid.
+#: Override with a smaller finite ``hertz`` for compliance, or ``0`` for
+#: a rigid PGS row with no drift correction.
 DEFAULT_HERTZ_LINEAR = wp.constant(wp.float32(1.0e9))
-#: Angular (rotational lock) joint stiffness. Same Nyquist-clamp
-#: contract as :data:`DEFAULT_HERTZ_LINEAR`: defaults to maximally
-#: rigid at the current substep, override with a lower finite value
-#: for a compliant rotational joint or ``hertz=0`` for no drift
-#: correction.
+#: Angular lock stiffness; same contract as :data:`DEFAULT_HERTZ_LINEAR`.
 DEFAULT_HERTZ_ANGULAR = wp.constant(wp.float32(1.0e9))
-#: Hinge / cone limit stiffness. Defaults to Nyquist-rigid so a body
-#: hitting its limit doesn't visibly bounce; override with a lower
-#: ``hertz`` for a soft, ringing end-stop.
+#: Hinge / cone limit stiffness; Nyquist-clamped so limits don't bounce.
 DEFAULT_HERTZ_LIMIT = wp.constant(wp.float32(1.0e9))
-#: Velocity-target motors don't carry a positional bias, so hertz here
-#: only modulates the impulse-coefficient (how aggressively the motor
-#: clamps to the target velocity). Defaults to Nyquist-rigid so a
-#: velocity motor reaches its target inside one substep; override with
-#: a lower ``hertz`` for a softer response.
+#: Velocity-motor stiffness (only modulates the impulse coefficient
+#: since velocity targets carry no positional bias).
 DEFAULT_HERTZ_MOTOR = wp.constant(wp.float32(1.0e9))
-#: Contact-pair stiffness. Same Nyquist-clamp contract as the joint
-#: defaults: effectively "as stiff as the current substep can
-#: resolve" so contacts are *hard* by default. The catastrophic
-#: first-substep impulse that a deep initial penetration would
-#: otherwise inject at Nyquist-rigid stiffness is limited by the
-#: ``max_push_speed`` recovery-speed cap in the prepare kernel (Box2D
-#: v3's solver2d post does the same on top of its soft-contact
-#: formulation). For compliant / bouncy / jelly contact behaviour,
-#: override per-material (planned) -- the solver treats any finite
-#: ``hertz`` below the Nyquist rate as honest spring compliance.
+#: Contact-pair stiffness; Nyquist-clamped. The big first-substep
+#: impulse on initial deep penetration is bounded by the prepare
+#: kernel's ``max_push_speed`` recovery-speed cap.
 DEFAULT_HERTZ_CONTACT = wp.constant(wp.float32(1.0e9))
 
 

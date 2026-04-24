@@ -1,36 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Persistent + per-substep state for contact constraints.
+"""Persistent + per-substep state for contact constraints, keyed by the
+contact's sorted-buffer index ``k``.
 
-Every contact in the upstream Newton :class:`Contacts` buffer is addressed
-by its sorted-buffer index ``k``. A :data:`CONSTRAINT_TYPE_CONTACT` column
-in the shared :class:`ConstraintContainer` represents one whole
-``(shape_a, shape_b)`` shape-pair and stores the range
-``[contact_first, contact_first + contact_count)`` into that buffer; the
-solver kernels then loop over the range serially (Gauss-Seidel within a
-pair), reading / writing all per-contact state through the ``k``-indexed
-buffers in this module.
+* :attr:`ContactContainer.lambdas` -- persistent warm-start
+  (accumulated normal + tangent impulses, frozen ``(normal, tangent1)``
+  frame, body-local anchors). Double-buffered against
+  :attr:`prev_lambdas` via pointer swap so the warm-start gather can
+  read last step's finished state while the new step scribbles.
+* :attr:`ContactContainer.derived` -- per-substep scratch (lever arms
+  ``r1`` / ``r2``, scalar effective masses, velocity biases). Rebuilt
+  every prepare; not double-buffered.
 
-Two flavours of per-contact state live here:
-
-* :attr:`ContactContainer.lambdas` -- persistent PhoenX state
-  (accumulated normal + tangent impulses, the contact's frozen
-  ``(normal, tangent1)`` frame, the body-local anchors ``local_p0`` /
-  ``local_p1``). Double-buffered against :attr:`prev_lambdas` so the
-  warm-start gather can read last step's finished state while the new
-  step scribbles its own.
-* :attr:`ContactContainer.derived` -- per-substep derived quantities
-  (world-frame lever arms ``r1`` / ``r2``, scalar effective masses,
-  velocity bias terms). Rebuilt every ``prepare_for_iteration`` from
-  the persistent state + the current body pose, then consumed by
-  iterate and position-iterate sweeps. Not double-buffered.
-
-Two storage buffers beat one fused buffer because the persistent state
-needs the pointer-swap trick for warm-start double-buffering, while the
-derived buffer is pure scratch and swapping it would be wasted motion.
-Both share the same ``[dword, k]`` 2D layout (``k`` on the inner,
-contiguous axis) so a warp of threads walking adjacent contacts issues
-one coalesced transaction per field load.
+Both buffers are ``[dword, k]`` with ``k`` inner so a warp walking
+adjacent contacts issues one coalesced transaction per field load.
 
 Per-contact dword budgets:
 
@@ -38,14 +21,6 @@ Per-contact dword budgets:
   normal(3), tangent1(3), local_p0(3), local_p1(3)``.
 * :data:`CC_DERIVED_DWORDS_PER_CONTACT` = 12 -- ``r1(3), r2(3),
   eff_n, eff_t1, eff_t2, bias, bias_t1, bias_t2``.
-
-Previous 6-slot-per-column layout (``MAX_SLOTS = 6``) was retired in
-favour of the variable-size per-pair scheme -- the old design split
-dense SDF manifolds across multiple adjacent columns, forcing the graph
-colourer to separate them into different colours and replacing the
-intra-pair Gauss-Seidel sweep with an inter-colour serial pass; the
-per-contact scheme eliminates both the artificial split and the
-coloring churn.
 """
 
 from __future__ import annotations
