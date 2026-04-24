@@ -66,8 +66,15 @@ def build(
 
     fps = 50
     frame_dt = 1.0 / fps
-    sim_dt = frame_dt / substeps
 
+    # Fair cadence: PhoenX runs its own internal substep loop and is
+    # called ONCE per frame with dt=frame_dt; MuJoCo has no internal
+    # substepping so it's called ``substeps`` times per frame with
+    # dt=frame_dt/substeps. Either path does exactly ``substeps``
+    # integration steps per frame. Running the outer loop N times
+    # around PhoenX would inflate its effective substep count by N
+    # and make the comparison unfair (observed 2-4x bias before
+    # this fix).
     if solver_name == "phoenx":
         solver = newton.solvers.SolverPhoenX(
             model,
@@ -75,6 +82,8 @@ def build(
             solver_iterations=solver_iterations,
             velocity_iterations=velocity_iterations,
         )
+        outer_steps = 1
+        call_dt = frame_dt
     elif solver_name == "mujoco":
         solver = newton.solvers.SolverMuJoCo(
             model,
@@ -83,6 +92,8 @@ def build(
             njmax=100,
             nconmax=210,
         )
+        outer_steps = substeps
+        call_dt = frame_dt / substeps
     else:
         raise ValueError(f"unknown solver '{solver_name}'")
 
@@ -96,9 +107,9 @@ def build(
 
     def simulate_one_frame() -> None:
         model.collide(box["state_0"], contacts)
-        for _ in range(substeps):
+        for _ in range(outer_steps):
             box["state_0"].clear_forces()
-            solver.step(box["state_0"], box["state_1"], control, contacts, sim_dt)
+            solver.step(box["state_0"], box["state_1"], control, contacts, call_dt)
             box["state_0"], box["state_1"] = box["state_1"], box["state_0"]
 
     wp.synchronize_device()
