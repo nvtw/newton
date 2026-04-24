@@ -176,11 +176,16 @@ class Example:
 
         if solver_name == "phoenx":
             # PhoenX runs its own contacts (collision pipeline auto-
-            # created with sticky matching by the solver).
+            # created with sticky matching by the solver). Substeps=4
+            # matches the outer example cadence; per the MuJoCo-parity
+            # sweep in test_mujoco_parity, 4 internal substeps at 8 PGS
+            # iterations track MuJoCo's PD response to within ~0.01 rad
+            # RMS on a 1 m pendulum at dt=5 ms, which is what we need
+            # for a PhysX-trained policy transfer.
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
-                substeps=1,           # outer example loop already substeps.
-                solver_iterations=16,
+                substeps=4,
+                solver_iterations=8,
                 velocity_iterations=1,
             )
         else:
