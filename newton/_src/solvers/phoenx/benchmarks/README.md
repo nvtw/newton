@@ -73,6 +73,20 @@ HTML). The dashboard shows per-scene env_fps, ms/world-step, and
 gpu_used_gb plotted against `num_worlds` with PhoenX and MuJoCo
 overlaid, plus the raw table for copy-paste.
 
+## Render static PNG plots
+
+For pasting into issues / slides / chat (no HTTP server):
+
+```bash
+python -m newton._src.solvers.phoenx.benchmarks.plot_bench
+```
+
+Writes one PNG per scenario into `results/plots/`. Uses the same
+solver colours as the Chart.js dashboard, log-log axes for
+env_fps / ms_per_step, and linear for gpu_used_gb. Needs
+`matplotlib` (not in Newton's core deps; install with
+`uv add matplotlib` or `pip install matplotlib`).
+
 ## Share an artefact
 
 To show someone the results, grab:
