@@ -292,6 +292,15 @@ class PhoenXWorld:
         self.constraints: ConstraintContainer = constraints
 
         self.num_bodies: int = int(bodies.position.shape[0])
+        # Count kinematic bodies once at construction so the per-substep
+        # kinematic kernels can short-circuit when no body is scripted.
+        # ``motion_type`` is written by the builder and never mutated by
+        # the solver, so a single host count at init stays accurate.
+        if self.num_bodies > 0:
+            mt = bodies.motion_type.numpy()
+            self._num_kinematic_bodies: int = int((mt == int(MOTION_KINEMATIC)).sum())
+        else:
+            self._num_kinematic_bodies = 0
         self.max_contact_columns: int = int(max_contact_columns)
         self.rigid_contact_max: int = int(rigid_contact_max)
         if self.max_contact_columns > 0 and self.rigid_contact_max == 0:
@@ -1111,8 +1120,11 @@ class PhoenXWorld:
 
     def _kinematic_prepare_step(self) -> None:
         """Once-per-step kinematic prepare: snapshot prev pose,
-        resolve target, infer velocity."""
-        if self.num_bodies == 0:
+        resolve target, infer velocity. No-op when no kinematic bodies
+        are present in the model -- the kernel's per-thread guard
+        would early-return on every thread anyway, so we can skip
+        launching the grid entirely and save ~4us."""
+        if self.num_bodies == 0 or self._num_kinematic_bodies == 0:
             return
         wp.launch(
             _kinematic_prepare_step_kernel,
@@ -1122,8 +1134,11 @@ class PhoenXWorld:
         )
 
     def _kinematic_interpolate_substep(self, alpha: float) -> None:
-        """Per-substep kinematic pose update via lerp / slerp."""
-        if self.num_bodies == 0:
+        """Per-substep kinematic pose update via lerp / slerp. Skipped
+        when no kinematic bodies exist (see :meth:`_kinematic_prepare_step`
+        rationale); at substeps=4 this is ~16us / step reclaimed in
+        the common dynamic-only case."""
+        if self.num_bodies == 0 or self._num_kinematic_bodies == 0:
             return
         wp.launch(
             _kinematic_interpolate_substep_kernel,
