@@ -37,6 +37,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     DRIVE_MODE_POSITION,
     DRIVE_MODE_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_FIXED,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
 )
@@ -99,11 +100,14 @@ class JointMode(IntEnum):
     * :attr:`PRISMATIC` -- 5-DoF slider along ``anchor1 -> anchor2``.
     * :attr:`BALL_SOCKET` -- 3-DoF point lock at ``anchor1``
       (rotations free, no drive/limit).
+    * :attr:`FIXED` -- 6-DoF weld along ``anchor1 -> anchor2``
+      (no drive/limit).
     """
 
     REVOLUTE = int(JOINT_MODE_REVOLUTE)
     PRISMATIC = int(JOINT_MODE_PRISMATIC)
     BALL_SOCKET = int(JOINT_MODE_BALL_SOCKET)
+    FIXED = int(JOINT_MODE_FIXED)
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +473,33 @@ class WorldBuilder:
                     "stiffness_limit/damping_limit at 0"
                 )
             anchor2_effective: tuple[float, float, float] = tuple(anchor1)  # type: ignore[assignment]
+        elif mode_enum is JointMode.FIXED:
+            if anchor2 is None:
+                raise ValueError(
+                    "add_joint(mode=FIXED) requires ``anchor2``; the line "
+                    "anchor1 -> anchor2 defines the weld's body-frame axis"
+                )
+            if drive_mode_enum is not DriveMode.OFF:
+                raise ValueError(
+                    "add_joint(mode=FIXED) has no drive row; leave "
+                    "drive_mode=DriveMode.OFF"
+                )
+            if target != 0.0 or target_velocity != 0.0 or max_force_drive != 0.0:
+                raise ValueError(
+                    "add_joint(mode=FIXED) has no drive row; leave "
+                    "target/target_velocity/max_force_drive at defaults"
+                )
+            if min_value <= max_value:
+                raise ValueError(
+                    "add_joint(mode=FIXED) has no limit row; leave "
+                    "min_value/max_value at defaults (min > max disables)"
+                )
+            if stiffness_limit != 0.0 or damping_limit != 0.0:
+                raise ValueError(
+                    "add_joint(mode=FIXED) has no limit row; leave "
+                    "stiffness_limit/damping_limit at 0"
+                )
+            anchor2_effective = anchor2
         else:
             if anchor2 is None:
                 raise ValueError(
