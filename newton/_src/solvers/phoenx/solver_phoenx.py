@@ -1192,6 +1192,7 @@ class PhoenXWorld:
                 self._contact_container,
                 wp.int32(self.position_iterations),
                 wp.int32(self.num_worlds),
+                wp.int32(self.num_joints),
             ],
             device=self.device,
         )
@@ -1254,6 +1255,7 @@ class PhoenXWorld:
                 self._contact_container,
                 contact_views,
                 wp.int32(self.num_worlds),
+                wp.int32(self.num_joints),
             ],
             device=self.device,
         )
@@ -1283,6 +1285,7 @@ class PhoenXWorld:
                 contact_views,
                 wp.int32(num_iterations),
                 wp.int32(self.num_worlds),
+                wp.int32(self.num_joints),
             ],
             device=self.device,
         )

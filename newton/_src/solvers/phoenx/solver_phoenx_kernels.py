@@ -561,6 +561,11 @@ def _constraint_iterate_fast_tail_kernel(
     contacts: ContactViews,
     num_iterations: wp.int32,
     num_worlds: wp.int32,
+    # First cid assigned to a contact column. Joints occupy
+    # ``[0, num_joints)``, contacts ``[num_joints, capacity)``, so the
+    # dispatch branch can be a cheap register compare instead of a
+    # per-cid ``constraint_get_type`` memory read.
+    num_joints: wp.int32,
 ):
     """Main-solve dispatcher: ``num_iterations`` PGS sweeps per world,
     positional bias ON.
@@ -592,10 +597,9 @@ def _constraint_iterate_fast_tail_kernel(
             base = local_tid
             while base < count:
                 cid = world_element_ids_by_color[start + base]
-                t = constraint_get_type(constraints, cid)
-                if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+                if cid < num_joints:
                     actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
-                elif t == CONSTRAINT_TYPE_CONTACT:
+                else:
                     contact_iterate(constraints, cid, bodies, idt, cc, contacts, True)
                 base += _STRAGGLER_BLOCK_DIM
 
@@ -617,6 +621,7 @@ def _constraint_prepare_fast_tail_kernel(
     cc: ContactContainer,
     contacts: ContactViews,
     num_worlds: wp.int32,
+    num_joints: wp.int32,
 ):
     """Prepare dispatcher: one sweep per world. Computes effective
     masses, velocity bias, applies warm-start impulse."""
@@ -638,10 +643,9 @@ def _constraint_prepare_fast_tail_kernel(
         base = local_tid
         while base < count:
             cid = world_element_ids_by_color[start + base]
-            t = constraint_get_type(constraints, cid)
-            if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+            if cid < num_joints:
                 actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-            elif t == CONSTRAINT_TYPE_CONTACT:
+            else:
                 contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
             base += _STRAGGLER_BLOCK_DIM
 
@@ -660,6 +664,7 @@ def _constraint_position_iterate_fast_tail_kernel(
     cc: ContactContainer,
     num_iterations: wp.int32,
     num_worlds: wp.int32,
+    num_joints: wp.int32,
 ):
     """XPBD position-iteration dispatcher for contact tangent drift.
 
@@ -688,8 +693,9 @@ def _constraint_position_iterate_fast_tail_kernel(
             base = local_tid
             while base < count:
                 cid = world_element_ids_by_color[start + base]
-                t = constraint_get_type(constraints, cid)
-                if t == CONSTRAINT_TYPE_CONTACT:
+                # Only contact cids participate in XPBD position drift;
+                # joint cids at ``cid < num_joints`` are skipped.
+                if cid >= num_joints:
                     contact_position_iterate(constraints, cid, bodies, cc)
                 base += _STRAGGLER_BLOCK_DIM
 
@@ -712,6 +718,7 @@ def _constraint_relax_fast_tail_kernel(
     contacts: ContactViews,
     num_iterations: wp.int32,
     num_worlds: wp.int32,
+    num_joints: wp.int32,
 ):
     """Box2D v3 TGS-soft relax dispatcher: ``num_iterations`` sweeps
     with positional bias OFF (enforces ``Jv = 0``)."""
@@ -735,10 +742,9 @@ def _constraint_relax_fast_tail_kernel(
             base = local_tid
             while base < count:
                 cid = world_element_ids_by_color[start + base]
-                t = constraint_get_type(constraints, cid)
-                if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+                if cid < num_joints:
                     actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
-                elif t == CONSTRAINT_TYPE_CONTACT:
+                else:
                     contact_iterate(constraints, cid, bodies, idt, cc, contacts, False)
                 base += _STRAGGLER_BLOCK_DIM
 
