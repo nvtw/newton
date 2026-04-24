@@ -762,6 +762,12 @@ class SolverPhoenX(SolverBase):
         self._last_dt = float(dt) / max(1, self.world.substeps)
 
         self._export_body_state(state_out)
+        # Sync the canonical joint coordinates. Policies that read
+        # ``state.joint_q`` / ``state.joint_qd`` (e.g. the Anymal PyTorch
+        # rig) need these kept current; eval_ik is the inverse of the
+        # FK that produced ``body_q`` / ``body_qd`` in the first place.
+        if state_out.joint_q is not None and state_out.joint_qd is not None and int(self.model.joint_count) > 0:
+            newton.eval_ik(self.model, state_out, state_out.joint_q, state_out.joint_qd)
 
     def notify_model_changed(self, flags: int) -> None:
         """Refresh internal state when the caller edits ``Model``.
