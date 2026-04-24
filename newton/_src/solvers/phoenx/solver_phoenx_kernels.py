@@ -66,7 +66,7 @@ __all__ = [
 ]
 
 
-_STRAGGLER_BLOCK_DIM: int = 256
+_STRAGGLER_BLOCK_DIM: int = 64
 
 
 @wp.func_native("""
