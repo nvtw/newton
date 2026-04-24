@@ -400,6 +400,52 @@ def _contact_impulse_to_force_kernel(
 
 
 # ---------------------------------------------------------------------------
+# Contact-buffer sizing for the PhoenX path
+# ---------------------------------------------------------------------------
+
+
+def _estimate_rigid_contact_max_phoenx(model) -> int | None:
+    """Tight ``rigid_contact_max`` estimate for the PhoenX solver.
+
+    Returns ``None`` when we can't improve on Newton's built-in
+    heuristic (then the caller falls back to Newton's default).
+
+    Newton's default estimator in
+    :func:`newton._src.sim.collide._estimate_rigid_contact_max` sums
+    ``num_meshes * 20-neighbors * 40-contacts-per-pair`` over **all**
+    mesh shapes -- *including non-colliding visual meshes* (shapes
+    with ``COLLIDE_SHAPES`` cleared). A humanoid model that carries
+    its visual meshes alongside box/capsule approximations therefore
+    gets a budget of ~2.4 M rigid contacts at 4096 worlds even when
+    the collision filter leaves only ~130 K allowed pairs between
+    colliding shapes.
+
+    PhoenX uses the precomputed ``model.shape_contact_pair_count``
+    (the COLLIDE_SHAPES-filtered pair list) multiplied by
+    ``PRIMITIVE_CPP = 5`` (the GJK/MPR narrow-phase per-pair cap) as
+    a 1:1 tight estimate, then applies a 2x safety factor for
+    steady-state jitter / transient broad-phase over-emission. That
+    cuts ~85% of the rigid-contact-related buffer footprint in
+    humanoid-on-plane scenes while staying well above the actual
+    per-step contact count (~10-20 per world).
+
+    When either piece of metadata is missing, return ``None`` so
+    ``CollisionPipeline`` falls back to Newton's default.
+    """
+    pair_count = int(getattr(model, "shape_contact_pair_count", 0) or 0)
+    if pair_count <= 0:
+        return None
+
+    # PhoenX's narrow phase uses the primitive-contacts path for
+    # shape-vs-shape collisions by default; the MESH=40 contacts-per-
+    # pair penalty in Newton's default is an opt-in hydroelastic
+    # upper bound, not what our GJK / MPR pipeline actually produces.
+    PRIMITIVE_CPP = 5
+    SAFETY = 2
+    return max(1000, pair_count * PRIMITIVE_CPP * SAFETY)
+
+
+# ---------------------------------------------------------------------------
 # SolverPhoenX
 # ---------------------------------------------------------------------------
 
@@ -521,7 +567,26 @@ class SolverPhoenX(SolverBase):
             if needs_new_cp:
                 import newton as _newton  # local to keep the import cycle tight
 
-                model._collision_pipeline = _newton.CollisionPipeline(model, contact_matching="sticky")
+                # Override Newton's default ``rigid_contact_max``
+                # estimator with a PhoenX-tight one built from
+                # ``shape_contact_pair_count`` -- the precomputed
+                # COLLIDE_SHAPES-filtered pair count. Newton's default
+                # ignores the flag when counting meshes (which in
+                # models with kept-for-visual-only mesh shapes
+                # inflates the budget ~15x; cost: 1.3 GB of mostly
+                # unused buffers at h1_flat / 4096 worlds). Force
+                # re-estimation by clearing any stale
+                # ``model.rigid_contact_max`` first -- the builder
+                # may have set it from an earlier model.contacts()
+                # call that ran before our solver attached.
+                tight_rcm = _estimate_rigid_contact_max_phoenx(model)
+                if tight_rcm is not None:
+                    model.rigid_contact_max = 0  # bypass "already sized" short-circuit
+                model._collision_pipeline = _newton.CollisionPipeline(
+                    model,
+                    contact_matching="sticky",
+                    rigid_contact_max=tight_rcm,
+                )
                 model._collision_pipeline.contacts()  # forces buffer sizing
         rigid_contact_max = int(model.rigid_contact_max)
         # One constraint column per shape pair covers arbitrary contact
