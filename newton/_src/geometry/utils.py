@@ -702,9 +702,15 @@ def remesh_convex_hull(vertices: np.ndarray, maxhullvert: int = 0, eps: float = 
         - verts: A numpy array of shape (M, 3) containing the vertex positions of the convex hull.
         - faces: A numpy array of shape (K, 3) containing the vertex indices of the triangular faces of the convex hull.
 
+    Raises:
+        ValueError: If ``vertices`` is empty. Empty input has no geometric
+            interpretation; the caller must decide whether to skip the hull
+            computation or supply a fallback rather than having this function
+            fabricate a point at the origin.
+
     Guarantees:
-        - Never raises on degenerate input; always returns a well-formed
-          ``(verts, faces)`` pair with ``M >= 3`` and ``K >= 2``.
+        - Never raises on non-empty degenerate input; always returns a
+          well-formed ``(verts, faces)`` pair with ``M >= 3`` and ``K >= 2``.
         - ``verts`` is always a subset of the true convex hull's vertex set.
         - For full-rank (rank-3) inputs, the output is a closed 3D convex hull
           with outward-facing triangle windings, unchanged from the pre-degeneracy
@@ -735,21 +741,44 @@ def remesh_convex_hull(vertices: np.ndarray, maxhullvert: int = 0, eps: float = 
           differ from what a 3D ``TAn`` pass would have selected (which is
           unavoidable, since Qhull cannot answer the 3D question for flat input).
         - As a last-resort safety net, the full-3D branch retries with Qhull's
-          ``QJ`` (joggle) option if the initial call raises. This perturbs input
-          by ~1e-11 and returns the convex hull of the *perturbed* input.
+          ``QJ`` (joggle) option if the initial call raises. Qhull computes
+          the hull of the perturbed input, but the returned ``verts`` are
+          indexed back into the original ``vertices`` so the output remains
+          a strict subset of the caller's input (any connectivity error of
+          order ~1e-11 from the joggle is absorbed into the face topology).
+
+    Warnings:
+        Rank-0/1/2 degenerate branches emit a ``UserWarning`` describing the
+        detected degeneracy so that callers (e.g. :meth:`Mesh.convex_hull`,
+        :meth:`PointCloud.as_mesh`, :func:`remesh`) don't silently end up
+        with a zero-volume, zero-mass collider. Filter with
+        ``warnings.filterwarnings("ignore", message="remesh_convex_hull: ...")``
+        if the caller has already validated the input.
     """
 
     from scipy.spatial import ConvexHull, QhullError
 
     vertices = np.asarray(vertices, dtype=np.float64)
 
-    # Degenerate: empty or single point.
+    # Empty input has no geometric interpretation: fabricating a point at the
+    # origin would silently inject phantom geometry into the simulation. Let
+    # the caller decide whether to skip or supply a fallback.
     if vertices.shape[0] == 0:
-        return (
-            np.zeros((3, 3), dtype=np.float32),
-            np.array([[0, 1, 2], [0, 2, 1]], dtype=np.int32),
+        raise ValueError("remesh_convex_hull requires at least one input vertex; got an empty array.")
+
+    def _warn_degenerate(rank: str) -> None:
+        # Warn so callers (Mesh.convex_hull, PointCloud.as_mesh, remesh, ...)
+        # don't silently end up with a zero-volume, zero-mass collider.
+        warnings.warn(
+            f"remesh_convex_hull: input point cloud is {rank}; returning a "
+            "zero-volume fallback mesh. Downstream inertia computations will "
+            "produce zero mass / COM / inertia.",
+            UserWarning,
+            stacklevel=2,
         )
+
     if vertices.shape[0] == 1:
+        _warn_degenerate("a single point (rank 0)")
         return _degenerate_hull_point(vertices[0])
 
     # Classify dimensionality via SVD of the centred point cloud.
@@ -764,10 +793,12 @@ def remesh_convex_hull(vertices: np.ndarray, maxhullvert: int = 0, eps: float = 
 
     # Rank 0: all points coincident.
     if s0 <= eps:
+        _warn_degenerate("coincident (rank 0)")
         return _degenerate_hull_point(centre)
 
     # Rank 1: collinear.
     if s1 <= eps * scale:
+        _warn_degenerate("collinear (rank 1)")
         direction = vh[0]
         return _degenerate_hull_line(vertices, direction, centre)
 
@@ -775,6 +806,7 @@ def remesh_convex_hull(vertices: np.ndarray, maxhullvert: int = 0, eps: float = 
     # convex hull, fan-triangulate, and emit each triangle twice with opposite
     # winding so the flat hull is double-sided.
     if s2 <= eps * scale:
+        _warn_degenerate("coplanar (rank 2)")
         axis_u = vh[0]
         axis_v = vh[1]
         points2d = np.stack([centred @ axis_u, centred @ axis_v], axis=1)
@@ -817,8 +849,16 @@ def remesh_convex_hull(vertices: np.ndarray, maxhullvert: int = 0, eps: float = 
         hull = ConvexHull(vertices, qhull_options=qhull_options)
     except QhullError:
         # Retry with joggled input as a last resort before giving up on 3D.
+        # QJ perturbs coordinates in-place (~1e-11); it does not reorder or
+        # drop points, so hull.simplices indices still refer to the same rows
+        # of the original input array. We intentionally pull coordinates from
+        # `vertices` rather than `hull.points` below so the returned verts
+        # remain a strict subset of the caller's input (preserving the
+        # docstring invariant).
         hull = ConvexHull(vertices, qhull_options=qhull_options + " QJ")
-    verts = hull.points.copy().astype(np.float32)
+    # Index into the original (un-joggled) input so that verts is always a
+    # subset of the caller's vertices, even through the QJ retry path.
+    verts = vertices.astype(np.float32)
     faces = hull.simplices.astype(np.int32)
 
     # fix winding order of faces

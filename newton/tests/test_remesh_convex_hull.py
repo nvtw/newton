@@ -22,6 +22,7 @@ directly from ``newton._src.geometry.utils`` — consistent with how
 from __future__ import annotations
 
 import unittest
+import warnings
 
 import numpy as np
 
@@ -149,11 +150,25 @@ class TestRemeshConvexHullFull3D(unittest.TestCase):
 class TestRemeshConvexHullDegenerate(unittest.TestCase):
     """Degeneracy handling added by the diff."""
 
-    def test_empty_input(self):
-        verts, faces = remesh_convex_hull(np.zeros((0, 3), dtype=np.float64))
-        _assert_mesh_shape(self, verts, faces)
-        self.assertEqual(verts.shape, (3, 3))
-        self.assertEqual(faces.shape, (2, 3))
+    def setUp(self):
+        # The degenerate branches intentionally emit a UserWarning; the tests
+        # in this class assert geometry, not the warning (see
+        # TestRemeshConvexHullDegenerateWarnings for that). Silence them here
+        # so they don't pollute test output.
+        self._warn_ctx = warnings.catch_warnings()
+        self._warn_ctx.__enter__()
+        warnings.simplefilter("ignore", UserWarning)
+
+    def tearDown(self):
+        self._warn_ctx.__exit__(None, None, None)
+
+    def test_empty_input_raises(self):
+        # Empty input must raise rather than fabricate a phantom collider
+        # at the origin; callers (Mesh.compute_convex_hull,
+        # ModelBuilder.approximate_meshes, ...) are responsible for deciding
+        # whether to skip or supply a fallback.
+        with self.assertRaises(ValueError):
+            remesh_convex_hull(np.zeros((0, 3), dtype=np.float64))
 
     def test_single_point(self):
         p = np.array([[1.5, -2.25, 0.125]], dtype=np.float64)
@@ -295,6 +310,14 @@ class TestRemeshConvexHullDegenerate(unittest.TestCase):
 class TestRemeshConvexHullNeverRaises(unittest.TestCase):
     """Property-style guarantee: degenerate input must never raise."""
 
+    def setUp(self):
+        self._warn_ctx = warnings.catch_warnings()
+        self._warn_ctx.__enter__()
+        warnings.simplefilter("ignore", UserWarning)
+
+    def tearDown(self):
+        self._warn_ctx.__exit__(None, None, None)
+
     def test_randomized_degenerate_inputs_do_not_raise(self):
         rng = np.random.default_rng(12345)
         cases: list[np.ndarray] = []
@@ -324,8 +347,9 @@ class TestRemeshConvexHullNeverRaises(unittest.TestCase):
             uv = rng.uniform(-2.0, 2.0, size=(n_pts, 2))
             cases.append(origin + uv[:, 0:1] * u + uv[:, 1:2] * v)
 
-        # Edge cases at the boundary of the classifier.
-        cases.append(np.zeros((0, 3)))
+        # Edge cases at the boundary of the classifier. The empty case is
+        # excluded here because it deliberately raises; see
+        # TestRemeshConvexHullDegenerate.test_empty_input_raises.
         cases.append(np.zeros((1, 3)))
         cases.append(np.zeros((5, 3)))
 
@@ -336,6 +360,46 @@ class TestRemeshConvexHullNeverRaises(unittest.TestCase):
                 except Exception as exc:
                     self.fail(f"remesh_convex_hull raised on degenerate case {i}: {exc!r}")
                 _assert_mesh_shape(self, verts, faces)
+
+
+class TestRemeshConvexHullDegenerateWarnings(unittest.TestCase):
+    """Each rank-0/1/2 branch must emit a UserWarning so that callers don't
+    silently end up with a zero-volume, zero-mass collider."""
+
+    def _assert_degenerate_warning(self, pts: np.ndarray) -> None:
+        with self.assertWarnsRegex(UserWarning, r"remesh_convex_hull: .* zero-volume"):
+            remesh_convex_hull(pts)
+
+    def test_single_point_warns(self):
+        self._assert_degenerate_warning(np.array([[1.0, 2.0, 3.0]], dtype=np.float64))
+
+    def test_coincident_warns(self):
+        p = np.array([0.5, -0.25, 1.0], dtype=np.float64)
+        self._assert_degenerate_warning(np.tile(p, (8, 1)))
+
+    def test_collinear_warns(self):
+        xs = np.linspace(-1.0, 1.0, 10)
+        pts = np.stack([xs, np.zeros_like(xs), np.zeros_like(xs)], axis=1)
+        self._assert_degenerate_warning(pts)
+
+    def test_coplanar_warns(self):
+        t = np.linspace(0, 2 * np.pi, num=12, endpoint=False)
+        pts = np.stack([np.cos(t), np.sin(t), np.zeros_like(t)], axis=1)
+        self._assert_degenerate_warning(pts)
+
+    def test_full_rank_does_not_warn(self):
+        # A generic 3D input must not trip any of the degeneracy warnings.
+        rng = np.random.default_rng(7)
+        pts = rng.standard_normal((50, 3))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", UserWarning)
+            remesh_convex_hull(pts)
+        degeneracy_warnings = [w for w in caught if "remesh_convex_hull" in str(w.message)]
+        self.assertEqual(
+            degeneracy_warnings,
+            [],
+            f"full-rank input must not emit a degeneracy warning, got {degeneracy_warnings}",
+        )
 
 
 if __name__ == "__main__":
