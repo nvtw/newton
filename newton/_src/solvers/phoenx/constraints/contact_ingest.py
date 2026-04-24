@@ -27,7 +27,9 @@ import warp as wp
 
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    ContactColumnContainer,
     ContactViews,
+    _col_write_int,
     contact_set_contact_count,
     contact_set_contact_first,
     contact_set_friction,
@@ -38,8 +40,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_BODY2_OFFSET,
     CONSTRAINT_TYPE_CONTACT,
     CONSTRAINT_TYPE_OFFSET,
-    ConstraintContainer,
-    write_int,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -433,10 +433,9 @@ def _contact_pack_columns_kernel(
     shape_material: wp.array[wp.int32],
     materials: wp.array[MaterialData],
     num_contact_columns: wp.array[wp.int32],
-    cid_base: wp.int32,
     default_friction: wp.float32,
     # out
-    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
 ):
     """Materialise one contact column -- one thread per output column.
 
@@ -444,15 +443,19 @@ def _contact_pack_columns_kernel(
     ``num_contact_columns[0]`` so the launch size is captureable in a
     graph independently of the per-step column count.
 
-    Each thread owns output column ``tid``. Looks up its source pair
-    ``p`` via ``pair_source_idx`` and writes the header + range. The
-    contact range is ``[pair_first[p], pair_first[p] + pair_count[p])``
-    -- one column now covers an entire shape pair.
+    Each thread owns output column ``tid`` (local_cid). Writes the
+    header + range. The contact range is ``[pair_first[p],
+    pair_first[p] + pair_count[p])`` -- one column now covers an
+    entire shape pair.
+
+    Writes to :class:`ContactColumnContainer` directly -- contact
+    column headers live in their own narrow storage so the
+    joint-wide :class:`ConstraintContainer` can be sized to just
+    ``num_joints``.
     """
     tid = wp.tid()
     if tid >= num_contact_columns[0]:
         return
-    cid = cid_base + tid
 
     p = pair_source_idx[tid]
     count = pair_count[p]
@@ -473,14 +476,19 @@ def _contact_pack_columns_kernel(
     mu_static = resolve_friction_static_in_kernel(materials, mat_a, mat_b, default_friction)
     mu_dynamic = resolve_friction_in_kernel(materials, mat_a, mat_b, default_friction)
 
-    write_int(constraints, CONSTRAINT_TYPE_OFFSET, cid, CONSTRAINT_TYPE_CONTACT)
-    write_int(constraints, CONSTRAINT_BODY1_OFFSET, cid, b1)
-    write_int(constraints, CONSTRAINT_BODY2_OFFSET, cid, b2)
+    # Header is stored at offsets 0 / 1 / 2 (contract is
+    # ``constraint_type / body1 / body2``). Dispatcher no longer reads
+    # the type tag for contacts (cid-based dispatch) but the slot is
+    # written anyway to preserve the shared header invariant for any
+    # diagnostic / future caller that does.
+    _col_write_int(contact_cols, CONSTRAINT_TYPE_OFFSET, tid, CONSTRAINT_TYPE_CONTACT)
+    _col_write_int(contact_cols, CONSTRAINT_BODY1_OFFSET, tid, b1)
+    _col_write_int(contact_cols, CONSTRAINT_BODY2_OFFSET, tid, b2)
 
-    contact_set_friction(constraints, cid, mu_static)
-    contact_set_friction_dynamic(constraints, cid, mu_dynamic)
-    contact_set_contact_first(constraints, cid, first)
-    contact_set_contact_count(constraints, cid, count)
+    contact_set_friction(contact_cols, tid, mu_static)
+    contact_set_friction_dynamic(contact_cols, tid, mu_dynamic)
+    contact_set_contact_first(contact_cols, tid, first)
+    contact_set_contact_count(contact_cols, tid, count)
 
 
 # ---------------------------------------------------------------------------
@@ -697,9 +705,8 @@ def ingest_contacts(
     contacts,  # newton._src.sim.contacts.Contacts
     shape_body: wp.array,
     num_shapes: int,
-    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
     scratch: IngestScratch,
-    cid_base: int,
     max_contact_columns: int,
     default_friction: float = 0.5,
     device: wp.DeviceLike = None,
@@ -725,11 +732,14 @@ def ingest_contacts(
             signature for API compatibility. The pair-detection step no
             longer packs ``(sa, sb)`` into an int32 key, so there is no
             longer a ``num_shapes * num_shapes < 2**31`` limit.
-        constraints: Shared constraint storage. Contact columns are
-            written at ``cid in [cid_base, cid_base +
-            num_contact_columns)``.
+        contact_cols: Contact column header storage (sized for contacts
+            only). Contact columns are written at local_cid ``[0,
+            num_contact_columns)``; the caller maps these back to the
+            global cid range ``[num_joints, num_joints +
+            num_contact_columns)`` via the fast-tail kernel dispatch
+            (``cid < num_joints`` -> joint, else contact at
+            ``cid - num_joints``).
         scratch: Reusable per-step scratch.
-        cid_base: First cid reserved for contacts.
         max_contact_columns: Hard cap on the number of contact columns
             this step can emit. The cap is now the number of distinct
             shape pairs rather than ``ceil(contact_count / 6)``, so
@@ -869,10 +879,9 @@ def ingest_contacts(
             shape_material,
             materials,
             scratch.num_contact_columns,
-            int(cid_base),
             float(default_friction),
         ],
-        outputs=[constraints],
+        outputs=[contact_cols],
         device=device,
     )
 

@@ -36,16 +36,15 @@ import warp as wp
 
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _STRAGGLER_BLOCK_DIM,
-    _constraint_iterate_fast_tail_kernel,
+    _choose_fast_tail_worlds_per_block,
     _constraint_position_iterate_fast_tail_kernel,
-    _constraint_prepare_fast_tail_kernel,
+    _constraint_prepare_plus_iterate_fast_tail_kernel,
     _constraint_relax_fast_tail_kernel,
 )
 from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums
 
 _MAIN_SOLVE_KERNELS = {
-    _constraint_prepare_fast_tail_kernel.key,
-    _constraint_iterate_fast_tail_kernel.key,
+    _constraint_prepare_plus_iterate_fast_tail_kernel.key,
     _constraint_relax_fast_tail_kernel.key,
     _constraint_position_iterate_fast_tail_kernel.key,
 }
@@ -103,7 +102,7 @@ def _collect_launches(world, *, step_dt: float = 1.0 / 60.0) -> list[dict]:
 class TestPhoenXOneBlockPerWorld(unittest.TestCase):
     """One CUDA block per world across every main-solve kernel."""
 
-    def _assert_one_block_per_world(
+    def _assert_one_warp_per_world(
         self, captured: list[dict], num_worlds: int
     ) -> None:
         # Filter to just the kernels this invariant covers.
@@ -116,43 +115,51 @@ class TestPhoenXOneBlockPerWorld(unittest.TestCase):
                 "step() -- test plumbing broken"
             ),
         )
-        expected_dim = num_worlds * int(_STRAGGLER_BLOCK_DIM)
+        wpb = _choose_fast_tail_worlds_per_block(num_worlds)
+        expected_block_dim = int(_STRAGGLER_BLOCK_DIM) * wpb
+        raw_dim = num_worlds * int(_STRAGGLER_BLOCK_DIM)
+        expected_dim = (
+            (raw_dim + expected_block_dim - 1) // expected_block_dim
+        ) * expected_block_dim
         for c in main:
             self.assertEqual(
                 c["block_dim"],
-                int(_STRAGGLER_BLOCK_DIM),
-                msg=f"{c['kernel']}: block_dim={c['block_dim']} != "
-                f"_STRAGGLER_BLOCK_DIM ({_STRAGGLER_BLOCK_DIM})",
+                expected_block_dim,
+                msg=(
+                    f"{c['kernel']}: block_dim={c['block_dim']} != "
+                    f"{expected_block_dim} (_STRAGGLER_BLOCK_DIM={_STRAGGLER_BLOCK_DIM}"
+                    f" x wpb={wpb})"
+                ),
             )
             self.assertEqual(
                 c["dim"],
                 expected_dim,
                 msg=(
-                    f"{c['kernel']}: dim={c['dim']} != num_worlds "
-                    f"({num_worlds}) * _STRAGGLER_BLOCK_DIM "
-                    f"({_STRAGGLER_BLOCK_DIM}) = {expected_dim} -- the "
-                    "one-block-per-world invariant is broken"
+                    f"{c['kernel']}: dim={c['dim']} != padded "
+                    f"num_worlds ({num_worlds}) * _STRAGGLER_BLOCK_DIM "
+                    f"({_STRAGGLER_BLOCK_DIM}) rounded up to multiple of "
+                    f"{expected_block_dim} = {expected_dim}"
                 ),
             )
 
     def test_one_world(self) -> None:
-        """Single-world baseline: dim == 1 * 256, block_dim == 256."""
+        """Single-world baseline: block_dim = 32 * wpb, dim padded up."""
         world, _ = _build_n_pendulums(num_worlds=1)
         captured = _collect_launches(world)
-        self._assert_one_block_per_world(captured, num_worlds=1)
+        self._assert_one_warp_per_world(captured, num_worlds=1)
 
     def test_eight_worlds(self) -> None:
-        """Every main-solve kernel dispatches 8 blocks of 256 threads."""
+        """Every main-solve kernel packs 8 worlds into the heuristic's wpb."""
         world, _ = _build_n_pendulums(num_worlds=8)
         captured = _collect_launches(world)
-        self._assert_one_block_per_world(captured, num_worlds=8)
+        self._assert_one_warp_per_world(captured, num_worlds=8)
 
     def test_sixtyfour_worlds(self) -> None:
         """Scales cleanly at 64 worlds too (catches a hypothetical
         max_blocks clamp regression)."""
         world, _ = _build_n_pendulums(num_worlds=64)
         captured = _collect_launches(world)
-        self._assert_one_block_per_world(captured, num_worlds=64)
+        self._assert_one_warp_per_world(captured, num_worlds=64)
 
     def test_all_main_kernels_observed(self) -> None:
         """Prepare, iterate, relax, and position-iterate must all
@@ -167,14 +174,9 @@ class TestPhoenXOneBlockPerWorld(unittest.TestCase):
         # runs only when position_iterations > 0 (default 0), so
         # we don't require it here.
         self.assertIn(
-            _constraint_prepare_fast_tail_kernel.key,
+            _constraint_prepare_plus_iterate_fast_tail_kernel.key,
             kernels_seen,
-            msg="prepare kernel did not fire -- solver pipeline regressed",
-        )
-        self.assertIn(
-            _constraint_iterate_fast_tail_kernel.key,
-            kernels_seen,
-            msg="iterate kernel did not fire -- solver pipeline regressed",
+            msg="fused prepare+iterate kernel did not fire -- solver pipeline regressed",
         )
         self.assertIn(
             _constraint_relax_fast_tail_kernel.key,

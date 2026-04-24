@@ -30,16 +30,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
     ConstraintBodies,
-    ConstraintContainer,
     assert_constraint_header,
     constraint_bodies_make,
-    constraint_get_type,
     pd_coefficients,
-    read_float,
-    read_int,
     soft_constraint_coefficients,
-    write_float,
-    write_int,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -78,12 +72,19 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
-from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
+from newton._src.solvers.phoenx.helpers.data_packing import (
+    dword_offset_of,
+    num_dwords,
+    reinterpret_float_as_int,
+    reinterpret_int_as_float,
+)
 
 __all__ = [
     "CONTACT_DWORDS",
+    "ContactColumnContainer",
     "ContactConstraintData",
     "ContactViews",
+    "contact_column_container_zeros",
     "contact_get_body1",
     "contact_get_body2",
     "contact_get_contact_count",
@@ -176,11 +177,92 @@ _OFF_CONTACT_FIRST = wp.constant(dword_offset_of(ContactConstraintData, "contact
 _OFF_CONTACT_COUNT = wp.constant(dword_offset_of(ContactConstraintData, "contact_count"))
 
 
-#: Total dword count of one contact constraint column. Used by
-#: :class:`ConstraintContainer` to size the shared storage's row
-#: dimension. The per-pair layout drops every per-slot field so this
-#: is now just the fixed header footprint.
+#: Total dword count of one contact constraint column. The per-pair
+#: layout drops every per-slot field so this is now just the fixed
+#: header footprint -- 7 dwords, compared with the 154-dword ADBS
+#: joint header. Contact columns therefore live in their own
+#: narrow-width :class:`ContactColumnContainer` (below) rather than
+#: the joint-wide :class:`ConstraintContainer`, which is how the
+#: contact column storage stays ~22x smaller than the joints'.
 CONTACT_DWORDS: int = num_dwords(ContactConstraintData)
+
+
+# ---------------------------------------------------------------------------
+# ContactColumnContainer -- dedicated storage for the contact column header
+# ---------------------------------------------------------------------------
+#
+# Before this split the solver allocated one wide ``ConstraintContainer``
+# at shape ``(max(ADBS_DWORDS, CONTACT_DWORDS), num_joints +
+# max_contact_columns)`` -- 154 dwords per cid for every contact even
+# though contacts only use 7 of them. At h1_flat 4096 that was 1.4 GB
+# of mostly-zero padding.
+#
+# We keep the ConstraintContainer (joint-wide) for joint cids and add
+# this narrow sibling for contact cids. Contact column cids are local
+# to this container: ``local_cid = global_cid - num_joints``. The outer
+# fast-tail kernels do that subtraction once at the dispatch branch.
+#
+# Layout and accessor style mirror :class:`ConstraintContainer`: one
+# ``wp.array2d[wp.float32]`` of shape ``(CONTACT_DWORDS, num_columns)``
+# with the cid on the inner contiguous axis, and one ``wp.func``
+# per field.
+
+
+@wp.struct
+class ContactColumnContainer:
+    """Per-shape-pair column header storage for contacts.
+
+    Shape ``(CONTACT_DWORDS=7, num_columns)``. Each column occupies
+    7 dwords: type tag (unused but kept for header-contract parity),
+    body1, body2, friction, friction_dynamic, contact_first,
+    contact_count. Per-contact solver state (lambdas, lever arms,
+    effective masses, bias) lives in :class:`ContactContainer` keyed
+    by the individual contact's sorted-buffer index ``k``.
+    """
+
+    data: wp.array2d[wp.float32]
+
+
+def contact_column_container_zeros(
+    num_columns: int,
+    device: wp.DeviceLike = None,
+) -> ContactColumnContainer:
+    """Allocate a zero-initialised :class:`ContactColumnContainer`.
+
+    Args:
+        num_columns: Capacity (= ``max_contact_columns``). Contact
+            cid ``global_cid`` in ``[num_joints, num_joints + num_columns)``
+            maps to ``local_cid = global_cid - num_joints`` here.
+        device: Warp device.
+    """
+    c = ContactColumnContainer()
+    c.data = wp.zeros((int(CONTACT_DWORDS), int(num_columns)), dtype=wp.float32, device=device)
+    return c
+
+
+# Column-local read / write helpers, analogous to the
+# ``read_int / read_float / write_int / write_float`` helpers in
+# :mod:`constraint_container` but keyed by ``local_cid`` into
+# :class:`ContactColumnContainer`. Kept as module-private so kernels
+# never accidentally hit the wide joint container for contact data.
+@wp.func
+def _col_read_int(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32) -> wp.int32:
+    return reinterpret_float_as_int(c.data[off, local_cid])
+
+
+@wp.func
+def _col_write_int(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32, v: wp.int32):
+    c.data[off, local_cid] = reinterpret_int_as_float(v)
+
+
+@wp.func
+def _col_read_float(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32) -> wp.float32:
+    return c.data[off, local_cid]
+
+
+@wp.func
+def _col_write_float(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32, v: wp.float32):
+    c.data[off, local_cid] = v
 
 
 # ---------------------------------------------------------------------------
@@ -296,63 +378,63 @@ def contact_views_make(
 
 
 @wp.func
-def contact_get_body1(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
-    return read_int(c, _OFF_BODY1, cid)
+def contact_get_body1(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_BODY1, local_cid)
 
 
 @wp.func
-def contact_set_body1(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
-    write_int(c, _OFF_BODY1, cid, v)
+def contact_set_body1(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_BODY1, local_cid, v)
 
 
 @wp.func
-def contact_get_body2(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
-    return read_int(c, _OFF_BODY2, cid)
+def contact_get_body2(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_BODY2, local_cid)
 
 
 @wp.func
-def contact_set_body2(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
-    write_int(c, _OFF_BODY2, cid, v)
+def contact_set_body2(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_BODY2, local_cid, v)
 
 
 @wp.func
-def contact_get_friction(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_FRICTION, cid)
+def contact_get_friction(c: ContactColumnContainer, local_cid: wp.int32) -> wp.float32:
+    return _col_read_float(c, _OFF_FRICTION, local_cid)
 
 
 @wp.func
-def contact_set_friction(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_FRICTION, cid, v)
+def contact_set_friction(c: ContactColumnContainer, local_cid: wp.int32, v: wp.float32):
+    _col_write_float(c, _OFF_FRICTION, local_cid, v)
 
 
 @wp.func
-def contact_get_friction_dynamic(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_FRICTION_DYNAMIC, cid)
+def contact_get_friction_dynamic(c: ContactColumnContainer, local_cid: wp.int32) -> wp.float32:
+    return _col_read_float(c, _OFF_FRICTION_DYNAMIC, local_cid)
 
 
 @wp.func
-def contact_set_friction_dynamic(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_FRICTION_DYNAMIC, cid, v)
+def contact_set_friction_dynamic(c: ContactColumnContainer, local_cid: wp.int32, v: wp.float32):
+    _col_write_float(c, _OFF_FRICTION_DYNAMIC, local_cid, v)
 
 
 @wp.func
-def contact_get_contact_first(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
-    return read_int(c, _OFF_CONTACT_FIRST, cid)
+def contact_get_contact_first(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_CONTACT_FIRST, local_cid)
 
 
 @wp.func
-def contact_set_contact_first(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
-    write_int(c, _OFF_CONTACT_FIRST, cid, v)
+def contact_set_contact_first(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_CONTACT_FIRST, local_cid, v)
 
 
 @wp.func
-def contact_get_contact_count(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
-    return read_int(c, _OFF_CONTACT_COUNT, cid)
+def contact_get_contact_count(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_CONTACT_COUNT, local_cid)
 
 
 @wp.func
-def contact_set_contact_count(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
-    write_int(c, _OFF_CONTACT_COUNT, cid, v)
+def contact_set_contact_count(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_CONTACT_COUNT, local_cid, v)
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +476,7 @@ def _effective_mass_scalar(
 
 @wp.func
 def contact_prepare_for_iteration_at(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
@@ -687,7 +769,7 @@ def contact_prepare_for_iteration_at(
 
 @wp.func
 def contact_iterate_at(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
@@ -881,7 +963,7 @@ def contact_iterate_at(
 
 @wp.func
 def contact_position_iterate_at(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
@@ -1000,7 +1082,7 @@ def contact_position_iterate_at(
 
 @wp.func
 def contact_prepare_for_iteration(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
@@ -1015,7 +1097,7 @@ def contact_prepare_for_iteration(
 
 @wp.func
 def contact_iterate(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
@@ -1031,7 +1113,7 @@ def contact_iterate(
 
 @wp.func
 def contact_iterate_at_multi(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
@@ -1172,7 +1254,7 @@ def contact_iterate_at_multi(
 
 @wp.func
 def contact_iterate_multi(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
     bodies: BodyContainer,
     idt: wp.float32,
@@ -1191,7 +1273,7 @@ def contact_iterate_multi(
 
 @wp.func
 def contact_position_iterate(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
     bodies: BodyContainer,
     cc: ContactContainer,
@@ -1209,7 +1291,7 @@ def contact_position_iterate(
 
 @wp.func
 def contact_world_wrench_at(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
     base_offset: wp.int32,
     idt: wp.float32,
@@ -1245,7 +1327,7 @@ def contact_world_wrench_at(
 
 @wp.func
 def contact_world_wrench(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
     idt: wp.float32,
     cc: ContactContainer,
@@ -1282,32 +1364,27 @@ def contact_per_k_wrench_at(
 
 @wp.kernel(enable_backward=False)
 def contact_per_contact_wrench_kernel(
-    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
     cc: ContactContainer,
     contacts: ContactViews,
-    cid_base: wp.int32,
-    cid_capacity: wp.int32,
+    num_active_columns: wp.int32,
     idt: wp.float32,
     # out
     out: wp.array[wp.spatial_vector],
 ):
     """Scatter per-contact wrenches into a per-rigid-contact output array.
 
-    Launch dim must be at least ``cid_capacity - cid_base`` (one
-    thread per potential contact column). Each thread walks the
+    Launch dim = ``max_contact_columns`` (one thread per contact
+    column slot). Each thread walks the
     ``[contact_first, contact_first + contact_count)`` range and writes
     ``out[k] = spatial_vector(force, torque)`` for every contact ``k``
-    it covers. Contacts outside any active column retain the caller's
-    zero-fill.
+    it covers. Slots outside ``[0, num_active_columns)`` early-out.
     """
     tid = wp.tid()
-    cid = cid_base + tid
-    if cid >= cid_capacity:
+    if tid >= num_active_columns:
         return
-    if constraint_get_type(constraints, cid) != CONSTRAINT_TYPE_CONTACT:
-        return
-    contact_first = contact_get_contact_first(constraints, cid)
-    contact_count = contact_get_contact_count(constraints, cid)
+    contact_first = contact_get_contact_first(contact_cols, tid)
+    contact_count = contact_get_contact_count(contact_cols, tid)
     for i in range(contact_count):
         k = contact_first + i
         f, tau = contact_per_k_wrench_at(k, idt, cc)
@@ -1316,11 +1393,10 @@ def contact_per_contact_wrench_kernel(
 
 @wp.kernel(enable_backward=False)
 def contact_pair_wrench_kernel(
-    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
     cc: ContactContainer,
     contacts: ContactViews,
-    cid_base: wp.int32,
-    cid_capacity: wp.int32,
+    num_active_columns: wp.int32,
     idt: wp.float32,
     # out
     wrenches: wp.array[wp.spatial_vector],
@@ -1330,25 +1406,22 @@ def contact_pair_wrench_kernel(
 ):
     """Per-column summary: total wrench + ``(body1, body2)`` + contact count.
 
-    One output slot ``i = cid - cid_base`` per contact column. The
-    per-pair design means one column now covers the whole shape pair,
-    so the per-column output is already the per-pair wrench -- no
-    post-pass summation across adjacent columns needed.
+    One output slot per contact column. The per-pair design means one
+    column now covers the whole shape pair, so the per-column output
+    is already the per-pair wrench -- no post-pass summation across
+    adjacent columns needed.
     """
     tid = wp.tid()
-    cid = cid_base + tid
-    if cid >= cid_capacity:
-        return
-    if constraint_get_type(constraints, cid) != CONSTRAINT_TYPE_CONTACT:
+    if tid >= num_active_columns:
         wrenches[tid] = wp.spatial_vector(wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0))
         body1[tid] = -1
         body2[tid] = -1
         contact_count_out[tid] = 0
         return
-    b1 = contact_get_body1(constraints, cid)
-    b2 = contact_get_body2(constraints, cid)
-    contact_first = contact_get_contact_first(constraints, cid)
-    count = contact_get_contact_count(constraints, cid)
+    b1 = contact_get_body1(contact_cols, tid)
+    b2 = contact_get_body2(contact_cols, tid)
+    contact_first = contact_get_contact_first(contact_cols, tid)
+    count = contact_get_contact_count(contact_cols, tid)
     force = wp.vec3f(0.0, 0.0, 0.0)
     torque = wp.vec3f(0.0, 0.0, 0.0)
     for i in range(count):
@@ -1413,12 +1486,11 @@ def contact_per_k_error_at(
 
 @wp.kernel(enable_backward=False)
 def contact_per_contact_error_kernel(
-    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
     bodies: BodyContainer,
     cc: ContactContainer,
     contacts: ContactViews,
-    cid_base: wp.int32,
-    cid_capacity: wp.int32,
+    num_active_columns: wp.int32,
     # out
     out: wp.array[wp.vec3f],
 ):
@@ -1429,16 +1501,13 @@ def contact_per_contact_error_kernel(
     contact ``k`` in every active contact column.
     """
     tid = wp.tid()
-    cid = cid_base + tid
-    if cid >= cid_capacity:
+    if tid >= num_active_columns:
         return
-    if constraint_get_type(constraints, cid) != CONSTRAINT_TYPE_CONTACT:
-        return
-    b1 = contact_get_body1(constraints, cid)
-    b2 = contact_get_body2(constraints, cid)
+    b1 = contact_get_body1(contact_cols, tid)
+    b2 = contact_get_body2(contact_cols, tid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_first = contact_get_contact_first(constraints, cid)
-    contact_count = contact_get_contact_count(constraints, cid)
+    contact_first = contact_get_contact_first(contact_cols, tid)
+    contact_count = contact_get_contact_count(contact_cols, tid)
     for i in range(contact_count):
         k = contact_first + i
         out[k] = contact_per_k_error_at(k, bodies, body_pair, cc, contacts)
@@ -1446,7 +1515,7 @@ def contact_per_contact_error_kernel(
 
 @wp.func
 def contact_world_error_at(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
     base_offset: wp.int32,
 ) -> wp.spatial_vector:
@@ -1463,7 +1532,7 @@ def contact_world_error_at(
 
 @wp.func
 def contact_world_error(
-    constraints: ConstraintContainer,
+    constraints: ContactColumnContainer,
     cid: wp.int32,
 ) -> wp.spatial_vector:
     return contact_world_error_at(constraints, cid, 0)

@@ -36,7 +36,9 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     CONTACT_DWORDS,
+    ContactColumnContainer,
     ContactViews,
+    contact_column_container_zeros,
     contact_pair_wrench_kernel,
     contact_per_contact_error_kernel,
     contact_per_contact_wrench_kernel,
@@ -71,9 +73,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
-    _constraint_iterate_fast_tail_kernel,
     _constraint_position_iterate_fast_tail_kernel,
-    _constraint_prepare_fast_tail_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
     _constraint_relax_fast_tail_kernel,
     _constraints_to_elements_kernel,
@@ -412,11 +412,28 @@ class PhoenXWorld:
         )
 
         # ----- Contact infrastructure -----
-        # ContactContainer is keyed by contact index ``k``, so it
-        # sizes to ``rigid_contact_max``.
+        # Contact state lives in TWO separate containers, both sized for
+        # just contacts (not joints), so the joint-wide constraint
+        # buffer doesn't allocate padding for contact columns.
+        #
+        #   :class:`ContactContainer`        -- keyed by contact index
+        #     ``k`` (into the rigid_contact_max buffer). Holds per-
+        #     contact warm-start (lambdas), prev-step lambdas, and
+        #     per-substep derived scratch (r1/r2, eff_n, bias, ...).
+        #
+        #   :class:`ContactColumnContainer`  -- keyed by local contact
+        #     column cid ``[0, max_contact_columns)``. Holds the 7-dword
+        #     column header (type, body1, body2, friction,
+        #     friction_dynamic, contact_first, contact_count). Split
+        #     out so ``ConstraintContainer`` stays joint-sized (154
+        #     dwords) without allocating 147 padding dwords per contact
+        #     column -- cut ~1.3 GB at h1_flat 4096 worlds.
         if self.max_contact_columns > 0:
             self._contact_container: ContactContainer = contact_container_zeros(
                 self.rigid_contact_max, device=self.device
+            )
+            self._contact_cols: ContactColumnContainer = contact_column_container_zeros(
+                self.max_contact_columns, device=self.device
             )
             self._ingest_scratch: IngestScratch | None = IngestScratch(
                 rigid_contact_max=self.rigid_contact_max,
@@ -429,6 +446,7 @@ class PhoenXWorld:
             self._cid_of_contact_prev = wp.full(self.rigid_contact_max, -1, dtype=wp.int32, device=self.device)
         else:
             self._contact_container = contact_container_zeros(1, device=self.device)
+            self._contact_cols = contact_column_container_zeros(1, device=self.device)
             self._ingest_scratch = None
             self._cid_of_contact_cur = None
             self._cid_of_contact_prev = None
@@ -580,12 +598,18 @@ class PhoenXWorld:
 
     @staticmethod
     def required_constraint_dwords(num_joints: int) -> int:
-        """Minimum per-constraint dword width the
-        :class:`ConstraintContainer` must carry.
-        ``CONTACT_DWORDS`` if contacts-only; ``max(CONTACT_DWORDS,
-        ADBS_DWORDS)`` when any joints are reserved."""
+        """Dword width of the joint-only :class:`ConstraintContainer`.
+
+        Contacts now live in a dedicated narrow
+        :class:`ContactColumnContainer`; the
+        :class:`ConstraintContainer` is sized strictly for joints and
+        only needs the 154-dword ADBS header when any joints are
+        reserved (otherwise the minimal ``CONTACT_DWORDS = 7`` is
+        enough to satisfy the shared header contract on the unused
+        single-row allocation).
+        """
         if int(num_joints) > 0:
-            return max(int(CONTACT_DWORDS), int(ADBS_DWORDS))
+            return int(ADBS_DWORDS)
         return int(CONTACT_DWORDS)
 
     @staticmethod
@@ -594,11 +618,17 @@ class PhoenXWorld:
         max_contact_columns: int,
         device: wp.context.Devicelike = None,
     ) -> ConstraintContainer:
-        """Factory for a correctly-sized :class:`ConstraintContainer`
-        with capacity ``num_joints + max_contact_columns`` and the
-        required dword width (see
-        :meth:`required_constraint_dwords`)."""
-        cap = max(1, int(num_joints) + int(max_contact_columns))
+        """Factory for a correctly-sized joint-only
+        :class:`ConstraintContainer`.
+
+        Capacity is ``num_joints`` (not ``num_joints +
+        max_contact_columns`` as before): contact columns moved to
+        :class:`ContactColumnContainer` to avoid allocating the wide
+        ADBS header for every contact slot. ``max_contact_columns``
+        is kept in the signature for API compatibility but ignored.
+        """
+        _ = max_contact_columns  # reserved for API compat; contacts live elsewhere
+        cap = max(1, int(num_joints))
         return constraint_container_zeros(
             num_constraints=cap,
             num_dwords=PhoenXWorld.required_constraint_dwords(num_joints),
@@ -919,9 +949,8 @@ class PhoenXWorld:
             contacts=contacts,
             shape_body=shape_body,
             num_shapes=self.num_shapes,
-            constraints=self.constraints,
+            contact_cols=self._contact_cols,
             scratch=self._ingest_scratch,
-            cid_base=self.num_joints,
             max_contact_columns=self.max_contact_columns,
             default_friction=self.default_friction,
             device=self.device,
@@ -979,8 +1008,10 @@ class PhoenXWorld:
             dim=self._constraint_capacity,
             inputs=[
                 self.constraints,
+                self._contact_cols,
                 self.bodies,
                 self._num_active_constraints,
+                wp.int32(self.num_joints),
                 self._elements,
             ],
             device=self.device,
@@ -1178,6 +1209,7 @@ class PhoenXWorld:
             block_dim=self._fast_tail_block_dim(),
             inputs=[
                 self.constraints,
+                self._contact_cols,
                 self.bodies,
                 idt,
                 self._world_element_ids_by_color,
@@ -1203,7 +1235,7 @@ class PhoenXWorld:
             dim=self._fast_tail_launch_dim(),
             block_dim=self._fast_tail_block_dim(),
             inputs=[
-                self.constraints,
+                self._contact_cols,
                 self.bodies,
                 self._world_element_ids_by_color,
                 self._world_color_starts,
@@ -1254,32 +1286,6 @@ class PhoenXWorld:
         raw = self.num_worlds * _STRAGGLER_BLOCK_DIM
         return ((raw + block_dim - 1) // block_dim) * block_dim
 
-    def _launch_fast_prepare(
-        self,
-        idt: wp.float32,
-        contact_views: ContactViews,
-    ) -> None:
-        """Launch the prepare kernel, one warp per world."""
-        wp.launch(
-            _constraint_prepare_fast_tail_kernel,
-            dim=self._fast_tail_launch_dim(),
-            block_dim=self._fast_tail_block_dim(),
-            inputs=[
-                self.constraints,
-                self.bodies,
-                idt,
-                self._world_element_ids_by_color,
-                self._world_color_starts,
-                self._world_csr_offsets,
-                self._world_num_colors,
-                self._contact_container,
-                contact_views,
-                wp.int32(self.num_worlds),
-                wp.int32(self.num_joints),
-            ],
-            device=self.device,
-        )
-
     def _launch_fast_iter(
         self,
         kernel,
@@ -1295,6 +1301,7 @@ class PhoenXWorld:
             block_dim=self._fast_tail_block_dim(),
             inputs=[
                 self.constraints,
+                self._contact_cols,
                 self.bodies,
                 idt,
                 self._world_element_ids_by_color,
@@ -1406,8 +1413,10 @@ class PhoenXWorld:
             dim=self._constraint_capacity,
             inputs=[
                 self.constraints,
+                self._contact_cols,
                 self.bodies,
                 wp.int32(self._constraint_capacity),
+                wp.int32(self.num_joints),
                 idt,
                 self._contact_container,
                 contact_views,
@@ -1427,8 +1436,10 @@ class PhoenXWorld:
             dim=self._constraint_capacity,
             inputs=[
                 self.constraints,
+                self._contact_cols,
                 self.bodies,
                 wp.int32(self._constraint_capacity),
+                wp.int32(self.num_joints),
             ],
             outputs=[out],
             device=self.device,
@@ -1455,11 +1466,10 @@ class PhoenXWorld:
             contact_per_contact_wrench_kernel,
             dim=self.max_contact_columns,
             inputs=[
-                self.constraints,
+                self._contact_cols,
                 self._contact_container,
                 self._contact_views,
-                wp.int32(0),
-                wp.int32(self._constraint_capacity),
+                wp.int32(self.max_contact_columns),
                 idt,
             ],
             outputs=[out],
@@ -1487,11 +1497,10 @@ class PhoenXWorld:
             contact_pair_wrench_kernel,
             dim=self.max_contact_columns,
             inputs=[
-                self.constraints,
+                self._contact_cols,
                 self._contact_container,
                 self._contact_views,
-                wp.int32(0),
-                wp.int32(self._constraint_capacity),
+                wp.int32(self.max_contact_columns),
                 idt,
             ],
             outputs=[wrenches, body1, body2, contact_count],
@@ -1510,12 +1519,11 @@ class PhoenXWorld:
             contact_per_contact_error_kernel,
             dim=self.max_contact_columns,
             inputs=[
-                self.constraints,
+                self._contact_cols,
                 self.bodies,
                 self._contact_container,
                 self._contact_views,
-                wp.int32(0),
-                wp.int32(self._constraint_capacity),
+                wp.int32(self.max_contact_columns),
             ],
             outputs=[out],
             device=self.device,

@@ -25,7 +25,10 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     actuated_double_ball_socket_world_wrench,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    ContactColumnContainer,
     ContactViews,
+    contact_get_body1,
+    contact_get_body2,
     contact_iterate,
     contact_iterate_multi,
     contact_position_iterate,
@@ -34,12 +37,9 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_world_wrench,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
-    CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
-    CONSTRAINT_TYPE_CONTACT,
     ConstraintContainer,
     constraint_get_body1,
     constraint_get_body2,
-    constraint_get_type,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
@@ -54,9 +54,8 @@ __all__ = [
     "_choose_fast_tail_worlds_per_block",
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
-    "_constraint_iterate_fast_tail_kernel",
     "_constraint_position_iterate_fast_tail_kernel",
-    "_constraint_prepare_fast_tail_kernel",
+    "_constraint_prepare_plus_iterate_fast_tail_kernel",
     "_constraint_relax_fast_tail_kernel",
     "_constraints_to_elements_kernel",
     "_count_elements_per_world_kernel",
@@ -582,113 +581,9 @@ def _per_world_jp_coloring_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _constraint_iterate_fast_tail_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    world_element_ids_by_color: wp.array[wp.int32],
-    world_color_starts: wp.array2d[wp.int32],
-    world_csr_offsets: wp.array[wp.int32],
-    world_num_colors: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-    num_iterations: wp.int32,
-    num_worlds: wp.int32,
-    # First cid assigned to a contact column. Joints occupy
-    # ``[0, num_joints)``, contacts ``[num_joints, capacity)``, so the
-    # dispatch branch can be a cheap register compare instead of a
-    # per-cid ``constraint_get_type`` memory read.
-    num_joints: wp.int32,
-):
-    """Main-solve dispatcher: ``num_iterations`` PGS sweeps per world,
-    positional bias ON.
-
-    One warp per world; worlds don't share bodies, so per-colour sync is
-    warp-local (``__syncwarp``) and several worlds can cohabit one
-    128-thread block without risking cross-world ``__syncthreads``
-    deadlocks when their ``num_colors`` differ.
-    """
-    tid = wp.tid()
-    local_tid = tid % _STRAGGLER_BLOCK_DIM
-    world_id = tid / _STRAGGLER_BLOCK_DIM
-    # Padding lanes (launch dim rounded up to the block size) fall past
-    # the world count -- early-out before any OOB reads.
-    if world_id >= num_worlds:
-        return
-
-    n_colors = world_num_colors[world_id]
-    world_base = world_csr_offsets[world_id]
-
-    it = wp.int32(0)
-    while it < num_iterations:
-        c = wp.int32(0)
-        while c < n_colors:
-            start = world_base + world_color_starts[world_id, c]
-            end = world_base + world_color_starts[world_id, c + 1]
-            count = end - start
-
-            base = local_tid
-            while base < count:
-                cid = world_element_ids_by_color[start + base]
-                if cid < num_joints:
-                    actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
-                else:
-                    contact_iterate(constraints, cid, bodies, idt, cc, contacts, True)
-                base += _STRAGGLER_BLOCK_DIM
-
-            _sync_warp()
-            c += 1
-
-        it += 1
-
-
-@wp.kernel(enable_backward=False)
-def _constraint_prepare_fast_tail_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    world_element_ids_by_color: wp.array[wp.int32],
-    world_color_starts: wp.array2d[wp.int32],
-    world_csr_offsets: wp.array[wp.int32],
-    world_num_colors: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-    num_worlds: wp.int32,
-    num_joints: wp.int32,
-):
-    """Prepare dispatcher: one sweep per world. Computes effective
-    masses, velocity bias, applies warm-start impulse."""
-    tid = wp.tid()
-    local_tid = tid % _STRAGGLER_BLOCK_DIM
-    world_id = tid / _STRAGGLER_BLOCK_DIM
-    if world_id >= num_worlds:
-        return
-
-    n_colors = world_num_colors[world_id]
-    world_base = world_csr_offsets[world_id]
-
-    c = wp.int32(0)
-    while c < n_colors:
-        start = world_base + world_color_starts[world_id, c]
-        end = world_base + world_color_starts[world_id, c + 1]
-        count = end - start
-
-        base = local_tid
-        while base < count:
-            cid = world_element_ids_by_color[start + base]
-            if cid < num_joints:
-                actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-            else:
-                contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
-            base += _STRAGGLER_BLOCK_DIM
-
-        _sync_warp()
-        c += 1
-
-
-@wp.kernel(enable_backward=False)
 def _constraint_prepare_plus_iterate_fast_tail_kernel(
     constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
     bodies: BodyContainer,
     idt: wp.float32,
     world_element_ids_by_color: wp.array[wp.int32],
@@ -738,7 +633,9 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
             if cid < num_joints:
                 actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
             else:
-                contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
+                contact_prepare_for_iteration(
+                    contact_cols, cid - num_joints, bodies, idt, cc, contacts
+                )
             base += _STRAGGLER_BLOCK_DIM
 
         _sync_warp()
@@ -773,7 +670,7 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
                     )
                 else:
                     contact_iterate_multi(
-                        constraints, cid, bodies, idt, cc, contacts, True, inner_sweeps
+                        contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps
                     )
                 base += _STRAGGLER_BLOCK_DIM
 
@@ -785,7 +682,7 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
 
 @wp.kernel(enable_backward=False)
 def _constraint_position_iterate_fast_tail_kernel(
-    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
     bodies: BodyContainer,
     world_element_ids_by_color: wp.array[wp.int32],
     world_color_starts: wp.array2d[wp.int32],
@@ -826,7 +723,7 @@ def _constraint_position_iterate_fast_tail_kernel(
                 # Only contact cids participate in XPBD position drift;
                 # joint cids at ``cid < num_joints`` are skipped.
                 if cid >= num_joints:
-                    contact_position_iterate(constraints, cid, bodies, cc)
+                    contact_position_iterate(contact_cols, cid - num_joints, bodies, cc)
                 base += _STRAGGLER_BLOCK_DIM
 
             _sync_warp()
@@ -838,6 +735,7 @@ def _constraint_position_iterate_fast_tail_kernel(
 @wp.kernel(enable_backward=False)
 def _constraint_relax_fast_tail_kernel(
     constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
     bodies: BodyContainer,
     idt: wp.float32,
     world_element_ids_by_color: wp.array[wp.int32],
@@ -882,7 +780,7 @@ def _constraint_relax_fast_tail_kernel(
                 )
             else:
                 contact_iterate_multi(
-                    constraints, cid, bodies, idt, cc, contacts, False, num_iterations
+                    contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations
                 )
             base += _STRAGGLER_BLOCK_DIM
 
@@ -893,8 +791,10 @@ def _constraint_relax_fast_tail_kernel(
 @wp.kernel(enable_backward=False)
 def _constraints_to_elements_kernel(
     constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
     bodies: BodyContainer,
     num_constraints: wp.array[wp.int32],
+    num_joints: wp.int32,
     elements: wp.array[ElementInteractionData],
 ):
     """Project every active constraint into ``ElementInteractionData``.
@@ -903,19 +803,23 @@ def _constraints_to_elements_kernel(
     bodies get collapsed to ``-1`` and the dynamic body (if any) is
     compacted to slot 0.
 
-    Launched at ``dim = constraint_capacity`` because the active count
-    is device-held; inactive lanes early-out without writing. Every
-    downstream reader (``partitioning_adjacency_{count,store}``,
-    ``_count_elements_per_world``, ``_scatter_elements_to_worlds``,
-    ``_per_world_jp_coloring``) gates on ``num_active_constraints``,
-    so tail slots are never read and don't need a sentinel value.
+    Joint cids (``tid < num_joints``) read from the joint-wide
+    :class:`ConstraintContainer`; contact cids read from the narrow
+    :class:`ContactColumnContainer` at local offset
+    ``tid - num_joints``. Launched at ``dim = constraint_capacity``
+    because the active count is device-held; inactive lanes early-out.
     """
     tid = wp.tid()
     n = num_constraints[0]
     if tid >= n:
         return
-    b1 = constraint_get_body1(constraints, tid)
-    b2 = constraint_get_body2(constraints, tid)
+    if tid < num_joints:
+        b1 = constraint_get_body1(constraints, tid)
+        b2 = constraint_get_body2(constraints, tid)
+    else:
+        local_cid = tid - num_joints
+        b1 = contact_get_body1(contact_cols, local_cid)
+        b2 = contact_get_body2(contact_cols, local_cid)
     if b1 >= 0 and bodies.inverse_mass[b1] == 0.0:
         b1 = -1
     if b2 >= 0 and bodies.inverse_mass[b2] == 0.0:
@@ -932,8 +836,10 @@ def _constraints_to_elements_kernel(
 @wp.kernel(enable_backward=False)
 def _constraint_gather_wrenches_kernel(
     constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
     bodies: BodyContainer,
     num_constraints: wp.int32,
+    num_joints: wp.int32,
     idt: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
@@ -944,21 +850,24 @@ def _constraint_gather_wrenches_kernel(
     cid = wp.tid()
     if cid >= num_constraints:
         return
-    t = constraint_get_type(constraints, cid)
     force = wp.vec3f(0.0, 0.0, 0.0)
     torque = wp.vec3f(0.0, 0.0, 0.0)
-    if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+    if cid < num_joints:
         force, torque = actuated_double_ball_socket_world_wrench(constraints, cid, idt)
-    elif t == CONSTRAINT_TYPE_CONTACT:
-        force, torque = contact_world_wrench(constraints, cid, idt, cc, contacts)
+    else:
+        force, torque = contact_world_wrench(
+            contact_cols, cid - num_joints, idt, cc, contacts
+        )
     out[cid] = wp.spatial_vector(force, torque)
 
 
 @wp.kernel(enable_backward=False)
 def _constraint_gather_errors_kernel(
     constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
     bodies: BodyContainer,
     num_constraints: wp.int32,
+    num_joints: wp.int32,
     # out
     out: wp.array[wp.spatial_vector],
 ):
@@ -968,13 +877,12 @@ def _constraint_gather_errors_kernel(
     cid = wp.tid()
     if cid >= num_constraints:
         return
-    t = constraint_get_type(constraints, cid)
     zero = wp.spatial_vector(wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0))
     err = zero
-    if t == CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET:
+    if cid < num_joints:
         err = actuated_double_ball_socket_world_error(constraints, cid, bodies)
-    elif t == CONSTRAINT_TYPE_CONTACT:
-        err = contact_world_error(constraints, cid)
+    else:
+        err = contact_world_error(contact_cols, cid - num_joints)
     out[cid] = err
 
 
