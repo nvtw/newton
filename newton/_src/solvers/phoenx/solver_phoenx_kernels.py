@@ -319,6 +319,25 @@ def _scatter_elements_to_worlds_kernel(
     world_elements[world_element_offsets[w] + slot] = tid
 
 
+@wp.func
+def _biased_priority(
+    random_values: wp.array[wp.int32],
+    cid: wp.int32,
+    contact_cid_start: wp.int32,
+    contact_bias: wp.int32,
+) -> wp.int32:
+    """Return JP priority with an on-the-fly bias that lifts contact cids
+    above every joint cid. ``contact_cid_start`` is the first contact cid
+    (joints live below). ``contact_bias`` is the amount to add -- typically
+    ``max_num_interactions`` so the biased contact range sits strictly
+    above the unbiased joint range. Mirrors the section-marker trick used
+    in the C# PhoenX partitioning kernel, without the extra storage."""
+    r = random_values[cid]
+    if cid >= contact_cid_start:
+        r = r + contact_bias
+    return r
+
+
 @wp.kernel(enable_backward=False)
 def _per_world_jp_coloring_kernel(
     # per-world bucketing (input from the two kernels above)
@@ -331,6 +350,14 @@ def _per_world_jp_coloring_kernel(
     vertex_to_elements: wp.array[wp.int32],  # [cap * MAX_BODIES]
     random_values: wp.array[wp.int32],  # [capacity] JP priorities
     max_colors: wp.int32,
+    # ``cid >= contact_cid_start`` gets ``contact_bias`` added to its
+    # priority, so contacts commit before joints in every JP round. This
+    # clusters contacts into earlier colours, cutting intra-warp
+    # divergence in the fast-tail constraint iterate kernel (contacts and
+    # joints take different branches). When joints are absent
+    # ``contact_cid_start = capacity`` disables the bias.
+    contact_cid_start: wp.int32,
+    contact_bias: wp.int32,
     # scratch (caller zeros each step)
     assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
     world_commit_count: wp.array[wp.int32],  # [nw] per-round atomic cursor
@@ -408,7 +435,7 @@ def _per_world_jp_coloring_kernel(
             if slot < count:
                 eid = world_elements[base + slot]
                 if assigned[eid] == wp.int32(0):
-                    self_prio = random_values[eid]
+                    self_prio = _biased_priority(random_values, eid, contact_cid_start, contact_bias)
                     is_local_max = bool(True)
                     for j in range(MAX_BODIES):
                         if not is_local_max:
@@ -431,7 +458,7 @@ def _per_world_jp_coloring_kernel(
                             # (graph edge can't conflict).
                             if a != wp.int32(0) and a != current_color + wp.int32(1):
                                 continue
-                            if random_values[neighbor] > self_prio:
+                            if _biased_priority(random_values, neighbor, contact_cid_start, contact_bias) > self_prio:
                                 is_local_max = bool(False)
 
                     if is_local_max:

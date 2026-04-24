@@ -352,6 +352,12 @@ class PhoenXWorld:
             max_num_nodes=max(1, self.num_bodies),
             device=self.device,
             use_tile_scan=True,
+            # Contact cids occupy ``[num_joints, num_joints + max_contact_columns)``.
+            # Biasing their JP priorities upward clusters contacts into earlier
+            # colours and joints into later colours, cutting warp divergence
+            # in the fast-tail iterate kernel (contacts and joints take
+            # different ``constraint_iterate`` branches).
+            contact_cid_start=self.num_joints,
         )
 
         cap = self._constraint_capacity
@@ -1100,6 +1106,18 @@ class PhoenXWorld:
         # exactly the (world, lane) pair the kernel expects. Plain
         # ``launch`` would return a global thread index instead, which
         # would silently mis-address every block-scoped read/write.
+        # Biased priorities: contact cids get ``contact_bias`` added on
+        # the fly so they outrank every joint cid in JP. Clusters
+        # contacts into earlier colours / joints into later colours,
+        # reducing warp divergence in the constraint iterate kernel.
+        # Setting ``contact_cid_start = capacity`` disables the bias
+        # (joint-free or contact-free cases).
+        if 0 < self.num_joints < self._constraint_capacity:
+            contact_cid_start = self.num_joints
+            contact_bias = self._constraint_capacity
+        else:
+            contact_cid_start = self._constraint_capacity
+            contact_bias = 0
         wp.launch_tiled(
             _per_world_jp_coloring_kernel,
             dim=[nw],
@@ -1112,6 +1130,8 @@ class PhoenXWorld:
                 self._partitioner._vertex_to_adjacent_elements,
                 self._partitioner._random_values,
                 int(MAX_COLORS),
+                wp.int32(contact_cid_start),
+                wp.int32(contact_bias),
             ],
             outputs=[
                 self._per_world_assigned,

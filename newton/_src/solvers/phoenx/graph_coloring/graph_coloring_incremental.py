@@ -107,6 +107,7 @@ class IncrementalContactPartitioner:
         device: wp.DeviceLike = None,
         seed: int = 0,
         use_tile_scan: bool = True,
+        contact_cid_start: int = 0,
     ) -> None:
         self.max_num_interactions = max_num_interactions
         self.max_num_nodes = max_num_nodes
@@ -119,15 +120,32 @@ class IncrementalContactPartitioner:
         # never read past the end of the allocation.
         self.use_tile_scan = use_tile_scan
 
+        # Contacts live at cid >= ``contact_cid_start``. The JP kernels
+        # OR bit 30 into their priority on the fly (no extra storage)
+        # so contacts always outrank joints -- contacts cluster into
+        # earlier colours, joints into later colours, cutting intra-warp
+        # divergence in the fast-tail constraint iterate kernel.
+        self._contact_cid_start = int(contact_cid_start)
+
         import numpy as np  # noqa: PLC0415
 
         rng = np.random.default_rng(seed)
         priorities = rng.permutation(max_num_interactions).astype(np.int32) + 1
         self._random_values = wp.from_numpy(priorities, dtype=wp.int32, device=device)
 
-        # Single-section mode: marker at the end disables the offset in
-        # ``contact_partitions_get_random_value``.
-        self._section_marker = wp.array([max_num_interactions], dtype=wp.int32, device=device)
+        # Two-section priority scheme: cids in [0, contact_cid_start) are
+        # joints; cids in [contact_cid_start, max_num_interactions) are
+        # contacts. ``contact_partitions_get_random_value`` adds
+        # ``max_num_contacts`` to the priority when ``cid >= section_marker``,
+        # so every contact priority strictly exceeds every joint priority.
+        # Jones-Plassmann therefore commits contacts first, clustering them
+        # into earlier colours and joints into later colours -- cuts
+        # intra-warp divergence in the fast-tail iterate kernel (the
+        # contact vs joint dispatch branches each land on same-type warps).
+        # Setting the marker to ``max_num_interactions`` disables the bias
+        # (single-section behaviour, used when there are no joints).
+        marker = int(contact_cid_start) if 0 < int(contact_cid_start) < max_num_interactions else max_num_interactions
+        self._section_marker = wp.array([marker], dtype=wp.int32, device=device)
 
         # Adjacency storage.
         self._adjacency_section_end_indices = wp.zeros(max_num_nodes, dtype=wp.int32, device=device)
