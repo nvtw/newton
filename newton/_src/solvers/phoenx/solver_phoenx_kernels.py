@@ -766,11 +766,17 @@ def _constraints_to_elements_kernel(
     Only the two body indices matter to the graph colourer; static
     bodies get collapsed to ``-1`` and the dynamic body (if any) is
     compacted to slot 0.
+
+    Launched at ``dim = constraint_capacity`` because the active count
+    is device-held; inactive lanes early-out without writing. Every
+    downstream reader (``partitioning_adjacency_{count,store}``,
+    ``_count_elements_per_world``, ``_scatter_elements_to_worlds``,
+    ``_per_world_jp_coloring``) gates on ``num_active_constraints``,
+    so tail slots are never read and don't need a sentinel value.
     """
     tid = wp.tid()
     n = num_constraints[0]
     if tid >= n:
-        elements[tid] = element_interaction_data_make(-1, -1, -1, -1, -1, -1, -1, -1)
         return
     b1 = constraint_get_body1(constraints, tid)
     b2 = constraint_get_body2(constraints, tid)
