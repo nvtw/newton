@@ -5,17 +5,20 @@
 Called once per :meth:`PhoenXWorld.step`. Newton's
 :class:`~newton._src.sim.contacts.Contacts` is already sorted by
 ``(shape_a, shape_b)`` (contacts for one pair are contiguous), so
-ingest segments that prefix via ``(shape_a * num_shapes + shape_b)``
-run-length encoding and emits one :data:`CONSTRAINT_TYPE_CONTACT`
-column per non-filtered shape pair with the pair's
+ingest detects pair boundaries by comparing adjacent
+``(shape0, shape1)`` pairs, inclusive-scans the boundary marks into a
+1-based run id per contact, and scatters per-pair metadata at those
+boundaries to emit one :data:`CONSTRAINT_TYPE_CONTACT` column per
+non-filtered shape pair with the pair's
 ``[contact_first, contact_first + contact_count)`` stamped into the
 header.
 
 Fully graph-capture-safe: ``num_contact_columns`` is a device-side
 scalar, never host-read during the step; all kernels launch at fixed
 sizes (``rigid_contact_max`` / ``max_contact_columns``) and gate
-internally on device-held counters. ``num_shapes < 46340`` keeps the
-packed int32 key safe.
+internally on device-held counters. The adjacency-mark design has no
+int32 shape-count limit (an earlier ``sa * num_shapes + sb`` packing
+silently wrapped above ~46 340 shapes — see Bug.md #1).
 """
 
 from __future__ import annotations
@@ -55,10 +58,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
-from newton._src.solvers.phoenx.helpers.scan_and_sort import (
-    RLE_SENTINEL_INT32,
-    runlength_encode_variable_length,
-)
 from newton._src.solvers.phoenx.materials import (
     MaterialData,
     resolve_friction_in_kernel,
@@ -95,19 +94,19 @@ class IngestScratch:
 
     __slots__ = (
         "_device",
-        "keys",
         "max_contact_columns",
         "num_contact_columns",
         "num_pairs",
+        "pair_boundary",
         "pair_col_offset",
         "pair_columns",
         "pair_count",
         "pair_first",
+        "pair_id",
         "pair_shape_a",
         "pair_shape_b",
         "pair_source_idx",
         "rigid_contact_max",
-        "run_values",
     )
 
     def __init__(
@@ -122,12 +121,17 @@ class IngestScratch:
         n_pairs_max = max(1, self.rigid_contact_max)
         n_cols_max = max(1, self.max_contact_columns)
 
-        # Per-contact pair key.
-        self.keys = wp.zeros(self.rigid_contact_max, dtype=wp.int32, device=device)
+        # Per-contact run-start marker: ``pair_boundary[i] = 1`` iff
+        # contact ``i`` starts a new ``(shape_a, shape_b)`` run (contact
+        # 0 is always a boundary, tail past ``rigid_contact_count[0]``
+        # is zeroed). Replaces a packed ``int32`` key array that
+        # overflowed above ~46_340 shapes (see Bug.md #1).
+        self.pair_boundary = wp.zeros(self.rigid_contact_max, dtype=wp.int32, device=device)
 
-        # RLE unique-values output (keeps ``keys`` intact so callers can
-        # re-RLE / re-inspect if needed).
-        self.run_values = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
+        # Inclusive scan of ``pair_boundary``: ``pair_id[i]`` is the
+        # 1-based run id that contact ``i`` belongs to. Used to scatter
+        # each pair's metadata into its unique slot.
+        self.pair_id = wp.zeros(self.rigid_contact_max, dtype=wp.int32, device=device)
 
         # Per-pair arrays.
         self.pair_first = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
@@ -160,28 +164,51 @@ def allocate_ingest_scratch(
 
 
 # ---------------------------------------------------------------------------
-# Step 1: build the int32 (shape_a, shape_b) key per active contact.
+# Step 1: mark per-contact run boundaries.
+#
+# Contacts arrive sorted by ``(shape_a, shape_b)`` from the narrow-phase
+# pipeline (this was the whole reason the pre-Bug-#1 code RLE'd a packed
+# key: the RLE only works if same-pair contacts are adjacent). So we can
+# detect run boundaries directly from adjacency -- no key packing, no
+# int32 overflow, cleanly scales to any shape count representable in
+# int32.
 # ---------------------------------------------------------------------------
 
 
 @wp.kernel(enable_backward=False)
-def _contact_key_kernel(
+def _contact_pair_boundary_kernel(
     rigid_contact_count: wp.array[wp.int32],
     rigid_contact_shape0: wp.array[wp.int32],
     rigid_contact_shape1: wp.array[wp.int32],
-    num_shapes: wp.int32,
     # out
-    keys: wp.array[wp.int32],
+    pair_boundary: wp.array[wp.int32],
 ):
-    """Fill the per-contact key array for the RLE pass."""
+    """Write ``pair_boundary[i] = 1`` iff contact ``i`` starts a new
+    ``(shape_a, shape_b)`` run.
+
+    Boundary rule: ``i == 0``, or ``(shape0[i], shape1[i])`` differs
+    from ``(shape0[i - 1], shape1[i - 1])``. Tail entries past
+    ``rigid_contact_count[0]`` are set to 0 so the downstream inclusive
+    scan produces a stable result regardless of stale previous-frame
+    data. Replaces the old ``sa * num_shapes + sb`` int32 key packing
+    that silently wrapped at ~46_340 shapes (see Bug.md #1).
+    """
     tid = wp.tid()
     count = rigid_contact_count[0]
-    if tid < count:
-        sa = rigid_contact_shape0[tid]
-        sb = rigid_contact_shape1[tid]
-        keys[tid] = sa * num_shapes + sb
+    if tid >= count:
+        pair_boundary[tid] = wp.int32(0)
+        return
+    if tid == wp.int32(0):
+        pair_boundary[tid] = wp.int32(1)
+        return
+    prev_sa = rigid_contact_shape0[tid - 1]
+    prev_sb = rigid_contact_shape1[tid - 1]
+    cur_sa = rigid_contact_shape0[tid]
+    cur_sb = rigid_contact_shape1[tid]
+    if cur_sa != prev_sa or cur_sb != prev_sb:
+        pair_boundary[tid] = wp.int32(1)
     else:
-        keys[tid] = wp.int32(0)
+        pair_boundary[tid] = wp.int32(0)
 
 
 @wp.func
@@ -211,36 +238,85 @@ def _body_pair_filtered(
 
 
 # ---------------------------------------------------------------------------
-# Step 2: turn run_lengths into [pair_count, shape_a, shape_b, pair_columns].
+# Step 2: scatter per-pair metadata from run-boundary positions.
 # ---------------------------------------------------------------------------
 
 
 @wp.kernel(enable_backward=False)
-def _pair_metadata_kernel(
-    run_values: wp.array[wp.int32],
-    num_pairs: wp.array[wp.int32],
-    num_shapes: wp.int32,
+def _scatter_pair_starts_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    pair_boundary: wp.array[wp.int32],
+    pair_id: wp.array[wp.int32],
+    rigid_contact_shape0: wp.array[wp.int32],
+    rigid_contact_shape1: wp.array[wp.int32],
     # out
     pair_shape_a: wp.array[wp.int32],
     pair_shape_b: wp.array[wp.int32],
+    pair_first: wp.array[wp.int32],
     pair_columns: wp.array[wp.int32],
+    num_pairs: wp.array[wp.int32],
 ):
-    """Unpack ``run_values`` into per-pair shapes + clear the column tail.
+    """At every boundary position ``i``, scatter ``(shape_a, shape_b, i)``
+    into the unique slot ``pair_id[i] - 1``.
 
-    ``pair_columns`` is cleared for threads past ``num_pairs[0]`` so the
-    subsequent exclusive scan produces a stable total regardless of
-    leftover data from a previous step.
+    Thread ``tid = 0`` also writes ``num_pairs[0]`` from the final
+    inclusive-scan value. Pairs past ``num_pairs[0]`` get
+    ``pair_columns = 0`` so the downstream scan is stable.
+    """
+    tid = wp.tid()
+    count = rigid_contact_count[0]
+
+    # Publish num_pairs via thread 0 before any reads/writes that depend
+    # on it. The inclusive scan's last active value is the run count.
+    if tid == wp.int32(0):
+        if count > wp.int32(0):
+            num_pairs[0] = pair_id[count - 1]
+        else:
+            num_pairs[0] = wp.int32(0)
+
+    # Scatter per-pair metadata at run boundaries. Each boundary has a
+    # unique ``pair_id`` so two threads never target the same output
+    # slot -- fully deterministic, no atomics.
+    if tid < count and pair_boundary[tid] == wp.int32(1):
+        p = pair_id[tid] - wp.int32(1)
+        pair_shape_a[p] = rigid_contact_shape0[tid]
+        pair_shape_b[p] = rigid_contact_shape1[tid]
+        pair_first[p] = tid
+
+    # Tail-clear ``pair_columns`` past the live prefix. Launch dim is
+    # ``rigid_contact_max`` (same as the boundary kernel) so covering
+    # the tail is free.
+    if tid >= count:
+        pair_columns[tid] = wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def _pair_counts_from_starts_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    num_pairs: wp.array[wp.int32],
+    pair_first: wp.array[wp.int32],
+    # out
+    pair_count: wp.array[wp.int32],
+):
+    """Compute per-pair contact counts from the adjacent ``pair_first``
+    positions: ``pair_count[p] = pair_first[p + 1] - pair_first[p]``,
+    with the last pair picking up ``rigid_contact_count[0] -
+    pair_first[last]``.
+
+    Replaces the old exclusive scan of ``pair_count -> pair_first``; we
+    compute ``pair_first`` directly at scatter time and derive
+    ``pair_count`` from it instead.
     """
     tid = wp.tid()
     n = num_pairs[0]
     if tid >= n:
-        pair_columns[tid] = wp.int32(0)
         return
-    key = run_values[tid]
-    sa = key // num_shapes
-    sb = key - sa * num_shapes
-    pair_shape_a[tid] = sa
-    pair_shape_b[tid] = sb
+    cur = pair_first[tid]
+    if tid + wp.int32(1) < n:
+        nxt = pair_first[tid + wp.int32(1)]
+    else:
+        nxt = rigid_contact_count[0]
+    pair_count[tid] = nxt - cur
 
 
 @wp.kernel(enable_backward=False)
@@ -666,8 +742,10 @@ def ingest_contacts(
         contacts: Newton :class:`Contacts` buffer. Must have been built
             with a non-disabled ``contact_matching`` mode.
         shape_body: ``model.shape_body`` array.
-        num_shapes: Total shape count; used to pack the ``(shape_a,
-            shape_b)`` key into int32.
+        num_shapes: Unused as of the Bug.md #1 fix -- kept in the
+            signature for API compatibility. The pair-detection step no
+            longer packs ``(sa, sb)`` into an int32 key, so there is no
+            longer a ``num_shapes * num_shapes < 2**31`` limit.
         constraints: Shared constraint storage. Contact columns are
             written at ``cid in [cid_base, cid_base +
             num_contact_columns)``.
@@ -690,48 +768,65 @@ def ingest_contacts(
     """
     rigid_contact_max = int(contacts.rigid_contact_max)
 
-    # Step 1: per-contact key.
-    wp.launch(
-        kernel=_contact_key_kernel,
-        dim=rigid_contact_max,
-        inputs=[
-            contacts.rigid_contact_count,
-            contacts.rigid_contact_shape0,
-            contacts.rigid_contact_shape1,
-            int(num_shapes),
-        ],
-        outputs=[scratch.keys],
-        device=device,
-    )
-
-    # Step 2: RLE.
-    runlength_encode_variable_length(
-        values=scratch.keys,
-        active_length=contacts.rigid_contact_count,
-        run_values=scratch.run_values,
-        run_lengths=scratch.pair_count,
-        run_count=scratch.num_pairs,
-        sentinel=RLE_SENTINEL_INT32,
-    )
-
-    # Step 3a: unpack run_values -> pair_{shape_a, shape_b}, clear
-    # pair_columns tail.
-    wp.launch(
-        kernel=_pair_metadata_kernel,
-        dim=rigid_contact_max,
-        inputs=[scratch.run_values, scratch.num_pairs, int(num_shapes)],
-        outputs=[scratch.pair_shape_a, scratch.pair_shape_b, scratch.pair_columns],
-        device=device,
-    )
-
-    # Step 3b: pair_columns[p] = 1 for non-filtered pairs with
-    # pair_count > 0, else 0.
     if filter_keys is None:
         raise ValueError(
             "ingest_contacts: filter_keys must be non-None (use a size-1 "
             "sentinel array when no filters are registered; the kernel "
             "signature has no null-pointer path)."
         )
+
+    # Step 1: mark contacts where a new ``(shape_a, shape_b)`` run
+    # starts. Contacts arrive already sorted by pair.
+    wp.launch(
+        kernel=_contact_pair_boundary_kernel,
+        dim=rigid_contact_max,
+        inputs=[
+            contacts.rigid_contact_count,
+            contacts.rigid_contact_shape0,
+            contacts.rigid_contact_shape1,
+        ],
+        outputs=[scratch.pair_boundary],
+        device=device,
+    )
+
+    # Step 2: inclusive scan of the boundary marks -> 1-based run id
+    # per contact. ``pair_id[count - 1]`` is the total run count.
+    wp.utils.array_scan(scratch.pair_boundary, scratch.pair_id, inclusive=True)
+
+    # Step 3a: scatter per-pair (shape_a, shape_b, pair_first) into
+    # their unique slots, publish num_pairs, clear pair_columns tail.
+    wp.launch(
+        kernel=_scatter_pair_starts_kernel,
+        dim=rigid_contact_max,
+        inputs=[
+            contacts.rigid_contact_count,
+            scratch.pair_boundary,
+            scratch.pair_id,
+            contacts.rigid_contact_shape0,
+            contacts.rigid_contact_shape1,
+        ],
+        outputs=[
+            scratch.pair_shape_a,
+            scratch.pair_shape_b,
+            scratch.pair_first,
+            scratch.pair_columns,
+            scratch.num_pairs,
+        ],
+        device=device,
+    )
+
+    # Step 3b: derive per-pair contact counts from adjacent pair_first
+    # values. Replaces the old RLE ``run_lengths`` output.
+    wp.launch(
+        kernel=_pair_counts_from_starts_kernel,
+        dim=rigid_contact_max,
+        inputs=[contacts.rigid_contact_count, scratch.num_pairs, scratch.pair_first],
+        outputs=[scratch.pair_count],
+        device=device,
+    )
+
+    # Step 3c: pair_columns[p] = 1 for non-filtered pairs with
+    # pair_count > 0, else 0.
     wp.launch(
         kernel=_pair_columns_binary_kernel,
         dim=rigid_contact_max,
@@ -748,17 +843,6 @@ def ingest_contacts(
         outputs=[scratch.pair_columns],
         device=device,
     )
-
-    # Step 3c: exclusive scan pair_count -> pair_first. The scan runs
-    # over the full ``rigid_contact_max`` length; within the active
-    # prefix ``[0, num_pairs[0])`` the result is correct regardless
-    # of the (stale-from-previous-frame) tail, and downstream
-    # consumers only read the active prefix. Using Warp's
-    # deterministic ``array_scan`` (same primitive the
-    # ``pair_col_offset`` scan below uses) is much faster than the
-    # single-thread serial scan this used to do, and keeps the
-    # pipeline deterministic.
-    wp.utils.array_scan(scratch.pair_count, scratch.pair_first, inclusive=False)
 
     # Step 3d: exclusive scan of pair_columns -> pair_col_offset.
     wp.utils.array_scan(scratch.pair_columns, scratch.pair_col_offset, inclusive=False)

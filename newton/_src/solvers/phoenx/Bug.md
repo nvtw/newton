@@ -13,7 +13,7 @@ the fix in.
 
 ## #1 — int32 overflow in contact-ingest pair key packing
 
-**State:** open
+**State:** fixed (2026-04-24, commit _pending-tw-tbd_)
 **Discovered:** 2026-04-24
 **Repro:** any scene with `num_shapes >= 46_341` triggers silent
 corruption. In practice, `h1_flat` at `num_worlds >= 859` hits it
@@ -60,15 +60,44 @@ the misattribution.
 | 900        |     48 601 |       2.36e9 |          **✗**  |            7 202  |
 | 1024       |     55 297 |       3.06e9 |          **✗**  |            8 193  |
 
-**Fix plan:** Drop the packed-int32 key entirely. Contacts are
-already sorted by `(shape0, shape1)` before ingest, so we can
-compute pair boundaries by a simple "did the pair change from the
-previous entry?" mark, inclusive-scan into run ids, and scatter
-`pair_shape_a / pair_shape_b / pair_first` directly at the mark==1
-positions. No key packing, no RLE helper, scales cleanly to int32
-shape counts (≥2 billion shapes).
+**Fix landed:** Dropped the packed-int32 key entirely. Contacts are
+already sorted by `(shape0, shape1)` before ingest, so the new
+pipeline works entirely off adjacency:
 
-**Regression test:** _pending._
+1. `_contact_pair_boundary_kernel` marks `pair_boundary[i] = 1` iff
+   `(shape0[i], shape1[i]) != (shape0[i-1], shape1[i-1])` (or `i == 0`).
+2. `wp.utils.array_scan(pair_boundary, pair_id, inclusive=True)`
+   produces a 1-based run id per contact. `pair_id[count - 1]` is
+   `num_pairs`.
+3. `_scatter_pair_starts_kernel` scatters each boundary's
+   `(shape0, shape1, pair_first)` into the unique slot
+   `pair_id[i] - 1` and publishes `num_pairs` from thread 0.
+4. `_pair_counts_from_starts_kernel` derives `pair_count[p]` as
+   `pair_first[p + 1] - pair_first[p]` (with the final pair's tail
+   taken from `rigid_contact_count[0]`). This also eliminates the
+   earlier `wp.utils.array_scan(pair_count, pair_first)` exclusive
+   scan — `pair_first` is now produced directly by the scatter.
+
+No key packing, no `runlength_encode_variable_length` dependency,
+scales cleanly to any shape count representable in int32
+(~2×10⁹ shapes). Measured at h1_flat 1024 worlds (55 297 shapes):
+9 colours, 6400 ground contacts, total kernel time 2.34 ms/step —
+versus pre-fix runs that either silently produced ~0 ground
+contacts + 8000+ colours or took 10+ seconds when the downstream
+`MAX_COLORS` overflow (Bug #2) compounded the corruption.
+
+The removed kernels (`_contact_key_kernel`, `_pair_metadata_kernel`)
+and the RLE helper import are gone; the `num_shapes` parameter is
+retained in `ingest_contacts()` for API compatibility (unused).
+
+**Regression test:**
+`newton/_src/solvers/phoenx/tests/test_contact_ingest_large_shape_count.py::TestContactIngestLargeShapeCount`.
+Drives the three pair-detection kernels directly with synthetic
+contact streams whose shape ids sit above the old overflow
+threshold (50 000 / 60 000, so any int32 packing wraps). Verifies
+pair_shape_a, pair_shape_b, pair_first, pair_count come out
+correct, plus an empty-input edge case and a stale-tail
+robustness check.
 
 ---
 
