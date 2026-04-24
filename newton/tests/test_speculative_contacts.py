@@ -9,7 +9,9 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
+
+_cuda_available = wp.is_cuda_available()
 
 
 def _build_two_sphere_model(
@@ -391,23 +393,26 @@ def _run_mesh_box_vs_mesh_wall_sim(device, speculative_config, num_frames=10):
     exercising the mesh-mesh SDF contact path.  Same geometry as the
     sphere-vs-primitive-box test (wall half-thickness 0.02 m).
 
-    Uses ``max_resolution=256`` so the SDF has enough voxels across the
-    0.04 m wall, and 8 XPBD iterations because mesh-mesh SDF contacts
-    have zero effective radii (unlike sphere contacts) and need more
-    solver work to fully resolve the large speculative gap.
+    Uses ``max_resolution=128`` so each SDF volume stays under ~10 MB
+    (vs ~67 MB at resolution 256) -- important to avoid OOMing parallel
+    test workers on memory-constrained CI runners while still giving the
+    thin wall enough voxels along its narrow axis.  8 XPBD iterations are
+    needed because mesh-mesh SDF contacts have zero effective radii
+    (unlike sphere contacts) and need more solver work to fully resolve
+    the large speculative gap.
     """
     builder = newton.ModelBuilder(gravity=0.0)
     builder.rigid_gap = 0.0
 
     box_mesh = newton.Mesh.create_box(0.25, compute_normals=False, compute_uvs=False)
-    box_mesh.build_sdf(device=device, max_resolution=256)
+    box_mesh.build_sdf(device=device, max_resolution=128)
 
     box_body = builder.add_body(xform=wp.transform(wp.vec3(-2.0, 0.0, 0.0)))
     builder.add_shape_mesh(box_body, mesh=box_mesh)
     builder.body_qd[-1] = (50.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     wall_mesh = _make_thin_wall_mesh()
-    wall_mesh.build_sdf(device=device, max_resolution=256)
+    wall_mesh.build_sdf(device=device, max_resolution=128)
     builder.add_shape_mesh(body=-1, mesh=wall_mesh, xform=wp.transform_identity())
 
     model = builder.finalize(device=device)
@@ -460,73 +465,42 @@ def test_speculative_tunneling_mesh_mesh_with(test, device):
 
 
 class TestSpeculativeContacts(unittest.TestCase):
-    pass
+    """Cheap tests exercising the speculative code paths with a single
+    ``collide()`` call.  Run on both CPU and CUDA."""
 
 
-devices = get_cuda_test_devices()
-if not devices:
-    devices = [wp.get_device("cpu")]
+@unittest.skipUnless(_cuda_available, "Speculative tunneling tests require CUDA")
+class TestSpeculativeTunneling(unittest.TestCase):
+    """Multi-frame XPBD simulations (some with mesh SDFs) that demonstrate
+    speculative contacts preventing tunneling.  These are too
+    memory/time intensive on memory-constrained parallel CPU CI workers,
+    so they are restricted to CUDA devices."""
 
-add_function_test(
-    TestSpeculativeContacts,
-    "test_speculative_disabled_no_contacts",
-    test_speculative_disabled_no_contacts,
-    devices=devices,
-)
-add_function_test(
-    TestSpeculativeContacts,
-    "test_speculative_enabled_catches_fast_object",
-    test_speculative_enabled_catches_fast_object,
-    devices=devices,
-)
-add_function_test(
-    TestSpeculativeContacts,
-    "test_speculative_diverging_no_contacts",
-    test_speculative_diverging_no_contacts,
-    devices=devices,
-)
-add_function_test(
-    TestSpeculativeContacts,
-    "test_speculative_max_extension_clamp",
-    test_speculative_max_extension_clamp,
-    devices=devices,
-)
-add_function_test(
-    TestSpeculativeContacts, "test_speculative_dt_override", test_speculative_dt_override, devices=devices
-)
-add_function_test(
-    TestSpeculativeContacts, "test_speculative_angular_velocity", test_speculative_angular_velocity, devices=devices
-)
-add_function_test(
-    TestSpeculativeContacts, "test_speculative_tunneling_without", test_speculative_tunneling_without, devices=devices
-)
-add_function_test(
-    TestSpeculativeContacts, "test_speculative_tunneling_with", test_speculative_tunneling_with, devices=devices
-)
-add_function_test(
-    TestSpeculativeContacts,
-    "test_speculative_tunneling_mesh_wall_without",
-    test_speculative_tunneling_mesh_wall_without,
-    devices=devices,
-)
-add_function_test(
-    TestSpeculativeContacts,
-    "test_speculative_tunneling_mesh_wall_with",
-    test_speculative_tunneling_mesh_wall_with,
-    devices=devices,
-)
-add_function_test(
-    TestSpeculativeContacts,
-    "test_speculative_tunneling_mesh_mesh_without",
-    test_speculative_tunneling_mesh_mesh_without,
-    devices=devices,
-)
-add_function_test(
-    TestSpeculativeContacts,
-    "test_speculative_tunneling_mesh_mesh_with",
-    test_speculative_tunneling_mesh_mesh_with,
-    devices=devices,
-)
+
+_all_devices = get_test_devices()
+_cuda_devices = get_cuda_test_devices()
+
+_cheap_tests = [
+    ("test_speculative_disabled_no_contacts", test_speculative_disabled_no_contacts),
+    ("test_speculative_enabled_catches_fast_object", test_speculative_enabled_catches_fast_object),
+    ("test_speculative_diverging_no_contacts", test_speculative_diverging_no_contacts),
+    ("test_speculative_max_extension_clamp", test_speculative_max_extension_clamp),
+    ("test_speculative_dt_override", test_speculative_dt_override),
+    ("test_speculative_angular_velocity", test_speculative_angular_velocity),
+]
+for _name, _fn in _cheap_tests:
+    add_function_test(TestSpeculativeContacts, _name, _fn, devices=_all_devices)
+
+_heavy_tests = [
+    ("test_speculative_tunneling_without", test_speculative_tunneling_without),
+    ("test_speculative_tunneling_with", test_speculative_tunneling_with),
+    ("test_speculative_tunneling_mesh_wall_without", test_speculative_tunneling_mesh_wall_without),
+    ("test_speculative_tunneling_mesh_wall_with", test_speculative_tunneling_mesh_wall_with),
+    ("test_speculative_tunneling_mesh_mesh_without", test_speculative_tunneling_mesh_mesh_without),
+    ("test_speculative_tunneling_mesh_mesh_with", test_speculative_tunneling_mesh_mesh_with),
+]
+for _name, _fn in _heavy_tests:
+    add_function_test(TestSpeculativeTunneling, _name, _fn, devices=_cuda_devices)
 
 
 if __name__ == "__main__":
