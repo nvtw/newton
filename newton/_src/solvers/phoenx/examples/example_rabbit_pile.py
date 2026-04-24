@@ -155,33 +155,38 @@ class Example:
             length=0.0,
         )
 
-        # Scatter bunnies on a rough grid with random yaws. Small
-        # non-axis-aligned tilts break the symmetry of perfectly
-        # aligned SDFs (otherwise two neighbouring bunnies would fall
-        # together without sliding past each other).
+        # Scatter bunnies on a 3D grid with random yaw + small tilt so
+        # every bunny-vs-bunny pair has a non-degenerate SDF contact
+        # frame. Grid side is ``ceil(num_bunnies ** (1/3))`` so the
+        # cube comfortably holds every bunny; the top layer is partial
+        # when ``num_bunnies`` isn't a perfect cube.
         #
-        # The bunny mesh's scaled bounding box is roughly
-        # 0.32 m x 0.32 m at :data:`BUNNY_SCALE` = 0.2, and the
-        # mesh origin sits ~12 cm from the geometric centre; pairing
-        # a random tilt of up to 0.4 rad on top of that can sweep a
-        # vertex up to ~0.36 m away from the transform origin. Pick
-        # the grid spacing + vertical stagger above those bounds so
-        # bunnies never spawn intersecting each other or piercing the
-        # ground plane.
+        # The bunny mesh's scaled bounding box is roughly 0.32 m x
+        # 0.32 m at :data:`BUNNY_SCALE` = 0.2, with the mesh origin
+        # ~12 cm from the geometric centre; a random tilt of up to
+        # 0.4 rad sweeps a vertex up to ~0.36 m from the transform
+        # origin. Pick spacings above those bounds so no two bunnies
+        # spawn intersecting and the bottom layer clears the plane.
         horizontal_spacing = 0.75  # > 2 * max_radius
         vertical_spacing = 0.8     # > 2 * max_radius
         base_z = 0.45              # > max_radius so lowest tilt doesn't dip below z = 0
         rng = np.random.default_rng(seed=42)
-        side = int(np.ceil(self.num_bunnies**0.5))
+        side = max(1, int(np.ceil(self.num_bunnies ** (1.0 / 3.0))))
+        self._grid_side = side
         bunny_ids: list[int] = []
         for i in range(self.num_bunnies):
-            row = i // side
+            layer = i // (side * side)
+            row = (i // side) % side
             col = i % side
-            x = (col - 0.5 * (side - 1)) * horizontal_spacing
-            y = (row - 0.5 * (side - 1)) * horizontal_spacing
-            # Stagger vertically in layers so bunnies don't all
-            # spawn intersecting at t=0.
-            z = base_z + (i // side) * vertical_spacing
+            # Alternate-row half-step stagger so adjacent layers
+            # interlock instead of stacking columns -- bunnies slot
+            # into each other's gaps as they settle, which produces a
+            # tighter pile and lets the SDF narrow phase see more
+            # body-pair combinations.
+            stagger = 0.5 * horizontal_spacing if (layer % 2) else 0.0
+            x = (col - 0.5 * (side - 1)) * horizontal_spacing + stagger
+            y = (row - 0.5 * (side - 1)) * horizontal_spacing + stagger
+            z = base_z + layer * vertical_spacing
             yaw = float(rng.uniform(-np.pi, np.pi))
             tilt_axis = wp.vec3(*rng.normal(size=3).astype(np.float32))
             tilt_axis = tilt_axis / (float(np.linalg.norm([*tilt_axis])) + 1e-9)
@@ -289,8 +294,12 @@ class Example:
             num_phoenx_bodies, dtype=wp.transform, device=self.device
         )
         self.viewer.set_model(self.model)
+        # Pull the camera back in proportion to the grid so the whole
+        # pile stays in frame regardless of ``--num-bunnies``.
+        cam_dist = max(1.2, 0.8 * side)
+        cam_height = max(0.8, 0.6 * side)
         self.viewer.set_camera(
-            pos=wp.vec3(1.2, -1.2, 0.8),
+            pos=wp.vec3(cam_dist, -cam_dist, cam_height),
             pitch=-20.0,
             yaw=135.0,
         )
@@ -382,8 +391,12 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self) -> None:
-        """Every bunny has finite state and stayed roughly in the
-        pile area (within ~2 m of origin)."""
+        """Every bunny has finite state and stayed roughly over the
+        pile footprint. Tolerance scales with the grid side -- the
+        spawn extent is ``(side - 1) * 0.75 m`` across plus a
+        half-step stagger and some settling spread."""
+        spawn_half_extent = 0.5 * (self._grid_side - 1) * 0.75 + 0.5 * 0.75
+        xy_tol = max(2.0, spawn_half_extent + 1.5)
         positions = self.bodies.position.numpy()
         velocities = self.bodies.velocity.numpy()
         for i, body in enumerate(self._bunny_ids):
@@ -393,8 +406,8 @@ class Example:
             assert np.isfinite(pos).all(), f"bunny {i} pos non-finite ({pos})"
             assert np.isfinite(vel).all(), f"bunny {i} vel non-finite ({vel})"
             xy = float(np.linalg.norm(pos[:2]))
-            assert xy < 2.0, (
-                f"bunny {i} flew off the pile: xy={xy:.3f} m, pos={pos}"
+            assert xy < xy_tol, (
+                f"bunny {i} flew off the pile: xy={xy:.3f} m, tol={xy_tol:.3f}, pos={pos}"
             )
 
     @staticmethod
@@ -403,7 +416,7 @@ class Example:
         parser.add_argument(
             "--num-bunnies",
             type=int,
-            default=24,
+            default=100,
             help=(
                 "Number of bunnies in the pile. Each bunny has its "
                 "own SDF; more bunnies = more contacts. 24 takes "
