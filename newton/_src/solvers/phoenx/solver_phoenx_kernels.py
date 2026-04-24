@@ -106,19 +106,25 @@ def _choose_fast_tail_worlds_per_block(num_worlds: int) -> int:
     the returned block size ``32 * wpb`` keeps ``__syncwarp()`` valid
     regardless of ``wpb``.
 
-    Tuned on RTX PRO 6000 (sm_120), 188 SMs. Overridable via
-    ``NEWTON_PHOENX_WORLDS_PER_BLOCK`` for A/B tests:
+    Tuned on RTX PRO 6000 (sm_120), 188 SMs, after the fused
+    prepare+iterate + register-caching refactor. Overridable via
+    ``NEWTON_PHOENX_WORLDS_PER_BLOCK`` for A/B tests.
 
-    * ``num_worlds < 512``: pack lightly (``wpb=1..2``) so blocks
-      stay spread across SMs. Heavy packing at small world counts
-      drops blocks below ~1 per SM and tanks throughput (g1/h1 at
-      256 worlds regresses 8-13% at ``wpb=8``).
-    * ``num_worlds >= 512``: pack more aggressively to amortize
-      block launch cost and improve instruction-level parallelism;
-      +10-16% env_fps at 1024-4096 worlds.
-    * ``num_worlds >= 4096``: ``wpb=8`` wins by another few % on h1
-      but we stay at 4 -- single-knob simplicity and the large-world
-      case is already GPU-bound."""
+    Three-tier by scene size (env_fps numbers are 3-run averaged
+    across g1_flat / h1_flat):
+
+    * ``num_worlds < 512``: ``wpb = 2``. Keeps blocks spread across
+      SMs. ``wpb = 4`` already regresses 5-15% here, ``wpb = 8`` is
+      20-25% slower (blocks below 1 per SM).
+    * ``512 <= num_worlds < 2048``: ``wpb = 4``. ``wpb = 2`` is
+      slightly better on h1 (+3%) but worse on g1 (+8% with ``wpb = 4``);
+      ``wpb = 4`` is the cross-scenario middle ground.
+    * ``num_worlds >= 2048``: ``wpb = 8``. g1 @ 4096 picks up +20%
+      vs ``wpb = 4`` (more ILP per block absorbs the register
+      pressure from the register-cached revolute iterate); h1 @ 4096
+      loses ~4% but h1 @ 16384 is neutral. Average across both
+      scenarios is the better call.
+    """
     import os as _os  # noqa: PLC0415
 
     override = _os.environ.get("NEWTON_PHOENX_WORLDS_PER_BLOCK")
@@ -126,7 +132,9 @@ def _choose_fast_tail_worlds_per_block(num_worlds: int) -> int:
         return max(1, int(override))
     if num_worlds < 512:
         return 2
-    return 4
+    if num_worlds < 2048:
+        return 4
+    return 8
 
 
 #: Upper bound on the block size the fast-tail launches will ever use.
