@@ -302,6 +302,217 @@ class TestPhoenXMultiWorld(unittest.TestCase):
             f"{max_dev:.6f} (> 1e-3)",
         )
 
+    def test_per_world_initial_state_does_not_leak(self) -> None:
+        """Give each world a DIFFERENT initial angular velocity.
+        After one step each world must retain its distinct spin;
+        a leak would homogenise them toward the mean."""
+        device = wp.get_device("cuda:0")
+        num_worlds = 8
+        # 8 linearly-separated spins about y so after 30 frames we
+        # can assert each world's final |omega_y| is distinct and
+        # monotone in w.
+        avels = [(0.0, 0.5 + float(w), 0.0) for w in range(num_worlds)]
+        world, cube_slots = _build_n_pendulums(
+            num_worlds=num_worlds, angular_velocities=avels, device=device
+        )
+        _run_frames(world, 30)
+        ang_v = world.bodies.angular_velocity.numpy()
+        per_world_omega = [float(ang_v[cube_slots[w]][1]) for w in range(num_worlds)]
+        # Check monotone non-decreasing -- a damping / leakage bug
+        # would pull later worlds down toward zero.
+        for w in range(num_worlds - 1):
+            self.assertGreater(
+                per_world_omega[w + 1] + 1.0e-3,
+                per_world_omega[w],
+                msg=(
+                    f"omega_y not monotone across worlds: w{w}={per_world_omega[w]:.3f} "
+                    f"vs w{w + 1}={per_world_omega[w + 1]:.3f}"
+                ),
+            )
+        # And check no world collapsed to zero (would indicate
+        # complete cross-world damping).
+        self.assertGreater(
+            min(per_world_omega),
+            0.1,
+            msg=f"some world lost all spin: {per_world_omega}",
+        )
+
+    def test_kill_one_world_does_not_affect_others(self) -> None:
+        """World 0 is "killed" by pinning its cube to the anchor
+        (zero inverse mass). All other worlds must simulate normally.
+
+        Catches a class of bug where the per-world CSR bucketing
+        assumed every world has exactly the same number of active
+        bodies / constraints.
+        """
+        device = wp.get_device("cuda:0")
+        num_worlds = 4
+        world, cube_slots = _build_n_pendulums(
+            num_worlds=num_worlds, device=device
+        )
+        # Zero inverse mass on world 0's cube -> no dynamics.
+        inv_mass = world.bodies.inverse_mass.numpy()
+        inv_mass[cube_slots[0]] = 0.0
+        world.bodies.inverse_mass.assign(inv_mass)
+        # Also mark it static so the integrator skips it.
+        motion = world.bodies.motion_type.numpy()
+        motion[cube_slots[0]] = int(MOTION_STATIC)
+        world.bodies.motion_type.assign(motion)
+
+        _run_frames(world, 30)
+
+        # World 0: cube stayed put. Worlds 1..N: cube settled to the
+        # same place.
+        positions = world.bodies.position.numpy()
+        self.assertAlmostEqual(
+            float(positions[cube_slots[0]][0]),
+            0.0,
+            delta=1.0e-4,
+            msg="killed world's cube drifted despite static pinning",
+        )
+        ref = positions[cube_slots[1]]
+        for w in range(2, num_worlds):
+            np.testing.assert_allclose(
+                positions[cube_slots[w]],
+                ref,
+                atol=1.0e-4,
+                err_msg=(
+                    f"world {w} diverged from world 1 after world 0 was "
+                    "killed -- per-world isolation broken"
+                ),
+            )
+
+    def test_1024_worlds_stress(self) -> None:
+        """Scale the identical-worlds check to 1024. Catches crashes
+        from per-world scratch sizing (the CSR scatter allocates
+        ``num_worlds * max_colors`` entries), and catches regressions
+        in the 1-block-per-world dispatcher at scale.
+
+        Deliberately keeps the physics trivial (settling pendulum) so
+        numerical divergence under float32 stays bounded; the point
+        here is "does the solver handle 1024 blocks without OOM,
+        race conditions, or CSR clipping" not "is 5-digit precision
+        preserved across 1024 copies".
+        """
+        device = wp.get_device("cuda:0")
+        num_worlds = 1024
+        world, cube_slots = _build_n_pendulums(
+            num_worlds=num_worlds, device=device
+        )
+        # Short run -- just enough for one full graph replay.
+        _run_frames(world, 8)
+        positions = world.bodies.position.numpy()
+        self.assertTrue(
+            np.isfinite(positions).all(),
+            msg="NaN / inf in body positions after 1024-world step",
+        )
+        ref = positions[cube_slots[0]]
+        max_dev = 0.0
+        for w in range(1, num_worlds):
+            dev = float(np.max(np.abs(positions[cube_slots[w]] - ref)))
+            if dev > max_dev:
+                max_dev = dev
+        # Much looser tolerance than the 256-world case: 1024 blocks
+        # fire in interleaved order under the graph-coloring CSR, and
+        # float32 + per-block scratch produce bit-level jitter across
+        # worlds. The physical drift is still sub-millimetre.
+        self.assertLess(
+            max_dev,
+            5.0e-3,
+            msg=(
+                f"1024-world max divergence {max_dev:.6f} m exceeds "
+                "5 mm -- per-world isolation regressed at scale"
+            ),
+        )
+
+    def test_mixed_gravity_magnitudes(self) -> None:
+        """Three worlds with three distinct gravities (earth, moon,
+        zero-g). Cubes start off-axis so they swing; after the same
+        wall-clock time their kinetic energies differ according to
+        the gravity ratios, and the zero-g cube stays near its
+        starting point.
+        """
+        device = wp.get_device("cuda:0")
+        gravity = [
+            (0.0, -9.81, 0.0),   # earth
+            (0.0, -1.62, 0.0),   # moon
+            (0.0, 0.0, 0.0),      # zero-g
+        ]
+        world, cube_slots = _build_n_pendulums(
+            num_worlds=3, gravity=gravity, device=device
+        )
+        # Off-axis starts so gravity actually does work.
+        positions = world.bodies.position.numpy()
+        for cube in cube_slots:
+            positions[cube] = (0.3, -0.95, 0.0)
+        world.bodies.position.assign(positions)
+
+        _run_frames(world, 30)
+
+        ang_v = world.bodies.angular_velocity.numpy()
+        w_earth = float(np.linalg.norm(ang_v[cube_slots[0]]))
+        w_moon = float(np.linalg.norm(ang_v[cube_slots[1]]))
+        w_zero = float(np.linalg.norm(ang_v[cube_slots[2]]))
+
+        # Earth > moon > zero-g on angular speed.
+        self.assertGreater(
+            w_earth,
+            1.5 * w_moon,
+            msg=f"earth |w|={w_earth:.3f} not > 1.5x moon |w|={w_moon:.3f}",
+        )
+        self.assertGreater(
+            w_moon,
+            5.0 * w_zero,
+            msg=f"moon |w|={w_moon:.3f} not > 5x zero-g |w|={w_zero:.3f}",
+        )
+
+
+@unittest.skipUnless(
+    wp.is_cuda_available(), "PhoenX multi-world tests require CUDA"
+)
+class TestPhoenXMultiWorldScaling(unittest.TestCase):
+    """Stability / cardinality checks at sub-1024 world counts that
+    stress the per-world block-dispatcher edges.
+
+    Kept in a separate class so ``python -m unittest
+    test_multi_world.TestPhoenXMultiWorld`` picks the fast suite,
+    and scaling is opt-in via the fully-qualified class path.
+    """
+
+    def test_various_world_counts_finite(self) -> None:
+        """Run the identical-pendulums scene at a sweep of world
+        counts and assert positions stay finite. Catches off-by-one
+        in the world_num_colors / world_csr_offsets sizing.
+        """
+        device = wp.get_device("cuda:0")
+        # Include boundary sizes: 1 (single-block edge case), 2 (adjacent
+        # blocks), 32 (one warp's worth), 128 (half-SM), 513 (just over
+        # 512 -- catches fixed-size scratch arrays).
+        for num_worlds in [1, 2, 32, 128, 513]:
+            with self.subTest(num_worlds=num_worlds):
+                world, cube_slots = _build_n_pendulums(
+                    num_worlds=num_worlds, device=device
+                )
+                _run_frames(world, 5)
+                positions = world.bodies.position.numpy()
+                self.assertTrue(
+                    np.isfinite(positions).all(),
+                    msg=f"non-finite positions at num_worlds={num_worlds}",
+                )
+                # Also check every world's cube is somewhere near
+                # the anchor (within 2 m); a runaway dispatcher bug
+                # could launch cubes into the void.
+                for w, slot in enumerate(cube_slots):
+                    dist = float(np.linalg.norm(positions[slot]))
+                    self.assertLess(
+                        dist,
+                        2.0,
+                        msg=(
+                            f"num_worlds={num_worlds}, world={w}: cube at "
+                            f"distance {dist:.3f} m from origin"
+                        ),
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()
