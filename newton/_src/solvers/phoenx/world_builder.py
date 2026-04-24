@@ -1247,6 +1247,17 @@ class WorldBuilder:
         c.affected_by_gravity = wp.array(affected_by_gravity, dtype=wp.int32, device=device)
         c.motion_type = wp.array(motion_type, dtype=wp.int32, device=device)
         c.world_id = wp.array(world_id_arr, dtype=wp.int32, device=device)
+        # Kinematic pose-scripting scratch. ``position_prev`` must be
+        # seeded with the initial pose so the first step's velocity
+        # inference sees zero delta for bodies the user hasn't scripted
+        # yet; the kinematic_target_* fields are likewise seeded so a
+        # constant-velocity kinematic body's first step synthesises a
+        # correct target from (initial pose + velocity * dt).
+        c.position_prev = wp.array(positions, dtype=wp.vec3f, device=device)
+        c.orientation_prev = wp.array(orientations, dtype=wp.quatf, device=device)
+        c.kinematic_target_pos = wp.array(positions, dtype=wp.vec3f, device=device)
+        c.kinematic_target_orient = wp.array(orientations, dtype=wp.quatf, device=device)
+        c.kinematic_target_valid = wp.zeros(n, dtype=wp.int32, device=device)
         return c
 
     def _pack_joint_arrays(self, device: wp.context.Device) -> dict:

@@ -27,6 +27,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
+    MOTION_KINEMATIC,
     BodyContainer,
 )
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
@@ -74,6 +75,9 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _constraint_relax_fast_tail_kernel,
     _constraints_to_elements_kernel,
     _integrate_velocities_kernel,
+    _kinematic_interpolate_substep_kernel,
+    _kinematic_prepare_step_kernel,
+    _set_kinematic_pose_batch_kernel,
     _world_csr_count_kernel,
     _world_csr_prefix_offsets_kernel,
     _world_csr_scan_kernel,
@@ -425,6 +429,100 @@ class PhoenXWorld:
         self._shape_body_internal = shape_body
 
     # ------------------------------------------------------------------
+    # Kinematic pose scripting
+    # ------------------------------------------------------------------
+
+    def set_kinematic_pose(
+        self,
+        body: int,
+        position: tuple[float, float, float],
+        orientation: tuple[float, float, float, float],
+    ) -> None:
+        """Script a kinematic body's end-of-next-step pose.
+
+        The next :meth:`step` call will: (1) snapshot the body's
+        current pose as the lerp / slerp origin, (2) infer the linear
+        and angular velocity needed to land on the new pose by the
+        end of the step, and (3) lerp the origin and slerp the
+        orientation across substeps so contacts see smooth motion.
+
+        Args:
+            body: Body index. Must be a kinematic body (added via
+                :meth:`WorldBuilder.add_kinematic_body` or a Newton
+                body with :data:`~newton.BodyFlags.KINEMATIC` set).
+                Calling on a dynamic or static body raises
+                ``ValueError``.
+            position: Target origin in world frame [m].
+            orientation: Target orientation as a unit quaternion
+                ``(x, y, z, w)``.
+
+        Batched calls with hundreds of kinematic bodies should use
+        :meth:`set_kinematic_poses_batch` -- this method does a
+        single-element host->device roundtrip per call.
+        """
+        # Host-side motion-type validation. Fetching one int per call
+        # is not free, but it trades a GPU sync for a clear error when
+        # users misaddress bodies, which matches the "hard to screw up"
+        # ethos of the WorldBuilder API.
+        if body < 0 or body >= self.num_bodies:
+            raise IndexError(f"set_kinematic_pose: body index {body} out of range [0, {self.num_bodies})")
+        mt = int(self.bodies.motion_type.numpy()[body])
+        if mt != int(MOTION_KINEMATIC):
+            raise ValueError(
+                f"set_kinematic_pose(body={body}): body motion_type is "
+                f"{mt} (not MOTION_KINEMATIC={int(MOTION_KINEMATIC)}). "
+                "Only kinematic bodies can be pose-scripted."
+            )
+        body_arr = wp.array([int(body)], dtype=wp.int32, device=self.device)
+        pos_arr = wp.array([tuple(float(c) for c in position)], dtype=wp.vec3f, device=self.device)
+        orient_arr = wp.array(
+            [tuple(float(c) for c in orientation)],
+            dtype=wp.quatf,
+            device=self.device,
+        )
+        wp.launch(
+            _set_kinematic_pose_batch_kernel,
+            dim=1,
+            inputs=[self.bodies, body_arr, pos_arr, orient_arr],
+            device=self.device,
+        )
+
+    def set_kinematic_poses_batch(
+        self,
+        body_ids: wp.array,
+        positions: wp.array,
+        orientations: wp.array,
+    ) -> None:
+        """Batched variant of :meth:`set_kinematic_pose`.
+
+        Args:
+            body_ids: ``wp.array[int32]`` of kinematic body indices.
+            positions: ``wp.array[wp.vec3f]``, parallel to ``body_ids``.
+            orientations: ``wp.array[wp.quatf]``, parallel to ``body_ids``.
+
+        Non-kinematic entries in ``body_ids`` are silently ignored by
+        the kernel -- the caller is expected to pre-filter on the
+        host if strict validation matters. This matches the Newton
+        adapter, which pushes *all* body indices through the same
+        kernel and lets the motion-type check gate.
+        """
+        n = int(body_ids.shape[0])
+        if n == 0:
+            return
+        if positions.shape[0] != n or orientations.shape[0] != n:
+            raise ValueError(
+                "set_kinematic_poses_batch: body_ids, positions, orientations "
+                f"must share length (got {n}, {positions.shape[0]}, "
+                f"{orientations.shape[0]})"
+            )
+        wp.launch(
+            _set_kinematic_pose_batch_kernel,
+            dim=n,
+            inputs=[self.bodies, body_ids, positions, orientations],
+            device=self.device,
+        )
+
+    # ------------------------------------------------------------------
     # Joint initialisation
     # ------------------------------------------------------------------
 
@@ -640,11 +738,21 @@ class PhoenXWorld:
             self._partitioner.build_csr()
             self._build_world_csr()
 
+        # Once-per-step kinematic prepare: snapshot ``position`` ->
+        # ``position_prev``, resolve this step's pose target
+        # (user-scripted or auto from constant velocity), and infer
+        # the linear / angular velocity the solver exposes to contacts.
+        # Dynamic and static bodies are a no-op.
+        self._kinematic_prepare_step()
+
         # Substep loop ordering: solve with bias ON, integrate, position
         # iterate, then relax with bias OFF. Running relax before
         # integrate would throw away the positional bias's contribution
-        # to penetration recovery.
-        for _ in range(self.substeps):
+        # to penetration recovery. Kinematic bodies are slotted into
+        # their lerp/slerp-interpolated pose at each substep's tail so
+        # contacts prepared at the *next* substep see smooth motion.
+        inv_n = 1.0 / float(self.substeps)
+        for k in range(self.substeps):
             if picking is not None:
                 picking.apply_force()
             self._integrate_forces()
@@ -653,6 +761,8 @@ class PhoenXWorld:
             self._integrate_positions()
             self._position_iterate()
             self._relax_velocities()
+            alpha = float(k + 1) * inv_n
+            self._kinematic_interpolate_substep(alpha)
 
         self._update_inertia()
         self._clear_forces()
@@ -966,15 +1076,40 @@ class PhoenXWorld:
         )
 
     def _integrate_positions(self) -> None:
-        """``x += v * dt`` and ``q = dq(w * dt) * q`` for non-static
-        bodies. Axis-angle quaternion form keeps unit norm over many
-        substeps."""
+        """``x += v * dt`` and ``q = dq(w * dt) * q`` for dynamic
+        bodies. Static and kinematic bodies are skipped -- kinematic
+        pose advances via
+        :meth:`_kinematic_interpolate_substep`. Axis-angle quaternion
+        form keeps unit norm over many substeps."""
         if self.num_bodies == 0:
             return
         wp.launch(
             _integrate_velocities_kernel,
             dim=self.num_bodies,
             inputs=[self.bodies, wp.float32(self.substep_dt)],
+            device=self.device,
+        )
+
+    def _kinematic_prepare_step(self) -> None:
+        """Once-per-step kinematic prepare: snapshot prev pose,
+        resolve target, infer velocity."""
+        if self.num_bodies == 0:
+            return
+        wp.launch(
+            _kinematic_prepare_step_kernel,
+            dim=self.num_bodies,
+            inputs=[self.bodies, wp.float32(self.step_dt)],
+            device=self.device,
+        )
+
+    def _kinematic_interpolate_substep(self, alpha: float) -> None:
+        """Per-substep kinematic pose update via lerp / slerp."""
+        if self.num_bodies == 0:
+            return
+        wp.launch(
+            _kinematic_interpolate_substep_kernel,
+            dim=self.num_bodies,
+            inputs=[self.bodies, wp.float32(alpha)],
             device=self.device,
         )
 

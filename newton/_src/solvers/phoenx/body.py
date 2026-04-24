@@ -144,6 +144,44 @@ class BodyContainer:
     motion_type: wp.array[wp.int32]
     world_id: wp.array[wp.int32]
 
+    # --- Kinematic-body pose scripting ---------------------------------
+    #
+    # For :data:`MOTION_KINEMATIC` bodies, users script the pose each
+    # frame (either via :meth:`PhoenXWorld.set_kinematic_pose` or by
+    # writing ``state.body_q`` through the Newton adapter). The solver
+    # then infers linear + angular velocity from the pose delta and
+    # ``lerp``/``slerp``-interpolates between the endpoints across
+    # substeps so contacts see smooth motion, not a teleport at t=0.
+    #
+    # For backward compat, a kinematic body without a scripted target
+    # (``kinematic_target_valid == 0``) falls through to the
+    # constant-velocity path: the prepare kernel computes a target =
+    # ``pos_prev + velocity * dt`` each step so interpolation produces
+    # the same trajectory as the old integration.
+    #
+    # These fields are zero-sized (not allocated) when the container
+    # has no kinematic bodies; guard allocation with
+    # :func:`_body_container_has_kinematic`.
+
+    #: End-of-previous-step pose (lerp/slerp origin). Written once at
+    #: :meth:`PhoenXWorld.step` entry by the kinematic prepare kernel.
+    position_prev: wp.array[wp.vec3f]
+    orientation_prev: wp.array[wp.quatf]
+
+    #: End-of-current-step pose (lerp/slerp endpoint). Written by the
+    #: user via :meth:`PhoenXWorld.set_kinematic_pose` or by the
+    #: Newton adapter; the solver never overwrites it after the
+    #: prepare kernel resolves it.
+    kinematic_target_pos: wp.array[wp.vec3f]
+    kinematic_target_orient: wp.array[wp.quatf]
+
+    #: 1 = ``kinematic_target_*`` holds a user-supplied pose to use
+    #: this step; 0 = no explicit target, so the prepare kernel
+    #: synthesises one from the constant-velocity path. Reset to 0
+    #: by prepare so the user must re-assert the target each step
+    #: (either explicitly or by re-importing Newton state).
+    kinematic_target_valid: wp.array[wp.int32]
+
 
 @wp.func
 def body_container_get(c: BodyContainer, i: wp.int32) -> RigidBodyData:
@@ -245,4 +283,15 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     # untouched and the multi-world dispatcher collapses to the same
     # single-block behaviour as before the refactor.
     c.world_id = wp.zeros(num_bodies, dtype=wp.int32, device=device)
+    # Kinematic-body pose-scripting scratch. ``position_prev`` /
+    # ``orientation_prev`` are initialised to zero; the host-side
+    # packer (:func:`WorldBuilder._build_body_container` or the Newton
+    # adapter) must overwrite them with the body's initial pose so
+    # the first :meth:`PhoenXWorld.step` sees ``prev == target`` for
+    # kinematic bodies that the user hasn't touched (velocity = 0).
+    c.position_prev = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
+    c.orientation_prev = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
+    c.kinematic_target_pos = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
+    c.kinematic_target_orient = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
+    c.kinematic_target_valid = wp.zeros(num_bodies, dtype=wp.int32, device=device)
     return c

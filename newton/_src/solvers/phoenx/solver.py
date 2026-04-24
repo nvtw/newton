@@ -153,13 +153,8 @@ def _import_body_state_kernel(
     body_qd: wp.array[wp.spatial_vector],
     body_f: wp.array[wp.spatial_vector],
     body_com: wp.array[wp.vec3f],
-    # PhoenX body container outputs (slot index = tid + 1).
-    position: wp.array[wp.vec3f],
-    orientation: wp.array[wp.quatf],
-    velocity: wp.array[wp.vec3f],
-    angular_velocity: wp.array[wp.vec3f],
-    force: wp.array[wp.vec3f],
-    torque: wp.array[wp.vec3f],
+    # PhoenX body container (slot index = tid + 1).
+    bodies: BodyContainer,
 ):
     """Unpack Newton's ``body_q`` / ``body_qd`` / ``body_f`` into
     PhoenX's SoA body slots.
@@ -174,20 +169,70 @@ def _import_body_state_kernel(
 
     Writes go to slot ``tid + 1`` because slot 0 is the static world
     anchor (never touched by this kernel).
+
+    Motion-type-specific routing:
+
+    * **Dynamic / static**: pose and velocity are written straight to
+      ``bodies.position / orientation / velocity / angular_velocity``,
+      matching the pre-kinematic-pose-scripting behaviour.
+    * **Kinematic**: pose is routed to ``bodies.kinematic_target_pos
+      / kinematic_target_orient`` and ``kinematic_target_valid`` is
+      flagged to ``1`` so the next step's
+      :func:`_kinematic_prepare_step_kernel` infers velocity from the
+      ``(prev pose, user target)`` delta. ``body_qd`` is ignored for
+      kinematic bodies -- the inferred velocity wins. This lets
+      Newton-API callers script kinematic motion by simply updating
+      ``state.body_q``, without having to compute velocities manually.
     """
     tid = wp.tid()
     dst = tid + 1
     q = body_q[tid]
     rot = wp.transform_get_rotation(q)
     origin = wp.transform_get_translation(q)
-    position[dst] = origin + wp.quat_rotate(rot, body_com[tid])
-    orientation[dst] = rot
-    qd = body_qd[tid]
-    velocity[dst] = wp.vec3f(qd[0], qd[1], qd[2])
-    angular_velocity[dst] = wp.vec3f(qd[3], qd[4], qd[5])
+    pose_origin = origin + wp.quat_rotate(rot, body_com[tid])
+
     wrench = body_f[tid]
-    force[dst] = wp.vec3f(wrench[0], wrench[1], wrench[2])
-    torque[dst] = wp.vec3f(wrench[3], wrench[4], wrench[5])
+    bodies.force[dst] = wp.vec3f(wrench[0], wrench[1], wrench[2])
+    bodies.torque[dst] = wp.vec3f(wrench[3], wrench[4], wrench[5])
+
+    if bodies.motion_type[dst] == MOTION_KINEMATIC:
+        bodies.kinematic_target_pos[dst] = pose_origin
+        bodies.kinematic_target_orient[dst] = rot
+        bodies.kinematic_target_valid[dst] = 1
+    else:
+        bodies.position[dst] = pose_origin
+        bodies.orientation[dst] = rot
+        qd = body_qd[tid]
+        bodies.velocity[dst] = wp.vec3f(qd[0], qd[1], qd[2])
+        bodies.angular_velocity[dst] = wp.vec3f(qd[3], qd[4], qd[5])
+
+
+@wp.kernel(enable_backward=False)
+def _seed_kinematic_initial_pose_kernel(
+    bodies: BodyContainer,
+):
+    """One-time seed for kinematic bodies during solver setup.
+
+    :func:`_import_body_state_kernel` routes kinematic body poses to
+    the ``kinematic_target_*`` slots (so per-step imports don't
+    clobber ``position``, which the solver uses as the lerp / slerp
+    origin). On the very first import that leaves ``bodies.position``
+    unset for kinematic bodies, which would cause the first step's
+    velocity inference to teleport the body from ``pos = 0`` to the
+    target. This kernel copies the just-imported target into
+    ``position`` / ``orientation`` so the invariant holds:
+    ``position_prev == position == target`` at step 0 for a
+    kinematic body the user hasn't yet scripted.
+    """
+    i = wp.tid()
+    if bodies.motion_type[i] != MOTION_KINEMATIC:
+        return
+    bodies.position[i] = bodies.kinematic_target_pos[i]
+    bodies.orientation[i] = bodies.kinematic_target_orient[i]
+    # No need to reset ``kinematic_target_valid`` -- if the user
+    # doesn't call set_kinematic_pose / re-import between setup and
+    # the first step, the prepare kernel reads target == position and
+    # infers zero velocity; the redundant valid=1 is harmless.
 
 
 @wp.kernel(enable_backward=False)
@@ -413,15 +458,11 @@ class SolverPhoenX(SolverBase):
 
         # ---- Build the PhoenX body container ---------------------------
         num_bodies_phoenx = int(model.body_count) + 1
-        self.bodies: BodyContainer = body_container_zeros(
-            num_bodies_phoenx, device=self.device
-        )
+        self.bodies: BodyContainer = body_container_zeros(num_bodies_phoenx, device=self.device)
 
         # Identity orientation for every slot (including slot 0) so the
         # first _update_inertia doesn't see a zero quaternion.
-        self.bodies.orientation.assign(
-            np.tile([0.0, 0.0, 0.0, 1.0], (num_bodies_phoenx, 1)).astype(np.float32)
-        )
+        self.bodies.orientation.assign(np.tile([0.0, 0.0, 0.0, 1.0], (num_bodies_phoenx, 1)).astype(np.float32))
 
         # Static property copy. Launches over N + 1 threads (slot 0 is
         # the static anchor).
@@ -479,9 +520,8 @@ class SolverPhoenX(SolverBase):
             needs_new_cp = existing_cp is None or not getattr(existing_cp, "contact_matching", False)
             if needs_new_cp:
                 import newton as _newton  # local to keep the import cycle tight
-                model._collision_pipeline = _newton.CollisionPipeline(
-                    model, contact_matching="sticky"
-                )
+
+                model._collision_pipeline = _newton.CollisionPipeline(model, contact_matching="sticky")
                 model._collision_pipeline.contacts()  # forces buffer sizing
         rigid_contact_max = int(model.rigid_contact_max)
         # One constraint column per shape pair covers arbitrary contact
@@ -492,8 +532,8 @@ class SolverPhoenX(SolverBase):
         # ---- PhoenX gravity: aggregate Model gravity ------------------
         # Model stores gravity per world in ``model.gravity`` with
         # shape (num_worlds, 3). PhoenX takes the same.
-        gravity_np = model.gravity.numpy() if model.gravity is not None else np.asarray(
-            [[0.0, 0.0, -9.81]], dtype=np.float32
+        gravity_np = (
+            model.gravity.numpy() if model.gravity is not None else np.asarray([[0.0, 0.0, -9.81]], dtype=np.float32)
         )
         num_worlds = max(1, int(gravity_np.shape[0]))
         gravity_tuples = [tuple(float(x) for x in row) for row in gravity_np]
@@ -535,9 +575,7 @@ class SolverPhoenX(SolverBase):
         if int(model.body_count) > 0:
             # Zero body_f / particle_f on the temp state; only pose/
             # twist matter for joint init.
-            zero_wrench = wp.zeros(
-                int(model.body_count), dtype=wp.spatial_vector, device=self.device
-            )
+            zero_wrench = wp.zeros(int(model.body_count), dtype=wp.spatial_vector, device=self.device)
             wp.launch(
                 _import_body_state_kernel,
                 dim=int(model.body_count),
@@ -546,22 +584,23 @@ class SolverPhoenX(SolverBase):
                     model.body_qd,
                     zero_wrench,
                     model.body_com,
+                    self.bodies,
                 ],
-                outputs=[
-                    self.bodies.position,
-                    self.bodies.orientation,
-                    self.bodies.velocity,
-                    self.bodies.angular_velocity,
-                    self.bodies.force,
-                    self.bodies.torque,
-                ],
+                device=self.device,
+            )
+            # Seed kinematic bodies' ``position`` / ``orientation``
+            # from the target slots the import kernel just filled.
+            # See :func:`_seed_kinematic_initial_pose_kernel` for the
+            # why.
+            wp.launch(
+                _seed_kinematic_initial_pose_kernel,
+                dim=int(model.body_count) + 1,  # +1 for slot 0 (world anchor)
+                inputs=[self.bodies],
                 device=self.device,
             )
 
         if num_joints > 0:
-            self.world.initialize_actuated_double_ball_socket_joints(
-                **self._adbs.to_initialize_kwargs()
-            )
+            self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
 
         # Install per-shape materials (friction only for now; Newton's
         # shape_material_mu maps directly).
@@ -574,9 +613,7 @@ class SolverPhoenX(SolverBase):
         if model.shape_body is not None and model.shape_count > 0:
             shape_body_np = model.shape_body.numpy()
             shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
-            self._shape_body = wp.array(
-                shape_body_phoenx, dtype=wp.int32, device=self.device
-            )
+            self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
         else:
             self._shape_body = None
 
@@ -602,7 +639,11 @@ class SolverPhoenX(SolverBase):
         )
 
         mu_np = self.model.shape_material_mu.numpy()
-        restitution = self.model.shape_material_restitution.numpy() if self.model.shape_material_restitution is not None else np.zeros_like(mu_np)
+        restitution = (
+            self.model.shape_material_restitution.numpy()
+            if self.model.shape_material_restitution is not None
+            else np.zeros_like(mu_np)
+        )
         materials = [
             Material(
                 static_friction=float(mu_np[i]),
@@ -629,8 +670,16 @@ class SolverPhoenX(SolverBase):
         model = self.model
         # Fall back to Model-held targets / gains if Control doesn't
         # supply them.
-        target_pos = control.joint_target_pos if control is not None and control.joint_target_pos is not None else model.joint_target_pos
-        target_vel = control.joint_target_vel if control is not None and control.joint_target_vel is not None else model.joint_target_vel
+        target_pos = (
+            control.joint_target_pos
+            if control is not None and control.joint_target_pos is not None
+            else model.joint_target_pos
+        )
+        target_vel = (
+            control.joint_target_vel
+            if control is not None and control.joint_target_vel is not None
+            else model.joint_target_vel
+        )
         if target_pos is None or target_vel is None or model.joint_target_mode is None:
             return  # no per-DOF drive configured
         wp.launch(
@@ -699,7 +748,15 @@ class SolverPhoenX(SolverBase):
 
     def _import_body_state(self, state_in: State) -> None:
         """Pull ``state_in.body_q`` / ``body_qd`` / ``body_f`` into
-        the PhoenX body container (slot ``i + 1``)."""
+        the PhoenX body container (slot ``i + 1``).
+
+        Kinematic bodies route their pose to the
+        ``kinematic_target_{pos,orient}`` slots with ``valid=1`` so
+        the solver infers velocity from the per-step pose delta and
+        interpolates between substeps; dynamic / static bodies get
+        their pose and velocity written directly. See
+        :func:`_import_body_state_kernel` for the branch.
+        """
         n = int(self.model.body_count)
         if n == 0:
             return
@@ -711,14 +768,7 @@ class SolverPhoenX(SolverBase):
                 state_in.body_qd,
                 state_in.body_f,
                 self.model.body_com,
-            ],
-            outputs=[
-                self.bodies.position,
-                self.bodies.orientation,
-                self.bodies.velocity,
-                self.bodies.angular_velocity,
-                self.bodies.force,
-                self.bodies.torque,
+                self.bodies,
             ],
             device=self.device,
         )
@@ -802,11 +852,13 @@ class SolverPhoenX(SolverBase):
         if flags & (int(SolverNotifyFlags.JOINT_PROPERTIES) | int(SolverNotifyFlags.JOINT_DOF_PROPERTIES)):
             self._adbs = build_adbs_init_arrays(self.model, device=self.device)
             if self._adbs.num_joint_columns > 0:
-                self.world.initialize_actuated_double_ball_socket_joints(
-                    **self._adbs.to_initialize_kwargs()
-                )
+                self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
         if flags & int(SolverNotifyFlags.MODEL_PROPERTIES):
-            gravity_np = self.model.gravity.numpy() if self.model.gravity is not None else np.asarray([[0.0, 0.0, -9.81]], dtype=np.float32)
+            gravity_np = (
+                self.model.gravity.numpy()
+                if self.model.gravity is not None
+                else np.asarray([[0.0, 0.0, -9.81]], dtype=np.float32)
+            )
             self.world.gravity = wp.array(gravity_np, dtype=wp.vec3f, device=self.device)
         if flags & int(SolverNotifyFlags.BODY_INERTIAL_PROPERTIES):
             # Refresh the copied inv_mass / inv_inertia slots.

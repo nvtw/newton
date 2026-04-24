@@ -13,7 +13,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.body import (
-    MOTION_DYNAMIC,
+    MOTION_KINEMATIC,
     MOTION_STATIC,
     BodyContainer,
 )
@@ -55,7 +55,10 @@ __all__ = [
     "_constraint_relax_fast_tail_kernel",
     "_constraints_to_elements_kernel",
     "_integrate_velocities_kernel",
+    "_kinematic_interpolate_substep_kernel",
+    "_kinematic_prepare_step_kernel",
     "_rotation_quaternion",
+    "_set_kinematic_pose_batch_kernel",
     "_world_csr_count_kernel",
     "_world_csr_prefix_offsets_kernel",
     "_world_csr_scan_kernel",
@@ -520,15 +523,164 @@ def _integrate_velocities_kernel(
     bodies: BodyContainer,
     dt: wp.float32,
 ):
-    """Advance position + orientation. Static bodies skipped; kinematic
-    bodies advance with their scripted velocities."""
+    """Advance position + orientation for dynamic bodies only.
+
+    Static bodies skipped unconditionally. Kinematic bodies are
+    *also* skipped here -- their pose advances via explicit lerp /
+    slerp interpolation between ``position_prev`` and
+    ``kinematic_target_pos`` in
+    :func:`_kinematic_interpolate_substep_kernel`, so running the
+    velocity integration on them would double-advance the pose.
+    """
     i = wp.tid()
-    if bodies.motion_type[i] == MOTION_STATIC:
+    mt = bodies.motion_type[i]
+    if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
         return
 
     bodies.position[i] = bodies.position[i] + bodies.velocity[i] * dt
     q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
     bodies.orientation[i] = wp.normalize(q_rot * bodies.orientation[i])
+
+
+@wp.kernel(enable_backward=False)
+def _kinematic_prepare_step_kernel(
+    bodies: BodyContainer,
+    dt: wp.float32,
+):
+    """Once-per-step kinematic prepare, called at
+    :meth:`PhoenXWorld.step` entry *before* the substep loop.
+
+    Resolves this step's pose target for every kinematic body, infers
+    the linear + angular velocity the solver should expose to contacts,
+    and snapshots the body's current pose as ``position_prev`` /
+    ``orientation_prev`` so the per-substep interpolator has a stable
+    ``lerp`` / ``slerp`` origin.
+
+    Target resolution:
+
+    * ``kinematic_target_valid[i] == 1`` (user called
+      :meth:`PhoenXWorld.set_kinematic_pose` or the Newton adapter
+      flagged a pose import) -- read the user-set target out of
+      ``kinematic_target_{pos,orient}`` and clear the flag.
+    * ``kinematic_target_valid[i] == 0`` (no explicit script this
+      step, constant-velocity backward-compat path) -- synthesise
+      a target from ``position_prev + velocity * dt`` and the
+      axis-angle integration of ``angular_velocity * dt``.
+
+    Velocity inference uses the quaternion log-map so large
+    rotations are handled correctly (small-angle ``omega ~= 2 *
+    q_rel.xyz / dt`` is exact only at the limit; the full formula
+    ``angle = 2 * atan2(|xyz|, w); omega = axis * angle / dt``
+    generalises without drift).
+    """
+    i = wp.tid()
+    if bodies.motion_type[i] != MOTION_KINEMATIC:
+        return
+
+    pos_prev = bodies.position[i]
+    orient_prev = bodies.orientation[i]
+    bodies.position_prev[i] = pos_prev
+    bodies.orientation_prev[i] = orient_prev
+
+    if bodies.kinematic_target_valid[i] == 1:
+        pos_target = bodies.kinematic_target_pos[i]
+        orient_target = bodies.kinematic_target_orient[i]
+        # One-shot consumption: the user must re-assert the target
+        # each step (this matches the Newton adapter, which flags
+        # valid=1 every import).
+        bodies.kinematic_target_valid[i] = 0
+    else:
+        # Constant-velocity path: advance from ``(pos, orient)`` by
+        # ``(velocity, angular_velocity) * dt``. Uses the same
+        # axis-angle rotation the dynamic integrator uses so a
+        # constant-omega kinematic traces exactly the same orientation
+        # trajectory as the legacy code.
+        pos_target = pos_prev + bodies.velocity[i] * dt
+        q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
+        orient_target = wp.normalize(q_rot * orient_prev)
+        bodies.kinematic_target_pos[i] = pos_target
+        bodies.kinematic_target_orient[i] = orient_target
+
+    # Infer velocity from pose delta. For the constant-velocity path
+    # this round-trips exactly (target = pos_prev + velocity * dt ->
+    # inferred velocity == original velocity). For the scripted path
+    # it exposes the pose-derivative for contact response.
+    inv_dt = wp.float32(1.0) / dt
+    v = (pos_target - pos_prev) * inv_dt
+
+    # Angular velocity via log-map of ``q_rel = target * inv(prev)``.
+    # Canonicalise to the shortest-path hemisphere first so the
+    # ``atan2`` branch cut doesn't flip the sign.
+    q_rel = orient_target * wp.quat_inverse(orient_prev)
+    if q_rel[3] < 0.0:
+        q_rel = -q_rel
+    xyz = wp.vec3f(q_rel[0], q_rel[1], q_rel[2])
+    xyz_len = wp.length(xyz)
+    if xyz_len > 1.0e-9:
+        angle = 2.0 * wp.atan2(xyz_len, q_rel[3])
+        omega = xyz * (angle * inv_dt / xyz_len)
+    else:
+        omega = wp.vec3f(0.0, 0.0, 0.0)
+
+    bodies.velocity[i] = v
+    bodies.angular_velocity[i] = omega
+
+
+@wp.kernel(enable_backward=False)
+def _set_kinematic_pose_batch_kernel(
+    bodies: BodyContainer,
+    body_ids: wp.array[wp.int32],
+    target_positions: wp.array[wp.vec3f],
+    target_orientations: wp.array[wp.quatf],
+):
+    """Batched writeback for :meth:`PhoenXWorld.set_kinematic_pose`.
+
+    One thread per entry in ``body_ids``. Writes the target pose into
+    the kinematic-scripting slots and flags
+    ``kinematic_target_valid = 1`` so the next
+    :func:`_kinematic_prepare_step_kernel` picks it up.
+
+    Attempting to script a non-kinematic body is a no-op (silent);
+    callers should validate on the host side and raise clearly.
+    """
+    k = wp.tid()
+    b = body_ids[k]
+    if bodies.motion_type[b] != MOTION_KINEMATIC:
+        return
+    bodies.kinematic_target_pos[b] = target_positions[k]
+    bodies.kinematic_target_orient[b] = target_orientations[k]
+    bodies.kinematic_target_valid[b] = 1
+
+
+@wp.kernel(enable_backward=False)
+def _kinematic_interpolate_substep_kernel(
+    bodies: BodyContainer,
+    alpha: wp.float32,
+):
+    """Per-substep kinematic pose update.
+
+    Called *after* :func:`_integrate_velocities_kernel` inside each
+    substep with ``alpha = (substep_index + 1) / num_substeps``. Writes
+
+    .. math::
+        \\text{position}    &= \\text{lerp}(\\text{position}_{\\text{prev}},
+                                 \\text{kinematic\\_target\\_pos}, \\alpha) \\\\
+        \\text{orientation} &= \\text{slerp}(\\text{orientation}_{\\text{prev}},
+                                 \\text{kinematic\\_target\\_orient}, \\alpha)
+
+    At ``alpha = 1`` the body lands exactly on its target. Dynamic and
+    static bodies are skipped (dynamic pose already advanced by
+    :func:`_integrate_velocities_kernel`; static never moves).
+    """
+    i = wp.tid()
+    if bodies.motion_type[i] != MOTION_KINEMATIC:
+        return
+    prev_pos = bodies.position_prev[i]
+    target_pos = bodies.kinematic_target_pos[i]
+    prev_orient = bodies.orientation_prev[i]
+    target_orient = bodies.kinematic_target_orient[i]
+    bodies.position[i] = (1.0 - alpha) * prev_pos + alpha * target_pos
+    bodies.orientation[i] = wp.quat_slerp(prev_orient, target_orient, alpha)
 
 
 @wp.kernel(enable_backward=False)
