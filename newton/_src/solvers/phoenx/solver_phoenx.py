@@ -74,6 +74,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _constraint_iterate_fast_tail_kernel,
     _constraint_position_iterate_fast_tail_kernel,
     _constraint_prepare_fast_tail_kernel,
+    _constraint_prepare_plus_iterate_fast_tail_kernel,
     _constraint_relax_fast_tail_kernel,
     _constraints_to_elements_kernel,
     _count_elements_per_world_kernel,
@@ -1160,17 +1161,36 @@ class PhoenXWorld:
 
     def _solve_main(self) -> None:
         """Main PGS solve per substep: prepare + ``solver_iterations``
-        iterate sweeps with bias ON."""
+        iterate sweeps with bias ON.
+
+        Launches the fused prepare+iterate kernel so the per-world
+        setup (``world_id``, ``n_colors``, ``world_base``) is computed
+        once and the one kernel-launch boundary between prepare and
+        iterate is removed.
+        """
         if self._constraint_capacity == 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
-        self._launch_fast_prepare(idt, contact_views)
-        self._launch_fast_iter(
-            _constraint_iterate_fast_tail_kernel,
-            self.solver_iterations,
-            idt,
-            contact_views,
+        wp.launch(
+            _constraint_prepare_plus_iterate_fast_tail_kernel,
+            dim=self._fast_tail_launch_dim(),
+            block_dim=self._fast_tail_block_dim(),
+            inputs=[
+                self.constraints,
+                self.bodies,
+                idt,
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
+                self._contact_container,
+                contact_views,
+                wp.int32(self.solver_iterations),
+                wp.int32(self.num_worlds),
+                wp.int32(self.num_joints),
+            ],
+            device=self.device,
         )
 
     def _position_iterate(self) -> None:

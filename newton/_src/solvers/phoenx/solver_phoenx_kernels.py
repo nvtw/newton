@@ -654,6 +654,88 @@ def _constraint_prepare_fast_tail_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _constraint_prepare_plus_iterate_fast_tail_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    world_element_ids_by_color: wp.array[wp.int32],
+    world_color_starts: wp.array2d[wp.int32],
+    world_csr_offsets: wp.array[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_iterations: wp.int32,
+    num_worlds: wp.int32,
+    num_joints: wp.int32,
+):
+    """Fused prepare + main-solve dispatcher.
+
+    Runs the prepare pass and the ``num_iterations`` PGS sweeps in a
+    single kernel launch. Saves one kernel launch per substep; more
+    importantly, per-world setup (``world_id``, ``n_colors``,
+    ``world_base``) is computed once and the register-resident
+    per-world state survives across the prepare -> iterate transition
+    for free.
+
+    The prepare outputs (``cc.derived``) still round-trip through
+    global memory between prepare and iterate -- different cids in a
+    warp touch different contacts, so we can't keep them in
+    registers. But the kernel-launch fixed cost is eliminated and
+    some loop-boundary scalars may be reused by the compiler.
+    """
+    tid = wp.tid()
+    local_tid = tid % _STRAGGLER_BLOCK_DIM
+    world_id = tid / _STRAGGLER_BLOCK_DIM
+    if world_id >= num_worlds:
+        return
+
+    n_colors = world_num_colors[world_id]
+    world_base = world_csr_offsets[world_id]
+
+    # ---- Prepare phase --------------------------------------------
+    c = wp.int32(0)
+    while c < n_colors:
+        start = world_base + world_color_starts[world_id, c]
+        end = world_base + world_color_starts[world_id, c + 1]
+        count = end - start
+
+        base = local_tid
+        while base < count:
+            cid = world_element_ids_by_color[start + base]
+            if cid < num_joints:
+                actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+            else:
+                contact_prepare_for_iteration(constraints, cid, bodies, idt, cc, contacts)
+            base += _STRAGGLER_BLOCK_DIM
+
+        _sync_warp()
+        c += 1
+
+    # ---- Iterate phase -------------------------------------------
+    it = wp.int32(0)
+    while it < num_iterations:
+        c = wp.int32(0)
+        while c < n_colors:
+            start = world_base + world_color_starts[world_id, c]
+            end = world_base + world_color_starts[world_id, c + 1]
+            count = end - start
+
+            base = local_tid
+            while base < count:
+                cid = world_element_ids_by_color[start + base]
+                if cid < num_joints:
+                    actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
+                else:
+                    contact_iterate(constraints, cid, bodies, idt, cc, contacts, True)
+                base += _STRAGGLER_BLOCK_DIM
+
+            _sync_warp()
+            c += 1
+
+        it += 1
+
+
+@wp.kernel(enable_backward=False)
 def _constraint_position_iterate_fast_tail_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
