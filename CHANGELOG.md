@@ -20,6 +20,7 @@
 
 ### Changed
 
+- Consolidate the Jitter and PhoenX rigid-body solvers into a single PhoenX package at `newton._src.solvers.phoenx`. Remove `SolverJitter` along with the standalone `BallSocket` / `HingeAngle` / `HingeJoint` / `Prismatic` / `DoubleBallSocket` / `DoubleBallSocketPrismatic` / `AngularMotor` / `LinearMotor` / `AngularLimit` / `LinearLimit` / `D6` constraint types, their `WorldBuilder.add_*` helpers, and the `WorldBuilder.finalize(enable_all_constraints=...)` knob. The unified actuated double-ball-socket joint (`JointMode.BALL_SOCKET` / `REVOLUTE` / `PRISMATIC` with optional PD drive and limit) covers every revolute / prismatic / ball-socket use case; rename the rigid-body solver import path from `newton._src.solvers.jitter` to `newton._src.solvers.phoenx`, rename `JITTER_CONTACT_MATCHING` to `PHOENX_CONTACT_MATCHING`, `JitterPicking` to `Picking`, and `WorldBuilder.finalize()` now returns a `PhoenXWorld` directly.
 - Use pre-computed local AABB for `CONVEX_MESH` shapes in `compute_shape_aabbs`, avoiding a per-frame support-function AABB computation
 - Build mesh SDFs via the texture-based sparse path only; sample via `SDF.texture_data` instead of `SDF.sparse_volume` / `SDF.coarse_volume`.
 - Render all GL viewer lines (joints, contacts, wireframes) as geometry-shader quads instead of ``GL_LINES`` for uniform width across zoom levels and non-square viewports
@@ -33,6 +34,7 @@
 
 ### Fixed
 
+- Fix `SolverPhoenX` / `SolverJitter` speculative-contact handling end-to-end. Matches `b2SolveOverflowContacts` / `b2SolveContactsTask` in Box2D v3: (a) for separated contacts (`gap > 0`) the normal row uses `bias = gap * inv_dt` with rigid PGS coefficients (`mass_coeff = 1`, `impulse_coeff = 0`) -- the row only fires when the predicted closing displacement would exceed the gap and caps it at `gap / dt`; (b) the speculative branch runs unconditionally of `use_bias`, so the relax pass (`use_bias=False`) keeps the `gap * inv_dt` bias instead of zeroing it. Previously the row reused the soft Baumgarte `bias = gap * bias_rate` in the main solve and then zeroed the bias during relax, which (i) created a virtual spring at the speculative gap distance in the main solve and (ii) made the relax pass apply a pure `-eff_n * vn` brake on every closing body in the speculative window; together these produced the "mesh enters honey as soon as speculative contacts appear" artefact on the rabbit-pile and nut-bolt examples. Penetrating contacts (`gap < 0`) keep the soft Baumgarte path in the main solve and fall to rigid `Jv = 0` enforcement (bias = 0, rigid coefficients) in the relax pass
 - Fix Sphinx docs builds to auto-discover bundled ``pypandoc_binary`` pandoc so notebook tutorials build without manual PATH configuration
 - Fix viewer crash with `imgui_bundle>=1.92.6` when editing colors by normalizing `color_edit3` input/output in `_edit_color3`
 - Show prismatic joints in the GL viewer when "Show Joints" is enabled
