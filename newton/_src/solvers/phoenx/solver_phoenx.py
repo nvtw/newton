@@ -402,6 +402,11 @@ class PhoenXWorld:
         # reads from here if the caller doesn't pass ``shape_body``
         # explicitly (Newton-Model callers still pass it through).
         self._shape_body_internal: wp.array[wp.int32] | None = None
+        # Lazy zero-length sentinel substituted for optional
+        # per-contact stiffness / damping / friction arrays when the
+        # user's :class:`~newton.Contacts` didn't allocate them.
+        # Allocated on first step that needs it.
+        self._soft_contact_sentinel: wp.array[wp.float32] | None = None
 
     # ------------------------------------------------------------------
     # Material system / collision filters / placeholder contact views
@@ -681,6 +686,11 @@ class PhoenXWorld:
         dummy_int = wp.zeros(1, dtype=wp.int32, device=self.device)
         dummy_vec3 = wp.zeros(1, dtype=wp.vec3f, device=self.device)
         dummy_float = wp.zeros(1, dtype=wp.float32, device=self.device)
+        # Soft-contact stiffness / damping / friction arrays can be
+        # sentinel length 0 when the caller's ``Contacts`` didn't
+        # allocate them. The prepare kernel gates on the array
+        # length per-contact.
+        sentinel_float = wp.zeros(0, dtype=wp.float32, device=self.device)
         return contact_views_make(
             rigid_contact_count=dummy_int,
             rigid_contact_point0=dummy_vec3,
@@ -692,6 +702,9 @@ class PhoenXWorld:
             rigid_contact_margin0=dummy_float,
             rigid_contact_margin1=dummy_float,
             shape_body=dummy_int,
+            rigid_contact_stiffness=sentinel_float,
+            rigid_contact_damping=sentinel_float,
+            rigid_contact_friction=sentinel_float,
         )
 
     # ------------------------------------------------------------------
@@ -801,6 +814,29 @@ class PhoenXWorld:
                 "``WorldBuilder.add_shape_*`` so it gets installed at finalize."
             )
 
+        # Soft-contact per-contact arrays are optional on Newton's
+        # ``Contacts``: only allocated when
+        # ``per_contact_shape_properties=True``. When missing we pass
+        # a length-0 sentinel so the Warp kernels' per-contact
+        # ``array.shape[0] > k`` check short-circuits cleanly.
+        if self._soft_contact_sentinel is None:
+            self._soft_contact_sentinel = wp.zeros(0, dtype=wp.float32, device=self.device)
+        contact_stiffness = (
+            contacts.rigid_contact_stiffness
+            if getattr(contacts, "rigid_contact_stiffness", None) is not None
+            else self._soft_contact_sentinel
+        )
+        contact_damping = (
+            contacts.rigid_contact_damping
+            if getattr(contacts, "rigid_contact_damping", None) is not None
+            else self._soft_contact_sentinel
+        )
+        contact_friction = (
+            contacts.rigid_contact_friction
+            if getattr(contacts, "rigid_contact_friction", None) is not None
+            else self._soft_contact_sentinel
+        )
+
         self._contact_views = contact_views_make(
             rigid_contact_count=contacts.rigid_contact_count,
             rigid_contact_point0=contacts.rigid_contact_point0,
@@ -812,6 +848,9 @@ class PhoenXWorld:
             rigid_contact_margin0=contacts.rigid_contact_margin0,
             rigid_contact_margin1=contacts.rigid_contact_margin1,
             shape_body=shape_body,
+            rigid_contact_stiffness=contact_stiffness,
+            rigid_contact_damping=contact_damping,
+            rigid_contact_friction=contact_friction,
         )
 
         # Swap lambda buffers + forward map (pointer swap, O(1)).

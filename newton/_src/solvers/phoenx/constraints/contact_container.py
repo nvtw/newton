@@ -42,6 +42,9 @@ __all__ = [
     "cc_get_local_p1",
     "cc_get_normal",
     "cc_get_normal_lambda",
+    "cc_get_pd_bias",
+    "cc_get_pd_eff_soft",
+    "cc_get_pd_gamma",
     "cc_get_prev_local_p0",
     "cc_get_prev_local_p1",
     "cc_get_prev_normal",
@@ -64,6 +67,9 @@ __all__ = [
     "cc_set_local_p1",
     "cc_set_normal",
     "cc_set_normal_lambda",
+    "cc_set_pd_bias",
+    "cc_set_pd_eff_soft",
+    "cc_set_pd_gamma",
     "cc_set_r1",
     "cc_set_r2",
     "cc_set_tangent1",
@@ -83,8 +89,14 @@ CC_LAMBDA_DWORDS_PER_CONTACT: int = 3
 CC_DWORDS_PER_CONTACT: int = 15
 
 #: Per-contact derived dwords filled by ``prepare_for_iteration``:
-#: ``r1(3), r2(3), eff_n, eff_t1, eff_t2, bias, bias_t1, bias_t2``.
-CC_DERIVED_DWORDS_PER_CONTACT: int = 12
+#: ``r1(3), r2(3), eff_n, eff_t1, eff_t2, bias, bias_t1, bias_t2,
+#: pd_gamma, pd_bias, pd_eff_soft``. The final three are non-zero
+#: only for PhysX-style soft contacts (user-supplied absolute
+#: stiffness / damping on the Newton :class:`Contacts` buffer);
+#: ``pd_eff_soft > 0`` is the iterate-side flag that switches the
+#: normal row from the Box2D hertz-based path to the absolute PD
+#: spring-damper path.
+CC_DERIVED_DWORDS_PER_CONTACT: int = 15
 
 
 # Module-level constants for Warp kernels. ``wp.constant`` so they embed
@@ -117,6 +129,16 @@ _CC_OFF_EFF_T2 = wp.constant(8)
 _CC_OFF_BIAS = wp.constant(9)
 _CC_OFF_BIAS_T1 = wp.constant(10)
 _CC_OFF_BIAS_T2 = wp.constant(11)
+# Soft-contact PD plumbing (pairs with ``pd_coefficients`` in
+# ``constraint_container.py``). Written by
+# :func:`contact_prepare_for_iteration_at` when the Newton
+# ``rigid_contact_stiffness`` / ``rigid_contact_damping`` arrays are
+# populated (per-contact, absolute units: N/m and N*s/m).
+# ``pd_eff_soft == 0`` is the per-contact opt-out -- iterate then
+# falls through to the legacy Box2D path unchanged.
+_CC_OFF_PD_GAMMA = wp.constant(12)
+_CC_OFF_PD_BIAS = wp.constant(13)
+_CC_OFF_PD_EFF_SOFT = wp.constant(14)
 
 
 @wp.struct
@@ -397,6 +419,36 @@ def cc_set_bias_t2(cc: ContactContainer, k: wp.int32, v: wp.float32):
     cc.derived[_CC_OFF_BIAS_T2, k] = v
 
 
+@wp.func
+def cc_get_pd_gamma(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.derived[_CC_OFF_PD_GAMMA, k]
+
+
+@wp.func
+def cc_set_pd_gamma(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.derived[_CC_OFF_PD_GAMMA, k] = v
+
+
+@wp.func
+def cc_get_pd_bias(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.derived[_CC_OFF_PD_BIAS, k]
+
+
+@wp.func
+def cc_set_pd_bias(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.derived[_CC_OFF_PD_BIAS, k] = v
+
+
+@wp.func
+def cc_get_pd_eff_soft(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return cc.derived[_CC_OFF_PD_EFF_SOFT, k]
+
+
+@wp.func
+def cc_set_pd_eff_soft(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    cc.derived[_CC_OFF_PD_EFF_SOFT, k] = v
+
+
 # ---------------------------------------------------------------------------
 # Host-side factories.
 # ---------------------------------------------------------------------------
@@ -421,15 +473,9 @@ def contact_container_zeros(
     # anyway.
     n = max(1, int(rigid_contact_max))
     cc = ContactContainer()
-    cc.lambdas = wp.zeros(
-        (CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device
-    )
-    cc.prev_lambdas = wp.zeros(
-        (CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device
-    )
-    cc.derived = wp.zeros(
-        (CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device
-    )
+    cc.lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    cc.prev_lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     return cc
 
 

@@ -34,6 +34,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     assert_constraint_header,
     constraint_bodies_make,
     constraint_get_type,
+    pd_coefficients,
     read_float,
     read_int,
     soft_constraint_coefficients,
@@ -52,6 +53,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_local_p1,
     cc_get_normal,
     cc_get_normal_lambda,
+    cc_get_pd_bias,
+    cc_get_pd_eff_soft,
+    cc_get_pd_gamma,
     cc_get_r1,
     cc_get_r2,
     cc_get_tangent1,
@@ -66,6 +70,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_local_p0,
     cc_set_local_p1,
     cc_set_normal_lambda,
+    cc_set_pd_bias,
+    cc_set_pd_eff_soft,
+    cc_set_pd_gamma,
     cc_set_r1,
     cc_set_r2,
     cc_set_tangent1_lambda,
@@ -162,15 +169,9 @@ assert_constraint_header(ContactConstraintData)
 _OFF_BODY1 = wp.constant(dword_offset_of(ContactConstraintData, "body1"))
 _OFF_BODY2 = wp.constant(dword_offset_of(ContactConstraintData, "body2"))
 _OFF_FRICTION = wp.constant(dword_offset_of(ContactConstraintData, "friction"))
-_OFF_FRICTION_DYNAMIC = wp.constant(
-    dword_offset_of(ContactConstraintData, "friction_dynamic")
-)
-_OFF_CONTACT_FIRST = wp.constant(
-    dword_offset_of(ContactConstraintData, "contact_first")
-)
-_OFF_CONTACT_COUNT = wp.constant(
-    dword_offset_of(ContactConstraintData, "contact_count")
-)
+_OFF_FRICTION_DYNAMIC = wp.constant(dword_offset_of(ContactConstraintData, "friction_dynamic"))
+_OFF_CONTACT_FIRST = wp.constant(dword_offset_of(ContactConstraintData, "contact_first"))
+_OFF_CONTACT_COUNT = wp.constant(dword_offset_of(ContactConstraintData, "contact_count"))
 
 
 #: Total dword count of one contact constraint column. Used by
@@ -225,6 +226,27 @@ class ContactViews:
     #: Newton model's per-shape body index (``model.shape_body``).
     shape_body: wp.array[wp.int32]
 
+    #: Per-contact absolute stiffness [N/m] written by narrow phases
+    #: that support soft contacts (e.g. hydroelastic). ``0`` at a
+    #: contact slot means "use the legacy Box2D hertz-based normal
+    #: row". Allocated by :class:`~newton.Contacts` only when
+    #: ``per_contact_shape_properties=True``; when the user-supplied
+    #: ``Contacts`` buffer didn't allocate it, the solver installs a
+    #: zero-length sentinel and every contact falls through to the
+    #: legacy path.
+    rigid_contact_stiffness: wp.array[wp.float32]
+    #: Per-contact absolute damping [N*s/m]. Same semantics as
+    #: :attr:`rigid_contact_stiffness`: non-zero switches the normal
+    #: row to the absolute PD spring-damper path.
+    rigid_contact_damping: wp.array[wp.float32]
+    #: Per-contact friction coefficient override [dimensionless]. When
+    #: the allocated Contacts array has a positive value at slot ``k``,
+    #: the solver uses it instead of the material-table entry (lets
+    #: hydroelastic and other per-contact narrow phases publish
+    #: pressure-dependent friction). ``0`` or the sentinel buffer
+    #: means "fall back to the material table".
+    rigid_contact_friction: wp.array[wp.float32]
+
 
 def contact_views_make(
     rigid_contact_count: wp.array,
@@ -237,9 +259,18 @@ def contact_views_make(
     rigid_contact_margin0: wp.array,
     rigid_contact_margin1: wp.array,
     shape_body: wp.array,
+    rigid_contact_stiffness: wp.array,
+    rigid_contact_damping: wp.array,
+    rigid_contact_friction: wp.array,
 ) -> ContactViews:
     """Build a :class:`ContactViews` from already-allocated Warp arrays.
-    Pure struct pack on the host; no device allocations."""
+    Pure struct pack on the host; no device allocations.
+
+    The three soft-contact arrays (stiffness / damping / friction) are
+    optional on Newton's :class:`~newton.Contacts`; the caller must
+    substitute a zero-length sentinel array (same dtype) when they're
+    unset, so every :class:`ContactViews` field stays addressable.
+    """
     v = ContactViews()
     v.rigid_contact_count = rigid_contact_count
     v.rigid_contact_point0 = rigid_contact_point0
@@ -251,6 +282,9 @@ def contact_views_make(
     v.rigid_contact_margin0 = rigid_contact_margin0
     v.rigid_contact_margin1 = rigid_contact_margin1
     v.shape_body = shape_body
+    v.rigid_contact_stiffness = rigid_contact_stiffness
+    v.rigid_contact_damping = rigid_contact_damping
+    v.rigid_contact_friction = rigid_contact_friction
     return v
 
 
@@ -290,44 +324,32 @@ def contact_set_friction(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
 
 
 @wp.func
-def contact_get_friction_dynamic(
-    c: ConstraintContainer, cid: wp.int32
-) -> wp.float32:
+def contact_get_friction_dynamic(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
     return read_float(c, _OFF_FRICTION_DYNAMIC, cid)
 
 
 @wp.func
-def contact_set_friction_dynamic(
-    c: ConstraintContainer, cid: wp.int32, v: wp.float32
-):
+def contact_set_friction_dynamic(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
     write_float(c, _OFF_FRICTION_DYNAMIC, cid, v)
 
 
 @wp.func
-def contact_get_contact_first(
-    c: ConstraintContainer, cid: wp.int32
-) -> wp.int32:
+def contact_get_contact_first(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
     return read_int(c, _OFF_CONTACT_FIRST, cid)
 
 
 @wp.func
-def contact_set_contact_first(
-    c: ConstraintContainer, cid: wp.int32, v: wp.int32
-):
+def contact_set_contact_first(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
     write_int(c, _OFF_CONTACT_FIRST, cid, v)
 
 
 @wp.func
-def contact_get_contact_count(
-    c: ConstraintContainer, cid: wp.int32
-) -> wp.int32:
+def contact_get_contact_count(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
     return read_int(c, _OFF_CONTACT_COUNT, cid)
 
 
 @wp.func
-def contact_set_contact_count(
-    c: ConstraintContainer, cid: wp.int32, v: wp.int32
-):
+def contact_set_contact_count(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
     write_int(c, _OFF_CONTACT_COUNT, cid, v)
 
 
@@ -349,12 +371,7 @@ def _effective_mass_scalar(
     """Scalar ``1 / J M^-1 J^T`` for an axis-aligned contact row."""
     rc1 = wp.cross(r1, axis)
     rc2 = wp.cross(r2, axis)
-    w = (
-        inv_mass1
-        + inv_mass2
-        + wp.dot(rc1, inv_inertia1 @ rc1)
-        + wp.dot(rc2, inv_inertia2 @ rc2)
-    )
+    w = inv_mass1 + inv_mass2 + wp.dot(rc1, inv_inertia1 @ rc1) + wp.dot(rc2, inv_inertia2 @ rc2)
     if w > 1.0e-12:
         return 1.0 / w
     return 0.0
@@ -499,29 +516,15 @@ def contact_prepare_for_iteration_at(
         # surface.
         margin0 = contacts.rigid_contact_margin0[k]
         margin1 = contacts.rigid_contact_margin1[k]
-        p1_world = (
-            position1
-            + wp.quat_rotate(orientation1, local_p0 - body_com1)
-            + margin0 * n
-        )
-        p2_world = (
-            position2
-            + wp.quat_rotate(orientation2, local_p1 - body_com2)
-            - margin1 * n
-        )
+        p1_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
+        p2_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
 
         r1 = p1_world - position1
         r2 = p2_world - position2
 
-        eff_n = _effective_mass_scalar(
-            n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
-        )
-        eff_t1 = _effective_mass_scalar(
-            t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
-        )
-        eff_t2 = _effective_mass_scalar(
-            t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
-        )
+        eff_n = _effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+        eff_t1 = _effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+        eff_t2 = _effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
 
         effective_gap = wp.dot(p2_world - p1_world, n)
 
@@ -532,9 +535,7 @@ def contact_prepare_for_iteration_at(
         # corrections.
         lam_n_ws = cc_get_normal_lambda(cc, k)
         lam_n_ref = wp.float32(1.0) / wp.max(eff_n * idt, wp.float32(1.0e-6))
-        load_boost = wp.min(
-            wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0)
-        )
+        load_boost = wp.min(wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0))
 
         # Speculative vs penetrating bias (Box2D v3 / solver2d model).
         # For a *separated* contact (``gap > 0``) we want the row to only
@@ -582,16 +583,10 @@ def contact_prepare_for_iteration_at(
         fric_limit_prev = mu_s_col * lam_n_prev
         cone_margin = wp.float32(0.98)
         lam_t_mag_sq = lam_t1_prev * lam_t1_prev + lam_t2_prev * lam_t2_prev
-        coulomb_saturated = (
-            lam_n_prev > wp.float32(0.0)
-            and lam_t_mag_sq
-            >= (cone_margin * fric_limit_prev) * (cone_margin * fric_limit_prev)
+        coulomb_saturated = lam_n_prev > wp.float32(0.0) and lam_t_mag_sq >= (cone_margin * fric_limit_prev) * (
+            cone_margin * fric_limit_prev
         )
-        if (
-            drift_sq > slip_threshold * slip_threshold
-            or normal_aligned < wp.float32(0.95)
-            or coulomb_saturated
-        ):
+        if drift_sq > slip_threshold * slip_threshold or normal_aligned < wp.float32(0.95) or coulomb_saturated:
             fresh_lp0 = contacts.rigid_contact_point0[k]
             fresh_lp1 = contacts.rigid_contact_point1[k]
             cc_set_local_p0(cc, k, fresh_lp0)
@@ -599,27 +594,13 @@ def contact_prepare_for_iteration_at(
             if coulomb_saturated:
                 cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
-            p1_world = (
-                position1
-                + wp.quat_rotate(orientation1, fresh_lp0 - body_com1)
-                + margin0 * n
-            )
-            p2_world = (
-                position2
-                + wp.quat_rotate(orientation2, fresh_lp1 - body_com2)
-                - margin1 * n
-            )
+            p1_world = position1 + wp.quat_rotate(orientation1, fresh_lp0 - body_com1) + margin0 * n
+            p2_world = position2 + wp.quat_rotate(orientation2, fresh_lp1 - body_com2) - margin1 * n
             r1 = p1_world - position1
             r2 = p2_world - position2
-            eff_n = _effective_mass_scalar(
-                n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
-            )
-            eff_t1 = _effective_mass_scalar(
-                t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
-            )
-            eff_t2 = _effective_mass_scalar(
-                t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
-            )
+            eff_n = _effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+            eff_t1 = _effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+            eff_t2 = _effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
             p_diff = p2_world - p1_world
             drift_t1_raw = wp.dot(p_diff, t1_dir)
             drift_t2_raw = wp.dot(p_diff, t2_dir)
@@ -638,6 +619,52 @@ def contact_prepare_for_iteration_at(
         cc_set_bias_t1(cc, k, bias_t1_val)
         cc_set_bias_t2(cc, k, bias_t2_val)
 
+        # ---- Optional soft-contact PD plumbing -----------------------
+        # When Newton's per-contact stiffness / damping arrays are
+        # allocated (``Contacts(per_contact_shape_properties=True)``),
+        # route the normal row through the absolute PD spring-damper
+        # formula. The iterate then reads ``pd_eff_soft > 0`` as the
+        # switch and applies ``lam = -eff_soft * (jv - bias +
+        # gamma * acc)`` instead of the Box2D hertz-based row.
+        #
+        # Sentinel arrays (length 0) short-circuit this branch --
+        # ``pd_eff_soft = 0`` means "legacy path", which is the
+        # pre-soft-contact behaviour bit-for-bit.
+        stiffness_arr_len = contacts.rigid_contact_stiffness.shape[0]
+        damping_arr_len = contacts.rigid_contact_damping.shape[0]
+        if stiffness_arr_len > k or damping_arr_len > k:
+            k_n = wp.float32(0.0)
+            c_n = wp.float32(0.0)
+            if stiffness_arr_len > k:
+                k_n = contacts.rigid_contact_stiffness[k]
+            if damping_arr_len > k:
+                c_n = contacts.rigid_contact_damping[k]
+            if (k_n > wp.float32(0.0) or c_n > wp.float32(0.0)) and eff_n > wp.float32(0.0):
+                # ``pd_coefficients`` wants inverse effective mass;
+                # ``eff_n`` is the forward mass.
+                eff_inv_n = wp.float32(1.0) / eff_n
+                # Sign convention: the contact normal row has
+                # ``jv_n = (v2 - v1) . n`` (closing speed positive
+                # when penetrating). ``effective_gap`` is positive
+                # when separated, negative when penetrating -- so the
+                # penetration depth the spring should push against
+                # is ``-effective_gap``. The PD row's ``bias_signed``
+                # is then ``k * (-gap) * bias_factor * idt``, which
+                # the iterate enters as ``lam = -eff_soft * (jv_n -
+                # bias + ...)`` -- i.e. positive ``depth -> bias > 0
+                # -> positive ``lam`` -> positive normal impulse (push
+                # body 2 away from body 1). Matches the Box2D
+                # Baumgarte path's sign and the unilateral clamp
+                # ``lam_n >= 0``.
+                pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(k_n, c_n, -effective_gap, eff_inv_n, dt_substep)
+                cc_set_pd_gamma(cc, k, pd_gamma_n)
+                cc_set_pd_bias(cc, k, pd_bias_n)
+                cc_set_pd_eff_soft(cc, k, pd_eff_soft_n)
+            else:
+                cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
+        else:
+            cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
+
         # Warm-start impulse (current-buffer lambdas were seeded by the
         # gather kernel before prepare). Accumulate in world space and
         # scatter once after the full column has been processed.
@@ -652,12 +679,8 @@ def contact_prepare_for_iteration_at(
     # Contact impulse acts from body 1 onto body 2 along +normal.
     bodies.velocity[b1] = bodies.velocity[b1] - inv_mass1 * total_lin_imp_on_b2
     bodies.velocity[b2] = bodies.velocity[b2] + inv_mass2 * total_lin_imp_on_b2
-    bodies.angular_velocity[b1] = (
-        bodies.angular_velocity[b1] - inv_inertia1 @ total_ang_imp_on_b1
-    )
-    bodies.angular_velocity[b2] = (
-        bodies.angular_velocity[b2] + inv_inertia2 @ total_ang_imp_on_b2
-    )
+    bodies.angular_velocity[b1] = bodies.angular_velocity[b1] - inv_inertia1 @ total_ang_imp_on_b1
+    bodies.angular_velocity[b2] = bodies.angular_velocity[b2] + inv_inertia2 @ total_ang_imp_on_b2
 
 
 @wp.func
@@ -781,20 +804,39 @@ def contact_iterate_at(
         #    ``use_bias``): rigid PGS with zero bias -- pure
         #    ``Jv = 0`` enforcement without the positional-bias
         #    velocity that the main solve just injected.
-        if is_speculative:
-            mass_coeff_n = wp.float32(1.0)
-            impulse_coeff_n = wp.float32(0.0)
-        elif use_bias:
-            mass_coeff_n = mass_coeff
-            impulse_coeff_n = impulse_coeff
-        else:
-            mass_coeff_n = wp.float32(1.0)
-            impulse_coeff_n = wp.float32(0.0)
-        d_lam_n_us = -eff_n * (jv_n + bias_val)
+        # Soft-contact PD normal row (PhysX-style absolute spring-
+        # damper). Active iff the prepare pass wrote a non-zero
+        # ``pd_eff_soft`` for this contact -- i.e. the Newton buffer's
+        # per-contact stiffness or damping is non-zero. The bias here
+        # is the spring force contribution (``k * depth``) and must
+        # STAY ON during the relax pass -- zeroing it would let
+        # ``-eff_soft * gamma * acc`` cancel the accumulated impulse
+        # exactly, just as in the ADBS drive/limit/cable rows.
+        pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
         lam_n_old = cc_get_normal_lambda(cc, k)
-        d_lam_n = mass_coeff_n * d_lam_n_us - impulse_coeff_n * lam_n_old
-        lam_n_new = wp.max(lam_n_old + d_lam_n, wp.float32(0.0))
-        d_lam_n = lam_n_new - lam_n_old
+        if pd_eff_soft_n > wp.float32(0.0):
+            pd_gamma_n = cc_get_pd_gamma(cc, k)
+            pd_bias_n = cc_get_pd_bias(cc, k)
+            # ``lam = -eff_soft * (jv - bias + gamma * acc)``; unit-
+            # matched to the absolute-PD rows in the ADBS joint
+            # drive / limit.
+            d_lam_n_us = -pd_eff_soft_n * (jv_n - pd_bias_n + pd_gamma_n * lam_n_old)
+            lam_n_new = wp.max(lam_n_old + d_lam_n_us, wp.float32(0.0))
+            d_lam_n = lam_n_new - lam_n_old
+        else:
+            if is_speculative:
+                mass_coeff_n = wp.float32(1.0)
+                impulse_coeff_n = wp.float32(0.0)
+            elif use_bias:
+                mass_coeff_n = mass_coeff
+                impulse_coeff_n = impulse_coeff
+            else:
+                mass_coeff_n = wp.float32(1.0)
+                impulse_coeff_n = wp.float32(0.0)
+            d_lam_n_us = -eff_n * (jv_n + bias_val)
+            d_lam_n = mass_coeff_n * d_lam_n_us - impulse_coeff_n * lam_n_old
+            lam_n_new = wp.max(lam_n_old + d_lam_n, wp.float32(0.0))
+            d_lam_n = lam_n_new - lam_n_old
 
         fric_limit_static = mu_s * lam_n_new
         fric_limit_kinetic = mu_k * lam_n_new
@@ -925,12 +967,8 @@ def contact_position_iterate_at(
         if vel_t1 * vel_t1 + vel_t2 * vel_t2 > rest_vel_thresh * rest_vel_thresh:
             continue
 
-        eff_t1 = _effective_mass_scalar(
-            t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
-        )
-        eff_t2 = _effective_mass_scalar(
-            t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
-        )
+        eff_t1 = _effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+        eff_t2 = _effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
 
         d_lam_t1 = -drift_t1 * eff_t1
         d_lam_t2 = -drift_t2 * eff_t2
@@ -970,9 +1008,7 @@ def contact_prepare_for_iteration(
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_prepare_for_iteration_at(
-        constraints, cid, 0, bodies, body_pair, idt, cc, contacts
-    )
+    contact_prepare_for_iteration_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts)
 
 
 @wp.func
@@ -988,9 +1024,7 @@ def contact_iterate(
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at(
-        constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias
-    )
+    contact_iterate_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias)
 
 
 @wp.func
@@ -1144,9 +1178,7 @@ def contact_pair_wrench_kernel(
     if cid >= cid_capacity:
         return
     if constraint_get_type(constraints, cid) != CONSTRAINT_TYPE_CONTACT:
-        wrenches[tid] = wp.spatial_vector(
-            wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0)
-        )
+        wrenches[tid] = wp.spatial_vector(wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0))
         body1[tid] = -1
         body2[tid] = -1
         contact_count_out[tid] = 0
@@ -1264,9 +1296,7 @@ def contact_world_error_at(
     the generic error gather branch uniform with the other constraint
     types without contaminating the output with an arbitrary aggregate.
     """
-    return wp.spatial_vector(
-        wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0)
-    )
+    return wp.spatial_vector(wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0))
 
 
 @wp.func
