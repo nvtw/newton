@@ -66,6 +66,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
 )
 from newton._src.solvers.phoenx.materials import MaterialData
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
+    _PER_WORLD_COLORING_BLOCK_DIM,
     _STRAGGLER_BLOCK_DIM,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
@@ -74,9 +75,12 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _constraint_prepare_fast_tail_kernel,
     _constraint_relax_fast_tail_kernel,
     _constraints_to_elements_kernel,
+    _count_elements_per_world_kernel,
     _integrate_velocities_kernel,
     _kinematic_interpolate_substep_kernel,
     _kinematic_prepare_step_kernel,
+    _per_world_jp_coloring_kernel,
+    _scatter_elements_to_worlds_kernel,
     _set_kinematic_pose_batch_kernel,
     _world_csr_count_kernel,
     _world_csr_scan_kernel,
@@ -363,6 +367,35 @@ class PhoenXWorld:
         # ``world_csr_offsets``.
         self._world_totals_shifted: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._world_num_colors: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
+
+        # ----- Per-world coloring scratch (for parallel JP path) -----
+        #
+        # The per-world coloring path is dramatically faster than the
+        # device-wide global coloring above ~500 worlds -- it parallelises
+        # the JP MIS loop over worlds (one block per world) instead of
+        # serialising the CSR compact into a single block. Scratch sized
+        # so the path is always available.
+        self._use_per_world_coloring: bool = True
+        self._per_world_element_count: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
+        # Exclusive prefix of per-world counts; sized nw+1 so
+        # ``world_element_offsets[w+1] - world_element_offsets[w]`` is
+        # always a legal read.
+        self._per_world_element_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
+        self._per_world_element_cursor: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
+        # Flat buffer that holds each world's active cids contiguously
+        # (bucketed by world_id of ``bodies[0]``). Size = constraint
+        # capacity because every active constraint belongs to exactly
+        # one world.
+        self._per_world_elements: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
+        # Per-element colour assignment (1-based; 0 = unassigned). This
+        # is the primary output of the per-world JP kernel and also
+        # doubles as the scratch the kernel clears at the start of each
+        # step.
+        self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
+        # Per-round, per-world atomic cursor used to hand out unique
+        # output slots within a colour. Reset to zero inside the kernel
+        # at the top of each colour.
+        self._per_world_commit_count: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
         self._world_color_counts: wp.array2d[wp.int32] = wp.zeros(
             (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
         )
@@ -753,9 +786,18 @@ class PhoenXWorld:
 
         self._rebuild_elements()
         if self._constraint_capacity > 0:
+            # Adjacency build is still global (per-body CSR of element
+            # neighbours). The JP coloring itself can be either global
+            # (partitioner.build_csr + _build_world_csr, which serialises
+            # the compact into a single block) or per-world (one block
+            # per world, fully parallel across worlds). Per-world scales
+            # dramatically better past ~500 worlds.
             self._partitioner.reset(self._elements, self._num_active_constraints)
-            self._partitioner.build_csr()
-            self._build_world_csr()
+            if self._use_per_world_coloring:
+                self._build_per_world_coloring()
+            else:
+                self._partitioner.build_csr()
+                self._build_world_csr()
 
         # Once-per-step kinematic prepare: snapshot ``position`` ->
         # ``position_prev``, resolve this step's pose target
@@ -984,6 +1026,101 @@ class PhoenXWorld:
                 self._world_color_cursor,
             ],
             outputs=[self._world_element_ids_by_color],
+            device=self.device,
+        )
+
+    def _build_per_world_coloring(self) -> None:
+        """Parallel per-world Jones-Plassmann coloring.
+
+        Replaces the global coloring + post-bucketing pipeline
+        (``partitioner.build_csr`` + ``_build_world_csr``) with three
+        kernels:
+
+        1. :func:`_count_elements_per_world_kernel` -- atomic count of
+           active cids per world (one thread per cid).
+        2. Inclusive scan of the counts -> ``per_world_element_offsets``.
+        3. :func:`_scatter_elements_to_worlds_kernel` -- bucket cids
+           into ``per_world_elements`` using a per-world atomic cursor.
+        4. :func:`_per_world_jp_coloring_kernel` -- one block per
+           world, runs the full JP MIS loop on its bucket and emits
+           directly into ``world_element_ids_by_color`` /
+           ``world_color_starts`` / ``world_num_colors``.
+
+        The existing adjacency CSR from ``partitioner.reset`` is
+        reused (it's a global structure, but because worlds have
+        disjoint body sets after static-null-out each element's
+        neighbours all live in the same world). Only the device-wide
+        scan + compact portion of the old path is replaced.
+        """
+        nw = self.num_worlds
+        cap = self._constraint_capacity
+
+        # Phase 1: count elements per world (and seed the shifted-offset
+        # buffer so the inclusive scan below produces exclusive offsets
+        # + trailing total).
+        self._per_world_element_count.zero_()
+        self._world_totals_shifted.zero_()
+        wp.launch(
+            _count_elements_per_world_kernel,
+            dim=cap,
+            inputs=[self._elements, self._num_active_constraints, self.bodies],
+            outputs=[self._per_world_element_count, self._world_totals_shifted],
+            device=self.device,
+        )
+
+        # Phase 2: inclusive scan of shifted counts -> per_world_element_offsets[0]=0,
+        # [w+1] = sum(counts[0..w]). Deterministic.
+        wp.utils.array_scan(self._world_totals_shifted, self._per_world_element_offsets, inclusive=True)
+
+        # Phase 3: scatter cids into per-world buckets.
+        self._per_world_element_cursor.zero_()
+        wp.launch(
+            _scatter_elements_to_worlds_kernel,
+            dim=cap,
+            inputs=[
+                self._elements,
+                self._num_active_constraints,
+                self.bodies,
+                self._per_world_element_offsets,
+                self._per_world_element_cursor,
+            ],
+            outputs=[self._per_world_elements],
+            device=self.device,
+        )
+
+        # Phase 4: per-world JP coloring. One block per world.
+        self._per_world_assigned.zero_()
+        self._per_world_commit_count.zero_()
+        # The output CSR base offsets (world_csr_offsets) match the
+        # per-world element offsets (every active element belongs to
+        # some colour in some world, so offsets[w] identifies both the
+        # bucket start and the start of world w's colour sequence).
+        wp.copy(self._world_csr_offsets, self._per_world_element_offsets)
+        # ``launch_tiled`` returns (block_idx, lane) from ``wp.tid()`` --
+        # exactly the (world, lane) pair the kernel expects. Plain
+        # ``launch`` would return a global thread index instead, which
+        # would silently mis-address every block-scoped read/write.
+        wp.launch_tiled(
+            _per_world_jp_coloring_kernel,
+            dim=[nw],
+            inputs=[
+                self._per_world_element_offsets,
+                self._per_world_element_count,
+                self._per_world_elements,
+                self._elements,
+                self._partitioner._adjacency_section_end_indices,
+                self._partitioner._vertex_to_adjacent_elements,
+                self._partitioner._random_values,
+                int(MAX_COLORS),
+            ],
+            outputs=[
+                self._per_world_assigned,
+                self._per_world_commit_count,
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_num_colors,
+            ],
+            block_dim=_PER_WORLD_COLORING_BLOCK_DIM,
             device=self.device,
         )
 

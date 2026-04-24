@@ -41,11 +41,13 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
+    MAX_BODIES,
     ElementInteractionData,
     element_interaction_data_make,
 )
 
 __all__ = [
+    "_PER_WORLD_COLORING_BLOCK_DIM",
     "_STRAGGLER_BLOCK_DIM",
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
@@ -54,10 +56,13 @@ __all__ = [
     "_constraint_prepare_fast_tail_kernel",
     "_constraint_relax_fast_tail_kernel",
     "_constraints_to_elements_kernel",
+    "_count_elements_per_world_kernel",
     "_integrate_velocities_kernel",
     "_kinematic_interpolate_substep_kernel",
     "_kinematic_prepare_step_kernel",
+    "_per_world_jp_coloring_kernel",
     "_rotation_quaternion",
+    "_scatter_elements_to_worlds_kernel",
     "_set_kinematic_pose_batch_kernel",
     "_world_csr_count_kernel",
     "_world_csr_scan_kernel",
@@ -224,6 +229,241 @@ def _world_csr_scatter_kernel(
     local_slot = wp.atomic_add(world_color_cursor, w, c, wp.int32(1))
     dst = world_csr_offsets[w] + world_color_starts[w, c] + local_slot
     world_element_ids_by_color[dst] = cid
+
+
+# ---------------------------------------------------------------------------
+# Per-world graph coloring (one block per world).
+# ---------------------------------------------------------------------------
+#
+# Worlds are independent after static-body nullification -- no element
+# in world w references a body in any other world. So Jones-Plassmann
+# MIS partitioning can run per-world in parallel instead of device-wide.
+# One block per world, each block runs the full JP loop on its world's
+# element subset. Output lands directly in the per-world CSR that the
+# fast-tail dispatchers consume, skipping the post-coloring bucketing
+# pass used by the global-coloring path.
+#
+# This typically produces the same colour count per world as the
+# global path (they're the same local subgraph), but the work is
+# parallel across worlds instead of serialized inside a single-block
+# scan / compact kernel. Dramatic win at large world counts.
+
+
+_PER_WORLD_COLORING_BLOCK_DIM: int = 64
+
+
+@wp.kernel(enable_backward=False)
+def _count_elements_per_world_kernel(
+    elements: wp.array[ElementInteractionData],
+    num_elements: wp.array[wp.int32],
+    bodies: BodyContainer,
+    # out
+    world_element_count: wp.array[wp.int32],  # [nw]
+    world_element_offsets_shifted: wp.array[wp.int32],  # [nw+1], will be inclusive-scanned
+):
+    """Atomic count of per-world elements.
+
+    Writes both the raw count (consumed by the scatter kernel) AND
+    the shifted form (``shifted[w + 1] += 1``) so an inclusive scan
+    produces an exclusive prefix + trailing total in a single pass.
+    Thread 0 additionally stamps ``shifted[0] = 0`` (the first
+    scan-input slot).
+
+    Elements with ``bodies[0] == -1`` (both bodies static -- should not
+    happen in active constraints but guard anyway) contribute to no
+    world and are skipped downstream.
+    """
+    tid = wp.tid()
+    n = num_elements[0]
+    if tid == wp.int32(0):
+        # The inclusive scan reads shifted[0] as the base value; stamp
+        # 0 once so offsets[0] = 0 regardless of the tail garbage.
+        world_element_offsets_shifted[0] = wp.int32(0)
+    if tid >= n:
+        return
+    b = elements[tid].bodies[0]
+    if b < 0:
+        return
+    w = bodies.world_id[b]
+    wp.atomic_add(world_element_count, w, wp.int32(1))
+    wp.atomic_add(world_element_offsets_shifted, w + wp.int32(1), wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def _scatter_elements_to_worlds_kernel(
+    elements: wp.array[ElementInteractionData],
+    num_elements: wp.array[wp.int32],
+    bodies: BodyContainer,
+    world_element_offsets: wp.array[wp.int32],
+    # scratch (zeroed by caller each step)
+    world_element_cursor: wp.array[wp.int32],
+    # out
+    world_elements: wp.array[wp.int32],
+):
+    """Scatter each element's cid into its per-world slot.
+
+    Within-world order is non-deterministic (atomic cursor bumps) --
+    that's fine: the downstream JP coloring re-orders by colour, and
+    within one colour the ordering doesn't affect PGS convergence
+    (graph coloring guarantees no body is shared within a colour).
+    """
+    tid = wp.tid()
+    n = num_elements[0]
+    if tid >= n:
+        return
+    b = elements[tid].bodies[0]
+    if b < 0:
+        return
+    w = bodies.world_id[b]
+    slot = wp.atomic_add(world_element_cursor, w, wp.int32(1))
+    world_elements[world_element_offsets[w] + slot] = tid
+
+
+@wp.kernel(enable_backward=False)
+def _per_world_jp_coloring_kernel(
+    # per-world bucketing (input from the two kernels above)
+    world_element_offsets: wp.array[wp.int32],  # [nw+1] (exclusive prefix of counts)
+    world_element_count: wp.array[wp.int32],  # [nw] (raw per-world count)
+    world_elements: wp.array[wp.int32],  # [total] flat cid stream, sorted by world
+    # graph data
+    elements: wp.array[ElementInteractionData],
+    adjacency_end: wp.array[wp.int32],  # [num_bodies]
+    vertex_to_elements: wp.array[wp.int32],  # [cap * MAX_BODIES]
+    random_values: wp.array[wp.int32],  # [capacity] JP priorities
+    max_colors: wp.int32,
+    # scratch (caller zeros each step)
+    assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
+    world_commit_count: wp.array[wp.int32],  # [nw] per-round atomic cursor
+    # outputs
+    world_element_ids_by_color: wp.array[wp.int32],  # [total] sorted-by-colour per world
+    world_color_starts: wp.array2d[wp.int32],  # [nw, MAX_COLORS+1] per-world prefix
+    world_num_colors: wp.array[wp.int32],  # [nw]
+):
+    """Run Jones-Plassmann MIS coloring independently in each world.
+
+    One block per world. Inside the block:
+
+    1. Clear ``assigned`` for the world's elements.
+    2. Loop: pick local maxima in priority, commit them as the next
+       colour, repeat until everything is assigned.
+    3. Each committed element writes into ``world_element_ids_by_color``
+       at offset ``world_element_offsets[w] + color_base + slot`` where
+       ``slot`` is an atomic-bump on a per-world cursor (reset each
+       round) and ``color_base`` is the cumulative committed count up
+       to this round.
+
+    Correctness (same as the original global JP kernel):
+    ``contact_partitions_is_removed``-style check on neighbours ignores
+    any neighbour settled in a **prior** colour. Neighbours settled
+    **this** colour still contribute via the priority comparison --
+    since JP commits only elements that are the local maximum among
+    still-active neighbours, at most one of any pair of neighbours
+    commits per round.
+    """
+    block, lane = wp.tid()
+    w = block
+    base = world_element_offsets[w]
+    count = world_element_count[w]
+
+    if count == 0:
+        if lane == wp.int32(0):
+            world_num_colors[w] = wp.int32(0)
+            world_color_starts[w, 0] = wp.int32(0)
+        return
+
+    # Phase 1: zero per-element assigned flags for this world's elements.
+    stride = _PER_WORLD_COLORING_BLOCK_DIM
+    offset = wp.int32(0)
+    while offset < count:
+        slot = offset + lane
+        if slot < count:
+            eid = world_elements[base + slot]
+            assigned[eid] = wp.int32(0)
+        offset = offset + stride
+
+    if lane == wp.int32(0):
+        world_color_starts[w, 0] = wp.int32(0)
+
+    _sync_threads()
+
+    current_color = wp.int32(0)
+    num_remaining = count
+    color_base = wp.int32(0)
+
+    while num_remaining > wp.int32(0) and current_color < max_colors:
+        # Reset per-world round cursor.
+        if lane == wp.int32(0):
+            world_commit_count[w] = wp.int32(0)
+        _sync_threads()
+
+        # Phase 2: find local maxima and commit them. Every lane runs
+        # the stride loop the same number of times so that the
+        # ``wp.tile`` reduction below sees all lanes at the same point
+        # regardless of count -- Warp tile ops are block-collective.
+        committed_this_lane = wp.int32(0)
+        offset = wp.int32(0)
+        while offset < count:
+            slot = offset + lane
+            committed_here = wp.int32(0)
+            if slot < count:
+                eid = world_elements[base + slot]
+                if assigned[eid] == wp.int32(0):
+                    self_prio = random_values[eid]
+                    is_local_max = bool(True)
+                    for j in range(MAX_BODIES):
+                        if not is_local_max:
+                            break
+                        b = elements[eid].bodies[j]
+                        if b < 0:
+                            break
+                        adj_start = wp.int32(0)
+                        if b > 0:
+                            adj_start = adjacency_end[b - 1]
+                        adj_end_b = adjacency_end[b]
+                        for k in range(adj_start, adj_end_b):
+                            if not is_local_max:
+                                break
+                            neighbor = vertex_to_elements[k]
+                            if neighbor == eid:
+                                continue
+                            a = assigned[neighbor]
+                            # Settled in a prior colour -> skip
+                            # (graph edge can't conflict).
+                            if a != wp.int32(0) and a != current_color + wp.int32(1):
+                                continue
+                            if random_values[neighbor] > self_prio:
+                                is_local_max = bool(False)
+
+                    if is_local_max:
+                        assigned[eid] = current_color + wp.int32(1)
+                        out_slot = wp.atomic_add(world_commit_count, w, wp.int32(1))
+                        world_element_ids_by_color[base + color_base + out_slot] = eid
+                        committed_here = wp.int32(1)
+            committed_this_lane = committed_this_lane + committed_here
+            offset = offset + stride
+
+        _sync_threads()
+
+        # Block-wide reduce committed count via a tile sum. Using
+        # ``wp.tile`` builds a tile from each lane's scalar; ``tile_sum``
+        # returns a 1-tile whose scalar is the block-wide total. All
+        # lanes see the same value so we can branch uniformly on it.
+        committed_tile = wp.tile(committed_this_lane)
+        committed_total = wp.tile_sum(committed_tile)
+        committed_this_round = committed_total[0]
+
+        color_base = color_base + committed_this_round
+        num_remaining = num_remaining - committed_this_round
+        current_color = current_color + wp.int32(1)
+
+        if lane == wp.int32(0):
+            world_color_starts[w, current_color] = color_base
+
+        if committed_this_round == wp.int32(0):
+            break
+
+    if lane == wp.int32(0):
+        world_num_colors[w] = current_color
 
 
 # ---------------------------------------------------------------------------
