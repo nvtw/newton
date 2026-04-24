@@ -1987,7 +1987,7 @@ class NarrowPhase:
                     record_tape=False,
                 )
 
-            # Launch mesh-mesh contact processing kernel on CUDA.
+            # Launch mesh-mesh contact processing kernel.
             # The kernel uses texture SDF for fast sampling, with BVH fallback via shape_sdf_index,
             # as well as on-the-fly heightfield evaluation via heightfield_data.
             if texture_sdf_data is None:

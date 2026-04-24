@@ -944,7 +944,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     tri_is_hfield = False
                     sdf_is_hfield = False
                 tri_type = GeoType.HFIELD if tri_is_hfield else GeoType.MESH
-                sdf_type = GeoType.HFIELD if sdf_is_hfield else GeoType.MESH
 
                 mesh_id_tri = shape_source[tri_shape]
                 mesh_id_sdf = shape_source[sdf_shape]
@@ -1014,10 +1013,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 wp.tile_scatter_masked(progress, 0, 0, t == 0)
 
-                if wp.static(enable_heightfields):
-                    sdf_is_heightfield = sdf_type == GeoType.HFIELD
-                else:
-                    sdf_is_heightfield = False
+                sdf_is_heightfield = sdf_is_hfield
                 sdf_aabb_lower = texture_sdf.sdf_box_lower
                 sdf_aabb_upper = texture_sdf.sdf_box_upper
 
@@ -1315,7 +1311,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     tri_is_hfield = False
                     sdf_is_hfield = False
                 tri_type = GeoType.HFIELD if tri_is_hfield else GeoType.MESH
-                sdf_type = GeoType.HFIELD if sdf_is_hfield else GeoType.MESH
 
                 mesh_id_tri = shape_source[tri_shape]
                 mesh_id_sdf = shape_source[sdf_shape]
@@ -1389,10 +1384,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 wp.tile_scatter_masked(progress, 0, edge_start, t == 0)
 
-                if wp.static(enable_heightfields):
-                    sdf_is_heightfield = sdf_type == GeoType.HFIELD
-                else:
-                    sdf_is_heightfield = False
+                sdf_is_heightfield = sdf_is_hfield
                 sdf_aabb_lower = texture_sdf.sdf_box_lower
                 sdf_aabb_upper = texture_sdf.sdf_box_upper
 
