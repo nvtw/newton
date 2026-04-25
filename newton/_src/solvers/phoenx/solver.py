@@ -303,7 +303,6 @@ class SolverPhoenX(SolverBase):
         # ``PhoenXWorld.__init__`` derives internally).
         self._constraints: ConstraintContainer = PhoenXWorld.make_constraint_container(
             num_joints=num_joints,
-            max_contact_columns=max(1, rigid_contact_max),
             device=self.device,
         )
 

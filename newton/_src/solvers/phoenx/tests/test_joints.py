@@ -191,7 +191,6 @@ class _PendulumScene:
         self.num_joints = 1
         self.constraints = PhoenXWorld.make_constraint_container(
             num_joints=self.num_joints,
-            max_contact_columns=max(1, rigid_contact_max),
             device=self.device,
         )
 
@@ -604,7 +603,7 @@ class TestPhoenXChainConvergence(unittest.TestCase):
         bodies.motion_type.assign(motion)
 
         num_joints = num_cubes
-        constraints = PhoenXWorld.make_constraint_container(num_joints=num_joints, max_contact_columns=0, device=device)
+        constraints = PhoenXWorld.make_constraint_container(num_joints=num_joints, device=device)
         world = PhoenXWorld(
             bodies=bodies,
             constraints=constraints,

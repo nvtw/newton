@@ -312,7 +312,6 @@ class _PhoenXScene:
         # when the scene has no joints).
         self.constraints = PhoenXWorld.make_constraint_container(
             num_joints=0,
-            max_contact_columns=0,
             device=self.device,
         )
 

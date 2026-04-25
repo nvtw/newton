@@ -579,19 +579,19 @@ class PhoenXWorld:
     @staticmethod
     def make_constraint_container(
         num_joints: int,
-        max_contact_columns: int,
         device: wp.context.Devicelike = None,
     ) -> ConstraintContainer:
         """Factory for a correctly-sized joint-only
         :class:`ConstraintContainer`.
 
-        Capacity is ``num_joints`` (not ``num_joints +
-        max_contact_columns`` as before): contact columns moved to
-        :class:`ContactColumnContainer` to avoid allocating the wide
-        ADBS header for every contact slot. ``max_contact_columns``
-        is kept in the signature for API compatibility but ignored.
+        Capacity is ``max(1, num_joints)`` -- contact columns live in
+        :class:`ContactColumnContainer` and are sized separately, so
+        the joint-side container only needs a 1-row placeholder when
+        there are no joints. The dword width is the ADBS joint header
+        when joints exist (154 dwords) or the contact placeholder
+        width (7 dwords) otherwise; see
+        :meth:`required_constraint_dwords`.
         """
-        _ = max_contact_columns  # reserved for API compat; contacts live elsewhere
         cap = max(1, int(num_joints))
         return constraint_container_zeros(
             num_constraints=cap,
@@ -938,7 +938,6 @@ class PhoenXWorld:
         )
 
         gather_contact_warmstart(
-            cid_base=self.num_joints,
             scratch=self._ingest_scratch,
             rigid_contact_match_index=contacts.rigid_contact_match_index,
             prev_cid_of_contact=self._cid_of_contact_prev,

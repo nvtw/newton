@@ -101,7 +101,7 @@ def _build_n_pendulums(
 
     # One joint per world.
     num_joints = num_worlds
-    constraints = PhoenXWorld.make_constraint_container(num_joints=num_joints, max_contact_columns=0, device=device)
+    constraints = PhoenXWorld.make_constraint_container(num_joints=num_joints, device=device)
     world = PhoenXWorld(
         bodies=bodies,
         constraints=constraints,

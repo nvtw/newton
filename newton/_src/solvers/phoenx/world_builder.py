@@ -1011,7 +1011,6 @@ class WorldBuilder:
         # sizes 1:1 against ``rigid_contact_max``.
         constraints = PhoenXWorld.make_constraint_container(
             num_joints=num_joints,
-            max_contact_columns=max(1, int(rigid_contact_max)),
             device=device,
         )
 

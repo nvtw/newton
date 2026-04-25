@@ -532,7 +532,6 @@ def _contact_warmstart_gather_kernel(
     rigid_contact_match_index: wp.array[wp.int32],
     prev_cid_of_contact: wp.array[wp.int32],
     num_contact_columns: wp.array[wp.int32],
-    cid_base: wp.int32,
     bodies: BodyContainer,
     contacts: ContactViews,
     cc: ContactContainer,
@@ -565,7 +564,6 @@ def _contact_warmstart_gather_kernel(
     tid = wp.tid()
     if tid >= num_contact_columns[0]:
         return
-    _ = cid_base
 
     p = pair_source_idx[tid]
     count = pair_count[p]
@@ -918,7 +916,6 @@ def stamp_forward_contact_map(
 
 
 def gather_contact_warmstart(
-    cid_base: int,
     scratch: IngestScratch,
     rigid_contact_match_index: wp.array,
     prev_cid_of_contact: wp.array,
@@ -946,7 +943,6 @@ def gather_contact_warmstart(
             rigid_contact_match_index,
             prev_cid_of_contact,
             scratch.num_contact_columns,
-            int(cid_base),
             bodies,
             contacts,
         ],

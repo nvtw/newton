@@ -276,7 +276,6 @@ class Example:
         # we asked for joints.
         self.constraints = PhoenXWorld.make_constraint_container(
             num_joints=NUM_HINGES,
-            max_contact_columns=0,
             device=self.device,
         )
 

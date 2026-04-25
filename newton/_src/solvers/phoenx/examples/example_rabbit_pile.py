@@ -315,7 +315,6 @@ class Example:
         # placeholder in this contact-only scene.
         self.constraints = PhoenXWorld.make_constraint_container(
             num_joints=0,
-            max_contact_columns=0,
             device=self.device,
         )
 
