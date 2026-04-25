@@ -264,14 +264,24 @@ class ActuatedDoubleBallSocketData:
     bias1: wp.vec3f
     bias2: wp.vec3f
     bias3: wp.float32
-    # Revolute Schur cache (ignored by prismatic).
-    a1_inv: wp.mat33f
-    ut_ai: wp.mat33f
-    s_inv: wp.mat33f
-    # Prismatic Schur cache (ignored by revolute).
-    a4_inv: wp.mat44f
-    c_pris: wp.vec4f
-    s_scalar_inv: wp.float32
+    # Mode-specific Schur cache. Joint mode is fixed at construction,
+    # so the revolute and prismatic caches are mutually exclusive --
+    # we alias them onto a single 27-dword block sized for the larger.
+    #
+    # Revolute layout (27 dwords used):
+    #   ``mode_cache[0..8]``   = a1_inv  : mat33 (9 dwords)
+    #   ``mode_cache[9..17]``  = ut_ai   : mat33 (9 dwords)
+    #   ``mode_cache[18..26]`` = s_inv   : mat33 (9 dwords)
+    #
+    # Prismatic layout (21 dwords used, 6 unused tail):
+    #   ``mode_cache[0..15]``  = a4_inv       : mat44 (16 dwords)
+    #   ``mode_cache[16..19]`` = c_pris       : vec4 (4 dwords)
+    #   ``mode_cache[20]``     = s_scalar_inv : float (1 dword)
+    #
+    # Reads / writes go through :func:`_read_revo_*` / :func:`_read_pris_*`
+    # helpers below so the alias stays in one place. Saves 21 dwords
+    # per joint vs. allocating both caches separately.
+    mode_cache: wp.types.vector(length=27, dtype=wp.float32)
     # Warm-start accumulated impulses (world frame).
     accumulated_impulse1: wp.vec3f
     accumulated_impulse2: wp.vec3f
@@ -380,12 +390,16 @@ _OFF_IMPULSE_COEFF = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "
 _OFF_BIAS1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias1"))
 _OFF_BIAS2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias2"))
 _OFF_BIAS3 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias3"))
-_OFF_A1_INV = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "a1_inv"))
-_OFF_UT_AI = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "ut_ai"))
-_OFF_S_INV = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "s_inv"))
-_OFF_A4_INV = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "a4_inv"))
-_OFF_C_PRIS = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "c_pris"))
-_OFF_S_SCALAR_INV = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "s_scalar_inv"))
+# Aliased mode-specific Schur cache. Revolute uses dwords [0..27),
+# prismatic uses [0..21) of the same 27-dword block. Joint mode is
+# fixed at construction so the two layouts never collide.
+_OFF_MODE_CACHE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "mode_cache"))
+_OFF_A1_INV = wp.constant(int(_OFF_MODE_CACHE) + 0)
+_OFF_UT_AI = wp.constant(int(_OFF_MODE_CACHE) + 9)
+_OFF_S_INV = wp.constant(int(_OFF_MODE_CACHE) + 18)
+_OFF_A4_INV = wp.constant(int(_OFF_MODE_CACHE) + 0)
+_OFF_C_PRIS = wp.constant(int(_OFF_MODE_CACHE) + 16)
+_OFF_S_SCALAR_INV = wp.constant(int(_OFF_MODE_CACHE) + 20)
 _OFF_ACC_IMP1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse1"))
 _OFF_ACC_IMP2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse2"))
 _OFF_ACC_IMP3 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse3"))
