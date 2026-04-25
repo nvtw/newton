@@ -224,9 +224,12 @@ class PhoenXWorld:
                 (default) is the per-world fast-tail path: one warp
                 per world, scales beyond ~256 worlds. ``"single_world"``
                 drives the global Jones-Plassmann colouring with
-                per-colour grid launches via ``wp.capture_while`` --
-                uses every SM on the colour and wins when the scene
-                is one (or a few) very big world(s); accepts
+                per-colour grid launches via ``wp.capture_while``.
+                Each colour is a full grid launch (``dim =
+                constraint_capacity``, default 256-thread blocks),
+                so every SM on the device picks up work for the
+                colour -- not a single-block sweep. Wins when the
+                scene is one (or a few) very big world(s); accepts
                 ``num_worlds > 1`` but loses the per-world parallelism
                 of the default path.
             device: Warp device. Defaults to ``bodies.position.device``.

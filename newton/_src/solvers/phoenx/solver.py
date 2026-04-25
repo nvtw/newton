@@ -179,8 +179,10 @@ class SolverPhoenX(SolverBase):
                   of small worlds.
                 * ``"single_world"``: per-colour grid launches via
                   ``wp.capture_while`` over the global JP colouring.
-                  Uses every SM on each colour; wins for one (or a
-                  few) very big world(s).
+                  Each colour is a *full grid* launch (cid count many
+                  threads, default-sized blocks), so every SM on the
+                  device picks up work; wins for one (or a few) very
+                  big world(s).
         """
         super().__init__(model)
 
