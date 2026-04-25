@@ -351,14 +351,15 @@ class ActuatedDoubleBallSocketData:
     bias_drive: wp.float32
     gamma_drive: wp.float32
     eff_mass_drive_soft: wp.float32
-    # Box2D-only limit cache (stiffness_limit == damping_limit == 0).
-    bias_limit_box2d: wp.float32
-    mass_coeff_limit: wp.float32
-    impulse_coeff_limit: wp.float32
-    # PD-only limit cache (stiffness_limit > 0 or damping_limit > 0).
-    pd_gamma_limit: wp.float32
-    pd_beta_limit: wp.float32
-    pd_mass_coeff_limit: wp.float32
+    # Aliased per-substep limit cache: 3 dwords shared between the
+    # Box2D and PD limit formulations. The discriminator is
+    # ``stiffness_limit > 0 or damping_limit > 0`` -> PD, else Box2D;
+    # the choice is fixed once stiffness_limit / damping_limit are set
+    # at construction, so the two layouts never collide.
+    #
+    # Box2D layout: [bias_limit_box2d, mass_coeff_limit, impulse_coeff_limit]
+    # PD layout:    [pd_gamma_limit,   pd_beta_limit,    pd_mass_coeff_limit]
+    limit_cache: wp.types.vector(length=3, dtype=wp.float32)
     max_lambda_drive: wp.float32
     clamp: wp.int32
     # Cached world-frame joint axis from the most recent prepare-pass.
@@ -439,12 +440,16 @@ _OFF_EFF_INV_AXIAL = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "
 _OFF_BIAS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias_drive"))
 _OFF_GAMMA_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "gamma_drive"))
 _OFF_EFF_MASS_DRIVE_SOFT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "eff_mass_drive_soft"))
-_OFF_BIAS_LIMIT_BOX2D = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias_limit_box2d"))
-_OFF_MASS_COEFF_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "mass_coeff_limit"))
-_OFF_IMPULSE_COEFF_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "impulse_coeff_limit"))
-_OFF_PD_GAMMA_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "pd_gamma_limit"))
-_OFF_PD_BETA_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "pd_beta_limit"))
-_OFF_PD_MASS_COEFF_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "pd_mass_coeff_limit"))
+# Aliased Box2D / PD limit cache: 3 shared dwords. Layouts:
+#   Box2D: [bias_limit_box2d, mass_coeff_limit, impulse_coeff_limit]
+#   PD:    [pd_gamma_limit,   pd_beta_limit,    pd_mass_coeff_limit]
+_OFF_LIMIT_CACHE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "limit_cache"))
+_OFF_BIAS_LIMIT_BOX2D = wp.constant(int(_OFF_LIMIT_CACHE) + 0)
+_OFF_MASS_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 1)
+_OFF_IMPULSE_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 2)
+_OFF_PD_GAMMA_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 0)
+_OFF_PD_BETA_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 1)
+_OFF_PD_MASS_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 2)
 _OFF_MAX_LAMBDA_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_lambda_drive"))
 _OFF_CLAMP = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "clamp"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_world"))
@@ -663,12 +668,12 @@ def actuated_double_ball_socket_initialize_kernel(
     write_float(constraints, _OFF_BIAS_DRIVE, cid, 0.0)
     write_float(constraints, _OFF_GAMMA_DRIVE, cid, 0.0)
     write_float(constraints, _OFF_EFF_MASS_DRIVE_SOFT, cid, 0.0)
-    write_float(constraints, _OFF_BIAS_LIMIT_BOX2D, cid, 0.0)
-    write_float(constraints, _OFF_MASS_COEFF_LIMIT, cid, 1.0)
-    write_float(constraints, _OFF_IMPULSE_COEFF_LIMIT, cid, 0.0)
-    write_float(constraints, _OFF_PD_GAMMA_LIMIT, cid, 0.0)
-    write_float(constraints, _OFF_PD_BETA_LIMIT, cid, 0.0)
-    write_float(constraints, _OFF_PD_MASS_COEFF_LIMIT, cid, 0.0)
+    # ``limit_cache`` is mode-aliased Box2D vs PD; one zero-fill of
+    # the 3 shared dwords covers both layouts. Prepare overwrites
+    # them every substep based on the limit type.
+    write_float(constraints, _OFF_LIMIT_CACHE + 0, cid, 0.0)
+    write_float(constraints, _OFF_LIMIT_CACHE + 1, cid, 0.0)
+    write_float(constraints, _OFF_LIMIT_CACHE + 2, cid, 0.0)
     write_float(constraints, _OFF_MAX_LAMBDA_DRIVE, cid, 0.0)
     write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, n_hat_init)
@@ -961,22 +966,20 @@ def _axial_drive_limit_prepare_at(
             limit_C = cumulative_value - min_value
     write_int(constraints, base_offset + _OFF_CLAMP, cid, clamp)
 
+    # ``limit_cache`` is mode-aliased Box2D / PD: writing both layouts
+    # would clobber the active one (same 3 dwords). Iterate gates on
+    # ``stiffness_limit > 0 or damping_limit > 0`` to pick the layout,
+    # so only the active triple is filled.
     if stiffness_limit > 0.0 or damping_limit > 0.0:
         pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(stiffness_limit, damping_limit, limit_C, eff_inv, dt)
         write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
         write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
         write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
-        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, 0.0)
     else:
         br_limit, mc_limit, ic_limit = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
         write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
         write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
         write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
-        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, 0.0)
 
     # Warm-start: sum of drive + limit accumulated impulses, with
     # ``acc_limit`` forcibly zeroed when the limit is inactive.
