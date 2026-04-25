@@ -48,6 +48,8 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
+    CC_DERIVED_DWORDS_PER_CONTACT,
+    CC_DWORDS_PER_CONTACT,
     ContactContainer,
     contact_container_swap_prev_current,
     contact_container_zeros,
@@ -436,6 +438,59 @@ class PhoenXWorld:
         # user's :class:`~newton.Contacts` didn't allocate them.
         # Allocated on first step that needs it.
         self._soft_contact_sentinel: wp.array[wp.float32] | None = None
+
+        # Validate that the caller-supplied containers match the
+        # solver's per-step sizing. Bypass-the-factory mistakes
+        # (allocating ``ConstraintContainer`` with the wrong shape,
+        # passing a body container of the wrong length) get caught
+        # here at construction instead of producing silent
+        # out-of-range reads in the kernels.
+        self._assert_invariants()
+
+    def _assert_invariants(self) -> None:
+        """Validate per-step buffer dimensions against the documented
+        schema. Runs once at the end of ``__init__``; cost is a few
+        Python ``assert`` checks on ``.shape`` tuples (no GPU work).
+
+        Raises ``AssertionError`` with a descriptive message on
+        mismatch; the message names which container, what shape it
+        actually has, and what shape the kernels expected. Use
+        :meth:`make_constraint_container` to build the constraint
+        container -- the factory always emits the correct shape.
+        """
+        expected_constraint_dwords = self.required_constraint_dwords(self.num_joints)
+        expected_constraint_cols = max(1, int(self.num_joints))
+        actual_constraint_shape = self.constraints.data.shape
+        assert actual_constraint_shape == (expected_constraint_dwords, expected_constraint_cols), (
+            f"ConstraintContainer.data has shape {actual_constraint_shape}, expected "
+            f"({expected_constraint_dwords}, {expected_constraint_cols}); use "
+            f"PhoenXWorld.make_constraint_container() to build it"
+        )
+
+        expected_col_cols = max(1, int(self.max_contact_columns))
+        actual_col_shape = self._contact_cols.data.shape
+        assert actual_col_shape == (CONTACT_DWORDS, expected_col_cols), (
+            f"ContactColumnContainer.data has shape {actual_col_shape}, "
+            f"expected ({CONTACT_DWORDS}, {expected_col_cols})"
+        )
+
+        # Contact container is sized to ``rigid_contact_max`` (or 1
+        # when contacts are disabled).
+        expected_cc_cols = max(1, int(self.rigid_contact_max))
+        for name, expected_rows in (
+            ("lambdas", CC_DWORDS_PER_CONTACT),
+            ("prev_lambdas", CC_DWORDS_PER_CONTACT),
+            ("derived", CC_DERIVED_DWORDS_PER_CONTACT),
+        ):
+            actual = getattr(self._contact_container, name).shape
+            assert actual == (expected_rows, expected_cc_cols), (
+                f"ContactContainer.{name} has shape {actual}, expected ({expected_rows}, {expected_cc_cols})"
+            )
+
+        gravity_n = int(self.gravity.shape[0])
+        assert gravity_n == self.num_worlds, (
+            f"gravity array has length {gravity_n}, expected num_worlds={self.num_worlds}"
+        )
 
     # ------------------------------------------------------------------
     # Material system / collision filters / placeholder contact views
