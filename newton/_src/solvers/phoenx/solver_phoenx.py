@@ -155,7 +155,6 @@ class PhoenXWorld:
         gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         max_contact_columns: int = 0,
         rigid_contact_max: int = 0,
-        num_shapes: int = 0,
         num_joints: int = 0,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
@@ -191,8 +190,6 @@ class PhoenXWorld:
             rigid_contact_max: Upper bound on the Newton ``Contacts``
                 buffer's rigid-contact range. Defaults to
                 ``max_contact_columns * 6``.
-            num_shapes: Total shape count. Must satisfy
-                ``num_shapes * num_shapes < 2**31``.
             num_joints: Actuated-DBS joint columns reserved at
                 ``[0, num_joints)``. Populate via
                 :meth:`initialize_actuated_double_ball_socket_joints`
@@ -253,7 +250,6 @@ class PhoenXWorld:
             # One column covers a shape pair's multi-contact cluster,
             # so a 6x multiplier is a conservative default.
             self.rigid_contact_max = self.max_contact_columns * 6
-        self.num_shapes: int = int(num_shapes)
         self.num_joints: int = int(num_joints)
         if self.num_joints < 0:
             raise ValueError(f"num_joints must be >= 0 (got {self.num_joints})")
@@ -934,7 +930,6 @@ class PhoenXWorld:
         ingest_contacts(
             contacts=contacts,
             shape_body=shape_body,
-            num_shapes=self.num_shapes,
             contact_cols=self._contact_cols,
             scratch=self._ingest_scratch,
             max_contact_columns=self.max_contact_columns,

@@ -333,7 +333,6 @@ class _PhoenXScene:
             gravity=(0.0, 0.0, -_G),
             max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
-            num_shapes=int(self.model.shape_count),
             default_friction=self.friction,
             step_layout=self.step_layout,
             device=self.device,

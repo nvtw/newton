@@ -33,10 +33,10 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.constraints.constraint_contact import CONTACT_DWORDS
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_container_zeros,
 )
-from newton._src.solvers.phoenx.constraints.constraint_contact import CONTACT_DWORDS
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel,
     newton_to_phoenx_kernel,
@@ -51,7 +51,6 @@ from newton._src.solvers.phoenx.solver_phoenx import (
     PhoenXWorld,
     pack_body_xforms_kernel,
 )
-
 
 #: Per-bunny uniform scale. The bunny USD ships in unit-metre units,
 #: which is too big to pile neatly; 0.2 makes each bunny ~20 cm tall.
@@ -78,7 +77,8 @@ def _load_bunny_mesh(build_sdf: bool) -> newton.Mesh:
     so the example still runs on bare-CUDA machines.
     """
     try:
-        from pxr import Usd  # noqa: PLC0415
+        from pxr import Usd
+
         import newton.usd as newton_usd  # noqa: PLC0415
 
         stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))
@@ -89,18 +89,83 @@ def _load_bunny_mesh(build_sdf: bool) -> newton.Mesh:
         t = 0.5 * (1.0 + 5.0**0.5)
         verts = np.array(
             [
-                [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
-                [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
-                [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1],
+                [-1, t, 0],
+                [1, t, 0],
+                [-1, -t, 0],
+                [1, -t, 0],
+                [0, -1, t],
+                [0, 1, t],
+                [0, -1, -t],
+                [0, 1, -t],
+                [t, 0, -1],
+                [t, 0, 1],
+                [-t, 0, -1],
+                [-t, 0, 1],
             ],
             dtype=np.float32,
         )
         faces = np.array(
             [
-                0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11,
-                1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
-                3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9,
-                4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9, 8, 1,
+                0,
+                11,
+                5,
+                0,
+                5,
+                1,
+                0,
+                1,
+                7,
+                0,
+                7,
+                10,
+                0,
+                10,
+                11,
+                1,
+                5,
+                9,
+                5,
+                11,
+                4,
+                11,
+                10,
+                2,
+                10,
+                7,
+                6,
+                7,
+                1,
+                8,
+                3,
+                9,
+                4,
+                3,
+                4,
+                2,
+                3,
+                2,
+                6,
+                3,
+                6,
+                8,
+                3,
+                8,
+                9,
+                4,
+                9,
+                5,
+                2,
+                4,
+                11,
+                6,
+                2,
+                10,
+                8,
+                6,
+                7,
+                9,
+                8,
+                1,
             ],
             dtype=np.int32,
         )
@@ -140,9 +205,7 @@ class Example:
         self.viewer = viewer
         self.device = wp.get_device()
         if not self.device.is_cuda:
-            raise RuntimeError(
-                "example_rabbit_pile requires CUDA (SDF narrow phase is CUDA-only)."
-            )
+            raise RuntimeError("example_rabbit_pile requires CUDA (SDF narrow phase is CUDA-only).")
 
         bunny_mesh = _load_bunny_mesh(build_sdf=True)
 
@@ -168,8 +231,8 @@ class Example:
         # origin. Pick spacings above those bounds so no two bunnies
         # spawn intersecting and the bottom layer clears the plane.
         horizontal_spacing = 0.75  # > 2 * max_radius
-        vertical_spacing = 0.8     # > 2 * max_radius
-        base_z = 0.45              # > max_radius so lowest tilt doesn't dip below z = 0
+        vertical_spacing = 0.8  # > 2 * max_radius
+        base_z = 0.45  # > max_radius so lowest tilt doesn't dip below z = 0
         rng = np.random.default_rng(seed=42)
         side = max(1, int(np.ceil(self.num_bunnies ** (1.0 / 3.0))))
         self._grid_side = side
@@ -213,24 +276,18 @@ class Example:
         self.model = mb.finalize()
 
         # ---- Collision pipeline ---------------------------------------
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model, contact_matching="sticky"
-        )
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
 
         self.state = self.model.state()
-        newton.eval_fk(
-            self.model, self.model.joint_q, self.model.joint_qd, self.state
-        )
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         self.model.body_q.assign(self.state.body_q)
 
         # ---- PhoenX body container (slot 0 = static world anchor) ----
         num_phoenx_bodies = int(self.model.body_count) + 1
         bodies = body_container_zeros(num_phoenx_bodies, device=self.device)
-        bodies.orientation.assign(
-            np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32)
-        )
+        bodies.orientation.assign(np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32))
         wp.launch(
             init_phoenx_bodies_kernel,
             dim=self.model.body_count,
@@ -270,9 +327,7 @@ class Example:
 
         shape_body_np = self.model.shape_body.numpy()
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
-        self._shape_body = wp.array(
-            shape_body_phoenx, dtype=wp.int32, device=self.device
-        )
+        self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
         # ---- Solver ---------------------------------------------------
         self.world = PhoenXWorld(
@@ -284,15 +339,12 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
-            num_shapes=int(self.model.shape_count),
             default_friction=BUNNY_FRICTION,
             device=self.device,
         )
 
         # ---- Viewer ---------------------------------------------------
-        self._xforms = wp.zeros(
-            num_phoenx_bodies, dtype=wp.transform, device=self.device
-        )
+        self._xforms = wp.zeros(num_phoenx_bodies, dtype=wp.transform, device=self.device)
         self.viewer.set_model(self.model)
         # Pull the camera back in proportion to the grid so the whole
         # pile stays in frame regardless of ``--num-bunnies``.
@@ -305,13 +357,9 @@ class Example:
         )
 
         # ---- Picking --------------------------------------------------
-        half_extents_np = np.full(
-            (num_phoenx_bodies, 3), BUNNY_SCALE * 0.5, dtype=np.float32
-        )
+        half_extents_np = np.full((num_phoenx_bodies, 3), BUNNY_SCALE * 0.5, dtype=np.float32)
         half_extents_np[0] = 0.0  # world anchor
-        self._half_extents = wp.array(
-            half_extents_np, dtype=wp.vec3f, device=self.device
-        )
+        self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
         self.picking = Picking(self.world, self._half_extents)
         register_with_viewer_gl(self.viewer, self.picking)
 
@@ -406,9 +454,7 @@ class Example:
             assert np.isfinite(pos).all(), f"bunny {i} pos non-finite ({pos})"
             assert np.isfinite(vel).all(), f"bunny {i} vel non-finite ({vel})"
             xy = float(np.linalg.norm(pos[:2]))
-            assert xy < xy_tol, (
-                f"bunny {i} flew off the pile: xy={xy:.3f} m, tol={xy_tol:.3f}, pos={pos}"
-            )
+            assert xy < xy_tol, f"bunny {i} flew off the pile: xy={xy:.3f} m, tol={xy_tol:.3f}, pos={pos}"
 
     @staticmethod
     def create_parser():

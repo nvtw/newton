@@ -253,7 +253,7 @@ class Example:
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps =50
+        self.sim_substeps = 50
         self.solver_iterations = 4
 
         self.viewer = viewer
@@ -294,7 +294,6 @@ class Example:
             gravity=(0.0, 0.0, -9.81),  # match the jitter variant's -y gravity
             max_contact_columns=max_contact_columns,
             rigid_contact_max=0,
-            num_shapes=0,
             num_joints=NUM_HINGES,
             device=self.device,
         )
@@ -315,9 +314,7 @@ class Example:
         # the world anchor as non-pickable.
         half_extents_np = np.zeros((NUM_BODIES, 3), dtype=np.float32)
         half_extents_np[1:] = HALF_EXTENT
-        self._half_extents = wp.array(
-            half_extents_np, dtype=wp.vec3f, device=self.device
-        )
+        self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
         self.picking = Picking(self.world, self._half_extents)
         register_with_viewer_gl(self.viewer, self.picking)
 
@@ -372,12 +369,8 @@ class Example:
         """
         positions = self.bodies.position.numpy()
         for i in range(1, NUM_BODIES):
-            assert np.isfinite(positions[i]).all(), (
-                f"body {i} produced non-finite position"
-            )
-            assert positions[i, 1] > -10.0 * NUM_CUBES, (
-                f"body {i} fell unreasonably far ({positions[i, 1]})"
-            )
+            assert np.isfinite(positions[i]).all(), f"body {i} produced non-finite position"
+            assert positions[i, 1] > -10.0 * NUM_CUBES, f"body {i} fell unreasonably far ({positions[i, 1]})"
 
 
 if __name__ == "__main__":

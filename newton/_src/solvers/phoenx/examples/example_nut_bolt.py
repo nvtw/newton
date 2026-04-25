@@ -32,6 +32,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_container_zeros,
 )
+
 # Contact matching mode. The shared jitter/phoenx default is
 # ``"sticky"`` -- it pins each matched contact's body-frame anchors
 # and world-frame normal to their first-frame values, which kills
@@ -112,7 +113,7 @@ def _load_mesh_with_sdf(mesh_file: str, gap: float) -> tuple[newton.Mesh, wp.vec
     (the SDF is generated around the mesh's local origin, not its
     original AABB centre). ``center_vec`` is in mesh (unscaled) units.
     """
-    import trimesh  # noqa: PLC0415 -- deferred: heavy dep, only on call.
+    import trimesh
 
     mesh_data = trimesh.load(mesh_file, force="mesh")
     vertices = np.array(mesh_data.vertices, dtype=np.float32)
@@ -170,15 +171,11 @@ class Example:
         self.viewer = viewer
         self.device = wp.get_device()
         if not self.device.is_cuda:
-            raise RuntimeError(
-                "example_nut_bolt requires CUDA (SDF narrow phase is CUDA-only)."
-            )
+            raise RuntimeError("example_nut_bolt requires CUDA (SDF narrow phase is CUDA-only).")
 
         # ---- Fetch the nut/bolt meshes --------------------------------
         print("Downloading nut/bolt assets...")
-        asset_path = newton.examples.download_external_git_folder(
-            ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER
-        )
+        asset_path = newton.examples.download_external_git_folder(ISAACGYM_ENVS_REPO_URL, ISAACGYM_NUT_BOLT_FOLDER)
         print(f"Assets downloaded to: {asset_path}")
 
         bolt_file = str(asset_path / f"factory_bolt_{ASSEMBLY_STR}.obj")
@@ -251,26 +248,17 @@ class Example:
         body_inv_mass_np[bolt_body] = 0.0
         body_inv_inertia_np[bolt_body] = np.zeros((3, 3), dtype=np.float32)
         self.model.body_inv_mass.assign(wp.array(body_inv_mass_np, dtype=wp.float32))
-        self.model.body_inv_inertia.assign(
-            wp.array(body_inv_inertia_np, dtype=wp.mat33)
-        )
+        self.model.body_inv_inertia.assign(wp.array(body_inv_inertia_np, dtype=wp.mat33))
 
-        print(
-            f"[PhoenX Nut-Bolt] bodies={self.model.body_count} "
-            f"shapes={self.model.shape_count}"
-        )
+        print(f"[PhoenX Nut-Bolt] bodies={self.model.body_count} shapes={self.model.shape_count}")
 
         # ---- Collision pipeline ---------------------------------------
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model, contact_matching=_CONTACT_MATCHING
-        )
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=_CONTACT_MATCHING)
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
 
         self.state = self.model.state()
-        newton.eval_fk(
-            self.model, self.model.joint_q, self.model.joint_qd, self.state
-        )
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         self.model.body_q.assign(self.state.body_q)
 
         # ---- PhoenX body container (slot 0 = static world anchor) ----
@@ -279,9 +267,7 @@ class Example:
         # Seed every slot's orientation to identity so the rotation-
         # to-matrix call in :func:`_phoenx_update_inertia_kernel`
         # doesn't blow up on the zero-quaternion default.
-        bodies.orientation.assign(
-            np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32)
-        )
+        bodies.orientation.assign(np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32))
         wp.launch(
             init_phoenx_bodies_kernel,
             dim=self.model.body_count,
@@ -320,9 +306,7 @@ class Example:
 
         shape_body_np = self.model.shape_body.numpy()
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
-        self._shape_body = wp.array(
-            shape_body_phoenx, dtype=wp.int32, device=self.device
-        )
+        self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
         # ---- Solver ---------------------------------------------------
         self.world = PhoenXWorld(
@@ -334,7 +318,6 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
-            num_shapes=int(self.model.shape_count),
             default_friction=SHAPE_CFG.mu,
             device=self.device,
         )
@@ -369,9 +352,7 @@ class Example:
             0.025 * self.scene_scale,
             0.015 * self.scene_scale,
         )
-        self._half_extents = wp.array(
-            half_extents_np, dtype=wp.vec3f, device=self.device
-        )
+        self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
         self.picking = Picking(self.world, self._half_extents)
         register_with_viewer_gl(self.viewer, self.picking)
 
@@ -472,8 +453,7 @@ class Example:
         assert np.isfinite(nut_vel).all(), f"nut velocity non-finite ({nut_vel})"
         nut_xy_dist = float(
             np.linalg.norm(
-                np.asarray(nut_pos[:2], dtype=np.float32)
-                - np.asarray(self._nut_initial_xy, dtype=np.float32)
+                np.asarray(nut_pos[:2], dtype=np.float32) - np.asarray(self._nut_initial_xy, dtype=np.float32)
             )
         )
         max_drift = 0.1 * self.scene_scale

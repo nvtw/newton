@@ -312,7 +312,6 @@ class SolverPhoenX(SolverBase):
             gravity=gravity_arg,
             max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
-            num_shapes=int(model.shape_count),
             num_joints=num_joints,
             default_friction=float(default_friction),
             num_worlds=num_worlds,

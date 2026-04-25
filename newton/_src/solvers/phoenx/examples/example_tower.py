@@ -33,8 +33,6 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.phoenx.body import (
-    MOTION_DYNAMIC,
-    MOTION_STATIC,
     body_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
@@ -104,7 +102,11 @@ PLANK_DENSITY = 1000.0
 # State-mirroring kernels shared with other PhoenX examples.
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
+)
+from newton._src.solvers.phoenx.examples.example_common import (
     newton_to_phoenx_kernel as _newton_to_phoenx_kernel,
+)
+from newton._src.solvers.phoenx.examples.example_common import (
     phoenx_to_newton_kernel as _phoenx_to_newton_kernel,
 )
 
@@ -182,9 +184,7 @@ class Example:
                 world_x = cos_o * local_x - sin_o * local_y
                 world_y = sin_o * local_x + cos_o * local_y
                 world_z = local_z
-                quat = wp.quat_from_axis_angle(
-                    wp.vec3(0.0, 0.0, 1.0), orientation_rad
-                )
+                quat = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), orientation_rad)
                 body = builder.add_body(
                     xform=wp.transform(
                         p=wp.vec3(float(world_x), float(world_y), float(world_z)),
@@ -213,17 +213,12 @@ class Example:
 
         # Finalise the Newton side.
         self.model = builder.finalize()
-        print(
-            f"[PhoenX Tower] bodies={self.model.body_count} "
-            f"shapes={self.model.shape_count}"
-        )
+        print(f"[PhoenX Tower] bodies={self.model.body_count} shapes={self.model.shape_count}")
 
         # Collision pipeline -- contact matching must be enabled for
         # the PhoenX solver's warm-start gather to find last frame's
         # impulses for persistent contacts.
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model, contact_matching=PHOENX_CONTACT_MATCHING
-        )
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=PHOENX_CONTACT_MATCHING)
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
 
@@ -249,9 +244,7 @@ class Example:
         wp.copy(
             bodies.orientation,
             wp.array(
-                np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(
-                    np.float32
-                ),
+                np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32),
                 dtype=wp.quatf,
                 device=self.device,
             ),
@@ -296,9 +289,7 @@ class Example:
         # +1 to match PhoenX's slot-0-is-world layout.
         shape_body_np = self.model.shape_body.numpy()
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
-        self._shape_body = wp.array(
-            shape_body_phoenx, dtype=wp.int32, device=self.device
-        )
+        self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
         # Build the solver.
         self.world = PhoenXWorld(
@@ -310,7 +301,6 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
-            num_shapes=int(self.model.shape_count),
             step_layout=STEP_LAYOUT,
             device=self.device,
         )
@@ -333,9 +323,7 @@ class Example:
         half_extents_np = np.zeros((self.world.num_bodies, 3), dtype=np.float32)
         for newton_idx in self._plank_newton_ids:
             half_extents_np[newton_idx + 1] = (PLANK_HX, PLANK_HY, PLANK_HZ)
-        self._half_extents = wp.array(
-            half_extents_np, dtype=wp.vec3f, device=self.device
-        )
+        self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
         self.picking = Picking(self.world, self._half_extents)
         register_with_viewer_gl(self.viewer, self.picking)
 
@@ -442,8 +430,7 @@ class Example:
             assert np.isfinite(pos).all(), f"body {newton_idx} non-finite position"
             r_xy = float(math.hypot(pos[0], pos[1]))
             assert r_xy < tolerance, (
-                f"plank {newton_idx} flew outside the tower envelope "
-                f"(r_xy={r_xy:.2f}, tol={tolerance:.2f})"
+                f"plank {newton_idx} flew outside the tower envelope (r_xy={r_xy:.2f}, tol={tolerance:.2f})"
             )
 
 

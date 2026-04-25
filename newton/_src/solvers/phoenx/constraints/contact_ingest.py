@@ -704,7 +704,6 @@ def _stamp_cid_of_contact_kernel(
 def ingest_contacts(
     contacts,  # newton._src.sim.contacts.Contacts
     shape_body: wp.array,
-    num_shapes: int,
     contact_cols: ContactColumnContainer,
     scratch: IngestScratch,
     max_contact_columns: int,
@@ -728,10 +727,6 @@ def ingest_contacts(
         contacts: Newton :class:`Contacts` buffer. Must have been built
             with a non-disabled ``contact_matching`` mode.
         shape_body: ``model.shape_body`` array.
-        num_shapes: Unused as of the Bug.md #1 fix -- kept in the
-            signature for API compatibility. The pair-detection step no
-            longer packs ``(sa, sb)`` into an int32 key, so there is no
-            longer a ``num_shapes * num_shapes < 2**31`` limit.
         contact_cols: Contact column header storage (sized for contacts
             only). Contact columns are written at local_cid ``[0,
             num_contact_columns)``; the caller maps these back to the

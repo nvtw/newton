@@ -42,8 +42,6 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.body import (
-    MOTION_DYNAMIC,
-    MOTION_STATIC,
     body_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.contact_matching_config import (
@@ -104,9 +102,7 @@ class _PendulumScene:
         # equivalent by zeroing its inverse mass in the PhoenX body
         # container below.
         self._anchor_newton = mb.add_body(
-            xform=wp.transform(
-                p=wp.vec3(*anchor_world), q=wp.quat_identity()
-            ),
+            xform=wp.transform(p=wp.vec3(*anchor_world), q=wp.quat_identity()),
             # ``mass = 0`` on Newton side means "static body" -- the
             # ingest path then produces inv_mass = 0 and the PhoenX
             # init kernel sets motion_type = STATIC for us.
@@ -127,9 +123,7 @@ class _PendulumScene:
         iyy = self.pendulum_mass / 3.0 * (hx * hx + hz * hz)
         izz = self.pendulum_mass / 3.0 * (hx * hx + hy * hy)
         self._pendulum_newton = mb.add_body(
-            xform=wp.transform(
-                p=wp.vec3(*pendulum_world), q=wp.quat_identity()
-            ),
+            xform=wp.transform(p=wp.vec3(*pendulum_world), q=wp.quat_identity()),
             mass=self.pendulum_mass,
             inertia=((ixx, 0.0, 0.0), (0.0, iyy, 0.0), (0.0, 0.0, izz)),
         )
@@ -143,9 +137,7 @@ class _PendulumScene:
 
         self.model = mb.finalize()
         self.state = self.model.state()
-        newton.eval_fk(
-            self.model, self.model.joint_q, self.model.joint_qd, self.state
-        )
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         self.model.body_q.assign(self.state.body_q)
 
         # ---- PhoenX body container (anchor + pendulum) ---------------
@@ -185,18 +177,14 @@ class _PendulumScene:
         self.bodies = bodies
 
         # ---- Collision pipeline (joint-only scene -> no contacts) ----
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model, contact_matching=PHOENX_CONTACT_MATCHING
-        )
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=PHOENX_CONTACT_MATCHING)
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
         max_contact_columns = max(16, (rigid_contact_max + 5) // 6)
 
         shape_body_np = self.model.shape_body.numpy()
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
-        self._shape_body = wp.array(
-            shape_body_phoenx, dtype=wp.int32, device=self.device
-        )
+        self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
         # ---- Constraint container with 1 joint + contact capacity ----
         self.num_joints = 1
@@ -215,7 +203,6 @@ class _PendulumScene:
             gravity=self.gravity,
             max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
-            num_shapes=int(self.model.shape_count),
             num_joints=self.num_joints,
             device=self.device,
         )
@@ -356,9 +343,7 @@ class _PendulumScene:
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX joint tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX joint tests require CUDA")
 class TestPhoenXActuatedDoubleBallSocket(unittest.TestCase):
     """Unified-joint smoke + dynamics tests for :class:`PhoenXWorld`."""
 
@@ -444,8 +429,7 @@ class TestPhoenXActuatedDoubleBallSocket(unittest.TestCase):
         self.assertLess(
             float(final[2]),
             float(initial[2]) - 0.05,
-            f"revolute pendulum did not drop under gravity "
-            f"(z_initial={initial[2]:.3f} -> z_final={final[2]:.3f})",
+            f"revolute pendulum did not drop under gravity (z_initial={initial[2]:.3f} -> z_final={final[2]:.3f})",
         )
         # Arm length preserved within soft-constraint slack
         # (``hertz=60`` with critical damping is tight). Allow 5 %
@@ -559,14 +543,11 @@ class TestPhoenXActuatedDoubleBallSocket(unittest.TestCase):
         self.assertGreater(
             float(final[0]),
             expected_x_min,
-            f"revolute limit overshot: pendulum at x={final[0]:.3f} "
-            f"(limit expects > {expected_x_min:.3f})",
+            f"revolute limit overshot: pendulum at x={final[0]:.3f} (limit expects > {expected_x_min:.3f})",
         )
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX joint tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX joint tests require CUDA")
 class TestPhoenXChainConvergence(unittest.TestCase):
     """Multi-joint chain test: validates that the step loop order
     (``solve -> integrate_positions -> relax``) converges under
@@ -623,9 +604,7 @@ class TestPhoenXChainConvergence(unittest.TestCase):
         bodies.motion_type.assign(motion)
 
         num_joints = num_cubes
-        constraints = PhoenXWorld.make_constraint_container(
-            num_joints=num_joints, max_contact_columns=0, device=device
-        )
+        constraints = PhoenXWorld.make_constraint_container(num_joints=num_joints, max_contact_columns=0, device=device)
         world = PhoenXWorld(
             bodies=bodies,
             constraints=constraints,
@@ -635,7 +614,6 @@ class TestPhoenXChainConvergence(unittest.TestCase):
             gravity=(0.0, -_G, 0.0),
             max_contact_columns=0,
             rigid_contact_max=0,
-            num_shapes=0,
             num_joints=num_joints,
             device=device,
         )

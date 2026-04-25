@@ -976,7 +976,6 @@ class WorldBuilder:
         gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         max_contact_columns: int = 0,
         rigid_contact_max: int = 0,
-        num_shapes: int | None = None,
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
         device: wp.context.Devicelike = None,
@@ -997,8 +996,6 @@ class WorldBuilder:
            arrays, stores them on the :class:`PhoenXWorld` so
            :meth:`PhoenXWorld.step` can resolve contact shape ids
            without the caller threading them through manually.
-        3. Sizes ``num_shapes`` from ``len(self._shapes)`` when the
-           caller leaves it ``None``.
         """
         device = wp.get_device(device)
 
@@ -1009,7 +1006,6 @@ class WorldBuilder:
         self._accumulate_mass_inertia_from_shapes()
 
         num_joints = len(self._joint_descriptors)
-        effective_num_shapes = len(self._shapes) if num_shapes is None else int(num_shapes)
         bodies = self._build_body_container(device)
         constraints = PhoenXWorld.make_constraint_container(
             num_joints=num_joints,
@@ -1026,7 +1022,6 @@ class WorldBuilder:
             gravity=gravity,
             max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
-            num_shapes=effective_num_shapes,
             num_joints=num_joints,
             collision_filter_pairs=self._collision_filter_pairs,
             default_friction=default_friction,

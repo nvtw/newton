@@ -19,7 +19,6 @@ graph-captured launches for reasonable wall-clock throughput.
 
 from __future__ import annotations
 
-import math
 import unittest
 
 import numpy as np
@@ -46,8 +45,7 @@ def _build_n_pendulums(
     *,
     num_worlds: int,
     angular_velocities: list[tuple[float, float, float]] | None = None,
-    gravity: tuple[float, float, float]
-    | list[tuple[float, float, float]] = (0.0, -9.81, 0.0),
+    gravity: tuple[float, float, float] | list[tuple[float, float, float]] = (0.0, -9.81, 0.0),
     device: wp.context.Devicelike = None,
 ) -> tuple[PhoenXWorld, list[int]]:
     """Build ``num_worlds`` identical pendulum scenes sharing one
@@ -103,9 +101,7 @@ def _build_n_pendulums(
 
     # One joint per world.
     num_joints = num_worlds
-    constraints = PhoenXWorld.make_constraint_container(
-        num_joints=num_joints, max_contact_columns=0, device=device
-    )
+    constraints = PhoenXWorld.make_constraint_container(num_joints=num_joints, max_contact_columns=0, device=device)
     world = PhoenXWorld(
         bodies=bodies,
         constraints=constraints,
@@ -115,7 +111,6 @@ def _build_n_pendulums(
         gravity=gravity,
         max_contact_columns=0,
         rigid_contact_max=0,
-        num_shapes=0,
         num_joints=num_joints,
         num_worlds=num_worlds,
         device=device,
@@ -194,9 +189,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         """
         device = wp.get_device("cuda:0")
         num_worlds = 8
-        world, cube_slots = _build_n_pendulums(
-            num_worlds=num_worlds, device=device
-        )
+        world, cube_slots = _build_n_pendulums(num_worlds=num_worlds, device=device)
         _run_frames(world, 30)
         positions = world.bodies.position.numpy()
         ref = positions[cube_slots[0]]
@@ -215,9 +208,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         """
         device = wp.get_device("cuda:0")
         avels = [(0.0, 0.0, 0.0), (0.0, 5.0, 0.0)]
-        world, cube_slots = _build_n_pendulums(
-            num_worlds=2, angular_velocities=avels, device=device
-        )
+        world, cube_slots = _build_n_pendulums(num_worlds=2, angular_velocities=avels, device=device)
         _run_frames(world, 30)
         avels_after = world.bodies.angular_velocity.numpy()
         w0_ang = avels_after[cube_slots[0]]
@@ -241,9 +232,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         """
         device = wp.get_device("cuda:0")
         gravity = [(0.0, -9.81, 0.0), (0.0, -1.62, 0.0)]
-        world, cube_slots = _build_n_pendulums(
-            num_worlds=2, gravity=gravity, device=device
-        )
+        world, cube_slots = _build_n_pendulums(num_worlds=2, gravity=gravity, device=device)
         # Start each cube slightly off-axis so it swings instead of
         # hanging perfectly vertical (which would hide gravity's
         # effect since the ball socket's normal reaction scales
@@ -270,8 +259,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         self.assertGreater(
             w0_speed,
             2.0 * w1_speed,
-            f"earth cube |w|={w0_speed:.3f} not > 2x moon |w|={w1_speed:.3f} -- "
-            "per-world gravity didn't take effect",
+            f"earth cube |w|={w0_speed:.3f} not > 2x moon |w|={w1_speed:.3f} -- per-world gravity didn't take effect",
         )
 
     def test_many_worlds_converge(self) -> None:
@@ -284,9 +272,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         """
         device = wp.get_device("cuda:0")
         num_worlds = 256
-        world, cube_slots = _build_n_pendulums(
-            num_worlds=num_worlds, device=device
-        )
+        world, cube_slots = _build_n_pendulums(num_worlds=num_worlds, device=device)
         _run_frames(world, 10)
         positions = world.bodies.position.numpy()
         ref = positions[cube_slots[0]]
@@ -298,8 +284,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         self.assertLess(
             max_dev,
             1.0e-3,
-            f"max divergence across {num_worlds} worlds was "
-            f"{max_dev:.6f} (> 1e-3)",
+            f"max divergence across {num_worlds} worlds was {max_dev:.6f} (> 1e-3)",
         )
 
     def test_per_world_initial_state_does_not_leak(self) -> None:
@@ -312,9 +297,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         # can assert each world's final |omega_y| is distinct and
         # monotone in w.
         avels = [(0.0, 0.5 + float(w), 0.0) for w in range(num_worlds)]
-        world, cube_slots = _build_n_pendulums(
-            num_worlds=num_worlds, angular_velocities=avels, device=device
-        )
+        world, cube_slots = _build_n_pendulums(num_worlds=num_worlds, angular_velocities=avels, device=device)
         _run_frames(world, 30)
         ang_v = world.bodies.angular_velocity.numpy()
         per_world_omega = [float(ang_v[cube_slots[w]][1]) for w in range(num_worlds)]
@@ -347,9 +330,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         """
         device = wp.get_device("cuda:0")
         num_worlds = 4
-        world, cube_slots = _build_n_pendulums(
-            num_worlds=num_worlds, device=device
-        )
+        world, cube_slots = _build_n_pendulums(num_worlds=num_worlds, device=device)
         # Zero inverse mass on world 0's cube -> no dynamics.
         inv_mass = world.bodies.inverse_mass.numpy()
         inv_mass[cube_slots[0]] = 0.0
@@ -376,10 +357,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
                 positions[cube_slots[w]],
                 ref,
                 atol=1.0e-4,
-                err_msg=(
-                    f"world {w} diverged from world 1 after world 0 was "
-                    "killed -- per-world isolation broken"
-                ),
+                err_msg=(f"world {w} diverged from world 1 after world 0 was killed -- per-world isolation broken"),
             )
 
     def test_1024_worlds_stress(self) -> None:
@@ -396,9 +374,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         """
         device = wp.get_device("cuda:0")
         num_worlds = 1024
-        world, cube_slots = _build_n_pendulums(
-            num_worlds=num_worlds, device=device
-        )
+        world, cube_slots = _build_n_pendulums(num_worlds=num_worlds, device=device)
         # Short run -- just enough for one full graph replay.
         _run_frames(world, 8)
         positions = world.bodies.position.numpy()
@@ -419,10 +395,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         self.assertLess(
             max_dev,
             5.0e-3,
-            msg=(
-                f"1024-world max divergence {max_dev:.6f} m exceeds "
-                "5 mm -- per-world isolation regressed at scale"
-            ),
+            msg=(f"1024-world max divergence {max_dev:.6f} m exceeds 5 mm -- per-world isolation regressed at scale"),
         )
 
     def test_mixed_gravity_magnitudes(self) -> None:
@@ -434,13 +407,11 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         """
         device = wp.get_device("cuda:0")
         gravity = [
-            (0.0, -9.81, 0.0),   # earth
-            (0.0, -1.62, 0.0),   # moon
-            (0.0, 0.0, 0.0),      # zero-g
+            (0.0, -9.81, 0.0),  # earth
+            (0.0, -1.62, 0.0),  # moon
+            (0.0, 0.0, 0.0),  # zero-g
         ]
-        world, cube_slots = _build_n_pendulums(
-            num_worlds=3, gravity=gravity, device=device
-        )
+        world, cube_slots = _build_n_pendulums(num_worlds=3, gravity=gravity, device=device)
         # Off-axis starts so gravity actually does work.
         positions = world.bodies.position.numpy()
         for cube in cube_slots:
@@ -467,9 +438,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX multi-world tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX multi-world tests require CUDA")
 class TestPhoenXMultiWorldScaling(unittest.TestCase):
     """Stability / cardinality checks at sub-1024 world counts that
     stress the per-world block-dispatcher edges.
@@ -490,9 +459,7 @@ class TestPhoenXMultiWorldScaling(unittest.TestCase):
         # 512 -- catches fixed-size scratch arrays).
         for num_worlds in [1, 2, 32, 128, 513]:
             with self.subTest(num_worlds=num_worlds):
-                world, cube_slots = _build_n_pendulums(
-                    num_worlds=num_worlds, device=device
-                )
+                world, cube_slots = _build_n_pendulums(num_worlds=num_worlds, device=device)
                 _run_frames(world, 5)
                 positions = world.bodies.position.numpy()
                 self.assertTrue(
@@ -507,10 +474,7 @@ class TestPhoenXMultiWorldScaling(unittest.TestCase):
                     self.assertLess(
                         dist,
                         2.0,
-                        msg=(
-                            f"num_worlds={num_worlds}, world={w}: cube at "
-                            f"distance {dist:.3f} m from origin"
-                        ),
+                        msg=(f"num_worlds={num_worlds}, world={w}: cube at distance {dist:.3f} m from origin"),
                     )
 
 
