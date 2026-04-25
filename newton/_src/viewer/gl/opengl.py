@@ -22,7 +22,13 @@ from .shaders import (
     ShadowShader,
 )
 
-ENABLE_CUDA_INTEROP = False
+# CUDA-GL interop. When enabled (and the active Warp device is CUDA),
+# per-instance transforms are written directly into mapped GL buffers
+# from device-side Warp arrays -- no D2H copy, no host sync. Defaults
+# on; set ``NEWTON_VIEWER_CUDA_INTEROP=0`` to fall back to the pinned
+# host path (useful when the active GL context isn't tied to the same
+# CUDA context Warp picked up, e.g. some remote-display setups).
+ENABLE_CUDA_INTEROP = os.environ.get("NEWTON_VIEWER_CUDA_INTEROP", "1") != "0"
 ENABLE_GL_CHECKS = False
 
 wp.set_module_options({"enable_backward": False})
@@ -884,6 +890,50 @@ class MeshInstancerGL:
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.instance_color_buffer)
             gl.glBufferData(gl.GL_ARRAY_BUFFER, host_colors.nbytes, host_colors.ctypes.data, gl.GL_STATIC_DRAW)
 
+        if materials is not None:
+            host_materials = materials.numpy()
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.instance_material_buffer)
+            gl.glBufferData(gl.GL_ARRAY_BUFFER, host_materials.nbytes, host_materials.ctypes.data, gl.GL_STATIC_DRAW)
+
+    def update_from_packed_cuda(self, packed_xforms, offset, count, colors=None, materials=None):
+        """Upload mat44 transforms directly from a device Warp array via CUDA-GL interop.
+
+        Avoids the D2H/H2D round trip ``update_from_pinned`` requires:
+        the registered VBO is mapped into a CUDA pointer, the slice
+        ``packed_xforms[offset : offset + count]`` is copied into it
+        device-to-device, and the buffer is unmapped. The mapping is
+        WRITE_DISCARD, so only the first ``count`` rows are valid after
+        this call -- which matches the renderer's
+        ``glDrawElementsInstanced(..., active_instances)``.
+
+        Args:
+            packed_xforms: ``wp.array[wp.mat44]`` on the same CUDA
+                device as this instancer's registered VBO.
+            offset: Starting index inside ``packed_xforms``.
+            count: Number of active instances to copy and render.
+            colors: Optional ``wp.array`` of per-instance colors.
+            materials: Optional ``wp.array`` of per-instance materials.
+
+        Raises:
+            RuntimeError: If interop isn't available on this instancer
+                (caller must fall back to ``update_from_pinned``).
+        """
+        gl = RendererGL.gl
+        if self._instance_transform_cuda_buffer is None:
+            raise RuntimeError(
+                "CUDA-GL interop not available on this instancer; use update_from_pinned instead."
+            )
+        if count > self.num_instances:
+            raise ValueError(f"Active instance count ({count}) exceeds allocated capacity ({self.num_instances}).")
+        self.active_instances = count
+        if count > 0:
+            vbo = self._instance_transform_cuda_buffer.map(dtype=wp.mat44, shape=(self.num_instances,))
+            wp.copy(vbo, packed_xforms, dest_offset=0, src_offset=offset, count=count)
+            self._instance_transform_cuda_buffer.unmap()
+        if colors is not None:
+            host_colors = colors.numpy()
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.instance_color_buffer)
+            gl.glBufferData(gl.GL_ARRAY_BUFFER, host_colors.nbytes, host_colors.ctypes.data, gl.GL_STATIC_DRAW)
         if materials is not None:
             host_materials = materials.numpy()
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.instance_material_buffer)

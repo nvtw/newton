@@ -417,6 +417,29 @@ def _compute_per_world_shape_pairs_max(model: Model) -> int:
     return max(0, total)
 
 
+def _resolve_shape_pairs_max(model: Model, override: int | None) -> int:
+    """Pick the broad-phase candidate-pair buffer capacity.
+
+    ``override`` lets the caller cap the SAP/NXN pair buffer, which is
+    otherwise sized to the worst-case ``N*(N-1)/2`` per-world bound.
+    SAP scenes with thousands of bodies typically emit only a tiny
+    fraction of that bound, so the default sizing is grossly wasteful
+    (multi-GB on 10k+ shape scenes). ``None`` keeps the legacy
+    behaviour; a positive integer overrides it. ``0`` is rejected --
+    use ``None`` instead -- and values larger than the natural bound
+    are silently clamped down (allocating beyond the bound is just
+    burning memory, never required).
+    """
+    natural = _compute_per_world_shape_pairs_max(model)
+    if override is None:
+        return natural
+    if override <= 0:
+        raise ValueError(f"shape_pairs_max must be a positive integer or None, got {override}")
+    if override > natural:
+        return natural
+    return int(override)
+
+
 BROAD_PHASE_MODES = ("nxn", "sap", "explicit")
 
 
@@ -477,6 +500,7 @@ class CollisionPipeline:
         | None = None,
         narrow_phase: NarrowPhase | None = None,
         sdf_hydroelastic_config: HydroelasticSDF.Config | None = None,
+        shape_pairs_max: int | None = None,
         deterministic: bool = False,
         contact_matching: Literal["disabled", "latest", "sticky"] = "disabled",
         contact_matching_pos_threshold: float = 0.0005,
@@ -514,6 +538,18 @@ class CollisionPipeline:
                 "nxn"/"sap" modes, ignored.
             sdf_hydroelastic_config: Configuration for
                 hydroelastic collision handling. Defaults to None.
+            shape_pairs_max: Override for the broad-phase candidate-pair
+                buffer capacity used by the ``"nxn"`` and ``"sap"`` modes.
+                Defaults to the worst-case ``N*(N-1)/2`` per-world bound,
+                which is correct for ``"nxn"`` but typically 10-100x
+                larger than what ``"sap"`` actually emits on sparse
+                scenes. Set this to a tighter value (e.g. measured peak
+                with ~25% headroom) to avoid multi-GB allocations on
+                large SAP scenes; a too-small value triggers a buffer
+                overflow warning at runtime. Ignored for the
+                ``"explicit"`` mode (which uses the filtered pair list
+                length directly) and for expert paths that pass a
+                pre-built ``narrow_phase``.
             deterministic: Sort contacts after the narrow phase so that results
                 are independent of GPU thread scheduling.  Adds a radix sort +
                 gather pass.  Hydroelastic contacts are not yet covered.
@@ -675,7 +711,7 @@ class CollisionPipeline:
                     raise ValueError("model.shape_world is required for broad_phase=NXN")
                 self.broad_phase = BroadPhaseAllPairs(shape_world, shape_flags=shape_flags, device=device)
                 self.shape_pairs_filtered = None
-                self.shape_pairs_max = _compute_per_world_shape_pairs_max(model)
+                self.shape_pairs_max = _resolve_shape_pairs_max(model, shape_pairs_max)
                 self.shape_pairs_excluded = self._build_excluded_pairs(model)
                 self.shape_pairs_excluded_count = (
                     self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
@@ -685,7 +721,7 @@ class CollisionPipeline:
                     raise ValueError("model.shape_world is required for broad_phase=SAP")
                 self.broad_phase = BroadPhaseSAP(shape_world, shape_flags=shape_flags, device=device)
                 self.shape_pairs_filtered = None
-                self.shape_pairs_max = _compute_per_world_shape_pairs_max(model)
+                self.shape_pairs_max = _resolve_shape_pairs_max(model, shape_pairs_max)
                 self.shape_pairs_excluded = self._build_excluded_pairs(model)
                 self.shape_pairs_excluded_count = (
                     self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
