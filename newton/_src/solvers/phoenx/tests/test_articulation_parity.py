@@ -52,6 +52,13 @@ def _px_factory(model: newton.Model):
     )
 
 
+def _px_factory_singleworld(model: newton.Model):
+    return newton.solvers.SolverPhoenX(
+        model, substeps=4, solver_iterations=16, velocity_iterations=1,
+        step_layout="single_world",
+    )
+
+
 def _run_joint_state(
     solver_factory: Callable[[newton.Model], object],
     model_factory: Callable[[], newton.Model],

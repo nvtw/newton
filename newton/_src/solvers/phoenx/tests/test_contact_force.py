@@ -51,6 +51,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.tests._test_helpers import STEP_LAYOUTS
 from newton._src.solvers.phoenx.tests.test_stacking import (
     _PhoenXScene,
 )
@@ -83,11 +84,12 @@ class TestPhoenXContactForce(unittest.TestCase):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _make_scene(self) -> _PhoenXScene:
+    def _make_scene(self, step_layout: str = "multi_world") -> _PhoenXScene:
         return _PhoenXScene(
             fps=self.FPS,
             substeps=self.SUBSTEPS,
             solver_iterations=self.SOLVER_ITERATIONS,
+            step_layout=step_layout,
         )
 
     def _settle(self, scene: _PhoenXScene, bodies: list[int]) -> None:
@@ -122,49 +124,51 @@ class TestPhoenXContactForce(unittest.TestCase):
         pair-summary kernel duplicates, the reported force would
         be a multi-count sum.
         """
-        scene = self._make_scene()
-        scene.add_ground_plane()
-        sphere = scene.add_sphere(
-            position=(0.0, 0.0, self.SPHERE_RADIUS + 0.05),
-            radius=self.SPHERE_RADIUS,
-            mass=self.MASS,
-        )
-        scene.finalize()
-        self._settle(scene, [sphere])
+        for layout in STEP_LAYOUTS:
+            with self.subTest(step_layout=layout):
+                scene = self._make_scene(step_layout=layout)
+                scene.add_ground_plane()
+                sphere = scene.add_sphere(
+                    position=(0.0, 0.0, self.SPHERE_RADIUS + 0.05),
+                    radius=self.SPHERE_RADIUS,
+                    mass=self.MASS,
+                )
+                scene.finalize()
+                self._settle(scene, [sphere])
 
-        F, npairs, npoints = scene.gather_contact_wrench_on_body(sphere)
-        self.assertEqual(
-            npairs, 1, f"expected exactly one sphere-ground pair, got {npairs}"
-        )
-        self.assertEqual(
-            npoints,
-            1,
-            f"sphere-plane must be a single-point manifold; got {npoints}",
-        )
-        raw = scene.active_rigid_contact_count()
-        self.assertEqual(
-            raw,
-            1,
-            f"narrow phase emitted {raw} points for a sphere-on-plane at rest; "
-            "expected exactly 1",
-        )
+                F, npairs, npoints = scene.gather_contact_wrench_on_body(sphere)
+                self.assertEqual(
+                    npairs, 1, f"expected exactly one sphere-ground pair, got {npairs}"
+                )
+                self.assertEqual(
+                    npoints,
+                    1,
+                    f"sphere-plane must be a single-point manifold; got {npoints}",
+                )
+                raw = scene.active_rigid_contact_count()
+                self.assertEqual(
+                    raw,
+                    1,
+                    f"narrow phase emitted {raw} points for a sphere-on-plane at rest; "
+                    "expected exactly 1",
+                )
 
-        expected = self.MASS * _G
-        self.assertGreater(float(F[2]), 0.0, f"Fz should be upward, got {F}")
-        rel_err = abs(float(F[2]) - expected) / expected
-        self.assertLess(
-            rel_err,
-            0.05,
-            f"contact Fz = {float(F[2]):.3f} N vs m*g = {expected:.3f} N "
-            f"(rel err {rel_err:.2%}); > 5 % means the normal accumulator "
-            "didn't converge",
-        )
-        lateral = math.hypot(float(F[0]), float(F[1]))
-        self.assertLess(
-            lateral,
-            0.05 * expected,
-            f"lateral force should be ~0, got ({F[0]:.3f}, {F[1]:.3f}) N",
-        )
+                expected = self.MASS * _G
+                self.assertGreater(float(F[2]), 0.0, f"Fz should be upward, got {F}")
+                rel_err = abs(float(F[2]) - expected) / expected
+                self.assertLess(
+                    rel_err,
+                    0.05,
+                    f"contact Fz = {float(F[2]):.3f} N vs m*g = {expected:.3f} N "
+                    f"(rel err {rel_err:.2%}); > 5 % means the normal accumulator "
+                    "didn't converge",
+                )
+                lateral = math.hypot(float(F[0]), float(F[1]))
+                self.assertLess(
+                    lateral,
+                    0.05 * expected,
+                    f"lateral force should be ~0, got ({F[0]:.3f}, {F[1]:.3f}) N",
+                )
 
     def test_static_cube_weight(self) -> None:
         """Cube on a plane: Fz == m*g within 1 %.

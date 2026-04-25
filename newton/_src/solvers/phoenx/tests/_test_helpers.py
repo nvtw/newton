@@ -15,7 +15,15 @@ helpers as the tests grow.
 
 import warp as wp
 
-__all__ = ["GRAPH_CAPTURE_FRAME_THRESHOLD", "run_settle_loop"]
+__all__ = ["GRAPH_CAPTURE_FRAME_THRESHOLD", "STEP_LAYOUTS", "run_settle_loop"]
+
+
+# Layouts every behavioural test should exercise. ``"multi_world"`` is
+# the default per-world fast-tail dispatch; ``"single_world"`` drives
+# the global JP colouring via ``wp.capture_while``. Both must produce
+# the same observable physics on any scene -- subTest the assertion
+# block over both so a regression in either path fails CI.
+STEP_LAYOUTS = ("multi_world", "single_world")
 
 
 # Minimum ``frames`` count at which CUDA graph capture pays for itself.

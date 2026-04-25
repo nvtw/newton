@@ -29,6 +29,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.tests._test_helpers import STEP_LAYOUTS
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 
 _G = 9.81
@@ -73,7 +74,7 @@ class TestKineticFrictionStopDistance(unittest.TestCase):
     SUBSTEPS = 4
     SOLVER_ITERATIONS = 12
 
-    def _run_single_cube(self, mu: float, v0: float) -> tuple[float, float]:
+    def _run_single_cube(self, mu: float, v0: float, step_layout: str = "multi_world") -> tuple[float, float]:
         """Settle a single cube with initial +X velocity ``v0`` under
         friction ``mu`` until it stops. Returns ``(stop_distance,
         residual_speed)``.
@@ -83,6 +84,7 @@ class TestKineticFrictionStopDistance(unittest.TestCase):
             substeps=self.SUBSTEPS,
             solver_iterations=self.SOLVER_ITERATIONS,
             friction=mu,
+            step_layout=step_layout,
         )
         scene.add_ground_plane()
         box = scene.add_box(
@@ -105,10 +107,19 @@ class TestKineticFrictionStopDistance(unittest.TestCase):
         return float(pos[0]), float(np.linalg.norm(vel))
 
     def test_stop_distances_match_analytic(self) -> None:
-        for mu in self.MU_VALUES:
-            for v0 in self.V0_VALUES:
-                with self.subTest(mu=mu, v0=v0):
-                    stop_x, v_res = self._run_single_cube(mu, v0)
+        for layout in STEP_LAYOUTS:
+            # Sample a single (mu, v0) pair per layout to keep runtime
+            # bounded. The full sweep below already covers the default
+            # path; for the alternative layout we just need to confirm
+            # the friction path is structurally equivalent.
+            mu_v0_pairs = (
+                [(mu, v0) for mu in self.MU_VALUES for v0 in self.V0_VALUES]
+                if layout == "multi_world"
+                else [(0.5, 3.0)]
+            )
+            for mu, v0 in mu_v0_pairs:
+                with self.subTest(step_layout=layout, mu=mu, v0=v0):
+                    stop_x, v_res = self._run_single_cube(mu, v0, step_layout=layout)
                     expected = _analytic_stop_distance(v0, mu)
                     rel_err = abs(stop_x - expected) / expected
                     self.assertLess(
@@ -141,21 +152,26 @@ class TestStaticFrictionNoDrift(unittest.TestCase):
     """
 
     def test_cube_at_rest_does_not_drift(self) -> None:
-        scene = _PhoenXScene(fps=60, substeps=4, solver_iterations=16, friction=0.5)
-        scene.add_ground_plane()
-        box = scene.add_box(
-            position=(0.0, 0.0, 0.5 + 1.0e-3),
-            half_extents=(0.5, 0.5, 0.5),
-        )
-        scene.finalize()
-        for _ in range(180):  # 3 s
-            scene.step()
-        pos = scene.body_position(box)
-        vel = scene.body_velocity(box)
-        h_drift = float(np.hypot(pos[0], pos[1]))
-        h_speed = float(np.hypot(vel[0], vel[1]))
-        self.assertLess(h_drift, 1.0e-3, f"drift={h_drift:.6f} m")
-        self.assertLess(h_speed, 1.0e-3, f"speed={h_speed:.6f} m/s")
+        for layout in STEP_LAYOUTS:
+            with self.subTest(step_layout=layout):
+                scene = _PhoenXScene(
+                    fps=60, substeps=4, solver_iterations=16, friction=0.5,
+                    step_layout=layout,
+                )
+                scene.add_ground_plane()
+                box = scene.add_box(
+                    position=(0.0, 0.0, 0.5 + 1.0e-3),
+                    half_extents=(0.5, 0.5, 0.5),
+                )
+                scene.finalize()
+                for _ in range(180):  # 3 s
+                    scene.step()
+                pos = scene.body_position(box)
+                vel = scene.body_velocity(box)
+                h_drift = float(np.hypot(pos[0], pos[1]))
+                h_speed = float(np.hypot(vel[0], vel[1]))
+                self.assertLess(h_drift, 1.0e-3, f"drift={h_drift:.6f} m")
+                self.assertLess(h_speed, 1.0e-3, f"speed={h_speed:.6f} m/s")
 
 
 # ---------------------------------------------------------------------------
