@@ -78,6 +78,10 @@ from newton._src.solvers.phoenx.helpers.data_packing import (
     reinterpret_float_as_int,
     reinterpret_int_as_float,
 )
+from newton._src.solvers.phoenx.helpers.math_helpers import (
+    apply_pair_velocity_impulse,
+    effective_mass_scalar,
+)
 
 __all__ = [
     "CONTACT_DWORDS",
@@ -438,30 +442,6 @@ def contact_set_contact_count(c: ContactColumnContainer, local_cid: wp.int32, v:
 
 
 # ---------------------------------------------------------------------------
-# Math helpers
-# ---------------------------------------------------------------------------
-
-
-@wp.func
-def _effective_mass_scalar(
-    axis: wp.vec3f,
-    r1: wp.vec3f,
-    r2: wp.vec3f,
-    inv_mass1: wp.float32,
-    inv_mass2: wp.float32,
-    inv_inertia1: wp.mat33f,
-    inv_inertia2: wp.mat33f,
-) -> wp.float32:
-    """Scalar ``1 / J M^-1 J^T`` for an axis-aligned contact row."""
-    rc1 = wp.cross(r1, axis)
-    rc2 = wp.cross(r2, axis)
-    w = inv_mass1 + inv_mass2 + wp.dot(rc1, inv_inertia1 @ rc1) + wp.dot(rc2, inv_inertia2 @ rc2)
-    if w > 1.0e-12:
-        return 1.0 / w
-    return 0.0
-
-
-# ---------------------------------------------------------------------------
 # Prepare / iterate / position_iterate
 # ---------------------------------------------------------------------------
 #
@@ -606,9 +586,9 @@ def contact_prepare_for_iteration_at(
         r1 = p1_world - position1
         r2 = p2_world - position2
 
-        eff_n = _effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-        eff_t1 = _effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-        eff_t2 = _effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+        eff_n = effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+        eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+        eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
 
         effective_gap = wp.dot(p2_world - p1_world, n)
 
@@ -682,9 +662,9 @@ def contact_prepare_for_iteration_at(
             p2_world = position2 + wp.quat_rotate(orientation2, fresh_lp1 - body_com2) - margin1 * n
             r1 = p1_world - position1
             r2 = p2_world - position2
-            eff_n = _effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-            eff_t1 = _effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-            eff_t2 = _effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+            eff_n = effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+            eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+            eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
             p_diff = p2_world - p1_world
             drift_t1_raw = wp.dot(p_diff, t1_dir)
             drift_t2_raw = wp.dot(p_diff, t2_dir)
@@ -950,10 +930,11 @@ def contact_iterate_at(
         cc_set_tangent2_lambda(cc, k, lam_t2_new)
 
         imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
-        v1 -= inv_mass1 * imp
-        v2 += inv_mass2 * imp
-        w1 -= inv_inertia1 @ wp.cross(r1, imp)
-        w2 += inv_inertia2 @ wp.cross(r2, imp)
+        v1, v2, w1, w2 = apply_pair_velocity_impulse(
+            v1, v2, w1, w2,
+            inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
+            r1, r2, imp,
+        )
 
     bodies.velocity[b1] = v1
     bodies.velocity[b2] = v2
@@ -1051,17 +1032,18 @@ def contact_position_iterate_at(
         if vel_t1 * vel_t1 + vel_t2 * vel_t2 > rest_vel_thresh * rest_vel_thresh:
             continue
 
-        eff_t1 = _effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-        eff_t2 = _effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+        eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+        eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
 
         d_lam_t1 = -drift_t1 * eff_t1
         d_lam_t2 = -drift_t2 * eff_t2
         pos_imp = d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
 
-        d_pos1 = d_pos1 - inv_mass1 * pos_imp
-        d_pos2 = d_pos2 + inv_mass2 * pos_imp
-        d_omega1 = d_omega1 - inv_inertia1 @ wp.cross(r1, pos_imp)
-        d_omega2 = d_omega2 + inv_inertia2 @ wp.cross(r2, pos_imp)
+        d_pos1, d_pos2, d_omega1, d_omega2 = apply_pair_velocity_impulse(
+            d_pos1, d_pos2, d_omega1, d_omega2,
+            inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
+            r1, r2, pos_imp,
+        )
 
     bodies.position[b1] = position1 + d_pos1
     bodies.position[b2] = position2 + d_pos2
@@ -1240,10 +1222,11 @@ def contact_iterate_at_multi(
             cc_set_tangent2_lambda(cc, k, lam_t2_new)
 
             imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
-            v1 -= inv_mass1 * imp
-            v2 += inv_mass2 * imp
-            w1 -= inv_inertia1 @ wp.cross(r1, imp)
-            w2 += inv_inertia2 @ wp.cross(r2, imp)
+            v1, v2, w1, w2 = apply_pair_velocity_impulse(
+                v1, v2, w1, w2,
+                inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
+                r1, r2, imp,
+            )
         it += 1
 
     bodies.velocity[b1] = v1

@@ -20,11 +20,14 @@ import math
 import warp as wp
 
 __all__ = [
+    "apply_pair_velocity_impulse",
     "create_orthonormal",
-    "qmatrix_project_multiply_left_right",
+    "effective_mass_scalar",
     "extract_rotation_angle",
-    "revolution_tracker_update",
+    "qmatrix_project_multiply_left_right",
     "revolution_tracker_angle",
+    "revolution_tracker_update",
+    "rotate_inertia",
 ]
 
 
@@ -213,6 +216,85 @@ def revolution_tracker_update(
     elif delta < -PI:
         new_counter = revolution_counter + 1
     return new_counter, new_quaternion_angle
+
+
+# ---------------------------------------------------------------------------
+# Velocity / impulse helpers shared by every PGS row solver.
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def apply_pair_velocity_impulse(
+    v1: wp.vec3f,
+    v2: wp.vec3f,
+    w1: wp.vec3f,
+    w2: wp.vec3f,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_inertia1_world: wp.mat33f,
+    inv_inertia2_world: wp.mat33f,
+    r1: wp.vec3f,
+    r2: wp.vec3f,
+    imp: wp.vec3f,
+):
+    """Antisymmetric body-pair velocity update for a point-applied impulse.
+
+    The impulse ``imp`` acts from body 1 onto body 2 at world-frame
+    lever arms ``r1`` (in body 1) / ``r2`` (in body 2). Returns the
+    updated ``(v1, v2, w1, w2)`` tuple. Inlined into PGS iterate /
+    warm-start scatter / position-iterate paths.
+    """
+    v1_new = v1 - inv_mass1 * imp
+    v2_new = v2 + inv_mass2 * imp
+    w1_new = w1 - inv_inertia1_world @ wp.cross(r1, imp)
+    w2_new = w2 + inv_inertia2_world @ wp.cross(r2, imp)
+    return v1_new, v2_new, w1_new, w2_new
+
+
+@wp.func
+def effective_mass_scalar(
+    axis: wp.vec3f,
+    r1: wp.vec3f,
+    r2: wp.vec3f,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_inertia1_world: wp.mat33f,
+    inv_inertia2_world: wp.mat33f,
+) -> wp.float32:
+    """Scalar ``1 / (J M^-1 J^T)`` for a point-axis row.
+
+    ``J = [-axis, axis, -cross(r1, axis)^T, cross(r2, axis)^T]``; the
+    quadratic form ``J M^-1 J^T`` reduces to
+    ``inv_m1 + inv_m2 + dot(rc1, I1 @ rc1) + dot(rc2, I2 @ rc2)``.
+    Returns 0 when the denominator collapses (both bodies static or
+    kinematically pinned) so callers can short-circuit without a
+    divide-by-zero.
+    """
+    rc1 = wp.cross(r1, axis)
+    rc2 = wp.cross(r2, axis)
+    w = (
+        inv_mass1
+        + inv_mass2
+        + wp.dot(rc1, inv_inertia1_world @ rc1)
+        + wp.dot(rc2, inv_inertia2_world @ rc2)
+    )
+    if w > 1.0e-12:
+        return 1.0 / w
+    return 0.0
+
+
+@wp.func
+def rotate_inertia(rotation: wp.mat33f, inertia_body: wp.mat33f) -> wp.mat33f:
+    """Conjugation ``R * I_body * R^T`` for inertia / inverse-inertia.
+
+    Used wherever the world-frame inertia is refreshed from a body's
+    current orientation: PhoenX's once-per-step
+    ``_phoenx_update_inertia_kernel`` and the example helpers that
+    seed the body container. Plumbing this through one helper keeps
+    the math identical across callers and gives us a single place to
+    drop in a ``Mat3Sym``-aware path later (Phase C).
+    """
+    return rotation * inertia_body * wp.transpose(rotation)
 
 
 @wp.func

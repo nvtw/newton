@@ -48,6 +48,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
     element_interaction_data_make,
 )
+from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 
 __all__ = [
     "_PER_WORLD_COLORING_BLOCK_DIM",
@@ -1147,7 +1148,7 @@ def _phoenx_update_inertia_kernel(
     bodies.velocity[i] = bodies.velocity[i] * bodies.linear_damping[i]
     bodies.angular_velocity[i] = bodies.angular_velocity[i] * bodies.angular_damping[i]
     r = wp.quat_to_matrix(bodies.orientation[i])
-    bodies.inverse_inertia_world[i] = r * bodies.inverse_inertia[i] * wp.transpose(r)
+    bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
 
 
 @wp.kernel(enable_backward=False)
