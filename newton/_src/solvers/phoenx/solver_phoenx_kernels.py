@@ -13,6 +13,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.body import (
+    MOTION_DYNAMIC,
     MOTION_KINEMATIC,
     MOTION_STATIC,
     BodyContainer,
@@ -63,9 +64,13 @@ __all__ = [
     "_kinematic_interpolate_substep_kernel",
     "_kinematic_prepare_step_kernel",
     "_per_world_jp_coloring_kernel",
+    "_phoenx_apply_forces_and_gravity_kernel",
+    "_phoenx_clear_forces_kernel",
+    "_phoenx_update_inertia_kernel",
     "_rotation_quaternion",
     "_scatter_elements_to_worlds_kernel",
     "_set_kinematic_pose_batch_kernel",
+    "_sync_num_active_constraints_kernel",
     "_world_csr_count_kernel",
     "_world_csr_scan_kernel",
     "_world_csr_scatter_kernel",
@@ -1073,3 +1078,84 @@ def pack_body_xforms_kernel(
     array for ``viewer.log_shapes``."""
     i = wp.tid()
     xforms[i] = wp.transform(bodies.position[i], bodies.orientation[i])
+
+
+# ---------------------------------------------------------------------------
+# Per-step body kernels (forces + gravity, inertia refresh, force clear) and
+# the on-device active-constraint count fuse. Driven from ``PhoenXWorld.step``.
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel(enable_backward=False)
+def _sync_num_active_constraints_kernel(
+    num_contact_columns: wp.array[wp.int32],
+    joint_constraint_count: wp.int32,
+    # out
+    num_active_constraints: wp.array[wp.int32],
+):
+    """``num_active_constraints = num_joints + num_contact_columns``,
+    on-device. Single-thread; safe inside graph capture."""
+    tid = wp.tid()
+    if tid != 0:
+        return
+    num_active_constraints[0] = joint_constraint_count + num_contact_columns[0]
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_apply_forces_and_gravity_kernel(
+    bodies: BodyContainer,
+    gravity: wp.array[wp.vec3f],
+    substep_dt: wp.float32,
+):
+    """Fused per-body velocity update at the top of every substep.
+
+    Combines the old ``apply_external_forces`` and ``integrate_gravity``
+    passes. Both kernels had the same dim / same gate / same per-body
+    velocity read-modify-write, so running two launches instead of one
+    only paid extra CUDA launch overhead (~4us each at 256 worlds, i.e.
+    ~32us / frame at substeps=4). Force accumulators are NOT cleared
+    here -- :func:`_phoenx_clear_forces_kernel` runs once at the end
+    of :meth:`PhoenXWorld.step`.
+    """
+    i = wp.tid()
+    if bodies.motion_type[i] != MOTION_DYNAMIC:
+        return
+    if bodies.inverse_mass[i] == 0.0:
+        return
+    v = bodies.velocity[i]
+    w = bodies.angular_velocity[i]
+    inv_mass = bodies.inverse_mass[i]
+    inv_inertia_world = bodies.inverse_inertia_world[i]
+    v = v + bodies.force[i] * (inv_mass * substep_dt)
+    w = w + (inv_inertia_world * bodies.torque[i]) * substep_dt
+    if bodies.affected_by_gravity[i] != 0:
+        v = v + gravity[bodies.world_id[i]] * substep_dt
+    bodies.velocity[i] = v
+    bodies.angular_velocity[i] = w
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_update_inertia_kernel(
+    bodies: BodyContainer,
+):
+    """Apply linear/angular damping and refresh
+    ``inverse_inertia_world = R * I^-1 * R^T`` from the current
+    orientation. Once per step, after the substep loop."""
+    i = wp.tid()
+    if bodies.motion_type[i] != MOTION_DYNAMIC:
+        return
+    bodies.velocity[i] = bodies.velocity[i] * bodies.linear_damping[i]
+    bodies.angular_velocity[i] = bodies.angular_velocity[i] * bodies.angular_damping[i]
+    r = wp.quat_to_matrix(bodies.orientation[i])
+    bodies.inverse_inertia_world[i] = r * bodies.inverse_inertia[i] * wp.transpose(r)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_clear_forces_kernel(
+    bodies: BodyContainer,
+):
+    """Zero per-body force/torque accumulators. Runs once at the end
+    of :meth:`PhoenXWorld.step`."""
+    i = wp.tid()
+    bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
+    bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
