@@ -25,7 +25,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.constraints.contact_ingest import (
-    _pair_columns_binary_kernel,
+    _pair_counts_and_columns_kernel,
 )
 from newton._src.solvers.phoenx.world_builder import (
     ShapeType,
@@ -173,23 +173,30 @@ class TestSelfContactFilter(unittest.TestCase):
         # (1, 3) shape->(body 1, body 2) is legitimate.
         pair_shape_a = wp.array([1, 1], dtype=wp.int32, device=device)
         pair_shape_b = wp.array([2, 3], dtype=wp.int32, device=device)
-        pair_count = wp.array([5, 3], dtype=wp.int32, device=device)
+        # ``_pair_counts_and_columns_kernel`` derives ``pair_count``
+        # from adjacent ``pair_first`` entries (and ``rigid_contact_count``
+        # for the last pair); pair 0 owns 5 contacts, pair 1 owns 3.
+        pair_first = wp.array([0, 5], dtype=wp.int32, device=device)
+        rigid_contact_count = wp.array([8], dtype=wp.int32, device=device)
         num_pairs = wp.array([2], dtype=wp.int32, device=device)
         filter_keys = wp.array([0], dtype=wp.int64, device=device)
+        pair_count = wp.zeros(2, dtype=wp.int32, device=device)
         pair_columns = wp.zeros(2, dtype=wp.int32, device=device)
 
         wp.launch(
-            _pair_columns_binary_kernel,
+            _pair_counts_and_columns_kernel,
             dim=2,
             inputs=[
-                pair_count,
+                rigid_contact_count,
+                num_pairs,
+                pair_first,
                 pair_shape_a,
                 pair_shape_b,
-                num_pairs,
                 shape_body,
                 wp.int32(4),
                 filter_keys,
                 wp.int32(0),
+                pair_count,
                 pair_columns,
             ],
             device=device,
@@ -211,23 +218,27 @@ class TestSelfContactFilter(unittest.TestCase):
         shape_body = wp.array([0, 0, 1], dtype=wp.int32, device=device)
         pair_shape_a = wp.array([0], dtype=wp.int32, device=device)
         pair_shape_b = wp.array([1], dtype=wp.int32, device=device)
-        pair_count = wp.array([2], dtype=wp.int32, device=device)
+        pair_first = wp.array([0], dtype=wp.int32, device=device)
+        rigid_contact_count = wp.array([2], dtype=wp.int32, device=device)
         num_pairs = wp.array([1], dtype=wp.int32, device=device)
         filter_keys = wp.array([0], dtype=wp.int64, device=device)
+        pair_count = wp.zeros(1, dtype=wp.int32, device=device)
         pair_columns = wp.zeros(1, dtype=wp.int32, device=device)
 
         wp.launch(
-            _pair_columns_binary_kernel,
+            _pair_counts_and_columns_kernel,
             dim=1,
             inputs=[
-                pair_count,
+                rigid_contact_count,
+                num_pairs,
+                pair_first,
                 pair_shape_a,
                 pair_shape_b,
-                num_pairs,
                 shape_body,
                 wp.int32(3),
                 filter_keys,
                 wp.int32(0),
+                pair_count,
                 pair_columns,
             ],
             device=device,
