@@ -70,8 +70,6 @@ from newton._src.solvers.xpbd.kernels import apply_joint_forces
 __all__ = ["SolverPhoenX"]
 
 
-
-
 # ---------------------------------------------------------------------------
 # Contact-buffer sizing for the PhoenX path
 # ---------------------------------------------------------------------------
@@ -158,6 +156,7 @@ class SolverPhoenX(SolverBase):
         position_iterations: int = 0,
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
+        threads_per_world: int | str = "auto",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -183,6 +182,15 @@ class SolverPhoenX(SolverBase):
                   threads, default-sized blocks), so every SM on the
                   device picks up work; wins for one (or a few) very
                   big world(s).
+            threads_per_world: Effective threads-per-world for the
+                multi-world fast-tail kernels. ``"auto"`` (default)
+                picks per-step on the GPU from the colour-size
+                histogram; ``32`` matches the legacy one-warp-per-world
+                layout; ``16`` packs two worlds per warp (wins on
+                large fleets of sparse-colour worlds, e.g. h1_flat
+                >= 4096); ``8`` packs four worlds per warp (rarely
+                wins outright, gated tight in the auto picker).
+                Graph-capture safe; the launch grid is fixed.
         """
         super().__init__(model)
 
@@ -313,6 +321,7 @@ class SolverPhoenX(SolverBase):
             default_friction=float(default_friction),
             num_worlds=num_worlds,
             step_layout=step_layout,
+            threads_per_world=threads_per_world,
             device=self.device,
         )
 
@@ -674,4 +683,3 @@ class SolverPhoenX(SolverBase):
             outputs=[contacts.force],
             device=self.device,
         )
-
