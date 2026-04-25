@@ -243,7 +243,6 @@ class ActuatedDoubleBallSocketData:
     # Positional soft-constraint knobs + cached per-substep coefficients.
     hertz: wp.float32
     damping_ratio: wp.float32
-    bias_rate: wp.float32
     mass_coeff: wp.float32
     impulse_coeff: wp.float32
     # Positional biases (anchors 1 and 2; the prismatic third anchor
@@ -360,7 +359,6 @@ class ActuatedDoubleBallSocketData:
     # Box2D layout: [bias_limit_box2d, mass_coeff_limit, impulse_coeff_limit]
     # PD layout:    [pd_gamma_limit,   pd_beta_limit,    pd_mass_coeff_limit]
     limit_cache: wp.types.vector(length=3, dtype=wp.float32)
-    max_lambda_drive: wp.float32
     clamp: wp.int32
     # Cached world-frame joint axis from the most recent prepare-pass.
     axis_world: wp.vec3f
@@ -387,7 +385,6 @@ _OFF_T1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "t1"))
 _OFF_T2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "t2"))
 _OFF_HERTZ = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "hertz"))
 _OFF_DAMPING_RATIO = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_ratio"))
-_OFF_BIAS_RATE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias_rate"))
 _OFF_MASS_COEFF = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "mass_coeff"))
 _OFF_IMPULSE_COEFF = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "impulse_coeff"))
 _OFF_BIAS1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias1"))
@@ -450,7 +447,6 @@ _OFF_IMPULSE_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 2)
 _OFF_PD_GAMMA_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 0)
 _OFF_PD_BETA_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 1)
 _OFF_PD_MASS_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 2)
-_OFF_MAX_LAMBDA_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_lambda_drive"))
 _OFF_CLAMP = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "clamp"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_world"))
 _OFF_ACC_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_drive"))
@@ -633,7 +629,6 @@ def actuated_double_ball_socket_initialize_kernel(
 
     write_float(constraints, _OFF_HERTZ, cid, hertz[tid])
     write_float(constraints, _OFF_DAMPING_RATIO, cid, damping_ratio[tid])
-    write_float(constraints, _OFF_BIAS_RATE, cid, 0.0)
     write_float(constraints, _OFF_MASS_COEFF, cid, 1.0)
     write_float(constraints, _OFF_IMPULSE_COEFF, cid, 0.0)
 
@@ -674,7 +669,6 @@ def actuated_double_ball_socket_initialize_kernel(
     write_float(constraints, _OFF_LIMIT_CACHE + 0, cid, 0.0)
     write_float(constraints, _OFF_LIMIT_CACHE + 1, cid, 0.0)
     write_float(constraints, _OFF_LIMIT_CACHE + 2, cid, 0.0)
-    write_float(constraints, _OFF_MAX_LAMBDA_DRIVE, cid, 0.0)
     write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, n_hat_init)
     write_float(constraints, _OFF_ACC_DRIVE, cid, 0.0)
@@ -698,6 +692,7 @@ def _axial_drive_limit_iterate(
     base_offset: wp.int32,
     jv_axial: wp.float32,
     clamp: wp.int32,
+    idt: wp.float32,
 ) -> wp.float32:
     """Scalar drive+limit PGS step for revolute/prismatic mode.
 
@@ -728,8 +723,10 @@ def _axial_drive_limit_iterate(
     # reads ahead of the branches so we don't pay for the ones that
     # aren't consumed by the active path.
     drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
-    max_lambda_drive = read_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid)
     max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
+    # ``max_lambda_drive`` was a stored ``max_force_drive * dt``; recompute
+    # inline since both inputs are already in registers (saves 1 dword/joint).
+    max_lambda_drive = max_force_drive * (wp.float32(1.0) / idt)
     bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
     gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
     eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
@@ -872,7 +869,6 @@ def _anchor1_positional_prepare_at(
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     dt = 1.0 / idt
     bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
-    write_float(constraints, base_offset + _OFF_BIAS_RATE, cid, bias_rate)
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
     bias1 = (p1_b2 - p1_b1) * bias_rate
@@ -950,9 +946,6 @@ def _axial_drive_limit_prepare_at(
     write_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid, gamma_drive)
     write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, eff_mass_drive_soft)
     write_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid, bias_drive)
-
-    max_lambda_drive = max_force_drive * dt
-    write_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid, max_lambda_drive)
 
     # ---- Limit (dual convention) -------------------------------------
     clamp = _CLAMP_NONE
@@ -1270,7 +1263,6 @@ def _revolute_prepare_at(
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     dt = 1.0 / idt
     bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
-    write_float(constraints, base_offset + _OFF_BIAS_RATE, cid, bias_rate)
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
@@ -1440,7 +1432,7 @@ def _revolute_iterate_at(
     # the warm-start below: ``+n_hat`` for body 1, ``-n_hat`` for body
     # 2, so positive lambda spins body 1 *forward* and body 2 *back*.
     jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp)
+    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt)
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
@@ -1653,7 +1645,6 @@ def _prismatic_prepare_at(
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     dt = 1.0 / idt
     bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
-    write_float(constraints, base_offset + _OFF_BIAS_RATE, cid, bias_rate)
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
@@ -1858,7 +1849,7 @@ def _prismatic_iterate_at(
     v1_anchor = velocity1 + wp.cross(angular_velocity1, r1_b1)
     v2_anchor = velocity2 + wp.cross(angular_velocity2, r1_b2)
     jv_axial = wp.dot(n_hat, v1_anchor - v2_anchor)
-    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp)
+    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt)
 
     # Apply the combined linear impulse: lam along n_hat, with body 1
     # getting +n_hat and body 2 getting -n_hat (mirror of revolute's
@@ -2345,7 +2336,6 @@ def _fixed_prepare_at(
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     dt = 1.0 / idt
     bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
-    write_float(constraints, base_offset + _OFF_BIAS_RATE, cid, bias_rate)
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
@@ -2648,8 +2638,10 @@ def _revolute_iterate_at_multi(
 
     # ---- Axial drive + limit constants -------------------------------
     drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
-    max_lambda_drive = read_float(constraints, base_offset + _OFF_MAX_LAMBDA_DRIVE, cid)
     max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
+    # ``max_lambda_drive`` derived from ``max_force_drive * dt`` -- see
+    # the revolute iterate for rationale.
+    max_lambda_drive = max_force_drive * (wp.float32(1.0) / idt)
     bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
     gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
     eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
