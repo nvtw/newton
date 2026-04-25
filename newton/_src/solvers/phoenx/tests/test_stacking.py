@@ -37,12 +37,6 @@ import newton
 from newton._src.solvers.phoenx.body import (
     body_container_zeros,
 )
-from newton._src.solvers.phoenx.constraints.constraint_contact import (
-    CONTACT_DWORDS,
-)
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    constraint_container_zeros,
-)
 from newton._src.solvers.phoenx.constraints.contact_matching_config import (
     PHOENX_CONTACT_MATCHING,
 )
@@ -312,12 +306,13 @@ class _PhoenXScene:
             )
         self.bodies = bodies
 
-        # Contact-only constraint container; one column per
-        # ``(shape_a, shape_b)`` pair sizes 1:1 against rigid_contact_max.
-        max_contact_columns = max(1, rigid_contact_max)
-        self.constraints = constraint_container_zeros(
-            num_constraints=max_contact_columns,
-            num_dwords=CONTACT_DWORDS,
+        # Joint-only :class:`ConstraintContainer` (the contact-column
+        # storage moved to :class:`ContactColumnContainer` long ago,
+        # so the constraint container only needs a 1-row placeholder
+        # when the scene has no joints).
+        self.constraints = PhoenXWorld.make_constraint_container(
+            num_joints=0,
+            max_contact_columns=0,
             device=self.device,
         )
 

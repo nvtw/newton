@@ -33,10 +33,6 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.phoenx.body import body_container_zeros
-from newton._src.solvers.phoenx.constraints.constraint_contact import CONTACT_DWORDS
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    constraint_container_zeros,
-)
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel,
     newton_to_phoenx_kernel,
@@ -313,13 +309,13 @@ class Example:
         )
         self.bodies = bodies
 
-        # ---- Contact-only constraint container ------------------------
-        # One column per ``(shape_a, shape_b)`` pair; sizes 1:1 against
-        # ``rigid_contact_max``.
-        max_contact_columns = max(1, rigid_contact_max)
-        self.constraints = constraint_container_zeros(
-            num_constraints=max_contact_columns,
-            num_dwords=CONTACT_DWORDS,
+        # ---- Joint-only constraint container ---------------------------
+        # Contact column storage lives in :class:`ContactColumnContainer`;
+        # the joint-side constraint container only needs a 1-row
+        # placeholder in this contact-only scene.
+        self.constraints = PhoenXWorld.make_constraint_container(
+            num_joints=0,
+            max_contact_columns=0,
             device=self.device,
         )
 
