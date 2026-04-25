@@ -88,6 +88,8 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_clear_forces_kernel,
     _phoenx_update_inertia_kernel,
+    _pick_threads_per_world_kernel,
+    _reduce_total_colours_kernel,
     _scatter_elements_to_worlds_kernel,
     _set_kinematic_pose_batch_kernel,
     _sync_num_active_constraints_kernel,
@@ -177,6 +179,7 @@ class PhoenXWorld:
         default_friction: float = 0.5,
         num_worlds: int = 1,
         step_layout: str = "multi_world",
+        threads_per_world: int | str = "auto",
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -232,6 +235,18 @@ class PhoenXWorld:
                 scene is one (or a few) very big world(s); accepts
                 ``num_worlds > 1`` but loses the per-world parallelism
                 of the default path.
+            threads_per_world: Effective threads-per-world for the
+                multi-world fast-tail kernels. ``"auto"`` (default)
+                picks per-step on the GPU from the colour-size
+                histogram; ``32`` matches the legacy one-warp-per-world
+                layout; ``16`` packs two worlds per warp (wins on
+                sparse-colour scenes -- e.g. h1_flat -- once the
+                fleet is large enough to keep SM occupancy up); ``8``
+                packs four worlds per warp (rarely wins outright,
+                gated tight in the auto picker). The launch grid is
+                always ``num_worlds * 32`` lanes; reducing tpw just
+                early-exits the surplus, so this knob is graph-capture
+                safe and does not need re-construction to retune.
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -278,10 +293,40 @@ class PhoenXWorld:
         if self.num_worlds <= 0:
             raise ValueError(f"num_worlds must be >= 1 (got {self.num_worlds})")
         if step_layout not in ("multi_world", "single_world"):
-            raise ValueError(
-                f"step_layout must be 'multi_world' or 'single_world' (got {step_layout!r})"
-            )
+            raise ValueError(f"step_layout must be 'multi_world' or 'single_world' (got {step_layout!r})")
         self.step_layout: str = step_layout
+        # Threads-per-world. ``"auto"`` lets the GPU picker decide every
+        # step from colour stats; an int forces a fixed value (validated
+        # against the {8, 16, 32} set the kernels have been tuned for).
+        # ``_tpw_choice`` is a 1-element GPU buffer that the fast-tail
+        # kernels read at the top of every launch -- see
+        # :func:`_pick_threads_per_world_kernel` for the heuristic.
+        if isinstance(threads_per_world, str):
+            if threads_per_world != "auto":
+                raise ValueError(f"threads_per_world must be 'auto' or one of (8, 16, 32) (got {threads_per_world!r})")
+            # Host-side fast-path: the picker's saturation gate for
+            # tpw=16 is "num_worlds >= 8 * sm_count". Below that, the
+            # picker would always emit tpw=32, so we skip the per-step
+            # launch entirely and pin to 32. Avoids ~10us/step of
+            # picker overhead on small fleets where it would never
+            # pay off anyway.
+            _sm = getattr(self.device, "sm_count", 0) or 1
+            if self.num_worlds < 8 * _sm:
+                self._tpw_auto: bool = False
+                initial_tpw = _STRAGGLER_BLOCK_DIM
+            else:
+                self._tpw_auto = True
+                initial_tpw = _STRAGGLER_BLOCK_DIM
+        else:
+            tpw_int = int(threads_per_world)
+            if tpw_int not in (8, 16, 32):
+                raise ValueError(f"threads_per_world must be 'auto' or one of (8, 16, 32) (got {tpw_int})")
+            self._tpw_auto = False
+            initial_tpw = tpw_int
+        self._tpw_choice: wp.array[wp.int32] = wp.array([initial_tpw], dtype=wp.int32, device=self.device)
+        # Scratch for the picker's parallel colour-count reduction.
+        # Reset to 0 each step before the reduction kernel runs.
+        self._tpw_total_colours: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.gravity: wp.array[wp.vec3f] = _build_gravity_array(gravity, self.num_worlds, self.device)
         self.default_friction = float(default_friction)
 
@@ -788,6 +833,15 @@ class PhoenXWorld:
                 self._partitioner.build_csr()
                 self._build_world_csr()
 
+            # Per-step adaptive threads-per-world pick. Reads the freshly
+            # built per-world colour stats and writes ``_tpw_choice[0]``;
+            # the fast-tail kernels read it at every launch in the
+            # substep loop below. Skipped when the user pinned a static
+            # tpw at construction or when the single-world layout is in
+            # use (its kernels don't read ``_tpw_choice``).
+            if self._tpw_auto and self.step_layout != "single_world":
+                self._pick_tpw()
+
         # Once-per-step kinematic prepare: snapshot ``position`` ->
         # ``position_prev``, resolve this step's pose target
         # (user-scripted or auto from constant velocity), and infer
@@ -1178,6 +1232,7 @@ class PhoenXWorld:
                 wp.int32(self.solver_iterations),
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
+                self._tpw_choice,
             ],
             device=self.device,
         )
@@ -1202,6 +1257,7 @@ class PhoenXWorld:
                 wp.int32(self.position_iterations),
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
+                self._tpw_choice,
             ],
             device=self.device,
         )
@@ -1230,9 +1286,7 @@ class PhoenXWorld:
         Decrements ``color_cursor`` inside the kernel; the capture-while
         exits when the cursor hits 0.
         """
-        contact_views = (
-            self._contact_views if self._contact_views is not None else self._contact_views_placeholder
-        )
+        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
         if kernel is _constraint_position_iterate_singleworld_kernel:
             wp.launch(
@@ -1329,9 +1383,13 @@ class PhoenXWorld:
     def _fast_tail_block_dim(self) -> int:
         """Resolve the fast-tail block size for this solver instance.
 
-        Always ``_STRAGGLER_BLOCK_DIM * wpb`` so each world owns exactly
-        one warp (``__syncwarp`` correctness). ``wpb`` depends on
-        ``num_worlds`` -- see :func:`_choose_fast_tail_worlds_per_block`.
+        Always ``_STRAGGLER_BLOCK_DIM * wpb`` so the block holds an
+        integer number of warps (``__syncwarp`` correctness). ``wpb``
+        depends on ``num_worlds`` -- see
+        :func:`_choose_fast_tail_worlds_per_block`. The block_dim is
+        independent of the adaptive ``threads_per_world`` choice; the
+        latter only affects how many lanes inside each warp do real
+        work.
         """
         return _STRAGGLER_BLOCK_DIM * _choose_fast_tail_worlds_per_block(self.num_worlds)
 
@@ -1339,15 +1397,49 @@ class PhoenXWorld:
         """Launch dim for the fast-tail kernels, padded up to the block
         size so we can use a block_dim wider than a single warp.
 
-        One warp per world -> ``num_worlds * 32`` rounded up to the
-        configured block size. Padding lanes early-exit via the
-        ``world_id >= num_worlds`` guard inside the kernel, so the tail
-        block stays correct regardless of whether ``num_worlds``
-        divides the worlds-per-block.
+        Sized for the maximum threads-per-world (``_STRAGGLER_BLOCK_DIM
+        = 32``); when the adaptive picker drops the effective tpw to 16
+        or 8, the surplus lanes resolve a ``world_id`` past
+        ``num_worlds`` and early-exit. Keeping the launch shape fixed
+        is what lets the per-step picker live inside the captured CUDA
+        graph -- changing ``dim`` would require re-capturing.
         """
         block_dim = self._fast_tail_block_dim()
         raw = self.num_worlds * _STRAGGLER_BLOCK_DIM
         return ((raw + block_dim - 1) // block_dim) * block_dim
+
+    def _pick_tpw(self) -> None:
+        """Run the per-step threads-per-world picker on the GPU.
+
+        Two-kernel pipeline so the cost stays ~constant in
+        ``num_worlds``: a parallel atomic reduction over
+        ``_world_num_colors`` totals the colour count, then a 1-thread
+        kernel reads the precomputed total cid count
+        (``_world_csr_offsets[num_worlds]``) plus the device's SM count
+        and writes the chosen tpw to ``_tpw_choice[0]``. No host sync;
+        the whole pipeline lands in the captured CUDA graph.
+        """
+        sm_count = getattr(self.device, "sm_count", 0) or 0
+        self._tpw_total_colours.zero_()
+        wp.launch(
+            _reduce_total_colours_kernel,
+            dim=self.num_worlds,
+            inputs=[self._world_num_colors, wp.int32(self.num_worlds)],
+            outputs=[self._tpw_total_colours],
+            device=self.device,
+        )
+        wp.launch(
+            _pick_threads_per_world_kernel,
+            dim=1,
+            inputs=[
+                self._world_csr_offsets,
+                self._tpw_total_colours,
+                wp.int32(self.num_worlds),
+                wp.int32(sm_count),
+            ],
+            outputs=[self._tpw_choice],
+            device=self.device,
+        )
 
     def _launch_fast_iter(
         self,
@@ -1376,6 +1468,7 @@ class PhoenXWorld:
                 wp.int32(num_iterations),
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
+                self._tpw_choice,
             ],
             device=self.device,
         )

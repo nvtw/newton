@@ -72,6 +72,8 @@ __all__ = [
     "_phoenx_apply_forces_and_gravity_kernel",
     "_phoenx_clear_forces_kernel",
     "_phoenx_update_inertia_kernel",
+    "_pick_threads_per_world_kernel",
+    "_reduce_total_colours_kernel",
     "_rotation_quaternion",
     "_scatter_elements_to_worlds_kernel",
     "_set_kinematic_pose_batch_kernel",
@@ -83,6 +85,12 @@ __all__ = [
 ]
 
 
+#: Maximum threads-per-world the fast-tail kernels ever use. Equal to
+#: warp size; the launch dim is always sized to ``num_worlds *
+#: _STRAGGLER_BLOCK_DIM`` so the per-step adaptive picker can drop the
+#: effective threads-per-world to 16 or 8 without re-launching with a
+#: different grid -- the surplus threads early-exit on
+#: ``world_id >= num_worlds``.
 _STRAGGLER_BLOCK_DIM: int = 32
 
 # How many PGS sweeps ``contact_iterate_multi`` /
@@ -166,6 +174,112 @@ __syncwarp();
 #endif
 """)
 def _sync_warp(): ...
+
+
+# ---------------------------------------------------------------------------
+# Adaptive threads-per-world picker
+# ---------------------------------------------------------------------------
+#
+# The fast-tail kernels launch with a fixed grid of ``num_worlds *
+# _STRAGGLER_BLOCK_DIM`` threads (one warp slot per world at maximum
+# tpw=32). Each kernel reads its effective tpw from a 1-element buffer
+# written by :func:`_pick_threads_per_world_kernel` once per step. With
+# tpw=32 every thread does work; with tpw=16 lanes 16-31 of each warp
+# slot map to ``world_id >= num_worlds`` and early-exit; with tpw=8 the
+# top 24 lanes early-exit. This lets a sparse-color scene (h1_flat:
+# mean ~5 cids/colour/world) double its lane utilisation by packing two
+# worlds per warp -- without changing the host-side launch shape, so
+# the whole step still fits in a single CUDA graph.
+
+
+@wp.kernel(enable_backward=False)
+def _reduce_total_colours_kernel(
+    world_num_colors: wp.array[wp.int32],
+    num_worlds: wp.int32,
+    # out
+    total_colours: wp.array[wp.int32],
+):
+    """Parallel atomic-sum of ``world_num_colors`` into a 1-element scalar.
+
+    Caller must zero ``total_colours`` before launch (``zero_()``). Each
+    thread handles one world; threads beyond ``num_worlds`` early-exit
+    so the launch grid can be over-sized to a fixed number for
+    graph-capture stability.
+    """
+    tid = wp.tid()
+    if tid >= num_worlds:
+        return
+    nc = world_num_colors[tid]
+    if nc > 0:
+        wp.atomic_add(total_colours, 0, nc)
+
+
+@wp.kernel(enable_backward=False)
+def _pick_threads_per_world_kernel(
+    world_csr_offsets: wp.array[wp.int32],
+    total_colours: wp.array[wp.int32],
+    num_worlds: wp.int32,
+    sm_count: wp.int32,
+    # out
+    tpw_choice: wp.array[wp.int32],
+):
+    """One thread; picks tpw in {16, 32} from precomputed totals.
+
+    Two-tier heuristic, tuned on RTX PRO 6000 (sm_count=188) across
+    h1_flat at 64..16384 worlds, tower at 32..256 worlds, and
+    g1_flat at 64..2048 worlds:
+
+      * **tpw=32 (default, one warp per world).** Used whenever the
+        scene fills < ~8 warps per SM at tpw=32 (small / medium
+        fleets where SM occupancy is the bottleneck and dropping
+        warp count regresses), or when colours are dense enough that
+        most of the warp's 32 lanes already do useful work
+        (mean >= 6 cids/colour).
+      * **tpw=16 (two worlds per warp).** Both gates must hit:
+        enough warps per SM to absorb halving (>= 8 warps/SM at
+        tpw=32) AND sparse-enough colours that two worlds' worth of
+        cids still fit comfortably under the warp roof
+        (mean <= 6 cids/colour). End-to-end gain ~+4-12% on
+        h1_flat-class fleets above 2048 worlds.
+
+    ``tpw=8`` is reachable via the static ``threads_per_world=8``
+    constructor argument but the auto picker never emits it: empirical
+    data shows tpw=8 wins occasionally at extreme world counts but
+    the gap over tpw=16 is dwarfed by run-to-run noise, while
+    incorrectly picking tpw=8 over tpw=16 (e.g. h1_8192, where
+    tpw=16 saved +12% but tpw=8 only +3%) is a noticeable regression.
+
+    All comparisons in fixed-point (x16) so the kernel runs without
+    floating-point ops. Inputs come from the scan / reduction
+    kernels that ran before this one, so the picker itself is O(1)
+    and stays cheap inside the captured graph.
+    """
+    if wp.tid() != 0:
+        return
+
+    # ``world_csr_offsets`` is the inclusive prefix scan of per-world
+    # cid counts; the entry past the last world holds the grand total.
+    total_cids = world_csr_offsets[num_worlds]
+    nc = total_colours[0]
+
+    if nc <= 0 or num_worlds <= 0:
+        tpw_choice[0] = 32
+        return
+
+    # Mean cids per (world, colour). Integer math (mean_x16 = mean *
+    # 16) so the thresholds below stay in int32 land.
+    mean_x16 = (total_cids * wp.int32(16)) / nc
+
+    # Saturation: warps available per SM at tpw=32. Below ~8 we can't
+    # afford to halve them without losing SM occupancy.
+    warps_at_tpw32 = num_worlds  # 1 warp/world at tpw=32
+    saturation_x16 = (warps_at_tpw32 * wp.int32(16)) / wp.max(sm_count, wp.int32(1))
+
+    pick = wp.int32(32)
+    if mean_x16 <= wp.int32(6 * 16) and saturation_x16 >= wp.int32(8 * 16):
+        pick = wp.int32(16)
+
+    tpw_choice[0] = pick
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +719,7 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
     num_iterations: wp.int32,
     num_worlds: wp.int32,
     num_joints: wp.int32,
+    tpw_buf: wp.array[wp.int32],
 ):
     """Fused prepare + main-solve dispatcher.
 
@@ -615,6 +730,12 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
     per-world state survives across the prepare -> iterate transition
     for free.
 
+    ``tpw_buf[0]`` holds the effective threads-per-world chosen by
+    :func:`_pick_threads_per_world_kernel`. Threads with
+    ``world_id >= num_worlds`` early-exit; this is how the launch grid
+    of ``num_worlds * _STRAGGLER_BLOCK_DIM`` retracts to ``num_worlds *
+    tpw`` lanes when ``tpw < _STRAGGLER_BLOCK_DIM``.
+
     The prepare outputs (``cc.derived``) still round-trip through
     global memory between prepare and iterate -- different cids in a
     warp touch different contacts, so we can't keep them in
@@ -622,8 +743,9 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
     some loop-boundary scalars may be reused by the compiler.
     """
     tid = wp.tid()
-    local_tid = tid % _STRAGGLER_BLOCK_DIM
-    world_id = tid / _STRAGGLER_BLOCK_DIM
+    tpw = tpw_buf[0]
+    local_tid = tid % tpw
+    world_id = tid / tpw
     if world_id >= num_worlds:
         return
 
@@ -643,10 +765,8 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
             if cid < num_joints:
                 actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
             else:
-                contact_prepare_for_iteration(
-                    contact_cols, cid - num_joints, bodies, idt, cc, contacts
-                )
-            base += _STRAGGLER_BLOCK_DIM
+                contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+            base += tpw
 
         _sync_warp()
         c += 1
@@ -675,14 +795,10 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
             while base < count:
                 cid = world_element_ids_by_color[start + base]
                 if cid < num_joints:
-                    actuated_double_ball_socket_iterate_multi(
-                        constraints, cid, bodies, idt, True, inner_sweeps
-                    )
+                    actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
                 else:
-                    contact_iterate_multi(
-                        contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps
-                    )
-                base += _STRAGGLER_BLOCK_DIM
+                    contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps)
+                base += tpw
 
             _sync_warp()
             c += 1
@@ -702,6 +818,7 @@ def _constraint_position_iterate_fast_tail_kernel(
     num_iterations: wp.int32,
     num_worlds: wp.int32,
     num_joints: wp.int32,
+    tpw_buf: wp.array[wp.int32],
 ):
     """XPBD position-iteration dispatcher for contact tangent drift.
 
@@ -709,10 +826,14 @@ def _constraint_position_iterate_fast_tail_kernel(
     Each per-slot position iterate is gated by the slip threshold so
     sliding pairs are skipped; the Coulomb-clamped velocity friction
     handles them.
+
+    See :func:`_constraint_prepare_plus_iterate_fast_tail_kernel` for
+    the ``tpw_buf`` adaptive-launch convention.
     """
     tid = wp.tid()
-    local_tid = tid % _STRAGGLER_BLOCK_DIM
-    world_id = tid / _STRAGGLER_BLOCK_DIM
+    tpw = tpw_buf[0]
+    local_tid = tid % tpw
+    world_id = tid / tpw
     if world_id >= num_worlds:
         return
 
@@ -734,7 +855,7 @@ def _constraint_position_iterate_fast_tail_kernel(
                 # joint cids at ``cid < num_joints`` are skipped.
                 if cid >= num_joints:
                     contact_position_iterate(contact_cols, cid - num_joints, bodies, cc)
-                base += _STRAGGLER_BLOCK_DIM
+                base += tpw
 
             _sync_warp()
             c += 1
@@ -757,12 +878,18 @@ def _constraint_relax_fast_tail_kernel(
     num_iterations: wp.int32,
     num_worlds: wp.int32,
     num_joints: wp.int32,
+    tpw_buf: wp.array[wp.int32],
 ):
     """Box2D v3 TGS-soft relax dispatcher: ``num_iterations`` sweeps
-    with positional bias OFF (enforces ``Jv = 0``)."""
+    with positional bias OFF (enforces ``Jv = 0``).
+
+    See :func:`_constraint_prepare_plus_iterate_fast_tail_kernel` for
+    the ``tpw_buf`` adaptive-launch convention.
+    """
     tid = wp.tid()
-    local_tid = tid % _STRAGGLER_BLOCK_DIM
-    world_id = tid / _STRAGGLER_BLOCK_DIM
+    tpw = tpw_buf[0]
+    local_tid = tid % tpw
+    world_id = tid / tpw
     if world_id >= num_worlds:
         return
 
@@ -785,14 +912,10 @@ def _constraint_relax_fast_tail_kernel(
         while base < count:
             cid = world_element_ids_by_color[start + base]
             if cid < num_joints:
-                actuated_double_ball_socket_iterate_multi(
-                    constraints, cid, bodies, idt, False, num_iterations
-                )
+                actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
             else:
-                contact_iterate_multi(
-                    contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations
-                )
-            base += _STRAGGLER_BLOCK_DIM
+                contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations)
+            base += tpw
 
         _sync_warp()
         c += 1
@@ -865,9 +988,7 @@ def _constraint_gather_wrenches_kernel(
     if cid < num_joints:
         force, torque = actuated_double_ball_socket_world_wrench(constraints, cid, idt)
     else:
-        force, torque = contact_world_wrench(
-            contact_cols, cid - num_joints, bodies, idt, cc, contacts
-        )
+        force, torque = contact_world_wrench(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
     out[cid] = wp.spatial_vector(force, torque)
 
 
@@ -1241,9 +1362,7 @@ def _constraint_prepare_singleworld_kernel(
         if cid < num_joints:
             actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
         else:
-            contact_prepare_for_iteration(
-                contact_cols, cid - num_joints, bodies, idt, cc, contacts
-            )
+            contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
 
     if tid == 0:
         color_cursor[0] = cursor - 1

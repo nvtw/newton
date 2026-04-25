@@ -20,6 +20,7 @@
 - Add `enable_multiccd` parameter to `SolverMuJoCo` for multi-CCD contact generation (up to 4 contact points per geom pair)
 - Support `<joint type="ball"/>` in the MJCF importer, and preserve authored damping, stiffness, and frictionloss when exporting ball joints to MuJoCo specs (previously silently dropped)
 - Add `ViewerViser.log_scalar()` for live scalar time-series plots via uPlot
+- Add adaptive `threads_per_world` knob to `SolverPhoenX` (`"auto"` by default, also accepts `8`, `16`, or `32`). The fast-tail multi-world kernels read their effective threads-per-world from a 1-element GPU buffer; the per-step picker (also captured into the CUDA graph) drops tpw to 16 (two worlds per warp) on large sparse-colour fleets to lift warp-lane utilisation, e.g. ~+5% on h1_flat at 2048 worlds and ~+8% on h1_flat at 8192 worlds. Smaller / denser scenes pin tpw=32 with no per-step overhead.
 - Honor `UsdGeomImageable` visibility (including inherited `invisible`) on USD prims imported via `ModelBuilder.add_usd()`; visual shapes, gaussian splats, and collider shapes are imported with `ShapeFlags.VISIBLE` cleared when the prim is effectively invisible, while collision behavior is preserved
 
 ### Changed
