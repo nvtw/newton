@@ -65,10 +65,12 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
     MAX_COLORS,
     IncrementalContactPartitioner,
 )
+from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int
 from newton._src.solvers.phoenx.materials import MaterialData
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
     _STRAGGLER_BLOCK_DIM,
+    _build_scatter_keys_kernel,
     _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
@@ -88,7 +90,6 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _phoenx_update_inertia_kernel,
     _pick_threads_per_world_kernel,
     _reduce_total_colours_kernel,
-    _scatter_elements_to_worlds_kernel,
     _set_kinematic_pose_batch_kernel,
     _sync_num_active_constraints_kernel,
     pack_body_xforms_kernel,
@@ -357,21 +358,22 @@ class PhoenXWorld:
         # ``world_element_offsets[w+1] - world_element_offsets[w]`` is
         # always a legal read.
         self._per_world_element_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
-        self._per_world_element_cursor: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
         # Flat buffer that holds each world's active cids contiguously
-        # (bucketed by world_id of ``bodies[0]``). Size = constraint
-        # capacity because every active constraint belongs to exactly
-        # one world.
-        self._per_world_elements: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
+        # (bucketed by world_id of ``bodies[0]``). Sized to ``2 * cap``
+        # because the deterministic scatter uses
+        # :func:`wp.utils.radix_sort_pairs`, which needs a ping-pong
+        # second half. Only the first ``cap`` entries (the sort
+        # output) are read by the JP coloring; the second half is
+        # scratch.
+        self._per_world_elements: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
+        # Per-cid world-id keys for the scatter sort. Same ping-pong
+        # sizing as ``_per_world_elements``.
+        self._per_world_scatter_keys: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
         # Per-element colour assignment (1-based; 0 = unassigned). This
         # is the primary output of the per-world JP kernel and also
         # doubles as the scratch the kernel clears at the start of each
         # step.
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
-        # Per-round, per-world atomic cursor used to hand out unique
-        # output slots within a colour. Reset to zero inside the kernel
-        # at the top of each colour.
-        self._per_world_commit_count: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
         self._world_color_counts: wp.array2d[wp.int32] = wp.zeros(
             (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
         )
@@ -1001,14 +1003,23 @@ class PhoenXWorld:
         """Parallel per-world Jones-Plassmann coloring.
 
         1. :func:`_count_elements_per_world_kernel` -- atomic count of
-           active cids per world (one thread per cid).
+           active cids per world. The atomics are commutative so the
+           counts themselves are bit-deterministic regardless of GPU
+           thread scheduling.
         2. Inclusive scan of the counts -> ``per_world_element_offsets``.
-        3. :func:`_scatter_elements_to_worlds_kernel` -- bucket cids
-           into ``per_world_elements`` using a per-world atomic cursor.
+        3. :func:`_build_scatter_keys_kernel` + stable
+           ``radix_sort_pairs`` -- bucket cids into
+           ``per_world_elements`` by world id. Stable sort keeps the
+           cid order within each bucket fixed, replacing an
+           atomic-cursor scatter that produced a thread-scheduling-
+           dependent order.
         4. :func:`_per_world_jp_coloring_kernel` -- one block per
            world, runs the full JP MIS loop on its bucket and emits
            directly into ``world_element_ids_by_color`` /
-           ``world_color_starts`` / ``world_num_colors``.
+           ``world_color_starts`` / ``world_num_colors``. Output slot
+           assignment within a colour uses
+           ``wp.tile_scan_exclusive`` (also deterministic) instead of
+           the older atomic cursor.
 
         The adjacency CSR from ``partitioner.reset`` is reused
         (worlds have disjoint body sets after static-null-out, so
@@ -1034,25 +1045,31 @@ class PhoenXWorld:
         # [w+1] = sum(counts[0..w]). Deterministic.
         wp.utils.array_scan(self._world_totals_shifted, self._per_world_element_offsets, inclusive=True)
 
-        # Phase 3: scatter cids into per-world buckets.
-        self._per_world_element_cursor.zero_()
+        # Phase 3: deterministic scatter via stable sort by world id.
+        # ``_build_scatter_keys_kernel`` populates per-cid (key=world_id,
+        # value=cid) pairs (with INT32_MAX keys masking inactive
+        # cids); ``sort_variable_length_int`` runs a stable
+        # ``radix_sort_pairs`` so that the value array becomes the
+        # per-world bucketed cid stream, ordered by cid within each
+        # world. This replaces an atomic-cursor scatter whose order
+        # depended on GPU thread scheduling -- the sort is a function
+        # of (world_id, cid) and therefore bit-deterministic across
+        # runs.
         wp.launch(
-            _scatter_elements_to_worlds_kernel,
+            _build_scatter_keys_kernel,
             dim=cap,
-            inputs=[
-                self._elements,
-                self._num_active_constraints,
-                self.bodies,
-                self._per_world_element_offsets,
-                self._per_world_element_cursor,
-            ],
-            outputs=[self._per_world_elements],
+            inputs=[self._elements, self._num_active_constraints, self.bodies, wp.int32(cap)],
+            outputs=[self._per_world_scatter_keys, self._per_world_elements],
             device=self.device,
+        )
+        sort_variable_length_int(
+            self._per_world_scatter_keys,
+            self._per_world_elements,
+            self._num_active_constraints,
         )
 
         # Phase 4: per-world JP coloring. One block per world.
         self._per_world_assigned.zero_()
-        self._per_world_commit_count.zero_()
         # The output CSR base offsets (world_csr_offsets) match the
         # per-world element offsets (every active element belongs to
         # some colour in some world, so offsets[w] identifies both the
@@ -1091,7 +1108,6 @@ class PhoenXWorld:
             ],
             outputs=[
                 self._per_world_assigned,
-                self._per_world_commit_count,
                 self._world_element_ids_by_color,
                 self._world_color_starts,
                 self._world_num_colors,
