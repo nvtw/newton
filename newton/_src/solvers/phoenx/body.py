@@ -3,9 +3,11 @@
 Struct-of-arrays: one ``wp.array`` per field, indexed by body id. SoA
 gives coalesced per-field loads (32 lanes -> 1-2 128-byte transactions)
 and cheap partial reads when a kernel only touches a subset of fields.
-Use :func:`body_container_get` / :func:`body_container_set` inside
-``@wp.func``/``@wp.kernel`` to pack/unpack a single body;
-:func:`body_container_zeros` on the host to allocate.
+Kernels access fields directly (``bodies.position[i]`` etc.) -- there is
+no per-body gather/scatter helper because the solver-side kernels
+typically read only a handful of fields and the compiler already keeps
+them in registers across the inner constraint loop.
+:func:`body_container_zeros` on the host allocates the SoA.
 All quantities are single precision (``float32``).
 """
 
@@ -16,9 +18,6 @@ __all__ = [
     "MOTION_KINEMATIC",
     "MOTION_STATIC",
     "BodyContainer",
-    "RigidBodyData",
-    "body_container_get",
-    "body_container_set",
     "body_container_zeros",
 ]
 
@@ -32,88 +31,13 @@ MOTION_DYNAMIC = wp.constant(2)
 
 
 @wp.struct
-class RigidBodyData:
-    """Per-body state required by the constraint kernels.
-
-    Mirrors the relevant subset of Jitter2's ``RigidBodyData``. Naming is
-    one-for-one in snake_case:
-
-    Velocity-level state (read & written every constraint iteration):
-        * ``position``               <-> ``Position``
-        * ``velocity``               <-> ``Velocity``
-        * ``angular_velocity``       <-> ``AngularVelocity``
-        * ``orientation``            <-> ``Orientation``
-
-    Mass / inertia (rebuilt once per step from the body-frame inertia):
-        * ``inverse_inertia_world``  <-> ``InverseInertiaWorld`` (rotated)
-        * ``inverse_inertia``        <-> ``inverseInertia`` (body frame, constant)
-        * ``inverse_mass``           <-> ``InverseMass``
-
-    Per-step force accumulators + cached per-substep deltas (Jitter's
-    two-stage IntegrateForces split):
-        * ``force``                  <-> ``Force`` (cleared in _update_bodies)
-        * ``torque``                 <-> ``Torque`` (cleared in _update_bodies)
-        * ``delta_velocity``         <-> ``DeltaVelocity``
-        * ``delta_angular_velocity`` <-> ``DeltaAngularVelocity``
-
-    Damping + flags:
-        * ``linear_damping``         per-body multiplier applied in _update_bodies
-        * ``angular_damping``        per-body multiplier applied in _update_bodies
-        * ``affected_by_gravity``    0/1; gated in _update_bodies
-        * ``motion_type``            see ``MOTION_*`` constants
-
-    Multi-world:
-        * ``world_id``               per-body world index (0 for
-          single-world scenes). Used by :func:`_update_bodies_kernel`
-          to pick the per-world gravity vector and (later) by the
-          constraint dispatcher to pick the per-world CSR slice.
-    """
-
-    position: wp.vec3f
-    velocity: wp.vec3f
-    angular_velocity: wp.vec3f
-
-    orientation: wp.quatf
-
-    #: Body-local offset from the body-origin frame (the frame Newton's
-    #: narrow phase expresses contact anchors in) to the body's centre
-    #: of mass. :attr:`position` tracks the *COM* in world space, so
-    #: when a contact anchor from the narrow phase is used as a lever
-    #: arm about the COM the kernel must subtract ``body_com`` before
-    #: adding it to :attr:`position`. Zero for shapes whose mesh origin
-    #: coincides with the COM (boxes, spheres); non-zero for asymmetric
-    #: meshes (bunny, nut, etc.).
-    body_com: wp.vec3f
-
-    inverse_inertia_world: wp.mat33f
-    inverse_inertia: wp.mat33f
-
-    inverse_mass: wp.float32
-
-    force: wp.vec3f
-    torque: wp.vec3f
-    delta_velocity: wp.vec3f
-    delta_angular_velocity: wp.vec3f
-
-    linear_damping: wp.float32
-    angular_damping: wp.float32
-
-    affected_by_gravity: wp.int32
-    motion_type: wp.int32
-    world_id: wp.int32
-
-
-@wp.struct
 class BodyContainer:
     """Struct-of-arrays storage for a batch of rigid bodies.
 
-    Each field is a 1-D ``wp.array`` of length ``num_bodies`` (must match
-    across fields). Constructed on the host with
-    :func:`body_container_zeros`; accessed inside kernels via
-    :func:`body_container_get` and :func:`body_container_set`.
-
-    The field set mirrors :class:`RigidBodyData` exactly so the gather /
-    scatter helpers stay one-line per field.
+    Each field is a 1-D ``wp.array`` of length ``num_bodies`` (must
+    match across fields). Constructed on the host with
+    :func:`body_container_zeros`; kernels read/write the fields
+    directly, e.g. ``bodies.position[i]``.
     """
 
     position: wp.array[wp.vec3f]
@@ -122,9 +46,13 @@ class BodyContainer:
 
     orientation: wp.array[wp.quatf]
 
-    #: Per-body local-frame offset from the body-origin frame to the
-    #: COM. See :attr:`RigidBodyData.body_com` for the convention
-    #: rationale.
+    #: Per-body local-frame offset from the body-origin frame (the frame
+    #: Newton's narrow phase expresses contact anchors in) to the body's
+    #: centre of mass. :attr:`position` tracks the *COM* in world space,
+    #: so contact anchors must subtract ``body_com`` before being used as
+    #: lever arms about the COM. Zero for shapes whose mesh origin
+    #: coincides with the COM (boxes, spheres); non-zero for asymmetric
+    #: meshes (bunny, nut, etc.).
     body_com: wp.array[wp.vec3f]
 
     inverse_inertia_world: wp.array[wp.mat33f]
@@ -134,8 +62,6 @@ class BodyContainer:
 
     force: wp.array[wp.vec3f]
     torque: wp.array[wp.vec3f]
-    delta_velocity: wp.array[wp.vec3f]
-    delta_angular_velocity: wp.array[wp.vec3f]
 
     linear_damping: wp.array[wp.float32]
     angular_damping: wp.array[wp.float32]
@@ -153,15 +79,11 @@ class BodyContainer:
     # ``lerp``/``slerp``-interpolates between the endpoints across
     # substeps so contacts see smooth motion, not a teleport at t=0.
     #
-    # For backward compat, a kinematic body without a scripted target
-    # (``kinematic_target_valid == 0``) falls through to the
-    # constant-velocity path: the prepare kernel computes a target =
-    # ``pos_prev + velocity * dt`` each step so interpolation produces
-    # the same trajectory as the old integration.
-    #
-    # These fields are zero-sized (not allocated) when the container
-    # has no kinematic bodies; guard allocation with
-    # :func:`_body_container_has_kinematic`.
+    # A kinematic body without a scripted target this step
+    # (``kinematic_target_valid == 0``) falls through to a
+    # constant-velocity path: the prepare kernel synthesises a target
+    # ``pos_prev + velocity * dt`` so interpolation still produces a
+    # well-defined endpoint.
 
     #: End-of-previous-step pose (lerp/slerp origin). Written once at
     #: :meth:`PhoenXWorld.step` entry by the kinematic prepare kernel.
@@ -181,63 +103,6 @@ class BodyContainer:
     #: by prepare so the user must re-assert the target each step
     #: (either explicitly or by re-importing Newton state).
     kinematic_target_valid: wp.array[wp.int32]
-
-
-@wp.func
-def body_container_get(c: BodyContainer, i: wp.int32) -> RigidBodyData:
-    """Gather the body at index ``i`` into a :class:`RigidBodyData` value.
-
-    Use this at the top of a constraint/integration kernel to pull a
-    single body into registers, then operate on the value type and write
-    it back with :func:`body_container_set`.
-    """
-    b = RigidBodyData()
-    b.position = c.position[i]
-    b.velocity = c.velocity[i]
-    b.angular_velocity = c.angular_velocity[i]
-    b.orientation = c.orientation[i]
-    b.body_com = c.body_com[i]
-    b.inverse_inertia_world = c.inverse_inertia_world[i]
-    b.inverse_inertia = c.inverse_inertia[i]
-    b.inverse_mass = c.inverse_mass[i]
-    b.force = c.force[i]
-    b.torque = c.torque[i]
-    b.delta_velocity = c.delta_velocity[i]
-    b.delta_angular_velocity = c.delta_angular_velocity[i]
-    b.linear_damping = c.linear_damping[i]
-    b.angular_damping = c.angular_damping[i]
-    b.affected_by_gravity = c.affected_by_gravity[i]
-    b.motion_type = c.motion_type[i]
-    b.world_id = c.world_id[i]
-    return b
-
-
-@wp.func
-def body_container_set(c: BodyContainer, i: wp.int32, b: RigidBodyData):
-    """Scatter a :class:`RigidBodyData` value into the container at index
-    ``i``.
-
-    The launcher must guarantee that no two threads write the same
-    ``i`` concurrently (the graph-coloring partitioner provides this for
-    the constraint solver); the writes are plain stores with no
-    atomics."""
-    c.position[i] = b.position
-    c.velocity[i] = b.velocity
-    c.angular_velocity[i] = b.angular_velocity
-    c.orientation[i] = b.orientation
-    c.body_com[i] = b.body_com
-    c.inverse_inertia_world[i] = b.inverse_inertia_world
-    c.inverse_inertia[i] = b.inverse_inertia
-    c.inverse_mass[i] = b.inverse_mass
-    c.force[i] = b.force
-    c.torque[i] = b.torque
-    c.delta_velocity[i] = b.delta_velocity
-    c.delta_angular_velocity[i] = b.delta_angular_velocity
-    c.linear_damping[i] = b.linear_damping
-    c.angular_damping[i] = b.angular_damping
-    c.affected_by_gravity[i] = b.affected_by_gravity
-    c.motion_type[i] = b.motion_type
-    c.world_id[i] = b.world_id
 
 
 def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyContainer:
@@ -273,8 +138,6 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.inverse_mass = wp.zeros(num_bodies, dtype=wp.float32, device=device)
     c.force = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.torque = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
-    c.delta_velocity = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
-    c.delta_angular_velocity = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.linear_damping = wp.full(num_bodies, value=1.0, dtype=wp.float32, device=device)
     c.angular_damping = wp.full(num_bodies, value=1.0, dtype=wp.float32, device=device)
     c.affected_by_gravity = wp.full(num_bodies, value=1, dtype=wp.int32, device=device)

@@ -374,12 +374,6 @@ class PhoenXWorld:
         # doubles as the scratch the kernel clears at the start of each
         # step.
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
-        self._world_color_counts: wp.array2d[wp.int32] = wp.zeros(
-            (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
-        )
-        self._world_color_cursor: wp.array2d[wp.int32] = wp.zeros(
-            (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
-        )
 
         # ----- Contact infrastructure -----
         # Contact state lives in TWO separate containers, both sized for

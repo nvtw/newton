@@ -1236,8 +1236,6 @@ class WorldBuilder:
         c.inverse_mass = wp.array(inverse_mass, dtype=wp.float32, device=device)
         c.force = wp.zeros(n, dtype=wp.vec3f, device=device)
         c.torque = wp.zeros(n, dtype=wp.vec3f, device=device)
-        c.delta_velocity = wp.zeros(n, dtype=wp.vec3f, device=device)
-        c.delta_angular_velocity = wp.zeros(n, dtype=wp.vec3f, device=device)
         c.linear_damping = wp.array(linear_damping, dtype=wp.float32, device=device)
         c.angular_damping = wp.array(angular_damping, dtype=wp.float32, device=device)
         c.affected_by_gravity = wp.array(affected_by_gravity, dtype=wp.int32, device=device)
