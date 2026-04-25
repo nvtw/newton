@@ -294,10 +294,9 @@ class Example:
         self.bodies = bodies
 
         # ---- Contact-only constraint container ------------------------
-        # The nut/bolt SDF narrow phase can produce tens of points per
-        # frame; 64 columns sits well above the observed peak for
-        # ``m20_loose`` and is what the jitter example uses.
-        max_contact_columns = max(64, (rigid_contact_max + 5) // 6)
+        # One column per ``(shape_a, shape_b)`` pair; sizes 1:1 against
+        # ``rigid_contact_max``.
+        max_contact_columns = max(1, rigid_contact_max)
         self.constraints = constraint_container_zeros(
             num_constraints=max_contact_columns,
             num_dwords=CONTACT_DWORDS,
@@ -316,7 +315,6 @@ class Example:
             solver_iterations=self.solver_iterations,
             velocity_iterations=1,
             gravity=(0.0, 0.0, -9.81),
-            max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
             default_friction=SHAPE_CFG.mu,
             device=self.device,

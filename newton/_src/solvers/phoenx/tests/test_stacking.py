@@ -312,8 +312,9 @@ class _PhoenXScene:
             )
         self.bodies = bodies
 
-        # Contact-only constraint container.
-        max_contact_columns = max(16, (rigid_contact_max + 5) // 6)
+        # Contact-only constraint container; one column per
+        # ``(shape_a, shape_b)`` pair sizes 1:1 against rigid_contact_max.
+        max_contact_columns = max(1, rigid_contact_max)
         self.constraints = constraint_container_zeros(
             num_constraints=max_contact_columns,
             num_dwords=CONTACT_DWORDS,
@@ -331,7 +332,6 @@ class _PhoenXScene:
             solver_iterations=self.solver_iterations,
             velocity_iterations=self.velocity_iterations,
             gravity=(0.0, 0.0, -_G),
-            max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
             default_friction=self.friction,
             step_layout=self.step_layout,
