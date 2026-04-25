@@ -275,9 +275,11 @@ class Example:
         )
         self.bodies = bodies
 
-        # Contacts-only constraint container. Each column is one packed
-        # contact cid (up to 6 contacts per pair).
-        max_contact_columns = max(16, (rigid_contact_max + 5) // 6)
+        # Contacts-only constraint container. One column per
+        # ``(shape_a, shape_b)`` pair (with arbitrary contact count
+        # per pair), so the column buffer sizes 1:1 against
+        # ``rigid_contact_max``.
+        max_contact_columns = max(1, rigid_contact_max)
         self.constraints = constraint_container_zeros(
             num_constraints=max_contact_columns,
             num_dwords=CONTACT_DWORDS,
@@ -299,7 +301,6 @@ class Example:
             solver_iterations=self.solver_iterations,
             velocity_iterations=0,  # PhoenX's default
             gravity=(0.0, 0.0, -9.81),
-            max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
             device=self.device,

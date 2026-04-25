@@ -278,10 +278,6 @@ class SolverPhoenX(SolverBase):
                 )
                 model._collision_pipeline.contacts()  # forces buffer sizing
         rigid_contact_max = int(model.rigid_contact_max)
-        # One constraint column per shape pair covers arbitrary contact
-        # counts per pair; guarded by ``max(1, ...)`` for the contact-
-        # free case.
-        max_contact_columns = max(1, rigid_contact_max)
 
         # ---- PhoenX gravity: aggregate Model gravity ------------------
         # Model stores gravity per world in ``model.gravity`` with
@@ -297,9 +293,13 @@ class SolverPhoenX(SolverBase):
             gravity_arg = gravity_tuples
 
         # ---- Make the constraint container + world --------------------
+        # One constraint column per ``(shape_a, shape_b)`` pair covers
+        # an arbitrary contact count per pair; size the column buffer
+        # 1:1 against ``rigid_contact_max`` (the same number
+        # ``PhoenXWorld.__init__`` derives internally).
         self._constraints: ConstraintContainer = PhoenXWorld.make_constraint_container(
             num_joints=num_joints,
-            max_contact_columns=max_contact_columns,
+            max_contact_columns=max(1, rigid_contact_max),
             device=self.device,
         )
 
@@ -310,7 +310,6 @@ class SolverPhoenX(SolverBase):
             solver_iterations=int(solver_iterations),
             velocity_iterations=int(velocity_iterations),
             gravity=gravity_arg,
-            max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
             num_joints=num_joints,
             default_friction=float(default_friction),

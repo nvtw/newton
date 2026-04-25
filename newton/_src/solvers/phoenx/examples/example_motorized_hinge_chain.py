@@ -274,17 +274,15 @@ class Example:
         # (it hangs in free space, no ground plane, no inter-cube
         # penetration). The factory picks ``ADBS_DWORDS`` width since
         # we asked for joints.
-        max_contact_columns = 0
         self.constraints = PhoenXWorld.make_constraint_container(
             num_joints=NUM_HINGES,
-            max_contact_columns=max_contact_columns,
+            max_contact_columns=0,
             device=self.device,
         )
 
         # ---- Solver ---------------------------------------------------
-        # No contacts in this scene, so ``max_contact_columns = 0`` --
-        # the solver's contact ingest paths stay dormant and the
-        # partitioner only sees joint elements.
+        # ``rigid_contact_max=0`` -- the solver's contact ingest paths
+        # stay dormant and the partitioner only sees joint elements.
         self.world = PhoenXWorld(
             bodies=self.bodies,
             constraints=self.constraints,
@@ -292,7 +290,6 @@ class Example:
             solver_iterations=self.solver_iterations,
             velocity_iterations=1,
             gravity=(0.0, 0.0, -9.81),  # match the jitter variant's -y gravity
-            max_contact_columns=max_contact_columns,
             rigid_contact_max=0,
             num_joints=NUM_HINGES,
             device=self.device,
