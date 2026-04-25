@@ -180,18 +180,17 @@ class _PendulumScene:
         self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=PHOENX_CONTACT_MATCHING)
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
+        max_contact_columns = max(16, (rigid_contact_max + 5) // 6)
 
         shape_body_np = self.model.shape_body.numpy()
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
         self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
         # ---- Constraint container with 1 joint + contact capacity ----
-        # One contact column per ``(shape_a, shape_b)`` pair; sizes 1:1
-        # against ``rigid_contact_max``.
         self.num_joints = 1
         self.constraints = PhoenXWorld.make_constraint_container(
             num_joints=self.num_joints,
-            max_contact_columns=max(1, rigid_contact_max),
+            max_contact_columns=max_contact_columns,
             device=self.device,
         )
 
@@ -202,6 +201,7 @@ class _PendulumScene:
             solver_iterations=self.solver_iterations,
             velocity_iterations=1,  # helps joint stiffness converge
             gravity=self.gravity,
+            max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
             num_joints=self.num_joints,
             device=self.device,
@@ -612,6 +612,7 @@ class TestPhoenXChainConvergence(unittest.TestCase):
             solver_iterations=4,
             velocity_iterations=1,
             gravity=(0.0, -_G, 0.0),
+            max_contact_columns=0,
             rigid_contact_max=0,
             num_joints=num_joints,
             device=device,

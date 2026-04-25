@@ -154,6 +154,7 @@ class PhoenXWorld:
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
         gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
+        max_contact_columns: int = 0,
         rigid_contact_max: int = 0,
         num_joints: int = 0,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
@@ -185,10 +186,11 @@ class PhoenXWorld:
             gravity: Constant world-space gravity [m/s^2]. A 3-tuple
                 broadcasts; an iterable of 3-tuples gives each world
                 its own vector.
+            max_contact_columns: Contact cid capacity per step. ``0``
+                disables contact paths.
             rigid_contact_max: Upper bound on the Newton ``Contacts``
-                buffer's rigid-contact range. Sizes the contact-column
-                capacity 1:1 (one column per ``(shape_a, shape_b)``
-                pair); ``0`` disables contact paths entirely.
+                buffer's rigid-contact range. Defaults to
+                ``max_contact_columns * 6``.
             num_joints: Actuated-DBS joint columns reserved at
                 ``[0, num_joints)``. Populate via
                 :meth:`initialize_actuated_double_ball_socket_joints`
@@ -243,13 +245,12 @@ class PhoenXWorld:
             self._num_kinematic_bodies: int = int((mt == int(MOTION_KINEMATIC)).sum())
         else:
             self._num_kinematic_bodies = 0
-        # One contact column covers an entire ``(shape_a, shape_b)``
-        # pair regardless of contact count, so the column count equals
-        # ``rigid_contact_max`` 1:1. The ``max(1, ...)`` keeps the
-        # contact-free path sizing-safe (zero-length wp.array2d isn't
-        # legal).
+        self.max_contact_columns: int = int(max_contact_columns)
         self.rigid_contact_max: int = int(rigid_contact_max)
-        self.max_contact_columns: int = max(1, self.rigid_contact_max) if self.rigid_contact_max > 0 else 0
+        if self.max_contact_columns > 0 and self.rigid_contact_max == 0:
+            # One column covers a shape pair's multi-contact cluster,
+            # so a 6x multiplier is a conservative default.
+            self.rigid_contact_max = self.max_contact_columns * 6
         self.num_joints: int = int(num_joints)
         if self.num_joints < 0:
             raise ValueError(f"num_joints must be >= 0 (got {self.num_joints})")
@@ -1484,7 +1485,7 @@ class PhoenXWorld:
     def gather_contact_wrenches(self, out: wp.array) -> None:
         """Per-individual-contact wrench (force + torque) from the
         last substep. ``out`` is ``wp.array[wp.spatial_vector]`` of
-        length :attr:`rigid_contact_max`."""
+        length :attr:`max_contact_columns * 6`."""
         if self.max_contact_columns == 0:
             out.zero_()
             return

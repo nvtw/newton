@@ -314,9 +314,11 @@ class Example:
         self.bodies = bodies
 
         # ---- Contact-only constraint container ------------------------
-        # One column per ``(shape_a, shape_b)`` pair; sizes 1:1 against
-        # ``rigid_contact_max``.
-        max_contact_columns = max(1, rigid_contact_max)
+        # The bunny pile is the largest contact pool we ship; reserve
+        # room for every narrow-phase point to land in its own column
+        # in the worst case so the ingest never stalls on a full
+        # column-table.
+        max_contact_columns = max(64, (rigid_contact_max + 5) // 6)
         self.constraints = constraint_container_zeros(
             num_constraints=max_contact_columns,
             num_dwords=CONTACT_DWORDS,
@@ -335,6 +337,7 @@ class Example:
             solver_iterations=self.solver_iterations,
             velocity_iterations=1,
             gravity=(0.0, 0.0, -9.81),
+            max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
             default_friction=BUNNY_FRICTION,
             device=self.device,

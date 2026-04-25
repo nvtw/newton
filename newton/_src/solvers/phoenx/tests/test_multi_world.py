@@ -109,6 +109,7 @@ def _build_n_pendulums(
         solver_iterations=_SOLVER_ITERATIONS,
         velocity_iterations=1,
         gravity=gravity,
+        max_contact_columns=0,
         rigid_contact_max=0,
         num_joints=num_joints,
         num_worlds=num_worlds,

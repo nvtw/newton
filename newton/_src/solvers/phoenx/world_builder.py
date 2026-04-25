@@ -974,6 +974,7 @@ class WorldBuilder:
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
         gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
+        max_contact_columns: int = 0,
         rigid_contact_max: int = 0,
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
@@ -1006,12 +1007,9 @@ class WorldBuilder:
 
         num_joints = len(self._joint_descriptors)
         bodies = self._build_body_container(device)
-        # One constraint column per ``(shape_a, shape_b)`` pair covers
-        # an arbitrary contact count per pair, so the column buffer
-        # sizes 1:1 against ``rigid_contact_max``.
         constraints = PhoenXWorld.make_constraint_container(
             num_joints=num_joints,
-            max_contact_columns=max(1, int(rigid_contact_max)),
+            max_contact_columns=int(max_contact_columns),
             device=device,
         )
 
@@ -1022,6 +1020,7 @@ class WorldBuilder:
             solver_iterations=solver_iterations,
             velocity_iterations=velocity_iterations,
             gravity=gravity,
+            max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
             num_joints=num_joints,
             collision_filter_pairs=self._collision_filter_pairs,
