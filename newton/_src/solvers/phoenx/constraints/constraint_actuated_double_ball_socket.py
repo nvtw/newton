@@ -232,19 +232,11 @@ class ActuatedDoubleBallSocketData:
     local_anchor1_b2: wp.vec3f
     local_anchor2_b1: wp.vec3f
     local_anchor2_b2: wp.vec3f
-    # Anchor 3 body-local snapshots: only meaningful in prismatic mode
-    # (ignored by revolute). Auto-derived at init as
-    # ``anchor1 + rest_length * t_ref`` with ``t_ref`` an arbitrary
-    # unit perpendicular to the slide axis.
-    local_anchor3_b1: wp.vec3f
-    local_anchor3_b2: wp.vec3f
-    # Runtime (per-substep) lever arms for the three anchors.
+    # Runtime (per-substep) lever arms for the two shared anchors.
     r1_b1: wp.vec3f
     r1_b2: wp.vec3f
     r2_b1: wp.vec3f
     r2_b2: wp.vec3f
-    r3_b1: wp.vec3f
-    r3_b2: wp.vec3f
     # Runtime tangent basis perpendicular to the current world joint axis.
     t1: wp.vec3f
     t2: wp.vec3f
@@ -254,16 +246,16 @@ class ActuatedDoubleBallSocketData:
     bias_rate: wp.float32
     mass_coeff: wp.float32
     impulse_coeff: wp.float32
-    # Positional biases.
+    # Positional biases (anchors 1 and 2; the prismatic third anchor
+    # bias lives in ``mode_extras`` below since it's mode-exclusive
+    # with the revolute twist-tracker fields).
     # Revolute: ``bias1`` = 3-vec world drift at anchor 1; ``bias2`` =
     #   tangent drift at anchor 2 packed into ``(t1, t2, 0)``.
     # Prismatic: ``bias1`` = tangent drift at anchor 1 packed into
     #   ``(t1, t2, 0)``; ``bias2`` = tangent drift at anchor 2 packed
-    #   into ``(t1, t2, 0)``. ``bias3`` = scalar drift at anchor 3
-    #   along ``t2``.
+    #   into ``(t1, t2, 0)``.
     bias1: wp.vec3f
     bias2: wp.vec3f
-    bias3: wp.float32
     # Mode-specific Schur cache. Joint mode is fixed at construction,
     # so the revolute and prismatic caches are mutually exclusive --
     # we alias them onto a single 27-dword block sized for the larger.
@@ -282,10 +274,29 @@ class ActuatedDoubleBallSocketData:
     # helpers below so the alias stays in one place. Saves 21 dwords
     # per joint vs. allocating both caches separately.
     mode_cache: wp.types.vector(length=27, dtype=wp.float32)
-    # Warm-start accumulated impulses (world frame).
+    # Mode-specific extras. Same alias trick as ``mode_cache`` but for
+    # fields used in *one* mode and totally unread in the other --
+    # 16 dwords sized for the larger (prismatic) layout.
+    #
+    # Prismatic layout (16 dwords used):
+    #   ``mode_extras[0..2]``   = local_anchor3_b1     : vec3 (3 dwords)
+    #   ``mode_extras[3..5]``   = local_anchor3_b2     : vec3 (3 dwords)
+    #   ``mode_extras[6..8]``   = r3_b1                : vec3 (3 dwords)
+    #   ``mode_extras[9..11]``  = r3_b2                : vec3 (3 dwords)
+    #   ``mode_extras[12..14]`` = accumulated_impulse3 : vec3 (3 dwords)
+    #   ``mode_extras[15]``     = bias3                : float (1 dword)
+    #
+    # Revolute layout (6 dwords used, 10 unused tail):
+    #   ``mode_extras[0..3]`` = inv_initial_orientation   : quat  (4 dwords)
+    #   ``mode_extras[4]``    = revolution_counter        : int   (1 dword)
+    #   ``mode_extras[5]``    = previous_quaternion_angle : float (1 dword)
+    #
+    # Saves another 6 dwords/joint on top of the ``mode_cache`` alias.
+    mode_extras: wp.types.vector(length=16, dtype=wp.float32)
+    # Warm-start accumulated impulses for the shared anchors. The
+    # third (prismatic-only) impulse moved into ``mode_extras`` above.
     accumulated_impulse1: wp.vec3f
     accumulated_impulse2: wp.vec3f
-    accumulated_impulse3: wp.vec3f
 
     # ---- Actuator + limit block --------------------------------------
     # Body-1-local joint axis snapshot. Used by revolute for a
@@ -296,16 +307,11 @@ class ActuatedDoubleBallSocketData:
     # old two-axis projection.
     axis_local1: wp.vec3f
     rest_length: wp.float32
-    # Rest relative orientation used by the revolute twist tracker:
-    # ``diff = q2 * inv_initial_orientation * q1^*`` is identity at
-    # finalize() time, and :func:`extract_rotation_angle` projected
-    # onto ``j = quat_rotate(q1, axis_local1)`` gives the in-branch
-    # twist in ``(-pi, pi]``. The revolution counter wraps that into
-    # an unbounded cumulative angle, matching the standalone angular
-    # motor / angular limit.
-    inv_initial_orientation: wp.quatf
-    revolution_counter: wp.int32
-    previous_quaternion_angle: wp.float32
+    # NB: ``inv_initial_orientation``, ``revolution_counter``, and
+    # ``previous_quaternion_angle`` (revolute twist-tracker scratch)
+    # used to live here as separate fields. They've been folded into
+    # the ``mode_extras`` alias block above so prismatic joints don't
+    # carry 6 unused dwords.
     drive_mode: wp.int32
     # Setpoints: ``target`` is radians (revolute) or meters (prismatic);
     # ``target_velocity`` is rad/s or m/s.
@@ -372,14 +378,10 @@ _OFF_LA1_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_a
 _OFF_LA1_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor1_b2"))
 _OFF_LA2_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor2_b1"))
 _OFF_LA2_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor2_b2"))
-_OFF_LA3_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor3_b1"))
-_OFF_LA3_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor3_b2"))
 _OFF_R1_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r1_b1"))
 _OFF_R1_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r1_b2"))
 _OFF_R2_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r2_b1"))
 _OFF_R2_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r2_b2"))
-_OFF_R3_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r3_b1"))
-_OFF_R3_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r3_b2"))
 _OFF_T1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "t1"))
 _OFF_T2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "t2"))
 _OFF_HERTZ = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "hertz"))
@@ -389,7 +391,6 @@ _OFF_MASS_COEFF = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "mas
 _OFF_IMPULSE_COEFF = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "impulse_coeff"))
 _OFF_BIAS1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias1"))
 _OFF_BIAS2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias2"))
-_OFF_BIAS3 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias3"))
 # Aliased mode-specific Schur cache. Revolute uses dwords [0..27),
 # prismatic uses [0..21) of the same 27-dword block. Joint mode is
 # fixed at construction so the two layouts never collide.
@@ -400,15 +401,28 @@ _OFF_S_INV = wp.constant(int(_OFF_MODE_CACHE) + 18)
 _OFF_A4_INV = wp.constant(int(_OFF_MODE_CACHE) + 0)
 _OFF_C_PRIS = wp.constant(int(_OFF_MODE_CACHE) + 16)
 _OFF_S_SCALAR_INV = wp.constant(int(_OFF_MODE_CACHE) + 20)
+# Aliased mode-extras block. Prismatic packs anchor-3 / r3 / acc_imp3
+# / bias3 (16 dwords); revolute packs the twist-tracker scratch
+# (inv_initial_orientation + revolution_counter + previous_quaternion_angle
+# = 6 dwords). Mutually exclusive, so we share the 16-dword block.
+_OFF_MODE_EXTRAS = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "mode_extras"))
+# Prismatic-only fields, dwords 0..15 of mode_extras:
+_OFF_LA3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
+_OFF_LA3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 3)
+_OFF_R3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
+_OFF_R3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 9)
+_OFF_ACC_IMP3 = wp.constant(int(_OFF_MODE_EXTRAS) + 12)
+_OFF_BIAS3 = wp.constant(int(_OFF_MODE_EXTRAS) + 15)
+# Revolute-only fields, dwords 0..5 of mode_extras (10 unused tail):
+_OFF_INV_INITIAL_ORIENTATION = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
+_OFF_REVOLUTION_COUNTER = wp.constant(int(_OFF_MODE_EXTRAS) + 4)
+_OFF_PREVIOUS_QUATERNION_ANGLE = wp.constant(int(_OFF_MODE_EXTRAS) + 5)
+
 _OFF_ACC_IMP1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse1"))
 _OFF_ACC_IMP2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse2"))
-_OFF_ACC_IMP3 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse3"))
 
 _OFF_AXIS_LOCAL1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_local1"))
 _OFF_REST_LENGTH = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "rest_length"))
-_OFF_INV_INITIAL_ORIENTATION = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "inv_initial_orientation"))
-_OFF_REVOLUTION_COUNTER = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "revolution_counter"))
-_OFF_PREVIOUS_QUATERNION_ANGLE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "previous_quaternion_angle"))
 _OFF_DRIVE_MODE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "drive_mode"))
 _OFF_TARGET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target"))
 _OFF_TARGET_VELOCITY = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target_velocity"))
@@ -570,31 +584,47 @@ def actuated_double_ball_socket_initialize_kernel(
     la3_b2 = wp.quat_rotate_inv(orient2, a3_w - pos2)
 
     constraint_set_type(constraints, cid, CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET)
+    mode = joint_mode[tid]
+
     write_int(constraints, _OFF_BODY1, cid, b1)
     write_int(constraints, _OFF_BODY2, cid, b2)
-    write_int(constraints, _OFF_JOINT_MODE, cid, joint_mode[tid])
+    write_int(constraints, _OFF_JOINT_MODE, cid, mode)
     write_vec3(constraints, _OFF_LA1_B1, cid, la1_b1)
     write_vec3(constraints, _OFF_LA1_B2, cid, la1_b2)
     write_vec3(constraints, _OFF_LA2_B1, cid, la2_b1)
     write_vec3(constraints, _OFF_LA2_B2, cid, la2_b2)
-    write_vec3(constraints, _OFF_LA3_B1, cid, la3_b1)
-    write_vec3(constraints, _OFF_LA3_B2, cid, la3_b2)
 
     zero3 = wp.vec3f(0.0, 0.0, 0.0)
     write_vec3(constraints, _OFF_R1_B1, cid, zero3)
     write_vec3(constraints, _OFF_R1_B2, cid, zero3)
     write_vec3(constraints, _OFF_R2_B1, cid, zero3)
     write_vec3(constraints, _OFF_R2_B2, cid, zero3)
-    write_vec3(constraints, _OFF_R3_B1, cid, zero3)
-    write_vec3(constraints, _OFF_R3_B2, cid, zero3)
     write_vec3(constraints, _OFF_T1, cid, zero3)
     write_vec3(constraints, _OFF_T2, cid, zero3)
     write_vec3(constraints, _OFF_BIAS1, cid, zero3)
     write_vec3(constraints, _OFF_BIAS2, cid, zero3)
-    write_float(constraints, _OFF_BIAS3, cid, 0.0)
     write_vec3(constraints, _OFF_ACC_IMP1, cid, zero3)
     write_vec3(constraints, _OFF_ACC_IMP2, cid, zero3)
-    write_vec3(constraints, _OFF_ACC_IMP3, cid, zero3)
+
+    # ``mode_extras`` block is mode-aliased: REVOLUTE / CABLE store the
+    # twist-tracker scratch (inv_initial_orientation, revolution_counter,
+    # previous_quaternion_angle); PRISMATIC / FIXED store the anchor-3
+    # snapshot + bias3 + acc_imp3. Writing both layouts unconditionally
+    # would clobber the alias, so we branch.
+    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED:
+        write_vec3(constraints, _OFF_LA3_B1, cid, la3_b1)
+        write_vec3(constraints, _OFF_LA3_B2, cid, la3_b2)
+        write_vec3(constraints, _OFF_R3_B1, cid, zero3)
+        write_vec3(constraints, _OFF_R3_B2, cid, zero3)
+        write_vec3(constraints, _OFF_ACC_IMP3, cid, zero3)
+        write_float(constraints, _OFF_BIAS3, cid, 0.0)
+    else:
+        # REVOLUTE / CABLE / BALL_SOCKET: zero out the anchor-3 slots
+        # via the twist-tracker layout. BALL_SOCKET reads neither side
+        # of the alias, so any consistent zero is fine.
+        write_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid, inv_initial_orientation)
+        write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, 0)
+        write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, 0.0)
 
     write_float(constraints, _OFF_HERTZ, cid, hertz[tid])
     write_float(constraints, _OFF_DAMPING_RATIO, cid, damping_ratio[tid])
@@ -611,12 +641,12 @@ def actuated_double_ball_socket_initialize_kernel(
     write_vec4(constraints, _OFF_C_PRIS, cid, wp.vec4f(0.0, 0.0, 0.0, 0.0))
     write_float(constraints, _OFF_S_SCALAR_INV, cid, 0.0)
 
-    # Actuator block.
+    # Actuator block. Twist-tracker init (inv_initial_orientation +
+    # revolution_counter + previous_quaternion_angle) ran in the
+    # mode-conditional block above since those fields share dwords
+    # with the prismatic anchor-3 snapshot.
     write_vec3(constraints, _OFF_AXIS_LOCAL1, cid, axis_local1)
     write_float(constraints, _OFF_REST_LENGTH, cid, rest_length)
-    write_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid, inv_initial_orientation)
-    write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, 0)
-    write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, 0.0)
     write_int(constraints, _OFF_DRIVE_MODE, cid, drive_mode[tid])
     write_float(constraints, _OFF_TARGET, cid, target[tid])
     write_float(constraints, _OFF_TARGET_VELOCITY, cid, target_velocity[tid])
