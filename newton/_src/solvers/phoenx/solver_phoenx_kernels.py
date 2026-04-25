@@ -78,9 +78,6 @@ __all__ = [
     "_scatter_elements_to_worlds_kernel",
     "_set_kinematic_pose_batch_kernel",
     "_sync_num_active_constraints_kernel",
-    "_world_csr_count_kernel",
-    "_world_csr_scan_kernel",
-    "_world_csr_scatter_kernel",
     "pack_body_xforms_kernel",
 ]
 
@@ -124,8 +121,7 @@ def _choose_fast_tail_worlds_per_block(num_worlds: int) -> int:
     regardless of ``wpb``.
 
     Tuned on RTX PRO 6000 (sm_120), 188 SMs, after the fused
-    prepare+iterate + register-caching refactor. Overridable via
-    ``NEWTON_PHOENX_WORLDS_PER_BLOCK`` for A/B tests.
+    prepare+iterate + register-caching refactor.
 
     Three-tier by scene size (env_fps numbers are 3-run averaged
     across g1_flat / h1_flat):
@@ -142,11 +138,6 @@ def _choose_fast_tail_worlds_per_block(num_worlds: int) -> int:
       loses ~4% but h1 @ 16384 is neutral. Average across both
       scenarios is the better call.
     """
-    import os as _os  # noqa: PLC0415
-
-    override = _os.environ.get("NEWTON_PHOENX_WORLDS_PER_BLOCK")
-    if override is not None:
-        return max(1, int(override))
     if num_worlds < 512:
         return 2
     if num_worlds < 2048:
@@ -283,170 +274,16 @@ def _pick_threads_per_world_kernel(
 
 
 # ---------------------------------------------------------------------------
-# Per-world CSR bucketing
-# ---------------------------------------------------------------------------
-#
-# The incremental partitioner produces a single global Jones-Plassmann
-# coloring over every active constraint. Worlds share no bodies, so
-# per-world slices can be carved out in a cheap post-pass instead of
-# colouring once per world.
-#
-# Pipeline: ``_world_csr_count_kernel`` -> ``_world_csr_scan_kernel``
-# -> ``_world_csr_prefix_offsets_kernel`` -> ``_world_csr_scatter_kernel``.
-# Output layout: ``world_element_ids_by_color[capacity]`` (flat,
-# bucketed by world); ``world_color_starts[w, c]`` (per-world
-# exclusive-prefix); ``world_csr_offsets[w]`` (base index for world
-# ``w``'s slice); ``world_num_colors[w]`` (highest non-empty colour).
-
-
-@wp.func
-def _find_color_of_position(
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.int32,
-    pos: wp.int32,
-) -> wp.int32:
-    """Return ``c`` s.t. ``color_starts[c] <= pos < color_starts[c + 1]``.
-    ``O(log num_colors)`` binary search."""
-    lo = wp.int32(0)
-    hi = num_colors
-    while lo < hi:
-        mid = (lo + hi) >> 1
-        if color_starts[mid] <= pos:
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo - 1
-
-
-@wp.kernel(enable_backward=False)
-def _world_csr_count_kernel(
-    bodies: BodyContainer,
-    elements: wp.array[ElementInteractionData],
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors_arr: wp.array[wp.int32],
-    # out
-    world_color_counts: wp.array2d[wp.int32],
-):
-    """Atomic count of per-(world, colour) elements.
-
-    One thread per position in the global ``element_ids_by_color``.
-    Reads the compacted primary body from ``elements[cid].bodies[0]``
-    so worlds sharing a static world body still route via the dynamic
-    body's world id.
-    """
-    tid = wp.tid()
-    n_colors = num_colors_arr[0]
-    if n_colors == 0:
-        return
-    total_elements = color_starts[n_colors]
-    if tid >= total_elements:
-        return
-    c = _find_color_of_position(color_starts, n_colors, tid)
-    cid = element_ids_by_color[tid]
-    b_primary = elements[cid].bodies[0]
-    if b_primary < 0:
-        return
-    w = bodies.world_id[b_primary]
-    wp.atomic_add(world_color_counts, w, c, wp.int32(1))
-
-
-@wp.kernel(enable_backward=False)
-def _world_csr_scan_kernel(
-    world_color_counts: wp.array2d[wp.int32],
-    num_colors_arr: wp.array[wp.int32],
-    # out
-    world_color_starts: wp.array2d[wp.int32],
-    world_num_colors: wp.array[wp.int32],
-    world_totals_shifted: wp.array[wp.int32],
-):
-    """Per-world serial prefix scan -> ``world_color_starts`` +
-    ``world_num_colors`` (highest non-empty colour index). One thread
-    per world.
-
-    Additionally stages the per-world total into
-    ``world_totals_shifted[w + 1]`` (and ``[0] = 0`` from thread 0)
-    so an inclusive ``wp.utils.array_scan`` over the result produces
-    ``world_csr_offsets`` directly -- replaces a serial O(num_worlds)
-    prefix kernel that scaled poorly past 256 worlds (206 us at 1024
-    worlds). The scan writes under O(log num_worlds) kernel work.
-    """
-    w = wp.tid()
-    n_colors = num_colors_arr[0]
-    acc = wp.int32(0)
-    highest = wp.int32(0)
-    for c in range(n_colors):
-        world_color_starts[w, c] = acc
-        count = world_color_counts[w, c]
-        if count > 0:
-            highest = c + 1
-        acc += count
-    world_color_starts[w, n_colors] = acc
-    world_num_colors[w] = highest
-    # Shifted staging: ``shifted[w + 1] = total_w``; thread 0 stamps
-    # ``[0] = 0`` so the downstream inclusive scan lands
-    # ``world_csr_offsets[0] = 0`` and
-    # ``world_csr_offsets[w + 1] = sum(totals[0..w])``.
-    world_totals_shifted[w + 1] = acc
-    if w == 0:
-        world_totals_shifted[0] = wp.int32(0)
-
-
-@wp.kernel(enable_backward=False)
-def _world_csr_scatter_kernel(
-    bodies: BodyContainer,
-    elements: wp.array[ElementInteractionData],
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors_arr: wp.array[wp.int32],
-    world_color_starts: wp.array2d[wp.int32],
-    world_csr_offsets: wp.array[wp.int32],
-    # scratch (caller zeroes; atomic cursors -- one per (world, colour))
-    world_color_cursor: wp.array2d[wp.int32],
-    # out
-    world_element_ids_by_color: wp.array[wp.int32],
-):
-    """Scatter each global-CSR element into its per-world slot.
-
-    Runs after :func:`_world_csr_scan_kernel`. Atomic-cursor bump per
-    ``(world, colour)`` gives a unique within-colour index; within-
-    colour order is non-deterministic but the partitioner already
-    guarantees no two same-colour elements share a body.
-    """
-    tid = wp.tid()
-    n_colors = num_colors_arr[0]
-    if n_colors == 0:
-        return
-    total_elements = color_starts[n_colors]
-    if tid >= total_elements:
-        return
-    c = _find_color_of_position(color_starts, n_colors, tid)
-    cid = element_ids_by_color[tid]
-    b_primary = elements[cid].bodies[0]
-    if b_primary < 0:
-        return
-    w = bodies.world_id[b_primary]
-    local_slot = wp.atomic_add(world_color_cursor, w, c, wp.int32(1))
-    dst = world_csr_offsets[w] + world_color_starts[w, c] + local_slot
-    world_element_ids_by_color[dst] = cid
-
-
-# ---------------------------------------------------------------------------
-# Per-world graph coloring (one block per world).
+# Per-world graph coloring (one block per world)
 # ---------------------------------------------------------------------------
 #
 # Worlds are independent after static-body nullification -- no element
-# in world w references a body in any other world. So Jones-Plassmann
-# MIS partitioning can run per-world in parallel instead of device-wide.
-# One block per world, each block runs the full JP loop on its world's
-# element subset. Output lands directly in the per-world CSR that the
-# fast-tail dispatchers consume, skipping the post-coloring bucketing
-# pass used by the global-coloring path.
-#
-# This typically produces the same colour count per world as the
-# global path (they're the same local subgraph), but the work is
-# parallel across worlds instead of serialized inside a single-block
-# scan / compact kernel. Dramatic win at large world counts.
+# in world w references a body in any other world. Jones-Plassmann MIS
+# partitioning runs per-world in parallel: one block per world, each
+# block runs the full JP loop on its world's element subset. Output
+# lands directly in the per-world CSR (``world_element_ids_by_color``,
+# ``world_color_starts[w, c]``, ``world_csr_offsets[w]``,
+# ``world_num_colors[w]``) that the fast-tail dispatchers consume.
 
 
 _PER_WORLD_COLORING_BLOCK_DIM: int = 64

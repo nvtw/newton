@@ -93,16 +93,12 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _scatter_elements_to_worlds_kernel,
     _set_kinematic_pose_batch_kernel,
     _sync_num_active_constraints_kernel,
-    _world_csr_count_kernel,
-    _world_csr_scan_kernel,
-    _world_csr_scatter_kernel,
     pack_body_xforms_kernel,
 )
 
 __all__ = [
     "DEFAULT_SHAPE_GAP",
     "PhoenXWorld",
-    "make_phoenx_shape_cfg",
     "pack_body_xforms_kernel",
 ]
 
@@ -113,17 +109,6 @@ __all__ = [
 #: still have a gap, which is easier to stabilise than penetration
 #: recovery. Scene-scale-sensitive: override for MEMS / vehicle scales.
 DEFAULT_SHAPE_GAP: float = 0.05
-
-
-def make_phoenx_shape_cfg(**overrides):
-    """Return a ``ModelBuilder.ShapeConfig`` with ``gap = DEFAULT_SHAPE_GAP``.
-    ``overrides`` win over the PhoenX default."""
-    import newton as _newton  # local import: avoids top-level cycle
-
-    cfg = _newton.ModelBuilder.ShapeConfig(gap=DEFAULT_SHAPE_GAP)
-    for k, v in overrides.items():
-        setattr(cfg, k, v)
-    return cfg
 
 
 def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]:
@@ -373,12 +358,11 @@ class PhoenXWorld:
 
         # ----- Per-world coloring scratch (for parallel JP path) -----
         #
-        # The per-world coloring path is dramatically faster than the
-        # device-wide global coloring above ~500 worlds -- it parallelises
-        # the JP MIS loop over worlds (one block per world) instead of
-        # serialising the CSR compact into a single block. Scratch sized
-        # so the path is always available.
-        self._use_per_world_coloring: bool = True
+        # The per-world coloring path parallelises the JP MIS loop over
+        # worlds (one block per world); it's the only multi_world
+        # coloring strategy now. Single-world layouts route through
+        # ``partitioner.build_csr`` instead -- see the dispatch in
+        # :meth:`step`.
         self._per_world_element_count: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
         # Exclusive prefix of per-world counts; sized nw+1 so
         # ``world_element_offsets[w+1] - world_element_offsets[w]`` is
@@ -824,14 +808,13 @@ class PhoenXWorld:
                 # Single-world step path needs only the global CSR;
                 # the per-world bucketing scaffolding is unused.
                 self._partitioner.build_csr()
-            elif self._use_per_world_coloring:
-                # Adjacency build is still global (per-body CSR of
-                # element neighbours). Per-world JP scales much
-                # better past ~500 worlds than the device-wide path.
-                self._build_per_world_coloring()
             else:
-                self._partitioner.build_csr()
-                self._build_world_csr()
+                # Multi-world: parallel per-world JP coloring. The
+                # adjacency build is still global (per-body CSR of
+                # element neighbours), but the MIS loop runs one
+                # block per world and is the only multi_world
+                # strategy now.
+                self._build_per_world_coloring()
 
             # Per-step adaptive threads-per-world pick. Reads the freshly
             # built per-world colour stats and writes ``_tpw_choice[0]``;
@@ -1028,63 +1011,8 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _build_world_csr(self) -> None:
-        """Bucket the partitioner's global CSR into per-world slices.
-        Fully device-side; proportional to the capacity."""
-        self._world_color_counts.zero_()
-        cap = self._constraint_capacity
-        wp.launch(
-            _world_csr_count_kernel,
-            dim=cap,
-            inputs=[
-                self.bodies,
-                self._elements,
-                self._partitioner.element_ids_by_color,
-                self._partitioner.color_starts,
-                self._partitioner.num_colors,
-            ],
-            outputs=[self._world_color_counts],
-            device=self.device,
-        )
-        wp.launch(
-            _world_csr_scan_kernel,
-            dim=self.num_worlds,
-            inputs=[
-                self._world_color_counts,
-                self._partitioner.num_colors,
-            ],
-            outputs=[self._world_color_starts, self._world_num_colors, self._world_totals_shifted],
-            device=self.device,
-        )
-        # Cross-world prefix: inclusive scan of the shifted per-world
-        # totals produces ``world_csr_offsets[0] = 0`` and
-        # ``world_csr_offsets[w + 1] = sum(totals[0..w])``. Replaces a
-        # single-thread serial scan that grew to 206 us at 1024 worlds.
-        wp.utils.array_scan(self._world_totals_shifted, self._world_csr_offsets, inclusive=True)
-        self._world_color_cursor.zero_()
-        wp.launch(
-            _world_csr_scatter_kernel,
-            dim=cap,
-            inputs=[
-                self.bodies,
-                self._elements,
-                self._partitioner.element_ids_by_color,
-                self._partitioner.color_starts,
-                self._partitioner.num_colors,
-                self._world_color_starts,
-                self._world_csr_offsets,
-                self._world_color_cursor,
-            ],
-            outputs=[self._world_element_ids_by_color],
-            device=self.device,
-        )
-
     def _build_per_world_coloring(self) -> None:
         """Parallel per-world Jones-Plassmann coloring.
-
-        Replaces the global coloring + post-bucketing pipeline
-        (``partitioner.build_csr`` + ``_build_world_csr``) with three
-        kernels:
 
         1. :func:`_count_elements_per_world_kernel` -- atomic count of
            active cids per world (one thread per cid).
@@ -1096,11 +1024,9 @@ class PhoenXWorld:
            directly into ``world_element_ids_by_color`` /
            ``world_color_starts`` / ``world_num_colors``.
 
-        The existing adjacency CSR from ``partitioner.reset`` is
-        reused (it's a global structure, but because worlds have
-        disjoint body sets after static-null-out each element's
-        neighbours all live in the same world). Only the device-wide
-        scan + compact portion of the old path is replaced.
+        The adjacency CSR from ``partitioner.reset`` is reused
+        (worlds have disjoint body sets after static-null-out, so
+        each element's neighbours all live in the same world).
         """
         nw = self.num_worlds
         cap = self._constraint_capacity

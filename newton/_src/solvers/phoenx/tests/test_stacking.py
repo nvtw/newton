@@ -35,8 +35,6 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.body import (
-    MOTION_DYNAMIC,
-    MOTION_STATIC,
     body_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
@@ -50,7 +48,11 @@ from newton._src.solvers.phoenx.constraints.contact_matching_config import (
 )
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
+)
+from newton._src.solvers.phoenx.examples.example_common import (
     newton_to_phoenx_kernel as _newton_to_phoenx_kernel,
+)
+from newton._src.solvers.phoenx.examples.example_common import (
     phoenx_to_newton_kernel as _phoenx_to_newton_kernel,
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
@@ -100,9 +102,10 @@ class _PhoenXScene:
         # Pick up the PhoenX contact-ahead-of-impact default so every
         # shape added to the scene detects contacts a few cm before
         # penetration. Keeps the scene-level contact settings in one
-        # place and lets the tests exercise the same defaults that
-        # user-facing PhoenX scenes pick up via ``make_phoenx_shape_cfg``.
+        # place and lets the tests exercise the same default
+        # ``DEFAULT_SHAPE_GAP`` user-facing PhoenX scenes pick up.
         from newton._src.solvers.phoenx.solver_phoenx import DEFAULT_SHAPE_GAP
+
         self.mb.default_shape_cfg.gap = DEFAULT_SHAPE_GAP
         self._newton_body_ids: list[int] = []
         self._finalized = False
@@ -265,14 +268,10 @@ class _PhoenXScene:
 
         self.model = self.mb.finalize()
         self.state = self.model.state()
-        newton.eval_fk(
-            self.model, self.model.joint_q, self.model.joint_qd, self.state
-        )
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         self.model.body_q.assign(self.state.body_q)
 
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model, contact_matching=PHOENX_CONTACT_MATCHING
-        )
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=PHOENX_CONTACT_MATCHING)
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
 
@@ -282,9 +281,7 @@ class _PhoenXScene:
         wp.copy(
             bodies.orientation,
             wp.array(
-                np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(
-                    np.float32
-                ),
+                np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32),
                 dtype=wp.quatf,
                 device=self.device,
             ),
@@ -325,9 +322,7 @@ class _PhoenXScene:
 
         shape_body_np = self.model.shape_body.numpy()
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
-        self._shape_body = wp.array(
-            shape_body_phoenx, dtype=wp.int32, device=self.device
-        )
+        self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
         self.world = PhoenXWorld(
             bodies=self.bodies,
@@ -452,9 +447,7 @@ class _PhoenXScene:
 
     # -- contact force reporting --
 
-    def gather_contact_wrench_on_body(
-        self, newton_idx: int
-    ) -> tuple[np.ndarray, int, int]:
+    def gather_contact_wrench_on_body(self, newton_idx: int) -> tuple[np.ndarray, int, int]:
         """Return ``(force[3], n_pairs, n_contact_points)`` for one
         Newton body, summed from the per-pair wrench API.
 
@@ -481,9 +474,7 @@ class _PhoenXScene:
         pair_b1 = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
         pair_b2 = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
         pair_count = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
-        self.world.gather_contact_pair_wrenches(
-            pair_w, pair_b1, pair_b2, pair_count
-        )
+        self.world.gather_contact_pair_wrenches(pair_w, pair_b1, pair_b2, pair_count)
         pw = pair_w.numpy()[:, :3]
         b1 = pair_b1.numpy()
         b2 = pair_b2.numpy()
@@ -540,9 +531,7 @@ class _PhoenXScene:
         pair_b1 = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
         pair_b2 = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
         pair_count = wp.zeros(n_cols, dtype=wp.int32, device=self.device)
-        self.world.gather_contact_pair_wrenches(
-            pair_w, pair_b1, pair_b2, pair_count
-        )
+        self.world.gather_contact_pair_wrenches(pair_w, pair_b1, pair_b2, pair_count)
         return (
             pair_w.numpy()[:, :3],
             pair_b1.numpy(),
@@ -614,9 +603,7 @@ class _PhoenXScene:
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX solver requires CUDA for graph-captured stepping"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX solver requires CUDA for graph-captured stepping")
 class TestPhoenXSolverStacking(unittest.TestCase):
     """End-to-end regression tests for :class:`PhoenXWorld`."""
 
@@ -799,9 +786,7 @@ class TestPhoenXSolverStacking(unittest.TestCase):
         the full tower's. A settled tower should have every plank
         within an envelope roughly 2x the ring radius.
         """
-        scene = _PhoenXScene(
-            fps=120, substeps=20, solver_iterations=3, velocity_iterations=1
-        )
+        scene = _PhoenXScene(fps=120, substeps=20, solver_iterations=3, velocity_iterations=1)
         scene.add_ground_plane()
 
         tower_height_layers = 3
@@ -861,9 +846,7 @@ class TestPhoenXSolverStacking(unittest.TestCase):
             )
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX solver requires CUDA for graph-captured stepping"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX solver requires CUDA for graph-captured stepping")
 class TestPhoenXSolverRobustness(unittest.TestCase):
     """Stress tests for the PhoenX solver's Baumgarte / bias handling.
 
@@ -936,13 +919,9 @@ class TestPhoenXSolverRobustness(unittest.TestCase):
         stack_ids: list[int] = []
         z = he + 0.05
         for _ in range(3):
-            stack_ids.append(
-                scene.add_box(position=(0.0, 0.0, z), half_extents=(he, he, he))
-            )
+            stack_ids.append(scene.add_box(position=(0.0, 0.0, z), half_extents=(he, he, he)))
             z += 2 * he + gap
-        slammer = scene.add_box(
-            position=(-4.0, 0.0, he + 0.05), half_extents=(he, he, he)
-        )
+        slammer = scene.add_box(position=(-4.0, 0.0, he + 0.05), half_extents=(he, he, he))
         scene.finalize()
         scene.set_body_velocity(slammer, (15.0, 0.0, 0.0))
 
