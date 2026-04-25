@@ -1530,6 +1530,7 @@ class PhoenXWorld:
             dim=self.max_contact_columns,
             inputs=[
                 self._contact_cols,
+                self.bodies,
                 self._contact_container,
                 self._contact_views,
                 wp.int32(self.max_contact_columns),
@@ -1561,6 +1562,7 @@ class PhoenXWorld:
             dim=self.max_contact_columns,
             inputs=[
                 self._contact_cols,
+                self.bodies,
                 self._contact_container,
                 self._contact_views,
                 wp.int32(self.max_contact_columns),

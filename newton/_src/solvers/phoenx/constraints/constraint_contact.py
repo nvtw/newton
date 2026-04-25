@@ -50,8 +50,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_pd_bias,
     cc_get_pd_eff_soft,
     cc_get_pd_gamma,
-    cc_get_r1,
-    cc_get_r2,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
@@ -67,8 +65,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_pd_bias,
     cc_set_pd_eff_soft,
     cc_set_pd_gamma,
-    cc_set_r1,
-    cc_set_r2,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
@@ -674,8 +670,9 @@ def contact_prepare_for_iteration_at(
         bias_t1_val = friction_bias_factor * drift_t1 * idt * load_boost
         bias_t2_val = friction_bias_factor * drift_t2 * idt * load_boost
 
-        cc_set_r1(cc, k, r1)
-        cc_set_r2(cc, k, r2)
+        # r1 / r2 used to be cached here; we recompute them inline in
+        # iterate from local_p0 / local_p1 (already in lambdas) plus
+        # the body pose -- saves 6 dwords/contact in CC.derived.
         cc_set_eff_n(cc, k, eff_n)
         cc_set_eff_t1(cc, k, eff_t1)
         cc_set_eff_t2(cc, k, eff_t2)
@@ -800,6 +797,13 @@ def contact_iterate_at(
     inv_inertia1 = bodies.inverse_inertia_world[b1]
     inv_inertia2 = bodies.inverse_inertia_world[b2]
 
+    # Body pose for the per-contact lever-arm recompute. Hoisted out
+    # of the per-contact loop so the compiler can keep it in registers.
+    orientation1 = bodies.orientation[b1]
+    orientation2 = bodies.orientation[b2]
+    body_com1 = bodies.body_com[b1]
+    body_com2 = bodies.body_com[b2]
+
     v1 = bodies.velocity[b1]
     v2 = bodies.velocity[b2]
     w1 = bodies.angular_velocity[b1]
@@ -808,11 +812,19 @@ def contact_iterate_at(
     for i in range(contact_count):
         k = contact_first + i
 
-        r1 = cc_get_r1(cc, k)
-        r2 = cc_get_r2(cc, k)
         n = cc_get_normal(cc, k)
         t1_dir = cc_get_tangent1(cc, k)
         t2_dir = wp.cross(n, t1_dir)
+        # Recompute lever arms from the body-local anchors + body pose.
+        # ``r1 / r2`` used to be cached in ``cc.derived``; matches the
+        # prepare's ``p_world - position`` form, including the per-shape
+        # margin shift along ``n``.
+        local_p0 = cc_get_local_p0(cc, k)
+        local_p1 = cc_get_local_p1(cc, k)
+        margin0 = contacts.rigid_contact_margin0[k]
+        margin1 = contacts.rigid_contact_margin1[k]
+        r1 = wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
+        r2 = wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
         eff_n = cc_get_eff_n(cc, k)
         eff_t1 = cc_get_eff_t1(cc, k)
         eff_t2 = cc_get_eff_t2(cc, k)
@@ -1139,6 +1151,13 @@ def contact_iterate_at_multi(
     inv_inertia1 = bodies.inverse_inertia_world[b1]
     inv_inertia2 = bodies.inverse_inertia_world[b2]
 
+    # Body pose for the per-contact lever-arm recompute (replaces the
+    # cached r1/r2 in cc.derived).
+    orientation1 = bodies.orientation[b1]
+    orientation2 = bodies.orientation[b2]
+    body_com1 = bodies.body_com[b1]
+    body_com2 = bodies.body_com[b2]
+
     v1 = bodies.velocity[b1]
     v2 = bodies.velocity[b2]
     w1 = bodies.angular_velocity[b1]
@@ -1149,11 +1168,15 @@ def contact_iterate_at_multi(
         for i in range(contact_count):
             k = contact_first + i
 
-            r1 = cc_get_r1(cc, k)
-            r2 = cc_get_r2(cc, k)
             n = cc_get_normal(cc, k)
             t1_dir = cc_get_tangent1(cc, k)
             t2_dir = wp.cross(n, t1_dir)
+            local_p0 = cc_get_local_p0(cc, k)
+            local_p1 = cc_get_local_p1(cc, k)
+            margin0 = contacts.rigid_contact_margin0[k]
+            margin1 = contacts.rigid_contact_margin1[k]
+            r1 = wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
+            r2 = wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
             eff_n = cc_get_eff_n(cc, k)
             eff_t1 = cc_get_eff_t1(cc, k)
             eff_t2 = cc_get_eff_t2(cc, k)
@@ -1273,10 +1296,33 @@ def contact_position_iterate(
 
 
 @wp.func
+def _contact_recompute_r2(
+    bodies: BodyContainer,
+    contacts: ContactViews,
+    b2: wp.int32,
+    k: wp.int32,
+    n: wp.vec3f,
+    cc: ContactContainer,
+) -> wp.vec3f:
+    """Recompute the cached-style ``r2`` lever arm for contact ``k``.
+
+    Same expression as the prepare's ``r2 = quat_rotate(orient2,
+    local_p1 - body_com2) - margin1 * n``. Used by the wrench
+    helpers in place of the dropped ``cc_get_r2`` cache.
+    """
+    local_p1 = cc_get_local_p1(cc, k)
+    body_com2 = bodies.body_com[b2]
+    orientation2 = bodies.orientation[b2]
+    margin1 = contacts.rigid_contact_margin1[k]
+    return wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
+
+
+@wp.func
 def contact_world_wrench_at(
     constraints: ContactColumnContainer,
     cid: wp.int32,
     base_offset: wp.int32,
+    bodies: BodyContainer,
     idt: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
@@ -1286,10 +1332,12 @@ def contact_world_wrench_at(
     Sums the per-contact impulse ``lambda_n * n + lambda_t1 * t1 +
     lambda_t2 * t2`` across the column's ``contact_count`` contacts
     and divides by ``dt`` for a force. Torque is computed against
-    body 2's COM using the cached lever arm ``r2``.
+    body 2's COM using the recomputed lever arm ``r2`` (see
+    :func:`_contact_recompute_r2`).
     """
     contact_first = contact_get_contact_first(constraints, cid)
     contact_count = contact_get_contact_count(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
     force = wp.vec3f(0.0, 0.0, 0.0)
     torque = wp.vec3f(0.0, 0.0, 0.0)
     for i in range(contact_count):
@@ -1297,7 +1345,7 @@ def contact_world_wrench_at(
         n = cc_get_normal(cc, k)
         t1_dir = cc_get_tangent1(cc, k)
         t2_dir = wp.cross(n, t1_dir)
-        r2 = cc_get_r2(cc, k)
+        r2 = _contact_recompute_r2(bodies, contacts, b2, k, n, cc)
         lam_n = cc_get_normal_lambda(cc, k)
         lam_t1 = cc_get_tangent1_lambda(cc, k)
         lam_t2 = cc_get_tangent2_lambda(cc, k)
@@ -1312,16 +1360,20 @@ def contact_world_wrench_at(
 def contact_world_wrench(
     constraints: ContactColumnContainer,
     cid: wp.int32,
+    bodies: BodyContainer,
     idt: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
 ):
-    return contact_world_wrench_at(constraints, cid, 0, idt, cc, contacts)
+    return contact_world_wrench_at(constraints, cid, 0, bodies, idt, cc, contacts)
 
 
 @wp.func
 def contact_per_k_wrench_at(
     k: wp.int32,
+    b2: wp.int32,
+    bodies: BodyContainer,
+    contacts: ContactViews,
     idt: wp.float32,
     cc: ContactContainer,
 ):
@@ -1330,12 +1382,12 @@ def contact_per_k_wrench_at(
     ``force`` is ``imp / dt`` where ``imp = lam_n n + lam_t1 t1 +
     lam_t2 t2`` is the world-space impulse the contact applied during
     the most recent substep; ``torque`` is the moment about body 2's
-    COM using the cached lever arm ``r2``.
+    COM using the recomputed lever arm ``r2``.
     """
     n = cc_get_normal(cc, k)
     t1_dir = cc_get_tangent1(cc, k)
     t2_dir = wp.cross(n, t1_dir)
-    r2 = cc_get_r2(cc, k)
+    r2 = _contact_recompute_r2(bodies, contacts, b2, k, n, cc)
     lam_n = cc_get_normal_lambda(cc, k)
     lam_t1 = cc_get_tangent1_lambda(cc, k)
     lam_t2 = cc_get_tangent2_lambda(cc, k)
@@ -1348,6 +1400,7 @@ def contact_per_k_wrench_at(
 @wp.kernel(enable_backward=False)
 def contact_per_contact_wrench_kernel(
     contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
     cc: ContactContainer,
     contacts: ContactViews,
     num_active_columns: wp.int32,
@@ -1368,15 +1421,17 @@ def contact_per_contact_wrench_kernel(
         return
     contact_first = contact_get_contact_first(contact_cols, tid)
     contact_count = contact_get_contact_count(contact_cols, tid)
+    b2 = contact_get_body2(contact_cols, tid)
     for i in range(contact_count):
         k = contact_first + i
-        f, tau = contact_per_k_wrench_at(k, idt, cc)
+        f, tau = contact_per_k_wrench_at(k, b2, bodies, contacts, idt, cc)
         out[k] = wp.spatial_vector(f, tau)
 
 
 @wp.kernel(enable_backward=False)
 def contact_pair_wrench_kernel(
     contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
     cc: ContactContainer,
     contacts: ContactViews,
     num_active_columns: wp.int32,
@@ -1409,7 +1464,7 @@ def contact_pair_wrench_kernel(
     torque = wp.vec3f(0.0, 0.0, 0.0)
     for i in range(count):
         k = contact_first + i
-        f, tau = contact_per_k_wrench_at(k, idt, cc)
+        f, tau = contact_per_k_wrench_at(k, b2, bodies, contacts, idt, cc)
         force += f
         torque += tau
     wrenches[tid] = wp.spatial_vector(force, torque)

@@ -866,7 +866,7 @@ def _constraint_gather_wrenches_kernel(
         force, torque = actuated_double_ball_socket_world_wrench(constraints, cid, idt)
     else:
         force, torque = contact_world_wrench(
-            contact_cols, cid - num_joints, idt, cc, contacts
+            contact_cols, cid - num_joints, bodies, idt, cc, contacts
         )
     out[cid] = wp.spatial_vector(force, torque)
 

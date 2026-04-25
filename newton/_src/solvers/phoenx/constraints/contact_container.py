@@ -52,8 +52,6 @@ __all__ = [
     "cc_get_prev_tangent1",
     "cc_get_prev_tangent1_lambda",
     "cc_get_prev_tangent2_lambda",
-    "cc_get_r1",
-    "cc_get_r2",
     "cc_get_tangent1",
     "cc_get_tangent1_lambda",
     "cc_get_tangent2_lambda",
@@ -70,8 +68,6 @@ __all__ = [
     "cc_set_pd_bias",
     "cc_set_pd_eff_soft",
     "cc_set_pd_gamma",
-    "cc_set_r1",
-    "cc_set_r2",
     "cc_set_tangent1",
     "cc_set_tangent1_lambda",
     "cc_set_tangent2_lambda",
@@ -89,14 +85,21 @@ CC_LAMBDA_DWORDS_PER_CONTACT: int = 3
 CC_DWORDS_PER_CONTACT: int = 15
 
 #: Per-contact derived dwords filled by ``prepare_for_iteration``:
-#: ``r1(3), r2(3), eff_n, eff_t1, eff_t2, bias, bias_t1, bias_t2,
+#: ``eff_n, eff_t1, eff_t2, bias, bias_t1, bias_t2,
 #: pd_gamma, pd_bias, pd_eff_soft``. The final three are non-zero
 #: only for PhysX-style soft contacts (user-supplied absolute
 #: stiffness / damping on the Newton :class:`Contacts` buffer);
 #: ``pd_eff_soft > 0`` is the iterate-side flag that switches the
 #: normal row from the Box2D hertz-based path to the absolute PD
 #: spring-damper path.
-CC_DERIVED_DWORDS_PER_CONTACT: int = 15
+#:
+#: ``r1`` / ``r2`` (lever arms) used to be cached here too but were
+#: trivially recomputable from ``local_p0`` / ``local_p1`` (already
+#: in ``lambdas``) plus the body pose; we drop them and recompute
+#: in iterate. Saves 6 dwords/contact; iterate pays one extra
+#: ``quat_rotate`` per body per contact (compiler usually hoists
+#: the per-body part out of the per-contact loop).
+CC_DERIVED_DWORDS_PER_CONTACT: int = 9
 
 
 # Module-level constants for Warp kernels. ``wp.constant`` so they embed
@@ -117,18 +120,12 @@ _CC_OFF_LOCAL_P1_X = wp.constant(12)
 _CC_OFF_LOCAL_P1_Y = wp.constant(13)
 _CC_OFF_LOCAL_P1_Z = wp.constant(14)
 
-_CC_OFF_R1_X = wp.constant(0)
-_CC_OFF_R1_Y = wp.constant(1)
-_CC_OFF_R1_Z = wp.constant(2)
-_CC_OFF_R2_X = wp.constant(3)
-_CC_OFF_R2_Y = wp.constant(4)
-_CC_OFF_R2_Z = wp.constant(5)
-_CC_OFF_EFF_N = wp.constant(6)
-_CC_OFF_EFF_T1 = wp.constant(7)
-_CC_OFF_EFF_T2 = wp.constant(8)
-_CC_OFF_BIAS = wp.constant(9)
-_CC_OFF_BIAS_T1 = wp.constant(10)
-_CC_OFF_BIAS_T2 = wp.constant(11)
+_CC_OFF_EFF_N = wp.constant(0)
+_CC_OFF_EFF_T1 = wp.constant(1)
+_CC_OFF_EFF_T2 = wp.constant(2)
+_CC_OFF_BIAS = wp.constant(3)
+_CC_OFF_BIAS_T1 = wp.constant(4)
+_CC_OFF_BIAS_T2 = wp.constant(5)
 # Soft-contact PD plumbing (pairs with ``pd_coefficients`` in
 # ``constraint_container.py``). Written by
 # :func:`contact_prepare_for_iteration_at` when the Newton
@@ -136,9 +133,9 @@ _CC_OFF_BIAS_T2 = wp.constant(11)
 # populated (per-contact, absolute units: N/m and N*s/m).
 # ``pd_eff_soft == 0`` is the per-contact opt-out -- iterate then
 # falls through to the legacy Box2D path unchanged.
-_CC_OFF_PD_GAMMA = wp.constant(12)
-_CC_OFF_PD_BIAS = wp.constant(13)
-_CC_OFF_PD_EFF_SOFT = wp.constant(14)
+_CC_OFF_PD_GAMMA = wp.constant(6)
+_CC_OFF_PD_BIAS = wp.constant(7)
+_CC_OFF_PD_EFF_SOFT = wp.constant(8)
 
 
 @wp.struct
@@ -325,38 +322,6 @@ def cc_get_prev_local_p1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
 # ---------------------------------------------------------------------------
 # Derived (per-substep scratch) accessors -- keyed by contact index k.
 # ---------------------------------------------------------------------------
-
-
-@wp.func
-def cc_get_r1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
-    return wp.vec3f(
-        cc.derived[_CC_OFF_R1_X, k],
-        cc.derived[_CC_OFF_R1_Y, k],
-        cc.derived[_CC_OFF_R1_Z, k],
-    )
-
-
-@wp.func
-def cc_set_r1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    cc.derived[_CC_OFF_R1_X, k] = v[0]
-    cc.derived[_CC_OFF_R1_Y, k] = v[1]
-    cc.derived[_CC_OFF_R1_Z, k] = v[2]
-
-
-@wp.func
-def cc_get_r2(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
-    return wp.vec3f(
-        cc.derived[_CC_OFF_R2_X, k],
-        cc.derived[_CC_OFF_R2_Y, k],
-        cc.derived[_CC_OFF_R2_Z, k],
-    )
-
-
-@wp.func
-def cc_set_r2(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    cc.derived[_CC_OFF_R2_X, k] = v[0]
-    cc.derived[_CC_OFF_R2_Y, k] = v[1]
-    cc.derived[_CC_OFF_R2_Z, k] = v[2]
 
 
 @wp.func
