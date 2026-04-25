@@ -72,9 +72,13 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
+    _constraint_iterate_singleworld_kernel,
     _constraint_position_iterate_fast_tail_kernel,
+    _constraint_position_iterate_singleworld_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
+    _constraint_prepare_singleworld_kernel,
     _constraint_relax_fast_tail_kernel,
+    _constraint_relax_singleworld_kernel,
     _constraints_to_elements_kernel,
     _count_elements_per_world_kernel,
     _integrate_velocities_kernel,
@@ -172,6 +176,7 @@ class PhoenXWorld:
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         num_worlds: int = 1,
+        step_layout: str = "multi_world",
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -215,6 +220,15 @@ class PhoenXWorld:
                 is registered (see :meth:`set_materials`).
             num_worlds: Number of independent sub-worlds. Gating uses
                 ``BodyContainer.world_id``.
+            step_layout: Solve dispatch strategy. ``"multi_world"``
+                (default) is the per-world fast-tail path: one warp
+                per world, scales beyond ~256 worlds. ``"single_world"``
+                drives the global Jones-Plassmann colouring with
+                per-colour grid launches via ``wp.capture_while`` --
+                uses every SM on the colour and wins when the scene
+                is one (or a few) very big world(s); accepts
+                ``num_worlds > 1`` but loses the per-world parallelism
+                of the default path.
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -260,6 +274,11 @@ class PhoenXWorld:
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
             raise ValueError(f"num_worlds must be >= 1 (got {self.num_worlds})")
+        if step_layout not in ("multi_world", "single_world"):
+            raise ValueError(
+                f"step_layout must be 'multi_world' or 'single_world' (got {step_layout!r})"
+            )
+        self.step_layout: str = step_layout
         self.gravity: wp.array[wp.vec3f] = _build_gravity_array(gravity, self.num_worlds, self.device)
         self.default_friction = float(default_friction)
 
@@ -752,14 +771,15 @@ class PhoenXWorld:
 
         self._rebuild_elements()
         if self._constraint_capacity > 0:
-            # Adjacency build is still global (per-body CSR of element
-            # neighbours). The JP coloring itself can be either global
-            # (partitioner.build_csr + _build_world_csr, which serialises
-            # the compact into a single block) or per-world (one block
-            # per world, fully parallel across worlds). Per-world scales
-            # dramatically better past ~500 worlds.
             self._partitioner.reset(self._elements, self._num_active_constraints)
-            if self._use_per_world_coloring:
+            if self.step_layout == "single_world":
+                # Single-world step path needs only the global CSR;
+                # the per-world bucketing scaffolding is unused.
+                self._partitioner.build_csr()
+            elif self._use_per_world_coloring:
+                # Adjacency build is still global (per-body CSR of
+                # element neighbours). Per-world JP scales much
+                # better past ~500 worlds than the device-wide path.
                 self._build_per_world_coloring()
             else:
                 self._partitioner.build_csr()
@@ -783,10 +803,16 @@ class PhoenXWorld:
             if picking is not None:
                 picking.apply_force()
             self._integrate_forces_and_gravity()
-            self._solve_main()
-            self._integrate_positions()
-            self._position_iterate()
-            self._relax_velocities()
+            if self.step_layout == "single_world":
+                self._solve_main_singleworld()
+                self._integrate_positions()
+                self._position_iterate_singleworld()
+                self._relax_velocities_singleworld()
+            else:
+                self._solve_main()
+                self._integrate_positions()
+                self._position_iterate()
+                self._relax_velocities()
             alpha = float(k + 1) * inv_n
             self._kinematic_interpolate_substep(alpha)
 
@@ -1190,6 +1216,112 @@ class PhoenXWorld:
             idt,
             contact_views,
         )
+
+    # ------------------------------------------------------------------
+    # Single-world dispatch (capture-while over the global colour CSR)
+    # ------------------------------------------------------------------
+
+    def _capture_singleworld_sweep(self, kernel, **kw) -> None:
+        """``wp.capture_while`` body: launch ``kernel`` for one colour.
+
+        Decrements ``color_cursor`` inside the kernel; the capture-while
+        exits when the cursor hits 0.
+        """
+        contact_views = (
+            self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        )
+        idt = kw.get("idt", wp.float32(0.0))
+        if kernel is _constraint_position_iterate_singleworld_kernel:
+            wp.launch(
+                kernel,
+                dim=self._constraint_capacity,
+                inputs=[
+                    self._contact_cols,
+                    self.bodies,
+                    self._partitioner.element_ids_by_color,
+                    self._partitioner.color_starts,
+                    self._partitioner.num_colors,
+                    self._partitioner.color_cursor,
+                    self._contact_container,
+                    wp.int32(self.num_joints),
+                ],
+                device=self.device,
+            )
+            return
+        wp.launch(
+            kernel,
+            dim=self._constraint_capacity,
+            inputs=[
+                self.constraints,
+                self._contact_cols,
+                self.bodies,
+                idt,
+                self._partitioner.element_ids_by_color,
+                self._partitioner.color_starts,
+                self._partitioner.num_colors,
+                self._partitioner.color_cursor,
+                self._contact_container,
+                contact_views,
+                wp.int32(self.num_joints),
+            ],
+            device=self.device,
+        )
+
+    def _solve_main_singleworld(self) -> None:
+        """Single-world prepare + main PGS iterate path.
+
+        One ``wp.capture_while`` for prepare, then ``solver_iterations``
+        more capture-while loops for the bias-on iterate. Each launch
+        uses the entire device on one colour, then the cursor advances.
+        """
+        if self._constraint_capacity == 0:
+            return
+        idt = wp.float32(1.0 / self.substep_dt)
+
+        # Prepare-for-iteration sweep.
+        self._partitioner.begin_sweep()
+        wp.capture_while(
+            self._partitioner.color_cursor,
+            self._capture_singleworld_sweep,
+            kernel=_constraint_prepare_singleworld_kernel,
+            idt=idt,
+        )
+
+        # Main iterate sweeps (bias ON).
+        for _ in range(self.solver_iterations):
+            self._partitioner.begin_sweep()
+            wp.capture_while(
+                self._partitioner.color_cursor,
+                self._capture_singleworld_sweep,
+                kernel=_constraint_iterate_singleworld_kernel,
+                idt=idt,
+            )
+
+    def _position_iterate_singleworld(self) -> None:
+        """Single-world XPBD contact tangent-drift sweeps."""
+        if self._constraint_capacity == 0 or self.position_iterations <= 0:
+            return
+        for _ in range(self.position_iterations):
+            self._partitioner.begin_sweep()
+            wp.capture_while(
+                self._partitioner.color_cursor,
+                self._capture_singleworld_sweep,
+                kernel=_constraint_position_iterate_singleworld_kernel,
+            )
+
+    def _relax_velocities_singleworld(self) -> None:
+        """Single-world TGS-soft relax sweeps (bias OFF)."""
+        if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
+            return
+        idt = wp.float32(1.0 / self.substep_dt)
+        for _ in range(self.velocity_iterations):
+            self._partitioner.begin_sweep()
+            wp.capture_while(
+                self._partitioner.color_cursor,
+                self._capture_singleworld_sweep,
+                kernel=_constraint_relax_singleworld_kernel,
+                idt=idt,
+            )
 
     def _fast_tail_block_dim(self) -> int:
         """Resolve the fast-tail block size for this solver instance.

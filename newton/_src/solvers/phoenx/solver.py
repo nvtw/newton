@@ -157,6 +157,7 @@ class SolverPhoenX(SolverBase):
         velocity_iterations: int = 1,
         position_iterations: int = 0,
         default_friction: float = 0.5,
+        step_layout: str = "multi_world",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -172,6 +173,14 @@ class SolverPhoenX(SolverBase):
                 substep.
             default_friction: Fallback friction when the Contacts
                 buffer carries no per-contact or per-shape material.
+            step_layout: Solver dispatch strategy.
+                * ``"multi_world"`` (default): per-world fast-tail
+                  kernels with one warp per world. Scales to thousands
+                  of small worlds.
+                * ``"single_world"``: per-colour grid launches via
+                  ``wp.capture_while`` over the global JP colouring.
+                  Uses every SM on each colour; wins for one (or a
+                  few) very big world(s).
         """
         super().__init__(model)
 
@@ -301,6 +310,7 @@ class SolverPhoenX(SolverBase):
             num_joints=num_joints,
             default_friction=float(default_friction),
             num_worlds=num_worlds,
+            step_layout=step_layout,
             device=self.device,
         )
 

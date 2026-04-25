@@ -56,9 +56,13 @@ __all__ = [
     "_choose_fast_tail_worlds_per_block",
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
+    "_constraint_iterate_singleworld_kernel",
     "_constraint_position_iterate_fast_tail_kernel",
+    "_constraint_position_iterate_singleworld_kernel",
     "_constraint_prepare_plus_iterate_fast_tail_kernel",
+    "_constraint_prepare_singleworld_kernel",
     "_constraint_relax_fast_tail_kernel",
+    "_constraint_relax_singleworld_kernel",
     "_constraints_to_elements_kernel",
     "_count_elements_per_world_kernel",
     "_integrate_velocities_kernel",
@@ -1160,3 +1164,173 @@ def _phoenx_clear_forces_kernel(
     i = wp.tid()
     bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
     bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Single-world step path: per-colour grid launches via ``wp.capture_while``
+# ---------------------------------------------------------------------------
+#
+# These kernels treat the partitioner's GLOBAL CSR (``element_ids_by_color``
+# / ``color_starts`` / ``num_colors``) as a single coloured graph and
+# drive the colour walk via a host-side ``wp.capture_while`` loop on
+# ``color_cursor``. One grid launch per colour; each launch uses the
+# whole device. Wins when the scene has one big world (or a small number
+# of large worlds) -- the multi-world fast-tail kernels pin one warp per
+# world and leave most SMs idle in that regime.
+#
+# Usage from the host:
+#
+#     partitioner.begin_sweep()
+#     wp.capture_while(
+#         partitioner.color_cursor,
+#         lambda: wp.launch(_constraint_prepare_singleworld_kernel,
+#                           dim=constraint_capacity, ...),
+#     )
+#
+# The kernel decrements ``color_cursor`` by 1 at the end (thread 0
+# only); when it reaches 0 the capture-while loop exits.
+
+
+@wp.func
+def _singleworld_color_range(
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+):
+    """Decode the current colour's cid range from the cursor.
+
+    Returns ``(start, count, cursor)``: ``start`` is the index into
+    ``element_ids_by_color`` of the colour's first cid; ``count`` is
+    how many cids belong to it; ``cursor`` is the snapshot of
+    ``color_cursor[0]`` for the cursor-decrement at end of kernel.
+    """
+    cursor = color_cursor[0]
+    n_colors = num_colors[0]
+    c = n_colors - cursor
+    start = color_starts[c]
+    end = color_starts[c + 1]
+    count = end - start
+    return start, count, cursor
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_prepare_singleworld_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+):
+    """Prepare-for-iteration dispatcher, single-world / one-colour-per-launch.
+
+    Threads beyond the colour's cid count early-exit; thread 0
+    decrements ``color_cursor`` by 1 so the host-side
+    :func:`wp.capture_while` exits when every colour has been swept.
+    """
+    tid = wp.tid()
+    start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
+
+    if tid < count:
+        cid = element_ids_by_color[start + tid]
+        if cid < num_joints:
+            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+        else:
+            contact_prepare_for_iteration(
+                contact_cols, cid - num_joints, bodies, idt, cc, contacts
+            )
+
+    if tid == 0:
+        color_cursor[0] = cursor - 1
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_iterate_singleworld_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+):
+    """Main-solve PGS dispatcher (bias ON), one colour per launch.
+
+    Same launch contract as :func:`_constraint_prepare_singleworld_kernel`;
+    this is the iterate counterpart with ``use_bias=True``.
+    """
+    tid = wp.tid()
+    start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
+
+    if tid < count:
+        cid = element_ids_by_color[start + tid]
+        if cid < num_joints:
+            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
+        else:
+            contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, True)
+
+    if tid == 0:
+        color_cursor[0] = cursor - 1
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_relax_singleworld_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+):
+    """Relax-pass dispatcher (bias OFF), one colour per launch."""
+    tid = wp.tid()
+    start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
+
+    if tid < count:
+        cid = element_ids_by_color[start + tid]
+        if cid < num_joints:
+            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
+        else:
+            contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False)
+
+    if tid == 0:
+        color_cursor[0] = cursor - 1
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_position_iterate_singleworld_kernel(
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    num_joints: wp.int32,
+):
+    """XPBD contact tangent-drift dispatcher, one colour per launch.
+    Joints are skipped (no XPBD path for joint constraints)."""
+    tid = wp.tid()
+    start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
+
+    if tid < count:
+        cid = element_ids_by_color[start + tid]
+        if cid >= num_joints:
+            contact_position_iterate(contact_cols, cid - num_joints, bodies, cc)
+
+    if tid == 0:
+        color_cursor[0] = cursor - 1
