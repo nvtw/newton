@@ -26,7 +26,6 @@ import warp as wp
 
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
-    CONSTRAINT_TYPE_CONTACT,
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
     ConstraintBodies,
@@ -100,8 +99,6 @@ __all__ = [
     "contact_per_contact_wrench_kernel",
     "contact_per_k_error_at",
     "contact_per_k_wrench_at",
-    "contact_position_iterate",
-    "contact_position_iterate_at",
     "contact_prepare_for_iteration",
     "contact_prepare_for_iteration_at",
     "contact_set_body1",
@@ -943,130 +940,23 @@ def contact_iterate_at(
 
         imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
         v1, v2, w1, w2 = apply_pair_velocity_impulse(
-            v1, v2, w1, w2,
-            inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
-            r1, r2, imp,
+            v1,
+            v2,
+            w1,
+            w2,
+            inv_mass1,
+            inv_mass2,
+            inv_inertia1,
+            inv_inertia2,
+            r1,
+            r2,
+            imp,
         )
 
     bodies.velocity[b1] = v1
     bodies.velocity[b2] = v2
     bodies.angular_velocity[b1] = w1
     bodies.angular_velocity[b2] = w2
-
-
-@wp.func
-def contact_position_iterate_at(
-    constraints: ContactColumnContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    body_pair: ConstraintBodies,
-    cc: ContactContainer,
-):
-    """XPBD-style position iteration for contact tangent drift.
-
-    One sweep of position-level PGS over every contact of the column's
-    shape pair. Modifies body positions / orientations (not velocities)
-    so static-friction drift converges to zero within the iteration
-    budget, bypassing the Nyquist-rate ceiling that velocity-level
-    Baumgarte hits.
-
-    Sliding contacts (drift > slip_threshold) are gated out and handled
-    by the velocity friction path; resting-velocity contacts are the
-    only ones this kernel touches. Per-body deltas accumulate across
-    contacts of the column and apply once at the end.
-    """
-
-    b1 = body_pair.b1
-    b2 = body_pair.b2
-
-    contact_first = contact_get_contact_first(constraints, cid)
-    contact_count = contact_get_contact_count(constraints, cid)
-    if contact_count == 0:
-        return
-
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    if inv_mass1 + inv_mass2 < wp.float32(1.0e-12):
-        return
-
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
-    position1 = bodies.position[b1]
-    position2 = bodies.position[b2]
-    orientation1 = bodies.orientation[b1]
-    orientation2 = bodies.orientation[b2]
-    body_com1 = bodies.body_com[b1]
-    body_com2 = bodies.body_com[b2]
-    v1 = bodies.velocity[b1]
-    v2 = bodies.velocity[b2]
-    w1 = bodies.angular_velocity[b1]
-    w2 = bodies.angular_velocity[b2]
-
-    slip_threshold = wp.float32(0.002)
-    rest_vel_thresh = wp.float32(0.005)
-
-    d_pos1 = wp.vec3f(0.0, 0.0, 0.0)
-    d_pos2 = wp.vec3f(0.0, 0.0, 0.0)
-    d_omega1 = wp.vec3f(0.0, 0.0, 0.0)
-    d_omega2 = wp.vec3f(0.0, 0.0, 0.0)
-
-    for i in range(contact_count):
-        k = contact_first + i
-
-        n = cc_get_normal(cc, k)
-        t1_dir = cc_get_tangent1(cc, k)
-        t2_dir = wp.cross(n, t1_dir)
-        local_p0 = cc_get_local_p0(cc, k)
-        local_p1 = cc_get_local_p1(cc, k)
-
-        # ``local_p`` is in body-origin frame; ``position`` is the
-        # COM. Subtract ``body_com`` before rotating so the lever arm
-        # is expressed from the COM (see
-        # :func:`contact_prepare_for_iteration_at` for the convention
-        # rationale).
-        p1_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1)
-        p2_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2)
-        r1 = p1_world - position1
-        r2 = p2_world - position2
-
-        p_diff = p2_world - p1_world
-        drift_t1 = wp.dot(p_diff, t1_dir)
-        drift_t2 = wp.dot(p_diff, t2_dir)
-
-        drift_sq = drift_t1 * drift_t1 + drift_t2 * drift_t2
-        if drift_sq > slip_threshold * slip_threshold:
-            continue
-
-        vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
-        vel_t1 = wp.dot(vel_rel, t1_dir)
-        vel_t2 = wp.dot(vel_rel, t2_dir)
-        if vel_t1 * vel_t1 + vel_t2 * vel_t2 > rest_vel_thresh * rest_vel_thresh:
-            continue
-
-        eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-        eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-
-        d_lam_t1 = -drift_t1 * eff_t1
-        d_lam_t2 = -drift_t2 * eff_t2
-        pos_imp = d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
-
-        d_pos1, d_pos2, d_omega1, d_omega2 = apply_pair_velocity_impulse(
-            d_pos1, d_pos2, d_omega1, d_omega2,
-            inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
-            r1, r2, pos_imp,
-        )
-
-    bodies.position[b1] = position1 + d_pos1
-    bodies.position[b2] = position2 + d_pos2
-
-    dq1 = wp.quat(d_omega1[0], d_omega1[1], d_omega1[2], wp.float32(0.0))
-    new_q1 = orientation1 + wp.float32(0.5) * (dq1 * orientation1)
-    bodies.orientation[b1] = wp.normalize(new_q1)
-
-    dq2 = wp.quat(d_omega2[0], d_omega2[1], d_omega2[2], wp.float32(0.0))
-    new_q2 = orientation2 + wp.float32(0.5) * (dq2 * orientation2)
-    bodies.orientation[b2] = wp.normalize(new_q2)
 
 
 # ---------------------------------------------------------------------------
@@ -1246,9 +1136,17 @@ def contact_iterate_at_multi(
 
             imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
             v1, v2, w1, w2 = apply_pair_velocity_impulse(
-                v1, v2, w1, w2,
-                inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
-                r1, r2, imp,
+                v1,
+                v2,
+                w1,
+                w2,
+                inv_mass1,
+                inv_mass2,
+                inv_inertia1,
+                inv_inertia2,
+                r1,
+                r2,
+                imp,
             )
         it += 1
 
@@ -1272,22 +1170,7 @@ def contact_iterate_multi(
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at_multi(
-        constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias, num_sweeps
-    )
-
-
-@wp.func
-def contact_position_iterate(
-    constraints: ContactColumnContainer,
-    cid: wp.int32,
-    bodies: BodyContainer,
-    cc: ContactContainer,
-):
-    b1 = contact_get_body1(constraints, cid)
-    b2 = contact_get_body2(constraints, cid)
-    body_pair = constraint_bodies_make(b1, b2)
-    contact_position_iterate_at(constraints, cid, 0, bodies, body_pair, cc)
+    contact_iterate_at_multi(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias, num_sweeps)
 
 
 # ---------------------------------------------------------------------------

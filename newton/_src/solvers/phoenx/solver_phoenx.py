@@ -73,8 +73,6 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
     _constraint_iterate_singleworld_kernel,
-    _constraint_position_iterate_fast_tail_kernel,
-    _constraint_position_iterate_singleworld_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
     _constraint_prepare_singleworld_kernel,
     _constraint_relax_fast_tail_kernel,
@@ -154,7 +152,6 @@ class PhoenXWorld:
         substeps: int = 1,
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
-        position_iterations: int = 0,
         gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         max_contact_columns: int = 0,
         rigid_contact_max: int = 0,
@@ -186,8 +183,6 @@ class PhoenXWorld:
             velocity_iterations: TGS-soft relax sweeps per substep
                 (bias=False). Defaults to ``1``; ``0`` recovers raw
                 PhoenX but accumulates Baumgarte drift on tall stacks.
-            position_iterations: Extra XPBD contact tangent-drift
-                sweeps per substep. Set to ``0`` for straight PhoenX.
             gravity: Constant world-space gravity [m/s^2]. A 3-tuple
                 broadcasts; an iterable of 3-tuples gives each world
                 its own vector.
@@ -272,7 +267,6 @@ class PhoenXWorld:
         self.velocity_iterations = int(velocity_iterations)
         if self.velocity_iterations < 0:
             raise ValueError(f"velocity_iterations must be >= 0 (got {self.velocity_iterations})")
-        self.position_iterations = int(position_iterations)
 
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
@@ -846,12 +840,10 @@ class PhoenXWorld:
             if self.step_layout == "single_world":
                 self._solve_main_singleworld()
                 self._integrate_positions()
-                self._position_iterate_singleworld()
                 self._relax_velocities_singleworld()
             else:
                 self._solve_main()
                 self._integrate_positions()
-                self._position_iterate()
                 self._relax_velocities()
             alpha = float(k + 1) * inv_n
             self._kinematic_interpolate_substep(alpha)
@@ -1163,31 +1155,6 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _position_iterate(self) -> None:
-        """XPBD-style contact tangent-drift sweeps. Contacts-only;
-        joints have no XPBD path."""
-        if self._constraint_capacity == 0 or self.position_iterations <= 0:
-            return
-        wp.launch(
-            _constraint_position_iterate_fast_tail_kernel,
-            dim=self._fast_tail_launch_dim(),
-            block_dim=self._fast_tail_block_dim(),
-            inputs=[
-                self._contact_cols,
-                self.bodies,
-                self._world_element_ids_by_color,
-                self._world_color_starts,
-                self._world_csr_offsets,
-                self._world_num_colors,
-                self._contact_container,
-                wp.int32(self.position_iterations),
-                wp.int32(self.num_worlds),
-                wp.int32(self.num_joints),
-                self._tpw_choice,
-            ],
-            device=self.device,
-        )
-
     def _relax_velocities(self) -> None:
         """TGS-soft relax sweeps with bias OFF. Removes the drift
         velocity the positional bias injected during the main solve."""
@@ -1214,23 +1181,6 @@ class PhoenXWorld:
         """
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
-        if kernel is _constraint_position_iterate_singleworld_kernel:
-            wp.launch(
-                kernel,
-                dim=self._constraint_capacity,
-                inputs=[
-                    self._contact_cols,
-                    self.bodies,
-                    self._partitioner.element_ids_by_color,
-                    self._partitioner.color_starts,
-                    self._partitioner.num_colors,
-                    self._partitioner.color_cursor,
-                    self._contact_container,
-                    wp.int32(self.num_joints),
-                ],
-                device=self.device,
-            )
-            return
         wp.launch(
             kernel,
             dim=self._constraint_capacity,
@@ -1278,18 +1228,6 @@ class PhoenXWorld:
                 self._capture_singleworld_sweep,
                 kernel=_constraint_iterate_singleworld_kernel,
                 idt=idt,
-            )
-
-    def _position_iterate_singleworld(self) -> None:
-        """Single-world XPBD contact tangent-drift sweeps."""
-        if self._constraint_capacity == 0 or self.position_iterations <= 0:
-            return
-        for _ in range(self.position_iterations):
-            self._partitioner.begin_sweep()
-            wp.capture_while(
-                self._partitioner.color_cursor,
-                self._capture_singleworld_sweep,
-                kernel=_constraint_position_iterate_singleworld_kernel,
             )
 
     def _relax_velocities_singleworld(self) -> None:

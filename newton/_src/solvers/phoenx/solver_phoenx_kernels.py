@@ -32,7 +32,6 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_body2,
     contact_iterate,
     contact_iterate_multi,
-    contact_position_iterate,
     contact_prepare_for_iteration,
     contact_world_error,
     contact_world_wrench,
@@ -57,8 +56,6 @@ __all__ = [
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
     "_constraint_iterate_singleworld_kernel",
-    "_constraint_position_iterate_fast_tail_kernel",
-    "_constraint_position_iterate_singleworld_kernel",
     "_constraint_prepare_plus_iterate_fast_tail_kernel",
     "_constraint_prepare_singleworld_kernel",
     "_constraint_relax_fast_tail_kernel",
@@ -644,63 +641,6 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _constraint_position_iterate_fast_tail_kernel(
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    world_element_ids_by_color: wp.array[wp.int32],
-    world_color_starts: wp.array2d[wp.int32],
-    world_csr_offsets: wp.array[wp.int32],
-    world_num_colors: wp.array[wp.int32],
-    cc: ContactContainer,
-    num_iterations: wp.int32,
-    num_worlds: wp.int32,
-    num_joints: wp.int32,
-    tpw_buf: wp.array[wp.int32],
-):
-    """XPBD position-iteration dispatcher for contact tangent drift.
-
-    Runs between ``integrate_velocities`` and ``relax_velocities``.
-    Each per-slot position iterate is gated by the slip threshold so
-    sliding pairs are skipped; the Coulomb-clamped velocity friction
-    handles them.
-
-    See :func:`_constraint_prepare_plus_iterate_fast_tail_kernel` for
-    the ``tpw_buf`` adaptive-launch convention.
-    """
-    tid = wp.tid()
-    tpw = tpw_buf[0]
-    local_tid = tid % tpw
-    world_id = tid / tpw
-    if world_id >= num_worlds:
-        return
-
-    n_colors = world_num_colors[world_id]
-    world_base = world_csr_offsets[world_id]
-
-    it = wp.int32(0)
-    while it < num_iterations:
-        c = wp.int32(0)
-        while c < n_colors:
-            start = world_base + world_color_starts[world_id, c]
-            end = world_base + world_color_starts[world_id, c + 1]
-            count = end - start
-
-            base = local_tid
-            while base < count:
-                cid = world_element_ids_by_color[start + base]
-                # Only contact cids participate in XPBD position drift;
-                # joint cids at ``cid < num_joints`` are skipped.
-                if cid >= num_joints:
-                    contact_position_iterate(contact_cols, cid - num_joints, bodies, cc)
-                base += tpw
-
-            _sync_warp()
-            c += 1
-
-        it += 1
-
-
-@wp.kernel(enable_backward=False)
 def _constraint_relax_fast_tail_kernel(
     constraints: ConstraintContainer,
     contact_cols: ContactColumnContainer,
@@ -1262,31 +1202,6 @@ def _constraint_relax_singleworld_kernel(
             actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
         else:
             contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False)
-
-    if tid == 0:
-        color_cursor[0] = cursor - 1
-
-
-@wp.kernel(enable_backward=False)
-def _constraint_position_iterate_singleworld_kernel(
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
-    color_cursor: wp.array[wp.int32],
-    cc: ContactContainer,
-    num_joints: wp.int32,
-):
-    """XPBD contact tangent-drift dispatcher, one colour per launch.
-    Joints are skipped (no XPBD path for joint constraints)."""
-    tid = wp.tid()
-    start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
-
-    if tid < count:
-        cid = element_ids_by_color[start + tid]
-        if cid >= num_joints:
-            contact_position_iterate(contact_cols, cid - num_joints, bodies, cc)
 
     if tid == 0:
         color_cursor[0] = cursor - 1

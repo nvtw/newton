@@ -153,7 +153,6 @@ class SolverPhoenX(SolverBase):
         substeps: int = 1,
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
-        position_iterations: int = 0,
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
@@ -168,8 +167,6 @@ class SolverPhoenX(SolverBase):
             substeps: PhoenX internal substeps per :meth:`step` call.
             solver_iterations: PGS iterations per substep.
             velocity_iterations: TGS-soft relax sweeps per substep.
-            position_iterations: XPBD contact tangent-drift sweeps per
-                substep.
             default_friction: Fallback friction when the Contacts
                 buffer carries no per-contact or per-shape material.
             step_layout: Solver dispatch strategy.
@@ -312,7 +309,6 @@ class SolverPhoenX(SolverBase):
             substeps=int(substeps),
             solver_iterations=int(solver_iterations),
             velocity_iterations=int(velocity_iterations),
-            position_iterations=int(position_iterations),
             gravity=gravity_arg,
             max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,

@@ -31,13 +31,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _STRAGGLER_BLOCK_DIM,
     _choose_fast_tail_worlds_per_block,
-    _constraint_position_iterate_fast_tail_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
     _constraint_relax_fast_tail_kernel,
 )
@@ -46,7 +44,6 @@ from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums
 _MAIN_SOLVE_KERNELS = {
     _constraint_prepare_plus_iterate_fast_tail_kernel.key,
     _constraint_relax_fast_tail_kernel.key,
-    _constraint_position_iterate_fast_tail_kernel.key,
 }
 
 
@@ -65,11 +62,7 @@ def _collect_launches(world, *, step_dt: float = 1.0 / 60.0) -> list[dict]:
         # First positional is the kernel; ``dim`` / ``block_dim``
         # can be either positional or keyword.
         kernel = args[0] if args else kwargs.get("kernel")
-        dim = (
-            args[1]
-            if len(args) > 1 and "dim" not in kwargs
-            else kwargs.get("dim")
-        )
+        dim = args[1] if len(args) > 1 and "dim" not in kwargs else kwargs.get("dim")
         block_dim = kwargs.get("block_dim")
         if block_dim is None:
             # Block dim is also positional in some signatures; pull
@@ -79,48 +72,33 @@ def _collect_launches(world, *, step_dt: float = 1.0 / 60.0) -> list[dict]:
         captured.append(
             {
                 "kernel": getattr(kernel, "key", str(kernel)),
-                "dim": (
-                    int(dim)
-                    if not isinstance(dim, (list, tuple))
-                    else tuple(int(d) for d in dim)
-                ),
+                "dim": (int(dim) if not isinstance(dim, (list, tuple)) else tuple(int(d) for d in dim)),
                 "block_dim": int(block_dim),
             }
         )
         return real_launch(*args, **kwargs)
 
-    with patch("warp.launch", spy), patch(
-        "newton._src.solvers.phoenx.solver_phoenx.wp.launch", spy
-    ):
+    with patch("warp.launch", spy), patch("newton._src.solvers.phoenx.solver_phoenx.wp.launch", spy):
         world.step(dt=step_dt, contacts=None, shape_body=None)
     return captured
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX launch-shape tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX launch-shape tests require CUDA")
 class TestPhoenXOneBlockPerWorld(unittest.TestCase):
     """One CUDA block per world across every main-solve kernel."""
 
-    def _assert_one_warp_per_world(
-        self, captured: list[dict], num_worlds: int
-    ) -> None:
+    def _assert_one_warp_per_world(self, captured: list[dict], num_worlds: int) -> None:
         # Filter to just the kernels this invariant covers.
         main = [c for c in captured if c["kernel"] in _MAIN_SOLVE_KERNELS]
         self.assertGreater(
             len(main),
             0,
-            msg=(
-                "did not observe any main-solve kernel launch during "
-                "step() -- test plumbing broken"
-            ),
+            msg=("did not observe any main-solve kernel launch during step() -- test plumbing broken"),
         )
         wpb = _choose_fast_tail_worlds_per_block(num_worlds)
         expected_block_dim = int(_STRAGGLER_BLOCK_DIM) * wpb
         raw_dim = num_worlds * int(_STRAGGLER_BLOCK_DIM)
-        expected_dim = (
-            (raw_dim + expected_block_dim - 1) // expected_block_dim
-        ) * expected_block_dim
+        expected_dim = ((raw_dim + expected_block_dim - 1) // expected_block_dim) * expected_block_dim
         for c in main:
             self.assertEqual(
                 c["block_dim"],
@@ -162,17 +140,15 @@ class TestPhoenXOneBlockPerWorld(unittest.TestCase):
         self._assert_one_warp_per_world(captured, num_worlds=64)
 
     def test_all_main_kernels_observed(self) -> None:
-        """Prepare, iterate, relax, and position-iterate must all
-        appear. Missing one would mean a kernel got renamed or the
-        dispatcher skipped it under the default configuration."""
+        """Fused prepare+iterate and relax must both appear under the
+        default configuration. Missing one would mean a kernel got
+        renamed or the dispatcher skipped it."""
         world, _ = _build_n_pendulums(num_worlds=4)
         captured = _collect_launches(world)
         kernels_seen = {c["kernel"] for c in captured}
         # Prepare + iterate always run when there are active
         # constraints. Relax runs when velocity_iterations > 0 (our
-        # test harness uses velocity_iterations=1). Position iterate
-        # runs only when position_iterations > 0 (default 0), so
-        # we don't require it here.
+        # test harness uses velocity_iterations=1).
         self.assertIn(
             _constraint_prepare_plus_iterate_fast_tail_kernel.key,
             kernels_seen,
@@ -181,10 +157,7 @@ class TestPhoenXOneBlockPerWorld(unittest.TestCase):
         self.assertIn(
             _constraint_relax_fast_tail_kernel.key,
             kernels_seen,
-            msg=(
-                "relax kernel did not fire -- "
-                "velocity_iterations=1 should always run one relax pass"
-            ),
+            msg=("relax kernel did not fire -- velocity_iterations=1 should always run one relax pass"),
         )
 
 
