@@ -52,6 +52,18 @@ from newton._src.solvers.phoenx.picking import (
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
+# ---- Step layout toggle ----
+# Flip this to switch between the two PhoenX dispatch strategies:
+#   ``False`` (default) -> ``"multi_world"``: per-world fast-tail
+#       kernels (one warp per world). Best when you replicate this
+#       tower across many sub-worlds.
+#   ``True``           -> ``"single_world"``: per-colour grid
+#       launches via ``wp.capture_while``. Wins on one big world
+#       with thousands of contacts -- which is exactly what this
+#       40-layer tower is.
+USE_BIG_WORLD_MODE: bool = True
+STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
+
 # ---- Tower geometry (matches ``Common.BuildTower``) ----
 # The C# source scales every dimension by ``scaling = 0.1 / 3``. Here
 # we unscale to Newton's natural SI units (PhoenX's world happens to
@@ -299,6 +311,7 @@ class Example:
             max_contact_columns=max_contact_columns,
             rigid_contact_max=rigid_contact_max,
             num_shapes=int(self.model.shape_count),
+            step_layout=STEP_LAYOUT,
             device=self.device,
         )
 
