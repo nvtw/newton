@@ -135,6 +135,54 @@ def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]
     return wp.array(arr_np, dtype=wp.vec3f, device=device)
 
 
+#: Block dim used by the single-world PGS sweep kernels.
+#: 256 threads / block matches Warp's default and NarrowPhase's choice;
+#: the kernels are register-heavy (~168 registers/thread) so a smaller
+#: block would not improve occupancy further.
+_SINGLEWORLD_BLOCK_DIM: int = 256
+
+
+def _singleworld_total_threads(constraint_capacity: int, device) -> int:
+    """Persistent grid size for the single-world PGS sweep kernels.
+
+    The previous one-thread-per-cid sizing launched ~900K-thread grids
+    on Kapla-scale scenes where any given colour activates only a few
+    hundred cids, burning 84% of thread slots on early-exit reads.
+    Mirrors the sizing strategy used by
+    :class:`newton._src.geometry.narrow_phase.NarrowPhase`: pick a
+    block count that balances "saturate the device" against "don't
+    overprovision past the workload", then hold that grid size across
+    every colour launch so the CUDA graph capture stays stable.
+
+    Args:
+        constraint_capacity: Upper bound on active cids per colour
+            (``num_joints + max_contact_columns``). The grid never
+            needs more threads than this because a colour's active
+            count is bounded by the capacity.
+        device: Warp device the kernel will launch on. Only
+            ``sm_count`` is read (CPU fallback picks a flat cap).
+
+    Returns:
+        The persistent grid size in threads, always a multiple of
+        :data:`_SINGLEWORLD_BLOCK_DIM`.
+    """
+    block_dim = _SINGLEWORLD_BLOCK_DIM
+    device_obj = wp.get_device(device)
+    if device_obj.is_cuda:
+        # 4 blocks/SM hits good occupancy without overprovisioning.
+        max_blocks_limit = device_obj.sm_count * 4
+    else:
+        max_blocks_limit = 256
+    # ``min_blocks = 32`` gives 8K threads minimum -- enough to keep
+    # every SM warm on small GPUs without stranding work on large
+    # ones. The ``capacity_blocks`` cap prevents a 900K-cid capacity
+    # from demanding more threads than there are cids.
+    min_blocks = 32
+    capacity_blocks = (max(1, int(constraint_capacity)) + block_dim - 1) // block_dim
+    num_blocks = max(min_blocks, min(capacity_blocks, max_blocks_limit))
+    return block_dim * num_blocks
+
+
 class PhoenXWorld:
     """PhoenX solver driver. Owns a :class:`BodyContainer`, a
     :class:`ConstraintContainer`, and per-step contact ingest /
@@ -314,6 +362,14 @@ class PhoenXWorld:
 
         # Joint cids at ``[0, num_joints)``; contact cids follow.
         self._constraint_capacity: int = max(1, self.num_joints + self.max_contact_columns)
+
+        # Persistent grid size for the single-world PGS sweep kernels.
+        # Fixed at construction so every colour launch uses the same
+        # ``dim`` -- required to keep the outer CUDA graph capture
+        # stable across varying per-colour active counts.
+        self._singleworld_total_threads: int = _singleworld_total_threads(
+            self._constraint_capacity, self.device
+        )
 
         # ----- Partitioner + per-world CSR buffers -----
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
@@ -1234,14 +1290,18 @@ class PhoenXWorld:
     def _capture_singleworld_sweep(self, kernel, **kw) -> None:
         """``wp.capture_while`` body: launch ``kernel`` for one colour.
 
-        Decrements ``color_cursor`` inside the kernel; the capture-while
-        exits when the cursor hits 0.
+        Uses a persistent fixed-size grid (``_singleworld_total_threads``)
+        with an internal grid-stride loop over the colour's active cid
+        range -- same strategy as
+        :class:`newton._src.geometry.narrow_phase.NarrowPhase`. Thread
+        0 decrements ``color_cursor``; the capture-while exits when
+        the cursor hits 0.
         """
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
         wp.launch(
             kernel,
-            dim=self._constraint_capacity,
+            dim=self._singleworld_total_threads,
             inputs=[
                 self.constraints,
                 self._contact_cols,
@@ -1254,7 +1314,9 @@ class PhoenXWorld:
                 self._contact_container,
                 contact_views,
                 wp.int32(self.num_joints),
+                wp.int32(self._singleworld_total_threads),
             ],
+            block_dim=_SINGLEWORLD_BLOCK_DIM,
             device=self.device,
         )
 

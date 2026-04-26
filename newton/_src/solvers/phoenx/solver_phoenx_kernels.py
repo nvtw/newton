@@ -1089,10 +1089,21 @@ def _phoenx_clear_forces_kernel(
 # These kernels treat the partitioner's GLOBAL CSR (``element_ids_by_color``
 # / ``color_starts`` / ``num_colors``) as a single coloured graph and
 # drive the colour walk via a host-side ``wp.capture_while`` loop on
-# ``color_cursor``. One grid launch per colour; each launch uses the
-# whole device. Wins when the scene has one big world (or a small number
-# of large worlds) -- the multi-world fast-tail kernels pin one warp per
-# world and leave most SMs idle in that regime.
+# ``color_cursor``. One grid launch per colour; each launch is a
+# *persistent* grid of fixed size and uses an internal grid-stride loop
+# to cover the current colour's active cid range. Wins when the scene
+# has one big world (or a small number of large worlds) -- the
+# multi-world fast-tail kernels pin one warp per world and leave most
+# SMs idle in that regime.
+#
+# The launch dim is sized once per :class:`PhoenXWorld` at construction
+# (see :attr:`PhoenXWorld._singleworld_total_threads`) to a reasonable
+# multiple of the device's SM count, following the same strategy as
+# :class:`newton._src.geometry.narrow_phase.NarrowPhase`. Launching one
+# thread per ``constraint_capacity`` element used to produce ~900K-thread
+# grids on Kapla-scale scenes where a single colour has only a few
+# hundred active cids -- massive overprovisioning that tanked occupancy
+# (168 reg/thread * 256-wide blocks at 16% theoretical occupancy).
 #
 # Usage from the host:
 #
@@ -1100,7 +1111,8 @@ def _phoenx_clear_forces_kernel(
 #     wp.capture_while(
 #         partitioner.color_cursor,
 #         lambda: wp.launch(_constraint_prepare_singleworld_kernel,
-#                           dim=constraint_capacity, ...),
+#                           dim=total_num_threads, ...,
+#                           total_num_threads=total_num_threads),
 #     )
 #
 # The kernel decrements ``color_cursor`` by 1 at the end (thread 0
@@ -1142,18 +1154,20 @@ def _constraint_prepare_singleworld_kernel(
     cc: ContactContainer,
     contacts: ContactViews,
     num_joints: wp.int32,
+    total_num_threads: wp.int32,
 ):
     """Prepare-for-iteration dispatcher, single-world / one-colour-per-launch.
 
-    Threads beyond the colour's cid count early-exit; thread 0
+    Launched as a persistent grid of ``total_num_threads`` threads that
+    grid-strides over the current colour's active cid range. Thread 0
     decrements ``color_cursor`` by 1 so the host-side
     :func:`wp.capture_while` exits when every colour has been swept.
     """
     tid = wp.tid()
     start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
 
-    if tid < count:
-        cid = element_ids_by_color[start + tid]
+    for t in range(tid, count, total_num_threads):
+        cid = element_ids_by_color[start + t]
         if cid < num_joints:
             actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
         else:
@@ -1176,6 +1190,7 @@ def _constraint_iterate_singleworld_kernel(
     cc: ContactContainer,
     contacts: ContactViews,
     num_joints: wp.int32,
+    total_num_threads: wp.int32,
 ):
     """Main-solve PGS dispatcher (bias ON), one colour per launch.
 
@@ -1185,8 +1200,8 @@ def _constraint_iterate_singleworld_kernel(
     tid = wp.tid()
     start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
 
-    if tid < count:
-        cid = element_ids_by_color[start + tid]
+    for t in range(tid, count, total_num_threads):
+        cid = element_ids_by_color[start + t]
         if cid < num_joints:
             actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
         else:
@@ -1209,13 +1224,14 @@ def _constraint_relax_singleworld_kernel(
     cc: ContactContainer,
     contacts: ContactViews,
     num_joints: wp.int32,
+    total_num_threads: wp.int32,
 ):
     """Relax-pass dispatcher (bias OFF), one colour per launch."""
     tid = wp.tid()
     start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
 
-    if tid < count:
-        cid = element_ids_by_color[start + tid]
+    for t in range(tid, count, total_num_threads):
+        cid = element_ids_by_color[start + t]
         if cid < num_joints:
             actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
         else:

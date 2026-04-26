@@ -56,6 +56,6 @@ from typing import Literal
 #: :class:`newton.CollisionPipeline`.  Change this single constant to
 #: sweep every in-tree Jitter scene; see the module docstring above for
 #: what each mode does and why ``"sticky"`` is the default.
-PHOENX_CONTACT_MATCHING: Literal["sticky", "latest"] = "sticky"
+PHOENX_CONTACT_MATCHING: Literal["sticky", "latest"] = "latest"
 
 __all__ = ["PHOENX_CONTACT_MATCHING"]
