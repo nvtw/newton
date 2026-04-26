@@ -97,6 +97,16 @@ class Example:
     :func:`wp.capture_launch` every frame.
     """
 
+    # First ``WARMUP_FRAMES`` frames run with global linear + angular
+    # damping pinned at 1.0 -- every dynamic body's velocity is zeroed
+    # at the end of every substep. The C# import positions occasionally
+    # have a few millimetre overlaps where adjacent planks meet at a
+    # right angle; without the warm-up those overlaps inject impulses
+    # that lift the tower off the ground in the first frame and cascade
+    # into a divergence. After the warm-up we set both damping factors
+    # back to 0 so the live demo runs un-damped.
+    WARMUP_FRAMES: int = 20
+
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.args = args
@@ -108,6 +118,7 @@ class Example:
         self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
+        self.frame_index: int = 0
         self.sim_substeps = 15
         self.solver_iterations = 3
         self.velocity_iterations = 0
@@ -303,6 +314,14 @@ class Example:
         self.picking = Picking(self.world, self._half_extents)
         register_with_viewer_gl(self.viewer, self.picking)
 
+        # Pin global damping to 1.0 for the warm-up window. The captured
+        # CUDA graph reads ``self.world._global_damping`` from a device
+        # slot at replay time, so flipping the value back to 0.0 in
+        # :meth:`step` after :data:`WARMUP_FRAMES` does not require a
+        # recapture.
+        self.world.set_global_linear_damping(1.0)
+        self.world.set_global_angular_damping(1.0)
+
         # CUDA graph capture for the per-frame step pipeline. Falls
         # back to direct :meth:`simulate` on CPU or when capture is
         # disabled. PhoenX's single-world PGS sweeps use
@@ -372,11 +391,19 @@ class Example:
         )
 
     def step(self) -> None:
+        # End of warm-up window: release the global damping pin so the
+        # live demo runs without artificial energy loss. Toggling the
+        # device-side damping array between graph replays is
+        # graph-capture-safe (the kernel reads from the same slot).
+        if self.frame_index == self.WARMUP_FRAMES:
+            self.world.set_global_linear_damping(0.0)
+            self.world.set_global_angular_damping(0.0)
         if self.graph is not None:
             wp.capture_launch(self.graph)
         else:
             self.simulate()
         self.sim_time += self.frame_dt
+        self.frame_index += 1
 
     def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)

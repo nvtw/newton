@@ -96,6 +96,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _kinematic_prepare_step_kernel,
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
+    _phoenx_apply_global_damping_kernel,
     _phoenx_update_inertia_and_clear_forces_kernel,
     _pick_threads_per_world_kernel,
     _reduce_total_colours_kernel,
@@ -343,6 +344,17 @@ class PhoenXWorld:
         self._tpw_total_colours: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.gravity: wp.array[wp.vec3f] = _build_gravity_array(gravity, self.num_worlds, self.device)
         self.default_friction = float(default_friction)
+
+        # Global per-substep damping. ``None`` until the user opts in via
+        # :meth:`set_global_linear_damping` / :meth:`set_global_angular_damping`;
+        # while ``None`` the per-substep kernel is skipped entirely (zero
+        # cost). Once allocated, kept allocated for the lifetime of the
+        # solver -- changing the factor between graph replays is safe (the
+        # captured graph reads from the same device slot), but **opting in
+        # mid-simulation requires re-capturing any existing CUDA graph**
+        # since the captured graph doesn't include the new kernel launch.
+        self._global_damping: wp.array[wp.float32] | None = None
+        self._global_damping_host: np.ndarray | None = None
 
         # ----- Step time bookkeeping -----
         self.step_dt: float = 0.0
@@ -938,6 +950,7 @@ class PhoenXWorld:
                 self._relax_velocities()
             alpha = float(k + 1) * inv_n
             self._kinematic_interpolate_substep(alpha)
+            self._apply_global_damping()
 
         self._update_inertia_and_clear_forces()
 
@@ -1578,6 +1591,91 @@ class PhoenXWorld:
             inputs=[self.bodies],
             device=self.device,
         )
+
+    def _apply_global_damping(self) -> None:
+        """Per-substep tail kernel: apply :attr:`_global_damping` to every
+        dynamic body's linear / angular velocity. No-op (no kernel
+        launch) until the user opts in via
+        :meth:`set_global_linear_damping` / :meth:`set_global_angular_damping`."""
+        if self._global_damping is None or self.num_bodies == 0:
+            return
+        wp.launch(
+            _phoenx_apply_global_damping_kernel,
+            dim=self.num_bodies,
+            inputs=[self.bodies, self._global_damping],
+            device=self.device,
+        )
+
+    # ------------------------------------------------------------------
+    # Global damping API
+    # ------------------------------------------------------------------
+
+    def _ensure_global_damping_allocated(self) -> None:
+        """Lazily allocate the device array on first opt-in. Subsequent
+        setter calls reuse the allocation."""
+        if self._global_damping is None:
+            self._global_damping = wp.zeros(2, dtype=wp.float32, device=self.device)
+            self._global_damping_host = np.zeros(2, dtype=np.float32)
+
+    def set_global_linear_damping(self, value: float) -> None:
+        """Set the per-substep global linear-velocity damping factor.
+
+        Applied as ``v *= 1 - value`` at the end of every substep, on
+        top of the per-body :attr:`linear_damping`. ``value`` must lie
+        in ``[0, 1]``: ``0`` is a no-op; ``1`` zeroes the linear velocity
+        of every dynamic body each substep (useful for a settle
+        warm-up before live simulation).
+
+        **Opt-in semantics.** The first call to this (or
+        :meth:`set_global_angular_damping`) lazily allocates the
+        backing :class:`wp.array` and starts launching the per-substep
+        damping kernel. While neither setter has been called, the
+        kernel is skipped entirely (zero cost).
+
+        **Graph-capture rules.** Once the array exists, the value lives
+        in a device slot the captured graph reads at replay time, so
+        changing the factor between replays is safe. **Opting in for
+        the first time mid-simulation invalidates any already-captured
+        graph** (the new kernel launch isn't in it) -- either
+        re-capture, or call ``set_global_*_damping(0.0)`` once *before*
+        capture to lock the kernel in upfront and toggle the value
+        later without re-capture.
+        """
+        v = float(value)
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"global_linear_damping must be in [0, 1] (got {v})")
+        self._ensure_global_damping_allocated()
+        self._global_damping_host[0] = v
+        self._global_damping.assign(self._global_damping_host)
+
+    def set_global_angular_damping(self, value: float) -> None:
+        """Set the per-substep global angular-velocity damping factor.
+
+        Applied as ``w *= 1 - value`` at the end of every substep, on
+        top of the per-body :attr:`angular_damping`. See
+        :meth:`set_global_linear_damping` for opt-in and graph-capture
+        rules.
+        """
+        v = float(value)
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"global_angular_damping must be in [0, 1] (got {v})")
+        self._ensure_global_damping_allocated()
+        self._global_damping_host[1] = v
+        self._global_damping.assign(self._global_damping_host)
+
+    def get_global_linear_damping(self) -> float:
+        """Current global linear damping factor; ``0.0`` if the user
+        has never opted in. Host-shadow read, no device sync."""
+        if self._global_damping_host is None:
+            return 0.0
+        return float(self._global_damping_host[0])
+
+    def get_global_angular_damping(self) -> float:
+        """Current global angular damping factor; ``0.0`` if the user
+        has never opted in. Host-shadow read, no device sync."""
+        if self._global_damping_host is None:
+            return 0.0
+        return float(self._global_damping_host[1])
 
     # ------------------------------------------------------------------
     # Diagnostics

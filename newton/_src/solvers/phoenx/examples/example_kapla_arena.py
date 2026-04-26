@@ -92,6 +92,15 @@ class Example:
         self.args = args
         self.device = wp.get_device()
 
+        # First ``WARMUP_FRAMES`` frames pin global linear + angular
+        # damping at 1.0 to zero out velocities every substep -- the
+        # USDA's Kapla brick poses have small overlaps where bricks meet
+        # at corners, and without the warm-up the pent-up impulses lift
+        # the arena off the ground in frame 1 and cascade into a
+        # divergence. Damping is released to 0 after the warm-up.
+        self.WARMUP_FRAMES: int = 20
+        self.frame_index: int = 0
+
         # Frame pacing and solver settings match ``Demo16.cs`` exactly:
         # ``world.StepDt = 1 / 120``, ``NumberSubsteps = 4``,
         # ``SolverIterations = 4``. ``SolverVelocityIterations`` is
@@ -273,6 +282,11 @@ class Example:
         self.picking = Picking(self.world, self._half_extents)
         register_with_viewer_gl(self.viewer, self.picking)
 
+        # Pin global damping to 1.0 for the warm-up window so the
+        # captured graph zeroes velocities every substep.
+        self.world.set_global_linear_damping(1.0)
+        self.world.set_global_angular_damping(1.0)
+
         # CUDA graph capture for the per-frame step pipeline. Falls
         # back to direct :meth:`simulate` on CPU or when capture is
         # disabled. PhoenX's single-world PGS sweeps use
@@ -342,11 +356,20 @@ class Example:
         )
 
     def step(self) -> None:
+        # End of warm-up: release the damping pin so the live demo runs
+        # without artificial energy loss. The captured graph reads
+        # ``self.world._global_damping`` from a device slot, so this
+        # host-side write takes effect on the next ``capture_launch``
+        # without re-capture.
+        if self.frame_index == self.WARMUP_FRAMES:
+            self.world.set_global_linear_damping(0.0)
+            self.world.set_global_angular_damping(0.0)
         if self.graph is not None:
             wp.capture_launch(self.graph)
         else:
             self.simulate()
         self.sim_time += self.frame_dt
+        self.frame_index += 1
 
     def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)

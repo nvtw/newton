@@ -68,6 +68,7 @@ __all__ = [
     "_kinematic_prepare_step_kernel",
     "_per_world_jp_coloring_kernel",
     "_phoenx_apply_forces_and_gravity_kernel",
+    "_phoenx_apply_global_damping_kernel",
     "_phoenx_update_inertia_and_clear_forces_kernel",
     "_pick_threads_per_world_kernel",
     "_reduce_total_colours_kernel",
@@ -1011,6 +1012,28 @@ def _phoenx_update_inertia_and_clear_forces_kernel(
     # Force / torque clear: every body slot, including kinematic / static.
     bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
     bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_apply_global_damping_kernel(
+    bodies: BodyContainer,
+    global_damping: wp.array[wp.float32],
+):
+    """Per-substep global damping for dynamic bodies.
+
+    ``global_damping`` is a length-2 device array: ``[0]`` = linear,
+    ``[1]`` = angular. Applies ``v *= 1 - global_damping[0]`` and
+    ``w *= 1 - global_damping[1]``. Default values of ``0`` are a
+    no-op; ``1`` zeroes the corresponding velocity component every
+    substep (Kapla-style settle warm-up). Stored in a device array so
+    the host can rewrite it between graph replays without re-capture.
+    """
+    i = wp.tid()
+    if bodies.motion_type[i] == MOTION_DYNAMIC:
+        lin = 1.0 - global_damping[0]
+        ang = 1.0 - global_damping[1]
+        bodies.velocity[i] = bodies.velocity[i] * lin
+        bodies.angular_velocity[i] = bodies.angular_velocity[i] * ang
 
 
 # ---------------------------------------------------------------------------
