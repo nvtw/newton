@@ -131,12 +131,17 @@ class TestDriveTargetJumpStability(unittest.TestCase):
     the solver."""
 
     def test_target_step_change(self) -> None:
-        """Target toggles between +pi/2 and -pi/2 every 10 frames for
-        1 s. Joint must track without diverging."""
-        n = 200
+        """Square-wave target toggling between +pi/2 and -pi/2 every
+        plateau frames for 2 s. The drive must (a) not diverge and
+        (b) actually move the joint toward the current target on every
+        plateau -- a drive that ignored the target would fail (b)."""
+        plateau = 20  # 100 ms at dt=5 ms
+        n_plateaus = 20
+        n = plateau * n_plateaus
         dt = 0.005
-        # Square-wave target.
-        targets = np.where((np.arange(n) // 10) % 2 == 0, math.pi / 2.0, -math.pi / 2.0).astype(np.float32)
+        targets = np.where(
+            (np.arange(n) // plateau) % 2 == 0, math.pi / 2.0, -math.pi / 2.0
+        ).astype(np.float32)
         model = _pendulum(target_pos=0.0, target_ke=200.0, target_kd=20.0)
         q, qd = _run_with_target_schedule(model, targets, dt)
 
@@ -147,18 +152,92 @@ class TestDriveTargetJumpStability(unittest.TestCase):
         self.assertLess(peak_q, math.pi, msg=f"|q| peaked at {peak_q:.3f} rad -- too large for square-wave target")
         self.assertLess(peak_qd, 100.0, msg=f"|qd| peaked at {peak_qd:.3f} rad/s -- runaway")
 
+        # Joint must actually move under the drive -- a broken drive
+        # leaves q near zero. With ke=200 / kd=20 the critically-damped
+        # response only partially settles inside a 100 ms plateau, but
+        # peak excursion crosses ~0.5 rad easily.
+        self.assertGreater(
+            peak_q,
+            0.3,
+            msg=f"|q| peaked only at {peak_q:.3f} rad -- drive may be ignoring the target",
+        )
+
+        # Per-plateau direction check: skip the first plateau (initial
+        # transient from rest), then for every subsequent plateau the
+        # change ``q[end] - q[start]`` must lie in the direction of
+        # ``target - q[start]`` -- i.e., the drive consistently pulls
+        # toward the active target. Allow up to 1 plateau out of the 19
+        # remaining to violate (covers the toggle frame's overshoot).
+        violations = 0
+        for p in range(1, n_plateaus):
+            i0 = p * plateau
+            i1 = (p + 1) * plateau - 1
+            target_p = float(targets[i0])
+            dq = float(q[i1] - q[i0])
+            err0 = target_p - float(q[i0])
+            if err0 == 0.0 or dq == 0.0:
+                continue
+            if dq * err0 < 0.0:
+                violations += 1
+        self.assertLessEqual(
+            violations,
+            1,
+            msg=f"{violations}/{n_plateaus - 1} plateaus moved away from their target",
+        )
+
     def test_random_target_jitter(self) -> None:
-        """Random uniform target in ``[-pi/2, +pi/2]`` each frame."""
-        n = 400
+        """Smooth band-limited random target inside ``[-pi/2, +pi/2]`` as
+        a stand-in for the smooth-but-noisy commands an early-stage RL
+        policy emits. The drive must (a) not diverge and (b) correlate
+        positively with the target -- a drive that ignored the target
+        would have correlation ~0."""
+        n = 600
         dt = 0.005
+        # Smooth target: low-pass-filtered Gaussian noise. tau = 300 ms ->
+        # ~0.5 Hz dominant content, well below the pendulum's ~2 Hz
+        # natural frequency so phase lag stays small and the
+        # target/response correlation is sharp.
         rng = np.random.default_rng(seed=0)
-        targets = rng.uniform(-math.pi / 2.0, math.pi / 2.0, size=n).astype(np.float32)
+        tau = 0.3
+        alpha = dt / (tau + dt)
+        raw = rng.standard_normal(n).astype(np.float32) * 6.0
+        smooth = np.empty(n, dtype=np.float32)
+        smooth[0] = 0.0
+        for i in range(1, n):
+            smooth[i] = (1.0 - alpha) * smooth[i - 1] + alpha * raw[i]
+        targets = np.clip(smooth, -math.pi / 2.0, math.pi / 2.0)
         model = _pendulum(target_pos=0.0, target_ke=200.0, target_kd=20.0)
         q, qd = _run_with_target_schedule(model, targets, dt)
 
         self.assertTrue(np.isfinite(q).all())
         self.assertTrue(np.isfinite(qd).all())
         self.assertLess(float(np.abs(q).max()), math.pi)
+
+        # Sanity: joint must move under the drive (broken drive leaves
+        # q ~ 0).
+        skip = n // 5
+        q_rms = float(np.sqrt(np.mean(q[skip:] ** 2)))
+        self.assertGreater(
+            q_rms,
+            0.05,
+            msg=f"q RMS {q_rms:.3f} rad too small -- joint barely moved",
+        )
+
+        # Correlation with target: a drive that follows the target gives
+        # a strongly positive correlation; ignoring the target gives ~0.
+        q_c = q[skip:] - q[skip:].mean()
+        t_c = targets[skip:] - targets[skip:].mean()
+        denom = float(np.sqrt((q_c * q_c).sum() * (t_c * t_c).sum()))
+        if denom > 0.0:
+            corr = float((q_c * t_c).sum() / denom)
+        else:
+            corr = 0.0
+        self.assertGreater(
+            corr,
+            0.5,
+            msg=f"q-vs-target correlation {corr:.3f} too low -- drive may "
+                "not be tracking targets",
+        )
 
     def test_impulse_target_return(self) -> None:
         """Target starts at 0, jumps to +pi/4 for one frame, back to 0.
