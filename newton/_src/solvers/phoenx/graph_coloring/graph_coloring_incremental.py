@@ -43,6 +43,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     partitioning_prepare_kernel,
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import scan_variable_length
+from newton._src.solvers.phoenx.solver_config import NUM_INNER_WHILE_ITERATIONS
 
 __all__ = ["MAX_COLORS", "IncrementalContactPartitioner"]
 
@@ -613,40 +614,51 @@ class IncrementalContactPartitioner:
             )
 
     def _capture_build_csr_step(self) -> None:
-        """Body of the ``build_csr`` capture_while: one JP colour round."""
-        wp.launch(
-            partitioning_coloring_incremental_kernel,
-            dim=self.max_num_interactions,
-            inputs=[
-                self._partition_data_concat,
-                self._random_values,
-                self._adjacency_section_end_indices,
-                self._vertex_to_adjacent_elements,
-                self.max_num_contacts,
-                self._elements,
-                self._remaining_ids,
-                self._num_remaining,
-                self._section_marker,
-                self._current_color,
-            ],
-        )
-        wp.launch_tiled(
-            incremental_tile_compact_csr_and_advance_kernel,
-            dim=[1],
-            inputs=[
-                self._partition_data_concat,
-                self._remaining_ids,
-                self._current_color,
-                self._num_remaining,
-                self._num_colors,
-                self._element_ids_by_color,
-                self._color_starts,
-                self._interaction_id_to_partition,
-                int(MAX_COLORS),
-                self._overflow_flag,
-            ],
-            block_dim=int(TILE_SCAN_BLOCK_DIM),
-        )
+        """Body of the ``build_csr`` capture_while.
+
+        Runs up to :data:`NUM_INNER_WHILE_ITERATIONS` JP colour rounds
+        back-to-back so the outer ``wp.capture_while`` only pays its
+        per-iteration graph-traversal cost once per ``N`` rounds. Both
+        inner kernels honour an early-exit contract when
+        ``num_remaining[0] == 0`` (the MIS pass is per-thread skipped
+        by its existing ``slot >= num_remaining[0]`` guard; the compact
+        kernel returns before any write when ``n == 0``), so the tail
+        rounds past convergence are cheap no-ops.
+        """
+        for _ in range(NUM_INNER_WHILE_ITERATIONS):
+            wp.launch(
+                partitioning_coloring_incremental_kernel,
+                dim=self.max_num_interactions,
+                inputs=[
+                    self._partition_data_concat,
+                    self._random_values,
+                    self._adjacency_section_end_indices,
+                    self._vertex_to_adjacent_elements,
+                    self.max_num_contacts,
+                    self._elements,
+                    self._remaining_ids,
+                    self._num_remaining,
+                    self._section_marker,
+                    self._current_color,
+                ],
+            )
+            wp.launch_tiled(
+                incremental_tile_compact_csr_and_advance_kernel,
+                dim=[1],
+                inputs=[
+                    self._partition_data_concat,
+                    self._remaining_ids,
+                    self._current_color,
+                    self._num_remaining,
+                    self._num_colors,
+                    self._element_ids_by_color,
+                    self._color_starts,
+                    self._interaction_id_to_partition,
+                    int(MAX_COLORS),
+                    self._overflow_flag,
+                ],
+                block_dim=int(TILE_SCAN_BLOCK_DIM),
+            )
 
     def begin_sweep(self) -> None:
         """Reset the sweep-time colour cursor before a PGS sweep.

@@ -69,6 +69,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int
 from newton._src.solvers.phoenx.materials import MaterialData
+from newton._src.solvers.phoenx.solver_config import NUM_INNER_WHILE_ITERATIONS
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
     _STRAGGLER_BLOCK_DIM,
@@ -1288,7 +1289,8 @@ class PhoenXWorld:
     # ------------------------------------------------------------------
 
     def _capture_singleworld_sweep(self, kernel, **kw) -> None:
-        """``wp.capture_while`` body: launch ``kernel`` for one colour.
+        """``wp.capture_while`` body: sweep up to
+        :data:`NUM_INNER_WHILE_ITERATIONS` colours in one outer step.
 
         Uses a persistent fixed-size grid (``_singleworld_total_threads``)
         with an internal grid-stride loop over the colour's active cid
@@ -1296,29 +1298,36 @@ class PhoenXWorld:
         :class:`newton._src.geometry.narrow_phase.NarrowPhase`. Thread
         0 decrements ``color_cursor``; the capture-while exits when
         the cursor hits 0.
+
+        The body is unrolled ``NUM_INNER_WHILE_ITERATIONS`` times on the
+        host to amortise the per-outer-iteration capture-while overhead.
+        Each launch checks ``color_cursor[0] <= 0`` at the top and
+        early-exits, so tail launches past convergence within a single
+        outer iteration are no-ops.
         """
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
-        wp.launch(
-            kernel,
-            dim=self._singleworld_total_threads,
-            inputs=[
-                self.constraints,
-                self._contact_cols,
-                self.bodies,
-                idt,
-                self._partitioner.element_ids_by_color,
-                self._partitioner.color_starts,
-                self._partitioner.num_colors,
-                self._partitioner.color_cursor,
-                self._contact_container,
-                contact_views,
-                wp.int32(self.num_joints),
-                wp.int32(self._singleworld_total_threads),
-            ],
-            block_dim=_SINGLEWORLD_BLOCK_DIM,
-            device=self.device,
-        )
+        for _ in range(NUM_INNER_WHILE_ITERATIONS):
+            wp.launch(
+                kernel,
+                dim=self._singleworld_total_threads,
+                inputs=[
+                    self.constraints,
+                    self._contact_cols,
+                    self.bodies,
+                    idt,
+                    self._partitioner.element_ids_by_color,
+                    self._partitioner.color_starts,
+                    self._partitioner.num_colors,
+                    self._partitioner.color_cursor,
+                    self._contact_container,
+                    contact_views,
+                    wp.int32(self.num_joints),
+                    wp.int32(self._singleworld_total_threads),
+                ],
+                block_dim=_SINGLEWORLD_BLOCK_DIM,
+                device=self.device,
+            )
 
     def _solve_main_singleworld(self) -> None:
         """Single-world prepare + main PGS iterate path.

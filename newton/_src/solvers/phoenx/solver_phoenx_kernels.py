@@ -1110,13 +1110,23 @@ def _phoenx_clear_forces_kernel(
 #     partitioner.begin_sweep()
 #     wp.capture_while(
 #         partitioner.color_cursor,
-#         lambda: wp.launch(_constraint_prepare_singleworld_kernel,
-#                           dim=total_num_threads, ...,
-#                           total_num_threads=total_num_threads),
+#         lambda: [wp.launch(_constraint_prepare_singleworld_kernel,
+#                            dim=total_num_threads, ...,
+#                            total_num_threads=total_num_threads)
+#                  for _ in range(NUM_INNER_WHILE_ITERATIONS)],
 #     )
 #
 # The kernel decrements ``color_cursor`` by 1 at the end (thread 0
 # only); when it reaches 0 the capture-while loop exits.
+#
+# Early-exit contract (required for ``NUM_INNER_WHILE_ITERATIONS`` > 1):
+# every kernel checks ``color_cursor[0] <= 0`` at the top and returns
+# immediately without touching any state, so the tail launches inside
+# the capture-while body -- which the host issues unconditionally --
+# become cheap no-ops once the sweep has converged within the same
+# outer iteration. That is what makes it safe to amortise the
+# capture-while overhead by unrolling the body ``NUM_INNER_WHILE_ITERATIONS``
+# times.
 
 
 @wp.func
@@ -1162,7 +1172,13 @@ def _constraint_prepare_singleworld_kernel(
     grid-strides over the current colour's active cid range. Thread 0
     decrements ``color_cursor`` by 1 so the host-side
     :func:`wp.capture_while` exits when every colour has been swept.
+
+    Early-exits without touching state when ``color_cursor[0] <= 0`` so
+    tail launches past convergence (from the inner unrolling inside the
+    capture-while body) are no-ops.
     """
+    if color_cursor[0] <= 0:
+        return
     tid = wp.tid()
     start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
 
@@ -1195,8 +1211,11 @@ def _constraint_iterate_singleworld_kernel(
     """Main-solve PGS dispatcher (bias ON), one colour per launch.
 
     Same launch contract as :func:`_constraint_prepare_singleworld_kernel`;
-    this is the iterate counterpart with ``use_bias=True``.
+    this is the iterate counterpart with ``use_bias=True``. Inherits the
+    same early-exit contract.
     """
+    if color_cursor[0] <= 0:
+        return
     tid = wp.tid()
     start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
 
@@ -1226,7 +1245,13 @@ def _constraint_relax_singleworld_kernel(
     num_joints: wp.int32,
     total_num_threads: wp.int32,
 ):
-    """Relax-pass dispatcher (bias OFF), one colour per launch."""
+    """Relax-pass dispatcher (bias OFF), one colour per launch.
+
+    Inherits the early-exit contract from
+    :func:`_constraint_prepare_singleworld_kernel`.
+    """
+    if color_cursor[0] <= 0:
+        return
     tid = wp.tid()
     start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
 

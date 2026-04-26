@@ -45,7 +45,7 @@ import unittest
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.constraints.contact_matching_config import (
+from newton._src.solvers.phoenx.solver_config import (
     PHOENX_CONTACT_MATCHING,
 )
 from newton._src.solvers.phoenx.solver import SolverPhoenX

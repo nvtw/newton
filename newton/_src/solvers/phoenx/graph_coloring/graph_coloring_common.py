@@ -808,6 +808,16 @@ def incremental_tile_compact_csr_and_advance_kernel(
     _block, lane = wp.tid()
 
     n = num_remaining[0]
+    # Early-exit contract: tolerate extra launches past convergence so
+    # the host side can safely unroll the capture-while body
+    # ``NUM_INNER_WHILE_ITERATIONS`` times. When ``num_remaining == 0``
+    # no element is still uncoloured and every per-colour counter
+    # (``current_color``, ``num_colors``, ``color_starts``) has already
+    # been written to its final value by the round that drained the
+    # list. Returning without any writes keeps those counters stable
+    # so the surplus launches are true no-ops.
+    if n == 0:
+        return
     cc = current_color[0]
     # Overflow guard. ``color_starts`` is sized ``max_colors + 1`` so
     # the largest writable end-offset slot is ``color_starts[max_colors]``
