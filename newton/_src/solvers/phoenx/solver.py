@@ -271,7 +271,7 @@ class SolverPhoenX(SolverBase):
                 tight_rcm = _estimate_rigid_contact_max_phoenx(model)
                 if tight_rcm is not None:
                     model.rigid_contact_max = 0  # bypass "already sized" short-circuit
-                from newton._src.solvers.phoenx.constraints.contact_matching_config import (
+                from newton._src.solvers.phoenx.solver_config import (
                     PHOENX_CONTACT_MATCHING,
                 )
 

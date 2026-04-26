@@ -69,19 +69,26 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int
 from newton._src.solvers.phoenx.materials import MaterialData
+from newton._src.solvers.phoenx.solver_config import (
+    FUSE_TAIL_BLOCK_DIM,
+    FUSE_TAIL_MAX_COLOR_SIZE,
+    NUM_INNER_WHILE_ITERATIONS,
+)
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
     _STRAGGLER_BLOCK_DIM,
-    SINGLEWORLD_FUSED_BLOCK_DIM,
     _build_scatter_keys_kernel,
     _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
     _constraint_iterate_singleworld_fused_kernel,
+    _constraint_iterate_singleworld_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
     _constraint_prepare_singleworld_fused_kernel,
+    _constraint_prepare_singleworld_kernel,
     _constraint_relax_fast_tail_kernel,
     _constraint_relax_singleworld_fused_kernel,
+    _constraint_relax_singleworld_kernel,
     _constraints_to_elements_kernel,
     _count_elements_per_world_kernel,
     _integrate_velocities_kernel,
@@ -89,9 +96,11 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _kinematic_prepare_step_kernel,
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
-    _phoenx_update_inertia_and_clear_forces_kernel,
+    _phoenx_clear_forces_kernel,
+    _phoenx_update_inertia_kernel,
     _pick_threads_per_world_kernel,
     _reduce_total_colours_kernel,
+    _reset_head_active_kernel,
     _set_kinematic_pose_batch_kernel,
     _sync_num_active_constraints_kernel,
     pack_body_xforms_kernel,
@@ -133,6 +142,54 @@ def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]
             data.append((float(r[0]), float(r[1]), float(r[2])))
     arr_np = np.asarray(data, dtype=np.float32)
     return wp.array(arr_np, dtype=wp.vec3f, device=device)
+
+
+#: Block dim used by the single-world PGS sweep kernels.
+#: 256 threads / block matches Warp's default and NarrowPhase's choice;
+#: the kernels are register-heavy (~168 registers/thread) so a smaller
+#: block would not improve occupancy further.
+_SINGLEWORLD_BLOCK_DIM: int = 256
+
+
+def _singleworld_total_threads(constraint_capacity: int, device) -> int:
+    """Persistent grid size for the single-world PGS sweep kernels.
+
+    The previous one-thread-per-cid sizing launched ~900K-thread grids
+    on Kapla-scale scenes where any given colour activates only a few
+    hundred cids, burning 84% of thread slots on early-exit reads.
+    Mirrors the sizing strategy used by
+    :class:`newton._src.geometry.narrow_phase.NarrowPhase`: pick a
+    block count that balances "saturate the device" against "don't
+    overprovision past the workload", then hold that grid size across
+    every colour launch so the CUDA graph capture stays stable.
+
+    Args:
+        constraint_capacity: Upper bound on active cids per colour
+            (``num_joints + max_contact_columns``). The grid never
+            needs more threads than this because a colour's active
+            count is bounded by the capacity.
+        device: Warp device the kernel will launch on. Only
+            ``sm_count`` is read (CPU fallback picks a flat cap).
+
+    Returns:
+        The persistent grid size in threads, always a multiple of
+        :data:`_SINGLEWORLD_BLOCK_DIM`.
+    """
+    block_dim = _SINGLEWORLD_BLOCK_DIM
+    device_obj = wp.get_device(device)
+    if device_obj.is_cuda:
+        # 4 blocks/SM hits good occupancy without overprovisioning.
+        max_blocks_limit = device_obj.sm_count * 4
+    else:
+        max_blocks_limit = 256
+    # ``min_blocks = 32`` gives 8K threads minimum -- enough to keep
+    # every SM warm on small GPUs without stranding work on large
+    # ones. The ``capacity_blocks`` cap prevents a 900K-cid capacity
+    # from demanding more threads than there are cids.
+    min_blocks = 32
+    capacity_blocks = (max(1, int(constraint_capacity)) + block_dim - 1) // block_dim
+    num_blocks = max(min_blocks, min(capacity_blocks, max_blocks_limit))
+    return block_dim * num_blocks
 
 
 class PhoenXWorld:
@@ -314,6 +371,31 @@ class PhoenXWorld:
 
         # Joint cids at ``[0, num_joints)``; contact cids follow.
         self._constraint_capacity: int = max(1, self.num_joints + self.max_contact_columns)
+
+        # Persistent grid size for the single-world PGS sweep kernels.
+        # Fixed at construction so every colour launch uses the same
+        # ``dim`` -- required to keep the outer CUDA graph capture
+        # stable across varying per-colour active counts.
+        self._singleworld_total_threads: int = _singleworld_total_threads(self._constraint_capacity, self.device)
+
+        # Termination flag for the single-world *head* capture-while.
+        # Starts each sweep at 1 and is zeroed by the persistent-grid
+        # sweep kernel when it encounters a colour whose size is
+        # ``<= FUSE_TAIL_MAX_COLOR_SIZE`` -- that hand-off point is
+        # where control passes to the fused tail kernel. A separate
+        # flag (instead of reusing ``color_cursor``) is what lets the
+        # tail kernel resume from the exact cursor position the head
+        # stopped at. When the tail-fuse feature is disabled (default
+        # ``fuse_threshold = 0``), the head kernel never hits the
+        # hand-off branch and the flag stays at 1 for the entire
+        # sweep; termination then falls back to the ``color_cursor
+        # == 0`` predicate check in the kernel's own early-exit
+        # guard, which also leaves ``head_active`` unchanged, so the
+        # subsequent ``_reset_head_active_kernel`` below is all the
+        # bookkeeping the feature-disabled path needs.
+        self._head_active: wp.array[wp.int32] = wp.ones(1, dtype=wp.int32, device=self.device)
+        self._fuse_threshold: int = int(FUSE_TAIL_MAX_COLOR_SIZE)
+        self._fuse_tail_block_dim: int = int(FUSE_TAIL_BLOCK_DIM)
 
         # ----- Partitioner + per-world CSR buffers -----
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
@@ -894,7 +976,8 @@ class PhoenXWorld:
             alpha = float(k + 1) * inv_n
             self._kinematic_interpolate_substep(alpha)
 
-        self._update_inertia_and_clear_forces()
+        self._update_inertia()
+        self._clear_forces()
 
     # ------------------------------------------------------------------
     # Phase implementations
@@ -1231,23 +1314,69 @@ class PhoenXWorld:
     # ------------------------------------------------------------------
 
     def _capture_singleworld_sweep(self, kernel, **kw) -> None:
-        """``wp.capture_while`` body: launch ``kernel`` for one or more
-        colours and decrement the cursor accordingly.
+        """``wp.capture_while`` body: sweep up to
+        :data:`NUM_INNER_WHILE_ITERATIONS` colours on the
+        persistent-grid ("head") path in one outer step.
 
-        The launch uses a single CUDA block of
-        :data:`SINGLEWORLD_FUSED_BLOCK_DIM` threads. The fused kernels
-        sweep up to :data:`SINGLEWORLD_FUSED_K` colours per launch with
-        ``__syncthreads()`` between them; the legacy one-colour-per-launch
-        kernels stop after a single colour. Either way the kernel
-        decrements ``color_cursor`` by however many colours it consumed,
-        and the capture-while exits when the cursor hits 0.
+        Uses a persistent fixed-size grid (``_singleworld_total_threads``)
+        with an internal grid-stride loop over the colour's active cid
+        range -- same strategy as
+        :class:`newton._src.geometry.narrow_phase.NarrowPhase`. Thread
+        0 decrements ``color_cursor`` and, on either convergence
+        (``color_cursor == 0``) or tail-fuse hand-off
+        (``count <= fuse_threshold``), clears ``head_active[0]`` to
+        terminate the head capture-while.
+
+        The body is unrolled ``NUM_INNER_WHILE_ITERATIONS`` times on
+        the host to amortise the per-outer-iteration capture-while
+        overhead. Each launch re-enters one of the kernel's early-exit
+        branches once ``head_active`` has been cleared within the same
+        outer iteration, so the tail launches are cheap no-ops.
         """
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
-        wp.launch(
+        for _ in range(NUM_INNER_WHILE_ITERATIONS):
+            wp.launch(
+                kernel,
+                dim=self._singleworld_total_threads,
+                inputs=[
+                    self.constraints,
+                    self._contact_cols,
+                    self.bodies,
+                    idt,
+                    self._partitioner.element_ids_by_color,
+                    self._partitioner.color_starts,
+                    self._partitioner.num_colors,
+                    self._partitioner.color_cursor,
+                    self._contact_container,
+                    contact_views,
+                    wp.int32(self.num_joints),
+                    wp.int32(self._singleworld_total_threads),
+                    wp.int32(self._fuse_threshold),
+                    self._head_active,
+                ],
+                block_dim=_SINGLEWORLD_BLOCK_DIM,
+                device=self.device,
+            )
+
+    def _capture_singleworld_tail_sweep(self, kernel, **kw) -> None:
+        """``wp.capture_while`` body: drain the remaining small colours
+        via the fused single-block kernel.
+
+        Launched as ``wp.launch_tiled(dim=[1], block_dim=FUSE_TAIL_BLOCK_DIM)``
+        so the whole sweep runs in one block and ``_sync_threads``
+        (``__syncthreads``) can order body-velocity writes between
+        consecutive colours. The kernel internally walks colours until
+        either ``color_cursor`` hits 0 or a colour exceeds
+        ``fuse_threshold`` (hand-off back to the head path); it always
+        publishes the final cursor value, so the outer capture-while
+        terminates naturally on the cursor == 0 predicate.
+        """
+        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        idt = kw.get("idt", wp.float32(0.0))
+        wp.launch_tiled(
             kernel,
-            dim=SINGLEWORLD_FUSED_BLOCK_DIM,
-            block_dim=SINGLEWORLD_FUSED_BLOCK_DIM,
+            dim=[1],
             inputs=[
                 self.constraints,
                 self._contact_cols,
@@ -1260,39 +1389,74 @@ class PhoenXWorld:
                 self._contact_container,
                 contact_views,
                 wp.int32(self.num_joints),
+                wp.int32(self._fuse_threshold),
             ],
+            block_dim=self._fuse_tail_block_dim,
             device=self.device,
+        )
+
+    def _singleworld_head_plus_tail_sweep(self, head_kernel, tail_kernel, idt: wp.float32) -> None:
+        """Drive a single PGS sweep as "persistent-grid head + fused
+        single-block tail".
+
+        The head ``capture_while`` is gated by :attr:`_head_active` so
+        the head kernel can terminate by either (a) draining the
+        cursor or (b) encountering a small colour that should be
+        handled by the fused tail kernel. The tail ``capture_while``
+        is gated by the colour cursor and runs the fused kernel which
+        drains every remaining small colour in a single block using
+        ``_sync_threads`` between colours.
+
+        When :attr:`_fuse_threshold` is 0, the head kernel never takes
+        the hand-off branch; it drains the cursor itself and the tail
+        capture-while's predicate (``color_cursor``) is already 0, so
+        the tail kernel is never launched -- behaviour identical to
+        the pre-fuse path.
+        """
+        # Reset head_active = 1 so the head capture-while gets at
+        # least one launch in which to decide (converge, hand off, or
+        # do real work).
+        wp.launch(_reset_head_active_kernel, dim=1, inputs=[self._head_active], device=self.device)
+
+        wp.capture_while(
+            self._head_active,
+            self._capture_singleworld_sweep,
+            kernel=head_kernel,
+            idt=idt,
+        )
+        wp.capture_while(
+            self._partitioner.color_cursor,
+            self._capture_singleworld_tail_sweep,
+            kernel=tail_kernel,
+            idt=idt,
         )
 
     def _solve_main_singleworld(self) -> None:
         """Single-world prepare + main PGS iterate path.
 
-        One ``wp.capture_while`` for prepare, then ``solver_iterations``
-        more capture-while loops for the bias-on iterate. Uses the
-        fused single-block kernels which sweep
-        :data:`SINGLEWORLD_FUSED_K` colours per launch.
+        One head+tail sweep for prepare, then ``solver_iterations``
+        more head+tail sweeps for the bias-on iterate. Each sweep
+        runs the persistent-grid kernel for large colours then hands
+        off to the single-block fused kernel for the tail of small
+        colours.
         """
         if self._constraint_capacity == 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
 
-        # Prepare-for-iteration sweep.
         self._partitioner.begin_sweep()
-        wp.capture_while(
-            self._partitioner.color_cursor,
-            self._capture_singleworld_sweep,
-            kernel=_constraint_prepare_singleworld_fused_kernel,
-            idt=idt,
+        self._singleworld_head_plus_tail_sweep(
+            _constraint_prepare_singleworld_kernel,
+            _constraint_prepare_singleworld_fused_kernel,
+            idt,
         )
 
-        # Main iterate sweeps (bias ON).
         for _ in range(self.solver_iterations):
             self._partitioner.begin_sweep()
-            wp.capture_while(
-                self._partitioner.color_cursor,
-                self._capture_singleworld_sweep,
-                kernel=_constraint_iterate_singleworld_fused_kernel,
-                idt=idt,
+            self._singleworld_head_plus_tail_sweep(
+                _constraint_iterate_singleworld_kernel,
+                _constraint_iterate_singleworld_fused_kernel,
+                idt,
             )
 
     def _relax_velocities_singleworld(self) -> None:
@@ -1302,11 +1466,10 @@ class PhoenXWorld:
         idt = wp.float32(1.0 / self.substep_dt)
         for _ in range(self.velocity_iterations):
             self._partitioner.begin_sweep()
-            wp.capture_while(
-                self._partitioner.color_cursor,
-                self._capture_singleworld_sweep,
-                kernel=_constraint_relax_singleworld_fused_kernel,
-                idt=idt,
+            self._singleworld_head_plus_tail_sweep(
+                _constraint_relax_singleworld_kernel,
+                _constraint_relax_singleworld_fused_kernel,
+                idt,
             )
 
     def _fast_tail_block_dim(self) -> int:
@@ -1446,17 +1609,25 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _update_inertia_and_clear_forces(self) -> None:
-        """Apply damping, rebuild ``inverse_inertia_world`` from the
-        final orientation, and zero the per-body force/torque
-        accumulators. One kernel launch per step instead of two -- the
-        two old per-body kernels were back-to-back and shared the same
-        body-state hot lines.
-        """
+    def _update_inertia(self) -> None:
+        """Apply damping and rebuild ``inverse_inertia_world`` from
+        the final orientation. Once per step, after the substep loop."""
         if self.num_bodies == 0:
             return
         wp.launch(
-            _phoenx_update_inertia_and_clear_forces_kernel,
+            _phoenx_update_inertia_kernel,
+            dim=self.num_bodies,
+            inputs=[self.bodies],
+            device=self.device,
+        )
+
+    def _clear_forces(self) -> None:
+        """Zero per-body force/torque accumulators so the next
+        :meth:`step` starts with an empty external load."""
+        if self.num_bodies == 0:
+            return
+        wp.launch(
+            _phoenx_clear_forces_kernel,
             dim=self.num_bodies,
             inputs=[self.bodies],
             device=self.device,

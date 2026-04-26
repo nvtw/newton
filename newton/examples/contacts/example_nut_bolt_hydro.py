@@ -163,7 +163,7 @@ class Example:
 
         # PhoenX needs contact matching for its per-pair warm-start.
         # XPBD and MuJoCo are happy with the default latest-only matching.
-        from newton._src.solvers.phoenx.constraints.contact_matching_config import (
+        from newton._src.solvers.phoenx.solver_config import (
             PHOENX_CONTACT_MATCHING,
         )
 

@@ -11,11 +11,18 @@ tracking) so solver parameters (``substeps``, ``solver_iterations``)
 can be varied for sweeps.
 """
 
-from newton._src.solvers.phoenx.benchmarks.scenarios import g1_flat, h1_flat
+from newton._src.solvers.phoenx.benchmarks.scenarios import (
+    big_box_grid,
+    g1_flat,
+    h1_flat,
+    tower_grid,
+)
 
 SCENARIOS = {
+    "big_box_grid": big_box_grid,
     "g1_flat": g1_flat,
     "h1_flat": h1_flat,
+    "tower_grid": tower_grid,
 }
 
-__all__ = ["SCENARIOS", "g1_flat", "h1_flat"]
+__all__ = ["SCENARIOS", "big_box_grid", "g1_flat", "h1_flat", "tower_grid"]
