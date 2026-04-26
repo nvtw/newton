@@ -112,16 +112,25 @@ class Example:
         else:
             self.model = builder.finalize()
 
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model,
-            broad_phase=args.broad_phase,
-        )
+        solver_name = getattr(args, "solver", "xpbd")
+        # PhoenX needs sticky contact matching for its persistent warm-start.
+        cp_kwargs = dict(broad_phase=args.broad_phase)
+        if solver_name == "phoenx":
+            cp_kwargs["contact_matching"] = "sticky"
+        self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)
 
-        self.solver = newton.solvers.SolverXPBD(
-            self.model,
-            iterations=XPBD_ITERATIONS,
-            rigid_contact_relaxation=XPBD_CONTACT_RELAXATION,
-        )
+        if solver_name == "phoenx":
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model, substeps=4, solver_iterations=8, velocity_iterations=1
+            )
+        elif solver_name == "mujoco":
+            self.solver = newton.solvers.SolverMuJoCo(self.model)
+        else:
+            self.solver = newton.solvers.SolverXPBD(
+                self.model,
+                iterations=XPBD_ITERATIONS,
+                rigid_contact_relaxation=XPBD_CONTACT_RELAXATION,
+            )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -209,6 +218,12 @@ class Example:
             type=int,
             default=DEFAULT_PYRAMID_SIZE,
             help="Number of rows in each pyramid base.",
+        )
+        parser.add_argument(
+            "--solver",
+            choices=["xpbd", "mujoco", "phoenx"],
+            default="xpbd",
+            help="Rigid-body solver backend.",
         )
         return parser
 
