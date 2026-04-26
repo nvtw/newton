@@ -188,21 +188,15 @@ CONTACT_DWORDS: int = num_dwords(ContactConstraintData)
 # ContactColumnContainer -- dedicated storage for the contact column header
 # ---------------------------------------------------------------------------
 #
-# Before this split the solver allocated one wide ``ConstraintContainer``
-# at shape ``(max(ADBS_DWORDS, CONTACT_DWORDS), num_joints +
-# max_contact_columns)`` -- 154 dwords per cid for every contact even
-# though contacts only use 7 of them. At h1_flat 4096 that was 1.4 GB
-# of mostly-zero padding.
+# Narrow sibling of :class:`ConstraintContainer` for contact cids
+# only. A single wide container would have wasted ~1.4 GB at h1_flat
+# 4096 on padding (contacts use 7 of 154 dwords). Contact cids are
+# local here: ``local_cid = global_cid - num_joints``, with the
+# subtraction done once at the dispatch branch.
 #
-# We keep the ConstraintContainer (joint-wide) for joint cids and add
-# this narrow sibling for contact cids. Contact column cids are local
-# to this container: ``local_cid = global_cid - num_joints``. The outer
-# fast-tail kernels do that subtraction once at the dispatch branch.
-#
-# Layout and accessor style mirror :class:`ConstraintContainer`: one
+# Layout mirrors :class:`ConstraintContainer`: one
 # ``wp.array2d[wp.float32]`` of shape ``(CONTACT_DWORDS, num_columns)``
-# with the cid on the inner contiguous axis, and one ``wp.func``
-# per field.
+# with cid on the inner axis, and one ``wp.func`` per field.
 
 
 @wp.struct
@@ -460,29 +454,16 @@ def contact_prepare_for_iteration_at(
 ):
     """Prepare one contact column for the upcoming PGS iterations.
 
-    For every contact ``k`` in the column's range:
+    Per contact ``k`` in the column: re-project body-frame anchors to
+    world space, compute lever arms, effective masses for the normal
+    + two tangent rows (cached in ``ContactContainer.derived``), the
+    Baumgarte positional + static-friction tangent biases, then apply
+    the warm-start impulse to body velocities. Warm-start scatter is
+    batched: one write-back per body after all contacts are processed.
 
-      1. Re-project the stored body-frame anchors into world space
-         using the current body transforms (PhoenX's
-         ``UpdatePosition`` / TGS sub-step refresh).
-      2. Compute lever arms ``r1 = p1 - com1`` / ``r2 = p2 - com2``.
-      3. Compute scalar effective masses for the normal + two tangent
-         rows and cache them in :class:`ContactContainer`'s ``derived``
-         buffer.
-      4. Compute the Baumgarte-style positional bias +
-         static-friction tangent bias.
-      5. Apply the warm-start impulse to the bodies' velocities so
-         the PGS loop starts from a converged guess.
-
-    The warm-start impulse scatter is batched: the loop accumulates
-    the per-contact world-space impulse in local registers and
-    applies it to the body velocities / angular velocities in one
-    write after all contacts have been processed.
-
-    ``base_offset`` is unused here (all contact state lives in
-    :class:`ContactContainer`, not in the constraint column) but kept
-    in the signature so the dispatcher can call this ``wp.func``
-    uniformly with the fused joint types.
+    ``base_offset`` is unused (contact state lives in
+    :class:`ContactContainer`) but kept in the signature so the
+    dispatcher can call this ``wp.func`` uniformly with joints.
     """
     # Silence unused-parameter warnings; every contact column writes at
     # header offset 0 of its cid, so there's no sub-block offset to
@@ -594,27 +575,15 @@ def contact_prepare_for_iteration_at(
         lam_n_ref = wp.float32(1.0) / wp.max(eff_n * idt, wp.float32(1.0e-6))
         load_boost = wp.min(wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0))
 
-        # Speculative vs penetrating bias (Box2D v3 / solver2d model).
-        # For a *separated* contact (``gap > 0``) we want the row to only
-        # fire when the relative closing velocity would actually push
-        # the bodies past each other within this substep -- i.e. when
-        # ``-jv_n > gap / dt``. The target closing velocity is therefore
-        # ``gap / dt = gap * idt``, so bodies closing slower than that
-        # see no impulse (the clamp below fires) and bodies closing
-        # faster get decelerated to exactly the rate that reaches zero
-        # gap at the end of the substep. Using the softened ``bias_rate
-        # ~ 0.6 / dt`` here instead (as the old code did) set the target
-        # at ``gap * bias_rate``, which is slower than the "just-close-
-        # in-one-step" rate and creates a soft spring that stops falling
-        # bodies mid-air at the speculative gap distance -- the "honey"
-        # artefact when a dropping mesh hits the speculative detection
-        # shell and decelerates like it's in fluid.
-        #
-        # For a *penetrating* contact (``gap < 0``) we want the soft
-        # Baumgarte push-apart the old formula produces, so we keep the
-        # soft bias rate there. ``bias_val`` is always non-negative for
-        # separated contacts and always non-positive for penetrating
-        # contacts after the clamp; iterate() reads the sign to pick
+        # Speculative vs penetrating bias (Box2D v3 / solver2d).
+        # Separated (``gap > 0``): target closing velocity ``gap*idt``
+        # so the row only fires when ``-jv_n > gap/dt``. Using the
+        # soft ``bias_rate ~ 0.6/dt`` here (as old code did) creates a
+        # "honey" artefact where dropping bodies decelerate at the
+        # speculative shell as if in fluid.
+        # Penetrating (``gap < 0``): keep the soft Baumgarte push-
+        # apart. ``bias_val`` ends up >= 0 for separated and <= 0 for
+        # penetrating contacts; iterate() reads the sign to pick
         # rigid vs soft PGS coefficients.
         if effective_gap > wp.float32(0.0):
             bias_val = effective_gap * idt
@@ -701,19 +670,13 @@ def contact_prepare_for_iteration_at(
                 # ``pd_coefficients`` wants inverse effective mass;
                 # ``eff_n`` is the forward mass.
                 eff_inv_n = wp.float32(1.0) / eff_n
-                # Sign convention: the contact normal row has
-                # ``jv_n = (v2 - v1) . n`` (closing speed positive
-                # when penetrating). ``effective_gap`` is positive
-                # when separated, negative when penetrating -- so the
-                # penetration depth the spring should push against
-                # is ``-effective_gap``. The PD row's ``bias_signed``
-                # is then ``k * (-gap) * bias_factor * idt``, which
-                # the iterate enters as ``lam = -eff_soft * (jv_n -
-                # bias + ...)`` -- i.e. positive ``depth -> bias > 0
-                # -> positive ``lam`` -> positive normal impulse (push
-                # body 2 away from body 1). Matches the Box2D
-                # Baumgarte path's sign and the unilateral clamp
-                # ``lam_n >= 0``.
+                # Sign: ``jv_n = (v2-v1).n`` (closing when >0),
+                # ``effective_gap`` >0 separated / <0 penetrating, so
+                # spring depth is ``-effective_gap``. Iterate enters
+                # ``lam = -eff_soft*(jv_n - bias + ...)``; positive
+                # depth -> positive bias -> positive normal impulse
+                # (pushes b2 off b1). Matches Box2D Baumgarte sign
+                # and the ``lam_n >= 0`` unilateral clamp.
                 pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(k_n, c_n, -effective_gap, eff_inv_n, dt_substep)
                 cc_set_pd_gamma(cc, k, pd_gamma_n)
                 cc_set_pd_bias(cc, k, pd_bias_n)
@@ -828,19 +791,13 @@ def contact_iterate_at(
         bias_val = cc_get_bias(cc, k)
         bias_t1_val = cc_get_bias_t1(cc, k)
         bias_t2_val = cc_get_bias_t2(cc, k)
-        # ``bias_val > 0`` marks a speculative contact (see
-        # :func:`contact_prepare_for_iteration_at`); in that regime
-        # Box2D's ``s > 0`` branch runs unconditionally of ``useBias``,
-        # so the relax pass (``use_bias=False``) MUST keep the
-        # ``gap * inv_dt`` bias, otherwise the row degenerates into a
-        # pure ``-eff_n * jv_n`` push on every closing body -- which
-        # applies a *large* decelerating impulse to anything falling
-        # toward the surface while still separated. That's the honey
-        # artefact: a speculative-contact shell that decelerates the
-        # body even though the main solve correctly kept it rigid.
-        # For penetrating contacts (``bias_val <= 0``) the relax pass
-        # DOES zero the Baumgarte bias so the row settles on ``Jv = 0``
-        # instead of re-injecting positional drift velocity.
+        # ``bias_val > 0`` = speculative (see prepare). Box2D's
+        # ``s > 0`` branch runs regardless of ``useBias``, so the
+        # relax pass MUST keep the speculative bias; zeroing it
+        # collapses the row to ``-eff_n * jv_n``, decelerating every
+        # falling body at the speculative shell (the "honey"
+        # artefact). Penetrating (``bias_val <= 0``) relax DOES zero
+        # the Baumgarte bias so the row settles on ``Jv = 0``.
         is_speculative = bias_val > wp.float32(0.0)
         if not use_bias:
             if not is_speculative:
@@ -860,31 +817,22 @@ def contact_iterate_at(
         jv_t2 = wp.dot(vel_rel, t2_dir)
 
         # Normal row: Box2D v3 soft-constraint solve + clamp. Three
-        # regimes, matching ``b2SolveOverflowContacts`` and
-        # ``b2SolveContactsTask`` in Box2D v3:
-        #
-        # 1. Speculative (``is_speculative``, i.e. ``effective_gap > 0``
-        #    at prepare time): rigid PGS (``mass_coeff = 1``,
-        #    ``impulse_coeff = 0``) + bias ``gap * inv_dt`` -- runs
-        #    unconditionally of ``use_bias`` so the relax pass keeps
-        #    capping closing at ``gap / dt`` instead of degenerating
-        #    into a pure ``-eff_n * jv_n`` brake.
-        # 2. Penetrating + main solve (``!is_speculative`` and
-        #    ``use_bias``): soft PGS with the Box2D rollover
-        #    (``mass_coeff``, ``impulse_coeff`` from
-        #    :func:`soft_constraint_coefficients`).
-        # 3. Penetrating + relax (``!is_speculative`` and not
-        #    ``use_bias``): rigid PGS with zero bias -- pure
-        #    ``Jv = 0`` enforcement without the positional-bias
-        #    velocity that the main solve just injected.
-        # Soft-contact PD normal row (PhysX-style absolute spring-
-        # damper). Active iff the prepare pass wrote a non-zero
-        # ``pd_eff_soft`` for this contact -- i.e. the Newton buffer's
-        # per-contact stiffness or damping is non-zero. The bias here
-        # is the spring force contribution (``k * depth``) and must
-        # STAY ON during the relax pass -- zeroing it would let
-        # ``-eff_soft * gamma * acc`` cancel the accumulated impulse
-        # exactly, just as in the ADBS drive/limit/cable rows.
+        # regimes (mirrors ``b2SolveOverflowContacts`` /
+        # ``b2SolveContactsTask``):
+        #  1. Speculative (``gap > 0`` at prepare): rigid PGS
+        #     (``mass_coeff=1``, ``impulse_coeff=0``) + ``gap*inv_dt``
+        #     bias, runs unconditionally so relax still caps closing
+        #     at ``gap/dt`` instead of braking on ``-eff_n*jv_n``.
+        #  2. Penetrating main solve (``!speculative && use_bias``):
+        #     soft PGS via :func:`soft_constraint_coefficients`.
+        #  3. Penetrating relax (``!speculative && !use_bias``):
+        #     rigid PGS, zero bias -- pure ``Jv=0`` without the
+        #     positional bias the main solve just injected.
+        # Soft-contact PD normal row (PhysX-style absolute K/D),
+        # active iff prepare wrote non-zero ``pd_eff_soft``. Bias is
+        # the spring term ``k*depth`` and STAYS ON during relax --
+        # zeroing it would let ``-eff_soft*gamma*acc`` cancel the
+        # accumulated impulse, same as ADBS drive/limit/cable rows.
         pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
         lam_n_old = cc_get_normal_lambda(cc, k)
         if pd_eff_soft_n > wp.float32(0.0):

@@ -60,9 +60,7 @@ def sort_variable_length_int(keys: wp.array[int], values: wp.array[int], active_
     wp.utils.radix_sort_pairs(keys, values, count)
 
 
-def sort_variable_length_int64(
-    keys: wp.array[wp.int64], values: wp.array[int], active_length: wp.array[int]
-) -> None:
+def sort_variable_length_int64(keys: wp.array[wp.int64], values: wp.array[int], active_length: wp.array[int]) -> None:
     count = keys.shape[0] // 2
     wp.launch(_mask_tail_int64, dim=count, inputs=[keys, active_length])
     wp.utils.radix_sort_pairs(keys, values, count)
@@ -140,33 +138,24 @@ def runlength_encode_variable_length(
 ) -> None:
     """Graph-capture-safe RLE where ``active_length`` lives on device.
 
-    ``values.shape[0]`` is treated as the fixed launch / RLE size.
-    Inputs past ``active_length[0]`` get overwritten with ``sentinel``
-    before the RLE call so they collapse into a single trailing run
-    that we then drop in-place; the net effect is identical to
-    calling :func:`wp.utils.runlength_encode` with
-    ``value_count = active_length[0]`` (which isn't supported because
-    the underlying CUB routine takes ``value_count`` as a host int).
+    ``values.shape[0]`` is the fixed launch size. Tail entries past
+    ``active_length[0]`` are overwritten with ``sentinel`` so they
+    collapse into a single trailing run that we drop in-place --
+    equivalent to ``wp.utils.runlength_encode`` with
+    ``value_count = active_length[0]`` (unavailable because CUB's
+    ``value_count`` is a host int).
 
-    After this call:
-
-    * ``run_values[0:run_count[0]]`` holds the unique values of
-      ``values[0:active_length[0]]`` in order of first appearance.
-    * ``run_lengths[0:run_count[0]]`` holds the matching run lengths.
-    * ``run_count[0]`` is the number of runs.
+    After the call, ``run_values[0:run_count[0]]`` /
+    ``run_lengths[0:run_count[0]]`` hold the unique values and matching
+    lengths of ``values[0:active_length[0]]`` in first-appearance order.
 
     Args:
-        values: Input array. ``int32`` only. **Modified in place**
-            (tail entries past ``active_length[0]`` are overwritten
-            with ``sentinel``).
-        active_length: 1-element device array holding the valid prefix
-            length of ``values``. Read, not written.
-        run_values: Output unique-values array, size >= values.shape[0].
-        run_lengths: Output run-lengths array, size >= values.shape[0].
-        run_count: 1-element device array receiving the total run
-            count (after sentinel-tail removal).
-        sentinel: Value to stamp into the tail and drop from the
-            output. Must not appear anywhere in the legitimate input.
+        values: ``int32`` input array, **modified in place** (tail
+            stamped with ``sentinel``).
+        active_length: 1-elem device scalar, valid prefix length.
+        run_values, run_lengths: Outputs sized ``>= values.shape[0]``.
+        run_count: 1-elem output, final run count (sentinel dropped).
+        sentinel: Must not appear in legitimate input.
     """
     n = values.shape[0]
     wp.launch(

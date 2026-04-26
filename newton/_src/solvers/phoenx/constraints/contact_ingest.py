@@ -538,28 +538,19 @@ def _contact_warmstart_gather_kernel(
 ):
     """Seed this frame's ``cc`` slots from the prev frame (PhoenX model).
 
-    One thread per output column. For each contact ``k`` in the
-    column's range:
+    One thread per output column. For each contact ``k`` in the range:
 
-      * ``prev_k = rigid_contact_match_index[k]`` is the index in the
-        *previous* frame's sorted buffer that the matcher paired this
-        contact with, or :data:`MATCH_NOT_FOUND` / :data:`MATCH_BROKEN`
-        (``< 0``) for unmatched.
-      * When matched, copy every persistent field (``lambdas, normal,
-        tangent1, local_p0, local_p1``) across from ``cc.prev_*[prev_k]``.
-        This is the fixed-frame warm-start: the scalar impulses stay
-        physically meaningful because the ``(n, t1, t2)`` basis they
-        were written in is the same basis used to interpret them.
-      * When unmatched, run PhoenX's ``Initialize`` dance: pull
-        ``normal`` + body-local anchors from the upstream buffer,
-        derive ``tangent1`` from the tangential relative velocity,
-        and zero the impulses.
+    * Matched (``prev_k = rigid_contact_match_index[k] >= 0``):
+      copy ``lambdas, normal, tangent1, local_p0, local_p1`` from
+      ``cc.prev_*[prev_k]``. Fixed-frame warm-start preserves impulse
+      meaning since the ``(n, t1, t2)`` basis is identical.
+    * Unmatched (``< 0``): run PhoenX ``Initialize`` -- pull
+      ``normal`` and body-local anchors from the upstream buffer,
+      derive ``tangent1`` from tangential relative velocity, zero
+      impulses.
 
-    With the per-pair design, prev-frame data is keyed directly by
-    the contact's sorted-buffer index ``prev_k`` -- we only need a
-    ``prev_cid_of_contact`` gate to distinguish "prev contact was
-    covered by an active column" from "stale entry" and avoid reading
-    a prev slot that belonged to an already-overwritten frame.
+    ``prev_cid_of_contact`` gates reads of stale prev slots that
+    belonged to an already-overwritten frame.
     """
     tid = wp.tid()
     if tid >= num_contact_columns[0]:
@@ -716,37 +707,28 @@ def ingest_contacts(
 ) -> None:
     """Materialise contact columns for one step.
 
-    Graph-capture safe: no host readbacks, all kernel launches have
-    sizes known at host time, and all step-varying counts are kept
-    on-device in :attr:`IngestScratch.num_pairs` /
-    :attr:`IngestScratch.num_contact_columns`.
+    Graph-capture safe: no host readbacks, all launch sizes known at
+    host time, step-varying counts kept on-device in :attr:`IngestScratch`.
 
     Args:
-        contacts: Newton :class:`Contacts` buffer. Must have been built
-            with a non-disabled ``contact_matching`` mode.
+        contacts: Newton :class:`Contacts` buffer (must have been
+            built with a non-disabled ``contact_matching`` mode).
         shape_body: ``model.shape_body`` array.
-        contact_cols: Contact column header storage (sized for contacts
-            only). Contact columns are written at local_cid ``[0,
-            num_contact_columns)``; the caller maps these back to the
-            global cid range ``[num_joints, num_joints +
-            num_contact_columns)`` via the fast-tail kernel dispatch
-            (``cid < num_joints`` -> joint, else contact at
-            ``cid - num_joints``).
+        contact_cols: Contact-only column storage. Writes at
+            local_cid ``[0, num_contact_columns)``; dispatcher maps
+            to global cid via ``cid < num_joints`` -> joint, else
+            contact at ``cid - num_joints``.
         scratch: Reusable per-step scratch.
-        max_contact_columns: Hard cap on the number of contact columns
-            this step can emit. The cap is now the number of distinct
-            shape pairs rather than ``ceil(contact_count / 6)``, so
-            it sizes much more tightly than the old design.
-        default_friction: Fallback friction coefficient.
+        max_contact_columns: Cap on contact columns per step (now
+            sized by distinct shape pairs).
+        default_friction: Fallback friction.
         device: Warp device for the launches.
-        num_bodies: Total body count. Used to pack the
-            ``(min_body, max_body)`` pair into an int64 key for the
-            body-pair filter.
-        filter_keys: Sorted ``wp.int64`` array of packed canonical
-            body-pair keys to ignore.
-        filter_count: Number of valid entries in ``filter_keys``.
-        shape_material: Optional per-shape material index.
-        materials: Optional material table.
+        num_bodies: Total body count; used to pack
+            ``(min_body, max_body)`` into int64 filter keys.
+        filter_keys: Sorted int64 array of canonical body-pair keys
+            to ignore.
+        filter_count: Valid entries in ``filter_keys``.
+        shape_material, materials: Optional per-shape material lookup.
     """
     rigid_contact_max = int(contacts.rigid_contact_max)
 

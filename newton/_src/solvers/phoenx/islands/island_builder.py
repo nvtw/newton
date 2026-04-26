@@ -475,36 +475,27 @@ def _island_stage2_kernel(
 class UnionFindIslandBuilder:
     """Warp port of PhoenX's :class:`UnionFindIslandBuilder`.
 
-    Build connected components ("islands") over a set of bodies linked
-    by :class:`ElementInteractionData` chains. Designed to mirror the
-    graph-colouring partitioner's API so a future physics integration
-    can swap the two out or run them side-by-side.
+    Build connected components over bodies linked by
+    :class:`ElementInteractionData` chains.
 
     Usage::
 
         builder = UnionFindIslandBuilder(num_bodies_capacity=N, device=dev)
         builder.build_islands(interactions, num_interactions, num_bodies)
         num_islands = int(builder.num_sets.numpy()[0])
-        # Per-body island id (already deterministic):
+        # Per-body island id, body ids grouped by island,
+        # inclusive ends per island:
         island_of_body = builder.set_nr.numpy()
-        # Body ids grouped by island (contiguous per island):
         body_ids = builder.set_sizes.numpy()
-        # Inclusive ends per island:
         ends = builder.set_sizes_compact.numpy()[:num_islands]
 
-    Determinism: the island ids are sorted by each island's smallest
-    body id so two runs over the same inputs produce identical
-    ``set_nr`` / ``set_sizes`` / ``set_sizes_compact`` outputs, even
-    though the underlying atomic union-find is race-happy by design.
-    The determinism trick is pure post-processing (atomic-min +
-    sort-by-min-index + invert-map) so the algorithm's O(N * alpha(N))
-    asymptotic cost is preserved.
+    Deterministic despite the race-happy atomic union-find:
+    post-processing sorts island ids by each island's smallest body
+    id (atomic-min + sort-by-min-index + invert-map) so the
+    O(N * alpha(N)) asymptotic cost is preserved.
 
-    All device buffers are allocated once at construction; subsequent
-    :meth:`build_islands` calls are fixed-size launches and
-    graph-capture safe as long as the sort helpers they call remain
-    graph-capture safe (they currently launch
-    :func:`wp.utils.radix_sort_pairs`, which is).
+    All device buffers are allocated at construction; subsequent
+    :meth:`build_islands` calls are fixed-size and graph-capture safe.
     """
 
     def __init__(
@@ -524,9 +515,7 @@ class UnionFindIslandBuilder:
             device: Warp device. ``None`` takes the current default.
         """
         if num_bodies_capacity <= 0:
-            raise ValueError(
-                f"num_bodies_capacity must be > 0 (got {num_bodies_capacity})"
-            )
+            raise ValueError(f"num_bodies_capacity must be > 0 (got {num_bodies_capacity})")
         self._capacity: int = int(num_bodies_capacity)
         self._device = wp.get_device(device)
 
@@ -537,34 +526,18 @@ class UnionFindIslandBuilder:
         # sized ``2 * capacity``.
         sort_cap = 2 * cap
 
-        self.entries: wp.array[wp.int64] = wp.zeros(
-            cap, dtype=wp.int64, device=self._device
-        )
-        self.set_nr: wp.array[wp.int32] = wp.zeros(
-            cap, dtype=wp.int32, device=self._device
-        )
+        self.entries: wp.array[wp.int64] = wp.zeros(cap, dtype=wp.int64, device=self._device)
+        self.set_nr: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self._device)
         # ``set_sizes`` is reused as the body-id carrier for the final
         # sort. The sort wants a 2x ping-pong buffer so we match.
-        self.set_sizes: wp.array[wp.int32] = wp.zeros(
-            sort_cap, dtype=wp.int32, device=self._device
-        )
-        self.set_sizes_compact: wp.array[wp.int32] = wp.zeros(
-            cap, dtype=wp.int32, device=self._device
-        )
+        self.set_sizes: wp.array[wp.int32] = wp.zeros(sort_cap, dtype=wp.int32, device=self._device)
+        self.set_sizes_compact: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self._device)
         # ``old_to_new`` is the island-id carrier for the final sort
         # (swaps role with ``set_sizes``); same 2x ping-pong sizing.
-        self.old_to_new: wp.array[wp.int32] = wp.zeros(
-            sort_cap, dtype=wp.int32, device=self._device
-        )
-        self.num_sets: wp.array[wp.int32] = wp.zeros(
-            1, dtype=wp.int32, device=self._device
-        )
-        self.min_index_per_set: wp.array[wp.int32] = wp.zeros(
-            sort_cap, dtype=wp.int32, device=self._device
-        )
-        self.min_index_per_set_compact: wp.array[wp.int32] = wp.zeros(
-            sort_cap, dtype=wp.int32, device=self._device
-        )
+        self.old_to_new: wp.array[wp.int32] = wp.zeros(sort_cap, dtype=wp.int32, device=self._device)
+        self.num_sets: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self._device)
+        self.min_index_per_set: wp.array[wp.int32] = wp.zeros(sort_cap, dtype=wp.int32, device=self._device)
+        self.min_index_per_set_compact: wp.array[wp.int32] = wp.zeros(sort_cap, dtype=wp.int32, device=self._device)
 
     @property
     def capacity(self) -> int:
@@ -579,40 +552,31 @@ class UnionFindIslandBuilder:
     ) -> None:
         """Run the full PhoenX pipeline end-to-end on the device.
 
-        Writes / reads are documented on each per-kernel helper above;
-        the overall flow is:
+        Flow (per-kernel reads/writes documented on each helper):
 
-        1. :func:`_island_init_kernel` seeds ``entries`` /
-           ``set_sizes`` / ``min_index_per_set`` sentinels.
-        2. :func:`_island_unite_kernel` chains bodies per interaction.
-        3. :func:`_island_compute_set_nrs_kernel` pins each body to
-           its representative + atomically accumulates per-rep stats.
-        4. Compact ordering (``old_to_new`` 1/0 bitmap ->
-           exclusive scan -> reduce to ``num_sets``).
-        5. :func:`_island_collect_indices_kernel` packs min-indices +
-           seeds the sort's value array with identity.
-        6. Sort (key = compact min-index, value = compact slot id).
-        7. :func:`_island_invert_map_kernel` produces the
-           ``rawCompact -> sortedCompact`` permutation.
-        8. :func:`_island_rewrite_set_nrs_kernel` rewrites every
-           body's island id + populates ``set_sizes_compact``.
-        9. Inclusive scan of ``set_sizes_compact`` ->
-           island-end offsets.
-        10. :func:`_island_stage2_kernel` + key-value sort group
-            body ids by island.
+        1. ``_island_init_kernel`` seeds sentinels.
+        2. ``_island_unite_kernel`` chains bodies per interaction.
+        3. ``_island_compute_set_nrs_kernel`` pins each body to its
+           representative + accumulates per-rep stats.
+        4. Compact ordering (``old_to_new`` bitmap -> exclusive scan
+           -> reduce to ``num_sets``).
+        5. ``_island_collect_indices_kernel`` packs min-indices.
+        6. Sort by compact min-index.
+        7. ``_island_invert_map_kernel`` -> ``rawCompact ->
+           sortedCompact`` permutation.
+        8. ``_island_rewrite_set_nrs_kernel`` rewrites per-body
+           island ids + populates ``set_sizes_compact``.
+        9. Inclusive scan -> island-end offsets.
+        10. ``_island_stage2_kernel`` + key-value sort group body
+            ids by island.
 
         Args:
-            interaction_bodies: ``wp.array2d[wp.int32]`` of shape
-                ``(>= num_interactions[0], 8)``. Row ``k`` lists the
-                bodies that interaction ``k`` connects, with ``-1``
-                in unused slots. Only the active prefix is consulted
-                (rows past ``num_interactions[0]`` are ignored).
-            num_interactions: Device scalar holding the active
-                interaction count.
-            num_bodies: Device scalar holding the active body count.
-                Every launch targets ``capacity`` threads but each
-                one gates on this scalar so the kernel work stays
-                bounded by the live set.
+            interaction_bodies: ``(>= num_interactions[0], 8)``; row
+                ``k`` lists bodies connected by interaction ``k``,
+                unused slots ``-1``.
+            num_interactions: Device scalar, active interaction count.
+            num_bodies: Device scalar, active body count. Every
+                launch targets ``capacity`` threads and gates on this.
         """
         cap = self._capacity
 
@@ -792,9 +756,7 @@ class UnionFindIslandBuilder:
         ends = self.set_sizes_compact.numpy()
         n = self.num_islands()
         if not (0 <= island_index < n):
-            raise IndexError(
-                f"island_index {island_index} out of range [0, {n})"
-            )
+            raise IndexError(f"island_index {island_index} out of range [0, {n})")
         start = 0 if island_index == 0 else int(ends[island_index - 1])
         end = int(ends[island_index])
         bodies = self.set_sizes.numpy()[start:end]
@@ -811,8 +773,6 @@ class UnionFindIslandBuilder:
         ends = self.set_sizes_compact.numpy()
         n = self.num_islands()
         if not (0 <= island_index < n):
-            raise IndexError(
-                f"island_index {island_index} out of range [0, {n})"
-            )
+            raise IndexError(f"island_index {island_index} out of range [0, {n})")
         start = 0 if island_index == 0 else int(ends[island_index - 1])
         return int(self.set_sizes.numpy()[start])

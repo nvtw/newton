@@ -3,32 +3,21 @@
 """PhoenX solver wrapped in Newton's :class:`SolverBase` interface.
 
 Drives :class:`PhoenXWorld` from Newton's standard
-:class:`Model` / :class:`State` / :class:`Control` / :class:`Contacts`
-surface.  Constraint and contact storage stays column-major inside
-PhoenX; only the per-step body state (pose + twist + wrench) is
-round-tripped through Newton's SoA.
+``Model`` / ``State`` / ``Control`` / ``Contacts`` surface. Constraint
+and contact storage stays column-major inside PhoenX; only per-step
+body state (pose + twist + wrench) round-trips through Newton SoA.
 
-One-time cost at construction:
-    * allocate ``body_count + 1`` PhoenX body buffers (slot 0 is the
-      static world anchor); copy ``inv_mass`` / ``inv_inertia`` /
-      ``body_com`` / ``world_id`` / flags from Model;
-    * walk ``model.joint_*`` to build the 19 ADBS init arrays and
-      stamp one constraint column per supported joint (REVOLUTE,
-      PRISMATIC, BALL, FIXED). FREE joints get no column.
+Construction: allocate ``body_count + 1`` body buffers (slot 0 =
+static world anchor), copy mass / inertia / com / world_id / flags
+from ``Model``, walk ``model.joint_*`` to stamp one ADBS column per
+supported joint (REVOLUTE, PRISMATIC, BALL, FIXED; FREE gets none).
 
-Per-step cost on top of PhoenX's own step:
-    * one import kernel (``State.body_q`` / ``body_qd`` / ``body_f``
-      -> PhoenX fields; and a one-shot wrench accumulation from
-      ``control.joint_f`` via the stock Newton ``apply_joint_forces``
-      kernel);
-    * one joint-control writeback kernel that rewrites the per-joint
-      drive dwords (``target`` / ``target_velocity`` / ``stiffness``
-      / ``damping`` / ``max_force_drive``) from ``Control`` +
-      ``Model`` gains;
-    * one export kernel (PhoenX -> ``State.body_q`` / ``body_qd``).
-
-PhoenX's internal substep loop is preserved; the outer caller can
-still substep by setting ``substeps=1``.
+Per step (on top of PhoenX's own step): one import kernel (Newton ->
+PhoenX body fields + ``joint_f`` -> wrenches), one joint-control
+writeback kernel (``Control`` + ``Model`` gains -> drive dwords),
+one export kernel (PhoenX -> ``State.body_q`` / ``body_qd``).
+PhoenX's internal substep loop is preserved; pass ``substeps=1`` to
+substep outside.
 """
 
 from __future__ import annotations
@@ -78,30 +67,12 @@ __all__ = ["SolverPhoenX"]
 def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     """Tight ``rigid_contact_max`` estimate for the PhoenX solver.
 
-    Returns ``None`` when we can't improve on Newton's built-in
-    heuristic (then the caller falls back to Newton's default).
-
-    Newton's default estimator in
-    :func:`newton._src.sim.collide._estimate_rigid_contact_max` sums
-    ``num_meshes * 20-neighbors * 40-contacts-per-pair`` over **all**
-    mesh shapes -- *including non-colliding visual meshes* (shapes
-    with ``COLLIDE_SHAPES`` cleared). A humanoid model that carries
-    its visual meshes alongside box/capsule approximations therefore
-    gets a budget of ~2.4 M rigid contacts at 4096 worlds even when
-    the collision filter leaves only ~130 K allowed pairs between
-    colliding shapes.
-
-    PhoenX uses the precomputed ``model.shape_contact_pair_count``
-    (the COLLIDE_SHAPES-filtered pair list) multiplied by
-    ``PRIMITIVE_CPP = 5`` (the GJK/MPR narrow-phase per-pair cap) as
-    a 1:1 tight estimate, then applies a 2x safety factor for
-    steady-state jitter / transient broad-phase over-emission. That
-    cuts ~85% of the rigid-contact-related buffer footprint in
-    humanoid-on-plane scenes while staying well above the actual
-    per-step contact count (~10-20 per world).
-
-    When either piece of metadata is missing, return ``None`` so
-    ``CollisionPipeline`` falls back to Newton's default.
+    Uses the precomputed ``model.shape_contact_pair_count`` (already
+    ``COLLIDE_SHAPES``-filtered) * primitive-CPP narrow-phase cap * 2
+    safety, rather than Newton's default ``num_meshes * 20 * 40``
+    which over-counts non-colliding visual meshes by ~7x in humanoid
+    scenes. Returns ``None`` when the pair count isn't available so
+    the caller falls back to Newton's default.
     """
     pair_count = int(getattr(model, "shape_contact_pair_count", 0) or 0)
     if pair_count <= 0:
@@ -169,25 +140,17 @@ class SolverPhoenX(SolverBase):
             velocity_iterations: TGS-soft relax sweeps per substep.
             default_friction: Fallback friction when the Contacts
                 buffer carries no per-contact or per-shape material.
-            step_layout: Solver dispatch strategy.
-                * ``"multi_world"`` (default): per-world fast-tail
-                  kernels with one warp per world. Scales to thousands
-                  of small worlds.
-                * ``"single_world"``: per-colour grid launches via
-                  ``wp.capture_while`` over the global JP colouring.
-                  Each colour is a *full grid* launch (cid count many
-                  threads, default-sized blocks), so every SM on the
-                  device picks up work; wins for one (or a few) very
-                  big world(s).
+            step_layout: ``"multi_world"`` (default) -- per-world
+                fast-tail kernels, one warp per world (scales to
+                thousands of small worlds). ``"single_world"`` --
+                per-colour grid launches via ``wp.capture_while``
+                over the global JP colouring; wins for one or a few
+                very big worlds.
             threads_per_world: Effective threads-per-world for the
                 multi-world fast-tail kernels. ``"auto"`` (default)
-                picks per-step on the GPU from the colour-size
-                histogram; ``32`` matches the legacy one-warp-per-world
-                layout; ``16`` packs two worlds per warp (wins on
-                large fleets of sparse-colour worlds, e.g. h1_flat
-                >= 4096); ``8`` packs four worlds per warp (rarely
-                wins outright, gated tight in the auto picker).
-                Graph-capture safe; the launch grid is fixed.
+                picks per-step from the colour-size histogram;
+                ``32`` = one warp per world (legacy), ``16`` = two,
+                ``8`` = four (rarely wins). Graph-capture safe.
         """
         super().__init__(model)
 
@@ -256,18 +219,15 @@ class SolverPhoenX(SolverBase):
             if needs_new_cp:
                 import newton as _newton  # local to keep the import cycle tight
 
-                # Override Newton's default ``rigid_contact_max``
-                # estimator with a PhoenX-tight one built from
-                # ``shape_contact_pair_count`` -- the precomputed
-                # COLLIDE_SHAPES-filtered pair count. Newton's default
-                # ignores the flag when counting meshes (which in
-                # models with kept-for-visual-only mesh shapes
-                # inflates the budget ~15x; cost: 1.3 GB of mostly
-                # unused buffers at h1_flat / 4096 worlds). Force
-                # re-estimation by clearing any stale
-                # ``model.rigid_contact_max`` first -- the builder
-                # may have set it from an earlier model.contacts()
-                # call that ran before our solver attached.
+                # Override Newton's ``rigid_contact_max`` estimator
+                # with a PhoenX-tight one from
+                # ``shape_contact_pair_count`` (COLLIDE_SHAPES-filtered).
+                # Newton's default ignores the flag when counting
+                # meshes, which inflates the budget ~15x in models
+                # with visual-only mesh shapes (1.3 GB unused at
+                # h1_flat/4096). Clear any stale value first -- the
+                # builder may have set one from an earlier
+                # ``model.contacts()``.
                 tight_rcm = _estimate_rigid_contact_max_phoenx(model)
                 if tight_rcm is not None:
                     model.rigid_contact_max = 0  # bypass "already sized" short-circuit

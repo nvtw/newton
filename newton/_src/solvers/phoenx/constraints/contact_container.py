@@ -86,19 +86,14 @@ CC_DWORDS_PER_CONTACT: int = 15
 
 #: Per-contact derived dwords filled by ``prepare_for_iteration``:
 #: ``eff_n, eff_t1, eff_t2, bias, bias_t1, bias_t2,
-#: pd_gamma, pd_bias, pd_eff_soft``. The final three are non-zero
-#: only for PhysX-style soft contacts (user-supplied absolute
-#: stiffness / damping on the Newton :class:`Contacts` buffer);
-#: ``pd_eff_soft > 0`` is the iterate-side flag that switches the
-#: normal row from the Box2D hertz-based path to the absolute PD
-#: spring-damper path.
+#: pd_gamma, pd_bias, pd_eff_soft``. The last three are non-zero only
+#: for PhysX-style soft contacts (user K/D on Newton :class:`Contacts`);
+#: ``pd_eff_soft > 0`` switches the normal row from Box2D hertz-based
+#: to absolute PD spring-damper.
 #:
-#: ``r1`` / ``r2`` (lever arms) used to be cached here too but were
-#: trivially recomputable from ``local_p0`` / ``local_p1`` (already
-#: in ``lambdas``) plus the body pose; we drop them and recompute
-#: in iterate. Saves 6 dwords/contact; iterate pays one extra
-#: ``quat_rotate`` per body per contact (compiler usually hoists
-#: the per-body part out of the per-contact loop).
+#: ``r1`` / ``r2`` (lever arms) are recomputed in iterate from
+#: ``local_p0`` / ``local_p1`` + body pose (saves 6 dwords/contact;
+#: one extra ``quat_rotate`` per body-contact, typically hoisted).
 CC_DERIVED_DWORDS_PER_CONTACT: int = 9
 
 

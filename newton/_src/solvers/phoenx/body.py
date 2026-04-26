@@ -72,18 +72,14 @@ class BodyContainer:
 
     # --- Kinematic-body pose scripting ---------------------------------
     #
-    # For :data:`MOTION_KINEMATIC` bodies, users script the pose each
-    # frame (either via :meth:`PhoenXWorld.set_kinematic_pose` or by
-    # writing ``state.body_q`` through the Newton adapter). The solver
-    # then infers linear + angular velocity from the pose delta and
-    # ``lerp``/``slerp``-interpolates between the endpoints across
-    # substeps so contacts see smooth motion, not a teleport at t=0.
-    #
-    # A kinematic body without a scripted target this step
-    # (``kinematic_target_valid == 0``) falls through to a
-    # constant-velocity path: the prepare kernel synthesises a target
-    # ``pos_prev + velocity * dt`` so interpolation still produces a
-    # well-defined endpoint.
+    # :data:`MOTION_KINEMATIC` bodies take a per-frame scripted pose
+    # (via :meth:`PhoenXWorld.set_kinematic_pose` or ``state.body_q``).
+    # The solver infers linear + angular velocity from the pose delta
+    # and lerp/slerp-interpolates across substeps so contacts see
+    # smooth motion. With no scripted target this step
+    # (``kinematic_target_valid == 0``), the prepare kernel synthesises
+    # ``pos_prev + velocity * dt`` as the target for constant-velocity
+    # fallthrough.
 
     #: End-of-previous-step pose (lerp/slerp origin). Written once at
     #: :meth:`PhoenXWorld.step` entry by the kinematic prepare kernel.
