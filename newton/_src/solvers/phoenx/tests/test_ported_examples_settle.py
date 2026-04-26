@@ -93,6 +93,17 @@ _SCENES: list[tuple[str, int, str]] = [
     ("example_b2d_bridge", 480, "swing"),
     ("example_b2d_cantilever", 480, "swing"),
     ("example_jitter_double_pendulum", 240, "swing"),
+    # -- solver2d ports -----------------------------------------------
+    ("example_s2d_overlap_recovery", 480, "settle"),
+    ("example_s2d_rush", 480, "settle"),
+    ("example_s2d_confined", 480, "settle"),
+    # FarPyramid is "swing" rather than "settle" -- at 100 km from
+    # origin the float32 ULP is ~5 mm, so the stack continually
+    # jitters with ~2 m/s amplitude. Known precision limit of float32
+    # storage; the original solver2d sample uses it as a stress test
+    # for solvers with local-frame substepping (which PhoenX doesn't
+    # have). Test only checks "no blow-up".
+    ("example_s2d_far_pyramid", 600, "swing"),
 ]
 
 # Steady-state thresholds.

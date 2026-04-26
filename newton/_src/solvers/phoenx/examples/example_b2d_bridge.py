@@ -59,12 +59,19 @@ class Example(PortedExample):
                 xform=wp.transform(p=wp.vec3(cx, 0.0, z), q=wp.quat_identity()),
             )
             builder.add_shape_box(link, hx=PLANK_HX, hy=PLANK_HY, hz=PLANK_HZ)
+            # Tiny D-only velocity drive on every hinge -- equivalent to
+            # joint friction; bleeds the chain's swing energy out over a
+            # few seconds so the demo settles instead of oscillating
+            # indefinitely (PGS soft constraints don't dissipate).
             j = builder.add_joint_revolute(
                 parent=prev,
                 child=link,
                 parent_xform=prev_xform,
                 child_xform=wp.transform(p=wp.vec3(-PLANK_HX, 0.0, 0.0), q=wp.quat_identity()),
                 axis=(0.0, 1.0, 0.0),
+                target_vel=0.0,
+                target_kd=0.5,
+                actuator_mode=newton.JointTargetMode.VELOCITY,
             )
             joints.append(j)
             extents.append(default_box_half_extents(PLANK_HX, PLANK_HY, PLANK_HZ))

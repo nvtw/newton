@@ -46,6 +46,8 @@ class Example(PortedExample):
                 xform=wp.transform(p=wp.vec3(cx, 0.0, z), q=wp.quat_identity()),
             )
             builder.add_shape_box(link, hx=HE, hy=HE, hz=HE)
+            # Joint friction (D-only velocity drive) -- damps the chain's
+            # swing without overriding its rest equilibrium.
             joints.append(
                 builder.add_joint_revolute(
                     parent=prev,
@@ -53,6 +55,9 @@ class Example(PortedExample):
                     parent_xform=prev_xform,
                     child_xform=wp.transform(p=wp.vec3(-HE, 0.0, 0.0), q=wp.quat_identity()),
                     axis=(0.0, 1.0, 0.0),
+                    target_vel=0.0,
+                    target_kd=0.5,
+                    actuator_mode=newton.JointTargetMode.VELOCITY,
                 )
             )
             extents.append(default_box_half_extents(HE, HE, HE))

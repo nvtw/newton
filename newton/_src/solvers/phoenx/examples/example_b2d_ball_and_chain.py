@@ -63,6 +63,8 @@ class Example(PortedExample):
                 radius=LINK_RADIUS,
                 half_height=LINK_HALF_LEN,
             )
+            # Joint friction (D-only) so the chain settles instead of
+            # swinging indefinitely under the heavy ball.
             j = builder.add_joint_revolute(
                 parent=prev_link,
                 child=link,
@@ -71,6 +73,9 @@ class Example(PortedExample):
                     p=wp.vec3(-LINK_LEN * 0.5, 0.0, 0.0), q=wp.quat_identity()
                 ),
                 axis=(0.0, 1.0, 0.0),
+                target_vel=0.0,
+                target_kd=0.2,
+                actuator_mode=newton.JointTargetMode.VELOCITY,
             )
             joints.append(j)
             extents.append(default_capsule_half_extents(LINK_RADIUS, LINK_HALF_LEN))
