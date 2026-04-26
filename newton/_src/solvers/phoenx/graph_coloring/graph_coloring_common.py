@@ -280,29 +280,17 @@ def partitioning_coloring_incremental_kernel(
     section_marker_single_el_arr: wp.array[int],
     color_arr: wp.array[int],
 ):
-    """Jones-Plassmann MIS pass iterating over a compact remaining-ids list.
+    """Jones-Plassmann MIS pass over a compact remaining-ids list.
 
-    Functionally identical to :func:`partitioning_coloring_kernel` but reads
-    the set of candidate elements from ``remaining_ids[0..num_remaining[0])``
-    instead of filtering ``[0, num_elements[0])`` via an ``is_removed``
-    check at the top of every thread.
+    Same MIS logic as :func:`partitioning_coloring_kernel` but drives
+    from ``remaining_ids[0..num_remaining[0])`` instead of filtering
+    ``[0, max_num_interactions)`` by ``is_removed``. Every launched
+    lane has real work (full-warp utilisation on the hot adjacency
+    walk) and the launch grid shrinks with each round.
 
-    Why this matters:
-
-    * **No thread divergence from self-filtering.** In the classic
-      kernel every lane must load ``partition_data_concat[tid]`` to
-      decide whether to bail. With a compact remaining list every
-      launched lane has real work -- warps stay fully utilised and the
-      adjacency walk (the hot inner loop) runs on all 32 lanes
-      together instead of a sparse subset.
-    * **Fewer spurious launches.** The launch grid is ``num_remaining``
-      rounded up to a tile, not ``max_num_interactions``. After a few
-      colour rounds this is already a sizeable cut.
-
-    Neighbours referenced via the adjacency list are still checked with
-    ``contact_partitions_is_removed`` because they can come from any
-    earlier round (and thus may or may not be settled); that filter is
-    cheap and unavoidable for correctness.
+    Neighbours from the adjacency list still go through
+    ``contact_partitions_is_removed`` since they can come from any
+    earlier round.
     """
     slot = wp.tid()
 
@@ -631,68 +619,32 @@ def incremental_tile_compact_remaining_and_advance_kernel(
 ):
     """Fused compact + remaining-list update + advance for one JP round.
 
-    Replaces four back-to-back kernels
-    (``incremental_flag_kernel`` -> tile scan -> ``incremental_compact_kernel``
-    -> ``incremental_advance_kernel``) with a single single-block
-    grid-stride launch and additionally maintains a compact **index
-    buffer** of still-active elements so the next round's coloring pass
-    only visits lanes that actually have work.
+    Single-block tile-scan launch that replaces the old
+    flag / scan / compact / advance kernel chain. In-place compacts
+    ``remaining_ids[0..num_remaining)`` -- dropping elements just
+    committed to colour ``cc = current_color[0]`` -- so the next
+    coloring round visits only active lanes (keeps warps fully
+    utilised; previously ~50% of lanes early-exited).
 
-    Why the compact index buffer matters
-    ------------------------------------
+    Per-tile flags + two threaded tile scans:
 
-    Before this optimisation, every colour round launched
-    ``partitioning_coloring_kernel`` with ``dim=max_num_interactions``.
-    Each lane loaded ``partition_data_concat[tid]`` and early-exited if
-    the element was already settled by an earlier round. At ~18 colours
-    per sweep the average warp therefore had only ~50% of lanes doing
-    real work, the rest stalled on the early-exit branch.
-
-    By compacting ``remaining_ids[0..num_remaining)`` in place here --
-    dropping the elements just committed to partition ``cc`` -- the
-    next round can drive ``partitioning_coloring_incremental_kernel``
-    over a dense work list. Every launched warp is fully utilised and
-    the hot adjacency walk runs on all 32 lanes together.
-
-    In-place update safety
-    ----------------------
-
-    The kernel reads from and writes to the *same* ``remaining_ids``
-    buffer. The compaction is correct because survivors are packed
-    leftward, i.e. every write goes to an index ``<=`` the index it
-    read from:
-
-    * Within a tile (1024 lanes), the exclusive-scan primitive acts as
-      an implicit block sync: every lane's read of
-      ``remaining_ids[offset+lane]`` completes before any lane's
-      survivor store executes.
-    * Across tiles: tile N writes survivors into indices ``[running,
-      running + tile_survivors)`` where ``running <= N*1024``
-      (survivors never exceed slots processed). Tile N+1 reads from
-      ``[(N+1)*1024, (N+2)*1024)``. Since
-      ``running + tile_survivors <= (N+1)*1024``, the writes stay
-      strictly below the next tile's read window.
-
-    Per-tile algorithm
-    ------------------
-
-    Each tile computes two per-lane 0/1 flags and two tile scans:
-
-    * ``committed_flag = 1`` iff the element was just coloured with
-      ``cc = current_color[0]``; its exclusive scan drives the
-      compacted write into ``partition_element_ids`` and indexes
+    * ``committed_flag`` (just coloured): exclusive scan drives the
+      writes into ``partition_element_ids`` /
       ``interaction_id_to_partition``.
-    * ``survivor_flag = in_range ? 1 - committed_flag : 0``; its
-      exclusive scan drives the in-place compaction of
-      ``remaining_ids``.
+    * ``survivor_flag`` (still active): exclusive scan drives the
+      in-place compaction of ``remaining_ids``.
 
-    Two running prefixes (``committed_running``, ``survivor_running``)
-    are threaded across tiles via ``wp.tile_sum``.
+    In-place safety: survivors are packed leftward, so every write
+    goes to an index ``<=`` the read it came from. Within a tile the
+    scan primitive block-syncs reads vs writes; across tiles tile
+    N's write window ``[running, running + tile_survivors)`` is
+    strictly below tile N+1's read window
+    ``[(N+1)*1024, (N+2)*1024)`` because survivors never exceed
+    slots processed.
 
-    After the last tile, lane 0 publishes the totals and advances
-    ``current_color``. Race-free: every lane reads ``current_color[0]``
-    once into register ``cc`` at the top, and the only write happens
-    from lane 0 after all reads have completed in every tile.
+    Lane 0 publishes totals and advances ``current_color`` only
+    after the last tile (every lane latched ``cc`` into a register
+    at the top, so the single late write is race-free).
     """
     _block, lane = wp.tid()
 
@@ -784,26 +736,13 @@ def incremental_tile_compact_csr_and_advance_kernel(
 ):
     """CSR variant of :func:`incremental_tile_compact_remaining_and_advance_kernel`.
 
-    Same per-tile algorithm (in-place compaction of ``remaining_ids``,
-    block-wide exclusive scans, lane-0 scalar publication) but the
-    committed-elements compacted output is appended to the CSR layout
-    ``element_ids_by_color`` at offset ``color_starts[cc]`` rather than
-    written into a one-shot ``partition_element_ids`` buffer. After
-    the last tile lane 0 additionally writes
-    ``color_starts[cc + 1] = color_starts[cc] + committed_running``
-    so the next colour -- and the final ``num_colors`` sentinel slot --
-    picks up the correct starting offset.
-
-    ``num_colors`` mirrors ``current_color`` as each colour completes
-    and is read by :class:`~newton._src.solvers.phoenx.World` to drive
-    the sweep-time ``capture_while`` that replays the CSR colour by
-    colour across all PGS iterations and substeps of a ``step()``.
-
-    Race-free by the same argument as the non-CSR sibling: every lane
-    reads ``current_color[0]`` once at the top into ``cc``, and the
-    only writes to ``current_color``, ``color_starts[cc+1]``, and
-    ``num_colors`` happen from lane 0 after all reads have completed
-    across every tile.
+    Same per-tile algorithm but committed elements are appended to
+    the CSR layout at ``element_ids_by_color[color_starts[cc]..]``
+    instead of a one-shot buffer. Lane 0 additionally writes
+    ``color_starts[cc + 1]`` (so the next colour -- and the trailing
+    ``num_colors`` sentinel slot -- starts at the right offset) and
+    mirrors ``current_color`` into ``num_colors`` for the outer
+    sweep-time ``capture_while``.
     """
     _block, lane = wp.tid()
 

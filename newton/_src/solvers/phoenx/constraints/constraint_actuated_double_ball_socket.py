@@ -120,30 +120,22 @@ JOINT_MODE_BALL_SOCKET = wp.constant(wp.int32(2))
 #: Gauss-Seidel. No drive, no limit. All three anchors are snapshotted
 #: in the column at init regardless of mode, so no extra state.
 JOINT_MODE_FIXED = wp.constant(wp.int32(3))
-#: Cable (soft ball-socket) joint: rigid 3-row point lock at anchor1
-#: (same as BALL_SOCKET) plus three soft angular rows with
-#: independent per-component stiffness and damping -- ``k_bend`` on
-#: the two axes perpendicular to the reference direction
-#: ``anchor1 -> anchor2`` and ``k_twist`` along it. Each row uses the
-#: same Box2D-style soft PD formulation the axial drive / limit uses
-#: (``pd_coefficients`` -> ``(gamma, bias, eff_mass_soft)``), so
-#: warm-starting, substep Nyquist clamping, and relax-pass semantics
-#: are all reused without new plumbing.
+#: Cable (soft ball-socket): BALL_SOCKET's rigid 3-row point lock +
+#: three soft angular rows (2x ``k_bend`` perpendicular to
+#: ``anchor1->anchor2``, 1x ``k_twist`` along it). Each row uses the
+#: same Box2D-style soft PD plumbing as the axial drive/limit, so
+#: warm-start, Nyquist clamping, and relax semantics are reused.
 #:
 #: Column slot reuse (unchanged ``ADBS_DWORDS``):
-#:   * ``inv_initial_orientation`` -- rest relative orientation (the
-#:     init kernel already computes and stores exactly this quaternion
-#:     for REVOLUTE; CABLE reuses it verbatim).
-#:   * ``axis_local1`` -- reference direction in body-1 local frame
-#:     (init kernel already snapshots this from ``anchor2 - anchor1``).
+#:   * ``inv_initial_orientation`` -- rest relative orientation
+#:     (REVOLUTE already snapshots this quaternion).
+#:   * ``axis_local1`` -- ``anchor2-anchor1`` in body-1 local frame.
 #:   * ``stiffness_drive`` / ``damping_drive`` -> ``k_bend`` / ``d_bend``.
 #:   * ``stiffness_limit`` / ``damping_limit`` -> ``k_twist`` / ``d_twist``.
-#:   * ``ut_ai`` (3x3 mat33) -> 3 cached world-frame row directions
-#:     ``(d_bend1_world, d_bend2_world, d_twist_world)``.
-#:   * ``s_inv`` (3x3 mat33) -> 3 cached PD coefficient triples
-#:     ``(gamma, bias, eff_mass_soft)``.
-#:   * ``acc_imp2`` (vec3) -> per-row accumulated impulses
-#:     ``(acc_bend1, acc_bend2, acc_twist)``.
+#:   * ``ut_ai`` (mat33) -> world-frame row directions
+#:     ``(d_bend1, d_bend2, d_twist)``.
+#:   * ``s_inv`` (mat33) -> per-row ``(gamma, bias, eff_mass_soft)``.
+#:   * ``acc_imp2`` (vec3) -> ``(acc_bend1, acc_bend2, acc_twist)``.
 JOINT_MODE_CABLE = wp.constant(wp.int32(4))
 
 
@@ -185,40 +177,27 @@ _CLAMP_MIN = wp.constant(wp.int32(2))
 class ActuatedDoubleBallSocketData:
     """Per-constraint dword-layout schema for the unified joint.
 
-    The struct is a *union* over the two joint modes: revolute uses the
-    ``a1_inv / ut_ai / s_inv`` Schur cache, prismatic uses the
-    ``a4_inv / c_pris / s_scalar_inv`` Schur cache. Both modes share
-    every other slot (anchors, lever arms, warm-start impulses,
-    drive / limit scalars), which is what lets the dispatcher treat
-    them as one constraint type with no extra branch per iteration.
+    Union over the two joint modes: revolute and prismatic use
+    mode-specific Schur caches but share every other slot (anchors,
+    lever arms, warm-start impulses, drive / limit scalars), so the
+    dispatcher treats them as one constraint type.
 
-    Layout groups (in storage order):
+    Layout groups:
 
-    * **Header** -- ``constraint_type / body1 / body2`` (required by
-      the dispatcher contract).
-    * **Shared positional block** -- two user-supplied anchors on the
-      joint axis, their body-local snapshots, runtime lever arms,
-      cached tangent basis, and the rest-pose relative orientation
-      (for the revolute twist extraction).
-    * **Revolute-only Schur cache** -- ``a1_inv, ut_ai, s_inv`` (3x3,
-      3x3, 3x3 with a packed 2x2). Written by :func:`_revolute_prepare_at`,
-      read by :func:`_revolute_iterate_at`.
-    * **Prismatic-only Schur cache** -- ``a4_inv (mat44f)``,
-      ``c_pris (vec4f)``, ``s_scalar_inv (float)``, plus the anchor-3
-      body-local snapshots / world lever arms. Written by
-      :func:`_prismatic_prepare_at`, read by :func:`_prismatic_iterate_at`.
-    * **Warm-start** -- per-anchor accumulated impulses in world frame:
-      three ``vec3f`` slots (``acc_imp1, acc_imp2, acc_imp3``) are
-      enough to cover both modes without dword-stomping (revolute uses
-      ``acc_imp1`` as a full vec3 and ``acc_imp2`` as a tangent-only
-      vec3 with last component 0; prismatic uses all three as
-      tangent-only vec3s).
+    * **Header** -- ``constraint_type / body1 / body2``.
+    * **Shared positional block** -- two user anchors on the joint
+      axis, their body-local snapshots, runtime lever arms, cached
+      tangent basis, revolute rest-pose quat.
+    * **Revolute Schur cache** -- ``a1_inv, ut_ai, s_inv``.
+    * **Prismatic Schur cache** -- ``a4_inv`` (mat44f), ``c_pris``
+      (vec4f), ``s_scalar_inv``, plus anchor-3 snapshots / lever arms.
+    * **Warm-start** -- three ``vec3f`` accumulated impulses covering
+      both modes (revolute: ``acc_imp1`` full vec3 + ``acc_imp2``
+      tangent-only; prismatic: all three tangent-only).
     * **Actuator block** -- drive / limit setpoints, cached soft-
       constraint coefficients, scalar accumulated impulses.
 
-    Storage cost: ~80 dwords (about 320 B per joint). That's ~45%
-    larger than the old ActuatedDoubleBallSocket (~55 dwords) but is a
-    net LoC save vs keeping three separate constraint types.
+    Storage: ~80 dwords (~320 B per joint).
     """
 
     # ---- Header -------------------------------------------------------
@@ -245,52 +224,30 @@ class ActuatedDoubleBallSocketData:
     damping_ratio: wp.float32
     mass_coeff: wp.float32
     impulse_coeff: wp.float32
-    # Positional biases (anchors 1 and 2; the prismatic third anchor
-    # bias lives in ``mode_extras`` below since it's mode-exclusive
-    # with the revolute twist-tracker fields).
-    # Revolute: ``bias1`` = 3-vec world drift at anchor 1; ``bias2`` =
-    #   tangent drift at anchor 2 packed into ``(t1, t2, 0)``.
-    # Prismatic: ``bias1`` = tangent drift at anchor 1 packed into
-    #   ``(t1, t2, 0)``; ``bias2`` = tangent drift at anchor 2 packed
-    #   into ``(t1, t2, 0)``.
+    # Positional biases at anchors 1+2 (prismatic anchor-3 bias lives
+    # in ``mode_extras`` -- mode-exclusive with the revolute tracker).
+    # Revolute:  bias1 = world drift at a1; bias2 = a2 tangent drift (t1,t2,0).
+    # Prismatic: bias1, bias2 = a1, a2 tangent drifts (t1,t2,0).
     bias1: wp.vec3f
     bias2: wp.vec3f
-    # Mode-specific Schur cache. Joint mode is fixed at construction,
-    # so the revolute and prismatic caches are mutually exclusive --
-    # we alias them onto a single 27-dword block sized for the larger.
+    # Mode-specific Schur cache, aliased onto one 27-dword block sized
+    # for the larger mode (joint mode is fixed at construction).
+    # Reads/writes go through :func:`_read_revo_*` / :func:`_read_pris_*`.
     #
-    # Revolute layout (27 dwords used):
-    #   ``mode_cache[0..8]``   = a1_inv  : mat33 (9 dwords)
-    #   ``mode_cache[9..17]``  = ut_ai   : mat33 (9 dwords)
-    #   ``mode_cache[18..26]`` = s_inv   : mat33 (9 dwords)
-    #
-    # Prismatic layout (21 dwords used, 6 unused tail):
-    #   ``mode_cache[0..15]``  = a4_inv       : mat44 (16 dwords)
-    #   ``mode_cache[16..19]`` = c_pris       : vec4 (4 dwords)
-    #   ``mode_cache[20]``     = s_scalar_inv : float (1 dword)
-    #
-    # Reads / writes go through :func:`_read_revo_*` / :func:`_read_pris_*`
-    # helpers below so the alias stays in one place. Saves 21 dwords
-    # per joint vs. allocating both caches separately.
+    # Revolute  (27 used): [0..8] a1_inv mat33, [9..17] ut_ai mat33,
+    #                      [18..26] s_inv mat33.
+    # Prismatic (21 used, 6 unused tail): [0..15] a4_inv mat44,
+    #                      [16..19] c_pris vec4, [20] s_scalar_inv.
     mode_cache: wp.types.vector(length=27, dtype=wp.float32)
-    # Mode-specific extras. Same alias trick as ``mode_cache`` but for
-    # fields used in *one* mode and totally unread in the other --
-    # 16 dwords sized for the larger (prismatic) layout.
+    # Mode-specific extras, same alias trick. 16 dwords sized for the
+    # larger (prismatic) layout.
     #
-    # Prismatic layout (16 dwords used):
-    #   ``mode_extras[0..2]``   = local_anchor3_b1     : vec3 (3 dwords)
-    #   ``mode_extras[3..5]``   = local_anchor3_b2     : vec3 (3 dwords)
-    #   ``mode_extras[6..8]``   = r3_b1                : vec3 (3 dwords)
-    #   ``mode_extras[9..11]``  = r3_b2                : vec3 (3 dwords)
-    #   ``mode_extras[12..14]`` = accumulated_impulse3 : vec3 (3 dwords)
-    #   ``mode_extras[15]``     = bias3                : float (1 dword)
-    #
-    # Revolute layout (6 dwords used, 10 unused tail):
-    #   ``mode_extras[0..3]`` = inv_initial_orientation   : quat  (4 dwords)
-    #   ``mode_extras[4]``    = revolution_counter        : int   (1 dword)
-    #   ``mode_extras[5]``    = previous_quaternion_angle : float (1 dword)
-    #
-    # Saves another 6 dwords/joint on top of the ``mode_cache`` alias.
+    # Prismatic (16 used): [0..2] local_anchor3_b1, [3..5] local_anchor3_b2,
+    #     [6..8] r3_b1, [9..11] r3_b2, [12..14] accumulated_impulse3,
+    #     [15] bias3.
+    # Revolute  (6 used, 10 unused tail):
+    #     [0..3] inv_initial_orientation (quat),
+    #     [4] revolution_counter, [5] previous_quaternion_angle.
     mode_extras: wp.types.vector(length=16, dtype=wp.float32)
     # Warm-start accumulated impulses for the shared anchors. The
     # third (prismatic-only) impulse moved into ``mode_extras`` above.
@@ -488,56 +445,36 @@ def actuated_double_ball_socket_initialize_kernel(
 ):
     """Pack one batch of unified joint descriptors.
 
-    For both joint modes, ``anchor1`` and ``anchor2`` are two user-
-    supplied world-space points on the joint axis. Revolute interprets
-    the line through them as the hinge axis; prismatic interprets it as
-    the slide axis.
-
-    For prismatic mode the init kernel *auto-derives* a third anchor
-    ``a3 = anchor1 + rest_length * t_ref`` where ``t_ref`` is an
-    arbitrary unit perpendicular to ``n_hat_init`` and
-    ``rest_length = |anchor2 - anchor1|``. This third anchor is
-    snapshotted into both bodies' local frames so the runtime math can
-    rotate it into world space per substep -- no user-visible API
-    change compared with the two-anchor interface.
+    ``anchor1`` / ``anchor2`` are two world-space points on the joint
+    axis: the line through them is the hinge axis (revolute) or slide
+    axis (prismatic). Prismatic init auto-derives a third anchor
+    ``a3 = anchor1 + |a2 - a1| * t_ref`` (``t_ref`` arbitrary unit
+    perp to ``n_hat_init``) and snapshots it into both body frames.
 
     Args:
-        constraints: Shared column-major constraint storage.
-        bodies: Solver body container; only ``position`` / ``orientation``
-            of the referenced bodies are read.
+        constraints: Column-major constraint storage.
+        bodies: Only ``position`` / ``orientation`` of referenced
+            bodies are read.
         cid_offset: Global cid of the first constraint in this batch.
-        body1: Body indices for body 1 [num_in_batch].
-        body2: Body indices for body 2 [num_in_batch].
-        anchor1: World-space first anchor [num_in_batch] [m].
-        anchor2: World-space second anchor [num_in_batch] [m];
-            ``anchor2 - anchor1`` defines the joint axis.
-        hertz: Positional Schur block soft-constraint frequency [Hz].
-        damping_ratio: Positional Schur block damping ratio.
+        body1, body2: Body indices [num_in_batch].
+        anchor1, anchor2: World-space anchors [m] defining the axis.
+        hertz, damping_ratio: Positional Schur block soft-constraint
+            knobs.
         joint_mode: :data:`JOINT_MODE_REVOLUTE` or
             :data:`JOINT_MODE_PRISMATIC`.
-        drive_mode: :data:`DRIVE_MODE_OFF` / :data:`DRIVE_MODE_POSITION` /
-            :data:`DRIVE_MODE_VELOCITY`.
-        target: Position-drive setpoint [rad] (revolute) or [m]
-            (prismatic).
-        target_velocity: Velocity-drive setpoint [rad/s] or [m/s].
-        max_force_drive: Drive impulse cap [N*m] (revolute) or [N]
-            (prismatic); 0 disables the drive even if mode != OFF.
-        stiffness_drive: Drive PD stiffness ``kp`` [N*m/rad] (revolute)
-            or [N/m] (prismatic).
-        damping_drive: Drive PD damping ``kd`` [N*m*s/rad] (revolute)
-            or [N*s/m] (prismatic). ``stiffness_drive ==
-            damping_drive == 0`` disables the drive row.
-        min_value / max_value: Limit window [rad] or [m]. ``min_value
-            > max_value`` disables the limit (matches the standalone
-            angular_limit / linear_limit sentinel).
-        hertz_limit / damping_ratio_limit: Box2D limit soft-constraint
-            knobs; used iff ``stiffness_limit == damping_limit == 0``.
-        stiffness_limit / damping_limit: PD limit soft-constraint
-            gains (``kp``, ``kd``) in absolute SI units. When either
-            is strictly positive the limit uses the Jitter2
-            spring-damper path and ignores ``hertz_limit`` /
-            ``damping_ratio_limit``. Matches the standalone
-            angular_limit / linear_limit's dual-convention dispatch.
+        drive_mode: :data:`DRIVE_MODE_OFF` / ``_POSITION`` / ``_VELOCITY``.
+        target: Position setpoint [rad or m].
+        target_velocity: Velocity setpoint [rad/s or m/s].
+        max_force_drive: Drive impulse cap [N*m or N]; ``0`` disables.
+        stiffness_drive, damping_drive: Drive PD gains in absolute SI
+            units; both ``0`` disables the drive row.
+        min_value, max_value: Limit window [rad or m]; ``min > max``
+            disables the limit.
+        hertz_limit, damping_ratio_limit: Box2D-style limit knobs;
+            used iff ``stiffness_limit == damping_limit == 0``.
+        stiffness_limit, damping_limit: PD limit gains (absolute SI).
+            If either > 0 the limit uses the Jitter2 spring-damper
+            path and the Box2D knobs are ignored.
     """
     tid = wp.tid()
     cid = cid_offset + tid
@@ -1446,27 +1383,20 @@ def _revolute_iterate_at(
 # Prismatic (slider) mode math
 # ---------------------------------------------------------------------------
 #
-# Rank-5 pure-points formulation, 2+2+1 rows:
-#
-#   Rows 0-1: tangent drift at anchor 1 projected onto (t1, t2).
-#   Rows 2-3: tangent drift at anchor 2 projected onto (t1, t2).
-#   Row  4 : scalar drift at anchor 3 projected onto t2. This kills
-#            the last rotational DoF (rotation about n_hat).
+# Rank-5 pure-points, 2+2+1 rows: anchor-1 tangent drift onto (t1,t2),
+# anchor-2 tangent drift onto (t1,t2), and anchor-3 drift onto t2 to
+# kill the last rotational DoF (rotation about n_hat).
 #
 # The 5x5 effective-mass matrix is block-structured as
+#     K = [ K4     c ]    K4 (4x4) = anchor-tangent pairs
+#         [ c^T    d ]    c  (4)   = a3 cross-coupling, d (scalar)
 #
-#     K = [ K4     c  ]    K4 in R^{4x4}  (the two anchor-tangent pairs)
-#         [ c^T    d  ]    c  in R^{4}    (cross-coupling a3 <-> a1/a2)
-#                          d  in R        (a3 self-coupling)
+# Schur-eliminate the scalar row first:
+#     s_inv = 1 / (d - c^T K4^{-1} c)
+#     lam3  = -s_inv * (rhs3 - c^T K4^{-1} rhs4)
+#     lam4  = -K4^{-1} * (rhs4 + c * lam3)
 #
-# Schur eliminate the scalar anchor-3 row first:
-#
-#   s_inv = 1 / (d - c^T K4^{-1} c)
-#   lam3  = -s_inv * (rhs3 - c^T K4^{-1} rhs4)
-#   lam4  = -K4^{-1} * (rhs4 + c * lam3)
-#
-# This uses exactly one wp.inverse(mat44f) per prepare pass and no
-# per-iter inverses.
+# One ``wp.inverse(mat44f)`` per prepare; zero per-iter inverses.
 
 
 @wp.func
@@ -1870,30 +1800,20 @@ def _prismatic_iterate_at(
 # Cable (soft ball-socket) mode
 # ---------------------------------------------------------------------------
 #
-# Rigid 3-row point lock at anchor1 (verbatim ball-socket) plus three
-# independent soft angular rows:
-#   * 2x "bend" rows about the axes perpendicular to
-#     ``n_hat = anchor1 -> anchor2``;
-#   * 1x "twist" row along ``n_hat``.
+# Rigid 3-row point lock at anchor1 + three independent soft angular
+# rows: 2x "bend" perpendicular to ``n_hat = anchor1 -> anchor2`` and
+# 1x "twist" along ``n_hat``. Each scalar row reuses
+# :func:`pd_coefficients` (substep Nyquist clamping, warm-start,
+# bias-off relax pass for free) and iterates Gauss-Seidel-style, same
+# as :func:`_axial_drive_limit_iterate`.
 #
-# Each scalar row uses the exact Box2D-style soft PD coefficient
-# plumbing the axial drive / limit row already uses
-# (``pd_coefficients(stiffness, damping, position_error, eff_inv, dt)``
-# returning ``(gamma, bias, eff_mass_soft)``), so substep Nyquist
-# clamping, warm-start, and the relax-pass bias-off path are all free.
-# The iterate applies the three rows in Gauss-Seidel order --
-# identical pattern to :func:`_axial_drive_limit_iterate`.
-#
-# Cable measures deflection via a Darboux vector: the log-map of the
-# alignment quaternion
-#     q_align = q_wc * inv_init * q_wp^{-1}
-# where ``inv_init = q_wc_rest^{-1} * q_wp_rest`` is the same
-# quantity REVOLUTE already snapshots in ``_OFF_INV_INITIAL_ORIENTATION``.
-# Under small deflection (|kappa| << pi, the expected cable regime)
-# the log-map collapses to ``2 * q_align.xyz`` and the angular
-# Jacobian rows are simply world-frame unit directions in a basis
-# aligned with the reference axis; the small-angle formulation keeps
-# the iterate cheap and matches PGS's row-at-a-time updates.
+# Deflection is measured as the Darboux vector, i.e. the log-map of
+# ``q_align = q_wc * inv_init * q_wp^{-1}`` with
+# ``inv_init = q_wc_rest^{-1} * q_wp_rest`` (same quantity REVOLUTE
+# snapshots in ``_OFF_INV_INITIAL_ORIENTATION``). Under small
+# deflection the log-map collapses to ``2 * q_align.xyz``; angular
+# Jacobian rows are world-frame unit directions in the reference-
+# axis basis, keeping the iterate cheap.
 
 
 @wp.func
@@ -2168,19 +2088,16 @@ def _cable_iterate_at(
 # ---------------------------------------------------------------------------
 #
 # FIXED = REVOLUTE anchor-1 3-row + REVOLUTE anchor-2 tangent 2-row +
-# PRISMATIC anchor-3 scalar 1-row. All three anchors are already
-# snapshotted in the column at init (anchor-3 is derived at init as
-# ``anchor1 + rest_length * t_ref``), so no new state. Tangent basis
-# ``(t1, t2)`` follows the PRISMATIC convention (``t1`` aligned with
-# the anchor-3 offset perpendicular to ``n_hat``) so the anchor-3
-# scalar row is a unit-gain tangential velocity gate for rotation
-# about ``n_hat``.
+# PRISMATIC anchor-3 scalar 1-row. Anchor-3 is derived at init as
+# ``anchor1 + rest_length * t_ref``, so no new state is needed.
+# Tangent basis follows the PRISMATIC convention (``t1`` aligned with
+# anchor-3 perpendicular to ``n_hat``), making the anchor-3 scalar row
+# a unit-gain gate for rotation about ``n_hat``.
 #
-# Prepare caches ``a1_inv`` + ``ut_ai`` + ``s_inv_packed`` (reused from
-# REVOLUTE) for the 3+2 block and ``s_scalar_inv`` (reused from
-# PRISMATIC, but standalone -- no coupling to anchors 1 or 2) for the
-# anchor-3 row. Iterate runs the 3+2 block and then the anchor-3 row
-# in block Gauss-Seidel; PGS outer iterations couple the two blocks.
+# Prepare caches ``a1_inv`` + ``ut_ai`` + ``s_inv_packed`` (from
+# REVOLUTE) for the 3+2 block and ``s_scalar_inv`` (standalone, no
+# anchor-1/2 coupling) for the anchor-3 row. Iterate runs the two
+# blocks in Gauss-Seidel; outer PGS iterations couple them.
 
 
 @wp.func
@@ -2793,15 +2710,11 @@ def actuated_double_ball_socket_iterate_multi(
     body_pair = constraint_bodies_make(b1, b2)
     joint_mode = read_int(constraints, _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
-        _revolute_iterate_at_multi(
-            constraints, cid, 0, bodies, body_pair, idt, use_bias, num_sweeps
-        )
+        _revolute_iterate_at_multi(constraints, cid, 0, bodies, body_pair, idt, use_bias, num_sweeps)
     else:
         it = wp.int32(0)
         while it < num_sweeps:
-            actuated_double_ball_socket_iterate_at(
-                constraints, cid, 0, bodies, body_pair, idt, use_bias
-            )
+            actuated_double_ball_socket_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
             it += 1
 
 
@@ -2961,35 +2874,22 @@ def actuated_double_ball_socket_world_error_at(
 ) -> wp.spatial_vector:
     """Position-level constraint residual for the unified joint.
 
-    Covers all three joint modes (REVOLUTE, PRISMATIC, BALL_SOCKET)
-    plus the optional actuator axis. Output layout:
+    Covers REVOLUTE / PRISMATIC / BALL_SOCKET + optional actuator.
 
-      * ``spatial_top`` = world-frame anchor 1 drift ``p1_b2 -
-        p1_b1`` (fully constrained in revolute and ball-socket modes;
-        in prismatic mode the tangential components are the
-        constraint rows, the axial component is the free DoF).
-      * ``spatial_bottom`` = ``(drift_t1_anchor2, drift_t2_anchor2,
-        actuator_residual)``. The two tangent drifts at anchor 2 are
-        the extra 2 positional rows in revolute / prismatic modes
-        (zero in ball-socket mode). The actuator residual collapses
-        three contributions:
+    * ``spatial_top``   = anchor 1 drift ``p1_b2 - p1_b1`` (all 3
+      components in revolute / ball-socket; tangential only in
+      prismatic -- axial is the free DoF).
+    * ``spatial_bottom`` = ``(drift_t1_anchor2, drift_t2_anchor2,
+      actuator_residual)``. Anchor-2 tangents are the extra 2
+      positional rows in revolute / prismatic (zero in ball-socket).
+      The actuator residual is
+      ``cumulative_angle_or_slide - target`` (``DRIVE_MODE_POSITION``)
+      plus ``- limit`` when clamped, else zero; drive and limit add
+      when both active.
 
-        - drive row in ``DRIVE_MODE_POSITION``: ``cumulative_angle -
-          target`` (revolute) or ``slide - target`` (prismatic);
-        - limit row when clamped: ``cumulative_angle - limit`` or
-          ``slide - limit``;
-        - otherwise zero.
-
-        When both the drive and the limit are active in the same
-        substep their residuals add -- callers wanting to distinguish
-        them should read the fields directly; this surfaces the net
-        position error along the free DoF, which is what the PGS
-        actually targets.
-
-    Revolute mode uses the persisted revolution tracker state (same
-    as :func:`angular_limit_world_error_at`). Prismatic mode
-    recomputes the slide from the current body pose. Ball-socket
-    mode reports anchor 1 drift only.
+    Revolute uses the persisted revolution tracker; prismatic
+    recomputes the slide from the current pose; ball-socket reports
+    only anchor-1 drift.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2

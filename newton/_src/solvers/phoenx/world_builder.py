@@ -547,21 +547,15 @@ class WorldBuilder:
     # Shape API
     # ------------------------------------------------------------------
     #
-    # The shape API is *optional*. Users who want to manage mass /
-    # inertia entirely by hand can skip it and pass
-    # ``inverse_mass`` / ``inverse_inertia`` explicitly on
-    # :meth:`add_dynamic_body`. Users who want the builder to handle
-    # compound-body physics for them attach shapes with either
-    # ``density`` (kg / m^3) or ``mass`` (kg); at finalize the builder
-    # sums the mass and inertia via the parallel-axis theorem, and
-    # overwrites the body's ``inverse_mass`` / ``inverse_inertia``.
+    # Optional: users can manage mass/inertia by hand via explicit
+    # ``inverse_mass`` / ``inverse_inertia`` on :meth:`add_dynamic_body`,
+    # or attach shapes with ``density`` (kg/m^3) or ``mass`` (kg) and
+    # let :meth:`finalize` sum via the parallel-axis theorem (overwriting
+    # the body's inverse mass/inertia).
     #
-    # Mixing the two modes is an error: if a body has any shape with
-    # a mass source set AND its descriptor has an explicit non-default
-    # mass or inertia, :meth:`finalize` raises ``ValueError``. That
-    # way it's impossible to silently end up with a body whose mass
-    # comes from "the last override you forgot about". The intent is
-    # declared once, on the shape.
+    # Mixing modes is an error: a shape with a mass source AND a body
+    # with explicit non-default mass/inertia makes :meth:`finalize`
+    # raise ``ValueError`` -- intent is declared once, on the shape.
 
     def _attach_shape(self, desc: ShapeDescriptor) -> int:
         """Validate + append a shape, return its index."""
@@ -778,40 +772,32 @@ class WorldBuilder:
         Modes:
 
         * :attr:`JointMode.BALL_SOCKET` -- 3-DoF point lock at
-          ``anchor1``. ``anchor2`` must be ``None``; drive and limit
-          fields must be left at defaults.
-        * :attr:`JointMode.REVOLUTE` -- 5-DoF hinge about the line
-          from ``anchor1`` to ``anchor2``. Drive / limit interpret
-          ``target`` / ``min_value`` / ``max_value`` as angles [rad]
-          and ``max_force_drive`` as torque [N*m].
+          ``anchor1``. ``anchor2`` must be ``None``; drive / limit
+          must stay at defaults.
+        * :attr:`JointMode.REVOLUTE` -- 5-DoF hinge about
+          ``anchor1 -> anchor2``. Drive / limit values are angles
+          [rad], ``max_force_drive`` is torque [N*m].
         * :attr:`JointMode.PRISMATIC` -- 5-DoF slider along
-          ``anchor1 -> anchor2``. Drive / limit interpret values as
-          displacements [m] along the axis and ``max_force_drive`` as
-          force [N].
-        * :attr:`JointMode.FIXED` -- 6-DoF weld along ``anchor1 ->
-          anchor2``. No drive / limit; every positional and
-          rotational DoF is locked.
+          ``anchor1 -> anchor2``. Drive / limit values are
+          displacements [m], ``max_force_drive`` is force [N].
+        * :attr:`JointMode.FIXED` -- 6-DoF weld along
+          ``anchor1 -> anchor2``; no drive / limit.
         * :attr:`JointMode.CABLE` -- rigid ball-socket at ``anchor1``
-          plus three soft angular rows measuring the Darboux vector
-          of the child body relative to its rest pose. Pass
-          ``bend_stiffness`` [N*m/rad] and ``twist_stiffness``
-          [N*m/rad] for the two axes perpendicular to ``anchor1 ->
-          anchor2`` and the axis along it respectively, plus the
-          matching ``bend_damping`` / ``twist_damping`` [N*m*s/rad].
-          The rest pose is the configuration at :meth:`finalize` time.
-          No ``drive_mode`` / ``target`` / ``limit`` -- cable angular
-          behaviour is entirely defined by the four stiffness /
-          damping scalars.
+          plus three soft angular rows (Darboux vector vs
+          :meth:`finalize`-time rest pose). ``bend_{stiffness,damping}``
+          [N*m/rad, N*m*s/rad] govern the two axes perp to
+          ``anchor1 -> anchor2``, ``twist_{stiffness,damping}`` the
+          axis along it. No drive / limit rows.
 
         ``stiffness_drive == damping_drive == 0`` disables the drive
-        row (REVOLUTE / PRISMATIC); ``min_value > max_value`` disables
-        the limit row. Setting either limit PD gain positive selects
-        the PD formulation over the Box2D ``(hertz_limit,
-        damping_ratio_limit)`` path.
+        (REVOLUTE / PRISMATIC); ``min_value > max_value`` disables
+        the limit. Any positive ``{stiffness,damping}_limit`` selects
+        the PD limit formulation over Box2D ``(hertz_limit,
+        damping_ratio_limit)``.
 
         Returns:
-            A :class:`JointHandle` whose ``cid`` field is rewritten in
-            place by :meth:`finalize` to the joint's global cid.
+            A :class:`JointHandle` whose ``cid`` is rewritten by
+            :meth:`finalize` to the joint's global cid.
         """
         self._validate_body(body1)
         self._validate_body(body2)

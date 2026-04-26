@@ -153,25 +153,17 @@ _SINGLEWORLD_BLOCK_DIM: int = 256
 def _singleworld_total_threads(constraint_capacity: int, device) -> int:
     """Persistent grid size for the single-world PGS sweep kernels.
 
-    The previous one-thread-per-cid sizing launched ~900K-thread grids
-    on Kapla-scale scenes where any given colour activates only a few
-    hundred cids, burning 84% of thread slots on early-exit reads.
-    Mirrors the sizing strategy used by
-    :class:`newton._src.geometry.narrow_phase.NarrowPhase`: pick a
-    block count that balances "saturate the device" against "don't
-    overprovision past the workload", then hold that grid size across
-    every colour launch so the CUDA graph capture stays stable.
+    Mirrors :class:`NarrowPhase`'s "saturate without overprovisioning"
+    sizing: 4 blocks/SM on CUDA (capped by capacity and a 32-block
+    floor) so the CUDA graph stays stable while avoiding the old
+    one-thread-per-cid 900K-grid waste.
 
     Args:
-        constraint_capacity: Upper bound on active cids per colour
-            (``num_joints + max_contact_columns``). The grid never
-            needs more threads than this because a colour's active
-            count is bounded by the capacity.
-        device: Warp device the kernel will launch on. Only
-            ``sm_count`` is read (CPU fallback picks a flat cap).
+        constraint_capacity: Upper bound on active cids per colour.
+        device: Warp device (only ``sm_count`` is read).
 
     Returns:
-        The persistent grid size in threads, always a multiple of
+        Persistent grid size in threads, multiple of
         :data:`_SINGLEWORLD_BLOCK_DIM`.
     """
     block_dim = _SINGLEWORLD_BLOCK_DIM
@@ -257,30 +249,19 @@ class PhoenXWorld:
                 is registered (see :meth:`set_materials`).
             num_worlds: Number of independent sub-worlds. Gating uses
                 ``BodyContainer.world_id``.
-            step_layout: Solve dispatch strategy. ``"multi_world"``
-                (default) is the per-world fast-tail path: one warp
-                per world, scales beyond ~256 worlds. ``"single_world"``
-                drives the global Jones-Plassmann colouring with
-                per-colour grid launches via ``wp.capture_while``.
-                Each colour is a full grid launch (``dim =
-                constraint_capacity``, default 256-thread blocks),
-                so every SM on the device picks up work for the
-                colour -- not a single-block sweep. Wins when the
-                scene is one (or a few) very big world(s); accepts
-                ``num_worlds > 1`` but loses the per-world parallelism
-                of the default path.
+            step_layout: ``"multi_world"`` (default) uses the per-world
+                fast-tail path (one warp per world; scales beyond ~256
+                worlds). ``"single_world"`` drives the global
+                Jones-Plassmann colouring with per-colour persistent
+                grid launches via ``wp.capture_while``; wins when the
+                scene is one or a few very big worlds.
             threads_per_world: Effective threads-per-world for the
                 multi-world fast-tail kernels. ``"auto"`` (default)
-                picks per-step on the GPU from the colour-size
-                histogram; ``32`` matches the legacy one-warp-per-world
-                layout; ``16`` packs two worlds per warp (wins on
-                sparse-colour scenes -- e.g. h1_flat -- once the
-                fleet is large enough to keep SM occupancy up); ``8``
-                packs four worlds per warp (rarely wins outright,
-                gated tight in the auto picker). The launch grid is
-                always ``num_worlds * 32`` lanes; reducing tpw just
-                early-exits the surplus, so this knob is graph-capture
-                safe and does not need re-construction to retune.
+                picks per-step from the colour-size histogram;
+                ``32`` = one warp per world (legacy), ``16`` = two,
+                ``8`` = four (rarely wins). Grid is always
+                ``num_worlds * 32`` lanes with the surplus
+                early-exiting, so this knob is graph-capture safe.
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -377,21 +358,15 @@ class PhoenXWorld:
         # stable across varying per-colour active counts.
         self._singleworld_total_threads: int = _singleworld_total_threads(self._constraint_capacity, self.device)
 
-        # Termination flag for the single-world *head* capture-while.
-        # Starts each sweep at 1 and is zeroed by the persistent-grid
-        # sweep kernel when it encounters a colour whose size is
-        # ``<= FUSE_TAIL_MAX_COLOR_SIZE`` -- that hand-off point is
-        # where control passes to the fused tail kernel. A separate
-        # flag (instead of reusing ``color_cursor``) is what lets the
-        # tail kernel resume from the exact cursor position the head
-        # stopped at. When the tail-fuse feature is disabled (default
-        # ``fuse_threshold = 0``), the head kernel never hits the
-        # hand-off branch and the flag stays at 1 for the entire
-        # sweep; termination then falls back to the ``color_cursor
-        # == 0`` predicate check in the kernel's own early-exit
-        # guard, which also leaves ``head_active`` unchanged, so the
-        # subsequent ``_reset_head_active_kernel`` below is all the
-        # bookkeeping the feature-disabled path needs.
+        # Head capture-while predicate. Starts each sweep at 1; the
+        # persistent-grid sweep zeroes it on the hand-off to the fused
+        # tail kernel (colour size ``<= FUSE_TAIL_MAX_COLOR_SIZE``).
+        # A separate flag (vs. reusing ``color_cursor``) is what lets
+        # the tail kernel resume at the exact cursor position. When
+        # the feature is disabled (``fuse_threshold = 0``), the hand-
+        # off branch is unreachable; termination then comes from the
+        # kernel's ``color_cursor == 0`` early-exit and the reset
+        # kernel below is the only per-sweep bookkeeping needed.
         self._head_active: wp.array[wp.int32] = wp.ones(1, dtype=wp.int32, device=self.device)
         self._fuse_threshold: int = int(FUSE_TAIL_MAX_COLOR_SIZE)
         self._fuse_tail_block_dim: int = int(FUSE_TAIL_BLOCK_DIM)
@@ -459,22 +434,17 @@ class PhoenXWorld:
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
 
         # ----- Contact infrastructure -----
-        # Contact state lives in TWO separate containers, both sized for
-        # just contacts (not joints), so the joint-wide constraint
-        # buffer doesn't allocate padding for contact columns.
+        # Contact state in two narrow containers (vs stuffing contacts
+        # into the 154-dword joint container) -- saved ~1.3 GB at
+        # h1_flat 4096 worlds.
         #
-        #   :class:`ContactContainer`        -- keyed by contact index
-        #     ``k`` (into the rigid_contact_max buffer). Holds per-
-        #     contact warm-start (lambdas), prev-step lambdas, and
-        #     per-substep derived scratch (r1/r2, eff_n, bias, ...).
-        #
-        #   :class:`ContactColumnContainer`  -- keyed by local contact
-        #     column cid ``[0, max_contact_columns)``. Holds the 7-dword
-        #     column header (type, body1, body2, friction,
-        #     friction_dynamic, contact_first, contact_count). Split
-        #     out so ``ConstraintContainer`` stays joint-sized (154
-        #     dwords) without allocating 147 padding dwords per contact
-        #     column -- cut ~1.3 GB at h1_flat 4096 worlds.
+        #   :class:`ContactContainer`       -- keyed by contact index
+        #     ``k`` into the rigid_contact_max buffer. Warm-start
+        #     lambdas, prev-step lambdas, per-substep scratch.
+        #   :class:`ContactColumnContainer` -- keyed by local column
+        #     cid ``[0, max_contact_columns)``. 7-dword column header
+        #     (type, body1/2, friction, friction_dynamic,
+        #     contact_first, contact_count).
         if self.max_contact_columns > 0:
             self._contact_container: ContactContainer = contact_container_zeros(
                 self.rigid_contact_max, device=self.device
@@ -610,25 +580,19 @@ class PhoenXWorld:
     ) -> None:
         """Script a kinematic body's end-of-next-step pose.
 
-        The next :meth:`step` call will: (1) snapshot the body's
-        current pose as the lerp / slerp origin, (2) infer the linear
-        and angular velocity needed to land on the new pose by the
-        end of the step, and (3) lerp the origin and slerp the
-        orientation across substeps so contacts see smooth motion.
+        The next :meth:`step` snapshots the current pose as the lerp /
+        slerp origin, infers the linear and angular velocity to land
+        on the target by end-of-step, and lerps / slerps across
+        substeps so contacts see smooth motion.
 
         Args:
-            body: Body index. Must be a kinematic body (added via
-                :meth:`WorldBuilder.add_kinematic_body` or a Newton
-                body with :data:`~newton.BodyFlags.KINEMATIC` set).
-                Calling on a dynamic or static body raises
-                ``ValueError``.
-            position: Target origin in world frame [m].
-            orientation: Target orientation as a unit quaternion
-                ``(x, y, z, w)``.
+            body: Kinematic body index (dynamic/static raises
+                ``ValueError``).
+            position: Target origin, world frame [m].
+            orientation: Target quaternion ``(x, y, z, w)``.
 
-        Batched calls with hundreds of kinematic bodies should use
-        :meth:`set_kinematic_poses_batch` -- this method does a
-        single-element host->device roundtrip per call.
+        Use :meth:`set_kinematic_poses_batch` for many bodies to
+        avoid per-call H2D round-trips.
         """
         # Host-side motion-type validation. Fetching one int per call
         # is not free, but it trades a GPU sync for a clear error when
@@ -1130,28 +1094,21 @@ class PhoenXWorld:
     def _build_per_world_coloring(self) -> None:
         """Parallel per-world Jones-Plassmann coloring.
 
-        1. :func:`_count_elements_per_world_kernel` -- atomic count of
-           active cids per world. The atomics are commutative so the
-           counts themselves are bit-deterministic regardless of GPU
-           thread scheduling.
-        2. Inclusive scan of the counts -> ``per_world_element_offsets``.
-        3. :func:`_build_scatter_keys_kernel` + stable
-           ``radix_sort_pairs`` -- bucket cids into
-           ``per_world_elements`` by world id. Stable sort keeps the
-           cid order within each bucket fixed, replacing an
-           atomic-cursor scatter that produced a thread-scheduling-
-           dependent order.
-        4. :func:`_per_world_jp_coloring_kernel` -- one block per
-           world, runs the full JP MIS loop on its bucket and emits
-           directly into ``world_element_ids_by_color`` /
-           ``world_color_starts`` / ``world_num_colors``. Output slot
-           assignment within a colour uses
-           ``wp.tile_scan_exclusive`` (also deterministic) instead of
-           the older atomic cursor.
+        1. ``_count_elements_per_world_kernel`` -- atomic count of
+           active cids per world (commutative atomics, deterministic).
+        2. Inclusive scan -> ``per_world_element_offsets``.
+        3. ``_build_scatter_keys_kernel`` + stable
+           ``radix_sort_pairs`` -- bucket cids by world id; stable
+           sort keeps order deterministic.
+        4. ``_per_world_jp_coloring_kernel`` -- one block per world
+           runs the full JP MIS loop on its bucket and emits into
+           ``world_element_ids_by_color`` / ``world_color_starts`` /
+           ``world_num_colors``. Intra-colour slots use
+           ``wp.tile_scan_exclusive`` (deterministic).
 
-        The adjacency CSR from ``partitioner.reset`` is reused
-        (worlds have disjoint body sets after static-null-out, so
-        each element's neighbours all live in the same world).
+        Reuses the adjacency CSR from ``partitioner.reset`` (worlds
+        are disjoint after static-null-out, so all neighbours live in
+        the same world).
         """
         nw = self.num_worlds
         cap = self._constraint_capacity

@@ -86,53 +86,23 @@ __all__ = [
 #: ``world_id >= num_worlds``.
 _STRAGGLER_BLOCK_DIM: int = 32
 
-# How many PGS sweeps ``contact_iterate_multi`` /
-# ``actuated_double_ball_socket_iterate_multi`` run per call. Every
-# value saves per-cid body / constraint reloads amortised inside the
-# multi function, but values > 1 also *shrink* the cross-colour PGS
-# feedback from ``solver_iterations`` rounds down to
-# ``solver_iterations / _FUSED_INNER_SWEEPS`` rounds -- which tall
-# stacks cannot tolerate.
-#
-# ``2`` (4 feedback rounds at the default ``solver_iterations = 8``)
-# passes every short-stack / pyramid / hinge test in the suite but
-# *fails* ``test_example_tower`` (40 layers of circular planks): the
-# top ring drops ~1 m in a 1 s settle because the ground reaction
-# cannot propagate through 40 contact layers in 4 rounds.
-#
-# ``1`` keeps full 8-round feedback (math-identical to the pre-multi
-# outer loop) but still exercises the register-caching infrastructure
-# so the compiler can keep body / constraint constants in registers
-# across the PGS row solves *within* a single sweep. Every test passes
-# and the large-world gains are still significant (+34%/+57% vs the
-# pre-optimisation baseline at 4096 worlds for g1/h1_flat).
-# ``_FUSED_INNER_SWEEPS`` must evenly divide ``solver_iterations``.
+# PGS sweeps that ``*_iterate_multi`` runs per call. Must evenly
+# divide ``solver_iterations``; each value > 1 amortises per-cid body
+# / constraint reloads but *shrinks* cross-colour feedback to
+# ``solver_iterations / _FUSED_INNER_SWEEPS`` rounds -- tall stacks
+# (e.g. 40-layer tower) cannot tolerate that. ``1`` keeps full
+# 8-round feedback + still benefits from intra-sweep register caching.
 _FUSED_INNER_SWEEPS: int = 1
 
 
 def _choose_fast_tail_worlds_per_block(num_worlds: int) -> int:
-    """How many worlds to cohabit one physical block in the fast-tail
-    kernels. Each world always owns exactly one warp (32 threads), so
-    the returned block size ``32 * wpb`` keeps ``__syncwarp()`` valid
-    regardless of ``wpb``.
+    """Worlds per physical block in the fast-tail kernels.
 
-    Tuned on RTX PRO 6000 (sm_120), 188 SMs, after the fused
-    prepare+iterate + register-caching refactor.
-
-    Three-tier by scene size (env_fps numbers are 3-run averaged
-    across g1_flat / h1_flat):
-
-    * ``num_worlds < 512``: ``wpb = 2``. Keeps blocks spread across
-      SMs. ``wpb = 4`` already regresses 5-15% here, ``wpb = 8`` is
-      20-25% slower (blocks below 1 per SM).
-    * ``512 <= num_worlds < 2048``: ``wpb = 4``. ``wpb = 2`` is
-      slightly better on h1 (+3%) but worse on g1 (+8% with ``wpb = 4``);
-      ``wpb = 4`` is the cross-scenario middle ground.
-    * ``num_worlds >= 2048``: ``wpb = 8``. g1 @ 4096 picks up +20%
-      vs ``wpb = 4`` (more ILP per block absorbs the register
-      pressure from the register-cached revolute iterate); h1 @ 4096
-      loses ~4% but h1 @ 16384 is neutral. Average across both
-      scenarios is the better call.
+    Each world owns one warp (32 threads); block size is ``32 * wpb``
+    so ``__syncwarp()`` stays valid. Three-tier by world count,
+    empirically tuned on RTX PRO 6000 (sm_120, 188 SMs):
+    ``wpb = 2`` below 512 worlds, ``wpb = 4`` up to 2048, ``wpb = 8``
+    above.
     """
     if num_worlds < 512:
         return 2
@@ -167,16 +137,14 @@ def _sync_warp(): ...
 # Adaptive threads-per-world picker
 # ---------------------------------------------------------------------------
 #
-# The fast-tail kernels launch with a fixed grid of ``num_worlds *
-# _STRAGGLER_BLOCK_DIM`` threads (one warp slot per world at maximum
-# tpw=32). Each kernel reads its effective tpw from a 1-element buffer
-# written by :func:`_pick_threads_per_world_kernel` once per step. With
-# tpw=32 every thread does work; with tpw=16 lanes 16-31 of each warp
-# slot map to ``world_id >= num_worlds`` and early-exit; with tpw=8 the
-# top 24 lanes early-exit. This lets a sparse-color scene (h1_flat:
-# mean ~5 cids/colour/world) double its lane utilisation by packing two
-# worlds per warp -- without changing the host-side launch shape, so
-# the whole step still fits in a single CUDA graph.
+# Fast-tail kernels launch at a fixed ``num_worlds *
+# _STRAGGLER_BLOCK_DIM`` grid (one warp slot per world at tpw=32) and
+# read effective tpw from a 1-element buffer written once per step by
+# :func:`_pick_threads_per_world_kernel`. Smaller tpw maps the top
+# lanes to ``world_id >= num_worlds`` and early-exits them. Sparse-
+# colour scenes (h1_flat ~5 cids/colour/world) double lane utilisation
+# by packing two worlds per warp -- without changing host launch
+# shape, so the whole step stays in a single CUDA graph.
 
 
 @wp.kernel(enable_backward=False)
@@ -212,34 +180,21 @@ def _pick_threads_per_world_kernel(
 ):
     """One thread; picks tpw in {16, 32} from precomputed totals.
 
-    Two-tier heuristic, tuned on RTX PRO 6000 (sm_count=188) across
-    h1_flat at 64..16384 worlds, tower at 32..256 worlds, and
-    g1_flat at 64..2048 worlds:
+    Two-tier heuristic (tuned on RTX PRO 6000 sm_count=188):
 
-      * **tpw=32 (default, one warp per world).** Used whenever the
-        scene fills < ~8 warps per SM at tpw=32 (small / medium
-        fleets where SM occupancy is the bottleneck and dropping
-        warp count regresses), or when colours are dense enough that
-        most of the warp's 32 lanes already do useful work
-        (mean >= 6 cids/colour).
-      * **tpw=16 (two worlds per warp).** Both gates must hit:
-        enough warps per SM to absorb halving (>= 8 warps/SM at
-        tpw=32) AND sparse-enough colours that two worlds' worth of
-        cids still fit comfortably under the warp roof
-        (mean <= 6 cids/colour). End-to-end gain ~+4-12% on
-        h1_flat-class fleets above 2048 worlds.
+    * **tpw=32** (default, one warp per world) when warps/SM < 8
+      (occupancy-bound) or colours are dense
+      (mean >= 6 cids/colour).
+    * **tpw=16** (two worlds per warp) when both gates hit: enough
+      warps per SM to halve (>= 8 warps/SM at tpw=32) AND sparse
+      colours (mean <= 6 cids/colour). +4-12% end-to-end on
+      h1_flat-class fleets above 2048 worlds.
 
-    ``tpw=8`` is reachable via the static ``threads_per_world=8``
-    constructor argument but the auto picker never emits it: empirical
-    data shows tpw=8 wins occasionally at extreme world counts but
-    the gap over tpw=16 is dwarfed by run-to-run noise, while
-    incorrectly picking tpw=8 over tpw=16 (e.g. h1_8192, where
-    tpw=16 saved +12% but tpw=8 only +3%) is a noticeable regression.
-
-    All comparisons in fixed-point (x16) so the kernel runs without
-    floating-point ops. Inputs come from the scan / reduction
-    kernels that ran before this one, so the picker itself is O(1)
-    and stays cheap inside the captured graph.
+    ``tpw=8`` is reachable via the static
+    ``threads_per_world=8`` arg but the auto picker never emits it
+    (gap over tpw=16 is noise, occasional 12% -> 3% regressions).
+    All comparisons in fixed-point (x16) so no FP ops; O(1) inside
+    the captured graph.
     """
     if wp.tid() != 0:
         return
@@ -461,18 +416,12 @@ def _per_world_jp_coloring_kernel(
     color_base = wp.int32(0)
 
     while num_remaining > wp.int32(0) and current_color < max_colors:
-        # Phase 2: find local maxima and commit them. Every lane runs
-        # the stride loop the same number of times so that the
-        # ``wp.tile`` reduction / scan below sees all lanes at the
-        # same point regardless of count -- Warp tile ops are
-        # block-collective.
-        #
-        # Slot assignment within a colour is via ``tile_scan_exclusive``
-        # rather than an atomic cursor: the scan is deterministic
-        # (depends only on per-lane ``committed_here``, which is a
-        # function of the priority graph), where atomic_add ordering
-        # depends on which lane reaches the atomic first. The tile
-        # primitives carry the same per-step cost.
+        # Phase 2: find local maxima and commit them. All lanes run
+        # the stride loop the same number of times so the
+        # block-collective tile reduction/scan sees every lane at the
+        # same point. Slot assignment uses ``tile_scan_exclusive``
+        # (deterministic, depends only on ``committed_here``) rather
+        # than an atomic cursor, at the same per-step cost.
         committed_this_round = wp.int32(0)
         offset = wp.int32(0)
         while offset < count:
@@ -574,24 +523,20 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
 ):
     """Fused prepare + main-solve dispatcher.
 
-    Runs the prepare pass and the ``num_iterations`` PGS sweeps in a
-    single kernel launch. Saves one kernel launch per substep; more
-    importantly, per-world setup (``world_id``, ``n_colors``,
-    ``world_base``) is computed once and the register-resident
-    per-world state survives across the prepare -> iterate transition
-    for free.
+    Runs the prepare pass and ``num_iterations`` PGS sweeps in one
+    launch: saves a per-substep launch and keeps per-world setup
+    (``world_id``, ``n_colors``, ``world_base``) register-resident
+    across prepare -> iterate.
 
-    ``tpw_buf[0]`` holds the effective threads-per-world chosen by
-    :func:`_pick_threads_per_world_kernel`. Threads with
-    ``world_id >= num_worlds`` early-exit; this is how the launch grid
-    of ``num_worlds * _STRAGGLER_BLOCK_DIM`` retracts to ``num_worlds *
-    tpw`` lanes when ``tpw < _STRAGGLER_BLOCK_DIM``.
+    ``tpw_buf[0]`` (effective threads-per-world from
+    :func:`_pick_threads_per_world_kernel`) retracts the
+    ``num_worlds * _STRAGGLER_BLOCK_DIM`` launch grid to
+    ``num_worlds * tpw`` active lanes via early-exit when
+    ``world_id >= num_worlds``.
 
-    The prepare outputs (``cc.derived``) still round-trip through
-    global memory between prepare and iterate -- different cids in a
-    warp touch different contacts, so we can't keep them in
-    registers. But the kernel-launch fixed cost is eliminated and
-    some loop-boundary scalars may be reused by the compiler.
+    Prepare outputs (``cc.derived``) still round-trip through gmem --
+    different cids in a warp touch different contacts, so they can't
+    stay in registers.
     """
     tid = wp.tid()
     tpw = tpw_buf[0]
@@ -853,31 +798,24 @@ def _kinematic_prepare_step_kernel(
     bodies: BodyContainer,
     dt: wp.float32,
 ):
-    """Once-per-step kinematic prepare, called at
-    :meth:`PhoenXWorld.step` entry *before* the substep loop.
+    """Once-per-step kinematic prepare, called before the substep loop.
 
-    Resolves this step's pose target for every kinematic body, infers
-    the linear + angular velocity the solver should expose to contacts,
-    and snapshots the body's current pose as ``position_prev`` /
-    ``orientation_prev`` so the per-substep interpolator has a stable
-    ``lerp`` / ``slerp`` origin.
+    For each kinematic body: resolve this step's pose target, infer
+    the linear / angular velocity to expose to contacts, and
+    snapshot the current pose into ``position_prev`` /
+    ``orientation_prev`` as the per-substep lerp / slerp origin.
 
     Target resolution:
 
-    * ``kinematic_target_valid[i] == 1`` (user called
-      :meth:`PhoenXWorld.set_kinematic_pose` or the Newton adapter
-      flagged a pose import) -- read the user-set target out of
+    * ``kinematic_target_valid[i] == 1`` -- read from
       ``kinematic_target_{pos,orient}`` and clear the flag.
-    * ``kinematic_target_valid[i] == 0`` (no explicit script this
-      step, constant-velocity backward-compat path) -- synthesise
-      a target from ``position_prev + velocity * dt`` and the
-      axis-angle integration of ``angular_velocity * dt``.
+    * ``0`` -- synthesise from ``position_prev + velocity * dt`` and
+      axis-angle ``angular_velocity * dt`` (constant-velocity
+      backward-compat).
 
-    Velocity inference uses the quaternion log-map so large
-    rotations are handled correctly (small-angle ``omega ~= 2 *
-    q_rel.xyz / dt`` is exact only at the limit; the full formula
-    ``angle = 2 * atan2(|xyz|, w); omega = axis * angle / dt``
-    generalises without drift).
+    Velocity inference uses the quaternion log-map
+    (``angle = 2 * atan2(|xyz|, w); omega = axis * angle / dt``) so
+    large rotations are exact, not just small-angle.
     """
     i = wp.tid()
     if bodies.motion_type[i] != MOTION_KINEMATIC:
@@ -1079,71 +1017,30 @@ def _phoenx_update_inertia_and_clear_forces_kernel(
 # Single-world step path: per-colour grid launches via ``wp.capture_while``
 # ---------------------------------------------------------------------------
 #
-# These kernels treat the partitioner's GLOBAL CSR (``element_ids_by_color``
-# / ``color_starts`` / ``num_colors``) as a single coloured graph and
-# drive the colour walk via a host-side ``wp.capture_while`` loop on
-# ``color_cursor``. One grid launch per colour; each launch is a
-# *persistent* grid of fixed size and uses an internal grid-stride loop
-# to cover the current colour's active cid range. Wins when the scene
-# has one big world (or a small number of large worlds) -- the
-# multi-world fast-tail kernels pin one warp per world and leave most
-# SMs idle in that regime.
+# Persistent grid walks the partitioner's GLOBAL CSR colour-by-colour,
+# driven by a host-side ``wp.capture_while`` on ``head_active``. One
+# launch per colour; launch dim sized once at construction (see
+# :attr:`PhoenXWorld._singleworld_total_threads`) to a multiple of
+# SM count, same strategy as :class:`NarrowPhase`. Wins for one or a
+# few big worlds; the multi-world fast-tail path leaves SMs idle there.
 #
-# The launch dim is sized once per :class:`PhoenXWorld` at construction
-# (see :attr:`PhoenXWorld._singleworld_total_threads`) to a reasonable
-# multiple of the device's SM count, following the same strategy as
-# :class:`newton._src.geometry.narrow_phase.NarrowPhase`. Launching one
-# thread per ``constraint_capacity`` element used to produce ~900K-thread
-# grids on Kapla-scale scenes where a single colour has only a few
-# hundred active cids -- massive overprovisioning that tanked occupancy
-# (168 reg/thread * 256-wide blocks at 16% theoretical occupancy).
+# Head capture-while termination -- ``head_active[0]`` starts at 1 and
+# the kernel clears it in two cases:
 #
-# Usage from the host:
+#   (a) ``color_cursor[0] <= 0``  -- sweep drained every colour.
+#   (b) ``count <= fuse_threshold`` -- hand off to the fused tail
+#       kernel, which resumes at the same cursor.
 #
-#     partitioner.begin_sweep()
-#     # head_active starts at 1; the head capture-while terminates when
-#     # the normal kernel hits the tail-fuse hand-off predicate.
-#     wp.capture_while(
-#         head_active,
-#         lambda: [wp.launch(_constraint_prepare_singleworld_kernel,
-#                            dim=total_num_threads, ...,
-#                            total_num_threads=total_num_threads)
-#                  for _ in range(NUM_INNER_WHILE_ITERATIONS)],
-#     )
+# Neither case touches ``color_cursor``; the dedicated ``head_active``
+# flag is what lets the tail kernel pick up where (b) stopped. During
+# normal work thread 0 decrements ``color_cursor`` at end-of-kernel.
+# ``fuse_threshold = 0`` disables (b) and preserves the original
+# one-kernel-per-colour behaviour.
 #
-# The kernel decrements ``color_cursor`` by 1 at the end (thread 0
-# only) during normal work; when the cursor reaches 0 the capture-while
-# also exits (the kernel's no-op guard keeps ``head_active`` stable).
-#
-# Head capture-while termination:
-# ``head_active[0]`` is the predicate of the head capture-while. It
-# starts each sweep at 1 and is cleared by the kernel in two cases:
-#
-#   (a) ``color_cursor[0] <= 0`` -- the sweep has drained every colour.
-#   (b) ``count <= fuse_threshold`` for the current colour -- hand off
-#       to the fused tail kernel, which resumes at the same cursor.
-#
-# Both cases return from the kernel without touching ``color_cursor``.
-# A dedicated ``head_active`` flag (instead of reusing ``color_cursor``
-# for termination) is what lets the tail kernel resume at the exact
-# cursor position case (b) stopped at.
-#
-# Setting ``fuse_threshold = 0`` disables the hand-off branch (the
-# inequality ``count <= 0`` is never true for a real colour, so only
-# (a) ever fires) and preserves the original one-kernel-per-colour
-# behaviour.
-#
-# Early-exit / inner-unroll contract
-# (required for ``NUM_INNER_WHILE_ITERATIONS`` > 1):
-# ``_capture_singleworld_sweep`` issues ``NUM_INNER_WHILE_ITERATIONS``
-# launches back-to-back per outer capture-while iteration. Launches
-# after the one that clears ``head_active`` are still issued; they
-# re-enter one of the two early-exit branches above (either the
-# cursor-converged guard or the hand-off branch) and become cheap
-# no-ops. The initial ``color_cursor[0] <= 0`` guard handles case
-# (a); the ``count <= fuse_threshold`` branch naturally repeats
-# case (b) until the outer capture-while observes ``head_active[0]
-# == 0`` and exits.
+# Early-exit contract (required for ``NUM_INNER_WHILE_ITERATIONS > 1``):
+# launches after the one that clears ``head_active`` still fire; they
+# re-enter the early-exit branches as cheap no-ops until the outer
+# capture-while observes ``head_active[0] == 0``.
 
 
 @wp.func
@@ -1317,49 +1214,26 @@ def _constraint_relax_singleworld_kernel(
 # Single-world step path: fused tail kernels (one block, many colours)
 # ---------------------------------------------------------------------------
 #
-# The persistent-grid kernels above launch once per colour. Near the tail
-# of a sweep, colour sizes drop well below one block's worth of lanes
-# (< ``FUSE_TAIL_MAX_COLOR_SIZE``) but we still pay the full
-# kernel-launch + capture-while boundary per colour. The fused tail
-# kernel below replaces that tail with a single 1D-block kernel that
-# walks the remaining small colours in-place, using
-# ``_sync_threads`` (``__syncthreads``) in place of the kernel boundary
-# to order each colour's body-velocity writes before the next colour's
-# reads.
+# Single 1D-block kernel that walks the sweep's trailing small colours
+# back-to-back, using ``__syncthreads`` in place of the per-colour
+# kernel boundary. Launched via ``wp.launch_tiled(dim=[1],
+# block_dim=FUSE_TAIL_BLOCK_DIM)``.
 #
-# Launch contract (see :meth:`PhoenXWorld._capture_singleworld_tail_sweep`):
+# Correctness:
 #
-#     wp.launch_tiled(
-#         _constraint_iterate_singleworld_fused_kernel,
-#         dim=[1],
-#         inputs=[...],
-#         block_dim=FUSE_TAIL_BLOCK_DIM,
-#     )
-#
-# which yields a single block of ``FUSE_TAIL_BLOCK_DIM`` lanes;
-# ``wp.tid()`` returns ``(block_idx, lane)`` where ``block_idx == 0``
-# for every thread.
-#
-# Correctness contract:
-#
-# * Each iteration of the internal ``while`` handles exactly one
-#   colour; the colour must have size ``<= FUSE_TAIL_MAX_COLOR_SIZE``
-#   so every cid is owned by a distinct lane (``lane < count``).
-# * ``_sync_threads`` between colours makes every lane's body-velocity
-#   writes for colour ``c`` visible to every lane's reads for colour
-#   ``c + 1``; because the coloring invariant forbids any two cids in
-#   the same colour from sharing a body, intra-colour races are
-#   already impossible.
-# * If the internal ``while`` encounters a colour with size >
-#   ``FUSE_TAIL_MAX_COLOR_SIZE`` the kernel exits WITHOUT decrementing
-#   ``color_cursor``, handing the colour off to the persistent-grid
-#   kernel on the next pass. The persistent-grid kernel mirrors this
-#   hand-off in the other direction: it exits without decrementing
-#   when the current colour has size <= ``fuse_threshold``, so the two
-#   kernels form a size-partition of the colour sequence.
+# * Each iteration of the internal ``while`` handles one colour of
+#   size ``<= FUSE_TAIL_MAX_COLOR_SIZE`` so every cid owns a distinct
+#   lane. ``_sync_threads`` orders each colour's body-velocity writes
+#   before the next colour's reads; the coloring invariant already
+#   rules out intra-colour body-sharing races.
+# * On encountering a colour with size > ``FUSE_TAIL_MAX_COLOR_SIZE``
+#   the kernel exits WITHOUT decrementing ``color_cursor``, handing
+#   off to the persistent-grid kernel. That kernel mirrors the
+#   hand-off from the other direction (exits on
+#   ``count <= fuse_threshold``), so the two kernels partition the
+#   colour sequence by size.
 # * The outer ``wp.capture_while(color_cursor, ...)`` terminates
-#   naturally when the fused kernel drains the last small colour and
-#   leaves ``color_cursor[0] == 0``.
+#   when the fused kernel drains the last small colour.
 
 
 @wp.kernel(enable_backward=False)

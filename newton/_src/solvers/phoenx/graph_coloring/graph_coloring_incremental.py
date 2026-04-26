@@ -60,45 +60,27 @@ MAX_COLORS = 1024
 class IncrementalContactPartitioner:
     """Jones-Plassmann partitioner with two usage modes.
 
-    Mode A (per-colour streaming, the original API)
-        Used by the standalone coloring tests. Workflow:
+    Mode A -- per-colour streaming (standalone coloring tests):
+        Construct with capacities, :meth:`reset` whenever the element
+        set changes, then call :meth:`launch` per colour. Each call
+        publishes one partition to :attr:`partition_element_ids`
+        (length :attr:`partition_count`, colour
+        :attr:`current_color`). Stop when :attr:`num_remaining == 0`.
 
-        1. Construct once with the capacities (``max_num_interactions``,
-           ``max_num_nodes``). All device buffers are allocated up front.
-        2. Call :meth:`reset` whenever the element set changes. This
-           rebuilds the adjacency structure and resets the loop state.
-        3. Call :meth:`launch` to produce the next partition. The
-           resulting element list is exposed via
-           :attr:`partition_element_ids` (length
-           :attr:`partition_count`); the colour used is
-           :attr:`current_color`.
-        4. Stop when :attr:`num_remaining` reaches zero.
+    Mode B -- CSR build once, replay many (used by :class:`World`):
+        After :meth:`reset`, :meth:`build_csr` drives the full
+        Jones-Plassmann loop via ``wp.capture_while`` and writes two
+        CSR arrays:
 
-    Mode B (CSR build once, replay many times)
-        Used by :class:`World`. Workflow:
+        * :attr:`element_ids_by_color` -- flat concat of every
+          colour's element ids.
+        * :attr:`color_starts` -- exclusive prefix; colour ``c`` owns
+          ``element_ids_by_color[color_starts[c]:color_starts[c+1]]``.
 
-        1. Construct and :meth:`reset` as above.
-        2. Call :meth:`build_csr` once. This drives the Jones-Plassmann
-           loop to completion via ``wp.capture_while`` and writes the
-           full coloring into two CSR arrays:
-
-           * :attr:`element_ids_by_color` -- flat concatenation of
-             every colour's element ids (length
-             ``max_num_interactions``).
-           * :attr:`color_starts` -- exclusive prefix of colour sizes;
-             colour ``c`` owns
-             ``element_ids_by_color[color_starts[c]:color_starts[c+1]]``.
-
-           :attr:`num_colors` holds the actual colour count, capped at
-           :data:`MAX_COLORS`.
-        3. Replay the same CSR across many sweeps (e.g. PGS prepare +
-           N iterate passes) by walking the CSR with a device-side
-           cursor -- no further coloring work required.
-
-        Because the constraint graph's topology is frozen inside a
-        ``World.step`` call (contacts are ingested once, joints are
-        static), one ``build_csr`` call produces a coloring that is
-        valid for every substep + every PGS iteration of the step.
+        :attr:`num_colors` (capped at :data:`MAX_COLORS`) holds the
+        final count. The constraint graph is frozen inside a
+        ``World.step`` call, so one build is valid for every substep
+        and PGS iteration of the step.
     """
 
     def __init__(
@@ -134,15 +116,13 @@ class IncrementalContactPartitioner:
         priorities = rng.permutation(max_num_interactions).astype(np.int32) + 1
         self._random_values = wp.from_numpy(priorities, dtype=wp.int32, device=device)
 
-        # Two-section priority scheme: cids in [0, contact_cid_start) are
-        # joints; cids in [contact_cid_start, max_num_interactions) are
-        # contacts. ``contact_partitions_get_random_value`` adds
-        # ``max_num_contacts`` to the priority when ``cid >= section_marker``,
-        # so every contact priority strictly exceeds every joint priority.
-        # Jones-Plassmann therefore commits contacts first, clustering them
-        # into earlier colours and joints into later colours -- cuts
-        # intra-warp divergence in the fast-tail iterate kernel (the
-        # contact vs joint dispatch branches each land on same-type warps).
+        # Two-section priority: joints live in [0, contact_cid_start),
+        # contacts in [contact_cid_start, max_num_interactions).
+        # ``contact_partitions_get_random_value`` adds
+        # ``max_num_contacts`` to contact priorities, so every contact
+        # beats every joint in Jones-Plassmann -- contacts cluster
+        # into earlier colours, joints into later, cutting intra-warp
+        # divergence in the fast-tail iterate dispatch.
         # Setting the marker to ``max_num_interactions`` disables the bias
         # (single-section behaviour, used when there are no joints).
         marker = int(contact_cid_start) if 0 < int(contact_cid_start) < max_num_interactions else max_num_interactions
@@ -179,19 +159,12 @@ class IncrementalContactPartitioner:
         self._offsets = wp.zeros(padded_len, dtype=wp.int32, device=device)
         self._partition_element_ids = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
-        # Compact remaining-elements index buffer. Holds the raw ids
-        # of all still-active elements for the next JP round; updated
-        # in place by ``incremental_tile_compact_remaining_and_advance_kernel``
-        # after every round.
-        #
-        # In-place compaction is safe because the fused kernel packs
-        # survivors leftward (writes go to indices <= the indices they
-        # were read from); see the kernel docstring for the detailed
-        # correctness argument. Using a single buffer -- rather than a
-        # ping-pong pair with host-side swap -- is essential for CUDA
-        # graph capture, which freezes kernel arguments at record time
-        # and would bind the same physical buffer for every replayed
-        # iteration regardless of any Python-level swap.
+        # Compact remaining-elements ids for the next JP round,
+        # updated in place by
+        # ``incremental_tile_compact_remaining_and_advance_kernel``.
+        # Safe in-place (survivors pack leftward, writes <= reads).
+        # A single buffer (no host-side ping-pong) is required for
+        # graph capture, which freezes kernel args at record time.
         self._remaining_ids = wp.zeros(padded_len, dtype=wp.int32, device=device)
 
         # Scalar device-side loop state (1-element arrays).
@@ -341,27 +314,17 @@ class IncrementalContactPartitioner:
     def reset_loop_state_only(self) -> None:
         """Fast reset that keeps the previously-built adjacency intact.
 
-        Safe to call in place of :meth:`reset` whenever the constraint
-        set -- i.e. ``elements`` and ``num_elements[0]`` -- has not
-        changed since the last :meth:`reset` call. This is the common
-        case in a PGS solver: between iterations within a substep only
-        the accumulated impulses change, the constraint graph itself is
-        fixed, so the expensive adjacency rebuild (prepare + count +
-        scan + store) can be skipped entirely.
+        Safe whenever the constraint set hasn't changed since the
+        last :meth:`reset` -- the common PGS inter-iteration case.
+        Skips the expensive adjacency rebuild (prepare + count + scan
+        + store) and only resets:
 
-        The method only resets:
-
-        * ``partition_data_concat[tid] = _UNPARTITIONED | tid`` for
-          ``tid < num_elements[0]`` -- undoing the color tags the
-          previous ``launch()`` loop wrote.
-        * ``interaction_id_to_partition[tid] = -1`` so the per-element
-          assigned color reflects "unassigned" again.
+        * ``partition_data_concat[tid] = _UNPARTITIONED | tid``
+        * ``interaction_id_to_partition[tid] = -1``
         * ``current_color``, ``num_remaining``, ``partition_count``
-          scalars (via the same ``incremental_init_kernel`` used by
-          :meth:`reset`).
+          scalars.
 
-        :meth:`reset` must have been called at least once before this
-        method to populate the adjacency structure.
+        :meth:`reset` must have been called at least once.
         """
         assert self._elements is not None and self._num_elements is not None, (
             "reset() must be called before reset_loop_state_only()"
@@ -422,23 +385,14 @@ class IncrementalContactPartitioner:
         """
         assert self._elements is not None and self._num_elements is not None, "reset() must be called before launch()"
 
-        # 1. JP coloring pass driven by the compact remaining-ids list.
-        #
-        # ``partitioning_coloring_incremental_kernel`` iterates over
-        # ``remaining_ids_front[0..num_remaining[0])`` instead of
-        # ``partition_data_concat[0..num_elements[0])``. Every lane now
-        # processes an element that is definitively still active, so
-        # warps are fully utilised and the adjacency walk runs across
-        # all lanes together -- this eliminates the thread-divergence
-        # cost that dominated the classic kernel as rounds progressed.
-        #
-        # Launch dim stays at ``max_num_interactions`` because the
-        # launch size must be a static constant under ``capture_while``
-        # (``num_remaining[0]`` lives on the device). Lanes beyond
-        # ``num_remaining[0]`` early-exit before any memory work; the
-        # warp-utilisation gain comes from the fact that the *active*
-        # lanes are packed contiguously in the launch grid, instead of
-        # scattered across the full [0, max_num_interactions) range.
+        # 1. JP coloring pass over the compact remaining-ids list.
+        # Iterating ``remaining_ids_front[0..num_remaining[0])`` instead
+        # of the full ``partition_data_concat`` packs active lanes
+        # contiguously, killing the thread divergence that dominated
+        # the classic kernel in later rounds.
+        # Launch dim must stay static (``num_remaining[0]`` is on-
+        # device under ``capture_while``); lanes beyond that early-
+        # exit cheaply.
         wp.launch(
             partitioning_coloring_incremental_kernel,
             dim=self.max_num_interactions,
@@ -456,21 +410,13 @@ class IncrementalContactPartitioner:
             ],
         )
 
-        # 2. Fused in-place compaction of remaining_ids + commit the
-        #    current partition + advance device-side loop state.
-        #
-        # Four kernels collapsed into one single-block grid-stride
-        # launch. The fused kernel reads from and writes to the *same*
-        # ``remaining_ids`` buffer, packing survivors leftward into
-        # [0, survivor_running). Safe in place because every write
-        # lands at an index <= the index it read from; see the kernel
-        # docstring for the detailed argument.
-        #
-        # ``use_tile_scan`` is required because this compact path
-        # relies on ``wp.tile_scan_exclusive`` / ``wp.tile_sum``; the
-        # old non-tile fallback (``wp.utils.array_scan``) was removed
-        # when the remaining-ids buffer was introduced because it is
-        # not safe inside ``wp.capture_while`` anyway.
+        # 2. Fused in-place compact of remaining_ids + commit current
+        # partition + advance device loop state -- four kernels
+        # collapsed into one single-block grid-stride launch. Safe in
+        # place: every write lands at an index <= the index it read
+        # (see kernel docstring).
+        # Requires tile-scan; the non-tile fallback was removed with
+        # the remaining-ids buffer (it was graph-capture-unsafe).
         assert self.use_tile_scan, (
             "IncrementalContactPartitioner.launch requires use_tile_scan=True. "
             "The non-tile fallback was removed when the remaining-ids buffer was "
@@ -498,35 +444,20 @@ class IncrementalContactPartitioner:
     def build_csr(self) -> None:
         """Run Jones-Plassmann to completion and materialise the CSR coloring.
 
-        Must be called after :meth:`reset` -- ``reset`` builds the
-        adjacency; ``build_csr`` consumes it.
+        Call after :meth:`reset` (which builds the adjacency).
+        Writes :attr:`element_ids_by_color` (element ids grouped by
+        colour), :attr:`color_starts` (exclusive prefix;
+        ``color_starts[num_colors[0]]`` is the inclusive end), and
+        :attr:`num_colors`. The loop is a ``wp.capture_while`` so the
+        build is graph-capture safe; the colour count stays
+        device-resident.
 
-        Writes:
-
-        * :attr:`element_ids_by_color` -- raw element ids grouped
-          contiguously by assigned colour.
-        * :attr:`color_starts` -- exclusive prefix of colour sizes
-          (inclusive end of the last colour lives at
-          ``color_starts[num_colors[0]]``).
-        * :attr:`num_colors` -- number of distinct colours used.
-
-        The loop is expressed via ``wp.capture_while`` so the entire
-        build is graph-capture safe; the colour count is not read back
-        to the host here, only by downstream sweep launches that use
-        the device-resident ``num_colors`` scalar.
-
-        The PGS solver invokes this exactly **once per
-        ``World.step()``** (not per substep): the constraint graph's
-        topology is frozen inside a step -- contacts are ingested
-        before the substep loop, joints are static -- so the CSR is
-        valid for every substep + PGS iteration of that step.
-
-        This method leaves the per-colour streaming state
-        (``current_color``, ``num_remaining``, ``partition_count``,
-        ``partition_element_ids``) consistent with the final state of
-        a full JP loop, so it is safe to intermix with :meth:`launch`
-        on the same partitioner instance across different steps
-        (though not within a single build).
+        Called exactly once per ``World.step()``: the constraint
+        graph is frozen inside a step (contacts ingested before the
+        substep loop, joints static) so one CSR covers every substep
+        and PGS iteration. Leaves the per-colour streaming state
+        consistent with a full JP loop, so Mode A :meth:`launch` can
+        be intermixed across steps (not within one build).
         """
         assert self._elements is not None and self._num_elements is not None, (
             "reset() must be called before build_csr()"
@@ -585,18 +516,14 @@ class IncrementalContactPartitioner:
             self._capture_build_csr_step,
         )
 
-        # Host-side check: if the compact kernel tripped the overflow
-        # guard the flag will be 1. The ``.numpy()`` readback is a sync
-        # point (adds ~10 us per step at 256 worlds) but it is the only
-        # way to convert a graph-captured overflow into a Python-land
-        # exception. Skip the readback when we're already inside a
-        # user-owned graph capture -- the D2H copy would fail with
-        # "legacy stream depending on a capturing blocking stream".
-        # The kernel-side early-exit still protects the buffer; the
-        # user just won't see a Python raise until the next uncaptured
-        # step. Without this check, a coloring that exceeded
-        # ``MAX_COLORS`` silently returned corrupted state -- see the
-        # Bug #2 entry in ``Bug.md``.
+        # Host-side overflow check via a ``.numpy()`` sync (~10 us
+        # @256 worlds) -- the only way to surface a graph-captured
+        # overflow as a Python exception. Skipped inside a user-owned
+        # capture (D2H would fail with "legacy stream depending on a
+        # capturing blocking stream"); the kernel early-exit still
+        # protects the buffer, user sees the raise on the next
+        # uncaptured step. Without this, overflow silently returned
+        # corrupted state -- see Bug #2 in ``Bug.md``.
         device = self._overflow_flag.device
         if device.is_cuda and device.is_capturing:
             return

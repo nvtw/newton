@@ -46,6 +46,7 @@ __all__ = [
     "constraint_set_body1",
     "constraint_set_body2",
     "constraint_set_type",
+    "pd_coefficients",
     "read_float",
     "read_int",
     "read_mat33",
@@ -53,7 +54,6 @@ __all__ = [
     "read_quat",
     "read_vec3",
     "read_vec4",
-    "pd_coefficients",
     "soft_constraint_coefficients",
     "write_float",
     "write_int",
@@ -69,30 +69,16 @@ __all__ = [
 # Constraint header layout (type tag + body indices)
 # ---------------------------------------------------------------------------
 #
-# Every per-type constraint schema *must* start with the same three
-# dwords, in order:
+# Every per-type constraint schema MUST start with three int32 dwords:
+#   dword 0: constraint_type,  dword 1: body1,  dword 2: body2.
+# This lets the generic dispatcher / element-projection kernels read
+# the type tag and body pair from any column without knowing the
+# per-type schema. :func:`assert_constraint_header` verifies the
+# layout at import time so reorderings fail loudly.
 #
-#   dword 0: constraint_type  (wp.int32)
-#   dword 1: body1            (wp.int32)
-#   dword 2: body2            (wp.int32)
-#
-# Pinning this header lets the generic dispatcher and element-projection
-# kernels read the type tag + body pair from *any* column without
-# knowing which per-type schema packed it. The per-type ``*_get_body1``
-# / ``*_get_body2`` accessors stay (they're symmetric with the rest of
-# the per-type accessors) but they all collapse to the same load --
-# they're effectively aliases of :func:`constraint_get_body1` /
-# :func:`constraint_get_body2`.
-#
-# The contract is checked at import time by
-# :func:`assert_constraint_header` -- if a future edit reorders fields,
-# the importing module's ``import`` fails loudly instead of silently
-# corrupting body indices at runtime.
-#
-# Type tags: add new tags here -- monotonically increasing, no holes
-# -- and mirror the assignment in the per-type module's
-# ``constraint_set_type`` call. Don't reuse retired tag values; bump
-# the highest one instead so any stale persisted state shows up loudly.
+# Type tags: add monotonically, no holes, mirror the value in the
+# per-type ``constraint_set_type`` call. Never reuse retired tag
+# values -- bump the highest so stale persisted state shows up loudly.
 
 #: Sentinel for unwritten / cleared columns.
 CONSTRAINT_TYPE_INVALID = wp.constant(wp.int32(0))
@@ -316,25 +302,37 @@ def read_mat44(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.mat44
     :mod:`constraint_actuated_double_ball_socket`.
     """
     return wp.mat44f(
-        c.data[off + 0, cid],  c.data[off + 1, cid],  c.data[off + 2, cid],  c.data[off + 3, cid],
-        c.data[off + 4, cid],  c.data[off + 5, cid],  c.data[off + 6, cid],  c.data[off + 7, cid],
-        c.data[off + 8, cid],  c.data[off + 9, cid],  c.data[off + 10, cid], c.data[off + 11, cid],
-        c.data[off + 12, cid], c.data[off + 13, cid], c.data[off + 14, cid], c.data[off + 15, cid],
+        c.data[off + 0, cid],
+        c.data[off + 1, cid],
+        c.data[off + 2, cid],
+        c.data[off + 3, cid],
+        c.data[off + 4, cid],
+        c.data[off + 5, cid],
+        c.data[off + 6, cid],
+        c.data[off + 7, cid],
+        c.data[off + 8, cid],
+        c.data[off + 9, cid],
+        c.data[off + 10, cid],
+        c.data[off + 11, cid],
+        c.data[off + 12, cid],
+        c.data[off + 13, cid],
+        c.data[off + 14, cid],
+        c.data[off + 15, cid],
     )
 
 
 @wp.func
 def write_mat44(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.mat44f):
-    c.data[off + 0, cid]  = v[0, 0]
-    c.data[off + 1, cid]  = v[0, 1]
-    c.data[off + 2, cid]  = v[0, 2]
-    c.data[off + 3, cid]  = v[0, 3]
-    c.data[off + 4, cid]  = v[1, 0]
-    c.data[off + 5, cid]  = v[1, 1]
-    c.data[off + 6, cid]  = v[1, 2]
-    c.data[off + 7, cid]  = v[1, 3]
-    c.data[off + 8, cid]  = v[2, 0]
-    c.data[off + 9, cid]  = v[2, 1]
+    c.data[off + 0, cid] = v[0, 0]
+    c.data[off + 1, cid] = v[0, 1]
+    c.data[off + 2, cid] = v[0, 2]
+    c.data[off + 3, cid] = v[0, 3]
+    c.data[off + 4, cid] = v[1, 0]
+    c.data[off + 5, cid] = v[1, 1]
+    c.data[off + 6, cid] = v[1, 2]
+    c.data[off + 7, cid] = v[1, 3]
+    c.data[off + 8, cid] = v[2, 0]
+    c.data[off + 9, cid] = v[2, 1]
     c.data[off + 10, cid] = v[2, 2]
     c.data[off + 11, cid] = v[2, 3]
     c.data[off + 12, cid] = v[3, 0]
@@ -487,40 +485,19 @@ def soft_constraint_coefficients(
 ):
     """Map ``(hertz, damping_ratio, dt)`` to PGS soft-constraint coefficients.
 
-    Based on the Box2D v3 / Bepu / Nordby formulation from
-    https://box2d.org/posts/2024/02/solver2d/ ("Soft Constraints"), with
-    one deviation: the requested angular frequency ``omega = 2*pi*hertz``
-    is *clamped at the per-substep Nyquist rate* ``omega_nyq = pi / dt``
-    before being fed into the coefficient math. Consequently asking for
-    more stiffness than the current ``dt`` can resolve simply yields the
-    stiffest resolvable lock (``omega * dt == pi``, i.e. the spring
-    advances half a cycle per step), never an aliased response. This
-    makes the user contract substep-independent: a "rigid lock" stays
-    rigid regardless of substep count, and increasing the substep count
-    only makes it *more* rigid (higher Nyquist, larger ``mass_coeff``).
+    Box2D v3 / Bepu / Nordby formulation
+    (https://box2d.org/posts/2024/02/solver2d/). ``omega = 2*pi*hertz``
+    is clamped at the per-substep Nyquist ``pi/dt``, so requesting
+    more stiffness than the current ``dt`` can resolve yields the
+    stiffest resolvable lock rather than aliasing. Substep-independent:
+    more substeps = higher Nyquist = more rigid.
 
-    Inputs are the user-facing knobs (independent of mass); outputs
-    feed straight into the PGS update.
+    Returns ``(bias_rate [1/s], mass_coeff [-], impulse_coeff [-])``;
+    the latter two lie in ``[0, 1]`` and feed straight into the PGS
+    update.
 
-    Returns ``(bias_rate, mass_coeff, impulse_coeff)``:
-
-      * ``bias_rate``    [1/s] -- multiplies a positional separation
-        to produce a velocity-correction bias.
-      * ``mass_coeff``   [-]   -- scales the unsoftened ``effective_mass``
-        in the per-iteration impulse calculation, lies in ``[0, 1]``.
-      * ``impulse_coeff``[-]   -- damps the accumulated impulse term
-        ("softness leak"), also in ``[0, 1]``.
-
-    Lowering ``hertz`` below the Nyquist rate ``1 / (2 * dt)`` makes the
-    joint progressively softer (genuine spring compliance); raising it
-    above hits the Nyquist clamp and plateaus at the stiffest
-    resolvable response.
-
-    Setting ``hertz <= 0`` produces a *rigid* constraint with *no drift
-    correction*: ``bias_rate = 0``, ``mass_coeff = 1``,
-    ``impulse_coeff = 0`` -- exactly the un-softened plain-PGS update.
-    Use this when you want rigid PGS without the Box2D drift-closing
-    bias (e.g. when drift is already handled externally).
+    ``hertz <= 0`` yields a rigid constraint with no drift
+    correction: ``(0, 1, 0)`` -- the un-softened plain-PGS row.
     """
     if hertz <= 0.0:
         return wp.float32(0.0), wp.float32(1.0), wp.float32(0.0)
@@ -549,79 +526,34 @@ def pd_coefficients(
 ):
     """Map ``(k, c, C, M_inv, dt)`` to Jitter2 PGS spring-damper triple.
 
-    Implicit-Euler spring-damper formulation transcribed verbatim from
-    Jitter2's :class:`SpringConstraint.SetSpringParameters` (SoftBodies/
-    SpringConstraint.cs). The user specifies absolute physical gains
-    :math:`k` and :math:`c`:
+    Implicit-Euler spring-damper from Jitter2 ``SpringConstraint.
+    SetSpringParameters``. User specifies absolute gains ``k`` [N/m
+    or N*m/rad] and ``c`` [N*s/m or N*m*s/rad]; unlike the Box2D-style
+    :func:`soft_constraint_coefficients` these do *not* bake in the
+    effective mass, so for mass-invariant behaviour the caller
+    rescales.
 
-      * ``stiffness`` ``k`` in [N/m] for linear rows or [N*m/rad] for
-        angular rows -- the restoring force per unit position error.
-        The applied force on the constraint row is ``-k * C`` with
-        ``C`` the current position error.
-      * ``damping`` ``c`` in [N*s/m] or [N*m*s/rad] -- the viscous
-        force per unit relative velocity. The applied force is
-        ``-c * v_rel``.
+    Returns ``(gamma, bias, eff_mass_softened)`` with ``idt = 1/dt``
+    already folded in so the PGS iterate is one update:
 
-    unlike the Box2D / Bepu :func:`soft_constraint_coefficients` pair
-    ``(hertz, damping_ratio)`` which bake the effective mass into the
-    gains. For the same behaviour across bodies of different mass this
-    PD form must be *rescaled by mass*, but it lets the user directly
-    write "F = -k*x - c*v" without knowing ``m_eff`` up front.
+    * ``gamma             = 1 / (c + dt*k) * idt``       [s^-1]
+    * ``bias              = C * dt*k / (c + dt*k) * idt`` [m/s or rad/s]
+    * ``eff_mass_softened = 1 / (M_inv + gamma)``         [kg or kg*m^2]
 
-    Jitter2's ``SetSpringParameters`` stores two scalars:
+    yielding ``lambda = -M_eff_soft * (J v - bias_signed +
+    gamma * lambda_acc)`` (caller sign-flips ``bias`` to match its
+    Jacobian convention).
 
-    .. code-block:: text
-
-        Softness   = 1 / (c + dt * k)
-        BiasFactor = dt * k * Softness
-
-    and then every substep computes (``idt = 1/dt``)
-
-    .. code-block:: text
-
-        # prepare
-        EffectiveMass = 1 / (M_inv + Softness * idt)
-        Bias          = C * BiasFactor * idt
-        # iterate
-        softScalar    = acc * Softness * idt
-        lambda        = -EffectiveMass * (jv + Bias + softScalar)
-
-    To keep the kernel side uniform we return the three scalars
-    ``(gamma, bias, eff_mass_softened)`` that absorb the ``idt``
-    factor so the iterate is a single PGS update:
-
-      * ``gamma``             = ``Softness * idt``  [s^-1]
-      * ``bias``              = ``C * BiasFactor * idt``  [m/s or rad/s]
-      * ``eff_mass_softened`` = ``1 / (M_inv + gamma)``  [kg or kg*m^2]
-
-    The iterate then reduces to
-
-    .. math::
-        \\lambda = -M_{\\text{eff,soft}}\\,
-            (J v - \\text{bias}_{\\text{signed}} + \\gamma \\lambda_{\\text{acc}})
-
-    with ``bias_signed`` sign-flipped by the caller to match the
-    constraint's Jacobian convention (see the per-joint prepare for
-    the sign rule).
-
-    At ``k = c = 0`` all three outputs are zero and the PGS row is a
-    no-op -- the caller's iterate guards on the "drive off" flag to
-    skip the solve entirely.
+    Short-circuits to ``(0, 0, 0)`` -- a no-op PGS row -- when
+    ``eff_mass_inv <= 0`` or both gains are zero. Callers additionally
+    guard on a "drive off" flag to skip the solve entirely.
 
     Args:
-        stiffness: Positional stiffness ``k``; expected non-negative.
-            ``0`` turns off the spring part (pure damper).
-        damping: Viscous damping ``c``; expected non-negative.
-            ``0`` turns off the damper (pure spring).
-        position_error: Current position error ``C = actual - target``
-            (rad for revolute, m for prismatic). Folded into ``bias``
-            per Jitter2 SpringConstraint.
-        eff_mass_inv: Reciprocal of the raw (unsoftened) Jacobian-
-            weighted effective mass of the constraint row (i.e.
-            ``J M^{-1} J^T``). ``0`` (both bodies static or Jacobian
-            null) short-circuits to all-zeros -- the PGS update is a
-            no-op.
-        dt: Substep time step [s]. Must be > 0.
+        stiffness: Positional stiffness ``k >= 0``; ``0`` = pure damper.
+        damping: Viscous damping ``c >= 0``; ``0`` = pure spring.
+        position_error: ``C = actual - target`` [rad or m].
+        eff_mass_inv: ``J M^{-1} J^T``; ``0`` short-circuits to no-op.
+        dt: Substep [s], must be > 0.
     """
     if eff_mass_inv <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
@@ -642,5 +574,3 @@ def pd_coefficients(
     bias = position_error * bias_factor * idt
     eff_mass_soft = wp.float32(1.0) / (eff_mass_inv + gamma)
     return gamma, bias, eff_mass_soft
-
-

@@ -128,19 +128,12 @@ def num_dwords(struct_type: object) -> int:
 # Reinterpret-cast helpers (C++ ``reinterpret_cast<U&>(t)``)
 # ---------------------------------------------------------------------------
 #
-# Warp has no built-in bit-cast operator. ``wp.int32(value)`` performs a
-# *value* conversion (truncates toward zero); to get the IEEE-754 bit
-# pattern of a float as an int (or vice versa) we need a real
-# ``reinterpret_cast``. ``@wp.func_native`` lets us drop straight into
-# C++/CUDA: the body string is spliced into the generated kernel
-# verbatim, so we get the exact codegen the compiler would produce for a
-# C++ ``reinterpret_cast<U&>(t)`` -- no function-call overhead and no
-# memory traffic.
-#
+# Warp's ``wp.int32(x)`` is a value conversion; for IEEE-754 bit
+# patterns we need a real ``reinterpret_cast``, done via
+# ``@wp.func_native`` (body spliced verbatim into generated CUDA).
 # Pattern mirrors ``float_flip`` in
-# :mod:`newton._src.geometry.contact_reduction` (Stereopsis radix sort).
-# Differentiability: these are intentionally non-differentiable bit
-# tricks; do not feed their outputs through the autodiff tape.
+# :mod:`newton._src.geometry.contact_reduction`. Intentionally
+# non-differentiable -- do not feed through the autodiff tape.
 
 
 @wp.func_native("""
@@ -162,5 +155,3 @@ return reinterpret_cast<float&>(value);
 def reinterpret_int_as_float(value: wp.int32) -> wp.float32:
     """Bit-cast an ``int32`` back to ``float32`` (inverse of :func:`reinterpret_float_as_int`)."""
     ...
-
-

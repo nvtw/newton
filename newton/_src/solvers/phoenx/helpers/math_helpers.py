@@ -122,25 +122,17 @@ def qmatrix_project_multiply_left_right(left: wp.quatf, right: wp.quatf) -> wp.m
 # ---------------------------------------------------------------------------
 # Full-revolution angle tracker
 #
-# Ported from PhoenX (Jolt) ``FullRevolutionTracker`` (RevoluteJoint.cuh:27)
-# plus ``quat::ExtractRotationAngle`` (MiniMath/quat.cuh:703). The tracker
-# unwraps the quaternion's [-pi, pi] branch into an unbounded cumulative
-# angle so hinge-style limits can be specified with arbitrarily large
-# ``min_value`` / ``max_value`` (e.g. the "wide-open" idiom
-# ``min = -1e2`` for a one-sided clamp) without the ``sin(theta/2)``
-# wrap-around that bites the half-angle projection at theta > pi.
+# Ported from PhoenX (Jolt) ``FullRevolutionTracker`` +
+# ``quat::ExtractRotationAngle``. Unwraps the quaternion's [-pi, pi]
+# branch into an unbounded cumulative angle so hinge limits can use
+# arbitrarily large ``min``/``max`` (e.g. ``min = -1e2`` for a one-
+# sided clamp) without ``sin(theta/2)`` wrap-around at theta > pi.
 #
-# The tracker is stateless at this layer: the caller owns two persistent
-# scalar fields per joint instance,
-#
-#     revolution_counter:       int32  (initially 0)
-#     previous_quaternion_angle: float32  (initially 0)
-#
-# and on every ``prepare`` step reads them, calls
-# :func:`revolution_tracker_update` to produce the new ``(counter',
-# previous')`` pair, writes them back, then reads the total angle via
-# :func:`revolution_tracker_angle`. No allocation, no host/device sync,
-# no per-joint book-keeping outside what the constraint already stores.
+# Stateless at this layer -- the caller owns two persistent scalars
+# per joint: ``revolution_counter`` (int32, init 0) and
+# ``previous_quaternion_angle`` (float32, init 0). Each prepare step:
+# read them, call :func:`revolution_tracker_update`, write back, then
+# read total angle via :func:`revolution_tracker_angle`.
 # ---------------------------------------------------------------------------
 
 
@@ -180,40 +172,17 @@ def revolution_tracker_update(
 ):
     """Absorb a new in-branch angle into the cumulative revolution count.
 
-    Direct port of PhoenX's ``FullRevolutionTracker.Update``
-    (RevoluteJoint.cuh:40). Given the previous and current values of
-    ``extract_rotation_angle`` (both in ``(-pi, pi]``), detect a
-    branch-crossing and update the revolution counter so the cumulative
-    angle is continuous.
+    Port of PhoenX's ``FullRevolutionTracker.Update``. Both angles are
+    in ``(-pi, pi]``; a per-substep |delta| > pi must be a wrap, so:
 
-    Sign convention: the raw quaternion angle is limited to one full
-    principal branch. A step's true angular velocity can only move the
-    angle by a fraction of a turn per substep (assuming sane timesteps
-    and no rigid-body teleport), so if the in-branch delta exceeds
-    ``+/- pi`` it has to be a wrap:
+    * ``delta > +pi``  -> wrapped from ``~-pi`` up past ``+pi``
+      (rotated backwards): counter ``- 1``.
+    * ``delta < -pi``  -> wrapped from ``~+pi`` down past ``-pi``
+      (rotated forwards past a full turn): counter ``+ 1``.
 
-      * ``delta > +pi``  -> we wrapped from ``~-pi`` back up past
-        ``+pi``; physically the joint rotated *backwards* a little, so
-        the cumulative turn count decreases by one.
-      * ``delta < -pi``  -> we wrapped from ``~+pi`` back down past
-        ``-pi``; the joint rotated *forwards* past a full turn, so the
-        count increases.
-
-    Args:
-        new_quaternion_angle: Latest in-branch angle from
-            :func:`extract_rotation_angle`, in radians, in
-            ``(-pi, pi]``.
-        revolution_counter: Persistent counter read from the
-            constraint's scratch storage.
-        previous_quaternion_angle: Persistent previous in-branch
-            angle read from the constraint's scratch storage.
-
-    Returns:
-        ``(new_revolution_counter, new_previous_quaternion_angle)``
-        -- the two scalars the caller must write back before the
-        next prepare step. The new previous angle is simply the
-        input ``new_quaternion_angle`` (the caller never stores the
-        raw delta).
+    Returns ``(new_counter, new_prev_angle)``; the caller writes
+    both back before the next prepare. ``new_prev_angle`` is just
+    ``new_quaternion_angle`` (raw delta is never stored).
     """
     delta = new_quaternion_angle - previous_quaternion_angle
     new_counter = revolution_counter

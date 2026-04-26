@@ -134,33 +134,24 @@ def _import_body_state_kernel(
     # PhoenX body container (slot index = tid + 1).
     bodies: BodyContainer,
 ):
-    """Unpack Newton's ``body_q`` / ``body_qd`` / ``body_f`` into
-    PhoenX's SoA body slots.
+    """Unpack Newton ``body_q`` / ``body_qd`` / ``body_f`` into PhoenX SoA slots.
 
-    Newton conventions:
-        * ``body_q.translation`` is the body origin in world frame;
-          PhoenX stores COM-in-world, so we add ``R * body_com``.
-        * ``body_qd`` = ``(v_com_world, omega_world)`` -- already in
-          PhoenX's convention (COM-linear, world-angular).
-        * ``body_f`` = wrench at the COM in world frame -- matches
-          PhoenX's ``force`` / ``torque`` semantics.
+    Conventions: PhoenX stores COM-in-world so we add ``R * body_com``
+    to Newton's body-origin ``body_q.translation``. ``body_qd =
+    (v_com_world, omega_world)`` and ``body_f`` (wrench at COM, world
+    frame) already match PhoenX. Writes go to ``tid + 1`` since
+    slot 0 is the static anchor.
 
-    Writes go to slot ``tid + 1`` because slot 0 is the static world
-    anchor (never touched by this kernel).
+    Per-body routing by motion type:
 
-    Motion-type-specific routing:
-
-    * **Dynamic / static**: pose and velocity are written straight to
-      ``bodies.position / orientation / velocity / angular_velocity``,
-      matching the pre-kinematic-pose-scripting behaviour.
-    * **Kinematic**: pose is routed to ``bodies.kinematic_target_pos
-      / kinematic_target_orient`` and ``kinematic_target_valid`` is
-      flagged to ``1`` so the next step's
-      :func:`_kinematic_prepare_step_kernel` infers velocity from the
-      ``(prev pose, user target)`` delta. ``body_qd`` is ignored for
-      kinematic bodies -- the inferred velocity wins. This lets
-      Newton-API callers script kinematic motion by simply updating
-      ``state.body_q``, without having to compute velocities manually.
+    * **Dynamic / static**: pose + velocity go straight into
+      ``bodies.position / orientation / velocity / angular_velocity``.
+    * **Kinematic**: pose goes to ``bodies.kinematic_target_pos /
+      kinematic_target_orient`` with ``kinematic_target_valid = 1``;
+      next step's :func:`_kinematic_prepare_step_kernel` infers
+      velocity from ``(prev pose, target)`` delta (``body_qd``
+      ignored). Lets Newton-API callers script kinematic motion by
+      updating ``state.body_q`` without computing velocities.
     """
     tid = wp.tid()
     dst = tid + 1
@@ -240,14 +231,11 @@ def _export_body_state_kernel(
 # Per-step control -> ADBS column writeback
 # ---------------------------------------------------------------------------
 #
-# The ADBS column already carries per-joint ``target`` / ``target_vel``
-# / ``stiffness_drive`` / ``damping_drive`` / ``max_force_drive`` /
-# ``drive_mode`` fields. Rather than pass them through an extra array,
-# we rewrite those column dwords in place every step from the user's
-# ``Control`` and ``Model`` drive-gain arrays. Joints whose
-# ``target_mode == EFFORT`` (or ``NONE``) end up with
-# ``DRIVE_MODE_OFF`` and their torque is applied via
-# :func:`apply_joint_forces` -> ``state.body_f`` instead.
+# Rewrites per-joint ``target`` / ``target_vel`` / ``stiffness_drive``
+# / ``damping_drive`` / ``max_force_drive`` / ``drive_mode`` directly
+# into the ADBS column from ``Control`` + ``Model`` drive gains each
+# step. ``target_mode == EFFORT`` / ``NONE`` map to ``DRIVE_MODE_OFF``
+# and route torque through :func:`apply_joint_forces` -> ``body_f``.
 
 
 @wp.kernel(enable_backward=False)
@@ -367,5 +355,3 @@ def _contact_impulse_to_force_wrapper_kernel(
     lam_t2 = cc_get_tangent2_lambda(cc, k)
     f = (lam_n * n + lam_t1 * t1 + lam_t2 * t2) * idt
     force_out[k] = wp.spatial_vector(f, wp.vec3f(0.0, 0.0, 0.0))
-
-
