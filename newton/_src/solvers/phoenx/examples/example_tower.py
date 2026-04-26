@@ -419,9 +419,25 @@ class Example:
         self.sim_time += self.frame_dt
 
     def render(self) -> None:
+        # ``log_state`` uses ``ViewerGL``'s CUDA-OpenGL interop path:
+        # the body-state CUDA buffer is mapped directly into the
+        # instance-transform VBO (no D2H copy, no host sync). Default
+        # ``NEWTON_VIEWER_CUDA_INTEROP=1`` keeps it on; set to ``0`` to
+        # fall back to the pinned-host buffer + ``glBufferSubData`` path
+        # for comparison.
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state)
-        self.viewer.log_contacts(self.contacts, self.state)
+        # ``log_contacts`` reads ``contacts.rigid_contact_count`` via
+        # ``.numpy()`` to size the arrow batch, which forces a per-frame
+        # host sync. With ``--grid-side > 1`` the tower has many
+        # thousands of contacts whose arrows would be unreadable
+        # anyway, so we skip them in multi-tower mode and keep the
+        # render path GPU-resident. ``--show-contacts`` re-enables the
+        # sync if a user explicitly asks for the arrow overlay.
+        grid_side = int(getattr(self.args, "grid_side", 1) or 1)
+        force_contacts = bool(getattr(self.args, "show_contacts", False))
+        if grid_side <= 1 or force_contacts:
+            self.viewer.log_contacts(self.contacts, self.state)
         self.viewer.end_frame()
 
     # ------------------------------------------------------------------
@@ -467,6 +483,17 @@ if __name__ == "__main__":
             "world (default 1, i.e. a single tower). Useful for stress-testing "
             "the single_world solver on dense scenes; see "
             "``benchmarks/scenarios/tower_grid.py`` for the headless variant."
+        ),
+    )
+    parser.add_argument(
+        "--show-contacts",
+        action="store_true",
+        help=(
+            "Render contact-normal arrows. Off by default in multi-tower "
+            "(``--grid-side > 1``) mode because ``log_contacts`` reads the "
+            "contact count via ``.numpy()`` every frame, which forces a "
+            "host sync that throttles the otherwise CUDA-OpenGL-interop "
+            "render path."
         ),
     )
     viewer, args = newton.examples.init(parser)
