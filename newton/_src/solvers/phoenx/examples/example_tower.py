@@ -130,8 +130,8 @@ class Example:
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 20
-        self.solver_iterations = 3
+        self.sim_substeps = 5
+        self.solver_iterations = 5
 
         self._build_scene()
 
@@ -477,7 +477,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--grid-side",
         type=int,
-        default=1,
+        default=6,
         help=(
             "Tile the tower into a ``grid-side x grid-side`` 2D grid in one "
             "world (default 1, i.e. a single tower). Useful for stress-testing "

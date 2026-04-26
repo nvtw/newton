@@ -760,6 +760,14 @@ class CollisionPipeline:
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
             # Pass write_contact as custom writer to write directly to final Contacts format
+            #
+            # contact_max is passed explicitly so NarrowPhase sizes its internal
+            # deterministic sort buffers to rigid_contact_max (the same capacity
+            # the Contacts buffer uses) rather than falling back to the default
+            # max_candidate_pairs.  On SAP/NXN scenes with thousands of shapes
+            # the candidate-pair bound (N*(N-1)/2 per world) is orders of
+            # magnitude larger than the neighbor-budget contact estimate and
+            # allocating sorter scratch at that size burns multi-GB of VRAM.
             self.narrow_phase = NarrowPhase(
                 max_candidate_pairs=self.shape_pairs_max,
                 max_triangle_pairs=max_triangle_pairs,
@@ -774,6 +782,7 @@ class CollisionPipeline:
                 has_heightfields=has_heightfields,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
                 deterministic=deterministic,
+                contact_max=rigid_contact_max,
                 verify_buffers=verify_buffers,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf

@@ -977,6 +977,49 @@ class TestShapePairsMaxScaling(unittest.TestCase):
                 f"broad_phase={bp_mode}: shape_pairs_max must not be quadratic",
             )
 
+    def test_narrow_phase_sort_buffers_scale_with_contact_max(self):
+        """NarrowPhase's deterministic sort buffers must follow rigid_contact_max,
+        not the (potentially huge) broad-phase candidate-pair bound.
+
+        On SAP/NXN scenes with thousands of shapes ``shape_pairs_max`` is
+        ``O(N*(N-1)/2)`` while ``rigid_contact_max`` is only ``O(N)``.  Sizing
+        the contact sorter by ``shape_pairs_max`` produces multi-GB allocations
+        that OOM on mid-range GPUs (see the PhoenX tower example with
+        ``--grid-side>=6``, where ``N*(N-1)/2`` exceeds 1e9 pairs).
+        """
+        spw = 800
+
+        builder = newton.ModelBuilder()
+        for _ in range(spw):
+            b = builder.add_body()
+            builder.add_shape_box(body=b, hx=0.1, hy=0.1, hz=0.1)
+
+        model = builder.finalize()
+
+        pipeline = newton.CollisionPipeline(
+            model,
+            contact_matching="latest",
+            broad_phase="sap",
+        )
+
+        rigid_contact_max = pipeline.rigid_contact_max
+        self.assertLess(
+            rigid_contact_max,
+            pipeline.shape_pairs_max,
+            "expected rigid_contact_max < shape_pairs_max for this workload",
+        )
+        self.assertEqual(
+            pipeline.narrow_phase._sort_key_array.shape[0],
+            rigid_contact_max,
+            "NarrowPhase sort-key buffer must match rigid_contact_max, not shape_pairs_max",
+        )
+        self.assertIsNotNone(pipeline.narrow_phase._contact_sorter)
+        self.assertEqual(
+            pipeline.narrow_phase._contact_sorter._capacity,
+            rigid_contact_max,
+            "NarrowPhase ContactSorter capacity must match rigid_contact_max",
+        )
+
 
 def test_particle_shape_contacts(test, device, shape_type: GeoType):
     """
