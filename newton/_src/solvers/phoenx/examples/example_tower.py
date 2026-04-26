@@ -35,12 +35,12 @@ import newton.examples
 from newton._src.solvers.phoenx.body import (
     body_container_zeros,
 )
-from newton._src.solvers.phoenx.solver_config import (
-    PHOENX_CONTACT_MATCHING,
-)
 from newton._src.solvers.phoenx.picking import (
     Picking,
     register_with_viewer_gl,
+)
+from newton._src.solvers.phoenx.solver_config import (
+    PHOENX_CONTACT_MATCHING,
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
@@ -206,13 +206,25 @@ class Example:
                 orientation_rad += FULL_ROTATION_STEP
 
         # Finalise the Newton side.
-        self.model = builder.finalize()
+        # ``skip_shape_contact_pairs=True``: the precomputed shape-pair
+        # list is only used by the ``"explicit"`` broad phase. Building
+        # it is an O(N^2) Python loop, which is fine for the default
+        # tower (~1280 planks) but explodes once it's tiled into a
+        # grid; safe under SAP/NXN.
+        self.model = builder.finalize(skip_shape_contact_pairs=True)
         print(f"[PhoenX Tower] bodies={self.model.body_count} shapes={self.model.shape_count}")
 
         # Collision pipeline -- contact matching must be enabled for
         # the PhoenX solver's warm-start gather to find last frame's
         # impulses for persistent contacts.
-        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=PHOENX_CONTACT_MATCHING)
+        # SAP broad phase: the all-pairs (NXN) default allocates an
+        # ``N*(N-1)/2`` candidate-pair buffer per world, which is many
+        # GB once the tower is replicated into a grid. SAP reports only
+        # actual overlapping AABBs so ``shape_pairs_max`` shrinks to a
+        # small constant.
+        self.collision_pipeline = newton.CollisionPipeline(
+            self.model, contact_matching=PHOENX_CONTACT_MATCHING, broad_phase="sap"
+        )
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
 

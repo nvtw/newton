@@ -32,7 +32,6 @@ from newton._src.solvers.phoenx.benchmarks.runner import (
     _gpu_used_bytes,
 )
 
-
 # Defaults tuned to land at "interesting" colour counts without
 # needing every test machine to have 40 GB of headroom. 6x6 towers x
 # 40 layers x 32 planks = 30720 bodies; on top of the box +
@@ -137,7 +136,13 @@ def build(
     builder.replicate(grid, num_worlds)
     builder.add_ground_plane()
 
-    model = builder.finalize()
+    # ``skip_shape_contact_pairs=True``: the precomputed shape-pair
+    # list is only consumed by the ``"explicit"`` broad phase mode.
+    # Building it is an O(N^2) Python loop -- on a 6x6 tower grid
+    # (~30 k shapes) that's ~450 M iterations and several GB of
+    # contiguous wp.vec2i. Skipping it is mandatory once the scene
+    # outgrows a few thousand shapes; safe under SAP / NXN.
+    model = builder.finalize(skip_shape_contact_pairs=True)
 
     fps = 60
     frame_dt = 1.0 / fps
@@ -172,7 +177,27 @@ def build(
     state_1 = model.state()
     control = model.control()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
-    contacts = model.contacts()
+    # SAP broad phase + explicit caps:
+    # * ``broad_phase="sap"`` so candidate pairs are reported
+    #   incrementally rather than allocated as the worst-case
+    #   ``N*(N-1)/2`` slab.
+    # * ``shape_pairs_max`` / ``rigid_contact_max`` follow the
+    #   kapla-tower convention: an explicit budget proportional to
+    #   the body count, with ~25% headroom over what the scene
+    #   actually emits during settling.
+    n_bricks = grid_side * grid_side * layers * _BOXES_PER_RING
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="sap",
+        contact_matching="sticky",
+        # ~75 contact-candidate pairs per brick (4-6 neighbours x 12 corners)
+        shape_pairs_max=max(50_000, 75 * n_bricks),
+        # ~32 actual contacts per brick at peak (8 neighbours x 4 corners
+        # within reach during compression).
+        rigid_contact_max=max(50_000, 32 * n_bricks),
+    )
+    model._collision_pipeline = pipeline
+    contacts = pipeline.contacts()
 
     box = {"state_0": state_0, "state_1": state_1}
 

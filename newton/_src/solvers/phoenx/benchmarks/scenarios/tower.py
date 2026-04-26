@@ -23,7 +23,6 @@ from newton._src.solvers.phoenx.benchmarks.runner import (
     _gpu_used_bytes,
 )
 
-
 # Tower scale trimmed from the 40x32 example default so the benchmark
 # stays representative without blowing the 90 s CI budget at larger
 # world counts. The per-world contact-density profile is preserved --
@@ -58,9 +57,7 @@ def _build_tower_builder() -> newton.ModelBuilder:
             world_z = 0.5 + layer * (2.0 * _PLANK_HZ + 0.01)
             quat = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), orientation_rad)
             body = tower.add_body(
-                xform=wp.transform(
-                    p=wp.vec3(float(world_x), float(world_y), float(world_z)), q=quat
-                ),
+                xform=wp.transform(p=wp.vec3(float(world_x), float(world_y), float(world_z)), q=quat),
             )
             tower.add_shape_box(
                 body,
@@ -103,7 +100,10 @@ def build(
     builder.default_shape_cfg.kd = 5.0e2
     builder.add_ground_plane()
 
-    model = builder.finalize()
+    # ``skip_shape_contact_pairs=True``: the precomputed shape-pair
+    # list is only used by the ``"explicit"`` broad phase. Building
+    # it is an O(N^2) Python loop -- avoid it under SAP.
+    model = builder.finalize(skip_shape_contact_pairs=True)
 
     fps = 60
     frame_dt = 1.0 / fps
@@ -138,7 +138,16 @@ def build(
     state_1 = model.state()
     control = model.control()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
-    contacts = model.contacts()
+    # SAP broad phase: avoids the all-pairs ``N*(N-1)/2`` candidate-pair
+    # buffer that the NXN default allocates, which is multi-GB once the
+    # tower is replicated across many worlds.
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="sap",
+        contact_matching="sticky",
+    )
+    model._collision_pipeline = pipeline
+    contacts = pipeline.contacts()
 
     box = {"state_0": state_0, "state_1": state_1}
 

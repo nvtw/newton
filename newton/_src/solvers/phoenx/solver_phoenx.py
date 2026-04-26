@@ -96,8 +96,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _kinematic_prepare_step_kernel,
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
-    _phoenx_clear_forces_kernel,
-    _phoenx_update_inertia_kernel,
+    _phoenx_update_inertia_and_clear_forces_kernel,
     _pick_threads_per_world_kernel,
     _reduce_total_colours_kernel,
     _reset_head_active_kernel,
@@ -976,8 +975,7 @@ class PhoenXWorld:
             alpha = float(k + 1) * inv_n
             self._kinematic_interpolate_substep(alpha)
 
-        self._update_inertia()
-        self._clear_forces()
+        self._update_inertia_and_clear_forces()
 
     # ------------------------------------------------------------------
     # Phase implementations
@@ -1609,25 +1607,16 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _update_inertia(self) -> None:
-        """Apply damping and rebuild ``inverse_inertia_world`` from
-        the final orientation. Once per step, after the substep loop."""
+    def _update_inertia_and_clear_forces(self) -> None:
+        """Apply damping, rebuild ``inverse_inertia_world`` from the
+        final orientation, and zero the per-body force/torque
+        accumulators. One kernel launch per step instead of two -- the
+        two old per-body kernels were back-to-back and shared the same
+        body-state hot lines."""
         if self.num_bodies == 0:
             return
         wp.launch(
-            _phoenx_update_inertia_kernel,
-            dim=self.num_bodies,
-            inputs=[self.bodies],
-            device=self.device,
-        )
-
-    def _clear_forces(self) -> None:
-        """Zero per-body force/torque accumulators so the next
-        :meth:`step` starts with an empty external load."""
-        if self.num_bodies == 0:
-            return
-        wp.launch(
-            _phoenx_clear_forces_kernel,
+            _phoenx_update_inertia_and_clear_forces_kernel,
             dim=self.num_bodies,
             inputs=[self.bodies],
             device=self.device,

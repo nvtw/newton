@@ -27,7 +27,6 @@ from newton._src.solvers.phoenx.benchmarks.runner import (
     _gpu_used_bytes,
 )
 
-
 # ~3600 boxes / world by default. Big enough for single_world to
 # pull ahead but small enough to fit on a 24 GB GPU without
 # touching the rigid_contact_max safety factor.
@@ -55,7 +54,10 @@ def _build_grid_builder() -> newton.ModelBuilder:
                 y = iy * spacing - half
                 body = b.add_body(xform=wp.transform(p=wp.vec3(x, y, z)))
                 b.add_shape_box(
-                    body, hx=_BOX_HE, hy=_BOX_HE, hz=_BOX_HE,
+                    body,
+                    hx=_BOX_HE,
+                    hy=_BOX_HE,
+                    hz=_BOX_HE,
                     cfg=newton.ModelBuilder.ShapeConfig(density=_DENSITY),
                 )
     return b
@@ -87,7 +89,10 @@ def build(
     builder.replicate(grid, num_worlds)
     builder.add_ground_plane()
 
-    model = builder.finalize()
+    # ``skip_shape_contact_pairs=True``: the precomputed shape-pair
+    # list is only used by the ``"explicit"`` broad phase. Building
+    # it is an O(N^2) Python loop -- avoid it under SAP.
+    model = builder.finalize(skip_shape_contact_pairs=True)
 
     fps = 60
     frame_dt = 1.0 / fps
@@ -122,7 +127,17 @@ def build(
     state_1 = model.state()
     control = model.control()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
-    contacts = model.contacts()
+    # SAP broad phase: NXN allocates the worst-case ``N*(N-1)/2``
+    # candidate-pair buffer per world; for 3600 boxes that's already
+    # ~6.5 M pairs of slack we can avoid by letting SAP report only
+    # actual overlaps.
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="sap",
+        contact_matching="sticky",
+    )
+    model._collision_pipeline = pipeline
+    contacts = pipeline.contacts()
 
     box = {"state_0": state_0, "state_1": state_1}
 

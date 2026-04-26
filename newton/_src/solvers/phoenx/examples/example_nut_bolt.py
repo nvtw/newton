@@ -259,7 +259,7 @@ class Example:
         num_phoenx_bodies = int(self.model.body_count) + 1
         bodies = body_container_zeros(num_phoenx_bodies, device=self.device)
         # Seed every slot's orientation to identity so the rotation-
-        # to-matrix call in :func:`_phoenx_update_inertia_kernel`
+        # to-matrix call in :func:`_phoenx_update_inertia_and_clear_forces_kernel`
         # doesn't blow up on the zero-quaternion default.
         bodies.orientation.assign(np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32))
         wp.launch(
