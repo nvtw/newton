@@ -1108,8 +1108,10 @@ def _phoenx_clear_forces_kernel(
 # Usage from the host:
 #
 #     partitioner.begin_sweep()
+#     # head_active starts at 1; the head capture-while terminates when
+#     # the normal kernel hits the tail-fuse hand-off predicate.
 #     wp.capture_while(
-#         partitioner.color_cursor,
+#         head_active,
 #         lambda: [wp.launch(_constraint_prepare_singleworld_kernel,
 #                            dim=total_num_threads, ...,
 #                            total_num_threads=total_num_threads)
@@ -1117,16 +1119,38 @@ def _phoenx_clear_forces_kernel(
 #     )
 #
 # The kernel decrements ``color_cursor`` by 1 at the end (thread 0
-# only); when it reaches 0 the capture-while loop exits.
+# only) during normal work; when the cursor reaches 0 the capture-while
+# also exits (the kernel's no-op guard keeps ``head_active`` stable).
 #
-# Early-exit contract (required for ``NUM_INNER_WHILE_ITERATIONS`` > 1):
-# every kernel checks ``color_cursor[0] <= 0`` at the top and returns
-# immediately without touching any state, so the tail launches inside
-# the capture-while body -- which the host issues unconditionally --
-# become cheap no-ops once the sweep has converged within the same
-# outer iteration. That is what makes it safe to amortise the
-# capture-while overhead by unrolling the body ``NUM_INNER_WHILE_ITERATIONS``
-# times.
+# Head capture-while termination:
+# ``head_active[0]`` is the predicate of the head capture-while. It
+# starts each sweep at 1 and is cleared by the kernel in two cases:
+#
+#   (a) ``color_cursor[0] <= 0`` -- the sweep has drained every colour.
+#   (b) ``count <= fuse_threshold`` for the current colour -- hand off
+#       to the fused tail kernel, which resumes at the same cursor.
+#
+# Both cases return from the kernel without touching ``color_cursor``.
+# A dedicated ``head_active`` flag (instead of reusing ``color_cursor``
+# for termination) is what lets the tail kernel resume at the exact
+# cursor position case (b) stopped at.
+#
+# Setting ``fuse_threshold = 0`` disables the hand-off branch (the
+# inequality ``count <= 0`` is never true for a real colour, so only
+# (a) ever fires) and preserves the original one-kernel-per-colour
+# behaviour.
+#
+# Early-exit / inner-unroll contract
+# (required for ``NUM_INNER_WHILE_ITERATIONS`` > 1):
+# ``_capture_singleworld_sweep`` issues ``NUM_INNER_WHILE_ITERATIONS``
+# launches back-to-back per outer capture-while iteration. Launches
+# after the one that clears ``head_active`` are still issued; they
+# re-enter one of the two early-exit branches above (either the
+# cursor-converged guard or the hand-off branch) and become cheap
+# no-ops. The initial ``color_cursor[0] <= 0`` guard handles case
+# (a); the ``count <= fuse_threshold`` branch naturally repeats
+# case (b) until the outer capture-while observes ``head_active[0]
+# == 0`` and exits.
 
 
 @wp.func
@@ -1165,22 +1189,34 @@ def _constraint_prepare_singleworld_kernel(
     contacts: ContactViews,
     num_joints: wp.int32,
     total_num_threads: wp.int32,
+    fuse_threshold: wp.int32,
+    head_active: wp.array[wp.int32],
 ):
     """Prepare-for-iteration dispatcher, single-world / one-colour-per-launch.
 
     Launched as a persistent grid of ``total_num_threads`` threads that
     grid-strides over the current colour's active cid range. Thread 0
     decrements ``color_cursor`` by 1 so the host-side
-    :func:`wp.capture_while` exits when every colour has been swept.
+    :func:`wp.capture_while` on ``head_active`` exits when every
+    colour has been swept or handed off.
 
-    Early-exits without touching state when ``color_cursor[0] <= 0`` so
-    tail launches past convergence (from the inner unrolling inside the
-    capture-while body) are no-ops.
+    Termination: thread 0 clears ``head_active[0]`` in two cases:
+    ``color_cursor[0] <= 0`` (sweep drained) and
+    ``count <= fuse_threshold`` (hand-off to the fused tail kernel).
+    The kernel returns immediately in both cases without decrementing
+    ``color_cursor``. ``fuse_threshold = 0`` disables the hand-off.
     """
-    if color_cursor[0] <= 0:
-        return
     tid = wp.tid()
+    if color_cursor[0] <= 0:
+        if tid == 0:
+            head_active[0] = 0
+        return
     start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
+
+    if count <= fuse_threshold:
+        if tid == 0:
+            head_active[0] = 0
+        return
 
     for t in range(tid, count, total_num_threads):
         cid = element_ids_by_color[start + t]
@@ -1207,17 +1243,26 @@ def _constraint_iterate_singleworld_kernel(
     contacts: ContactViews,
     num_joints: wp.int32,
     total_num_threads: wp.int32,
+    fuse_threshold: wp.int32,
+    head_active: wp.array[wp.int32],
 ):
     """Main-solve PGS dispatcher (bias ON), one colour per launch.
 
     Same launch contract as :func:`_constraint_prepare_singleworld_kernel`;
     this is the iterate counterpart with ``use_bias=True``. Inherits the
-    same early-exit contract.
+    same termination and tail-fuse hand-off contracts.
     """
-    if color_cursor[0] <= 0:
-        return
     tid = wp.tid()
+    if color_cursor[0] <= 0:
+        if tid == 0:
+            head_active[0] = 0
+        return
     start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
+
+    if count <= fuse_threshold:
+        if tid == 0:
+            head_active[0] = 0
+        return
 
     for t in range(tid, count, total_num_threads):
         cid = element_ids_by_color[start + t]
@@ -1244,16 +1289,25 @@ def _constraint_relax_singleworld_kernel(
     contacts: ContactViews,
     num_joints: wp.int32,
     total_num_threads: wp.int32,
+    fuse_threshold: wp.int32,
+    head_active: wp.array[wp.int32],
 ):
     """Relax-pass dispatcher (bias OFF), one colour per launch.
 
-    Inherits the early-exit contract from
+    Inherits the termination and tail-fuse hand-off contracts from
     :func:`_constraint_prepare_singleworld_kernel`.
     """
-    if color_cursor[0] <= 0:
-        return
     tid = wp.tid()
+    if color_cursor[0] <= 0:
+        if tid == 0:
+            head_active[0] = 0
+        return
     start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
+
+    if count <= fuse_threshold:
+        if tid == 0:
+            head_active[0] = 0
+        return
 
     for t in range(tid, count, total_num_threads):
         cid = element_ids_by_color[start + t]
@@ -1264,3 +1318,213 @@ def _constraint_relax_singleworld_kernel(
 
     if tid == 0:
         color_cursor[0] = cursor - 1
+
+
+# ---------------------------------------------------------------------------
+# Single-world step path: fused tail kernels (one block, many colours)
+# ---------------------------------------------------------------------------
+#
+# The persistent-grid kernels above launch once per colour. Near the tail
+# of a sweep, colour sizes drop well below one block's worth of lanes
+# (< ``FUSE_TAIL_MAX_COLOR_SIZE``) but we still pay the full
+# kernel-launch + capture-while boundary per colour. The fused tail
+# kernel below replaces that tail with a single 1D-block kernel that
+# walks the remaining small colours in-place, using
+# ``_sync_threads`` (``__syncthreads``) in place of the kernel boundary
+# to order each colour's body-velocity writes before the next colour's
+# reads.
+#
+# Launch contract (see :meth:`PhoenXWorld._capture_singleworld_tail_sweep`):
+#
+#     wp.launch_tiled(
+#         _constraint_iterate_singleworld_fused_kernel,
+#         dim=[1],
+#         inputs=[...],
+#         block_dim=FUSE_TAIL_BLOCK_DIM,
+#     )
+#
+# which yields a single block of ``FUSE_TAIL_BLOCK_DIM`` lanes;
+# ``wp.tid()`` returns ``(block_idx, lane)`` where ``block_idx == 0``
+# for every thread.
+#
+# Correctness contract:
+#
+# * Each iteration of the internal ``while`` handles exactly one
+#   colour; the colour must have size ``<= FUSE_TAIL_MAX_COLOR_SIZE``
+#   so every cid is owned by a distinct lane (``lane < count``).
+# * ``_sync_threads`` between colours makes every lane's body-velocity
+#   writes for colour ``c`` visible to every lane's reads for colour
+#   ``c + 1``; because the coloring invariant forbids any two cids in
+#   the same colour from sharing a body, intra-colour races are
+#   already impossible.
+# * If the internal ``while`` encounters a colour with size >
+#   ``FUSE_TAIL_MAX_COLOR_SIZE`` the kernel exits WITHOUT decrementing
+#   ``color_cursor``, handing the colour off to the persistent-grid
+#   kernel on the next pass. The persistent-grid kernel mirrors this
+#   hand-off in the other direction: it exits without decrementing
+#   when the current colour has size <= ``fuse_threshold``, so the two
+#   kernels form a size-partition of the colour sequence.
+# * The outer ``wp.capture_while(color_cursor, ...)`` terminates
+#   naturally when the fused kernel drains the last small colour and
+#   leaves ``color_cursor[0] == 0``.
+
+
+@wp.kernel(enable_backward=False)
+def _reset_head_active_kernel(head_active: wp.array[wp.int32]):
+    """Reset ``head_active[0] = 1`` before a single-world head sweep.
+
+    Called once before each ``wp.capture_while(head_active, ...)`` so
+    the predicate starts truthy and the head kernel gets at least one
+    launch in which to decide (converge, hand off, or do real work).
+    """
+    head_active[0] = 1
+
+
+@wp.func
+def _singleworld_color_range_from_cursor(
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    cursor: wp.int32,
+):
+    """Variant of :func:`_singleworld_color_range` that takes a cursor
+    value directly instead of reading it from an array.
+
+    Used by the fused tail kernel which threads the cursor through
+    registers across the internal colour loop so every lane observes
+    the same value without re-reading global memory.
+    """
+    n_colors = num_colors[0]
+    c = n_colors - cursor
+    start = color_starts[c]
+    end = color_starts[c + 1]
+    count = end - start
+    return start, count
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_prepare_singleworld_fused_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+    fuse_threshold: wp.int32,
+):
+    """Prepare-for-iteration, tail-fused variant.
+
+    Launched as a single 1D block of ``FUSE_TAIL_BLOCK_DIM`` lanes via
+    ``wp.launch_tiled(..., dim=[1], block_dim=FUSE_TAIL_BLOCK_DIM)``.
+    Each internal ``while`` iteration consumes one colour (the
+    ``color_cursor``-pointed colour); the loop exits when either the
+    cursor hits 0 (sweep finished) or the next colour is too big for
+    one-block coverage (hand off to the persistent-grid kernel).
+
+    Race-free by the same coloring invariant the persistent-grid
+    kernels rely on; ``_sync_threads`` replaces the kernel boundary
+    for cross-colour write visibility.
+    """
+    _block, lane = wp.tid()
+    cursor = color_cursor[0]
+    while cursor > 0:
+        start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor)
+        if count > fuse_threshold:
+            # Colour too big for one-block coverage; hand off without
+            # decrementing. The persistent-grid kernel will pick it
+            # up on the next outer capture-while iteration.
+            break
+        if lane < count:
+            cid = element_ids_by_color[start + lane]
+            if cid < num_joints:
+                actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+            else:
+                contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+        # Synchronise so this colour's body writes are visible to the
+        # next colour's reads (next iteration of the while). Same role
+        # the kernel boundary plays in the persistent-grid path.
+        _sync_threads()
+        cursor = cursor - 1
+    # Publish the final cursor value once, from lane 0.
+    if lane == 0:
+        color_cursor[0] = cursor
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_iterate_singleworld_fused_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+    fuse_threshold: wp.int32,
+):
+    """Main-solve iterate (bias ON), tail-fused variant.
+
+    Same launch contract and correctness contract as
+    :func:`_constraint_prepare_singleworld_fused_kernel`.
+    """
+    _block, lane = wp.tid()
+    cursor = color_cursor[0]
+    while cursor > 0:
+        start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor)
+        if count > fuse_threshold:
+            break
+        if lane < count:
+            cid = element_ids_by_color[start + lane]
+            if cid < num_joints:
+                actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
+            else:
+                contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, True)
+        _sync_threads()
+        cursor = cursor - 1
+    if lane == 0:
+        color_cursor[0] = cursor
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_relax_singleworld_fused_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+    fuse_threshold: wp.int32,
+):
+    """Relax (bias OFF), tail-fused variant.
+
+    Same launch contract and correctness contract as
+    :func:`_constraint_prepare_singleworld_fused_kernel`.
+    """
+    _block, lane = wp.tid()
+    cursor = color_cursor[0]
+    while cursor > 0:
+        start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor)
+        if count > fuse_threshold:
+            break
+        if lane < count:
+            cid = element_ids_by_color[start + lane]
+            if cid < num_joints:
+                actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
+            else:
+                contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False)
+        _sync_threads()
+        cursor = cursor - 1
+    if lane == 0:
+        color_cursor[0] = cursor

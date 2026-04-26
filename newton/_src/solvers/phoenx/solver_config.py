@@ -63,18 +63,54 @@ Knobs
     sweet spot on the single-world PGS path where the per-colour
     launch overhead was the dominant cost.
 
+``FUSE_TAIL_MAX_COLOR_SIZE`` (``int``)
+    Maximum colour size (in cids) eligible for the **single-block
+    fused tail** path of the single-world PGS sweep.  Once a sweep's
+    remaining colours are all this small, control is handed from the
+    persistent multi-block grid kernel to a single 1D-block fused
+    kernel that walks the rest of the colours back-to-back, using
+    ``wp.sync_block`` (i.e. ``__syncthreads``) in place of the
+    kernel-launch boundary that would otherwise enforce write
+    visibility between colours.  This eliminates O(remaining-colours)
+    kernel-launch latencies on the tail of every sweep.
+
+    Correctness contract: a "small" colour (size <= this knob) fits
+    entirely inside a single block of width
+    :data:`FUSE_TAIL_BLOCK_DIM`, so every cid of the colour is owned
+    by a distinct lane and ``wp.sync_block`` suffices to order the
+    colour's body-velocity writes before the next colour's reads --
+    no cross-block coordination is needed.  The persistent-grid
+    kernels hand off automatically: they early-exit (without
+    decrementing ``color_cursor``) when the *current* colour's size
+    is already <= this threshold, leaving the cursor pointing at the
+    first colour the fused tail kernel will sweep.
+
+    Set to ``0`` to disable the fused-tail path entirely; every
+    colour then flows through the persistent-grid kernel as before.
+    The shipped default is ``0`` until the path has been measured on
+    the target workloads; bump to ``FUSE_TAIL_BLOCK_DIM`` (256) to
+    enable.
+
+``FUSE_TAIL_BLOCK_DIM`` (``int``)
+    Block width of the single-block fused tail kernel.  Must be
+    >= :data:`FUSE_TAIL_MAX_COLOR_SIZE` so a small colour's cids are
+    each owned by a distinct lane within the one block.  Held equal
+    to the ``FUSE_TAIL_MAX_COLOR_SIZE`` default (256) for the same
+    register-budget reasons as :data:`FUSE_TAIL_BLOCK_DIM`'s
+    grid-mode sibling ``_SINGLEWORLD_BLOCK_DIM``.
+
 Usage
 -----
 ::
 
     from newton._src.solvers.phoenx.solver_config import (
+        FUSE_TAIL_BLOCK_DIM,
+        FUSE_TAIL_MAX_COLOR_SIZE,
         NUM_INNER_WHILE_ITERATIONS,
         PHOENX_CONTACT_MATCHING,
     )
 
-    pipeline = newton.CollisionPipeline(
-        model, contact_matching=PHOENX_CONTACT_MATCHING
-    )
+    pipeline = newton.CollisionPipeline(model, contact_matching=PHOENX_CONTACT_MATCHING)
 """
 
 from __future__ import annotations
@@ -93,7 +129,20 @@ PHOENX_CONTACT_MATCHING: Literal["sticky", "latest"] = "latest"
 #: contract every body kernel must honour.
 NUM_INNER_WHILE_ITERATIONS: int = 8
 
+#: Maximum colour size (in cids) eligible for the single-block fused
+#: tail path of the single-world PGS sweep.  ``0`` disables the path
+#: (every colour stays on the persistent-grid kernel).  See the module
+#: docstring for the correctness contract and the hand-off mechanism.
+FUSE_TAIL_MAX_COLOR_SIZE: int = 0
+
+#: Block width of the fused tail kernel.  Must be
+#: >= :data:`FUSE_TAIL_MAX_COLOR_SIZE` so every cid of a "small"
+#: colour is owned by a distinct lane within the one block.
+FUSE_TAIL_BLOCK_DIM: int = 256
+
 __all__ = [
+    "FUSE_TAIL_BLOCK_DIM",
+    "FUSE_TAIL_MAX_COLOR_SIZE",
     "NUM_INNER_WHILE_ITERATIONS",
     "PHOENX_CONTACT_MATCHING",
 ]
