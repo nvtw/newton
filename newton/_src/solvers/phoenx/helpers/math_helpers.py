@@ -107,9 +107,15 @@ def qmatrix_project_multiply_left_right(left: wp.quatf, right: wp.quatf) -> wp.m
     m22 = -lz * rz + ly * ry + lx * rx + lw * rw
 
     return wp.mat33f(
-        m00, m01, m02,
-        m10, m11, m12,
-        m20, m21, m22,
+        m00,
+        m01,
+        m02,
+        m10,
+        m11,
+        m12,
+        m20,
+        m21,
+        m22,
     )
 
 
@@ -156,7 +162,7 @@ def extract_rotation_angle(q: wp.quatf, rotation_axis: wp.vec3f) -> wp.float32:
     ``atan2`` would wrap at a different branch and break the
     :func:`revolution_tracker_update` delta test.
 
-    ``rotation_axis`` is expected to be unit-length and colinear with
+    ``rotation_axis`` is expected to be unit-length and collinear with
     the hinge's rotation axis in the same coordinate frame as ``q``
     (both world-space, per the PhoenX convention).
     """
@@ -272,12 +278,7 @@ def effective_mass_scalar(
     """
     rc1 = wp.cross(r1, axis)
     rc2 = wp.cross(r2, axis)
-    w = (
-        inv_mass1
-        + inv_mass2
-        + wp.dot(rc1, inv_inertia1_world @ rc1)
-        + wp.dot(rc2, inv_inertia2_world @ rc2)
-    )
+    w = inv_mass1 + inv_mass2 + wp.dot(rc1, inv_inertia1_world @ rc1) + wp.dot(rc2, inv_inertia2_world @ rc2)
     if w > 1.0e-12:
         return 1.0 / w
     return 0.0
@@ -289,7 +290,7 @@ def rotate_inertia(rotation: wp.mat33f, inertia_body: wp.mat33f) -> wp.mat33f:
 
     Used wherever the world-frame inertia is refreshed from a body's
     current orientation: PhoenX's once-per-step
-    ``_phoenx_update_inertia_kernel`` and the example helpers that
+    ``_phoenx_update_inertia_and_clear_forces_kernel`` and the example helpers that
     seed the body container. Plumbing this through one helper keeps
     the math identical across callers and gives us a single place to
     drop in a ``Mat3Sym``-aware path later (Phase C).

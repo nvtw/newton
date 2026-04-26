@@ -73,8 +73,7 @@ __all__ = [
     "_kinematic_prepare_step_kernel",
     "_per_world_jp_coloring_kernel",
     "_phoenx_apply_forces_and_gravity_kernel",
-    "_phoenx_clear_forces_kernel",
-    "_phoenx_update_inertia_kernel",
+    "_phoenx_update_inertia_and_clear_forces_kernel",
     "_pick_threads_per_world_kernel",
     "_reduce_total_colours_kernel",
     "_rotation_quaternion",
@@ -1040,8 +1039,8 @@ def _phoenx_apply_forces_and_gravity_kernel(
     velocity read-modify-write, so running two launches instead of one
     only paid extra CUDA launch overhead (~4us each at 256 worlds, i.e.
     ~32us / frame at substeps=4). Force accumulators are NOT cleared
-    here -- :func:`_phoenx_clear_forces_kernel` runs once at the end
-    of :meth:`PhoenXWorld.step`.
+    here -- :func:`_phoenx_update_inertia_and_clear_forces_kernel`
+    runs once at the end of :meth:`PhoenXWorld.step` and zeros them.
     """
     i = wp.tid()
     if bodies.motion_type[i] != MOTION_DYNAMIC:
@@ -1061,28 +1060,22 @@ def _phoenx_apply_forces_and_gravity_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _phoenx_update_inertia_kernel(
+def _phoenx_update_inertia_and_clear_forces_kernel(
     bodies: BodyContainer,
 ):
-    """Apply linear/angular damping and refresh
-    ``inverse_inertia_world = R * I^-1 * R^T`` from the current
-    orientation. Once per step, after the substep loop."""
+    """End-of-step per-body kernel: damping + rotated inertia refresh
+    **plus** force/torque accumulator zeroing. Runs once per step,
+    after the substep loop. Damping uses ``linear_damping`` /
+    ``angular_damping`` per body; the world-frame inertia is rebuilt
+    from the final orientation (``R * I^-1 * R^T``)."""
     i = wp.tid()
-    if bodies.motion_type[i] != MOTION_DYNAMIC:
-        return
-    bodies.velocity[i] = bodies.velocity[i] * bodies.linear_damping[i]
-    bodies.angular_velocity[i] = bodies.angular_velocity[i] * bodies.angular_damping[i]
-    r = wp.quat_to_matrix(bodies.orientation[i])
-    bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
-
-
-@wp.kernel(enable_backward=False)
-def _phoenx_clear_forces_kernel(
-    bodies: BodyContainer,
-):
-    """Zero per-body force/torque accumulators. Runs once at the end
-    of :meth:`PhoenXWorld.step`."""
-    i = wp.tid()
+    # Damping + rotated inertia: dynamic-only.
+    if bodies.motion_type[i] == MOTION_DYNAMIC:
+        bodies.velocity[i] = bodies.velocity[i] * bodies.linear_damping[i]
+        bodies.angular_velocity[i] = bodies.angular_velocity[i] * bodies.angular_damping[i]
+        r = wp.quat_to_matrix(bodies.orientation[i])
+        bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
+    # Force / torque clear: every body slot, including kinematic / static.
     bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
     bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
 
