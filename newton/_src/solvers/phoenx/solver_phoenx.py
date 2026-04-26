@@ -72,15 +72,16 @@ from newton._src.solvers.phoenx.materials import MaterialData
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
     _STRAGGLER_BLOCK_DIM,
+    SINGLEWORLD_FUSED_BLOCK_DIM,
     _build_scatter_keys_kernel,
     _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
-    _constraint_iterate_singleworld_kernel,
+    _constraint_iterate_singleworld_fused_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
-    _constraint_prepare_singleworld_kernel,
+    _constraint_prepare_singleworld_fused_kernel,
     _constraint_relax_fast_tail_kernel,
-    _constraint_relax_singleworld_kernel,
+    _constraint_relax_singleworld_fused_kernel,
     _constraints_to_elements_kernel,
     _count_elements_per_world_kernel,
     _integrate_velocities_kernel,
@@ -1232,16 +1233,23 @@ class PhoenXWorld:
     # ------------------------------------------------------------------
 
     def _capture_singleworld_sweep(self, kernel, **kw) -> None:
-        """``wp.capture_while`` body: launch ``kernel`` for one colour.
+        """``wp.capture_while`` body: launch ``kernel`` for one or more
+        colours and decrement the cursor accordingly.
 
-        Decrements ``color_cursor`` inside the kernel; the capture-while
-        exits when the cursor hits 0.
+        The launch uses a single CUDA block of
+        :data:`SINGLEWORLD_FUSED_BLOCK_DIM` threads. The fused kernels
+        sweep up to :data:`SINGLEWORLD_FUSED_K` colours per launch with
+        ``__syncthreads()`` between them; the legacy one-colour-per-launch
+        kernels stop after a single colour. Either way the kernel
+        decrements ``color_cursor`` by however many colours it consumed,
+        and the capture-while exits when the cursor hits 0.
         """
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
         wp.launch(
             kernel,
-            dim=self._constraint_capacity,
+            dim=SINGLEWORLD_FUSED_BLOCK_DIM,
+            block_dim=SINGLEWORLD_FUSED_BLOCK_DIM,
             inputs=[
                 self.constraints,
                 self._contact_cols,
@@ -1262,8 +1270,9 @@ class PhoenXWorld:
         """Single-world prepare + main PGS iterate path.
 
         One ``wp.capture_while`` for prepare, then ``solver_iterations``
-        more capture-while loops for the bias-on iterate. Each launch
-        uses the entire device on one colour, then the cursor advances.
+        more capture-while loops for the bias-on iterate. Uses the
+        fused single-block kernels which sweep
+        :data:`SINGLEWORLD_FUSED_K` colours per launch.
         """
         if self._constraint_capacity == 0:
             return
@@ -1274,7 +1283,7 @@ class PhoenXWorld:
         wp.capture_while(
             self._partitioner.color_cursor,
             self._capture_singleworld_sweep,
-            kernel=_constraint_prepare_singleworld_kernel,
+            kernel=_constraint_prepare_singleworld_fused_kernel,
             idt=idt,
         )
 
@@ -1284,7 +1293,7 @@ class PhoenXWorld:
             wp.capture_while(
                 self._partitioner.color_cursor,
                 self._capture_singleworld_sweep,
-                kernel=_constraint_iterate_singleworld_kernel,
+                kernel=_constraint_iterate_singleworld_fused_kernel,
                 idt=idt,
             )
 
@@ -1298,7 +1307,7 @@ class PhoenXWorld:
             wp.capture_while(
                 self._partitioner.color_cursor,
                 self._capture_singleworld_sweep,
-                kernel=_constraint_relax_singleworld_kernel,
+                kernel=_constraint_relax_singleworld_fused_kernel,
                 idt=idt,
             )
 

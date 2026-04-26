@@ -50,16 +50,21 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 
 __all__ = [
+    "SINGLEWORLD_FUSED_BLOCK_DIM",
+    "SINGLEWORLD_FUSED_K",
     "_PER_WORLD_COLORING_BLOCK_DIM",
     "_STRAGGLER_BLOCK_DIM",
     "_build_scatter_keys_kernel",
     "_choose_fast_tail_worlds_per_block",
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
+    "_constraint_iterate_singleworld_fused_kernel",
     "_constraint_iterate_singleworld_kernel",
     "_constraint_prepare_plus_iterate_fast_tail_kernel",
+    "_constraint_prepare_singleworld_fused_kernel",
     "_constraint_prepare_singleworld_kernel",
     "_constraint_relax_fast_tail_kernel",
+    "_constraint_relax_singleworld_fused_kernel",
     "_constraint_relax_singleworld_kernel",
     "_constraints_to_elements_kernel",
     "_count_elements_per_world_kernel",
@@ -1223,3 +1228,191 @@ def _constraint_relax_singleworld_kernel(
 
     if tid == 0:
         color_cursor[0] = cursor - 1
+
+
+# ---------------------------------------------------------------------------
+# Single-world FUSED dispatch: K colours per launch in one block
+# ---------------------------------------------------------------------------
+#
+# These kernels collapse :data:`SINGLEWORLD_FUSED_K` consecutive colours
+# into a single launch driven by ``wp.capture_while``. Each launch is
+# **one** CUDA block of :data:`SINGLEWORLD_FUSED_BLOCK_DIM` threads, so
+# ``__syncthreads()`` between colours is a valid device-wide barrier
+# (within the live block, which is the only block).
+#
+# Why one block:
+# The existing per-colour single-world dispatcher launches with
+# ``dim = constraint_capacity`` -- e.g. 37820 threads for big_box_grid.
+# Inside that grid, only one block actually has cids for the active
+# colour; the other ~36 blocks early-exit on ``tid >= count``. So the
+# pre-existing throughput already corresponds to a single SM doing the
+# work; collapsing to a single physical block removes the launch
+# bookkeeping for the dead blocks and lets us insert ``__syncthreads()``
+# safely between fused colours.
+
+# How many colours we sweep per kernel launch. Higher ``K`` amortises
+# the ``wp.capture_while`` per-iteration overhead and the kernel-launch
+# bookkeeping, but pushes register pressure up because the inner
+# constraint loops are inlined.
+SINGLEWORLD_FUSED_K: int = 4
+
+# Width of the single block these kernels launch with. Must be a power
+# of two and >= warp size. Capped well below the CUDA per-block max
+# (1024) because the fused kernels inline the contact + joint iterate
+# functions, which carry enough registers per thread that a 1024-wide
+# block trips ``cudaErrorLaunchOutOfResources`` ("too many resources
+# requested for launch"). 256 keeps register pressure manageable and
+# the strided per-colour loop covers wider colours.
+SINGLEWORLD_FUSED_BLOCK_DIM: int = 256
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_prepare_singleworld_fused_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+):
+    """Prepare-for-iteration dispatcher fused over
+    :data:`SINGLEWORLD_FUSED_K` colours per launch.
+
+    Single-block launch:
+    ``dim = block_dim = SINGLEWORLD_FUSED_BLOCK_DIM``. Threads stride
+    within each colour and ``_sync_threads()`` (block barrier) separates
+    consecutive fused colours. The cursor is decremented by
+    ``min(K, remaining)`` at the end so partial fusion near the
+    cursor's tail (when fewer than K colours remain) terminates
+    correctly.
+    """
+    tid = wp.tid()
+    cursor = color_cursor[0]
+    n_colors_total = num_colors[0]
+    block_dim = wp.int32(SINGLEWORLD_FUSED_BLOCK_DIM)
+    K = wp.int32(SINGLEWORLD_FUSED_K)
+
+    # ``cursor`` is N for "N colours left to sweep"; ``c`` walks from
+    # the lowest unprocessed colour upward over up to K steps.
+    fused = wp.min(K, cursor)
+    step = wp.int32(0)
+    while step < fused:
+        c = n_colors_total - cursor + step
+        start = color_starts[c]
+        end = color_starts[c + 1]
+        count = end - start
+
+        # Strided per-colour loop within the single block.
+        i = tid
+        while i < count:
+            cid = element_ids_by_color[start + i]
+            if cid < num_joints:
+                actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+            else:
+                contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+            i += block_dim
+
+        # Block barrier: cross-colour body-state hazard fence.
+        _sync_threads()
+        step += 1
+
+    if tid == 0:
+        color_cursor[0] = cursor - fused
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_iterate_singleworld_fused_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+):
+    """Main-solve PGS dispatcher (bias ON) fused over
+    :data:`SINGLEWORLD_FUSED_K` colours per launch.
+    """
+    tid = wp.tid()
+    cursor = color_cursor[0]
+    n_colors_total = num_colors[0]
+    block_dim = wp.int32(SINGLEWORLD_FUSED_BLOCK_DIM)
+    K = wp.int32(SINGLEWORLD_FUSED_K)
+
+    fused = wp.min(K, cursor)
+    step = wp.int32(0)
+    while step < fused:
+        c = n_colors_total - cursor + step
+        start = color_starts[c]
+        end = color_starts[c + 1]
+        count = end - start
+
+        i = tid
+        while i < count:
+            cid = element_ids_by_color[start + i]
+            if cid < num_joints:
+                actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
+            else:
+                contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, True)
+            i += block_dim
+
+        _sync_threads()
+        step += 1
+
+    if tid == 0:
+        color_cursor[0] = cursor - fused
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_relax_singleworld_fused_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+):
+    """Relax-pass dispatcher (bias OFF) fused over
+    :data:`SINGLEWORLD_FUSED_K` colours per launch."""
+    tid = wp.tid()
+    cursor = color_cursor[0]
+    n_colors_total = num_colors[0]
+    block_dim = wp.int32(SINGLEWORLD_FUSED_BLOCK_DIM)
+    K = wp.int32(SINGLEWORLD_FUSED_K)
+
+    fused = wp.min(K, cursor)
+    step = wp.int32(0)
+    while step < fused:
+        c = n_colors_total - cursor + step
+        start = color_starts[c]
+        end = color_starts[c + 1]
+        count = end - start
+
+        i = tid
+        while i < count:
+            cid = element_ids_by_color[start + i]
+            if cid < num_joints:
+                actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
+            else:
+                contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False)
+            i += block_dim
+
+        _sync_threads()
+        step += 1
+
+    if tid == 0:
+        color_cursor[0] = cursor - fused
