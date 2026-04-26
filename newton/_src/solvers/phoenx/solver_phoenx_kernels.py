@@ -1254,7 +1254,7 @@ def _constraint_relax_singleworld_kernel(
 # the ``wp.capture_while`` per-iteration overhead and the kernel-launch
 # bookkeeping, but pushes register pressure up because the inner
 # constraint loops are inlined.
-SINGLEWORLD_FUSED_K: int = 4
+SINGLEWORLD_FUSED_K: int = 16
 
 # Width of the single block these kernels launch with. Must be a power
 # of two and >= warp size. Capped well below the CUDA per-block max
