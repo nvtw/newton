@@ -35,6 +35,15 @@ import newton.examples
 from newton._src.solvers.phoenx.body import (
     body_container_zeros,
 )
+from newton._src.solvers.phoenx.examples.example_common import (
+    init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
+)
+from newton._src.solvers.phoenx.examples.example_common import (
+    newton_to_phoenx_kernel as _newton_to_phoenx_kernel,
+)
+from newton._src.solvers.phoenx.examples.example_common import (
+    phoenx_to_newton_kernel as _phoenx_to_newton_kernel,
+)
 from newton._src.solvers.phoenx.picking import (
     Picking,
     register_with_viewer_gl,
@@ -91,18 +100,6 @@ FULL_ROTATION_STEP = 2.0 * HALF_ROTATION_STEP
 # sets time scale; what matters for stability is uniform density
 # across all planks.
 PLANK_DENSITY = 1000.0
-
-
-# State-mirroring kernels shared with other PhoenX examples.
-from newton._src.solvers.phoenx.examples.example_common import (
-    init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
-)
-from newton._src.solvers.phoenx.examples.example_common import (
-    newton_to_phoenx_kernel as _newton_to_phoenx_kernel,
-)
-from newton._src.solvers.phoenx.examples.example_common import (
-    phoenx_to_newton_kernel as _phoenx_to_newton_kernel,
-)
 
 
 class Example:
@@ -162,48 +159,60 @@ class Example:
         # Tower of planks. Orientation accumulates a per-plank rotation
         # step about +Z, plus a half-step between rings (matches the
         # C# ``orientation *= halfRotationStep`` inside the layer loop).
+        #
+        # ``--grid-side`` (host CLI) tiles the tower into a 2D grid in
+        # one shared world. Per-tower geometry is unchanged.
         self._plank_newton_ids: list[int] = []
-        orientation_rad = 0.0
-        for e in range(TOWER_HEIGHT_LAYERS):
-            orientation_rad += HALF_ROTATION_STEP
-            for _ in range(BOXES_PER_RING):
-                cos_o = math.cos(orientation_rad)
-                sin_o = math.sin(orientation_rad)
-                # C# local offset: (0, 0.5 + e, RING_RADIUS) with Y up.
-                # On +Z-up: Y_Jitter (height) -> Z_Newton,
-                # Z_Jitter (radius) -> Y_Newton.
-                local_x = 0.0
-                local_y = RING_RADIUS
-                local_z = 0.5 + e
-                world_x = cos_o * local_x - sin_o * local_y
-                world_y = sin_o * local_x + cos_o * local_y
-                world_z = local_z
-                quat = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), orientation_rad)
-                body = builder.add_body(
-                    xform=wp.transform(
-                        p=wp.vec3(float(world_x), float(world_y), float(world_z)),
-                        q=quat,
-                    ),
-                )
-                # Let the shape's density compute both the mass and
-                # the inertia tensor. Passing ``mass=...`` on
-                # ``add_body`` *without* overriding shape density
-                # produces a consistent (mass, inertia) pair; passing
-                # ``density=0`` on the ShapeConfig zeros the inertia
-                # contribution and Newton's inertia validator falls
-                # back to a default that does not match the shape,
-                # which is how the tower used to sink through the
-                # ground plane (contacts fire but the normal row
-                # can't hold the weight).
-                builder.add_shape_box(
-                    body,
-                    hx=PLANK_HX,
-                    hy=PLANK_HY,
-                    hz=PLANK_HZ,
-                    cfg=newton.ModelBuilder.ShapeConfig(density=PLANK_DENSITY),
-                )
-                self._plank_newton_ids.append(body)
-                orientation_rad += FULL_ROTATION_STEP
+        grid_side = int(getattr(self.args, "grid_side", 1) or 1)
+        # Tower footprint plus a generous gap so neighbouring towers
+        # only interact through the shared ground plane.
+        tile_spacing = 2.0 * (RING_RADIUS + PLANK_HX) + 5.0
+        half_grid = (grid_side - 1) * 0.5 * tile_spacing
+        for ix in range(grid_side):
+            for iy in range(grid_side):
+                center_x = ix * tile_spacing - half_grid
+                center_y = iy * tile_spacing - half_grid
+                orientation_rad = 0.0
+                for e in range(TOWER_HEIGHT_LAYERS):
+                    orientation_rad += HALF_ROTATION_STEP
+                    for _ in range(BOXES_PER_RING):
+                        cos_o = math.cos(orientation_rad)
+                        sin_o = math.sin(orientation_rad)
+                        # C# local offset: (0, 0.5 + e, RING_RADIUS) with Y up.
+                        # On +Z-up: Y_Jitter (height) -> Z_Newton,
+                        # Z_Jitter (radius) -> Y_Newton.
+                        local_x = 0.0
+                        local_y = RING_RADIUS
+                        local_z = 0.5 + e
+                        world_x = cos_o * local_x - sin_o * local_y + center_x
+                        world_y = sin_o * local_x + cos_o * local_y + center_y
+                        world_z = local_z
+                        quat = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), orientation_rad)
+                        body = builder.add_body(
+                            xform=wp.transform(
+                                p=wp.vec3(float(world_x), float(world_y), float(world_z)),
+                                q=quat,
+                            ),
+                        )
+                        # Let the shape's density compute both the mass and
+                        # the inertia tensor. Passing ``mass=...`` on
+                        # ``add_body`` *without* overriding shape density
+                        # produces a consistent (mass, inertia) pair; passing
+                        # ``density=0`` on the ShapeConfig zeros the inertia
+                        # contribution and Newton's inertia validator falls
+                        # back to a default that does not match the shape,
+                        # which is how the tower used to sink through the
+                        # ground plane (contacts fire but the normal row
+                        # can't hold the weight).
+                        builder.add_shape_box(
+                            body,
+                            hx=PLANK_HX,
+                            hy=PLANK_HY,
+                            hz=PLANK_HZ,
+                            cfg=newton.ModelBuilder.ShapeConfig(density=PLANK_DENSITY),
+                        )
+                        self._plank_newton_ids.append(body)
+                        orientation_rad += FULL_ROTATION_STEP
 
         # Finalise the Newton side.
         # ``skip_shape_contact_pairs=True``: the precomputed shape-pair
@@ -421,13 +430,21 @@ class Example:
 
     def test_final(self) -> None:
         """After settling, every plank must still lie within a
-        generous envelope around the original tower footprint.
+        generous envelope around its tower's footprint.
 
         A solver blow-up (NaNs, ejected bodies) scatters planks well
-        beyond ``RING_RADIUS * 3``, which this check catches without
-        over-constraining the exact settled geometry.
+        beyond a few tower radii, which this check catches without
+        over-constraining the exact settled geometry. With
+        ``--grid-side > 1`` the envelope is the bounding circle of the
+        whole tile arrangement.
         """
-        tolerance = RING_RADIUS * 3.0
+        grid_side = int(getattr(self.args, "grid_side", 1) or 1)
+        tile_spacing = 2.0 * (RING_RADIUS + PLANK_HX) + 5.0
+        # Worst-case radial extent: half the diagonal of the tile grid
+        # plus a per-tower envelope. ``* 3`` keeps the same headroom
+        # the original single-tower check used.
+        grid_radius = 0.5 * tile_spacing * (grid_side - 1) * math.sqrt(2.0)
+        tolerance = grid_radius + RING_RADIUS * 3.0
         positions = self.bodies.position.numpy()
         for newton_idx in self._plank_newton_ids:
             # PhoenX slot = Newton index + 1 (world body at slot 0).
@@ -441,6 +458,17 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
+    parser.add_argument(
+        "--grid-side",
+        type=int,
+        default=1,
+        help=(
+            "Tile the tower into a ``grid-side x grid-side`` 2D grid in one "
+            "world (default 1, i.e. a single tower). Useful for stress-testing "
+            "the single_world solver on dense scenes; see "
+            "``benchmarks/scenarios/tower_grid.py`` for the headless variant."
+        ),
+    )
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)
     newton.examples.run(example, args)
