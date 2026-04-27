@@ -71,10 +71,18 @@ def _anymal_model_with_position_drives() -> newton.Model:
         mb.joint_target_ke[i] = 150.0
         mb.joint_target_kd[i] = 5.0
     initial_q = {
-        "RH_HAA": 0.0,   "RH_HFE": -0.4,  "RH_KFE": 0.8,
-        "LH_HAA": 0.0,   "LH_HFE": -0.4,  "LH_KFE": 0.8,
-        "RF_HAA": 0.0,   "RF_HFE": 0.4,   "RF_KFE": -0.8,
-        "LF_HAA": 0.0,   "LF_HFE": 0.4,   "LF_KFE": -0.8,
+        "RH_HAA": 0.0,
+        "RH_HFE": -0.4,
+        "RH_KFE": 0.8,
+        "LH_HAA": 0.0,
+        "LH_HFE": -0.4,
+        "LH_KFE": 0.8,
+        "RF_HAA": 0.0,
+        "RF_HFE": 0.4,
+        "RF_KFE": -0.8,
+        "LF_HAA": 0.0,
+        "LF_HFE": 0.4,
+        "LF_KFE": -0.8,
     }
     for name, value in initial_q.items():
         idx = next(
@@ -98,9 +106,7 @@ def _setup_anymal_loop(model: newton.Model):
     per-frame target updates and matches what the Anymal walk example
     does.
     """
-    solver = newton.solvers.SolverPhoenX(
-        model, substeps=ANYMAL_SUBSTEPS, solver_iterations=8, velocity_iterations=1
-    )
+    solver = newton.solvers.SolverPhoenX(model, substeps=ANYMAL_SUBSTEPS, solver_iterations=8, velocity_iterations=1)
     state_0 = model.state()
     state_1 = model.state()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
@@ -149,8 +155,14 @@ class TestAnymalRandomPositionTargets(unittest.TestCase):
         rng = np.random.default_rng(seed=0)
         model = _anymal_model_with_position_drives()
         (
-            solver, s0, s1, control, contacts, target_buf,
-            leg_dof_count, leg_dof_offset,
+            solver,
+            s0,
+            s1,
+            control,
+            contacts,
+            target_buf,
+            leg_dof_count,
+            leg_dof_offset,
         ) = _setup_anymal_loop(model)
 
         # Sample targets around the default pose with a +/-0.5 rad window
@@ -241,8 +253,14 @@ class TestAnymalRandomVelocityTargets(unittest.TestCase):
         model.joint_target_kd.assign(np.full(model.joint_dof_count, 5.0, dtype=np.float32))
 
         (
-            solver, s0, s1, control, contacts, target_buf,
-            leg_dof_count, leg_dof_offset,
+            solver,
+            s0,
+            s1,
+            control,
+            contacts,
+            target_buf,
+            leg_dof_count,
+            leg_dof_offset,
         ) = _setup_anymal_loop(model)
 
         # Sample velocity targets inside ``[-omega_max/3, omega_max/3]``
@@ -255,9 +273,7 @@ class TestAnymalRandomVelocityTargets(unittest.TestCase):
         n_frames = ANYMAL_FRAMES
         peak_qd = 0.0
         for i in range(n_frames):
-            target_buf_vel[leg_dof_offset:] = rng.uniform(
-                -omega_max, omega_max, size=leg_dof_count
-            ).astype(np.float32)
+            target_buf_vel[leg_dof_offset:] = rng.uniform(-omega_max, omega_max, size=leg_dof_count).astype(np.float32)
             control.joint_target_vel.assign(target_buf_vel)
             s0, s1 = _step_one_frame(solver, s0, s1, control, contacts, model, ANYMAL_DT)
             if i % 30 == 29:

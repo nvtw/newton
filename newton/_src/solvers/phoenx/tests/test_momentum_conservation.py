@@ -26,8 +26,8 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.tests._test_helpers import run_settle_loop
 from newton._src.solvers.phoenx.examples.scene_registry import Scene, scene
+from newton._src.solvers.phoenx.tests._test_helpers import run_settle_loop
 from newton._src.solvers.phoenx.world_builder import JointMode, WorldBuilder
 
 # ---------------------------------------------------------------------------
@@ -154,8 +154,7 @@ class TestMomentumConservation(unittest.TestCase):
                 expected_fy,
                 delta=f_tol,
                 msg=(
-                    f"cid {cid}: fy={fy:.4f} N, expected ~{expected_fy:.4f} N "
-                    f"(weight of {NUM_CUBES - cid} cubes below)"
+                    f"cid {cid}: fy={fy:.4f} N, expected ~{expected_fy:.4f} N (weight of {NUM_CUBES - cid} cubes below)"
                 ),
             )
             self.assertLess(

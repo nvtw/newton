@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 import unittest
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import warp as wp
@@ -79,9 +79,7 @@ def _build_pendulum_model(
     )
 
     actuator_mode = (
-        newton.JointTargetMode.POSITION
-        if (target_ke > 0.0 or target_kd > 0.0)
-        else newton.JointTargetMode.NONE
+        newton.JointTargetMode.POSITION if (target_ke > 0.0 or target_kd > 0.0) else newton.JointTargetMode.NONE
     )
     # Invert the cube position to get the joint anchor in child frame.
     neg = tuple(-c for c in cube_world_position)
@@ -141,9 +139,7 @@ def _run(
 
 
 def _mj_factory(model: newton.Model):
-    return newton.solvers.SolverMuJoCo(
-        model, solver="newton", nconmax=16, njmax=16
-    )
+    return newton.solvers.SolverMuJoCo(model, solver="newton", nconmax=16, njmax=16)
 
 
 #: Default PhoenX settings for parity tests. ``substeps=4`` + 16 PGS
@@ -252,7 +248,7 @@ class TestPhoenXMuJoCoParity(unittest.TestCase):
                 self.assertEqual(
                     np.sign(traj_mj[i, 0]),
                     np.sign(traj_px[i, 0]),
-                    msg=f"sign mismatch at frame {i}: mj={traj_mj[i,0]:+.4f}, px={traj_px[i,0]:+.4f}",
+                    msg=f"sign mismatch at frame {i}: mj={traj_mj[i, 0]:+.4f}, px={traj_px[i, 0]:+.4f}",
                 )
         rms = float(np.sqrt(np.mean((traj_mj[:, 0] - traj_px[:, 0]) ** 2)))
         self.assertLess(
@@ -413,8 +409,10 @@ class TestPhoenXStiffnessSweep(unittest.TestCase):
         ]
         results = []
         for substeps, iterations in configs:
+
             def factory(m, s=substeps, it=iterations):
                 return _px_factory(m, substeps=s, solver_iterations=it)
+
             traj_px = _run(factory, make, n, dt)
             rms = float(np.sqrt(np.mean((traj_mj[:, 0] - traj_px[:, 0]) ** 2)))
             final_err = abs(float(traj_mj[-1, 0]) - float(traj_px[-1, 0]))

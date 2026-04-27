@@ -19,20 +19,20 @@ from __future__ import annotations
 import math
 import unittest
 
-import numpy as np
 import warp as wp
 
 import newton
-
 from newton._src.solvers.phoenx.examples.example_phoenx_scale import (
-    Example as ScaleExample,
-    LIMIT_KE,
+    CUBE_GRID,
+    CUBE_MASS,
+    GRAVITY,
     LIMIT_KD,
+    LIMIT_KE,
     LIMIT_LOWER,
     PLATFORM_MASS,
-    CUBE_MASS,
-    CUBE_GRID,
-    GRAVITY,
+)
+from newton._src.solvers.phoenx.examples.example_phoenx_scale import (
+    Example as ScaleExample,
 )
 
 
@@ -66,9 +66,7 @@ class _NullViewer:
         pass
 
 
-def _build_isolated_scale(
-    *, platform_mass: float, n_cubes: int, cube_mass: float, limit_ke: float, limit_kd: float
-):
+def _build_isolated_scale(*, platform_mass: float, n_cubes: int, cube_mass: float, limit_ke: float, limit_kd: float):
     """Standalone scale builder for the parametric Hooke's-law sweep --
     avoids the example's hard-coded mass/cube count so the test can
     sweep across loads."""
@@ -76,9 +74,9 @@ def _build_isolated_scale(
     mb.add_ground_plane()
     cfg_static = newton.ModelBuilder.ShapeConfig(density=0.0)
     plat_hx, plat_hy, plat_hz = 0.5, 0.5, 0.025
-    ixx = platform_mass / 3.0 * (plat_hy ** 2 + plat_hz ** 2)
-    iyy = platform_mass / 3.0 * (plat_hx ** 2 + plat_hz ** 2)
-    izz = platform_mass / 3.0 * (plat_hx ** 2 + plat_hy ** 2)
+    ixx = platform_mass / 3.0 * (plat_hy**2 + plat_hz**2)
+    iyy = platform_mass / 3.0 * (plat_hx**2 + plat_hz**2)
+    izz = platform_mass / 3.0 * (plat_hx**2 + plat_hy**2)
     plat = mb.add_link(
         xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.20), q=wp.quat_identity()),
         mass=platform_mass,
@@ -100,7 +98,7 @@ def _build_isolated_scale(
 
     if n_cubes > 0:
         cube_he = 0.07
-        cixx = cube_mass / 3.0 * (cube_he ** 2 + cube_he ** 2)
+        cixx = cube_mass / 3.0 * (cube_he**2 + cube_he**2)
         cinertia = ((cixx, 0, 0), (0, cixx, 0), (0, 0, cixx))
         grid = int(round(math.sqrt(n_cubes)))
         spacing = 2.2 * cube_he
@@ -195,9 +193,9 @@ class TestScaleHookesLaw(unittest.TestCase):
                     expected_deflection,
                     delta=tol,
                     msg=f"plat_m={plat_m}, n_cubes={n_cubes}: "
-                        f"deflection={actual_deflection*1000:.3f} mm vs "
-                        f"expected {expected_deflection*1000:.3f} mm "
-                        f"(F_total={f_total:.2f} N, ke={LIMIT_KE:.0f} N/m)",
+                    f"deflection={actual_deflection * 1000:.3f} mm vs "
+                    f"expected {expected_deflection * 1000:.3f} mm "
+                    f"(F_total={f_total:.2f} N, ke={LIMIT_KE:.0f} N/m)",
                 )
 
     def test_stiffness_sweep_inverse_proportional(self) -> None:
@@ -256,9 +254,9 @@ class TestScaleHookesLaw(unittest.TestCase):
             actual_deflection,
             expected_deflection,
             delta=0.10 * expected_deflection,
-            msg=f"example deflection={actual_deflection*1000:.3f} mm vs expected "
-                f"{expected_deflection*1000:.3f} mm "
-                f"(F_total={f_total:.2f} N)",
+            msg=f"example deflection={actual_deflection * 1000:.3f} mm vs expected "
+            f"{expected_deflection * 1000:.3f} mm "
+            f"(F_total={f_total:.2f} N)",
         )
 
 

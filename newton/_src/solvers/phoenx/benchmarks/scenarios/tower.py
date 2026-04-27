@@ -87,7 +87,6 @@ def build(
     larger per-tower scale) to bench the capture-while path on the
     contact-dense regime it targets.
     """
-    device = wp.get_device()
     mem_before = _gpu_used_bytes()
 
     tower = _build_tower_builder()

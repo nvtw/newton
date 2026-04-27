@@ -44,16 +44,16 @@ PLATFORM_MASS = 5.0  # kg
 
 CUBE_HE = 0.07
 CUBE_MASS = 0.5  # kg
-CUBE_GRID = 5    # 5 x 5 = 25 cubes
+CUBE_GRID = 5  # 5 x 5 = 25 cubes
 
 # ---- Spring config -------------------------------------------------------
-LIMIT_KE = 50_000.0   # N/m
+LIMIT_KE = 50_000.0  # N/m
 # Critical damping: ``kd_crit = 2 * sqrt(ke * M)`` with M = 17.5 kg
 # (5 kg platform + 25 * 0.5 kg cubes) ~= 1870 N*s/m. Round up so the
 # platform settles inside ~1 second instead of oscillating.
-LIMIT_KD = 2000.0     # N*s/m
-LIMIT_LOWER = -0.05   # m
-LIMIT_UPPER = 0.05    # m
+LIMIT_KD = 2000.0  # N*s/m
+LIMIT_LOWER = -0.05  # m
+LIMIT_UPPER = 0.05  # m
 
 GRAVITY = 9.81
 SUBSTEPS = 16
@@ -89,9 +89,9 @@ def _build_scale_model() -> newton.Model:
     # joint's neutral position (q=0) puts the platform a bit above the
     # base; gravity pulls q < 0 until the lower-limit spring holds it.
     platform_z0 = 0.20
-    ixx = PLATFORM_MASS / 3.0 * (PLATFORM_HY ** 2 + PLATFORM_HZ ** 2)
-    iyy = PLATFORM_MASS / 3.0 * (PLATFORM_HX ** 2 + PLATFORM_HZ ** 2)
-    izz = PLATFORM_MASS / 3.0 * (PLATFORM_HX ** 2 + PLATFORM_HY ** 2)
+    ixx = PLATFORM_MASS / 3.0 * (PLATFORM_HY**2 + PLATFORM_HZ**2)
+    iyy = PLATFORM_MASS / 3.0 * (PLATFORM_HX**2 + PLATFORM_HZ**2)
+    izz = PLATFORM_MASS / 3.0 * (PLATFORM_HX**2 + PLATFORM_HY**2)
     plat = mb.add_link(
         xform=wp.transform(p=wp.vec3(0.0, 0.0, platform_z0), q=wp.quat_identity()),
         mass=PLATFORM_MASS,
@@ -113,7 +113,7 @@ def _build_scale_model() -> newton.Model:
     mb.add_articulation([joint])
 
     # Pile 5 x 5 = 25 cubes on the platform.
-    cixx = CUBE_MASS / 3.0 * (CUBE_HE ** 2 + CUBE_HE ** 2)
+    cixx = CUBE_MASS / 3.0 * (CUBE_HE**2 + CUBE_HE**2)
     cinertia = ((cixx, 0.0, 0.0), (0.0, cixx, 0.0), (0.0, 0.0, cixx))
     spacing = 2.2 * CUBE_HE
     x0 = -((CUBE_GRID - 1) * spacing) * 0.5
@@ -147,9 +147,7 @@ class Example:
         self.sim_time = 0.0
 
         self.model = _build_scale_model()
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model, contact_matching="sticky"
-        )
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
         self.contacts = self.collision_pipeline.contacts()
 
         self.solver = newton.solvers.SolverPhoenX(

@@ -17,7 +17,7 @@ from __future__ import annotations
 import dataclasses
 import gc
 import time
-from typing import Callable
+from collections.abc import Callable
 
 import warp as wp
 
@@ -96,16 +96,12 @@ def run_one(
         graph = capture.graph
         wp.synchronize_device()
 
-    gpu_total_gb = (
-        float(device.total_memory) / (1024**3) if device.is_cuda else 0.0
-    )
+    gpu_total_gb = float(device.total_memory) / (1024**3) if device.is_cuda else 0.0
 
     # Steady-state GPU memory sample. Taken AFTER the capture so any
     # scratch allocated during capture (contact ingest scratch,
     # graph resources) is included.
-    gpu_used_gb = (
-        float(_gpu_used_bytes()) / (1024**3) if device.is_cuda else 0.0
-    )
+    gpu_used_gb = float(_gpu_used_bytes()) / (1024**3) if device.is_cuda else 0.0
 
     # Measurement loop: wall-clock around ``measure_frames`` replays
     # with a single sync at the end. Including more syncs serialises

@@ -59,9 +59,7 @@ from newton._src.solvers.phoenx.tests.test_stacking import (
 _G = 9.81
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX contact-force tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX contact-force tests require CUDA")
 class TestPhoenXContactForce(unittest.TestCase):
     """F=m*g and stack-weight-propagation checks for PhoenX."""
 
@@ -137,9 +135,7 @@ class TestPhoenXContactForce(unittest.TestCase):
                 self._settle(scene, [sphere])
 
                 F, npairs, npoints = scene.gather_contact_wrench_on_body(sphere)
-                self.assertEqual(
-                    npairs, 1, f"expected exactly one sphere-ground pair, got {npairs}"
-                )
+                self.assertEqual(npairs, 1, f"expected exactly one sphere-ground pair, got {npairs}")
                 self.assertEqual(
                     npoints,
                     1,
@@ -149,8 +145,7 @@ class TestPhoenXContactForce(unittest.TestCase):
                 self.assertEqual(
                     raw,
                     1,
-                    f"narrow phase emitted {raw} points for a sphere-on-plane at rest; "
-                    "expected exactly 1",
+                    f"narrow phase emitted {raw} points for a sphere-on-plane at rest; expected exactly 1",
                 )
 
                 expected = self.MASS * _G
@@ -189,9 +184,7 @@ class TestPhoenXContactForce(unittest.TestCase):
         self._settle(scene, [cube])
 
         F, npairs, npoints = scene.gather_contact_wrench_on_body(cube)
-        self.assertGreaterEqual(
-            npairs, 1, f"expected at least one cube-ground pair, got {npairs}"
-        )
+        self.assertGreaterEqual(npairs, 1, f"expected at least one cube-ground pair, got {npairs}")
         self.assertGreater(
             npoints,
             0,
@@ -212,8 +205,7 @@ class TestPhoenXContactForce(unittest.TestCase):
         self.assertLess(
             lateral,
             0.01 * expected,
-            f"lateral force ({F[0]:.4f}, {F[1]:.4f}) N should be near zero "
-            "for a resting cube.",
+            f"lateral force ({F[0]:.4f}, {F[1]:.4f}) N should be near zero for a resting cube.",
         )
 
     # ------------------------------------------------------------------
@@ -255,8 +247,7 @@ class TestPhoenXContactForce(unittest.TestCase):
         self.assertLess(
             rel_err_top,
             0.02,
-            f"top cube Fz = {float(F_top[2]):.3f} N vs m*g = {expected_top:.3f} N "
-            f"(rel err {rel_err_top:.2%})",
+            f"top cube Fz = {float(F_top[2]):.3f} N vs m*g = {expected_top:.3f} N (rel err {rel_err_top:.2%})",
         )
 
         # Bottom cube feels its own weight + the top cube above it
@@ -276,8 +267,7 @@ class TestPhoenXContactForce(unittest.TestCase):
         self.assertLess(
             rel_err_total,
             0.02,
-            f"net stack Fz = {total_fz:.3f} N vs 2 m*g = {expected_total:.3f} N "
-            f"(rel err {rel_err_total:.2%})",
+            f"net stack Fz = {total_fz:.3f} N vs 2 m*g = {expected_total:.3f} N (rel err {rel_err_total:.2%})",
         )
 
     def test_five_cube_stack_bottom_weight(self) -> None:
@@ -323,8 +313,7 @@ class TestPhoenXContactForce(unittest.TestCase):
         self.assertLess(
             rel_err,
             0.5,
-            f"five-cube stack net Fz = {total_fz:.3f} N vs 5 m*g = "
-            f"{expected:.3f} N (rel err {rel_err:.2%})",
+            f"five-cube stack net Fz = {total_fz:.3f} N vs 5 m*g = {expected:.3f} N (rel err {rel_err:.2%})",
         )
 
     # ------------------------------------------------------------------
@@ -361,8 +350,7 @@ class TestPhoenXContactForce(unittest.TestCase):
         self.assertLess(
             lateral,
             0.01 * weight,
-            f"lateral force {lateral:.5f} N at rest should be << {0.01 * weight:.5f} N "
-            f"(F = {F})",
+            f"lateral force {lateral:.5f} N at rest should be << {0.01 * weight:.5f} N (F = {F})",
         )
 
     # ------------------------------------------------------------------
@@ -427,9 +415,7 @@ class TestPhoenXContactForce(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX contact-force tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX contact-force tests require CUDA")
 class TestPhoenXContactMomentumConservation(unittest.TestCase):
     """Conservation checks ported from jitter's
     :mod:`test_contact_momentum_conservation`.
@@ -481,8 +467,7 @@ class TestPhoenXContactMomentumConservation(unittest.TestCase):
         self.assertLess(
             w_mag,
             1.0e-4,
-            f"cube spontaneously spinning: |omega|={w_mag:.6f} rad/s "
-            f"(omega={w})",
+            f"cube spontaneously spinning: |omega|={w_mag:.6f} rad/s (omega={w})",
         )
 
     def test_pair_collision_angular_momentum(self) -> None:
@@ -498,12 +483,8 @@ class TestPhoenXContactMomentumConservation(unittest.TestCase):
         v0 = 1.0
         separation = 0.2
         x_off = he + separation * 0.5
-        left = scene.add_box(
-            position=(-x_off, 0.0, 0.0), half_extents=(he, he, he), mass=self.MASS
-        )
-        right = scene.add_box(
-            position=(x_off, 0.0, 0.0), half_extents=(he, he, he), mass=self.MASS
-        )
+        left = scene.add_box(position=(-x_off, 0.0, 0.0), half_extents=(he, he, he), mass=self.MASS)
+        right = scene.add_box(position=(x_off, 0.0, 0.0), half_extents=(he, he, he), mass=self.MASS)
         scene.finalize()
         # Zero gravity so only contacts can generate torque.
         scene.world.gravity.fill_(wp.vec3f(0.0, 0.0, 0.0))
@@ -538,14 +519,11 @@ class TestPhoenXContactMomentumConservation(unittest.TestCase):
             self.assertLess(
                 L_mag,
                 1.0e-3 * L_scale,
-                f"[{tag}] total angular momentum {L_mag:.6f} kg m^2/s "
-                f"(L_scale ref {L_scale:.3f})",
+                f"[{tag}] total angular momentum {L_mag:.6f} kg m^2/s (L_scale ref {L_scale:.3f})",
             )
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX contact-force tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX contact-force tests require CUDA")
 class TestPhoenXPyramidSettle(unittest.TestCase):
     """Settle-and-assert pyramid tests ported from
     :mod:`test_pyramid.TestPyramidSettle`.
@@ -581,9 +559,7 @@ class TestPhoenXPyramidSettle(unittest.TestCase):
         scene.finalize()
         return scene, box_ids
 
-    def _assert_settled(
-        self, scene: _PhoenXScene, box_ids: list[int]
-    ) -> None:
+    def _assert_settled(self, scene: _PhoenXScene, box_ids: list[int]) -> None:
         """A settled pyramid has bounded positions and near-zero
         velocities. Mirrors :meth:`example_pyramid.Example.test_final`'s
         budgets (10 cm position slack, 0.5 m/s velocity slack).
@@ -625,9 +601,7 @@ class TestPhoenXPyramidSettle(unittest.TestCase):
         self._assert_settled(scene, box_ids)
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX contact-force tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX contact-force tests require CUDA")
 class TestPhoenXPyramidForceBalance(unittest.TestCase):
     """Strongest per-body contact-force check: settle a pyramid and
     demand that ``F_up - F_down == m*g`` for every cube.

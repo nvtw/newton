@@ -70,9 +70,7 @@ class _RenderGroup:
         self.xforms = xforms
 
 
-def _build_render_groups(
-    half_extents_np: np.ndarray, device
-) -> list[_RenderGroup]:
+def _build_render_groups(half_extents_np: np.ndarray, device) -> list[_RenderGroup]:
     """Bucket bodies by their non-zero half-extent into render groups.
     Bodies with any non-positive component are skipped."""
     groups: dict[tuple[float, float, float], list[int]] = {}
@@ -173,7 +171,7 @@ class _LiveScene:
 class _SceneSelectorUI:
     """Free-floating imgui window with the scene dropdown."""
 
-    def __init__(self, owner: "Example"):
+    def __init__(self, owner: Example):
         self.owner = owner
 
     def render(self, imgui):
@@ -184,9 +182,7 @@ class _SceneSelectorUI:
         io = viewer.ui.io
         window_width = 360
         window_height = 200
-        imgui.set_next_window_pos(
-            imgui.ImVec2(10, io.display_size[1] - window_height - 10)
-        )
+        imgui.set_next_window_pos(imgui.ImVec2(10, io.display_size[1] - window_height - 10))
         imgui.set_next_window_size(imgui.ImVec2(window_width, window_height))
         flags = imgui.WindowFlags_.no_resize.value
 
@@ -275,9 +271,7 @@ class Example:
     # ------------------------------------------------------------------
 
     def step(self):
-        if self._pending_scene is not None and (
-            self._live is None or self._pending_scene != self._live.name
-        ):
+        if self._pending_scene is not None and (self._live is None or self._pending_scene != self._live.name):
             target = self._pending_scene
             self._pending_scene = None
             self._load_scene(target)

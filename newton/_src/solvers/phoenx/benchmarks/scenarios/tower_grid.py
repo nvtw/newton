@@ -125,7 +125,6 @@ def build(
     scenario exercises. Pass ``step_layout="multi_world"`` if you
     want to compare layouts on the same scene.
     """
-    device = wp.get_device()
     mem_before = _gpu_used_bytes()
 
     grid = _build_grid_of_towers(grid_side=grid_side, layers=layers)

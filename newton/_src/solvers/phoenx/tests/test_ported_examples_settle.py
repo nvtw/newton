@@ -118,9 +118,7 @@ _SWING_W = 50.0
 def _measure_scene(module_name: str, frames: int) -> dict:
     """Build the example, run ``frames`` steps, return final-frame
     state stats over all dynamic bodies."""
-    mod = __import__(
-        f"newton._src.solvers.phoenx.examples.{module_name}", fromlist=["Example"]
-    )
+    mod = __import__(f"newton._src.solvers.phoenx.examples.{module_name}", fromlist=["Example"])
     e = mod.Example(_FakeViewer(), None)
     for _ in range(frames):
         e.step()
@@ -159,13 +157,13 @@ class TestPortedExamplesReachSteadyState(unittest.TestCase):
                         stats["max_v"],
                         _SETTLE_V,
                         msg=f"{module_name}: max |v| = {stats['max_v']:.3f} m/s "
-                            f"after {frames} frames -- stack jittering or unstable",
+                        f"after {frames} frames -- stack jittering or unstable",
                     )
                     self.assertLess(
                         stats["max_w"],
                         _SETTLE_W,
                         msg=f"{module_name}: max |w| = {stats['max_w']:.3f} rad/s "
-                            f"after {frames} frames -- stack jittering or unstable",
+                        f"after {frames} frames -- stack jittering or unstable",
                     )
                 else:
                     # Swing class -- only catch outright blow-up.

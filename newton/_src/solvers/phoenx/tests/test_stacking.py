@@ -37,9 +37,6 @@ import newton
 from newton._src.solvers.phoenx.body import (
     body_container_zeros,
 )
-from newton._src.solvers.phoenx.solver_config import (
-    PHOENX_CONTACT_MATCHING,
-)
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
 )
@@ -49,7 +46,10 @@ from newton._src.solvers.phoenx.examples.example_common import (
 from newton._src.solvers.phoenx.examples.example_common import (
     phoenx_to_newton_kernel as _phoenx_to_newton_kernel,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.solver_config import (
+    PHOENX_CONTACT_MATCHING,
+)
+from newton._src.solvers.phoenx.solver_phoenx import DEFAULT_SHAPE_GAP, PhoenXWorld
 
 _G = 9.81
 
@@ -98,8 +98,6 @@ class _PhoenXScene:
         # penetration. Keeps the scene-level contact settings in one
         # place and lets the tests exercise the same default
         # ``DEFAULT_SHAPE_GAP`` user-facing PhoenX scenes pick up.
-        from newton._src.solvers.phoenx.solver_phoenx import DEFAULT_SHAPE_GAP
-
         self.mb.default_shape_cfg.gap = DEFAULT_SHAPE_GAP
         self._newton_body_ids: list[int] = []
         self._finalized = False
@@ -740,7 +738,6 @@ class TestPhoenXSolverStacking(unittest.TestCase):
             z += 2 * he + gap
         scene.finalize()
 
-        z0_top = z - (2 * he + gap)  # initial top COM
         for _ in range(240):  # 4 s
             scene.step()
 

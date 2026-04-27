@@ -26,6 +26,19 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.examples.example_common import (
+    init_phoenx_bodies_kernel,
+    newton_to_phoenx_kernel,
+    phoenx_to_newton_kernel,
+)
+from newton._src.solvers.phoenx.picking import (
+    Picking,
+    register_with_viewer_gl,
+)
+from newton._src.solvers.phoenx.solver_phoenx import (
+    PhoenXWorld,
+    pack_body_xforms_kernel,
+)
 
 # Contact matching mode. The shared jitter/phoenx default is
 # ``"sticky"`` -- it pins each matched contact's body-frame anchors
@@ -41,19 +54,6 @@ from newton._src.solvers.phoenx.body import body_container_zeros
 # MuJoCo's solver don't go through this matching layer at all, so
 # this is a PhoenX-specific sticky-vs-fresh tradeoff.
 _CONTACT_MATCHING = "latest"
-from newton._src.solvers.phoenx.examples.example_common import (
-    init_phoenx_bodies_kernel,
-    newton_to_phoenx_kernel,
-    phoenx_to_newton_kernel,
-)
-from newton._src.solvers.phoenx.picking import (
-    Picking,
-    register_with_viewer_gl,
-)
-from newton._src.solvers.phoenx.solver_phoenx import (
-    PhoenXWorld,
-    pack_body_xforms_kernel,
-)
 
 # Assembly + asset source -- identical to the jitter / XPBD / MuJoCo
 # nut-bolt examples so the same mesh pair is compared across solvers.

@@ -188,9 +188,7 @@ class TestBallSocket(unittest.TestCase):
             anchor1=(0.0, 0.0, 0.0),
             mode=JointMode.BALL_SOCKET,
         )
-        world = b.finalize(
-            substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
-        )
+        world = b.finalize(substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device)
 
         run_settle_loop(world, SETTLE_FRAMES, dt=1.0 / FPS)
 
@@ -204,10 +202,7 @@ class TestBallSocket(unittest.TestCase):
         self.assertLess(
             diff,
             0.05,
-            msg=(
-                f"ball socket bled angular velocity: started at {omega0_arr}, "
-                f"ended at {omega_final}"
-            ),
+            msg=(f"ball socket bled angular velocity: started at {omega0_arr}, ended at {omega_final}"),
         )
 
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 import unittest
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import warp as wp
@@ -41,20 +41,19 @@ except ImportError:
 
 
 def _mj_factory(model: newton.Model):
-    return newton.solvers.SolverMuJoCo(
-        model, solver="newton", nconmax=64, njmax=64
-    )
+    return newton.solvers.SolverMuJoCo(model, solver="newton", nconmax=64, njmax=64)
 
 
 def _px_factory(model: newton.Model):
-    return newton.solvers.SolverPhoenX(
-        model, substeps=4, solver_iterations=16, velocity_iterations=1
-    )
+    return newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=16, velocity_iterations=1)
 
 
 def _px_factory_singleworld(model: newton.Model):
     return newton.solvers.SolverPhoenX(
-        model, substeps=4, solver_iterations=16, velocity_iterations=1,
+        model,
+        substeps=4,
+        solver_iterations=16,
+        velocity_iterations=1,
         step_layout="single_world",
     )
 
@@ -119,7 +118,10 @@ def _build_two_link_chain(
         inertia=((0.01, 0.0, 0.0), (0.0, 0.1, 0.0), (0.0, 0.0, 0.1)),
     )
     mb.add_shape_box(
-        link_a, hx=0.5, hy=0.05, hz=0.05,
+        link_a,
+        hx=0.5,
+        hy=0.05,
+        hz=0.05,
         cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
     )
 
@@ -129,7 +131,10 @@ def _build_two_link_chain(
         inertia=((0.01, 0.0, 0.0), (0.0, 0.1, 0.0), (0.0, 0.0, 0.1)),
     )
     mb.add_shape_box(
-        link_b, hx=0.5, hy=0.05, hz=0.05,
+        link_b,
+        hx=0.5,
+        hy=0.05,
+        hz=0.05,
         cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
     )
 
@@ -192,18 +197,16 @@ class TestTwoLinkChainParity(unittest.TestCase):
         def make():
             return _build_two_link_chain(init_q0=0.0, init_q1=0.0)
 
-        bq_mj, jq_mj = _run_joint_state(_mj_factory, make, 60, 0.005)
-        bq_px, jq_px = _run_joint_state(_px_factory, make, 60, 0.005)
+        bq_mj, _jq_mj = _run_joint_state(_mj_factory, make, 60, 0.005)
+        bq_px, _jq_px = _run_joint_state(_px_factory, make, 60, 0.005)
 
         # After 0.3 s the body positions should still be near the
         # rest pose.
         for name, bq in (("MuJoCo", bq_mj), ("PhoenX", bq_px)):
             link_a_pos = bq[-1, 0, :3]
             link_b_pos = bq[-1, 1, :3]
-            self.assertAlmostEqual(float(link_a_pos[0]), 0.5, delta=0.05,
-                                   msg=f"{name}: link_a x drifted: {link_a_pos}")
-            self.assertAlmostEqual(float(link_b_pos[0]), 1.5, delta=0.05,
-                                   msg=f"{name}: link_b x drifted: {link_b_pos}")
+            self.assertAlmostEqual(float(link_a_pos[0]), 0.5, delta=0.05, msg=f"{name}: link_a x drifted: {link_a_pos}")
+            self.assertAlmostEqual(float(link_b_pos[0]), 1.5, delta=0.05, msg=f"{name}: link_b x drifted: {link_b_pos}")
 
     def test_init_q0_nonzero_matches_mujoco(self) -> None:
         """Start with ``joint_q[0] = pi/4`` preloaded via
@@ -325,10 +328,18 @@ def _anymal_model() -> newton.Model:
     # example sets. These initial angles are exactly what the stale-
     # body_q regression used to swallow silently.
     initial_q = {
-        "RH_HAA": 0.0,   "RH_HFE": -0.4,  "RH_KFE": 0.8,
-        "LH_HAA": 0.0,   "LH_HFE": -0.4,  "LH_KFE": 0.8,
-        "RF_HAA": 0.0,   "RF_HFE": 0.4,   "RF_KFE": -0.8,
-        "LF_HAA": 0.0,   "LF_HFE": 0.4,   "LF_KFE": -0.8,
+        "RH_HAA": 0.0,
+        "RH_HFE": -0.4,
+        "RH_KFE": 0.8,
+        "LH_HAA": 0.0,
+        "LH_HFE": -0.4,
+        "LH_KFE": 0.8,
+        "RF_HAA": 0.0,
+        "RF_HFE": 0.4,
+        "RF_KFE": -0.8,
+        "LF_HAA": 0.0,
+        "LF_HFE": 0.4,
+        "LF_KFE": -0.8,
     }
     for name, value in initial_q.items():
         idx = next(
@@ -360,9 +371,7 @@ class TestAnymalArticulationParity(unittest.TestCase):
         model_px = _anymal_model()
 
         _ = newton.solvers.SolverMuJoCo(model_mj, solver="newton", nconmax=100, njmax=50)
-        _ = newton.solvers.SolverPhoenX(
-            model_px, substeps=4, solver_iterations=16, velocity_iterations=1
-        )
+        _ = newton.solvers.SolverPhoenX(model_px, substeps=4, solver_iterations=16, velocity_iterations=1)
 
         state_mj = model_mj.state()
         state_px = model_px.state()
@@ -401,8 +410,8 @@ class TestAnymalArticulationParity(unittest.TestCase):
         target = np.zeros(int(model.joint_dof_count), dtype=np.float32)
         target[6:] = q[7:]
 
-        bq_mj, _ = _run_joint_state(_mj_factory, lambda: _anymal_model(), n, dt, target_pos=target)
-        bq_px, _ = _run_joint_state(_px_factory, lambda: _anymal_model(), n, dt, target_pos=target)
+        bq_mj, _ = _run_joint_state(_mj_factory, _anymal_model, n, dt, target_pos=target)
+        bq_px, _ = _run_joint_state(_px_factory, _anymal_model, n, dt, target_pos=target)
 
         max_delta = float(np.abs(bq_mj[-1, :, :3] - bq_px[-1, :, :3]).max())
         self.assertLess(

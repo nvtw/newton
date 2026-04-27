@@ -33,9 +33,6 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.phoenx.body import body_container_zeros
-from newton._src.solvers.phoenx.solver_config import (
-    PHOENX_CONTACT_MATCHING,
-)
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
 )
@@ -54,6 +51,9 @@ from newton._src.solvers.phoenx.examples.kapla_arena_data import (
 from newton._src.solvers.phoenx.picking import (
     Picking,
     register_with_viewer_gl,
+)
+from newton._src.solvers.phoenx.solver_config import (
+    PHOENX_CONTACT_MATCHING,
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
@@ -204,9 +204,7 @@ class Example:
         wp.copy(
             bodies.orientation,
             wp.array(
-                np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(
-                    np.float32
-                ),
+                np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32),
                 dtype=wp.quatf,
                 device=self.device,
             ),
@@ -247,9 +245,7 @@ class Example:
 
         shape_body_np = self.model.shape_body.numpy()
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
-        self._shape_body = wp.array(
-            shape_body_phoenx, dtype=wp.int32, device=self.device
-        )
+        self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
         self.world = PhoenXWorld(
             bodies=self.bodies,
@@ -276,9 +272,7 @@ class Example:
         half_extents_np = np.zeros((self.world.num_bodies, 3), dtype=np.float32)
         for newton_idx in self._brick_newton_ids:
             half_extents_np[newton_idx + 1] = (hx, hy, hz)
-        self._half_extents = wp.array(
-            half_extents_np, dtype=wp.vec3f, device=self.device
-        )
+        self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
         self.picking = Picking(self.world, self._half_extents)
         register_with_viewer_gl(self.viewer, self.picking)
 
@@ -389,13 +383,10 @@ class Example:
         positions = self.bodies.position.numpy()
         for newton_idx in self._brick_newton_ids:
             pos = positions[newton_idx + 1]
-            assert np.isfinite(pos).all(), (
-                f"body {newton_idx} non-finite position: {pos}"
-            )
+            assert np.isfinite(pos).all(), f"body {newton_idx} non-finite position: {pos}"
             r_xy = float(np.hypot(pos[0], pos[1]))
             assert r_xy < tolerance, (
-                f"brick {newton_idx} flew outside the arena envelope "
-                f"(r_xy={r_xy:.3f}, tol={tolerance:.3f})"
+                f"brick {newton_idx} flew outside the arena envelope (r_xy={r_xy:.3f}, tol={tolerance:.3f})"
             )
 
 

@@ -27,7 +27,6 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 
-
 #: Voxel resolution used for the mesh-cube SDF determinism test.
 #: 128 is a realistic mid-range setting -- enough voxels per cube face
 #: (16 across a 0.2 m edge) that the SDF narrow phase sees genuine
@@ -58,17 +57,47 @@ def _cube_mesh(half_extent: float) -> newton.Mesh:
     faces = np.array(
         [
             # -Z face (bottom)
-            0, 2, 1,  1, 2, 3,
+            0,
+            2,
+            1,
+            1,
+            2,
+            3,
             # +Z face (top)
-            4, 5, 6,  5, 7, 6,
+            4,
+            5,
+            6,
+            5,
+            7,
+            6,
             # -Y face (front)
-            0, 1, 4,  1, 5, 4,
+            0,
+            1,
+            4,
+            1,
+            5,
+            4,
             # +Y face (back)
-            2, 6, 3,  3, 6, 7,
+            2,
+            6,
+            3,
+            3,
+            6,
+            7,
             # -X face (left)
-            0, 4, 2,  2, 4, 6,
+            0,
+            4,
+            2,
+            2,
+            4,
+            6,
             # +X face (right)
-            1, 3, 5,  3, 7, 5,
+            1,
+            3,
+            5,
+            3,
+            7,
+            5,
         ],
         dtype=np.int32,
     )
@@ -235,22 +264,17 @@ def _run_and_compare(
     # Initial states must already match before any stepping; if they
     # don't, the builder itself is nondeterministic (e.g. a host-side
     # random seed drifted), and blaming the solver would be wrong.
-    _assert_bit_exact(
-        case, _snapshot(ref_scene), _snapshot(dup_scene), scene_name, frame=0
-    )
+    _assert_bit_exact(case, _snapshot(ref_scene), _snapshot(dup_scene), scene_name, frame=0)
 
     for f in range(1, frames + 1):
         ref_scene.step()
         dup_scene.step()
-        _assert_bit_exact(
-            case, _snapshot(ref_scene), _snapshot(dup_scene), scene_name, frame=f
-        )
+        _assert_bit_exact(case, _snapshot(ref_scene), _snapshot(dup_scene), scene_name, frame=f)
 
 
 @unittest.skipUnless(
     wp.get_preferred_device().is_cuda,
-    "PhoenX determinism tests run on CUDA only (graph capture + deterministic "
-    "collision pipeline require CUDA).",
+    "PhoenX determinism tests run on CUDA only (graph capture + deterministic collision pipeline require CUDA).",
 )
 class TestPhoenXDeterminism(unittest.TestCase):
     """Two solver instances from the same scene recipe must produce
@@ -260,9 +284,7 @@ class TestPhoenXDeterminism(unittest.TestCase):
         """Smallest test: two boxes in free space. If this fails, a
         non-contact kernel (integrate-forces / integrate-gravity /
         integrate-positions / update-inertia) is nondeterministic."""
-        _run_and_compare(
-            self, _build_free_fall_scene, scene_name="free_fall", frames=30
-        )
+        _run_and_compare(self, _build_free_fall_scene, scene_name="free_fall", frames=30)
 
     def test_single_box_on_plane(self) -> None:
         """Next-smallest: one box settling on the ground plane.

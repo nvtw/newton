@@ -112,9 +112,7 @@ def _build_ramp_scene(
     return scene, cube_box
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX ramp slide tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX ramp slide tests require CUDA")
 class TestPhoenXRampBelowThreshold(unittest.TestCase):
     """Box on a ramp tilted *below* the angle of repose
     (``tan(theta) < mu``) must stay at rest.
@@ -136,9 +134,7 @@ class TestPhoenXRampBelowThreshold(unittest.TestCase):
         # direction. Ramp is tilted about +Y so slide axis is
         # ``(cos(theta), 0, -sin(theta))`` in world frame (points
         # down the slope).
-        slide_dir = np.array(
-            [math.cos(theta), 0.0, -math.sin(theta)], dtype=np.float32
-        )
+        slide_dir = np.array([math.cos(theta), 0.0, -math.sin(theta)], dtype=np.float32)
         slide_dist = float(np.dot(pos, slide_dir))
         slide_speed = float(np.dot(vel, slide_dir))
         # Cube should be essentially stationary. Allow 5 cm of
@@ -146,8 +142,7 @@ class TestPhoenXRampBelowThreshold(unittest.TestCase):
         self.assertLess(
             abs(slide_dist),
             0.05,
-            f"cube slid {slide_dist:.4f} m on gentle ramp "
-            f"(theta={math.degrees(theta):.0f}, mu={mu})",
+            f"cube slid {slide_dist:.4f} m on gentle ramp (theta={math.degrees(theta):.0f}, mu={mu})",
         )
         self.assertLess(
             abs(slide_speed),
@@ -156,9 +151,7 @@ class TestPhoenXRampBelowThreshold(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX ramp slide tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX ramp slide tests require CUDA")
 class TestPhoenXRampAboveThreshold(unittest.TestCase):
     """Box on a ramp tilted *above* the angle of repose
     (``tan(theta) > mu``) must slide down with acceleration
@@ -181,9 +174,7 @@ class TestPhoenXRampAboveThreshold(unittest.TestCase):
         for _ in range(10):
             scene.step()
 
-        slide_dir = np.array(
-            [math.cos(theta), 0.0, -math.sin(theta)], dtype=np.float32
-        )
+        slide_dir = np.array([math.cos(theta), 0.0, -math.sin(theta)], dtype=np.float32)
         v_start = float(np.dot(scene.body_velocity(cube), slide_dir))
         measure_frames = 30  # 0.25 s at 120 Hz -- short enough to
         # stay before the cube hits the edge of the ramp.
@@ -199,14 +190,11 @@ class TestPhoenXRampAboveThreshold(unittest.TestCase):
             0.15,  # 15% tolerance -- box-on-tilted-box contact has a
             # small but noticeable warm-up transient on the friction
             # row; the steady-state acceleration is well inside 15%.
-            f"slide accel {measured_accel:.3f} m/s^2 vs expected "
-            f"{expected_accel:.3f} (rel err {rel_err:.2%})",
+            f"slide accel {measured_accel:.3f} m/s^2 vs expected {expected_accel:.3f} (rel err {rel_err:.2%})",
         )
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX ramp slide tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX ramp slide tests require CUDA")
 class TestPhoenXRampFrictionlessSlide(unittest.TestCase):
     """Box on a tilted ramp with ``mu = 0`` must slide down with
     pure-gravity acceleration ``a = g * sin(theta)``.
@@ -227,9 +215,7 @@ class TestPhoenXRampFrictionlessSlide(unittest.TestCase):
         for _ in range(10):
             scene.step()
 
-        slide_dir = np.array(
-            [math.cos(theta), 0.0, -math.sin(theta)], dtype=np.float32
-        )
+        slide_dir = np.array([math.cos(theta), 0.0, -math.sin(theta)], dtype=np.float32)
         v_start = float(np.dot(scene.body_velocity(cube), slide_dir))
         measure_frames = 30
         for _ in range(measure_frames):
@@ -249,9 +235,7 @@ class TestPhoenXRampFrictionlessSlide(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(
-    wp.is_cuda_available(), "PhoenX ramp slide tests require CUDA"
-)
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX ramp slide tests require CUDA")
 class TestPhoenXRampExactThreshold(unittest.TestCase):
     """Box on a ramp tilted *at* the angle of repose (``tan(theta)
     = mu``) must be at the sliding boundary -- small slide or none
@@ -269,9 +253,7 @@ class TestPhoenXRampExactThreshold(unittest.TestCase):
         scene, cube = _build_ramp_scene(theta_rad=theta, mu=mu)
         for _ in range(240):  # 2 s
             scene.step()
-        slide_dir = np.array(
-            [math.cos(theta), 0.0, -math.sin(theta)], dtype=np.float32
-        )
+        slide_dir = np.array([math.cos(theta), 0.0, -math.sin(theta)], dtype=np.float32)
         pos = scene.body_position(cube)
         vel = scene.body_velocity(cube)
         slide_speed = float(np.dot(vel, slide_dir))
@@ -283,14 +265,12 @@ class TestPhoenXRampExactThreshold(unittest.TestCase):
         self.assertLess(
             slide_speed,
             1.0,
-            f"cube accelerated past 1 m/s at the slide threshold "
-            f"(speed={slide_speed:.3f})",
+            f"cube accelerated past 1 m/s at the slide threshold (speed={slide_speed:.3f})",
         )
         self.assertLess(
             slide_dist,
             2.0,
-            f"cube slid {slide_dist:.3f} m at the slide threshold "
-            "(expected <= 2 m of creep)",
+            f"cube slid {slide_dist:.3f} m at the slide threshold (expected <= 2 m of creep)",
         )
 
 

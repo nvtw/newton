@@ -31,7 +31,6 @@ from newton._src.solvers.phoenx.world_builder import (
     WorldBuilder,
 )
 
-
 GRAVITY = 9.81
 FPS = 120
 SUBSTEPS = 8

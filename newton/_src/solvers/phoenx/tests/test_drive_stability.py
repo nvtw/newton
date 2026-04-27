@@ -31,7 +31,6 @@ import warp as wp
 
 import newton
 
-
 _G = 9.81
 
 
@@ -55,7 +54,10 @@ def _pendulum(
         inertia=((0.1, 0.0, 0.0), (0.0, 0.1, 0.0), (0.0, 0.0, 0.1)),
     )
     mb.add_shape_box(
-        cube, hx=0.1, hy=0.1, hz=0.1,
+        cube,
+        hx=0.1,
+        hy=0.1,
+        hz=0.1,
         cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
     )
     kwargs = {
@@ -87,9 +89,7 @@ def _pendulum(
 
 
 def _solver(model: newton.Model):
-    return newton.solvers.SolverPhoenX(
-        model, substeps=4, solver_iterations=16, velocity_iterations=1
-    )
+    return newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=16, velocity_iterations=1)
 
 
 def _run_with_target_schedule(
@@ -139,9 +139,7 @@ class TestDriveTargetJumpStability(unittest.TestCase):
         n_plateaus = 20
         n = plateau * n_plateaus
         dt = 0.005
-        targets = np.where(
-            (np.arange(n) // plateau) % 2 == 0, math.pi / 2.0, -math.pi / 2.0
-        ).astype(np.float32)
+        targets = np.where((np.arange(n) // plateau) % 2 == 0, math.pi / 2.0, -math.pi / 2.0).astype(np.float32)
         model = _pendulum(target_pos=0.0, target_ke=200.0, target_kd=20.0)
         q, qd = _run_with_target_schedule(model, targets, dt)
 
@@ -235,8 +233,7 @@ class TestDriveTargetJumpStability(unittest.TestCase):
         self.assertGreater(
             corr,
             0.5,
-            msg=f"q-vs-target correlation {corr:.3f} too low -- drive may "
-                "not be tracking targets",
+            msg=f"q-vs-target correlation {corr:.3f} too low -- drive may not be tracking targets",
         )
 
     def test_impulse_target_return(self) -> None:
@@ -254,7 +251,9 @@ class TestDriveTargetJumpStability(unittest.TestCase):
         self.assertLess(abs(float(qd[-1])), 0.5, msg=f"qd residual {qd[-1]:.3f} too large after impulse return")
 
 
-def _cumulative_y_rotation(model: newton.Model, s0: newton.State, initial_cum: float, last_branch: float) -> tuple[float, float]:
+def _cumulative_y_rotation(
+    model: newton.Model, s0: newton.State, initial_cum: float, last_branch: float
+) -> tuple[float, float]:
     """Track cumulative rotation about +y from the body's quaternion.
 
     ``2*atan2(q_y, q_w)`` maps to ``(-2*pi, 2*pi]``; a single body
@@ -429,7 +428,7 @@ class TestLimitStability(unittest.TestCase):
             limit_ke=200.0,
             limit_kd=20.0,
         )
-        cum, qd = _run_target_and_track_rotation(model, targets, dt)
+        cum, _qd = _run_target_and_track_rotation(model, targets, dt)
 
         self.assertTrue(math.isfinite(cum))
         # Physical rotation must be inside the window (or a generous

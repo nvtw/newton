@@ -16,7 +16,6 @@ from __future__ import annotations
 import warp as wp
 
 import newton
-
 from newton._src.solvers.phoenx.examples._ported_example_base import (
     PortedExample,
     default_sphere_half_extents,
@@ -45,19 +44,25 @@ class Example(PortedExample):
             builder.add_shape_box(
                 -1,
                 xform=wp.transform(p=wp.vec3(sign * (HALF_X + WALL_HE), 0.0, 0.0), q=wp.quat_identity()),
-                hx=WALL_HE, hy=HALF_Y + 2 * WALL_HE, hz=HALF_Z + 2 * WALL_HE,
+                hx=WALL_HE,
+                hy=HALF_Y + 2 * WALL_HE,
+                hz=HALF_Z + 2 * WALL_HE,
                 cfg=wall_cfg,
             )
             builder.add_shape_box(
                 -1,
                 xform=wp.transform(p=wp.vec3(0.0, sign * (HALF_Y + WALL_HE), 0.0), q=wp.quat_identity()),
-                hx=HALF_X, hy=WALL_HE, hz=HALF_Z + 2 * WALL_HE,
+                hx=HALF_X,
+                hy=WALL_HE,
+                hz=HALF_Z + 2 * WALL_HE,
                 cfg=wall_cfg,
             )
             builder.add_shape_box(
                 -1,
                 xform=wp.transform(p=wp.vec3(0.0, 0.0, sign * (HALF_Z + WALL_HE)), q=wp.quat_identity()),
-                hx=HALF_X, hy=HALF_Y, hz=WALL_HE,
+                hx=HALF_X,
+                hy=HALF_Y,
+                hz=WALL_HE,
                 cfg=wall_cfg,
             )
 

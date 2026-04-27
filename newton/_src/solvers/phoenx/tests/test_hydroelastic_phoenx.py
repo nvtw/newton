@@ -30,10 +30,10 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.solver import SolverPhoenX
 from newton._src.solvers.phoenx.solver_config import (
     PHOENX_CONTACT_MATCHING,
 )
-from newton._src.solvers.phoenx.solver import SolverPhoenX
 from newton.geometry import HydroelasticSDF
 
 # Same scene parameters as test_hydroelastic.py for parity.
@@ -134,7 +134,7 @@ class TestPhoenXHydroelasticStack(unittest.TestCase):
     def test_stacked_primitive_cubes(self) -> None:
         device = wp.get_preferred_device()
         (
-            model,
+            _model,
             solver,
             state_0,
             state_1,

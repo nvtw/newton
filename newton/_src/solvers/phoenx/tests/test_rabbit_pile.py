@@ -29,7 +29,7 @@ import warp as wp
 @unittest.skipUnless(wp.is_cuda_available(), "Rabbit pile requires CUDA (SDF)")
 class TestPhoenXRabbitPile(unittest.TestCase):
     def test_six_bunnies_settle_without_exploding(self) -> None:
-        from newton._src.solvers.phoenx.examples.example_rabbit_pile import (
+        from newton._src.solvers.phoenx.examples.example_rabbit_pile import (  # noqa: PLC0415
             Example,
         )
 
@@ -37,6 +37,7 @@ class TestPhoenXRabbitPile(unittest.TestCase):
         # optional deps and falls back to the icosahedron stand-in,
         # which exercises the exact same contact pipeline.
         args = argparse.Namespace(num_bunnies=6)
+
         # Stub the viewer -- we don't render, just step.
         class _NullViewer:
             def set_model(self, *_args, **_kwargs):
@@ -77,8 +78,7 @@ class TestPhoenXRabbitPile(unittest.TestCase):
         self.assertGreater(
             peak_contacts,
             0,
-            "Rabbit-pile scene produced zero contacts during settle; "
-            "SDF narrow phase likely regressed.",
+            "Rabbit-pile scene produced zero contacts during settle; SDF narrow phase likely regressed.",
         )
 
 

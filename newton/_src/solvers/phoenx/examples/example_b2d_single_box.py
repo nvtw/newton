@@ -17,7 +17,6 @@ from __future__ import annotations
 import warp as wp
 
 import newton
-
 from newton._src.solvers.phoenx.examples._ported_example_base import (
     PortedExample,
     default_box_half_extents,

@@ -502,7 +502,7 @@ def contact_prepare_for_iteration_at(
     # crossing oscillation from perfectly-rigid constraints is damped
     # out without needing a ``penetration_slop`` dead zone.
     dt_substep = wp.float32(1.0) / idt
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+    bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
         DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
     )
 

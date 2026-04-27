@@ -56,8 +56,8 @@ def _load_points(path: Path) -> list[dict]:
             f"  python -m newton._src.solvers.phoenx.benchmarks.run_benchmarks"
         )
     rows: list[dict] = []
-    for line in path.read_text().splitlines():
-        line = line.strip()
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
         if not line:
             continue
         rows.append(json.loads(line))
@@ -71,7 +71,7 @@ def _plot_scene(
     colors: dict[str, str],
     log_y_fps: bool = True,
     log_y_ms: bool = True,
-) -> "plt.Figure":
+) -> plt.Figure:
     """Build one figure for ``scene``: three panels, one line per
     solver. Only rows with ``ok=True`` are plotted; failed rows land
     in the JSONL but shouldn't distort the curves."""
@@ -80,9 +80,7 @@ def _plot_scene(
 
     gpu_label = ok_rows[0].get("gpu", "unknown GPU") if ok_rows else ""
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
-    fig.suptitle(
-        f"PhoenX vs MuJoCo-Warp — {scene}  ({gpu_label})", fontsize=11
-    )
+    fig.suptitle(f"PhoenX vs MuJoCo-Warp — {scene}  ({gpu_label})", fontsize=11)
 
     panels = [
         (axes[0], "env_fps", "env_fps (higher is better)", log_y_fps),
@@ -147,9 +145,7 @@ def render(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Render PhoenX vs MuJoCo-Warp benchmark plots."
-    )
+    parser = argparse.ArgumentParser(description="Render PhoenX vs MuJoCo-Warp benchmark plots.")
     parser.add_argument(
         "--points",
         type=Path,

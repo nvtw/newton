@@ -18,8 +18,8 @@ from __future__ import annotations
 import importlib
 import os
 import pkgutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 import numpy as np
 
@@ -85,10 +85,7 @@ def scene(
     def deco(func: SceneBuilder) -> SceneBuilder:
         display = name if name is not None else func.__name__
         if display in _REGISTRY and _REGISTRY[display].builder is not func:
-            raise ValueError(
-                f"scene name {display!r} already registered by "
-                f"{_REGISTRY[display].source_module!r}"
-            )
+            raise ValueError(f"scene name {display!r} already registered by {_REGISTRY[display].source_module!r}")
         _REGISTRY[display] = _RegisteredScene(
             name=display,
             builder=func,
@@ -109,9 +106,7 @@ def registered_scenes() -> list[_RegisteredScene]:
 def discover_scenes() -> list[_RegisteredScene]:
     """Import every ``test_*.py`` in the phoenx tests package so their
     ``@scene`` decorators run, then return the populated registry."""
-    pkg_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests"
-    )
+    pkg_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests")
     pkg_name = "newton._src.solvers.phoenx.tests"
     for mod_info in pkgutil.iter_modules([pkg_dir]):
         if not mod_info.name.startswith("test_"):

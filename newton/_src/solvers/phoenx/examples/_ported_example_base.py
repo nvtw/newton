@@ -18,13 +18,13 @@ joint construction and the camera differ. Subclasses implement
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import warp as wp
 
 import newton
-import newton.examples  # noqa: F401  -- needed for run_ported_example()
+import newton.examples
 from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel,
@@ -105,7 +105,7 @@ class PortedExample:
         """Populate ``builder``; return per-body pick half-extents."""
         raise NotImplementedError
 
-    def configure_camera(self, viewer) -> None:  # noqa: D401 -- short hook
+    def configure_camera(self, viewer) -> None:
         """Default camera: 6 m back along +x, 2 m up, looking at origin."""
         viewer.set_camera(pos=wp.vec3(6.0, 0.0, 2.0), pitch=-15.0, yaw=180.0)
 
@@ -228,9 +228,7 @@ class PortedExample:
 
     def simulate(self) -> None:
         self._sync_newton_to_phoenx()
-        self.model.collide(
-            self.state, contacts=self.contacts, collision_pipeline=self.collision_pipeline
-        )
+        self.model.collide(self.state, contacts=self.contacts, collision_pipeline=self.collision_pipeline)
         self.picking.apply_force()
         self.world.step(dt=self.frame_dt, contacts=self.contacts, shape_body=self._shape_body)
         self._sync_phoenx_to_newton()

@@ -26,7 +26,6 @@ import warp as wp
 
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 
-
 # ---- Tower geometry (must stay in sync with example_tower.py) ----
 _TOWER_HEIGHT_LAYERS = 40
 _BOXES_PER_RING = 32
@@ -118,14 +117,13 @@ class TestExampleTowerNothingDrops(unittest.TestCase):
             scene.step()
 
         positions = scene.bodies.position.numpy()
-        velocities = scene.bodies.velocity.numpy()
 
         # Per-layer expected z (half a plank above layer integer z).
         drop_tol = 0.5 * _PLANK_HZ  # 0.25 m -- well below 1.0 m layer drop
         max_drop = 0.0
         worst_body = -1
         worst_layer = -1
-        for i, (body, z0) in enumerate(zip(plank_ids, initial_z)):
+        for i, (body, z0) in enumerate(zip(plank_ids, initial_z, strict=False)):
             slot = body + 1  # slot 0 = world anchor
             z = float(positions[slot, 2])
             drop = z0 - z
@@ -159,8 +157,7 @@ class TestExampleTowerNothingDrops(unittest.TestCase):
             self.assertLess(
                 r_xy,
                 envelope,
-                f"plank {body} flew outside tower envelope "
-                f"(r_xy={r_xy:.2f}, tol={envelope:.2f})",
+                f"plank {body} flew outside tower envelope (r_xy={r_xy:.2f}, tol={envelope:.2f})",
             )
 
 

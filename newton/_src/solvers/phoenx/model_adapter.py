@@ -30,7 +30,6 @@ maps to slot 0.
 from __future__ import annotations
 
 import numpy as np
-
 import warp as wp
 
 import newton
@@ -182,9 +181,7 @@ class AdbsInitArrays:
         }
 
 
-def _newton_target_mode_to_adbs_drive_mode(
-    target_mode: int, stiffness: float, damping: float
-) -> int:
+def _newton_target_mode_to_adbs_drive_mode(target_mode: int, stiffness: float, damping: float) -> int:
     """Map Newton's :class:`JointTargetMode` to PhoenX :class:`DriveMode`.
 
     * ``NONE`` / ``EFFORT`` -> :data:`DRIVE_MODE_OFF` (torque is
@@ -211,9 +208,7 @@ def _newton_target_mode_to_adbs_drive_mode(
     return int(DRIVE_MODE_OFF)
 
 
-def build_adbs_init_arrays(
-    model: newton.Model, device: wp.context.Devicelike | None = None
-) -> AdbsInitArrays:
+def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | None = None) -> AdbsInitArrays:
     """Walk ``model``'s joint arrays, convert each supported joint to
     an ADBS descriptor, and upload the 19 kwargs as ``wp.array`` on
     ``device``.
@@ -245,16 +240,25 @@ def build_adbs_init_arrays(
         joint_idx_to_cid = wp.zeros(0, dtype=wp.int32, device=device)
         joint_idx_to_dof_start = wp.zeros(0, dtype=wp.int32, device=device)
         return AdbsInitArrays(
-            body1=empty_i, body2=empty_i,
-            anchor1=empty_v, anchor2=empty_v,
-            hertz=empty_f, damping_ratio=empty_f,
-            joint_mode=empty_i, drive_mode=empty_i,
-            target=empty_f, target_velocity=empty_f,
+            body1=empty_i,
+            body2=empty_i,
+            anchor1=empty_v,
+            anchor2=empty_v,
+            hertz=empty_f,
+            damping_ratio=empty_f,
+            joint_mode=empty_i,
+            drive_mode=empty_i,
+            target=empty_f,
+            target_velocity=empty_f,
             max_force_drive=empty_f,
-            stiffness_drive=empty_f, damping_drive=empty_f,
-            min_value=empty_f, max_value=empty_f,
-            hertz_limit=empty_f, damping_ratio_limit=empty_f,
-            stiffness_limit=empty_f, damping_limit=empty_f,
+            stiffness_drive=empty_f,
+            damping_drive=empty_f,
+            min_value=empty_f,
+            max_value=empty_f,
+            hertz_limit=empty_f,
+            damping_ratio_limit=empty_f,
+            stiffness_limit=empty_f,
+            damping_limit=empty_f,
             joint_idx_to_cid=joint_idx_to_cid,
             joint_idx_to_dof_start=joint_idx_to_dof_start,
             joint_q_at_init=empty_f,
@@ -324,7 +328,9 @@ def build_adbs_init_arrays(
         if parent_idx < 0:
             X_w_p = np.asarray(joint_X_p[j], dtype=np.float32)
         else:
-            X_w_p = _transform_multiply(np.asarray(body_q[parent_idx], dtype=np.float32), np.asarray(joint_X_p[j], dtype=np.float32))
+            X_w_p = _transform_multiply(
+                np.asarray(body_q[parent_idx], dtype=np.float32), np.asarray(joint_X_p[j], dtype=np.float32)
+            )
 
         anchor1_world = _transform_translation(X_w_p)
         qd_start = int(joint_qd_start[j])
@@ -341,7 +347,7 @@ def build_adbs_init_arrays(
         stiff_drive = 0.0
         damp_drive = 0.0
         max_force = 0.0
-        min_val = 1.0   # disabled: min > max
+        min_val = 1.0  # disabled: min > max
         max_val = -1.0
         stiff_limit = 0.0
         damp_limit = 0.0
@@ -360,12 +366,12 @@ def build_adbs_init_arrays(
             axis_world = _quat_rotate_np(X_w_p[3:], np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
             anchor2_world = anchor1_world + axis_world
         elif jtype is newton.JointType.REVOLUTE or jtype is newton.JointType.PRISMATIC:
-            phoenx_mode = (
-                int(JOINT_MODE_REVOLUTE)
-                if jtype is newton.JointType.REVOLUTE
-                else int(JOINT_MODE_PRISMATIC)
+            phoenx_mode = int(JOINT_MODE_REVOLUTE) if jtype is newton.JointType.REVOLUTE else int(JOINT_MODE_PRISMATIC)
+            axis_local = (
+                np.asarray(joint_axis[qd_start], dtype=np.float32)
+                if len(joint_axis)
+                else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
             )
-            axis_local = np.asarray(joint_axis[qd_start], dtype=np.float32) if len(joint_axis) else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
             axis_len = float(np.linalg.norm(axis_local))
             if axis_len > 1e-12:
                 axis_local = axis_local / axis_len
@@ -391,9 +397,7 @@ def build_adbs_init_arrays(
                 raw = float(effort_limit[qd_start])
                 max_force = raw if np.isfinite(raw) else 0.0
             if target_mode is not None:
-                drive_mode = _newton_target_mode_to_adbs_drive_mode(
-                    int(target_mode[qd_start]), stiff_drive, damp_drive
-                )
+                drive_mode = _newton_target_mode_to_adbs_drive_mode(int(target_mode[qd_start]), stiff_drive, damp_drive)
             # Limits (PhoenX PD path if either gain is > 0). PhoenX's
             # cumulative angle is relative to the init pose, not
             # absolute; subtract the init joint coord so the limit
@@ -430,34 +434,36 @@ def build_adbs_init_arrays(
             min_val -= init_q
             max_val -= init_q
 
-        descriptors.append({
-            "body1": phoenx_parent,
-            "body2": phoenx_child,
-            "anchor1": anchor1_world,
-            "anchor2": anchor2_world,
-            "hertz": float(DEFAULT_HERTZ_LINEAR),
-            "damping_ratio": float(DEFAULT_DAMPING_RATIO),
-            "joint_mode": phoenx_mode,
-            "drive_mode": drive_mode,
-            # Per-joint ``target`` likewise needs the init-offset so
-            # Newton's absolute drive target lines up with PhoenX's
-            # cumulative-angle-from-init. The per-step control kernel
-            # redoes this offset each frame as the user updates
-            # ``control.joint_target_pos``; we only set it here for
-            # the very first step (before any control update fires).
-            "target": target_val - init_q,
-            "target_velocity": target_vel_val,
-            "max_force_drive": max_force,
-            "stiffness_drive": stiff_drive,
-            "damping_drive": damp_drive,
-            "min_value": min_val,
-            "max_value": max_val,
-            "hertz_limit": hertz_limit_val,
-            "damping_ratio_limit": damping_ratio_limit_val,
-            "stiffness_limit": stiff_limit,
-            "damping_limit": damp_limit,
-            "joint_q_at_init": init_q,
-        })
+        descriptors.append(
+            {
+                "body1": phoenx_parent,
+                "body2": phoenx_child,
+                "anchor1": anchor1_world,
+                "anchor2": anchor2_world,
+                "hertz": float(DEFAULT_HERTZ_LINEAR),
+                "damping_ratio": float(DEFAULT_DAMPING_RATIO),
+                "joint_mode": phoenx_mode,
+                "drive_mode": drive_mode,
+                # Per-joint ``target`` likewise needs the init-offset so
+                # Newton's absolute drive target lines up with PhoenX's
+                # cumulative-angle-from-init. The per-step control kernel
+                # redoes this offset each frame as the user updates
+                # ``control.joint_target_pos``; we only set it here for
+                # the very first step (before any control update fires).
+                "target": target_val - init_q,
+                "target_velocity": target_vel_val,
+                "max_force_drive": max_force,
+                "stiffness_drive": stiff_drive,
+                "damping_drive": damp_drive,
+                "min_value": min_val,
+                "max_value": max_val,
+                "hertz_limit": hertz_limit_val,
+                "damping_ratio_limit": damping_ratio_limit_val,
+                "stiffness_limit": stiff_limit,
+                "damping_limit": damp_limit,
+                "joint_q_at_init": init_q,
+            }
+        )
         joint_idx_to_cid_np[j] = len(descriptors) - 1
 
     # ---- Upload --------------------------------------------------------
@@ -472,7 +478,11 @@ def build_adbs_init_arrays(
         return wp.array(a, dtype=wp.float32, device=device)
 
     def _stack_v(key: str) -> wp.array:
-        a = np.asarray([d[key] for d in descriptors], dtype=np.float32).reshape(-1, 3) if num_cols else np.zeros((0, 3), dtype=np.float32)
+        a = (
+            np.asarray([d[key] for d in descriptors], dtype=np.float32).reshape(-1, 3)
+            if num_cols
+            else np.zeros((0, 3), dtype=np.float32)
+        )
         return wp.array(a, dtype=wp.vec3f, device=device)
 
     return AdbsInitArrays(

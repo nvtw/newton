@@ -33,7 +33,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.examples.scene_registry import Scene, scene
-from newton._src.solvers.phoenx.tests._test_helpers import STEP_LAYOUTS, run_settle_loop
+from newton._src.solvers.phoenx.tests._test_helpers import STEP_LAYOUTS
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 from newton._src.solvers.phoenx.world_builder import (
     DriveMode,
@@ -155,7 +155,7 @@ class TestHeavyOnLightStack(unittest.TestCase):
             100.0 * GRAVITY,
             delta=0.05 * 100.0 * GRAVITY,
             msg=f"cube-cube contact Fz = {F_top[2]:.2f} N vs m_top*g = "
-                f"{100.0 * GRAVITY:.2f} N -- heavy cube's weight not propagating",
+            f"{100.0 * GRAVITY:.2f} N -- heavy cube's weight not propagating",
         )
 
         # Plane->bottom pair force: must equal full stack weight.
@@ -164,8 +164,7 @@ class TestHeavyOnLightStack(unittest.TestCase):
             plane_fz,
             expected_net,
             delta=0.05 * expected_net,
-            msg=f"plane->bottom pair Fz = {plane_fz:.2f} N vs "
-                f"(m_top+m_bot)*g = {expected_net:.2f} N",
+            msg=f"plane->bottom pair Fz = {plane_fz:.2f} N vs (m_top+m_bot)*g = {expected_net:.2f} N",
         )
 
 
@@ -311,8 +310,7 @@ class TestSandwichedLightCube(unittest.TestCase):
             plane_fz,
             expected_net,
             delta=0.05 * expected_net,
-            msg=f"plane->bottom pair Fz = {plane_fz:.2f} N vs total weight = "
-                f"{expected_net:.2f} N",
+            msg=f"plane->bottom pair Fz = {plane_fz:.2f} N vs total weight = {expected_net:.2f} N",
         )
 
 
@@ -483,8 +481,7 @@ class TestHeavyPendulum(unittest.TestCase):
                 self.assertGreaterEqual(
                     len(crossings),
                     4,
-                    msg=f"only {len(crossings)} zero-crossings in {n_frames} frames -- "
-                        "pendulum may not be oscillating",
+                    msg=f"only {len(crossings)} zero-crossings in {n_frames} frames -- pendulum may not be oscillating",
                 )
 
                 # Linear interpolate each crossing to sub-frame precision.
@@ -505,8 +502,7 @@ class TestHeavyPendulum(unittest.TestCase):
                 self.assertLess(
                     rel_err,
                     0.05,
-                    msg=f"T_measured={T_measured:.4f} s, expected={T_expected:.4f} s, "
-                        f"rel_err={rel_err * 100:.2f}%",
+                    msg=f"T_measured={T_measured:.4f} s, expected={T_expected:.4f} s, rel_err={rel_err * 100:.2f}%",
                 )
 
                 # Amplitude must remain meaningful (no spurious damping).
@@ -518,7 +514,7 @@ class TestHeavyPendulum(unittest.TestCase):
                     peak_first,
                     0.9 * initial_angle,
                     msg=f"peak amplitude {peak_first:.4f} rad < 0.9 * initial "
-                        f"{initial_angle:.4f} rad -- spurious damping",
+                    f"{initial_angle:.4f} rad -- spurious damping",
                 )
 
 

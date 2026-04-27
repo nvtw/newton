@@ -17,7 +17,6 @@ from __future__ import annotations
 import warp as wp
 
 import newton
-
 from newton._src.solvers.phoenx.examples._ported_example_base import (
     PortedExample,
     default_capsule_half_extents,
@@ -60,9 +59,7 @@ class Example(PortedExample):
 
         # Head above torso.
         head = builder.add_link(
-            xform=wp.transform(
-                p=wp.vec3(0.0, 0.0, spawn_z + torso_h + head_r + 0.03), q=wp.quat_identity()
-            ),
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, spawn_z + torso_h + head_r + 0.03), q=wp.quat_identity()),
         )
         builder.add_shape_sphere(head, radius=head_r)
         extents.append(default_sphere_half_extents(head_r))
@@ -87,9 +84,7 @@ class Example(PortedExample):
                     parent=parent,
                     child=child,
                     parent_xform=parent_xform,
-                    child_xform=wp.transform(
-                        p=wp.vec3(0.0, 0.0, child_xform_offset_z), q=wp.quat_identity()
-                    ),
+                    child_xform=wp.transform(p=wp.vec3(0.0, 0.0, child_xform_offset_z), q=wp.quat_identity()),
                     axis=(0.0, 1.0, 0.0),
                     limit_lower=joint_lo,
                     limit_upper=joint_hi,
@@ -99,17 +94,13 @@ class Example(PortedExample):
 
         # Arms.
         for sign in (+1.0, -1.0):
-            shoulder_xform = wp.transform(
-                p=wp.vec3(sign * (torso_r + 0.02), 0.0, torso_h - 0.02), q=wp.quat_identity()
-            )
+            shoulder_xform = wp.transform(p=wp.vec3(sign * (torso_r + 0.02), 0.0, torso_h - 0.02), q=wp.quat_identity())
             upper = add_limb(torso, shoulder_xform, upper_h, upper_h + 0.01, -1.5, 1.5)
             elbow_xform = wp.transform(p=wp.vec3(0.0, 0.0, -upper_h - 0.01), q=wp.quat_identity())
             add_limb(upper, elbow_xform, lower_h, lower_h + 0.01, -2.2, 0.0)
         # Legs.
         for sign in (+1.0, -1.0):
-            hip_xform = wp.transform(
-                p=wp.vec3(sign * (torso_r * 0.6), 0.0, -torso_h - 0.02), q=wp.quat_identity()
-            )
+            hip_xform = wp.transform(p=wp.vec3(sign * (torso_r * 0.6), 0.0, -torso_h - 0.02), q=wp.quat_identity())
             thigh = add_limb(torso, hip_xform, thigh_h, thigh_h + 0.01, -1.5, 1.5)
             knee_xform = wp.transform(p=wp.vec3(0.0, 0.0, -thigh_h - 0.01), q=wp.quat_identity())
             add_limb(thigh, knee_xform, shin_h, shin_h + 0.01, 0.0, 2.2)

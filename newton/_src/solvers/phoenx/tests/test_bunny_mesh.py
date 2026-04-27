@@ -52,19 +52,84 @@ def _icosahedron_vertices_and_indices() -> tuple[np.ndarray, np.ndarray]:
     phi = (1.0 + math.sqrt(5.0)) * 0.5
     verts = np.array(
         [
-            [-1.0, phi, 0.0], [1.0, phi, 0.0], [-1.0, -phi, 0.0], [1.0, -phi, 0.0],
-            [0.0, -1.0, phi], [0.0, 1.0, phi], [0.0, -1.0, -phi], [0.0, 1.0, -phi],
-            [phi, 0.0, -1.0], [phi, 0.0, 1.0], [-phi, 0.0, -1.0], [-phi, 0.0, 1.0],
+            [-1.0, phi, 0.0],
+            [1.0, phi, 0.0],
+            [-1.0, -phi, 0.0],
+            [1.0, -phi, 0.0],
+            [0.0, -1.0, phi],
+            [0.0, 1.0, phi],
+            [0.0, -1.0, -phi],
+            [0.0, 1.0, -phi],
+            [phi, 0.0, -1.0],
+            [phi, 0.0, 1.0],
+            [-phi, 0.0, -1.0],
+            [-phi, 0.0, 1.0],
         ],
         dtype=np.float32,
     )
     verts /= np.linalg.norm(verts, axis=1, keepdims=True)
     faces = np.array(
         [
-            0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11,
-            1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
-            3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9,
-            4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9, 8, 1,
+            0,
+            11,
+            5,
+            0,
+            5,
+            1,
+            0,
+            1,
+            7,
+            0,
+            7,
+            10,
+            0,
+            10,
+            11,
+            1,
+            5,
+            9,
+            5,
+            11,
+            4,
+            11,
+            10,
+            2,
+            10,
+            7,
+            6,
+            7,
+            1,
+            8,
+            3,
+            9,
+            4,
+            3,
+            4,
+            2,
+            3,
+            2,
+            6,
+            3,
+            6,
+            8,
+            3,
+            8,
+            9,
+            4,
+            9,
+            5,
+            2,
+            4,
+            11,
+            6,
+            2,
+            10,
+            8,
+            6,
+            7,
+            9,
+            8,
+            1,
         ],
         dtype=np.int32,
     )
@@ -85,7 +150,8 @@ def _load_bunny_mesh() -> newton.Mesh:
         # either ``pxr`` or the USD-backed ``newton.usd`` bits are
         # missing from the env. Local-import ``newton_usd`` so the
         # name doesn't shadow the module-level ``newton``.
-        from pxr import Usd  # noqa: PLC0415
+        from pxr import Usd
+
         import newton.usd as newton_usd  # noqa: PLC0415
     except ModuleNotFoundError:
         verts, faces = _icosahedron_vertices_and_indices()
@@ -206,14 +272,12 @@ class TestBunnyMeshFrictionalSlide(unittest.TestCase):
         self.assertGreater(
             measured_decel,
             0.5 * expected_decel,
-            f"bunny decel {measured_decel:.3f} m/s^2 < 0.5 * mu*g = "
-            f"{0.5 * expected_decel:.3f}",
+            f"bunny decel {measured_decel:.3f} m/s^2 < 0.5 * mu*g = {0.5 * expected_decel:.3f}",
         )
         self.assertLess(
             measured_decel,
             2.0 * expected_decel,
-            f"bunny decel {measured_decel:.3f} m/s^2 > 2 * mu*g = "
-            f"{2.0 * expected_decel:.3f}",
+            f"bunny decel {measured_decel:.3f} m/s^2 > 2 * mu*g = {2.0 * expected_decel:.3f}",
         )
 
 

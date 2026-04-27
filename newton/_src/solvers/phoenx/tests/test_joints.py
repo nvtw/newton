@@ -42,7 +42,13 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.body import (
+    MOTION_DYNAMIC,
+    MOTION_STATIC,
     body_container_zeros,
+)
+from newton._src.solvers.phoenx.constraints.constraint_container import (
+    DEFAULT_DAMPING_RATIO,
+    DEFAULT_HERTZ_LINEAR,
 )
 from newton._src.solvers.phoenx.solver_config import (
     PHOENX_CONTACT_MATCHING,
@@ -560,20 +566,6 @@ class TestPhoenXChainConvergence(unittest.TestCase):
     """
 
     def test_30_link_chain_stays_bounded(self) -> None:
-        import math
-
-        from newton._src.solvers.phoenx.body import (
-            MOTION_DYNAMIC,
-            MOTION_STATIC,
-            body_container_zeros,
-        )
-        from newton._src.solvers.phoenx.constraints.constraint_container import (
-            DEFAULT_DAMPING_RATIO,
-            DEFAULT_HERTZ_LINEAR,
-        )
-        from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
-        from newton._src.solvers.phoenx.world_builder import DriveMode, JointMode
-
         device = wp.get_device("cuda:0")
         num_cubes = 30
         half_extent = 0.05

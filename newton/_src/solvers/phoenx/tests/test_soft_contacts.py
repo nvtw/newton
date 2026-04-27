@@ -45,10 +45,10 @@ import unittest
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.solver import SolverPhoenX
 from newton._src.solvers.phoenx.solver_config import (
     PHOENX_CONTACT_MATCHING,
 )
-from newton._src.solvers.phoenx.solver import SolverPhoenX
 
 _G = 9.81
 

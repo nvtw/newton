@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import platform
 import subprocess
 import sys
@@ -258,9 +257,7 @@ def run_sweep(cfg: SweepConfig, clear_existing: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Hand-triggered PhoenX vs MuJoCo-Warp benchmark sweep."
-    )
+    parser = argparse.ArgumentParser(description="Hand-triggered PhoenX vs MuJoCo-Warp benchmark sweep.")
     parser.add_argument(
         "--full-sweep",
         action="store_true",

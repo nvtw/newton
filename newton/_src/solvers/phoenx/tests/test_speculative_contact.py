@@ -27,15 +27,12 @@ from __future__ import annotations
 
 import unittest
 
-import numpy as np
 import warp as wp
 
-import newton
 from newton._src.solvers.phoenx.examples.example_rabbit_pile import (
     DEFAULT_SHAPE_GAP,
 )
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
-
 
 _G = 9.81
 
@@ -137,9 +134,7 @@ class TestPhoenXSpeculativeContactNoDrag(unittest.TestCase):
                 # motion would consume, so a correct speculative row
                 # fires with zero impulse and ``delta_v`` must equal
                 # ``g * dt`` exactly.
-                speculative_samples.append(
-                    (t, v_z, n, prev_v_z - v_z)
-                )
+                speculative_samples.append((t, v_z, n, prev_v_z - v_z))
 
             prev_v_z = v_z
             prev_lowest_z = lowest_z
@@ -151,8 +146,7 @@ class TestPhoenXSpeculativeContactNoDrag(unittest.TestCase):
         self.assertGreater(
             len(speculative_samples),
             0,
-            "Sphere never saw a speculative contact; widen the drop "
-            "distance or shrink ``DEFAULT_SHAPE_GAP``.",
+            "Sphere never saw a speculative contact; widen the drop distance or shrink ``DEFAULT_SHAPE_GAP``.",
         )
 
         # ``delta = prev_v - current_v``. Under gravity alone this
@@ -162,7 +156,7 @@ class TestPhoenXSpeculativeContactNoDrag(unittest.TestCase):
         # than ``g * dt`` (or even negative if the brake overshoots
         # gravity). We detect both signs of deviation.
         worst_frame_deviation = 0.0
-        for t, v_z, n, delta in speculative_samples:
+        for _t, _v_z, _n, delta in speculative_samples:
             deviation = abs(delta - (-expected_delta_v))
             if deviation > worst_frame_deviation:
                 worst_frame_deviation = deviation

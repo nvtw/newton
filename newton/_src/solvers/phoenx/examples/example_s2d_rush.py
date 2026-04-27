@@ -21,7 +21,6 @@ import math
 import warp as wp
 
 import newton
-
 from newton._src.solvers.phoenx.examples._ported_example_base import (
     PortedExample,
     default_sphere_half_extents,

@@ -35,7 +35,6 @@ import warp as wp
 
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 
-
 _G = 9.81
 
 
@@ -160,7 +159,7 @@ class TestPhoenXFiveCubeStackScaleSweep(unittest.TestCase):
         positions = scene.bodies.position.numpy()
         max_speed = 0.0
         max_drift = 0.0
-        for layer, body in enumerate(body_ids):
+        for _layer, body in enumerate(body_ids):
             slot = body + 1
             max_speed = max(max_speed, float(np.linalg.norm(velocities[slot])))
             # XY drift (stack should stay on-axis).

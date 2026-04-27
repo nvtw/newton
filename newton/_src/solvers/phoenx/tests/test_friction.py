@@ -125,14 +125,12 @@ class TestKineticFrictionStopDistance(unittest.TestCase):
                     self.assertLess(
                         rel_err,
                         0.20,
-                        f"mu={mu} v0={v0}: stop={stop_x:.3f} m vs "
-                        f"expected {expected:.3f} m (rel_err {rel_err:+.2%})",
+                        f"mu={mu} v0={v0}: stop={stop_x:.3f} m vs expected {expected:.3f} m (rel_err {rel_err:+.2%})",
                     )
                     self.assertLess(
                         v_res,
                         0.05,
-                        f"mu={mu} v0={v0}: cube still moving at "
-                        f"|v|={v_res:.4f} m/s",
+                        f"mu={mu} v0={v0}: cube still moving at |v|={v_res:.4f} m/s",
                     )
 
 
@@ -155,7 +153,10 @@ class TestStaticFrictionNoDrift(unittest.TestCase):
         for layout in STEP_LAYOUTS:
             with self.subTest(step_layout=layout):
                 scene = _PhoenXScene(
-                    fps=60, substeps=4, solver_iterations=16, friction=0.5,
+                    fps=60,
+                    substeps=4,
+                    solver_iterations=16,
+                    friction=0.5,
                     step_layout=layout,
                 )
                 scene.add_ground_plane()
@@ -224,7 +225,7 @@ class TestStaticFrictionThreshold(unittest.TestCase):
 
     def test_low_friction_slides(self) -> None:
         """mu=0.1 < push_ratio=0.5 -> cube slides."""
-        x, vx = self._run_mu(0.1)
+        x, _vx = self._run_mu(0.1)
         self.assertGreater(x, 1.0, f"mu=0.1 cube only reached x={x:.4f} m")
 
 
@@ -257,9 +258,7 @@ class TestKineticSlideDeceleration(unittest.TestCase):
         )
         scene.add_ground_plane()
         he = 0.5
-        box = scene.add_box(
-            position=(0.0, 0.0, he + 1.0e-3), half_extents=(he, he, he)
-        )
+        box = scene.add_box(position=(0.0, 0.0, he + 1.0e-3), half_extents=(he, he, he))
         scene.finalize()
         scene.set_body_velocity(box, (self.V0, 0.0, 0.0))
 
@@ -282,8 +281,7 @@ class TestKineticSlideDeceleration(unittest.TestCase):
         self.assertLess(
             rel_err,
             0.15,
-            f"decel={measured_decel:.3f} m/s^2 vs expected "
-            f"{expected_decel:.3f} m/s^2 (rel_err {rel_err:+.2%})",
+            f"decel={measured_decel:.3f} m/s^2 vs expected {expected_decel:.3f} m/s^2 (rel_err {rel_err:+.2%})",
         )
 
         # Now run past the analytic stop time and assert the cube
@@ -295,8 +293,7 @@ class TestKineticSlideDeceleration(unittest.TestCase):
         self.assertLess(
             abs(vx_final),
             0.05,
-            f"cube did not stop: vx_final={vx_final:.4f} m/s after "
-            f"{t_stop * 1.5:.3f} s",
+            f"cube did not stop: vx_final={vx_final:.4f} m/s after {t_stop * 1.5:.3f} s",
         )
 
 
@@ -458,8 +455,7 @@ class TestPhoenXFrictionInducedRotation(unittest.TestCase):
         self.assertGreater(
             linear_decel,
             0.5 * expected_linear_decel,
-            f"sphere linear decel {linear_decel:.3f} m/s^2 vs expected "
-            f"{expected_linear_decel:.3f}",
+            f"sphere linear decel {linear_decel:.3f} m/s^2 vs expected {expected_linear_decel:.3f}",
         )
 
 

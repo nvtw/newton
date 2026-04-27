@@ -59,8 +59,8 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.tests._test_helpers import run_settle_loop
 from newton._src.solvers.phoenx.examples.scene_registry import Scene, scene
+from newton._src.solvers.phoenx.tests._test_helpers import run_settle_loop
 from newton._src.solvers.phoenx.world_builder import (
     DriveMode,
     JointMode,
@@ -142,9 +142,7 @@ def _build_revolute_scene(
         hertz_limit=hertz_limit,
         damping_ratio_limit=damping_ratio_limit,
     )
-    world = b.finalize(
-        substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
-    )
+    world = b.finalize(substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device)
     return world, handle
 
 
@@ -212,9 +210,7 @@ def _build_prismatic_scene(
         hertz_limit=hertz_limit,
         damping_ratio_limit=damping_ratio_limit,
     )
-    world = b.finalize(
-        substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
-    )
+    world = b.finalize(substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device)
     return world, handle
 
 
@@ -254,9 +250,7 @@ def _build_ball_socket_scene(
         anchor1=anchor,
         mode=JointMode.BALL_SOCKET,
     )
-    world = b.finalize(
-        substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device
-    )
+    world = b.finalize(substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device)
     return world, handle
 
 
@@ -280,9 +274,7 @@ def _scene_half_extents() -> np.ndarray:
     tags=("joint", "ball_socket"),
 )
 def build_ball_socket_free_spin_scene(device) -> Scene:
-    world, _ = _build_ball_socket_scene(
-        device, initial_angular_velocity=(1.5, 0.7, 2.0)
-    )
+    world, _ = _build_ball_socket_scene(device, initial_angular_velocity=(1.5, 0.7, 2.0))
     return Scene(
         world=world,
         body_half_extents=_scene_half_extents(),
@@ -333,10 +325,7 @@ def build_revolute_axial_spin_scene(device) -> Scene:
 
 @scene(
     "Joint (revolute): position drive",
-    description=(
-        "Static-anchored cube driven to a +0.7 rad axial twist by a soft "
-        "position drive."
-    ),
+    description=("Static-anchored cube driven to a +0.7 rad axial twist by a soft position drive."),
     tags=("joint", "revolute", "actuated"),
 )
 def build_revolute_position_drive_scene(device) -> Scene:
@@ -355,10 +344,7 @@ def build_revolute_position_drive_scene(device) -> Scene:
 
 @scene(
     "Joint (revolute): velocity drive",
-    description=(
-        "Static-anchored cube driven to 1.5 rad/s axial spin by a soft "
-        "velocity drive (max_force=20 N*m)."
-    ),
+    description=("Static-anchored cube driven to 1.5 rad/s axial spin by a soft velocity drive (max_force=20 N*m)."),
     tags=("joint", "revolute", "actuated"),
 )
 def build_revolute_velocity_drive_scene(device) -> Scene:
@@ -379,8 +365,7 @@ def build_revolute_velocity_drive_scene(device) -> Scene:
 @scene(
     "Joint (revolute): limit clamp",
     description=(
-        "Cube spinning into the upper +0.5 rad stop; the unilateral "
-        "spring-damper must clamp the twist at ~+0.5 rad."
+        "Cube spinning into the upper +0.5 rad stop; the unilateral spring-damper must clamp the twist at ~+0.5 rad."
     ),
     tags=("joint", "revolute", "actuated"),
 )
@@ -446,7 +431,7 @@ def _axial_twist(orientation: np.ndarray) -> float:
     case where the swing is ~zero, which it must be because the
     revolute lock kills the off-axis rotational DoF).
     """
-    x, y, z, w = orientation
+    _x, _y, z, w = orientation
     return 2.0 * math.atan2(z, w)
 
 
@@ -501,9 +486,7 @@ class TestJointRevolute(unittest.TestCase):
         A drift here means the rank-5 lock has lost rows.
         """
         device = wp.get_preferred_device()
-        world, _ = _build_revolute_scene(
-            device, initial_angular_velocity=(0.5, 0.0, 0.0)
-        )
+        world, _ = _build_revolute_scene(device, initial_angular_velocity=(0.5, 0.0, 0.0))
         self._step(world)
 
         positions = world.bodies.position.numpy()
@@ -522,9 +505,7 @@ class TestJointRevolute(unittest.TestCase):
         """Pure axial spin must survive untouched."""
         device = wp.get_preferred_device()
         omega_axial = 2.0
-        world, _ = _build_revolute_scene(
-            device, initial_angular_velocity=(0.0, 0.0, omega_axial)
-        )
+        world, _ = _build_revolute_scene(device, initial_angular_velocity=(0.0, 0.0, omega_axial))
         self._step(world)
 
         omegas = world.bodies.angular_velocity.numpy()
@@ -540,9 +521,7 @@ class TestJointRevolute(unittest.TestCase):
     def test_perpendicular_spin_is_locked_out(self):
         """Transverse omega.x must decay to ~0 -- nowhere for it to go."""
         device = wp.get_preferred_device()
-        world, _ = _build_revolute_scene(
-            device, initial_angular_velocity=(2.0, 0.0, 0.0)
-        )
+        world, _ = _build_revolute_scene(device, initial_angular_velocity=(2.0, 0.0, 0.0))
         self._step(world)
 
         omegas = world.bodies.angular_velocity.numpy()
@@ -1002,10 +981,7 @@ class TestJointBallSocket(unittest.TestCase):
                 omegas[cube, i],
                 omega0[i],
                 delta=0.05,
-                msg=(
-                    f"angular velocity.{name} bled from {omega0[i]} to "
-                    f"{omegas[cube, i]}"
-                ),
+                msg=(f"angular velocity.{name} bled from {omega0[i]} to {omegas[cube, i]}"),
             )
 
     def test_pendulum_cm_swings_but_anchor_holds(self):
@@ -1040,10 +1016,7 @@ class TestJointBallSocket(unittest.TestCase):
         self.assertLess(
             np.linalg.norm(a_b2 - np.asarray(anchor, dtype=np.float64)),
             0.05,
-            msg=(
-                f"pendulum anchor drifted to {a_b2} (expected near origin); "
-                "ball-socket lock is leaking"
-            ),
+            msg=(f"pendulum anchor drifted to {a_b2} (expected near origin); ball-socket lock is leaking"),
         )
         # The cube should have swung off the vertical -- either x-coordinate
         # or x-velocity must be non-trivial.
@@ -1052,8 +1025,7 @@ class TestJointBallSocket(unittest.TestCase):
         self.assertTrue(
             moved,
             msg=(
-                f"pendulum did not swing: pos={positions[cube]}, vel={vel}. "
-                "Ball-socket is over-constraining rotation."
+                f"pendulum did not swing: pos={positions[cube]}, vel={vel}. Ball-socket is over-constraining rotation."
             ),
         )
 

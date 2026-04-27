@@ -16,7 +16,6 @@ from __future__ import annotations
 import warp as wp
 
 import newton
-
 from newton._src.solvers.phoenx.examples._ported_example_base import (
     PortedExample,
     run_ported_example,
@@ -35,7 +34,7 @@ class Example(PortedExample):
         extents: list = []
 
         # Three identical compound bodies dropped at different heights.
-        for i, (x, z) in enumerate([(-2.0, 4.0), (0.0, 6.0), (2.0, 8.0)]):
+        for _i, (x, z) in enumerate([(-2.0, 4.0), (0.0, 6.0), (2.0, 8.0)]):
             body = builder.add_body(xform=wp.transform(p=wp.vec3(x, 0.0, z), q=wp.quat_identity()))
             # Compound: a horizontal capsule + a sphere on top + a small box on each side.
             builder.add_shape_capsule(

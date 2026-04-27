@@ -78,7 +78,6 @@ def build(
     is ``"single_world"`` -- the regime this scenario was chosen to
     showcase).
     """
-    device = wp.get_device()
     mem_before = _gpu_used_bytes()
 
     grid = _build_grid_builder()

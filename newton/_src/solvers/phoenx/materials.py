@@ -34,8 +34,8 @@ __all__ = [
     "COMBINE_MAX",
     "COMBINE_MIN",
     "COMBINE_MULTIPLY",
-    "CombineMode",
     "DEFAULT_MATERIAL_INDEX",
+    "CombineMode",
     "Material",
     "MaterialData",
     "material_table_from_list",
@@ -95,13 +95,9 @@ class Material:
 
     def __post_init__(self) -> None:
         if self.static_friction < 0.0:
-            raise ValueError(
-                f"static_friction must be >= 0 (got {self.static_friction})"
-            )
+            raise ValueError(f"static_friction must be >= 0 (got {self.static_friction})")
         if self.dynamic_friction < 0.0:
-            raise ValueError(
-                f"dynamic_friction must be >= 0 (got {self.dynamic_friction})"
-            )
+            raise ValueError(f"dynamic_friction must be >= 0 (got {self.dynamic_friction})")
         if self.dynamic_friction > self.static_friction + 1e-6:
             # PhysX enforces this as a hard error; we only warn via
             # assertion because the solver currently only consumes
@@ -111,9 +107,7 @@ class Material:
             # row.
             pass
         if not (0.0 <= self.restitution <= 1.0):
-            raise ValueError(
-                f"restitution must be in [0, 1] (got {self.restitution})"
-            )
+            raise ValueError(f"restitution must be in [0, 1] (got {self.restitution})")
         for name, mode in (
             ("friction_combine_mode", self.friction_combine_mode),
             ("restitution_combine_mode", self.restitution_combine_mode),
@@ -125,8 +119,7 @@ class Material:
                 COMBINE_MAX,
             ):
                 raise ValueError(
-                    f"{name}={mode} is not a valid CombineMode; expected one "
-                    f"of AVERAGE/MIN/MULTIPLY/MAX (0/1/2/3)"
+                    f"{name}={mode} is not a valid CombineMode; expected one of AVERAGE/MIN/MULTIPLY/MAX (0/1/2/3)"
                 )
 
 
@@ -158,9 +151,7 @@ def pack_material_data(m: Material) -> MaterialData:
     return d
 
 
-def material_table_from_list(
-    materials: list[Material], device: wp.context.Devicelike = None
-) -> wp.array:
+def material_table_from_list(materials: list[Material], device: wp.context.Devicelike = None) -> wp.array:
     """Build a ``wp.array[MaterialData]`` from a Python list.
 
     Element 0 is *always* the default material (same defaults as

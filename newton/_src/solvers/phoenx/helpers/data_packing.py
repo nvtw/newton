@@ -9,7 +9,7 @@ emits has its fields in the same declaration order. So host ``ctypes``
 offsets are the device offsets.
 
 This module exposes those offsets as plain Python ints so they can be
-baked into ``wp.constant``s, used to interpret a ``wp.array(dtype=wp.uint8)``
+baked into ``wp.constant``s, used to interpret a ``wp.array[wp.uint8]``
 view of a typed buffer, etc.
 
 Example:

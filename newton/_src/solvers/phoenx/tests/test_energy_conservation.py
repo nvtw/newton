@@ -128,10 +128,9 @@ class TestEnergyConservation(unittest.TestCase):
                     world.step(dt)
                 graph = cap.graph
 
-                energies = np.empty(n_frames, dtype=np.float64)
                 # Frame 0 was the warm-up step; frame 1 was the captured
                 # step; replay frames 2..n_frames-1.
-                for i in range(n_frames - 2):
+                for _ in range(n_frames - 2):
                     wp.capture_launch(graph)
                 positions = world.bodies.position.numpy()
                 velocities = world.bodies.velocity.numpy()
@@ -157,8 +156,7 @@ class TestEnergyConservation(unittest.TestCase):
                 self.assertLess(
                     rel_err,
                     0.05,
-                    msg=f"E_initial={e0:.4f} J, E_final={e_f:.4f} J, "
-                        f"drift {rel_err * 100:.2f}% > 5%",
+                    msg=f"E_initial={e0:.4f} J, E_final={e_f:.4f} J, drift {rel_err * 100:.2f}% > 5%",
                 )
 
                 # Also: at the end of run the pendulum should still be
@@ -174,14 +172,14 @@ class TestEnergyConservation(unittest.TestCase):
                 peak_omega = peak_v / LEVER
                 # Sum-of-squares speed (phase invariant) should still
                 # carry most of the swing energy.
-                speed2 = (v_speed / LEVER) ** 2 + v_ang_speed ** 2
+                speed2 = (v_speed / LEVER) ** 2 + v_ang_speed**2
                 rms_omega = math.sqrt(speed2 / 2.0)  # rms across linear and angular contributions
                 # If pendulum lost all its swing energy this drops to 0.
                 self.assertGreater(
                     rms_omega,
                     0.3 * peak_omega,
                     msg=f"end-of-run pendulum almost stopped: rms_omega={rms_omega:.4f}, "
-                        f"peak_omega={peak_omega:.4f} -- spurious damping",
+                    f"peak_omega={peak_omega:.4f} -- spurious damping",
                 )
 
 

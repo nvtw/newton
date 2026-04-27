@@ -35,12 +35,9 @@ import gc
 import importlib
 import sys
 from collections import defaultdict
-from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator
 
 import warp as wp
-
 
 # ---------------------------------------------------------------------------
 # Memory scope helper
@@ -64,7 +61,7 @@ class MemoryScope:
     end_current: int = 0
     end_high: int = 0
 
-    def __enter__(self) -> "MemoryScope":
+    def __enter__(self) -> MemoryScope:
         wp.synchronize_device()
         device = wp.get_device()
         if device.is_cuda:
@@ -112,9 +109,7 @@ def _build_via_benchmarks_factory(
     already produce a ``simulate_one_frame`` closure over their
     scene state -- perfect fit.
     """
-    module = importlib.import_module(
-        f"newton._src.solvers.phoenx.benchmarks.scenarios.{scenario}"
-    )
+    module = importlib.import_module(f"newton._src.solvers.phoenx.benchmarks.scenarios.{scenario}")
     handle = module.build(
         num_worlds=num_worlds,
         solver_name=solver,
@@ -154,24 +149,21 @@ def _run_eager_kernel_timing(scene: ProfileScene, warmup: int = 4) -> dict[str, 
     ) as t:
         scene.step()
 
-    agg: dict[str, dict] = defaultdict(lambda: {"calls": 0, "total_ms": 0.0,
-                                                 "max_ms": 0.0, "min_ms": 1e18})
+    agg: dict[str, dict] = defaultdict(lambda: {"calls": 0, "total_ms": 0.0, "max_ms": 0.0, "min_ms": 1e18})
     for r in t.timing_results:
         # Warp labels: "forward kernel <kernel_name_hash>". Strip the
         # common prefix so the report stays readable.
         name = r.name
         for prefix in ("forward kernel ", "backward kernel "):
             if name.startswith(prefix):
-                name = name[len(prefix):]
+                name = name[len(prefix) :]
         rec = agg[name]
         rec["calls"] += 1
         rec["total_ms"] += float(r.elapsed)
         rec["max_ms"] = max(rec["max_ms"], float(r.elapsed))
         rec["min_ms"] = min(rec["min_ms"], float(r.elapsed))
     # Descending total.
-    return dict(
-        sorted(agg.items(), key=lambda item: -item[1]["total_ms"])
-    )
+    return dict(sorted(agg.items(), key=lambda item: -item[1]["total_ms"]))
 
 
 # ---------------------------------------------------------------------------
@@ -193,9 +185,7 @@ def _print_memory(scopes: list[MemoryScope]) -> None:
     print("-- GPU mempool (current delta / peak delta) --")
     total_delta = 0.0
     for s in scopes:
-        print(
-            f"  {s.label:<24} delta={s.delta_gb:+7.3f} GB   peak_delta={s.peak_delta_gb:+7.3f} GB"
-        )
+        print(f"  {s.label:<24} delta={s.delta_gb:+7.3f} GB   peak_delta={s.peak_delta_gb:+7.3f} GB")
         total_delta += s.delta_gb
     print(f"  {'TOTAL (sum of deltas)':<24}           {total_delta:+7.3f} GB")
 
@@ -206,16 +196,12 @@ def _print_kernels(agg: dict[str, dict], top_n: int, *, scene_name: str = "") ->
     total = sum(v["total_ms"] for v in agg.values())
     total_calls = sum(v["calls"] for v in agg.values())
     print(f"  total_kernel_ms={total:.3f}   total_calls={total_calls}   unique_kernels={len(agg)}")
-    print(
-        f"  {'rank':>4}  {'calls':>5}  {'total(ms)':>10}  {'avg(ms)':>9}  {'%':>6}  name"
-    )
+    print(f"  {'rank':>4}  {'calls':>5}  {'total(ms)':>10}  {'avg(ms)':>9}  {'%':>6}  name")
     for i, (name, v) in enumerate(list(agg.items())[:top_n], 1):
         avg = v["total_ms"] / v["calls"]
         pct = v["total_ms"] / total * 100 if total > 0 else 0.0
         short_name = name[-70:] if len(name) > 70 else name
-        print(
-            f"  {i:>4}  {v['calls']:>5}  {v['total_ms']:>10.4f}  {avg:>9.4f}  {pct:>5.1f}%  {short_name}"
-        )
+        print(f"  {i:>4}  {v['calls']:>5}  {v['total_ms']:>10.4f}  {avg:>9.4f}  {pct:>5.1f}%  {short_name}")
 
 
 # ---------------------------------------------------------------------------
@@ -244,9 +230,7 @@ def profile(
     wp.synchronize_device()
 
     with MemoryScope("1. scene_build") as m_build:
-        scene = _build_via_benchmarks_factory(
-            scenario, num_worlds, solver, substeps, iterations
-        )
+        scene = _build_via_benchmarks_factory(scenario, num_worlds, solver, substeps, iterations)
 
     # Warmup pass (module JIT, lazy scratch allocations).
     with MemoryScope("2. warmup_2_frames") as m_warmup:
@@ -273,9 +257,7 @@ def profile(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Profile a phoenx / mujoco scene: memory + per-kernel ms."
-    )
+    parser = argparse.ArgumentParser(description="Profile a phoenx / mujoco scene: memory + per-kernel ms.")
     parser.add_argument("--scenario", default="h1_flat")
     parser.add_argument("--solver", choices=["phoenx", "mujoco"], default="phoenx")
     parser.add_argument("--num-worlds", type=int, default=64)

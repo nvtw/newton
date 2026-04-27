@@ -114,8 +114,7 @@ def _build_pd_vs_gravity(
 @scene(
     "Drive: PD vs gravity (rotary Hooke's law)",
     description=(
-        "Hinge cube on a 1 m lever, PD position drive at theta*=0 vs "
-        "gravity. Steady state: theta_eq ~ -mgL/ke."
+        "Hinge cube on a 1 m lever, PD position drive at theta*=0 vs gravity. Steady state: theta_eq ~ -mgL/ke."
     ),
     tags=("drive", "hooke"),
 )
@@ -321,8 +320,7 @@ class TestPDVsGravityHookesLaw(unittest.TestCase):
                 product,
                 ideal,
                 delta=0.10 * ideal,
-                msg=f"ke={ke}: ke*|theta_eq|={product:.4f} N*m vs ideal "
-                    f"{ideal:.4f} N*m -- Hooke's law scaling broken",
+                msg=f"ke={ke}: ke*|theta_eq|={product:.4f} N*m vs ideal {ideal:.4f} N*m -- Hooke's law scaling broken",
             )
 
 
@@ -390,8 +388,7 @@ class TestOpposedDrives(unittest.TestCase):
                     abs(tau_vel_z),
                     expected_torque,
                     delta=0.10 * expected_torque,
-                    msg=f"velocity drive torque |{tau_vel_z:.4f}| N*m vs "
-                        f"expected {expected_torque:.4f} N*m",
+                    msg=f"velocity drive torque |{tau_vel_z:.4f}| N*m vs expected {expected_torque:.4f} N*m",
                 )
 
                 # Position drive torque must equal velocity drive torque
@@ -402,8 +399,8 @@ class TestOpposedDrives(unittest.TestCase):
                     0.0,
                     delta=0.10 * expected_torque,
                     msg=f"torque sum {tau_pos_z + tau_vel_z:.4f} N*m -- "
-                        f"opposed drives not balancing (pos={tau_pos_z:.4f}, "
-                        f"vel={tau_vel_z:.4f})",
+                    f"opposed drives not balancing (pos={tau_pos_z:.4f}, "
+                    f"vel={tau_vel_z:.4f})",
                 )
 
 

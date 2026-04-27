@@ -32,15 +32,12 @@ def build(
 ) -> SceneHandle:
     """Build a G1-on-ground scene with ``num_worlds`` replicated
     humanoids driven by ``solver_name`` ('phoenx' or 'mujoco')."""
-    device = wp.get_device()
     mem_before = _gpu_used_bytes()
 
     g1 = newton.ModelBuilder()
     if solver_name == "mujoco":
         newton.solvers.SolverMuJoCo.register_custom_attributes(g1)
-    g1.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
-        limit_ke=1.0e3, limit_kd=1.0e1, friction=1e-5
-    )
+    g1.default_joint_cfg = newton.ModelBuilder.JointDofConfig(limit_ke=1.0e3, limit_kd=1.0e1, friction=1e-5)
     g1.default_shape_cfg.ke = 1.0e3
     g1.default_shape_cfg.kd = 2.0e2
     g1.default_shape_cfg.kf = 1.0e3

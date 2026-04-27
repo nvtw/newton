@@ -238,7 +238,9 @@ class ContactPartitioner:
         self._max_used_color = wp.zeros(1, dtype=wp.int32, device=device)
         self._interaction_id_to_partition = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
         self._adjacency_section_end_indices = wp.zeros(max_num_nodes, dtype=wp.int32, device=device)
-        self._vertex_to_adjacent_elements = wp.zeros(max_num_interactions * int(MAX_BODIES), dtype=wp.int32, device=device)
+        self._vertex_to_adjacent_elements = wp.zeros(
+            max_num_interactions * int(MAX_BODIES), dtype=wp.int32, device=device
+        )
 
         # 2*N ping-pong buffer required by Warp's radix sort. int64 so the
         # (unpartitioned_marker | color_plus_one | tid) packing is lossless

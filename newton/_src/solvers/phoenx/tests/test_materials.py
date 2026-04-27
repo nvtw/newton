@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import unittest
 
-import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.materials import (
@@ -128,9 +127,7 @@ class TestContactUsesMaterialFriction(unittest.TestCase):
             ],
             device=device,
         )
-        shape_material = wp.array(
-            [1, 2], dtype=wp.int32, device=device
-        )  # plane -> mat 1; cube -> mat 2
+        shape_material = wp.array([1, 2], dtype=wp.int32, device=device)  # plane -> mat 1; cube -> mat 2
         scene.install_materials(materials, shape_material)
 
         # Settle vertical first.
@@ -200,9 +197,7 @@ class TestPhoenXStaticVsDynamicFriction(unittest.TestCase):
         mu_kinetic = 0.2
         # Push at 0.4 * m * g (between kinetic and static budgets).
         push_ratio = 0.4
-        scene = _PhoenXScene(
-            fps=60, substeps=4, solver_iterations=16, friction=0.0
-        )
+        scene = _PhoenXScene(fps=60, substeps=4, solver_iterations=16, friction=0.0)
         scene.add_ground_plane()
         he = 0.5
         box = scene.add_box(
@@ -260,9 +255,7 @@ class TestPhoenXStaticVsDynamicFriction(unittest.TestCase):
         """
         mu_static = 0.5
         mu_kinetic = 0.1
-        scene = _PhoenXScene(
-            fps=120, substeps=8, solver_iterations=16, friction=0.0
-        )
+        scene = _PhoenXScene(fps=120, substeps=8, solver_iterations=16, friction=0.0)
         scene.add_ground_plane()
         he = 0.5
         box = scene.add_box(

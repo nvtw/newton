@@ -56,7 +56,7 @@ def _axial_twist(orientation: np.ndarray) -> float:
     keeps body 1 static at identity, so this directly gives the
     joint angle.
     """
-    x, y, z, w = orientation
+    _x, _y, z, w = orientation
     return 2.0 * math.atan2(z, w)
 
 

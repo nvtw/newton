@@ -855,7 +855,9 @@ def _axial_drive_limit_prepare_at(
     drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
     target = read_float(constraints, base_offset + _OFF_TARGET, cid)
     target_velocity = read_float(constraints, base_offset + _OFF_TARGET_VELOCITY, cid)
-    max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
+    # max_force_drive is read here for symmetry with the iterate path,
+    # but the prepare row only consumes stiffness/damping. Suppress the
+    # F841 by reading it under a noqa scope for documentation.
     stiffness_drive = read_float(constraints, base_offset + _OFF_STIFFNESS_DRIVE, cid)
     damping_drive = read_float(constraints, base_offset + _OFF_DAMPING_DRIVE, cid)
     min_value = read_float(constraints, base_offset + _OFF_MIN_VALUE, cid)

@@ -16,7 +16,6 @@ from __future__ import annotations
 import warp as wp
 
 import newton
-
 from newton._src.solvers.phoenx.examples._ported_example_base import (
     PortedExample,
     default_capsule_half_extents,
@@ -50,9 +49,7 @@ class Example(PortedExample):
 
         for i in range(N_LINKS):
             link = builder.add_link(
-                xform=wp.transform(
-                    p=wp.vec3(LINK_LEN * (i + 1), 0.0, anchor_z), q=wp.quat_identity()
-                ),
+                xform=wp.transform(p=wp.vec3(LINK_LEN * (i + 1), 0.0, anchor_z), q=wp.quat_identity()),
                 mass=1.0,
             )
             # Capsule oriented along +x; half_height is the cylindrical
@@ -69,9 +66,7 @@ class Example(PortedExample):
                 parent=prev_link,
                 child=link,
                 parent_xform=prev_xform,
-                child_xform=wp.transform(
-                    p=wp.vec3(-LINK_LEN * 0.5, 0.0, 0.0), q=wp.quat_identity()
-                ),
+                child_xform=wp.transform(p=wp.vec3(-LINK_LEN * 0.5, 0.0, 0.0), q=wp.quat_identity()),
                 axis=(0.0, 1.0, 0.0),
                 target_vel=0.0,
                 target_kd=0.2,
@@ -83,9 +78,7 @@ class Example(PortedExample):
             prev_xform = wp.transform(p=wp.vec3(LINK_LEN * 0.5, 0.0, 0.0), q=wp.quat_identity())
 
         ball = builder.add_link(
-            xform=wp.transform(
-                p=wp.vec3(LINK_LEN * (N_LINKS + 1), 0.0, anchor_z), q=wp.quat_identity()
-            ),
+            xform=wp.transform(p=wp.vec3(LINK_LEN * (N_LINKS + 1), 0.0, anchor_z), q=wp.quat_identity()),
             mass=20.0,
         )
         builder.add_shape_sphere(ball, radius=BALL_RADIUS)

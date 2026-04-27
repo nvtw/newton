@@ -32,7 +32,6 @@ import warp as wp
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_STATIC,
-    BodyContainer,
 )
 
 __all__ = [

@@ -20,7 +20,6 @@ from __future__ import annotations
 import math
 import unittest
 
-import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
@@ -71,20 +70,16 @@ class TestPhoenXZeroFrictionCubeSlide(unittest.TestCase):
         self.assertLess(
             abs(decel),
             0.01 * _G,
-            f"cube decelerated by {decel:.4f} m/s^2 with mu=0 -- "
-            f"tangent row leaked (v0={v0}, v_final={v_final:.4f})",
+            f"cube decelerated by {decel:.4f} m/s^2 with mu=0 -- tangent row leaked (v0={v0}, v_final={v_final:.4f})",
         )
         # Residual vertical/lateral motion must stay in the cube's
         # normal-row noise floor.
         v_final_full = scene.body_velocity(cube)
-        v_lateral = float(
-            math.hypot(float(v_final_full[1]), float(v_final_full[2]))
-        )
+        v_lateral = float(math.hypot(float(v_final_full[1]), float(v_final_full[2])))
         self.assertLess(
             v_lateral,
             0.05,
-            f"cube picked up lateral/vertical velocity {v_lateral:.4f} "
-            "m/s with mu=0",
+            f"cube picked up lateral/vertical velocity {v_lateral:.4f} m/s with mu=0",
         )
 
 
