@@ -104,14 +104,21 @@ LOAD_BOX_HZ = 0.5
 #: Lifting voussoir ``i`` by ``i * _VOUSSOIR_GAP`` along +z preserves
 #: every face's slope and orientation (the wedge lock that makes the
 #: arch self-supporting still works) and only separates adjacent
-#: voussoirs along the gravity axis by a sub-millimetre gap. On the
-#: very first substep each voussoir falls ``_VOUSSOIR_GAP`` to seat
-#: against its lower neighbour with cleanly-disambiguated normals.
-#: 0.5 mm is large enough to side-step the GJK degeneracy and small
-#: enough that PhoenX's bias-clamp absorbs the impact in one
-#: substep -- bigger gaps re-introduce ringing, smaller gaps slip
-#: back into the degenerate regime under floating-point noise.
-_VOUSSOIR_GAP: float = 5.0e-4
+#: voussoirs along the gravity axis by a visible gap. Bricks fall
+#: ``_VOUSSOIR_GAP`` (default 2 cm) to seat against their lower
+#: neighbour with cleanly-disambiguated normals.
+_VOUSSOIR_GAP: float = 0.02
+
+#: Per-rank taper applied to each voussoir's depth (along y) and radial
+#: thickness (R_out - R_in span). Foot voussoirs (rank 0) are full
+#: size; each step up toward the keystone shaves another
+#: ``_VOUSSOIR_TAPER`` off both dimensions. A 1 % per-rank taper makes
+#: the keystone (rank 8 on a 17-voussoir arch) ~92 % the linear size
+#: of the feet -- visibly tapered without distorting the wedge angles
+#: that drive the friction lock. Pairs with ``_VOUSSOIR_GAP``: the
+#: smaller upper bricks no longer share corners with their bigger
+#: neighbours, which is the second half of the GJK-degeneracy fix.
+_VOUSSOIR_TAPER: float = 0.01
 
 
 def _prism_mesh_from_quad_xz(
@@ -168,9 +175,17 @@ def _quad_pick_extents(quad_xz: list[tuple[float, float]], depth: float) -> tupl
     )
 
 
+def _scale_quad_about_centroid(quad_xz: list[tuple[float, float]], factor: float) -> list[tuple[float, float]]:
+    """Shrink ``quad_xz`` toward its (x, z) centroid by ``factor``. Used to
+    apply the per-rank radial taper without reshaping the wedge angles."""
+    cx = sum(p[0] for p in quad_xz) / 4.0
+    cz = sum(p[1] for p in quad_xz) / 4.0
+    return [(cx + (p[0] - cx) * factor, cz + (p[1] - cz) * factor) for p in quad_xz]
+
+
 class Example(PortedExample):
     sim_substeps = 20
-    solver_iterations = 6
+    solver_iterations = 20
     default_friction = 0.6  # b2ShapeDef.material.friction in the sample
     start_paused = True
     pause_after_step = True  # SPACE advances one frame at a time
@@ -179,53 +194,74 @@ class Example(PortedExample):
         builder.add_ground_plane()
         extents: list = []
 
+        # ``rank`` = position along the arch from foot toward keystone.
+        # Rank 0 = foot (bottom), rank 8 = keystone (top). Both the
+        # vertical offset and the per-rank size taper accumulate with
+        # rank so the upper bricks are clearly above and clearly
+        # smaller than the lower ones.
+        def _scale_for_rank(rank: int) -> float:
+            return (1.0 - _VOUSSOIR_TAPER) ** rank
+
         # Right-side voussoirs: quad (ps1[i], ps2[i], ps2[i+1], ps1[i+1])
         # — inner-low, outer-low, outer-high, inner-high (CCW in the
-        # x-z plane). Each voussoir is lifted by ``i * _VOUSSOIR_GAP``
-        # along +z so adjacent pieces don't share faces (which
-        # Newton's convex-hull narrow phase resolves with degenerate
-        # normals -- see the constant's docstring).
+        # x-z plane). Each voussoir is lifted by ``rank *
+        # _VOUSSOIR_GAP`` along +z and scaled by ``_scale_for_rank``
+        # so adjacent pieces don't share faces (Newton's convex-hull
+        # narrow phase resolves shared faces with degenerate normals
+        # -- see the constants' docstrings).
         for i in range(8):
-            quad = [PS1[i], PS2[i], PS2[i + 1], PS1[i + 1]]
-            mesh = _prism_mesh_from_quad_xz(quad, BLOCK_DEPTH)
+            rank = i
+            scale = _scale_for_rank(rank)
+            quad = _scale_quad_about_centroid([PS1[i], PS2[i], PS2[i + 1], PS1[i + 1]], scale)
+            mesh = _prism_mesh_from_quad_xz(quad, BLOCK_DEPTH * scale)
             body = builder.add_body(
-                xform=wp.transform(p=wp.vec3(0.0, 0.0, i * _VOUSSOIR_GAP), q=wp.quat_identity()),
+                xform=wp.transform(p=wp.vec3(0.0, 0.0, rank * _VOUSSOIR_GAP), q=wp.quat_identity()),
             )
             builder.add_shape_convex_hull(body=body, mesh=mesh)
-            extents.append(_quad_pick_extents(quad, BLOCK_DEPTH))
+            extents.append(_quad_pick_extents(quad, BLOCK_DEPTH * scale))
 
         # Left-side voussoirs: mirror x. Box2D's order
         # (-ps2[i], -ps1[i], -ps1[i+1], -ps2[i+1]) is CCW after the
         # mirror flip; verified by signed-area check.
         for i in range(8):
-            quad = [
-                (-PS2[i][0], PS2[i][1]),
-                (-PS1[i][0], PS1[i][1]),
-                (-PS1[i + 1][0], PS1[i + 1][1]),
-                (-PS2[i + 1][0], PS2[i + 1][1]),
-            ]
-            mesh = _prism_mesh_from_quad_xz(quad, BLOCK_DEPTH)
+            rank = i
+            scale = _scale_for_rank(rank)
+            quad = _scale_quad_about_centroid(
+                [
+                    (-PS2[i][0], PS2[i][1]),
+                    (-PS1[i][0], PS1[i][1]),
+                    (-PS1[i + 1][0], PS1[i + 1][1]),
+                    (-PS2[i + 1][0], PS2[i + 1][1]),
+                ],
+                scale,
+            )
+            mesh = _prism_mesh_from_quad_xz(quad, BLOCK_DEPTH * scale)
             body = builder.add_body(
-                xform=wp.transform(p=wp.vec3(0.0, 0.0, i * _VOUSSOIR_GAP), q=wp.quat_identity()),
+                xform=wp.transform(p=wp.vec3(0.0, 0.0, rank * _VOUSSOIR_GAP), q=wp.quat_identity()),
             )
             builder.add_shape_convex_hull(body=body, mesh=mesh)
-            extents.append(_quad_pick_extents(quad, BLOCK_DEPTH))
+            extents.append(_quad_pick_extents(quad, BLOCK_DEPTH * scale))
 
         # Keystone: bridges the right and left top voussoirs. Bottom edge
         # rests on the inner-radius corners (ps1[8]); top edge runs along
         # the outer-radius arc (ps2[8]).
-        keystone_quad = [
-            PS1[8],
-            PS2[8],
-            (-PS2[8][0], PS2[8][1]),
-            (-PS1[8][0], PS1[8][1]),
-        ]
-        mesh = _prism_mesh_from_quad_xz(keystone_quad, BLOCK_DEPTH)
+        rank = 8
+        scale = _scale_for_rank(rank)
+        keystone_quad = _scale_quad_about_centroid(
+            [
+                PS1[8],
+                PS2[8],
+                (-PS2[8][0], PS2[8][1]),
+                (-PS1[8][0], PS1[8][1]),
+            ],
+            scale,
+        )
+        mesh = _prism_mesh_from_quad_xz(keystone_quad, BLOCK_DEPTH * scale)
         body = builder.add_body(
-            xform=wp.transform(p=wp.vec3(0.0, 0.0, 8 * _VOUSSOIR_GAP), q=wp.quat_identity()),
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, rank * _VOUSSOIR_GAP), q=wp.quat_identity()),
         )
         builder.add_shape_convex_hull(body=body, mesh=mesh)
-        extents.append(_quad_pick_extents(keystone_quad, BLOCK_DEPTH))
+        extents.append(_quad_pick_extents(keystone_quad, BLOCK_DEPTH * scale))
 
         # 4 load boxes stacked on top of the keystone (Box2D
         # sample_stacking.cpp:808-814).
