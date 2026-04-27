@@ -220,11 +220,18 @@ path is enabled.
 
 .. note::
 
-    Restitution is **not** consumed by the contact constraint — all
+    Restitution is **not** consumed by the contact constraint -- all
     contacts are perfectly inelastic. The materials API exposes a
     restitution coefficient for forward compatibility, but the
-    constraint kernels currently ignore it. To get bounce, drive
-    bodies through a joint or apply explicit forces.
+    constraint kernels currently ignore it. This matches
+    :class:`~newton.solvers.SolverMuJoCo`, which models contacts as
+    soft constraints via ``solref`` / ``solimp`` instead of a
+    classical coefficient of restitution and likewise does not
+    consume :attr:`Model.shape_material_restitution`;
+    :class:`~newton.solvers.SolverXPBD` is the only Newton rigid-body
+    solver that does (opt-in via ``enable_restitution=True``).
+    To get bounce in PhoenX, drive bodies through a joint or apply
+    explicit forces.
 
 
 Warm starting
@@ -602,7 +609,6 @@ make different trade-offs and excel at different things.
 - You need the full joint vocabulary: ``D6``, ``DISTANCE``, equality
   constraints (``CONNECT`` / ``WELD`` / ``JOINT``), mimic constraints,
   friction-loss, velocity limits.
-- You need restitution / contact bounce.
 - You're running on generalised-coordinate articulations and want
   reduced-coordinate dynamics rather than a maximal-coordinate
   formulation.
@@ -617,6 +623,14 @@ PhoenX:
 
 - No contact restitution today (the materials API exposes the
   coefficient but the constraint kernels ignore it).
+  :class:`~newton.solvers.SolverMuJoCo` also doesn't consume
+  ``shape_material_restitution`` -- MuJoCo models contacts as soft
+  constraints via ``solref`` / ``solimp`` rather than a classical
+  coefficient of restitution -- so this isn't a behavioural
+  divergence between the two solvers; it's a Newton ecosystem-wide
+  gap. :class:`~newton.solvers.SolverXPBD` (opt-in
+  ``enable_restitution=True``) is currently the only rigid-body
+  Newton solver that consumes the field directly.
 - Smaller joint vocabulary on Newton's standard ``ModelBuilder`` path;
   no equality / mimic constraints, no ``D6``, no ``DISTANCE``.
   ``CABLE`` is supported but only with rigid stretch (see
