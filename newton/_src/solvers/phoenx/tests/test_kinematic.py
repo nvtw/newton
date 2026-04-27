@@ -249,6 +249,269 @@ class TestKinematicBatchApi(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(
+    wp.is_cuda_available(),
+    "Newton-pipeline kinematic tests require CUDA (CollisionPipeline + graph capture).",
+)
+class TestKinematicNewtonCollisionPipeline(unittest.TestCase):
+    """Newton's :class:`CollisionPipeline` reads ``state.body_q``, not
+    PhoenX's body container. A scripted kinematic body whose
+    ``state.body_q`` slot isn't refreshed is invisible to broad/narrow
+    phase, even though PhoenX's internal pose tracks the target. This
+    is the bug the Kapla camera collider hit before the host-side
+    ``state.body_q`` patch in :mod:`example_kapla_tower`.
+    """
+
+    def _build_kinematic_pusher_scene(self):
+        """Two unit spheres a small gap apart on a plane: one
+        kinematic (slot 0), one dynamic (slot 1). Returns
+        ``(model, state, contacts, collision_pipeline, world,
+        bodies, kine_id, dyn_id)``.
+        """
+        import newton  # noqa: PLC0415
+        from newton._src.solvers.phoenx.body import (  # noqa: PLC0415
+            MOTION_KINEMATIC,
+            body_container_zeros,
+        )
+        from newton._src.solvers.phoenx.examples.example_common import (  # noqa: PLC0415
+            init_phoenx_bodies_kernel,
+            newton_to_phoenx_kernel,
+        )
+        from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld  # noqa: PLC0415
+
+        device = wp.get_device("cuda:0")
+        radius = 0.2
+        gap = 0.05  # initial separation along x; smaller than the
+        # 0.3 m kinematic step, so the dynamic body cannot help being
+        # touched.
+
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        cfg = newton.ModelBuilder.ShapeConfig(density=1000.0, gap=0.01)
+
+        kine_id = builder.add_body(
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, radius), q=wp.quat_identity()),
+        )
+        builder.add_shape_sphere(kine_id, radius=radius, cfg=cfg)
+        dyn_id = builder.add_body(
+            xform=wp.transform(
+                p=wp.vec3(2.0 * radius + gap, 0.0, radius),
+                q=wp.quat_identity(),
+            ),
+        )
+        builder.add_shape_sphere(dyn_id, radius=radius, cfg=cfg)
+
+        model = builder.finalize()
+        collision_pipeline = newton.CollisionPipeline(model, contact_matching="latest")
+        contacts = collision_pipeline.contacts()
+        rigid_contact_max = int(contacts.rigid_contact_point0.shape[0])
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        model.body_q.assign(state.body_q)
+
+        num_phx_bodies = int(model.body_count) + 1
+        bodies = body_container_zeros(num_phx_bodies, device=device)
+        wp.copy(
+            bodies.orientation,
+            wp.array(
+                np.tile([0.0, 0.0, 0.0, 1.0], (num_phx_bodies, 1)).astype(np.float32),
+                dtype=wp.quatf,
+                device=device,
+            ),
+        )
+        wp.launch(
+            init_phoenx_bodies_kernel,
+            dim=model.body_count,
+            inputs=[
+                model.body_q,
+                state.body_qd,
+                model.body_com,
+                model.body_inv_mass,
+                model.body_inv_inertia,
+            ],
+            outputs=[
+                bodies.position,
+                bodies.orientation,
+                bodies.velocity,
+                bodies.angular_velocity,
+                bodies.inverse_mass,
+                bodies.inverse_inertia,
+                bodies.inverse_inertia_world,
+                bodies.motion_type,
+                bodies.body_com,
+            ],
+            device=device,
+        )
+        # Promote slot 0 -> kinematic, zero its inverse mass / inertia.
+        slot = kine_id + 1
+        mt = bodies.motion_type.numpy()
+        mt[slot] = int(MOTION_KINEMATIC)
+        bodies.motion_type.assign(mt)
+        for arr_name in ("inverse_mass",):
+            arr = getattr(bodies, arr_name).numpy()
+            arr[slot] = 0.0
+            getattr(bodies, arr_name).assign(arr)
+        for arr_name in ("inverse_inertia", "inverse_inertia_world"):
+            arr = getattr(bodies, arr_name).numpy()
+            arr[slot] = np.zeros((3, 3), dtype=np.float32)
+            getattr(bodies, arr_name).assign(arr)
+
+        constraints = PhoenXWorld.make_constraint_container(num_joints=0, device=device)
+        shape_body_np = model.shape_body.numpy()
+        shape_body_phx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
+        shape_body = wp.array(shape_body_phx, dtype=wp.int32, device=device)
+        world = PhoenXWorld(
+            bodies=bodies,
+            constraints=constraints,
+            substeps=4,
+            solver_iterations=4,
+            gravity=(0.0, 0.0, -9.81),
+            rigid_contact_max=rigid_contact_max,
+            step_layout="single_world",
+            device=device,
+        )
+
+        # The example_kapla_tower pattern: skip the kinematic body in
+        # *both* sync directions so its only writers are
+        # ``set_kinematic_poses_batch`` (PhoenX side) and the optional
+        # ``state.body_q`` patch under test. We achieve that by
+        # syncing the slice ``[0, kine_id)``; the dynamic body is
+        # before kine_id by construction (kine added first, dyn
+        # second... we need to swap order).
+        # Actually we added kine_id FIRST so dyn_id > kine_id. Sync
+        # only ``[kine_id+1, body_count)`` -- i.e. everything past the
+        # kinematic body. There's just the one dynamic body after
+        # kine_id, so this trims to a 1-body slice.
+        sync_start = kine_id + 1
+        sync_count = model.body_count - sync_start
+
+        def sync_dynamic_to_phx() -> None:
+            if sync_count <= 0:
+                return
+            wp.launch(
+                newton_to_phoenx_kernel,
+                dim=sync_count,
+                inputs=[
+                    state.body_q[sync_start:],
+                    state.body_qd[sync_start:],
+                    model.body_com,
+                ],
+                outputs=[
+                    bodies.position[1 + sync_start : 1 + sync_start + sync_count],
+                    bodies.orientation[1 + sync_start : 1 + sync_start + sync_count],
+                    bodies.velocity[1 + sync_start : 1 + sync_start + sync_count],
+                    bodies.angular_velocity[1 + sync_start : 1 + sync_start + sync_count],
+                ],
+                device=device,
+            )
+
+        return (
+            model,
+            state,
+            contacts,
+            collision_pipeline,
+            world,
+            bodies,
+            shape_body,
+            kine_id,
+            dyn_id,
+            sync_dynamic_to_phx,
+            sync_start,
+            sync_count,
+        )
+
+    def _run(self, *, patch_state_body_q: bool, frames: int = 8):
+        """Step the kinematic-pusher scene ``frames`` times, moving the
+        kinematic body by 0.3 m along +x each frame. Returns the
+        final dynamic-body x-position (world frame).
+
+        ``patch_state_body_q=True`` mirrors the camera-collider fix:
+        write the kinematic target into ``state.body_q`` so Newton's
+        CollisionPipeline sees the body's live position. ``False``
+        is the buggy path -- shows that the dynamic body never moves
+        because broad phase doesn't see the kinematic close in.
+        """
+        (
+            model,
+            state,
+            contacts,
+            collision_pipeline,
+            world,
+            bodies,
+            shape_body,
+            kine_id,
+            dyn_id,
+            sync_dynamic_to_phx,
+            sync_start,
+            sync_count,
+        ) = self._build_kinematic_pusher_scene()
+        device = world.device
+        radius = 0.2
+        kine_pos_arr = wp.array([(0.0, 0.0, radius)], dtype=wp.vec3f, device=device)
+        kine_orient_arr = wp.array([(0.0, 0.0, 0.0, 1.0)], dtype=wp.quatf, device=device)
+        body_id_arr = wp.array([int(kine_id + 1)], dtype=wp.int32, device=device)
+        dt = 1.0 / 60.0
+
+        for f in range(frames):
+            x = 0.3 * (f + 1)
+            kine_pos_np = np.asarray([(x, 0.0, radius)], dtype=np.float32)
+            kine_pos_arr.assign(kine_pos_np)
+            world.set_kinematic_poses_batch(
+                body_ids=body_id_arr,
+                positions=kine_pos_arr,
+                orientations=kine_orient_arr,
+            )
+            if patch_state_body_q:
+                # Rewrite the kinematic body's slot of state.body_q so
+                # CollisionPipeline broad/narrow-phases at the live
+                # position. This is the same trick example_kapla_tower
+                # uses for its camera collider.
+                bq = state.body_q.numpy()
+                bq[kine_id] = (x, 0.0, radius, 0.0, 0.0, 0.0, 1.0)
+                state.body_q.assign(bq)
+            sync_dynamic_to_phx()
+            model.collide(state, contacts=contacts, collision_pipeline=collision_pipeline)
+            world.step(dt=dt, contacts=contacts, shape_body=shape_body)
+            # Pull the dynamic body's pose back to host for assertions
+            # via the PhoenX-side container (which the solver wrote).
+            dyn_pos = bodies.position.numpy()[dyn_id + 1]
+            # Bridge back to Newton state for the next frame's collide.
+            from newton._src.solvers.phoenx.examples.example_common import (  # noqa: PLC0415
+                phoenx_to_newton_kernel,
+            )
+
+            n = model.body_count
+            wp.launch(
+                phoenx_to_newton_kernel,
+                dim=n,
+                inputs=[
+                    bodies.position[1 : 1 + n],
+                    bodies.orientation[1 : 1 + n],
+                    bodies.velocity[1 : 1 + n],
+                    bodies.angular_velocity[1 : 1 + n],
+                    model.body_com,
+                ],
+                outputs=[state.body_q, state.body_qd],
+                device=device,
+            )
+        return float(dyn_pos[0])
+
+    def test_kinematic_pushes_dynamic_when_state_body_q_patched(self) -> None:
+        """Kinematic body advances 0.3 m/frame; without the patch the
+        dynamic body sits still, with the patch it gets shoved."""
+        x_with = self._run(patch_state_body_q=True, frames=4)
+        x_without = self._run(patch_state_body_q=False, frames=4)
+        # Dynamic body started at 2*0.2 + 0.05 = 0.45 m. Without the
+        # patch it stays put (no collision detected). With it, the
+        # kinematic sphere sweeps past 1.2 m of x, so the dynamic
+        # body gets pushed well past its start.
+        self.assertGreater(
+            x_with,
+            x_without + 0.1,
+            f"state.body_q patch failed to wake collision: with={x_with:.3f}, without={x_without:.3f}",
+        )
+
+
 if __name__ == "__main__":
     wp.init()
     unittest.main()

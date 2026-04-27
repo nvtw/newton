@@ -35,7 +35,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, body_container_zeros
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
 )
@@ -60,54 +60,61 @@ from newton._src.solvers.phoenx.solver_config import (
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
-# ---- Geometry ------------------------------------------------------------
-# Matches the C# ``float globalScaling = 0.01f`` in ``Demo15.cs``. The
-# raw USD positions span ~70 m in the horizontal plane and 28 m in
-# height; multiplying by 0.01 yields a ~70 cm tall tabletop tower.
+
+# Patch ``state.body_q`` for the camera collider so Newton's
+# CollisionPipeline (which broad/narrow-phases against ``body_q``)
+# tracks the live camera, not the spawn position.
+@wp.kernel(enable_backward=False)
+def _write_camera_body_q_kernel(
+    body_id: wp.int32,
+    pos: wp.array(dtype=wp.vec3f),
+    orient: wp.array(dtype=wp.quatf),
+    body_q: wp.array(dtype=wp.transform),
+):
+    body_q[body_id] = wp.transform(pos[0], orient[0])
+
+# Mirrors C# ``Demo15.cs``: globalScaling 0.01 there, 0.1 here for a
+# ~70 cm tabletop tower; ground sits at 0.35 * scale.
 GLOBAL_SCALING: float = 0.1
-
-# Brick density. The C# scene relies on PhoenX's default unit-density
-# brick so the absolute mass only sets the time scale; what matters
-# for stability is uniform density across all bricks. 1000 kg/m^3 is
-# Newton's standard and gives each brick a sensible 3.2 g.
 BRICK_DENSITY: float = 1000.0
-
-# C# uses ``ResetScene(true, 0.35f * globalScaling)``: the second arg
-# is a Y-offset for the ground top surface. Newton applies it as
-# ``add_ground_plane(height=...)``.
 GROUND_HEIGHT: float = 0.35 * GLOBAL_SCALING
 
-# ---- Step layout toggle ---------------------------------------------------
-# Kapla Tower is ~11k bodies in a single world, dominated by one
-# huge contact pool -- the same regime where ``single_world`` wins
-# in :mod:`example_tower`.
+# Single-world layout wins on the dense ~11k-body contact pool.
 USE_BIG_WORLD_MODE: bool = True
 STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
+
+# Tile the single ``KaplaTower2.usda`` instancer into a 2D grid centred
+# on the origin. ``(1, 1)`` reproduces the original scene; bigger
+# grids scale brick count, SAP candidates and contact pool linearly,
+# which the collision-pipeline budgets below absorb via ``Nx * Ny``.
+TOWER_GRID_DIMS: tuple[int, int] = (2, 2)
+# Centre-to-centre spacing [m]. Tower footprint ~7.1 x 5.0 m at
+# scale 0.1; 9 m leaves ~2 m clearance so neighbours don't leak into
+# each other's SAP lists during settling.
+TOWER_GRID_SPACING: tuple[float, float] = (9.0, 9.0)
+
+# Invisible kinematic sphere parented to the camera. PhoenX's
+# inferred-velocity path on :data:`MOTION_KINEMATIC` bodies turns
+# fly-throughs into impulses on the bricks. Sphere (rotation-
+# invariant) so we don't need to track camera orientation.
+CAMERA_COLLIDER_ENABLED: bool = True
+CAMERA_COLLIDER_RADIUS: float = 0.4
+# Newton-side mass density only; PhoenX-side inverse mass is zeroed
+# right after init so the value just needs to be finite.
+CAMERA_COLLIDER_DENSITY: float = 1000.0
 
 
 class Example:
     """PhoenX Kapla Tower -- port of ``Demo15`` from PhoenXDemo.
 
-    Pipeline per frame mirrors :class:`example_tower.Example`:
-        1. Sync Newton state -> PhoenX body container.
-        2. Run Newton's :class:`CollisionPipeline` to produce the
-           ``Contacts`` buffer.
-        3. Call :meth:`PhoenXWorld.step` to advance the solver.
-        4. Sync PhoenX body container -> Newton state.
-
-    The whole per-frame pipeline is captured into a single CUDA
-    graph at construction time and replayed via
-    :func:`wp.capture_launch` every frame.
+    Per-frame pipeline (captured into a CUDA graph): sync Newton
+    state -> PhoenX, run :class:`CollisionPipeline`, step
+    :class:`PhoenXWorld`, sync back.
     """
 
-    # First ``WARMUP_FRAMES`` frames run with global linear + angular
-    # damping pinned at 1.0 -- every dynamic body's velocity is zeroed
-    # at the end of every substep. The C# import positions occasionally
-    # have a few millimetre overlaps where adjacent planks meet at a
-    # right angle; without the warm-up those overlaps inject impulses
-    # that lift the tower off the ground in the first frame and cascade
-    # into a divergence. After the warm-up we set both damping factors
-    # back to 0 so the live demo runs un-damped.
+    # Frames 0..WARMUP_FRAMES-1 pin global damping to 1.0 so the
+    # USD-extracted brick poses (which carry mm-scale overlaps where
+    # planks meet) don't kick the tower into divergence on frame 1.
     WARMUP_FRAMES: int = 20
 
     def __init__(self, viewer, args):
@@ -115,9 +122,6 @@ class Example:
         self.args = args
         self.device = wp.get_device()
 
-        # Frame pacing and solver settings match ``Demo15.cs`` exactly:
-        # ``world.StepDt = 1 / 120``, ``NumberSubsteps = 15``,
-        # ``SolverIterations = 3``, ``SolverVelocityIterations = 0``.
         self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -133,97 +137,105 @@ class Example:
     # ------------------------------------------------------------------
 
     def _build_scene(self) -> None:
-        """Build the Newton model from the embedded Kapla brick data,
-        then wire up the PhoenX body / constraint containers and the
-        :class:`PhoenXWorld` driver.
-
-        Brick instance positions / orientations are loaded from
-        :mod:`kapla_tower_data`, which was extracted once from
-        ``KaplaTower2.usda``.
-        """
         builder = newton.ModelBuilder()
         builder.add_ground_plane(height=GROUND_HEIGHT)
 
-        # Brick half-extents after the global scale.
         hx = 0.5 * GLOBAL_SCALING * BRICK_FULL_EXTENTS[0]
         hy = 0.5 * GLOBAL_SCALING * BRICK_FULL_EXTENTS[1]
         hz = 0.5 * GLOBAL_SCALING * BRICK_FULL_EXTENTS[2]
 
-        # Renormalise the per-instance quaternions: the source USDA
-        # uses ``quath`` (half-precision) for tower orientations, so
-        # the embedded floats are off-unit by O(1e-3). Newton expects
-        # unit quaternions in ``body_q``.
+        # USDA stores quats as half-precision; renormalise so Newton
+        # gets unit quaternions in ``body_q``.
         positions = (POSITIONS * GLOBAL_SCALING).astype(np.float32)
         quats = ORIENTATIONS.astype(np.float32)
         norms = np.linalg.norm(quats, axis=1, keepdims=True)
         quats = quats / np.maximum(norms, 1e-12)
 
-        # ``gap`` is the contact-margin half-width applied to the
-        # shape's AABB during broad-phase culling. The Newton default
-        # (5 cm) was tuned for human-scale bodies and is ~4x larger
-        # than each brick itself -- it pads the AABB by ~10x and
-        # explodes the SAP candidate-pair count into the millions.
-        # 1 cm is a comfortable margin for these 1.3 cm half-extent
-        # planks.
+        # 1 cm AABB margin. Newton default (5 cm) is ~4x bigger than
+        # the bricks and would explode the SAP candidate count.
         cfg = newton.ModelBuilder.ShapeConfig(density=BRICK_DENSITY, gap=0.01)
-        self._brick_newton_ids: list[int] = []
-        for i in range(NUM_BRICKS):
-            qx, qy, qz, qw = quats[i]
-            px, py, pz = positions[i]
-            body = builder.add_body(
+
+        nx, ny = (int(d) for d in TOWER_GRID_DIMS)
+        if nx < 1 or ny < 1:
+            raise ValueError(f"TOWER_GRID_DIMS components must be >= 1 (got {TOWER_GRID_DIMS})")
+        spacing_x, spacing_y = (float(s) for s in TOWER_GRID_SPACING)
+        self._tower_grid_dims: tuple[int, int] = (nx, ny)
+        self._tower_grid_spacing: tuple[float, float] = (spacing_x, spacing_y)
+
+        cell_centres_xy: list[tuple[float, float]] = []
+        for j in range(ny):
+            for i in range(nx):
+                cx = (i - 0.5 * (nx - 1)) * spacing_x
+                cy = (j - 0.5 * (ny - 1)) * spacing_y
+                cell_centres_xy.append((cx, cy))
+        self._cell_centres_xy = cell_centres_xy
+
+        # Per-cell newton-id list (cell_index = j * nx + i, row-major).
+        self._brick_newton_ids: list[list[int]] = [[] for _ in range(nx * ny)]
+        for cell_index, (cx, cy) in enumerate(cell_centres_xy):
+            for i in range(NUM_BRICKS):
+                qx, qy, qz, qw = quats[i]
+                px, py, pz = positions[i]
+                body = builder.add_body(
+                    xform=wp.transform(
+                        p=wp.vec3(float(px) + cx, float(py) + cy, float(pz)),
+                        q=wp.quat(float(qx), float(qy), float(qz), float(qw)),
+                    ),
+                )
+                builder.add_shape_box(body, hx=hx, hy=hy, hz=hz, cfg=cfg)
+                self._brick_newton_ids[cell_index].append(body)
+
+        # Camera collider added as dynamic so finalize() accepts it,
+        # then flipped to :data:`MOTION_KINEMATIC` and inverse-mass-
+        # zeroed below.
+        self._camera_body_newton_id: int | None = None
+        # Must match the ``viewer.set_camera`` pos below so the first
+        # frame doesn't slam the collider into the tower.
+        self._camera_collider_initial_pos: tuple[float, float, float] = (1.2, 0.0, 0.4)
+        if CAMERA_COLLIDER_ENABLED:
+            cam_cfg = newton.ModelBuilder.ShapeConfig(
+                density=CAMERA_COLLIDER_DENSITY,
+                gap=0.01,
+                is_visible=False,
+            )
+            cam_body = builder.add_body(
                 xform=wp.transform(
-                    p=wp.vec3(float(px), float(py), float(pz)),
-                    q=wp.quat(float(qx), float(qy), float(qz), float(qw)),
+                    p=wp.vec3(*(float(c) for c in self._camera_collider_initial_pos)),
+                    q=wp.quat_identity(),
                 ),
             )
-            builder.add_shape_box(body, hx=hx, hy=hy, hz=hz, cfg=cfg)
-            self._brick_newton_ids.append(body)
+            builder.add_shape_sphere(cam_body, radius=float(CAMERA_COLLIDER_RADIUS), cfg=cam_cfg)
+            self._camera_body_newton_id = cam_body
 
-        # ``skip_shape_contact_pairs=True``: avoid the ``O(N^2)``
-        # Python pair-list builder in ``finalize``. We use SAP for
-        # the broad phase below, which doesn't consume the
-        # explicit list. Without this flag, finalize takes minutes
-        # on 11k bodies *and* PhoenX's contact-buffer heuristic
-        # reads ``shape_contact_pair_count`` (~64M) and tries to
-        # allocate tens of GB of GPU memory.
+        # SAP doesn't need the explicit O(N^2) pair list, and skipping
+        # avoids minutes of Python work + tens of GB of speculative
+        # pair allocation.
         self.model = builder.finalize(skip_shape_contact_pairs=True)
+        total_tower_bricks = sum(len(ids) for ids in self._brick_newton_ids)
         print(
             f"[PhoenX KaplaTower] bodies={self.model.body_count} "
             f"shapes={self.model.shape_count} "
+            f"tower_grid={nx}x{ny} "
+            f"tower_bricks={total_tower_bricks} "
+            f"camera_collider={'yes' if self._camera_body_newton_id is not None else 'no'} "
             f"brick_full_extents={BRICK_FULL_EXTENTS} scale={GLOBAL_SCALING}"
         )
 
-        # Collision pipeline.
-        #
-        # * ``contact_matching`` -- enabled so the PhoenX solver's
-        #   warm-start gather can find last frame's impulses for
-        #   persistent contacts (essential for the tower to settle).
-        # * ``broad_phase="sap"`` -- the default ``"nxn"`` tests
-        #   all ``O(N^2)`` shape pairs, which on 11k bricks is 60M+
-        #   candidates. SAP only emits real overlap candidates,
-        #   which combined with the small per-shape ``gap`` above
-        #   keeps the candidate count proportional to the actual
-        #   number of touching brick pairs.
-        # * ``rigid_contact_max`` -- the default heuristic
-        #   underestimates the kapla tower's contact pool. Frame 0
-        #   sees ~647k contacts; once the tower starts micro-shaking
-        #   transient inter-penetrations push that closer to ~750k.
-        #   Allocate ~20% more so we stay stable across the whole
-        #   settling phase.
-        # * ``shape_pairs_max`` -- without this knob the SAP path
-        #   sizes its broad-phase / narrow-phase scratch and
-        #   contact-sorter buffers off the worst-case ``N*(N-1)/2``
-        #   bound (~64M pairs for 11k bricks), which pushes peak
-        #   GPU memory past 12 GB. The tower's actual SAP candidate
-        #   count is ~800k; budget ~1.9x that for transient
-        #   compression so the buffer never overflows during
-        #   settling.
+        # SAP broad phase + warm-start contact_matching for stable
+        # settling. ``shape_pairs_max`` / ``rigid_contact_max``
+        # budgets sized from the observed single-tower numbers
+        # (~800k SAP candidates, ~750k contacts) and scaled linearly
+        # by the cell count -- replicated cells are spatially
+        # disjoint so SAP drops cross-cell pairs.
+        num_cells = nx * ny
+        shape_pairs_max = 1_500_000 * num_cells
+        rigid_contact_max_pipeline = 900_000 * num_cells
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
             contact_matching=PHOENX_CONTACT_MATCHING,
             broad_phase="sap",
-            shape_pairs_max=1_500_000,
-            rigid_contact_max=900_000,
+            shape_pairs_max=shape_pairs_max,
+            rigid_contact_max=rigid_contact_max_pipeline,
         )
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
@@ -266,12 +278,32 @@ class Example:
             ],
             device=self.device,
         )
+
+        # Flip the camera collider to MOTION_KINEMATIC and zero its
+        # inverse mass / inertia so the solver treats it as an
+        # immovable but velocity-aware rail.
+        if self._camera_body_newton_id is not None:
+            slot = self._camera_body_newton_id + 1
+            self._camera_phoenx_slot: int = slot
+            mt_np = bodies.motion_type.numpy()
+            mt_np[slot] = int(MOTION_KINEMATIC)
+            bodies.motion_type.assign(mt_np)
+            inv_m_np = bodies.inverse_mass.numpy()
+            inv_m_np[slot] = 0.0
+            bodies.inverse_mass.assign(inv_m_np)
+            inv_I_np = bodies.inverse_inertia.numpy()
+            inv_I_np[slot] = np.zeros((3, 3), dtype=np.float32)
+            bodies.inverse_inertia.assign(inv_I_np)
+            inv_Iw_np = bodies.inverse_inertia_world.numpy()
+            inv_Iw_np[slot] = np.zeros((3, 3), dtype=np.float32)
+            bodies.inverse_inertia_world.assign(inv_Iw_np)
+        else:
+            self._camera_phoenx_slot: int | None = None  # type: ignore[no-redef]
+
         self.bodies = bodies
 
-        # Contact columns live in a dedicated ``ContactColumnContainer``
-        # inside :class:`PhoenXWorld`; the joint-side constraint
-        # container only needs a 1-row placeholder in this
-        # contact-only scene.
+        # Joint-side container only needs a placeholder row -- contact
+        # columns live in PhoenXWorld's own ContactColumnContainer.
         self.constraints = PhoenXWorld.make_constraint_container(
             num_joints=0,
             device=self.device,
@@ -290,13 +322,10 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
-            max_thread_blocks=32,
+            max_thread_blocks=256,
             device=self.device,
         )
 
-        # Camera -- the tower spans roughly 0.7 m horizontal x 0.3 m
-        # tall after ``GLOBAL_SCALING``. Pull back a little under 1 m
-        # so the whole structure is in frame.
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
             pos=wp.vec3(1.2, 0.0, 0.4),
@@ -304,30 +333,58 @@ class Example:
             yaw=180.0,
         )
 
-        # Picking: every brick gets the same OBB half-extents.
+        # Picking AABBs: brick = box half-extents, camera collider =
+        # sphere radius cubed. Slot 0 is the static world anchor.
         half_extents_np = np.zeros((self.world.num_bodies, 3), dtype=np.float32)
-        for newton_idx in self._brick_newton_ids:
-            half_extents_np[newton_idx + 1] = (hx, hy, hz)
+        for cell_ids in self._brick_newton_ids:
+            for newton_idx in cell_ids:
+                half_extents_np[newton_idx + 1] = (hx, hy, hz)
+        if self._camera_body_newton_id is not None:
+            r = float(CAMERA_COLLIDER_RADIUS)
+            half_extents_np[self._camera_body_newton_id + 1] = (r, r, r)
         self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
         self.picking = Picking(self.world, self._half_extents)
         register_with_viewer_gl(self.viewer, self.picking)
 
-        # Pin global damping to 1.0 for the warm-up window. The captured
-        # CUDA graph reads ``self.world._global_damping`` from a device
-        # slot at replay time, so flipping the value back to 0.0 in
-        # :meth:`step` after :data:`WARMUP_FRAMES` does not require a
-        # recapture.
+        # Camera-collider buffers, capture-safe by construction:
+        # ``_camera_pos_host`` is pinned (so wp.copy is a fixed-pointer
+        # DMA the captured graph can replay), ``_camera_pos_host_np``
+        # aliases its bytes for in-place Python writes between
+        # replays, and ``_camera_pos_arr`` is the device mirror.
+        # Orientation is identity for the sphere collider.
+        if self._camera_phoenx_slot is not None:
+            self._camera_body_id_arr = wp.array(
+                [int(self._camera_phoenx_slot)], dtype=wp.int32, device=self.device
+            )
+            self._camera_pos_arr = wp.array(
+                [self._camera_collider_initial_pos],
+                dtype=wp.vec3f,
+                device=self.device,
+            )
+            self._camera_orient_arr = wp.array(
+                [(0.0, 0.0, 0.0, 1.0)], dtype=wp.quatf, device=self.device
+            )
+            self._camera_pos_host = wp.array(
+                [self._camera_collider_initial_pos],
+                dtype=wp.vec3f,
+                device="cpu",
+                pinned=True,
+            )
+            # ``numpy()`` on a pinned CPU array returns an aliased
+            # view, so in-place writes to this handle mutate the
+            # underlying wp.array without allocations.
+            self._camera_pos_host_np = self._camera_pos_host.numpy()
+
+        # Warm-up damping (relaxed in :meth:`step` after WARMUP_FRAMES).
+        # Read from a device slot at replay time, so toggling later
+        # doesn't require a recapture.
         self.world.set_global_linear_damping(1.0)
         self.world.set_global_angular_damping(1.0)
 
-        # CUDA graph capture for the per-frame step pipeline. Falls
-        # back to direct :meth:`simulate` on CPU or when capture is
-        # disabled. PhoenX's single-world PGS sweeps use
-        # ``wp.capture_while`` internally, which only takes the
-        # conditional-graph fast path when an outer capture is
-        # active -- otherwise every colour launch does a D2H sync
-        # on the colour cursor. Capturing here is what keeps those
-        # out of the steady-state profile.
+        # Capture the per-frame pipeline into a single CUDA graph.
+        # The PGS sweep uses ``wp.capture_while`` internally, which
+        # only takes its conditional-graph fast path when there's an
+        # outer capture active.
         self.graph = None
         if self.device.is_cuda:
             with wp.ScopedCapture() as capture:
@@ -339,6 +396,29 @@ class Example:
     # ------------------------------------------------------------------
 
     def simulate(self) -> None:
+        # Stage the camera position on the device, hand it to PhoenX as
+        # the kinematic target, AND patch the same slot of
+        # ``state.body_q`` so Newton's CollisionPipeline (which
+        # broad/narrow-phases against ``body_q``) sees the collider at
+        # the live camera location.
+        if self._camera_phoenx_slot is not None:
+            wp.copy(self._camera_pos_arr, self._camera_pos_host)
+            self.world.set_kinematic_poses_batch(
+                body_ids=self._camera_body_id_arr,
+                positions=self._camera_pos_arr,
+                orientations=self._camera_orient_arr,
+            )
+            wp.launch(
+                _write_camera_body_q_kernel,
+                dim=1,
+                inputs=[
+                    wp.int32(self._camera_body_newton_id),
+                    self._camera_pos_arr,
+                    self._camera_orient_arr,
+                    self.state.body_q,
+                ],
+                device=self.device,
+            )
         self._sync_newton_to_phoenx()
         self.model.collide(
             self.state,
@@ -354,7 +434,14 @@ class Example:
         self._sync_phoenx_to_newton()
 
     def _sync_newton_to_phoenx(self) -> None:
+        # Camera collider is always the last body and is driven by the
+        # kinematic target, not the dynamic-body sync. Cap the range
+        # at n-1 to leave its PhoenX slot alone.
         n = self.model.body_count
+        if self._camera_body_newton_id is not None:
+            n -= 1
+        if n <= 0:
+            return
         wp.launch(
             _newton_to_phoenx_kernel,
             dim=n,
@@ -373,7 +460,14 @@ class Example:
         )
 
     def _sync_phoenx_to_newton(self) -> None:
+        # Symmetric to :meth:`_sync_newton_to_phoenx` -- skip the camera
+        # slot. ``state.body_q[camera]`` is owned by the host-side
+        # update in :meth:`simulate`.
         n = self.model.body_count
+        if self._camera_body_newton_id is not None:
+            n -= 1
+        if n <= 0:
+            return
         wp.launch(
             _phoenx_to_newton_kernel,
             dim=n,
@@ -388,24 +482,36 @@ class Example:
             device=self.device,
         )
 
+    def _update_camera_collider(self) -> None:
+        """Stage the camera position into the pinned host buffer.
+
+        The captured graph re-reads the bytes via ``wp.copy`` on each
+        replay, so the in-place numpy write is all that's needed
+        between frames. Headless viewers (no ``camera.pos``) fall
+        back to the initial spawn position.
+        """
+        if self._camera_phoenx_slot is None:
+            return
+        cam_pos = getattr(getattr(self.viewer, "camera", None), "pos", None)
+        if cam_pos is None:
+            cam_xyz = self._camera_collider_initial_pos
+        else:
+            cam_xyz = (float(cam_pos.x), float(cam_pos.y), float(cam_pos.z))
+        self._camera_pos_host_np[0] = cam_xyz
+
     def step(self) -> None:
-        # End of warm-up window: release the global damping pin so the
-        # live demo runs without artificial energy loss. Toggling the
-        # device-side damping array between graph replays is
-        # graph-capture-safe (the kernel reads from the same slot).
+        # Release the warm-up damping pin once we're past the settle.
+        # Toggling the device-side slot is capture-safe; no recapture.
         if self.frame_index == self.WARMUP_FRAMES:
             self.world.set_global_linear_damping(0.0)
             self.world.set_global_angular_damping(0.0)
+        self._update_camera_collider()
         if self.graph is not None:
             wp.capture_launch(self.graph)
         else:
             self.simulate()
-        # self._print_step_report()
-        # Optional: snapshot the post-step constraint graph (elements,
-        # cost values, body count, jitter) so the standalone graph-
-        # coloring benchmark can replay the exact Kapla problem. Gated
-        # on PHOENX_DUMP_COLORING_GRAPH=<frame_index> so steady-state
-        # runs pay zero overhead.
+        self._print_step_report()
+        # Optional snapshot for the standalone coloring bench.
         dump_frame_env = os.environ.get("PHOENX_DUMP_COLORING_GRAPH")
         if dump_frame_env is not None and int(dump_frame_env) == self.frame_index:
             self._dump_coloring_graph()
@@ -413,13 +519,8 @@ class Example:
         self.frame_index += 1
 
     def _dump_coloring_graph(self) -> None:
-        """Snapshot the active constraint graph to ``kapla_graph.npz``.
-
-        Captures everything the colouring algorithms need (elements,
-        cost values, body count, JP jitter) in a self-contained file so
-        the benchmark can replay the exact Kapla problem without
-        rebuilding the scene or running collision detection.
-        """
+        """Snapshot the active constraint graph to ``kapla_graph.npz``
+        for the standalone coloring benchmark to replay."""
         partitioner = self.world._partitioner
         n_active = int(self.world._num_active_constraints.numpy()[0])
         elements_struct = partitioner._elements.numpy()[:n_active]
@@ -439,9 +540,8 @@ class Example:
 
     def _print_step_report(self) -> None:
         report = self.world.step_report()
-        # max_body_degree is the lower bound any valid graph
-        # colouring of the constraint conflict graph can achieve, so
-        # ``colors / max_body_degree`` shows how close JP is to optimal.
+        # ``max_body_degree`` is the chromatic lower bound; the ratio
+        # measures how close the colourer is to it.
         slack = (
             f"{report.num_colors / report.max_body_degree:.2f}x"
             if report.max_body_degree > 0
@@ -472,25 +572,28 @@ class Example:
     # ------------------------------------------------------------------
 
     def test_final(self) -> None:
-        """After settling, no brick may have escaped a generous
-        envelope around the original tower footprint.
-
-        A solver blow-up (NaNs, ejected bodies) scatters bricks well
-        beyond the original radius; this catches that without
+        """After settling, no brick may have escaped its cell's
+        envelope. Catches NaNs / ejected bodies without
         over-constraining the exact settled geometry.
         """
-        # Original positions span ~35 in the un-scaled USD frame;
-        # 4x is a generous envelope after the global scale.
-        radius = float(np.linalg.norm(POSITIONS[:, :2], axis=1).max())
-        tolerance = 4.0 * radius * GLOBAL_SCALING
+        # 4x the unscaled tower radius is generous post-scale.
+        tower_radius = float(np.linalg.norm(POSITIONS[:, :2], axis=1).max())
+        tower_tolerance = 4.0 * tower_radius * GLOBAL_SCALING
         positions = self.bodies.position.numpy()
-        for newton_idx in self._brick_newton_ids:
+        for cell_index, cell_ids in enumerate(self._brick_newton_ids):
+            cx, cy = self._cell_centres_xy[cell_index]
+            for newton_idx in cell_ids:
+                pos = positions[newton_idx + 1]
+                assert np.isfinite(pos).all(), f"body {newton_idx} non-finite position: {pos}"
+                r_xy = float(np.hypot(pos[0] - cx, pos[1] - cy))
+                assert r_xy < tower_tolerance, (
+                    f"brick {newton_idx} (cell {cell_index}) flew outside the tower envelope "
+                    f"(r_xy={r_xy:.3f}, tol={tower_tolerance:.3f})"
+                )
+
+        for newton_idx in self._wrecking_ball_newton_ids:
             pos = positions[newton_idx + 1]
-            assert np.isfinite(pos).all(), f"body {newton_idx} non-finite position: {pos}"
-            r_xy = float(np.hypot(pos[0], pos[1]))
-            assert r_xy < tolerance, (
-                f"brick {newton_idx} flew outside the tower envelope (r_xy={r_xy:.3f}, tol={tolerance:.3f})"
-            )
+            assert np.isfinite(pos).all(), f"wrecking ball {newton_idx} non-finite position: {pos}"
 
 
 if __name__ == "__main__":
