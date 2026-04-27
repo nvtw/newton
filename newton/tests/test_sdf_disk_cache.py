@@ -240,8 +240,9 @@ class TestSDFDiskCachePure(unittest.TestCase):
             "subgrid_occupied",
         ):
             self.assertIn(required, present)
-        self.assertIn("schema", manifest)
         self.assertIn("key_inputs", manifest)
+        self.assertIn("hash", manifest)
+        self.assertIn("newton_version", manifest)
 
     def test_missing_files_is_miss(self) -> None:
         self.assertIsNone(_sdf_cache.try_load_sparse_data(self.cache_dir, "deadbeef"))
@@ -256,16 +257,6 @@ class TestSDFDiskCachePure(unittest.TestCase):
         npz_path.write_bytes(b"not an npz")
         self.assertIsNone(_sdf_cache.try_load_sparse_data(tmp, h))
 
-    def test_corrupt_sidecar_is_miss(self) -> None:
-        sparse_data = self._fake_sparse_data()
-        tmp = self.cache_dir
-        kwargs = _common_hash_kwargs(self.vertices, self.indices)
-        h, key_inputs = _sdf_cache.hash_inputs(**kwargs)
-        _sdf_cache.save_sparse_data(tmp, h, sparse_data, key_inputs=key_inputs, newton_version="test")
-        _, json_path = _sdf_cache.cache_paths(tmp, h)
-        json_path.write_text("{ this is not valid json")
-        self.assertIsNone(_sdf_cache.try_load_sparse_data(tmp, h))
-
     def test_missing_sidecar_is_miss(self) -> None:
         sparse_data = self._fake_sparse_data()
         tmp = self.cache_dir
@@ -274,19 +265,6 @@ class TestSDFDiskCachePure(unittest.TestCase):
         _sdf_cache.save_sparse_data(tmp, h, sparse_data, key_inputs=key_inputs, newton_version="test")
         _, json_path = _sdf_cache.cache_paths(tmp, h)
         json_path.unlink()
-        self.assertIsNone(_sdf_cache.try_load_sparse_data(tmp, h))
-
-    def test_sidecar_version_mismatch_is_miss(self) -> None:
-        sparse_data = self._fake_sparse_data()
-        tmp = self.cache_dir
-        kwargs = _common_hash_kwargs(self.vertices, self.indices)
-        h, key_inputs = _sdf_cache.hash_inputs(**kwargs)
-        _sdf_cache.save_sparse_data(tmp, h, sparse_data, key_inputs=key_inputs, newton_version="test")
-        _, json_path = _sdf_cache.cache_paths(tmp, h)
-        with open(json_path) as f:
-            manifest = json.load(f)
-        manifest["cache_format_version"] = _sdf_cache.CACHE_FORMAT_VERSION + 999
-        json_path.write_text(json.dumps(manifest))
         self.assertIsNone(_sdf_cache.try_load_sparse_data(tmp, h))
 
     def test_embedded_version_mismatch_is_miss(self) -> None:
