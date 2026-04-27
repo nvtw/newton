@@ -217,7 +217,7 @@ class SolverPhoenX(SolverBase):
             existing_cp = getattr(model, "_collision_pipeline", None)
             needs_new_cp = existing_cp is None or not getattr(existing_cp, "contact_matching", False)
             if needs_new_cp:
-                import newton as _newton  # local to keep the import cycle tight
+                import newton as _newton  # noqa: PLC0415  -- local to keep the import cycle tight
 
                 # Override Newton's ``rigid_contact_max`` estimator
                 # with a PhoenX-tight one from
@@ -231,7 +231,7 @@ class SolverPhoenX(SolverBase):
                 tight_rcm = _estimate_rigid_contact_max_phoenx(model)
                 if tight_rcm is not None:
                     model.rigid_contact_max = 0  # bypass "already sized" short-circuit
-                from newton._src.solvers.phoenx.solver_config import (
+                from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
                     PHOENX_CONTACT_MATCHING,
                 )
 
@@ -348,7 +348,7 @@ class SolverPhoenX(SolverBase):
         table. Each shape gets a unique material index; the table
         carries ``(mu_static, mu_dynamic, restitution)`` via the
         existing :mod:`materials` plumbing."""
-        from newton._src.solvers.phoenx.materials import (
+        from newton._src.solvers.phoenx.materials import (  # noqa: PLC0415
             CombineMode,
             Material,
             material_table_from_list,
@@ -535,7 +535,11 @@ class SolverPhoenX(SolverBase):
             4. Export body state (PhoenX -> ``state_out``).
         """
         if control is None:
-            control = self.model.control()
+            # ``clone_variables=False`` aliases the Model's per-DOF arrays
+            # (joint_target_pos / joint_target_vel / joint_act / joint_f)
+            # straight onto the new Control instead of cloning four
+            # ``wp.array``s every step. Matches XPBD / Featherstone.
+            control = self.model.control(clone_variables=False)
 
         self._apply_joint_control(control)
         self._accumulate_joint_forces(state_in, control)
@@ -576,8 +580,13 @@ class SolverPhoenX(SolverBase):
                 else np.asarray([[0.0, 0.0, -9.81]], dtype=np.float32)
             )
             self.world.gravity = wp.array(gravity_np, dtype=wp.vec3f, device=self.device)
-        if flags & int(SolverNotifyFlags.BODY_INERTIAL_PROPERTIES):
-            # Refresh the copied inv_mass / inv_inertia slots.
+        # ``BODY_PROPERTIES`` covers body_flags edits (which the kernel
+        # uses to rederive ``motion_type`` / ``affected_by_gravity``);
+        # ``BODY_INERTIAL_PROPERTIES`` covers body_inv_mass / body_com.
+        # The kernel is the union of those refreshes, so a single launch
+        # handles either flag.
+        body_refresh_mask = int(SolverNotifyFlags.BODY_INERTIAL_PROPERTIES | SolverNotifyFlags.BODY_PROPERTIES)
+        if flags & body_refresh_mask:
             if self.model.body_count > 0:
                 wp.launch(
                     _init_phoenx_body_container_kernel,
@@ -588,7 +597,6 @@ class SolverPhoenX(SolverBase):
                         self.model.body_com,
                         self.model.body_flags,
                         self.model.body_world,
-                        wp.int32(int(BodyFlags.NO_GRAVITY)),
                         wp.int32(int(BodyFlags.KINEMATIC)),
                     ],
                     outputs=[
@@ -604,6 +612,13 @@ class SolverPhoenX(SolverBase):
                     ],
                     device=self.device,
                 )
+        if flags & int(SolverNotifyFlags.SHAPE_PROPERTIES):
+            # Friction / restitution lives in our material table; rebuild
+            # it from the current Model arrays. Cheap (host walk over
+            # ``shape_count``) and only fires when the user explicitly
+            # signals a shape edit.
+            if self.model.shape_material_mu is not None and self.model.shape_count > 0:
+                self._install_shape_materials()
 
     def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
         """Write per-contact wrenches back to

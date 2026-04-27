@@ -52,7 +52,10 @@
 - Fix finite plane geometry 2x too large in collision, bounding sphere, and raytrace sensor
 - Fix MPR convergence failure on large and extreme-aspect-ratio mesh triangles by projecting the starting point onto the triangle nearest the convex center
 - Fix O(W²·S²) memory explosion in `CollisionPipeline` shape-pair buffer allocation for NXN and SAP broad phase modes by computing per-world pair counts instead of a global N²
+- Fix `CollisionPipeline` allocating the internal `NarrowPhase` deterministic sort / contact-sorter buffers at the broad-phase candidate-pair bound (`O(N²)` per world) instead of `rigid_contact_max`, which OOM'd with multi-GB allocations on large SAP scenes (e.g. PhoenX tower with `--grid-side>=6`)
 - Fix `SensorRaycast` ignoring `PLANE` geometry
+- Fix `SolverPhoenX.notify_model_changed(BODY_INERTIAL_PROPERTIES)` raising at kernel launch (extra flag scalar in the body-container refresh launch did not match the kernel signature). Also broaden the refresh path to fire on `BODY_PROPERTIES` (so `body_flags` edits re-derive `motion_type`/`affected_by_gravity`) and add `SHAPE_PROPERTIES` handling that rebuilds the per-shape friction/restitution material table
+- Fix `SolverPhoenX.step()` allocating four GPU arrays per step in the `control=None` fallback by switching the implicit `Model.control()` to `clone_variables=False` (matches `SolverXPBD` / `SolverFeatherstone`)
 - Fix multi-world `qfrc_actuator` conversion using the wrong body center of mass for worlds with `worldid > 0`
 - Fix SDF hydroelastic broadphase scatter kernel using a grid-stride loop with binary search instead of per-pair thread launch
 - Fix box support-map sign flips from quaternion rotation noise (~1e-14) producing invalid GJK/MPR contacts for face-touching boxes with non-trivial base rotations
