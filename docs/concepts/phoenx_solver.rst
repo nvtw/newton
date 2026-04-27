@@ -348,6 +348,20 @@ Feed-forward joint efforts (``Control.joint_f``) are converted to body
 wrenches via the stock :func:`apply_joint_forces` kernel and folded
 into the per-body force accumulator before the PGS solve.
 
+**Joint armature** (:attr:`Model.joint_armature`) is supported on
+``REVOLUTE`` and ``PRISMATIC`` joints. Because PhoenX is
+maximal-coordinate, armature is implemented by **baking the rotor
+inertia into both attached bodies along the joint axis** at solver
+construction (and on
+:meth:`~SolverPhoenX.notify_model_changed` for ``BODY_INERTIAL_PROPERTIES``
+or ``JOINT_PROPERTIES``). This is how the constraint kernel sees
+``M_eff = M_chain + armature`` along the joint axis without any
+hot-path overhead. Armature on ``BALL`` / ``FIXED`` / ``FREE``
+joints is ignored (no axial DoF). Critical for stability of
+high-stiffness PD drives on chains where an intermediate link has
+near-zero inertia about the joint axis (e.g. humanoid waist links
+of <0.1 kg with ``target_ke = 300`` N·m/rad).
+
 
 .. _phoenx-cable-joints:
 
@@ -581,7 +595,7 @@ make different trade-offs and excel at different things.
 
 - You need the full joint vocabulary: ``D6``, ``DISTANCE``, equality
   constraints (``CONNECT`` / ``WELD`` / ``JOINT``), mimic constraints,
-  joint armature, friction-loss, effort/velocity limits.
+  friction-loss, velocity limits.
 - You need restitution / contact bounce.
 - You're running on generalised-coordinate articulations and want
   reduced-coordinate dynamics rather than a maximal-coordinate

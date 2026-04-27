@@ -281,6 +281,15 @@ class ActuatedDoubleBallSocketData:
     # :func:`pd_coefficients` for the implicit-Euler math.
     stiffness_drive: wp.float32
     damping_drive: wp.float32
+    # Joint-axis armature (rotor / leadscrew inertia) [kg*m^2 for revolute,
+    # kg for prismatic]. Increases the *axial* effective inertia seen by
+    # the drive and limit rows, but not the rigid 5-row positional lock.
+    # Equivalent to MuJoCo's ``mjOption.armature`` / ``joint armature`` in
+    # reduced coordinates: ``M_eff_axial = M_chain_axial + armature``.
+    # Critical for stability of high-stiffness PD drives on chains where
+    # an intermediate link has near-zero inertia about the joint axis
+    # (e.g. humanoid waist-yaw / waist-roll links). ``0`` disables.
+    armature: wp.float32
     # Limit window: rad (revolute) or m (prismatic). ``min_value >
     # max_value`` disables the limit (matches the standalone
     # angular_limit / linear_limit sentinel).
@@ -384,6 +393,7 @@ _OFF_TARGET_VELOCITY = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData,
 _OFF_MAX_FORCE_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_force_drive"))
 _OFF_STIFFNESS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_drive"))
 _OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_drive"))
+_OFF_ARMATURE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "armature"))
 _OFF_MIN_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "min_value"))
 _OFF_MAX_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_value"))
 _OFF_HERTZ_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "hertz_limit"))
@@ -442,6 +452,7 @@ def actuated_double_ball_socket_initialize_kernel(
     damping_ratio_limit: wp.array[wp.float32],
     stiffness_limit: wp.array[wp.float32],
     damping_limit: wp.array[wp.float32],
+    armature: wp.array[wp.float32],
 ):
     """Pack one batch of unified joint descriptors.
 
@@ -475,6 +486,9 @@ def actuated_double_ball_socket_initialize_kernel(
         stiffness_limit, damping_limit: PD limit gains (absolute SI).
             If either > 0 the limit uses the Jitter2 spring-damper
             path and the Box2D knobs are ignored.
+        armature: Joint-axis armature [kg*m^2 for revolute, kg for
+            prismatic]. Adds to the axial effective inertia for the
+            drive and limit rows; ``0`` disables.
     """
     tid = wp.tid()
     cid = cid_offset + tid
@@ -590,6 +604,7 @@ def actuated_double_ball_socket_initialize_kernel(
     write_float(constraints, _OFF_MAX_FORCE_DRIVE, cid, max_force_drive[tid])
     write_float(constraints, _OFF_STIFFNESS_DRIVE, cid, stiffness_drive[tid])
     write_float(constraints, _OFF_DAMPING_DRIVE, cid, damping_drive[tid])
+    write_float(constraints, _OFF_ARMATURE, cid, armature[tid])
     write_float(constraints, _OFF_MIN_VALUE, cid, min_value[tid])
     write_float(constraints, _OFF_MAX_VALUE, cid, max_value[tid])
     write_float(constraints, _OFF_HERTZ_LIMIT, cid, hertz_limit[tid])
@@ -1224,7 +1239,10 @@ def _revolute_prepare_at(
 
     # ---- Axial drive + limit block (angular) ------------------------
     # Angular effective mass: the axial impulse is a pure torque along
-    # ``n_hat``, so ``m_inv = n . (I1^-1 + I2^-1) . n``.
+    # ``n_hat``, so ``m_inv = n . (I1^-1 + I2^-1) . n``. Joint armature
+    # (rotor / leadscrew inertia) is *baked into* ``inv_inertia_world``
+    # at solver construction (see ``SolverPhoenX._bake_joint_armature_into_body_inertia``),
+    # so this expression is already armature-aware -- no extra term here.
     eff_inv = wp.dot(n_hat, inv_inertia1 @ n_hat) + wp.dot(n_hat, inv_inertia2 @ n_hat)
 
     # Revolute twist tracker: ``diff = q2 * inv_init * q1^*`` is the
@@ -1628,6 +1646,10 @@ def _prismatic_prepare_at(
     # Linear inverse effective mass at anchor 1 along n_hat:
     #   m_inv = n . B11 . n  (same quadratic form as the tangent block,
     #                         but projected onto n_hat instead of t).
+    # Joint armature (translational rotor inertia referred to the slide
+    # axis) is baked into ``inverse_mass`` / ``inverse_inertia_world``
+    # at solver construction, so this expression is already
+    # armature-aware -- no extra term here.
     eff_inv = wp.dot(n_hat, b11 @ n_hat)
 
     # Slide along n_hat measured at anchor 1. Starts at 0 at init

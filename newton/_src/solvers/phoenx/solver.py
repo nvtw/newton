@@ -60,6 +60,45 @@ __all__ = ["SolverPhoenX"]
 
 
 # ---------------------------------------------------------------------------
+# Host-side quaternion / rotation helpers (used by the armature bake)
+# ---------------------------------------------------------------------------
+
+
+def _quat_rotate_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Rotate ``v`` by quaternion ``q = (x, y, z, w)`` (numpy, host)."""
+    qx, qy, qz, qw = (float(x) for x in q)
+    vx, vy, vz = (float(x) for x in v)
+    tx = 2.0 * (qy * vz - qz * vy)
+    ty = 2.0 * (qz * vx - qx * vz)
+    tz = 2.0 * (qx * vy - qy * vx)
+    return np.array(
+        [
+            vx + qw * tx + (qy * tz - qz * ty),
+            vy + qw * ty + (qz * tx - qx * tz),
+            vz + qw * tz + (qx * ty - qy * tx),
+        ],
+        dtype=np.float64,
+    )
+
+
+def _quat_to_rot_np(q: np.ndarray) -> np.ndarray:
+    """3x3 rotation matrix from quaternion ``q = (x, y, z, w)``."""
+    qx, qy, qz, qw = (float(x) for x in q)
+    n = qx * qx + qy * qy + qz * qz + qw * qw
+    if n < 1e-20:
+        return np.eye(3, dtype=np.float64)
+    s = 2.0 / n
+    return np.array(
+        [
+            [1.0 - s * (qy * qy + qz * qz), s * (qx * qy - qz * qw), s * (qx * qz + qy * qw)],
+            [s * (qx * qy + qz * qw), 1.0 - s * (qx * qx + qz * qz), s * (qy * qz - qx * qw)],
+            [s * (qx * qz - qy * qw), s * (qy * qz + qx * qw), 1.0 - s * (qx * qx + qy * qy)],
+        ],
+        dtype=np.float64,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Contact-buffer sizing for the PhoenX path
 # ---------------------------------------------------------------------------
 
@@ -198,6 +237,16 @@ class SolverPhoenX(SolverBase):
                 ],
                 device=self.device,
             )
+            # Joint armature: PhoenX is maximal-coordinate, so reduced-
+            # coord ``M_q = M_chain + armature`` doesn't drop in directly.
+            # Instead we bake the armature into both bodies' inertia along
+            # the joint axis so the constraint kernels' standard
+            # ``eff_inv = J M^-1 J^T`` and the body-velocity update both
+            # see the same augmented mass matrix. Without this, chains
+            # with skinny intermediate links (e.g. humanoid waist links
+            # of <0.1 kg) destabilise high-stiffness PD drives within a
+            # few substeps.
+            self._bake_joint_armature_into_body_inertia(model)
 
         # ---- Sync model.body_q with model.joint_q ---------------------
         # The adapter snapshots body-local joint anchors from
@@ -351,6 +400,121 @@ class SolverPhoenX(SolverBase):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _bake_joint_armature_into_body_inertia(self, model: Model) -> None:
+        """Add per-joint axial armature into both attached bodies' inertia.
+
+        For each REVOLUTE / PRISMATIC joint with ``armature > 0``,
+        augments the parent and child PhoenX-slot inverse inertia / mass
+        so the constraint solve sees an effective inertia of
+        ``M_chain + armature`` along the joint axis. Skipped on FREE,
+        BALL, and FIXED joints (no axial DoF). Done once at construction
+        on the host: pulls model arrays back to numpy, rebuilds the
+        inertia tensors, recomputes ``inverse_inertia`` (body-local) and
+        ``inverse_inertia_world`` (= R*I^-1*R^T at the rest pose), and
+        re-uploads them.
+        """
+        if model.joint_count == 0 or model.joint_armature is None:
+            return
+
+        joint_type = model.joint_type.numpy()
+        joint_parent = model.joint_parent.numpy()
+        joint_child = model.joint_child.numpy()
+        joint_qd_start = model.joint_qd_start.numpy()
+        joint_axis = model.joint_axis.numpy()
+        joint_X_p = model.joint_X_p.numpy()
+        joint_X_c = model.joint_X_c.numpy()
+        armature = model.joint_armature.numpy()
+
+        body_inv_mass = self.bodies.inverse_mass.numpy().copy()
+        body_inv_inertia = self.bodies.inverse_inertia.numpy().copy()
+        body_inv_inertia_world = self.bodies.inverse_inertia_world.numpy().copy()
+        body_orientation = self.bodies.orientation.numpy()
+
+        # Reconstruct local inertia tensor (3x3) per body from inv_inertia.
+        # PhoenX stores inverse_inertia as a 3x3 mat33 (body-local).
+        n_phoenx = body_inv_inertia.shape[0]
+        body_inertia = np.zeros_like(body_inv_inertia)
+        body_mass = np.zeros(n_phoenx, dtype=np.float32)
+        for i in range(n_phoenx):
+            invI = body_inv_inertia[i]
+            if abs(np.linalg.det(invI)) > 1e-30:
+                body_inertia[i] = np.linalg.inv(invI)
+            body_mass[i] = (1.0 / body_inv_mass[i]) if body_inv_mass[i] > 0.0 else 0.0
+
+        rev_t = int(newton.JointType.REVOLUTE)
+        pri_t = int(newton.JointType.PRISMATIC)
+
+        any_baked = False
+        for j in range(model.joint_count):
+            jt = int(joint_type[j])
+            if jt != rev_t and jt != pri_t:
+                continue
+            qd = int(joint_qd_start[j])
+            if qd >= len(armature):
+                continue
+            a = float(armature[qd])
+            if a <= 0.0:
+                continue
+            any_baked = True
+
+            # Newton body indices; PhoenX slots are body+1 with -1->0 (world).
+            n_p = int(joint_parent[j])
+            n_c = int(joint_child[j])
+            slot_p = 0 if n_p < 0 else n_p + 1
+            slot_c = 0 if n_c < 0 else n_c + 1
+
+            if jt == rev_t:
+                axis_jf = joint_axis[qd] if qd < len(joint_axis) else np.array([1.0, 0.0, 0.0])
+                # Axis in each attached body's local frame: rotate the
+                # joint-frame axis by the joint frame's body-local rotation.
+                Xp_q = joint_X_p[j][3:7]
+                Xc_q = joint_X_c[j][3:7]
+                axis_in_p = _quat_rotate_np(Xp_q, axis_jf)
+                axis_in_c = _quat_rotate_np(Xc_q, axis_jf)
+                np_p = float(np.linalg.norm(axis_in_p))
+                np_c = float(np.linalg.norm(axis_in_c))
+                if np_p > 1e-12:
+                    axis_in_p = axis_in_p / np_p
+                if np_c > 1e-12:
+                    axis_in_c = axis_in_c / np_c
+                # Splitting the armature equally across both bodies (each
+                # gets ``a``) is the same approximation the PhoenX-port
+                # prototype validated on the G1: it slightly over-counts
+                # inertia when both bodies have comparable mass along the
+                # axis, but never destabilises (errs on the conservative
+                # side) and exactly fixes the "skinny intermediate link"
+                # case where one body is the bottleneck.
+                if slot_p > 0:
+                    body_inertia[slot_p] = body_inertia[slot_p] + a * np.outer(axis_in_p, axis_in_p)
+                if slot_c > 0:
+                    body_inertia[slot_c] = body_inertia[slot_c] + a * np.outer(axis_in_c, axis_in_c)
+            else:  # PRISMATIC
+                # Translational armature: add to mass on both bodies.
+                if slot_p > 0:
+                    body_mass[slot_p] = body_mass[slot_p] + a
+                if slot_c > 0:
+                    body_mass[slot_c] = body_mass[slot_c] + a
+
+        if not any_baked:
+            return
+
+        # Recompute inverses, then rotate to world for the rest pose.
+        for i in range(1, n_phoenx):
+            I = body_inertia[i]
+            if abs(np.linalg.det(I)) > 1e-30:
+                body_inv_inertia[i] = np.linalg.inv(I).astype(np.float32)
+            m = body_mass[i]
+            body_inv_mass[i] = (1.0 / m) if m > 0.0 else 0.0
+
+            # Rotate to world. Quaternion is (x, y, z, w).
+            q = body_orientation[i]
+            R = _quat_to_rot_np(q)
+            body_inv_inertia_world[i] = (R @ body_inv_inertia[i] @ R.T).astype(np.float32)
+
+        self.bodies.inverse_mass.assign(body_inv_mass)
+        self.bodies.inverse_inertia.assign(body_inv_inertia)
+        self.bodies.inverse_inertia_world.assign(body_inv_inertia_world)
 
     def _install_shape_materials(self) -> None:
         """Stream Model's per-shape friction into PhoenX's material
@@ -621,6 +785,11 @@ class SolverPhoenX(SolverBase):
                     ],
                     device=self.device,
                 )
+                # Re-bake armature: ``_init_phoenx_body_container_kernel``
+                # just overwrote ``inverse_mass`` / ``inverse_inertia``
+                # with the model's raw values, so the previous bake is
+                # gone.
+                self._bake_joint_armature_into_body_inertia(self.model)
         if flags & int(SolverNotifyFlags.SHAPE_PROPERTIES):
             # Friction / restitution lives in our material table; rebuild
             # it from the current Model arrays. Cheap (host walk over

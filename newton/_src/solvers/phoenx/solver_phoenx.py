@@ -732,6 +732,7 @@ class PhoenXWorld:
         damping_ratio_limit: wp.array,
         stiffness_limit: wp.array,
         damping_limit: wp.array,
+        armature: wp.array | None = None,
     ) -> None:
         """Pack ``num_joints`` actuated-DBS joint columns.
 
@@ -763,9 +764,17 @@ class PhoenXWorld:
                 knobs (used when both PD gains are zero).
             stiffness_limit, damping_limit: Limit PD gains (SI). Any
                 strictly positive value selects the PD formulation.
+            armature: Per-joint axial armature [kg*m^2 for revolute,
+                kg for prismatic]. ``None`` (default) zero-fills, which
+                disables armature on every joint -- callers that rely
+                on PhoenX's pre-armature behaviour are unaffected.
+                Folded into the axial drive / limit effective inertia
+                only; rigid 5-row positional locks are unchanged.
         """
         if self.num_joints <= 0:
             return
+        if armature is None:
+            armature = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
         wp.launch(
             actuated_double_ball_socket_initialize_kernel,
             dim=self.num_joints,
@@ -792,6 +801,7 @@ class PhoenXWorld:
                 damping_ratio_limit,
                 stiffness_limit,
                 damping_limit,
+                armature,
             ],
             device=self.device,
         )

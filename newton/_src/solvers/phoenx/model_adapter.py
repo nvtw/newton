@@ -120,6 +120,7 @@ class AdbsInitArrays:
         damping_ratio_limit: wp.array,
         stiffness_limit: wp.array,
         damping_limit: wp.array,
+        armature: wp.array,
         joint_idx_to_cid: wp.array,
         joint_idx_to_dof_start: wp.array,
         joint_q_at_init: wp.array,
@@ -144,6 +145,7 @@ class AdbsInitArrays:
         self.damping_ratio_limit = damping_ratio_limit
         self.stiffness_limit = stiffness_limit
         self.damping_limit = damping_limit
+        self.armature = armature
         self.joint_idx_to_cid = joint_idx_to_cid
         self.joint_idx_to_dof_start = joint_idx_to_dof_start
         #: Per-ADBS-column initial Newton joint coordinate. PhoenX's
@@ -178,6 +180,7 @@ class AdbsInitArrays:
             "damping_ratio_limit": self.damping_ratio_limit,
             "stiffness_limit": self.stiffness_limit,
             "damping_limit": self.damping_limit,
+            "armature": self.armature,
         }
 
 
@@ -259,6 +262,7 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
             damping_ratio_limit=empty_f,
             stiffness_limit=empty_f,
             damping_limit=empty_f,
+            armature=empty_f,
             joint_idx_to_cid=joint_idx_to_cid,
             joint_idx_to_dof_start=joint_idx_to_dof_start,
             joint_q_at_init=empty_f,
@@ -288,6 +292,7 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
     target_vel = _pull_dof_f(model.joint_target_vel)
     target_ke = _pull_dof_f(model.joint_target_ke)
     target_kd = _pull_dof_f(model.joint_target_kd)
+    joint_armature = _pull_dof_f(model.joint_armature)
     effort_limit = _pull_dof_f(model.joint_effort_limit)
     limit_lower = _pull_dof_f(model.joint_limit_lower)
     limit_upper = _pull_dof_f(model.joint_limit_upper)
@@ -353,6 +358,12 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
         damp_limit = 0.0
         hertz_limit_val = float(DEFAULT_HERTZ_LIMIT)
         damping_ratio_limit_val = float(DEFAULT_DAMPING_RATIO)
+        # Joint armature only applies to the axial drive / limit row of
+        # REVOLUTE / PRISMATIC joints; left at 0 for BALL / FIXED so the
+        # constraint kernel's ``eff_inv = eff_inv_raw / (1 + a *
+        # eff_inv_raw)`` reduces to the un-armatured behaviour for
+        # those modes.
+        armature_val = 0.0
 
         if jtype is newton.JointType.BALL:
             phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
@@ -413,6 +424,8 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
                 stiff_limit = float(limit_ke[qd_start])
             if limit_kd is not None:
                 damp_limit = float(limit_kd[qd_start])
+            if joint_armature is not None and qd_start < len(joint_armature):
+                armature_val = float(joint_armature[qd_start])
         else:  # pragma: no cover -- defensive
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
@@ -461,6 +474,7 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
                 "damping_ratio_limit": damping_ratio_limit_val,
                 "stiffness_limit": stiff_limit,
                 "damping_limit": damp_limit,
+                "armature": armature_val,
                 "joint_q_at_init": init_q,
             }
         )
@@ -505,6 +519,7 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
         damping_ratio_limit=_stack_f("damping_ratio_limit"),
         stiffness_limit=_stack_f("stiffness_limit"),
         damping_limit=_stack_f("damping_limit"),
+        armature=_stack_f("armature"),
         joint_idx_to_cid=wp.array(joint_idx_to_cid_np, dtype=wp.int32, device=device),
         joint_idx_to_dof_start=wp.array(joint_idx_to_dof_start_np, dtype=wp.int32, device=device),
         joint_q_at_init=_stack_f("joint_q_at_init"),
