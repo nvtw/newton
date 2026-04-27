@@ -273,6 +273,26 @@ class Example:
         self.model.set_gravity((0.0, 0.0, -9.81))
 
         if self.solver_name == "phoenx":
+            # PhoenX enforces stiction strictly (matches the analytic
+            # Coulomb law to within a few micrometres of creep over
+            # 10 s; see ``newton/_src/solvers/phoenx/tests/
+            # _actuator_compare.py``). MuJoCo Warp's solver lets the
+            # foot creep ~1 m / 10 s on a 30 deg incline at mu = 0.75
+            # and a MuJoCo-trained policy implicitly assumes that
+            # micro-creep is available. Without it, the entire ground-
+            # reaction torque funnels into the lowest-stiffness DoF
+            # (G1 ankle pitch, target_ke = 20 N*m/rad) and bends it,
+            # producing the "toes push into the floor" symptom.
+            #
+            # Scaling PhoenX's foot friction down lets a small amount
+            # of slip back into the contact and unloads the ankle.
+            # Tune this in-place; values < 1 reduce stiction, > 1
+            # increase it. 1.0 = no scaling.
+            phoenx_foot_friction_scale = 1.0
+            if phoenx_foot_friction_scale != 1.0:
+                self._scale_foot_friction(phoenx_foot_friction_scale)
+
+        if self.solver_name == "phoenx":
             # PhoenX runs its own contacts (sticky CollisionPipeline
             # auto-attached). 4 substeps + 8 PGS iterations matches the
             # MuJoCo-parity sweep used by the Anymal walk demo and is
@@ -435,6 +455,35 @@ class Example:
         self.viewer.log_state(self.state_0)
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
+
+    def _scale_foot_friction(self, scale: float) -> None:
+        """Multiply ``model.shape_material_mu`` for shapes whose body
+        is a foot / ankle-roll link by ``scale``. Keyword matching
+        on the body label catches both Anymal (``*_FOOT``) and G1
+        (``*_ankle_roll_link``) without per-robot wiring.
+        """
+        body_labels = self.model.body_label
+        # Names suffixes that mark a "foot" body across the supported
+        # robots. Anymal: LF_FOOT/RF_FOOT/LH_FOOT/RH_FOOT. G1 / Go2:
+        # left_ankle_roll_link / right_ankle_roll_link.
+        foot_keywords = ("foot", "ankle_roll", "FOOT")
+        foot_bodies = {i for i, lbl in enumerate(body_labels) if any(kw in lbl for kw in foot_keywords)}
+        if not foot_bodies:
+            print("[WARN] foot-friction-scale: no foot bodies matched; flag is a no-op")
+            return
+
+        shape_body_np = self.model.shape_body.numpy()
+        mu_np = self.model.shape_material_mu.numpy()
+        n_scaled = 0
+        for shape_idx, body_idx in enumerate(shape_body_np):
+            if int(body_idx) in foot_bodies:
+                mu_np[shape_idx] *= float(scale)
+                n_scaled += 1
+        self.model.shape_material_mu.assign(mu_np)
+        print(
+            f"[INFO] foot-friction-scale: {scale:.2f} applied to {n_scaled} foot shapes "
+            f"(across {len(foot_bodies)} foot bodies)"
+        )
 
     def test_final(self):
         newton.examples.test_body_state(
