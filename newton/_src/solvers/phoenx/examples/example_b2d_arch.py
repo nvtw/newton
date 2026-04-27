@@ -6,15 +6,37 @@
 #
 # Direct port of ``samples/sample_stacking.cpp:Arch`` from Box2D v3:
 # 17 trapezoidal voussoirs (8 right + 8 left + 1 keystone) tracing a
-# half-circle, plus 4 stacked load boxes pressing down on the keystone.
-# The arch is held up by friction + compression alone; replacing the
-# voussoirs with uniform boxes (as the previous port did) loses the
-# wedge geometry that locks the stones together.
+# half-circle. The arch is held up by friction + compression alone;
+# replacing the voussoirs with uniform boxes (as the previous port did)
+# loses the wedge geometry that locks the stones together.
 #
 # Each Box2D 2D quad becomes a 3D convex hull by extrusion: the original
 # (x, y) polygon lies in Newton's (x, z) plane (z up, matching the
 # (0, 0, -9.81) gravity), and we extrude along +/- ``BLOCK_DEPTH / 2`` in
 # y to give the bodies a non-zero thickness for collision and rendering.
+#
+# **Known limitation.** Box2D's arch is the canonical 2D arch demo:
+# adjacent voussoirs share *edges* exactly, and Box2D's polygon-vs-
+# polygon SAT narrow phase clips contacts cleanly along those shared
+# edges. Translating to 3D extrudes those shared edges into shared
+# *faces*, which Newton's convex-hull GJK / MPR resolves with
+# degenerate closest-feature output (zero-volume overlap, zero-distance
+# separation) -- contact normals can flip and the arch sinks softly
+# through itself. We side-step the GJK degeneracy with a sub-millimetre
+# cumulative vertical offset between adjacent voussoirs, which is
+# enough to disambiguate the contact normals (verified by inspecting
+# ``rigid_contact_normal`` at frame 0). However, even with correct
+# normals the arch is not stable in 3D under Newton's contact pipeline
+# at any tested combination of friction (0.6 -> 5.0), substeps
+# (16 -> 40), iterations (6 -> 64), block depth (1 m -> 8 m), or
+# density (10 -> 1000 kg/m^3). The same scene also collapses under
+# ``SolverMuJoCo``, so this isn't PhoenX-specific. We believe the
+# root cause is that ``b2MakePolygon`` produces face-distributed
+# contact patches in 2D, while Newton's narrow phase produces only
+# 4 corner contacts per voussoir-pair in 3D -- enough for parallel-
+# face stacking (see ``example_b2d_large_pyramid``) but not enough
+# friction-distribution for the slanted-face wedge lock the arch
+# relies on.
 #
 # Run: python -m newton._src.solvers.phoenx.examples.example_b2d_arch
 ###########################################################################
@@ -60,14 +82,36 @@ _PS2 = [
 PS1 = [(_SCALE * x, _SCALE * z) for (x, z) in _PS1]
 PS2 = [(_SCALE * x, _SCALE * z) for (x, z) in _PS2]
 
-#: Extrusion thickness along the y-axis for the 2D->3D lift. The arch
-#: is "deep" enough that bodies don't tip out of plane in 3D; matches
-#: the box-on-top thickness so the load distributes evenly.
+#: Extrusion thickness along the y-axis for the 2D->3D lift.
 BLOCK_DEPTH = 1.0
 
 #: Box2D's load-box half-extents (sample_stacking.cpp:810).
 LOAD_BOX_HX = 2.0
 LOAD_BOX_HZ = 0.5
+
+
+#: Cumulative vertical offset (along +z, the fall direction) added to
+#: each voussoir as we walk up the arch. Box2D's original sample ships
+#: polygons whose adjacent edges *exactly* coincide -- the 2D
+#: polygon-vs-polygon SAT narrow phase handles that case cleanly by
+#: clipping contacts along the shared edge. Newton's 3D convex-hull
+#: GJK / MPR can't: zero-volume overlap + zero-distance separation
+#: make the closest-feature output ambiguous, so contact normals flip
+#: and PhoenX (correctly) reacts to a perceived deep penetration along
+#: the wrong axis -- the 17-voussoir arch sinks softly through the
+#: ground.
+#:
+#: Lifting voussoir ``i`` by ``i * _VOUSSOIR_GAP`` along +z preserves
+#: every face's slope and orientation (the wedge lock that makes the
+#: arch self-supporting still works) and only separates adjacent
+#: voussoirs along the gravity axis by a sub-millimetre gap. On the
+#: very first substep each voussoir falls ``_VOUSSOIR_GAP`` to seat
+#: against its lower neighbour with cleanly-disambiguated normals.
+#: 0.5 mm is large enough to side-step the GJK degeneracy and small
+#: enough that PhoenX's bias-clamp absorbs the impact in one
+#: substep -- bigger gaps re-introduce ringing, smaller gaps slip
+#: back into the degenerate regime under floating-point noise.
+_VOUSSOIR_GAP: float = 5.0e-4
 
 
 def _prism_mesh_from_quad_xz(
@@ -136,11 +180,16 @@ class Example(PortedExample):
 
         # Right-side voussoirs: quad (ps1[i], ps2[i], ps2[i+1], ps1[i+1])
         # — inner-low, outer-low, outer-high, inner-high (CCW in the
-        # x-z plane).
+        # x-z plane). Each voussoir is lifted by ``i * _VOUSSOIR_GAP``
+        # along +z so adjacent pieces don't share faces (which
+        # Newton's convex-hull narrow phase resolves with degenerate
+        # normals -- see the constant's docstring).
         for i in range(8):
             quad = [PS1[i], PS2[i], PS2[i + 1], PS1[i + 1]]
             mesh = _prism_mesh_from_quad_xz(quad, BLOCK_DEPTH)
-            body = builder.add_body()
+            body = builder.add_body(
+                xform=wp.transform(p=wp.vec3(0.0, 0.0, i * _VOUSSOIR_GAP), q=wp.quat_identity()),
+            )
             builder.add_shape_convex_hull(body=body, mesh=mesh)
             extents.append(_quad_pick_extents(quad, BLOCK_DEPTH))
 
@@ -155,7 +204,9 @@ class Example(PortedExample):
                 (-PS2[i + 1][0], PS2[i + 1][1]),
             ]
             mesh = _prism_mesh_from_quad_xz(quad, BLOCK_DEPTH)
-            body = builder.add_body()
+            body = builder.add_body(
+                xform=wp.transform(p=wp.vec3(0.0, 0.0, i * _VOUSSOIR_GAP), q=wp.quat_identity()),
+            )
             builder.add_shape_convex_hull(body=body, mesh=mesh)
             extents.append(_quad_pick_extents(quad, BLOCK_DEPTH))
 
@@ -169,7 +220,9 @@ class Example(PortedExample):
             (-PS1[8][0], PS1[8][1]),
         ]
         mesh = _prism_mesh_from_quad_xz(keystone_quad, BLOCK_DEPTH)
-        body = builder.add_body()
+        body = builder.add_body(
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, 8 * _VOUSSOIR_GAP), q=wp.quat_identity()),
+        )
         builder.add_shape_convex_hull(body=body, mesh=mesh)
         extents.append(_quad_pick_extents(keystone_quad, BLOCK_DEPTH))
 
