@@ -309,26 +309,25 @@ class Example:
                 self._scale_foot_friction(phoenx_foot_friction_scale)
 
         if self.solver_name == "phoenx":
-            # ``substeps=1`` matches MuJoCo Warp's effective integrator
-            # dt (the example feeds ``solver.step(dt=5 ms)`` to both
-            # solvers). At higher substep counts PhoenX integrates the
-            # contact impulses so much finer than MuJoCo that the
-            # per-step contact-reaction torque on the foot-box corners
-            # flips sign, which propagates up the chain as a trunk-
-            # pitch direction reversal. The policy's projected gravity
-            # then disagrees with what it was trained on and the
-            # standing pose collapses (the "toes pushing into the
-            # floor" symptom). With substeps=1, the trunk pitches in
-            # the same direction as MuJoCo. Compensate with more PGS /
-            # velocity iterations so stability isn't sacrificed.
+            # PhoenX runs its own contacts (sticky CollisionPipeline
+            # auto-attached). 4 substeps + 8 PGS iterations matches the
+            # MuJoCo-parity sweep used by the Anymal walk demo and is
+            # the right cadence for PhysX-trained PD policies whose
+            # joint stiffnesses sit in the 100-1000 N*m/rad range.
             #
-            # ``velocity_readout="finite_difference"`` is harmless at
-            # substeps=1 (FD == substep_end) but kept enabled so this
-            # config remains correct if substeps is increased later.
+            # ``velocity_readout="finite_difference"`` stamps
+            # ``state.body_qd`` with the outer-step pose-delta velocity
+            # instead of PhoenX's substep-end value. Matches the
+            # post-integration ``qvel`` convention MuJoCo Warp returns
+            # (which is what the policy was trained against), and
+            # specifically removes the multi-rad/s per-step ringing
+            # that the stiff foot-ground contact resolution produces
+            # on the ankle DoFs (most visible after the first 1-2
+            # steps; see ``_g1_obs_diff.py``).
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
-                substeps=1,
-                solver_iterations=64,
+                substeps=20,
+                solver_iterations=8,
                 velocity_iterations=2,
                 velocity_readout="finite_difference",
             )
