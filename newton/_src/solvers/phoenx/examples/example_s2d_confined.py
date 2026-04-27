@@ -91,9 +91,7 @@ class Example(PortedExample):
         # Bottom (y = Y_INNER_LO) and top (y = Y_INNER_HI) walls.
         builder.add_shape_box(
             -1,
-            xform=wp.transform(
-                p=wp.vec3(0.0, Y_INNER_LO - WALL_HE, 0.0), q=wp.quat_identity()
-            ),
+            xform=wp.transform(p=wp.vec3(0.0, Y_INNER_LO - WALL_HE, 0.0), q=wp.quat_identity()),
             hx=X_INNER_HALF,
             hy=WALL_HE,
             hz=wall_hz,
@@ -101,9 +99,7 @@ class Example(PortedExample):
         )
         builder.add_shape_box(
             -1,
-            xform=wp.transform(
-                p=wp.vec3(0.0, Y_INNER_HI + WALL_HE, 0.0), q=wp.quat_identity()
-            ),
+            xform=wp.transform(p=wp.vec3(0.0, Y_INNER_HI + WALL_HE, 0.0), q=wp.quat_identity()),
             hx=X_INNER_HALF,
             hy=WALL_HE,
             hz=wall_hz,

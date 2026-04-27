@@ -192,12 +192,13 @@ def contact_partitions_is_removed(
 
 @wp.func
 def contact_partitions_get_random_value(
-    random_values: wp.array[int], i: int, section_marker: int, max_num_contacts: int
-) -> int:
-    r = random_values[i]
-    if i >= section_marker:
-        r += max_num_contacts
-    return r
+    random_values: wp.array[wp.int32],
+    cost_values: wp.array[wp.int32],
+    i: int,
+) -> wp.int64:
+    cost = wp.int64(cost_values[i])
+    jitter = wp.int64(random_values[i]) & _ID_MASK
+    return (cost << _COLOR_SHIFT) | jitter
 
 
 @wp.kernel(enable_backward=False)
@@ -205,13 +206,12 @@ def partitioning_coloring_kernel(
     partition_data_concat: wp.array[wp.int64],
     partition_ends: wp.array[int],
     max_used_color: wp.array[int],
-    random_values: wp.array[int],
+    random_values: wp.array[wp.int32],
+    cost_values: wp.array[wp.int32],
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
-    max_num_contacts: int,
     elements: wp.array[ElementInteractionData],
     num_elements: wp.array[int],
-    section_marker_single_el_arr: wp.array[int],
     color_arr: wp.array[int],
 ):
     # Jones-Plassmann independent-set pass: a vertex joins partition
@@ -224,7 +224,6 @@ def partitioning_coloring_kernel(
         return
 
     color_copy = color_arr[0]
-    section_marker = section_marker_single_el_arr[0]
 
     if contact_partitions_is_removed(partition_data_concat, tid, color_copy):
         return
@@ -234,7 +233,7 @@ def partitioning_coloring_kernel(
 
     is_local_max = bool(True)
 
-    self_prio = contact_partitions_get_random_value(random_values, tid, section_marker, max_num_contacts)
+    self_prio = contact_partitions_get_random_value(random_values, cost_values, tid)
     el = elements[tid]
 
     for j in range(MAX_BODIES):
@@ -255,10 +254,7 @@ def partitioning_coloring_kernel(
                 continue
             if contact_partitions_is_removed(partition_data_concat, neighbor, color_copy):
                 continue
-            if (
-                contact_partitions_get_random_value(random_values, neighbor, section_marker, max_num_contacts)
-                > self_prio
-            ):
+            if contact_partitions_get_random_value(random_values, cost_values, neighbor) > self_prio:
                 is_local_max = False
                 break
 
@@ -270,14 +266,13 @@ def partitioning_coloring_kernel(
 @wp.kernel(enable_backward=False)
 def partitioning_coloring_incremental_kernel(
     partition_data_concat: wp.array[wp.int64],
-    random_values: wp.array[int],
+    random_values: wp.array[wp.int32],
+    cost_values: wp.array[wp.int32],
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
-    max_num_contacts: int,
     elements: wp.array[ElementInteractionData],
     remaining_ids: wp.array[int],
     num_remaining: wp.array[int],
-    section_marker_single_el_arr: wp.array[int],
     color_arr: wp.array[int],
 ):
     """Jones-Plassmann MIS pass over a compact remaining-ids list.
@@ -299,7 +294,6 @@ def partitioning_coloring_incremental_kernel(
 
     tid = remaining_ids[slot]
     color_copy = color_arr[0]
-    section_marker = section_marker_single_el_arr[0]
 
     # Elements in the compact list are -- by construction -- not yet
     # assigned, so the outer ``is_removed`` self-check that the classic
@@ -307,7 +301,7 @@ def partitioning_coloring_incremental_kernel(
 
     is_local_max = bool(True)
 
-    self_prio = contact_partitions_get_random_value(random_values, tid, section_marker, max_num_contacts)
+    self_prio = contact_partitions_get_random_value(random_values, cost_values, tid)
     el = elements[tid]
 
     for j in range(MAX_BODIES):
@@ -330,10 +324,7 @@ def partitioning_coloring_incremental_kernel(
             # belong to an earlier round's partition. Filter them out.
             if contact_partitions_is_removed(partition_data_concat, neighbor, color_copy):
                 continue
-            if (
-                contact_partitions_get_random_value(random_values, neighbor, section_marker, max_num_contacts)
-                > self_prio
-            ):
+            if contact_partitions_get_random_value(random_values, cost_values, neighbor) > self_prio:
                 is_local_max = False
                 break
 

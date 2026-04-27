@@ -97,7 +97,6 @@ def maximal_independent_set_partitioning(
     elements: wp.array[ElementInteractionData],
     num_elements: wp.array[int],
     max_num_nodes: int,
-    section_marker_single_el_arr: wp.array[int],
     partition_ends: wp.array[int],
     num_partitions: wp.array[int],
     has_additional_partition: wp.array[int],
@@ -107,9 +106,9 @@ def maximal_independent_set_partitioning(
     partition_data_elements: wp.array[int],
     interaction_id_to_partition: wp.array[int],
     random_values: wp.array[int],
+    cost_values: wp.array[int],
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
-    max_num_contacts: int,
     # Scratch buffer required by Warp's key-value radix sort.
     partition_data_concat_sort_values: wp.array[int],
     # 1-element device array used to feed the current color into the coloring
@@ -157,12 +156,11 @@ def maximal_independent_set_partitioning(
                 partition_ends,
                 max_used_color,
                 random_values,
+                cost_values,
                 adjacency_section_end_indices,
                 vertex_to_adjacent_elements,
-                max_num_contacts,
                 elements,
                 num_elements,
-                section_marker_single_el_arr,
                 color_arr,
             ],
         )
@@ -216,8 +214,6 @@ class ContactPartitioner:
         self.max_num_interactions = max_num_interactions
         self.max_num_nodes = max_num_nodes
         self.max_num_partitions = max_num_partitions
-        # C# sets maxNumContacts = maxNumInteractions in the ctor.
-        self.max_num_contacts = max_num_interactions
 
         # Pairwise-distinct Jones-Plassmann priorities. A permutation of [1, N]
         # guarantees uniqueness, which the algorithm needs to break ties
@@ -227,10 +223,7 @@ class ContactPartitioner:
         rng = np.random.default_rng(seed)
         priorities = rng.permutation(max_num_interactions).astype(np.int32) + 1
         self._random_values = wp.from_numpy(priorities, dtype=wp.int32, device=device)
-
-        # All elements belong to a single "section" by default -> marker past
-        # the end disables the offset in ``GetRandomValue``.
-        self._section_marker = wp.array([max_num_interactions], dtype=wp.int32, device=device)
+        self._cost_values = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
         self._partition_ends = wp.zeros(max_num_partitions + 1, dtype=wp.int32, device=device)
         self._num_partitions = wp.zeros(1, dtype=wp.int32, device=device)
@@ -257,6 +250,7 @@ class ContactPartitioner:
         self,
         elements: wp.array[ElementInteractionData],
         num_elements: wp.array[int],
+        cost_values=None,
     ) -> None:
         """Run the colouring pipeline on ``elements[:num_elements[0]]``.
 
@@ -264,12 +258,16 @@ class ContactPartitioner:
             elements: Per-interaction body lists. Capacity must be
                 ``>= max_num_interactions``.
             num_elements: Single-element device array holding the active count.
+            cost_values: Optional per-interaction JP cost. If omitted, all costs
+                are zero and the colourer uses the seeded jitter only.
         """
+        if cost_values is None:
+            cost_values = self._cost_values
+
         maximal_independent_set_partitioning(
             elements=elements,
             num_elements=num_elements,
             max_num_nodes=self.max_num_nodes,
-            section_marker_single_el_arr=self._section_marker,
             partition_ends=self._partition_ends,
             num_partitions=self._num_partitions,
             has_additional_partition=self._has_additional_partition,
@@ -279,9 +277,9 @@ class ContactPartitioner:
             partition_data_elements=self._partition_data_elements,
             interaction_id_to_partition=self._interaction_id_to_partition,
             random_values=self._random_values,
+            cost_values=cost_values,
             adjacency_section_end_indices=self._adjacency_section_end_indices,
             vertex_to_adjacent_elements=self._vertex_to_adjacent_elements,
-            max_num_contacts=self.max_num_contacts,
             partition_data_concat_sort_values=self._partition_data_concat_sort_values,
             color_arr=self._color_arr,
         )

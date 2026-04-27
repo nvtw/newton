@@ -27,6 +27,9 @@
 
 from __future__ import annotations
 
+import os
+import pathlib
+
 import numpy as np
 import warp as wp
 
@@ -396,8 +399,66 @@ class Example:
             wp.capture_launch(self.graph)
         else:
             self.simulate()
+        self._print_step_report()
+        # Optional: snapshot the post-step constraint graph (elements,
+        # cost values, body count, jitter) so the standalone graph-
+        # coloring benchmark can replay the exact Kapla problem. Gated
+        # on PHOENX_DUMP_COLORING_GRAPH=<frame_index> so steady-state
+        # runs pay zero overhead.
+        dump_frame_env = os.environ.get("PHOENX_DUMP_COLORING_GRAPH")
+        if dump_frame_env is not None and int(dump_frame_env) == self.frame_index:
+            self._dump_coloring_graph()
         self.sim_time += self.frame_dt
         self.frame_index += 1
+
+    def _dump_coloring_graph(self) -> None:
+        """Snapshot the active constraint graph to ``kapla_graph.npz``.
+
+        Captures everything the colouring algorithms need (elements,
+        cost values, body count, JP jitter) in a self-contained file so
+        the benchmark can replay the exact Kapla problem without
+        rebuilding the scene or running collision detection.
+        """
+        partitioner = self.world._partitioner
+        n_active = int(self.world._num_active_constraints.numpy()[0])
+        elements_struct = partitioner._elements.numpy()[:n_active]
+        bodies = elements_struct["bodies"].astype(np.int32, copy=False)
+        cost = partitioner._cost_values.numpy()[:n_active].astype(np.int32, copy=False)
+        jitter = partitioner._random_values.numpy()[:n_active].astype(np.int32, copy=False)
+        out_path = pathlib.Path("kapla_graph.npz").resolve()
+        np.savez(
+            out_path,
+            bodies=bodies,
+            cost_values=cost,
+            random_values=jitter,
+            num_bodies=np.int32(self.world.num_bodies),
+            frame_index=np.int32(self.frame_index),
+        )
+        print(f"[PhoenX KaplaTower] dumped coloring graph to {out_path} (frame={self.frame_index}, n={n_active})")
+
+    def _print_step_report(self) -> None:
+        report = self.world.step_report()
+        # max_body_degree is the lower bound any valid graph
+        # colouring of the constraint conflict graph can achieve, so
+        # ``colors / max_body_degree`` shows how close JP is to optimal.
+        slack = (
+            f"{report.num_colors / report.max_body_degree:.2f}x"
+            if report.max_body_degree > 0
+            else "n/a"
+        )
+        fields = [
+            f"step={self.frame_index}",
+            f"contacts={report.num_contact_columns}",
+            f"active_constraints={report.num_active_constraints}",
+            f"colors={report.num_colors}",
+            f"max_body_degree={report.max_body_degree}",
+            f"colors/lower_bound={slack}",
+            f"color_sizes={report.color_sizes}",
+        ]
+        if report.per_world_num_colors is not None:
+            fields.append(f"per_world_num_colors={report.per_world_num_colors}")
+            fields.append(f"per_world_color_sizes={report.per_world_color_sizes}")
+        print("[PhoenX KaplaTower] " + " ".join(fields))
 
     def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)

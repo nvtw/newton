@@ -53,6 +53,7 @@ def _run_partitioner(
     max_num_partitions: int,
     max_num_interactions: int | None = None,
     random_values: np.ndarray | None = None,
+    cost_values: np.ndarray | None = None,
 ) -> dict:
     """Allocate all buffers, run the partitioner, and return the results as
     numpy arrays for host-side validation."""
@@ -88,13 +89,17 @@ def _run_partitioner(
         assert random_values.shape == (max_num_interactions,)
     random_values_arr = wp.from_numpy(random_values, dtype=wp.int32)
 
+    if cost_values is None:
+        cost_values = np.zeros(max_num_interactions, dtype=np.int32)
+    else:
+        cost_values = np.asarray(cost_values, dtype=np.int32)
+        assert cost_values.shape == (max_num_interactions,)
+    cost_values_arr = wp.from_numpy(cost_values, dtype=wp.int32)
+
     # Adjacency buffers. Upper bound on adjacency entries: every element
     # contributes at most MAX_BODIES vertex references.
     adjacency_section_end_indices = wp.zeros(max_num_nodes, dtype=wp.int32)
     vertex_to_adjacent_elements = wp.zeros(max_num_interactions * int(MAX_BODIES), dtype=wp.int32)
-
-    max_num_contacts = max_num_interactions
-    section_marker_single_el_arr = wp.array([max_num_interactions], dtype=wp.int32)
 
     # Sort scratch (key-value pairs, 2*N each).
     partition_data_concat_sort_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32)
@@ -105,7 +110,6 @@ def _run_partitioner(
         elements=elements,
         num_elements=num_elements_arr,
         max_num_nodes=max_num_nodes,
-        section_marker_single_el_arr=section_marker_single_el_arr,
         partition_ends=partition_ends,
         num_partitions=num_partitions_arr,
         has_additional_partition=has_additional_partition,
@@ -115,9 +119,9 @@ def _run_partitioner(
         partition_data_elements=partition_data_elements,
         interaction_id_to_partition=interaction_id_to_partition,
         random_values=random_values_arr,
+        cost_values=cost_values_arr,
         adjacency_section_end_indices=adjacency_section_end_indices,
         vertex_to_adjacent_elements=vertex_to_adjacent_elements,
-        max_num_contacts=max_num_contacts,
         partition_data_concat_sort_values=partition_data_concat_sort_values,
         color_arr=color_arr,
     )
@@ -221,6 +225,31 @@ class TestGraphColoring(unittest.TestCase):
         self.assertEqual(result["has_additional_partition"], 0)
         first = _get_partition_slice(result, 0)
         self.assertEqual(len(first), len(elements_bodies))
+
+    def test_cost_biased_priorities_cluster_high_cost(self):
+        # Two expensive contact-like columns each conflict with a cheap
+        # neighbour, but not with each other. Cost dominates jitter, so both
+        # expensive columns should win the first JP round.
+        elements_bodies = [
+            [0, 1],
+            [2, 3],
+            [0, 4],
+            [2, 5],
+        ]
+        cost_values = np.array([10, 10, 1, 1], dtype=np.int32)
+        random_values = np.array([1, 2, 4, 3], dtype=np.int32)
+
+        result = _run_partitioner(
+            elements_bodies,
+            max_num_nodes=6,
+            max_num_partitions=4,
+            random_values=random_values,
+            cost_values=cost_values,
+        )
+        _validate_partitions(elements_bodies, result, max_num_nodes=6)
+
+        first = {int(eid) for eid in _get_partition_slice(result, 0)}
+        self.assertEqual(first, {0, 1})
 
     def test_fully_connected_each_element_own_partition(self):
         # Every element touches body 0 => a clique. All elements conflict

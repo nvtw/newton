@@ -25,6 +25,10 @@ Typical usage::
 
 import warp as wp
 
+from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    ContactColumnContainer,
+    contact_get_contact_count,
+)
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     TILE_SCAN_BLOCK_DIM,
@@ -55,6 +59,21 @@ __all__ = ["MAX_COLORS", "IncrementalContactPartitioner"]
 # margin at negligible memory cost (``color_starts`` is
 # ``(MAX_COLORS + 1) * 4 B = 4100 B``).
 MAX_COLORS = 1024
+
+
+@wp.kernel(enable_backward=False)
+def _fill_cost_values_from_contacts_kernel(
+    cost_values: wp.array[wp.int32],
+    contact_cols: ContactColumnContainer,
+    num_contact_columns: wp.array[wp.int32],
+    num_joints: wp.int32,
+):
+    tid = wp.tid()
+    local_cid = tid - num_joints
+    if local_cid >= wp.int32(0) and local_cid < num_contact_columns[0]:
+        cost_values[tid] = contact_get_contact_count(contact_cols, local_cid)
+    else:
+        cost_values[tid] = wp.int32(0)
 
 
 class IncrementalContactPartitioner:
@@ -90,12 +109,9 @@ class IncrementalContactPartitioner:
         device: wp.DeviceLike = None,
         seed: int = 0,
         use_tile_scan: bool = True,
-        contact_cid_start: int = 0,
     ) -> None:
         self.max_num_interactions = max_num_interactions
         self.max_num_nodes = max_num_nodes
-        # C# convention: max_num_contacts == max_num_interactions in single-section mode.
-        self.max_num_contacts = max_num_interactions
         # When True, :meth:`launch` uses a single-block tile-scan kernel
         # (graph-capture safe, no implicit allocations) instead of
         # ``wp.utils.array_scan``. Flag/offset buffers are padded to a
@@ -103,30 +119,15 @@ class IncrementalContactPartitioner:
         # never read past the end of the allocation.
         self.use_tile_scan = use_tile_scan
 
-        # Contacts live at cid >= ``contact_cid_start``. The JP kernels
-        # OR bit 30 into their priority on the fly (no extra storage)
-        # so contacts always outrank joints -- contacts cluster into
-        # earlier colours, joints into later colours, cutting intra-warp
-        # divergence in the fast-tail constraint iterate kernel.
-        self._contact_cid_start = int(contact_cid_start)
-
         import numpy as np  # noqa: PLC0415
 
         rng = np.random.default_rng(seed)
         priorities = rng.permutation(max_num_interactions).astype(np.int32) + 1
         self._random_values = wp.from_numpy(priorities, dtype=wp.int32, device=device)
-
-        # Two-section priority: joints live in [0, contact_cid_start),
-        # contacts in [contact_cid_start, max_num_interactions).
-        # ``contact_partitions_get_random_value`` adds
-        # ``max_num_contacts`` to contact priorities, so every contact
-        # beats every joint in Jones-Plassmann -- contacts cluster
-        # into earlier colours, joints into later, cutting intra-warp
-        # divergence in the fast-tail iterate dispatch.
-        # Setting the marker to ``max_num_interactions`` disables the bias
-        # (single-section behaviour, used when there are no joints).
-        marker = int(contact_cid_start) if 0 < int(contact_cid_start) < max_num_interactions else max_num_interactions
-        self._section_marker = wp.array([marker], dtype=wp.int32, device=device)
+        # Per-cid JP cost. The solver refreshes contacts each step from
+        # ContactColumnContainer.contact_count; standalone partitioner tests
+        # leave this zero-filled for jitter-only colouring.
+        self._cost_values = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
         # Adjacency storage.
         self._adjacency_section_end_indices = wp.zeros(max_num_nodes, dtype=wp.int32, device=device)
@@ -226,6 +227,29 @@ class IncrementalContactPartitioner:
     # ------------------------------------------------------------------
     # Setup / loop control
     # ------------------------------------------------------------------
+
+    def set_costs_from_contacts(
+        self,
+        num_joints: int,
+        num_contact_columns: wp.array[wp.int32],
+        contact_cols: ContactColumnContainer,
+    ) -> None:
+        """Refresh per-cid JP costs from contact column contact counts.
+
+        Joints and inactive tail cids get cost 0. Active contact cids get
+        the number of contacts in their shape-pair column.
+        """
+        wp.launch(
+            _fill_cost_values_from_contacts_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._cost_values,
+                contact_cols,
+                num_contact_columns,
+                wp.int32(num_joints),
+            ],
+            device=self._cost_values.device,
+        )
 
     def reset(
         self,
@@ -399,13 +423,12 @@ class IncrementalContactPartitioner:
             inputs=[
                 self._partition_data_concat,
                 self._random_values,
+                self._cost_values,
                 self._adjacency_section_end_indices,
                 self._vertex_to_adjacent_elements,
-                self.max_num_contacts,
                 self._elements,
                 self._remaining_ids,
                 self._num_remaining,
-                self._section_marker,
                 self._current_color,
             ],
         )
@@ -559,13 +582,12 @@ class IncrementalContactPartitioner:
                 inputs=[
                     self._partition_data_concat,
                     self._random_values,
+                    self._cost_values,
                     self._adjacency_section_end_indices,
                     self._vertex_to_adjacent_elements,
-                    self.max_num_contacts,
                     self._elements,
                     self._remaining_ids,
                     self._num_remaining,
-                    self._section_marker,
                     self._current_color,
                 ],
             )

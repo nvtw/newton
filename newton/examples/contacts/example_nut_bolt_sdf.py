@@ -171,9 +171,7 @@ class Example:
                 self.model, substeps=4, solver_iterations=8, velocity_iterations=1
             )
         else:
-            raise ValueError(
-                f"Unknown solver type: {self.solver_type}. Choose from 'xpbd', 'mujoco', or 'phoenx'."
-            )
+            raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd', 'mujoco', or 'phoenx'.")
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()

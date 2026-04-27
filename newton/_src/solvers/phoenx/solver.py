@@ -839,3 +839,15 @@ class SolverPhoenX(SolverBase):
             outputs=[contacts.force],
             device=self.device,
         )
+
+    def step_report(self) -> PhoenXWorld.StepReport:
+        """Diagnostic snapshot of the most recent :meth:`step`.
+
+        Forwards to :meth:`PhoenXWorld.step_report`. Reports the graph
+        colour count, per-colour element histogram, and active contact
+        column count from the just-finished step. Performs a few
+        device-to-host copies on demand and is not graph-capture
+        safe; only call from host code outside any
+        :func:`wp.ScopedCapture` region.
+        """
+        return self.world.step_report()
