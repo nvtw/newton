@@ -24,6 +24,11 @@ from newton._src.solvers.phoenx.examples._ported_example_base import (
     run_ported_example,
 )
 
+#: D-only velocity drive on every revolute, playing the role of Box2D's
+#: ``m_jointFrictionTorque`` (motor with ``motorSpeed=0``, small max
+#: torque). Without it limbs are completely floppy on impact.
+JOINT_DAMPING = 0.05
+
 
 class Example(PortedExample):
     sim_substeps = 12
@@ -72,6 +77,9 @@ class Example(PortedExample):
                 axis=(0.0, 1.0, 0.0),
                 limit_lower=-0.5,
                 limit_upper=0.5,
+                target_vel=0.0,
+                target_kd=JOINT_DAMPING,
+                actuator_mode=newton.JointTargetMode.VELOCITY,
             )
         )
 
@@ -88,6 +96,9 @@ class Example(PortedExample):
                     axis=(0.0, 1.0, 0.0),
                     limit_lower=joint_lo,
                     limit_upper=joint_hi,
+                    target_vel=0.0,
+                    target_kd=JOINT_DAMPING,
+                    actuator_mode=newton.JointTargetMode.VELOCITY,
                 )
             )
             return child

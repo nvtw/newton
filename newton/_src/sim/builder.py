@@ -3644,6 +3644,8 @@ class ModelBuilder:
         label: str | None = None,
         lock_inertia: bool = False,
         is_kinematic: bool = False,
+        linear_velocity: Vec3 | None = None,
+        angular_velocity: Vec3 | None = None,
         custom_attributes: dict[str, Any] | None = None,
     ) -> int:
         """Adds a stand-alone free-floating rigid body to the model.
@@ -3676,6 +3678,12 @@ class ModelBuilder:
                 center of mass, or inertia. This does not affect merging behavior in
                 :meth:`collapse_fixed_joints`, which always accumulates mass and inertia across merged bodies.
             is_kinematic: If True, the body is kinematic and does not respond to forces.
+            linear_velocity: Initial linear velocity of the body in the world frame [m/s].
+                If None (default), the body starts at rest. Written into both
+                :attr:`body_qd` and the auto-created free joint's velocity DoFs so
+                downstream :func:`newton.eval_fk` calls preserve the value.
+            angular_velocity: Initial angular velocity of the body in the world frame
+                [rad/s]. If None (default), the body starts at rest.
             custom_attributes: Dictionary of custom attribute names to values.
 
         Returns:
@@ -3703,6 +3711,18 @@ class ModelBuilder:
         # Create an articulation from the joint
         articulation_label = f"{label}_articulation" if label else None
         self.add_articulation([joint_id], label=articulation_label)
+
+        # Optional initial twist. Written to both ``body_qd`` (the
+        # state used directly by solvers that read body twists) and the
+        # FREE joint's six velocity DoFs (the source of truth that
+        # ``eval_fk`` propagates back to ``body_qd``). Newton's
+        # spatial_vector / FREE-joint qd layout is (linear, angular).
+        if linear_velocity is not None or angular_velocity is not None:
+            lin = axis_to_vec3(linear_velocity) if linear_velocity is not None else wp.vec3()
+            ang = axis_to_vec3(angular_velocity) if angular_velocity is not None else wp.vec3()
+            self.body_qd[body_id] = wp.spatial_vector(lin[0], lin[1], lin[2], ang[0], ang[1], ang[2])
+            qd_start = self.joint_qd_start[joint_id]
+            self.joint_qd[qd_start : qd_start + 6] = [lin[0], lin[1], lin[2], ang[0], ang[1], ang[2]]
 
         return body_id
 

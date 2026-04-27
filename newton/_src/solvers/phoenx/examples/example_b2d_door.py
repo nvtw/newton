@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import math
+
 import warp as wp
 
 import newton
@@ -49,14 +51,17 @@ class Example(PortedExample):
             parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, DOOR_HZ + 0.05), q=wp.quat_identity()),
             child_xform=wp.transform(p=wp.vec3(0.0, -DOOR_HY, 0.0), q=wp.quat_identity()),
             axis=(0.0, 0.0, 1.0),
+            # Matches Box2D's Door: lowerAngle=-pi/2, upperAngle=pi/2.
+            limit_lower=-0.5 * math.pi,
+            limit_upper=0.5 * math.pi,
         )
         builder.add_articulation([joint])
 
         # Ball thrown at the door.
         ball = builder.add_body(
             xform=wp.transform(p=wp.vec3(2.0, 0.5, DOOR_HZ + 0.05), q=wp.quat_identity()),
+            linear_velocity=(-8.0, 0.0, 0.0),
         )
-        builder.body_qd[ball] = (0.0, 0.0, 0.0, -8.0, 0.0, 0.0)
         builder.add_shape_sphere(ball, radius=BALL_RADIUS)
 
         return [

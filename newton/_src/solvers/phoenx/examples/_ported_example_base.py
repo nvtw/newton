@@ -74,7 +74,7 @@ class PortedExample:
     * Override :attr:`fps`, :attr:`sim_substeps`, :attr:`solver_iterations`,
       :attr:`velocity_iterations`, :attr:`gravity`, :attr:`step_layout`,
       :attr:`broad_phase`, :attr:`shape_pairs_max`, :attr:`default_friction`,
-      :attr:`default_restitution` as needed.
+      :attr:`default_restitution`, :attr:`show_contacts` as needed.
     """
 
     fps: int = 60
@@ -87,6 +87,11 @@ class PortedExample:
     shape_pairs_max: int | None = None
     default_friction: float = 0.5
     default_restitution: float = 0.0
+    #: Whether to draw contact arrows. Set ``False`` on big scenes:
+    #: ``viewer.log_contacts`` reads ``rigid_contact_count`` via
+    #: ``.numpy()`` every frame, forcing a host sync that defeats the
+    #: ViewerGL CUDA-OpenGL interop path.
+    show_contacts: bool = True
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -297,9 +302,16 @@ class PortedExample:
         self.sim_time += self.frame_dt
 
     def render(self) -> None:
+        # ``log_state`` uses ViewerGL's CUDA-OpenGL interop path: the
+        # body-state CUDA buffer is mapped directly into the
+        # instance-transform VBO with no D2H copy. ``log_contacts`` would
+        # break that path on every frame because it reads
+        # ``rigid_contact_count`` via ``.numpy()`` to size the arrow
+        # batch -- skip it for scenes with ``show_contacts = False``.
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state)
-        self.viewer.log_contacts(self.contacts, self.state)
+        if self.show_contacts:
+            self.viewer.log_contacts(self.contacts, self.state)
         self.viewer.end_frame()
 
 

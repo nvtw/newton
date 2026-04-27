@@ -4,9 +4,10 @@
 ###########################################################################
 # Box2D port: ``Joints / Cantilever``
 #
-# 8-plank cantilever beam: each plank attaches to the previous one by a
-# revolute joint at the connecting edge; the first plank is welded to a
-# static world anchor. The beam sags under gravity.
+# 8-plank cantilever beam: every joint is a weld (fixed) at the
+# connecting edge, matching Box2D's ``sample_joints.cpp::Cantilever``
+# (``b2WeldJoint`` for all 8 joints, including the world anchor). The
+# beam sags slightly under gravity.
 #
 # Run: python -m newton._src.solvers.phoenx.examples.example_b2d_cantilever
 ###########################################################################
@@ -60,13 +61,14 @@ class Example(PortedExample):
                 xform=wp.transform(p=wp.vec3(cx, 0.0, z), q=wp.quat_identity()),
             )
             builder.add_shape_box(link, hx=PLANK_HX, hy=PLANK_HY, hz=PLANK_HZ)
+            # Weld (fixed) joint -- matches Box2D's b2WeldJoint. A revolute
+            # would let the beam articulate into a rope, not a beam.
             joints.append(
-                builder.add_joint_revolute(
+                builder.add_joint_fixed(
                     parent=prev,
                     child=link,
                     parent_xform=wp.transform(p=wp.vec3(PLANK_HX, 0.0, 0.0), q=wp.quat_identity()),
                     child_xform=wp.transform(p=wp.vec3(-PLANK_HX, 0.0, 0.0), q=wp.quat_identity()),
-                    axis=(0.0, 1.0, 0.0),
                 )
             )
             extents.append(default_box_half_extents(PLANK_HX, PLANK_HY, PLANK_HZ))
