@@ -34,6 +34,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     TILE_SCAN_BLOCK_DIM,
     ElementInteractionData,
+    greedy_clear_int_kernel,
     greedy_color_histogram_kernel,
     greedy_count_and_scan_color_starts_kernel,
     greedy_reset_init_kernel,
@@ -278,6 +279,12 @@ class IncrementalContactPartitioner:
         # grid can stay much smaller than the constraint capacity --
         # over-launching here is pure warp-scheduling overhead.
         self._greedy_grid_size: int = _greedy_coloring_grid_size(max_num_interactions, device)
+        # Predicate for the in-graph greedy-overflow fallback. Copied
+        # from ``_overflow_flag`` after the greedy build so the
+        # ``wp.capture_while`` body that runs the round-based JP
+        # rebuild can clear it independently of the JP path's own
+        # overflow accounting.
+        self._fallback_flag: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Sweep cursor used by :meth:`begin_sweep` / the PGS kernels.
         # Holds the number of colours still to process in the current
@@ -545,22 +552,35 @@ class IncrementalContactPartitioner:
         :attr:`num_colors`. The loop is a ``wp.capture_while`` so the
         build is graph-capture safe; the colour count stays
         device-resident.
-
-        Called exactly once per ``World.step()``: the constraint
-        graph is frozen inside a step (contacts ingested before the
-        substep loop, joints static) so one CSR covers every substep
-        and PGS iteration. Leaves the per-colour streaming state
-        consistent with a full JP loop, so Mode A :meth:`launch` can
-        be intermixed across steps (not within one build).
         """
         assert self._elements is not None and self._num_elements is not None, (
             "reset() must be called before build_csr()"
         )
+        self._build_csr_inner()
 
-        # Initialise CSR-specific state: zero the colour count, stamp
-        # color_starts[0] = 0, reset current_color / num_remaining /
-        # num_colors. Also wipe the per-colour partition_count so Mode
-        # A readers never see stale data after a Mode B build.
+        # Surface MAX_COLORS overflow as an exception when not
+        # capturing (D2H reads are illegal during capture).
+        device = self._overflow_flag.device
+        if device.is_cuda and device.is_capturing:
+            return
+        if int(self._overflow_flag.numpy()[0]) != 0:
+            raise RuntimeError(
+                "PhoenX graph coloring exceeded MAX_COLORS "
+                f"(={MAX_COLORS}). The constraint graph requires more "
+                "partitions than the fixed-size color_starts buffer can "
+                "hold. This usually indicates a pathological contact "
+                "graph (e.g. a super-hub body touching many contacts) "
+                "or an upstream ingest bug that cross-links worlds."
+            )
+
+    def _build_csr_inner(self) -> None:
+        """Captured-graph-safe body of :meth:`build_csr`.
+
+        Does init + capture_while + post-pass. No host-side reads, so
+        callers can stuff this inside another captured region (e.g.
+        the JP fallback path of
+        :meth:`build_csr_greedy_with_jp_fallback`).
+        """
         wp.launch(
             incremental_init_csr_kernel,
             dim=1,
@@ -572,17 +592,8 @@ class IncrementalContactPartitioner:
                 self._num_elements,
             ],
         )
-        # Reset the MAX_COLORS overflow flag for this build. If the
-        # capture_while loop hits the cap, the compact kernel sets this
-        # to 1 and we raise below, turning a previously-silent buffer
-        # overrun into a clear error.
+        # Reset the MAX_COLORS overflow flag for this build.
         self._overflow_flag.zero_()
-
-        # Reset per-element state that the JP coloring loop consumes.
-        # This mirrors what reset() does after the adjacency rebuild;
-        # we cannot reuse ``reset`` itself because build_csr can be
-        # called repeatedly on the same unchanged adjacency (e.g. if
-        # the caller invoked ``reset_loop_state_only`` earlier).
         wp.launch(
             incremental_reset_loop_state_kernel,
             dim=self.max_num_interactions,
@@ -597,42 +608,10 @@ class IncrementalContactPartitioner:
             dim=self.max_num_interactions,
             inputs=[self._remaining_ids, self._num_elements],
         )
-
-        # Drive the coloring to completion. Each iteration: (1) run the
-        # JP MIS pass over the current compact remaining-ids list,
-        # (2) append the just-committed elements to
-        # ``element_ids_by_color`` at ``color_starts[cc]`` and advance
-        # loop state. Terminates when ``num_remaining`` hits zero, OR
-        # when the compact kernel zeros ``num_remaining`` after hitting
-        # the ``MAX_COLORS`` cap.
         wp.capture_while(
             self._num_remaining,
             self._capture_build_csr_step,
         )
-
-        # Host-side overflow check via a ``.numpy()`` sync (~10 us
-        # @256 worlds) -- the only way to surface a graph-captured
-        # overflow as a Python exception. Skipped inside a user-owned
-        # capture (D2H would fail with "legacy stream depending on a
-        # capturing blocking stream"); the kernel early-exit still
-        # protects the buffer, user sees the raise on the next
-        # uncaptured step. Without this, overflow silently returned
-        # corrupted state -- see Bug #2 in ``Bug.md``.
-        device = self._overflow_flag.device
-        if device.is_cuda and device.is_capturing:
-            return
-        if int(self._overflow_flag.numpy()[0]) != 0:
-            raise RuntimeError(
-                "PhoenX graph coloring exceeded MAX_COLORS "
-                f"(={MAX_COLORS}). The constraint graph requires more "
-                "partitions than the fixed-size color_starts buffer can "
-                "hold. This usually indicates a pathological contact "
-                "graph (e.g. a super-hub body touching many contacts) "
-                "or an upstream ingest bug that cross-links worlds. "
-                "Inspect `bodies[0]` frequency in the element table to "
-                "diagnose; raising MAX_COLORS is a stop-gap, not a "
-                "fix."
-            )
 
     def _capture_build_csr_step(self) -> None:
         """Body of the ``build_csr`` capture_while.
@@ -685,38 +664,56 @@ class IncrementalContactPartitioner:
     # ------------------------------------------------------------------
 
     def build_csr_greedy(self) -> None:
-        """Greedy variant of :meth:`build_csr` using JP-MIS + smallest-
-        free-colour assignment.
+        """Greedy build (JP-MIS + smallest-free-colour). Bounded at
+        :data:`GREEDY_MAX_COLORS` (64) by the int64 forbidden mask;
+        raises ``RuntimeError`` if the graph wants more.
 
-        Same input contract (``reset()`` must have been called to build
-        adjacency) and same output contract (``element_ids_by_color`` /
-        ``color_starts`` / ``num_colors`` populated; ``num_colors[0]``
-        bounded by :data:`GREEDY_MAX_COLORS`).
-
-        Algorithm: each round picks an MIS via the standard JP rule
-        (vertex commits iff it has the highest priority among its
-        still-uncoloured neighbours), but each committed vertex
-        receives the smallest colour not used by its already-coloured
-        neighbours instead of the round number. Empirically gives
-        2-3x fewer colours than the round-equals-colour JP at similar
-        per-round cost.
-
-        Determinism: order of element ids within a single colour is
-        scattered atomically and not deterministic across runs, but
-        the *set* of elements per colour is fully determined by the
-        adjacency, priorities, and costs; PGS sweeps consume each
-        colour as an unordered independent set so the within-colour
-        order is irrelevant.
+        Most callers should use
+        :meth:`build_csr_greedy_with_jp_fallback` instead, which
+        gracefully degrades to round-based JP without a host poll.
         """
         assert self._elements is not None and self._num_elements is not None, (
             "reset() must be called before build_csr_greedy()"
         )
+        self._build_csr_greedy_inner()
+        device = self._overflow_flag.device
+        if device.is_cuda and device.is_capturing:
+            return
+        if int(self._overflow_flag.numpy()[0]) != 0:
+            raise RuntimeError(
+                "PhoenX greedy graph coloring exceeded GREEDY_MAX_COLORS "
+                f"(={int(GREEDY_MAX_COLORS)}). The constraint graph "
+                "requires more partitions than a single int64 forbidden "
+                "mask can track. Use build_csr_greedy_with_jp_fallback "
+                "or build_csr instead."
+            )
 
-        # Reset CSR-side state (color_starts[0] = 0, num_colors = 0,
-        # current_color = 0). We don't use ``num_remaining`` for the
-        # greedy capture_while -- ``any_uncolored`` drives termination
-        # instead -- but the kernel writes to it so the field stays
-        # coherent for any consumer that reads it.
+    def build_csr_greedy_with_jp_fallback(self) -> None:
+        """Greedy build with an in-graph round-based-JP fallback.
+
+        Runs the greedy build first; if its 64-colour bitmask
+        overflows on this graph, runs the round-based ``build_csr``
+        inside a ``wp.capture_while`` keyed on the overflow flag so
+        the corrupt CSR is overwritten with a valid one inside the
+        same captured frame. No host poll, no probe step, no
+        per-step branching from Python.
+        """
+        self._build_csr_greedy_inner()
+        # Stage the fallback predicate. ``_fallback_flag`` is a
+        # separate buffer from ``_overflow_flag`` so the JP body can
+        # clear it without racing the JP path's own MAX_COLORS
+        # overflow accounting (which writes back to
+        # ``_overflow_flag``).
+        wp.copy(self._fallback_flag, self._overflow_flag)
+        wp.capture_while(self._fallback_flag, self._capture_jp_fallback_step)
+
+    def _build_csr_greedy_inner(self) -> None:
+        """Captured-graph-safe body of :meth:`build_csr_greedy`.
+
+        Init + capture_while + post-pass. Splits cleanly so the
+        in-graph fallback orchestrator above can call this without
+        the host overflow-raise that the public method appends.
+        """
         wp.launch(
             incremental_init_csr_kernel,
             dim=1,
@@ -728,11 +725,6 @@ class IncrementalContactPartitioner:
                 self._num_elements,
             ],
         )
-        # One-shot reset: zero overflow flag, color_count buckets,
-        # and color_offsets cursor. The ``num_remaining`` predicate
-        # was initialised to ``num_elements`` by
-        # :func:`incremental_init_csr_kernel` above; the greedy
-        # kernel decrements it once per commit.
         wp.launch(
             greedy_reset_init_kernel,
             dim=int(GREEDY_MAX_COLORS),
@@ -743,11 +735,6 @@ class IncrementalContactPartitioner:
                 int(GREEDY_MAX_COLORS),
             ],
         )
-
-        # Reset per-element packed tag (clears any leftover colour
-        # from a previous build_csr_greedy on the same adjacency).
-        # No ``remaining_ids`` to initialise -- the greedy kernel
-        # iterates ``[0, num_elements)`` directly.
         wp.launch(
             incremental_reset_loop_state_kernel,
             dim=self.max_num_interactions,
@@ -757,22 +744,10 @@ class IncrementalContactPartitioner:
                 self._num_elements,
             ],
         )
-
-        # Main loop: greedy MIS-and-colour kernel only (no compact).
-        # Capture_while predicate is ``num_remaining`` -- strictly
-        # decreasing across rounds (the kernel atomic_subs once per
-        # commit) so the conditional CUDA graph converges cleanly.
         wp.capture_while(
             self._num_remaining,
             self._capture_build_csr_greedy_step,
         )
-
-        # Post-pass: histogram colours into color_count, derive
-        # color_starts via exclusive prefix scan, scatter element ids
-        # into element_ids_by_color in colour order. All graph-capture
-        # safe (no host syncs); these MUST run before the host-side
-        # overflow check returns early in the capture path so that the
-        # CSR is populated either way.
         wp.launch(
             greedy_color_histogram_kernel,
             dim=self.max_num_interactions,
@@ -805,24 +780,17 @@ class IncrementalContactPartitioner:
             ],
         )
 
-        # Surface overflow only outside graph capture (D2H syncs are
-        # illegal during capture). Same host-sync contract as
-        # ``build_csr``: a captured build silently completes; the next
-        # uncaptured call observes the flag and raises.
-        device = self._overflow_flag.device
-        if device.is_cuda and device.is_capturing:
-            return
-        if int(self._overflow_flag.numpy()[0]) != 0:
-            raise RuntimeError(
-                "PhoenX greedy graph coloring exceeded GREEDY_MAX_COLORS "
-                f"(={int(GREEDY_MAX_COLORS)}). The constraint graph "
-                "requires more partitions than a single int64 forbidden "
-                "mask can track. This either indicates a very dense "
-                "subgraph (max body degree > 64) or a worse-than-greedy "
-                "interaction between the JP MIS and the colour-selection "
-                "rule. Fall back to ``build_csr`` (round-based JP) by "
-                "switching solver_config.PHOENX_USE_GREEDY_COLORING off."
-            )
+    def _capture_jp_fallback_step(self) -> None:
+        """Body of the in-graph greedy->JP fallback capture_while.
+
+        Runs the round-based JP rebuild and clears the fallback
+        predicate so the surrounding ``wp.capture_while`` exits after
+        exactly one iteration regardless of whether JP itself
+        overflows ``MAX_COLORS`` (that's a separate, much more
+        permissive cap).
+        """
+        self._build_csr_inner()
+        wp.launch(greedy_clear_int_kernel, dim=1, inputs=[self._fallback_flag])
 
     def _capture_build_csr_greedy_step(self) -> None:
         """Body of the ``build_csr_greedy`` capture_while.
