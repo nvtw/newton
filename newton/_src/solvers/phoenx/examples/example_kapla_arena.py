@@ -256,6 +256,7 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
+            max_thread_blocks=32,
             device=self.device,
         )
 

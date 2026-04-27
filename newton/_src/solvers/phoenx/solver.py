@@ -184,6 +184,7 @@ class SolverPhoenX(SolverBase):
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
+        max_thread_blocks: int | None = None,
         velocity_readout: str = "substep_end",
     ):
         """Build the PhoenX solver from ``model``.
@@ -209,6 +210,19 @@ class SolverPhoenX(SolverBase):
                 picks per-step from the colour-size histogram;
                 ``32`` = one warp per world (legacy), ``16`` = two,
                 ``8`` = four (rarely wins). Graph-capture safe.
+            max_thread_blocks: Optional hard cap on the persistent
+                grid used by the single-world PGS sweeps
+                (constraint prepare, main iterate, and velocity
+                relax). ``None`` (default) keeps the auto-sized
+                grid -- 256 threads per block, ``clamp(ceil(cap /
+                256), 32, 4 * sm_count)`` blocks on CUDA. When set,
+                the grid is sized to ``min(ceil(cap / 256),
+                max_thread_blocks)`` blocks, bypassing both the
+                32-block floor and the SM-derived ceiling. Use this
+                to share the GPU with a co-resident workload (e.g.
+                a renderer or a second solver) or to measure SM
+                occupancy. No effect on
+                ``step_layout="multi_world"``.
             velocity_readout: Convention used when stamping
                 ``state_out.body_qd``. Three modes:
 
@@ -391,6 +405,7 @@ class SolverPhoenX(SolverBase):
             num_worlds=num_worlds,
             step_layout=step_layout,
             threads_per_world=threads_per_world,
+            max_thread_blocks=max_thread_blocks,
             device=self.device,
         )
 

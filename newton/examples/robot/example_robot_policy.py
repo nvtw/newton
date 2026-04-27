@@ -259,7 +259,7 @@ class Example:
             # to the contact-impulse asymmetry observed at step 0/1.
             # Force gap = 0 on the PhoenX path so the contact set
             # contains only real surface contacts.
-            builder.default_shape_cfg.gap = 0.0
+            builder.default_shape_cfg.gap = 0.01
 
         builder.add_usd(
             newton.examples.get_asset(asset_directory + "/" + robot_config.asset_path),

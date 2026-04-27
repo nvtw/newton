@@ -159,7 +159,11 @@ def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]
 _SINGLEWORLD_BLOCK_DIM: int = 256
 
 
-def _singleworld_total_threads(constraint_capacity: int, device) -> int:
+def _singleworld_total_threads(
+    constraint_capacity: int,
+    device,
+    max_thread_blocks: int | None = None,
+) -> int:
     """Persistent grid size for the single-world PGS sweep kernels.
 
     Mirrors :class:`NarrowPhase`'s "saturate without overprovisioning"
@@ -170,12 +174,32 @@ def _singleworld_total_threads(constraint_capacity: int, device) -> int:
     Args:
         constraint_capacity: Upper bound on active cids per colour.
         device: Warp device (only ``sm_count`` is read).
+        max_thread_blocks: Optional hard cap on the persistent grid's
+            block count. When set, replaces the default ``4 *
+            sm_count`` (CUDA) / ``256`` (CPU) cap *and* the 32-block
+            floor; the grid is sized to ``min(capacity_blocks,
+            max_thread_blocks)`` (still at least 1 block). Use this
+            to share the GPU with a co-resident workload or to
+            measure SM-occupancy effects. Only the single-world
+            layout's PGS sweeps (prepare, main iterate, velocity
+            relax) read this; the multi-world fast-tail path is
+            unaffected.
 
     Returns:
         Persistent grid size in threads, multiple of
         :data:`_SINGLEWORLD_BLOCK_DIM`.
     """
     block_dim = _SINGLEWORLD_BLOCK_DIM
+    capacity_blocks = (max(1, int(constraint_capacity)) + block_dim - 1) // block_dim
+    if max_thread_blocks is not None:
+        if int(max_thread_blocks) < 1:
+            raise ValueError(f"max_thread_blocks must be >= 1 (got {max_thread_blocks})")
+        # Opt-in mode: respect the user's cap verbatim, bypassing the
+        # 32-block floor and SM-derived ceiling. Still clamped above
+        # by ``capacity_blocks`` because launching more blocks than
+        # there are cids strands work without benefit.
+        num_blocks = max(1, min(capacity_blocks, int(max_thread_blocks)))
+        return block_dim * num_blocks
     device_obj = wp.get_device(device)
     if device_obj.is_cuda:
         # 4 blocks/SM hits good occupancy without overprovisioning.
@@ -187,7 +211,6 @@ def _singleworld_total_threads(constraint_capacity: int, device) -> int:
     # ones. The ``capacity_blocks`` cap prevents a 900K-cid capacity
     # from demanding more threads than there are cids.
     min_blocks = 32
-    capacity_blocks = (max(1, int(constraint_capacity)) + block_dim - 1) // block_dim
     num_blocks = max(min_blocks, min(capacity_blocks, max_blocks_limit))
     return block_dim * num_blocks
 
@@ -276,6 +299,7 @@ class PhoenXWorld:
         num_worlds: int = 1,
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
+        max_thread_blocks: int | None = None,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -327,6 +351,18 @@ class PhoenXWorld:
                 ``8`` = four (rarely wins). Grid is always
                 ``num_worlds * 32`` lanes with the surplus
                 early-exiting, so this knob is graph-capture safe.
+            max_thread_blocks: Optional hard cap on the persistent
+                grid used by the single-world PGS sweeps (prepare,
+                main iterate, velocity relax). When ``None``
+                (default) the grid is sized as
+                ``clamp(ceil(cap / 256), 32, 4 * sm_count)`` blocks
+                of 256 threads. When set, replaces both the
+                32-block floor and the SM-derived ceiling, so the
+                grid becomes ``min(ceil(cap / 256),
+                max_thread_blocks)`` blocks. Use this to share the
+                GPU with a co-resident workload or to measure
+                occupancy. No effect on
+                ``step_layout="multi_world"``.
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -431,8 +467,20 @@ class PhoenXWorld:
         # Persistent grid size for the single-world PGS sweep kernels.
         # Fixed at construction so every colour launch uses the same
         # ``dim`` -- required to keep the outer CUDA graph capture
-        # stable across varying per-colour active counts.
-        self._singleworld_total_threads: int = _singleworld_total_threads(self._constraint_capacity, self.device)
+        # stable across varying per-colour active counts. The
+        # optional ``max_thread_blocks`` opt-in caps the persistent
+        # grid (and bypasses the 32-block floor); see
+        # :func:`_singleworld_total_threads`.
+        if max_thread_blocks is not None and int(max_thread_blocks) < 1:
+            raise ValueError(f"max_thread_blocks must be >= 1 (got {max_thread_blocks})")
+        self._max_thread_blocks: int | None = (
+            int(max_thread_blocks) if max_thread_blocks is not None else None
+        )
+        self._singleworld_total_threads: int = _singleworld_total_threads(
+            self._constraint_capacity,
+            self.device,
+            max_thread_blocks=self._max_thread_blocks,
+        )
 
         # Head capture-while predicate. Starts each sweep at 1; the
         # persistent-grid sweep zeroes it on the hand-off to the fused

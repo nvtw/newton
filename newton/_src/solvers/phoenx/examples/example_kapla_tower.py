@@ -122,9 +122,9 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.frame_index: int = 0
-        self.sim_substeps = 15
-        self.solver_iterations = 3
-        self.velocity_iterations = 0
+        self.sim_substeps = 4
+        self.solver_iterations = 5
+        self.velocity_iterations = 1
 
         self._build_scene()
 
@@ -290,6 +290,7 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
+            max_thread_blocks=32,
             device=self.device,
         )
 
@@ -399,7 +400,7 @@ class Example:
             wp.capture_launch(self.graph)
         else:
             self.simulate()
-        self._print_step_report()
+        # self._print_step_report()
         # Optional: snapshot the post-step constraint graph (elements,
         # cost values, body count, jitter) so the standalone graph-
         # coloring benchmark can replay the exact Kapla problem. Gated
@@ -499,5 +500,5 @@ if __name__ == "__main__":
     # Start paused so the initial (potentially inter-penetrating)
     # brick layout is visible before the solver begins resolving.
     # Press SPACE or toggle the viewer's "Pause" checkbox to run.
-    viewer._paused = True
+    # viewer._paused = True
     newton.examples.run(example, args)
