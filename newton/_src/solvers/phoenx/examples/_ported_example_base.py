@@ -31,6 +31,7 @@ from newton._src.solvers.phoenx.examples.example_common import (
     newton_to_phoenx_kernel,
     phoenx_to_newton_kernel,
 )
+from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.picking import (
     Picking,
     register_with_viewer_gl,
@@ -73,7 +74,7 @@ class PortedExample:
     * Override :attr:`fps`, :attr:`sim_substeps`, :attr:`solver_iterations`,
       :attr:`velocity_iterations`, :attr:`gravity`, :attr:`step_layout`,
       :attr:`broad_phase`, :attr:`shape_pairs_max`, :attr:`default_friction`,
-      :attr:`default_restitution` as needed.
+      :attr:`default_restitution`, :attr:`show_contacts` as needed.
     """
 
     fps: int = 60
@@ -86,6 +87,11 @@ class PortedExample:
     shape_pairs_max: int | None = None
     default_friction: float = 0.5
     default_restitution: float = 0.0
+    #: Whether to draw contact arrows. Set ``False`` on big scenes:
+    #: ``viewer.log_contacts`` reads ``rigid_contact_count`` via
+    #: ``.numpy()`` every frame, forcing a host sync that defeats the
+    #: ViewerGL CUDA-OpenGL interop path.
+    show_contacts: bool = True
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -181,9 +187,20 @@ class PortedExample:
             )
         self.bodies = bodies
 
-        # Joint-only constraint container is a placeholder; contact
-        # constraints live in PhoenXWorld's contact column container.
-        self.constraints = PhoenXWorld.make_constraint_container(num_joints=0, device=self.device)
+        # Translate Newton joints (revolute / prismatic / ball / fixed)
+        # into ADBS constraint columns. Without this the ported demos
+        # build chains via ``builder.add_joint_revolute(...)`` but the
+        # PhoenX solver was running with ``num_joints=0``, so the chain
+        # links were free-floating and only ever interacted via contacts
+        # (visibly "not really connected"). The ``model_adapter`` snapshots
+        # body-local anchors from ``model.body_q``, which we just refreshed
+        # via ``eval_fk`` above.
+        self._adbs = build_adbs_init_arrays(self.model, device=self.device)
+        num_joints = self._adbs.num_joint_columns
+        self.constraints = PhoenXWorld.make_constraint_container(
+            num_joints=num_joints,
+            device=self.device,
+        )
 
         shape_body_np = self.model.shape_body.numpy()
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
@@ -197,10 +214,19 @@ class PortedExample:
             velocity_iterations=self.velocity_iterations,
             gravity=self.gravity,
             rigid_contact_max=rigid_contact_max,
+            num_joints=num_joints,
             default_friction=self.default_friction,
             step_layout=self.step_layout,
             device=self.device,
         )
+
+        # Joint columns must be initialised after the body container is
+        # seeded (the ADBS init kernel reads PhoenX body positions to
+        # snapshot the body-local anchor offsets).
+        if num_joints > 0:
+            self.world.initialize_actuated_double_ball_socket_joints(
+                **self._adbs.to_initialize_kwargs()
+            )
 
         self.viewer.set_model(self.model)
         self.configure_camera(self.viewer)
@@ -276,9 +302,16 @@ class PortedExample:
         self.sim_time += self.frame_dt
 
     def render(self) -> None:
+        # ``log_state`` uses ViewerGL's CUDA-OpenGL interop path: the
+        # body-state CUDA buffer is mapped directly into the
+        # instance-transform VBO with no D2H copy. ``log_contacts`` would
+        # break that path on every frame because it reads
+        # ``rigid_contact_count`` via ``.numpy()`` to size the arrow
+        # batch -- skip it for scenes with ``show_contacts = False``.
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state)
-        self.viewer.log_contacts(self.contacts, self.state)
+        if self.show_contacts:
+            self.viewer.log_contacts(self.contacts, self.state)
         self.viewer.end_frame()
 
 

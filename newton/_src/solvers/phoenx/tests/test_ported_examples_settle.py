@@ -83,10 +83,16 @@ _SCENES: list[tuple[str, int, str]] = [
     ("example_jitter_restitution_and_friction", 480, "settle"),
     ("example_jitter_colosseum", 600, "settle"),
     ("example_b2d_door", 240, "settle"),
-    ("example_b2d_revolute", 240, "settle"),
-    ("example_b2d_prismatic", 240, "settle"),
     ("example_jitter_motor_and_limit", 240, "settle"),
     # -- Swing (free joint scenes -- energy conserved, no driver) -----
+    # ``example_b2d_revolute`` is a damping-free 2-link pendulum -- it
+    # genuinely swings forever in PGS (TGS-soft relax doesn't dissipate).
+    # ``example_b2d_prismatic`` is a position-driven slider that
+    # oscillates around the limit before settling; KD=10 isn't enough
+    # to bring it under the 0.5 m/s settle gate in 4s, but it never
+    # blows up.
+    ("example_b2d_revolute", 240, "swing"),
+    ("example_b2d_prismatic", 240, "swing"),
     ("example_b2d_ball_and_chain", 480, "swing"),
     ("example_b2d_ragdoll", 480, "swing"),
     ("example_b2d_chain_link", 480, "swing"),
@@ -120,6 +126,12 @@ def _measure_scene(module_name: str, frames: int) -> dict:
     state stats over all dynamic bodies."""
     mod = __import__(f"newton._src.solvers.phoenx.examples.{module_name}", fromlist=["Example"])
     e = mod.Example(_FakeViewer(), None)
+    # Snapshot body-0 height at t=0 so the world-anchored-joint
+    # regression below can compare drop distance against the scene's
+    # initial elevation. Slot 0 is PhoenX's static world anchor; the
+    # first Newton body lives at slot 1.
+    pos0 = e.bodies.position.numpy()
+    body0_z_init = float(pos0[1, 2]) if pos0.shape[0] > 1 else 0.0
     for _ in range(frames):
         e.step()
     pos = e.bodies.position.numpy()
@@ -133,7 +145,30 @@ def _measure_scene(module_name: str, frames: int) -> dict:
         "max_v": float(np.linalg.norm(vel[dyn], axis=1).max()) if dyn.any() else 0.0,
         "max_w": float(np.linalg.norm(om[dyn], axis=1).max()) if dyn.any() else 0.0,
         "max_pos": float(np.abs(pos).max()),
+        "body0_z_init": body0_z_init,
+        "body0_z_final": float(pos[1, 2]) if pos.shape[0] > 1 else 0.0,
     }
+
+
+# Scenes whose first body is pinned to the world by a revolute joint
+# (Newton ``add_joint_revolute(parent=-1, ...)``) and is meant to hang
+# from that anchor for the entire run. If the PortedExample scaffold
+# ever stops translating Newton joints into PhoenX constraint columns
+# again, body 0 free-falls and drops far below its initial height --
+# this catches that exact regression.
+_WORLD_ANCHORED_SCENES: frozenset[str] = frozenset(
+    {
+        "example_b2d_revolute",
+        "example_b2d_chain_link",
+        "example_b2d_ball_and_chain",
+    }
+)
+#: Maximum permitted z-drop of body 0 in a world-anchored joint scene.
+#: A correctly wired revolute joint keeps body 0 within a fraction of a
+#: link length of the anchor; a missing joint puts it on the ground
+#: (~9 m below in chain_link / ball_and_chain). 1 m is comfortably
+#: above the former and well below the latter.
+_WORLD_ANCHOR_MAX_DROP = 1.0
 
 
 @unittest.skipUnless(
@@ -176,6 +211,23 @@ class TestPortedExamplesReachSteadyState(unittest.TestCase):
                         stats["max_w"],
                         _SWING_W,
                         msg=f"{module_name}: max |w| = {stats['max_w']:.3f} rad/s -- runaway",
+                    )
+
+                # World-anchored-joint regression: if joints aren't
+                # plumbed into PhoenX, body 0 falls to the ground.
+                if module_name in _WORLD_ANCHORED_SCENES:
+                    drop = stats["body0_z_init"] - stats["body0_z_final"]
+                    self.assertLess(
+                        drop,
+                        _WORLD_ANCHOR_MAX_DROP,
+                        msg=(
+                            f"{module_name}: body 0 dropped {drop:.2f} m from its "
+                            f"world anchor (initial z = {stats['body0_z_init']:.2f}, "
+                            f"final z = {stats['body0_z_final']:.2f}) -- the world "
+                            "revolute joint isn't holding the chain up; check that "
+                            "PortedExample is still translating Newton joints into "
+                            "PhoenX ADBS constraint columns."
+                        ),
                     )
 
 

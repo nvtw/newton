@@ -34,9 +34,8 @@ class Example(PortedExample):
         builder.add_ground_plane()
         body = builder.add_body(
             xform=wp.transform(p=wp.vec3(0.0, 0.0, EXTENT + 1.0), q=wp.quat_identity()),
+            linear_velocity=(5.0, 0.0, 0.0),
         )
-        # Match the Box2D demo's initial 5 m/s along +x.
-        builder.body_qd[body] = (0.0, 0.0, 0.0, 5.0, 0.0, 0.0)
         builder.add_shape_box(body, hx=EXTENT, hy=EXTENT, hz=EXTENT)
         return [default_box_half_extents(EXTENT, EXTENT, EXTENT)]
 

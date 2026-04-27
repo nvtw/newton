@@ -44,15 +44,13 @@ class Example(PortedExample):
             y = RADIUS * math.sin(theta)
             body = builder.add_body(
                 xform=wp.transform(p=wp.vec3(x, y, HE + 0.05), q=wp.quat_identity()),
-            )
-            # Radial outward velocity in the X-Y plane.
-            builder.body_qd[body] = (
-                0.0,
-                0.0,
-                0.0,
-                float(impulse_speed * math.cos(theta)),
-                float(impulse_speed * math.sin(theta)),
-                4.0,
+                # Radial outward velocity in the X-Y plane plus a small
+                # +z lift so the pile lofts before falling back down.
+                linear_velocity=(
+                    float(impulse_speed * math.cos(theta)),
+                    float(impulse_speed * math.sin(theta)),
+                    4.0,
+                ),
             )
             builder.add_shape_box(body, hx=HE, hy=HE, hz=HE)
             extents.append(default_box_half_extents(HE, HE, HE))

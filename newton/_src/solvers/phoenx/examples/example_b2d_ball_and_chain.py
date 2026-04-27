@@ -8,10 +8,19 @@
 # end. 2D revolute joints between adjacent capsules become 3D revolute
 # joints about world +y. The end ball is a 3D sphere.
 #
+# Geometry and mass ratio mirror Box2D's ``samples/sample_joints.cpp``
+# ``BallAndChain``: capsule half-length ``hx = 0.5`` with radius
+# ``0.125`` (so each link is 1.25 m end-to-end), end ball radius
+# ``4.0``, and a density of 20 on every shape. With those shapes the
+# 2D ball/link area ratio is ~168, which is what makes this scene a
+# classic mass-ratio stress test for iterative solvers.
+#
 # Run: python -m newton._src.solvers.phoenx.examples.example_b2d_ball_and_chain
 ###########################################################################
 
 from __future__ import annotations
+
+import math
 
 import warp as wp
 
@@ -23,23 +32,38 @@ from newton._src.solvers.phoenx.examples._ported_example_base import (
     run_ported_example,
 )
 
-LINK_RADIUS = 0.05
-LINK_HALF_LEN = 0.25
+LINK_RADIUS = 0.125
+LINK_HALF_LEN = 0.5
 LINK_LEN = 2.0 * (LINK_RADIUS + LINK_HALF_LEN)
 N_LINKS = 30
-BALL_RADIUS = 0.4
+BALL_RADIUS = 4.0
+
+# Box2D uses ``density = 20`` for both shapes and lets the engine
+# integrate area * density to get mass; we keep the same ratio by
+# integrating those 2D areas analytically. Capsule = rectangle of size
+# (2 * LINK_HALF_LEN, 2 * LINK_RADIUS) plus a full disc of radius
+# LINK_RADIUS (the two end caps glued together). Ball = disc of radius
+# BALL_RADIUS. Density cancels in the ratio so the absolute mass units
+# are arbitrary -- only the ratio matters for solver stress; we pick
+# LINK_MASS = 1 kg and scale the ball by the area ratio (~168x).
+_LINK_AREA = (2.0 * LINK_HALF_LEN) * (2.0 * LINK_RADIUS) + math.pi * LINK_RADIUS * LINK_RADIUS
+_BALL_AREA = math.pi * BALL_RADIUS * BALL_RADIUS
+LINK_MASS = 1.0
+BALL_MASS = LINK_MASS * (_BALL_AREA / _LINK_AREA)  # ~168 kg
 
 # Quaternion rotating body-frame +z (the capsule's default axis) to +x.
 _QUAT_ZTOX = wp.quat(0.0, 0.7071067811865476, 0.0, 0.7071067811865476)
 
 
 class Example(PortedExample):
-    sim_substeps = 8
-    solver_iterations = 16
+    sim_substeps = 20
+    solver_iterations = 4
     gravity = (0.0, 0.0, -9.81)
 
     def build_scene(self, builder: newton.ModelBuilder):
-        builder.add_ground_plane(height=-10.0)
+        # Ground sits well below the fully-extended chain (~30 * 1.25 m
+        # of links + 2 * BALL_RADIUS) so the swing never clips it.
+        builder.add_ground_plane(height=-50.0)
 
         anchor_z = 0.0
         joints: list[int] = []
@@ -50,7 +74,7 @@ class Example(PortedExample):
         for i in range(N_LINKS):
             link = builder.add_link(
                 xform=wp.transform(p=wp.vec3(LINK_LEN * (i + 1), 0.0, anchor_z), q=wp.quat_identity()),
-                mass=1.0,
+                mass=LINK_MASS,
             )
             # Capsule oriented along +x; half_height is the cylindrical
             # mid-section, total length is 2*(radius + half_height).
@@ -79,7 +103,7 @@ class Example(PortedExample):
 
         ball = builder.add_link(
             xform=wp.transform(p=wp.vec3(LINK_LEN * (N_LINKS + 1), 0.0, anchor_z), q=wp.quat_identity()),
-            mass=20.0,
+            mass=BALL_MASS,
         )
         builder.add_shape_sphere(ball, radius=BALL_RADIUS)
         j = builder.add_joint_revolute(
@@ -95,7 +119,12 @@ class Example(PortedExample):
         return extents
 
     def configure_camera(self, viewer):
-        viewer.set_camera(pos=wp.vec3(LINK_LEN * (N_LINKS + 1) + 6.0, 0.0, -2.0), pitch=-5.0, yaw=180.0)
+        # Box2D's sample frames the scene at center (0, -8) zoom 27.5 in
+        # 2D screen units; in 3D we centre on the chain's mid-span and
+        # pull the camera back along -y by ~50 m so the whole chain plus
+        # the ball fit on screen.
+        chain_mid_x = 0.5 * LINK_LEN * (N_LINKS + 1)
+        viewer.set_camera(pos=wp.vec3(chain_mid_x, -55.0, -8.0), pitch=-5.0, yaw=90.0)
 
 
 if __name__ == "__main__":
