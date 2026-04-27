@@ -125,9 +125,10 @@ def _quad_pick_extents(quad_xz: list[tuple[float, float]], depth: float) -> tupl
 
 
 class Example(PortedExample):
-    sim_substeps = 16
-    solver_iterations = 32
+    sim_substeps = 20
+    solver_iterations = 6
     default_friction = 0.6  # b2ShapeDef.material.friction in the sample
+    start_paused = True
 
     def build_scene(self, builder: newton.ModelBuilder):
         builder.add_ground_plane()
@@ -175,7 +176,8 @@ class Example(PortedExample):
         # 4 load boxes stacked on top of the keystone (Box2D
         # sample_stacking.cpp:808-814).
         keystone_top_z = PS2[8][1]
-        for i in range(4):
+        num_load_boxes = 0
+        for i in range(num_load_boxes):
             cz = LOAD_BOX_HZ + keystone_top_z + 1.0 * i
             body = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, cz)))
             builder.add_shape_box(body, hx=LOAD_BOX_HX, hy=0.5 * BLOCK_DEPTH, hz=LOAD_BOX_HZ)
@@ -184,7 +186,10 @@ class Example(PortedExample):
         return extents
 
     def configure_camera(self, viewer):
-        viewer.set_camera(pos=wp.vec3(0.0, -16.0, 6.0), pitch=-5.0, yaw=180.0)
+        # Arch outer feet at x=+/-6, keystone top at z~11, load-box stack
+        # peaks near z=15. Frame the whole pile from in front (-y),
+        # ``yaw=90`` looks back along +y.
+        viewer.set_camera(pos=wp.vec3(0.0, -22.0, 7.0), pitch=-10.0, yaw=90.0)
 
 
 if __name__ == "__main__":

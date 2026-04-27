@@ -92,6 +92,9 @@ class PortedExample:
     #: ``.numpy()`` every frame, forcing a host sync that defeats the
     #: ViewerGL CUDA-OpenGL interop path.
     show_contacts: bool = True
+    #: Start the viewer in paused mode so the user can inspect the
+    #: initial scene (toggle with SPACE in :class:`ViewerGL`).
+    start_paused: bool = False
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -321,4 +324,8 @@ def run_ported_example(example_factory: Callable[[object, object], PortedExample
     entry-point boilerplate one line."""
     viewer, args = newton.examples.init()
     example = example_factory(viewer, args)
+    if example.start_paused:
+        # Same convention as example_kapla_tower / example_basic_joints:
+        # toggle the private flag before run() enters its loop.
+        viewer._paused = True
     newton.examples.run(example, args)
