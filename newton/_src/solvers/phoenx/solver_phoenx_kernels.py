@@ -43,6 +43,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
+    GREEDY_MAX_COLORS,
     MAX_BODIES,
     ElementInteractionData,
     element_interaction_data_make,
@@ -66,6 +67,7 @@ __all__ = [
     "_integrate_velocities_kernel",
     "_kinematic_interpolate_substep_kernel",
     "_kinematic_prepare_step_kernel",
+    "_per_world_greedy_coloring_kernel",
     "_per_world_jp_coloring_kernel",
     "_phoenx_apply_forces_and_gravity_kernel",
     "_phoenx_apply_global_damping_kernel",
@@ -482,6 +484,218 @@ def _per_world_jp_coloring_kernel(
 
     if lane == wp.int32(0):
         world_num_colors[w] = current_color
+
+
+# Constant used to flip a 64-bit forbidden-color mask without a unary
+# bitwise NOT (Warp's int64 codegen is unreliable; mirrors the
+# ``_FREE_COLOR_FLIP`` constant in graph_coloring_common.py).
+_PER_WORLD_FREE_COLOR_FLIP = wp.constant(wp.int64(-1))
+
+
+@wp.kernel(enable_backward=False)
+def _per_world_greedy_coloring_kernel(
+    # per-world bucketing (input from the two kernels above)
+    world_element_offsets: wp.array[wp.int32],  # [nw+1] (exclusive prefix of counts)
+    world_element_count: wp.array[wp.int32],  # [nw] (raw per-world count)
+    world_elements: wp.array[wp.int32],  # [total] flat cid stream, sorted by world
+    # graph data
+    elements: wp.array[ElementInteractionData],
+    adjacency_end: wp.array[wp.int32],  # [num_bodies]
+    vertex_to_elements: wp.array[wp.int32],  # [cap * MAX_BODIES]
+    random_values: wp.array[wp.int32],  # [capacity] JP priorities
+    cost_values: wp.array[wp.int32],  # [capacity] JP costs (unused in greedy mode)
+    max_colors: wp.int32,  # = GREEDY_MAX_COLORS, kept for parity with JP variant
+    # scratch (caller zeros each step)
+    assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
+    color_count: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS] histogram bucket
+    color_offsets: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS] live cursor for scatter
+    # outputs
+    world_element_ids_by_color: wp.array[wp.int32],  # [total] sorted-by-colour per world
+    world_color_starts: wp.array2d[wp.int32],  # [nw, MAX_COLORS+1] per-world prefix
+    world_num_colors: wp.array[wp.int32],  # [nw]
+    overflow_flag: wp.array[wp.int32],  # [1] set if any world exceeds GREEDY_MAX_COLORS
+):
+    """JP-MIS + smallest-free-color greedy variant of
+    :func:`_per_world_jp_coloring_kernel`.
+
+    Same per-world dispatch (one block per world, lanes stride over
+    the world's element list) and the same MIS contract (a vertex
+    commits iff it is the highest priority among its still-uncolored
+    neighbours -- never two within one round). What changes:
+
+      * Each committed vertex gets the smallest colour not already
+        used by its already-coloured neighbours, computed from a
+        per-vertex int64 forbidden-color bitmask. This drops the
+        per-world colour count to the chromatic lower bound on dense
+        sub-graphs.
+      * Because commits within one round can land in different
+        colours, the round-equals-colour CSR scatter the JP variant
+        uses no longer applies. We make two extra passes: a
+        per-world histogram + exclusive prefix scan to derive
+        ``world_color_starts``, then an atomic scatter into
+        ``world_element_ids_by_color``. Both passes stay inside the
+        block; no cross-block synchronisation is required.
+
+    Order of element ids within a colour is non-deterministic
+    (atomics on ``color_offsets``), but the *set* of elements per
+    colour is fully determined by the input. PGS sweeps consume each
+    colour as an unordered independent set so simulation outputs are
+    bit-deterministic.
+    """
+    block, lane = wp.tid()
+    w = block
+    base = world_element_offsets[w]
+    count = world_element_count[w]
+
+    if count == 0:
+        if lane == wp.int32(0):
+            world_num_colors[w] = wp.int32(0)
+            world_color_starts[w, 0] = wp.int32(0)
+        return
+
+    # Phase 1: zero per-element ``assigned`` flags + per-world
+    # histogram / cursor buckets. The histogram is sized
+    # ``GREEDY_MAX_COLORS`` so the reset always covers the full row
+    # regardless of how many colours this world ends up needing.
+    stride = _PER_WORLD_COLORING_BLOCK_DIM
+    offset = wp.int32(0)
+    while offset < count:
+        slot = offset + lane
+        if slot < count:
+            eid = world_elements[base + slot]
+            assigned[eid] = wp.int32(0)
+        offset = offset + stride
+
+    offset = wp.int32(0)
+    while offset < GREEDY_MAX_COLORS:
+        slot = offset + lane
+        if slot < GREEDY_MAX_COLORS:
+            color_count[w, slot] = wp.int32(0)
+            color_offsets[w, slot] = wp.int32(0)
+        offset = offset + stride
+
+    if lane == wp.int32(0):
+        world_color_starts[w, 0] = wp.int32(0)
+
+    _sync_threads()
+
+    # Phase 2: greedy MIS+colour rounds. Each round picks an
+    # independent set (MIS) and assigns each picked vertex the
+    # smallest colour not used by its colored neighbours. Loop
+    # terminates when no vertex remains uncoloured.
+    num_remaining = count
+    overflow_local = wp.int32(0)
+
+    # Bound the outer loop with a hard cap to keep the kernel
+    # finite-launch-safe; in practice greedy converges in tens of
+    # rounds, well below ``count``.
+    round_idx = wp.int32(0)
+    while num_remaining > wp.int32(0) and round_idx < count:
+        committed_this_round = wp.int32(0)
+        offset = wp.int32(0)
+        while offset < count:
+            slot = offset + lane
+            committed_here = wp.int32(0)
+            if slot < count:
+                eid = world_elements[base + slot]
+                if assigned[eid] == wp.int32(0):
+                    self_prio = _cost_biased_priority(random_values, cost_values, eid)
+                    is_local_max = bool(True)
+                    forbidden_mask = wp.int64(0)
+                    for j in range(MAX_BODIES):
+                        if not is_local_max:
+                            break
+                        b = elements[eid].bodies[j]
+                        if b < 0:
+                            break
+                        adj_start = wp.int32(0)
+                        if b > 0:
+                            adj_start = adjacency_end[b - 1]
+                        adj_end_b = adjacency_end[b]
+                        for k in range(adj_start, adj_end_b):
+                            if not is_local_max:
+                                break
+                            neighbor = vertex_to_elements[k]
+                            if neighbor == eid:
+                                continue
+                            a = assigned[neighbor]
+                            if a == wp.int32(0):
+                                # Uncoloured neighbour: MIS tiebreak.
+                                if _cost_biased_priority(random_values, cost_values, neighbor) > self_prio:
+                                    is_local_max = bool(False)
+                            else:
+                                # Coloured neighbour: forbid that colour.
+                                ncolor = a - wp.int32(1)
+                                if ncolor < GREEDY_MAX_COLORS:
+                                    forbidden_mask = forbidden_mask | (wp.int64(1) << wp.int64(ncolor))
+
+                    if is_local_max:
+                        # Smallest free colour = first 0-bit in mask.
+                        free_mask = forbidden_mask ^ _PER_WORLD_FREE_COLOR_FLIP
+                        c = wp.int32(0)
+                        for _ in range(GREEDY_MAX_COLORS):
+                            if (free_mask & (wp.int64(1) << wp.int64(c))) != wp.int64(0):
+                                break
+                            c = c + wp.int32(1)
+                        if c >= GREEDY_MAX_COLORS:
+                            overflow_local = wp.int32(1)
+                        else:
+                            assigned[eid] = c + wp.int32(1)
+                            wp.atomic_add(color_count, w, c, wp.int32(1))
+                            committed_here = wp.int32(1)
+
+            committed_tile = wp.tile(committed_here)
+            iter_total_tile = wp.tile_sum(committed_tile)
+            iter_total = iter_total_tile[0]
+            committed_this_round = committed_this_round + iter_total
+            offset = offset + stride
+
+        _sync_threads()
+        num_remaining = num_remaining - committed_this_round
+        if committed_this_round == wp.int32(0):
+            # Either the world converged or the bitmask is saturated
+            # for some vertex. Either way, stop -- the overflow flag
+            # below catches the saturated case.
+            break
+        round_idx = round_idx + wp.int32(1)
+
+    if overflow_local != wp.int32(0) and lane == wp.int32(0):
+        overflow_flag[0] = wp.int32(1)
+
+    # Phase 3: histogram-driven CSR build for this world.
+    # ``color_count[w, c]`` already holds the bucket size from the
+    # atomic_adds above. Compute exclusive prefix into
+    # ``world_color_starts[w, :]`` on lane 0 (cheap, GREEDY_MAX_COLORS
+    # = 64 entries) so subsequent scatter sees stable offsets.
+    if lane == wp.int32(0):
+        running = wp.int32(0)
+        last_used = wp.int32(-1)
+        for c in range(GREEDY_MAX_COLORS):
+            world_color_starts[w, c] = running
+            cnt = color_count[w, c]
+            if cnt > wp.int32(0):
+                last_used = c
+            running = running + cnt
+        world_color_starts[w, GREEDY_MAX_COLORS] = running
+        world_num_colors[w] = last_used + wp.int32(1)
+    _sync_threads()
+
+    # Phase 4: scatter element ids into the per-world CSR slice. Each
+    # lane walks a stride of the world's element list, looks up its
+    # assigned colour, and atomic-bumps ``color_offsets[w, c]`` to
+    # claim a unique slot in the colour's range.
+    offset = wp.int32(0)
+    while offset < count:
+        slot = offset + lane
+        if slot < count:
+            eid = world_elements[base + slot]
+            a = assigned[eid]
+            if a > wp.int32(0):
+                c = a - wp.int32(1)
+                local_slot = wp.atomic_add(color_offsets, w, c, wp.int32(1))
+                start = world_color_starts[w, c]
+                world_element_ids_by_color[base + start + local_slot] = eid
+        offset = offset + stride
 
 
 # ---------------------------------------------------------------------------

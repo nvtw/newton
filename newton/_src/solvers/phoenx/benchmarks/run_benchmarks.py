@@ -199,9 +199,24 @@ def run_sweep(cfg: SweepConfig, clear_existing: bool) -> None:
         row["solver_iterations"] = it
         try:
             reset_gpu_between_runs()
+            # ``phoenx_greedy`` and ``phoenx_jp`` are sweep-time aliases
+            # for ``phoenx`` that toggle
+            # ``solver_config.PHOENX_USE_GREEDY_COLORING`` before the
+            # SolverPhoenX is constructed. The scenario builders read
+            # only ``solver_name`` so we map the alias to ``"phoenx"``
+            # for the build call but keep the original label in the
+            # JSONL row so the dashboard / plots overlay the two
+            # variants as separate lines.
+            if solver in ("phoenx_greedy", "phoenx_jp"):
+                import newton._src.solvers.phoenx.solver_config as _phx_cfg  # noqa: PLC0415
+
+                _phx_cfg.PHOENX_USE_GREEDY_COLORING = solver == "phoenx_greedy"
+                build_solver = "phoenx"
+            else:
+                build_solver = solver
             handle = SCENARIOS[scene].build(
                 num_worlds=nw,
-                solver_name=solver,
+                solver_name=build_solver,
                 substeps=ss,
                 solver_iterations=it,
             )
@@ -214,6 +229,11 @@ def run_sweep(cfg: SweepConfig, clear_existing: bool) -> None:
             # etc.; ``row`` already has them too, so ``metrics``
             # wins on collisions.
             row.update(metrics)
+            # ``run_one`` reports whatever the scene built with
+            # (``build_solver``), but for the phoenx_jp / phoenx_greedy
+            # aliases we want the alias label in the dashboard so the
+            # two variants overlay as separate lines.
+            row["solver"] = solver
             t_sweep += metrics["elapsed_s"]
             print(
                 f"  -> env_fps={metrics['env_fps']:,.0f}"
@@ -273,8 +293,15 @@ def main(argv: list[str] | None = None) -> int:
         "--solvers",
         nargs="+",
         default=None,
-        choices=["phoenx", "mujoco"],
-        help="Subset of solvers to run (default: both).",
+        choices=["phoenx", "phoenx_greedy", "phoenx_jp", "mujoco"],
+        help=(
+            "Subset of solvers to run (default: both). ``phoenx`` "
+            "respects whatever ``PHOENX_USE_GREEDY_COLORING`` is "
+            "set to. ``phoenx_greedy`` / ``phoenx_jp`` are sweep "
+            "aliases that force the flag on / off before each "
+            "build, useful for back-to-back graph-coloring "
+            "comparisons."
+        ),
     )
     parser.add_argument(
         "--num-worlds",

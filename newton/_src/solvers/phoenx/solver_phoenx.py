@@ -62,6 +62,7 @@ from newton._src.solvers.phoenx.constraints.contact_ingest import (
     stamp_forward_contact_map,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
+    GREEDY_MAX_COLORS,
     ElementInteractionData,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import (
@@ -99,6 +100,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _integrate_velocities_kernel,
     _kinematic_interpolate_substep_kernel,
     _kinematic_prepare_step_kernel,
+    _per_world_greedy_coloring_kernel,
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
@@ -500,6 +502,23 @@ class PhoenXWorld:
         # doubles as the scratch the kernel clears at the start of each
         # step.
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
+        # ----- Greedy variant scratch (per-world) ----------------------
+        #
+        # Used only by ``_per_world_greedy_coloring_kernel`` (the
+        # PHOENX_USE_GREEDY_COLORING=True path). Each row holds one
+        # world's per-colour histogram bucket and live scatter cursor.
+        # ``_per_world_greedy_overflow`` is a single-element flag the
+        # kernel sets if any world's coloring exceeds GREEDY_MAX_COLORS;
+        # surfaced via :meth:`step_report` for debugging but not raised
+        # mid-step (the greedy fallback is "use the round-based JP
+        # path", which the user can pick by flipping the config flag).
+        self._per_world_greedy_color_count: wp.array2d[wp.int32] = wp.zeros(
+            (nw, int(GREEDY_MAX_COLORS)), dtype=wp.int32, device=self.device
+        )
+        self._per_world_greedy_color_offsets: wp.array2d[wp.int32] = wp.zeros(
+            (nw, int(GREEDY_MAX_COLORS)), dtype=wp.int32, device=self.device
+        )
+        self._per_world_greedy_overflow: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
 
         # ----- Contact infrastructure -----
         # Contact state in two narrow containers (vs stuffing contacts
@@ -1279,7 +1298,7 @@ class PhoenXWorld:
             self._num_active_constraints,
         )
 
-        # Phase 4: per-world JP coloring. One block per world.
+        # Phase 4: per-world coloring. One block per world.
         self._per_world_assigned.zero_()
         # The output CSR base offsets (world_csr_offsets) match the
         # per-world element offsets (every active element belongs to
@@ -1290,31 +1309,64 @@ class PhoenXWorld:
         # exactly the (world, lane) pair the kernel expects. Plain
         # ``launch`` would return a global thread index instead, which
         # would silently mis-address every block-scoped read/write.
-        # Cost-biased priorities: contacts use their per-column contact count
-        # as the high priority word, while joints stay at cost 0.
-        wp.launch_tiled(
-            _per_world_jp_coloring_kernel,
-            dim=[nw],
-            inputs=[
-                self._per_world_element_offsets,
-                self._per_world_element_count,
-                self._per_world_elements,
-                self._elements,
-                self._partitioner._adjacency_section_end_indices,
-                self._partitioner._vertex_to_adjacent_elements,
-                self._partitioner._random_values,
-                self._partitioner._cost_values,
-                int(MAX_COLORS),
-            ],
-            outputs=[
-                self._per_world_assigned,
-                self._world_element_ids_by_color,
-                self._world_color_starts,
-                self._world_num_colors,
-            ],
-            block_dim=_PER_WORLD_COLORING_BLOCK_DIM,
-            device=self.device,
-        )
+        if PHOENX_USE_GREEDY_COLORING:
+            # Greedy variant: each MIS commit picks the smallest free
+            # colour. Drops Kapla-class per-world colour counts to the
+            # max-body-degree lower bound (mirrors the single-world
+            # path in IncrementalContactPartitioner.build_csr_greedy).
+            wp.launch_tiled(
+                _per_world_greedy_coloring_kernel,
+                dim=[nw],
+                inputs=[
+                    self._per_world_element_offsets,
+                    self._per_world_element_count,
+                    self._per_world_elements,
+                    self._elements,
+                    self._partitioner._adjacency_section_end_indices,
+                    self._partitioner._vertex_to_adjacent_elements,
+                    self._partitioner._random_values,
+                    self._partitioner._cost_values,
+                    int(GREEDY_MAX_COLORS),
+                ],
+                outputs=[
+                    self._per_world_assigned,
+                    self._per_world_greedy_color_count,
+                    self._per_world_greedy_color_offsets,
+                    self._world_element_ids_by_color,
+                    self._world_color_starts,
+                    self._world_num_colors,
+                    self._per_world_greedy_overflow,
+                ],
+                block_dim=_PER_WORLD_COLORING_BLOCK_DIM,
+                device=self.device,
+            )
+        else:
+            # Round-equals-colour Jones-Plassmann (legacy). Cost-biased
+            # priorities: contacts use their per-column contact count
+            # as the high priority word, while joints stay at cost 0.
+            wp.launch_tiled(
+                _per_world_jp_coloring_kernel,
+                dim=[nw],
+                inputs=[
+                    self._per_world_element_offsets,
+                    self._per_world_element_count,
+                    self._per_world_elements,
+                    self._elements,
+                    self._partitioner._adjacency_section_end_indices,
+                    self._partitioner._vertex_to_adjacent_elements,
+                    self._partitioner._random_values,
+                    self._partitioner._cost_values,
+                    int(MAX_COLORS),
+                ],
+                outputs=[
+                    self._per_world_assigned,
+                    self._world_element_ids_by_color,
+                    self._world_color_starts,
+                    self._world_num_colors,
+                ],
+                block_dim=_PER_WORLD_COLORING_BLOCK_DIM,
+                device=self.device,
+            )
 
     def _integrate_forces_and_gravity(self) -> None:
         """Apply per-body force / torque accumulators AND gravity in one
