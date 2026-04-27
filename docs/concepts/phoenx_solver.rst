@@ -14,10 +14,9 @@ TGS-soft relax** loop with a deterministic graph-coloured constraint
 schedule and a fast-tail multi-world dispatch designed for fleets of small,
 independent simulations (locomotion, manipulation, RL training).
 
-The solver is a Warp port of the C# PhoenX engine; the algorithmic
+The solver is a Warp port of the C# PhoenX engine; the contact
 backbone closely follows Box2D v3 (``b2SolveOverflowContacts`` /
-``b2SolveContactsTask``) for contacts and Tonge 2012 mass splitting for
-stacking.
+``b2SolveContactsTask``).
 
 .. contents::
     :local:
@@ -37,18 +36,22 @@ PhoenX is the right choice when you need:
   scheduling-dependent constraint ordering.
 - **CUDA-graph capture** — :meth:`step` performs no host syncs and
   allocates no Python objects. Capture once, replay millions of times.
-- **Stable resting stacks of rigid bodies** — Tonge mass-splitting +
-  TGS-soft relax keep block towers and dense rabbit piles from
-  inflating.
+- **Stable resting stacks of rigid bodies** — speculative-contact
+  handling and TGS-soft relax keep block towers and dense rabbit
+  piles from inflating.
 
 It is **not** the right choice for:
 
 - Generalised-coordinate articulation work that needs the kinematic
   tree (use :class:`~newton.solvers.SolverFeatherstone` or
   :class:`~newton.solvers.SolverMuJoCo`).
-- Equality / weld / mimic constraints, ``D6``, ``DISTANCE``, or
-  ``CABLE`` joints (use :class:`~newton.solvers.SolverMuJoCo` or
-  :class:`~newton.solvers.SolverXPBD`).
+- Equality / mimic constraints, ``D6``, or ``DISTANCE`` joints
+  through Newton's standard :class:`~newton.ModelBuilder` flow (use
+  :class:`~newton.solvers.SolverMuJoCo` or
+  :class:`~newton.solvers.SolverXPBD`). Cable-style joints with
+  bend / twist soft angular rows *are* implemented in PhoenX but at
+  the moment are only reachable through PhoenX's standalone
+  ``WorldBuilder``; see :ref:`phoenx-cable-joints` below.
 - Cloth, particles, soft bodies, MPM (use the dedicated solvers).
 - Differentiable simulation (PhoenX kernels are not authored under
   ``wp.Tape``).
@@ -323,7 +326,13 @@ Joint type     Behaviour                                       Drive / limit
 ``FREE``       Free-floating; no constraint column             —
 ============== =============================================== =================
 
-``DISTANCE``, ``D6``, and ``CABLE`` joints raise at construction.
+``DISTANCE`` and ``D6`` joints raise at construction.
+
+``CABLE`` joints **also** raise on the standard Newton path — the
+underlying PhoenX cable constraint exists (see below) but is not
+yet wired through :class:`~newton.ModelBuilder` /
+:attr:`~newton.JointType.CABLE`. Use :class:`~newton.solvers.SolverVBD`
+if you need cable joints via Newton's public API.
 
 Drives (``REVOLUTE`` / ``PRISMATIC``) are PD with per-DoF
 ``joint_target_ke`` (stiffness), ``joint_target_kd`` (damping), and
@@ -338,6 +347,37 @@ Joint limits for ``REVOLUTE`` / ``PRISMATIC`` use
 Feed-forward joint efforts (``Control.joint_f``) are converted to body
 wrenches via the stock :func:`apply_joint_forces` kernel and folded
 into the per-body force accumulator before the PGS solve.
+
+
+.. _phoenx-cable-joints:
+
+Cable joints (bend + twist stiffness)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The actuated double-ball-socket constraint also carries a **cable
+mode** — a rigid ball-socket at ``anchor1`` plus three soft angular
+rows formulated against the joint's finalize-time rest pose:
+
+- Two **bend** rows, with stiffness ``k_bend`` [N·m/rad] and damping
+  ``d_bend`` [N·m·s/rad], penalise rotation about the two axes
+  perpendicular to the cable's reference axis ``anchor1 → anchor2``.
+- One **twist** row, with stiffness ``k_twist`` and damping
+  ``d_twist`` (same units), penalises rotation about the reference
+  axis itself.
+
+The angular rows are integrated as PD constraints inside the same
+PGS sweep that handles contacts and rigid joints, so chained cable
+segments converge under the standard ``solver_iterations``.
+
+This mode is **not** reachable through Newton's
+:class:`~newton.ModelBuilder` — :attr:`~newton.JointType.CABLE` raises
+in the model adapter today. To use it, build the world directly
+through PhoenX's standalone ``WorldBuilder`` API and call
+``add_joint(mode=JointMode.CABLE, anchor1=..., anchor2=...,
+bend_stiffness=..., bend_damping=..., twist_stiffness=...,
+twist_damping=...)`` — see the source-tree examples for chained-cable
+patterns. Wiring this through Newton's joint type system is on the
+roadmap.
 
 
 Contacts
@@ -557,16 +597,17 @@ PhoenX:
 
 - No contact restitution today (the materials API exposes the
   coefficient but the constraint kernels ignore it).
-- Smaller joint vocabulary; no equality / mimic constraints, no
-  ``D6``.
+- Smaller joint vocabulary on Newton's standard ``ModelBuilder`` path;
+  no equality / mimic constraints, no ``D6``, no ``DISTANCE``, and
+  ``CABLE`` only via PhoenX's own builder.
 - Pyramidal Coulomb friction, not the exact circular cone (loose by
   a few percent in pathological tangent-misaligned cases).
-- Mass splitting follows Tonge 2012 with a per-partition
-  approximation; tall (``> 1`` layer) stacks of contacting bodies
-  may need extra ``substeps`` and ``solver_iterations`` to converge.
+- Tall stacks of contacting bodies may need extra ``substeps`` and
+  ``solver_iterations`` to converge cleanly under PGS — pure
+  Gauss-Seidel without mass-splitting biases toward the bottom of
+  the stack.
 - The Newton port is younger than MuJoCo's decade of physics tuning;
-  some bugs are still being shaken out (see the changelog under
-  ``[Unreleased]``).
+  expect rougher edges in less-travelled corners.
 
 MuJoCo Warp:
 
@@ -608,27 +649,6 @@ solver's source tree alongside the kernels and is primarily aimed at
 contributors hardening the solver. A throughput regression suite is
 maintained next to it for catching kernel-level performance and
 memory regressions.
-
-
-Limitations and known issues
-----------------------------
-
-Tracked in ``newton/_src/solvers/phoenx/Bug.md`` (linked from the
-source tree). Recently fixed:
-
-- **Contact-ingest int32 overflow** at ``num_shapes ≥ 46 341`` —
-  fixed 2026-04-24 via adjacency-marking instead of packed-int32 keys.
-- **MAX_COLORS overflow** in the JP partitioner — fixed 2026-04-24
-  with bounds checks and a host-side raise.
-
-Open:
-
-- **Mass-splitting fidelity** on tall stacks. Current implementation
-  uses a per-partition split factor; the Tonge 2012 copy-state
-  refactoring is on the roadmap. Workaround: bump ``substeps`` and
-  ``solver_iterations``.
-- **No contact restitution.** Materials carry the coefficient but
-  the constraint kernels ignore it.
 
 
 See also
