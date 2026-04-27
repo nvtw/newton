@@ -74,15 +74,22 @@ _SCENES: list[tuple[str, int, str]] = [
     ("example_b2d_tilted_stack", 600, "settle"),
     ("example_b2d_many_pyramids", 600, "settle"),
     ("example_b2d_circle_stack", 600, "settle"),
-    ("example_b2d_double_domino", 480, "settle"),
+    # Spiral with 3000 dominoes triggers a chain reaction that
+    # propagates for many seconds; the test only enforces "no blow-up"
+    # within the frame budget.
+    ("example_b2d_double_domino", 480, "swing"),
     ("example_b2d_drop", 240, "settle"),
     ("example_b2d_compound_shapes", 480, "settle"),
     ("example_b2d_explosion", 600, "settle"),
     ("example_jitter_ancient_pyramids", 600, "settle"),
     ("example_jitter_tower_of_jitter", 600, "settle"),
-    ("example_jitter_restitution_and_friction", 480, "settle"),
+    # The mu=0 cube in this sweep is meant to glide forever (per
+    # demo's own docstring); it never decelerates.
+    ("example_jitter_restitution_and_friction", 480, "swing"),
     ("example_jitter_colosseum", 600, "settle"),
-    ("example_b2d_door", 240, "settle"),
+    # Door + ball-at-8 m/s with no joint damping keeps oscillating
+    # past the 4 s budget; gate against blow-up only.
+    ("example_b2d_door", 240, "swing"),
     ("example_jitter_motor_and_limit", 240, "settle"),
     # -- Swing (free joint scenes -- energy conserved, no driver) -----
     # ``example_b2d_revolute`` is a damping-free 2-link pendulum -- it
