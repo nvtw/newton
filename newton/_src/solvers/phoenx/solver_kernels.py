@@ -227,6 +227,108 @@ def _export_body_state_kernel(
     body_qd[tid] = wp.spatial_vector(velocity[src], angular_velocity[src])
 
 
+@wp.kernel(enable_backward=False)
+def _snapshot_pre_step_pose_kernel(
+    # PhoenX body container (length N + 1 with slot 0 = anchor).
+    position: wp.array[wp.vec3f],
+    orientation: wp.array[wp.quatf],
+    # Snapshot buffers (length N -- one per Newton body, slot 0 omitted).
+    pos_prev_out: wp.array[wp.vec3f],
+    orient_prev_out: wp.array[wp.quatf],
+):
+    """Snapshot the PhoenX body container's ``position`` /
+    ``orientation`` (COM-in-world) into the FD pre-step buffers
+    *after* :func:`_import_body_state_kernel` has propagated
+    ``state_in.body_q`` into the container but *before* any
+    substepping.
+
+    Used by the ``velocity_readout="finite_difference"`` mode in
+    :class:`SolverPhoenX` to derive the per-frame averaged velocity
+    from the outer-step pose delta.
+    """
+    tid = wp.tid()
+    src = tid + 1
+    pos_prev_out[tid] = position[src]
+    orient_prev_out[tid] = orientation[src]
+
+
+@wp.func
+def _quat_log_axis_angle(q: wp.quatf) -> wp.vec3f:
+    """Quaternion log map -> rotation vector ``axis * angle``. Picks
+    the shorter rotation (negates ``q`` when ``q.w < 0``) so the
+    output sits in :math:`[-\\pi, +\\pi]` around the axis.
+
+    For ``|xyz| << 1`` this collapses to ``2 * q.xyz`` -- accurate to
+    O(angle^2) at the small-step finite-difference window we're in
+    (per outer dt = 1 / fps_outer, typically a few ms).
+    """
+    qw = q[3]
+    if qw < wp.float32(0.0):
+        q = wp.quatf(-q[0], -q[1], -q[2], -q[3])
+        qw = q[3]
+    xyz = wp.vec3f(q[0], q[1], q[2])
+    s = wp.length(xyz)
+    if s < wp.float32(1.0e-8):
+        # Small-angle: angle ~ 2 * |xyz|, axis ~ xyz / |xyz|;
+        # combined: 2 * xyz (with the |xyz| cancelling).
+        return xyz * wp.float32(2.0)
+    half_angle = wp.atan2(s, qw)
+    return xyz * (wp.float32(2.0) * half_angle / s)
+
+
+@wp.kernel(enable_backward=False)
+def _export_body_state_fd_kernel(
+    # PhoenX body container (slot index = tid + 1).
+    position: wp.array[wp.vec3f],
+    orientation: wp.array[wp.quatf],
+    body_com: wp.array[wp.vec3f],
+    # Pre-step snapshot from :func:`_snapshot_pre_step_pose_kernel`.
+    pos_prev: wp.array[wp.vec3f],
+    orient_prev: wp.array[wp.quatf],
+    inv_dt: wp.float32,
+    # Newton State outputs.
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+):
+    """Variant of :func:`_export_body_state_kernel` that derives
+    ``body_qd`` from the outer-step pose delta instead of the
+    substep-end velocity.
+
+    Newton's public body-twist convention is ``(v_com_world,
+    omega_world)``: linear velocity of the COM in the world frame,
+    plus the body's angular velocity in the world frame. The FD
+    estimate is::
+
+        v_com_fd = (com_now - com_prev) * inv_dt
+        omega_fd = log(orient_now * inv(orient_prev)) * inv_dt
+
+    where ``com_*`` is ``bodies.position[*]`` (PhoenX stores COM-in-
+    world) so the FD value is *exactly* what the policy would see if
+    it computed velocities from the previous and current
+    ``state.body_q`` itself.
+
+    ``body_q`` is still set to the post-substep pose -- only the
+    velocity field changes.
+    """
+    tid = wp.tid()
+    src = tid + 1
+    rot = orientation[src]
+    com_now = position[src]
+    com_prev = pos_prev[tid]
+    rot_prev = orient_prev[tid]
+
+    # Origin = COM - R * body_com_local (mirrors _export_body_state_kernel).
+    origin = com_now - wp.quat_rotate(rot, body_com[tid])
+    body_q[tid] = wp.transform(origin, rot)
+
+    v_com_fd = (com_now - com_prev) * inv_dt
+    # delta_q in world frame: q_now * inv(q_prev). Right-multiplied
+    # convention so its log gives the world-frame rotation vector.
+    delta_q = rot * wp.quat_inverse(rot_prev)
+    omega_fd = _quat_log_axis_angle(delta_q) * inv_dt
+    body_qd[tid] = wp.spatial_vector(v_com_fd, omega_fd)
+
+
 # ---------------------------------------------------------------------------
 # Per-step control -> ADBS column writeback
 # ---------------------------------------------------------------------------

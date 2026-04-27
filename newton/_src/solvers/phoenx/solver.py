@@ -47,10 +47,12 @@ from newton._src.solvers.phoenx.model_adapter import (
 from newton._src.solvers.phoenx.solver_kernels import (
     _apply_joint_control_kernel,
     _contact_impulse_to_force_wrapper_kernel,
+    _export_body_state_fd_kernel,
     _export_body_state_kernel,
     _import_body_state_kernel,
     _init_phoenx_body_container_kernel,
     _seed_kinematic_initial_pose_kernel,
+    _snapshot_pre_step_pose_kernel,
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 from newton._src.solvers.solver import SolverBase
@@ -181,6 +183,7 @@ class SolverPhoenX(SolverBase):
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
+        velocity_readout: str = "substep_end",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -205,12 +208,40 @@ class SolverPhoenX(SolverBase):
                 picks per-step from the colour-size histogram;
                 ``32`` = one warp per world (legacy), ``16`` = two,
                 ``8`` = four (rarely wins). Graph-capture safe.
+            velocity_readout: Convention used when stamping
+                ``state_out.body_qd``. ``"substep_end"`` (default)
+                writes PhoenX's substep-end velocity straight through
+                -- the bit-faithful internal value, but it carries
+                whatever high-frequency contact-impulse content the
+                last substep produced. ``"finite_difference"`` writes
+                ``(body_q_now - body_q_prev) / dt_outer``, i.e. the
+                averaged velocity over the entire :meth:`step` call.
+                Useful for RL inference scenes where the policy was
+                trained against a solver (e.g. MuJoCo Warp) whose
+                returned ``qvel`` is the post-integration velocity
+                rather than an instantaneous value -- the FD readout
+                smooths over PhoenX's substep ringing without
+                changing the simulated physics.
         """
         super().__init__(model)
+        if velocity_readout not in ("substep_end", "finite_difference"):
+            raise ValueError(f"velocity_readout must be 'substep_end' or 'finite_difference', got {velocity_readout!r}")
+        self._velocity_readout = velocity_readout
 
         # ---- Build the PhoenX body container ---------------------------
         num_bodies_phoenx = int(model.body_count) + 1
         self.bodies: BodyContainer = body_container_zeros(num_bodies_phoenx, device=self.device)
+
+        # Pre-step pose snapshot buffers for the FD velocity readout
+        # mode. One slot per *Newton* body (slot 0 of the PhoenX body
+        # container is the static world anchor and isn't reflected
+        # back to ``state.body_q``). Allocated unconditionally because
+        # graph capture needs the array references stable, but the
+        # snapshot kernel is only launched when
+        # ``velocity_readout == "finite_difference"``.
+        n_newton_bodies = int(model.body_count)
+        self._fd_pos_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
+        self._fd_orient_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.quatf, device=self.device)
 
         # Identity orientation for every slot (including slot 0) so the
         # first _update_inertia doesn't see a zero quaternion.
@@ -668,28 +699,61 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
-    def _export_body_state(self, state_out: State) -> None:
-        """Pack PhoenX's body state back into ``state_out.body_q`` /
-        ``body_qd``."""
+    def _snapshot_pre_step_pose(self) -> None:
+        """Copy the PhoenX body container's COM-in-world pose into the
+        FD pre-step buffers. Called at step entry only when the FD
+        readout is enabled."""
         n = int(self.model.body_count)
         if n == 0:
             return
         wp.launch(
-            _export_body_state_kernel,
+            _snapshot_pre_step_pose_kernel,
             dim=n,
-            inputs=[
-                self.bodies.position,
-                self.bodies.orientation,
-                self.bodies.velocity,
-                self.bodies.angular_velocity,
-                self.model.body_com,
-            ],
-            outputs=[
-                state_out.body_q,
-                state_out.body_qd,
-            ],
+            inputs=[self.bodies.position, self.bodies.orientation],
+            outputs=[self._fd_pos_prev, self._fd_orient_prev],
             device=self.device,
         )
+
+    def _export_body_state(self, state_out: State, dt: float) -> None:
+        """Pack PhoenX's body state back into ``state_out.body_q`` /
+        ``body_qd``. Picks substep-end or finite-difference velocity
+        based on ``self._velocity_readout``."""
+        n = int(self.model.body_count)
+        if n == 0:
+            return
+        if self._velocity_readout == "finite_difference":
+            inv_dt = 1.0 / float(dt) if dt > 0.0 else 0.0
+            wp.launch(
+                _export_body_state_fd_kernel,
+                dim=n,
+                inputs=[
+                    self.bodies.position,
+                    self.bodies.orientation,
+                    self.model.body_com,
+                    self._fd_pos_prev,
+                    self._fd_orient_prev,
+                    wp.float32(inv_dt),
+                ],
+                outputs=[state_out.body_q, state_out.body_qd],
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                _export_body_state_kernel,
+                dim=n,
+                inputs=[
+                    self.bodies.position,
+                    self.bodies.orientation,
+                    self.bodies.velocity,
+                    self.bodies.angular_velocity,
+                    self.model.body_com,
+                ],
+                outputs=[
+                    state_out.body_q,
+                    state_out.body_qd,
+                ],
+                device=self.device,
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -724,6 +788,13 @@ class SolverPhoenX(SolverBase):
         self._accumulate_joint_forces(state_in, control)
         self._import_body_state(state_in)
 
+        # FD velocity readout snapshots the *imported* (i.e.
+        # state_in-aligned) PhoenX pose so the post-step delta covers
+        # the entire outer dt -- no off-by-substep error and no
+        # contamination from the pre-import state.
+        if self._velocity_readout == "finite_difference":
+            self._snapshot_pre_step_pose()
+
         self.world.step(
             dt=float(dt),
             contacts=contacts,
@@ -731,7 +802,7 @@ class SolverPhoenX(SolverBase):
         )
         self._last_dt = float(dt) / max(1, self.world.substeps)
 
-        self._export_body_state(state_out)
+        self._export_body_state(state_out, dt=float(dt))
         # Sync the canonical joint coordinates. Policies that read
         # ``state.joint_q`` / ``state.joint_qd`` (e.g. the Anymal PyTorch
         # rig) need these kept current; eval_ik is the inverse of the
