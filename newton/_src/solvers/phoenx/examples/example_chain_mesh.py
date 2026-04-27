@@ -174,9 +174,7 @@ class Example(PortedExample):
             gap=builder.default_shape_cfg.gap,
         )
         builder.add_shape_sphere(sphere_body, radius=sphere_radius, cfg=sphere_cfg)
-        extents.append(
-            (float(sphere_radius), float(sphere_radius), float(sphere_radius))
-        )
+        extents.append((float(sphere_radius), float(sphere_radius), float(sphere_radius)))
 
         # Connection rings: one between every pair of adjacent chains,
         # at every second ring position along the chain. Sits at the

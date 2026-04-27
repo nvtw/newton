@@ -31,8 +31,8 @@ COLS = 6
 
 
 class Example(PortedExample):
-    sim_substeps = 12
-    solver_iterations = 16
+    sim_substeps = 8
+    solver_iterations = 10
 
     def build_scene(self, builder: newton.ModelBuilder):
         builder.add_ground_plane()

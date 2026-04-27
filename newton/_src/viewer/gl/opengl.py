@@ -920,9 +920,7 @@ class MeshInstancerGL:
         """
         gl = RendererGL.gl
         if self._instance_transform_cuda_buffer is None:
-            raise RuntimeError(
-                "CUDA-GL interop not available on this instancer; use update_from_pinned instead."
-            )
+            raise RuntimeError("CUDA-GL interop not available on this instancer; use update_from_pinned instead.")
         if count > self.num_instances:
             raise ValueError(f"Active instance count ({count}) exceeds allocated capacity ({self.num_instances}).")
         self.active_instances = count

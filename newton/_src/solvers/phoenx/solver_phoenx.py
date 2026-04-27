@@ -21,6 +21,7 @@ Per-step flow mirrors ``World.Step.cs``:
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 import numpy as np
 import warp as wp
@@ -200,6 +201,62 @@ class PhoenXWorld:
     supported; call :meth:`initialize_actuated_double_ball_socket_joints`
     to populate them before the first :meth:`step`.
     """
+
+    @dataclass
+    class StepReport:
+        """Diagnostic snapshot of the most recent :meth:`step`.
+
+        All counters refer to the just-finished step; producing the
+        report performs a handful of device-to-host copies and is not
+        graph-capture safe -- only call it from host code outside the
+        captured region.
+        """
+
+        num_colors: int
+        """Number of graph colours used by the last PGS colouring.
+
+        For ``step_layout="single_world"`` this is the global colour
+        count. For ``"multi_world"`` it is the maximum colour count
+        across all worlds (i.e. the depth of the per-world PGS sweep)."""
+
+        color_sizes: list[int]
+        """Element count per colour, length :attr:`num_colors`.
+
+        Single-world: per-colour element counts of the global
+        colouring. Multi-world: sum across worlds of the elements
+        assigned to each colour index ``c`` (worlds with fewer than
+        ``c+1`` colours contribute zero)."""
+
+        per_world_num_colors: list[int] | None
+        """Per-world colour counts, length ``num_worlds``. ``None`` for
+        the single-world layout."""
+
+        per_world_color_sizes: list[list[int]] | None
+        """Per-world per-colour element counts. Outer list has one
+        entry per world; inner list ``i`` has length
+        ``per_world_num_colors[i]``. ``None`` for the single-world
+        layout."""
+
+        num_contact_columns: int
+        """Active contact columns processed in the last step (zero if
+        :meth:`step` was called without contacts)."""
+
+        num_joints: int
+        """Number of joint constraint columns; static for the lifetime
+        of the world."""
+
+        num_active_constraints: int
+        """``num_joints + num_contact_columns`` -- total cids that the
+        last colouring partitioned."""
+
+        max_body_degree: int
+        """Maximum number of active constraint columns incident to any
+        single body in the last :meth:`step`. This is a hard lower
+        bound on the number of colours any valid graph colouring of
+        the constraint conflict graph can use, so comparing it against
+        :attr:`num_colors` shows how close the colourer is to the
+        theoretical optimum. ``0`` if :meth:`step` has not been called
+        or there are no active constraints."""
 
     def __init__(
         self,
@@ -398,12 +455,6 @@ class PhoenXWorld:
             max_num_nodes=max(1, self.num_bodies),
             device=self.device,
             use_tile_scan=True,
-            # Contact cids occupy ``[num_joints, num_joints + max_contact_columns)``.
-            # Biasing their JP priorities upward clusters contacts into earlier
-            # colours and joints into later colours, cutting warp divergence
-            # in the fast-tail iterate kernel (contacts and joints take
-            # different ``constraint_iterate`` branches).
-            contact_cid_start=self.num_joints,
         )
 
         cap = self._constraint_capacity
@@ -919,6 +970,12 @@ class PhoenXWorld:
         self.substep_dt = dt / self.substeps
 
         self._ingest_and_warmstart_contacts(contacts, shape_body)
+        if self._ingest_scratch is not None:
+            self._partitioner.set_costs_from_contacts(
+                self.num_joints,
+                self._ingest_scratch.num_contact_columns,
+                self._contact_cols,
+            )
 
         self._rebuild_elements()
         if self._constraint_capacity > 0:
@@ -1225,18 +1282,8 @@ class PhoenXWorld:
         # exactly the (world, lane) pair the kernel expects. Plain
         # ``launch`` would return a global thread index instead, which
         # would silently mis-address every block-scoped read/write.
-        # Biased priorities: contact cids get ``contact_bias`` added on
-        # the fly so they outrank every joint cid in JP. Clusters
-        # contacts into earlier colours / joints into later colours,
-        # reducing warp divergence in the constraint iterate kernel.
-        # Setting ``contact_cid_start = capacity`` disables the bias
-        # (joint-free or contact-free cases).
-        if 0 < self.num_joints < self._constraint_capacity:
-            contact_cid_start = self.num_joints
-            contact_bias = self._constraint_capacity
-        else:
-            contact_cid_start = self._constraint_capacity
-            contact_bias = 0
+        # Cost-biased priorities: contacts use their per-column contact count
+        # as the high priority word, while joints stay at cost 0.
         wp.launch_tiled(
             _per_world_jp_coloring_kernel,
             dim=[nw],
@@ -1248,9 +1295,8 @@ class PhoenXWorld:
                 self._partitioner._adjacency_section_end_indices,
                 self._partitioner._vertex_to_adjacent_elements,
                 self._partitioner._random_values,
+                self._partitioner._cost_values,
                 int(MAX_COLORS),
-                wp.int32(contact_cid_start),
-                wp.int32(contact_bias),
             ],
             outputs=[
                 self._per_world_assigned,
@@ -1805,8 +1851,109 @@ class PhoenXWorld:
     def num_colors_used(self) -> int:
         """Number of graph colours the last PGS colouring used.
         Performs a device-to-host copy -- do not call inside a
-        :func:`wp.ScopedCapture` region."""
-        return int(self._partitioner.num_colors.numpy()[0])
+        :func:`wp.ScopedCapture` region.
+
+        For richer diagnostics (per-colour element counts, active
+        contact column count, per-world breakdown), use
+        :meth:`step_report`.
+        """
+        if self.step_layout == "single_world":
+            return int(self._partitioner.num_colors.numpy()[0])
+        # Multi-world: report the maximum colour depth across worlds,
+        # matching what step_report().num_colors returns.
+        return int(self._world_num_colors.numpy().max(initial=0))
+
+    def step_report(self) -> PhoenXWorld.StepReport:
+        """Snapshot of colouring + active-constraint diagnostics for
+        the last :meth:`step`.
+
+        Performs a handful of device-to-host copies (all gated on this
+        call -- the step itself never reads them on the host) so the
+        steady-state path stays graph-capture clean. Do not call
+        inside a :func:`wp.ScopedCapture` region.
+
+        Returns:
+            A :class:`StepReport` populated with the colour count,
+            per-colour element histogram, and active-contact-column
+            count from the last :meth:`step`. If :meth:`step` has not
+            been called yet (or was called with ``contacts=None`` and
+            no joints exist) the report counts are all zero.
+        """
+        num_contact_columns = (
+            int(self._ingest_scratch.num_contact_columns.numpy()[0])
+            if self._contact_views is not None and self._ingest_scratch is not None
+            else 0
+        )
+        num_active = self.num_joints + num_contact_columns
+
+        # Per-body degree from the partitioner's adjacency CSR end array.
+        # After ``partitioning_adjacency_store_kernel`` runs, slot ``v``
+        # holds the inclusive end of body ``v``'s element-id list, so
+        # ``deg(v) = end[v] - end[v-1]`` (with a 0 sentinel for v == 0).
+        # The lower bound on any valid graph colouring is the maximum
+        # degree, so this is the right number to compare ``num_colors``
+        # against.
+        if num_active > 0 and self.num_bodies > 0:
+            ends = self._partitioner._adjacency_section_end_indices.numpy()
+            n_bodies = min(int(self.num_bodies), int(ends.shape[0]))
+            if n_bodies > 0:
+                degrees = ends[:n_bodies].astype(np.int64, copy=False)
+                degrees[1:] = degrees[1:] - degrees[:-1]
+                max_body_degree = int(degrees.max(initial=0))
+            else:
+                max_body_degree = 0
+        else:
+            max_body_degree = 0
+
+        if self.step_layout == "single_world":
+            nc = int(self._partitioner.num_colors.numpy()[0])
+            if nc > 0:
+                starts = self._partitioner.color_starts.numpy()
+                color_sizes = [int(starts[c + 1] - starts[c]) for c in range(nc)]
+            else:
+                color_sizes = []
+            return self.StepReport(
+                num_colors=nc,
+                color_sizes=color_sizes,
+                per_world_num_colors=None,
+                per_world_color_sizes=None,
+                num_contact_columns=num_contact_columns,
+                num_joints=self.num_joints,
+                num_active_constraints=num_active,
+                max_body_degree=max_body_degree,
+            )
+
+        # Multi-world: per-world coloring. ``_world_num_colors`` is
+        # length ``num_worlds`` and ``_world_color_starts`` is shape
+        # ``[num_worlds, MAX_COLORS + 1]``.
+        nc_per_world = self._world_num_colors.numpy().astype(np.int32, copy=False)
+        starts_2d = self._world_color_starts.numpy().astype(np.int32, copy=False)
+        per_world_num_colors: list[int] = [int(n) for n in nc_per_world]
+        per_world_color_sizes: list[list[int]] = []
+        max_nc = 0
+        for w, n in enumerate(per_world_num_colors):
+            row = starts_2d[w]
+            sizes = [int(row[c + 1] - row[c]) for c in range(n)]
+            per_world_color_sizes.append(sizes)
+            if n > max_nc:
+                max_nc = n
+        # Aggregate per-colour-index totals across worlds. Worlds with
+        # fewer than ``max_nc`` colours contribute zero to higher
+        # indices.
+        agg = [0] * max_nc
+        for sizes in per_world_color_sizes:
+            for c, s in enumerate(sizes):
+                agg[c] += s
+        return self.StepReport(
+            num_colors=max_nc,
+            color_sizes=agg,
+            per_world_num_colors=per_world_num_colors,
+            per_world_color_sizes=per_world_color_sizes,
+            num_contact_columns=num_contact_columns,
+            num_joints=self.num_joints,
+            num_active_constraints=num_active,
+            max_body_degree=max_body_degree,
+        )
 
     def gather_contact_wrenches(self, out: wp.array) -> None:
         """Per-individual-contact wrench (force + torque) from the

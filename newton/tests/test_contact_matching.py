@@ -677,7 +677,6 @@ def test_tie_break_invariant_under_unsorted_permutation(test, device):
     contact buffer because only the winner's row is overwritten by
     :meth:`ContactMatcher.replay_matched`.
     """
-    from newton._src.geometry.contact_data import make_contact_sort_key
     from newton._src.geometry.contact_match import ContactMatcher
     from newton._src.geometry.contact_sort import ContactSorter
 
