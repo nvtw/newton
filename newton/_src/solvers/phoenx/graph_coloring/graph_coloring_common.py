@@ -263,6 +263,136 @@ def partitioning_coloring_kernel(
         wp.atomic_add(partition_ends, color_copy, 1)
 
 
+# Maximum colour count representable in a single int64 forbidden mask.
+# The greedy variant of the JP coloring (see
+# :func:`partitioning_coloring_incremental_greedy_kernel`) tracks the set of
+# colours already taken by an element's coloured neighbours in this many
+# bits. Real-world physics constraint graphs comfortably fit (Kapla tower's
+# max body degree is 28; ragdolls and robots stay well under 32). If a
+# graph would actually need more than this, the greedy kernel sets an
+# overflow flag and the caller raises a descriptive error before the
+# coloring corrupts (analogous to the MAX_COLORS guard in the CSR builder).
+GREEDY_MAX_COLORS = wp.constant(64)
+# Constant mask used to flip the forbidden mask in lieu of the unreliable
+# 64-bit bitwise NOT on int64 constants (see _TAG_MASK comment for the
+# original codegen issue).
+_FREE_COLOR_FLIP = wp.constant(wp.int64(-1))  # all ones, two's complement
+
+
+@wp.kernel(enable_backward=False)
+def partitioning_coloring_incremental_greedy_kernel(
+    partition_data_concat: wp.array[wp.int64],
+    random_values: wp.array[wp.int32],
+    cost_values: wp.array[wp.int32],
+    adjacency_section_end_indices: wp.array[int],
+    vertex_to_adjacent_elements: wp.array[int],
+    elements: wp.array[ElementInteractionData],
+    remaining_ids: wp.array[int],
+    num_remaining: wp.array[int],
+    overflow_flag: wp.array[int],
+):
+    """JP-MIS combined with greedy color selection.
+
+    Same parallelism contract as
+    :func:`partitioning_coloring_incremental_kernel`: a vertex commits
+    iff it has the highest priority among its still-uncoloured neighbours
+    (so commits within a round are an independent set, identical to the
+    classic JP step).
+
+    Difference: instead of tagging every committed vertex with the
+    *round number*, the kernel computes the smallest colour not used by
+    its already-coloured neighbours and writes that colour. Result: a
+    run of the loop converges to near-greedy colour counts (often 2-3x
+    fewer colours than vanilla JP) at the same rounds-per-build cost.
+
+    Forbidden colours are tracked in a single ``int64`` bitmask, which
+    bounds the achievable colour count at :data:`GREEDY_MAX_COLORS`
+    (= 64). Going past 64 colours raises ``overflow_flag[0] = 1``; the
+    host-side build path reads it after the build loop exits and
+    raises a descriptive error before any consumer sees corrupt
+    output. This is the same overflow contract as the CSR build's
+    ``MAX_COLORS`` cap.
+    """
+    slot = wp.tid()
+
+    if slot >= num_remaining[0]:
+        return
+
+    tid = remaining_ids[slot]
+
+    self_prio = contact_partitions_get_random_value(random_values, cost_values, tid)
+    el = elements[tid]
+
+    is_local_max = bool(True)
+    forbidden_mask = wp.int64(0)
+
+    for j in range(MAX_BODIES):
+        if not is_local_max:
+            break
+        v = element_interaction_data_get(el, j)
+        if v < 0:
+            break
+
+        if v > 0:
+            start = adjacency_section_end_indices[v - 1]
+        else:
+            start = 0
+        end = adjacency_section_end_indices[v]
+        for k in range(start, end):
+            neighbor = vertex_to_adjacent_elements[k]
+            if neighbor == tid:
+                continue
+            # Inspect this neighbour's tag word once and dispatch on
+            # whether they're already coloured. Two distinct cases:
+            #
+            #   colour == 0 -> neighbour is still uncoloured. Apply the
+            #     standard JP MIS check; if the neighbour outranks us,
+            #     bail (we won't commit this round).
+            #   colour != 0 -> neighbour is already coloured. Mark
+            #     their colour as forbidden in the bitmask so we don't
+            #     reuse it.
+            tagged = partition_data_concat[neighbor] & _TAG_MASK
+            color_plus_one = tagged >> _COLOR_SHIFT
+            if color_plus_one == wp.int64(0):
+                # Uncoloured -> MIS tiebreak.
+                if contact_partitions_get_random_value(random_values, cost_values, neighbor) > self_prio:
+                    is_local_max = False
+                    break
+            else:
+                # Coloured -> forbid that colour. Cap at the bitmask
+                # capacity; if a graph really needs more colours we
+                # raise overflow below.
+                ncolor = wp.int32(color_plus_one - wp.int64(1))
+                if ncolor < GREEDY_MAX_COLORS:
+                    forbidden_mask = forbidden_mask | (wp.int64(1) << wp.int64(ncolor))
+
+    if is_local_max:
+        # Smallest free colour = position of the lowest 0-bit in the
+        # forbidden mask. Free positions are encoded as 1s in the
+        # complement; ``forbidden_mask ^ -1`` is the all-ones flip
+        # without relying on int64 unary NOT (see the _TAG_MASK
+        # comment block for why we avoid ``~``).
+        free_mask = forbidden_mask ^ _FREE_COLOR_FLIP
+        # Linear scan for the first set bit. 64 iterations max -- well
+        # under the kernel's per-vertex adjacency walk -- and avoids
+        # depending on a Warp-side ``ffs`` builtin we don't otherwise
+        # need. The bit scan is bounded by GREEDY_MAX_COLORS so the
+        # `c < GREEDY_MAX_COLORS` guard always exits before the loop
+        # itself terminates if every colour is somehow forbidden.
+        c = wp.int32(0)
+        for _ in range(GREEDY_MAX_COLORS):
+            if (free_mask & (wp.int64(1) << wp.int64(c))) != wp.int64(0):
+                break
+            c = c + wp.int32(1)
+        if c >= GREEDY_MAX_COLORS:
+            # Mask saturated: graph wants > GREEDY_MAX_COLORS distinct
+            # colours. Flag overflow and skip this commit; the host
+            # side will raise after the loop exits.
+            overflow_flag[0] = 1
+        else:
+            partition_data_concat[tid] = (wp.int64(c + 1) << _COLOR_SHIFT) | wp.int64(tid)
+
+
 @wp.kernel(enable_backward=False)
 def partitioning_coloring_incremental_kernel(
     partition_data_concat: wp.array[wp.int64],
@@ -827,3 +957,221 @@ def incremental_tile_compact_csr_and_advance_kernel(
         # it unconditionally every round keeps the bookkeeping simple;
         # the last round's write is the one callers observe.
         num_colors[0] = cc + 1
+
+
+# ---------------------------------------------------------------------------
+# Greedy-mode helper kernels.
+#
+# The greedy variant of the JP coloring assigns each committed vertex the
+# smallest colour not used by its neighbours, so commits within one round
+# can land in any colour (not just the round number). This breaks the
+# colour-equals-round assumption baked into
+# ``incremental_tile_compact_csr_and_advance_kernel``. The kernels below
+# replace that compaction with: (1) a per-colour histogram, (2) an
+# exclusive-prefix scan to derive ``color_starts``, (3) a deterministic
+# scatter into ``element_ids_by_color`` keyed by the per-element colour
+# and ordered by element id within each colour.
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel(enable_backward=False)
+def greedy_reset_color_count_kernel(
+    color_count: wp.array[int],
+    color_offsets: wp.array[int],
+    overflow_flag: wp.array[int],
+    max_colors: int,
+):
+    """Single-block reset of the per-colour bookkeeping arrays.
+
+    Replaces three separate ``array.zero_()`` calls inside
+    :meth:`IncrementalContactPartitioner.build_csr_greedy`. Doing the
+    reset via a kernel keeps it inside the captured graph in the same
+    way the existing ``incremental_init_csr_kernel`` does for the
+    round-based path; ``array.zero_()`` works inside an outer
+    ``ScopedCapture`` but launches an extra ``cudaMemsetAsync`` per
+    array. Folding the three resets into one launch is also a small
+    constant win when the build is replayed many times per step.
+    """
+    tid = wp.tid()
+    if tid < max_colors:
+        color_count[tid] = wp.int32(0)
+        color_offsets[tid] = wp.int32(0)
+    if tid == 0:
+        overflow_flag[0] = wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def greedy_compact_remaining_kernel(
+    partition_data_concat: wp.array[wp.int64],
+    remaining_ids: wp.array[int],
+    num_remaining: wp.array[int],
+):
+    """Compact ``remaining_ids`` to vertices that are still uncoloured.
+
+    Reads each entry of ``remaining_ids[0..num_remaining[0])`` and
+    keeps it iff its packed colour is zero (i.e. the vertex did not
+    commit in the most recent greedy pass). Writes the survivor list
+    in place; lane 0 updates ``num_remaining[0]``.
+
+    Single-block tile-scan launch -- same shape as
+    :func:`incremental_tile_compact_remaining_and_advance_kernel`,
+    minus the per-colour CSR scatter (which moves to a separate
+    final pass at the end of the build, since greedy commits do
+    not arrive in colour order).
+    """
+    _block, lane = wp.tid()
+
+    n = num_remaining[0]
+    # Early-exit when the build has already converged. Same contract
+    # as the existing CSR compact kernel: extra launches past
+    # convergence must be no-ops so the unrolled capture_while body
+    # stays safe.
+    if n == 0:
+        return
+
+    survivor_running = int(0)
+
+    offset = int(0)
+    while offset < n:
+        slot = offset + lane
+
+        eid = int(0)
+        survivor_flag = int(0)
+        if slot < n:
+            eid = remaining_ids[slot]
+            tagged = partition_data_concat[eid] & _TAG_MASK
+            color_plus_one = tagged >> _COLOR_SHIFT
+            # Greedy mode: any non-zero colour means committed (in any
+            # round). Survivor iff still uncoloured.
+            if color_plus_one == wp.int64(0):
+                survivor_flag = 1
+
+        survivor_tile = wp.tile(survivor_flag)
+        survivor_scan = wp.tile_scan_exclusive(survivor_tile)
+        survivor_local = wp.untile(survivor_scan)
+
+        if survivor_flag == 1:
+            out_idx = survivor_running + survivor_local
+            remaining_ids[out_idx] = eid
+
+        survivor_total = wp.tile_sum(survivor_tile)
+        survivor_running = survivor_running + survivor_total[0]
+        offset = offset + TILE_SCAN_BLOCK_DIM
+
+    if lane == 0:
+        num_remaining[0] = survivor_running
+
+
+@wp.kernel(enable_backward=False)
+def greedy_color_histogram_kernel(
+    partition_data_concat: wp.array[wp.int64],
+    num_elements: wp.array[int],
+    color_count: wp.array[int],
+    interaction_id_to_partition: wp.array[int],
+):
+    """Count vertices per colour and stamp ``interaction_id_to_partition``.
+
+    Walks every element ``tid < num_elements[0]``, reads its packed
+    colour out of ``partition_data_concat``, atomically increments
+    ``color_count[colour]``, and writes the colour into
+    ``interaction_id_to_partition`` so consumers (e.g.
+    ``World.num_colors_used``) see the same per-element assignments
+    they did under JP. Uncoloured elements (colour == 0) are not
+    counted -- if any survive at this point it is a build bug; the
+    overflow path on the greedy kernel raises before we reach here.
+    """
+    tid = wp.tid()
+    n = num_elements[0]
+    if tid >= n:
+        return
+    tagged = partition_data_concat[tid] & _TAG_MASK
+    color_plus_one = tagged >> _COLOR_SHIFT
+    if color_plus_one == wp.int64(0):
+        # Should be unreachable on a converged greedy build. Stamp -1
+        # so downstream code at least sees a distinct sentinel.
+        interaction_id_to_partition[tid] = wp.int32(-1)
+        return
+    c = wp.int32(color_plus_one - wp.int64(1))
+    interaction_id_to_partition[tid] = c
+    wp.atomic_add(color_count, c, 1)
+
+
+@wp.kernel(enable_backward=False)
+def greedy_count_num_colors_kernel(
+    color_count: wp.array[int],
+    max_colors: int,
+    num_colors: wp.array[int],
+):
+    """Set ``num_colors[0] = 1 + max c such that color_count[c] > 0``.
+
+    Walks ``color_count[0..max_colors)`` on a single thread. With the
+    ``GREEDY_MAX_COLORS`` cap of 64 we never see more than 64 entries,
+    so a single-thread scan is fine; this is called once per build.
+    """
+    tid = wp.tid()
+    if tid != 0:
+        return
+    last = wp.int32(-1)
+    for c in range(max_colors):
+        if color_count[c] > 0:
+            last = c
+    num_colors[0] = last + 1
+
+
+@wp.kernel(enable_backward=False)
+def greedy_color_starts_scan_kernel(
+    color_count: wp.array[int],
+    color_starts: wp.array[int],
+    max_colors: int,
+):
+    """Single-thread exclusive prefix sum over ``color_count`` -> ``color_starts``.
+
+    With ``max_colors <= GREEDY_MAX_COLORS`` (= 64) a serial scan on
+    one thread is the simplest correct implementation. Build is called
+    once per ``World.step`` so the constant is negligible compared
+    with the per-element greedy kernel.
+    """
+    tid = wp.tid()
+    if tid != 0:
+        return
+    running = wp.int32(0)
+    for c in range(max_colors + 1):
+        color_starts[c] = running
+        if c < max_colors:
+            running = running + color_count[c]
+
+
+@wp.kernel(enable_backward=False)
+def greedy_scatter_elements_by_color_kernel(
+    partition_data_concat: wp.array[wp.int64],
+    color_starts: wp.array[int],
+    color_offsets: wp.array[int],
+    element_ids_by_color: wp.array[int],
+    num_elements: wp.array[int],
+):
+    """Scatter each coloured element into the CSR slot assigned to its colour.
+
+    For each element ``tid``:
+      1. Read its colour ``c`` from the packed tag word.
+      2. Atomic-add 1 to ``color_offsets[c]`` to claim a slot.
+      3. Write its id into
+         ``element_ids_by_color[color_starts[c] + slot]``.
+
+    ``color_offsets`` is a separate scratch array initialised to 0
+    at the start of the scatter so the atomics produce a 1:1 map
+    onto the CSR range owned by colour ``c``. Order of element ids
+    within a colour is non-deterministic (atomics) but the *set* of
+    elements per colour is fully determined by the greedy build.
+    Downstream PGS sweeps already iterate the colour slice as an
+    independent set, so order does not matter.
+    """
+    tid = wp.tid()
+    if tid >= num_elements[0]:
+        return
+    tagged = partition_data_concat[tid] & _TAG_MASK
+    color_plus_one = tagged >> _COLOR_SHIFT
+    if color_plus_one == wp.int64(0):
+        return
+    c = wp.int32(color_plus_one - wp.int64(1))
+    slot = wp.atomic_add(color_offsets, c, 1)
+    element_ids_by_color[color_starts[c] + slot] = tid

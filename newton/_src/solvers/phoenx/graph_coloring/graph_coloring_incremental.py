@@ -30,9 +30,16 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_contact_count,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
+    GREEDY_MAX_COLORS,
     MAX_BODIES,
     TILE_SCAN_BLOCK_DIM,
     ElementInteractionData,
+    greedy_color_histogram_kernel,
+    greedy_color_starts_scan_kernel,
+    greedy_compact_remaining_kernel,
+    greedy_count_num_colors_kernel,
+    greedy_reset_color_count_kernel,
+    greedy_scatter_elements_by_color_kernel,
     incremental_begin_sweep_kernel,
     incremental_fill_minus_one_kernel,
     incremental_init_csr_kernel,
@@ -43,6 +50,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     incremental_tile_compact_remaining_and_advance_kernel,
     partitioning_adjacency_count_kernel,
     partitioning_adjacency_store_kernel,
+    partitioning_coloring_incremental_greedy_kernel,
     partitioning_coloring_incremental_kernel,
     partitioning_prepare_kernel,
 )
@@ -207,6 +215,23 @@ class IncrementalContactPartitioner:
         # raises a descriptive error -- turning what used to be silent
         # memory corruption (see ``Bug.md`` #2) into a loud failure.
         self._overflow_flag = wp.zeros(1, dtype=wp.int32, device=device)
+
+        # ----- Greedy build (build_csr_greedy) scratch ------------------
+        #
+        # Greedy mode does not commit colours in round order, so it can't
+        # use the running-prefix CSR scatter that
+        # ``incremental_tile_compact_csr_and_advance_kernel`` does. Instead
+        # we histogram colours, exclusive-scan into ``color_starts``, and
+        # atomic-scatter elements. ``_greedy_color_count`` is the
+        # histogram bucket and ``_greedy_color_offsets`` is the live
+        # write cursor used by the scatter.
+        #
+        # Sized at :data:`GREEDY_MAX_COLORS` because the greedy kernel's
+        # forbidden-mask bitmask is bounded at that width; the build
+        # raises ``RuntimeError`` (host-side) if the algorithm wanted
+        # more colours than the bitmask can hold.
+        self._greedy_color_count: wp.array[wp.int32] = wp.zeros(int(GREEDY_MAX_COLORS), dtype=wp.int32, device=device)
+        self._greedy_color_offsets: wp.array[wp.int32] = wp.zeros(int(GREEDY_MAX_COLORS), dtype=wp.int32, device=device)
 
         # Sweep cursor used by :meth:`begin_sweep` / the PGS kernels.
         # Holds the number of colours still to process in the current
@@ -605,6 +630,185 @@ class IncrementalContactPartitioner:
                     self._interaction_id_to_partition,
                     int(MAX_COLORS),
                     self._overflow_flag,
+                ],
+                block_dim=int(TILE_SCAN_BLOCK_DIM),
+            )
+
+    # ------------------------------------------------------------------
+    # Greedy build (Mode B alternative): JP-MIS + smallest-free-colour
+    # ------------------------------------------------------------------
+
+    def build_csr_greedy(self) -> None:
+        """Greedy variant of :meth:`build_csr` using JP-MIS + smallest-
+        free-colour assignment.
+
+        Same input contract (``reset()`` must have been called to build
+        adjacency) and same output contract (``element_ids_by_color`` /
+        ``color_starts`` / ``num_colors`` populated; ``num_colors[0]``
+        bounded by :data:`GREEDY_MAX_COLORS`).
+
+        Algorithm: each round picks an MIS via the standard JP rule
+        (vertex commits iff it has the highest priority among its
+        still-uncoloured neighbours), but each committed vertex
+        receives the smallest colour not used by its already-coloured
+        neighbours instead of the round number. Empirically gives
+        2-3x fewer colours than the round-equals-colour JP at similar
+        per-round cost.
+
+        Determinism: order of element ids within a single colour is
+        scattered atomically and not deterministic across runs, but
+        the *set* of elements per colour is fully determined by the
+        adjacency, priorities, and costs; PGS sweeps consume each
+        colour as an unordered independent set so the within-colour
+        order is irrelevant.
+        """
+        assert self._elements is not None and self._num_elements is not None, (
+            "reset() must be called before build_csr_greedy()"
+        )
+
+        # Reset CSR-side state. We can reuse the same init kernel as
+        # the round-based path: it zeroes ``num_remaining``-driving
+        # state and clears ``color_starts[0]``.
+        wp.launch(
+            incremental_init_csr_kernel,
+            dim=1,
+            inputs=[
+                self._current_color,
+                self._num_remaining,
+                self._num_colors,
+                self._color_starts,
+                self._num_elements,
+            ],
+        )
+        # Reset per-colour bookkeeping with a single launch instead of
+        # three separate ``array.zero_()`` calls. ``zero_()`` would
+        # work inside an outer capture but emits an extra
+        # ``cudaMemsetAsync`` per array; one fused-launch reset keeps
+        # the build's per-step replay cost down.
+        wp.launch(
+            greedy_reset_color_count_kernel,
+            dim=int(GREEDY_MAX_COLORS),
+            inputs=[
+                self._greedy_color_count,
+                self._greedy_color_offsets,
+                self._overflow_flag,
+                int(GREEDY_MAX_COLORS),
+            ],
+        )
+
+        # Reset per-element packed tag and the compact remaining list,
+        # same as the round-based path. These leave the adjacency
+        # untouched (``reset()`` built it).
+        wp.launch(
+            incremental_reset_loop_state_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._partition_data_concat,
+                self._interaction_id_to_partition,
+                self._num_elements,
+            ],
+        )
+        wp.launch(
+            incremental_init_remaining_ids_kernel,
+            dim=self.max_num_interactions,
+            inputs=[self._remaining_ids, self._num_elements],
+        )
+
+        # Main loop: greedy MIS-and-colour kernel + compact remaining.
+        # Same capture_while shape as the round-based path; the inner
+        # body unrolls ``NUM_INNER_WHILE_ITERATIONS`` rounds.
+        wp.capture_while(
+            self._num_remaining,
+            self._capture_build_csr_greedy_step,
+        )
+
+        # Post-pass: histogram colours into color_count, derive
+        # color_starts via exclusive prefix scan, scatter element ids
+        # into element_ids_by_color in colour order. All graph-capture
+        # safe (no host syncs); these MUST run before the host-side
+        # overflow check returns early in the capture path so that the
+        # CSR is populated either way.
+        wp.launch(
+            greedy_color_histogram_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._partition_data_concat,
+                self._num_elements,
+                self._greedy_color_count,
+                self._interaction_id_to_partition,
+            ],
+        )
+        wp.launch(
+            greedy_count_num_colors_kernel,
+            dim=1,
+            inputs=[self._greedy_color_count, int(GREEDY_MAX_COLORS), self._num_colors],
+        )
+        wp.launch(
+            greedy_color_starts_scan_kernel,
+            dim=1,
+            inputs=[self._greedy_color_count, self._color_starts, int(GREEDY_MAX_COLORS)],
+        )
+        wp.launch(
+            greedy_scatter_elements_by_color_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._partition_data_concat,
+                self._color_starts,
+                self._greedy_color_offsets,
+                self._element_ids_by_color,
+                self._num_elements,
+            ],
+        )
+
+        # Surface overflow only outside graph capture (D2H syncs are
+        # illegal during capture). Same host-sync contract as
+        # ``build_csr``: a captured build silently completes; the next
+        # uncaptured call observes the flag and raises.
+        device = self._overflow_flag.device
+        if device.is_cuda and device.is_capturing:
+            return
+        if int(self._overflow_flag.numpy()[0]) != 0:
+            raise RuntimeError(
+                "PhoenX greedy graph coloring exceeded GREEDY_MAX_COLORS "
+                f"(={int(GREEDY_MAX_COLORS)}). The constraint graph "
+                "requires more partitions than a single int64 forbidden "
+                "mask can track. This either indicates a very dense "
+                "subgraph (max body degree > 64) or a worse-than-greedy "
+                "interaction between the JP MIS and the colour-selection "
+                "rule. Fall back to ``build_csr`` (round-based JP) by "
+                "switching solver_config.PHOENX_USE_GREEDY_COLORING off."
+            )
+
+    def _capture_build_csr_greedy_step(self) -> None:
+        """Body of the ``build_csr_greedy`` capture_while.
+
+        Same unroll contract as :meth:`_capture_build_csr_step`: both
+        kernels honour an early-exit when ``num_remaining[0] == 0`` so
+        the trailing rounds past convergence are no-ops.
+        """
+        for _ in range(NUM_INNER_WHILE_ITERATIONS):
+            wp.launch(
+                partitioning_coloring_incremental_greedy_kernel,
+                dim=self.max_num_interactions,
+                inputs=[
+                    self._partition_data_concat,
+                    self._random_values,
+                    self._cost_values,
+                    self._adjacency_section_end_indices,
+                    self._vertex_to_adjacent_elements,
+                    self._elements,
+                    self._remaining_ids,
+                    self._num_remaining,
+                    self._overflow_flag,
+                ],
+            )
+            wp.launch_tiled(
+                greedy_compact_remaining_kernel,
+                dim=[1],
+                inputs=[
+                    self._partition_data_concat,
+                    self._remaining_ids,
+                    self._num_remaining,
                 ],
                 block_dim=int(TILE_SCAN_BLOCK_DIM),
             )

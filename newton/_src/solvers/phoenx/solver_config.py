@@ -77,7 +77,7 @@ from typing import Literal
 
 #: Contact-matching mode fed into :class:`newton.CollisionPipeline`.
 #: See the module docstring; ``"sticky"`` is the production default.
-PHOENX_CONTACT_MATCHING: Literal["sticky", "latest"] = "latest"
+PHOENX_CONTACT_MATCHING: Literal["sticky", "latest"] = "sticky"
 
 #: Unroll count for every ``wp.capture_while`` body in PhoenX. See
 #: the module docstring for the early-exit contract.
@@ -93,9 +93,22 @@ FUSE_TAIL_MAX_COLOR_SIZE: int = 256
 #: Must be >= :data:`FUSE_TAIL_MAX_COLOR_SIZE`.
 FUSE_TAIL_BLOCK_DIM: int = 256
 
+#: Use the JP-MIS + greedy-colour partitioner
+#: (:meth:`IncrementalContactPartitioner.build_csr_greedy`) instead of
+#: the round-equals-colour JP path. Greedy gives 2-3x fewer colours on
+#: dense contact graphs (Kapla tower: 78 → 28 = lower bound) at
+#: comparable build time, in exchange for a max-colour-size that's
+#: typically ~2x larger -- the colour sweep parallelism is already
+#: GPU-saturated on big colours, so the trade favours fewer rounds.
+#: Bounded at 64 colours total (single-int64 forbidden mask); falls
+#: back to a descriptive error if a graph wants more, in which case
+#: flip this off to recover the round-based JP.
+PHOENX_USE_GREEDY_COLORING: bool = True
+
 __all__ = [
     "FUSE_TAIL_BLOCK_DIM",
     "FUSE_TAIL_MAX_COLOR_SIZE",
     "NUM_INNER_WHILE_ITERATIONS",
     "PHOENX_CONTACT_MATCHING",
+    "PHOENX_USE_GREEDY_COLORING",
 ]

@@ -74,6 +74,7 @@ from newton._src.solvers.phoenx.solver_config import (
     FUSE_TAIL_BLOCK_DIM,
     FUSE_TAIL_MAX_COLOR_SIZE,
     NUM_INNER_WHILE_ITERATIONS,
+    PHOENX_USE_GREEDY_COLORING,
 )
 from newton._src.solvers.phoenx.solver_kernels import (
     _accumulate_substep_velocity_kernel,
@@ -983,7 +984,14 @@ class PhoenXWorld:
             if self.step_layout == "single_world":
                 # Single-world step path needs only the global CSR;
                 # the per-world bucketing scaffolding is unused.
-                self._partitioner.build_csr()
+                # Greedy partitioner (default) gives 2-3x fewer
+                # colours than round-based JP on dense contact graphs
+                # (Kapla tower: 78 → 28). Switched off via
+                # PHOENX_USE_GREEDY_COLORING for the legacy path.
+                if PHOENX_USE_GREEDY_COLORING:
+                    self._partitioner.build_csr_greedy()
+                else:
+                    self._partitioner.build_csr()
             else:
                 # Multi-world: parallel per-world JP coloring. The
                 # adjacency build is still global (per-body CSR of
