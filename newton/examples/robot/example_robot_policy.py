@@ -280,7 +280,7 @@ class Example:
             # joint stiffnesses sit in the 100-1000 N*m/rad range.
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
-                substeps=4,
+                substeps=20,
                 solver_iterations=8,
                 velocity_iterations=1,
             )
