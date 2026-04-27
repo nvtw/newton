@@ -228,6 +228,63 @@ def _export_body_state_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _export_body_state_avg_kernel(
+    # PhoenX body container (slot index = tid + 1).
+    position: wp.array[wp.vec3f],
+    orientation: wp.array[wp.quatf],
+    body_com: wp.array[wp.vec3f],
+    # Time-integrated velocity accumulators (length = N).
+    vel_accum: wp.array[wp.vec3f],
+    omega_accum: wp.array[wp.vec3f],
+    inv_dt: wp.float32,
+    # Newton State outputs.
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+):
+    """Substep-averaged velocity readout.
+
+    Each substep, :func:`_accumulate_substep_velocity_kernel` adds
+    ``velocity * substep_dt`` and ``angular_velocity * substep_dt``
+    into ``vel_accum`` / ``omega_accum``. Multiplying by ``1 / dt``
+    here gives the time-averaged velocity over the whole outer step.
+    Pose is the substep-end pose (same as the standard exporter).
+    """
+    tid = wp.tid()
+    src = tid + 1
+    rot = orientation[src]
+    com_world = position[src]
+    origin = com_world - wp.quat_rotate(rot, body_com[tid])
+    body_q[tid] = wp.transform(origin, rot)
+    v_avg = vel_accum[tid] * inv_dt
+    w_avg = omega_accum[tid] * inv_dt
+    body_qd[tid] = wp.spatial_vector(v_avg, w_avg)
+
+
+@wp.kernel(enable_backward=False)
+def _accumulate_substep_velocity_kernel(
+    velocity: wp.array[wp.vec3f],
+    angular_velocity: wp.array[wp.vec3f],
+    substep_dt: wp.float32,
+    # Accumulators; length = N (one slot per Newton body, slot 0 of
+    # PhoenX is the static anchor and isn't reflected back).
+    vel_accum: wp.array[wp.vec3f],
+    omega_accum: wp.array[wp.vec3f],
+):
+    """Accumulate ``velocity * dt`` and ``angular_velocity * dt`` for
+    every dynamic body. Called once per substep, immediately after
+    the velocity / position integration step. Dividing the accumulator
+    by the outer-step ``dt`` at export gives the time-averaged
+    velocity over the outer step, which matches MuJoCo Warp's
+    post-integration ``qvel`` convention more closely than either the
+    raw substep-end value or the pose-delta-only FD readout.
+    """
+    tid = wp.tid()
+    src = tid + 1  # PhoenX slot 0 is the static world anchor.
+    vel_accum[tid] = vel_accum[tid] + velocity[src] * substep_dt
+    omega_accum[tid] = omega_accum[tid] + angular_velocity[src] * substep_dt
+
+
+@wp.kernel(enable_backward=False)
 def _snapshot_pre_step_pose_kernel(
     # PhoenX body container (length N + 1 with slot 0 = anchor).
     position: wp.array[wp.vec3f],

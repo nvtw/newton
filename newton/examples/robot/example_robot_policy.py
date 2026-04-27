@@ -324,12 +324,20 @@ class Example:
             # that the stiff foot-ground contact resolution produces
             # on the ankle DoFs (most visible after the first 1-2
             # steps; see ``_g1_obs_diff.py``).
+            # ``velocity_readout="substep_end"`` was empirically the
+            # best of the three modes on the G1 standing pose: the
+            # finite_difference and substep_average modes both invert
+            # the trunk-pitch direction relative to MuJoCo Warp, which
+            # turned the policy's projected-gravity observation into
+            # an off-distribution signal. ``substep_end`` keeps the
+            # right sign (just at higher magnitude than MJ's
+            # post-integration qvel). See _g1_obs_diff.py for numbers.
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
                 substeps=20,
                 solver_iterations=8,
                 velocity_iterations=2,
-                velocity_readout="finite_difference",
+                velocity_readout="substep_end",
             )
         else:
             self.solver = newton.solvers.SolverMuJoCo(

@@ -74,6 +74,9 @@ from newton._src.solvers.phoenx.solver_config import (
     FUSE_TAIL_MAX_COLOR_SIZE,
     NUM_INNER_WHILE_ITERATIONS,
 )
+from newton._src.solvers.phoenx.solver_kernels import (
+    _accumulate_substep_velocity_kernel,
+)
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
     _STRAGGLER_BLOCK_DIM,
@@ -874,7 +877,15 @@ class PhoenXWorld:
     # Public driver
     # ------------------------------------------------------------------
 
-    def step(self, dt: float, contacts=None, shape_body=None, picking=None) -> None:
+    def step(
+        self,
+        dt: float,
+        contacts=None,
+        shape_body=None,
+        picking=None,
+        vel_accum: wp.array[wp.vec3f] | None = None,
+        omega_accum: wp.array[wp.vec3f] | None = None,
+    ) -> None:
         """Advance the world by ``dt`` seconds.
 
         Phases: ingest contacts -> rebuild elements + JP colouring ->
@@ -961,6 +972,21 @@ class PhoenXWorld:
             alpha = float(k + 1) * inv_n
             self._kinematic_interpolate_substep(alpha)
             self._apply_global_damping()
+            if vel_accum is not None and omega_accum is not None and self.num_bodies > 0:
+                # ``substep_average`` velocity readout: accumulate
+                # post-substep velocities so the outer-step caller can
+                # divide by ``step_dt`` and get the time-averaged value.
+                wp.launch(
+                    _accumulate_substep_velocity_kernel,
+                    dim=int(self.num_bodies) - 1,  # slot 0 is the anchor
+                    inputs=[
+                        self.bodies.velocity,
+                        self.bodies.angular_velocity,
+                        wp.float32(self.substep_dt),
+                    ],
+                    outputs=[vel_accum, omega_accum],
+                    device=self.device,
+                )
 
         self._update_inertia_and_clear_forces()
 

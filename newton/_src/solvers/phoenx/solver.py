@@ -47,6 +47,7 @@ from newton._src.solvers.phoenx.model_adapter import (
 from newton._src.solvers.phoenx.solver_kernels import (
     _apply_joint_control_kernel,
     _contact_impulse_to_force_wrapper_kernel,
+    _export_body_state_avg_kernel,
     _export_body_state_fd_kernel,
     _export_body_state_kernel,
     _import_body_state_kernel,
@@ -209,23 +210,29 @@ class SolverPhoenX(SolverBase):
                 ``32`` = one warp per world (legacy), ``16`` = two,
                 ``8`` = four (rarely wins). Graph-capture safe.
             velocity_readout: Convention used when stamping
-                ``state_out.body_qd``. ``"substep_end"`` (default)
-                writes PhoenX's substep-end velocity straight through
-                -- the bit-faithful internal value, but it carries
-                whatever high-frequency contact-impulse content the
-                last substep produced. ``"finite_difference"`` writes
-                ``(body_q_now - body_q_prev) / dt_outer``, i.e. the
-                averaged velocity over the entire :meth:`step` call.
-                Useful for RL inference scenes where the policy was
-                trained against a solver (e.g. MuJoCo Warp) whose
-                returned ``qvel`` is the post-integration velocity
-                rather than an instantaneous value -- the FD readout
-                smooths over PhoenX's substep ringing without
-                changing the simulated physics.
+                ``state_out.body_qd``. Three modes:
+
+                * ``"substep_end"`` (default) writes PhoenX's
+                  substep-end velocity straight through -- bit-faithful
+                  to the internal state, but carries whatever
+                  high-frequency contact-impulse content the last
+                  substep produced.
+                * ``"finite_difference"`` writes
+                  ``(body_q_now - body_q_prev) / dt_outer``, i.e. the
+                  pose-delta-only readout over the entire :meth:`step`.
+                  Cheap, samples only the endpoints.
+                * ``"substep_average"`` accumulates ``velocity *
+                  substep_dt`` over every internal substep and divides
+                  by ``dt_outer``. Filters per-substep ringing more
+                  aggressively than ``finite_difference`` (samples
+                  N points instead of 2). Recommended for RL inference
+                  scenes where the policy was trained against
+                  MuJoCo Warp's post-integration ``qvel`` convention.
         """
         super().__init__(model)
-        if velocity_readout not in ("substep_end", "finite_difference"):
-            raise ValueError(f"velocity_readout must be 'substep_end' or 'finite_difference', got {velocity_readout!r}")
+        valid_readouts = ("substep_end", "finite_difference", "substep_average")
+        if velocity_readout not in valid_readouts:
+            raise ValueError(f"velocity_readout must be one of {valid_readouts}, got {velocity_readout!r}")
         self._velocity_readout = velocity_readout
 
         # ---- Build the PhoenX body container ---------------------------
@@ -242,6 +249,16 @@ class SolverPhoenX(SolverBase):
         n_newton_bodies = int(model.body_count)
         self._fd_pos_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
         self._fd_orient_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.quatf, device=self.device)
+
+        # Substep-velocity accumulators for the ``substep_average``
+        # readout mode. PhoenXWorld.step() accumulates ``velocity *
+        # substep_dt`` and ``angular_velocity * substep_dt`` per
+        # substep; the export kernel divides by ``step_dt`` to get
+        # the time-averaged velocity over the outer step. Same
+        # always-allocated graph-capture-stability rationale as the
+        # FD pre-step buffers.
+        self._substep_vel_accum = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
+        self._substep_omega_accum = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
 
         # Identity orientation for every slot (including slot 0) so the
         # first _update_inertia doesn't see a zero quaternion.
@@ -737,6 +754,22 @@ class SolverPhoenX(SolverBase):
                 outputs=[state_out.body_q, state_out.body_qd],
                 device=self.device,
             )
+        elif self._velocity_readout == "substep_average":
+            inv_dt = 1.0 / float(dt) if dt > 0.0 else 0.0
+            wp.launch(
+                _export_body_state_avg_kernel,
+                dim=n,
+                inputs=[
+                    self.bodies.position,
+                    self.bodies.orientation,
+                    self.model.body_com,
+                    self._substep_vel_accum,
+                    self._substep_omega_accum,
+                    wp.float32(inv_dt),
+                ],
+                outputs=[state_out.body_q, state_out.body_qd],
+                device=self.device,
+            )
         else:
             wp.launch(
                 _export_body_state_kernel,
@@ -795,10 +828,25 @@ class SolverPhoenX(SolverBase):
         if self._velocity_readout == "finite_difference":
             self._snapshot_pre_step_pose()
 
+        # Substep-average readout: zero the accumulators here so the
+        # next outer step starts clean. ``PhoenXWorld.step`` adds
+        # ``velocity * substep_dt`` after every substep when both
+        # buffers are passed in.
+        if self._velocity_readout == "substep_average":
+            self._substep_vel_accum.zero_()
+            self._substep_omega_accum.zero_()
+            world_vel_accum = self._substep_vel_accum
+            world_omega_accum = self._substep_omega_accum
+        else:
+            world_vel_accum = None
+            world_omega_accum = None
+
         self.world.step(
             dt=float(dt),
             contacts=contacts,
             shape_body=self._shape_body,
+            vel_accum=world_vel_accum,
+            omega_accum=world_omega_accum,
         )
         self._last_dt = float(dt) / max(1, self.world.substeps)
 
