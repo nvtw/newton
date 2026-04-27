@@ -111,13 +111,51 @@ def _step_n(solver_factory, n_frames: int) -> tuple[newton.Model, newton.State]:
     return model, s0
 
 
+def _quat_rotate_inverse_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """NumPy port of ``example_robot_policy.quat_rotate_inverse``.
+
+    ``q`` is XYZW. Returns ``v`` rotated by the inverse of ``q``,
+    matching what the torch policy gets after JIT-scripting.
+    """
+    qx, qy, qz, qw = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+    vx, vy, vz = float(v[0]), float(v[1]), float(v[2])
+    a_scale = 2.0 * qw * qw - 1.0
+    a_vec = np.array([vx * a_scale, vy * a_scale, vz * a_scale])
+    cross_qv = np.array([qy * vz - qz * vy, qz * vx - qx * vz, qx * vy - qy * vx])
+    b_vec = cross_qv * (qw * 2.0)
+    qv_dot_v = qx * vx + qy * vy + qz * vz
+    c_vec = np.array([qx, qy, qz]) * (qv_dot_v * 2.0)
+    return a_vec - b_vec + c_vec
+
+
+def _make_obs(jq: np.ndarray, jqd: np.ndarray) -> dict[str, np.ndarray]:
+    """Replicate the per-block observation construction in
+    :func:`example_robot_policy.compute_obs` *without* the index-
+    rearrangement (we want raw per-DoF order to compare like-for-like
+    across solvers). Returns a dict so the diff printer can reach
+    each block individually.
+    """
+    root_quat = jq[3:7]
+    root_lin_vel_w = jqd[0:3]
+    root_ang_vel_w = jqd[3:6]
+    gravity_w = np.array([0.0, 0.0, -1.0])  # the example feeds (0,0,-1)
+
+    return {
+        "vel_b": _quat_rotate_inverse_np(root_quat, root_lin_vel_w),
+        "a_vel_b": _quat_rotate_inverse_np(root_quat, root_ang_vel_w),
+        "grav_b": _quat_rotate_inverse_np(root_quat, gravity_w),
+        "joint_pos_rel": jq[7:].copy(),  # caller already has joint_pos_initial baseline
+        "joint_vel_rel": jqd[6:].copy(),
+    }
+
+
 def _print_diff(n_frames: int) -> None:
     cfg = _g1_29dof_yaml()
     names = cfg["mjw_joint_names"]
 
-    print(f"\n{'=' * 110}")
+    print(f"\n{'=' * 120}")
     print(f"AFTER {n_frames} STEPS  (dt = 1/200 s)")
-    print(f"{'=' * 110}")
+    print(f"{'=' * 120}")
 
     _, s_mj = _step_n(_mj_solver, n_frames)
     _, s_px = _step_n(_px_solver, n_frames)
@@ -128,6 +166,10 @@ def _print_diff(n_frames: int) -> None:
     jqd_px = s_px.joint_qd.numpy()
     jq_fd = s_fd.joint_q.numpy()
     jqd_fd = s_fd.joint_qd.numpy()
+
+    obs_mj = _make_obs(jq_mj, jqd_mj)
+    obs_px = _make_obs(jq_px, jqd_px)
+    obs_fd = _make_obs(jq_fd, jqd_fd)
 
     print()
     print("Free base (positions identical across the two PhoenX modes -- only velocities differ):")
@@ -143,6 +185,22 @@ def _print_diff(n_frames: int) -> None:
     print(f"  trunk ang vel MJ = {jqd_mj[3:6]}")
     print(f"  trunk ang vel PX = {jqd_px[3:6]}")
     print(f"  trunk ang vel FD = {jqd_fd[3:6]}")
+
+    print()
+    print("Policy obs tensor blocks (body-frame, exactly what the network sees):")
+    print(f"  vel_b  (root lin vel, body)    MJ = {obs_mj['vel_b']}")
+    print(f"  vel_b                          PX = {obs_px['vel_b']}")
+    print(f"  vel_b                          FD = {obs_fd['vel_b']}")
+    print(f"  a_vel_b (root ang vel, body)   MJ = {obs_mj['a_vel_b']}")
+    print(f"  a_vel_b                        PX = {obs_px['a_vel_b']}")
+    print(f"  a_vel_b                        FD = {obs_fd['a_vel_b']}")
+    print(f"  grav_b (projected gravity)     MJ = {obs_mj['grav_b']}")
+    print(f"  grav_b                         PX = {obs_px['grav_b']}")
+    print(f"  grav_b                         FD = {obs_fd['grav_b']}")
+    print(
+        f"  PX - MJ orientation drift (radians equivalent on grav_b deviation): "
+        f"{np.linalg.norm(obs_mj['grav_b'] - obs_px['grav_b']):.5f}"
+    )
 
     print()
     print(

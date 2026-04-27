@@ -245,6 +245,22 @@ class Example:
         builder.default_shape_cfg.kf = 1.0e3
         builder.default_shape_cfg.mu = 0.75
 
+        if self.solver_name == "phoenx":
+            # Newton's default ``rigid_gap = 0.1`` (10 cm) is the
+            # speculative-contact band the :class:`CollisionPipeline`
+            # uses to inflate AABBs and pre-generate contacts before
+            # the surfaces actually touch. MuJoCo Warp runs its own
+            # collision pipeline (driven by ``geom_margin`` /
+            # ``geom_gap`` set up in ``solver_mujoco`` from the same
+            # shape arrays) and doesn't lean on this band the same
+            # way. For the G1 standing pose with feet at z = 0 a 10 cm
+            # gap means PhoenX sees speculative contacts on bodies
+            # that aren't actually touching the ground -- contributing
+            # to the contact-impulse asymmetry observed at step 0/1.
+            # Force gap = 0 on the PhoenX path so the contact set
+            # contains only real surface contacts.
+            builder.default_shape_cfg.gap = 0.0
+
         builder.add_usd(
             newton.examples.get_asset(asset_directory + "/" + robot_config.asset_path),
             xform=wp.transform(wp.vec3(0, 0, 0.8)),
@@ -312,7 +328,7 @@ class Example:
                 self.model,
                 substeps=20,
                 solver_iterations=8,
-                velocity_iterations=1,
+                velocity_iterations=2,
                 velocity_readout="finite_difference",
             )
         else:
