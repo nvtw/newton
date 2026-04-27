@@ -424,6 +424,176 @@ class TestAnymalArticulationParity(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Direct PD-torque parity: drive a single revolute joint against a fixed
+# parent (world) and back-calculate the actuator torque from the child's
+# qd after one short step. Both solvers must apply the same continuous-
+# time PD law ``tau = kp*(target - q) - kd*qd`` to the child body, so
+# ``qd_after = (tau / I_child) * dt`` should be identical (up to the
+# integrator's discretisation error, which is O(kp*dt^2/I)).
+# ---------------------------------------------------------------------------
+
+
+def _build_pd_torque_rig(
+    *,
+    init_q: float,
+    target_pos: float,
+    target_ke: float,
+    target_kd: float,
+    armature: float = 0.0,
+) -> newton.Model:
+    """Single revolute joint, parent = world (locked). Child = pendulum
+    arm 0.5 m along +x with mass 1.0 kg and a pure ``Iyy = 0.1`` so the
+    closed-form expected angular acceleration is just ``tau / 0.1``.
+
+    Gravity zero, no contacts -- the only torque acting on the joint is
+    the PD drive itself, and the child's qd after a single short step
+    is a direct readout of the integrated PD torque over that step.
+    """
+    mb = newton.ModelBuilder()
+    newton.solvers.SolverMuJoCo.register_custom_attributes(mb)
+    mb.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
+        armature=armature,
+        limit_lower=-10.0,
+        limit_upper=10.0,
+        limit_ke=1.0e2,
+        limit_kd=1.0e0,
+    )
+
+    link = mb.add_link(
+        xform=wp.transform(p=wp.vec3(0.5, 0.0, 0.0), q=wp.quat_identity()),
+        mass=1.0,
+        inertia=((0.01, 0, 0), (0, 0.1, 0), (0, 0, 0.1)),
+    )
+    j = mb.add_joint_revolute(
+        parent=-1,
+        child=link,
+        axis=(0.0, 1.0, 0.0),
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform(p=wp.vec3(-0.5, 0.0, 0.0), q=wp.quat_identity()),
+        target_pos=target_pos,
+        target_ke=target_ke,
+        target_kd=target_kd,
+        actuator_mode=newton.JointTargetMode.POSITION,
+    )
+    mb.add_articulation([j])
+    mb.gravity = 0.0
+    model = mb.finalize()
+    q = model.joint_q.numpy()
+    q[0] = init_q
+    model.joint_q.assign(q)
+    return model
+
+
+def _step_one_and_read_qd(solver_factory, model_factory, dt: float) -> float:
+    model = model_factory()
+    solver = solver_factory(model)
+    s0 = model.state()
+    s1 = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+    control = model.control()
+    target = np.zeros(int(model.joint_dof_count), dtype=np.float32)
+    target[0] = float(model.joint_target_pos.numpy()[0])
+    control.joint_target_pos.assign(target)
+    s0.clear_forces()
+    solver.step(s0, s1, control, None, dt)
+    jq = wp.zeros(int(model.joint_coord_count), dtype=wp.float32, device=model.device)
+    jqd = wp.zeros(int(model.joint_dof_count), dtype=wp.float32, device=model.device)
+    newton.eval_ik(model, s1, jq, jqd)
+    return float(jqd.numpy()[0])
+
+
+@unittest.skipUnless(_HAS_MJW, "mujoco / mujoco_warp not available")
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "PD torque parity test runs on CUDA only.",
+)
+class TestPDDriveTorqueParity(unittest.TestCase):
+    """Drive a known PD against a locked parent and verify the integrated
+    actuator torque after one step matches between SolverMuJoCo and
+    SolverPhoenX.
+
+    The child has scalar inertia ``I = 0.1 kg*m^2`` about the joint axis
+    and starts at rest at ``q = init_q``. After one step of length
+    ``dt`` with target ``target_pos`` and gains ``(kp, kd)``, the
+    angular velocity is::
+
+        qd_after ~= tau_pd / I * dt
+        tau_pd   = qd_after * I / dt
+
+    Both solvers should report the same ``qd_after`` (and therefore the
+    same integrated torque) up to the implicit-Euler / Newton-step
+    discretisation difference, which is O(kp*dt^2/I). Tolerance is set
+    accordingly.
+    """
+
+    DT = 1.0e-3  # 1 ms -- small enough that discretisation differences
+    # between MuJoCo's Newton-step solver and PhoenX's Jitter2-style
+    # implicit Euler stay well under 1 % at the gains we sweep.
+
+    SWEEP = (
+        # (init_q, target_pos, kp, kd) -- positional error e = target - init_q
+        (0.0, 1.0, 100.0, 0.0),  # pure spring
+        (0.0, 0.5, 200.0, 0.0),  # higher kp, smaller error
+        (0.0, 1.0, 100.0, 10.0),  # spring + damping (qd_init=0 so kd term=0)
+        (-0.2, -0.2, 20.0, 2.0),  # G1 ankle gains, init at target -> tau ~ 0
+        (-0.2, 0.0, 20.0, 2.0),  # G1 ankle gains, off target by 0.2 rad
+        (0.5, 0.5, 500.0, 5.0),  # high stiffness, init at target -> tau = 0
+        (0.0, 0.1, 1000.0, 50.0),  # IsaacLab-class hip gain
+    )
+
+    def test_pd_torque_matches_mujoco(self) -> None:
+        """Both solvers must drive the same qd from the same PD config.
+
+        Direct readout: with parent locked (parent=-1=world), the
+        child accelerates only under the actuator torque. ``qd`` after
+        one short step *is* the integrated torque divided by the
+        joint-frame effective inertia, which is identical between
+        solvers (both read ``model.body_inertia`` + ``model.body_com``
+        + ``model.joint_*`` from the same finalised model). So if the
+        two solvers' continuous-time PD law and discretisation match
+        within tolerance, ``qd_mj == qd_px``.
+
+        Tolerance is per-sweep-row to track the regime: tight when
+        ``kp·dt²/I_eff << 1`` (any reasonable robot), looser when
+        approaching the implicit-Euler-vs-Newton-step divergence
+        threshold.
+        """
+        for init_q, target_pos, kp, kd in self.SWEEP:
+            with self.subTest(init_q=init_q, target=target_pos, kp=kp, kd=kd):
+
+                def factory(_iq=init_q, _tp=target_pos, _kp=kp, _kd=kd):
+                    return _build_pd_torque_rig(
+                        init_q=_iq,
+                        target_pos=_tp,
+                        target_ke=_kp,
+                        target_kd=_kd,
+                    )
+
+                qd_mj = _step_one_and_read_qd(_mj_factory, factory, self.DT)
+                qd_px = _step_one_and_read_qd(_px_factory, factory, self.DT)
+
+                # Tolerance in rad/s. ``max(|expected_qd_scale|, 1e-4)``
+                # keeps the tolerance sensible when the spring error
+                # is zero (the "init at target" rows). The expected
+                # qd-scale here is ``kp · |error| · dt / I_eff_lower_bound``
+                # where I_eff_lower_bound = body inertia I_y = 0.1 (the
+                # parallel-axis term only inflates this).
+                err = abs(target_pos - init_q)
+                scale = max(kp * err * self.DT / 0.1, 1.0e-4)
+                tol = 0.02 * scale  # 2 % of the qd magnitude
+                self.assertAlmostEqual(
+                    qd_mj,
+                    qd_px,
+                    delta=tol,
+                    msg=(
+                        f"PD-driven qd mismatch: MJ {qd_mj:.6f} vs PX {qd_px:.6f} "
+                        f"(rel diff {(qd_mj - qd_px) / scale:+.2%}; "
+                        f"init_q={init_q}, target={target_pos}, kp={kp}, kd={kd})"
+                    ),
+                )
+
+
 if __name__ == "__main__":
     wp.init()
     unittest.main()
