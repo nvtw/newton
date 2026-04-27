@@ -95,6 +95,14 @@ class PortedExample:
     #: Start the viewer in paused mode so the user can inspect the
     #: initial scene (toggle with SPACE in :class:`ViewerGL`).
     start_paused: bool = False
+    #: When ``True``, re-pause the viewer after every simulated frame
+    #: so the user can step through the simulation one frame at a
+    #: time. Press SPACE (in :class:`ViewerGL`) or toggle the Pause
+    #: ImGui checkbox to advance one frame; the flag is re-set to
+    #: ``True`` at the end of the next :meth:`step`. Has no effect on
+    #: viewers that don't expose a ``_paused`` attribute (e.g. headless
+    #: stub viewers in tests / benchmarks).
+    pause_after_step: bool = False
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -227,9 +235,7 @@ class PortedExample:
         # seeded (the ADBS init kernel reads PhoenX body positions to
         # snapshot the body-local anchor offsets).
         if num_joints > 0:
-            self.world.initialize_actuated_double_ball_socket_joints(
-                **self._adbs.to_initialize_kwargs()
-            )
+            self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
 
         self.viewer.set_model(self.model)
         self.configure_camera(self.viewer)
@@ -303,6 +309,12 @@ class PortedExample:
         else:
             self.simulate()
         self.sim_time += self.frame_dt
+        if self.pause_after_step and hasattr(self.viewer, "_paused"):
+            # Re-arm the viewer's pause flag so ``newton.examples.run``'s
+            # per-iteration ``if not viewer.is_paused():`` gate fires
+            # exactly once per user-issued unpause. SPACE (ViewerGL) or
+            # the side-panel "Pause" checkbox advances by one frame.
+            self.viewer._paused = True
 
     def render(self) -> None:
         # ``log_state`` uses ViewerGL's CUDA-OpenGL interop path: the
