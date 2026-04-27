@@ -1075,48 +1075,42 @@ def greedy_color_histogram_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def greedy_count_num_colors_kernel(
-    color_count: wp.array[int],
-    max_colors: int,
-    num_colors: wp.array[int],
-):
-    """Set ``num_colors[0] = 1 + max c such that color_count[c] > 0``.
-
-    Walks ``color_count[0..max_colors)`` on a single thread. With the
-    ``GREEDY_MAX_COLORS`` cap of 64 we never see more than 64 entries,
-    so a single-thread scan is fine; this is called once per build.
-    """
-    tid = wp.tid()
-    if tid != 0:
-        return
-    last = wp.int32(-1)
-    for c in range(max_colors):
-        if color_count[c] > 0:
-            last = c
-    num_colors[0] = last + 1
-
-
-@wp.kernel(enable_backward=False)
-def greedy_color_starts_scan_kernel(
+def greedy_count_and_scan_color_starts_kernel(
     color_count: wp.array[int],
     color_starts: wp.array[int],
+    num_colors: wp.array[int],
     max_colors: int,
 ):
-    """Single-thread exclusive prefix sum over ``color_count`` -> ``color_starts``.
+    """Single-thread fused exclusive-scan over ``color_count`` plus
+    ``num_colors`` derivation.
 
-    With ``max_colors <= GREEDY_MAX_COLORS`` (= 64) a serial scan on
-    one thread is the simplest correct implementation. Build is called
-    once per ``World.step`` so the constant is negligible compared
-    with the per-element greedy kernel.
+    Walks ``color_count[0..max_colors)`` once and writes:
+
+      * ``color_starts[c] = exclusive prefix sum of color_count[0..c)``,
+        for ``c`` in ``[0, max_colors]`` (so ``color_starts[max_colors]``
+        holds the total).
+      * ``num_colors[0] = 1 + max c such that color_count[c] > 0``.
+
+    Replaces two separate one-thread kernels (``greedy_count_num_colors``
+    and ``greedy_color_starts_scan``). With ``max_colors <=
+    GREEDY_MAX_COLORS`` (= 64) the inner walk is 64 iterations on one
+    thread, well within the same launch overhead as either kernel
+    alone -- the build saves one ~25us kernel launch per ``World.step``
+    by collapsing the two passes.
     """
     tid = wp.tid()
     if tid != 0:
         return
     running = wp.int32(0)
+    last = wp.int32(-1)
     for c in range(max_colors + 1):
         color_starts[c] = running
         if c < max_colors:
-            running = running + color_count[c]
+            cnt = color_count[c]
+            if cnt > 0:
+                last = c
+            running = running + cnt
+    num_colors[0] = last + 1
 
 
 @wp.kernel(enable_backward=False)

@@ -35,8 +35,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     TILE_SCAN_BLOCK_DIM,
     ElementInteractionData,
     greedy_color_histogram_kernel,
-    greedy_color_starts_scan_kernel,
-    greedy_count_num_colors_kernel,
+    greedy_count_and_scan_color_starts_kernel,
     greedy_reset_init_kernel,
     greedy_scatter_elements_by_color_kernel,
     incremental_begin_sweep_kernel,
@@ -785,14 +784,14 @@ class IncrementalContactPartitioner:
             ],
         )
         wp.launch(
-            greedy_count_num_colors_kernel,
+            greedy_count_and_scan_color_starts_kernel,
             dim=1,
-            inputs=[self._greedy_color_count, int(GREEDY_MAX_COLORS), self._num_colors],
-        )
-        wp.launch(
-            greedy_color_starts_scan_kernel,
-            dim=1,
-            inputs=[self._greedy_color_count, self._color_starts, int(GREEDY_MAX_COLORS)],
+            inputs=[
+                self._greedy_color_count,
+                self._color_starts,
+                self._num_colors,
+                int(GREEDY_MAX_COLORS),
+            ],
         )
         wp.launch(
             greedy_scatter_elements_by_color_kernel,
