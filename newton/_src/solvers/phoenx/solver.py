@@ -149,11 +149,17 @@ class SolverPhoenX(SolverBase):
       limit;
     * :data:`JointType.BALL` -- 3-DoF point lock (no drive / limit);
     * :data:`JointType.FIXED` -- 6-DoF weld (no drive / limit);
+    * :data:`JointType.CABLE` -- rigid ball-socket at the parent
+      attachment point + 2 bend + 1 twist soft angular rows. Newton's
+      isotropic bend/twist stiffness (stored on the angular DoF) is
+      written to both the bend and twist slots; the stretch DoF is
+      treated as rigid (PhoenX has no axial-length compliance, so a
+      finite ``stretch_stiffness`` is informational only);
     * :data:`JointType.FREE` -- free-floating base (no constraint
       column; integration alone handles it).
 
-    :data:`JointType.DISTANCE`, :data:`JointType.D6`,
-    :data:`JointType.CABLE` are not supported and raise at construction.
+    :data:`JointType.DISTANCE` and :data:`JointType.D6` are not
+    supported and raise at construction.
 
     **Newton :class:`~newton._src.viewer.picking.Picking`**: works out
     of the box. The viewer's ``apply_forces(state)`` (or a direct

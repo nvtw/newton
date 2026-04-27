@@ -48,10 +48,9 @@ It is **not** the right choice for:
 - Equality / mimic constraints, ``D6``, or ``DISTANCE`` joints
   through Newton's standard :class:`~newton.ModelBuilder` flow (use
   :class:`~newton.solvers.SolverMuJoCo` or
-  :class:`~newton.solvers.SolverXPBD`). Cable-style joints with
-  bend / twist soft angular rows *are* implemented in PhoenX but at
-  the moment are only reachable through PhoenX's standalone
-  ``WorldBuilder``; see :ref:`phoenx-cable-joints` below.
+  :class:`~newton.solvers.SolverXPBD`). ``CABLE`` joints *are*
+  supported, with the caveat that PhoenX has no axial-length
+  compliance — see :ref:`phoenx-cable-joints` below.
 - Cloth, particles, soft bodies, MPM (use the dedicated solvers).
 - Differentiable simulation (PhoenX kernels are not authored under
   ``wp.Tape``).
@@ -323,16 +322,11 @@ Joint type     Behaviour                                       Drive / limit
 ``PRISMATIC``  1-DoF slider (5 constrained rows)               ✅ both
 ``BALL``       3-DoF ball-socket (3 point-lock rows)           ❌ neither
 ``FIXED``      6-DoF weld (3 point + 3 angular)                ❌ neither
+``CABLE``      Rigid ball-socket + 2 bend + 1 twist soft rows  PD on bend/twist
 ``FREE``       Free-floating; no constraint column             —
 ============== =============================================== =================
 
 ``DISTANCE`` and ``D6`` joints raise at construction.
-
-``CABLE`` joints **also** raise on the standard Newton path — the
-underlying PhoenX cable constraint exists (see below) but is not
-yet wired through :class:`~newton.ModelBuilder` /
-:attr:`~newton.JointType.CABLE`. Use :class:`~newton.solvers.SolverVBD`
-if you need cable joints via Newton's public API.
 
 Drives (``REVOLUTE`` / ``PRISMATIC``) are PD with per-DoF
 ``joint_target_ke`` (stiffness), ``joint_target_kd`` (damping), and
@@ -383,15 +377,27 @@ The angular rows are integrated as PD constraints inside the same
 PGS sweep that handles contacts and rigid joints, so chained cable
 segments converge under the standard ``solver_iterations``.
 
-This mode is **not** reachable through Newton's
-:class:`~newton.ModelBuilder` — :attr:`~newton.JointType.CABLE` raises
-in the model adapter today. To use it, build the world directly
-through PhoenX's standalone ``WorldBuilder`` API and call
-``add_joint(mode=JointMode.CABLE, anchor1=..., anchor2=...,
-bend_stiffness=..., bend_damping=..., twist_stiffness=...,
-twist_damping=...)`` — see the source-tree examples for chained-cable
-patterns. Wiring this through Newton's joint type system is on the
-roadmap.
+**Newton API mapping** (``ModelBuilder.add_joint_cable`` /
+:attr:`~newton.JointType.CABLE`): the parent attachment in world
+becomes ``anchor1``, the child attachment becomes ``anchor2``, and
+the angular DoF's ``target_ke`` / ``target_kd`` are written to both
+the bend and twist slots (Newton's bend/twist is isotropic; PhoenX's
+two bend axes plus the twist axis all get the same gain).
+
+There is **one semantic gap** to be aware of: PhoenX's cable mode
+has a rigid ball-socket at the parent attachment, whereas Newton's
+cable joint also models the linear stretch as a 1-DoF spring
+(``stretch_stiffness``). PhoenX has no axial-length compliance, so
+the stretch is treated as rigid (Newton's default
+``stretch_stiffness = 1e9`` makes this a tight approximation in
+practice). If you need a genuinely stretchable cable, use
+:class:`~newton.solvers.SolverVBD`, which has a soft 1-DoF stretch
+DoF for cables.
+
+For low-level builder access — chained cable patterns, per-segment
+twist gains different from bend, etc. — call PhoenX's standalone
+``WorldBuilder.add_joint(mode=JointMode.CABLE, ...)`` directly
+instead of going through Newton's ``add_joint_cable``.
 
 
 Contacts
@@ -612,8 +618,9 @@ PhoenX:
 - No contact restitution today (the materials API exposes the
   coefficient but the constraint kernels ignore it).
 - Smaller joint vocabulary on Newton's standard ``ModelBuilder`` path;
-  no equality / mimic constraints, no ``D6``, no ``DISTANCE``, and
-  ``CABLE`` only via PhoenX's own builder.
+  no equality / mimic constraints, no ``D6``, no ``DISTANCE``.
+  ``CABLE`` is supported but only with rigid stretch (see
+  :ref:`phoenx-cable-joints`).
 - Pyramidal Coulomb friction, not the exact circular cone (loose by
   a few percent in pathological tangent-misaligned cases).
 - Tall stacks of contacting bodies may need extra ``substeps`` and

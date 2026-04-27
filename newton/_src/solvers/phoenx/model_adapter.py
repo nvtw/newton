@@ -14,6 +14,10 @@ Mapping:
 
 * :data:`JointType.REVOLUTE` -> :data:`JOINT_MODE_REVOLUTE`.
 * :data:`JointType.PRISMATIC` -> :data:`JOINT_MODE_PRISMATIC`.
+* :data:`JointType.CABLE` -> :data:`JOINT_MODE_CABLE` (rigid
+  ball-socket at the parent attachment + 2 bend + 1 twist soft
+  angular rows; Newton's stretch DoF is treated as rigid because
+  PhoenX has no axial-length compliance).
 * :data:`JointType.BALL` -> :data:`JOINT_MODE_BALL_SOCKET` (drive /
   limit not supported, must be off in the Model).
 * :data:`JointType.FIXED` -> :data:`JOINT_MODE_FIXED`.
@@ -38,6 +42,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     DRIVE_MODE_POSITION,
     DRIVE_MODE_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_CABLE,
     JOINT_MODE_FIXED,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
@@ -274,6 +279,7 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
     joint_parent = model.joint_parent.numpy()
     joint_child = model.joint_child.numpy()
     joint_X_p = model.joint_X_p.numpy()  # (N, 7) float32
+    joint_X_c = model.joint_X_c.numpy()  # (N, 7) float32 -- child attachment
     joint_q_start = model.joint_q_start.numpy()
     joint_qd_start = model.joint_qd_start.numpy()
     joint_axis = model.joint_axis.numpy() if model.joint_axis is not None else np.zeros((0, 3), dtype=np.float32)
@@ -316,11 +322,10 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
         if jtype in (
             newton.JointType.DISTANCE,
             newton.JointType.D6,
-            newton.JointType.CABLE,
         ):
             raise NotImplementedError(
                 f"PhoenX does not support JointType.{jtype.name} (joint {j}). "
-                "Supported: REVOLUTE, PRISMATIC, BALL, FIXED, FREE (no column)."
+                "Supported: REVOLUTE, PRISMATIC, BALL, FIXED, CABLE, FREE (no column)."
             )
 
         parent_idx = int(joint_parent[j])
@@ -369,6 +374,60 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
             phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
             # Ball-socket has no drive/limit; the ADBS builder enforces
             # this for us. BALL's axes in ``joint_axis`` are unused.
+        elif jtype is newton.JointType.CABLE:
+            phoenx_mode = int(JOINT_MODE_CABLE)
+            # Newton's CABLE joint has 2 DoFs: a linear stretch DoF
+            # (qd_start) and a single isotropic angular bend/twist DoF
+            # (qd_start + 1). PhoenX's cable mode is a rigid ball-socket
+            # at ``anchor1`` plus 3 soft angular rows: 2 bend (perpendicular
+            # to ``anchor1 -> anchor2``) and 1 twist (along the axis).
+            # The two abstractions don't line up exactly:
+            #
+            # * Newton models the cable's stretch as a 1-DoF spring; PhoenX
+            #   has no axial-length compliance (the ball-socket lock at
+            #   ``anchor1`` is rigid). We accept Newton's stretch_stiffness
+            #   as informational and treat the bond as rigid -- with
+            #   Newton's default ``stretch_stiffness = 1e9`` this is a
+            #   tight approximation.
+            # * Newton's angular DoF is isotropic ("bend/twist"), so we
+            #   feed the same stiffness/damping to PhoenX's bend AND twist
+            #   slots.
+            #
+            # Anchor convention: ``anchor1`` is the parent attachment in
+            # world (``parent_pose * joint_X_p``); ``anchor2`` is the
+            # child attachment in world (``child_pose * joint_X_c``). The
+            # vector ``anchor1 -> anchor2`` defines the cable's reference
+            # axis at finalize time; the bend rows are the two directions
+            # perpendicular to it. If both attachments coincide we
+            # synthesize a 1 m offset along the joint X axis so the
+            # bend basis stays well-defined.
+            if child_idx >= 0:
+                X_w_c = _transform_multiply(
+                    np.asarray(body_q[child_idx], dtype=np.float32),
+                    np.asarray(joint_X_c[j], dtype=np.float32),
+                )
+            else:  # pragma: no cover -- world-anchored cables are unusual but legal
+                X_w_c = np.asarray(joint_X_c[j], dtype=np.float32)
+            anchor2_world = _transform_translation(X_w_c)
+            if float(np.linalg.norm(anchor2_world - anchor1_world)) < 1e-6:
+                # Coincident attachments -- pick the joint frame X axis
+                # so bend/twist have a stable reference basis.
+                axis_world = _quat_rotate_np(X_w_p[3:], np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
+                anchor2_world = anchor1_world + axis_world
+
+            # Map Newton's isotropic bend/twist gains (stored on the
+            # angular DoF, ``qd_start + 1``) onto PhoenX's bend (drive
+            # slot) and twist (limit slot) -- same value on both.
+            bend_qd = qd_start + 1
+            bend_ke = float(target_ke[bend_qd]) if (target_ke is not None and bend_qd < len(target_ke)) else 0.0
+            bend_kd = float(target_kd[bend_qd]) if (target_kd is not None and bend_qd < len(target_kd)) else 0.0
+            stiff_drive = bend_ke
+            damp_drive = bend_kd
+            stiff_limit = bend_ke
+            damp_limit = bend_kd
+            # Drive mode stays OFF (cable has no PD position target);
+            # leave ``min_value > max_value`` so the limit row stays
+            # disabled in the cable formulation.
         elif jtype is newton.JointType.FIXED:
             phoenx_mode = int(JOINT_MODE_FIXED)
             # Axis doesn't matter physically for FIXED; derive one
