@@ -287,7 +287,8 @@ def partitioning_coloring_incremental_greedy_kernel(
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
     elements: wp.array[ElementInteractionData],
-    remaining_ids: wp.array[int],
+    num_elements: wp.array[int],
+    total_num_threads: wp.int32,
     num_remaining: wp.array[int],
     overflow_flag: wp.array[int],
 ):
@@ -305,6 +306,32 @@ def partitioning_coloring_incremental_greedy_kernel(
     run of the loop converges to near-greedy colour counts (often 2-3x
     fewer colours than vanilla JP) at the same rounds-per-build cost.
 
+    Persistent-grid grid-stride loop driven by ``total_num_threads``,
+    matching the layout of :func:`_constraint_iterate_singleworld_kernel`
+    in :mod:`solver_phoenx_kernels`. The launch dim is sized
+    independently of ``num_elements`` so the kernel runs on a
+    warp-aligned, SM-tuned grid regardless of the constraint capacity.
+    Each thread strides through ``[wp.tid(), num_elements,
+    total_num_threads)`` and processes the elements it lands on,
+    eliminating the partial-warp tail caused by launching at
+    ``num_elements`` directly when ``num_elements`` is not a multiple
+    of the warp size.
+
+    Drops the compacted ``remaining_ids`` list -- each strided index
+    reads its packed tag once and skips already-coloured entries. The
+    same divergence pattern the round-based JP kernel paid via
+    ``slot >= num_remaining`` plus a stale-list dereference, minus
+    the per-round compact kernel. On Kapla Tower the compact kernel
+    was ~16% of the captured frame time before this change.
+
+    Convergence is driven by the same ``num_remaining`` counter the
+    round-based JP path uses: initialised to ``num_elements`` by the
+    build's reset, atomically decremented by every commit in this
+    kernel, read by the outer ``wp.capture_while`` as the loop
+    predicate. Strictly monotonic (commits only decrease it; never
+    increase) so the conditional CUDA graph stays well-defined and
+    converges to 0 once every vertex is coloured.
+
     Forbidden colours are tracked in a single ``int64`` bitmask, which
     bounds the achievable colour count at :data:`GREEDY_MAX_COLORS`
     (= 64). Going past 64 colours raises ``overflow_flag[0] = 1``; the
@@ -313,84 +340,94 @@ def partitioning_coloring_incremental_greedy_kernel(
     output. This is the same overflow contract as the CSR build's
     ``MAX_COLORS`` cap.
     """
-    slot = wp.tid()
+    n = num_elements[0]
+    for tid in range(wp.tid(), n, total_num_threads):
+        # One read of the packed tag word: catches both the
+        # already-coloured case (skip iteration) and the
+        # unpartitioned tail state.
+        tag0 = partition_data_concat[tid] & _TAG_MASK
+        if (tag0 >> _COLOR_SHIFT) != wp.int64(0):
+            continue
 
-    if slot >= num_remaining[0]:
-        return
+        self_prio = contact_partitions_get_random_value(random_values, cost_values, tid)
+        el = elements[tid]
 
-    tid = remaining_ids[slot]
+        is_local_max = bool(True)
+        forbidden_mask = wp.int64(0)
 
-    self_prio = contact_partitions_get_random_value(random_values, cost_values, tid)
-    el = elements[tid]
-
-    is_local_max = bool(True)
-    forbidden_mask = wp.int64(0)
-
-    for j in range(MAX_BODIES):
-        if not is_local_max:
-            break
-        v = element_interaction_data_get(el, j)
-        if v < 0:
-            break
-
-        if v > 0:
-            start = adjacency_section_end_indices[v - 1]
-        else:
-            start = 0
-        end = adjacency_section_end_indices[v]
-        for k in range(start, end):
-            neighbor = vertex_to_adjacent_elements[k]
-            if neighbor == tid:
-                continue
-            # Inspect this neighbour's tag word once and dispatch on
-            # whether they're already coloured. Two distinct cases:
-            #
-            #   colour == 0 -> neighbour is still uncoloured. Apply the
-            #     standard JP MIS check; if the neighbour outranks us,
-            #     bail (we won't commit this round).
-            #   colour != 0 -> neighbour is already coloured. Mark
-            #     their colour as forbidden in the bitmask so we don't
-            #     reuse it.
-            tagged = partition_data_concat[neighbor] & _TAG_MASK
-            color_plus_one = tagged >> _COLOR_SHIFT
-            if color_plus_one == wp.int64(0):
-                # Uncoloured -> MIS tiebreak.
-                if contact_partitions_get_random_value(random_values, cost_values, neighbor) > self_prio:
-                    is_local_max = False
-                    break
-            else:
-                # Coloured -> forbid that colour. Cap at the bitmask
-                # capacity; if a graph really needs more colours we
-                # raise overflow below.
-                ncolor = wp.int32(color_plus_one - wp.int64(1))
-                if ncolor < GREEDY_MAX_COLORS:
-                    forbidden_mask = forbidden_mask | (wp.int64(1) << wp.int64(ncolor))
-
-    if is_local_max:
-        # Smallest free colour = position of the lowest 0-bit in the
-        # forbidden mask. Free positions are encoded as 1s in the
-        # complement; ``forbidden_mask ^ -1`` is the all-ones flip
-        # without relying on int64 unary NOT (see the _TAG_MASK
-        # comment block for why we avoid ``~``).
-        free_mask = forbidden_mask ^ _FREE_COLOR_FLIP
-        # Linear scan for the first set bit. 64 iterations max -- well
-        # under the kernel's per-vertex adjacency walk -- and avoids
-        # depending on a Warp-side ``ffs`` builtin we don't otherwise
-        # need. The bit scan is bounded by GREEDY_MAX_COLORS so the
-        # `c < GREEDY_MAX_COLORS` guard always exits before the loop
-        # itself terminates if every colour is somehow forbidden.
-        c = wp.int32(0)
-        for _ in range(GREEDY_MAX_COLORS):
-            if (free_mask & (wp.int64(1) << wp.int64(c))) != wp.int64(0):
+        for j in range(MAX_BODIES):
+            if not is_local_max:
                 break
-            c = c + wp.int32(1)
-        if c >= GREEDY_MAX_COLORS:
-            # Mask saturated: graph wants > GREEDY_MAX_COLORS distinct
-            # colours. Flag overflow and skip this commit; the host
-            # side will raise after the loop exits.
-            overflow_flag[0] = 1
-        else:
-            partition_data_concat[tid] = (wp.int64(c + 1) << _COLOR_SHIFT) | wp.int64(tid)
+            v = element_interaction_data_get(el, j)
+            if v < 0:
+                break
+
+            if v > 0:
+                start = adjacency_section_end_indices[v - 1]
+            else:
+                start = 0
+            end = adjacency_section_end_indices[v]
+            for k in range(start, end):
+                neighbor = vertex_to_adjacent_elements[k]
+                if neighbor == tid:
+                    continue
+                # Inspect this neighbour's tag word once and dispatch on
+                # whether they're already coloured. Two distinct cases:
+                #
+                #   colour == 0 -> neighbour is still uncoloured. Apply
+                #     the standard JP MIS check; if the neighbour
+                #     outranks us, bail (we won't commit this round).
+                #   colour != 0 -> neighbour is already coloured. Mark
+                #     their colour as forbidden in the bitmask so we
+                #     don't reuse it.
+                tagged = partition_data_concat[neighbor] & _TAG_MASK
+                color_plus_one = tagged >> _COLOR_SHIFT
+                if color_plus_one == wp.int64(0):
+                    # Uncoloured -> MIS tiebreak.
+                    if contact_partitions_get_random_value(random_values, cost_values, neighbor) > self_prio:
+                        is_local_max = False
+                        break
+                else:
+                    # Coloured -> forbid that colour. Cap at the bitmask
+                    # capacity; if a graph really needs more colours we
+                    # raise overflow below.
+                    ncolor = wp.int32(color_plus_one - wp.int64(1))
+                    if ncolor < GREEDY_MAX_COLORS:
+                        forbidden_mask = forbidden_mask | (wp.int64(1) << wp.int64(ncolor))
+
+        if is_local_max:
+            # Smallest free colour = position of the lowest 0-bit in
+            # the forbidden mask. Free positions are encoded as 1s in
+            # the complement; ``forbidden_mask ^ -1`` is the all-ones
+            # flip without relying on int64 unary NOT (see the
+            # _TAG_MASK comment block for why we avoid ``~``).
+            free_mask = forbidden_mask ^ _FREE_COLOR_FLIP
+            # Linear scan for the first set bit. 64 iterations max --
+            # well under the kernel's per-vertex adjacency walk -- and
+            # avoids depending on a Warp-side ``ffs`` builtin we don't
+            # otherwise need.
+            c = wp.int32(0)
+            for _ in range(GREEDY_MAX_COLORS):
+                if (free_mask & (wp.int64(1) << wp.int64(c))) != wp.int64(0):
+                    break
+                c = c + wp.int32(1)
+            if c >= GREEDY_MAX_COLORS:
+                # Mask saturated: graph wants > GREEDY_MAX_COLORS
+                # distinct colours. Flag overflow and skip this
+                # commit; the host side will raise after the loop
+                # exits. Note that we deliberately do *not*
+                # decrement ``num_remaining`` here: leaving the
+                # counter non-zero stops the outer capture_while
+                # from converging on the corrupt run, and the
+                # subsequent uncaptured ``build_csr_greedy`` (or
+                # the next host-side overflow check) raises a
+                # descriptive error.
+                overflow_flag[0] = 1
+            else:
+                partition_data_concat[tid] = (wp.int64(c + 1) << _COLOR_SHIFT) | wp.int64(tid)
+                # Strictly-monotonic capture_while predicate update:
+                # one decrement per commit, no off-thread interaction.
+                wp.atomic_sub(num_remaining, 0, 1)
 
 
 @wp.kernel(enable_backward=False)
@@ -975,22 +1012,25 @@ def incremental_tile_compact_csr_and_advance_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def greedy_reset_color_count_kernel(
+def greedy_reset_init_kernel(
+    overflow_flag: wp.array[int],
     color_count: wp.array[int],
     color_offsets: wp.array[int],
-    overflow_flag: wp.array[int],
     max_colors: int,
 ):
-    """Single-block reset of the per-colour bookkeeping arrays.
+    """One-shot reset of the build-wide control state.
 
-    Replaces three separate ``array.zero_()`` calls inside
-    :meth:`IncrementalContactPartitioner.build_csr_greedy`. Doing the
-    reset via a kernel keeps it inside the captured graph in the same
-    way the existing ``incremental_init_csr_kernel`` does for the
-    round-based path; ``array.zero_()`` works inside an outer
-    ``ScopedCapture`` but launches an extra ``cudaMemsetAsync`` per
-    array. Folding the three resets into one launch is also a small
-    constant win when the build is replayed many times per step.
+    Called once per :meth:`IncrementalContactPartitioner.build_csr_greedy`
+    before the JP loop starts. Zeroes:
+
+      * the overflow flag,
+      * the per-colour histogram bucket and the live scatter cursor
+        (both indexed ``[0, max_colors)``).
+
+    The ``num_remaining`` capture_while predicate is initialised by
+    :func:`incremental_init_csr_kernel` (set to ``num_elements``)
+    before this kernel runs; the greedy kernel then atomically
+    decrements it once per commit until it hits zero.
     """
     tid = wp.tid()
     if tid < max_colors:
@@ -998,68 +1038,6 @@ def greedy_reset_color_count_kernel(
         color_offsets[tid] = wp.int32(0)
     if tid == 0:
         overflow_flag[0] = wp.int32(0)
-
-
-@wp.kernel(enable_backward=False)
-def greedy_compact_remaining_kernel(
-    partition_data_concat: wp.array[wp.int64],
-    remaining_ids: wp.array[int],
-    num_remaining: wp.array[int],
-):
-    """Compact ``remaining_ids`` to vertices that are still uncoloured.
-
-    Reads each entry of ``remaining_ids[0..num_remaining[0])`` and
-    keeps it iff its packed colour is zero (i.e. the vertex did not
-    commit in the most recent greedy pass). Writes the survivor list
-    in place; lane 0 updates ``num_remaining[0]``.
-
-    Single-block tile-scan launch -- same shape as
-    :func:`incremental_tile_compact_remaining_and_advance_kernel`,
-    minus the per-colour CSR scatter (which moves to a separate
-    final pass at the end of the build, since greedy commits do
-    not arrive in colour order).
-    """
-    _block, lane = wp.tid()
-
-    n = num_remaining[0]
-    # Early-exit when the build has already converged. Same contract
-    # as the existing CSR compact kernel: extra launches past
-    # convergence must be no-ops so the unrolled capture_while body
-    # stays safe.
-    if n == 0:
-        return
-
-    survivor_running = int(0)
-
-    offset = int(0)
-    while offset < n:
-        slot = offset + lane
-
-        eid = int(0)
-        survivor_flag = int(0)
-        if slot < n:
-            eid = remaining_ids[slot]
-            tagged = partition_data_concat[eid] & _TAG_MASK
-            color_plus_one = tagged >> _COLOR_SHIFT
-            # Greedy mode: any non-zero colour means committed (in any
-            # round). Survivor iff still uncoloured.
-            if color_plus_one == wp.int64(0):
-                survivor_flag = 1
-
-        survivor_tile = wp.tile(survivor_flag)
-        survivor_scan = wp.tile_scan_exclusive(survivor_tile)
-        survivor_local = wp.untile(survivor_scan)
-
-        if survivor_flag == 1:
-            out_idx = survivor_running + survivor_local
-            remaining_ids[out_idx] = eid
-
-        survivor_total = wp.tile_sum(survivor_tile)
-        survivor_running = survivor_running + survivor_total[0]
-        offset = offset + TILE_SCAN_BLOCK_DIM
-
-    if lane == 0:
-        num_remaining[0] = survivor_running
 
 
 @wp.kernel(enable_backward=False)

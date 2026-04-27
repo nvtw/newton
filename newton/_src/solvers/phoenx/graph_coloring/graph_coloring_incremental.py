@@ -36,9 +36,8 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
     greedy_color_histogram_kernel,
     greedy_color_starts_scan_kernel,
-    greedy_compact_remaining_kernel,
     greedy_count_num_colors_kernel,
-    greedy_reset_color_count_kernel,
+    greedy_reset_init_kernel,
     greedy_scatter_elements_by_color_kernel,
     incremental_begin_sweep_kernel,
     incremental_fill_minus_one_kernel,
@@ -67,6 +66,47 @@ __all__ = ["MAX_COLORS", "IncrementalContactPartitioner"]
 # margin at negligible memory cost (``color_starts`` is
 # ``(MAX_COLORS + 1) * 4 B = 4100 B``).
 MAX_COLORS = 1024
+
+#: Block dim for the greedy MIS+colour kernel's persistent grid.
+#: Matches the value :mod:`solver_phoenx_kernels` uses for the PGS
+#: sweeps; 256 saturates Blackwell SMs without dropping occupancy on
+#: register-heavy bodies.
+_GREEDY_BLOCK_DIM: int = 256
+
+
+def _greedy_coloring_grid_size(max_num_interactions: int, device: wp.DeviceLike) -> int:
+    """Pick a persistent-grid thread count for the greedy coloring kernel.
+
+    The MIS+colour kernel is *light* per element (one tag-word read +
+    a few neighbour reads when uncoloured) and uses a grid-stride
+    loop, so we deliberately under-provision relative to the
+    constraint capacity: a smaller grid means fewer warps to
+    schedule per launch, fewer empty lanes when most elements have
+    already been coloured (late JP rounds), and better register
+    reuse across grid-strided iterations on a single thread.
+
+    Picks ``min(capacity_blocks, 1 block per SM)`` blocks of 256
+    threads. On Blackwell sm_120 (~120 SMs) that's ~30k threads
+    max; for a 73k-element Kapla graph each thread runs ~3
+    iterations, an order of magnitude fewer launched threads than
+    the pre-grid-stride 73k-thread launch with the same throughput.
+    The 8-block floor keeps tiny graphs from running on a single
+    warp.
+    """
+    block_dim = _GREEDY_BLOCK_DIM
+    device_obj = wp.get_device(device)
+    if device_obj.is_cuda:
+        # 1 block per SM. The kernel is light enough that 4 blocks/SM
+        # buys nothing -- the grid-stride loop already amortises the
+        # launch overhead, and each colour-round commit serialises
+        # behind a global atomic on ``any_uncolored`` regardless of
+        # block count.
+        max_blocks_limit = max(8, device_obj.sm_count)
+    else:
+        max_blocks_limit = 256
+    capacity_blocks = max(1, (max(1, int(max_num_interactions)) + block_dim - 1) // block_dim)
+    num_blocks = max(8, min(capacity_blocks, max_blocks_limit))
+    return num_blocks * block_dim
 
 
 @wp.kernel(enable_backward=False)
@@ -232,6 +272,13 @@ class IncrementalContactPartitioner:
         # more colours than the bitmask can hold.
         self._greedy_color_count: wp.array[wp.int32] = wp.zeros(int(GREEDY_MAX_COLORS), dtype=wp.int32, device=device)
         self._greedy_color_offsets: wp.array[wp.int32] = wp.zeros(int(GREEDY_MAX_COLORS), dtype=wp.int32, device=device)
+        # Persistent grid size for the greedy MIS+colour pass. Sized
+        # like the PGS sweep kernels: 4 blocks/SM with a small
+        # min-block floor and a per-capacity ceiling. Each launch
+        # uses a grid-stride loop over ``[0, num_elements)`` so the
+        # grid can stay much smaller than the constraint capacity --
+        # over-launching here is pure warp-scheduling overhead.
+        self._greedy_grid_size: int = _greedy_coloring_grid_size(max_num_interactions, device)
 
         # Sweep cursor used by :meth:`begin_sweep` / the PGS kernels.
         # Holds the number of colours still to process in the current
@@ -666,9 +713,11 @@ class IncrementalContactPartitioner:
             "reset() must be called before build_csr_greedy()"
         )
 
-        # Reset CSR-side state. We can reuse the same init kernel as
-        # the round-based path: it zeroes ``num_remaining``-driving
-        # state and clears ``color_starts[0]``.
+        # Reset CSR-side state (color_starts[0] = 0, num_colors = 0,
+        # current_color = 0). We don't use ``num_remaining`` for the
+        # greedy capture_while -- ``any_uncolored`` drives termination
+        # instead -- but the kernel writes to it so the field stays
+        # coherent for any consumer that reads it.
         wp.launch(
             incremental_init_csr_kernel,
             dim=1,
@@ -680,25 +729,26 @@ class IncrementalContactPartitioner:
                 self._num_elements,
             ],
         )
-        # Reset per-colour bookkeeping with a single launch instead of
-        # three separate ``array.zero_()`` calls. ``zero_()`` would
-        # work inside an outer capture but emits an extra
-        # ``cudaMemsetAsync`` per array; one fused-launch reset keeps
-        # the build's per-step replay cost down.
+        # One-shot reset: zero overflow flag, color_count buckets,
+        # and color_offsets cursor. The ``num_remaining`` predicate
+        # was initialised to ``num_elements`` by
+        # :func:`incremental_init_csr_kernel` above; the greedy
+        # kernel decrements it once per commit.
         wp.launch(
-            greedy_reset_color_count_kernel,
+            greedy_reset_init_kernel,
             dim=int(GREEDY_MAX_COLORS),
             inputs=[
+                self._overflow_flag,
                 self._greedy_color_count,
                 self._greedy_color_offsets,
-                self._overflow_flag,
                 int(GREEDY_MAX_COLORS),
             ],
         )
 
-        # Reset per-element packed tag and the compact remaining list,
-        # same as the round-based path. These leave the adjacency
-        # untouched (``reset()`` built it).
+        # Reset per-element packed tag (clears any leftover colour
+        # from a previous build_csr_greedy on the same adjacency).
+        # No ``remaining_ids`` to initialise -- the greedy kernel
+        # iterates ``[0, num_elements)`` directly.
         wp.launch(
             incremental_reset_loop_state_kernel,
             dim=self.max_num_interactions,
@@ -708,15 +758,11 @@ class IncrementalContactPartitioner:
                 self._num_elements,
             ],
         )
-        wp.launch(
-            incremental_init_remaining_ids_kernel,
-            dim=self.max_num_interactions,
-            inputs=[self._remaining_ids, self._num_elements],
-        )
 
-        # Main loop: greedy MIS-and-colour kernel + compact remaining.
-        # Same capture_while shape as the round-based path; the inner
-        # body unrolls ``NUM_INNER_WHILE_ITERATIONS`` rounds.
+        # Main loop: greedy MIS-and-colour kernel only (no compact).
+        # Capture_while predicate is ``num_remaining`` -- strictly
+        # decreasing across rounds (the kernel atomic_subs once per
+        # commit) so the conditional CUDA graph converges cleanly.
         wp.capture_while(
             self._num_remaining,
             self._capture_build_csr_greedy_step,
@@ -782,14 +828,24 @@ class IncrementalContactPartitioner:
     def _capture_build_csr_greedy_step(self) -> None:
         """Body of the ``build_csr_greedy`` capture_while.
 
-        Same unroll contract as :meth:`_capture_build_csr_step`: both
-        kernels honour an early-exit when ``num_remaining[0] == 0`` so
-        the trailing rounds past convergence are no-ops.
+        Each iteration zeroes the per-round ``any_uncolored`` flag,
+        then runs the greedy MIS+colour kernel. The kernel iterates
+        ``[0, num_elements)`` via grid-stride; uncoloured threads set
+        the flag to 1, coloured threads early-exit. No compaction
+        kernel: the round-based JP path's compact + remaining_ids
+        bookkeeping is replaced by the on-tag-word coloured check at
+        the top of each strided iteration.
+
+        Inner body is unrolled :data:`NUM_INNER_WHILE_ITERATIONS` times
+        so the outer ``wp.capture_while`` overhead amortises across N
+        rounds. Trailing iterations after convergence cost only the
+        flag-reset + an empty greedy launch (which short-circuits in
+        the early-exit branch on every strided iteration).
         """
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
             wp.launch(
                 partitioning_coloring_incremental_greedy_kernel,
-                dim=self.max_num_interactions,
+                dim=self._greedy_grid_size,
                 inputs=[
                     self._partition_data_concat,
                     self._random_values,
@@ -797,20 +853,12 @@ class IncrementalContactPartitioner:
                     self._adjacency_section_end_indices,
                     self._vertex_to_adjacent_elements,
                     self._elements,
-                    self._remaining_ids,
+                    self._num_elements,
+                    wp.int32(self._greedy_grid_size),
                     self._num_remaining,
                     self._overflow_flag,
                 ],
-            )
-            wp.launch_tiled(
-                greedy_compact_remaining_kernel,
-                dim=[1],
-                inputs=[
-                    self._partition_data_concat,
-                    self._remaining_ids,
-                    self._num_remaining,
-                ],
-                block_dim=int(TILE_SCAN_BLOCK_DIM),
+                block_dim=_GREEDY_BLOCK_DIM,
             )
 
     def begin_sweep(self) -> None:
