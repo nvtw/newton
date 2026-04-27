@@ -114,7 +114,7 @@ class Example:
 
         solver_name = getattr(args, "solver", "xpbd")
         # PhoenX needs sticky contact matching for its persistent warm-start.
-        cp_kwargs = dict(broad_phase=args.broad_phase)
+        cp_kwargs = {"broad_phase": args.broad_phase}
         if solver_name == "phoenx":
             cp_kwargs["contact_matching"] = "sticky"
         self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)

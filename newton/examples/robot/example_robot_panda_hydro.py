@@ -276,11 +276,11 @@ class Example:
             output_contact_surface=hasattr(viewer, "renderer"),  # Compile in if viewer supports it
         )
         solver_name_for_pipeline = getattr(args, "solver", "mujoco")
-        cp_kwargs = dict(
-            reduce_contacts=True,
-            broad_phase="explicit",
-            sdf_hydroelastic_config=sdf_hydroelastic_config,
-        )
+        cp_kwargs = {
+            "reduce_contacts": True,
+            "broad_phase": "explicit",
+            "sdf_hydroelastic_config": sdf_hydroelastic_config,
+        }
         if solver_name_for_pipeline == "phoenx":
             cp_kwargs["contact_matching"] = "sticky"
         self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)

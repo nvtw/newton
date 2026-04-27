@@ -450,7 +450,7 @@ class Example:
         # PhoenX requires the contacts buffer to be built with a
         # non-disabled ``contact_matching`` mode so its persistent
         # warm-start has stable cid-to-pair identities.
-        cp_kwargs = dict(reduce_contacts=True, rigid_contact_max=contact_max, broad_phase="nxn")
+        cp_kwargs = {"reduce_contacts": True, "rigid_contact_max": contact_max, "broad_phase": "nxn"}
         if solver_name == "phoenx":
             cp_kwargs["contact_matching"] = "sticky"
         self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)
