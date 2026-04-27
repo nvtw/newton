@@ -69,6 +69,7 @@ __all__ = [
     "_per_world_jp_coloring_kernel",
     "_phoenx_apply_forces_and_gravity_kernel",
     "_phoenx_apply_global_damping_kernel",
+    "_phoenx_refresh_world_inertia_kernel",
     "_phoenx_update_inertia_and_clear_forces_kernel",
     "_pick_threads_per_world_kernel",
     "_reduce_total_colours_kernel",
@@ -1012,6 +1013,34 @@ def _phoenx_update_inertia_and_clear_forces_kernel(
     # Force / torque clear: every body slot, including kinematic / static.
     bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
     bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_refresh_world_inertia_kernel(
+    bodies: BodyContainer,
+):
+    """Per-substep ``inverse_inertia_world`` refresh.
+
+    The constraint kernels read ``bodies.inverse_inertia_world[i]``
+    for each body's effective-mass projection. After
+    :func:`_integrate_velocities_kernel` rotates the body via
+    ``q_new = dq(omega * substep_dt) * q_old``, the previously
+    cached ``inverse_inertia_world`` no longer matches the current
+    orientation. For anisotropic bodies (``I_xx != I_yy != I_zz`` --
+    e.g. robot torsos) running multiple substeps without refreshing
+    biases the angular-impulse projection in subsequent substeps,
+    producing a small but cumulative drift in the angular momentum
+    direction. This kernel rebuilds ``R * I^-1 * R^T`` from the
+    current orientation so the next substep's solve uses the right
+    rotated inertia.
+
+    No damping, no force-clear -- those still run once per outer
+    step in :func:`_phoenx_update_inertia_and_clear_forces_kernel`.
+    """
+    i = wp.tid()
+    if bodies.motion_type[i] == MOTION_DYNAMIC:
+        r = wp.quat_to_matrix(bodies.orientation[i])
+        bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
 
 
 @wp.kernel(enable_backward=False)

@@ -100,6 +100,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
+    _phoenx_refresh_world_inertia_kernel,
     _phoenx_update_inertia_and_clear_forces_kernel,
     _pick_threads_per_world_kernel,
     _reduce_total_colours_kernel,
@@ -969,6 +970,17 @@ class PhoenXWorld:
                 self._solve_main()
                 self._integrate_positions()
                 self._relax_velocities()
+            # Inertia refresh: ``_integrate_positions`` rotated every
+            # dynamic body via ``q_new = dq(omega * substep_dt) * q``;
+            # the world-frame inverse inertia tensor stored in
+            # ``bodies.inverse_inertia_world`` was rebuilt for the
+            # PRIOR orientation, so any subsequent constraint solve in
+            # this step (relax + the next substep) would project
+            # impulses through a stale ``R * I^-1 * R^T``. For
+            # anisotropic robot links this biases the angular impulse
+            # direction over the substep loop. Refreshing here keeps
+            # every solve consistent with the current pose.
+            self._refresh_world_inertia()
             alpha = float(k + 1) * inv_n
             self._kinematic_interpolate_substep(alpha)
             self._apply_global_damping()
@@ -1610,6 +1622,23 @@ class PhoenXWorld:
             _kinematic_interpolate_substep_kernel,
             dim=self.num_bodies,
             inputs=[self.bodies, wp.float32(alpha)],
+            device=self.device,
+        )
+
+    def _refresh_world_inertia(self) -> None:
+        """Per-substep refresh of ``bodies.inverse_inertia_world``.
+
+        Rebuilds ``R * I_local^-1 * R^T`` from the body's current
+        orientation, no damping, no force-clear. Must run after
+        :meth:`_integrate_positions` so the next solve / next substep
+        sees an inertia rotation consistent with the body's pose.
+        """
+        if self.num_bodies == 0:
+            return
+        wp.launch(
+            _phoenx_refresh_world_inertia_kernel,
+            dim=self.num_bodies,
+            inputs=[self.bodies],
             device=self.device,
         )
 
