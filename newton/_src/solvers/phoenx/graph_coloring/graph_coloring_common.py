@@ -413,16 +413,22 @@ def partitioning_coloring_incremental_greedy_kernel(
                 c = c + wp.int32(1)
             if c >= GREEDY_MAX_COLORS:
                 # Mask saturated: graph wants > GREEDY_MAX_COLORS
-                # distinct colours. Flag overflow and skip this
-                # commit; the host side will raise after the loop
-                # exits. Note that we deliberately do *not*
-                # decrement ``num_remaining`` here: leaving the
-                # counter non-zero stops the outer capture_while
-                # from converging on the corrupt run, and the
-                # subsequent uncaptured ``build_csr_greedy`` (or
-                # the next host-side overflow check) raises a
-                # descriptive error.
+                # distinct colours. We MUST still commit something
+                # and decrement ``num_remaining`` -- the outer
+                # ``wp.capture_while`` runs inside a captured CUDA
+                # graph with no host poll site, so leaving the
+                # counter non-zero would loop forever rather than
+                # giving the host a chance to raise. Stamp the
+                # vertex with the highest-bit colour as a poison
+                # value (distinct from any legitimate commit, so the
+                # post-pass histogram lights it up at index
+                # ``GREEDY_MAX_COLORS - 1`` even when the
+                # legitimate maximum is lower) and let the host
+                # observe the flag after the build returns.
                 overflow_flag[0] = 1
+                fallback_c = wp.int32(GREEDY_MAX_COLORS - wp.int32(1))
+                partition_data_concat[tid] = (wp.int64(fallback_c + wp.int32(1)) << _COLOR_SHIFT) | wp.int64(tid)
+                wp.atomic_sub(num_remaining, 0, 1)
             else:
                 partition_data_concat[tid] = (wp.int64(c + 1) << _COLOR_SHIFT) | wp.int64(tid)
                 # Strictly-monotonic capture_while predicate update:
@@ -874,6 +880,19 @@ def incremental_tile_compact_csr_and_advance_kernel(
 # scatter into ``element_ids_by_color`` keyed by the per-element colour
 # and ordered by element id within each colour.
 # ---------------------------------------------------------------------------
+
+
+@wp.kernel(enable_backward=False)
+def greedy_clear_int_kernel(arr: wp.array[int]):
+    """Single-thread no-op zero of ``arr[0]``.
+
+    Used by ``build_csr_greedy_with_jp_fallback`` to clear the
+    fallback-decision flag at the end of its in-graph
+    ``wp.capture_while`` body so the conditional graph runs the JP
+    fallback at most once.
+    """
+    if wp.tid() == 0:
+        arr[0] = wp.int32(0)
 
 
 @wp.kernel(enable_backward=False)

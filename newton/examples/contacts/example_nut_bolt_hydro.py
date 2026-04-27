@@ -163,15 +163,15 @@ class Example:
 
         # PhoenX needs contact matching for its per-pair warm-start.
         # XPBD and MuJoCo are happy with the default latest-only matching.
-        from newton._src.solvers.phoenx.solver_config import (
+        from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
             PHOENX_CONTACT_MATCHING,
         )
 
-        cp_kwargs = dict(
-            reduce_contacts=True,
-            rigid_contact_max=self.rigid_contact_max,
-            broad_phase=self.broad_phase_mode,
-        )
+        cp_kwargs = {
+            "reduce_contacts": True,
+            "rigid_contact_max": self.rigid_contact_max,
+            "broad_phase": self.broad_phase_mode,
+        }
         if self.solver_type == "phoenx":
             cp_kwargs["contact_matching"] = PHOENX_CONTACT_MATCHING
         self.collision_pipeline = newton.CollisionPipeline(

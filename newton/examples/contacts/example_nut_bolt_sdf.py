@@ -136,11 +136,11 @@ class Example:
         # Keep model and pipeline contact capacities aligned.
         self.model.rigid_contact_max = self.rigid_contact_max
 
-        cp_kwargs = dict(
-            reduce_contacts=True,
-            rigid_contact_max=self.rigid_contact_max,
-            broad_phase=self.broad_phase,
-        )
+        cp_kwargs = {
+            "reduce_contacts": True,
+            "rigid_contact_max": self.rigid_contact_max,
+            "broad_phase": self.broad_phase,
+        }
         if self.solver_type == "phoenx":
             cp_kwargs["contact_matching"] = "sticky"
         self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)

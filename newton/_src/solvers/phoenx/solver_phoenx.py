@@ -473,9 +473,7 @@ class PhoenXWorld:
         # :func:`_singleworld_total_threads`.
         if max_thread_blocks is not None and int(max_thread_blocks) < 1:
             raise ValueError(f"max_thread_blocks must be >= 1 (got {max_thread_blocks})")
-        self._max_thread_blocks: int | None = (
-            int(max_thread_blocks) if max_thread_blocks is not None else None
-        )
+        self._max_thread_blocks: int | None = int(max_thread_blocks) if max_thread_blocks is not None else None
         self._singleworld_total_threads: int = _singleworld_total_threads(
             self._constraint_capacity,
             self.device,
@@ -507,6 +505,13 @@ class PhoenXWorld:
             device=self.device,
             use_tile_scan=True,
         )
+        # Tracks the live single-world coloring choice. Starts at the
+        # config default; flipped to False (round-based JP) by
+        # :meth:`step` if a non-captured greedy build overflows the
+        # 64-color bitmask. Once flipped, we never flip back -- the
+        # JP path has no chromatic-number bound and is the safe
+        # fallback for any graph the greedy variant can't fit.
+        self._use_greedy_coloring: bool = bool(PHOENX_USE_GREEDY_COLORING)
 
         cap = self._constraint_capacity
         nw = self.num_worlds
@@ -1049,14 +1054,20 @@ class PhoenXWorld:
         if self._constraint_capacity > 0:
             self._partitioner.reset(self._elements, self._num_active_constraints)
             if self.step_layout == "single_world":
-                # Single-world step path needs only the global CSR;
-                # the per-world bucketing scaffolding is unused.
-                # Greedy partitioner (default) gives 2-3x fewer
-                # colours than round-based JP on dense contact graphs
-                # (Kapla tower: 78 → 28). Switched off via
-                # PHOENX_USE_GREEDY_COLORING for the legacy path.
-                if PHOENX_USE_GREEDY_COLORING:
-                    self._partitioner.build_csr_greedy()
+                # Greedy gives 2-3x fewer colours on dense graphs but
+                # is bounded at 64 colours (single int64 forbidden
+                # mask). If the kernel raises its overflow flag on a
+                # non-captured step we silently flip
+                # ``_use_greedy_coloring`` and rebuild with the
+                # round-based JP path (which has no such bound).
+                if self._use_greedy_coloring:
+                    # Greedy with in-graph JP fallback: the
+                    # partitioner runs the round-based JP build
+                    # inside a ``wp.capture_while`` keyed on the
+                    # overflow flag, so a graph that overflows the
+                    # 64-colour bitmask still gets a valid CSR within
+                    # the same captured frame. No host probe needed.
+                    self._partitioner.build_csr_greedy_with_jp_fallback()
                 else:
                     self._partitioner.build_csr()
             else:
@@ -1284,6 +1295,43 @@ class PhoenXWorld:
             device=self.device,
         )
 
+    def _maybe_fallback_from_per_world_greedy_overflow(self, nw: int) -> None:
+        """Multi-world analogue of
+        :meth:`_maybe_fallback_from_greedy_overflow`. Flips the
+        instance flag and re-runs the per-world JP coloring if any
+        world's greedy build hit the 64-colour cap.
+        """
+        flag = self._per_world_greedy_overflow
+        device = flag.device
+        if device.is_cuda and device.is_capturing:
+            return
+        if int(flag.numpy()[0]) == 0:
+            return
+        self._use_greedy_coloring = False
+        wp.launch_tiled(
+            _per_world_jp_coloring_kernel,
+            dim=[nw],
+            inputs=[
+                self._per_world_element_offsets,
+                self._per_world_element_count,
+                self._per_world_elements,
+                self._elements,
+                self._partitioner._adjacency_section_end_indices,
+                self._partitioner._vertex_to_adjacent_elements,
+                self._partitioner._random_values,
+                self._partitioner._cost_values,
+                int(MAX_COLORS),
+            ],
+            outputs=[
+                self._per_world_assigned,
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_num_colors,
+            ],
+            block_dim=_PER_WORLD_COLORING_BLOCK_DIM,
+            device=self.device,
+        )
+
     def _build_per_world_coloring(self) -> None:
         """Parallel per-world Jones-Plassmann coloring.
 
@@ -1357,9 +1405,9 @@ class PhoenXWorld:
         # exactly the (world, lane) pair the kernel expects. Plain
         # ``launch`` would return a global thread index instead, which
         # would silently mis-address every block-scoped read/write.
-        if PHOENX_USE_GREEDY_COLORING:
+        if self._use_greedy_coloring:
             # Greedy variant: each MIS commit picks the smallest free
-            # colour. Drops Kapla-class per-world colour counts to the
+            # colour. Drops per-world colour counts toward the
             # max-body-degree lower bound (mirrors the single-world
             # path in IncrementalContactPartitioner.build_csr_greedy).
             wp.launch_tiled(
@@ -1388,6 +1436,11 @@ class PhoenXWorld:
                 block_dim=_PER_WORLD_COLORING_BLOCK_DIM,
                 device=self.device,
             )
+            # Same overflow-fallback contract as the single-world
+            # path: if the per-world greedy kernel exhausted the
+            # 64-color bitmask in any world, flip the live mode to
+            # JP and rerun *this* step's per-world coloring with it.
+            self._maybe_fallback_from_per_world_greedy_overflow(nw)
         else:
             # Round-equals-colour Jones-Plassmann (legacy). Cost-biased
             # priorities: contacts use their per-column contact count

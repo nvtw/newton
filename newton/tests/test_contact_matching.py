@@ -677,8 +677,8 @@ def test_tie_break_invariant_under_unsorted_permutation(test, device):
     contact buffer because only the winner's row is overwritten by
     :meth:`ContactMatcher.replay_matched`.
     """
-    from newton._src.geometry.contact_match import ContactMatcher
-    from newton._src.geometry.contact_sort import ContactSorter
+    from newton._src.geometry.contact_match import ContactMatcher  # noqa: PLC0415
+    from newton._src.geometry.contact_sort import ContactSorter  # noqa: PLC0415
 
     def py_key(shape_a, shape_b, sub):
         return ((shape_a & 0xFFFFF) << 43) | ((shape_b & 0xFFFFF) << 23) | (sub & 0x7FFFFF)
@@ -707,8 +707,8 @@ def test_tie_break_invariant_under_unsorted_permutation(test, device):
 
         # Two new contacts in pair (0, 1) at the same position; different sub_keys.
         # Both will pick prev[0]; ties resolve via packed claim.
-        contact_X = dict(shape_a=0, shape_b=1, sub=200)
-        contact_Y = dict(shape_a=0, shape_b=1, sub=300)
+        contact_X = {"shape_a": 0, "shape_b": 1, "sub": 200}
+        contact_Y = {"shape_a": 0, "shape_b": 1, "sub": 300}
 
         def run(order):
             """Run match with new contacts in the given list order."""

@@ -89,7 +89,7 @@ _CUBE_MESH: newton.Mesh | None = None
 
 def _get_cube_mesh() -> newton.Mesh:
     """Lazily construct (and SDF-bake when needed) the shared cube mesh."""
-    global _CUBE_MESH
+    global _CUBE_MESH  # noqa: PLW0603 -- module-level cache, intentional
     if _CUBE_MESH is None:
         _CUBE_MESH = _build_cube_mesh(CUBE_HALF)
         if BOX_REPRESENTATION is BoxRepresentation.MESH_SDF:
@@ -182,7 +182,7 @@ class Example:
 
         solver_name = getattr(args, "solver", "xpbd")
         # PhoenX needs sticky contact matching for its persistent warm-start.
-        cp_kwargs = dict(broad_phase=args.broad_phase)
+        cp_kwargs = {"broad_phase": args.broad_phase}
         if solver_name == "phoenx":
             cp_kwargs["contact_matching"] = "sticky"
         self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)

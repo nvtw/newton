@@ -67,11 +67,12 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 @wp.kernel(enable_backward=False)
 def _write_camera_body_q_kernel(
     body_id: wp.int32,
-    pos: wp.array(dtype=wp.vec3f),
-    orient: wp.array(dtype=wp.quatf),
-    body_q: wp.array(dtype=wp.transform),
+    pos: wp.array[wp.vec3f],
+    orient: wp.array[wp.quatf],
+    body_q: wp.array[wp.transform],
 ):
     body_q[body_id] = wp.transform(pos[0], orient[0])
+
 
 # Mirrors C# ``Demo15.cs``: globalScaling 0.01 there, 0.1 here for a
 # ~70 cm tabletop tower; ground sits at 0.35 * scale.
@@ -353,17 +354,13 @@ class Example:
         # replays, and ``_camera_pos_arr`` is the device mirror.
         # Orientation is identity for the sphere collider.
         if self._camera_phoenx_slot is not None:
-            self._camera_body_id_arr = wp.array(
-                [int(self._camera_phoenx_slot)], dtype=wp.int32, device=self.device
-            )
+            self._camera_body_id_arr = wp.array([int(self._camera_phoenx_slot)], dtype=wp.int32, device=self.device)
             self._camera_pos_arr = wp.array(
                 [self._camera_collider_initial_pos],
                 dtype=wp.vec3f,
                 device=self.device,
             )
-            self._camera_orient_arr = wp.array(
-                [(0.0, 0.0, 0.0, 1.0)], dtype=wp.quatf, device=self.device
-            )
+            self._camera_orient_arr = wp.array([(0.0, 0.0, 0.0, 1.0)], dtype=wp.quatf, device=self.device)
             self._camera_pos_host = wp.array(
                 [self._camera_collider_initial_pos],
                 dtype=wp.vec3f,
@@ -542,11 +539,7 @@ class Example:
         report = self.world.step_report()
         # ``max_body_degree`` is the chromatic lower bound; the ratio
         # measures how close the colourer is to it.
-        slack = (
-            f"{report.num_colors / report.max_body_degree:.2f}x"
-            if report.max_body_degree > 0
-            else "n/a"
-        )
+        slack = f"{report.num_colors / report.max_body_degree:.2f}x" if report.max_body_degree > 0 else "n/a"
         fields = [
             f"step={self.frame_index}",
             f"contacts={report.num_contact_columns}",
