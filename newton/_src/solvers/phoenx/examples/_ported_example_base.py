@@ -43,6 +43,9 @@ __all__ = [
     "PortedExample",
     "default_box_half_extents",
     "default_capsule_half_extents",
+    "default_cone_half_extents",
+    "default_cylinder_half_extents",
+    "default_mesh_half_extents",
     "default_sphere_half_extents",
 ]
 
@@ -59,6 +62,56 @@ def default_capsule_half_extents(radius: float, half_height: float) -> tuple[flo
     """OBB half-extents for picking: radius x radius x (radius + half_height) along the
     capsule axis (assumed +z in body frame)."""
     return (float(radius), float(radius), float(radius + half_height))
+
+
+def default_cylinder_half_extents(radius: float, half_height: float) -> tuple[float, float, float]:
+    """OBB half-extents for picking a cylinder.
+
+    Newton's :meth:`ModelBuilder.add_shape_cylinder` puts the cylinder
+    axis along the body-local +z, with the geometry spanning
+    ``[-half_height, +half_height]`` on Z and the disk radius on X/Y.
+    The tight axis-aligned OBB is therefore ``(radius, radius,
+    half_height)``."""
+    return (float(radius), float(radius), float(half_height))
+
+
+def default_cone_half_extents(radius: float, half_height: float) -> tuple[float, float, float]:
+    """OBB half-extents for picking a cone.
+
+    Newton's :meth:`ModelBuilder.add_shape_cone` orients the cone
+    along the body-local +z axis, with the base disk (radius
+    ``radius``) at ``z = -half_height`` and the apex at ``z =
+    +half_height``. The COM offset is ignored for picking -- the
+    visible-bounds OBB is the same ``(radius, radius, half_height)``
+    box that contains the full cone."""
+    return (float(radius), float(radius), float(half_height))
+
+
+def default_mesh_half_extents(
+    vertices: np.ndarray | wp.array,
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0),
+) -> tuple[float, float, float]:
+    """OBB half-extents for picking an arbitrary mesh / convex hull.
+
+    Computes the body-local axis-aligned bounding box of ``vertices``
+    after applying ``scale`` per-axis. Use this for
+    :meth:`ModelBuilder.add_shape_mesh` and
+    :meth:`ModelBuilder.add_shape_convex_hull` shapes whose extents
+    aren't a closed-form function of a radius / half-height.
+
+    Args:
+        vertices: ``(N, 3)`` array of mesh vertices in the body-local
+            frame. Either a NumPy array or a Warp array; the latter
+            is converted via ``.numpy()``.
+        scale: Per-axis scale factor applied to the vertices before
+            measuring (matches the ``scale=...`` argument of
+            :meth:`add_shape_mesh`)."""
+    arr = vertices.numpy() if hasattr(vertices, "numpy") else np.asarray(vertices)
+    if arr.ndim != 2 or arr.shape[1] != 3:
+        raise ValueError(f"vertices must be (N, 3); got {arr.shape}")
+    sx, sy, sz = (float(scale[0]), float(scale[1]), float(scale[2]))
+    half = 0.5 * (arr.max(axis=0) - arr.min(axis=0))
+    return (float(half[0] * abs(sx)), float(half[1] * abs(sy)), float(half[2] * abs(sz)))
 
 
 class PortedExample:
@@ -125,6 +178,16 @@ class PortedExample:
     def configure_camera(self, viewer) -> None:
         """Default camera: 6 m back along +x, 2 m up, looking at origin."""
         viewer.set_camera(pos=wp.vec3(6.0, 0.0, 2.0), pitch=-15.0, yaw=180.0)
+
+    def post_build(self) -> None:
+        """Optional hook called after the world / picking are wired up
+        but **before** the simulate graph is captured.
+
+        Subclasses override this to install per-shape materials via
+        ``self.world.set_materials(...)``, register collision filter
+        pairs, set kinematic poses, etc. The default implementation
+        does nothing."""
+        return
 
     # ------------------------------------------------------------------
     # Build pipeline
@@ -250,6 +313,13 @@ class PortedExample:
         self._pick_half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
         self.picking = Picking(self.world, self._pick_half_extents)
         register_with_viewer_gl(self.viewer, self.picking)
+
+        # Subclass hook: last chance to install per-shape materials,
+        # tweak solver knobs, etc., *before* the simulate graph is
+        # captured. Anything written into a wp.array here will still
+        # be visible inside the captured graph because the kernels
+        # bind the array references, not their contents.
+        self.post_build()
 
         self.graph = None
         if self.device.is_cuda:

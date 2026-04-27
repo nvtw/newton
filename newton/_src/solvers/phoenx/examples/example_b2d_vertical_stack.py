@@ -24,12 +24,12 @@ from newton._src.solvers.phoenx.examples._ported_example_base import (
 
 HE = 0.45
 GAP = 0.01
-ROWS = 12
+ROWS = 50
 
 
 class Example(PortedExample):
-    sim_substeps = 12
-    solver_iterations = 16
+    sim_substeps = 8
+    solver_iterations = 10
 
     def build_scene(self, builder: newton.ModelBuilder):
         builder.add_ground_plane()
