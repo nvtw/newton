@@ -475,25 +475,28 @@ class TestKinematicNewtonCollisionPipeline(unittest.TestCase):
             # Pull the dynamic body's pose back to host for assertions
             # via the PhoenX-side container (which the solver wrote).
             dyn_pos = bodies.position.numpy()[dyn_id + 1]
-            # Bridge back to Newton state for the next frame's collide.
-            from newton._src.solvers.phoenx.examples.example_common import (  # noqa: PLC0415
-                phoenx_to_newton_kernel,
-            )
+            # Bridge dynamic-body slice only back to Newton state.
+            # Skipping the kinematic slot mirrors example_kapla_tower's
+            # design -- the host-side patch (or absence of one) is the
+            # only writer of state.body_q[kine_id] under test.
+            if sync_count > 0:
+                from newton._src.solvers.phoenx.examples.example_common import (  # noqa: PLC0415
+                    phoenx_to_newton_kernel,
+                )
 
-            n = model.body_count
-            wp.launch(
-                phoenx_to_newton_kernel,
-                dim=n,
-                inputs=[
-                    bodies.position[1 : 1 + n],
-                    bodies.orientation[1 : 1 + n],
-                    bodies.velocity[1 : 1 + n],
-                    bodies.angular_velocity[1 : 1 + n],
-                    model.body_com,
-                ],
-                outputs=[state.body_q, state.body_qd],
-                device=device,
-            )
+                wp.launch(
+                    phoenx_to_newton_kernel,
+                    dim=sync_count,
+                    inputs=[
+                        bodies.position[1 + sync_start : 1 + sync_start + sync_count],
+                        bodies.orientation[1 + sync_start : 1 + sync_start + sync_count],
+                        bodies.velocity[1 + sync_start : 1 + sync_start + sync_count],
+                        bodies.angular_velocity[1 + sync_start : 1 + sync_start + sync_count],
+                        model.body_com,
+                    ],
+                    outputs=[state.body_q[sync_start:], state.body_qd[sync_start:]],
+                    device=device,
+                )
         return float(dyn_pos[0])
 
     def test_kinematic_pushes_dynamic_when_state_body_q_patched(self) -> None:
