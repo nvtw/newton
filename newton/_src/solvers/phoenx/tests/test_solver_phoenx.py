@@ -201,6 +201,56 @@ class TestSolverPhoenX(unittest.TestCase):
         drift = float(np.linalg.norm(pos - np.array([0.5, 0.0, 0.5])))
         self.assertLess(drift, 0.05, msg=f"welded cube drifted {drift:.4f} m")
 
+    def test_external_body_force_propagates_through_step(self) -> None:
+        """Newton's :class:`Picking` writes the pick spring into
+        ``state.body_f`` via ``wp.atomic_add``. Verify ``SolverPhoenX``
+        imports that channel: a +x linear force on a free-floating cube
+        (no gravity, no contacts) must produce a +x linear velocity
+        proportional to ``F * dt / m`` after one step.
+        """
+        # Free-floating unit-mass cube, no gravity, no joints, no contacts.
+        mb = newton.ModelBuilder()
+        mb.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0)))
+        mb.add_shape_box(
+            0,
+            hx=0.1,
+            hy=0.1,
+            hz=0.1,
+            cfg=newton.ModelBuilder.ShapeConfig(density=1000.0),
+        )
+        mb.gravity = 0.0
+        model = mb.finalize()
+
+        solver = newton.solvers.SolverPhoenX(model, substeps=1, solver_iterations=1)
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+
+        # Body mass for the assertion below.
+        mass = float(model.body_mass.numpy()[0])
+        self.assertGreater(mass, 0.0)
+
+        # Inject a +x linear force at COM via state.body_f -- the same
+        # array Newton's Picking writes to.
+        force_x = 100.0
+        body_f_np = np.zeros((1, 6), dtype=np.float32)
+        body_f_np[0, 0] = force_x  # spatial top = linear force
+        state_0.body_f.assign(body_f_np)
+
+        dt = 1.0 / 240.0
+        solver.step(state_0, state_1, control, None, dt)
+
+        # Expected: v += F * dt / m for one whole step.
+        body_qd = state_1.body_qd.numpy()
+        v_x = float(body_qd[0, 0])
+        expected = force_x * dt / mass
+        self.assertAlmostEqual(
+            v_x,
+            expected,
+            delta=expected * 0.05,
+            msg=f"external body_f did not propagate: v_x={v_x:.6f}, expected ~{expected:.6f}",
+        )
+
     def test_notify_model_changed_body_inertial_properties(self) -> None:
         """Regression: ``notify_model_changed`` with
         ``BODY_INERTIAL_PROPERTIES`` (or ``BODY_PROPERTIES``) must launch

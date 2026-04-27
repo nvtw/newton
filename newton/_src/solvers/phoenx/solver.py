@@ -115,6 +115,15 @@ class SolverPhoenX(SolverBase):
 
     :data:`JointType.DISTANCE`, :data:`JointType.D6`,
     :data:`JointType.CABLE` are not supported and raise at construction.
+
+    **Newton :class:`~newton._src.viewer.picking.Picking`**: works out
+    of the box. The viewer's ``apply_forces(state)`` (or a direct
+    :meth:`Picking._apply_picking_force` call) atomically adds the pick
+    spring's force/torque to ``state.body_f``; :meth:`step` imports
+    ``state.body_f`` into PhoenX's per-body force accumulator before
+    integrating, so picks are applied uniformly across substeps. Use
+    Newton's :class:`Picking` directly with a ``Model`` -- there is no
+    PhoenX-specific integration shim.
     """
 
     def __init__(
