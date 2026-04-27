@@ -298,11 +298,22 @@ class Example:
             # MuJoCo-parity sweep used by the Anymal walk demo and is
             # the right cadence for PhysX-trained PD policies whose
             # joint stiffnesses sit in the 100-1000 N*m/rad range.
+            #
+            # ``velocity_readout="finite_difference"`` stamps
+            # ``state.body_qd`` with the outer-step pose-delta velocity
+            # instead of PhoenX's substep-end value. Matches the
+            # post-integration ``qvel`` convention MuJoCo Warp returns
+            # (which is what the policy was trained against), and
+            # specifically removes the multi-rad/s per-step ringing
+            # that the stiff foot-ground contact resolution produces
+            # on the ankle DoFs (most visible after the first 1-2
+            # steps; see ``_g1_obs_diff.py``).
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
                 substeps=20,
                 solver_iterations=8,
                 velocity_iterations=1,
+                velocity_readout="finite_difference",
             )
         else:
             self.solver = newton.solvers.SolverMuJoCo(
