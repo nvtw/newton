@@ -727,6 +727,7 @@ class Mesh:
         shape_margin: float = 0.0,
         scale: tuple[float, float, float] | None = None,
         texture_format: str = "uint16",
+        cache_dir: str | os.PathLike[str] | None = None,
     ) -> "SDF":
         """Build and attach an SDF for this mesh.
 
@@ -756,6 +757,15 @@ class Mesh:
                 normalized textures (half the memory of float32).
                 ``"float32"`` stores full-precision values. ``"uint8"`` uses
                 8-bit textures for minimum memory at lower precision.
+            cache_dir: Optional directory used to cache cooked SDF data on
+                disk. When provided, the cooked sparse SDF (the data that
+                backs the GPU 3D textures) is keyed by mesh content +
+                build parameters and persisted as ``{hash}.sdf.npz`` plus
+                a sidecar ``{hash}.sdf.json`` manifest. Subsequent calls
+                with identical inputs reload from disk and skip the
+                expensive mesh-SDF cook. ``shape_margin`` is applied at
+                sample time and is *not* part of the cache key. Defaults
+                to ``None`` (cache disabled).
 
         Returns:
             The attached :class:`SDF` instance.
@@ -782,6 +792,7 @@ class Mesh:
             shape_margin=shape_margin,
             scale=scale,
             texture_format=texture_format,
+            cache_dir=cache_dir,
         )
         return self.sdf
 
