@@ -104,7 +104,12 @@ def _add_chain_ring(builder: newton.ModelBuilder, body: int, *, static: bool = F
 
 
 class Example(PortedExample):
-    sim_substeps = 30
+    # Two 1/120 s physics steps per rendered frame: collision
+    # detection runs twice as often as the default 60 Hz cadence,
+    # while the per-step substep count is halved so total solver
+    # work per render stays roughly constant.
+    fps = 120
+    sim_substeps = 15
     solver_iterations = 5
     velocity_iterations = 1
     default_friction = 0.4
@@ -114,6 +119,10 @@ class Example(PortedExample):
     # Skip contact arrows so ``viewer.log_state`` stays on ViewerGL's
     # CUDA-OpenGL interop path (no per-frame host sync).
     show_contacts = False
+
+    def step(self) -> None:
+        super().step()
+        super().step()
 
     def build_scene(self, builder: newton.ModelBuilder):
         builder.default_shape_cfg.gap = 0.01
