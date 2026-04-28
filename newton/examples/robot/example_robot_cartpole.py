@@ -57,13 +57,7 @@ class Example:
         # finalize model
         self.model = builder.finalize()
 
-        solver_name = getattr(args, "solver", "mujoco")
-        if solver_name == "phoenx":
-            self.solver = newton.solvers.SolverPhoenX(
-                self.model, substeps=4, solver_iterations=8, velocity_iterations=1
-            )
-        else:
-            self.solver = newton.solvers.SolverMuJoCo(self.model)
+        self.solver = newton.solvers.SolverMuJoCo(self.model)
         # self.solver = newton.solvers.SolverSemiImplicit(self.model, joint_attach_ke=1600.0, joint_attach_kd=20.0)
         # self.solver = newton.solvers.SolverFeatherstone(self.model)
 
@@ -199,12 +193,6 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
-        parser.add_argument(
-            "--solver",
-            choices=["mujoco", "phoenx"],
-            default="mujoco",
-            help="Rigid-body solver backend.",
-        )
         parser.set_defaults(world_count=100)
         return parser
 

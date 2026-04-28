@@ -75,8 +75,6 @@ class Example:
         self.device = wp.get_device()
         self.torch_device = wp.device_to_torch(self.device)
         self.is_test = args is not None and args.test
-
-        # Pick the solver backend; default stays MuJoCo for reproducibility.
         solver_name = getattr(args, "solver", "mujoco")
 
         builder = newton.ModelBuilder()
@@ -175,13 +173,6 @@ class Example:
         use_mujoco_contacts = getattr(args, "use_mujoco_contacts", False)
 
         if solver_name == "phoenx":
-            # PhoenX runs its own contacts (collision pipeline auto-
-            # created with sticky matching by the solver). Substeps=4
-            # matches the outer example cadence; per the MuJoCo-parity
-            # sweep in test_mujoco_parity, 4 internal substeps at 8 PGS
-            # iterations track MuJoCo's PD response to within ~0.01 rad
-            # RMS on a 1 m pendulum at dt=5 ms, which is what we need
-            # for a PhysX-trained policy transfer.
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
                 substeps=4,
@@ -219,11 +210,7 @@ class Example:
         # Evaluate forward kinematics to update body poses based on initial joint configuration
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
-        # Initialize contacts. PhoenX always needs a Contacts buffer
-        # (even though the solver auto-attaches a sticky CollisionPipeline,
-        # the example still drives ``model.collide`` in the simulate
-        # loop below). MuJoCo skips the buffer when collision detection
-        # lives inside its internal backend.
+        # MuJoCo can keep contacts inside its backend; PhoenX uses Newton contacts.
         if solver_name == "mujoco" and use_mujoco_contacts:
             self.contacts = None
         else:
@@ -382,7 +369,7 @@ class Example:
             "--solver",
             choices=["mujoco", "phoenx"],
             default="mujoco",
-            help="Rigid-body solver backend. 'mujoco' (default) uses the MuJoCo/Warp solver; 'phoenx' uses SolverPhoenX.",
+            help="Rigid-body solver backend.",
         )
         return parser
 

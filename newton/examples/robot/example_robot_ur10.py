@@ -142,13 +142,6 @@ class Example:
 
         self.ctrl = self.articulation_view.get_attribute("joint_target_pos", self.control)
 
-        # PhoenX dispatch intentionally not added: the UR10 USD ships
-        # with a 6-DoF (D6) base joint to anchor the arm to the world,
-        # which PhoenX's joint set does not include (only REVOLUTE,
-        # PRISMATIC, BALL, FIXED, FREE). The arm itself is fine but
-        # the import fails at the base joint. TODO: drop the D6
-        # anchor joint and weld the base into the world via a FIXED
-        # joint, then add the ``--solver phoenx`` dispatch.
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
             disable_contacts=True,

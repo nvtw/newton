@@ -136,14 +136,12 @@ class Example:
         # Keep model and pipeline contact capacities aligned.
         self.model.rigid_contact_max = self.rigid_contact_max
 
-        cp_kwargs = {
-            "reduce_contacts": True,
-            "rigid_contact_max": self.rigid_contact_max,
-            "broad_phase": self.broad_phase,
-        }
-        if self.solver_type == "phoenx":
-            cp_kwargs["contact_matching"] = "sticky"
-        self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)
+        self.collision_pipeline = newton.CollisionPipeline(
+            self.model,
+            reduce_contacts=True,
+            rigid_contact_max=self.rigid_contact_max,
+            broad_phase=self.broad_phase,
+        )
 
         # Create solver based on user choice
         if self.solver_type == "xpbd":
@@ -166,12 +164,8 @@ class Example:
                 ls_iterations=100,
                 impratio=1.0,
             )
-        elif self.solver_type == "phoenx":
-            self.solver = newton.solvers.SolverPhoenX(
-                self.model, substeps=4, solver_iterations=8, velocity_iterations=1
-            )
         else:
-            raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd', 'mujoco', or 'phoenx'.")
+            raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd' or 'mujoco'.")
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -386,9 +380,9 @@ class Example:
         parser.add_argument(
             "--solver",
             type=str,
-            choices=["xpbd", "mujoco", "phoenx"],
+            choices=["xpbd", "mujoco"],
             default="mujoco",
-            help="Rigid-body solver backend: 'xpbd', 'mujoco', or 'phoenx'.",
+            help="Solver to use: 'xpbd' (Extended Position-Based Dynamics) or 'mujoco' (MuJoCo constraint solver).",
         )
         parser.add_argument("--num-per-world", type=int, default=1, help="Number of assemblies per world.")
         return parser

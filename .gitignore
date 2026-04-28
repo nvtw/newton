@@ -73,6 +73,3 @@ docs/_static/viser/
 
 # Notebook checkpoints
 **/*.ipynb_checkpoints/
-
-# PhoenX internal bug log
-newton/_src/solvers/phoenx/Bug.md

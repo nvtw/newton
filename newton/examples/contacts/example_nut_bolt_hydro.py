@@ -161,22 +161,11 @@ class Example:
 
         self.model = main_scene.finalize()
 
-        # PhoenX needs contact matching for its per-pair warm-start.
-        # XPBD and MuJoCo are happy with the default latest-only matching.
-        from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
-            PHOENX_CONTACT_MATCHING,
-        )
-
-        cp_kwargs = {
-            "reduce_contacts": True,
-            "rigid_contact_max": self.rigid_contact_max,
-            "broad_phase": self.broad_phase_mode,
-        }
-        if self.solver_type == "phoenx":
-            cp_kwargs["contact_matching"] = PHOENX_CONTACT_MATCHING
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
-            **cp_kwargs,
+            reduce_contacts=True,
+            rigid_contact_max=self.rigid_contact_max,
+            broad_phase=self.broad_phase_mode,
         )
 
         # Create solver based on user choice
@@ -185,17 +174,6 @@ class Example:
                 self.model,
                 iterations=10,
                 rigid_contact_relaxation=self.xpbd_contact_relaxation,
-            )
-        elif self.solver_type == "phoenx":
-            # PhoenX consumes the hydroelastic narrow phase's per-
-            # contact ``rigid_contact_stiffness`` directly (absolute
-            # N/m), so the PhysX-style soft-contact path fires
-            # automatically -- no additional parameters needed.
-            self.solver = newton.solvers.SolverPhoenX(
-                self.model,
-                substeps=self.sim_substeps,
-                solver_iterations=8,
-                velocity_iterations=1,
             )
         elif self.solver_type == "mujoco":
             num_per_world = self.rigid_contact_max // self.world_count
@@ -430,9 +408,9 @@ class Example:
         parser.add_argument(
             "--solver",
             type=str,
-            choices=["xpbd", "mujoco", "phoenx"],
+            choices=["xpbd", "mujoco"],
             default="mujoco",
-            help="Solver to use: 'xpbd', 'mujoco', or 'phoenx'.",
+            help="Solver to use: 'xpbd' or 'mujoco'.",
         )
         parser.add_argument(
             "--num-per-world",

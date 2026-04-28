@@ -36,8 +36,7 @@ Newton Physics
    Extended Attributes <concepts/extended_attributes>
    Collisions and Contacts <concepts/collisions>
    Actuators <concepts/actuators>
-   PhoenX Solver <concepts/phoenx_solver>
-
+   
 .. toctree::
    :maxdepth: 1
    :hidden:

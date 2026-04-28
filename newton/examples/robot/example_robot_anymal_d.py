@@ -71,25 +71,16 @@ class Example:
 
         self.model = builder.finalize()
         use_mujoco_contacts = args.use_mujoco_contacts if args else False
-        self.solver_name = getattr(args, "solver", "mujoco")
-        if self.solver_name == "phoenx":
-            # PhoenX runs its own contacts via ``self.model.contacts()``;
-            # the multi-world step layout exercises this scene's
-            # world_count > 1 behaviour.
-            self.solver = newton.solvers.SolverPhoenX(
-                self.model, substeps=4, solver_iterations=8, velocity_iterations=1
-            )
-        else:
-            self.solver = SolverMuJoCo(
-                self.model,
-                cone="elliptic",
-                impratio=100,
-                iterations=100,
-                ls_iterations=50,
-                nconmax=45,
-                njmax=100,
-                use_mujoco_contacts=use_mujoco_contacts,
-            )
+        self.solver = SolverMuJoCo(
+            self.model,
+            cone="elliptic",
+            impratio=100,
+            iterations=100,
+            ls_iterations=50,
+            nconmax=45,
+            njmax=100,
+            use_mujoco_contacts=use_mujoco_contacts,
+        )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -98,9 +89,8 @@ class Example:
         # Evaluate forward kinematics for collision detection
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        # ``use_mujoco_contacts`` is only meaningful on the MuJoCo path.
-        self.use_mujoco_contacts = use_mujoco_contacts and self.solver_name == "mujoco"
-        if self.use_mujoco_contacts:
+        self.use_mujoco_contacts = use_mujoco_contacts
+        if use_mujoco_contacts:
             self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
         else:
             self.contacts = self.model.contacts()
@@ -131,7 +121,7 @@ class Example:
             # swap states
             self.state_0, self.state_1 = self.state_1, self.state_0
 
-        if self.solver_name == "mujoco" and self.use_mujoco_contacts:
+        if self.use_mujoco_contacts:
             self.solver.update_contacts(self.contacts, self.state_0)
 
     def step(self):
@@ -173,12 +163,6 @@ class Example:
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
         newton.examples.add_mujoco_contacts_arg(parser)
-        parser.add_argument(
-            "--solver",
-            choices=["mujoco", "phoenx"],
-            default="mujoco",
-            help="Rigid-body solver backend.",
-        )
         parser.set_defaults(world_count=8)
         return parser
 

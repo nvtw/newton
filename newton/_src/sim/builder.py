@@ -3644,8 +3644,6 @@ class ModelBuilder:
         label: str | None = None,
         lock_inertia: bool = False,
         is_kinematic: bool = False,
-        linear_velocity: Vec3 | None = None,
-        angular_velocity: Vec3 | None = None,
         custom_attributes: dict[str, Any] | None = None,
     ) -> int:
         """Adds a stand-alone free-floating rigid body to the model.
@@ -3678,12 +3676,6 @@ class ModelBuilder:
                 center of mass, or inertia. This does not affect merging behavior in
                 :meth:`collapse_fixed_joints`, which always accumulates mass and inertia across merged bodies.
             is_kinematic: If True, the body is kinematic and does not respond to forces.
-            linear_velocity: Initial linear velocity of the body in the world frame [m/s].
-                If None (default), the body starts at rest. Written into both
-                :attr:`body_qd` and the auto-created free joint's velocity DoFs so
-                downstream :func:`newton.eval_fk` calls preserve the value.
-            angular_velocity: Initial angular velocity of the body in the world frame
-                [rad/s]. If None (default), the body starts at rest.
             custom_attributes: Dictionary of custom attribute names to values.
 
         Returns:
@@ -3711,18 +3703,6 @@ class ModelBuilder:
         # Create an articulation from the joint
         articulation_label = f"{label}_articulation" if label else None
         self.add_articulation([joint_id], label=articulation_label)
-
-        # Optional initial twist. Written to both ``body_qd`` (the
-        # state used directly by solvers that read body twists) and the
-        # FREE joint's six velocity DoFs (the source of truth that
-        # ``eval_fk`` propagates back to ``body_qd``). Newton's
-        # spatial_vector / FREE-joint qd layout is (linear, angular).
-        if linear_velocity is not None or angular_velocity is not None:
-            lin = axis_to_vec3(linear_velocity) if linear_velocity is not None else wp.vec3()
-            ang = axis_to_vec3(angular_velocity) if angular_velocity is not None else wp.vec3()
-            self.body_qd[body_id] = wp.spatial_vector(lin[0], lin[1], lin[2], ang[0], ang[1], ang[2])
-            qd_start = self.joint_qd_start[joint_id]
-            self.joint_qd[qd_start : qd_start + 6] = [lin[0], lin[1], lin[2], ang[0], ang[1], ang[2]]
 
         return body_id
 
@@ -9664,7 +9644,6 @@ class ModelBuilder:
         skip_validation_shapes: bool = False,
         skip_validation_structure: bool = False,
         skip_validation_joint_ordering: bool = True,
-        skip_shape_contact_pairs: bool = False,
     ) -> Model:
         """
         Finalize the builder and create a concrete :class:`~newton.Model` for simulation.
@@ -9685,12 +9664,6 @@ class ModelBuilder:
                 array lengths, monotonicity). Default is False.
             skip_validation_joint_ordering: If True, skips validation of DFS topological joint ordering within
                 articulations. Default is True (opt-in) because this check has O(n log n) complexity.
-            skip_shape_contact_pairs: If True, skips :meth:`find_shape_contact_pairs` and leaves the resulting
-                ``model.shape_contact_pairs`` / ``model.shape_contact_pair_count`` empty. The precomputed pair
-                list is only consumed by the ``"explicit"`` broad phase mode in :class:`CollisionPipeline`,
-                so this is safe whenever ``"nxn"`` or ``"sap"`` is used. Strongly recommended for large scenes
-                (the pair-list builder is an ``O(N^2)`` Python loop over every shape pair). Default is False
-                (preserves existing behaviour).
 
         Returns:
             A fully constructed Model object containing all simulation data on the specified device.
@@ -10557,11 +10530,7 @@ class ModelBuilder:
             m.equality_constraint_count = len(self.equality_constraint_type)
             m.constraint_mimic_count = len(self.constraint_mimic_joint0)
 
-            if skip_shape_contact_pairs:
-                m.shape_contact_pairs = wp.empty(0, dtype=wp.vec2i, device=m.device)
-                m.shape_contact_pair_count = 0
-            else:
-                self.find_shape_contact_pairs(m)
+            self.find_shape_contact_pairs(m)
 
             # enable ground plane
             m.up_axis = self.up_axis
