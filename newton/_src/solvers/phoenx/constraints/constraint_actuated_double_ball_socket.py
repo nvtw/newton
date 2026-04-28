@@ -806,11 +806,10 @@ def _anchor1_positional_prepare_at(
     only positional constraint).
 
     ``clamp_nyquist`` is forwarded to
-    :func:`soft_constraint_coefficients`; pass ``False`` for
-    ball-socket (rigid lock), ``True`` for cable (the chain's
-    bend/twist rows are already uncapped, so the anchor lock keeping
-    its Nyquist clamp prevents impulses from compounding through the
-    chain).
+    :func:`soft_constraint_coefficients`. Both callers pass ``True``
+    today -- only the cable bend / twist soft rows opt out of the
+    clamp; every positional anchor lock keeps it on so PGS can
+    propagate the lock through long chains in a few iterations.
 
     Reads the body-local snapshots ``la1_b{1,2}``, rotates them into
     world frame, rebuilds the 3x3 effective mass ``a1`` and its
@@ -971,23 +970,20 @@ def _axial_drive_limit_prepare_at(
         # half (PD layout) drives the limit error to zero in the
         # main solve; ``damp_mass_limit`` runs in the relax pass
         # when the limit is clamped.
-        # PD limit row skips the Nyquist clamp -- user-set stiff
-        # joint stops should behave as rigid as the substep budget
-        # allows, not collapse to ``k_max = 1/(eff_inv*dt^2)`` and
-        # let the body slide through the limit. The split's spring
-        # half stays well-conditioned at any ``k``.
+        # PD limit row keeps Nyquist clamp on -- the bias-amplification
+        # / chain-instability concern that bit revolute / prismatic
+        # anchor locks at the unclamped omega applies here too.
         pd_gamma_limit, pd_beta_limit, pd_m_soft, damp_mass_limit = pd_coefficients_split(
-            stiffness_limit, damping_limit, limit_C, eff_inv, dt, False
+            stiffness_limit, damping_limit, limit_C, eff_inv, dt, True
         )
         write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
         write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
         write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
         write_float(constraints, base_offset + _OFF_DAMP_MASS_LIMIT, cid, damp_mass_limit)
     else:
-        # Box2D limit row: same "behave as rigid as substep allows"
-        # contract as the joint anchor lock -- skip Nyquist clamp.
+        # Box2D limit row: keep Nyquist clamp on (default).
         br_limit, mc_limit, ic_limit = soft_constraint_coefficients(
-            hertz_limit, damping_ratio_limit, dt, False
+            hertz_limit, damping_ratio_limit, dt, True
         )
         write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
         write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
@@ -1072,7 +1068,7 @@ def _ball_socket_prepare_at(
         angular_velocity1,
         velocity2,
         angular_velocity2,
-    ) = _anchor1_positional_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt, False)
+    ) = _anchor1_positional_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt, True)
 
     bodies.velocity[b1] = velocity1
     bodies.angular_velocity[b1] = angular_velocity1
