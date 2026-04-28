@@ -709,6 +709,54 @@ def _per_world_greedy_coloring_kernel(
 # per-lane RMW on body velocities is race-free.
 
 
+@wp.func
+def _dispatch_constraint_prepare_for_cid(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+    cid: wp.int32,
+):
+    """Type-dispatch ``prepare_for_iteration`` for one cid.
+
+    Joints occupy ``[0, num_joints)``; contacts ``[num_joints, ...)``.
+    Used by both the warp-per-world fast-tail kernels and the
+    block-per-world substep mega-kernel so the per-cid prepare math
+    is shared.
+    """
+    if cid < num_joints:
+        actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+    else:
+        contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+
+
+@wp.func
+def _dispatch_constraint_iterate_for_cid(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+    cid: wp.int32,
+    use_bias: wp.bool,
+    num_sweeps: wp.int32,
+):
+    """Type-dispatch ``iterate_multi`` for one cid.
+
+    Same dispatch contract as :func:`_dispatch_constraint_prepare_for_cid`.
+    Relax = call with ``use_bias = False``.
+    """
+    if cid < num_joints:
+        actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, use_bias, num_sweeps)
+    else:
+        contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias, num_sweeps)
+
+
 @wp.kernel(enable_backward=False)
 def _constraint_prepare_plus_iterate_fast_tail_kernel(
     constraints: ConstraintContainer,
@@ -763,10 +811,9 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
         base = local_tid
         while base < count:
             cid = world_element_ids_by_color[start + base]
-            if cid < num_joints:
-                actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-            else:
-                contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+            _dispatch_constraint_prepare_for_cid(
+                constraints, contact_cols, bodies, idt, cc, contacts, num_joints, cid
+            )
             base += tpw
 
         _sync_warp()
@@ -795,10 +842,9 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
             base = local_tid
             while base < count:
                 cid = world_element_ids_by_color[start + base]
-                if cid < num_joints:
-                    actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
-                else:
-                    contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps)
+                _dispatch_constraint_iterate_for_cid(
+                    constraints, contact_cols, bodies, idt, cc, contacts, num_joints, cid, True, inner_sweeps
+                )
                 base += tpw
 
             _sync_warp()
@@ -855,10 +901,9 @@ def _constraint_relax_fast_tail_kernel(
         base = local_tid
         while base < count:
             cid = world_element_ids_by_color[start + base]
-            if cid < num_joints:
-                actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
-            else:
-                contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations)
+            _dispatch_constraint_iterate_for_cid(
+                constraints, contact_cols, bodies, idt, cc, contacts, num_joints, cid, False, num_iterations
+            )
             base += tpw
 
         _sync_warp()
