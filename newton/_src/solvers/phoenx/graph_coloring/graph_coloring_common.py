@@ -571,17 +571,28 @@ def incremental_init_csr_kernel(
     color_starts[0] = 0
 
 
+_SWEEP_OFFSET_WRAP = wp.constant(wp.int32(1024))
+
+
 @wp.kernel(enable_backward=False)
 def incremental_begin_sweep_kernel(
     num_colors: wp.array[int],
     color_cursor: wp.array[int],
+    sweep_offset: wp.array[int],
 ):
     # Single-thread launch: copy ``num_colors`` into ``color_cursor``
-    # so the sweep-time capture_while has a fresh counter to decrement.
-    # Done as a kernel (rather than a host-side ``copy_``) so the setup
-    # can live inside a captured region when the caller wants to bake
-    # the whole substep into a CUDA graph.
+    # so the sweep-time capture_while has a fresh counter to decrement,
+    # and bump ``sweep_offset`` modulo ``_SWEEP_OFFSET_WRAP`` so the
+    # next sweep processes the colours in a rotated order. Symmetric
+    # Gauss-Seidel: each colour gets a turn at being "first" across
+    # successive sweeps, which evens out the convergence asymmetry
+    # PGS introduces between earlier-fired and later-fired colours
+    # (visible as alternating stiff / loose pairs along chains).
     color_cursor[0] = num_colors[0]
+    next_offset = sweep_offset[0] + wp.int32(1)
+    if next_offset >= _SWEEP_OFFSET_WRAP:
+        next_offset = wp.int32(0)
+    sweep_offset[0] = next_offset
 
 
 @wp.kernel(enable_backward=False)

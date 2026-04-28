@@ -301,6 +301,14 @@ class IncrementalContactPartitioner:
         # sweep's colour loop when the counter reaches zero.
         self._color_cursor = wp.zeros(1, dtype=wp.int32, device=device)
 
+        # Per-sweep colour rotation offset. Bumped by :meth:`begin_sweep`
+        # modulo ``_SWEEP_OFFSET_WRAP``; the constraint kernel decodes
+        # the active colour as ``(n_colors - cursor + offset) %
+        # n_colors`` so successive sweeps rotate which colour fires
+        # first (symmetric Gauss-Seidel; evens out PGS's earlier /
+        # later-colour bias on chains).
+        self._sweep_offset = wp.zeros(1, dtype=wp.int32, device=device)
+
         # Dummies so partitioning_prepare_kernel can be reused for adjacency zeroing.
         # max_num_partitions=0 -> partition_ends slot [0] is written; we never read it.
         self._prepare_partition_ends_dummy = wp.zeros(1, dtype=wp.int32, device=device)
@@ -857,7 +865,7 @@ class IncrementalContactPartitioner:
         wp.launch(
             incremental_begin_sweep_kernel,
             dim=1,
-            inputs=[self._num_colors, self._color_cursor],
+            inputs=[self._num_colors, self._color_cursor, self._sweep_offset],
         )
 
     # ------------------------------------------------------------------
@@ -933,6 +941,18 @@ class IncrementalContactPartitioner:
         condition for the sweep's per-colour launch loop.
         """
         return self._color_cursor
+
+    @property
+    def sweep_offset(self) -> wp.array:
+        """Device-side per-sweep colour rotation offset.
+
+        Bumped by :meth:`begin_sweep` modulo ``_SWEEP_OFFSET_WRAP``;
+        the PGS constraint kernels read it to decode the active
+        colour as ``(n_colors - cursor + offset) % n_colors``,
+        which rotates which colour fires first across successive
+        sweeps. Symmetric Gauss-Seidel / chain anti-bias.
+        """
+        return self._sweep_offset
 
     @property
     def interaction_id_to_partition(self) -> wp.array:

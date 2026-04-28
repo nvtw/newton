@@ -1341,6 +1341,7 @@ def _singleworld_color_range(
     color_starts: wp.array[wp.int32],
     num_colors: wp.array[wp.int32],
     color_cursor: wp.array[wp.int32],
+    sweep_offset: wp.array[wp.int32],
 ):
     """Decode the current colour's cid range from the cursor.
 
@@ -1348,10 +1349,15 @@ def _singleworld_color_range(
     ``element_ids_by_color`` of the colour's first cid; ``count`` is
     how many cids belong to it; ``cursor`` is the snapshot of
     ``color_cursor[0]`` for the cursor-decrement at end of kernel.
+
+    ``sweep_offset[0]`` rotates which colour fires first across
+    successive sweeps (symmetric Gauss-Seidel; see
+    :func:`incremental_begin_sweep_kernel`).
     """
     cursor = color_cursor[0]
     n_colors = num_colors[0]
-    c = n_colors - cursor
+    base = n_colors - cursor
+    c = (base + sweep_offset[0]) % n_colors
     start = color_starts[c]
     end = color_starts[c + 1]
     count = end - start
@@ -1408,16 +1414,19 @@ def _singleworld_color_range_from_cursor(
     color_starts: wp.array[wp.int32],
     num_colors: wp.array[wp.int32],
     cursor: wp.int32,
+    sweep_offset: wp.array[wp.int32],
 ):
     """Variant of :func:`_singleworld_color_range` that takes a cursor
     value directly instead of reading it from an array.
 
     Used by the fused tail kernel which threads the cursor through
     registers across the internal colour loop so every lane observes
-    the same value without re-reading global memory.
+    the same value without re-reading global memory. Same
+    ``sweep_offset`` rotation as :func:`_singleworld_color_range`.
     """
     n_colors = num_colors[0]
-    c = n_colors - cursor
+    base = n_colors - cursor
+    c = (base + sweep_offset[0]) % n_colors
     start = color_starts[c]
     end = color_starts[c + 1]
     count = end - start
@@ -1480,6 +1489,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
         color_starts: wp.array[wp.int32],
         num_colors: wp.array[wp.int32],
         color_cursor: wp.array[wp.int32],
+        sweep_offset: wp.array[wp.int32],
         cc: ContactContainer,
         contacts: ContactViews,
         num_joints: wp.int32,
@@ -1492,7 +1502,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
             if tid == 0:
                 head_active[0] = 0
             return
-        start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
+        start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor, sweep_offset)
 
         if count <= fuse_threshold:
             if tid == 0:
@@ -1542,6 +1552,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool):
         color_starts: wp.array[wp.int32],
         num_colors: wp.array[wp.int32],
         color_cursor: wp.array[wp.int32],
+        sweep_offset: wp.array[wp.int32],
         cc: ContactContainer,
         contacts: ContactViews,
         num_joints: wp.int32,
@@ -1550,7 +1561,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
         while cursor > 0:
-            start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor)
+            start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor, sweep_offset)
             if count > fuse_threshold:
                 break
             if lane < count:
