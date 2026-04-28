@@ -70,6 +70,11 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Doubles the per-cid register-cache benefit again (8 sweeps from one body load). Breaks `test_slam_ball_into_stack`: a heavy ball into a tower needs the finer cross-colour PGS feedback to dissipate the impulse without driving bodies through neighbours.
 - Settled on `2`. Don't push past without re-running impact-stack scenes.
 
+### `__ffsll` for the greedy first-free-colour scan
+- Wrapped the CUDA ``__ffsll`` intrinsic in a ``wp.func_native`` (``_lowest_set_bit``) and used it in both single-world and per-world greedy kernels in place of the 64-iteration linear bit-scan.
+- Per-launch greedy kernel time was unchanged (~52us on kapla single-world, multi-world bench unchanged). The original scan had an early-out on first set bit, and most masks have a low-set bit, so it rarely paid the full 64 iterations. The intrinsic is cleaner code but doesn't move the perf needle.
+- Kept the change for clarity; PR-reviewable as a one-line refactor that removes the open ``__ffsll`` TODO.
+
 ### Single-world multi-sweep iterate
 - Tried wiring `_FUSED_INNER_SWEEPS` into the single-world iterate path (call `*_iterate_multi(num_sweeps)` instead of `*_iterate`) and halving the outer `solver_iterations` loop.
 - ~3% kapla regression (single-world contact-heavy scene). The body-load saving exists but the per-launch cost grows ~2x and you lose half the cross-colour feedback granularity.
@@ -100,7 +105,6 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.
 - **Per-instance configurable `_FUSED_INNER_SWEEPS`** — let scenes opt into `4` (or even `8`) when they don't have impact-driven stacks.
 - **Pack body-hot fields into one 128B-aligned struct** — `velocity`, `angular_velocity`, `inv_mass`, `inv_inertia_world`, `body_com`, `orientation` are 5+ separate gathers per body per cid today. Likely a real win on contact-heavy scenes but it's a wide refactor.
-- **`__ffsll` / `wp.ffs` for the greedy first-free-colour scan** — currently a 64-iteration linear scan over the forbidden bitmask. Small absolute saving, but free if Warp grows the builtin (or via `wp.func_native` to call `__ffsll` directly).
 - **Reduce greedy kernel launch count** — ~82 MIS rounds per step on kapla = ~82 launches × ~5µs overhead. A persistent kernel running all rounds with global atomics + sync flags could collapse that. Cross-block sync is the main hurdle.
 - **Specialise `*_iterate_multi` for revolute-only** — saves the (already cheap) joint-mode branch in the multi-sweep helper. Marginal vs. specialising the kernel-level dispatch.
 

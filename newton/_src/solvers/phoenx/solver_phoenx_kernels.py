@@ -49,6 +49,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     GREEDY_MAX_COLORS,
     MAX_BODIES,
     ElementInteractionData,
+    _lowest_set_bit,
     element_interaction_data_make,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
@@ -650,12 +651,10 @@ def _per_world_greedy_coloring_kernel(
 
                     if is_local_max:
                         # Smallest free colour = first 0-bit in mask.
+                        # ``_lowest_set_bit`` wraps ``__ffsll`` so the
+                        # search is one HW instruction on CUDA.
                         free_mask = forbidden_mask ^ _PER_WORLD_FREE_COLOR_FLIP
-                        c = wp.int32(0)
-                        for _ in range(GREEDY_MAX_COLORS):
-                            if (free_mask & (wp.int64(1) << wp.int64(c))) != wp.int64(0):
-                                break
-                            c = c + wp.int32(1)
+                        c = _lowest_set_bit(free_mask)
                         if c >= GREEDY_MAX_COLORS:
                             overflow_local = wp.int32(1)
                         else:

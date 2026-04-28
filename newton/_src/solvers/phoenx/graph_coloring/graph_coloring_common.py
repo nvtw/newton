@@ -283,6 +283,25 @@ GREEDY_MAX_COLORS = wp.constant(64)
 _FREE_COLOR_FLIP = wp.constant(wp.int64(-1))  # all ones, two's complement
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return ((int)__ffsll((long long)mask)) - 1;
+#else
+// CPU fallback: linear scan, used by Warp's CPU codegen path.
+if (mask == 0) return -1;
+int p = 0;
+while ((mask & 1LL) == 0LL) { mask >>= 1; p++; }
+return p;
+#endif
+""")
+def _lowest_set_bit(mask: wp.int64) -> wp.int32:
+    """Position of the lowest set bit in ``mask`` (0-indexed), or -1
+    if ``mask`` is zero. Wraps the CUDA ``__ffsll`` intrinsic so the
+    greedy coloring kernel can find the smallest free colour in O(1)
+    instead of a 64-iteration linear bit-scan."""
+    ...
+
+
 @wp.kernel(enable_backward=False)
 def partitioning_coloring_incremental_greedy_kernel(
     partition_data_concat: wp.array[wp.int64],
@@ -408,16 +427,13 @@ def partitioning_coloring_incremental_greedy_kernel(
             # the complement; ``forbidden_mask ^ -1`` is the all-ones
             # flip without relying on int64 unary NOT (see the
             # _TAG_MASK comment block for why we avoid ``~``).
+            #
+            # ``_lowest_set_bit`` wraps ``__ffsll`` so the search is
+            # one HW instruction on CUDA; the previous 64-iteration
+            # linear scan was warp-divergent and burned cycles on
+            # commits that landed in low colours.
             free_mask = forbidden_mask ^ _FREE_COLOR_FLIP
-            # Linear scan for the first set bit. 64 iterations max --
-            # well under the kernel's per-vertex adjacency walk -- and
-            # avoids depending on a Warp-side ``ffs`` builtin we don't
-            # otherwise need.
-            c = wp.int32(0)
-            for _ in range(GREEDY_MAX_COLORS):
-                if (free_mask & (wp.int64(1) << wp.int64(c))) != wp.int64(0):
-                    break
-                c = c + wp.int32(1)
+            c = _lowest_set_bit(free_mask)
             if c >= GREEDY_MAX_COLORS:
                 # Mask saturated: graph wants > GREEDY_MAX_COLORS
                 # distinct colours. We MUST still commit something
