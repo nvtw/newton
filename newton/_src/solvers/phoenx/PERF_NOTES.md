@@ -42,6 +42,15 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Single-world kernels are factory-generated with a `wp.static` `revolute_only` axis (`_make_singleworld_persistent_kernel` / `_make_singleworld_fused_kernel`). Multi-world fast-tail kernels likewise (`_make_fast_tail_*`).
 - Wins are modest standalone (the contribution is mostly subsumed under `_FUSED_INNER_SWEEPS = 2` for multi-world); main value is keeping the iterate kernel binary smaller for the common all-revolute case.
 
+### Cable joint: spring/damping split + Nyquist clamp + full log-map
+- **Spring/damping split (XPBD pattern).** ``pd_coefficients_split`` returns ``(gamma_spring, bias_spring, eff_mass_spring, damp_mass)``. The cable iterate uses the spring triple in the main solve and ``lam = -damp_mass * Jv`` in the relax pass. The combined Box2D-v3 formulation collapsed to a stiff velocity lock at high damping (gamma -> 0, bias -> 0, eff_mass -> 1/M_inv); PGS could only resolve it by propagating one cid per iteration through the chain. Splitting decouples the two physical effects so high damping no longer kills convergence.
+- **Nyquist stiffness clamp** in both ``pd_coefficients`` (combined) and the spring half of ``pd_coefficients_split``. Caps ``k`` at ``1 / (M_inv * dt^2)`` so user-supplied gains beyond the substep's resolution degrade gracefully instead of producing impulse spikes.
+- **Full quaternion log-map** in ``_cable_prepare_at`` and the cable branch of ``actuated_double_ball_socket_world_error_at`` (replaces the small-angle ``kappa = 2 * q.xyz`` which underestimates by ~6% at 80 deg).
+- **Cross-substep warm-start cleared** for cable bend/twist. The previous fold applied the prior substep's accumulated impulses along the *new* substep's basis directions, which is wrong whenever the parent body rotates between substeps. Within-substep warm-start (acc accumulation across the iterate sweeps) is unchanged.
+
+### `velocity_iterations >= 1` validator
+- Bumped from ``>= 0`` to ``>= 1``. The relax pass is load-bearing for the cable's damping split (and for any future soft-PD damping split on revolute / prismatic drive rows). Three example / test sites that explicitly set 0 (kapla_arena, tower, the ``TestVelocityIterationsZero`` regression) bumped to 1; the regression class is repurposed to verify the validator rejects 0.
+
 ### Per-substep `inverse_inertia_world` refresh
 - After `_integrate_positions` rotates each dynamic body, `bodies.inverse_inertia_world` was stale for the next substep's solve. For anisotropic links this biased the angular impulse direction over the substep loop.
 - Fix: `_phoenx_refresh_world_inertia_kernel` runs after every substep. Real correctness gain on G1/H1 hold-pose parity tests; modest cost.
@@ -110,6 +119,7 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.
 - **Per-instance configurable `_FUSED_INNER_SWEEPS`** — let scenes opt into `4` (or even `8`) when they don't have impact-driven stacks.
+- **Drive / limit PD spring/damping split** — same XPBD-style split that cable now does, applied to ``_axial_drive_limit_iterate`` (revolute drive PD, prismatic drive PD, PD limit rows). Blocked on column layout: prismatic mode_extras is fully consumed by anchor-3 state, so a ``damp_mass_drive`` / ``damp_mass_limit`` slot needs new dwords on the constraint struct. Worth it whenever users start hitting "high damping kills convergence" on drive PD too.
 - **Reduce greedy kernel launch count** — ~82 MIS rounds per step on kapla = ~82 launches × ~5µs overhead. A persistent kernel running all rounds with global atomics + sync flags could collapse that. Cross-block sync is the main hurdle.
 - **Specialise `*_iterate_multi` for revolute-only** — saves the (already cheap) joint-mode branch in the multi-sweep helper. Marginal vs. specialising the kernel-level dispatch.
 
