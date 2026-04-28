@@ -1416,9 +1416,13 @@ class TestNarrowPhase(_NarrowPhaseSetupMixin, unittest.TestCase):
     def _assert_mesh_mesh_scaled_separated_positive_penetration(self, narrow_phase: NarrowPhase):
         """Run the scaled mesh-mesh separation scenario and verify positive contact distance."""
         if narrow_phase.mesh_mesh_contacts_kernel is None:
-            self.skipTest("Mesh-mesh NarrowPhase SDF contacts require CUDA")
+            self.skipTest("Mesh-mesh NarrowPhase SDF contacts not available")
 
         device = narrow_phase.device if narrow_phase.device is not None else wp.get_device()
+        if not wp.get_device(device).is_cuda:
+            # Mesh-SDF kernels run on CPU but the serial inner loop is too slow
+            # to include in the default test suite; keep coverage CUDA-only.
+            self.skipTest("Mesh-mesh SDF tests are CUDA-only to keep test runtime bounded")
         with wp.ScopedDevice(device):
             box_mesh = newton.Mesh.create_box(1.0, 1.0, 1.0, duplicate_vertices=False)
             mesh_id = box_mesh.finalize()
