@@ -623,15 +623,14 @@ def pd_coefficients_split(
 
     ``clamp_nyquist`` caps ``k`` at ``1 / (eff_mass_inv * dt^2)`` so
     the implicit-Euler spring stays in the regime where the substep
-    can resolve it. Drive / limit rows pass ``True`` (capping a
-    user-set gain at the Nyquist limit is preferable to the spring
-    aliasing). Cable bend / twist rows pass ``False`` -- the
-    intent there is "as rigid as possible at the substep budget the
-    user paid for", and clamping at ``k_max`` collapses the spring
-    to a velocity row that PGS can't propagate through long chains;
-    leaving ``k`` uncapped keeps the spring row well-conditioned
-    (``softness = 1 / (dt * k)``, ``gamma`` and ``bias`` simply
-    shrink as ``k`` grows) and preserves chain rigidity.
+    can resolve it. Pass ``False`` for rows where the user's intent
+    is "as rigid as possible at the substep budget paid for" --
+    cable bend / twist rows and revolute / prismatic limit stops --
+    since clamping at ``k_max`` collapses the spring to a velocity
+    row that PGS can't propagate (chains droop, joint limits leak).
+    The split's spring half stays well-conditioned at any ``k``
+    (``softness = 1 / (dt * k)``, ``gamma`` and ``bias`` shrink as
+    ``k`` grows), so leaving the clamp off is safe.
     """
     if eff_mass_inv <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)

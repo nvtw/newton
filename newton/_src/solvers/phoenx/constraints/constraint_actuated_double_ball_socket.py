@@ -957,8 +957,13 @@ def _axial_drive_limit_prepare_at(
         # half (PD layout) drives the limit error to zero in the
         # main solve; ``damp_mass_limit`` runs in the relax pass
         # when the limit is clamped.
+        # PD limit row skips the Nyquist clamp -- user-set stiff
+        # joint stops should behave as rigid as the substep budget
+        # allows, not collapse to ``k_max = 1/(eff_inv*dt^2)`` and
+        # let the body slide through the limit. The split's spring
+        # half stays well-conditioned at any ``k``.
         pd_gamma_limit, pd_beta_limit, pd_m_soft, damp_mass_limit = pd_coefficients_split(
-            stiffness_limit, damping_limit, limit_C, eff_inv, dt, True
+            stiffness_limit, damping_limit, limit_C, eff_inv, dt, False
         )
         write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
         write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
