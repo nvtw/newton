@@ -1381,7 +1381,10 @@ def create_texture_sdf_from_mesh(
     use_parity: bool = False,
     device: str | None = None,
     return_sparse_data: bool = False,
-) -> tuple[TextureSDFData, wp.Texture3D, wp.Texture3D, list] | tuple[TextureSDFData, wp.Texture3D, wp.Texture3D, list, dict | None]:
+) -> (
+    tuple[TextureSDFData, wp.Texture3D, wp.Texture3D, list]
+    | tuple[TextureSDFData, wp.Texture3D, wp.Texture3D, list, dict | None]
+):
     """Create texture SDF from a Warp mesh.
 
     This is the main entry point for texture SDF construction. It mirrors the

@@ -69,12 +69,42 @@ def _make_box_mesh() -> Mesh:
     )
     indices = np.array(
         [
-            0, 2, 1, 0, 3, 2,
-            4, 5, 6, 4, 6, 7,
-            0, 1, 5, 0, 5, 4,
-            2, 3, 7, 2, 7, 6,
-            0, 4, 7, 0, 7, 3,
-            1, 2, 6, 1, 6, 5,
+            0,
+            2,
+            1,
+            0,
+            3,
+            2,
+            4,
+            5,
+            6,
+            4,
+            6,
+            7,
+            0,
+            1,
+            5,
+            0,
+            5,
+            4,
+            2,
+            3,
+            7,
+            2,
+            7,
+            6,
+            0,
+            4,
+            7,
+            0,
+            7,
+            3,
+            1,
+            2,
+            6,
+            1,
+            6,
+            5,
         ],
         dtype=np.int32,
     )
@@ -276,9 +306,7 @@ class TestSDFDiskCachePure(unittest.TestCase):
         npz_path, _ = _sdf_cache.cache_paths(tmp, h)
         with np.load(npz_path) as npz:
             contents = {k: npz[k] for k in npz.files if k != "__cache_format_version__"}
-        contents["__cache_format_version__"] = np.asarray(
-            _sdf_cache.CACHE_FORMAT_VERSION + 999, dtype=np.int32
-        )
+        contents["__cache_format_version__"] = np.asarray(_sdf_cache.CACHE_FORMAT_VERSION + 999, dtype=np.int32)
         np.savez(npz_path, **contents)
         self.assertIsNone(_sdf_cache.try_load_sparse_data(tmp, h))
 
@@ -296,9 +324,7 @@ def test_disk_cache_hit_matches_live(test, device) -> None:
     try:
         sdf_live = mesh.build_sdf(device=device, cache_dir=cache_path)
         cache_files = list(cache_path.glob("*.sdf.npz"))
-        test.assertEqual(
-            len(cache_files), 1, f"expected exactly one cache file, found {cache_files}"
-        )
+        test.assertEqual(len(cache_files), 1, f"expected exactly one cache file, found {cache_files}")
         sidecar_files = list(cache_path.glob("*.sdf.json"))
         test.assertEqual(len(sidecar_files), 1)
 
@@ -337,7 +363,8 @@ def test_disk_cache_param_change_invalidates(test, device) -> None:
 
         files = sorted(cache_path.glob("*.sdf.npz"))
         test.assertEqual(
-            len(files), 2,
+            len(files),
+            2,
             f"expected two distinct cache entries, found {[p.name for p in files]}",
         )
     finally:
