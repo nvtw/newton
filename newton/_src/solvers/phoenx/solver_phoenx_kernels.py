@@ -1359,149 +1359,12 @@ def _singleworld_color_range(
     return start, count, cursor
 
 
-@wp.kernel(enable_backward=False)
-def _constraint_prepare_singleworld_kernel(
-    constraints: ConstraintContainer,
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
-    color_cursor: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-    num_joints: wp.int32,
-    total_num_threads: wp.int32,
-    fuse_threshold: wp.int32,
-    head_active: wp.array[wp.int32],
-):
-    """Prepare-for-iteration dispatcher, single-world / one-colour-per-launch.
-
-    Launched as a persistent grid of ``total_num_threads`` threads that
-    grid-strides over the current colour's active cid range. Thread 0
-    decrements ``color_cursor`` by 1 so the host-side
-    :func:`wp.capture_while` on ``head_active`` exits when every
-    colour has been swept or handed off.
-
-    Termination: thread 0 clears ``head_active[0]`` in two cases:
-    ``color_cursor[0] <= 0`` (sweep drained) and
-    ``count <= fuse_threshold`` (hand-off to the fused tail kernel).
-    The kernel returns immediately in both cases without decrementing
-    ``color_cursor``. ``fuse_threshold = 0`` disables the hand-off.
-    """
-    tid = wp.tid()
-    if color_cursor[0] <= 0:
-        if tid == 0:
-            head_active[0] = 0
-        return
-    start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
-
-    if count <= fuse_threshold:
-        if tid == 0:
-            head_active[0] = 0
-        return
-
-    for t in range(tid, count, total_num_threads):
-        cid = element_ids_by_color[start + t]
-        if cid < num_joints:
-            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-        else:
-            contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
-
-    if tid == 0:
-        color_cursor[0] = cursor - 1
-
-
-@wp.kernel(enable_backward=False)
-def _constraint_iterate_singleworld_kernel(
-    constraints: ConstraintContainer,
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
-    color_cursor: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-    num_joints: wp.int32,
-    total_num_threads: wp.int32,
-    fuse_threshold: wp.int32,
-    head_active: wp.array[wp.int32],
-):
-    """Main-solve PGS dispatcher (bias ON), one colour per launch.
-
-    Same launch contract as :func:`_constraint_prepare_singleworld_kernel`;
-    this is the iterate counterpart with ``use_bias=True``. Inherits the
-    same termination and tail-fuse hand-off contracts.
-    """
-    tid = wp.tid()
-    if color_cursor[0] <= 0:
-        if tid == 0:
-            head_active[0] = 0
-        return
-    start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
-
-    if count <= fuse_threshold:
-        if tid == 0:
-            head_active[0] = 0
-        return
-
-    for t in range(tid, count, total_num_threads):
-        cid = element_ids_by_color[start + t]
-        if cid < num_joints:
-            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
-        else:
-            contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, True)
-
-    if tid == 0:
-        color_cursor[0] = cursor - 1
-
-
-@wp.kernel(enable_backward=False)
-def _constraint_relax_singleworld_kernel(
-    constraints: ConstraintContainer,
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
-    color_cursor: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-    num_joints: wp.int32,
-    total_num_threads: wp.int32,
-    fuse_threshold: wp.int32,
-    head_active: wp.array[wp.int32],
-):
-    """Relax-pass dispatcher (bias OFF), one colour per launch.
-
-    Inherits the termination and tail-fuse hand-off contracts from
-    :func:`_constraint_prepare_singleworld_kernel`.
-    """
-    tid = wp.tid()
-    if color_cursor[0] <= 0:
-        if tid == 0:
-            head_active[0] = 0
-        return
-    start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
-
-    if count <= fuse_threshold:
-        if tid == 0:
-            head_active[0] = 0
-        return
-
-    for t in range(tid, count, total_num_threads):
-        cid = element_ids_by_color[start + t]
-        if cid < num_joints:
-            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
-        else:
-            contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False)
-
-    if tid == 0:
-        color_cursor[0] = cursor - 1
+# Persistent-grid head kernels are factory-generated below
+# (:func:`_make_singleworld_persistent_kernel`); see
+# :data:`_constraint_prepare_singleworld_kernel` etc. for the bound
+# names. Same shape as the previous hand-written kernels, with one
+# extra ``num_sweeps`` parameter that drives the per-cid multi-sweep
+# register cache via ``*_iterate_multi``.
 
 
 # ---------------------------------------------------------------------------
@@ -1562,133 +1425,10 @@ def _singleworld_color_range_from_cursor(
     return start, count
 
 
-@wp.kernel(enable_backward=False)
-def _constraint_prepare_singleworld_fused_kernel(
-    constraints: ConstraintContainer,
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
-    color_cursor: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-    num_joints: wp.int32,
-    fuse_threshold: wp.int32,
-):
-    """Prepare-for-iteration, tail-fused variant.
-
-    Launched as a single 1D block of ``FUSE_TAIL_BLOCK_DIM`` lanes via
-    ``wp.launch_tiled(..., dim=[1], block_dim=FUSE_TAIL_BLOCK_DIM)``.
-    Each internal ``while`` iteration consumes one colour (the
-    ``color_cursor``-pointed colour); the loop exits when either the
-    cursor hits 0 (sweep finished) or the next colour is too big for
-    one-block coverage (hand off to the persistent-grid kernel).
-
-    Race-free by the same coloring invariant the persistent-grid
-    kernels rely on; ``_sync_threads`` replaces the kernel boundary
-    for cross-colour write visibility.
-    """
-    _block, lane = wp.tid()
-    cursor = color_cursor[0]
-    while cursor > 0:
-        start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor)
-        if count > fuse_threshold:
-            # Colour too big for one-block coverage; hand off without
-            # decrementing. The persistent-grid kernel will pick it
-            # up on the next outer capture-while iteration.
-            break
-        if lane < count:
-            cid = element_ids_by_color[start + lane]
-            if cid < num_joints:
-                actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-            else:
-                contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
-        # Synchronise so this colour's body writes are visible to the
-        # next colour's reads (next iteration of the while). Same role
-        # the kernel boundary plays in the persistent-grid path.
-        _sync_threads()
-        cursor = cursor - 1
-    # Publish the final cursor value once, from lane 0.
-    if lane == 0:
-        color_cursor[0] = cursor
-
-
-@wp.kernel(enable_backward=False)
-def _constraint_iterate_singleworld_fused_kernel(
-    constraints: ConstraintContainer,
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
-    color_cursor: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-    num_joints: wp.int32,
-    fuse_threshold: wp.int32,
-):
-    """Main-solve iterate (bias ON), tail-fused variant.
-
-    Same launch contract and correctness contract as
-    :func:`_constraint_prepare_singleworld_fused_kernel`.
-    """
-    _block, lane = wp.tid()
-    cursor = color_cursor[0]
-    while cursor > 0:
-        start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor)
-        if count > fuse_threshold:
-            break
-        if lane < count:
-            cid = element_ids_by_color[start + lane]
-            if cid < num_joints:
-                actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, True)
-            else:
-                contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, True)
-        _sync_threads()
-        cursor = cursor - 1
-    if lane == 0:
-        color_cursor[0] = cursor
-
-
-@wp.kernel(enable_backward=False)
-def _constraint_relax_singleworld_fused_kernel(
-    constraints: ConstraintContainer,
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
-    color_cursor: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-    num_joints: wp.int32,
-    fuse_threshold: wp.int32,
-):
-    """Relax (bias OFF), tail-fused variant.
-
-    Same launch contract and correctness contract as
-    :func:`_constraint_prepare_singleworld_fused_kernel`.
-    """
-    _block, lane = wp.tid()
-    cursor = color_cursor[0]
-    while cursor > 0:
-        start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor)
-        if count > fuse_threshold:
-            break
-        if lane < count:
-            cid = element_ids_by_color[start + lane]
-            if cid < num_joints:
-                actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, False)
-            else:
-                contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False)
-        _sync_threads()
-        cursor = cursor - 1
-    if lane == 0:
-        color_cursor[0] = cursor
+# Tail-fused (one-block) variants are likewise factory-generated below
+# via :func:`_make_singleworld_fused_kernel`; the bound names retain
+# the original ``_constraint_*_singleworld_fused_kernel`` symbols so
+# the launch site doesn't need to change.
 
 
 # ---------------------------------------------------------------------------
@@ -1719,7 +1459,14 @@ def _constraint_relax_singleworld_fused_kernel(
 def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
     """Build a persistent-grid PGS kernel for the requested phase /
     specialisation. ``phase`` is ``"prepare"``, ``"iterate"`` or
-    ``"relax"``; ``revolute_only`` selects the joint dispatch path."""
+    ``"relax"``; ``revolute_only`` selects the joint dispatch path.
+
+    Single-world stays on the single-sweep ``*_iterate`` /
+    ``*_prepare_for_iteration`` helpers (no ``num_sweeps`` parameter):
+    the multi-sweep register cache is the multi-world fast-tail's
+    win and on contact-heavy single-world scenes (kapla) it shows a
+    small net regression.
+    """
     is_prepare = phase == "prepare"
     is_iterate = phase == "iterate"
     use_bias = is_iterate  # iterate ON, relax OFF (prepare ignores)
@@ -1833,6 +1580,24 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool):
     return kernel
 
 
+_constraint_prepare_singleworld_kernel = _make_singleworld_persistent_kernel(
+    phase="prepare", revolute_only=False
+)
+_constraint_iterate_singleworld_kernel = _make_singleworld_persistent_kernel(
+    phase="iterate", revolute_only=False
+)
+_constraint_relax_singleworld_kernel = _make_singleworld_persistent_kernel(
+    phase="relax", revolute_only=False
+)
+_constraint_prepare_singleworld_fused_kernel = _make_singleworld_fused_kernel(
+    phase="prepare", revolute_only=False
+)
+_constraint_iterate_singleworld_fused_kernel = _make_singleworld_fused_kernel(
+    phase="iterate", revolute_only=False
+)
+_constraint_relax_singleworld_fused_kernel = _make_singleworld_fused_kernel(
+    phase="relax", revolute_only=False
+)
 _constraint_prepare_singleworld_revolute_kernel = _make_singleworld_persistent_kernel(
     phase="prepare", revolute_only=True
 )
