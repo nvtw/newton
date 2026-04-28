@@ -16,6 +16,11 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - The greedy coloring's commit step writes only the per-vertex `(colour, tid)` packed tag. Building the colour-major CSR (`element_ids_by_color`, `color_starts`) used to be a separate compact + scan launch each.
 - Both passes now run in one kernel (`incremental_tile_compact_csr_and_advance_kernel`), saving a launch per build and ~1.5% of frame time on kapla.
 
+### Greedy coloring int32 colour-tag mirror
+- Added a parallel ``color_tags: wp.array[wp.int32]`` alongside the int64 ``partition_data_concat``. The greedy MIS+colour kernel reads ``color_tags`` on its hot path -- the per-thread early-exit check and the per-neighbour adjacency walk -- halving the per-read width.
+- The kernel still mirror-writes ``partition_data_concat`` on commit; histogram / scatter post-passes keep reading the int64 view because the JP-fallback rewrites ``partition_data_concat`` only and leaves ``color_tags`` stale.
+- Per-launch greedy kernel time on kapla: 54.7us → 51.8us (~5%); per-step coloring time 4.52ms → 4.32ms (~4%).
+
 ### Greedy coloring without compaction
 - Original implementation maintained a compacted `remaining_ids` list across MIS rounds. The compact kernel was ~16% of frame time on kapla.
 - Switched to a persistent grid-stride loop where each thread reads its own packed tag and skips already-coloured cids early. Net win was ~16% step time despite the kernel doing extra work in late rounds (most threads early-exit).
@@ -92,10 +97,11 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Open ideas (not yet attempted)
 
-- **`partition_data_concat` int32 packing** — bandwidth-bound neighbour reads in the greedy coloring kernel. ~93 references across 4 files. Could halve neighbour-read bandwidth if the kernel is bandwidth-bound (needs nsight-compute confirmation first).
+- **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.
 - **Per-instance configurable `_FUSED_INNER_SWEEPS`** — let scenes opt into `4` (or even `8`) when they don't have impact-driven stacks.
 - **Pack body-hot fields into one 128B-aligned struct** — `velocity`, `angular_velocity`, `inv_mass`, `inv_inertia_world`, `body_com`, `orientation` are 5+ separate gathers per body per cid today. Likely a real win on contact-heavy scenes but it's a wide refactor.
-- **`__ffsll` / `wp.ffs` for the greedy first-free-colour scan** — currently a 64-iteration linear scan over the forbidden bitmask. Small absolute saving, but free if Warp grows the builtin.
+- **`__ffsll` / `wp.ffs` for the greedy first-free-colour scan** — currently a 64-iteration linear scan over the forbidden bitmask. Small absolute saving, but free if Warp grows the builtin (or via `wp.func_native` to call `__ffsll` directly).
+- **Reduce greedy kernel launch count** — ~82 MIS rounds per step on kapla = ~82 launches × ~5µs overhead. A persistent kernel running all rounds with global atomics + sync flags could collapse that. Cross-block sync is the main hurdle.
 - **Specialise `*_iterate_multi` for revolute-only** — saves the (already cheap) joint-mode branch in the multi-sweep helper. Marginal vs. specialising the kernel-level dispatch.
 
 ## Profiling tips
