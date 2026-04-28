@@ -49,13 +49,9 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     element_interaction_data_make,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
-from newton._src.solvers.phoenx.solver_kernels import (
-    _accumulate_substep_velocity_for_body,
-)
 
 __all__ = [
     "_PER_WORLD_COLORING_BLOCK_DIM",
-    "_PHOENX_SUBSTEP_BLOCK_DIM",
     "_STRAGGLER_BLOCK_DIM",
     "_build_scatter_keys_kernel",
     "_choose_fast_tail_worlds_per_block",
@@ -76,7 +72,6 @@ __all__ = [
     "_phoenx_apply_forces_and_gravity_kernel",
     "_phoenx_apply_global_damping_kernel",
     "_phoenx_refresh_world_inertia_kernel",
-    "_phoenx_substep_megakernel",
     "_phoenx_update_inertia_and_clear_forces_kernel",
     "_pick_threads_per_world_kernel",
     "_reduce_total_colours_kernel",
@@ -85,16 +80,6 @@ __all__ = [
     "_sync_num_active_constraints_kernel",
     "pack_body_xforms_kernel",
 ]
-
-
-#: Block size of the multi-world substep mega-kernel
-#: (:func:`_phoenx_substep_megakernel`). One block per world; threads
-#: in the block grid-stride bodies and constraint elements of that
-#: world. 128 = 4 warps -- enough lanes to amortise body-grid-stride
-#: across humanoid-sized worlds (~30 bodies, ~60-200 constraints) in
-#: 1-2 strides, while staying small enough for high occupancy on the
-#: register-heavy iterate kernel.
-_PHOENX_SUBSTEP_BLOCK_DIM: int = 128
 
 
 #: Maximum threads-per-world the fast-tail kernels ever use. Equal to
@@ -1785,229 +1770,3 @@ def _constraint_relax_singleworld_fused_kernel(
         cursor = cursor - 1
     if lane == 0:
         color_cursor[0] = cursor
-
-
-# ---------------------------------------------------------------------------
-# Multi-world substep mega-kernel
-# ---------------------------------------------------------------------------
-#
-# Fuses the entire ``num_substeps`` loop -- per-body forces, the colour-
-# parallel PGS solve, position integration, the relax sweep, inertia
-# refresh, and the optional kinematic / damping / accumulate tails --
-# into a single launch. One block per world; threads grid-stride
-# bodies (via ``world_body_offsets`` / ``world_body_indices`` CSR) and
-# constraint elements (via ``world_csr_offsets`` / ``world_color_starts``
-# CSR) of that world. ``__syncthreads()`` orders phases inside the
-# block; cross-world independence means no cross-block sync is needed
-# at all.
-
-
-@wp.kernel(enable_backward=False)
-def _phoenx_substep_megakernel(
-    # ---- Per-body data ---------------------------------------------
-    bodies: BodyContainer,
-    gravity: wp.array[wp.vec3f],
-    substep_dt: wp.float32,
-    inv_substeps: wp.float32,
-    num_substeps: wp.int32,
-    # ---- Constraint data --------------------------------------------
-    constraints: ConstraintContainer,
-    contact_cols: ContactColumnContainer,
-    cc: ContactContainer,
-    contacts: ContactViews,
-    num_joints: wp.int32,
-    solver_iterations: wp.int32,
-    velocity_iterations: wp.int32,
-    # ---- Per-world body CSR -----------------------------------------
-    world_body_offsets: wp.array[wp.int32],  # [num_worlds + 1]
-    world_body_indices: wp.array[wp.int32],  # [num_bodies]
-    # ---- Per-world constraint CSR -----------------------------------
-    world_element_ids_by_color: wp.array[wp.int32],
-    world_color_starts: wp.array2d[wp.int32],
-    world_csr_offsets: wp.array[wp.int32],
-    world_num_colors: wp.array[wp.int32],
-    # ---- Optional per-substep tails ---------------------------------
-    has_kinematic: wp.int32,
-    has_damping: wp.int32,
-    global_damping: wp.array[wp.float32],
-    accumulate_velocity: wp.int32,
-    vel_accum: wp.array[wp.vec3f],
-    omega_accum: wp.array[wp.vec3f],
-):
-    """Run the full substep loop for one world in a single block.
-
-    Launched as ``wp.launch_tiled(dim=[num_worlds], block_dim=
-    _PHOENX_SUBSTEP_BLOCK_DIM)``. ``wp.tid()`` returns
-    ``(world_id, lane)`` -- the block index is the world id and the
-    in-block thread index drives the grid-stride over both bodies and
-    constraint elements of that world.
-
-    Per substep, the block walks:
-
-    1. forces + gravity (per body)
-    2. constraint prepare (single sweep across all colours)
-    3. ``solver_iterations`` PGS iterate sweeps with bias ON
-    4. position integration (per body)
-    5. ``velocity_iterations`` relax sweeps with bias OFF
-    6. world-frame inertia refresh (per body)
-    7. kinematic interpolate (optional, per body)
-    8. global damping (optional, per body)
-    9. substep-velocity accumulator (optional, per body)
-
-    ``has_kinematic`` / ``has_damping`` / ``accumulate_velocity`` are
-    int32 flags (0 / 1) gating the optional phases; the dummy device
-    arrays passed when disabled are never read.
-    """
-    block, lane = wp.tid()
-    world_id = block
-
-    body_start = world_body_offsets[world_id]
-    body_end = world_body_offsets[world_id + 1]
-    n_colors = world_num_colors[world_id]
-    world_base = world_csr_offsets[world_id]
-
-    idt = wp.float32(1.0) / substep_dt
-    stride = wp.int32(_PHOENX_SUBSTEP_BLOCK_DIM)
-
-    # ``_FUSED_INNER_SWEEPS = 1`` today (see comment on the constant);
-    # keeping the same outer/inner split as the fast-tail iterate so
-    # the multi-sweep register-resident inner path stays available if
-    # we ever raise the constant.
-    inner_sweeps = wp.int32(_FUSED_INNER_SWEEPS)
-    outer_iters = solver_iterations / inner_sweeps
-
-    k = wp.int32(0)
-    while k < num_substeps:
-        # ---- A. forces + gravity ----------------------------------
-        b = body_start + lane
-        while b < body_end:
-            body_id = world_body_indices[b]
-            _apply_forces_and_gravity_for_body(bodies, gravity, substep_dt, body_id)
-            b += stride
-        _sync_threads()
-
-        # ---- B. constraint prepare (one sweep over colours) -------
-        c = wp.int32(0)
-        while c < n_colors:
-            start = world_base + world_color_starts[world_id, c]
-            end = world_base + world_color_starts[world_id, c + 1]
-            count = end - start
-            base = lane
-            while base < count:
-                cid = world_element_ids_by_color[start + base]
-                _dispatch_constraint_prepare_for_cid(
-                    constraints, contact_cols, bodies, idt, cc, contacts, num_joints, cid
-                )
-                base += stride
-            _sync_threads()
-            c += 1
-
-        # ---- C. constraint iterate (bias ON) ----------------------
-        it_outer = wp.int32(0)
-        while it_outer < outer_iters:
-            c = wp.int32(0)
-            while c < n_colors:
-                start = world_base + world_color_starts[world_id, c]
-                end = world_base + world_color_starts[world_id, c + 1]
-                count = end - start
-                base = lane
-                while base < count:
-                    cid = world_element_ids_by_color[start + base]
-                    _dispatch_constraint_iterate_for_cid(
-                        constraints,
-                        contact_cols,
-                        bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        num_joints,
-                        cid,
-                        True,
-                        inner_sweeps,
-                    )
-                    base += stride
-                _sync_threads()
-                c += 1
-            it_outer += 1
-
-        # ---- D. integrate positions -------------------------------
-        b = body_start + lane
-        while b < body_end:
-            body_id = world_body_indices[b]
-            _integrate_velocity_for_body(bodies, substep_dt, body_id)
-            b += stride
-        _sync_threads()
-
-        # ---- E. constraint relax (bias OFF) -----------------------
-        if velocity_iterations > 0:
-            c = wp.int32(0)
-            while c < n_colors:
-                start = world_base + world_color_starts[world_id, c]
-                end = world_base + world_color_starts[world_id, c + 1]
-                count = end - start
-                base = lane
-                while base < count:
-                    cid = world_element_ids_by_color[start + base]
-                    _dispatch_constraint_iterate_for_cid(
-                        constraints,
-                        contact_cols,
-                        bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        num_joints,
-                        cid,
-                        False,
-                        velocity_iterations,
-                    )
-                    base += stride
-                _sync_threads()
-                c += 1
-
-        # ---- F. refresh world-frame inverse inertia ---------------
-        b = body_start + lane
-        while b < body_end:
-            body_id = world_body_indices[b]
-            _refresh_world_inertia_for_body(bodies, body_id)
-            b += stride
-        _sync_threads()
-
-        # ---- G. kinematic interpolate (optional) -----------------
-        if has_kinematic != 0:
-            alpha = wp.float32(k + 1) * inv_substeps
-            b = body_start + lane
-            while b < body_end:
-                body_id = world_body_indices[b]
-                _kinematic_interpolate_for_body(bodies, alpha, body_id)
-                b += stride
-            _sync_threads()
-
-        # ---- H. global damping (optional) -------------------------
-        if has_damping != 0:
-            b = body_start + lane
-            while b < body_end:
-                body_id = world_body_indices[b]
-                _apply_global_damping_for_body(bodies, global_damping, body_id)
-                b += stride
-            _sync_threads()
-
-        # ---- I. substep-velocity accumulate (optional) ------------
-        if accumulate_velocity != 0:
-            b = body_start + lane
-            while b < body_end:
-                body_id = world_body_indices[b]
-                # Same ``src = body_id`` (1-based) / ``dst = src - 1``
-                # mapping as the standalone kernel; the helper skips
-                # slot 0 internally so the world-0 anchor is excluded.
-                _accumulate_substep_velocity_for_body(
-                    bodies.velocity,
-                    bodies.angular_velocity,
-                    substep_dt,
-                    vel_accum,
-                    omega_accum,
-                    body_id,
-                )
-                b += stride
-            _sync_threads()
-
-        k += 1
