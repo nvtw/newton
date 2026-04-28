@@ -212,10 +212,13 @@ def create_support_map_function(support_func: Any):
                 # unstable closest-vertex heuristic: broad, flat hull faces
                 # seed from the face interior instead of an arbitrary corner.
                 query_in_b = wp.quat_rotate_inv(orientation_b, -position_b)
-                center_b_candidate = wp.quat_rotate(
-                    orientation_b,
-                    closest_point_convex_mesh_face(geom_b, query_in_b, data_provider),
-                ) + position_b
+                center_b_candidate = (
+                    wp.quat_rotate(
+                        orientation_b,
+                        closest_point_convex_mesh_face(geom_b, query_in_b, data_provider),
+                    )
+                    + position_b
+                )
 
                 candidate_btoa = center_a - center_b_candidate
                 current_btoa = center_a - position_b
