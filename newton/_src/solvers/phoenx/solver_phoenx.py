@@ -82,6 +82,7 @@ from newton._src.solvers.phoenx.solver_kernels import (
 )
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
+    _PHOENX_SUBSTEP_BLOCK_DIM,
     _STRAGGLER_BLOCK_DIM,
     _build_scatter_keys_kernel,
     _choose_fast_tail_worlds_per_block,
@@ -105,6 +106,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
     _phoenx_refresh_world_inertia_kernel,
+    _phoenx_substep_megakernel,
     _phoenx_update_inertia_and_clear_forces_kernel,
     _pick_threads_per_world_kernel,
     _reduce_total_colours_kernel,
@@ -456,6 +458,28 @@ class PhoenXWorld:
         self._global_damping: wp.array[wp.float32] | None = None
         self._global_damping_host: np.ndarray | None = None
 
+        # ----- Per-world body CSR -----
+        #
+        # ``world_body_offsets[w+1] - world_body_offsets[w]`` is the
+        # body count for world ``w``; ``world_body_indices[start..end]``
+        # are the PhoenX body slots in that world. Built once at init
+        # from ``bodies.world_id`` (which is static for the lifetime
+        # of the solver). Used by the multi-world substep mega-kernel
+        # so each block can grid-stride over its world's bodies
+        # without scanning the global body array.
+        self._world_body_offsets: wp.array[wp.int32]
+        self._world_body_indices: wp.array[wp.int32]
+        self._build_world_body_csr()
+
+        # Lazy-allocated dummy device arrays so the mega-kernel always
+        # gets a valid ``wp.array`` even when the optional features
+        # (substep-velocity accumulator, global damping) aren't in
+        # use. Sized to one element so the dummy buffer carries no
+        # data; the kernel never reads it because the matching flag
+        # is zero.
+        self._megakernel_dummy_damping: wp.array[wp.float32] = wp.zeros(2, dtype=wp.float32, device=self.device)
+        self._megakernel_dummy_vec3: wp.array[wp.vec3f] = wp.zeros(1, dtype=wp.vec3f, device=self.device)
+
         # ----- Step time bookkeeping -----
         self.step_dt: float = 0.0
         self.inv_step_dt: float = 0.0
@@ -637,6 +661,39 @@ class PhoenXWorld:
         # here at construction instead of producing silent
         # out-of-range reads in the kernels.
         self._assert_invariants()
+
+    def _build_world_body_csr(self) -> None:
+        """Build the body-per-world CSR (offsets + indices) on the host
+        and ship it to the device. ``bodies.world_id`` is static after
+        the builder finalises, so this runs once at solver
+        construction.
+
+        The CSR is consumed by the multi-world substep mega-kernel:
+        each block reads ``world_body_offsets[w..w+1]`` to find its
+        body slice and indexes through ``world_body_indices``.
+        """
+        nw = self.num_worlds
+        if self.num_bodies == 0:
+            self._world_body_offsets = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
+            self._world_body_indices = wp.zeros(1, dtype=wp.int32, device=self.device)
+            return
+
+        # ``world_id`` is one of [0, num_worlds); bodies live in
+        # whatever insertion order the builder produced.
+        wid_np = self.bodies.world_id.numpy()
+        # ``np.argsort`` with ``kind="stable"`` keeps PhoenX slot order
+        # within each world -- mirrors the deterministic radix sort the
+        # constraint CSR uses.
+        order = np.argsort(wid_np, kind="stable").astype(np.int32)
+        sorted_wid = wid_np[order]
+        # Exclusive prefix of per-world counts; an extra slot at the
+        # end stores the grand total so the kernel can do
+        # ``offsets[w+1] - offsets[w]`` without bounds-checking.
+        counts = np.bincount(sorted_wid, minlength=nw).astype(np.int32)
+        offsets = np.zeros(nw + 1, dtype=np.int32)
+        offsets[1:] = np.cumsum(counts)
+        self._world_body_offsets = wp.array(offsets, dtype=wp.int32, device=self.device)
+        self._world_body_indices = wp.array(order, dtype=wp.int32, device=self.device)
 
     def _assert_invariants(self) -> None:
         """Validate per-step buffer dimensions against the documented
@@ -1100,6 +1157,28 @@ class PhoenXWorld:
         # to penetration recovery. Kinematic bodies are slotted into
         # their lerp/slerp-interpolated pose at each substep's tail so
         # contacts prepared at the *next* substep see smooth motion.
+        if self.step_layout == "multi_world" and picking is None:
+            # Fused fast path: every substep -- bodies, solve, relax,
+            # inertia refresh, kinematic, damping, accumulate -- runs
+            # in a single mega-kernel launch with one block per world.
+            # Picking pulls us off this path because it needs a per-
+            # substep host launch (``picking.apply_force``).
+            self._run_substep_loop_multi_world(vel_accum, omega_accum)
+        else:
+            self._run_substep_loop_legacy(picking, vel_accum, omega_accum)
+
+        self._update_inertia_and_clear_forces()
+
+    def _run_substep_loop_legacy(
+        self,
+        picking,
+        vel_accum: wp.array[wp.vec3f] | None,
+        omega_accum: wp.array[wp.vec3f] | None,
+    ) -> None:
+        """Original per-kernel-launch substep loop. Used by the
+        single-world layout and by the multi-world layout when picking
+        is active (the mega-kernel can't host-launch
+        ``picking.apply_force`` per substep)."""
         inv_n = 1.0 / float(self.substeps)
         for k in range(self.substeps):
             if picking is not None:
@@ -1142,8 +1221,6 @@ class PhoenXWorld:
                     outputs=[vel_accum, omega_accum],
                     device=self.device,
                 )
-
-        self._update_inertia_and_clear_forces()
 
     # ------------------------------------------------------------------
     # Phase implementations
@@ -1530,6 +1607,86 @@ class PhoenXWorld:
             self.velocity_iterations,
             idt,
             contact_views,
+        )
+
+    # ------------------------------------------------------------------
+    # Multi-world substep mega-kernel
+    # ------------------------------------------------------------------
+
+    def _run_substep_loop_multi_world(
+        self,
+        vel_accum: wp.array[wp.vec3f] | None,
+        omega_accum: wp.array[wp.vec3f] | None,
+    ) -> None:
+        """Run the entire ``num_substeps`` loop in a single mega-kernel
+        launch (one block per world). Replaces the per-kernel-launch
+        substep loop in :meth:`step` for the multi-world layout.
+
+        Caller responsibilities (unchanged from the legacy path):
+
+        * Contacts are already ingested and the per-world coloring is
+          built before this is called.
+        * :meth:`_kinematic_prepare_step` has run once.
+        * :meth:`_update_inertia_and_clear_forces` runs after this
+          returns.
+
+        Picking is **not** supported here -- the ``picking.apply_force``
+        call needs a per-substep host launch and there's no way to
+        embed that inside the mega-kernel. Callers using picking fall
+        back to the per-kernel substep loop in :meth:`step`.
+        """
+        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        substep_dt = wp.float32(self.substep_dt)
+        inv_substeps = wp.float32(1.0 / float(self.substeps))
+
+        has_kinematic = wp.int32(1 if self._num_kinematic_bodies > 0 else 0)
+        if self._global_damping is not None:
+            has_damping = wp.int32(1)
+            damping_arr = self._global_damping
+        else:
+            has_damping = wp.int32(0)
+            damping_arr = self._megakernel_dummy_damping
+
+        if vel_accum is not None and omega_accum is not None and self.num_bodies > 0:
+            accumulate_velocity = wp.int32(1)
+            vel_acc_arr = vel_accum
+            omega_acc_arr = omega_accum
+        else:
+            accumulate_velocity = wp.int32(0)
+            vel_acc_arr = self._megakernel_dummy_vec3
+            omega_acc_arr = self._megakernel_dummy_vec3
+
+        wp.launch_tiled(
+            _phoenx_substep_megakernel,
+            dim=[self.num_worlds],
+            inputs=[
+                self.bodies,
+                self.gravity,
+                substep_dt,
+                inv_substeps,
+                wp.int32(self.substeps),
+                self.constraints,
+                self._contact_cols,
+                self._contact_container,
+                contact_views,
+                wp.int32(self.num_joints),
+                wp.int32(self.solver_iterations),
+                wp.int32(self.velocity_iterations),
+                self._world_body_offsets,
+                self._world_body_indices,
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
+                has_kinematic,
+                has_damping,
+                damping_arr,
+                accumulate_velocity,
+                vel_acc_arr,
+                omega_acc_arr,
+            ],
+            block_dim=_PHOENX_SUBSTEP_BLOCK_DIM,
+            device=self.device,
         )
 
     # ------------------------------------------------------------------
