@@ -1538,6 +1538,10 @@ class PhoenXWorld:
             if self._use_revolute_specialization
             else _constraint_prepare_plus_iterate_fast_tail_kernel
         )
+        # Bump the sweep offset so successive substeps rotate which
+        # colour fires first (symmetric Gauss-Seidel; see
+        # ``incremental_begin_sweep_kernel`` for the rationale).
+        self._partitioner.begin_sweep()
         wp.launch(
             kernel,
             dim=self._fast_tail_launch_dim(),
@@ -1551,6 +1555,7 @@ class PhoenXWorld:
                 self._world_color_starts,
                 self._world_csr_offsets,
                 self._world_num_colors,
+                self._partitioner.sweep_offset,
                 self._contact_container,
                 contact_views,
                 wp.int32(self.solver_iterations),
@@ -1848,6 +1853,7 @@ class PhoenXWorld:
                 self._world_color_starts,
                 self._world_csr_offsets,
                 self._world_num_colors,
+                self._partitioner.sweep_offset,
                 self._contact_container,
                 contact_views,
                 wp.int32(num_iterations),

@@ -751,6 +751,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
         world_color_starts: wp.array2d[wp.int32],
         world_csr_offsets: wp.array[wp.int32],
         world_num_colors: wp.array[wp.int32],
+        sweep_offset: wp.array[wp.int32],
         cc: ContactContainer,
         contacts: ContactViews,
         num_iterations: wp.int32,
@@ -767,8 +768,11 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
 
         n_colors = world_num_colors[world_id]
         world_base = world_csr_offsets[world_id]
+        offset = sweep_offset[0]
 
         # ---- Prepare phase ----------------------------------------
+        # Prepare runs once over every colour (no convergence asymmetry
+        # to fight); skip the rotation here.
         c = wp.int32(0)
         while c < n_colors:
             start = world_base + world_color_starts[world_id, c]
@@ -804,10 +808,17 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
         outer_iters = num_iterations / inner_sweeps
         it_outer = wp.int32(0)
         while it_outer < outer_iters:
+            # Rotate which colour fires first across outer iters
+            # (symmetric Gauss-Seidel; evens out PGS's earlier /
+            # later-colour convergence bias on chains). ``offset``
+            # rotates per substep too -- every kernel launch reads
+            # the host-bumped device array.
+            iter_offset = (offset + it_outer) % n_colors
             c = wp.int32(0)
             while c < n_colors:
-                start = world_base + world_color_starts[world_id, c]
-                end = world_base + world_color_starts[world_id, c + 1]
+                rc = (c + iter_offset) % n_colors
+                start = world_base + world_color_starts[world_id, rc]
+                end = world_base + world_color_starts[world_id, rc + 1]
                 count = end - start
 
                 base = local_tid
@@ -845,6 +856,7 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
         world_color_starts: wp.array2d[wp.int32],
         world_csr_offsets: wp.array[wp.int32],
         world_num_colors: wp.array[wp.int32],
+        sweep_offset: wp.array[wp.int32],
         cc: ContactContainer,
         contacts: ContactViews,
         num_iterations: wp.int32,
@@ -861,6 +873,7 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
 
         n_colors = world_num_colors[world_id]
         world_base = world_csr_offsets[world_id]
+        offset = sweep_offset[0] % n_colors
 
         # Dispatch via the register-cached ``*_iterate_multi`` path
         # with ``num_sweeps = num_iterations`` so each cid gets one
@@ -868,11 +881,12 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
         # sweep. ``velocity_iterations`` is typically 1 so there's no
         # real cross-colour feedback to preserve -- running the full
         # relax in one multi call is equivalent to the classic outer-
-        # inner split.
+        # inner split. Per-substep ``offset`` rotation still applied.
         c = wp.int32(0)
         while c < n_colors:
-            start = world_base + world_color_starts[world_id, c]
-            end = world_base + world_color_starts[world_id, c + 1]
+            rc = (c + offset) % n_colors
+            start = world_base + world_color_starts[world_id, rc]
+            end = world_base + world_color_starts[world_id, rc + 1]
             count = end - start
 
             base = local_tid
