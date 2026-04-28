@@ -103,11 +103,19 @@ _STRAGGLER_BLOCK_DIM: int = 32
 
 # PGS sweeps that ``*_iterate_multi`` runs per call. Must evenly
 # divide ``solver_iterations``; each value > 1 amortises per-cid body
-# / constraint reloads but *shrinks* cross-colour feedback to
-# ``solver_iterations / _FUSED_INNER_SWEEPS`` rounds -- tall stacks
-# (e.g. 40-layer tower) cannot tolerate that. ``1`` keeps full
-# 8-round feedback + still benefits from intra-sweep register caching.
-_FUSED_INNER_SWEEPS: int = 1
+# / constraint reloads (the body state and per-cid constraint
+# constants are loaded once and held in registers for the whole
+# multi-sweep) but *shrinks* cross-colour PGS feedback to
+# ``solver_iterations / _FUSED_INNER_SWEEPS`` rounds.
+#
+# Empirically: ``2`` gives a clean +17-21% on g1_flat / h1_flat
+# multi-world and still passes the full stacking / articulation /
+# high-mass-ratio test suite (32 cases). ``4`` halves outer rounds
+# again and saves a bit more bandwidth, but ``test_slam_ball_into_stack``
+# starts failing -- a heavy ball impacting a tower needs the finer
+# cross-colour feedback to dissipate the impulse without driving
+# bodies through neighbours.
+_FUSED_INNER_SWEEPS: int = 2
 
 _PRIORITY_COST_SHIFT = wp.constant(wp.int64(32))
 _PRIORITY_JITTER_MASK = wp.constant(wp.int64((1 << 32) - 1))
