@@ -79,6 +79,37 @@ class JointKind(enum.Enum):
 
 JOINT_KIND = JointKind.ACTUATED_DOUBLE_BALL_SOCKET
 
+
+class BodyShape(enum.Enum):
+    """Visible shape of each chain link.
+
+    * :attr:`CUBE` -- diamond-rotated unit cubes (the original layout).
+    * :attr:`CAPSULE` -- capsules whose body-local +z axis is aligned
+      with world -y so the chain reads as a rope of pill-shaped links.
+      Consecutive capsules share their line-segment endpoints at the
+      hinge location and a collision filter pair is registered for
+      every joint-connected body pair.
+    """
+
+    CUBE = "cube"
+    CAPSULE = "capsule"
+
+
+# Body shape for chain links. Flip to ``BodyShape.CAPSULE`` to render
+# (and physically space) the chain as capsules instead of cubes.
+BODY_SHAPE = BodyShape.CAPSULE
+
+# Capsule geometry (used only when ``BODY_SHAPE == BodyShape.CAPSULE``).
+# ``CAPSULE_LENGTH`` is the line-segment length of the capsule -- the
+# straight cylindrical mid-section between the two hemispherical end
+# caps. The total axial length of a rendered capsule is therefore
+# ``CAPSULE_LENGTH + CAPSULE_DIAMETER``. Defaults: 10 cm line-segment
+# with 5 cm diameter -> 15 cm total length per capsule.
+CAPSULE_LENGTH = 0.10
+CAPSULE_DIAMETER = 0.05
+_CAPSULE_RADIUS = 0.5 * CAPSULE_DIAMETER
+_CAPSULE_HALF_HEIGHT = 0.5 * CAPSULE_LENGTH
+
 # How the motor drives the free axial spin.
 #   * :attr:`DriveMode.OFF`      -- free-spin axis, no motor.
 #   * :attr:`DriveMode.VELOCITY` -- tracks ``TARGET_VELOCITY`` [rad/s].
@@ -102,6 +133,10 @@ _INV_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 _DIAGONAL_HALF = HALF_EXTENT * math.sqrt(2.0)
 _HALF_ANGLE = math.pi / 8.0  # half of 45 degrees
 _DIAGONAL_QUAT = (0.0, 0.0, math.sin(_HALF_ANGLE), math.cos(_HALF_ANGLE))
+
+# Body-local +z onto world -y: 90 deg rotation about world +x, xyzw.
+# Used for capsule bodies so the capsule axis runs along the chain.
+_CAPSULE_QUAT = (math.sin(math.pi / 4.0), 0.0, 0.0, math.cos(math.pi / 4.0))
 
 # Motor torque cap [N*m] -- generous so the PD drive can hold its
 # target against PGS jitter even on the top joint (which carries the
@@ -129,6 +164,22 @@ TARGET_VELOCITY = 0.0
 TARGET_ANGLE = 0.0
 
 
+def _link_layout() -> tuple[float, tuple[float, float, float, float]]:
+    """Return ``(pitch, orientation_quat)`` for the active body shape.
+
+    ``pitch`` is the centre-to-centre spacing along world -y so
+    consecutive links share the hinge anchor at their boundary. The
+    orientation quaternion is applied to every dynamic body.
+    """
+    if BODY_SHAPE is BodyShape.CUBE:
+        return 2.0 * _DIAGONAL_HALF, _DIAGONAL_QUAT
+    if BODY_SHAPE is BodyShape.CAPSULE:
+        # Capsule line-segment endpoints meet at the hinge: centre-to-
+        # centre spacing equals the line-segment length.
+        return CAPSULE_LENGTH, _CAPSULE_QUAT
+    raise ValueError(f"unsupported BODY_SHAPE: {BODY_SHAPE!r}")
+
+
 def _populate_chain_bodies(
     bodies,
     device: wp.context.Device,
@@ -137,18 +188,20 @@ def _populate_chain_bodies(
 
     Slot 0: static world anchor (default-initialised -- mass / inertia
     already zero, motion type already :data:`MOTION_STATIC`).
-    Slots 1..NUM_BODIES: dynamic cubes in a diamond column along -y.
-    Each cube has unit mass and identity body-frame inertia; the
-    rotation stays fixed at ``_DIAGONAL_QUAT`` so the shared-corner
-    anchors sit on the world y axis.
+    Slots 1..NUM_BODIES: dynamic links in a column along world -y.
+    Each link has unit mass and identity body-frame inertia. For
+    cubes the rotation is ``_DIAGONAL_QUAT`` (corners on the y axis);
+    for capsules it is ``_CAPSULE_QUAT`` so the body-local +z capsule
+    axis aligns with world -y.
     """
+    pitch, link_quat = _link_layout()
     positions = np.zeros((NUM_BODIES, 3), dtype=np.float32)
     orientations = np.zeros((NUM_BODIES, 4), dtype=np.float32)
     # World anchor: identity orientation.
     orientations[0] = (0.0, 0.0, 0.0, 1.0)
     for j in range(NUM_CUBES):
-        positions[j + 1] = (0.0, -(2 * j + 1) * _DIAGONAL_HALF, 0.0)
-        orientations[j + 1] = _DIAGONAL_QUAT
+        positions[j + 1] = (0.0, -(j + 0.5) * pitch, 0.0)
+        orientations[j + 1] = link_quat
     bodies.position.assign(positions)
     bodies.orientation.assign(orientations)
 
@@ -176,24 +229,31 @@ def _build_joint_arrays(
 ) -> dict[str, wp.array]:
     """Assemble the per-joint descriptor arrays the init kernel needs.
 
-    Every joint connects anchor corner (world y axis) of
-    consecutive diamond cubes, hinge axis +z, with the motor set up
-    per ``DRIVE_MODE``. Anchor 1 sits at ``z - HALF_EXTENT`` and
-    anchor 2 at ``z + HALF_EXTENT`` so the implicit hinge axis
-    ``anchor2 - anchor1`` aligns with world +z.
+    Every joint connects consecutive links on the world y axis with a
+    hinge axis along world +z and the motor set up per ``DRIVE_MODE``.
+    Anchor 1 sits at ``z - anchor_offset`` and anchor 2 at
+    ``z + anchor_offset`` so the implicit hinge axis
+    ``anchor2 - anchor1`` aligns with world +z. The offset uses
+    ``HALF_EXTENT`` for cubes and the capsule radius for capsules.
     """
+    pitch, _ = _link_layout()
+    if BODY_SHAPE is BodyShape.CAPSULE:
+        anchor_offset = _CAPSULE_RADIUS
+    else:
+        anchor_offset = HALF_EXTENT
+
     body1 = np.zeros(NUM_HINGES, dtype=np.int32)
     body2 = np.zeros(NUM_HINGES, dtype=np.int32)
     anchor1 = np.zeros((NUM_HINGES, 3), dtype=np.float32)
     anchor2 = np.zeros((NUM_HINGES, 3), dtype=np.float32)
-    # Slot 0 is the static world anchor; the first cube is slot 1.
+    # Slot 0 is the static world anchor; the first link is slot 1.
     world_slot = 0
     for k in range(NUM_HINGES):
-        body1[k] = world_slot if k == 0 else (k)  # cube_{k-1} -> slot k
-        body2[k] = k + 1  # cube_k -> slot k+1
-        y = -k * 2.0 * _DIAGONAL_HALF
-        anchor1[k] = (0.0, y, -HALF_EXTENT)
-        anchor2[k] = (0.0, y, HALF_EXTENT)
+        body1[k] = world_slot if k == 0 else (k)  # link_{k-1} -> slot k
+        body2[k] = k + 1  # link_k -> slot k+1
+        y = -k * pitch
+        anchor1[k] = (0.0, y, -anchor_offset)
+        anchor2[k] = (0.0, y, anchor_offset)
 
     target = np.full(NUM_HINGES, float(TARGET_ANGLE), dtype=np.float32)
     target_velocity = np.full(NUM_HINGES, float(TARGET_VELOCITY), dtype=np.float32)
@@ -282,6 +342,16 @@ class Example:
         # ---- Solver ---------------------------------------------------
         # ``rigid_contact_max=0`` -- the solver's contact ingest paths
         # stay dormant and the partitioner only sees joint elements.
+        # In capsule mode we also register a collision filter for every
+        # joint-connected pair so neighbouring capsules never produce
+        # contacts even if a future build of this example raises
+        # ``rigid_contact_max`` above zero.
+        collision_filter_pairs: list[tuple[int, int]] = []
+        if BODY_SHAPE is BodyShape.CAPSULE:
+            for k in range(NUM_HINGES):
+                a = 0 if k == 0 else k
+                b = k + 1
+                collision_filter_pairs.append((a, b))
         self.world = PhoenXWorld(
             bodies=self.bodies,
             constraints=self.constraints,
@@ -291,6 +361,7 @@ class Example:
             gravity=(0.0, 0.0, -9.81),  # match the jitter variant's -y gravity
             rigid_contact_max=0,
             num_joints=NUM_HINGES,
+            collision_filter_pairs=collision_filter_pairs,
             device=self.device,
         )
 
@@ -307,9 +378,18 @@ class Example:
 
         # ---- Picking --------------------------------------------------
         # Half-extents per body in body-local frame; (0, 0, 0) marks
-        # the world anchor as non-pickable.
+        # the world anchor as non-pickable. For capsules the bounding
+        # box is (radius, radius, half_height + radius) in the
+        # body-local frame whose +z runs along the capsule axis.
         half_extents_np = np.zeros((NUM_BODIES, 3), dtype=np.float32)
-        half_extents_np[1:] = HALF_EXTENT
+        if BODY_SHAPE is BodyShape.CAPSULE:
+            half_extents_np[1:] = (
+                _CAPSULE_RADIUS,
+                _CAPSULE_RADIUS,
+                _CAPSULE_HALF_HEIGHT + _CAPSULE_RADIUS,
+            )
+        else:
+            half_extents_np[1:] = HALF_EXTENT
         self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
         self.picking = Picking(self.world, self._half_extents)
         register_with_viewer_gl(self.viewer, self.picking)
@@ -350,12 +430,20 @@ class Example:
             device=self.device,
         )
         self.viewer.begin_frame(self.sim_time)
-        self.viewer.log_shapes(
-            "/world/cubes",
-            newton.GeoType.BOX,
-            (HALF_EXTENT, HALF_EXTENT, HALF_EXTENT),
-            self._xforms[1:],
-        )
+        if BODY_SHAPE is BodyShape.CAPSULE:
+            self.viewer.log_shapes(
+                "/world/capsules",
+                newton.GeoType.CAPSULE,
+                (_CAPSULE_RADIUS, _CAPSULE_HALF_HEIGHT),
+                self._xforms[1:],
+            )
+        else:
+            self.viewer.log_shapes(
+                "/world/cubes",
+                newton.GeoType.BOX,
+                (HALF_EXTENT, HALF_EXTENT, HALF_EXTENT),
+                self._xforms[1:],
+            )
         self.viewer.end_frame()
 
     def test_final(self) -> None:
