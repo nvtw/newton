@@ -2492,10 +2492,19 @@ def _beam_iterate_at(
     Three independent block solves (block Gauss-Seidel within a sweep):
     anchor-1 3-row Box2D-soft point lock, anchor-2 tangent 2-row
     PD-soft (bend), anchor-3 scalar 1-row PD-soft (twist). The PD
-    blocks use ``lambda = -M_soft * (Jv + bias + gamma * acc)``; for
-    ``use_bias=False`` (Box2D v3 TGS-soft relax pass) the positional
-    drift bias is zeroed but the ``gamma * acc`` warm-start term
-    stays, matching the existing PD axial-drive iterate.
+    blocks use ``lambda = -M_soft * (Jv + bias + gamma * acc)``.
+
+    ``use_bias`` only gates the *anchor-1* drift bias, matching the
+    Box2D v3 TGS-soft relax-pass convention for hard positional
+    locks. The anchor-2 / anchor-3 PD biases are NOT gated: those
+    biases encode the spring force ``k * theta`` (not a drift
+    correction), so zeroing them on the relax pass would cancel the
+    spring entirely (the relax iterate would drive
+    ``acc -> -Jv/gamma -> 0`` with the bias gone, and at convergence
+    ``gamma * acc`` exactly cancels the next main-pass bias). Same
+    rule the standalone PD axial-drive iterate follows -- its
+    ``bias_drive`` is unconditional in
+    :func:`_axial_drive_limit_iterate`.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -2552,10 +2561,9 @@ def _beam_iterate_at(
     k22_inv_10 = read_float(constraints, base_offset + _OFF_BEAM_K22_INV_10, cid)
     k22_inv_11 = read_float(constraints, base_offset + _OFF_BEAM_K22_INV_11, cid)
     gamma_bend = read_float(constraints, base_offset + _OFF_BEAM_GAMMA_BEND, cid)
-    if use_bias:
-        bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
-    else:
-        bias2 = wp.vec3f(0.0, 0.0, 0.0)
+    # NB: PD spring bias is unconditional (see docstring); only the
+    # anchor-1 drift bias is gated by ``use_bias``.
+    bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
 
     acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
     acc2_t1 = wp.dot(t1, acc2_world)
@@ -2581,10 +2589,8 @@ def _beam_iterate_at(
     # ---- Block 3: anchor-3 scalar 1-row PD-soft (twist) -------------
     m_twist_soft = read_float(constraints, base_offset + _OFF_BEAM_M_TWIST_SOFT, cid)
     gamma_twist = read_float(constraints, base_offset + _OFF_BEAM_GAMMA_TWIST, cid)
-    if use_bias:
-        bias3 = read_float(constraints, base_offset + _OFF_BIAS3, cid)
-    else:
-        bias3 = wp.float32(0.0)
+    # NB: PD spring bias is unconditional (see docstring).
+    bias3 = read_float(constraints, base_offset + _OFF_BIAS3, cid)
 
     acc3_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid)
     acc3_t2 = wp.dot(t2, acc3_world)
