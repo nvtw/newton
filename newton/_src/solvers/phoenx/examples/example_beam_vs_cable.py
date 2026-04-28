@@ -56,9 +56,9 @@ SEGMENT_MASS = 0.005
 # ``example_bend_stiffness_sweep`` so users can A/B straight across.
 NUM_STRANDS = 5
 BEND_STIFFNESS_MIN = 1.0e-2
-BEND_STIFFNESS_MAX = 1.0e2
+BEND_STIFFNESS_MAX = 1.0e4
 # Per-strand bend damping is derived from bend stiffness.
-BEND_DAMPING_RATIO = 0.3
+BEND_DAMPING_RATIO = 0.01
 
 # Twist gains held constant across strands so the visual A/B isolates
 # bend behaviour.
@@ -75,8 +75,8 @@ GRAVITY = 9.81
 
 SIM_FPS = 240
 RENDER_FPS = 60
-SUBSTEPS = 20
-SOLVER_ITERATIONS = 6
+SUBSTEPS = 30
+SOLVER_ITERATIONS = 4
 VELOCITY_ITERATIONS = 1
 STEP_LAYOUT = "single_world"
 

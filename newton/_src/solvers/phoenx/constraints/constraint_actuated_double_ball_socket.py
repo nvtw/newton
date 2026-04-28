@@ -2243,6 +2243,20 @@ def _cable_iterate_at(
 # (cf. CABLE), and the well-conditioned positional rows match
 # REVOLUTE / PRISMATIC convergence behaviour.
 
+#: Headroom factor on the BEAM substep stiffness clamp. The implicit-
+#: Euler PD's "naive" Nyquist bound is ``k <= 1 / (M_inv * dt^2)``
+#: (i.e. ``omega_n * dt <= 1``); past that point the soft-PD's
+#: effective mass collapses to ``1 / M_inv`` and the bias spikes to
+#: ``C / dt``, so user-supplied gains saturate rather than producing
+#: a stiffer spring. This factor multiplies the cap to ``N / (M_inv
+#: * dt^2)``, allowing super-Nyquist gains for users who want them.
+#: ``N = 1`` matches the strict naive bound; ``N = pi^2 ~ 9.87``
+#: matches the cable / Box2D ``omega <= pi/dt`` convention; larger
+#: values trade more headroom for more risk of high-frequency
+#: ringing on undamped chains. Applied uniformly to both the bend
+#: (anchor-2 tangent) and twist (anchor-3 scalar) PD blocks.
+_BEAM_NYQUIST_HEADROOM = wp.constant(wp.float32(10.0))
+
 
 @wp.func
 def _beam_prepare_at(
@@ -2367,12 +2381,16 @@ def _beam_prepare_at(
 
     # Nyquist-clamp the positional bend stiffness using the average
     # diagonal of K22 as the representative scalar effective mass.
+    # Cap is ``N / (M_inv * dt^2)`` with the headroom factor
+    # ``_BEAM_NYQUIST_HEADROOM`` -- ``N = 1`` is the strict bound,
+    # larger values let user gains push past the substep's resolvable
+    # spring frequency at the cost of high-frequency ringing risk.
     eff_inv_bend = wp.float32(0.5) * (k22_00 + k22_11)
     bias_factor_bend = wp.float32(0.0)
     gamma_bend = wp.float32(0.0)
     if (k_pos_bend > wp.float32(0.0)) or (d_pos_bend > wp.float32(0.0)):
         if eff_inv_bend > wp.float32(0.0):
-            k_max_bend = wp.float32(1.0) / (eff_inv_bend * dt * dt)
+            k_max_bend = _BEAM_NYQUIST_HEADROOM / (eff_inv_bend * dt * dt)
             k_clamped_bend = wp.min(k_pos_bend, k_max_bend)
         else:
             k_clamped_bend = k_pos_bend
@@ -2423,7 +2441,9 @@ def _beam_prepare_at(
     m_twist_soft = wp.float32(0.0)
     if (k_pos_twist > wp.float32(0.0)) or (d_pos_twist > wp.float32(0.0)):
         if eff_inv_twist > wp.float32(0.0):
-            k_max_twist = wp.float32(1.0) / (eff_inv_twist * dt * dt)
+            # Same headroom factor as the bend clamp; see
+            # ``_BEAM_NYQUIST_HEADROOM`` for the rationale.
+            k_max_twist = _BEAM_NYQUIST_HEADROOM / (eff_inv_twist * dt * dt)
             k_clamped_twist = wp.min(k_pos_twist, k_max_twist)
         else:
             k_clamped_twist = k_pos_twist
