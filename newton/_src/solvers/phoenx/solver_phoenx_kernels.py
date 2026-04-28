@@ -974,28 +974,6 @@ def _rotation_quaternion(omega: wp.vec3f, dt: wp.float32) -> wp.quatf:
     return wp.quatf(omega[0] * s, omega[1] * s, omega[2] * s, wp.cos(half))
 
 
-@wp.func
-def _integrate_velocity_for_body(
-    bodies: BodyContainer,
-    dt: wp.float32,
-    i: int,
-):
-    """Per-body work for :func:`_integrate_velocities_kernel`.
-
-    Extracted as a ``wp.func`` so a block-per-world mega-kernel can
-    grid-stride over the bodies of a world without duplicating the
-    integration math. Behaviour is identical to the launching
-    kernel: static / kinematic bodies are skipped.
-    """
-    mt = bodies.motion_type[i]
-    if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
-        return
-
-    bodies.position[i] = bodies.position[i] + bodies.velocity[i] * dt
-    q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
-    bodies.orientation[i] = wp.normalize(q_rot * bodies.orientation[i])
-
-
 @wp.kernel(enable_backward=False)
 def _integrate_velocities_kernel(
     bodies: BodyContainer,
@@ -1011,16 +989,40 @@ def _integrate_velocities_kernel(
     velocity integration on them would double-advance the pose.
     """
     i = wp.tid()
-    _integrate_velocity_for_body(bodies, dt, i)
+    mt = bodies.motion_type[i]
+    if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
+        return
+
+    bodies.position[i] = bodies.position[i] + bodies.velocity[i] * dt
+    q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
+    bodies.orientation[i] = wp.normalize(q_rot * bodies.orientation[i])
 
 
-@wp.func
-def _kinematic_prepare_step_for_body(
+@wp.kernel(enable_backward=False)
+def _kinematic_prepare_step_kernel(
     bodies: BodyContainer,
     dt: wp.float32,
-    i: int,
 ):
-    """Per-body work for :func:`_kinematic_prepare_step_kernel`."""
+    """Once-per-step kinematic prepare, called before the substep loop.
+
+    For each kinematic body: resolve this step's pose target, infer
+    the linear / angular velocity to expose to contacts, and
+    snapshot the current pose into ``position_prev`` /
+    ``orientation_prev`` as the per-substep lerp / slerp origin.
+
+    Target resolution:
+
+    * ``kinematic_target_valid[i] == 1`` -- read from
+      ``kinematic_target_{pos,orient}`` and clear the flag.
+    * ``0`` -- synthesise from ``position_prev + velocity * dt`` and
+      axis-angle ``angular_velocity * dt`` (constant-velocity
+      backward-compat).
+
+    Velocity inference uses the quaternion log-map
+    (``angle = 2 * atan2(|xyz|, w); omega = axis * angle / dt``) so
+    large rotations are exact, not just small-angle.
+    """
+    i = wp.tid()
     if bodies.motion_type[i] != MOTION_KINEMATIC:
         return
 
@@ -1074,34 +1076,6 @@ def _kinematic_prepare_step_for_body(
 
 
 @wp.kernel(enable_backward=False)
-def _kinematic_prepare_step_kernel(
-    bodies: BodyContainer,
-    dt: wp.float32,
-):
-    """Once-per-step kinematic prepare, called before the substep loop.
-
-    For each kinematic body: resolve this step's pose target, infer
-    the linear / angular velocity to expose to contacts, and
-    snapshot the current pose into ``position_prev`` /
-    ``orientation_prev`` as the per-substep lerp / slerp origin.
-
-    Target resolution:
-
-    * ``kinematic_target_valid[i] == 1`` -- read from
-      ``kinematic_target_{pos,orient}`` and clear the flag.
-    * ``0`` -- synthesise from ``position_prev + velocity * dt`` and
-      axis-angle ``angular_velocity * dt`` (constant-velocity
-      backward-compat).
-
-    Velocity inference uses the quaternion log-map
-    (``angle = 2 * atan2(|xyz|, w); omega = axis * angle / dt``) so
-    large rotations are exact, not just small-angle.
-    """
-    i = wp.tid()
-    _kinematic_prepare_step_for_body(bodies, dt, i)
-
-
-@wp.kernel(enable_backward=False)
 def _set_kinematic_pose_batch_kernel(
     bodies: BodyContainer,
     body_ids: wp.array[wp.int32],
@@ -1127,23 +1101,6 @@ def _set_kinematic_pose_batch_kernel(
     bodies.kinematic_target_valid[b] = 1
 
 
-@wp.func
-def _kinematic_interpolate_for_body(
-    bodies: BodyContainer,
-    alpha: wp.float32,
-    i: int,
-):
-    """Per-body work for :func:`_kinematic_interpolate_substep_kernel`."""
-    if bodies.motion_type[i] != MOTION_KINEMATIC:
-        return
-    prev_pos = bodies.position_prev[i]
-    target_pos = bodies.kinematic_target_pos[i]
-    prev_orient = bodies.orientation_prev[i]
-    target_orient = bodies.kinematic_target_orient[i]
-    bodies.position[i] = (1.0 - alpha) * prev_pos + alpha * target_pos
-    bodies.orientation[i] = wp.quat_slerp(prev_orient, target_orient, alpha)
-
-
 @wp.kernel(enable_backward=False)
 def _kinematic_interpolate_substep_kernel(
     bodies: BodyContainer,
@@ -1165,7 +1122,14 @@ def _kinematic_interpolate_substep_kernel(
     :func:`_integrate_velocities_kernel`; static never moves).
     """
     i = wp.tid()
-    _kinematic_interpolate_for_body(bodies, alpha, i)
+    if bodies.motion_type[i] != MOTION_KINEMATIC:
+        return
+    prev_pos = bodies.position_prev[i]
+    target_pos = bodies.kinematic_target_pos[i]
+    prev_orient = bodies.orientation_prev[i]
+    target_orient = bodies.kinematic_target_orient[i]
+    bodies.position[i] = (1.0 - alpha) * prev_pos + alpha * target_pos
+    bodies.orientation[i] = wp.quat_slerp(prev_orient, target_orient, alpha)
 
 
 @wp.kernel(enable_backward=False)
@@ -1200,30 +1164,6 @@ def _sync_num_active_constraints_kernel(
     num_active_constraints[0] = joint_constraint_count + num_contact_columns[0]
 
 
-@wp.func
-def _apply_forces_and_gravity_for_body(
-    bodies: BodyContainer,
-    gravity: wp.array[wp.vec3f],
-    substep_dt: wp.float32,
-    i: int,
-):
-    """Per-body work for :func:`_phoenx_apply_forces_and_gravity_kernel`."""
-    if bodies.motion_type[i] != MOTION_DYNAMIC:
-        return
-    if bodies.inverse_mass[i] == 0.0:
-        return
-    v = bodies.velocity[i]
-    w = bodies.angular_velocity[i]
-    inv_mass = bodies.inverse_mass[i]
-    inv_inertia_world = bodies.inverse_inertia_world[i]
-    v = v + bodies.force[i] * (inv_mass * substep_dt)
-    w = w + (inv_inertia_world * bodies.torque[i]) * substep_dt
-    if bodies.affected_by_gravity[i] != 0:
-        v = v + gravity[bodies.world_id[i]] * substep_dt
-    bodies.velocity[i] = v
-    bodies.angular_velocity[i] = w
-
-
 @wp.kernel(enable_backward=False)
 def _phoenx_apply_forces_and_gravity_kernel(
     bodies: BodyContainer,
@@ -1241,24 +1181,20 @@ def _phoenx_apply_forces_and_gravity_kernel(
     runs once at the end of :meth:`PhoenXWorld.step` and zeros them.
     """
     i = wp.tid()
-    _apply_forces_and_gravity_for_body(bodies, gravity, substep_dt, i)
-
-
-@wp.func
-def _update_inertia_and_clear_forces_for_body(
-    bodies: BodyContainer,
-    i: int,
-):
-    """Per-body work for :func:`_phoenx_update_inertia_and_clear_forces_kernel`."""
-    # Damping + rotated inertia: dynamic-only.
-    if bodies.motion_type[i] == MOTION_DYNAMIC:
-        bodies.velocity[i] = bodies.velocity[i] * bodies.linear_damping[i]
-        bodies.angular_velocity[i] = bodies.angular_velocity[i] * bodies.angular_damping[i]
-        r = wp.quat_to_matrix(bodies.orientation[i])
-        bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
-    # Force / torque clear: every body slot, including kinematic / static.
-    bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
-    bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
+    if bodies.motion_type[i] != MOTION_DYNAMIC:
+        return
+    if bodies.inverse_mass[i] == 0.0:
+        return
+    v = bodies.velocity[i]
+    w = bodies.angular_velocity[i]
+    inv_mass = bodies.inverse_mass[i]
+    inv_inertia_world = bodies.inverse_inertia_world[i]
+    v = v + bodies.force[i] * (inv_mass * substep_dt)
+    w = w + (inv_inertia_world * bodies.torque[i]) * substep_dt
+    if bodies.affected_by_gravity[i] != 0:
+        v = v + gravity[bodies.world_id[i]] * substep_dt
+    bodies.velocity[i] = v
+    bodies.angular_velocity[i] = w
 
 
 @wp.kernel(enable_backward=False)
@@ -1271,18 +1207,15 @@ def _phoenx_update_inertia_and_clear_forces_kernel(
     ``angular_damping`` per body; the world-frame inertia is rebuilt
     from the final orientation (``R * I^-1 * R^T``)."""
     i = wp.tid()
-    _update_inertia_and_clear_forces_for_body(bodies, i)
-
-
-@wp.func
-def _refresh_world_inertia_for_body(
-    bodies: BodyContainer,
-    i: int,
-):
-    """Per-body work for :func:`_phoenx_refresh_world_inertia_kernel`."""
+    # Damping + rotated inertia: dynamic-only.
     if bodies.motion_type[i] == MOTION_DYNAMIC:
+        bodies.velocity[i] = bodies.velocity[i] * bodies.linear_damping[i]
+        bodies.angular_velocity[i] = bodies.angular_velocity[i] * bodies.angular_damping[i]
         r = wp.quat_to_matrix(bodies.orientation[i])
         bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
+    # Force / torque clear: every body slot, including kinematic / static.
+    bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
+    bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
 
 
 @wp.kernel(enable_backward=False)
@@ -1308,21 +1241,9 @@ def _phoenx_refresh_world_inertia_kernel(
     step in :func:`_phoenx_update_inertia_and_clear_forces_kernel`.
     """
     i = wp.tid()
-    _refresh_world_inertia_for_body(bodies, i)
-
-
-@wp.func
-def _apply_global_damping_for_body(
-    bodies: BodyContainer,
-    global_damping: wp.array[wp.float32],
-    i: int,
-):
-    """Per-body work for :func:`_phoenx_apply_global_damping_kernel`."""
     if bodies.motion_type[i] == MOTION_DYNAMIC:
-        lin = 1.0 - global_damping[0]
-        ang = 1.0 - global_damping[1]
-        bodies.velocity[i] = bodies.velocity[i] * lin
-        bodies.angular_velocity[i] = bodies.angular_velocity[i] * ang
+        r = wp.quat_to_matrix(bodies.orientation[i])
+        bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
 
 
 @wp.kernel(enable_backward=False)
@@ -1340,7 +1261,11 @@ def _phoenx_apply_global_damping_kernel(
     the host can rewrite it between graph replays without re-capture.
     """
     i = wp.tid()
-    _apply_global_damping_for_body(bodies, global_damping, i)
+    if bodies.motion_type[i] == MOTION_DYNAMIC:
+        lin = 1.0 - global_damping[0]
+        ang = 1.0 - global_damping[1]
+        bodies.velocity[i] = bodies.velocity[i] * lin
+        bodies.angular_velocity[i] = bodies.angular_velocity[i] * ang
 
 
 # ---------------------------------------------------------------------------

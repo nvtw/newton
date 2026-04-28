@@ -260,29 +260,6 @@ def _export_body_state_avg_kernel(
     body_qd[tid] = wp.spatial_vector(v_avg, w_avg)
 
 
-@wp.func
-def _accumulate_substep_velocity_for_body(
-    velocity: wp.array[wp.vec3f],
-    angular_velocity: wp.array[wp.vec3f],
-    substep_dt: wp.float32,
-    vel_accum: wp.array[wp.vec3f],
-    omega_accum: wp.array[wp.vec3f],
-    # PhoenX body slot index (1-based; slot 0 is the static anchor).
-    src: int,
-):
-    """Per-body work for :func:`_accumulate_substep_velocity_kernel`.
-
-    ``src`` is the PhoenX body slot (1-based -- slot 0 is the static
-    anchor and is skipped here so the mega-kernel can pass body ids
-    drawn from ``body_world_start[w]..body_world_start[w+1]``).
-    """
-    if src <= 0:
-        return
-    dst = src - 1
-    vel_accum[dst] = vel_accum[dst] + velocity[src] * substep_dt
-    omega_accum[dst] = omega_accum[dst] + angular_velocity[src] * substep_dt
-
-
 @wp.kernel(enable_backward=False)
 def _accumulate_substep_velocity_kernel(
     velocity: wp.array[wp.vec3f],
@@ -303,9 +280,8 @@ def _accumulate_substep_velocity_kernel(
     """
     tid = wp.tid()
     src = tid + 1  # PhoenX slot 0 is the static world anchor.
-    _accumulate_substep_velocity_for_body(
-        velocity, angular_velocity, substep_dt, vel_accum, omega_accum, src
-    )
+    vel_accum[tid] = vel_accum[tid] + velocity[src] * substep_dt
+    omega_accum[tid] = omega_accum[tid] + angular_velocity[src] * substep_dt
 
 
 @wp.kernel(enable_backward=False)
