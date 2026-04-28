@@ -103,6 +103,7 @@ def maximal_independent_set_partitioning(
     max_used_color: wp.array[int],
     max_num_partitions: int,
     partition_data_concat: wp.array[wp.int64],
+    color_tags: wp.array[wp.int32],
     partition_data_elements: wp.array[int],
     interaction_id_to_partition: wp.array[int],
     random_values: wp.array[int],
@@ -140,6 +141,7 @@ def maximal_independent_set_partitioning(
             adjacency_section_end_indices,
             vertex_to_adjacent_elements,
             partition_data_concat,
+            color_tags,
             elements,
             num_elements,
         ],
@@ -243,6 +245,12 @@ class ContactPartitioner:
         # int32 element-id view, filled by the post-sort finalize kernel.
         self._partition_data_elements = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
+        # int32 colour-tag mirror used by the greedy variant; the
+        # batch partitioner runs round-based JP only, so this array is
+        # never read here -- it just satisfies
+        # ``partitioning_adjacency_store_kernel``'s signature.
+        self._color_tags = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+
         # 1-element device array feeding the coloring kernel's per-color loop.
         self._color_arr = wp.zeros(1, dtype=wp.int32, device=device)
 
@@ -274,6 +282,7 @@ class ContactPartitioner:
             max_used_color=self._max_used_color,
             max_num_partitions=self.max_num_partitions,
             partition_data_concat=self._partition_data_concat,
+            color_tags=self._color_tags,
             partition_data_elements=self._partition_data_elements,
             interaction_id_to_partition=self._interaction_id_to_partition,
             random_values=self._random_values,

@@ -105,6 +105,10 @@ def _run_partitioner(
     partition_data_concat_sort_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32)
     # 1-element device array feeding the per-color loop inside the partitioner.
     color_arr = wp.zeros(1, dtype=wp.int32)
+    # int32 colour-tag mirror used by the greedy variant; unused by the
+    # batch round-based JP path but needed to satisfy
+    # ``partitioning_adjacency_store_kernel``'s signature.
+    color_tags = wp.zeros(max_num_interactions, dtype=wp.int32)
 
     maximal_independent_set_partitioning(
         elements=elements,
@@ -116,6 +120,7 @@ def _run_partitioner(
         max_used_color=max_used_color,
         max_num_partitions=max_num_partitions,
         partition_data_concat=partition_data_concat,
+        color_tags=color_tags,
         partition_data_elements=partition_data_elements,
         interaction_id_to_partition=interaction_id_to_partition,
         random_values=random_values_arr,

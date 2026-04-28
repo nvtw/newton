@@ -188,6 +188,14 @@ class IncrementalContactPartitioner:
         # needed because we never sort.
         self._partition_data_concat = wp.zeros(max_num_interactions, dtype=wp.int64, device=device)
 
+        # Parallel int32 mirror of the colour bits of
+        # ``partition_data_concat`` (0 = uncoloured, 1+ = colour+1).
+        # Half the per-read width on the greedy kernel's hot inner
+        # adjacency walk -- on dense kapla-style graphs each
+        # uncoloured vertex reads ~28 neighbours' colour status per
+        # round, so the bandwidth saving compounds.
+        self._color_tags = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+
         # Per-element color (-1 until assigned).
         self._interaction_id_to_partition = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
@@ -383,6 +391,7 @@ class IncrementalContactPartitioner:
                 self._adjacency_section_end_indices,
                 self._vertex_to_adjacent_elements,
                 self._partition_data_concat,
+                self._color_tags,
                 elements,
                 num_elements,
             ],
@@ -442,6 +451,7 @@ class IncrementalContactPartitioner:
             dim=self.max_num_interactions,
             inputs=[
                 self._partition_data_concat,
+                self._color_tags,
                 self._interaction_id_to_partition,
                 self._num_elements,
             ],
@@ -599,6 +609,7 @@ class IncrementalContactPartitioner:
             dim=self.max_num_interactions,
             inputs=[
                 self._partition_data_concat,
+                self._color_tags,
                 self._interaction_id_to_partition,
                 self._num_elements,
             ],
@@ -740,6 +751,7 @@ class IncrementalContactPartitioner:
             dim=self.max_num_interactions,
             inputs=[
                 self._partition_data_concat,
+                self._color_tags,
                 self._interaction_id_to_partition,
                 self._num_elements,
             ],
@@ -815,6 +827,7 @@ class IncrementalContactPartitioner:
                 dim=self._greedy_grid_size,
                 inputs=[
                     self._partition_data_concat,
+                    self._color_tags,
                     self._random_values,
                     self._cost_values,
                     self._adjacency_section_end_indices,

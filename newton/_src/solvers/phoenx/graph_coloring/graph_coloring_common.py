@@ -144,6 +144,7 @@ def partitioning_adjacency_store_kernel(
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
     partition_data_concat: wp.array[wp.int64],
+    color_tags: wp.array[wp.int32],
     elements: wp.array[ElementInteractionData],
     num_elements: wp.array[int],
 ):
@@ -163,6 +164,9 @@ def partitioning_adjacency_store_kernel(
     # Assign a high value so unpartitioned (overflow) elements sort to the end.
     # Bits 32..61 stay zero until the coloring kernel fills in (color + 1).
     partition_data_concat[tid] = _UNPARTITIONED | wp.int64(tid)
+    # ``color_tags`` mirrors the colour bits of partition_data_concat
+    # for the greedy kernel's hot-path 4-byte reads.
+    color_tags[tid] = wp.int32(0)
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +286,7 @@ _FREE_COLOR_FLIP = wp.constant(wp.int64(-1))  # all ones, two's complement
 @wp.kernel(enable_backward=False)
 def partitioning_coloring_incremental_greedy_kernel(
     partition_data_concat: wp.array[wp.int64],
+    color_tags: wp.array[wp.int32],
     random_values: wp.array[wp.int32],
     cost_values: wp.array[wp.int32],
     adjacency_section_end_indices: wp.array[int],
@@ -342,11 +347,13 @@ def partitioning_coloring_incremental_greedy_kernel(
     """
     n = num_elements[0]
     for tid in range(wp.tid(), n, total_num_threads):
-        # One read of the packed tag word: catches both the
-        # already-coloured case (skip iteration) and the
-        # unpartitioned tail state.
-        tag0 = partition_data_concat[tid] & _TAG_MASK
-        if (tag0 >> _COLOR_SHIFT) != wp.int64(0):
+        # 4-byte read of the per-vertex colour tag (0 = uncoloured,
+        # 1+ = colour+1). Replaces the int64 read of
+        # ``partition_data_concat`` -- on dense kapla-style graphs
+        # the inner adjacency walk does ~28 of these reads per
+        # uncoloured vertex per round, so halving the per-read width
+        # is the dominant gmem-bandwidth saving.
+        if color_tags[tid] != wp.int32(0):
             continue
 
         self_prio = contact_partitions_get_random_value(random_values, cost_values, tid)
@@ -371,18 +378,18 @@ def partitioning_coloring_incremental_greedy_kernel(
                 neighbor = vertex_to_adjacent_elements[k]
                 if neighbor == tid:
                     continue
-                # Inspect this neighbour's tag word once and dispatch on
-                # whether they're already coloured. Two distinct cases:
+                # Inspect this neighbour's colour tag once and
+                # dispatch on whether they're already coloured. Two
+                # distinct cases:
                 #
-                #   colour == 0 -> neighbour is still uncoloured. Apply
+                #   tag == 0 -> neighbour is still uncoloured. Apply
                 #     the standard JP MIS check; if the neighbour
                 #     outranks us, bail (we won't commit this round).
-                #   colour != 0 -> neighbour is already coloured. Mark
+                #   tag != 0 -> neighbour is already coloured. Mark
                 #     their colour as forbidden in the bitmask so we
                 #     don't reuse it.
-                tagged = partition_data_concat[neighbor] & _TAG_MASK
-                color_plus_one = tagged >> _COLOR_SHIFT
-                if color_plus_one == wp.int64(0):
+                ntag = color_tags[neighbor]
+                if ntag == wp.int32(0):
                     # Uncoloured -> MIS tiebreak.
                     if contact_partitions_get_random_value(random_values, cost_values, neighbor) > self_prio:
                         is_local_max = False
@@ -391,7 +398,7 @@ def partitioning_coloring_incremental_greedy_kernel(
                     # Coloured -> forbid that colour. Cap at the bitmask
                     # capacity; if a graph really needs more colours we
                     # raise overflow below.
-                    ncolor = wp.int32(color_plus_one - wp.int64(1))
+                    ncolor = ntag - wp.int32(1)
                     if ncolor < GREEDY_MAX_COLORS:
                         forbidden_mask = forbidden_mask | (wp.int64(1) << wp.int64(ncolor))
 
@@ -427,9 +434,11 @@ def partitioning_coloring_incremental_greedy_kernel(
                 # observe the flag after the build returns.
                 overflow_flag[0] = 1
                 fallback_c = wp.int32(GREEDY_MAX_COLORS - wp.int32(1))
+                color_tags[tid] = fallback_c + wp.int32(1)
                 partition_data_concat[tid] = (wp.int64(fallback_c + wp.int32(1)) << _COLOR_SHIFT) | wp.int64(tid)
                 wp.atomic_sub(num_remaining, 0, 1)
             else:
+                color_tags[tid] = c + wp.int32(1)
                 partition_data_concat[tid] = (wp.int64(c + 1) << _COLOR_SHIFT) | wp.int64(tid)
                 # Strictly-monotonic capture_while predicate update:
                 # one decrement per commit, no off-thread interaction.
@@ -593,6 +602,7 @@ def incremental_init_remaining_ids_kernel(
 @wp.kernel(enable_backward=False)
 def incremental_reset_loop_state_kernel(
     partition_data_concat: wp.array[wp.int64],
+    color_tags: wp.array[wp.int32],
     interaction_id_to_partition: wp.array[int],
     num_elements: wp.array[int],
 ):
@@ -607,8 +617,10 @@ def incremental_reset_loop_state_kernel(
     What *does* have to be reset is:
 
     * ``partition_data_concat[tid] = _UNPARTITIONED | tid``, the
-      packed per-element (color, tid) tag the coloring kernel reads
-      and writes.
+      packed per-element (color, tid) tag the round-based JP path
+      reads and writes.
+    * ``color_tags[tid] = 0``, the int32 colour-only mirror the
+      greedy kernel reads on the hot path.
     * ``interaction_id_to_partition[tid] = -1``, so callers that read
       the per-element assigned color get a well-defined sentinel for
       elements not yet touched by the current pass.
@@ -621,6 +633,7 @@ def incremental_reset_loop_state_kernel(
     if tid >= num_elements[0]:
         return
     partition_data_concat[tid] = _UNPARTITIONED | wp.int64(tid)
+    color_tags[tid] = wp.int32(0)
     interaction_id_to_partition[tid] = -1
 
 
@@ -941,6 +954,12 @@ def greedy_color_histogram_kernel(
     they did under JP. Uncoloured elements (colour == 0) are not
     counted -- if any survive at this point it is a build bug; the
     overflow path on the greedy kernel raises before we reach here.
+
+    Reads from the int64 ``partition_data_concat`` rather than the
+    parallel int32 ``color_tags`` mirror so the JP-fallback path
+    (which only writes ``partition_data_concat``) sees consistent
+    values when the greedy build overflows and the round-based JP
+    rebuild fires inside the same captured frame.
     """
     tid = wp.tid()
     n = num_elements[0]
@@ -1020,6 +1039,10 @@ def greedy_scatter_elements_by_color_kernel(
     elements per colour is fully determined by the greedy build.
     Downstream PGS sweeps already iterate the colour slice as an
     independent set, so order does not matter.
+
+    Reads from ``partition_data_concat`` (not ``color_tags``) for the
+    same reason as :func:`greedy_color_histogram_kernel`: the JP-
+    fallback path leaves ``color_tags`` stale.
     """
     tid = wp.tid()
     if tid >= num_elements[0]:
