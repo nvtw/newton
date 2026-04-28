@@ -37,6 +37,7 @@ __all__ = [
     "DEFAULT_HERTZ_MOTOR",
     "ConstraintBodies",
     "ConstraintContainer",
+    "angle_proportional_chord_bias",
     "assert_constraint_header",
     "constraint_bodies_make",
     "constraint_container_zeros",
@@ -674,3 +675,48 @@ def pd_coefficients_split(
         damp_mass = (dt * damping) / (wp.float32(1.0) + dt * damping * eff_mass_inv)
 
     return gamma_s, bias_s, eff_mass_s, damp_mass
+
+
+@wp.func
+def angle_proportional_chord_bias(
+    chord_along: wp.float32,
+    lever_arm: wp.float32,
+    idt: wp.float32,
+):
+    """Convert a chord-length displacement into an angle-proportional
+    velocity bias for a soft point-anchor row.
+
+    For a body rotated by angle ``theta`` about an axis perpendicular
+    to a body-frame anchor at lever arm ``L``, the world-frame anchor
+    chord length is ``2 * L * sin(theta / 2)``. A naive PGS bias
+    ``chord * idt`` produces a restoring torque ``tau ~ k * L^2 * sin(theta)``
+    -- linear in ``theta`` only for small angles, saturating at
+    ``theta = pi/2`` and wrapping back to zero at ``theta = pi``.
+
+    This helper recovers ``theta`` from the chord and returns
+    ``theta * L * idt``, the velocity bias that closes the angle in
+    one substep along the chord direction. The resulting per-iter
+    PGS update produces a restoring torque ``tau ~ k * L^2 * theta``
+    that stays linear in ``theta`` across the full angle range.
+
+    Args:
+        chord_along: Signed chord length along a known direction
+            (e.g. tangent ``t1`` projection of the anchor displacement).
+            Sign carries the rotation direction.
+        lever_arm: ``L`` -- the body-frame distance from the joint
+            origin to the helper anchor (must be > 0).
+        idt: ``1 / substep_dt``.
+
+    Returns:
+        Velocity bias ``theta * L * idt`` with the sign of
+        ``chord_along``. Equals ``chord_along * idt`` to first order
+        (small-angle limit).
+    """
+    if lever_arm <= 0.0:
+        return wp.float32(0.0)
+    # Clamp the half-chord to ``|chord| <= 2*L`` (numerically possible
+    # to exceed by epsilon at large drift; ``asin`` requires a valid
+    # input domain).
+    sin_half = wp.clamp(chord_along / (wp.float32(2.0) * lever_arm), wp.float32(-1.0), wp.float32(1.0))
+    theta = wp.float32(2.0) * wp.asin(sin_half)
+    return theta * lever_arm * idt
