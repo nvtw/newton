@@ -79,7 +79,7 @@ class _PhoenXScene:
         fps: int = 60,
         substeps: int = 20,
         solver_iterations: int = 3,
-        velocity_iterations: int = 0,
+        velocity_iterations: int = 1,
         friction: float = 0.5,
         step_layout: str = "multi_world",
     ) -> None:

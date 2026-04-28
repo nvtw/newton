@@ -312,7 +312,7 @@ class Example:
             constraints=self.constraints,
             substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,
-            velocity_iterations=0,  # PhoenX's default
+            velocity_iterations=1,  # the relax pass is now load-bearing for soft-PD damping
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,

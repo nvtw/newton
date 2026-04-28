@@ -72,8 +72,9 @@ class TestPhoenXSpeculativeContactNoDrag(unittest.TestCase):
         # speculative bias (or flips coefficients to soft) during relax
         # applies a large brake impulse to any closing body in the
         # speculative window -- the main honey artefact on the rabbit
-        # pile. ``_PhoenXScene`` defaults to ``velocity_iterations = 0``
-        # (no relax), which would hide that regression, so override.
+        # pile. ``_PhoenXScene`` defaults to ``velocity_iterations = 1``
+        # (the new minimum after the soft-PD damping split); the
+        # explicit value here documents intent.
         scene = _PhoenXScene(
             fps=fps,
             substeps=1,

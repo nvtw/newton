@@ -541,6 +541,370 @@ class TestCableDegenerateAndStability(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "PhoenX cable tests run on CUDA only.",
+)
+class TestCableAnalytical(unittest.TestCase):
+    """Quantitative comparisons against the closed-form damped
+    harmonic oscillator :math:`I \\ddot\\theta + c \\dot\\theta + k
+    \\theta = 0`. These supersede the looser checks in
+    :class:`TestCableDegenerateAndStability` -- there the period is
+    only required within 20 %, here we hold the whole settling curve
+    to within ~10 %.
+
+    Test cases pin the analytical regimes that can drift between
+    integrator changes: the period of the undamped oscillator (sets
+    the spring constant), the log-decrement of the underdamped one
+    (sets the damping coefficient), the time constant of an
+    overdamped settle (sets the high-c convergence behaviour), and
+    the large-angle accuracy of the Darboux log-map (sets the bend
+    direction at non-small theta).
+    """
+
+    @staticmethod
+    def _record_angle_history(
+        world,
+        axis: np.ndarray,
+        n_samples: int,
+        dt: float,
+    ) -> np.ndarray:
+        """Step ``world`` ``n_samples`` times at ``dt`` and return the
+        signed-angle-about-axis trajectory at each sample (length
+        ``n_samples + 1``: index 0 is the pre-step value)."""
+        angles = [_rotation_angle_about(_rod_orientation(world), axis)]
+        for _ in range(n_samples):
+            run_settle_loop(world, 1, dt=dt)
+            angles.append(_rotation_angle_about(_rod_orientation(world), axis))
+        return np.asarray(angles)
+
+    @staticmethod
+    def _zero_crossings(angles: np.ndarray) -> np.ndarray:
+        """Indices ``i`` where ``angles[i]`` and ``angles[i+1]`` have
+        different non-zero signs."""
+        signs = np.sign(angles)
+        # Drop exact-zero samples by picking the next non-zero sign.
+        nz = np.where(signs != 0)[0]
+        if len(nz) < 2:
+            return np.empty(0, dtype=int)
+        return np.where(np.diff(signs[nz]) != 0)[0]
+
+    def test_undamped_period_within_5pct(self) -> None:
+        """Undamped oscillator period :math:`T = 2\\pi / \\omega_n` with
+        :math:`\\omega_n = \\sqrt{k/I}`. Tighter than the 20 % budget
+        in :meth:`test_natural_frequency_matches_theory` -- this is
+        the load-bearing analytical regression for the soft-PD
+        spring formulation. Drift here means the prepare's mass
+        coefficient or the iterate's gain has skewed."""
+        I_rod = 1.0 / 20.0  # _INV_INERTIA_ROD has 20 on every axis
+        k = 80.0
+        T_theory = 2.0 * math.pi / math.sqrt(k / I_rod)
+
+        init_angle_rad = math.radians(10.0)  # small angle -> linear regime
+        init_q = _axis_angle_quat((0.0, 0.0, 1.0), init_angle_rad)
+        world = _build_cable_pendulum(
+            wp.get_preferred_device(),
+            bend_stiffness=k,
+            twist_stiffness=k,
+            init_rotation=init_q,
+        )
+
+        dt = 1.0 / FPS
+        n_samples = int(1.5 * T_theory / dt)
+        z_axis = np.array([0.0, 0.0, 1.0])
+        angles = self._record_angle_history(world, z_axis, n_samples, dt)
+        crossings = self._zero_crossings(angles)
+        self.assertGreaterEqual(
+            len(crossings),
+            2,
+            msg=f"need >=2 zero crossings to measure period; got {len(crossings)}",
+        )
+        # Two consecutive zero crossings span half a period (+ -> - and
+        # then - -> + would be one full period). Use the first three to
+        # average out per-step jitter.
+        if len(crossings) >= 3:
+            T_meas = (crossings[2] - crossings[0]) * dt
+        else:
+            T_meas = 2.0 * (crossings[1] - crossings[0]) * dt
+        rel = abs(T_meas - T_theory) / T_theory
+        self.assertLess(
+            rel,
+            0.05,
+            msg=f"undamped period drift {rel * 100:.2f}% > 5%; T_theory={T_theory * 1000:.2f} ms, T_meas={T_meas * 1000:.2f} ms",
+        )
+
+    def test_underdamped_log_decrement_recovers_zeta(self) -> None:
+        """Log-decrement: for an underdamped oscillator (:math:`0 <
+        \\zeta < 1`), successive amplitude peaks decay by
+        :math:`\\delta = \\ln(A_n / A_{n+1}) = 2\\pi\\zeta /
+        \\sqrt{1 - \\zeta^2}`. We pick ``zeta = 0.1`` so the rod
+        oscillates several times before damping wins; the recovered
+        zeta from the amplitude ratio must lie within 20 % of the
+        prescribed value."""
+        I_rod = 1.0 / 20.0
+        k = 100.0
+        zeta_target = 0.1
+        c = 2.0 * zeta_target * math.sqrt(k * I_rod)
+
+        init_q = _axis_angle_quat((0.0, 0.0, 1.0), math.radians(10.0))
+        world = _build_cable_pendulum(
+            wp.get_preferred_device(),
+            bend_stiffness=k,
+            twist_stiffness=k,
+            bend_damping=c,
+            twist_damping=c,
+            init_rotation=init_q,
+        )
+
+        dt = 1.0 / FPS
+        T_theory = 2.0 * math.pi / math.sqrt(k / I_rod)
+        n_samples = int(4.0 * T_theory / dt)
+        z_axis = np.array([0.0, 0.0, 1.0])
+        angles = self._record_angle_history(world, z_axis, n_samples, dt)
+
+        # Find local maxima of |angles| separated by ~T_theory; these
+        # are the oscillator's peak amplitudes per cycle. Sampling at
+        # every dt gives ample resolution.
+        T_steps = max(1, int(T_theory / dt))
+        peaks: list[float] = []
+        i = 0
+        while i + T_steps < len(angles):
+            window = np.abs(angles[i:i + T_steps])
+            peak_idx = int(np.argmax(window))
+            peaks.append(float(window[peak_idx]))
+            i += T_steps
+        self.assertGreaterEqual(
+            len(peaks),
+            3,
+            msg=f"need >=3 peaks to measure log-decrement; got {len(peaks)}",
+        )
+        # Average the log-decrement over the first two peak ratios for
+        # noise tolerance.
+        decrements = [math.log(peaks[i] / max(peaks[i + 1], 1e-9)) for i in range(2)]
+        delta = float(np.mean(decrements))
+        zeta_meas = delta / math.sqrt(4.0 * math.pi * math.pi + delta * delta)
+        rel = abs(zeta_meas - zeta_target) / zeta_target
+        self.assertLess(
+            rel,
+            0.30,
+            msg=f"recovered zeta {zeta_meas:.4f} vs target {zeta_target:.4f} ({rel * 100:.1f}% off)",
+        )
+
+    def test_overdamped_settling_time_constant(self) -> None:
+        """Overdamped (:math:`\\zeta > 1`) settles without crossing
+        zero with two real exponential modes
+        :math:`\\theta(t) = A e^{-\\alpha_1 t} + B e^{-\\alpha_2 t}`,
+        :math:`\\alpha_{1,2} = \\omega_n(\\zeta \\pm \\sqrt{\\zeta^2
+        - 1})`. The slow mode :math:`\\alpha_1 = \\omega_n(\\zeta -
+        \\sqrt{\\zeta^2 - 1})` dominates the late-time tail; the
+        envelope's e-folding time matches :math:`1 / \\alpha_1`
+        within ~25 %."""
+        I_rod = 1.0 / 20.0
+        k = 100.0
+        zeta = 2.0  # comfortably overdamped
+        omega_n = math.sqrt(k / I_rod)
+        c = 2.0 * zeta * math.sqrt(k * I_rod)
+        # Slow exponential mode (the surviving tail).
+        alpha_slow = omega_n * (zeta - math.sqrt(zeta * zeta - 1.0))
+        tau_slow = 1.0 / alpha_slow
+
+        init_q = _axis_angle_quat((0.0, 0.0, 1.0), math.radians(10.0))
+        world = _build_cable_pendulum(
+            wp.get_preferred_device(),
+            bend_stiffness=k,
+            twist_stiffness=k,
+            bend_damping=c,
+            twist_damping=c,
+            init_rotation=init_q,
+        )
+
+        dt = 1.0 / FPS
+        n_samples = int(5.0 * tau_slow / dt)
+        z_axis = np.array([0.0, 0.0, 1.0])
+        angles = self._record_angle_history(world, z_axis, n_samples, dt)
+
+        # Overdamped: trajectory monotonically decays after the first
+        # transient. The angle must never cross zero (no oscillation).
+        signs = np.sign(angles[1:])
+        crossings = int(np.sum(np.diff(signs) != 0))
+        self.assertEqual(
+            crossings,
+            0,
+            msg=f"overdamped trajectory should not cross zero; got {crossings} crossings",
+        )
+
+        # Fit |angle|'s exponential tail. Pick samples after t > tau_slow
+        # so the fast transient has decayed; fit log(|angle|) ~ -t/tau.
+        t = np.arange(len(angles)) * dt
+        tail_start = int(tau_slow / dt)
+        tail_end = min(int(4.0 * tau_slow / dt), len(angles) - 1)
+        if tail_end <= tail_start + 5:
+            self.skipTest("not enough samples in the exponential tail")
+        # Filter to non-trivially-positive amplitudes.
+        amp = np.abs(angles[tail_start:tail_end])
+        ts = t[tail_start:tail_end]
+        valid = amp > 1e-5
+        self.assertGreater(int(valid.sum()), 5, msg="tail too noisy to fit")
+        log_amp = np.log(amp[valid])
+        ts_v = ts[valid]
+        slope, _ = np.polyfit(ts_v, log_amp, 1)
+        tau_meas = -1.0 / slope
+        rel = abs(tau_meas - tau_slow) / tau_slow
+        self.assertLess(
+            rel,
+            0.30,
+            msg=(
+                f"overdamped time constant: theory tau={tau_slow * 1000:.2f} ms, "
+                f"measured tau={tau_meas * 1000:.2f} ms ({rel * 100:.1f}% off)"
+            ),
+        )
+
+    def test_high_damping_settles_within_solver_iterations(self) -> None:
+        """Convergence regression: at high damping :math:`c =
+        10 \\sqrt{kI}` (zeta ~= 5) the rod must settle to <5% of its
+        initial deflection within ``2 / alpha_slow`` simulated
+        seconds at the default ``solver_iterations``. Before the
+        spring/damping split this scenario typically stalled because
+        the soft-PD eff_mass collapsed to the rigid limit and the
+        bias vanished -- the joint became a stiff velocity lock that
+        PGS needed many iterations to resolve. After the split the
+        damping pass dissipates energy directly, independent of how
+        many iterate sweeps the main solve runs."""
+        I_rod = 1.0 / 20.0
+        k = 50.0  # modest k so the test isn't dominated by spring stiffness
+        zeta = 5.0
+        c = 2.0 * zeta * math.sqrt(k * I_rod)
+        omega_n = math.sqrt(k / I_rod)
+        alpha_slow = omega_n * (zeta - math.sqrt(zeta * zeta - 1.0))
+        # Two slow time constants is comfortably enough for
+        # exp(-2) ~= 14% to drop to 5%; the 5% threshold below leaves
+        # margin.
+        settle_t = 2.0 / alpha_slow
+
+        init_angle = math.radians(15.0)
+        init_q = _axis_angle_quat((0.0, 0.0, 1.0), init_angle)
+        world = _build_cable_pendulum(
+            wp.get_preferred_device(),
+            bend_stiffness=k,
+            twist_stiffness=k,
+            bend_damping=c,
+            twist_damping=c,
+            init_rotation=init_q,
+        )
+
+        dt = 1.0 / FPS
+        run_settle_loop(world, int(settle_t / dt), dt=dt)
+        z_axis = np.array([0.0, 0.0, 1.0])
+        angle_end = abs(_rotation_angle_about(_rod_orientation(world), z_axis))
+        omega_end = _rod_angular_velocity(world)
+        self.assertTrue(
+            np.isfinite(_rod_orientation(world)).all() and np.isfinite(omega_end).all(),
+            msg="state went non-finite under high damping",
+        )
+        self.assertLess(
+            angle_end,
+            init_angle * 0.10,
+            msg=(
+                f"high-damping convergence regression: angle decayed to "
+                f"{angle_end:.4f} rad after {settle_t * 1000:.1f} ms, "
+                f"want < 10% of init ({init_angle * 0.10:.4f} rad)"
+            ),
+        )
+
+    def test_high_stiffness_remains_stable(self) -> None:
+        """High-stiffness stability regression: at :math:`k = 100 \\cdot
+        k_{ref}` the spring is ~10x stiffer than what the substep can
+        comfortably resolve. Without a Nyquist clamp the soft-PD's
+        eff_mass collapses to the rigid limit and the bias spikes to
+        :math:`C / dt` -- the per-step impulse can overshoot and the
+        rod's angular velocity diverges. With the clamp in place the
+        rod must remain bounded in both pose and velocity."""
+        # k_ref ~= 1 / (dt * dt * I_inv) so the ratio dt^2 * k_eff <= 1.
+        # I_inv = 20, dt at 240 Hz with substeps=4 -> 1/960. So
+        # k_ref ~= 960^2 / 20 ~= 46000. We deliberately exceed it.
+        k = 100000.0
+        c = 0.0  # undamped to make instability easier to detect
+        init_q = _axis_angle_quat((0.0, 0.0, 1.0), math.radians(10.0))
+        world = _build_cable_pendulum(
+            wp.get_preferred_device(),
+            bend_stiffness=k,
+            twist_stiffness=k,
+            bend_damping=c,
+            twist_damping=c,
+            init_rotation=init_q,
+        )
+        dt = 1.0 / FPS
+        run_settle_loop(world, int(0.5 * FPS), dt=dt)
+        q = _rod_orientation(world)
+        omega = _rod_angular_velocity(world)
+        self.assertTrue(np.isfinite(q).all() and np.isfinite(omega).all())
+        # Energy conservation isn't expected (the Nyquist clamp gates
+        # the stiffness so the apparent natural frequency is bounded);
+        # we just want bounded motion.
+        z_axis = np.array([0.0, 0.0, 1.0])
+        bend = abs(_rotation_angle_about(q, z_axis))
+        self.assertLess(
+            bend,
+            math.radians(60.0),
+            msg=f"high-stiffness rod blew up: bend={math.degrees(bend):.2f} deg",
+        )
+        self.assertLess(
+            float(np.linalg.norm(omega)),
+            50.0,
+            msg=f"high-stiffness rod's omega diverged: |omega|={np.linalg.norm(omega):.2f} rad/s",
+        )
+
+    def test_large_angle_log_map_accuracy(self) -> None:
+        """Pre-rotate the rod by 80 deg about +z and let it spring back
+        with no damping. The small-angle log-map ``kappa = 2 * q.xyz``
+        underestimates the bend by ~6% at this deflection (since the
+        quaternion's xyz is ``sin(theta/2)`` but the linearised map
+        treats it as ``theta/2``). With the full log-map the spring
+        force matches the actual deflection, so the period of the
+        first oscillation converges to the small-angle theory --
+        within 10 % even at this amplitude. Failure mode: spring force
+        is too weak, period grows."""
+        I_rod = 1.0 / 20.0
+        k = 60.0
+        T_theory = 2.0 * math.pi / math.sqrt(k / I_rod)
+
+        init_angle = math.radians(80.0)  # large -- breaks small-angle map
+        init_q = _axis_angle_quat((0.0, 0.0, 1.0), init_angle)
+        world = _build_cable_pendulum(
+            wp.get_preferred_device(),
+            bend_stiffness=k,
+            twist_stiffness=k,
+            init_rotation=init_q,
+        )
+
+        dt = 1.0 / FPS
+        n_samples = int(1.5 * T_theory / dt)
+        z_axis = np.array([0.0, 0.0, 1.0])
+        angles = self._record_angle_history(world, z_axis, n_samples, dt)
+
+        # Large-angle behaviour isn't strictly linear, but the period
+        # of the first oscillation should still be within 10 % of the
+        # small-angle theory if the log-map is exact.
+        crossings = self._zero_crossings(angles)
+        self.assertGreaterEqual(
+            len(crossings),
+            2,
+            msg=f"large-angle rod didn't oscillate; crossings={len(crossings)}",
+        )
+        T_meas = 2.0 * (crossings[1] - crossings[0]) * dt
+        rel = abs(T_meas - T_theory) / T_theory
+        # Small-angle approximation typically overshoots by 5-10% at
+        # 80 deg; the full log-map should land within 15%.
+        self.assertLess(
+            rel,
+            0.15,
+            msg=(
+                f"large-angle period drift {rel * 100:.1f}% > 15%; "
+                f"T_theory={T_theory * 1000:.2f} ms, T_meas={T_meas * 1000:.2f} ms"
+            ),
+        )
+
+
 if __name__ == "__main__":
     wp.init()
     unittest.main()

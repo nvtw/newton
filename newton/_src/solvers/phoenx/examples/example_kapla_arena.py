@@ -111,7 +111,7 @@ class Example:
         self.sim_time = 0.0
         self.sim_substeps = 4
         self.solver_iterations = 4
-        self.velocity_iterations = 0
+        self.velocity_iterations = 1
 
         self._build_scene()
 

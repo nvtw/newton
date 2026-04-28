@@ -72,8 +72,9 @@ class TestExampleTowerNothingDrops(unittest.TestCase):
     Simulates the 1280-plank circular tower through 60 frames at
     60 Hz (1 s) with the same solver settings the example uses
     (``substeps = 20``, ``solver_iterations = 3``,
-    ``velocity_iterations = 0``). Asserts every plank stays within
-    half a plank height of its initial layer centre.
+    ``velocity_iterations = 1``, the new minimum after the soft-PD
+    damping split). Asserts every plank stays within half a plank
+    height of its initial layer centre.
 
     The tolerance is deliberately generous (``0.5 * PLANK_HZ`` = 25 cm)
     -- a settled circular stack compresses a couple of mm under its
@@ -93,7 +94,7 @@ class TestExampleTowerNothingDrops(unittest.TestCase):
             fps=self.FPS,
             substeps=self.SIM_SUBSTEPS,
             solver_iterations=self.SOLVER_ITERATIONS,
-            velocity_iterations=0,
+            velocity_iterations=1,
             friction=0.5,
         )
         scene.add_ground_plane()

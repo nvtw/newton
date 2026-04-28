@@ -382,17 +382,31 @@ class TestColoringPriorityBias(unittest.TestCase):
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX joint-advanced tests require CUDA + graph capture")
-class TestVelocityIterationsZero(unittest.TestCase):
-    """``velocity_iterations = 0`` skips the TGS-soft relax sweep.
-    Position-bias-on iterations alone should still settle a single
-    body on a plane; baumgarte drift only accumulates on tall
-    stacks."""
+class TestVelocityIterationsValidator(unittest.TestCase):
+    """``velocity_iterations`` is now load-bearing for soft-PD damping
+    (cable bend / twist, revolute / prismatic drive PD, PD limit
+    rows): the relax pass applies the velocity-only damping impulse
+    that was split out of the main solve. ``velocity_iterations = 0``
+    must raise -- silently zeroing damping is worse than failing
+    construction."""
 
-    def test_single_body_settles_with_zero_velocity_iters(self) -> None:
+    def test_zero_velocity_iters_rejected(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            _PhoenXScene(
+                substeps=4,
+                solver_iterations=8,
+                velocity_iterations=0,
+            ).finalize()
+        self.assertIn("velocity_iterations", str(ctx.exception))
+
+    def test_one_velocity_iter_settles_box(self) -> None:
+        """Sanity check that the new minimum (``velocity_iterations =
+        1``) still produces a sensible single-body settle on the
+        ground plane."""
         scene = _PhoenXScene(
             substeps=4,
             solver_iterations=8,
-            velocity_iterations=0,
+            velocity_iterations=1,
         )
         scene.add_ground_plane()
         scene.add_box(position=(0.0, 0.0, 0.5), half_extents=(0.5, 0.5, 0.5))
@@ -400,14 +414,11 @@ class TestVelocityIterationsZero(unittest.TestCase):
         for _ in range(SETTLE_FRAMES):
             scene.step()
         wp.synchronize_device()
-        # Cube COM should rest near z = 0.5 (half-extent above the
-        # ground at z = 0). Allow 5 cm of baumgarte / penetration
-        # tolerance -- without a relax sweep it sits slightly high.
         z = float(scene.body_position(0)[2])
         self.assertLess(
             abs(z - 0.5),
             0.05,
-            msg=f"cube z={z:.4f} did not settle near 0.5 with velocity_iterations=0",
+            msg=f"cube z={z:.4f} did not settle near 0.5 with velocity_iterations=1",
         )
 
 
