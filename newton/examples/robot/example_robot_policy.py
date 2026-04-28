@@ -4,8 +4,9 @@
 ###########################################################################
 # Example Robot control via keyboard
 #
-# Shows how to control robot pretrained in IsaacLab with RL.
-# The policy is loaded from a file and the robot is controlled via keyboard.
+# Shows how to control robots pretrained in IsaacLab with RL.  Policies are
+# loaded from ONNX files and run via Newton's Warp-backed
+# :class:`~newton.utils.OnnxRuntime` (no PyTorch dependency).
 #
 # Press "p" to reset the robot.
 # Press "i", "j", "k", "l", "u", "o" to move the robot.
@@ -15,14 +16,12 @@
 # python -m newton.examples robot_policy --robot go2
 # python -m newton.examples robot_policy --robot anymal
 # python -m newton.examples robot_policy --robot anymal --physx
-# to run the example with a PhysX-trained policy run with --physx
 ###########################################################################
 
-import warnings
 from dataclasses import dataclass
 from typing import Any
 
-import torch
+import numpy as np
 import warp as wp
 import yaml
 
@@ -39,40 +38,41 @@ class RobotConfig:
     asset_dir: str
     policy_path: dict[str, str]
     asset_path: str
-    yaml_path: str  # Path within the asset directory to the configuration YAML
+    yaml_path: str
 
 
-# Robot configurations pointing to newton-assets repository
+# Policy paths are now ONNX files.  These names mirror the original ``.pt``
+# layout under ``rl_policies/`` but with the ``.onnx`` extension.
 ROBOT_CONFIGS = {
     "anymal": RobotConfig(
         asset_dir="anybotics_anymal_c",
-        policy_path={"mjw": "rl_policies/mjw_anymal.pt", "physx": "rl_policies/physx_anymal.pt"},
+        policy_path={"mjw": "rl_policies/mjw_anymal.onnx", "physx": "rl_policies/physx_anymal.onnx"},
         asset_path="usd/anymal_c.usda",
         yaml_path="rl_policies/anymal.yaml",
     ),
     "go2": RobotConfig(
         asset_dir="unitree_go2",
-        policy_path={"mjw": "rl_policies/mjw_go2.pt", "physx": "rl_policies/physx_go2.pt"},
+        policy_path={"mjw": "rl_policies/mjw_go2.onnx", "physx": "rl_policies/physx_go2.onnx"},
         asset_path="usd/go2.usda",
         yaml_path="rl_policies/go2.yaml",
     ),
     "g1_29dof": RobotConfig(
         asset_dir="unitree_g1",
-        policy_path={"mjw": "rl_policies/mjw_g1_29DOF.pt"},
+        policy_path={"mjw": "rl_policies/mjw_g1_29DOF.onnx"},
         asset_path="usd/g1_isaac.usd",
         yaml_path="rl_policies/g1_29dof.yaml",
     ),
     "g1_23dof": RobotConfig(
         asset_dir="unitree_g1",
-        policy_path={"mjw": "rl_policies/mjw_g1_23DOF.pt", "physx": "rl_policies/physx_g1_23DOF.pt"},
+        policy_path={"mjw": "rl_policies/mjw_g1_23DOF.onnx", "physx": "rl_policies/physx_g1_23DOF.onnx"},
         asset_path="usd/g1_minimal.usd",
         yaml_path="rl_policies/g1_23dof.yaml",
     ),
 }
 
 
-def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """Rotate a vector by the inverse of a quaternion.
+def quat_rotate_inverse(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Rotate a vector by the inverse of a quaternion (NumPy implementation).
 
     Args:
         q: The quaternion in (x, y, z, w). Shape is (..., 4).
@@ -81,103 +81,66 @@ def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     Returns:
         The rotated vector in (x, y, z). Shape is (..., 3).
     """
-    q_w = q[..., 3]  # w component is at index 3 for XYZW format
-    q_vec = q[..., :3]  # xyz components are at indices 0, 1, 2
-    a = v * (2.0 * q_w**2 - 1.0).unsqueeze(-1)
-    b = torch.cross(q_vec, v, dim=-1) * q_w.unsqueeze(-1) * 2.0
-    # for two-dimensional tensors, bmm is faster than einsum
-    if q_vec.dim() == 2:
-        c = q_vec * torch.bmm(q_vec.view(q.shape[0], 1, 3), v.view(q.shape[0], 3, 1)).squeeze(-1) * 2.0
-    else:
-        c = q_vec * torch.einsum("...i,...i->...", q_vec, v).unsqueeze(-1) * 2.0
+    q_w = q[..., 3]
+    q_vec = q[..., :3]
+    a = v * (2.0 * q_w**2 - 1.0)[..., np.newaxis]
+    b = np.cross(q_vec, v, axis=-1) * (q_w * 2.0)[..., np.newaxis]
+    c = q_vec * np.sum(q_vec * v, axis=-1, keepdims=True) * 2.0
     return a - b + c
 
 
-with warnings.catch_warnings():
-    warnings.filterwarnings(
-        "ignore",
-        message=r"`torch\.jit\.script` is deprecated\. Please switch to `torch\.compile` or `torch\.export`\.",
-        category=DeprecationWarning,
-    )
-    quat_rotate_inverse = torch.jit.script(quat_rotate_inverse)
-
-
 def compute_obs(
-    actions: torch.Tensor,
+    actions: np.ndarray,
     state: State,
-    joint_pos_initial: torch.Tensor,
-    device: str,
-    indices: torch.Tensor,
-    gravity_vec: torch.Tensor,
-    command: torch.Tensor,
-) -> torch.Tensor:
-    """Compute observation for robot policy.
+    joint_pos_initial: np.ndarray,
+    indices: np.ndarray,
+    gravity_vec: np.ndarray,
+    command: np.ndarray,
+) -> np.ndarray:
+    """Compute observation for robot policy."""
+    joint_q = state.joint_q.numpy() if state.joint_q is not None else np.zeros(7, dtype=np.float32)
+    joint_qd = state.joint_qd.numpy() if state.joint_qd is not None else np.zeros(6, dtype=np.float32)
 
-    Args:
-        actions: Previous actions tensor
-        state: Current simulation state
-        joint_pos_initial: Initial joint positions
-        device: PyTorch device string
-        indices: Index mapping for joint reordering
-        gravity_vec: Gravity vector in world frame
-        command: Command vector
-
-    Returns:
-        Observation tensor for policy input
-    """
-    # Extract state information with proper handling
-    joint_q = state.joint_q if state.joint_q is not None else []
-    joint_qd = state.joint_qd if state.joint_qd is not None else []
-
-    root_quat_w = torch.tensor(joint_q[3:7], device=device, dtype=torch.float32).unsqueeze(0)
-    root_lin_vel_w = torch.tensor(joint_qd[:3], device=device, dtype=torch.float32).unsqueeze(0)
-    root_ang_vel_w = torch.tensor(joint_qd[3:6], device=device, dtype=torch.float32).unsqueeze(0)
-    joint_pos_current = torch.tensor(joint_q[7:], device=device, dtype=torch.float32).unsqueeze(0)
-    joint_vel_current = torch.tensor(joint_qd[6:], device=device, dtype=torch.float32).unsqueeze(0)
+    root_quat_w = np.asarray(joint_q[3:7], dtype=np.float32).reshape(1, 4)
+    root_lin_vel_w = np.asarray(joint_qd[:3], dtype=np.float32).reshape(1, 3)
+    root_ang_vel_w = np.asarray(joint_qd[3:6], dtype=np.float32).reshape(1, 3)
+    joint_pos_current = np.asarray(joint_q[7:], dtype=np.float32).reshape(1, -1)
+    joint_vel_current = np.asarray(joint_qd[6:], dtype=np.float32).reshape(1, -1)
 
     vel_b = quat_rotate_inverse(root_quat_w, root_lin_vel_w)
     a_vel_b = quat_rotate_inverse(root_quat_w, root_ang_vel_w)
     grav = quat_rotate_inverse(root_quat_w, gravity_vec)
     joint_pos_rel = joint_pos_current - joint_pos_initial
     joint_vel_rel = joint_vel_current
-    rearranged_joint_pos_rel = torch.index_select(joint_pos_rel, 1, indices)
-    rearranged_joint_vel_rel = torch.index_select(joint_vel_rel, 1, indices)
-    obs = torch.cat([vel_b, a_vel_b, grav, command, rearranged_joint_pos_rel, rearranged_joint_vel_rel, actions], dim=1)
+    rearranged_joint_pos_rel = joint_pos_rel[:, indices]
+    rearranged_joint_vel_rel = joint_vel_rel[:, indices]
+    return np.concatenate(
+        [
+            vel_b,
+            a_vel_b,
+            grav,
+            command,
+            rearranged_joint_pos_rel,
+            rearranged_joint_vel_rel,
+            actions,
+        ],
+        axis=1,
+    ).astype(np.float32)
 
-    return obs
 
-
-def load_policy_and_setup_tensors(example: Any, policy_path: str, num_dofs: int, joint_pos_slice: slice):
-    """Load policy and setup initial tensors for robot control.
-
-    Args:
-        example: Robot example instance
-        policy_path: Path to the policy file
-        num_dofs: Number of degrees of freedom
-        joint_pos_slice: Slice for extracting joint positions from state
-    """
-    device = example.torch_device
+def load_policy_and_setup_arrays(example: Any, policy_path: str, num_dofs: int, joint_pos_slice: slice):
+    """Load ONNX policy and setup initial NumPy arrays for control."""
     print("[INFO] Loading policy from:", policy_path)
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r"`torch\.jit\.load` is deprecated\. Please switch to `torch\.export`\.",
-            category=DeprecationWarning,
-        )
-        example.policy = torch.jit.load(policy_path, map_location=device)
+    example.policy = newton.utils.OnnxRuntime(policy_path, device=str(example.device))
+    example.policy_input_name = example.policy.input_names[0]
+    example.policy_output_name = example.policy.output_names[0]
 
-    # Handle potential None state
-    joint_q = example.state_0.joint_q if example.state_0.joint_q is not None else []
-    example.joint_pos_initial = torch.tensor(joint_q[joint_pos_slice], device=device, dtype=torch.float32).unsqueeze(0)
-    example.act = torch.zeros(1, num_dofs, device=device, dtype=torch.float32)
-    example.rearranged_act = torch.zeros(1, num_dofs, device=device, dtype=torch.float32)
+    joint_q = example.state_0.joint_q.numpy() if example.state_0.joint_q is not None else np.zeros(7, dtype=np.float32)
+    example.joint_pos_initial = np.asarray(joint_q[joint_pos_slice], dtype=np.float32).reshape(1, num_dofs)
+    example.act = np.zeros((1, num_dofs), dtype=np.float32)
 
 
 def find_physx_mjwarp_mapping(mjwarp_joint_names, physx_joint_names):
-    """
-    Finds the mapping between PhysX and MJWarp joint names.
-    Returns a tuple of two lists: (mjc_to_physx, physx_to_mjc).
-    """
     mjc_to_physx = []
     physx_to_mjc = []
     for j in mjwarp_joint_names:
@@ -201,31 +164,24 @@ class Example:
         mjc_to_physx: list[int],
         physx_to_mjc: list[int],
     ):
-        # Setup simulation parameters first
         fps = 200
         self.frame_dt = 1.0e0 / fps
         self.decimation = 4
         self.cycle_time = 1 / fps * self.decimation
 
-        # Group related attributes by prefix
         self.sim_time = 0.0
         self.sim_step = 0
         self.sim_substeps = 1
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        # Save a reference to the viewer
         self.viewer = viewer
 
-        # Store configuration
         self.use_mujoco = False
         self.config = config
         self.robot_config = robot_config
 
-        # Device setup
         self.device = wp.get_device()
-        self.torch_device = "cuda" if self.device.is_cuda else "cpu"
 
-        # Build the model
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
@@ -249,8 +205,6 @@ class Example:
         builder.approximate_meshes("convex_hull")
 
         builder.add_ground_plane()
-        # builder's gravity isn't a vec3. use model.set_gravity()
-        # builder.gravity = wp.vec3(0.0, 0.0, -9.81)
 
         builder.joint_q[:3] = [0.0, 0.0, 0.76]
         builder.joint_q[3:7] = [0.0, 0.0, 0.7071, 0.7071]
@@ -273,89 +227,72 @@ class Example:
             njmax=100,
         )
 
-        # Initialize state objects
         self.state_temp = self.model.state()
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
         self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
 
-        # Set model in viewer
         self.viewer.set_model(self.model)
         self.viewer.vsync = True
 
-        # Ensure FK evaluation (for non-MuJoCo solvers)
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
-        # Store initial joint state for fast reset
         self._initial_joint_q = wp.clone(self.state_0.joint_q)
         self._initial_joint_qd = wp.clone(self.state_0.joint_qd)
 
-        # Pre-compute tensors that don't change during simulation
-        self.physx_to_mjc_indices = torch.tensor(physx_to_mjc, device=self.torch_device, dtype=torch.long)
-        self.mjc_to_physx_indices = torch.tensor(mjc_to_physx, device=self.torch_device, dtype=torch.long)
-        self.gravity_vec = torch.tensor([0.0, 0.0, -1.0], device=self.torch_device, dtype=torch.float32).unsqueeze(0)
-        self.command = torch.zeros((1, 3), device=self.torch_device, dtype=torch.float32)
+        self.physx_to_mjc_indices = np.asarray(physx_to_mjc, dtype=np.int64)
+        self.mjc_to_physx_indices = np.asarray(mjc_to_physx, dtype=np.int64)
+        self.gravity_vec = np.array([[0.0, 0.0, -1.0]], dtype=np.float32)
+        self.command = np.zeros((1, 3), dtype=np.float32)
         self._reset_key_prev = False
 
-        # Initialize policy-related attributes
-        # (will be set by load_policy_and_setup_tensors)
         self.policy = None
+        self.policy_input_name = None
+        self.policy_output_name = None
         self.joint_pos_initial = None
         self.act = None
-        self.rearranged_act = None
 
-        # Call capture at the end
         self.capture()
 
     def capture(self):
-        """Put graph capture into it's own method."""
         self.graph = None
         self.use_cuda_graph = False
         if wp.get_device().is_cuda and wp.is_mempool_enabled(wp.get_device()):
             print("[INFO] Using CUDA graph")
             self.use_cuda_graph = True
-            torch_tensor = torch.zeros(self.config["num_dofs"] + 6, device=self.torch_device, dtype=torch.float32)
-            self.control.joint_target_pos = wp.from_torch(torch_tensor, dtype=wp.float32, requires_grad=False)
+            self.control.joint_target_pos = wp.zeros(self.config["num_dofs"] + 6, dtype=wp.float32, device=self.device)
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
 
     def simulate(self):
-        """Simulate performs one frame's worth of updates."""
         need_state_copy = self.use_cuda_graph and self.sim_substeps % 2 == 1
 
         for i in range(self.sim_substeps):
             self.state_0.clear_forces()
 
-            # Apply forces to the model for picking, wind, etc
             self.viewer.apply_forces(self.state_0)
 
             self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
 
-            # Swap states - handle CUDA graph case specially
             if need_state_copy and i == self.sim_substeps - 1:
-                # Swap states by copying the state arrays for graph capture
                 self.state_0.assign(self.state_1)
             else:
-                # We can just swap the state references
                 self.state_0, self.state_1 = self.state_1, self.state_0
 
         self.solver.update_contacts(self.contacts, self.state_0)
 
     def reset(self):
         print("[INFO] Resetting example")
-        # Restore initial joint positions and velocities in-place.
         wp.copy(self.state_0.joint_q, self._initial_joint_q)
         wp.copy(self.state_0.joint_qd, self._initial_joint_qd)
         wp.copy(self.state_1.joint_q, self._initial_joint_q)
         wp.copy(self.state_1.joint_qd, self._initial_joint_qd)
-        # Recompute forward kinematics to refresh derived state.
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         newton.eval_fk(self.model, self.state_1.joint_q, self.state_1.joint_qd, self.state_1)
 
     def step(self):
-        # Build command from viewer keyboard
         if hasattr(self.viewer, "is_key_down"):
             fwd = 1.0 if self.viewer.is_key_down("i") else (-1.0 if self.viewer.is_key_down("k") else 0.0)
             lat = 0.5 if self.viewer.is_key_down("j") else (-0.5 if self.viewer.is_key_down("l") else 0.0)
@@ -363,7 +300,6 @@ class Example:
             self.command[0, 0] = float(fwd)
             self.command[0, 1] = float(lat)
             self.command[0, 2] = float(rot)
-            # Reset when 'P' is pressed (edge-triggered)
             reset_down = bool(self.viewer.is_key_down("p"))
             if reset_down and not self._reset_key_prev:
                 self.reset()
@@ -373,18 +309,20 @@ class Example:
             self.act,
             self.state_0,
             self.joint_pos_initial,
-            self.torch_device,
             self.physx_to_mjc_indices,
             self.gravity_vec,
             self.command,
         )
-        with torch.no_grad():
-            self.act = self.policy(obs)
-            self.rearranged_act = torch.index_select(self.act, 1, self.mjc_to_physx_indices)
-            a = self.joint_pos_initial + self.config["action_scale"] * self.rearranged_act
-            a_with_zeros = torch.cat([torch.zeros(6, device=self.torch_device, dtype=torch.float32), a.squeeze(0)])
-            a_wp = wp.from_torch(a_with_zeros, dtype=wp.float32, requires_grad=False)
-            wp.copy(self.control.joint_target_pos, a_wp)
+
+        obs_wp = wp.array(obs, dtype=wp.float32, device=self.device)
+        out = self.policy({self.policy_input_name: obs_wp})
+        self.act = out[self.policy_output_name].numpy().astype(np.float32)
+
+        rearranged_act = self.act[:, self.mjc_to_physx_indices]
+        a = self.joint_pos_initial + self.config["action_scale"] * rearranged_act
+        a_with_zeros = np.concatenate([np.zeros(6, dtype=np.float32), a.squeeze(0)])
+        a_wp = wp.array(a_with_zeros, dtype=wp.float32, device=self.device)
+        wp.copy(self.control.joint_target_pos, a_wp)
 
         for _ in range(self.decimation):
             if self.graph:
@@ -410,18 +348,14 @@ class Example:
 
 
 if __name__ == "__main__":
-    # Create parser that inherits common arguments and adds
-    # example-specific ones
     parser = newton.examples.create_parser()
     parser.add_argument(
         "--robot", type=str, default="g1_29dof", choices=list(ROBOT_CONFIGS.keys()), help="Robot name to load"
     )
     parser.add_argument("--physx", action="store_true", help="Run physX policy instead of MJWarp.")
 
-    # Parse arguments and initialize viewer
     viewer, args = newton.examples.init(parser)
 
-    # Get robot configuration
     if args.robot not in ROBOT_CONFIGS:
         print(f"[ERROR] Unknown robot: {args.robot}")
         print(f"[INFO] Available robots: {list(ROBOT_CONFIGS.keys())}")
@@ -430,11 +364,9 @@ if __name__ == "__main__":
     robot_config = ROBOT_CONFIGS[args.robot]
     print(f"[INFO] Selected robot: {args.robot}")
 
-    # Download assets from newton-assets repository
     asset_directory = str(newton.utils.download_asset(robot_config.asset_dir))
     print(f"[INFO] Asset directory: {asset_directory}")
 
-    # Load robot configuration from YAML file in the downloaded assets
     yaml_file_path = f"{asset_directory}/{robot_config.yaml_path}"
     try:
         with open(yaml_file_path, encoding="utf-8") as f:
@@ -464,8 +396,6 @@ if __name__ == "__main__":
 
     example = Example(viewer, robot_config, config, asset_directory, mjc_to_physx, physx_to_mjc)
 
-    # Use utility function to load policy and setup tensors
-    load_policy_and_setup_tensors(example, policy_path, config["num_dofs"], slice(7, None))
+    load_policy_and_setup_arrays(example, policy_path, config["num_dofs"], slice(7, None))
 
-    # Run using standard example loop
     newton.examples.run(example, args)

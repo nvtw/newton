@@ -29,6 +29,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "warp-lang>=1.13.0rc1",
+    "onnx>=1.16.0",  # ONNX protobuf parser (no onnxruntime; inference runs on Warp)
 ]
 
 [project.optional-dependencies]
@@ -83,14 +84,16 @@ examples = [
     "Pillow>=9.0.0",        # for image processing (viewer icons, heightfield loading, textures)
 ]
 
-# Extra dependency needed to run examples that inference an RL policy
+# PyTorch is no longer required to run RL policies (examples and actuators
+# load ONNX files via Newton's Warp-backed runtime).  These extras remain only
+# for the Kamino solver's RL training scripts.
 torch-cu12 = [
     "newton[examples]", # include example dependencies
-    "torch>=2.7.0",     # CUDA 12 PyTorch
+    "torch>=2.7.0",     # CUDA 12 PyTorch (Kamino RL only)
 ]
 torch-cu13 = [
     "newton[examples]", # include example dependencies
-    "torch>=2.10.0",    # CUDA 13 PyTorch
+    "torch>=2.10.0",    # CUDA 13 PyTorch (Kamino RL only)
 ]
 
 # Development and Testing

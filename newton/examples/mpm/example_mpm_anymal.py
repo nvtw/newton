@@ -11,10 +11,8 @@
 ###########################################################################
 
 import sys
-import warnings
 
 import numpy as np
-import torch
 import warp as wp
 
 import newton
@@ -160,31 +158,22 @@ class Example:
         # Setup control policy
         self.control = self.model.control()
 
-        q0 = wp.to_torch(self.state_0.joint_q)
-        self.torch_device = q0.device
-        self.joint_pos_initial = q0[7:].unsqueeze(0).detach().clone()
-        self.act = torch.zeros(1, 12, device=self.torch_device, dtype=torch.float32)
-        self.rearranged_act = torch.zeros(1, 12, device=self.torch_device, dtype=torch.float32)
+        self.joint_pos_initial = np.asarray(
+            self.state_0.joint_q.numpy()[7:], dtype=np.float32
+        ).reshape(1, 12)
+        self.act = np.zeros((1, 12), dtype=np.float32)
 
         # Download the policy from the newton-assets repository
-        policy_path = str(asset_path / "rl_policies" / "anymal_walking_policy_physx.pt")
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r"`torch\.jit\.load` is deprecated\. Please switch to `torch\.export`\.",
-                category=DeprecationWarning,
-            )
-            self.policy = torch.jit.load(policy_path, map_location=self.torch_device)
+        policy_path = str(asset_path / "rl_policies" / "anymal_walking_policy_physx.onnx")
+        self.policy = newton.utils.OnnxRuntime(policy_path, device=str(self.device))
+        self._policy_input_name = self.policy.input_names[0]
+        self._policy_output_name = self.policy.output_names[0]
 
-        # Pre-compute tensors that don't change during simulation
-        self.lab_to_mujoco_indices = torch.tensor(
-            [lab_to_mujoco[i] for i in range(len(lab_to_mujoco))], device=self.torch_device
-        )
-        self.mujoco_to_lab_indices = torch.tensor(
-            [mujoco_to_lab[i] for i in range(len(mujoco_to_lab))], device=self.torch_device
-        )
-        self.gravity_vec = torch.tensor([0.0, 0.0, -1.0], device=self.torch_device, dtype=torch.float32).unsqueeze(0)
-        self.command = torch.zeros((1, 3), device=self.torch_device, dtype=torch.float32)
+        # Pre-compute index arrays
+        self.lab_to_mujoco_indices = np.asarray(lab_to_mujoco, dtype=np.int64)
+        self.mujoco_to_lab_indices = np.asarray(mujoco_to_lab, dtype=np.int64)
+        self.gravity_vec = np.array([[0.0, 0.0, -1.0]], dtype=np.float32)
+        self.command = np.zeros((1, 3), dtype=np.float32)
 
         self._auto_forward = True
 
@@ -211,19 +200,18 @@ class Example:
             self.act,
             self.state_0,
             self.joint_pos_initial,
-            self.torch_device,
             self.lab_to_mujoco_indices,
             self.gravity_vec,
             self.command,
         )
-        with torch.no_grad():
-            self.act = self.policy(obs)
-            self.rearranged_act = torch.gather(self.act, 1, self.mujoco_to_lab_indices.unsqueeze(0))
-            a = self.joint_pos_initial + 0.5 * self.rearranged_act
-            a_with_zeros = torch.cat([torch.zeros(6, device=self.torch_device, dtype=torch.float32), a.squeeze(0)])
-            a_wp = wp.from_torch(a_with_zeros, dtype=wp.float32, requires_grad=False)
-            # copy action targets to control buffer
-            wp.copy(self.control.joint_target_pos, a_wp)
+        obs_wp = wp.array(obs, dtype=wp.float32, device=self.device)
+        out = self.policy({self._policy_input_name: obs_wp})
+        self.act = out[self._policy_output_name].numpy().astype(np.float32)
+        rearranged_act = self.act[:, self.mujoco_to_lab_indices]
+        a = self.joint_pos_initial + 0.5 * rearranged_act
+        a_with_zeros = np.concatenate([np.zeros(6, dtype=np.float32), a.squeeze(0)])
+        a_wp = wp.array(a_with_zeros, dtype=wp.float32, device=self.device)
+        wp.copy(self.control.joint_target_pos, a_wp)
 
     def simulate_robot(self):
         # robot substeps
