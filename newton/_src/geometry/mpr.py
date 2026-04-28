@@ -35,7 +35,8 @@ from typing import Any
 
 import warp as wp
 
-from .support_function import GeoTypeEx, closest_point_on_triangle
+from .closest_point import closest_point_on_shape
+from .support_function import GeoTypeEx
 
 
 @wp.struct
@@ -160,11 +161,20 @@ def create_support_map_function(support_func: Any):
         """
         Compute geometric center of Minkowski difference.
 
-        For generic shapes both centers are at their local origins.  For
-        triangles (and triangle prisms) the "center" on shape A is replaced
-        by the closest point on the triangle to the convex center
-        (``position_b``), giving MPR and GJK a much better starting point
-        when the triangle is large relative to the convex.
+        Both shape "centers" are seeded with closest-point queries when
+        the shape type supports them: shape A's center is the closest
+        point on A to ``position_b`` (B's origin in A-frame), and shape
+        B's center is the closest point on B to A's origin, transformed
+        back into A-frame. For shapes whose closest-point dispatcher
+        returns ``handled=False`` (ellipsoid, cone, tapered cylinder,
+        finite plane quads) we fall back to the local origin / shape
+        position respectively, preserving the previous seeding.
+
+        Triangles (and triangle prisms) additionally blend 1% toward the
+        face centroid; this is about *manifold quality*, not seeding (see
+        below). The downstream coincident-centers fallback in
+        ``solve_mpr_core`` handles the case where the two closest points
+        coincide (shapes touching exactly).
 
         Args:
             geom_a: Shape A geometry data
@@ -178,34 +188,54 @@ def create_support_map_function(support_func: Any):
         """
         center = Vert()
 
+        # Shape A: closest point on A (in A-frame) to B's origin (= position_b).
+        handled_a, cp_a = closest_point_on_shape(geom_a, position_b, data_provider)
         center_a = wp.vec3(0.0, 0.0, 0.0)
+        if handled_a:
+            center_a = cp_a
 
+        # Shape B: closest point on B (in B-frame) to A's origin (= origin
+        # of A's frame, i.e. the world-space point ``-position_b`` rotated
+        # into B's local frame). Then transform back to A-frame.
+        query_in_b = wp.quat_rotate_inv(orientation_b, -position_b)
+        handled_b, cp_b_local = closest_point_on_shape(geom_b, query_in_b, data_provider)
+        center_b = position_b
+        if handled_b:
+            center_b = wp.quat_rotate(orientation_b, cp_b_local) + position_b
+
+        # Collapse fallback: when both shapes overlap deeply or are
+        # symmetric about each other's centers, the symmetric closest-point
+        # seed can produce a near-zero ``BtoA``. Falling back to the
+        # original origin-to-origin direction (``-position_b``) preserves
+        # the robust seeding the legacy code relied on for resting/penetrating
+        # convex pairs (e.g. box pyramids).
+        SEED_COLLAPSE_EPSILON = float(1.0e-12)
+        seed_btoa = center_a - center_b
+        if wp.length_sq(seed_btoa) < SEED_COLLAPSE_EPSILON:
+            center_a = wp.vec3(0.0, 0.0, 0.0)
+            center_b = position_b
+
+        # Triangle manifold-quality nudge (1% toward centroid). This does
+        # NOT prevent an MPR degeneracy (MPR works fine from an edge
+        # point); it improves *manifold quality*. When shape B projects
+        # onto a shared mesh edge, both adjacent triangles get the same
+        # v0, producing MPR witness points biased toward the edge. The
+        # manifold builder (multicontact.py) uses these witness points as
+        # its center for perturbed support mapping, so edge-biased centers
+        # cause overlapping contact polygons across the two triangles
+        # instead of distinct ones - resulting in asymmetric force
+        # distribution and spurious torque. The 1% nudge gives each
+        # triangle a unique v0 pulled toward its own interior, yielding
+        # well-separated manifold centers.
         if geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
-            # Project shape B's center onto the triangle for a starting
-            # point near the contact region — this dramatically improves
-            # MPR convergence for large triangles.
-            #
-            # Blend 1% toward the centroid so the point is strictly in the
-            # face interior.  This does NOT prevent an MPR degeneracy (MPR
-            # works fine from an edge point); it improves *manifold quality*.
-            # When shape B projects onto a shared mesh edge, both adjacent
-            # triangles get the same v0, producing MPR witness points biased
-            # toward the edge.  The manifold builder (multicontact.py) uses
-            # these witness points as its center for perturbed support
-            # mapping, so edge-biased centers cause overlapping contact
-            # polygons across the two triangles instead of distinct ones —
-            # resulting in asymmetric force distribution and spurious torque.
-            # The 1% nudge gives each triangle a unique v0 pulled toward its
-            # own interior, yielding well-separated manifold centers.
             tri_a = wp.vec3(0.0, 0.0, 0.0)
             tri_b = geom_a.scale
             tri_c = geom_a.auxiliary
-            proj = closest_point_on_triangle(position_b, tri_a, tri_b, tri_c)
             centroid = (tri_a + tri_b + tri_c) / 3.0
-            center_a = proj + 0.01 * (centroid - proj)
+            center_a = center_a + 0.01 * (centroid - center_a)
 
-        center.B = position_b
-        center.BtoA = center_a - position_b
+        center.B = center_b
+        center.BtoA = center_a - center_b
 
         return center
 
