@@ -594,6 +594,7 @@ def pd_coefficients_split(
     position_error: wp.float32,
     eff_mass_inv: wp.float32,
     dt: wp.float32,
+    clamp_nyquist: wp.bool,
 ):
     """Spring / damping XPBD-style split of :func:`pd_coefficients`.
 
@@ -608,8 +609,8 @@ def pd_coefficients_split(
     Splitting decouples the two physical effects:
 
     * The spring row sees ``softness = 1 / (dt*k)``, so ``gamma`` and
-      ``bias`` are well-conditioned for any ``k`` (after the Nyquist
-      clamp). Convergence is independent of the damping gain.
+      ``bias`` are well-conditioned for any ``k``. Convergence is
+      independent of the damping gain.
     * The damping row applies one implicit-Euler velocity update:
       ``v_new = v / (1 + dt*c*M_inv)`` -> required impulse
       ``lam = -dt*c / (1 + dt*c*M_inv) * Jv``. One PGS iteration
@@ -619,6 +620,18 @@ def pd_coefficients_split(
 
     Equivalent steady state to the combined :func:`pd_coefficients`
     up to ``O(dt^2)`` discretisation error.
+
+    ``clamp_nyquist`` caps ``k`` at ``1 / (eff_mass_inv * dt^2)`` so
+    the implicit-Euler spring stays in the regime where the substep
+    can resolve it. Drive / limit rows pass ``True`` (capping a
+    user-set gain at the Nyquist limit is preferable to the spring
+    aliasing). Cable bend / twist rows pass ``False`` -- the
+    intent there is "as rigid as possible at the substep budget the
+    user paid for", and clamping at ``k_max`` collapses the spring
+    to a velocity row that PGS can't propagate through long chains;
+    leaving ``k`` uncapped keeps the spring row well-conditioned
+    (``softness = 1 / (dt * k)``, ``gamma`` and ``bias`` simply
+    shrink as ``k`` grows) and preserves chain rigidity.
     """
     if eff_mass_inv <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
@@ -628,15 +641,15 @@ def pd_coefficients_split(
     idt = wp.float32(1.0) / dt
 
     # ---- Spring-only soft constraint (damping = 0) -------------------
-    # Equivalent to ``pd_coefficients(k_clamped, 0, C, M_inv, dt)``;
-    # inlined to share the Nyquist clamp.
     gamma_s = wp.float32(0.0)
     bias_s = wp.float32(0.0)
     eff_mass_s = wp.float32(0.0)
     if stiffness > 0.0:
-        k_max = wp.float32(1.0) / (eff_mass_inv * dt * dt)
-        k_clamped = wp.min(stiffness, k_max)
-        softness_s = wp.float32(1.0) / (dt * k_clamped)
+        k_used = stiffness
+        if clamp_nyquist:
+            k_max = wp.float32(1.0) / (eff_mass_inv * dt * dt)
+            k_used = wp.min(stiffness, k_max)
+        softness_s = wp.float32(1.0) / (dt * k_used)
         gamma_s = softness_s * idt
         # ``bias_factor = dt * k / (0 + dt * k) = 1`` when damping = 0.
         bias_s = position_error * idt

@@ -958,7 +958,7 @@ def _axial_drive_limit_prepare_at(
         # main solve; ``damp_mass_limit`` runs in the relax pass
         # when the limit is clamped.
         pd_gamma_limit, pd_beta_limit, pd_m_soft, damp_mass_limit = pd_coefficients_split(
-            stiffness_limit, damping_limit, limit_C, eff_inv, dt
+            stiffness_limit, damping_limit, limit_C, eff_inv, dt, True
         )
         write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
         write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
@@ -2004,14 +2004,20 @@ def _cable_prepare_at(
     # the two physical effects; convergence at high ``c`` no longer
     # collapses to a stiff velocity lock the way the combined
     # formulation did. See :func:`pd_coefficients_split`.
+    # Cable bend / twist rows skip the Nyquist clamp -- see
+    # :func:`pd_coefficients_split` for the rationale. Long thin-rope
+    # chains have huge ``eff_inv`` and tiny ``k_max`` (sub-unit
+    # N*m/rad even at 100 substeps), so capping ``k`` there would
+    # collapse "rigid cable" to "wet noodle" regardless of the
+    # user-set stiffness.
     gamma_b1, bias_b1, eff_soft_b1, damp_mass_b1 = pd_coefficients_split(
-        k_bend, d_bend, kappa_b1, eff_inv_b1, dt
+        k_bend, d_bend, kappa_b1, eff_inv_b1, dt, False
     )
     gamma_b2, bias_b2, eff_soft_b2, damp_mass_b2 = pd_coefficients_split(
-        k_bend, d_bend, kappa_b2, eff_inv_b2, dt
+        k_bend, d_bend, kappa_b2, eff_inv_b2, dt, False
     )
     gamma_t, bias_t, eff_soft_t, damp_mass_t = pd_coefficients_split(
-        k_twist, d_twist, kappa_t, eff_inv_t, dt
+        k_twist, d_twist, kappa_t, eff_inv_t, dt, False
     )
 
     # ---- Cache row directions + coefficients -------------------------
