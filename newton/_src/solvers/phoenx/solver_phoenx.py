@@ -93,11 +93,13 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _constraint_iterate_singleworld_kernel,
     _constraint_iterate_singleworld_revolute_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
+    _constraint_prepare_plus_iterate_fast_tail_revolute_kernel,
     _constraint_prepare_singleworld_fused_kernel,
     _constraint_prepare_singleworld_fused_revolute_kernel,
     _constraint_prepare_singleworld_kernel,
     _constraint_prepare_singleworld_revolute_kernel,
     _constraint_relax_fast_tail_kernel,
+    _constraint_relax_fast_tail_revolute_kernel,
     _constraint_relax_singleworld_fused_kernel,
     _constraint_relax_singleworld_fused_revolute_kernel,
     _constraint_relax_singleworld_kernel,
@@ -1525,8 +1527,13 @@ class PhoenXWorld:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        kernel = (
+            _constraint_prepare_plus_iterate_fast_tail_revolute_kernel
+            if self._use_revolute_specialization
+            else _constraint_prepare_plus_iterate_fast_tail_kernel
+        )
         wp.launch(
-            _constraint_prepare_plus_iterate_fast_tail_kernel,
+            kernel,
             dim=self._fast_tail_launch_dim(),
             block_dim=self._fast_tail_block_dim(),
             inputs=[
@@ -1555,8 +1562,13 @@ class PhoenXWorld:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        kernel = (
+            _constraint_relax_fast_tail_revolute_kernel
+            if self._use_revolute_specialization
+            else _constraint_relax_fast_tail_kernel
+        )
         self._launch_fast_iter(
-            _constraint_relax_fast_tail_kernel,
+            kernel,
             self.velocity_iterations,
             idt,
             contact_views,

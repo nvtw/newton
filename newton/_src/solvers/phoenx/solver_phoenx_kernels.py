@@ -25,6 +25,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     actuated_double_ball_socket_world_error,
     actuated_double_ball_socket_world_wrench,
     revolute_iterate,
+    revolute_iterate_multi,
     revolute_prepare_for_iteration,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
@@ -63,10 +64,12 @@ __all__ = [
     "_constraint_iterate_singleworld_kernel",
     "_constraint_iterate_singleworld_revolute_kernel",
     "_constraint_prepare_plus_iterate_fast_tail_kernel",
+    "_constraint_prepare_plus_iterate_fast_tail_revolute_kernel",
     "_constraint_prepare_singleworld_fused_revolute_kernel",
     "_constraint_prepare_singleworld_kernel",
     "_constraint_prepare_singleworld_revolute_kernel",
     "_constraint_relax_fast_tail_kernel",
+    "_constraint_relax_fast_tail_revolute_kernel",
     "_constraint_relax_singleworld_fused_revolute_kernel",
     "_constraint_relax_singleworld_kernel",
     "_constraint_relax_singleworld_revolute_kernel",
@@ -717,83 +720,48 @@ def _per_world_greedy_coloring_kernel(
 # per-lane RMW on body velocities is race-free.
 
 
-@wp.kernel(enable_backward=False)
-def _constraint_prepare_plus_iterate_fast_tail_kernel(
-    constraints: ConstraintContainer,
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    world_element_ids_by_color: wp.array[wp.int32],
-    world_color_starts: wp.array2d[wp.int32],
-    world_csr_offsets: wp.array[wp.int32],
-    world_num_colors: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-    num_iterations: wp.int32,
-    num_worlds: wp.int32,
-    num_joints: wp.int32,
-    tpw_buf: wp.array[wp.int32],
-):
-    """Fused prepare + main-solve dispatcher.
+# Multi-world fast-tail kernels: factory + revolute / generic variants.
+#
+# Same body for the prepare-plus-iterate and the relax kernel; they
+# differ in (a) whether the prepare pass runs once before the iterate
+# sweeps and (b) whether ``use_bias`` is on (iterate) or off (relax).
+# Each is parameterised on ``revolute_only`` to skip the per-cid
+# ``read_int(_OFF_JOINT_MODE)`` global load and joint-mode branch in
+# all-revolute scenes (G1 / H1 / chain / ragdoll).
 
-    Runs the prepare pass and ``num_iterations`` PGS sweeps in one
-    launch: saves a per-substep launch and keeps per-world setup
-    (``world_id``, ``n_colors``, ``world_base``) register-resident
-    across prepare -> iterate.
 
-    ``tpw_buf[0]`` (effective threads-per-world from
-    :func:`_pick_threads_per_world_kernel`) retracts the
-    ``num_worlds * _STRAGGLER_BLOCK_DIM`` launch grid to
-    ``num_worlds * tpw`` active lanes via early-exit when
-    ``world_id >= num_worlds``.
+def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
+    """Build the multi-world fused prepare + iterate fast-tail kernel
+    for the requested joint specialisation."""
 
-    Prepare outputs (``cc.derived``) still round-trip through gmem --
-    different cids in a warp touch different contacts, so they can't
-    stay in registers.
-    """
-    tid = wp.tid()
-    tpw = tpw_buf[0]
-    local_tid = tid % tpw
-    world_id = tid / tpw
-    if world_id >= num_worlds:
-        return
+    @wp.kernel(enable_backward=False)
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        idt: wp.float32,
+        world_element_ids_by_color: wp.array[wp.int32],
+        world_color_starts: wp.array2d[wp.int32],
+        world_csr_offsets: wp.array[wp.int32],
+        world_num_colors: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_iterations: wp.int32,
+        num_worlds: wp.int32,
+        num_joints: wp.int32,
+        tpw_buf: wp.array[wp.int32],
+    ):
+        tid = wp.tid()
+        tpw = tpw_buf[0]
+        local_tid = tid % tpw
+        world_id = tid / tpw
+        if world_id >= num_worlds:
+            return
 
-    n_colors = world_num_colors[world_id]
-    world_base = world_csr_offsets[world_id]
+        n_colors = world_num_colors[world_id]
+        world_base = world_csr_offsets[world_id]
 
-    # ---- Prepare phase --------------------------------------------
-    c = wp.int32(0)
-    while c < n_colors:
-        start = world_base + world_color_starts[world_id, c]
-        end = world_base + world_color_starts[world_id, c + 1]
-        count = end - start
-
-        base = local_tid
-        while base < count:
-            cid = world_element_ids_by_color[start + base]
-            if cid < num_joints:
-                actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-            else:
-                contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
-            base += tpw
-
-        _sync_warp()
-        c += 1
-
-    # ---- Iterate phase -------------------------------------------
-    # Split ``num_iterations`` into
-    # ``outer_iters = num_iterations / _FUSED_INNER_SWEEPS`` outer
-    # rounds of cross-colour PGS feedback, each running
-    # ``_FUSED_INNER_SWEEPS`` sweeps on every cid with body state and
-    # per-cid constraint constants held in registers (``*_iterate_multi``
-    # functions). For revolute joints (the common G1 / H1 case) and
-    # contacts, the register-resident path eliminates
-    # ``(_FUSED_INNER_SWEEPS - 1)`` redundant body / constraint reads
-    # per cid per outer iteration.
-    inner_sweeps = wp.int32(_FUSED_INNER_SWEEPS)
-    outer_iters = num_iterations / inner_sweeps
-    it_outer = wp.int32(0)
-    while it_outer < outer_iters:
+        # ---- Prepare phase ----------------------------------------
         c = wp.int32(0)
         while c < n_colors:
             start = world_base + world_color_starts[world_id, c]
@@ -804,73 +772,128 @@ def _constraint_prepare_plus_iterate_fast_tail_kernel(
             while base < count:
                 cid = world_element_ids_by_color[start + base]
                 if cid < num_joints:
-                    actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
+                    if wp.static(revolute_only):
+                        revolute_prepare_for_iteration(constraints, cid, bodies, idt)
+                    else:
+                        actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
                 else:
-                    contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps)
+                    contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
                 base += tpw
 
             _sync_warp()
             c += 1
 
-        it_outer += 1
+        # ---- Iterate phase ----------------------------------------
+        # Split ``num_iterations`` into
+        # ``outer_iters = num_iterations / _FUSED_INNER_SWEEPS`` outer
+        # rounds of cross-colour PGS feedback, each running
+        # ``_FUSED_INNER_SWEEPS`` sweeps on every cid with body state
+        # and per-cid constraint constants held in registers
+        # (``*_iterate_multi`` functions). For revolute joints (the
+        # common G1 / H1 case) and contacts, the register-resident
+        # path eliminates ``(_FUSED_INNER_SWEEPS - 1)`` redundant body
+        # / constraint reads per cid per outer iteration.
+        inner_sweeps = wp.int32(_FUSED_INNER_SWEEPS)
+        outer_iters = num_iterations / inner_sweeps
+        it_outer = wp.int32(0)
+        while it_outer < outer_iters:
+            c = wp.int32(0)
+            while c < n_colors:
+                start = world_base + world_color_starts[world_id, c]
+                end = world_base + world_color_starts[world_id, c + 1]
+                count = end - start
+
+                base = local_tid
+                while base < count:
+                    cid = world_element_ids_by_color[start + base]
+                    if cid < num_joints:
+                        if wp.static(revolute_only):
+                            revolute_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
+                        else:
+                            actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
+                    else:
+                        contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps)
+                    base += tpw
+
+                _sync_warp()
+                c += 1
+
+            it_outer += 1
+
+    return kernel
 
 
-@wp.kernel(enable_backward=False)
-def _constraint_relax_fast_tail_kernel(
-    constraints: ConstraintContainer,
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    world_element_ids_by_color: wp.array[wp.int32],
-    world_color_starts: wp.array2d[wp.int32],
-    world_csr_offsets: wp.array[wp.int32],
-    world_num_colors: wp.array[wp.int32],
-    cc: ContactContainer,
-    contacts: ContactViews,
-    num_iterations: wp.int32,
-    num_worlds: wp.int32,
-    num_joints: wp.int32,
-    tpw_buf: wp.array[wp.int32],
-):
-    """Box2D v3 TGS-soft relax dispatcher: ``num_iterations`` sweeps
-    with positional bias OFF (enforces ``Jv = 0``).
+def _make_fast_tail_relax_kernel(*, revolute_only: bool):
+    """Build the multi-world relax fast-tail kernel
+    (``use_bias = False``, ``num_sweeps = num_iterations``) for the
+    requested joint specialisation."""
 
-    See :func:`_constraint_prepare_plus_iterate_fast_tail_kernel` for
-    the ``tpw_buf`` adaptive-launch convention.
-    """
-    tid = wp.tid()
-    tpw = tpw_buf[0]
-    local_tid = tid % tpw
-    world_id = tid / tpw
-    if world_id >= num_worlds:
-        return
+    @wp.kernel(enable_backward=False)
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        idt: wp.float32,
+        world_element_ids_by_color: wp.array[wp.int32],
+        world_color_starts: wp.array2d[wp.int32],
+        world_csr_offsets: wp.array[wp.int32],
+        world_num_colors: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_iterations: wp.int32,
+        num_worlds: wp.int32,
+        num_joints: wp.int32,
+        tpw_buf: wp.array[wp.int32],
+    ):
+        tid = wp.tid()
+        tpw = tpw_buf[0]
+        local_tid = tid % tpw
+        world_id = tid / tpw
+        if world_id >= num_worlds:
+            return
 
-    n_colors = world_num_colors[world_id]
-    world_base = world_csr_offsets[world_id]
+        n_colors = world_num_colors[world_id]
+        world_base = world_csr_offsets[world_id]
 
-    # Dispatch via the register-cached ``*_iterate_multi`` path with
-    # ``num_sweeps = num_iterations`` so each cid gets one body +
-    # constraint data load amortised over the whole relax sweep.
-    # ``velocity_iterations`` is typically 1 so there's no real
-    # cross-colour feedback to preserve -- running the full relax in
-    # one multi call is equivalent to the classic outer-inner split.
-    c = wp.int32(0)
-    while c < n_colors:
-        start = world_base + world_color_starts[world_id, c]
-        end = world_base + world_color_starts[world_id, c + 1]
-        count = end - start
+        # Dispatch via the register-cached ``*_iterate_multi`` path
+        # with ``num_sweeps = num_iterations`` so each cid gets one
+        # body + constraint data load amortised over the whole relax
+        # sweep. ``velocity_iterations`` is typically 1 so there's no
+        # real cross-colour feedback to preserve -- running the full
+        # relax in one multi call is equivalent to the classic outer-
+        # inner split.
+        c = wp.int32(0)
+        while c < n_colors:
+            start = world_base + world_color_starts[world_id, c]
+            end = world_base + world_color_starts[world_id, c + 1]
+            count = end - start
 
-        base = local_tid
-        while base < count:
-            cid = world_element_ids_by_color[start + base]
-            if cid < num_joints:
-                actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
-            else:
-                contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations)
-            base += tpw
+            base = local_tid
+            while base < count:
+                cid = world_element_ids_by_color[start + base]
+                if cid < num_joints:
+                    if wp.static(revolute_only):
+                        revolute_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
+                    else:
+                        actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
+                else:
+                    contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations)
+                base += tpw
 
-        _sync_warp()
-        c += 1
+            _sync_warp()
+            c += 1
+
+    return kernel
+
+
+_constraint_prepare_plus_iterate_fast_tail_kernel = _make_fast_tail_prepare_plus_iterate_kernel(
+    revolute_only=False
+)
+_constraint_prepare_plus_iterate_fast_tail_revolute_kernel = (
+    _make_fast_tail_prepare_plus_iterate_kernel(revolute_only=True)
+)
+_constraint_relax_fast_tail_kernel = _make_fast_tail_relax_kernel(revolute_only=False)
+_constraint_relax_fast_tail_revolute_kernel = _make_fast_tail_relax_kernel(revolute_only=True)
 
 
 @wp.kernel(enable_backward=False)

@@ -99,6 +99,7 @@ __all__ = [
     "actuated_double_ball_socket_world_wrench",
     "actuated_double_ball_socket_world_wrench_at",
     "revolute_iterate",
+    "revolute_iterate_multi",
     "revolute_prepare_for_iteration",
 ]
 
@@ -2913,6 +2914,28 @@ def revolute_prepare_for_iteration(
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
     _revolute_prepare_at(constraints, cid, 0, bodies, body_pair, idt)
+
+
+@wp.func
+def revolute_iterate_multi(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    use_bias: wp.bool,
+    num_sweeps: wp.int32,
+):
+    """Revolute-only multi-sweep iterate entry.
+
+    Equivalent to :func:`actuated_double_ball_socket_iterate_multi` for
+    revolute joints, but skips the ``read_int(_OFF_JOINT_MODE)``
+    global load and the joint-mode branch. Used by the multi-world
+    fast-tail kernels when every joint is revolute.
+    """
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    _revolute_iterate_at_multi(constraints, cid, 0, bodies, body_pair, idt, use_bias, num_sweeps)
 
 
 @wp.func
