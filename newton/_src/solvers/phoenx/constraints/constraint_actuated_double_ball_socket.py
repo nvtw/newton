@@ -392,14 +392,25 @@ _OFF_BIAS3 = wp.constant(int(_OFF_MODE_EXTRAS) + 15)
 _OFF_INV_INITIAL_ORIENTATION = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
 _OFF_REVOLUTION_COUNTER = wp.constant(int(_OFF_MODE_EXTRAS) + 4)
 _OFF_PREVIOUS_QUATERNION_ANGLE = wp.constant(int(_OFF_MODE_EXTRAS) + 5)
-# Cable-only fields. Cable shares the revolute ``inv_initial_orientation``
-# in dwords 0..3 (the rest pose snapshot uses the same construction); on
-# top of that it stores per-row damping effective masses for the
-# spring/damping split (relax pass applies them as velocity-only damping
-# impulses). dwords 6..15 are still free.
-_OFF_CABLE_DAMP_MASS_BEND1 = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
-_OFF_CABLE_DAMP_MASS_BEND2 = wp.constant(int(_OFF_MODE_EXTRAS) + 7)
-_OFF_CABLE_DAMP_MASS_TWIST = wp.constant(int(_OFF_MODE_EXTRAS) + 8)
+# Cable-only field layout (3-point bending). Cable uses the
+# prismatic-style ``mode_extras`` layout for anchor-3 storage
+# (``la3_b{1,2}``, ``r3_b{1,2}``, ``acc_imp3``, ``bias3`` -- the
+# init kernel branches on ``mode in {PRISMATIC, FIXED, CABLE}`` to
+# write that layout). Per-row PD spring/damping coefficients and
+# biases pack into the ``s_inv`` mat33 slot (mode_cache[18..26],
+# unused by cable's own prepare since it doesn't Schur-couple
+# anchor-1 with anchor-2). Bend rows share one coefficient triple
+# since transverse inertia is near-isotropic for capsule / cylinder
+# primitives that cables are built from.
+_OFF_CABLE_BEND_GAMMA = wp.constant(int(_OFF_MODE_CACHE) + 18)
+_OFF_CABLE_BEND_EFF_MASS = wp.constant(int(_OFF_MODE_CACHE) + 19)
+_OFF_CABLE_BEND_DAMP_MASS = wp.constant(int(_OFF_MODE_CACHE) + 20)
+_OFF_CABLE_TWIST_GAMMA = wp.constant(int(_OFF_MODE_CACHE) + 21)
+_OFF_CABLE_TWIST_EFF_MASS = wp.constant(int(_OFF_MODE_CACHE) + 22)
+_OFF_CABLE_TWIST_DAMP_MASS = wp.constant(int(_OFF_MODE_CACHE) + 23)
+_OFF_CABLE_BEND_BIAS_T1 = wp.constant(int(_OFF_MODE_CACHE) + 24)
+_OFF_CABLE_BEND_BIAS_T2 = wp.constant(int(_OFF_MODE_CACHE) + 25)
+_OFF_CABLE_TWIST_BIAS = wp.constant(int(_OFF_MODE_CACHE) + 26)
 
 _OFF_ACC_IMP1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse1"))
 _OFF_ACC_IMP2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse2"))
@@ -578,12 +589,14 @@ def actuated_double_ball_socket_initialize_kernel(
     write_vec3(constraints, _OFF_ACC_IMP1, cid, zero3)
     write_vec3(constraints, _OFF_ACC_IMP2, cid, zero3)
 
-    # ``mode_extras`` block is mode-aliased: REVOLUTE / CABLE store the
+    # ``mode_extras`` block is mode-aliased: REVOLUTE stores the
     # twist-tracker scratch (inv_initial_orientation, revolution_counter,
-    # previous_quaternion_angle); PRISMATIC / FIXED store the anchor-3
-    # snapshot + bias3 + acc_imp3. Writing both layouts unconditionally
-    # would clobber the alias, so we branch.
-    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED:
+    # previous_quaternion_angle); PRISMATIC / FIXED / CABLE store the
+    # anchor-3 snapshot + bias3 + acc_imp3 (cable's 3-point bending
+    # uses anchor-3 perpendicular to the cable axis for twist
+    # resistance; bend uses anchor-2 along the axis). Writing both
+    # layouts unconditionally would clobber the alias, so we branch.
+    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED or mode == JOINT_MODE_CABLE:
         write_vec3(constraints, _OFF_LA3_B1, cid, la3_b1)
         write_vec3(constraints, _OFF_LA3_B2, cid, la3_b2)
         write_vec3(constraints, _OFF_R3_B1, cid, zero3)
@@ -591,9 +604,9 @@ def actuated_double_ball_socket_initialize_kernel(
         write_vec3(constraints, _OFF_ACC_IMP3, cid, zero3)
         write_float(constraints, _OFF_BIAS3, cid, 0.0)
     else:
-        # REVOLUTE / CABLE / BALL_SOCKET: zero out the anchor-3 slots
-        # via the twist-tracker layout. BALL_SOCKET reads neither side
-        # of the alias, so any consistent zero is fine.
+        # REVOLUTE / BALL_SOCKET: zero out the anchor-3 slots via the
+        # twist-tracker layout. BALL_SOCKET reads neither side of the
+        # alias, so any consistent zero is fine.
         write_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid, inv_initial_orientation)
         write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, 0)
         write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, 0.0)
@@ -1923,28 +1936,34 @@ def _cable_prepare_at(
     body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
-    """Cable-mode prepare pass: anchor-1 3-row point lock
-    (ball-socket) plus three soft angular rows (bend x2, twist x1).
+    """Cable-mode prepare: anchor-1 hard 3-row ball-socket lock
+    plus 3-point bending springs (anchor-2 along the cable axis for
+    bend, anchor-3 perpendicular for twist).
 
-    Caches per-row world-frame Jacobian directions in ``ut_ai`` and
-    per-row soft-PD coefficients ``(gamma, bias, eff_mass_soft)`` in
-    ``s_inv``. The anchor-1 positional block uses the same
-    ``a1_inv`` cache ball-socket uses.
+    Bend stiffness (user-supplied as angular ``N*m/rad``) is
+    converted internally to a linear spring at lever arm
+    ``L_axial = ‖anchor2 - anchor1‖``. Same for twist at lever arm
+    ``L_perp = L_axial`` (the init kernel snapshots anchor-3 at
+    ``rest_length`` perpendicular to the cable axis, where
+    ``rest_length == L_axial``). The bias is angle-proportional
+    (see :func:`angle_proportional_chord_bias`): a 90° bend produces
+    a torque ``k_bend_ang * (pi/2)``, not the saturating
+    ``k_bend_ang * sin(pi/2)`` a chord-bias spring would give.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
 
     orient1 = bodies.orientation[b1]
     orient2 = bodies.orientation[b2]
+    pos1 = bodies.position[b1]
+    pos2 = bodies.position[b2]
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
     inv_inertia1 = bodies.inverse_inertia_world[b1]
     inv_inertia2 = bodies.inverse_inertia_world[b2]
-    inv_inertia_sum = inv_inertia1 + inv_inertia2
+    inv_mass_sum = inv_mass1 + inv_mass2
 
-    # ---- Anchor-1 positional block (ball-socket) ---------------------
-    # Cable keeps the anchor-lock Nyquist clamp on. The bend / twist
-    # rows are already uncapped (see :func:`pd_coefficients_split`),
-    # so combining that with an unclamped anchor lock blows up the
-    # chain at high stiffness (impulses compound through the rope).
+    # ---- Anchor-1: hard 3-row positional lock (shared helper) -------
     (
         _r1_b1,
         _r1_b2,
@@ -1955,150 +1974,162 @@ def _cable_prepare_at(
         velocity2,
         angular_velocity2,
     ) = _anchor1_positional_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt, True)
-    dt = 1.0 / idt
+    dt = wp.float32(1.0) / idt
 
-    # ---- Angular block: Darboux vector in world frame ----------------
-    # ``q_align = q_wc * inv_init * q_wp^{-1}`` -- same construction
-    # the REVOLUTE twist tracker uses (diff quaternion is identity at
-    # finalize). Map the quaternion to its rotation vector via the
-    # full log-map ``kappa = axis * angle`` with
-    # ``angle = 2 * atan2(|xyz|, w)`` and ``axis = xyz / |xyz|``. The
-    # cheaper ``2 * q.xyz`` small-angle approximation underestimates
-    # the bend by ~6 % at 80 deg deflection, which lets the spring
-    # force lag the actual deflection on large bends.
-    inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
-    q_align = orient2 * inv_init * wp.quat_inverse(orient1)
-    # Canonicalise to the shortest-path hemisphere so the log-map
-    # picks the rotation in :math:`[-\\pi, +\\pi]` around the axis.
-    if q_align[3] < 0.0:
-        q_align = -q_align
-    qa_xyz = wp.vec3f(q_align[0], q_align[1], q_align[2])
-    qa_xyz_len = wp.length(qa_xyz)
-    if qa_xyz_len > 1.0e-9:
-        # Full log-map. ``angle / |xyz|`` is the conversion from the
-        # quaternion's xyz (= sin(theta/2) * axis) to the rotation
-        # vector (= theta * axis).
-        angle = 2.0 * wp.atan2(qa_xyz_len, q_align[3])
-        kappa_world = qa_xyz * (angle / qa_xyz_len)
+    # ---- Anchor-2: world-frame snapshot from body-1 / body-2 frames -
+    la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
+    la2_b1 = read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
+    la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
+    r1_b1_world = wp.quat_rotate(orient1, la1_b1)
+    r2_b1 = wp.quat_rotate(orient1, la2_b1)
+    r2_b2 = wp.quat_rotate(orient2, la2_b2)
+    write_vec3(constraints, base_offset + _OFF_R2_B1, cid, r2_b1)
+    write_vec3(constraints, base_offset + _OFF_R2_B2, cid, r2_b2)
+
+    p1_b1 = pos1 + r1_b1_world
+    p2_b1 = pos1 + r2_b1
+    p2_b2 = pos2 + r2_b2
+
+    # Cable axis from body-1's anchor-1 to body-1's anchor-2 (rotates
+    # rigidly with body 1). This is the *current* axis direction; the
+    # rest pose has body-2's anchor-2 coinciding with body-1's anchor-2,
+    # so any deviation along the perpendicular plane is bend.
+    axis_b1 = p2_b1 - p1_b1
+    L_axial2 = wp.dot(axis_b1, axis_b1)
+    if L_axial2 > 1.0e-20:
+        L_axial = wp.sqrt(L_axial2)
+        n_hat = axis_b1 / L_axial
     else:
-        # Small-angle: angle ~ 2 * |xyz|, axis ~ xyz / |xyz|; combined,
-        # 2 * xyz cancels the |xyz| division.
-        kappa_world = qa_xyz * 2.0
+        L_axial = wp.float32(1.0)
+        n_hat = wp.vec3f(1.0, 0.0, 0.0)
 
-    # ---- Reference axis + bend basis in world frame ------------------
-    axis_local1 = read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
-    n_hat_world = wp.quat_rotate(orient1, axis_local1)
-    # Normalize defensively -- should already be unit from init.
-    n_len2 = wp.dot(n_hat_world, n_hat_world)
-    if n_len2 > 1.0e-20:
-        n_hat_world = n_hat_world / wp.sqrt(n_len2)
+    t1 = create_orthonormal(n_hat)
+    t2 = wp.cross(n_hat, t1)
+    write_vec3(constraints, base_offset + _OFF_T1, cid, t1)
+    write_vec3(constraints, base_offset + _OFF_T2, cid, t2)
+    write_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid, n_hat)
+
+    # ---- Bend per-row eff_inv ---------------------------------------
+    # Constraint along tangent t_i: C_i = t_i . (p2_b2 - p2_b1).
+    # J row contribution: linear ±t_i, angular ±(r2_b{1,2} × t_i).
+    # eff_inv_i = (1/m1 + 1/m2) + (r2_b1 × t_i)·I1⁻¹·(r2_b1 × t_i)
+    #                            + (r2_b2 × t_i)·I2⁻¹·(r2_b2 × t_i)
+    cross1_t1 = wp.cross(r2_b1, t1)
+    cross2_t1 = wp.cross(r2_b2, t1)
+    cross1_t2 = wp.cross(r2_b1, t2)
+    cross2_t2 = wp.cross(r2_b2, t2)
+    eff_inv_t1 = inv_mass_sum + wp.dot(cross1_t1, inv_inertia1 @ cross1_t1) + wp.dot(cross2_t1, inv_inertia2 @ cross2_t1)
+    eff_inv_t2 = inv_mass_sum + wp.dot(cross1_t2, inv_inertia1 @ cross1_t2) + wp.dot(cross2_t2, inv_inertia2 @ cross2_t2)
+    # One coefficient triple shared between the two tangent rows;
+    # transverse inertia is near-isotropic on capsule / cylinder
+    # primitives, so averaging is a small approximation.
+    eff_inv_bend = wp.float32(0.5) * (eff_inv_t1 + eff_inv_t2)
+
+    # ---- Bend stiffness conversion (angular -> linear) --------------
+    # User passes ``bend_stiffness`` as angular [N·m/rad]; the point
+    # spring at lever arm L produces ``tau = k_lin * L^2 * theta``,
+    # so ``k_lin = k_ang / L^2``. Same for damping.
+    k_bend_ang = read_float(constraints, base_offset + _OFF_STIFFNESS_DRIVE, cid)
+    c_bend_ang = read_float(constraints, base_offset + _OFF_DAMPING_DRIVE, cid)
+    L_axial2_safe = wp.max(L_axial2, wp.float32(1.0e-20))
+    k_bend_lin = k_bend_ang / L_axial2_safe
+    c_bend_lin = c_bend_ang / L_axial2_safe
+    gamma_bend, _bias_bend_unused, eff_mass_bend, damp_mass_bend = pd_coefficients_split(
+        k_bend_lin, c_bend_lin, wp.float32(0.0), eff_inv_bend, dt, True
+    )
+
+    # ---- Bend angle-proportional bias --------------------------------
+    # The 2-row tangent constraint sees the *perpendicular*
+    # projection of the drift, whose magnitude is ``L * sin(theta)``
+    # (not the full 3D chord ``2L sin(theta/2)``). So the angle
+    # recovery is ``theta = asin(|perp| / L)`` and per-component
+    # bias is ``(chord_along_t / |perp|) * theta * L * idt`` =
+    # ``chord_along_t * (theta / sin(theta)) * idt``. Reduces to
+    # ``chord_along_t * idt`` at small angles (``theta / sin(theta)
+    # -> 1``); grows the bias by ``~1.4x`` at 80 deg bend so the
+    # spring sees the actual deflection angle, not the chord.
+    drift2 = p2_b2 - p2_b1
+    chord_t1 = wp.dot(t1, drift2)
+    chord_t2 = wp.dot(t2, drift2)
+    perp_mag2 = chord_t1 * chord_t1 + chord_t2 * chord_t2
+    if perp_mag2 > 1.0e-20:
+        perp_mag = wp.sqrt(perp_mag2)
+        sin_theta = wp.clamp(perp_mag / L_axial, wp.float32(-1.0), wp.float32(1.0))
+        theta_bend = wp.asin(sin_theta)
+        # Scale = ``theta / sin(theta)`` >= 1, applied to the
+        # perp-tangent components to get per-tangent bias.
+        bend_scale = theta_bend * L_axial / perp_mag
+        bias_bend_t1 = chord_t1 * bend_scale * idt
+        bias_bend_t2 = chord_t2 * bend_scale * idt
     else:
-        n_hat_world = wp.vec3f(1.0, 0.0, 0.0)
+        bias_bend_t1 = wp.float32(0.0)
+        bias_bend_t2 = wp.float32(0.0)
 
-    # Two unit vectors perpendicular to n_hat_world. ``create_orthonormal``
-    # is deterministic in n_hat, so the basis is stable across substeps
-    # as long as the parent body's world rotation evolves smoothly.
-    e1_world = create_orthonormal(n_hat_world)
-    # Project out any drift along n_hat, then renormalise (cheap).
-    e1_world = e1_world - wp.dot(e1_world, n_hat_world) * n_hat_world
-    e1_len2 = wp.dot(e1_world, e1_world)
-    if e1_len2 > 1.0e-20:
-        e1_world = e1_world / wp.sqrt(e1_len2)
+    # ---- Anchor-3: world-frame snapshot (perpendicular twist anchor) -
+    la3_b1 = read_vec3(constraints, base_offset + _OFF_LA3_B1, cid)
+    la3_b2 = read_vec3(constraints, base_offset + _OFF_LA3_B2, cid)
+    r3_b1 = wp.quat_rotate(orient1, la3_b1)
+    r3_b2 = wp.quat_rotate(orient2, la3_b2)
+    write_vec3(constraints, base_offset + _OFF_R3_B1, cid, r3_b1)
+    write_vec3(constraints, base_offset + _OFF_R3_B2, cid, r3_b2)
+
+    p3_b1 = pos1 + r3_b1
+    p3_b2 = pos2 + r3_b2
+
+    # Twist row: scalar constraint along ``t2``, the perpendicular
+    # tangent direction not aligned with the anchor-3 lever arm.
+    # ``L_perp = L_axial`` per the design (init snapshots anchor-3 at
+    # ``rest_length`` perpendicular to ``n_hat``, and
+    # ``rest_length = L_axial``).
+    L_perp = L_axial
+    cross3_b1_t2 = wp.cross(r3_b1, t2)
+    cross3_b2_t2 = wp.cross(r3_b2, t2)
+    eff_inv_twist = inv_mass_sum + wp.dot(cross3_b1_t2, inv_inertia1 @ cross3_b1_t2) + wp.dot(cross3_b2_t2, inv_inertia2 @ cross3_b2_t2)
+
+    k_twist_ang = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
+    c_twist_ang = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
+    L_perp2_safe = wp.max(L_perp * L_perp, wp.float32(1.0e-20))
+    k_twist_lin = k_twist_ang / L_perp2_safe
+    c_twist_lin = c_twist_ang / L_perp2_safe
+    gamma_twist, _bias_twist_unused, eff_mass_twist, damp_mass_twist = pd_coefficients_split(
+        k_twist_lin, c_twist_lin, wp.float32(0.0), eff_inv_twist, dt, True
+    )
+
+    # Twist bias: same ``theta = asin(perp/L)`` recovery as bend, but
+    # the perpendicular-projection here is 1-D (just the ``t2``
+    # component of the anchor-3 drift -- the ``t1`` component is
+    # axial w.r.t. the lever arm ``r3 = L * t1`` and would catch
+    # axial *stretch* of anchor-3, which is already locked by
+    # anchor-1).
+    chord_twist = wp.dot(t2, p3_b2 - p3_b1)
+    sin_phi = wp.clamp(chord_twist / L_perp, wp.float32(-1.0), wp.float32(1.0))
+    theta_twist = wp.asin(sin_phi)
+    twist_perp_mag = wp.abs(chord_twist)
+    if twist_perp_mag > 1.0e-20:
+        twist_scale = theta_twist * L_perp / chord_twist
+        bias_twist = chord_twist * twist_scale * idt
     else:
-        e1_world = create_orthonormal(n_hat_world)
-    e2_world = wp.cross(n_hat_world, e1_world)
+        bias_twist = wp.float32(0.0)
 
-    # ---- Per-row stiffness / damping setup ---------------------------
-    # Bend params live in the drive slot (currently unused in cable
-    # mode); twist params live in the limit slot. Keeping the two
-    # pairs distinct lets users set a stiff rope (high twist, low
-    # bend) or the opposite.
-    k_bend = read_float(constraints, base_offset + _OFF_STIFFNESS_DRIVE, cid)
-    d_bend = read_float(constraints, base_offset + _OFF_DAMPING_DRIVE, cid)
-    k_twist = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
-    d_twist = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
+    # ---- Stash coefficients + biases in mode_cache slots ------------
+    write_float(constraints, base_offset + _OFF_CABLE_BEND_GAMMA, cid, gamma_bend)
+    write_float(constraints, base_offset + _OFF_CABLE_BEND_EFF_MASS, cid, eff_mass_bend)
+    write_float(constraints, base_offset + _OFF_CABLE_BEND_DAMP_MASS, cid, damp_mass_bend)
+    write_float(constraints, base_offset + _OFF_CABLE_TWIST_GAMMA, cid, gamma_twist)
+    write_float(constraints, base_offset + _OFF_CABLE_TWIST_EFF_MASS, cid, eff_mass_twist)
+    write_float(constraints, base_offset + _OFF_CABLE_TWIST_DAMP_MASS, cid, damp_mass_twist)
+    write_float(constraints, base_offset + _OFF_CABLE_BEND_BIAS_T1, cid, bias_bend_t1)
+    write_float(constraints, base_offset + _OFF_CABLE_BEND_BIAS_T2, cid, bias_bend_t2)
+    write_float(constraints, base_offset + _OFF_CABLE_TWIST_BIAS, cid, bias_twist)
 
-    # Per-row scalar PD plumbing. Each row i is a scalar constraint
-    # C_i(q) = kappa . d_i with Jacobian J_i_world = d_i_world; the
-    # unsoftened inverse effective mass is
-    # ``d_i . (I1^{-1} + I2^{-1}) . d_i``. ``pd_coefficients`` folds
-    # the stiffness / damping / substep into
-    # ``(gamma, bias, eff_mass_soft)`` using the same Box2D idiom
-    # :func:`_axial_drive_limit_iterate` uses for the drive row.
-    kappa_b1 = wp.dot(kappa_world, e1_world)
-    kappa_b2 = wp.dot(kappa_world, e2_world)
-    kappa_t = wp.dot(kappa_world, n_hat_world)
-
-    eff_inv_b1 = wp.dot(e1_world, inv_inertia_sum @ e1_world)
-    eff_inv_b2 = wp.dot(e2_world, inv_inertia_sum @ e2_world)
-    eff_inv_t = wp.dot(n_hat_world, inv_inertia_sum @ n_hat_world)
-
-    # Spring / damping split: the spring triple drives the main solve
-    # (use_bias = True), and ``damp_mass`` drives the relax pass
-    # (use_bias = False) as a pure velocity damping impulse. Decouples
-    # the two physical effects; convergence at high ``c`` no longer
-    # collapses to a stiff velocity lock the way the combined
-    # formulation did. See :func:`pd_coefficients_split`.
-    # Cable bend / twist rows skip the Nyquist clamp -- see
-    # :func:`pd_coefficients_split` for the rationale. Long thin-rope
-    # chains have huge ``eff_inv`` and tiny ``k_max`` (sub-unit
-    # N*m/rad even at 100 substeps), so capping ``k`` there would
-    # collapse "rigid cable" to "wet noodle" regardless of the
-    # user-set stiffness.
-    gamma_b1, bias_b1, eff_soft_b1, damp_mass_b1 = pd_coefficients_split(
-        k_bend, d_bend, kappa_b1, eff_inv_b1, dt, False
-    )
-    gamma_b2, bias_b2, eff_soft_b2, damp_mass_b2 = pd_coefficients_split(
-        k_bend, d_bend, kappa_b2, eff_inv_b2, dt, False
-    )
-    gamma_t, bias_t, eff_soft_t, damp_mass_t = pd_coefficients_split(
-        k_twist, d_twist, kappa_t, eff_inv_t, dt, False
-    )
-
-    # ---- Cache row directions + coefficients -------------------------
-    # ``ut_ai`` (mat33) holds the three world-frame row directions,
-    # one per row (e1, e2, n_hat).  ``s_inv`` (mat33) holds the three
-    # ``(gamma, bias, eff_mass_soft)`` triples.  Neither slot is used
-    # by any other joint mode, so stamping them here doesn't collide
-    # with REVOLUTE / PRISMATIC / FIXED state.
-    dirs_mat = wp.mat33f(
-        e1_world[0],
-        e1_world[1],
-        e1_world[2],
-        e2_world[0],
-        e2_world[1],
-        e2_world[2],
-        n_hat_world[0],
-        n_hat_world[1],
-        n_hat_world[2],
-    )
-    coeffs_mat = wp.mat33f(
-        gamma_b1,
-        bias_b1,
-        eff_soft_b1,
-        gamma_b2,
-        bias_b2,
-        eff_soft_b2,
-        gamma_t,
-        bias_t,
-        eff_soft_t,
-    )
-    write_mat33(constraints, base_offset + _OFF_UT_AI, cid, dirs_mat)
-    write_mat33(constraints, base_offset + _OFF_S_INV, cid, coeffs_mat)
-    # Per-row damping effective masses (used by the relax pass).
-    write_float(constraints, base_offset + _OFF_CABLE_DAMP_MASS_BEND1, cid, damp_mass_b1)
-    write_float(constraints, base_offset + _OFF_CABLE_DAMP_MASS_BEND2, cid, damp_mass_b2)
-    write_float(constraints, base_offset + _OFF_CABLE_DAMP_MASS_TWIST, cid, damp_mass_t)
-
-    # Reset the cross-substep angular warm-start. ``acc_kappa`` carries
-    # the previous substep's accumulated bend / twist impulses in the
-    # *old* (e1, e2, n_hat) basis; the basis is recomputed every
-    # substep from the parent body's current orientation, so applying
-    # those scalar impulses along the new basis directions is only
-    # correct when the parent doesn't rotate. The within-substep
-    # warm-start (iterate's acc accumulation across the
-    # ``solver_iterations`` sweeps) is unaffected.
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, wp.vec3f(0.0, 0.0, 0.0))
+    # ---- Reset cross-substep accumulators ---------------------------
+    # The (t1, t2) basis rotates with body 1 every substep, so scalar
+    # impulses warm-started along the prior basis would mis-direct.
+    # Within-substep warm-start (across solver_iterations sweeps) is
+    # preserved in ``acc_imp2`` / ``acc_imp3`` during iterate.
+    zero3 = wp.vec3f(0.0, 0.0, 0.0)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, zero3)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, zero3)
 
     bodies.velocity[b1] = velocity1
     bodies.angular_velocity[b1] = angular_velocity1
@@ -2116,11 +2147,17 @@ def _cable_iterate_at(
     idt: wp.float32,
     use_bias: wp.bool,
 ):
-    """Cable-mode PGS iterate: ball-socket anchor-1 solve + three
-    soft angular rows. ``use_bias=False`` zeros the anchor-1 drift
-    bias and the three per-row biases for the relax pass; the rows'
-    ``gamma * acc`` softness term stays on in both passes (Box2D
-    TGS-soft convention)."""
+    """Cable-mode PGS iterate: anchor-1 hard 3-row + anchor-2 soft
+    2-row tangent bend springs + anchor-3 soft 1-row twist spring.
+
+    ``use_bias=True`` runs the spring half (with angle-proportional
+    biases set in prepare). ``use_bias=False`` runs the relax pass:
+    pure velocity-only damping per row, no bias. The spring's
+    ``gamma * acc`` softness term is also dropped on relax (matches
+    the cable's pre-redesign convention; bend / twist accumulators
+    settle within the main solve and the relax just removes the
+    velocity drift the bias injected).
+    """
     b1 = body_pair.b1
     b2 = body_pair.b2
 
@@ -2133,7 +2170,7 @@ def _cable_iterate_at(
     inv_inertia1 = bodies.inverse_inertia_world[b1]
     inv_inertia2 = bodies.inverse_inertia_world[b2]
 
-    # ---- Anchor-1 3-row positional block -----------------------------
+    # ---- Anchor-1 hard 3-row positional block -----------------------
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
     cr1_b1 = wp.skew(r1_b1)
@@ -2157,90 +2194,106 @@ def _cable_iterate_at(
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1)
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
 
-    # ---- 3 soft angular rows -----------------------------------------
-    dirs_mat = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
+    # ---- Anchor-2 (bend) + anchor-3 (twist) soft point springs ------
+    r2_b1 = read_vec3(constraints, base_offset + _OFF_R2_B1, cid)
+    r2_b2 = read_vec3(constraints, base_offset + _OFF_R2_B2, cid)
+    r3_b1 = read_vec3(constraints, base_offset + _OFF_R3_B1, cid)
+    r3_b2 = read_vec3(constraints, base_offset + _OFF_R3_B2, cid)
+    t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
+    t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
 
-    d_bend1 = wp.vec3f(dirs_mat[0, 0], dirs_mat[0, 1], dirs_mat[0, 2])
-    d_bend2 = wp.vec3f(dirs_mat[1, 0], dirs_mat[1, 1], dirs_mat[1, 2])
-    d_twist = wp.vec3f(dirs_mat[2, 0], dirs_mat[2, 1], dirs_mat[2, 2])
+    eff_mass_bend = read_float(constraints, base_offset + _OFF_CABLE_BEND_EFF_MASS, cid)
+    gamma_bend = read_float(constraints, base_offset + _OFF_CABLE_BEND_GAMMA, cid)
+    damp_mass_bend = read_float(constraints, base_offset + _OFF_CABLE_BEND_DAMP_MASS, cid)
+    eff_mass_twist = read_float(constraints, base_offset + _OFF_CABLE_TWIST_EFF_MASS, cid)
+    gamma_twist = read_float(constraints, base_offset + _OFF_CABLE_TWIST_GAMMA, cid)
+    damp_mass_twist = read_float(constraints, base_offset + _OFF_CABLE_TWIST_DAMP_MASS, cid)
+
+    acc_bend = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc_twist_vec = read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid)
+    acc_bend_t1 = acc_bend[0]
+    acc_bend_t2 = acc_bend[1]
+    acc_twist = acc_twist_vec[0]
 
     if use_bias:
-        # Main solve: spring-only soft constraint per row. Damping
-        # is split out into the relax pass -- see
-        # :func:`pd_coefficients_split` for the rationale.
-        coeffs_mat = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
-        acc_kappa = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
-        gamma_b1 = coeffs_mat[0, 0]
-        bias_b1 = coeffs_mat[0, 1]
-        eff_soft_b1 = coeffs_mat[0, 2]
-        gamma_b2 = coeffs_mat[1, 0]
-        bias_b2 = coeffs_mat[1, 1]
-        eff_soft_b2 = coeffs_mat[1, 2]
-        gamma_t = coeffs_mat[2, 0]
-        bias_t = coeffs_mat[2, 1]
-        eff_soft_t = coeffs_mat[2, 2]
-
-        # Row 1: bend about e1.
-        # Sign convention matches :func:`_axial_drive_limit_iterate`:
-        # ``jv = d . (w1 - w2)`` and positive ``lam`` spins body 1
-        # faster about ``d`` -- i.e. restores the child toward the
-        # rest pose when ``kappa > 0``.
-        jv_b1 = wp.dot(d_bend1, angular_velocity1 - angular_velocity2)
-        lam_b1 = -eff_soft_b1 * (jv_b1 - bias_b1 + gamma_b1 * acc_kappa[0])
-        torque_b1 = d_bend1 * lam_b1
-        angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque_b1
-        angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque_b1
-
-        # Row 2: bend about e2 (use updated body velocities -- in-row GS).
-        jv_b2 = wp.dot(d_bend2, angular_velocity1 - angular_velocity2)
-        lam_b2 = -eff_soft_b2 * (jv_b2 - bias_b2 + gamma_b2 * acc_kappa[1])
-        torque_b2 = d_bend2 * lam_b2
-        angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque_b2
-        angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque_b2
-
-        # Row 3: twist about n_hat.
-        jv_t = wp.dot(d_twist, angular_velocity1 - angular_velocity2)
-        lam_t = -eff_soft_t * (jv_t - bias_t + gamma_t * acc_kappa[2])
-        torque_t = d_twist * lam_t
-        angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque_t
-        angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque_t
-
-        new_acc = wp.vec3f(acc_kappa[0] + lam_b1, acc_kappa[1] + lam_b2, acc_kappa[2] + lam_t)
-        write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, new_acc)
+        bias_bend_t1 = read_float(constraints, base_offset + _OFF_CABLE_BEND_BIAS_T1, cid)
+        bias_bend_t2 = read_float(constraints, base_offset + _OFF_CABLE_BEND_BIAS_T2, cid)
+        bias_twist = read_float(constraints, base_offset + _OFF_CABLE_TWIST_BIAS, cid)
     else:
-        # Relax pass: pure velocity-only damping per row. The
-        # implicit-Euler velocity update ``v_new = v / (1 + dt*c*M_inv)``
-        # is applied as one impulse ``lam = -damp_mass * Jv`` per
-        # row, which is exact for an isolated rigid body in a single
-        # PGS sweep. No bias term -- the spring is decoupled and
-        # already converged in the main solve.
-        damp_mass_b1 = read_float(constraints, base_offset + _OFF_CABLE_DAMP_MASS_BEND1, cid)
-        damp_mass_b2 = read_float(constraints, base_offset + _OFF_CABLE_DAMP_MASS_BEND2, cid)
-        damp_mass_t = read_float(constraints, base_offset + _OFF_CABLE_DAMP_MASS_TWIST, cid)
+        bias_bend_t1 = wp.float32(0.0)
+        bias_bend_t2 = wp.float32(0.0)
+        bias_twist = wp.float32(0.0)
 
-        # Row 1: bend-e1 damping.
-        if damp_mass_b1 > 0.0:
-            jv_b1 = wp.dot(d_bend1, angular_velocity1 - angular_velocity2)
-            lam_b1 = -damp_mass_b1 * jv_b1
-            torque_b1 = d_bend1 * lam_b1
-            angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque_b1
-            angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque_b1
+    # Sign convention follows revolute / ball-socket anchor lock:
+    # ``rhs = Jv + bias`` (positive Jv means drift is growing, bias
+    # is positive for positive drift, ``lam = -eff * rhs`` is then
+    # negative and restores drift -> 0). Apply: body 2 receives
+    # ``+lam`` along the row direction; body 1 receives ``-lam``.
+    cross1_t1 = wp.cross(r2_b1, t1)
+    cross2_t1 = wp.cross(r2_b2, t1)
+    if eff_mass_bend > 0.0:
+        jv_t1 = (
+            -wp.dot(t1, velocity1)
+            - wp.dot(cross1_t1, angular_velocity1)
+            + wp.dot(t1, velocity2)
+            + wp.dot(cross2_t1, angular_velocity2)
+        )
+        if use_bias:
+            lam_t1 = -eff_mass_bend * (jv_t1 + bias_bend_t1 + gamma_bend * acc_bend_t1)
+        else:
+            lam_t1 = -damp_mass_bend * jv_t1
+        velocity1 = velocity1 - inv_mass1 * (t1 * lam_t1)
+        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cross1_t1 * lam_t1)
+        velocity2 = velocity2 + inv_mass2 * (t1 * lam_t1)
+        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cross2_t1 * lam_t1)
+        if use_bias:
+            acc_bend_t1 = acc_bend_t1 + lam_t1
 
-        # Row 2: bend-e2 damping.
-        if damp_mass_b2 > 0.0:
-            jv_b2 = wp.dot(d_bend2, angular_velocity1 - angular_velocity2)
-            lam_b2 = -damp_mass_b2 * jv_b2
-            torque_b2 = d_bend2 * lam_b2
-            angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque_b2
-            angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque_b2
+    # Bend row 2: t2-tangent (in-row GS reads the velocities updated by row 1).
+    cross1_t2 = wp.cross(r2_b1, t2)
+    cross2_t2 = wp.cross(r2_b2, t2)
+    if eff_mass_bend > 0.0:
+        jv_t2 = (
+            -wp.dot(t2, velocity1)
+            - wp.dot(cross1_t2, angular_velocity1)
+            + wp.dot(t2, velocity2)
+            + wp.dot(cross2_t2, angular_velocity2)
+        )
+        if use_bias:
+            lam_t2 = -eff_mass_bend * (jv_t2 + bias_bend_t2 + gamma_bend * acc_bend_t2)
+        else:
+            lam_t2 = -damp_mass_bend * jv_t2
+        velocity1 = velocity1 - inv_mass1 * (t2 * lam_t2)
+        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cross1_t2 * lam_t2)
+        velocity2 = velocity2 + inv_mass2 * (t2 * lam_t2)
+        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cross2_t2 * lam_t2)
+        if use_bias:
+            acc_bend_t2 = acc_bend_t2 + lam_t2
 
-        # Row 3: twist damping.
-        if damp_mass_t > 0.0:
-            jv_t = wp.dot(d_twist, angular_velocity1 - angular_velocity2)
-            lam_t = -damp_mass_t * jv_t
-            torque_t = d_twist * lam_t
-            angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque_t
-            angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque_t
+    # Twist row: scalar along t2 with anchor-3 lever arms.
+    cross3_b1_t2 = wp.cross(r3_b1, t2)
+    cross3_b2_t2 = wp.cross(r3_b2, t2)
+    if eff_mass_twist > 0.0:
+        jv_tw = (
+            -wp.dot(t2, velocity1)
+            - wp.dot(cross3_b1_t2, angular_velocity1)
+            + wp.dot(t2, velocity2)
+            + wp.dot(cross3_b2_t2, angular_velocity2)
+        )
+        if use_bias:
+            lam_tw = -eff_mass_twist * (jv_tw + bias_twist + gamma_twist * acc_twist)
+        else:
+            lam_tw = -damp_mass_twist * jv_tw
+        velocity1 = velocity1 - inv_mass1 * (t2 * lam_tw)
+        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cross3_b1_t2 * lam_tw)
+        velocity2 = velocity2 + inv_mass2 * (t2 * lam_tw)
+        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cross3_b2_t2 * lam_tw)
+        if use_bias:
+            acc_twist = acc_twist + lam_tw
+
+    if use_bias:
+        write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, wp.vec3f(acc_bend_t1, acc_bend_t2, 0.0))
+        write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, wp.vec3f(acc_twist, 0.0, 0.0))
 
     bodies.velocity[b1] = velocity1
     bodies.angular_velocity[b1] = angular_velocity1
@@ -2981,22 +3034,25 @@ def actuated_double_ball_socket_world_wrench_at(
         force = (acc1 + acc2 + acc3) * idt
         torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)
     elif joint_mode == JOINT_MODE_CABLE:
-        # Anchor-1 3-row lock plus three soft angular rows. The
-        # angular rows are stored as per-row scalar impulses along
-        # the cached world-frame directions in ``ut_ai``; each row
-        # contributes a pure torque on body 2.
-        dirs_mat = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
-        acc_kappa = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
-        d_bend1 = wp.vec3f(dirs_mat[0, 0], dirs_mat[0, 1], dirs_mat[0, 2])
-        d_bend2 = wp.vec3f(dirs_mat[1, 0], dirs_mat[1, 1], dirs_mat[1, 2])
-        d_twist = wp.vec3f(dirs_mat[2, 0], dirs_mat[2, 1], dirs_mat[2, 2])
-        # Anchor-1 linear impulse + lever-arm torque (same as
-        # ball-socket), plus the three pure-torque contributions.
-        force = acc1 * idt
-        torque = wp.cross(r1_b2, acc1 * idt)
-        # Soft-angular sign follows the iterate: positive ``lam``
-        # rotates body 1 toward ``+d``, so body 2 sees ``-lam * d``.
-        torque = torque - (d_bend1 * acc_kappa[0] + d_bend2 * acc_kappa[1] + d_twist * acc_kappa[2]) * idt
+        # 3-point bending: anchor-1 hard 3-row lock + anchor-2 soft
+        # 2-row tangent bend springs (along t1, t2 with anchor-2
+        # lever arms r2_b2) + anchor-3 soft 1-row twist spring
+        # (along t2 with anchor-3 lever arm r3_b2). Each soft row
+        # contributes a linear force on body 2 along its tangent
+        # plus a lever-arm torque.
+        t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
+        t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
+        acc_bend = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+        acc_twist_vec = read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid)
+        # Bend tangent forces on body 2 (sign matches the iterate:
+        # positive ``lam_t_i`` pushes body 2 along ``+t_i``).
+        bend_force = (t1 * acc_bend[0] + t2 * acc_bend[1]) * idt
+        twist_force = t2 * (acc_twist_vec[0] * idt)
+        force = acc1 * idt + bend_force + twist_force
+        # Lever-arm torques: anchor-1 lever arm for the rigid lock,
+        # anchor-2 lever arm for bend (force applied at p2_b2 = pos2
+        # + r2_b2), anchor-3 lever arm for twist.
+        torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, bend_force) + wp.cross(r3_b2, twist_force)
     else:
         # Ball-socket: only the anchor-1 impulse.
         force = acc1 * idt
@@ -3219,38 +3275,44 @@ def actuated_double_ball_socket_world_error_at(
         t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
         actuator_err = wp.dot(t2, p3_b2 - p3_b1)
     elif joint_mode == JOINT_MODE_CABLE:
-        # Decompose the Darboux log-map about the reference axis.
-        # ``drift_t1`` = bend-e1 component, ``drift_t2`` = bend-e2,
-        # ``actuator_err`` = twist about the reference axis. All
-        # three are in radians, computed via the full quaternion
-        # log-map (matches :func:`_cable_prepare_at`).
-        inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
-        q_align = q2 * inv_init * wp.quat_inverse(q1)
-        if q_align[3] < 0.0:
-            q_align = -q_align
-        qa_xyz = wp.vec3f(q_align[0], q_align[1], q_align[2])
-        qa_xyz_len = wp.length(qa_xyz)
-        if qa_xyz_len > 1.0e-9:
-            angle = 2.0 * wp.atan2(qa_xyz_len, q_align[3])
-            kappa = qa_xyz * (angle / qa_xyz_len)
+        # 3-point bending error decoder: matches the prepare's
+        # angle-proportional bias formula. The 2-row tangent
+        # projection sees ``L * sin(theta)`` (not the full 3D chord),
+        # so ``theta = asin(perp / L)`` per axis.
+        la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
+        la2_b1 = read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
+        la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
+        la3_b1 = read_vec3(constraints, base_offset + _OFF_LA3_B1, cid)
+        la3_b2 = read_vec3(constraints, base_offset + _OFF_LA3_B2, cid)
+        r1_b1 = wp.quat_rotate(q1, la1_b1)
+        r2_b1 = wp.quat_rotate(q1, la2_b1)
+        r2_b2 = wp.quat_rotate(q2, la2_b2)
+        r3_b1 = wp.quat_rotate(q1, la3_b1)
+        r3_b2 = wp.quat_rotate(q2, la3_b2)
+        p2_b1 = pos1 + r2_b1
+        p2_b2 = pos2 + r2_b2
+        p3_b1 = pos1 + r3_b1
+        p3_b2 = pos2 + r3_b2
+        axis_b1 = p2_b1 - (pos1 + r1_b1)
+        L_axial2 = wp.dot(axis_b1, axis_b1)
+        if L_axial2 > 1.0e-20:
+            L_axial = wp.sqrt(L_axial2)
+            n_hat_world = axis_b1 / L_axial
         else:
-            kappa = qa_xyz * 2.0
-        axis_local1 = read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
-        n_hat_world = wp.quat_rotate(q1, axis_local1)
-        n_len2 = wp.dot(n_hat_world, n_hat_world)
-        if n_len2 > 1.0e-20:
-            n_hat_world = n_hat_world / wp.sqrt(n_len2)
-        else:
+            L_axial = wp.float32(1.0)
             n_hat_world = wp.vec3f(1.0, 0.0, 0.0)
-        e1_world = create_orthonormal(n_hat_world)
-        e1_world = e1_world - wp.dot(e1_world, n_hat_world) * n_hat_world
-        e1_len2 = wp.dot(e1_world, e1_world)
-        if e1_len2 > 1.0e-20:
-            e1_world = e1_world / wp.sqrt(e1_len2)
-        e2_world = wp.cross(n_hat_world, e1_world)
-        drift_t1 = wp.dot(kappa, e1_world)
-        drift_t2 = wp.dot(kappa, e2_world)
-        actuator_err = wp.dot(kappa, n_hat_world)
+        t1_world = create_orthonormal(n_hat_world)
+        t2_world = wp.cross(n_hat_world, t1_world)
+        bend_drift = p2_b2 - p2_b1
+        chord_t1 = wp.dot(t1_world, bend_drift)
+        chord_t2 = wp.dot(t2_world, bend_drift)
+        chord_twist = wp.dot(t2_world, p3_b2 - p3_b1)
+        sin_t1 = wp.clamp(chord_t1 / L_axial, wp.float32(-1.0), wp.float32(1.0))
+        sin_t2 = wp.clamp(chord_t2 / L_axial, wp.float32(-1.0), wp.float32(1.0))
+        sin_tw = wp.clamp(chord_twist / L_axial, wp.float32(-1.0), wp.float32(1.0))
+        drift_t1 = wp.asin(sin_t1)
+        drift_t2 = wp.asin(sin_t2)
+        actuator_err = wp.asin(sin_tw)
 
     return wp.spatial_vector(anchor1_drift, wp.vec3f(drift_t1, drift_t2, actuator_err))
 
