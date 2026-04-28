@@ -70,6 +70,12 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Doubles the per-cid register-cache benefit again (8 sweeps from one body load). Breaks `test_slam_ball_into_stack`: a heavy ball into a tower needs the finer cross-colour PGS feedback to dissipate the impulse without driving bodies through neighbours.
 - Settled on `2`. Don't push past without re-running impact-stack scenes.
 
+### Body-hot AoS pack (``BodyHot`` struct + per-substep sync)
+- Added a packed ``BodyHot`` ``wp.struct`` holding the four iterate-time read-only fields (``inverse_mass``, ``body_com``, ``orientation``, ``inverse_inertia_world``) and a parallel ``bodies.hot`` AoS array. ``_sync_body_hot_kernel`` snapshotted the SoA fields into the AoS mirror once per substep before the constraint solve. Iterate / prepare / relax read the four fields with one wide gather per body instead of four separate SoA gathers.
+- **Net loss.** Single-world kapla iterate per-launch was unchanged; multi-world g1_flat / h1_flat regressed 1-6% across 1024-16384 worlds.
+- The SoA layout already serves cache-line-shared loads across warp lanes touching different (but index-adjacent) bodies; the AoS struct kills that sharing because each thread's 68 B struct lives in a different cache line. The compiler also already keeps the SoA fields in registers across the inner loop, so the read-coalescing the AoS pack was supposed to provide didn't materialise.
+- Reverted in this session before commit. **Don't re-try the same shape unless you also redesign the access pattern** (e.g. groupings of cids that share bodies, or a thread-block-cooperative load).
+
 ### `__ffsll` for the greedy first-free-colour scan
 - Wrapped the CUDA ``__ffsll`` intrinsic in a ``wp.func_native`` (``_lowest_set_bit``) and used it in both single-world and per-world greedy kernels in place of the 64-iteration linear bit-scan.
 - Per-launch greedy kernel time was unchanged (~52us on kapla single-world, multi-world bench unchanged). The original scan had an early-out on first set bit, and most masks have a low-set bit, so it rarely paid the full 64 iterations. The intrinsic is cleaner code but doesn't move the perf needle.
@@ -104,7 +110,6 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.
 - **Per-instance configurable `_FUSED_INNER_SWEEPS`** — let scenes opt into `4` (or even `8`) when they don't have impact-driven stacks.
-- **Pack body-hot fields into one 128B-aligned struct** — `velocity`, `angular_velocity`, `inv_mass`, `inv_inertia_world`, `body_com`, `orientation` are 5+ separate gathers per body per cid today. Likely a real win on contact-heavy scenes but it's a wide refactor.
 - **Reduce greedy kernel launch count** — ~82 MIS rounds per step on kapla = ~82 launches × ~5µs overhead. A persistent kernel running all rounds with global atomics + sync flags could collapse that. Cross-block sync is the main hurdle.
 - **Specialise `*_iterate_multi` for revolute-only** — saves the (already cheap) joint-mode branch in the multi-sweep helper. Marginal vs. specialising the kernel-level dispatch.
 
