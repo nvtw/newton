@@ -4,10 +4,10 @@
 """
 Closest-point queries on convex primitives in their local frame.
 
-These helpers exist primarily to seed GJK and MPR (see ``geometric_center``
-in :mod:`newton._src.geometry.mpr`). The seed only needs to live "in the
-contact region"; sub-millimeter accuracy is not required, so the helpers
-trade off generality for compactness.
+These helpers provide exact closest-point queries for simple primitives.
+They are intentionally separate from GJK/MPR seeding: MPR's ``v0`` is not
+just a closest surface point, and feeding approximate closest points (for
+example closest vertices on convex hulls) can destabilize resting contacts.
 
 Convention matches ``GenericShapeData`` in :mod:`support_function`:
 
@@ -18,25 +18,20 @@ Convention matches ``GenericShapeData`` in :mod:`support_function`:
   (only handled when uniform; tapered cylinders fall back)
 - PLANE: half-width in ``scale.x``, half-length in ``scale.y``; the dispatcher
   only handles the infinite-plane case (``width <= 0`` or ``length <= 0``).
-- CONVEX_MESH: scale on ``scale``, packed mesh pointer in ``auxiliary``;
-  closest point is approximated by the closest scaled vertex.
+- CONVEX_MESH: scale on ``scale``, packed mesh pointer in ``auxiliary``.
 - TRIANGLE / TRIANGLE_PRISM: vertex A at origin, B-A in ``scale``, C-A in
   ``auxiliary``.
 
 For shapes not covered (ellipsoid, cone, tapered cylinder, finite plane
 quad) ``closest_point_on_shape`` returns ``handled=False`` so callers can
-fall back to their previous seeding strategy.
+fall back to a safer method.
 """
 
 from typing import Any
 
 import warp as wp
 
-from .support_function import (
-    GeoTypeEx,
-    closest_point_on_triangle,
-    unpack_mesh_ptr,
-)
+from .support_function import GeoTypeEx, closest_point_on_triangle, unpack_mesh_ptr
 from .types import GeoType
 
 
@@ -140,33 +135,40 @@ def closest_point_plane_infinite(query: wp.vec3) -> wp.vec3:
 
 
 @wp.func
-def closest_point_convex_mesh_vertex(
+def closest_point_convex_mesh_face(
     geom: Any,
     query: wp.vec3,
     data_provider: Any,
 ) -> wp.vec3:
-    """Closest *vertex* of a convex mesh hull to the query (approximate).
+    """Closest point on a convex mesh's triangle surface.
 
-    For the seeding use case this is sufficient: the worst-case error is
-    bounded by the hull diameter, not by ``query``'s distance from the
-    origin, which is the property GJK/MPR seeding actually needs.
+    This is an O(F) exact closest-surface query over the hull's triangles.
+    It deliberately uses triangle projection, not closest vertex, so flat
+    faces return their face interior instead of an arbitrary corner.
     """
     _ = data_provider
     mesh_ptr = unpack_mesh_ptr(geom.auxiliary)
     mesh = wp.mesh_get(mesh_ptr)
     mesh_scale = geom.scale
 
-    num_verts = mesh.points.shape[0]
-    best_idx = int(0)
+    best_point = wp.vec3(0.0, 0.0, 0.0)
     best_dist_sq = float(1.0e30)
-    for i in range(num_verts):
-        v = wp.cw_mul(mesh.points[i], mesh_scale)
-        d = v - query
-        d_sq = wp.dot(d, d)
-        if d_sq < best_dist_sq:
-            best_dist_sq = d_sq
-            best_idx = i
-    return wp.cw_mul(mesh.points[best_idx], mesh_scale)
+    tri_count = mesh.indices.shape[0] // 3
+    for tri_idx in range(tri_count):
+        idx0 = mesh.indices[tri_idx * 3 + 0]
+        idx1 = mesh.indices[tri_idx * 3 + 1]
+        idx2 = mesh.indices[tri_idx * 3 + 2]
+        v0 = wp.cw_mul(mesh.points[idx0], mesh_scale)
+        v1 = wp.cw_mul(mesh.points[idx1], mesh_scale)
+        v2 = wp.cw_mul(mesh.points[idx2], mesh_scale)
+        cp = closest_point_on_triangle(query, v0, v1, v2)
+        d = cp - query
+        dist_sq = wp.dot(d, d)
+        if dist_sq < best_dist_sq:
+            best_dist_sq = dist_sq
+            best_point = cp
+
+    return best_point
 
 
 @wp.func
@@ -177,25 +179,9 @@ def closest_point_on_shape(
 ) -> tuple[bool, wp.vec3]:
     """Dispatch to the per-primitive closest-point helper.
 
-    The dispatcher only returns ``handled=True`` for shapes whose local
-    *origin* is not guaranteed to be at the shape's geometric center —
-    these are the shapes for which the legacy origin-based GJK/MPR seed
-    can be far from the contact region:
-
-    - TRIANGLE / TRIANGLE_PRISM: local origin is vertex A, biased to one
-      corner of the triangle.
-    - CONVEX_MESH: arbitrary user mesh; the centroid may be far from the
-      mesh origin (e.g. off-center hulls).
-
-    For analytic primitives (sphere, box, capsule, cylinder, cone,
-    ellipsoid, plane) the local origin is the geometric center by
-    construction, so the legacy seed (origin-to-position_b) is already
-    well-conditioned and the dispatcher returns ``handled=False`` so the
-    caller falls back. Helpers for those shapes are still defined and
-    unit-tested in :func:`closest_point_sphere`, :func:`closest_point_box_local`,
-    :func:`closest_point_capsule_z`, :func:`closest_point_cylinder_z`,
-    :func:`closest_point_plane_infinite` so they are available for future
-    use, but they are not currently dispatched.
+    The dispatcher covers only exact helpers. Convex hulls use an exact
+    closest point over their triangle surface; this is O(F), so callers
+    should use it only where that cost is justified.
 
     Returns:
         Tuple ``(handled, point)``. ``handled`` is ``True`` when a closest
@@ -206,8 +192,26 @@ def closest_point_on_shape(
     handled = False
     point = wp.vec3(0.0, 0.0, 0.0)
 
-    if geom.shape_type == int(GeoType.CONVEX_MESH):
-        point = closest_point_convex_mesh_vertex(geom, query, data_provider)
+    _ = data_provider
+
+    if geom.shape_type == int(GeoType.SPHERE):
+        point = closest_point_sphere(query, geom.scale[0])
+        handled = True
+    elif geom.shape_type == int(GeoType.BOX):
+        point = closest_point_box_local(geom.scale, query)
+        handled = True
+    elif geom.shape_type == int(GeoType.CAPSULE):
+        point = closest_point_capsule_z(query, geom.scale[0], geom.scale[1])
+        handled = True
+    elif geom.shape_type == int(GeoType.CYLINDER):
+        point = closest_point_cylinder_z(query, geom.scale[0], geom.scale[1])
+        handled = True
+    elif geom.shape_type == int(GeoType.PLANE):
+        if geom.scale[0] <= 0.0 or geom.scale[1] <= 0.0:
+            point = closest_point_plane_infinite(query)
+            handled = True
+    elif geom.shape_type == int(GeoType.CONVEX_MESH):
+        point = closest_point_convex_mesh_face(geom, query, data_provider)
         handled = True
     elif geom.shape_type == int(GeoTypeEx.TRIANGLE) or geom.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
         tri_a = wp.vec3(0.0, 0.0, 0.0)
