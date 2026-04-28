@@ -309,6 +309,7 @@ class PhoenXWorld:
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
         max_thread_blocks: int | None = None,
+        rotate_color_order: bool = False,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -430,6 +431,15 @@ class PhoenXWorld:
         # observes any non-revolute mode. Must be stable before
         # ``wp.ScopedCapture`` records the step.
         self._use_revolute_specialization: bool = True
+
+        # Opt-in symmetric Gauss-Seidel: rotate which colour fires
+        # first across successive sweeps. PGS converges faster on
+        # later-fired colours than earlier ones, which prints as
+        # alternating stiff / loose pairs along chains. Rotating
+        # evens it out at zero runtime cost (one extra dword bumped
+        # in begin_sweep), but is otherwise semantically a behaviour
+        # change so off by default.
+        self._rotate_color_order: bool = bool(rotate_color_order)
 
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
@@ -1541,7 +1551,7 @@ class PhoenXWorld:
         # Bump the sweep offset so successive substeps rotate which
         # colour fires first (symmetric Gauss-Seidel; see
         # ``incremental_begin_sweep_kernel`` for the rationale).
-        self._partitioner.begin_sweep()
+        self._partitioner.begin_sweep(self._rotate_color_order)
         wp.launch(
             kernel,
             dim=self._fast_tail_launch_dim(),
@@ -1724,11 +1734,11 @@ class PhoenXWorld:
 
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = self._singleworld_kernels()
 
-        self._partitioner.begin_sweep()
+        self._partitioner.begin_sweep(self._rotate_color_order)
         self._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
 
         for _ in range(self.solver_iterations):
-            self._partitioner.begin_sweep()
+            self._partitioner.begin_sweep(self._rotate_color_order)
             self._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
 
     def _relax_velocities_singleworld(self) -> None:
@@ -1738,7 +1748,7 @@ class PhoenXWorld:
         idt = wp.float32(1.0 / self.substep_dt)
         _, _, _, _, relax_head, relax_fused = self._singleworld_kernels()
         for _ in range(self.velocity_iterations):
-            self._partitioner.begin_sweep()
+            self._partitioner.begin_sweep(self._rotate_color_order)
             self._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
 
     def _singleworld_kernels(self):

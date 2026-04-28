@@ -578,16 +578,29 @@ _SWEEP_OFFSET_WRAP = wp.constant(wp.int32(1024))
 def incremental_begin_sweep_kernel(
     num_colors: wp.array[int],
     color_cursor: wp.array[int],
-    sweep_offset: wp.array[int],
 ):
     # Single-thread launch: copy ``num_colors`` into ``color_cursor``
-    # so the sweep-time capture_while has a fresh counter to decrement,
-    # and bump ``sweep_offset`` modulo ``_SWEEP_OFFSET_WRAP`` so the
-    # next sweep processes the colours in a rotated order. Symmetric
-    # Gauss-Seidel: each colour gets a turn at being "first" across
-    # successive sweeps, which evens out the convergence asymmetry
-    # PGS introduces between earlier-fired and later-fired colours
-    # (visible as alternating stiff / loose pairs along chains).
+    # so the sweep-time capture_while has a fresh counter to decrement.
+    # Done as a kernel (rather than a host-side ``copy_``) so the setup
+    # can live inside a captured region when the caller wants to bake
+    # the whole substep into a CUDA graph.
+    color_cursor[0] = num_colors[0]
+
+
+@wp.kernel(enable_backward=False)
+def incremental_begin_sweep_rotate_kernel(
+    num_colors: wp.array[int],
+    color_cursor: wp.array[int],
+    sweep_offset: wp.array[int],
+):
+    # As :func:`incremental_begin_sweep_kernel`, plus bump
+    # ``sweep_offset`` modulo ``_SWEEP_OFFSET_WRAP``. The PGS kernels
+    # decode the active colour as ``(n_colors - cursor + offset) %
+    # n_colors``, so successive sweeps rotate which colour fires
+    # first (symmetric Gauss-Seidel). Evens out the convergence
+    # asymmetry PGS introduces between earlier-fired and later-fired
+    # colours (visible as alternating stiff / loose pairs along
+    # chains). Selected by ``SolverPhoenX(rotate_color_order=True)``.
     color_cursor[0] = num_colors[0]
     next_offset = sweep_offset[0] + wp.int32(1)
     if next_offset >= _SWEEP_OFFSET_WRAP:

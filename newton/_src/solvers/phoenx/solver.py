@@ -185,6 +185,7 @@ class SolverPhoenX(SolverBase):
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
         max_thread_blocks: int | None = None,
+        rotate_color_order: bool = False,
         velocity_readout: str = "substep_end",
     ):
         """Build the PhoenX solver from ``model``.
@@ -406,6 +407,7 @@ class SolverPhoenX(SolverBase):
             step_layout=step_layout,
             threads_per_world=threads_per_world,
             max_thread_blocks=max_thread_blocks,
+            rotate_color_order=rotate_color_order,
             device=self.device,
         )
 

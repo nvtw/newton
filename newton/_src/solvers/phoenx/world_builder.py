@@ -963,6 +963,7 @@ class WorldBuilder:
         rigid_contact_max: int = 0,
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
+        rotate_color_order: bool = False,
         device: wp.context.Devicelike = None,
     ) -> PhoenXWorld:
         """Allocate GPU storage and build a ready-to-step :class:`PhoenXWorld`.
@@ -1013,6 +1014,7 @@ class WorldBuilder:
             default_friction=default_friction,
             num_worlds=self._num_worlds,
             step_layout=step_layout,
+            rotate_color_order=rotate_color_order,
             device=device,
         )
 

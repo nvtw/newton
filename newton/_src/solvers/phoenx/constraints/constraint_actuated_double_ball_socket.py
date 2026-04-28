@@ -799,10 +799,18 @@ def _anchor1_positional_prepare_at(
     bodies: BodyContainer,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    clamp_nyquist: wp.bool,
 ):
     """Anchor-1 3-row positional lock prepare. Shared by BALL_SOCKET
     and CABLE modes (which use a standalone anchor-1 lock as their
     only positional constraint).
+
+    ``clamp_nyquist`` is forwarded to
+    :func:`soft_constraint_coefficients`; pass ``False`` for
+    ball-socket (rigid lock), ``True`` for cable (the chain's
+    bend/twist rows are already uncapped, so the anchor lock keeping
+    its Nyquist clamp prevents impulses from compounding through the
+    chain).
 
     Reads the body-local snapshots ``la1_b{1,2}``, rotates them into
     world frame, rebuilds the 3x3 effective mass ``a1`` and its
@@ -852,7 +860,13 @@ def _anchor1_positional_prepare_at(
     hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     dt = 1.0 / idt
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
+    # Joint anchor lock: skip Nyquist clamp so user-requested "rigid"
+    # lock actually closes drift each substep (default ``hertz=1e9``
+    # otherwise gets clamped and only ~60% of position drift is
+    # corrected per substep, producing visible anchor offset).
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+        hertz, damping_ratio, dt, clamp_nyquist
+    )
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
     bias1 = (p1_b2 - p1_b1) * bias_rate
@@ -970,7 +984,11 @@ def _axial_drive_limit_prepare_at(
         write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
         write_float(constraints, base_offset + _OFF_DAMP_MASS_LIMIT, cid, damp_mass_limit)
     else:
-        br_limit, mc_limit, ic_limit = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
+        # Box2D limit row: same "behave as rigid as substep allows"
+        # contract as the joint anchor lock -- skip Nyquist clamp.
+        br_limit, mc_limit, ic_limit = soft_constraint_coefficients(
+            hertz_limit, damping_ratio_limit, dt, False
+        )
         write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
         write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
         write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
@@ -1054,7 +1072,7 @@ def _ball_socket_prepare_at(
         angular_velocity1,
         velocity2,
         angular_velocity2,
-    ) = _anchor1_positional_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
+    ) = _anchor1_positional_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt, False)
 
     bodies.velocity[b1] = velocity1
     bodies.angular_velocity[b1] = angular_velocity1
@@ -1264,7 +1282,9 @@ def _revolute_prepare_at(
     hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     dt = 1.0 / idt
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
+    # Revolute anchor lock (3-row anchor-1 + 2-row anchor-2 tangent):
+    # skip Nyquist clamp -- see ball-socket prepare for rationale.
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt, False)
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
@@ -1642,7 +1662,9 @@ def _prismatic_prepare_at(
     hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     dt = 1.0 / idt
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
+    # Prismatic anchor lock: skip Nyquist clamp -- see ball-socket
+    # prepare for rationale.
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt, False)
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
@@ -1915,6 +1937,10 @@ def _cable_prepare_at(
     inv_inertia_sum = inv_inertia1 + inv_inertia2
 
     # ---- Anchor-1 positional block (ball-socket) ---------------------
+    # Cable keeps the anchor-lock Nyquist clamp on. The bend / twist
+    # rows are already uncapped (see :func:`pd_coefficients_split`),
+    # so combining that with an unclamped anchor lock blows up the
+    # chain at high stiffness (impulses compound through the rope).
     (
         _r1_b1,
         _r1_b2,
@@ -1924,7 +1950,7 @@ def _cable_prepare_at(
         angular_velocity1,
         velocity2,
         angular_velocity2,
-    ) = _anchor1_positional_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
+    ) = _anchor1_positional_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt, True)
     dt = 1.0 / idt
 
     # ---- Angular block: Darboux vector in world frame ----------------
@@ -2387,7 +2413,9 @@ def _fixed_prepare_at(
     hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     dt = 1.0 / idt
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
+    # Fixed (6-DoF weld) anchor lock: skip Nyquist clamp -- see
+    # ball-socket prepare for rationale.
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt, False)
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 

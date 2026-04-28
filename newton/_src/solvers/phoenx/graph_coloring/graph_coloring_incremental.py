@@ -40,6 +40,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     greedy_reset_init_kernel,
     greedy_scatter_elements_by_color_kernel,
     incremental_begin_sweep_kernel,
+    incremental_begin_sweep_rotate_kernel,
     incremental_fill_minus_one_kernel,
     incremental_init_csr_kernel,
     incremental_init_kernel,
@@ -849,7 +850,7 @@ class IncrementalContactPartitioner:
                 block_dim=_GREEDY_BLOCK_DIM,
             )
 
-    def begin_sweep(self) -> None:
+    def begin_sweep(self, rotate: bool = False) -> None:
         """Reset the sweep-time colour cursor before a PGS sweep.
 
         Copies ``num_colors`` into ``color_cursor`` so downstream
@@ -858,15 +859,27 @@ class IncrementalContactPartitioner:
         ``color_cursor`` as each colour completes; when it reaches 0
         the capture_while exits.
 
+        ``rotate=True`` additionally bumps ``sweep_offset`` so
+        successive sweeps rotate which colour fires first (symmetric
+        Gauss-Seidel; opt-in via
+        ``SolverPhoenX(rotate_color_order=True)``).
+
         Must be called before every PGS sweep. Cheap -- a single
-        1-thread kernel writing one scalar -- and graph-capture
-        friendly.
+        1-thread kernel writing one or two scalars -- and
+        graph-capture friendly.
         """
-        wp.launch(
-            incremental_begin_sweep_kernel,
-            dim=1,
-            inputs=[self._num_colors, self._color_cursor, self._sweep_offset],
-        )
+        if rotate:
+            wp.launch(
+                incremental_begin_sweep_rotate_kernel,
+                dim=1,
+                inputs=[self._num_colors, self._color_cursor, self._sweep_offset],
+            )
+        else:
+            wp.launch(
+                incremental_begin_sweep_kernel,
+                dim=1,
+                inputs=[self._num_colors, self._color_cursor],
+            )
 
     # ------------------------------------------------------------------
     # Public device arrays (results)

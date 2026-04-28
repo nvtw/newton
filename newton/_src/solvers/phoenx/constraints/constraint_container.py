@@ -482,15 +482,12 @@ def soft_constraint_coefficients(
     hertz: wp.float32,
     damping_ratio: wp.float32,
     dt: wp.float32,
+    clamp_nyquist: wp.bool,
 ):
     """Map ``(hertz, damping_ratio, dt)`` to PGS soft-constraint coefficients.
 
     Box2D v3 / Bepu / Nordby formulation
-    (https://box2d.org/posts/2024/02/solver2d/). ``omega = 2*pi*hertz``
-    is clamped at the per-substep Nyquist ``pi/dt``, so requesting
-    more stiffness than the current ``dt`` can resolve yields the
-    stiffest resolvable lock rather than aliasing. Substep-independent:
-    more substeps = higher Nyquist = more rigid.
+    (https://box2d.org/posts/2024/02/solver2d/).
 
     Returns ``(bias_rate [1/s], mass_coeff [-], impulse_coeff [-])``;
     the latter two lie in ``[0, 1]`` and feed straight into the PGS
@@ -498,18 +495,31 @@ def soft_constraint_coefficients(
 
     ``hertz <= 0`` yields a rigid constraint with no drift
     correction: ``(0, 1, 0)`` -- the un-softened plain-PGS row.
+
+    ``clamp_nyquist`` saturates ``omega = 2*pi*hertz`` at the
+    per-substep Nyquist rate ``pi/dt``. Pass ``True`` for rows where
+    the bias term can overshoot if ``omega`` aliases (contacts:
+    bias-rate spike causes inter-body separation jitter at low
+    substep counts). Pass ``False`` for rows where the user's intent
+    is "as rigid as possible at the substep budget paid for" --
+    joint anchor locks (ball-socket / revolute / prismatic / fixed)
+    and joint limit rows: clamping there caps drift correction at
+    ~``0.6 * idt`` and produces visible anchor offset / limit leak.
+    Unclamped omega makes ``mass_coeff -> 1``, ``impulse_coeff -> 0``,
+    ``bias_rate -> idt`` (effectively a hard PGS lock).
     """
     if hertz <= 0.0:
         return wp.float32(0.0), wp.float32(1.0), wp.float32(0.0)
 
-    # Clamp omega at the per-substep Nyquist rate: the fastest spring
-    # the integrator can resolve is one with half a cycle per step,
-    # i.e. ``omega * dt == pi``. Requests beyond that alias, so we
-    # saturate to the maximally-rigid response the current ``dt``
-    # supports. See the block comment above for the full rationale.
-    omega_request = 2.0 * 3.14159265358979 * hertz
-    omega_nyquist = 3.14159265358979 / dt
-    omega = wp.min(omega_request, omega_nyquist)
+    omega = 2.0 * 3.14159265358979 * hertz
+    if clamp_nyquist:
+        # Clamp omega at the per-substep Nyquist rate: the fastest
+        # spring the integrator can resolve is one with half a cycle
+        # per step, i.e. ``omega * dt == pi``. Requests beyond that
+        # alias, so we saturate to the maximally-rigid response the
+        # current ``dt`` supports.
+        omega_nyquist = 3.14159265358979 / dt
+        omega = wp.min(omega, omega_nyquist)
     a1 = 2.0 * damping_ratio + omega * dt
     a2 = dt * omega * a1
     a3 = 1.0 / (1.0 + a2)

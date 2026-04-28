@@ -503,7 +503,7 @@ def contact_prepare_for_iteration_at(
     # out without needing a ``penetration_slop`` dead zone.
     dt_substep = wp.float32(1.0) / idt
     bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
-        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep, True
     )
 
     # Friction-row position bias. Sub-millimetre ``friction_slop`` clamps
@@ -749,7 +749,7 @@ def contact_iterate_at(
 
     dt_substep = wp.float32(1.0) / idt
     _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep, True
     )
 
     inv_mass1 = bodies.inverse_mass[b1]
@@ -981,7 +981,7 @@ def contact_iterate_at_multi(
 
     dt_substep = wp.float32(1.0) / idt
     _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep, True
     )
 
     inv_mass1 = bodies.inverse_mass[b1]
