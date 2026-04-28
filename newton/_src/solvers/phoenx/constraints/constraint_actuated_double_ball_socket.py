@@ -1283,8 +1283,13 @@ def _revolute_prepare_at(
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     dt = 1.0 / idt
     # Revolute anchor lock (3-row anchor-1 + 2-row anchor-2 tangent):
-    # skip Nyquist clamp -- see ball-socket prepare for rationale.
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt, False)
+    # keep Nyquist clamp on. Long revolute chains (e.g. the 250-hinge
+    # motorized chain example) amplify the unclamped bias the way
+    # cable's bend / twist + anchor lock do; PGS can't propagate the
+    # hard lock through the chain in a few iterations and the chain
+    # explodes. The Box2D-soft formulation's slack is what keeps long
+    # chains stable.
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt, True)
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
@@ -1662,9 +1667,12 @@ def _prismatic_prepare_at(
     hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     dt = 1.0 / idt
-    # Prismatic anchor lock: skip Nyquist clamp -- see ball-socket
-    # prepare for rationale.
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt, False)
+    # Prismatic anchor lock: keep Nyquist clamp on -- same chain
+    # stability constraint as revolute. Long prismatic chains
+    # (linkage trains, articulated arms via prismatic joints) need
+    # the soft-formulation slack that the clamped formulation
+    # provides.
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt, True)
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
@@ -2413,9 +2421,11 @@ def _fixed_prepare_at(
     hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
     dt = 1.0 / idt
-    # Fixed (6-DoF weld) anchor lock: skip Nyquist clamp -- see
-    # ball-socket prepare for rationale.
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt, False)
+    # Fixed (6-DoF weld) anchor lock: keep Nyquist clamp on. Same
+    # chain stability constraint as revolute / prismatic -- welded
+    # multi-body assemblies (typical use case) form long constraint
+    # graphs that PGS can't propagate through with a hard lock.
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt, True)
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
