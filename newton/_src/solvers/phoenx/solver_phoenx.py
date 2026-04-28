@@ -32,6 +32,7 @@ from newton._src.solvers.phoenx.body import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     ADBS_DWORDS,
+    JOINT_MODE_REVOLUTE,
     actuated_double_ball_socket_initialize_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
@@ -88,13 +89,19 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
     _constraint_iterate_singleworld_fused_kernel,
+    _constraint_iterate_singleworld_fused_revolute_kernel,
     _constraint_iterate_singleworld_kernel,
+    _constraint_iterate_singleworld_revolute_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
     _constraint_prepare_singleworld_fused_kernel,
+    _constraint_prepare_singleworld_fused_revolute_kernel,
     _constraint_prepare_singleworld_kernel,
+    _constraint_prepare_singleworld_revolute_kernel,
     _constraint_relax_fast_tail_kernel,
     _constraint_relax_singleworld_fused_kernel,
+    _constraint_relax_singleworld_fused_revolute_kernel,
     _constraint_relax_singleworld_kernel,
+    _constraint_relax_singleworld_revolute_kernel,
     _constraints_to_elements_kernel,
     _count_elements_per_world_kernel,
     _integrate_velocities_kernel,
@@ -403,6 +410,18 @@ class PhoenXWorld:
         self.velocity_iterations = int(velocity_iterations)
         if self.velocity_iterations < 0:
             raise ValueError(f"velocity_iterations must be >= 0 (got {self.velocity_iterations})")
+
+        # Joint-type specialisation flag for the single-world kernels.
+        # ``True`` means every joint is revolute (or there are none),
+        # so :meth:`_singleworld_kernels` returns the revolute-only
+        # variants that skip the ``joint_mode`` global read + dispatch
+        # branch in the iterate hot loop. Defaults to ``True`` for
+        # ``num_joints == 0`` (the joint branch is dead anyway, and
+        # the smaller binary helps occupancy / icache); flipped to
+        # ``False`` if :meth:`initialize_actuated_double_ball_socket_joints`
+        # observes any non-revolute mode. Must be stable before
+        # ``wp.ScopedCapture`` records the step.
+        self._use_revolute_specialization: bool = True
 
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
@@ -903,6 +922,17 @@ class PhoenXWorld:
             return
         if armature is None:
             armature = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
+        # Detect whether the single-world solve can use the revolute-
+        # only iterate kernels. ``joint_mode`` is a host-readable
+        # ``wp.array[int32]`` of length ``num_joints``; one D2H copy
+        # at init time is acceptable (this method runs once before
+        # any graph capture).
+        try:
+            mode_np = joint_mode.numpy()
+        except Exception:
+            mode_np = None
+        if mode_np is not None and mode_np.size > 0:
+            self._use_revolute_specialization = bool((mode_np == int(JOINT_MODE_REVOLUTE)).all())
         wp.launch(
             actuated_double_ball_socket_initialize_kernel,
             dim=self.num_joints,
@@ -1667,33 +1697,53 @@ class PhoenXWorld:
             return
         idt = wp.float32(1.0 / self.substep_dt)
 
+        prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = self._singleworld_kernels()
+
         self._partitioner.begin_sweep()
-        self._singleworld_head_plus_tail_sweep(
-            _constraint_prepare_singleworld_kernel,
-            _constraint_prepare_singleworld_fused_kernel,
-            idt,
-        )
+        self._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
 
         for _ in range(self.solver_iterations):
             self._partitioner.begin_sweep()
-            self._singleworld_head_plus_tail_sweep(
-                _constraint_iterate_singleworld_kernel,
-                _constraint_iterate_singleworld_fused_kernel,
-                idt,
-            )
+            self._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
 
     def _relax_velocities_singleworld(self) -> None:
         """Single-world TGS-soft relax sweeps (bias OFF)."""
         if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
+        _, _, _, _, relax_head, relax_fused = self._singleworld_kernels()
         for _ in range(self.velocity_iterations):
             self._partitioner.begin_sweep()
-            self._singleworld_head_plus_tail_sweep(
-                _constraint_relax_singleworld_kernel,
-                _constraint_relax_singleworld_fused_kernel,
-                idt,
+            self._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
+
+    def _singleworld_kernels(self):
+        """Resolve the single-world kernel set for this solver.
+
+        Returns ``(prepare_head, prepare_fused, iterate_head,
+        iterate_fused, relax_head, relax_fused)``. When
+        :attr:`_use_revolute_specialization` is set (no joints, or
+        every joint is :data:`JointMode.REVOLUTE`), returns the
+        revolute-only variants which skip the per-cid
+        ``read_int(_OFF_JOINT_MODE)`` and four-way ``joint_mode``
+        branch in :func:`actuated_double_ball_socket_iterate`. Otherwise
+        returns the generic dispatchers."""
+        if self._use_revolute_specialization:
+            return (
+                _constraint_prepare_singleworld_revolute_kernel,
+                _constraint_prepare_singleworld_fused_revolute_kernel,
+                _constraint_iterate_singleworld_revolute_kernel,
+                _constraint_iterate_singleworld_fused_revolute_kernel,
+                _constraint_relax_singleworld_revolute_kernel,
+                _constraint_relax_singleworld_fused_revolute_kernel,
             )
+        return (
+            _constraint_prepare_singleworld_kernel,
+            _constraint_prepare_singleworld_fused_kernel,
+            _constraint_iterate_singleworld_kernel,
+            _constraint_iterate_singleworld_fused_kernel,
+            _constraint_relax_singleworld_kernel,
+            _constraint_relax_singleworld_fused_kernel,
+        )
 
     def _fast_tail_block_dim(self) -> int:
         """Resolve the fast-tail block size for this solver instance.

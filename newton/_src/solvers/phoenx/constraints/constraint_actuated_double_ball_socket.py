@@ -98,6 +98,8 @@ __all__ = [
     "actuated_double_ball_socket_world_error_at",
     "actuated_double_ball_socket_world_wrench",
     "actuated_double_ball_socket_world_wrench_at",
+    "revolute_iterate",
+    "revolute_prepare_for_iteration",
 ]
 
 
@@ -2872,6 +2874,45 @@ def actuated_double_ball_socket_iterate(
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
     actuated_double_ball_socket_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
+
+
+@wp.func
+def revolute_iterate(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    use_bias: wp.bool,
+):
+    """Revolute-only iterate entry, skipping the ``joint_mode``
+    dispatch.
+
+    Equivalent to :func:`actuated_double_ball_socket_iterate` for
+    revolute joints, but the ``read_int(_OFF_JOINT_MODE)`` and the
+    branch into ball-socket / prismatic / fixed / cable code are
+    removed. Used by the single-world solver kernels when the scene
+    contains only revolute joints (or no joints at all): see
+    :attr:`PhoenXWorld._all_joints_revolute`.
+    """
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    _revolute_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
+
+
+@wp.func
+def revolute_prepare_for_iteration(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+):
+    """Revolute-only prepare entry, skipping the ``joint_mode``
+    dispatch. Counterpart of :func:`revolute_iterate`."""
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    _revolute_prepare_at(constraints, cid, 0, bodies, body_pair, idt)
 
 
 @wp.func

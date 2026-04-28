@@ -24,6 +24,8 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     actuated_double_ball_socket_prepare_for_iteration,
     actuated_double_ball_socket_world_error,
     actuated_double_ball_socket_world_wrench,
+    revolute_iterate,
+    revolute_prepare_for_iteration,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
@@ -57,11 +59,17 @@ __all__ = [
     "_choose_fast_tail_worlds_per_block",
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
+    "_constraint_iterate_singleworld_fused_revolute_kernel",
     "_constraint_iterate_singleworld_kernel",
+    "_constraint_iterate_singleworld_revolute_kernel",
     "_constraint_prepare_plus_iterate_fast_tail_kernel",
+    "_constraint_prepare_singleworld_fused_revolute_kernel",
     "_constraint_prepare_singleworld_kernel",
+    "_constraint_prepare_singleworld_revolute_kernel",
     "_constraint_relax_fast_tail_kernel",
+    "_constraint_relax_singleworld_fused_revolute_kernel",
     "_constraint_relax_singleworld_kernel",
+    "_constraint_relax_singleworld_revolute_kernel",
     "_constraints_to_elements_kernel",
     "_count_elements_per_world_kernel",
     "_integrate_velocities_kernel",
@@ -1650,3 +1658,165 @@ def _constraint_relax_singleworld_fused_kernel(
         cursor = cursor - 1
     if lane == 0:
         color_cursor[0] = cursor
+
+
+# ---------------------------------------------------------------------------
+# Single-world kernel factories
+# ---------------------------------------------------------------------------
+#
+# The persistent-grid (head) and single-block (fused tail) kernels for
+# prepare / iterate / relax all share the same shape: they walk the
+# colour CSR, then per cid dispatch on ``cid < num_joints`` to either
+# the joint code or the contact code. The only axes of variation are:
+#
+#   * **phase**: prepare vs iterate vs relax. iterate uses
+#     ``use_bias=True``; relax uses ``False``; prepare has no bias.
+#   * **joint specialisation**: when every joint is revolute (or there
+#     are no joints), the kernel can call :func:`revolute_iterate` /
+#     :func:`revolute_prepare_for_iteration` directly, skipping the
+#     ``read_int(_OFF_JOINT_MODE)`` global load and the four-way
+#     ``joint_mode`` branch that
+#     :func:`actuated_double_ball_socket_iterate` carries.
+#
+# Both axes are compile-time. Closing the kernel over Python booleans
+# lets Warp constant-fold the variant selection at codegen and dead-
+# code-eliminate the unused branch / unused inlined function bodies.
+# Net: 2 factories produce 12 kernels (3 phases x 2 specialisations x
+# 2 shapes) without copy-paste.
+
+
+def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
+    """Build a persistent-grid PGS kernel for the requested phase /
+    specialisation. ``phase`` is ``"prepare"``, ``"iterate"`` or
+    ``"relax"``; ``revolute_only`` selects the joint dispatch path."""
+    is_prepare = phase == "prepare"
+    is_iterate = phase == "iterate"
+    use_bias = is_iterate  # iterate ON, relax OFF (prepare ignores)
+
+    @wp.kernel(enable_backward=False)
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        idt: wp.float32,
+        element_ids_by_color: wp.array[wp.int32],
+        color_starts: wp.array[wp.int32],
+        num_colors: wp.array[wp.int32],
+        color_cursor: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_joints: wp.int32,
+        total_num_threads: wp.int32,
+        fuse_threshold: wp.int32,
+        head_active: wp.array[wp.int32],
+    ):
+        tid = wp.tid()
+        if color_cursor[0] <= 0:
+            if tid == 0:
+                head_active[0] = 0
+            return
+        start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
+
+        if count <= fuse_threshold:
+            if tid == 0:
+                head_active[0] = 0
+            return
+
+        for t in range(tid, count, total_num_threads):
+            cid = element_ids_by_color[start + t]
+            if cid < num_joints:
+                if wp.static(is_prepare):
+                    if wp.static(revolute_only):
+                        revolute_prepare_for_iteration(constraints, cid, bodies, idt)
+                    else:
+                        actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+                else:
+                    if wp.static(revolute_only):
+                        revolute_iterate(constraints, cid, bodies, idt, use_bias)
+                    else:
+                        actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
+            else:
+                if wp.static(is_prepare):
+                    contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+                else:
+                    contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias)
+
+        if tid == 0:
+            color_cursor[0] = cursor - 1
+
+    return kernel
+
+
+def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool):
+    """Build a single-block tail-fused PGS kernel for the requested
+    phase / specialisation. Same axes as
+    :func:`_make_singleworld_persistent_kernel`."""
+    is_prepare = phase == "prepare"
+    is_iterate = phase == "iterate"
+    use_bias = is_iterate
+
+    @wp.kernel(enable_backward=False)
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        idt: wp.float32,
+        element_ids_by_color: wp.array[wp.int32],
+        color_starts: wp.array[wp.int32],
+        num_colors: wp.array[wp.int32],
+        color_cursor: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_joints: wp.int32,
+        fuse_threshold: wp.int32,
+    ):
+        _block, lane = wp.tid()
+        cursor = color_cursor[0]
+        while cursor > 0:
+            start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor)
+            if count > fuse_threshold:
+                break
+            if lane < count:
+                cid = element_ids_by_color[start + lane]
+                if cid < num_joints:
+                    if wp.static(is_prepare):
+                        if wp.static(revolute_only):
+                            revolute_prepare_for_iteration(constraints, cid, bodies, idt)
+                        else:
+                            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+                    else:
+                        if wp.static(revolute_only):
+                            revolute_iterate(constraints, cid, bodies, idt, use_bias)
+                        else:
+                            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
+                else:
+                    if wp.static(is_prepare):
+                        contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+                    else:
+                        contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias)
+            _sync_threads()
+            cursor = cursor - 1
+        if lane == 0:
+            color_cursor[0] = cursor
+
+    return kernel
+
+
+_constraint_prepare_singleworld_revolute_kernel = _make_singleworld_persistent_kernel(
+    phase="prepare", revolute_only=True
+)
+_constraint_iterate_singleworld_revolute_kernel = _make_singleworld_persistent_kernel(
+    phase="iterate", revolute_only=True
+)
+_constraint_relax_singleworld_revolute_kernel = _make_singleworld_persistent_kernel(
+    phase="relax", revolute_only=True
+)
+_constraint_prepare_singleworld_fused_revolute_kernel = _make_singleworld_fused_kernel(
+    phase="prepare", revolute_only=True
+)
+_constraint_iterate_singleworld_fused_revolute_kernel = _make_singleworld_fused_kernel(
+    phase="iterate", revolute_only=True
+)
+_constraint_relax_singleworld_fused_revolute_kernel = _make_singleworld_fused_kernel(
+    phase="relax", revolute_only=True
+)
