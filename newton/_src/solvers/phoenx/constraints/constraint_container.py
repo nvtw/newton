@@ -468,6 +468,17 @@ DEFAULT_HERTZ_LINEAR = wp.constant(wp.float32(1.0e9))
 DEFAULT_HERTZ_ANGULAR = wp.constant(wp.float32(1.0e9))
 #: Hinge / cone limit stiffness; Nyquist-clamped so limits don't bounce.
 DEFAULT_HERTZ_LIMIT = wp.constant(wp.float32(1.0e9))
+
+#: Hard upper bound on per-row Nyquist headroom multipliers (the
+#: ``nyquist_boost`` argument to :func:`pd_coefficients` and friends).
+#: A boost of ``N`` lets PD rows accept stiffness up to
+#: ``N / (M_inv * dt^2)`` -- ``N = 1`` is the strict implicit-Euler
+#: bound, larger values trade headroom for high-frequency ringing
+#: risk. Per-row requests above this constant are silently clamped
+#: down so users cannot push past a known-safe limit. The cable
+#: bend / twist rows default to this value (``10``); revolute /
+#: prismatic drive / limit rows default to ``1``.
+_PD_NYQUIST_HEADROOM_MAX = wp.constant(wp.float32(10.0))
 #: Velocity-motor stiffness (only modulates the impulse coefficient
 #: since velocity targets carry no positional bias).
 DEFAULT_HERTZ_MOTOR = wp.constant(wp.float32(1.0e9))
@@ -523,6 +534,7 @@ def pd_coefficients(
     position_error: wp.float32,
     eff_mass_inv: wp.float32,
     dt: wp.float32,
+    nyquist_boost: wp.float32,
 ):
     """Map ``(k, c, C, M_inv, dt)`` to Jitter2 PGS spring-damper triple.
 
@@ -554,6 +566,10 @@ def pd_coefficients(
         position_error: ``C = actual - target`` [rad or m].
         eff_mass_inv: ``J M^{-1} J^T``; ``0`` short-circuits to no-op.
         dt: Substep [s], must be > 0.
+        nyquist_boost: Per-row headroom multiplier on the Nyquist
+            stiffness clamp. ``1`` = strict bound, larger values trade
+            headroom for ringing risk; clamped to
+            ``[1, _PD_NYQUIST_HEADROOM_MAX]``.
     """
     if eff_mass_inv <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
@@ -567,8 +583,11 @@ def pd_coefficients(
     # bias spikes to ``C / dt`` and its effective mass collapses to
     # ``1 / eff_mass_inv``. Capping ``k`` at the Nyquist limit
     # keeps user-supplied gains in the regime where the soft-PD
-    # plumbing degrades smoothly.
-    k_max = wp.float32(1.0) / (eff_mass_inv * dt * dt)
+    # plumbing degrades smoothly. ``nyquist_boost`` lets a caller
+    # opt into more headroom; the global ``_PD_NYQUIST_HEADROOM_MAX``
+    # caps the boost so requests cannot push past a known-safe limit.
+    boost = wp.clamp(nyquist_boost, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
+    k_max = boost / (eff_mass_inv * dt * dt)
     k_clamped = wp.min(stiffness, k_max)
 
     # Jitter2 SetSpringParameters, but with k/c already in absolute
@@ -594,6 +613,7 @@ def pd_coefficients_split(
     position_error: wp.float32,
     eff_mass_inv: wp.float32,
     dt: wp.float32,
+    nyquist_boost: wp.float32,
 ):
     """Spring / damping XPBD-style split of :func:`pd_coefficients`.
 
@@ -634,7 +654,8 @@ def pd_coefficients_split(
     bias_s = wp.float32(0.0)
     eff_mass_s = wp.float32(0.0)
     if stiffness > 0.0:
-        k_max = wp.float32(1.0) / (eff_mass_inv * dt * dt)
+        boost = wp.clamp(nyquist_boost, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
+        k_max = boost / (eff_mass_inv * dt * dt)
         k_clamped = wp.min(stiffness, k_max)
         softness_s = wp.float32(1.0) / (dt * k_clamped)
         gamma_s = softness_s * idt

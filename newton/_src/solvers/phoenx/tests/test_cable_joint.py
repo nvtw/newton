@@ -34,8 +34,8 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
-    _CABLE_NYQUIST_HEADROOM,
+from newton._src.solvers.phoenx.solver_config import (
+    PHOENX_BOOST_CABLE_BEND,
 )
 from newton._src.solvers.phoenx.tests._test_helpers import make_graph_stepper, run_settle_loop
 from newton._src.solvers.phoenx.world_builder import (
@@ -418,7 +418,7 @@ class TestCableAnalytical(unittest.TestCase):
     harmonic oscillator. Mirror of
     :class:`test_cable_joint.TestCableAnalytical` with cable-specific
     bounds (e.g. the high-stiffness ceiling shifts by
-    ``_CABLE_NYQUIST_HEADROOM``).
+    ``PHOENX_BOOST_CABLE_BEND``).
     """
 
     def test_undamped_period_within_5pct(self) -> None:
@@ -713,7 +713,7 @@ class TestCableAnalytical(unittest.TestCase):
     def test_high_stiffness_remains_stable(self) -> None:
         """High-stiffness stability regression at ~100x of cable's
         *headroom-scaled* Nyquist cap (the strict cap times
-        :data:`_CABLE_NYQUIST_HEADROOM`). Without a clamp the soft-PD's
+        :data:`PHOENX_BOOST_CABLE_BEND`). Without a clamp the soft-PD's
         eff_mass collapses to the rigid limit and the bias spikes to
         ``C / dt`` -- per-step impulse can overshoot and angular
         velocity diverges. With the clamp in place pose and velocity
@@ -721,16 +721,16 @@ class TestCableAnalytical(unittest.TestCase):
 
         Note: the equivalent test in :mod:`test_cable_joint` sizes the
         ceiling against the strict Nyquist (CABLE's ``pd_coefficients``
-        path); cable caps at :data:`_CABLE_NYQUIST_HEADROOM` *times*
+        path); cable caps at :data:`PHOENX_BOOST_CABLE_BEND` *times*
         that ceiling, so we scale the test ``k`` accordingly to keep
         the regression at the same ratio above the saturation point.
         """
         # ``k_ref ~= 1 / (dt_substep^2 * I_inv)``; FPS=240, substeps=4
         # -> dt_substep = 1/960, I_inv = 20 -> k_ref ~= 46000. cable's
-        # cap is ``_CABLE_NYQUIST_HEADROOM * k_ref`` ~= 460000. We
+        # cap is ``PHOENX_BOOST_CABLE_BEND * k_ref`` ~= 460000. We
         # request ~100x of that to comfortably exceed the saturation
         # point.
-        headroom = float(_CABLE_NYQUIST_HEADROOM)
+        headroom = float(PHOENX_BOOST_CABLE_BEND)
         k_ref = (FPS * SUBSTEPS) ** 2 / 20.0
         k = 100.0 * headroom * k_ref
         init_q = _axis_angle_quat((0.0, 0.0, 1.0), math.radians(10.0))

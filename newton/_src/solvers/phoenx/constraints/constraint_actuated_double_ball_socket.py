@@ -46,6 +46,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
+    _PD_NYQUIST_HEADROOM_MAX,
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
     ConstraintBodies,
     ConstraintContainer,
@@ -75,6 +76,14 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
     extract_rotation_angle,
     revolution_tracker_angle,
     revolution_tracker_update,
+)
+from newton._src.solvers.phoenx.solver_config import (
+    PHOENX_BOOST_CABLE_BEND,
+    PHOENX_BOOST_CABLE_TWIST,
+    PHOENX_BOOST_PRISMATIC_DRIVE,
+    PHOENX_BOOST_PRISMATIC_LIMIT,
+    PHOENX_BOOST_REVOLUTE_DRIVE,
+    PHOENX_BOOST_REVOLUTE_LIMIT,
 )
 
 __all__ = [
@@ -292,7 +301,10 @@ class ActuatedDoubleBallSocketData:
     # N*m/rad], ``damping_drive`` = kd [N*s/m or N*m*s/rad]. Both zero
     # disables the drive row regardless of ``drive_mode`` -- matches
     # Jitter2's LinearMotor / AngularMotor short-circuit. See
-    # :func:`pd_coefficients` for the implicit-Euler math.
+    # :func:`pd_coefficients` for the implicit-Euler math. The Nyquist
+    # headroom multiplier on this row is a compile-time constant
+    # in :mod:`solver_config` (per joint type / per row); column
+    # storage avoided to keep the constraint footprint compact.
     stiffness_drive: wp.float32
     damping_drive: wp.float32
     # Joint-axis armature (rotor / leadscrew inertia) [kg*m^2 for revolute,
@@ -507,14 +519,16 @@ def actuated_double_ball_socket_initialize_kernel(
         target_velocity: Velocity setpoint [rad/s or m/s].
         max_force_drive: Drive impulse cap [N*m or N]; ``0`` disables.
         stiffness_drive, damping_drive: Drive PD gains in absolute SI
-            units; both ``0`` disables the drive row.
+            units; both ``0`` disables the drive row. CABLE mode
+            reuses these slots for ``bend_stiffness`` / ``bend_damping``.
         min_value, max_value: Limit window [rad or m]; ``min > max``
             disables the limit.
         hertz_limit, damping_ratio_limit: Box2D-style limit knobs;
             used iff ``stiffness_limit == damping_limit == 0``.
         stiffness_limit, damping_limit: PD limit gains (absolute SI).
             If either > 0 the limit uses the Jitter2 spring-damper
-            path and the Box2D knobs are ignored.
+            path and the Box2D knobs are ignored. CABLE mode reuses
+            these slots for ``twist_stiffness`` / ``twist_damping``.
         armature: Joint-axis armature [kg*m^2 for revolute, kg for
             prismatic]. Adds to the axial effective inertia for the
             drive and limit rows; ``0`` disables.
@@ -878,6 +892,8 @@ def _axial_drive_limit_prepare_at(
     cumulative_value: wp.float32,
     eff_inv: wp.float32,
     dt: wp.float32,
+    drive_boost: wp.float32,
+    limit_boost: wp.float32,
 ) -> wp.float32:
     """Shared drive + limit prepare for the axial scalar row.
 
@@ -893,6 +909,11 @@ def _axial_drive_limit_prepare_at(
     clamp state, and returns the warm-start ``axial_imp =
     acc_drive + acc_limit`` (with ``acc_limit`` zeroed when the
     limit is inactive, matching the standalone modules).
+
+    ``drive_boost`` / ``limit_boost`` are per-joint-type Nyquist
+    headroom multipliers (e.g. :data:`PHOENX_BOOST_REVOLUTE_DRIVE`)
+    threaded in from the per-mode caller; both are clamped to
+    ``[1, _PD_NYQUIST_HEADROOM_MAX]`` inside :func:`pd_coefficients`.
 
     Pairs with :func:`_axial_drive_limit_iterate`.
     """
@@ -919,7 +940,7 @@ def _axial_drive_limit_prepare_at(
         drive_C = cumulative_value - target
     if stiffness_drive > 0.0 or damping_drive > 0.0:
         gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients(
-            stiffness_drive, damping_drive, drive_C, eff_inv, dt
+            stiffness_drive, damping_drive, drive_C, eff_inv, dt, drive_boost
         )
     else:
         gamma_drive = wp.float32(0.0)
@@ -947,7 +968,9 @@ def _axial_drive_limit_prepare_at(
     # ``stiffness_limit > 0 or damping_limit > 0`` to pick the layout,
     # so only the active triple is filled.
     if stiffness_limit > 0.0 or damping_limit > 0.0:
-        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(stiffness_limit, damping_limit, limit_C, eff_inv, dt)
+        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(
+            stiffness_limit, damping_limit, limit_C, eff_inv, dt, limit_boost
+        )
         write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
         write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
         write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
@@ -1298,7 +1321,16 @@ def _revolute_prepare_at(
     # coefficients. Returns the warm-start axial impulse (sum of the
     # drive + limit accumulated impulses, with the limit one gated on
     # the clamp state). Pure torque on both bodies along ``n_hat``.
-    axial_imp = _axial_drive_limit_prepare_at(constraints, cid, base_offset, cumulative_angle, eff_inv, dt)
+    axial_imp = _axial_drive_limit_prepare_at(
+        constraints,
+        cid,
+        base_offset,
+        cumulative_angle,
+        eff_inv,
+        dt,
+        PHOENX_BOOST_REVOLUTE_DRIVE,
+        PHOENX_BOOST_REVOLUTE_LIMIT,
+    )
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
 
@@ -1692,7 +1724,16 @@ def _prismatic_prepare_at(
     # Prismatic applies it as a linear impulse at anchor 1 (with the
     # corresponding lever-arm torque on both bodies), the only
     # per-mode difference from the revolute warm-start.
-    axial_imp = _axial_drive_limit_prepare_at(constraints, cid, base_offset, slide, eff_inv, dt)
+    axial_imp = _axial_drive_limit_prepare_at(
+        constraints,
+        cid,
+        base_offset,
+        slide,
+        eff_inv,
+        dt,
+        PHOENX_BOOST_PRISMATIC_DRIVE,
+        PHOENX_BOOST_PRISMATIC_LIMIT,
+    )
     velocity1 = velocity1 + inv_mass1 * (n_hat * axial_imp)
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ wp.cross(r1_b1, n_hat * axial_imp)
     velocity2 = velocity2 - inv_mass2 * (n_hat * axial_imp)
@@ -1872,20 +1913,6 @@ def _prismatic_iterate_at(
 # and the well-conditioned positional rows match REVOLUTE / PRISMATIC
 # convergence behaviour.
 
-#: Headroom factor on the CABLE substep stiffness clamp. The implicit-
-#: Euler PD's "naive" Nyquist bound is ``k <= 1 / (M_inv * dt^2)``
-#: (i.e. ``omega_n * dt <= 1``); past that point the soft-PD's
-#: effective mass collapses to ``1 / M_inv`` and the bias spikes to
-#: ``C / dt``, so user-supplied gains saturate rather than producing
-#: a stiffer spring. This factor multiplies the cap to ``N / (M_inv
-#: * dt^2)``, allowing super-Nyquist gains for users who want them.
-#: ``N = 1`` matches the strict naive bound; ``N = pi^2 ~ 9.87``
-#: matches the Box2D ``omega <= pi/dt`` convention; larger
-#: values trade more headroom for more risk of high-frequency
-#: ringing on undamped chains. Applied uniformly to both the bend
-#: (anchor-2 tangent) and twist (anchor-3 scalar) PD blocks.
-_CABLE_NYQUIST_HEADROOM = wp.constant(wp.float32(10.0))
-
 
 @wp.func
 def _cable_prepare_at(
@@ -2010,16 +2037,16 @@ def _cable_prepare_at(
 
     # Nyquist-clamp the positional bend stiffness using the average
     # diagonal of K22 as the representative scalar effective mass.
-    # Cap is ``N / (M_inv * dt^2)`` with the headroom factor
-    # ``_CABLE_NYQUIST_HEADROOM`` -- ``N = 1`` is the strict bound,
-    # larger values let user gains push past the substep's resolvable
-    # spring frequency at the cost of high-frequency ringing risk.
+    # Cap is ``N / (M_inv * dt^2)`` where ``N = PHOENX_BOOST_CABLE_BEND``
+    # (default ``10``), clamped to ``[1, _PD_NYQUIST_HEADROOM_MAX]``
+    # so the global cap can prevent excess headroom requests.
+    bend_boost = wp.clamp(PHOENX_BOOST_CABLE_BEND, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
     eff_inv_bend = wp.float32(0.5) * (k22_00 + k22_11)
     bias_factor_bend = wp.float32(0.0)
     gamma_bend = wp.float32(0.0)
     if (k_pos_bend > wp.float32(0.0)) or (d_pos_bend > wp.float32(0.0)):
         if eff_inv_bend > wp.float32(0.0):
-            k_max_bend = _CABLE_NYQUIST_HEADROOM / (eff_inv_bend * dt * dt)
+            k_max_bend = bend_boost / (eff_inv_bend * dt * dt)
             k_clamped_bend = wp.min(k_pos_bend, k_max_bend)
         else:
             k_clamped_bend = k_pos_bend
@@ -2065,14 +2092,14 @@ def _cable_prepare_at(
     k_pos_twist = k_twist_user * inv_rest2
     d_pos_twist = d_twist_user * inv_rest2
 
+    twist_boost = wp.clamp(PHOENX_BOOST_CABLE_TWIST, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
     bias_factor_twist = wp.float32(0.0)
     gamma_twist = wp.float32(0.0)
     m_twist_soft = wp.float32(0.0)
     if (k_pos_twist > wp.float32(0.0)) or (d_pos_twist > wp.float32(0.0)):
         if eff_inv_twist > wp.float32(0.0):
-            # Same headroom factor as the bend clamp; see
-            # ``_CABLE_NYQUIST_HEADROOM`` for the rationale.
-            k_max_twist = _CABLE_NYQUIST_HEADROOM / (eff_inv_twist * dt * dt)
+            # Same headroom rule as the bend clamp.
+            k_max_twist = twist_boost / (eff_inv_twist * dt * dt)
             k_clamped_twist = wp.min(k_pos_twist, k_max_twist)
         else:
             k_clamped_twist = k_pos_twist

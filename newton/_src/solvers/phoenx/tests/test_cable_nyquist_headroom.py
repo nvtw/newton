@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Empirical characterisation of ``_CABLE_NYQUIST_HEADROOM``.
+"""Empirical characterisation of ``PHOENX_BOOST_CABLE_BEND``.
 
 The cable bend / twist Nyquist clamp uses a headroom factor ``N`` so
 the user-supplied stiffness is bounded by ``k <= N / (M_inv * dt^2)``;
-``_CABLE_NYQUIST_HEADROOM`` defaults to ``10`` (vs the strict ``N = 1``
+``PHOENX_BOOST_CABLE_BEND`` defaults to ``10`` (vs the strict ``N = 1``
 implicit-Euler bound). This test sweeps ``k_bend`` from well below
 the strict bound up past the headroom-relaxed cap and asserts:
 
@@ -45,8 +45,8 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
-    _CABLE_NYQUIST_HEADROOM,
+from newton._src.solvers.phoenx.solver_config import (
+    PHOENX_BOOST_CABLE_BEND,
 )
 from newton._src.solvers.phoenx.tests._test_helpers import run_settle_loop
 from newton._src.solvers.phoenx.tests.test_cable_joint import (
@@ -229,14 +229,14 @@ class TestCableNyquistHeadroom(unittest.TestCase):
         )
 
     def test_headroom_constant_value(self) -> None:
-        """Pin ``_CABLE_NYQUIST_HEADROOM = 10.0`` so a future tweak to
+        """Pin ``PHOENX_BOOST_CABLE_BEND = 10.0`` so a future tweak to
         the constant requires updating the headroom inventory
         (NYQUIST_HEADROOM.md) and the audit doc (PD_DRIVE_AUDIT.md)
         in the same PR. Strictly an inventory-coherence guard, not a
         physical assertion.
         """
         self.assertAlmostEqual(
-            float(_CABLE_NYQUIST_HEADROOM),
+            float(PHOENX_BOOST_CABLE_BEND),
             10.0,
             places=6,
             msg=(
