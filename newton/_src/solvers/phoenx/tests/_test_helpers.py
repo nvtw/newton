@@ -8,14 +8,16 @@ This module is *not* part of the public API; it lives under
 siblings. It consolidates the hot inner-loop patterns that every
 jitter test file used to open-code so bug fixes (graph-capture
 correctness, warm-up semantics, CPU fallback) land in one place.
-
-Currently only :func:`run_settle_loop` lives here. Add more shared
-helpers as the tests grow.
 """
 
 import warp as wp
 
-__all__ = ["GRAPH_CAPTURE_FRAME_THRESHOLD", "STEP_LAYOUTS", "run_settle_loop"]
+__all__ = [
+    "GRAPH_CAPTURE_FRAME_THRESHOLD",
+    "STEP_LAYOUTS",
+    "make_graph_stepper",
+    "run_settle_loop",
+]
 
 
 # Layouts every behavioural test should exercise. ``"multi_world"`` is
@@ -82,3 +84,66 @@ def run_settle_loop(world, frames: int, dt: float) -> None:
     # the remainder through the graph.
     for _ in range(frames - 2):
         wp.capture_launch(graph)
+
+
+def make_graph_stepper(world, dt: float):
+    """Return a ``step(n_frames: int) -> None`` callable that advances
+    ``world`` ``n_frames`` times at fixed ``dt`` seconds per step,
+    using CUDA graph capture under the hood.
+
+    Unlike :func:`run_settle_loop` (which captures a fresh graph each
+    call), this returns a *persistent* graph + replay closure -- ideal
+    for tests that step a single frame at a time inside a Python loop
+    (e.g. recording the pose trajectory) where the per-call capture
+    overhead of :func:`run_settle_loop` would defeat the purpose of
+    graph capture.
+
+    The graph is recorded once on first use after a warm-up step;
+    subsequent invocations replay it via ``wp.capture_launch``. Because
+    the warm-up + capture themselves advance the world by 2 frames,
+    those frames are carried as a "head start" -- the returned
+    closure honours the requested ``n_frames`` budget exactly.
+
+    On CPU (``device.is_cuda is False``) the returned closure falls
+    back to plain eager stepping.
+
+    Args:
+        world: A finalised :class:`PhoenXWorld`.
+        dt: Fixed substep [s] used for every replay. Recording at one
+            ``dt`` and replaying at another would silently skew the
+            integrator -- always re-create the stepper if ``dt``
+            changes.
+
+    Returns:
+        A callable ``step(n_frames: int) -> None``.
+    """
+    device = wp.get_device()
+    if not device.is_cuda:
+        def _step_eager(n_frames: int) -> None:
+            for _ in range(int(n_frames)):
+                world.step(dt)
+        return _step_eager
+
+    state = {"graph": None, "head_start": 0}
+
+    def _step_cuda(n_frames: int) -> None:
+        n = int(n_frames)
+        if n <= 0:
+            return
+        if state["graph"] is None:
+            # First call: warm-up + capture. The two frames spent here
+            # become a head start that absorbs the next ``n`` request.
+            world.step(dt)
+            with wp.ScopedCapture(device=device) as capture:
+                world.step(dt)
+            state["graph"] = capture.graph
+            state["head_start"] = 2
+        # Honour the caller's frame budget exactly: deduct the head
+        # start before replaying.
+        consumed = min(state["head_start"], n)
+        state["head_start"] -= consumed
+        remaining = n - consumed
+        for _ in range(remaining):
+            wp.capture_launch(state["graph"])
+
+    return _step_cuda

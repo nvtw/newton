@@ -186,6 +186,7 @@ class SolverPhoenX(SolverBase):
         threads_per_world: int | str = "auto",
         max_thread_blocks: int | None = None,
         velocity_readout: str = "substep_end",
+        use_beam_for_cable: bool = False,
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -242,6 +243,14 @@ class SolverPhoenX(SolverBase):
                   N points instead of 2). Recommended for RL inference
                   scenes where the policy was trained against
                   MuJoCo Warp's post-integration ``qvel`` convention.
+            use_beam_for_cable: Opt-in routing of every Newton
+                :data:`JointType.CABLE` to PhoenX's
+                :data:`JOINT_MODE_BEAM` instead of the default
+                :data:`JOINT_MODE_CABLE`. BEAM is a positional 3+2+1
+                row split that converges cleanly at high bend
+                stiffness (where CABLE's angular log-map rows
+                degrade). Defaults to ``False`` to preserve
+                existing behaviour.
         """
         super().__init__(model)
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -329,7 +338,12 @@ class SolverPhoenX(SolverBase):
             newton.eval_fk(model, model.joint_q, model.joint_qd, model)
 
         # ---- Build the joint (ADBS) column layout ----------------------
-        self._adbs: AdbsInitArrays = build_adbs_init_arrays(model, device=self.device)
+        # Persist ``use_beam_for_cable`` so :meth:`notify_model_changed`
+        # rebuilds the ADBS arrays with the same routing decision.
+        self._use_beam_for_cable = bool(use_beam_for_cable)
+        self._adbs: AdbsInitArrays = build_adbs_init_arrays(
+            model, device=self.device, use_beam_for_cable=self._use_beam_for_cable
+        )
         num_joints = self._adbs.num_joint_columns
 
         # ---- Collision-related sizing ---------------------------------
@@ -883,7 +897,9 @@ class SolverPhoenX(SolverBase):
         from scratch. Gravity is reread from ``model.gravity``.
         """
         if flags & (int(SolverNotifyFlags.JOINT_PROPERTIES) | int(SolverNotifyFlags.JOINT_DOF_PROPERTIES)):
-            self._adbs = build_adbs_init_arrays(self.model, device=self.device)
+            self._adbs = build_adbs_init_arrays(
+                self.model, device=self.device, use_beam_for_cable=self._use_beam_for_cable
+            )
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
         if flags & int(SolverNotifyFlags.MODEL_PROPERTIES):

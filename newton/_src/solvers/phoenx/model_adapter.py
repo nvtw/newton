@@ -17,13 +17,18 @@ Mapping:
 * :data:`JointType.CABLE` -> :data:`JOINT_MODE_CABLE` (rigid
   ball-socket at the parent attachment + 2 bend + 1 twist soft
   angular rows; Newton's stretch DoF is treated as rigid because
-  PhoenX has no axial-length compliance).
+  PhoenX has no axial-length compliance). Pass
+  ``use_beam_for_cable=True`` to :func:`build_adbs_init_arrays`
+  (or :class:`SolverPhoenX`) to route CABLE through PhoenX's newer
+  :data:`JOINT_MODE_BEAM` instead -- a positional 3+2+1 split that
+  doesn't suffer CABLE's log-map convergence degradation at high
+  bend stiffness.
 * :data:`JointType.BALL` -> :data:`JOINT_MODE_BALL_SOCKET` (drive /
   limit not supported, must be off in the Model).
 * :data:`JointType.FIXED` -> :data:`JOINT_MODE_FIXED`.
 * :data:`JointType.FREE` -> no constraint column (free-floating base).
-* :data:`JointType.DISTANCE`, :data:`JointType.D6`,
-  :data:`JointType.CABLE` -> unsupported; raises.
+* :data:`JointType.DISTANCE`, :data:`JointType.D6` -> unsupported;
+  raises.
 
 The PhoenX body container (built by :class:`SolverPhoenX`) reserves
 slot 0 as a static world anchor, so Newton body ``i`` maps to PhoenX
@@ -42,6 +47,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     DRIVE_MODE_POSITION,
     DRIVE_MODE_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_BEAM,
     JOINT_MODE_CABLE,
     JOINT_MODE_FIXED,
     JOINT_MODE_PRISMATIC,
@@ -216,7 +222,12 @@ def _newton_target_mode_to_adbs_drive_mode(target_mode: int, stiffness: float, d
     return int(DRIVE_MODE_OFF)
 
 
-def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | None = None) -> AdbsInitArrays:
+def build_adbs_init_arrays(
+    model: newton.Model,
+    device: wp.context.Devicelike | None = None,
+    *,
+    use_beam_for_cable: bool = False,
+) -> AdbsInitArrays:
     """Walk ``model``'s joint arrays, convert each supported joint to
     an ADBS descriptor, and upload the 19 kwargs as ``wp.array`` on
     ``device``.
@@ -226,6 +237,15 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
             read at its current state and used to compute world-frame
             anchor positions.
         device: Warp device. Defaults to ``model.device``.
+        use_beam_for_cable: If ``True``, every Newton
+            :data:`JointType.CABLE` is routed to PhoenX's
+            :data:`JOINT_MODE_BEAM` instead of :data:`JOINT_MODE_CABLE`.
+            The two modes share the bend / twist gain plumbing
+            (``bend_*`` -> drive slots, ``twist_*`` -> limit slots);
+            BEAM additionally rescales gains by ``1 / rest_length^2``
+            to convert the user-supplied rotational stiffness to the
+            equivalent positional spring at its lever-armed anchors.
+            Defaults to ``False`` to preserve existing behaviour.
 
     Returns:
         An :class:`AdbsInitArrays` bundle. ``joint_idx_to_cid`` maps
@@ -375,7 +395,14 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
             # Ball-socket has no drive/limit; the ADBS builder enforces
             # this for us. BALL's axes in ``joint_axis`` are unused.
         elif jtype is newton.JointType.CABLE:
-            phoenx_mode = int(JOINT_MODE_CABLE)
+            # Opt-in routing to BEAM. BEAM and CABLE share the bend /
+            # twist gain plumbing (see the ``stiff_drive`` / ``stiff_limit``
+            # writes below), so the only Newton-side difference is the
+            # ``phoenx_mode`` value. BEAM additionally rescales gains
+            # by ``1 / rest_length^2`` to convert N*m/rad -> N/m at the
+            # lever-armed anchors -- handled internally by the BEAM
+            # prepare kernel, so no extra adapter work is needed.
+            phoenx_mode = int(JOINT_MODE_BEAM) if use_beam_for_cable else int(JOINT_MODE_CABLE)
             # Newton's CABLE joint has 2 DoFs: a linear stretch DoF
             # (qd_start) and a single isotropic angular bend/twist DoF
             # (qd_start + 1). PhoenX's cable mode is a rigid ball-socket

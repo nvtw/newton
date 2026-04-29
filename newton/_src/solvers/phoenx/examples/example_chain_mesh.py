@@ -113,7 +113,7 @@ class Example(PortedExample):
     solver_iterations = 5
     velocity_iterations = 1
     default_friction = 0.4
-    start_paused = True
+    start_paused = False
     broad_phase = "sap"
     step_layout = "single_world"
     # Skip contact arrows so ``viewer.log_state`` stays on ViewerGL's
