@@ -31,7 +31,6 @@ import numpy as np
 import newton
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
-
 # ---------------------------------------------------------------------------
 # Geometry data (extracted from a real-world collision asset where this bug
 # was first observed).  All quantities in metres.
@@ -222,9 +221,7 @@ def test_off_origin_convex_hull_reports_correct_separation(test, device):
         contacts = pipeline.contacts()
         pipeline.collide(state, contacts)
 
-        gaps, normals = _collect_pair_signed_gaps(
-            contacts, model, state, shapes["triangle"], shapes["hull"]
-        )
+        gaps, normals = _collect_pair_signed_gaps(contacts, model, state, shapes["triangle"], shapes["hull"])
 
         test.assertGreater(
             gaps.size,
@@ -249,9 +246,7 @@ def test_off_origin_convex_hull_reports_correct_separation(test, device):
             float(mean_normal[2]),
             EXPECTED_NORMAL_Z,
             delta=NORMAL_TOL,
-            msg=(
-                f"Expected contact normal along -Z, got {mean_normal.tolist()}."
-            ),
+            msg=(f"Expected contact normal along -Z, got {mean_normal.tolist()}."),
         )
 
 
