@@ -1,17 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression test mirroring
-:mod:`newton._src.solvers.phoenx.examples.example_tower`.
+"""Circular-stack regression test for resting contacts.
 
-Builds the exact 40-layer / 32-planks-per-ring circular stack the
-example uses (same half-extents, same alternating-orientation
-pattern, same solver settings) and asserts that after a short settle
-no plank has dropped more than a fraction of a plank height from its
-initial layer. Designed to catch solver regressions that let resting
-contacts leak through each other -- ``example_tower`` is PhoenX's
-canonical jitter benchmark and the first scene to break when
-cross-colour PGS feedback is weakened.
+Builds a 40-layer / 32-plank-per-ring circular plank tower (1280
+planks total) and asserts that after a short settle no plank has
+dropped more than a fraction of a plank height from its initial
+layer. Designed to catch solver regressions that let resting
+contacts leak through each other -- a tall circular plank stack is
+PhoenX's canonical jitter benchmark and the first scene to break
+when cross-colour PGS feedback is weakened.
 
 Runs on CUDA only (same constraint as the rest of the PhoenX suite).
 """
@@ -26,7 +24,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 
-# ---- Tower geometry (must stay in sync with example_tower.py) ----
+# ---- Tower geometry ---------------------------------------------------
 _TOWER_HEIGHT_LAYERS = 40
 _BOXES_PER_RING = 32
 _PLANK_HX = 1.5  # tangential
@@ -39,11 +37,12 @@ _PLANK_DENSITY = 1000.0
 
 
 def _spawn_tower_plank_transforms() -> list[tuple[tuple[float, float, float], tuple[float, float, float, float]]]:
-    """Reproduce ``example_tower.Example._build_scene``'s plank layout.
+    """Layout 1280 planks in 40 rings of 32, alternating ring orientation
+    by half a step between layers (Kapla-style stagger).
 
-    Returns a list of ``(position, quat_xyzw)`` pairs in the same order
-    the example adds them, so a body-index-matched settlement check
-    can compare back against this layout.
+    Returns a list of ``(position, quat_xyzw)`` pairs in build order so
+    a body-index-matched settlement check can compare back against this
+    layout.
     """
     transforms: list[tuple[tuple[float, float, float], tuple[float, float, float, float]]] = []
     orientation_rad = 0.0
@@ -66,13 +65,12 @@ def _spawn_tower_plank_transforms() -> list[tuple[tuple[float, float, float], tu
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX tower test requires CUDA")
-class TestExampleTowerNothingDrops(unittest.TestCase):
-    """Full-scale ``example_tower`` regression: no plank falls.
+class TestTowerNothingDrops(unittest.TestCase):
+    """Full-scale circular plank tower regression: no plank falls.
 
     Simulates the 1280-plank circular tower through 60 frames at
-    60 Hz (1 s) with the same solver settings the example uses
-    (``substeps = 20``, ``solver_iterations = 3``,
-    ``velocity_iterations = 1``, the new minimum after the soft-PD
+    60 Hz (1 s) with ``substeps = 20``, ``solver_iterations = 3``,
+    ``velocity_iterations = 1`` (the new minimum after the soft-PD
     damping split). Asserts every plank stays within half a plank
     height of its initial layer centre.
 
@@ -83,7 +81,6 @@ class TestExampleTowerNothingDrops(unittest.TestCase):
     signature but comfortably above the resting compression.
     """
 
-    # Use the example's cadence.
     SIM_SUBSTEPS = 20
     SOLVER_ITERATIONS = 3
     FPS = 60
@@ -147,10 +144,7 @@ class TestExampleTowerNothingDrops(unittest.TestCase):
             f"observed z {float(positions[worst_body + 1, 2]):.3f} m.",
         )
 
-        # Secondary sanity: nothing flying. The example's own
-        # ``test_final`` uses RING_RADIUS * 3 as envelope; keep that
-        # same envelope here so this test also catches the
-        # blow-up-and-eject class of failure.
+        # Secondary sanity: nothing flying outside the tower envelope.
         envelope = _RING_RADIUS * 3.0
         for body in plank_ids:
             pos = positions[body + 1]

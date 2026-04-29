@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Empirical characterisation of ``_BEAM_NYQUIST_HEADROOM``.
+"""Empirical characterisation of ``_CABLE_NYQUIST_HEADROOM``.
 
-The BEAM bend / twist Nyquist clamp uses a headroom factor ``N`` so
+The cable bend / twist Nyquist clamp uses a headroom factor ``N`` so
 the user-supplied stiffness is bounded by ``k <= N / (M_inv * dt^2)``;
-``_BEAM_NYQUIST_HEADROOM`` defaults to ``10`` (vs the strict ``N = 1``
+``_CABLE_NYQUIST_HEADROOM`` defaults to ``10`` (vs the strict ``N = 1``
 implicit-Euler bound). This test sweeps ``k_bend`` from well below
 the strict bound up past the headroom-relaxed cap and asserts:
 
@@ -22,9 +22,9 @@ the strict bound up past the headroom-relaxed cap and asserts:
    numerical noise), since the apparent stiffness is bounded by the
    cap and any extra ``k`` is silently truncated by ``wp.min(k, k_max)``.
 
-The cap is computed from the BEAM bend block's representative
+The cap is computed from the cable bend block's representative
 effective inverse-mass, which depends on the rod's geometry / inertia.
-We use the pendulum helper from :mod:`test_beam_joint` (rod COM at
+We use the pendulum helper from :mod:`test_cable_joint` (rod COM at
 anchor, ``rest_length = 1 m``, ``inv_inertia = 20 I``) so ``M_inv ~=
 inv_mass * 2 + r^2 * inv_I * 2`` lands near 21 and the strict cap at
 ``dt = 1 / (240 * 4)`` s is around ``k_max_strict ~ 4.4e4``; the
@@ -33,7 +33,7 @@ regimes by an order of magnitude on either side.
 
 This test is the empirical complement to
 :file:`NYQUIST_HEADROOM.md`: that document inventories every clamp
-site, this test pins the BEAM-side cap behaviour so the inventory
+site, this test pins the cable-side cap behaviour so the inventory
 recommendations cannot silently drift.
 """
 
@@ -46,15 +46,15 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
-    _BEAM_NYQUIST_HEADROOM,
+    _CABLE_NYQUIST_HEADROOM,
 )
 from newton._src.solvers.phoenx.tests._test_helpers import run_settle_loop
-from newton._src.solvers.phoenx.tests.test_beam_joint import (
+from newton._src.solvers.phoenx.tests.test_cable_joint import (
     FPS,
     SOLVER_ITERATIONS,
     SUBSTEPS,
     _axis_angle_quat,
-    _build_beam_pendulum,
+    _build_cable_pendulum,
     _rod_orientation,
     _rotation_angle_about,
 )
@@ -76,9 +76,9 @@ _SETTLE_S = 1.0
 
 @unittest.skipUnless(
     wp.get_preferred_device().is_cuda,
-    "BEAM Nyquist sweep requires CUDA (graph-capture path).",
+    "cable Nyquist sweep requires CUDA (graph-capture path).",
 )
-class TestBeamNyquistHeadroom(unittest.TestCase):
+class TestCableNyquistHeadroom(unittest.TestCase):
     """Sweep ``k_bend`` past the strict and relaxed Nyquist caps; check
     boundedness, monotone stiffening below the cap, plateau above."""
 
@@ -89,7 +89,7 @@ class TestBeamNyquistHeadroom(unittest.TestCase):
         if the sim diverges to NaN -- callers can fail loudly on that.
         """
         init_q = _axis_angle_quat((0.0, 1.0, 0.0), _INIT_TILT_RAD)
-        world = _build_beam_pendulum(
+        world = _build_cable_pendulum(
             wp.get_preferred_device(),
             bend_stiffness=k_bend,
             twist_stiffness=k_bend,
@@ -157,7 +157,7 @@ class TestBeamNyquistHeadroom(unittest.TestCase):
         c_bend = 0.05  # very light damping
         ks = [1.0e2, 1.0e3, 1.0e4]
         residuals = [self._measure_residual_tilt(k, c_bend)[0] for k in ks]
-        for k, tilt in zip(ks, residuals):
+        for k, tilt in zip(ks, residuals, strict=False):
             self.assertTrue(
                 math.isfinite(tilt),
                 msg=f"residual tilt diverged at k_bend={k:.0e}",
@@ -172,7 +172,7 @@ class TestBeamNyquistHeadroom(unittest.TestCase):
                 residuals[i],
                 residuals[i - 1] * 1.1,
                 msg=(
-                    f"BEAM bend residual increased with stiffness below cap: "
+                    f"cable bend residual increased with stiffness below cap: "
                     f"k={ks[i - 1]:.0e} -> tilt={residuals[i - 1]:.4f}, "
                     f"k={ks[i]:.0e} -> tilt={residuals[i]:.4f}"
                 ),
@@ -205,7 +205,7 @@ class TestBeamNyquistHeadroom(unittest.TestCase):
         c_bend = 5.0
         ks = [1.0e6, 1.0e7]
         residuals = [self._measure_residual_tilt(k, c_bend)[0] for k in ks]
-        for k, tilt in zip(ks, residuals):
+        for k, tilt in zip(ks, residuals, strict=False):
             self.assertTrue(
                 math.isfinite(tilt),
                 msg=f"residual tilt diverged at k_bend={k:.0e}",
@@ -224,23 +224,23 @@ class TestBeamNyquistHeadroom(unittest.TestCase):
                 f"Above-cap residual changed by {rel * 100:.1f}%; expected <30% "
                 f"(plateau). k=1e6 -> tilt={residuals[0]:.6f}, "
                 f"k=1e7 -> tilt={residuals[1]:.6f}. If this fails, the "
-                f"BEAM Nyquist cap may not be saturating as documented."
+                f"cable Nyquist cap may not be saturating as documented."
             ),
         )
 
     def test_headroom_constant_value(self) -> None:
-        """Pin ``_BEAM_NYQUIST_HEADROOM = 10.0`` so a future tweak to
+        """Pin ``_CABLE_NYQUIST_HEADROOM = 10.0`` so a future tweak to
         the constant requires updating the headroom inventory
         (NYQUIST_HEADROOM.md) and the audit doc (PD_DRIVE_AUDIT.md)
         in the same PR. Strictly an inventory-coherence guard, not a
         physical assertion.
         """
         self.assertAlmostEqual(
-            float(_BEAM_NYQUIST_HEADROOM),
+            float(_CABLE_NYQUIST_HEADROOM),
             10.0,
             places=6,
             msg=(
-                "BEAM Nyquist headroom factor changed; update "
+                "cable Nyquist headroom factor changed; update "
                 "NYQUIST_HEADROOM.md and PD_DRIVE_AUDIT.md to "
                 "match the new value, and re-tune the plateau "
                 "threshold in test_plateau_beyond_headroom_cap."

@@ -30,7 +30,7 @@ directory (override via ``NEWTON_PHOENX_TIMING_REPORT``) so regressions
 in test wall-time -- typically a graph-capture fallback to eager
 stepping -- are caught at a glance. Sample report row::
 
-    1.234s  ok       newton._src.solvers.phoenx.tests.test_beam_joint.TestBeamAnalytical.test_undamped_period_within_5pct
+    1.234s  ok       newton._src.solvers.phoenx.tests.test_cable_joint.TestCableAnalytical.test_undamped_period_within_5pct
 """
 
 from __future__ import annotations
@@ -42,9 +42,15 @@ import unittest
 
 import warp as wp
 
-
 _REPORT_PATH_ENV = "NEWTON_PHOENX_TIMING_REPORT"
 _DEFAULT_REPORT_FILENAME = "test_run_all_report.txt"
+
+#: Defensive guard: any future test module added here is skipped by
+#: ``test_run_all``. Use it to exclude tests that instantiate phoenx
+#: ``Example`` classes -- those should never run as part of the unit
+#: test sweep; examples validate themselves via their ``test_final`` /
+#: ``test_post_step`` hooks when actually run.
+_EXAMPLE_RUNNING_TEST_MODULES: frozenset[str] = frozenset()
 
 
 def _require_cuda() -> None:
@@ -59,9 +65,7 @@ def _require_cuda() -> None:
     try:
         device = wp.get_device()
     except Exception as exc:  # pragma: no cover -- warp init failure
-        raise RuntimeError(
-            "Could not query the active warp device. PhoenX tests require CUDA."
-        ) from exc
+        raise RuntimeError("Could not query the active warp device. PhoenX tests require CUDA.") from exc
     if not device.is_cuda:
         raise unittest.SkipTest(
             f"PhoenX tests require a CUDA device (active device: {device.name!r}). "
@@ -98,7 +102,7 @@ def load_tests(loader: unittest.TestLoader, standard_tests, pattern):
         if not fname.startswith("test_") or not fname.endswith(".py"):
             continue
         stem = fname[:-3]
-        if stem == self_stem:
+        if stem == self_stem or stem in _EXAMPLE_RUNNING_TEST_MODULES:
             continue
         suite.addTests(loader.loadTestsFromName(f"{package}.{stem}"))
     return suite
@@ -248,7 +252,7 @@ def main() -> None:
         if not fname.startswith("test_") or not fname.endswith(".py"):
             continue
         stem = fname[:-3]
-        if stem == self_stem:
+        if stem == self_stem or stem in _EXAMPLE_RUNNING_TEST_MODULES:
             continue
         suite.addTests(loader.loadTestsFromName(f"{package}.{stem}"))
 
