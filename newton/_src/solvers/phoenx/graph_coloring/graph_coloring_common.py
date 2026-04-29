@@ -432,9 +432,20 @@ def partitioning_coloring_incremental_greedy_kernel(
             # one HW instruction on CUDA; the previous 64-iteration
             # linear scan was warp-divergent and burned cycles on
             # commits that landed in low colours.
+            #
+            # Overflow on this kernel is "no free bit in the 64-wide
+            # forbidden mask"; ``__ffsll(0)`` returns 0 which the
+            # wrapper turns into ``-1``. We MUST treat ``c < 0`` as
+            # overflow -- if we don't, the else branch writes
+            # ``color_tags[tid] = c + 1 = 0`` (the uncoloured
+            # sentinel), the vertex is re-processed every round and
+            # the per-commit ``atomic_sub(num_remaining, 1)`` drives
+            # the predicate negative, so the surrounding
+            # ``wp.capture_while(num_remaining, ...)`` never exits
+            # and the captured graph hangs the GPU.
             free_mask = forbidden_mask ^ _FREE_COLOR_FLIP
             c = _lowest_set_bit(free_mask)
-            if c >= GREEDY_MAX_COLORS:
+            if c < wp.int32(0) or c >= GREEDY_MAX_COLORS:
                 # Mask saturated: graph wants > GREEDY_MAX_COLORS
                 # distinct colours. We MUST still commit something
                 # and decrement ``num_remaining`` -- the outer

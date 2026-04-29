@@ -1000,6 +1000,75 @@ class TestMaxColorsOverflowGuard(unittest.TestCase):
         self.assertEqual(int(p.num_colors.numpy()[0]), num_elements)
 
 
+class TestGreedyOverflowDoesNotHang(unittest.TestCase):
+    """Regression test for the ``__ffsll`` rewrite of the greedy coloring's
+    "smallest free colour" search.
+
+    The pre-rewrite linear scan returned ``c == GREEDY_MAX_COLORS`` (= 64)
+    when the int64 forbidden mask was saturated, so the kernel's
+    ``c >= GREEDY_MAX_COLORS`` overflow branch fired correctly. The
+    ``__ffsll`` wrapper returns ``-1`` for a zero mask instead, which
+    falls through the (only) ``c >= GREEDY_MAX_COLORS`` check into the
+    "commit" branch. The vertex then gets ``color_tags[tid] = c + 1 = 0``
+    (the *uncoloured* sentinel) but ``num_remaining`` is still
+    ``atomic_sub``'d -- the same tid is re-processed every round and
+    the predicate goes negative. The surrounding ``wp.capture_while``
+    on ``num_remaining`` never exits, hanging the captured graph.
+
+    The fix is to also treat ``c < 0`` as overflow so the JP fallback
+    path runs and produces a valid CSR within the same captured frame.
+    """
+
+    @unittest.skipUnless(
+        wp.get_device().is_cuda and wp.is_conditional_graph_supported(),
+        "Conditional graph nodes not supported",
+    )
+    def test_hub_clique_above_greedy_cap_terminates(self) -> None:
+        """Hub clique forcing > GREEDY_MAX_COLORS must trigger the JP
+        fallback and produce a valid CSR -- not hang the GPU."""
+        device = wp.get_preferred_device()
+        # Pick num_elements > GREEDY_MAX_COLORS so the greedy build's
+        # 64-wide forbidden mask saturates partway through.
+        num_elements = 100
+        bodies_np = np.full((num_elements, int(MAX_BODIES)), -1, dtype=np.int32)
+        bodies_np[:, 0] = 0
+        bodies_np[:, 1] = np.arange(1, num_elements + 1, dtype=np.int32)
+
+        elements_arr = _make_stress_elements_array(bodies_np, device)
+        num_elements_arr = wp.array([num_elements], dtype=wp.int32, device=device)
+
+        p = IncrementalContactPartitioner(
+            max_num_interactions=num_elements,
+            max_num_nodes=num_elements + 1,
+            device=device,
+            seed=0,
+            use_tile_scan=True,
+        )
+        p.reset(elements_arr, num_elements_arr)
+
+        # Without the fix this hangs the GPU. With the fix the greedy
+        # overflow surfaces, the in-graph JP fallback rebuilds the CSR
+        # within the same captured frame, and the call returns.
+        p.build_csr_greedy_with_jp_fallback()
+        wp.synchronize_device(device)
+
+        # JP needed (Delta + 1) colours for a Delta-clique = num_elements.
+        observed_colors = int(p.num_colors.numpy()[0])
+        self.assertEqual(observed_colors, num_elements)
+
+        # Every element must have been assigned a colour (no -1 sentinels).
+        assignments = p.interaction_id_to_partition.numpy()
+        self.assertTrue(
+            (assignments >= 0).all(),
+            msg=f"some elements unassigned: count={(assignments < 0).sum()}",
+        )
+        # And every assignment must be a valid colour.
+        self.assertTrue(
+            (assignments < observed_colors).all(),
+            msg="assignment out of range",
+        )
+
+
 if __name__ == "__main__":
     wp.init()
     unittest.main()

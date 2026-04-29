@@ -653,9 +653,17 @@ def _per_world_greedy_coloring_kernel(
                         # Smallest free colour = first 0-bit in mask.
                         # ``_lowest_set_bit`` wraps ``__ffsll`` so the
                         # search is one HW instruction on CUDA.
+                        # ``__ffsll(0)`` -> wrapper returns -1, so a
+                        # saturated mask (all 64 colours forbidden)
+                        # surfaces as ``c < 0``. Treating that as
+                        # overflow -- not a valid colour -- keeps the
+                        # else branch from writing ``assigned[eid] =
+                        # 0`` (the uncoloured sentinel) and from
+                        # firing an OOB ``atomic_add(color_count, w,
+                        # -1, ...)``.
                         free_mask = forbidden_mask ^ _PER_WORLD_FREE_COLOR_FLIP
                         c = _lowest_set_bit(free_mask)
-                        if c >= GREEDY_MAX_COLORS:
+                        if c < wp.int32(0) or c >= GREEDY_MAX_COLORS:
                             overflow_local = wp.int32(1)
                         else:
                             assigned[eid] = c + wp.int32(1)
