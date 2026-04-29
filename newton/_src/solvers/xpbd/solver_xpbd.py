@@ -17,6 +17,7 @@ from .kernels import (
     apply_rigid_restitution,
     bending_constraint,
     convert_contact_impulse_to_force,
+    convert_joint_impulse_to_parent_f,
     copy_kinematic_body_state_kernel,
     solve_body_contact_positions,
     solve_body_joints,
@@ -48,6 +49,19 @@ class SolverXPBD(SolverBase):
         approximate: for contacts between two dynamic bodies the force is
         computed using the harmonic mean of the two bodies' contact counts,
         which is symmetric but not exact.
+
+        **Reported parent-joint forces** (see :attr:`~newton.State.body_parent_f`,
+        populated when the extended state attribute is requested) are also
+        approximate.  XPBD applies relaxation factors
+        (``joint_linear_relaxation``, ``joint_angular_relaxation``) to each
+        joint constraint correction, and with a finite ``iterations`` count
+        residual constraint error remains at end-of-step, so the reported
+        wrench is the *applied* constraint reaction rather than the exact
+        wrench needed to enforce the joint perfectly.  Joint actuator forces
+        from :attr:`~newton.Control.joint_f` are applied separately as
+        external body wrenches before integration and are *not* part of
+        ``body_parent_f`` (matching MuJoCo's ``cfrc_int`` convention, which is
+        the constraint-only wrench).
 
     Joint limitations:
         - Supported joint types: PRISMATIC, REVOLUTE, BALL, FIXED, FREE, DISTANCE, D6.
@@ -274,6 +288,12 @@ class SolverXPBD(SolverBase):
                 contact_impulse_iter = wp.zeros(
                     contacts.rigid_contact_max, dtype=wp.spatial_vector, device=model.device
                 )
+
+        # Optional per-joint accumulated child-side spatial impulse, used to
+        # populate ``state_out.body_parent_f`` after the iteration loop.
+        joint_impulse = None
+        if state_out.body_parent_f is not None and model.joint_count > 0:
+            joint_impulse = wp.zeros(model.joint_count, dtype=wp.spatial_vector, device=model.device)
 
         if control is None:
             control = model.control(clone_variables=False)
@@ -602,7 +622,7 @@ class SolverXPBD(SolverBase):
                                 self.joint_linear_relaxation,
                                 dt,
                             ],
-                            outputs=[body_deltas],
+                            outputs=[body_deltas, joint_impulse],
                             device=model.device,
                         )
 
@@ -611,6 +631,27 @@ class SolverXPBD(SolverBase):
             self._contact_impulse = contact_impulse
             self._contact_impulse_capacity = contacts.rigid_contact_max if contacts is not None else 0
             self._last_dt = dt
+
+            # Populate optional ``state_out.body_parent_f`` (incoming joint
+            # wrench per body) from the per-joint accumulated child-side
+            # impulse.  Bodies without an inbound joint (roots / free bodies)
+            # remain zero-initialized, matching MuJoCo's behavior.
+            if state_out.body_parent_f is not None:
+                state_out.body_parent_f.zero_()
+                if joint_impulse is not None:
+                    wp.launch(
+                        kernel=convert_joint_impulse_to_parent_f,
+                        dim=model.joint_count,
+                        inputs=[
+                            joint_impulse,
+                            model.joint_enabled,
+                            model.joint_type,
+                            model.joint_child,
+                            dt,
+                        ],
+                        outputs=[state_out.body_parent_f],
+                        device=model.device,
+                    )
 
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:
