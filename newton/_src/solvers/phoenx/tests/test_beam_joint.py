@@ -709,16 +709,19 @@ class TestBeamAnalytical(unittest.TestCase):
         deflection within ``2 / alpha_slow`` simulated seconds at the
         default ``solver_iterations``.
 
-        BEAM currently uses the *combined* :func:`pd_coefficients`
-        softness rather than the spring/damping split CABLE adopted
-        in commit ``8b9fb289`` -- so under high damping the soft-PD's
-        effective mass collapses toward the rigid limit and PGS needs
-        more iterations to dissipate. Threshold is set at 25 % of the
-        initial deflection, which BEAM hits comfortably while leaving
-        room for a future split-formulation upgrade to tighten this
-        bound (cf. ``test_cable_joint.test_high_damping_settles_within_solver_iterations``
-        which holds CABLE to 10 %). The Phase-2 audit calls out the
-        gap as an actionable follow-up."""
+        Both BEAM and CABLE use the combined :func:`pd_coefficients`
+        soft-PD formulation. The analytical residual after two slow
+        time constants at ``zeta = 5`` is ``exp(-2) ~= 13.5%``;
+        threshold ``20 %`` leaves ~6 % slack for the PGS soft-PD's
+        discretisation error. Earlier branches relaxed this bound
+        to 25 % because the audit assumed the combined formulation
+        underdamped vs. the (then) split-based CABLE -- in fact the
+        split's relax-only damping was overshooting the implicit-
+        Euler answer (``lam = -damp_mass * Jv`` has no softness, so
+        repeated PGS applications drove ``Jv -> 0`` rather than to
+        the implicit-Euler steady state). The combined formulation
+        is the physically correct path; both modes now share this
+        threshold."""
         k = 50.0
         zeta = 5.0
         c = 2.0 * zeta * math.sqrt(k * _I_ROD)
@@ -748,11 +751,12 @@ class TestBeamAnalytical(unittest.TestCase):
         )
         self.assertLess(
             angle_end,
-            init_angle * 0.25,
+            init_angle * 0.20,
             msg=(
                 f"high-damping convergence regression: angle decayed to "
                 f"{angle_end:.4f} rad after {settle_t * 1000:.1f} ms, "
-                f"want < 25% of init ({init_angle * 0.25:.4f} rad)"
+                f"want < 20% of init ({init_angle * 0.20:.4f} rad); "
+                f"analytical exp(-2) = 13.5%"
             ),
         )
 

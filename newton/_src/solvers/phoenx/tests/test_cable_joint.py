@@ -776,9 +776,16 @@ class TestCableAnalytical(unittest.TestCase):
         c = 2.0 * zeta * math.sqrt(k * I_rod)
         omega_n = math.sqrt(k / I_rod)
         alpha_slow = omega_n * (zeta - math.sqrt(zeta * zeta - 1.0))
-        # Two slow time constants is comfortably enough for
-        # exp(-2) ~= 14% to drop to 5%; the 5% threshold below leaves
-        # margin.
+        # Analytical residual after two slow time constants is
+        # ``exp(-2) ~= 13.5%`` of the initial deflection. Threshold
+        # 20% leaves ~6% slack for the PGS soft-PD's discretisation
+        # error. The previous 10% bound only passed because the
+        # split-formulation damping pass overshot the analytical
+        # answer (multiple PGS applications of an unsoftened
+        # ``lam = -damp_mass * Jv`` impulse drive ``Jv -> 0`` rather
+        # than to the implicit-Euler steady state); the combined
+        # :func:`pd_coefficients` we now use lands within ~1% of the
+        # analytical 13.5% and is the physically correct answer.
         settle_t = 2.0 / alpha_slow
 
         init_angle = math.radians(15.0)
@@ -803,11 +810,12 @@ class TestCableAnalytical(unittest.TestCase):
         )
         self.assertLess(
             angle_end,
-            init_angle * 0.10,
+            init_angle * 0.20,
             msg=(
                 f"high-damping convergence regression: angle decayed to "
                 f"{angle_end:.4f} rad after {settle_t * 1000:.1f} ms, "
-                f"want < 10% of init ({init_angle * 0.10:.4f} rad)"
+                f"want < 20% of init ({init_angle * 0.20:.4f} rad); "
+                f"analytical exp(-2) = 13.5%"
             ),
         )
 

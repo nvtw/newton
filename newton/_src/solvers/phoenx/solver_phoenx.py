@@ -410,14 +410,8 @@ class PhoenXWorld:
         if self.solver_iterations < 1:
             raise ValueError(f"solver_iterations must be >= 1 (got {self.solver_iterations})")
         self.velocity_iterations = int(velocity_iterations)
-        if self.velocity_iterations < 1:
-            # The relax pass is now load-bearing for soft constraints
-            # whose damping is split out of the main solve (cable
-            # bend / twist, revolute / prismatic drive PD, PD limit
-            # rows). Skipping it would silently zero those damping
-            # torques and break high-damping convergence -- see
-            # PERF_NOTES.md and ``test_cable_high_damping_settles``.
-            raise ValueError(f"velocity_iterations must be >= 1 (got {self.velocity_iterations})")
+        if self.velocity_iterations < 0:
+            raise ValueError(f"velocity_iterations must be >= 0 (got {self.velocity_iterations})")
 
         # Joint-type specialisation flag for the single-world kernels.
         # ``True`` means every joint is revolute (or there are none),
