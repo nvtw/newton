@@ -17,7 +17,10 @@ Cache layout
 For each cached SDF, a single ``{hash}.sdf.npz`` file is written under
 the user-supplied ``cache_dir``.  The basename is a content hash of the
 mesh and build parameters.  The file is written via ``os.replace`` from
-a ``*.tmp.npz`` companion to make replacement atomic.
+a per-writer ``{hash}.sdf.npz.{pid}.{token}.tmp.npz`` companion to make
+replacement atomic; the unique tmp suffix lets multiple processes cook
+the same hash concurrently without trampling each other's in-flight
+writes.
 
 Cooked array layout (``.npz`` contents)
 ---------------------------------------
@@ -83,10 +86,12 @@ caches are then transparently invalidated and recooked.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import os
+import secrets
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -147,8 +152,12 @@ def _digest_array(arr: np.ndarray, dtype: np.dtype) -> str:
 
 
 def _resolve_newton_version() -> str:
+    # The relative target is the package root ``newton``; ``..`` from this
+    # module would resolve to ``newton._src``, which has no ``__version__``.
+    # Importing ``newton._version`` directly side-steps the package's own
+    # ``__init__`` and so avoids any import-cycle risk during bootstrap.
     try:
-        from .. import __version__  # noqa: PLC0415
+        from newton._version import __version__  # noqa: PLC0415
 
         return str(__version__)
     except ImportError:
@@ -280,9 +289,45 @@ def save_sparse_data(
     # ``np.savez`` appends ``.npz`` to its target, so the tmp path must
     # already end in ``.npz`` for the post-save ``os.replace`` to find
     # the right file.
-    tmp_npz = npz_path.parent / (npz_path.name + ".tmp.npz")
-    np.savez(tmp_npz, **arrays)
-    os.replace(tmp_npz, npz_path)
+    #
+    # The tmp filename embeds the PID and a per-call random token so
+    # multiple writers cooking the same hash concurrently (CI matrix
+    # runs, parallel test workers, multi-process training) cannot trample
+    # each other's in-flight ``*.tmp.npz``.  ``os.replace`` is atomic on
+    # both POSIX and Windows for same-volume moves, so the published
+    # ``{hash}.sdf.npz`` is never observed in a partial state.
+    #
+    # A second concurrency wrinkle is Windows-specific: ``os.replace``
+    # into a destination that another process is *also* currently
+    # replacing can raise ``PermissionError``/``OSError`` even though
+    # both writers are publishing identical content for a content-hashed
+    # key.  We treat that race as a benign "already published by a peer"
+    # and discard our own tmp file rather than propagating the error.
+    tmp_npz = npz_path.parent / f"{npz_path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp.npz"
+    try:
+        np.savez(tmp_npz, **arrays)
+        try:
+            os.replace(tmp_npz, npz_path)
+        except OSError as exc:
+            # If another writer just published the same content-hash, the
+            # cache invariant is satisfied; drop our duplicate tmp file.
+            if npz_path.exists():
+                logger.debug(
+                    "SDF cache: concurrent publish of %s won by peer (%s); discarding tmp file",
+                    npz_path.name,
+                    exc,
+                )
+                with contextlib.suppress(OSError):
+                    tmp_npz.unlink()
+            else:
+                raise
+    except BaseException:
+        # Clean up our own tmp file on any failure (including
+        # ``KeyboardInterrupt``) so the cache directory doesn't
+        # accumulate stale ``*.tmp.npz``.
+        with contextlib.suppress(OSError):
+            tmp_npz.unlink()
+        raise
     return npz_path
 
 

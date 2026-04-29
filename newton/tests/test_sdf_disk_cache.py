@@ -11,8 +11,10 @@ system temp dir but can be flaky about other locations, so this keeps
 behaviour identical to the upstream pattern.
 """
 
+import os
 import shutil
 import tempfile
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -286,6 +288,89 @@ class TestSDFDiskCachePure(unittest.TestCase):
         npz_path = _sdf_cache.cache_path(tmp, h)
         npz_path.write_bytes(b"not an npz")
         self.assertIsNone(_sdf_cache.try_load_sparse_data(tmp, h))
+
+    def test_newton_version_is_resolved(self) -> None:
+        # Regression: the relative ``from .. import __version__`` previously
+        # resolved to ``newton._src`` (no ``__version__``) and silently fell
+        # back to the diagnostic string ``"unknown"``.  The diagnostic value
+        # is non-load-bearing but should reflect the real package version.
+        import newton  # noqa: PLC0415
+
+        resolved = _sdf_cache._resolve_newton_version()
+        self.assertEqual(resolved, newton.__version__)
+        self.assertNotEqual(resolved, "unknown")
+
+        # Round-trip: when no explicit version is passed, the resolved
+        # string must end up in the on-disk metadata.
+        sparse_data = self._fake_sparse_data()
+        h = _sdf_cache.hash_inputs(**_common_hash_kwargs(self.vertices, self.indices))
+        _sdf_cache.save_sparse_data(self.cache_dir, h, sparse_data)
+        with np.load(_sdf_cache.cache_path(self.cache_dir, h), allow_pickle=False) as npz:
+            self.assertEqual(str(npz["__newton_version__"].item()), newton.__version__)
+
+    def test_concurrent_writers_do_not_collide(self) -> None:
+        # Regression: a fixed ``{hash}.sdf.npz.tmp.npz`` tmp filename meant
+        # two writers cooking the same hash would trample each other's
+        # in-flight ``np.savez`` and ``os.replace`` could publish a
+        # partially-written file.  The tmp filename now embeds the PID and
+        # a random token so concurrent cookers each get their own scratch
+        # file; the final published ``{hash}.sdf.npz`` is loadable.
+        sparse_data = self._fake_sparse_data()
+        h = _sdf_cache.hash_inputs(**_common_hash_kwargs(self.vertices, self.indices))
+
+        num_workers = 8
+        errors: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                _sdf_cache.save_sparse_data(self.cache_dir, h, sparse_data, newton_version="test")
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_worker) for _ in range(num_workers)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"concurrent writers raised: {errors}")
+
+        loaded = _sdf_cache.try_load_sparse_data(self.cache_dir, h)
+        self.assertIsNotNone(loaded, "published cache file must be loadable after concurrent writes")
+        np.testing.assert_array_equal(loaded["coarse_sdf"], sparse_data["coarse_sdf"])
+
+        # No stragglers: every writer cleans up its own tmp file via
+        # ``os.replace``, so only the canonical ``.sdf.npz`` remains.
+        leftover_tmp = list(self.cache_dir.glob("*.tmp.npz"))
+        self.assertEqual(leftover_tmp, [], f"unexpected tmp files left behind: {leftover_tmp}")
+
+    def test_save_uses_unique_tmp_filename(self) -> None:
+        # Whitebox guard against future regressions: each ``save_sparse_data``
+        # call must use a distinct tmp filename so concurrent cookers in the
+        # same directory cannot collide.  We snapshot the tmp directory
+        # contents from a sibling thread mid-save; with PID+token in the tmp
+        # name, two saves for the same hash should produce two distinct
+        # tmp files (observed across runs, not necessarily simultaneously).
+        sparse_data = self._fake_sparse_data()
+        h = _sdf_cache.hash_inputs(**_common_hash_kwargs(self.vertices, self.indices))
+
+        seen_tmps: set[str] = set()
+        original_replace = os.replace
+
+        def _spy_replace(src, dst):
+            seen_tmps.add(os.fspath(src))
+            return original_replace(src, dst)
+
+        try:
+            os.replace = _spy_replace  # type: ignore[assignment]
+            for _ in range(4):
+                _sdf_cache.save_sparse_data(self.cache_dir, h, sparse_data, newton_version="test")
+        finally:
+            os.replace = original_replace  # type: ignore[assignment]
+
+        self.assertEqual(len(seen_tmps), 4, f"expected 4 distinct tmp filenames, got {seen_tmps}")
+        for tmp_name in seen_tmps:
+            self.assertTrue(tmp_name.endswith(".tmp.npz"), tmp_name)
 
     def test_embedded_version_mismatch_is_miss(self) -> None:
         sparse_data = self._fake_sparse_data()
