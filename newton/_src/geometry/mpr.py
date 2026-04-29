@@ -35,7 +35,7 @@ from typing import Any
 
 import warp as wp
 
-from .closest_point import closest_point_convex_mesh_face
+from .closest_point import closest_point_on_shape, convex_mesh_aabb_center
 from .support_function import GeoTypeEx, closest_point_on_triangle
 from .types import GeoType
 
@@ -162,11 +162,23 @@ def create_support_map_function(support_func: Any):
         """
         Compute geometric center of Minkowski difference.
 
-        For generic shapes both centers are at their local origins.  For
-        triangles (and triangle prisms) the "center" on shape A is replaced
-        by the closest point on the triangle to the convex center
-        (``position_b``), giving MPR and GJK a much better starting point
-        when the triangle is large relative to the convex.
+        Builds an interior reference point ``center_a`` on shape A and an
+        interior reference point on B (returned as ``center.B``):
+
+        - Most primitives (sphere, box, capsule, cylinder, plane): A's
+          local origin is the geometric center, used as-is.
+        - Convex meshes: the local origin is author-defined and may sit
+          outside the geometry, so we use the hull's local-space AABB
+          center.
+        - Triangles / triangle prisms: the local origin is a vertex, so we
+          project B's position onto the triangle (nudged 1% toward the
+          centroid for manifold-quality reasons; see comments below).
+
+        After ``center_a`` is established, B's center is refined from its
+        local origin to the closest surface point to ``center_a`` whenever
+        that strictly shortens the initial ray. For broad flat B faces
+        (hulls, boxes) this dramatically improves MPR's first portal
+        direction.
 
         Args:
             geom_a: Shape A geometry data
@@ -182,10 +194,18 @@ def create_support_map_function(support_func: Any):
 
         center_a = wp.vec3(0.0, 0.0, 0.0)
 
-        if geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
-            # Project shape B's center onto the triangle for a starting
-            # point near the contact region — this dramatically improves
-            # MPR convergence for large triangles.
+        if geom_a.shape_type == int(GeoType.CONVEX_MESH):
+            # A convex hull's author-defined local origin is unreliable —
+            # it can sit far from the actual geometry. Use the hull's
+            # local-space AABB center instead so ``center_a`` is a sensible
+            # interior reference point. Hulls are capped at
+            # ``Mesh.MAX_HULL_VERTICES`` (default 64), so this is cheap
+            # relative to MPR's other per-call work.
+            center_a = convex_mesh_aabb_center(geom_a)
+        elif geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
+            # Triangles' local origin is a vertex, not a sensible interior
+            # point — project B's center onto the triangle to seed the
+            # contact region.
             #
             # Blend 1% toward the centroid so the point is strictly in the
             # face interior.  This does NOT prevent an MPR degeneracy (MPR
@@ -206,24 +226,24 @@ def create_support_map_function(support_func: Any):
             centroid = (tri_a + tri_b + tri_c) / 3.0
             center_a = proj + 0.01 * (centroid - proj)
 
-            if geom_b.shape_type == int(GeoType.CONVEX_MESH):
-                # Complement the triangle seed with an exact closest point
-                # on the convex hull's triangle surface. This avoids the
-                # unstable closest-vertex heuristic: broad, flat hull faces
-                # seed from the face interior instead of an arbitrary corner.
-                query_in_b = wp.quat_rotate_inv(orientation_b, -position_b)
-                center_b_candidate = (
-                    wp.quat_rotate(
-                        orientation_b,
-                        closest_point_convex_mesh_face(geom_b, query_in_b, data_provider),
-                    )
-                    + position_b
-                )
+        # Closest surface point on B to ``center_a`` gives MPR a much
+        # shorter, better-aligned initial ray than B's local origin
+        # whenever A is small relative to a broad flat face on B (e.g.
+        # tiny cube on huge cube, sphere on hull face, triangle on hull).
+        # For shape types the dispatcher does not support, ``handled`` is
+        # False and the centroid seed is kept. The acceptance test rejects
+        # near-coincident or non-improving candidates; MPR's own
+        # zero-direction probe (length_sq < 1e-16) is the safety net for
+        # the rare boundary-seed degenerate case.
+        query_in_b = wp.quat_rotate_inv(orientation_b, center_a - position_b)
+        handled, closest_b_local = closest_point_on_shape(geom_b, query_in_b, data_provider)
+        if handled:
+            center_b_candidate = wp.quat_rotate(orientation_b, closest_b_local) + position_b
 
-                candidate_btoa = center_a - center_b_candidate
-                current_btoa = center_a - position_b
-                if wp.length_sq(candidate_btoa) > 1.0e-12 and wp.length_sq(candidate_btoa) < wp.length_sq(current_btoa):
-                    position_b = center_b_candidate
+            candidate_btoa = center_a - center_b_candidate
+            current_btoa = center_a - position_b
+            if wp.length_sq(candidate_btoa) > 1.0e-12 and wp.length_sq(candidate_btoa) < wp.length_sq(current_btoa):
+                position_b = center_b_candidate
 
         center.B = position_b
         center.BtoA = center_a - position_b

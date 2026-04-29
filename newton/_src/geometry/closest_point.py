@@ -135,6 +135,34 @@ def closest_point_plane_infinite(query: wp.vec3) -> wp.vec3:
 
 
 @wp.func
+def convex_mesh_aabb_center(geom: Any) -> wp.vec3:
+    """Center of a convex mesh's local-space AABB.
+
+    Used as an interior reference point for hulls whose author-defined
+    local origin is not near the geometry. The shape's precomputed AABB
+    lives on the model (``shape_collision_aabb_lower/upper``) but is not
+    addressable from a support-mapping context, so we recompute by a
+    single pass over the hull vertices. Convex hulls are capped at
+    ``Mesh.MAX_HULL_VERTICES`` (default 64), so this is cheap relative to
+    the existing O(F) closest-point query over the same hull.
+    """
+    mesh_ptr = unpack_mesh_ptr(geom.auxiliary)
+    mesh = wp.mesh_get(mesh_ptr)
+    mesh_scale = geom.scale
+    num_verts = mesh.points.shape[0]
+
+    big = float(1.0e30)
+    lo = wp.vec3(big, big, big)
+    hi = wp.vec3(-big, -big, -big)
+    for i in range(num_verts):
+        p = wp.cw_mul(mesh.points[i], mesh_scale)
+        lo = wp.vec3(wp.min(lo[0], p[0]), wp.min(lo[1], p[1]), wp.min(lo[2], p[2]))
+        hi = wp.vec3(wp.max(hi[0], p[0]), wp.max(hi[1], p[1]), wp.max(hi[2], p[2]))
+
+    return 0.5 * (lo + hi)
+
+
+@wp.func
 def closest_point_convex_mesh_face(
     geom: Any,
     query: wp.vec3,
