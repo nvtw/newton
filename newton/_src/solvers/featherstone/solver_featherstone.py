@@ -24,6 +24,7 @@ from ..semi_implicit.kernels_particle import (
 from ..solver import SolverBase
 from .kernels import (
     accumulate_free_distance_joint_f_to_body_force,
+    compute_body_parent_f,
     compute_com_transforms,
     compute_spatial_inertia,
     convert_body_force_com_to_origin,
@@ -92,6 +93,19 @@ class SolverFeatherstone(SolverBase):
         - Equality and mimic constraints are not supported.
 
         See :ref:`Joint feature support` for the full comparison across solvers.
+
+    Extended state attributes:
+        :attr:`~newton.State.body_parent_f` is populated when requested via
+        :meth:`~newton.ModelBuilder.request_state_attributes`. The reported
+        wrench is the per-body net spatial force from the RNEA backward pass
+        translated to the body's COM (linear ``[N]`` first, torque ``[N·m]``
+        in world frame at the COM), matching :class:`~newton.solvers.SolverMuJoCo`'s
+        ``cfrc_int``-based convention. Joint actuator forces from
+        :attr:`~newton.Control.joint_f` are applied as external body wrenches
+        before integration and *are* included in ``body_parent_f`` (the same
+        sign convention as the existing :class:`~newton.solvers.SolverMuJoCo`
+        / :class:`~newton.solvers.SolverXPBD` implementations -- the joint
+        reaction must counter all applied forces in equilibrium).
 
     Example
     -------
@@ -628,6 +642,24 @@ class SolverFeatherstone(SolverBase):
                         ],
                         device=model.device,
                     )
+
+                    # Optionally populate ``state_out.body_parent_f`` (incoming
+                    # joint wrench per body in world frame at COM) from the
+                    # RNEA backward-pass spatial forces. Only runs when the
+                    # extended state attribute has been requested.
+                    if state_out.body_parent_f is not None:
+                        wp.launch(
+                            compute_body_parent_f,
+                            dim=model.body_count,
+                            inputs=[
+                                state_aug.body_q_com,
+                                state_aug.body_f_s,
+                                state_aug.body_ft_s,
+                                body_f,
+                            ],
+                            outputs=[state_out.body_parent_f],
+                            device=model.device,
+                        )
 
                     # print("joint_tau:")
                     # print(state_aug.joint_tau.numpy())
