@@ -11,7 +11,6 @@ system temp dir but can be flaky about other locations, so this keeps
 behaviour identical to the upstream pattern.
 """
 
-import json
 import shutil
 import tempfile
 import unittest
@@ -163,13 +162,13 @@ class TestSDFDiskCachePure(unittest.TestCase):
 
     def test_hash_is_stable(self) -> None:
         kwargs = _common_hash_kwargs(self.vertices, self.indices)
-        h1, _ = _sdf_cache.hash_inputs(**kwargs)
-        h2, _ = _sdf_cache.hash_inputs(**kwargs)
+        h1 = _sdf_cache.hash_inputs(**kwargs)
+        h2 = _sdf_cache.hash_inputs(**kwargs)
         self.assertEqual(h1, h2)
         self.assertEqual(len(h1), 32)
 
     def test_hash_changes_with_params(self) -> None:
-        base = _sdf_cache.hash_inputs(**_common_hash_kwargs(self.vertices, self.indices))[0]
+        base = _sdf_cache.hash_inputs(**_common_hash_kwargs(self.vertices, self.indices))
 
         sensitive = [
             ("narrow_band_range", (-0.2, 0.2)),
@@ -185,28 +184,28 @@ class TestSDFDiskCachePure(unittest.TestCase):
         for name, value in sensitive:
             kwargs = _common_hash_kwargs(self.vertices, self.indices)
             kwargs[name] = value
-            h, _ = _sdf_cache.hash_inputs(**kwargs)
+            h = _sdf_cache.hash_inputs(**kwargs)
             self.assertNotEqual(h, base, f"hash should differ when {name} changes")
 
     def test_hash_changes_with_mesh(self) -> None:
-        base = _sdf_cache.hash_inputs(**_common_hash_kwargs(self.vertices, self.indices))[0]
+        base = _sdf_cache.hash_inputs(**_common_hash_kwargs(self.vertices, self.indices))
 
         moved = self.vertices.copy()
         moved[0, 0] += 0.1
         kwargs = _common_hash_kwargs(moved, self.indices)
-        h, _ = _sdf_cache.hash_inputs(**kwargs)
+        h = _sdf_cache.hash_inputs(**kwargs)
         self.assertNotEqual(h, base)
 
     def test_hash_winding_threshold_sign_only(self) -> None:
         kwargs = _common_hash_kwargs(self.vertices, self.indices)
         kwargs["winding_threshold"] = 0.5
-        h_pos_a, _ = _sdf_cache.hash_inputs(**kwargs)
+        h_pos_a = _sdf_cache.hash_inputs(**kwargs)
         kwargs["winding_threshold"] = 0.7
-        h_pos_b, _ = _sdf_cache.hash_inputs(**kwargs)
+        h_pos_b = _sdf_cache.hash_inputs(**kwargs)
         self.assertEqual(h_pos_a, h_pos_b, "hash must be insensitive to winding_threshold magnitude")
 
         kwargs["winding_threshold"] = -0.5
-        h_neg, _ = _sdf_cache.hash_inputs(**kwargs)
+        h_neg = _sdf_cache.hash_inputs(**kwargs)
         self.assertNotEqual(h_pos_a, h_neg, "hash must reflect winding_threshold sign")
 
     def _fake_sparse_data(self) -> dict:
@@ -234,11 +233,10 @@ class TestSDFDiskCachePure(unittest.TestCase):
         sparse_data = self._fake_sparse_data()
         tmp = self.cache_dir
         kwargs = _common_hash_kwargs(self.vertices, self.indices)
-        h, key_inputs = _sdf_cache.hash_inputs(**kwargs)
-        _sdf_cache.save_sparse_data(tmp, h, sparse_data, key_inputs=key_inputs, newton_version="test")
-        npz_path, json_path = _sdf_cache.cache_paths(tmp, h)
+        h = _sdf_cache.hash_inputs(**kwargs)
+        _sdf_cache.save_sparse_data(tmp, h, sparse_data, newton_version="test")
+        npz_path = _sdf_cache.cache_path(tmp, h)
         self.assertTrue(npz_path.exists())
-        self.assertTrue(json_path.exists())
 
         loaded = _sdf_cache.try_load_sparse_data(tmp, h)
         self.assertIsNotNone(loaded)
@@ -248,31 +246,33 @@ class TestSDFDiskCachePure(unittest.TestCase):
         self.assertEqual(loaded["subgrid_size"], sparse_data["subgrid_size"])
         self.assertEqual(loaded["quantization_mode"], sparse_data["quantization_mode"])
 
-    def test_sidecar_documents_arrays(self) -> None:
+    def test_npz_contains_provenance_and_expected_arrays(self) -> None:
         sparse_data = self._fake_sparse_data()
         tmp = self.cache_dir
         kwargs = _common_hash_kwargs(self.vertices, self.indices)
-        h, key_inputs = _sdf_cache.hash_inputs(**kwargs)
-        _sdf_cache.save_sparse_data(tmp, h, sparse_data, key_inputs=key_inputs, newton_version="test")
-        _, json_path = _sdf_cache.cache_paths(tmp, h)
-        with open(json_path) as f:
-            manifest = json.load(f)
+        h = _sdf_cache.hash_inputs(**kwargs)
+        _sdf_cache.save_sparse_data(tmp, h, sparse_data, newton_version="test")
+        npz_path = _sdf_cache.cache_path(tmp, h)
 
-        self.assertEqual(manifest["cache_format_version"], _sdf_cache.CACHE_FORMAT_VERSION)
-        self.assertEqual(manifest["kind"], "newton.texture_sdf")
-        present = {entry["name"] for entry in manifest["arrays_present"]}
-        for required in (
-            "__cache_format_version__",
-            "coarse_sdf",
-            "subgrid_data",
-            "subgrid_start_slots",
-            "subgrid_required",
-            "subgrid_occupied",
-        ):
-            self.assertIn(required, present)
-        self.assertIn("key_inputs", manifest)
-        self.assertIn("hash", manifest)
-        self.assertIn("newton_version", manifest)
+        with np.load(npz_path, allow_pickle=False) as npz:
+            present = set(npz.files)
+            for required in (
+                "__cache_format_version__",
+                "__kind__",
+                "__newton_version__",
+                "__created_utc__",
+                "coarse_sdf",
+                "subgrid_data",
+                "subgrid_start_slots",
+                "subgrid_required",
+                "subgrid_occupied",
+            ):
+                self.assertIn(required, present)
+            self.assertEqual(int(npz["__cache_format_version__"].item()), _sdf_cache.CACHE_FORMAT_VERSION)
+            self.assertEqual(str(npz["__kind__"].item()), "newton.texture_sdf")
+            self.assertEqual(str(npz["__newton_version__"].item()), "test")
+            created_utc = str(npz["__created_utc__"].item())
+            self.assertTrue(created_utc.endswith("+00:00") or created_utc.endswith("Z"))
 
     def test_missing_files_is_miss(self) -> None:
         self.assertIsNone(_sdf_cache.try_load_sparse_data(self.cache_dir, "deadbeef"))
@@ -281,29 +281,19 @@ class TestSDFDiskCachePure(unittest.TestCase):
         sparse_data = self._fake_sparse_data()
         tmp = self.cache_dir
         kwargs = _common_hash_kwargs(self.vertices, self.indices)
-        h, key_inputs = _sdf_cache.hash_inputs(**kwargs)
-        _sdf_cache.save_sparse_data(tmp, h, sparse_data, key_inputs=key_inputs, newton_version="test")
-        npz_path, _ = _sdf_cache.cache_paths(tmp, h)
+        h = _sdf_cache.hash_inputs(**kwargs)
+        _sdf_cache.save_sparse_data(tmp, h, sparse_data, newton_version="test")
+        npz_path = _sdf_cache.cache_path(tmp, h)
         npz_path.write_bytes(b"not an npz")
-        self.assertIsNone(_sdf_cache.try_load_sparse_data(tmp, h))
-
-    def test_missing_sidecar_is_miss(self) -> None:
-        sparse_data = self._fake_sparse_data()
-        tmp = self.cache_dir
-        kwargs = _common_hash_kwargs(self.vertices, self.indices)
-        h, key_inputs = _sdf_cache.hash_inputs(**kwargs)
-        _sdf_cache.save_sparse_data(tmp, h, sparse_data, key_inputs=key_inputs, newton_version="test")
-        _, json_path = _sdf_cache.cache_paths(tmp, h)
-        json_path.unlink()
         self.assertIsNone(_sdf_cache.try_load_sparse_data(tmp, h))
 
     def test_embedded_version_mismatch_is_miss(self) -> None:
         sparse_data = self._fake_sparse_data()
         tmp = self.cache_dir
         kwargs = _common_hash_kwargs(self.vertices, self.indices)
-        h, key_inputs = _sdf_cache.hash_inputs(**kwargs)
-        _sdf_cache.save_sparse_data(tmp, h, sparse_data, key_inputs=key_inputs, newton_version="test")
-        npz_path, _ = _sdf_cache.cache_paths(tmp, h)
+        h = _sdf_cache.hash_inputs(**kwargs)
+        _sdf_cache.save_sparse_data(tmp, h, sparse_data, newton_version="test")
+        npz_path = _sdf_cache.cache_path(tmp, h)
         with np.load(npz_path) as npz:
             contents = {k: npz[k] for k in npz.files if k != "__cache_format_version__"}
         contents["__cache_format_version__"] = np.asarray(_sdf_cache.CACHE_FORMAT_VERSION + 999, dtype=np.int32)
@@ -326,7 +316,7 @@ def test_disk_cache_hit_matches_live(test, device) -> None:
         cache_files = list(cache_path.glob("*.sdf.npz"))
         test.assertEqual(len(cache_files), 1, f"expected exactly one cache file, found {cache_files}")
         sidecar_files = list(cache_path.glob("*.sdf.json"))
-        test.assertEqual(len(sidecar_files), 1)
+        test.assertEqual(len(sidecar_files), 0, "JSON sidecar should no longer be produced")
 
         rng = np.random.default_rng(seed=0)
         points = rng.uniform(-0.6, 0.6, size=(64, 3)).astype(np.float32)

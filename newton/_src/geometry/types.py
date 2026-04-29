@@ -760,12 +760,13 @@ class Mesh:
             cache_dir: Optional directory used to cache cooked SDF data on
                 disk. When provided, the cooked sparse SDF (the data that
                 backs the GPU 3D textures) is keyed by mesh content +
-                build parameters and persisted as ``{hash}.sdf.npz`` plus
-                a sidecar ``{hash}.sdf.json`` manifest. Subsequent calls
-                with identical inputs reload from disk and skip the
-                expensive mesh-SDF cook. ``shape_margin`` is applied at
-                sample time and is *not* part of the cache key. Defaults
-                to ``None`` (cache disabled).
+                build parameters and persisted as a single
+                ``{hash}.sdf.npz`` file (an uncompressed ``np.savez``
+                bundle of typed numpy arrays). Subsequent calls with
+                identical inputs reload from disk and skip the expensive
+                mesh-SDF cook. ``shape_margin`` is applied at sample
+                time and is *not* part of the cache key. Defaults to
+                ``None`` (cache disabled).
 
         Returns:
             The attached :class:`SDF` instance.

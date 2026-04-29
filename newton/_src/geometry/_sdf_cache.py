@@ -14,23 +14,10 @@ unchanged.
 Cache layout
 ------------
 
-For each cached SDF, two files are written under the user-supplied
-``cache_dir`` and share a basename derived from a content hash of the
-mesh and build parameters:
-
-* ``{hash}.sdf.npz`` — uncompressed (``np.savez``) bundle of all numpy
-  arrays and scalar metadata that make up the cooked sparse SDF, plus a
-  reserved ``__cache_format_version__`` 0-d ``int32`` array.  This
-  embedded version is the authoritative invalidator; a mismatch is
-  treated as a miss and the file is overwritten on the next cook.
-* ``{hash}.sdf.json`` — sidecar manifest with the cache format version,
-  ``key_inputs`` (mesh hashes + resolved build parameters), and the
-  list of arrays present in the ``.npz``.  The sidecar is purely
-  informational/diagnostic; it is *not* consulted at load time.
-
-Both files are written via ``os.replace`` from ``*.tmp`` companions; the
-``.npz`` is replaced first so a partial write where the sidecar is
-missing is detected as a miss on the next load.
+For each cached SDF, a single ``{hash}.sdf.npz`` file is written under
+the user-supplied ``cache_dir``.  The basename is a content hash of the
+mesh and build parameters.  The file is written via ``os.replace`` from
+a ``*.tmp.npz`` companion to make replacement atomic.
 
 Cooked array layout (``.npz`` contents)
 ---------------------------------------
@@ -52,7 +39,28 @@ Cooked array layout (``.npz`` contents)
   and ``subgrids_sdf_value_range`` — each stored as a 0-d or
   shape-``(3,)`` numpy array.
 * ``__cache_format_version__`` — 0-d ``int32`` matching
-  :data:`CACHE_FORMAT_VERSION`.
+  :data:`CACHE_FORMAT_VERSION`.  This embedded version is the
+  authoritative invalidator; a mismatch is treated as a miss and the
+  file is overwritten on the next cook.
+* ``__kind__`` — 0-d ``str`` (``"newton.texture_sdf"``) marker so
+  these files are distinguishable from arbitrary ``.npz``'s sharing
+  the same directory.
+* ``__newton_version__`` — 0-d ``str``: Newton package version that
+  produced the cache.  Diagnostic only.
+* ``__created_utc__`` — 0-d ``str``: ISO-8601 UTC timestamp of the
+  write.  Diagnostic only.
+
+The ``__kind__``, ``__newton_version__``, and ``__created_utc__``
+fields are not consulted at load time.
+
+To inspect a cache file from a shell, an ``.npz`` is just a zip of
+``.npy`` members:
+
+.. code-block:: bash
+
+    python -m zipfile -l <hash>.sdf.npz
+    python -c "import numpy as np; f=np.load('<hash>.sdf.npz'); \\
+               print(f.files); print(f['__newton_version__'].item())"
 
 Cache key
 ---------
@@ -100,8 +108,10 @@ become invalid and are transparently re-cooked.
 
 
 _VERSION_KEY = "__cache_format_version__"
+_KIND_KEY = "__kind__"
+_NEWTON_VERSION_KEY = "__newton_version__"
+_CREATED_UTC_KEY = "__created_utc__"
 _NPZ_SUFFIX = ".sdf.npz"
-_JSON_SUFFIX = ".sdf.json"
 _KIND = "newton.texture_sdf"
 
 # Plain ndarray entries that pass through unmodified.
@@ -158,7 +168,7 @@ def hash_inputs(
     sign_method_resolved: str,
     winding_threshold: float,
     scale: tuple[float, float, float] | None,
-) -> tuple[str, dict[str, Any]]:
+) -> str:
     """Compute the cache key for a texture-SDF cook.
 
     Args:
@@ -178,11 +188,16 @@ def hash_inputs(
         scale: Pre-baked vertex scale or ``None``.
 
     Returns:
-        Tuple ``(hash_hex, key_inputs)``.  ``hash_hex`` is a 32-character
-        BLAKE2b digest used as the cache filename basename.
+        A 32-character BLAKE2b digest used as the cache filename
+        basename.
     """
 
-    key_inputs: dict[str, Any] = {
+    # JSON with ``sort_keys=True`` is used purely as a deterministic
+    # canonical-bytes encoder for the structured key inputs; the result
+    # is fed straight into BLAKE2b and never touches disk.
+    payload = {
+        "kind": _KIND,
+        "cache_format_version": CACHE_FORMAT_VERSION,
         "mesh": {
             "vertices_sha256": _digest_array(vertices, np.dtype(np.float32)),
             "indices_sha256": _digest_array(indices, np.dtype(np.int32)),
@@ -197,23 +212,20 @@ def hash_inputs(
             "margin": float(margin),
             "texture_format": str(texture_format),
             "sign_method_resolved": str(sign_method_resolved),
-            # Use sign only: magnitude is derived from mesh orientation
-            # and identical (0.5) in absolute value for the parity path.
+            # Sign only: magnitude is derived from mesh orientation and
+            # identical (0.5) in absolute value for the parity path.
             "winding_threshold_sign": (1 if winding_threshold >= 0.0 else -1),
             "scale": (None if scale is None else [float(scale[0]), float(scale[1]), float(scale[2])]),
         },
     }
-
-    payload = {"kind": _KIND, "cache_format_version": CACHE_FORMAT_VERSION, "key_inputs": key_inputs}
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.blake2b(encoded, digest_size=16).hexdigest(), key_inputs
+    return hashlib.blake2b(encoded, digest_size=16).hexdigest()
 
 
-def cache_paths(cache_dir: str | os.PathLike[str], hash_hex: str) -> tuple[Path, Path]:
-    """Return the ``(npz_path, json_path)`` for a given cache key."""
+def cache_path(cache_dir: str | os.PathLike[str], hash_hex: str) -> Path:
+    """Return the ``.npz`` path for a given cache key."""
 
-    base = Path(cache_dir) / hash_hex
-    return base.with_suffix(_NPZ_SUFFIX), base.with_suffix(_JSON_SUFFIX)
+    return Path(cache_dir) / f"{hash_hex}{_NPZ_SUFFIX}"
 
 
 def save_sparse_data(
@@ -221,9 +233,8 @@ def save_sparse_data(
     hash_hex: str,
     sparse_data: Mapping[str, Any],
     *,
-    key_inputs: Mapping[str, Any],
     newton_version: str | None = None,
-) -> tuple[Path, Path]:
+) -> Path:
     """Persist a cooked SDF dict to the cache.
 
     Args:
@@ -231,13 +242,11 @@ def save_sparse_data(
         hash_hex: Cache key from :func:`hash_inputs`.
         sparse_data: Dictionary returned by
             :func:`newton._src.geometry.sdf_texture.build_sparse_sdf_from_mesh`.
-        key_inputs: Hash inputs (second element from :func:`hash_inputs`),
-            stored in the sidecar manifest for diagnostics.
         newton_version: Newton package version string for provenance.
             Resolved from ``newton.__version__`` when ``None``.
 
     Returns:
-        ``(npz_path, json_path)`` written.
+        Path to the ``.npz`` file written.
 
     Raises:
         OSError: On filesystem errors.  Callers should treat any failure
@@ -246,7 +255,7 @@ def save_sparse_data(
 
     cache_dir_path = Path(cache_dir)
     cache_dir_path.mkdir(parents=True, exist_ok=True)
-    npz_path, json_path = cache_paths(cache_dir_path, hash_hex)
+    npz_path = cache_path(cache_dir_path, hash_hex)
 
     arrays: dict[str, np.ndarray] = {
         _VERSION_KEY: np.asarray(CACHE_FORMAT_VERSION, dtype=np.int32),
@@ -261,29 +270,20 @@ def save_sparse_data(
     for k in _VEC3_SCALARS:
         arrays[k] = np.asarray(sparse_data[k], dtype=np.float64).reshape(3)
 
+    arrays[_KIND_KEY] = np.asarray(_KIND, dtype=np.str_)
+    arrays[_NEWTON_VERSION_KEY] = np.asarray(
+        newton_version if newton_version is not None else _resolve_newton_version(),
+        dtype=np.str_,
+    )
+    arrays[_CREATED_UTC_KEY] = np.asarray(datetime.now(timezone.utc).isoformat(), dtype=np.str_)
+
     # ``np.savez`` appends ``.npz`` to its target, so the tmp path must
     # already end in ``.npz`` for the post-save ``os.replace`` to find
     # the right file.
     tmp_npz = npz_path.parent / (npz_path.name + ".tmp.npz")
     np.savez(tmp_npz, **arrays)
     os.replace(tmp_npz, npz_path)
-
-    manifest = {
-        "kind": _KIND,
-        "cache_format_version": CACHE_FORMAT_VERSION,
-        "newton_version": newton_version if newton_version is not None else _resolve_newton_version(),
-        "created_utc": datetime.now(timezone.utc).isoformat(),
-        "hash": hash_hex,
-        "key_inputs": dict(key_inputs),
-        "arrays_present": [
-            {"name": name, "dtype": str(arr.dtype), "shape": list(arr.shape)} for name, arr in arrays.items()
-        ],
-    }
-    tmp_json = json_path.parent / (json_path.name + ".tmp")
-    tmp_json.write_bytes(json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"))
-    os.replace(tmp_json, json_path)
-
-    return npz_path, json_path
+    return npz_path
 
 
 def try_load_sparse_data(
@@ -294,9 +294,7 @@ def try_load_sparse_data(
 
     Verifies the embedded ``__cache_format_version__`` in the ``.npz``;
     a mismatch, missing file, or any IO/parse error is logged and
-    treated as a miss.  Both the ``.npz`` and ``.json`` sidecar must
-    exist (a partial write where the sidecar is missing is treated as
-    a miss).
+    treated as a miss.
 
     Args:
         cache_dir: Directory holding the cache files.
@@ -308,9 +306,9 @@ def try_load_sparse_data(
         or ``None`` if the entry is missing or invalid.
     """
 
-    npz_path, json_path = cache_paths(cache_dir, hash_hex)
+    npz_path = cache_path(cache_dir, hash_hex)
 
-    if not npz_path.exists() or not json_path.exists():
+    if not npz_path.exists():
         return None
 
     try:
@@ -346,8 +344,6 @@ def write(
     cache_dir: str | os.PathLike[str],
     hash_hex: str,
     sparse_data: Mapping[str, Any],
-    *,
-    key_inputs: Mapping[str, Any],
 ) -> None:
     """Best-effort persist; logs and swallows ``OSError``.
 
@@ -356,14 +352,14 @@ def write(
     """
 
     try:
-        save_sparse_data(cache_dir, hash_hex, sparse_data, key_inputs=key_inputs)
+        save_sparse_data(cache_dir, hash_hex, sparse_data)
     except OSError as exc:
         logger.warning("SDF cache: failed to write %s: %s", cache_dir, exc)
 
 
 __all__ = [
     "CACHE_FORMAT_VERSION",
-    "cache_paths",
+    "cache_path",
     "hash_inputs",
     "save_sparse_data",
     "try_load_sparse_data",

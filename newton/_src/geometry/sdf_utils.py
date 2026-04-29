@@ -404,12 +404,13 @@ class SDF:
             cache_dir: Optional directory holding cached cooked SDFs. When
                 provided, the cooked SDF data (everything that backs the
                 GPU 3D textures) is keyed by mesh content + build
-                parameters and persisted as ``{hash}.sdf.npz`` plus a
-                sidecar ``{hash}.sdf.json`` manifest. A subsequent call
-                with the same inputs reloads from disk and skips the
-                expensive mesh-SDF build. ``shape_margin`` is applied at
-                sample time and is *not* part of the cache key. Defaults
-                to ``None`` (cache disabled).
+                parameters and persisted as a single ``{hash}.sdf.npz``
+                file (an uncompressed ``np.savez`` bundle of typed
+                numpy arrays). A subsequent call with the same inputs
+                reloads from disk and skips the expensive mesh-SDF
+                build. ``shape_margin`` is applied at sample time and
+                is *not* part of the cache key. Defaults to ``None``
+                (cache disabled).
 
         Returns:
             A validated :class:`SDF` runtime handle.
@@ -460,14 +461,13 @@ class SDF:
         qmode = _tex_fmt_map[texture_format]
 
         cache_hash: str | None = None
-        cache_key_inputs: dict | None = None
         loaded_sparse_data = None
         if cache_dir is not None:
             from . import _sdf_cache  # noqa: PLC0415
 
             verts_for_hash = np.asarray(mesh.vertices, dtype=np.float32) * np.array(effective_scale, dtype=np.float32)
             indices_for_hash = np.asarray(mesh.indices, dtype=np.int32).reshape(-1)
-            cache_hash, cache_key_inputs = _sdf_cache.hash_inputs(
+            cache_hash = _sdf_cache.hash_inputs(
                 vertices=verts_for_hash,
                 indices=indices_for_hash,
                 is_solid=bool(getattr(mesh, "is_solid", True)),
@@ -527,7 +527,7 @@ class SDF:
                 if want_sparse:
                     texture_data, coarse_texture, subgrid_texture, tex_block_coords, sparse_data = result
                     if sparse_data is not None:
-                        _sdf_cache.write(cache_dir, cache_hash, sparse_data, key_inputs=cache_key_inputs)
+                        _sdf_cache.write(cache_dir, cache_hash, sparse_data)
                 else:
                     texture_data, coarse_texture, subgrid_texture, tex_block_coords = result
 
