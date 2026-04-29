@@ -1003,6 +1003,17 @@ class WorldBuilder:
             device=device,
         )
 
+        # Detect compound bodies (any rigid body with > 1 shape) so the
+        # contact ingest can opt into body-pair grouping. Single-shape
+        # scenes pay nothing.
+        has_compound_bodies = False
+        if self._shapes:
+            shape_bodies = np.asarray([int(s.body) for s in self._shapes], dtype=np.int32)
+            shape_bodies = shape_bodies[shape_bodies >= 0]
+            if shape_bodies.size > 0:
+                counts = np.bincount(shape_bodies)
+                has_compound_bodies = bool((counts > 1).any())
+
         world = PhoenXWorld(
             bodies=bodies,
             constraints=constraints,
@@ -1016,6 +1027,7 @@ class WorldBuilder:
             default_friction=default_friction,
             num_worlds=self._num_worlds,
             step_layout=step_layout,
+            enable_body_pair_grouping=has_compound_bodies,
             device=device,
         )
 

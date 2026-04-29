@@ -392,6 +392,22 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
+        # Detect compound bodies (any body with > 1 collision shape) on
+        # the host. The result gates the body-pair contact grouping
+        # optimization, which sorts contacts by ``(min(b1, b2),
+        # max(b1, b2))`` so multiple shape-pair runs sharing one body
+        # pair collapse into a single contact column. Single-shape
+        # scenes pay nothing (the predicate keeps the optimization off
+        # and the matching scratch arrays are not allocated). See
+        # :file:`newton/_src/solvers/phoenx/CONTACT_GROUP_COMPOUND_OPT.md`.
+        has_compound_bodies = False
+        if model.shape_body is not None and model.shape_count > 0 and model.body_count > 0:
+            sb = model.shape_body.numpy()
+            sb = sb[sb >= 0]
+            if sb.size > 0:
+                counts = np.bincount(sb, minlength=int(model.body_count))
+                has_compound_bodies = bool((counts > 1).any())
+
         self.world = PhoenXWorld(
             bodies=self.bodies,
             constraints=self._constraints,
@@ -406,6 +422,7 @@ class SolverPhoenX(SolverBase):
             step_layout=step_layout,
             threads_per_world=threads_per_world,
             max_thread_blocks=max_thread_blocks,
+            enable_body_pair_grouping=has_compound_bodies,
             device=self.device,
         )
 

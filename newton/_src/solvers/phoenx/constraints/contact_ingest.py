@@ -58,6 +58,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
+from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 from newton._src.solvers.phoenx.materials import (
     MaterialData,
     resolve_friction_in_kernel,
@@ -92,8 +93,15 @@ class IngestScratch:
     kernel, which is what keeps the sequence graph-capture safe.
     """
 
+    # Naturally sorted (RUF023). Compound-grouping scratch arrays
+    # (``body_pair_keys``, ``inv_sort_perm``, ``prev_inv_sort_perm``,
+    # ``sort_perm``, ``sorted_*``) are only allocated when the solver
+    # opts in via ``enable_body_pair_grouping``; ``None`` otherwise so
+    # memory cost is zero in the common single-shape case.
     __slots__ = (
         "_device",
+        "body_pair_keys",
+        "inv_sort_perm",
         "max_contact_columns",
         "num_contact_columns",
         "num_pairs",
@@ -106,7 +114,20 @@ class IngestScratch:
         "pair_shape_a",
         "pair_shape_b",
         "pair_source_idx",
+        "prev_inv_sort_perm",
         "rigid_contact_max",
+        "sort_perm",
+        "sorted_damping",
+        "sorted_friction",
+        "sorted_margin0",
+        "sorted_margin1",
+        "sorted_match_index",
+        "sorted_normal",
+        "sorted_point0",
+        "sorted_point1",
+        "sorted_shape0",
+        "sorted_shape1",
+        "sorted_stiffness",
     )
 
     def __init__(
@@ -114,6 +135,7 @@ class IngestScratch:
         rigid_contact_max: int,
         max_contact_columns: int,
         device: wp.DeviceLike = None,
+        enable_body_pair_grouping: bool = False,
     ) -> None:
         self._device = device
         self.rigid_contact_max = int(rigid_contact_max)
@@ -153,14 +175,74 @@ class IngestScratch:
         self.num_pairs = wp.zeros(1, dtype=wp.int32, device=device)
         self.num_contact_columns = wp.zeros(1, dtype=wp.int32, device=device)
 
+        # ---- Compound-body grouping scratch ---------------------------
+        #
+        # When ``enable_body_pair_grouping=True`` we precede the per-
+        # shape-pair pipeline with a body-pair sort step: contacts that
+        # share a ``(min(b1, b2), max(b1, b2))`` body pair group together
+        # in the sorted order, so the pair-boundary scan emits one
+        # column per *body pair* instead of per *shape pair*. That
+        # collapses the 4-color forced spread of a 2x2 compound (A:{S1,S2}
+        # touching B:{T1,T2}) down to 1 color. Cost: one ``int64``
+        # radix sort + one gather kernel per ingest call.
+        #
+        # ``radix_sort_pairs`` requires ping-pong buffers at ``2 * N``;
+        # the helper's ``count = keys.shape[0] // 2`` convention expects
+        # the same. Sized to ``2 * rigid_contact_max`` accordingly.
+        if enable_body_pair_grouping:
+            n_sort = 2 * max(1, self.rigid_contact_max)
+            n_perm = max(1, self.rigid_contact_max)
+            self.body_pair_keys = wp.zeros(n_sort, dtype=wp.int64, device=device)
+            self.sort_perm = wp.zeros(n_sort, dtype=wp.int32, device=device)
+            self.inv_sort_perm = wp.full(n_perm, -1, dtype=wp.int32, device=device)
+            #: Previous frame's inverse permutation, swapped each step.
+            #: The warm-start gather translates Newton-order match
+            #: indices through this so ``cc.prev_*`` lookups land at the
+            #: prev frame's PhoenX-sorted index (which is what ``cc.*``
+            #: was keyed by last frame).
+            self.prev_inv_sort_perm = wp.full(n_perm, -1, dtype=wp.int32, device=device)
+            self.sorted_shape0 = wp.zeros(n_perm, dtype=wp.int32, device=device)
+            self.sorted_shape1 = wp.zeros(n_perm, dtype=wp.int32, device=device)
+            self.sorted_match_index = wp.zeros(n_perm, dtype=wp.int32, device=device)
+            self.sorted_normal = wp.zeros(n_perm, dtype=wp.vec3f, device=device)
+            self.sorted_point0 = wp.zeros(n_perm, dtype=wp.vec3f, device=device)
+            self.sorted_point1 = wp.zeros(n_perm, dtype=wp.vec3f, device=device)
+            self.sorted_margin0 = wp.zeros(n_perm, dtype=wp.float32, device=device)
+            self.sorted_margin1 = wp.zeros(n_perm, dtype=wp.float32, device=device)
+            self.sorted_stiffness = wp.zeros(n_perm, dtype=wp.float32, device=device)
+            self.sorted_damping = wp.zeros(n_perm, dtype=wp.float32, device=device)
+            self.sorted_friction = wp.zeros(n_perm, dtype=wp.float32, device=device)
+        else:
+            self.body_pair_keys = None
+            self.sort_perm = None
+            self.inv_sort_perm = None
+            self.prev_inv_sort_perm = None
+            self.sorted_shape0 = None
+            self.sorted_shape1 = None
+            self.sorted_match_index = None
+            self.sorted_normal = None
+            self.sorted_point0 = None
+            self.sorted_point1 = None
+            self.sorted_margin0 = None
+            self.sorted_margin1 = None
+            self.sorted_stiffness = None
+            self.sorted_damping = None
+            self.sorted_friction = None
+
 
 def allocate_ingest_scratch(
     rigid_contact_max: int,
     max_contact_columns: int,
     device: wp.DeviceLike = None,
+    enable_body_pair_grouping: bool = False,
 ) -> IngestScratch:
     """Factory alias matching the ``*_zeros`` style elsewhere in the solver."""
-    return IngestScratch(rigid_contact_max, max_contact_columns, device=device)
+    return IngestScratch(
+        rigid_contact_max,
+        max_contact_columns,
+        device=device,
+        enable_body_pair_grouping=enable_body_pair_grouping,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +291,194 @@ def _contact_pair_boundary_kernel(
         pair_boundary[tid] = wp.int32(1)
     else:
         pair_boundary[tid] = wp.int32(0)
+
+
+# ---------------------------------------------------------------------------
+# Compound-body grouping (opt-in): sort contacts by body pair before
+# the boundary scan so multiple shape-pair runs sharing one body pair
+# collapse into a single contact column. See
+# :file:`CONTACT_GROUP_COMPOUND_OPT.md` for the design rationale.
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel(enable_backward=False)
+def _build_body_pair_keys_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    rigid_contact_shape0: wp.array[wp.int32],
+    rigid_contact_shape1: wp.array[wp.int32],
+    shape_body: wp.array[wp.int32],
+    num_bodies: wp.int32,
+    # out
+    body_pair_keys: wp.array[wp.int64],
+    sort_perm: wp.array[wp.int32],
+):
+    """Stamp ``body_pair_keys[k] = pack(min(b1, b2), max(b1, b2))`` and
+    initialise ``sort_perm[k] = k`` (identity).
+
+    After ``radix_sort_pairs(body_pair_keys, sort_perm, count)`` the
+    ``sort_perm`` array becomes the permutation: ``sort_perm[sorted_k]``
+    is the original Newton-order index that landed at position
+    ``sorted_k`` after sorting by body pair.
+
+    Tail entries past ``rigid_contact_count[0]`` get sentinel
+    ``INT64_MAX`` keys so they sort to the end and the boundary scan
+    can ignore them. ``sort_perm`` for tail entries is also initialised
+    so the sort doesn't see undefined values.
+    """
+    tid = wp.tid()
+    n = rigid_contact_count[0]
+    if tid >= n:
+        body_pair_keys[tid] = wp.int64(9223372036854775807)  # INT64_MAX
+        sort_perm[tid] = tid
+        return
+    sa = rigid_contact_shape0[tid]
+    sb = rigid_contact_shape1[tid]
+    ba = shape_body[sa]
+    bb = shape_body[sb]
+    if ba <= bb:
+        lo = ba
+        hi = bb
+    else:
+        lo = bb
+        hi = ba
+    body_pair_keys[tid] = wp.int64(lo) * wp.int64(num_bodies) + wp.int64(hi)
+    sort_perm[tid] = tid
+
+
+@wp.kernel(enable_backward=False)
+def _build_inv_sort_perm_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    sort_perm: wp.array[wp.int32],
+    # out
+    inv_sort_perm: wp.array[wp.int32],
+):
+    """``inv_sort_perm[sort_perm[sorted_k]] = sorted_k`` for the active
+    range. Tail entries past the active count are left at their initial
+    ``-1`` (the warm-start gather guards against this with
+    ``prev_inv_sort_perm[prev_newton_k] >= 0`` checks indirectly via
+    ``prev_cid_of_contact``).
+    """
+    tid = wp.tid()
+    n = rigid_contact_count[0]
+    if tid >= n:
+        return
+    newton_k = sort_perm[tid]
+    inv_sort_perm[newton_k] = tid
+
+
+@wp.kernel(enable_backward=False)
+def _gather_sorted_contacts_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    sort_perm: wp.array[wp.int32],
+    # Newton-order narrow-phase arrays.
+    src_shape0: wp.array[wp.int32],
+    src_shape1: wp.array[wp.int32],
+    src_match_index: wp.array[wp.int32],
+    src_normal: wp.array[wp.vec3f],
+    src_point0: wp.array[wp.vec3f],
+    src_point1: wp.array[wp.vec3f],
+    src_margin0: wp.array[wp.float32],
+    src_margin1: wp.array[wp.float32],
+    src_stiffness: wp.array[wp.float32],
+    src_damping: wp.array[wp.float32],
+    src_friction: wp.array[wp.float32],
+    # ``prev_inv_sort_perm[prev_newton_k] = prev_sorted_k``. Used to
+    # translate Newton-order match indices to the prev frame's
+    # PhoenX-sorted index space, since ``cc.prev_*`` is keyed by the
+    # prev frame's sorted-k.
+    prev_inv_sort_perm: wp.array[wp.int32],
+    # out (sorted-k indexed)
+    sorted_shape0: wp.array[wp.int32],
+    sorted_shape1: wp.array[wp.int32],
+    sorted_match_index: wp.array[wp.int32],
+    sorted_normal: wp.array[wp.vec3f],
+    sorted_point0: wp.array[wp.vec3f],
+    sorted_point1: wp.array[wp.vec3f],
+    sorted_margin0: wp.array[wp.float32],
+    sorted_margin1: wp.array[wp.float32],
+    sorted_stiffness: wp.array[wp.float32],
+    sorted_damping: wp.array[wp.float32],
+    sorted_friction: wp.array[wp.float32],
+):
+    """Permute Newton's narrow-phase arrays into PhoenX-sorted order.
+
+    For each ``sorted_k``, copy the slot from ``newton_k = sort_perm[sorted_k]``.
+    The match index is additionally translated through
+    ``prev_inv_sort_perm`` so the value stored at
+    ``sorted_match_index[sorted_k]`` is the prev frame's sorted-k (or
+    -1 for unmatched). Optional soft-contact arrays
+    (``stiffness``/``damping``/``friction``) may be size-1 sentinel
+    arrays when the user-supplied ``Contacts`` didn't allocate them;
+    the gather respects that by branching on shape.
+    """
+    tid = wp.tid()
+    n = rigid_contact_count[0]
+    if tid >= n:
+        return
+    newton_k = sort_perm[tid]
+    sorted_shape0[tid] = src_shape0[newton_k]
+    sorted_shape1[tid] = src_shape1[newton_k]
+    # Translate match index through prev frame's inverse permutation:
+    # match[newton_k] = prev_newton_k -> prev_sorted_k.
+    raw_match = src_match_index[newton_k]
+    if raw_match >= wp.int32(0):
+        sorted_match_index[tid] = prev_inv_sort_perm[raw_match]
+    else:
+        sorted_match_index[tid] = raw_match
+    sorted_normal[tid] = src_normal[newton_k]
+    sorted_point0[tid] = src_point0[newton_k]
+    sorted_point1[tid] = src_point1[newton_k]
+    sorted_margin0[tid] = src_margin0[newton_k]
+    sorted_margin1[tid] = src_margin1[newton_k]
+    # Per-contact override arrays may be size-1 sentinel buffers; only
+    # gather when the source array actually addresses this index.
+    if newton_k < src_stiffness.shape[0]:
+        sorted_stiffness[tid] = src_stiffness[newton_k]
+    else:
+        sorted_stiffness[tid] = wp.float32(0.0)
+    if newton_k < src_damping.shape[0]:
+        sorted_damping[tid] = src_damping[newton_k]
+    else:
+        sorted_damping[tid] = wp.float32(0.0)
+    if newton_k < src_friction.shape[0]:
+        sorted_friction[tid] = src_friction[newton_k]
+    else:
+        sorted_friction[tid] = wp.float32(0.0)
+
+
+@wp.kernel(enable_backward=False)
+def _body_pair_boundary_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    body_pair_keys: wp.array[wp.int64],
+    # out
+    pair_boundary: wp.array[wp.int32],
+):
+    """Body-pair-grouping variant of :func:`_contact_pair_boundary_kernel`:
+    emit a 1 wherever the (already-sorted) body-pair key changes,
+    instead of comparing adjacent shape pairs.
+
+    With contacts sorted by body pair, every body pair contributes one
+    run regardless of how many shape pairs sit underneath it. The
+    downstream scan + scatter / pack therefore emits one output
+    contact column per body pair.
+    """
+    tid = wp.tid()
+    n = rigid_contact_count[0]
+    if tid >= n:
+        pair_boundary[tid] = wp.int32(0)
+        return
+    if tid == wp.int32(0):
+        pair_boundary[tid] = wp.int32(1)
+        return
+    if body_pair_keys[tid] != body_pair_keys[tid - 1]:
+        pair_boundary[tid] = wp.int32(1)
+    else:
+        pair_boundary[tid] = wp.int32(0)
+
+
+# ---------------------------------------------------------------------------
+# Body-pair filter helper (shared by per-shape-pair and body-pair paths).
+# ---------------------------------------------------------------------------
 
 
 @wp.func
@@ -704,6 +974,7 @@ def ingest_contacts(
     filter_count: int = 0,
     shape_material: wp.array | None = None,
     materials: wp.array | None = None,
+    enable_body_pair_grouping: bool = False,
 ) -> None:
     """Materialise contact columns for one step.
 
@@ -729,6 +1000,16 @@ def ingest_contacts(
             to ignore.
         filter_count: Valid entries in ``filter_keys``.
         shape_material, materials: Optional per-shape material lookup.
+        enable_body_pair_grouping: If ``True``, contacts are sorted by
+            body-pair before pair-boundary detection so multiple
+            shape-pair runs sharing one body pair collapse into a
+            single contact column. Halves to quarters the graph-coloring
+            color count on compound-body scenes (Kapla planks, ragdolls,
+            decomposed concave hulls). Costs one int64 radix sort + one
+            gather per ingest call. Requires the matching scratch
+            arrays to be allocated (``IngestScratch(...,
+            enable_body_pair_grouping=True)``) and a non-zero
+            ``num_bodies``. See :file:`CONTACT_GROUP_COMPOUND_OPT.md`.
     """
     rigid_contact_max = int(contacts.rigid_contact_max)
 
@@ -739,19 +1020,130 @@ def ingest_contacts(
             "signature has no null-pointer path)."
         )
 
-    # Step 1: mark contacts where a new ``(shape_a, shape_b)`` run
-    # starts. Contacts arrive already sorted by pair.
-    wp.launch(
-        kernel=_contact_pair_boundary_kernel,
-        dim=rigid_contact_max,
-        inputs=[
+    if enable_body_pair_grouping:
+        if scratch.body_pair_keys is None:
+            raise RuntimeError(
+                "ingest_contacts(enable_body_pair_grouping=True) needs an "
+                "IngestScratch built with the same flag; got a scratch "
+                "object without compound-grouping arrays."
+            )
+        # ---- Compound-body grouping path -----------------------------
+        #
+        # Sort contacts by body-pair key, gather narrow-phase data into
+        # PhoenX scratch (translating match indices into prev-frame
+        # sorted-k space along the way), then run the existing pipeline
+        # against the sorted scratch.
+        wp.launch(
+            kernel=_build_body_pair_keys_kernel,
+            dim=rigid_contact_max,
+            inputs=[
+                contacts.rigid_contact_count,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+                shape_body,
+                int(max(1, num_bodies)),
+            ],
+            outputs=[scratch.body_pair_keys, scratch.sort_perm],
+            device=device,
+        )
+        # Sort body-pair keys (in place); ``sort_perm`` becomes the
+        # permutation: ``sort_perm[sorted_k] = newton_k``.
+        sort_variable_length_int64(
+            scratch.body_pair_keys,
+            scratch.sort_perm,
             contacts.rigid_contact_count,
-            contacts.rigid_contact_shape0,
-            contacts.rigid_contact_shape1,
-        ],
-        outputs=[scratch.pair_boundary],
-        device=device,
-    )
+        )
+        # Build the inverse permutation for the warm-start gather to
+        # translate prev-frame Newton-order match indices into
+        # prev-frame PhoenX-sorted-k.
+        wp.launch(
+            kernel=_build_inv_sort_perm_kernel,
+            dim=rigid_contact_max,
+            inputs=[contacts.rigid_contact_count, scratch.sort_perm],
+            outputs=[scratch.inv_sort_perm],
+            device=device,
+        )
+        # Gather narrow-phase arrays into PhoenX scratch in sorted-k
+        # order, applying the prev-frame inverse perm to the match
+        # index so ``sorted_match_index[sorted_k]`` is the prev frame's
+        # PhoenX-sorted-k (or -1).
+        wp.launch(
+            kernel=_gather_sorted_contacts_kernel,
+            dim=rigid_contact_max,
+            inputs=[
+                contacts.rigid_contact_count,
+                scratch.sort_perm,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+                contacts.rigid_contact_match_index,
+                contacts.rigid_contact_normal,
+                contacts.rigid_contact_point0,
+                contacts.rigid_contact_point1,
+                contacts.rigid_contact_margin0,
+                contacts.rigid_contact_margin1,
+                contacts.rigid_contact_stiffness
+                if getattr(contacts, "rigid_contact_stiffness", None) is not None
+                else wp.zeros(0, dtype=wp.float32, device=device),
+                contacts.rigid_contact_damping
+                if getattr(contacts, "rigid_contact_damping", None) is not None
+                else wp.zeros(0, dtype=wp.float32, device=device),
+                contacts.rigid_contact_friction
+                if getattr(contacts, "rigid_contact_friction", None) is not None
+                else wp.zeros(0, dtype=wp.float32, device=device),
+                scratch.prev_inv_sort_perm,
+            ],
+            outputs=[
+                scratch.sorted_shape0,
+                scratch.sorted_shape1,
+                scratch.sorted_match_index,
+                scratch.sorted_normal,
+                scratch.sorted_point0,
+                scratch.sorted_point1,
+                scratch.sorted_margin0,
+                scratch.sorted_margin1,
+                scratch.sorted_stiffness,
+                scratch.sorted_damping,
+                scratch.sorted_friction,
+            ],
+            device=device,
+        )
+        # The downstream pipeline uses these sorted arrays in place of
+        # Newton's narrow-phase arrays. ``shape0`` / ``shape1`` come
+        # from the sorted scratch so material lookups land at the
+        # *first* shape pair in each merged column (acceptable for
+        # uniform-material compounds; see CONTACT_GROUP_COMPOUND_OPT.md
+        # Section 5).
+        ingest_shape0 = scratch.sorted_shape0
+        ingest_shape1 = scratch.sorted_shape1
+    else:
+        ingest_shape0 = contacts.rigid_contact_shape0
+        ingest_shape1 = contacts.rigid_contact_shape1
+
+    # Step 1: mark contacts where a new pair (shape-pair or body-pair,
+    # depending on mode) run starts.
+    if enable_body_pair_grouping:
+        wp.launch(
+            kernel=_body_pair_boundary_kernel,
+            dim=rigid_contact_max,
+            inputs=[
+                contacts.rigid_contact_count,
+                scratch.body_pair_keys,
+            ],
+            outputs=[scratch.pair_boundary],
+            device=device,
+        )
+    else:
+        wp.launch(
+            kernel=_contact_pair_boundary_kernel,
+            dim=rigid_contact_max,
+            inputs=[
+                contacts.rigid_contact_count,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+            ],
+            outputs=[scratch.pair_boundary],
+            device=device,
+        )
 
     # Step 2: inclusive scan of the boundary marks -> 1-based run id
     # per contact. ``pair_id[count - 1]`` is the total run count.
@@ -766,8 +1158,8 @@ def ingest_contacts(
             contacts.rigid_contact_count,
             scratch.pair_boundary,
             scratch.pair_id,
-            contacts.rigid_contact_shape0,
-            contacts.rigid_contact_shape1,
+            ingest_shape0,
+            ingest_shape1,
         ],
         outputs=[
             scratch.pair_shape_a,

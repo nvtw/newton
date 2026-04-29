@@ -309,6 +309,7 @@ class PhoenXWorld:
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
         max_thread_blocks: int | None = None,
+        enable_body_pair_grouping: bool = False,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -613,10 +614,12 @@ class PhoenXWorld:
             self._contact_cols: ContactColumnContainer = contact_column_container_zeros(
                 self.max_contact_columns, device=self.device
             )
+            self._enable_body_pair_grouping: bool = bool(enable_body_pair_grouping)
             self._ingest_scratch: IngestScratch | None = IngestScratch(
                 rigid_contact_max=self.rigid_contact_max,
                 max_contact_columns=self.max_contact_columns,
                 device=self.device,
+                enable_body_pair_grouping=self._enable_body_pair_grouping,
             )
             # Forward map stamps cid (no slot); prev-frame state is
             # keyed by the contact's sorted-buffer index ``k``.
@@ -628,6 +631,7 @@ class PhoenXWorld:
             self._ingest_scratch = None
             self._cid_of_contact_cur = None
             self._cid_of_contact_prev = None
+            self._enable_body_pair_grouping = False
 
         self._contact_views: ContactViews | None = None
         self._contact_views_placeholder: ContactViews = self._make_placeholder_contact_views()
@@ -1234,28 +1238,21 @@ class PhoenXWorld:
             else self._soft_contact_sentinel
         )
 
-        self._contact_views = contact_views_make(
-            rigid_contact_count=contacts.rigid_contact_count,
-            rigid_contact_point0=contacts.rigid_contact_point0,
-            rigid_contact_point1=contacts.rigid_contact_point1,
-            rigid_contact_normal=contacts.rigid_contact_normal,
-            rigid_contact_shape0=contacts.rigid_contact_shape0,
-            rigid_contact_shape1=contacts.rigid_contact_shape1,
-            rigid_contact_match_index=contacts.rigid_contact_match_index,
-            rigid_contact_margin0=contacts.rigid_contact_margin0,
-            rigid_contact_margin1=contacts.rigid_contact_margin1,
-            shape_body=shape_body,
-            rigid_contact_stiffness=contact_stiffness,
-            rigid_contact_damping=contact_damping,
-            rigid_contact_friction=contact_friction,
-        )
-
-        # Swap lambda buffers + forward map (pointer swap, O(1)).
+        # Swap lambda buffers + forward map (pointer swap, O(1)). Also
+        # swap the prev/curr inverse-permutation buffers when grouping
+        # is on -- next frame's gather translates Newton-order match
+        # indices through ``prev_inv_sort_perm`` (= this frame's
+        # ``inv_sort_perm`` after the swap).
         contact_container_swap_prev_current(self._contact_container)
         self._cid_of_contact_cur, self._cid_of_contact_prev = (
             self._cid_of_contact_prev,
             self._cid_of_contact_cur,
         )
+        if self._enable_body_pair_grouping and self._ingest_scratch.inv_sort_perm is not None:
+            self._ingest_scratch.inv_sort_perm, self._ingest_scratch.prev_inv_sort_perm = (
+                self._ingest_scratch.prev_inv_sort_perm,
+                self._ingest_scratch.inv_sort_perm,
+            )
 
         ingest_contacts(
             contacts=contacts,
@@ -1270,11 +1267,60 @@ class PhoenXWorld:
             filter_count=self._collision_filter_count,
             shape_material=self._shape_material,
             materials=self._materials,
+            enable_body_pair_grouping=self._enable_body_pair_grouping,
         )
 
+        # Build ContactViews. In compound-grouping mode the views point
+        # at PhoenX's sorted scratch (per-contact data is in sorted-k
+        # order, match index is already prev-frame sorted-k); otherwise
+        # they point at Newton's narrow-phase arrays directly.
+        if self._enable_body_pair_grouping:
+            self._contact_views = contact_views_make(
+                rigid_contact_count=contacts.rigid_contact_count,
+                rigid_contact_point0=self._ingest_scratch.sorted_point0,
+                rigid_contact_point1=self._ingest_scratch.sorted_point1,
+                rigid_contact_normal=self._ingest_scratch.sorted_normal,
+                rigid_contact_shape0=self._ingest_scratch.sorted_shape0,
+                rigid_contact_shape1=self._ingest_scratch.sorted_shape1,
+                rigid_contact_match_index=self._ingest_scratch.sorted_match_index,
+                rigid_contact_margin0=self._ingest_scratch.sorted_margin0,
+                rigid_contact_margin1=self._ingest_scratch.sorted_margin1,
+                shape_body=shape_body,
+                rigid_contact_stiffness=self._ingest_scratch.sorted_stiffness,
+                rigid_contact_damping=self._ingest_scratch.sorted_damping,
+                rigid_contact_friction=self._ingest_scratch.sorted_friction,
+            )
+        else:
+            self._contact_views = contact_views_make(
+                rigid_contact_count=contacts.rigid_contact_count,
+                rigid_contact_point0=contacts.rigid_contact_point0,
+                rigid_contact_point1=contacts.rigid_contact_point1,
+                rigid_contact_normal=contacts.rigid_contact_normal,
+                rigid_contact_shape0=contacts.rigid_contact_shape0,
+                rigid_contact_shape1=contacts.rigid_contact_shape1,
+                rigid_contact_match_index=contacts.rigid_contact_match_index,
+                rigid_contact_margin0=contacts.rigid_contact_margin0,
+                rigid_contact_margin1=contacts.rigid_contact_margin1,
+                shape_body=shape_body,
+                rigid_contact_stiffness=contact_stiffness,
+                rigid_contact_damping=contact_damping,
+                rigid_contact_friction=contact_friction,
+            )
+
+        # Warm-start gather: in compound mode the match index is
+        # already in prev-frame sorted-k space (translated during
+        # ingest), so we pass the views' field directly. In
+        # non-compound mode it is Newton-order match_index, which is
+        # the same convention ``cc.prev_*`` was keyed by last frame
+        # (no resort), so the gather unwinds correctly.
+        gather_match_index = (
+            self._ingest_scratch.sorted_match_index
+            if self._enable_body_pair_grouping
+            else contacts.rigid_contact_match_index
+        )
         gather_contact_warmstart(
             scratch=self._ingest_scratch,
-            rigid_contact_match_index=contacts.rigid_contact_match_index,
+            rigid_contact_match_index=gather_match_index,
             prev_cid_of_contact=self._cid_of_contact_prev,
             bodies=self.bodies,
             contacts=self._contact_views,
