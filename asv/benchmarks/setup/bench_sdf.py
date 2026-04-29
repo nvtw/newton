@@ -121,13 +121,6 @@ class FastBuildSdf:
 
     Uses an icosphere with ~5120 triangles (subdivision 4), representative of
     typical collision meshes used with Newton's SDF contact path.
-
-    Each timed call builds :data:`_BUILDS_PER_SAMPLE` SDFs in a loop and
-    releases each immediately, reporting the total wall time.  The batch size
-    is scaled down at higher resolutions so every sample takes roughly the
-    same wall time.  This amortizes GPU boost-clock/thermal transients on AWS
-    CI runners that previously made single-build measurements bimodal across
-    runs (see #2534).
     """
 
     params = ([32, 64, 128, 256],)
