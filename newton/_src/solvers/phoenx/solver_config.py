@@ -131,15 +131,21 @@ PHOENX_USE_GREEDY_COLORING: bool = True
 # changing one of these constants triggers a kernel-cache miss and
 # rebuild but otherwise needs no API changes.
 
-#: Headroom on the revolute joint's PD drive row.
-PHOENX_BOOST_REVOLUTE_DRIVE = wp.constant(wp.float32(1.0))
+#: Headroom on the revolute joint's PD drive row. Default ``10``: the
+#: drive is a single-axis scalar PD row, well-conditioned enough to
+#: tolerate the same headroom as the cable bend / twist rows. Aligns
+#: with the Box2D-soft limit's ``omega <= pi/dt`` convention
+#: (effective ``N ~ pi^2 ~ 9.87``) so the two limit formulations
+#: behave consistently.
+PHOENX_BOOST_REVOLUTE_DRIVE = wp.constant(wp.float32(10.0))
 #: Headroom on the revolute joint's PD limit row (PD path only;
 #: Box2D-soft limits use the omega-cap convention).
-PHOENX_BOOST_REVOLUTE_LIMIT = wp.constant(wp.float32(1.0))
-#: Headroom on the prismatic joint's PD drive row.
-PHOENX_BOOST_PRISMATIC_DRIVE = wp.constant(wp.float32(1.0))
+PHOENX_BOOST_REVOLUTE_LIMIT = wp.constant(wp.float32(10.0))
+#: Headroom on the prismatic joint's PD drive row. Same rationale
+#: as :data:`PHOENX_BOOST_REVOLUTE_DRIVE`.
+PHOENX_BOOST_PRISMATIC_DRIVE = wp.constant(wp.float32(10.0))
 #: Headroom on the prismatic joint's PD limit row.
-PHOENX_BOOST_PRISMATIC_LIMIT = wp.constant(wp.float32(1.0))
+PHOENX_BOOST_PRISMATIC_LIMIT = wp.constant(wp.float32(10.0))
 #: Headroom on the cable joint's bend (anchor-2 tangent 2-row PD)
 #: rows. Default ``10``: cable bends are visually "soft" springs, so
 #: chains routinely request stiff gains relative to dt; the headroom

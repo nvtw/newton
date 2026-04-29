@@ -132,6 +132,13 @@ class _TimingTestResult(unittest.TextTestResult):
         self.timings: list[tuple[str, float, str]] = []
         self._t_start: float | None = None
         self._current_outcome: str = "ok"
+        # Optional handle for live per-test flushing. Set by the runner
+        # before the suite runs; if non-None we append one row per test
+        # in :meth:`stopTest` and ``fsync`` so a Ctrl-C / OOM mid-suite
+        # still leaves a parseable timing log on disk. The runner
+        # rewrites the file with the structured (slowest-30 + chrono)
+        # report at the end of a clean run.
+        self._live_handle = None
 
     def startTest(self, test: unittest.TestCase) -> None:
         super().startTest(test)
@@ -142,6 +149,13 @@ class _TimingTestResult(unittest.TextTestResult):
         elapsed = (time.perf_counter() - self._t_start) if self._t_start is not None else 0.0
         self.timings.append((test.id(), elapsed, self._current_outcome))
         self._t_start = None
+        if self._live_handle is not None:
+            try:
+                self._live_handle.write(f"{elapsed:8.3f}  {self._current_outcome:6s}  {test.id()}\n")
+                self._live_handle.flush()
+                os.fsync(self._live_handle.fileno())
+            except OSError:  # pragma: no cover -- non-fatal
+                pass
         super().stopTest(test)
 
     def addError(self, test: unittest.TestCase, err) -> None:
@@ -178,8 +192,40 @@ class _TimingTestRunner(unittest.TextTestRunner):
         super().__init__(*args, **kwargs)
         self._report_path = report_path
 
+    def _makeResult(self):
+        # Stock ``TextTestRunner.run`` calls ``self._makeResult()`` and
+        # uses the returned object as the run's result sink. We hook in
+        # here so we can attach the live-flush handle to *the same*
+        # result instance ``run`` will then drive -- doing it after
+        # ``super().run()`` would be too late (every ``stopTest`` call
+        # has already fired).
+        result = super()._makeResult()
+        if self._report_path is not None and isinstance(result, _TimingTestResult):
+            try:
+                # Truncate any previous run's report so partial results
+                # never get mixed in. Header lets a hung-then-killed run
+                # still parse via ``grep -v '^#'``.
+                handle = open(self._report_path, "w", encoding="utf-8")
+                handle.write("# PhoenX unit test timing report (live)\n")
+                handle.write("# Columns: elapsed_s outcome test_id\n")
+                handle.write("#\n")
+                handle.flush()
+                result._live_handle = handle
+            except OSError as exc:  # pragma: no cover -- non-fatal
+                print(
+                    f"\nWARNING: could not open live timing report at {self._report_path!r}: {exc}",
+                    file=sys.stderr,
+                )
+        return result
+
     def run(self, test):
         result = super().run(test)
+        if isinstance(result, _TimingTestResult) and result._live_handle is not None:
+            try:
+                result._live_handle.close()
+            except OSError:  # pragma: no cover -- non-fatal
+                pass
+            result._live_handle = None
         if self._report_path is not None and isinstance(result, _TimingTestResult):
             try:
                 _write_timing_report(self._report_path, result.timings)

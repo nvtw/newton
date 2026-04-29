@@ -13,7 +13,6 @@ correctness, warm-up semantics, CPU fallback) land in one place.
 import warp as wp
 
 __all__ = [
-    "GRAPH_CAPTURE_FRAME_THRESHOLD",
     "STEP_LAYOUTS",
     "make_graph_stepper",
     "run_settle_loop",
@@ -28,31 +27,18 @@ __all__ = [
 STEP_LAYOUTS = ("multi_world", "single_world")
 
 
-# Minimum ``frames`` count at which CUDA graph capture pays for itself.
-#
-# Each ``world.step(dt)`` call on CUDA pays a fixed Python + Warp
-# launch overhead of ~0.5-2 ms (hundreds of tiny kernel launches per
-# substep); a CUDA graph replay collapses that to ~10 us. Below this
-# threshold the capture setup (warm-up step + ScopedCapture) is a net
-# loss, so we fall back to eager stepping. 40 frames was chosen
-# empirically: at FPS=60 that's ~0.67 s of simulated time, i.e. any
-# non-trivial settle loop amortises the capture.
-GRAPH_CAPTURE_FRAME_THRESHOLD = 40
-
-
 def run_settle_loop(world, frames: int, dt: float) -> None:
     """Advance ``world`` by ``frames`` steps of size ``dt`` seconds each.
 
-    On CUDA and when ``frames`` exceeds :data:`GRAPH_CAPTURE_FRAME_THRESHOLD`,
-    records a single ``world.step(dt)`` into a CUDA graph after a warm-up
-    step and replays it for the remaining iterations. Warp graph
-    semantics: the graph captures the exact kernel launches made by
-    ``world.step(dt)``; because tests use a fixed ``dt`` and a fixed
-    solver configuration, replays are bit-identical to eager mode.
+    On CUDA, *always* captures a CUDA graph (regardless of frame
+    count) and replays it for the bulk of the loop. Each
+    ``world.step(dt)`` call pays a fixed ~0.5-2 ms Python + Warp
+    launch overhead which graph replay collapses to ~10 us, so even
+    short loops benefit -- the previous frame-count threshold was a
+    legacy carve-out from when capture overhead was higher.
 
-    Falls back to plain eager stepping on CPU (where ``wp.ScopedCapture``
-    is a no-op) and for small frame counts (where capture overhead
-    dominates).
+    Falls back to plain eager stepping on CPU (``wp.ScopedCapture``
+    is a no-op there) and for ``frames < 1``.
 
     Args:
         world: A :class:`newton._src.solvers.phoenx.World` built via
@@ -61,10 +47,11 @@ def run_settle_loop(world, frames: int, dt: float) -> None:
         frames: Number of ``step(dt)`` iterations to advance.
         dt: Timestep per iteration [s].
     """
-    device = wp.get_device()
-    use_graph = device.is_cuda and frames >= GRAPH_CAPTURE_FRAME_THRESHOLD
+    if frames < 1:
+        return
 
-    if not use_graph:
+    device = wp.get_device()
+    if not device.is_cuda:
         for _ in range(frames):
             world.step(dt)
         return
@@ -75,6 +62,8 @@ def run_settle_loop(world, frames: int, dt: float) -> None:
     # buffers. Capturing those would fail (or pin the wrong
     # allocation into the graph).
     world.step(dt)
+    if frames == 1:
+        return
 
     with wp.ScopedCapture(device=device) as capture:
         world.step(dt)
@@ -119,9 +108,11 @@ def make_graph_stepper(world, dt: float):
     """
     device = wp.get_device()
     if not device.is_cuda:
+
         def _step_eager(n_frames: int) -> None:
             for _ in range(int(n_frames)):
                 world.step(dt)
+
         return _step_eager
 
     state = {"graph": None, "head_start": 0}
