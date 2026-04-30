@@ -41,51 +41,32 @@ from onnx import numpy_helper
 # ---------------------------------------------------------------------------
 # Warp kernels
 # ---------------------------------------------------------------------------
-
-# Tile sizes for the GEMM kernel. A single 16x16 output tile per block
-# is computed via Warp tile primitives; on supported HW these lower to
-# Tensor-Core MMAs. Out-of-bounds tile loads return zero and tile stores
-# clip writes, so non-tile-aligned (M, N, K) work without a fallback as
-# long as the launch grid is rounded up.
-_TILE_M = wp.constant(16)
-_TILE_N = wp.constant(16)
-_TILE_K = wp.constant(16)
-_TILE_THREADS = 128
+#
+# These are simple per-output-element kernels: one thread writes one cell.
+# Policies seen in practice are tiny (batch=1, hidden<=128), so the tiled /
+# tensor-core variants are unnecessary and only add nvJitLink/LTO compile
+# pressure that races with mujoco_warp's tile_cholesky build under heavy
+# parallel test runs.
 
 
 @wp.kernel
 def _gemm_transb_kernel(
-    A: wp.array2d[float],
-    B: wp.array2d[float],
-    bias: wp.array[float],
-    C: wp.array2d[float],
+    A: wp.array2d[float],  # (M, K)
+    B: wp.array2d[float],  # (N, K) — stored transposed
+    bias: wp.array[float],  # (N,)
+    C: wp.array2d[float],  # (M, N)
     K: int,
     alpha: float,
     beta: float,
 ):
-    """Tiled GEMM (16x16x16), B stored transposed as (N, K).
-
-    Loaded as (TILE_N, TILE_K) and transposed to (TILE_K, TILE_N) before
-    the tile matmul.
-    """
+    """``C = alpha * A @ B.T + beta * bias`` with ``transB=1``."""
     i, j = wp.tid()
 
-    sum_tile = wp.tile_zeros(shape=(_TILE_M, _TILE_N), dtype=wp.float32)
+    s = float(0.0)
+    for k in range(K):
+        s += A[i, k] * B[j, k]
 
-    count = (K + _TILE_K - 1) // _TILE_K
-    for k in range(count):
-        a = wp.tile_load(A, shape=(_TILE_M, _TILE_K), offset=(i * _TILE_M, k * _TILE_K))
-        b_nk = wp.tile_load(B, shape=(_TILE_N, _TILE_K), offset=(j * _TILE_N, k * _TILE_K))
-        b = wp.tile_transpose(b_nk)
-        wp.tile_matmul(a, b, sum_tile)
-
-    sum_tile = sum_tile * alpha
-
-    b_tile = wp.tile_load(bias, shape=_TILE_N, offset=j * _TILE_N)
-    b_tile = b_tile * beta
-    sum_tile = sum_tile + wp.tile_broadcast(b_tile, shape=(_TILE_M, _TILE_N))
-
-    wp.tile_store(C, sum_tile, offset=(i * _TILE_M, j * _TILE_N))
+    C[i, j] = alpha * s + beta * bias[j]
 
 
 @wp.kernel
@@ -100,11 +81,10 @@ def _elu_kernel(
 
 
 # ---------------------------------------------------------------------------
-# LSTM cell.  Two on-device kernels: a tiled GEMM that computes the four
-# gates ``x @ W.T + h_prev @ R.T`` into a (batch, 4*hidden) workspace, and a
-# pointwise update that adds the biases, applies sigmoid/tanh, and writes
-# ``h_out`` / ``c_out``.  Both lower to ``wp.launch_tiled`` / ``wp.launch``
-# and are graph-capturable after kernel warmup.
+# LSTM cell.  Two on-device kernels: a thread-per-gate GEMM that computes the
+# four gates ``x @ W.T + h_prev @ R.T`` into a (batch, 4*hidden) workspace,
+# and a pointwise update that adds the biases, applies sigmoid/tanh, and
+# writes ``h_out`` / ``c_out``.  Both are graph-capturable after warmup.
 # ---------------------------------------------------------------------------
 
 
@@ -118,26 +98,16 @@ def _lstm_gates_kernel(
     input_size: int,
     hidden_size: int,
 ):
-    """Tile-GEMM: ``gates = x @ W.T + h_prev @ R.T``."""
-    i, j = wp.tid()
+    """``gates = x @ W.T + h_prev @ R.T`` (one thread per (batch, gate))."""
+    b, j = wp.tid()
 
-    sum_tile = wp.tile_zeros(shape=(_TILE_M, _TILE_N), dtype=wp.float32)
+    s = float(0.0)
+    for k in range(input_size):
+        s += x[b, k] * W[j, k]
+    for k in range(hidden_size):
+        s += h_prev[b, k] * R[j, k]
 
-    count_in = (input_size + _TILE_K - 1) // _TILE_K
-    for k in range(count_in):
-        a = wp.tile_load(x, shape=(_TILE_M, _TILE_K), offset=(i * _TILE_M, k * _TILE_K))
-        w_nk = wp.tile_load(W, shape=(_TILE_N, _TILE_K), offset=(j * _TILE_N, k * _TILE_K))
-        w = wp.tile_transpose(w_nk)
-        wp.tile_matmul(a, w, sum_tile)
-
-    count_h = (hidden_size + _TILE_K - 1) // _TILE_K
-    for k in range(count_h):
-        a = wp.tile_load(h_prev, shape=(_TILE_M, _TILE_K), offset=(i * _TILE_M, k * _TILE_K))
-        r_nk = wp.tile_load(R, shape=(_TILE_N, _TILE_K), offset=(j * _TILE_N, k * _TILE_K))
-        r = wp.tile_transpose(r_nk)
-        wp.tile_matmul(a, r, sum_tile)
-
-    wp.tile_store(gates, sum_tile, offset=(i * _TILE_M, j * _TILE_N))
+    gates[b, j] = s
 
 
 @wp.kernel
@@ -476,18 +446,6 @@ def _shape_lstm(op, shapes, tensors, device):
 # ---------------------------------------------------------------------------
 
 
-def _launch_gemm(A, B, bias, out, M, N, K, alpha, beta, device):
-    grid_m = (M + int(_TILE_M) - 1) // int(_TILE_M)
-    grid_n = (N + int(_TILE_N) - 1) // int(_TILE_N)
-    wp.launch_tiled(
-        _gemm_transb_kernel,
-        dim=(grid_m, grid_n),
-        inputs=[A, B, bias, out, K, alpha, beta],
-        block_dim=_TILE_THREADS,
-        device=device,
-    )
-
-
 def _exec_gemm(op, tensors, shapes, device):
     A = tensors[op.inputs[0]]
     B = tensors[op.inputs[1]]
@@ -502,7 +460,12 @@ def _exec_gemm(op, tensors, shapes, device):
     K = B_shape[1]
 
     out = tensors[op.outputs[0]]
-    _launch_gemm(A, B, bias, out, M, N, K, alpha, beta, device)
+    wp.launch(
+        _gemm_transb_kernel,
+        dim=(M, N),
+        inputs=[A, B, bias, out, K, alpha, beta],
+        device=device,
+    )
     shapes[op.outputs[0]] = (M, N)
 
 
@@ -567,13 +530,10 @@ def _exec_lstm(op, tensors, shapes, device):
     h_out = cache["h_out"]
     c_out = cache["c_out"]
 
-    grid_m = (batch + int(_TILE_M) - 1) // int(_TILE_M)
-    grid_n = (4 * hidden_size + int(_TILE_N) - 1) // int(_TILE_N)
-    wp.launch_tiled(
+    wp.launch(
         _lstm_gates_kernel,
-        dim=(grid_m, grid_n),
+        dim=(batch, 4 * hidden_size),
         inputs=[x_t, h_prev, cache["W"], cache["R"], gates, input_size, hidden_size],
-        block_dim=_TILE_THREADS,
         device=device,
     )
     wp.launch(
