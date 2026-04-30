@@ -46,7 +46,7 @@ def _scale_pair_kernel(
     pos_first: int,
 ):
     i, k = wp.tid()  # i in [0, N), k in [0, 2*history_length)
-    block = k // n_per_block          # 0 -> first half, 1 -> second half
+    block = k // n_per_block  # 0 -> first half, 1 -> second half
     is_pos = block == 0 if pos_first != 0 else block == 1
     if is_pos:
         out[i, k] = pos_error[i] * pos_scale

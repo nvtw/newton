@@ -22,6 +22,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import newton.utils
+
 POLICY_INFO = {
     # asset_dir, relative .pt path, observation dim
     "anybotics_anymal_c": [
@@ -76,8 +78,6 @@ def _convert_one(pt_path: Path, obs_dim: int) -> Path:
 
 
 def main() -> int:
-    import newton.utils
-
     failures: list[tuple[Path, BaseException]] = []
     converted: list[Path] = []
 
@@ -92,7 +92,7 @@ def main() -> int:
 
             try:
                 converted.append(_convert_one(pt_path, obs_dim))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 print(f"  !! FAILED: {pt_path}: {exc}")
                 failures.append((pt_path, exc))
 

@@ -6,7 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-import numpy as np
 import warp as wp
 
 from ..utils import load_checkpoint, load_metadata
@@ -37,15 +36,21 @@ def _compute_errors_kernel(
 
 
 @wp.kernel
-def _scale_and_copy_first_row_kernel(
-    src: wp.array2d[float],
-    dst: wp.array[float],
+def _scale_effort_to_forces_kernel(
+    src: wp.array2d[float],  # (N, K) effort, row-major
+    dst: wp.array[float],  # (count,) forces
     scale: float,
-    n: int,
+    cols: int,
 ):
+    """Read the leading ``count`` entries of ``src`` (row-major) and scale them.
+
+    Effectively flattens ``src`` and copies the first ``count`` values into
+    ``dst`` after multiplying by ``scale``.
+    """
     i = wp.tid()
-    if i < n:
-        dst[i] = src[0, i] * scale
+    row = i // cols
+    col = i % cols
+    dst[i] = src[row, col] * scale
 
 
 @wp.kernel
@@ -186,16 +191,12 @@ class ControllerNeuralLSTM(Controller):
         return True
 
     def is_graphable(self) -> bool:
-        return False
+        return True
 
     def state(self, num_actuators: int, device: wp.Device) -> ControllerNeuralLSTM.State:
         return ControllerNeuralLSTM.State(
-            hidden=wp.zeros(
-                (self._num_layers, num_actuators, self._hidden_size), dtype=wp.float32, device=device
-            ),
-            cell=wp.zeros(
-                (self._num_layers, num_actuators, self._hidden_size), dtype=wp.float32, device=device
-            ),
+            hidden=wp.zeros((self._num_layers, num_actuators, self._hidden_size), dtype=wp.float32, device=device),
+            cell=wp.zeros((self._num_layers, num_actuators, self._hidden_size), dtype=wp.float32, device=device),
         )
 
     def compute(
@@ -247,33 +248,23 @@ class ControllerNeuralLSTM(Controller):
         hidden_new = out[self._hidden_out_name]
         cell_new = out[self._cell_out_name]
 
-        # The downstream LSTM op produces (seq=1, batch=N, hidden) shape for Y_h/Y_c.
-        # Make sure shapes line up with state.hidden / state.cell.
-        wp.copy(
-            self._next_hidden,
-            wp.array(
-                np.ascontiguousarray(hidden_new.numpy()).reshape(self._num_layers, n, self._hidden_size),
-                dtype=wp.float32,
-                device=device,
-            ),
-        )
-        wp.copy(
-            self._next_cell,
-            wp.array(
-                np.ascontiguousarray(cell_new.numpy()).reshape(self._num_layers, n, self._hidden_size),
-                dtype=wp.float32,
-                device=device,
-            ),
-        )
+        # ``hidden_new`` / ``cell_new`` come back as ``(num_directions, N, H)``
+        # views over the runtime's preallocated ``(N, H)`` buffers, which
+        # matches ``num_layers=1`` here.  Copy on-device into the controller's
+        # next-state buffers so callers see a stable handle.
+        wp.copy(self._next_hidden, hidden_new.reshape((self._num_layers, n, self._hidden_size)))
+        wp.copy(self._next_cell, cell_new.reshape((self._num_layers, n, self._hidden_size)))
 
-        # effort shape coming back is (N, output_size).  We flatten the first len(forces) entries.
-        effort_2d = effort
-        if len(effort_2d.shape) == 1:
-            effort_np = effort_2d.numpy().reshape(1, -1)
-            effort_2d = wp.array(np.ascontiguousarray(effort_np), dtype=wp.float32, device=device)
-
-        flat = effort.numpy().reshape(-1)[: len(forces)] * self.effort_scale
-        wp.copy(forces, wp.array(np.ascontiguousarray(flat.astype(np.float32)), dtype=wp.float32, device=device))
+        # ``effort`` is the (N, output_size) tensor produced by the final
+        # Gemm.  Scale it and copy the leading ``len(forces)`` entries into
+        # ``forces`` in a single launch.
+        cols = effort.shape[1] if len(effort.shape) > 1 else 1
+        wp.launch(
+            _scale_effort_to_forces_kernel,
+            dim=len(forces),
+            inputs=[effort, forces, self.effort_scale, cols],
+            device=device,
+        )
 
     def update_state(
         self,

@@ -211,9 +211,7 @@ class Example:
         self._policy_input_name = self.policy.input_names[0]
         self._policy_output_name = self.policy.output_names[0]
 
-        self.joint_pos_initial = np.asarray(
-            self.state_0.joint_q.numpy()[7:], dtype=np.float32
-        ).reshape(1, 12)
+        self.joint_pos_initial = np.asarray(self.state_0.joint_q.numpy()[7:], dtype=np.float32).reshape(1, 12)
         self.act = np.zeros((1, 12), dtype=np.float32)
 
         self.lab_to_mujoco_indices = np.asarray(lab_to_mujoco, dtype=np.int64)

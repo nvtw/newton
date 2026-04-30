@@ -1,31 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Minimal ONNX inference runtime backed by Warp kernels.
+"""Graph-capturable ONNX inference runtime for Newton policy networks.
 
 Only the ``onnx`` package (pure protobuf parser) is required -- no
 ``onnxruntime`` or ``torch``.  Weights are loaded once onto the target
 Warp device; inference executes a pre-built list of lightweight op
-descriptors that dispatch to fused Warp kernels.
+descriptors that dispatch to Warp kernels without host round-trips or
+device allocation.
 
-Supported ONNX operators:
+Supported ONNX operators (all graph-capturable after one warmup call):
 
-* **Gemm** -- ``C = alpha * A @ B[^T] + beta * bias``
-* **MatMul** -- 2-D matrix multiplication
-* **Elu / Relu / Tanh / Sigmoid** -- element-wise activations
-* **Add / Sub / Mul / Div** -- element-wise binary ops (with simple broadcast)
-* **Concat** -- last-axis concatenation of 2-D tensors
-* **Split** -- split a 2-D tensor along the last axis
-* **Reshape** -- reshape with shape from initializer / constant
-* **Transpose** -- 2-D transpose, or 3-D ``(seq, batch, hidden)`` <-> ``(batch, seq, hidden)``
-* **Squeeze / Unsqueeze** -- single-axis squeeze/unsqueeze
-* **Identity** -- alias passthrough
-* **Constant** -- emit an initializer-like tensor
-* **LSTM** -- forward, single-direction, layout 0 or 1; arbitrary ``seq_length``
+* **Gemm** -- ``C = alpha * A @ B.T + beta * bias`` with ``transB=1``
+* **Elu** -- element-wise activation
+* **Squeeze** -- alias passthrough (the output array shares memory with the
+  input).  Only used to drop unit dims, no copy is performed.
+* **LSTM** -- forward, single-direction, single-layer, ``seq_length=1``.  The
+  full step (gate GEMM + cell update) executes in two on-device kernels.
+  This is the layout produced by single-step policy LSTMs.
 
 Example::
 
-    from newton._src.utils.onnx_runtime import OnnxRuntime
+    from newton.utils import OnnxRuntime
 
     rt = OnnxRuntime("policy.onnx", device="cuda:0")
     out = rt({"observation": wp.array2d(obs, dtype=wp.float32, device="cuda:0")})
@@ -46,9 +42,19 @@ from onnx import numpy_helper
 # Warp kernels
 # ---------------------------------------------------------------------------
 
+# Tile sizes for the GEMM kernel. A single 16x16 output tile per block
+# is computed via Warp tile primitives; on supported HW these lower to
+# Tensor-Core MMAs. Out-of-bounds tile loads return zero and tile stores
+# clip writes, so non-tile-aligned (M, N, K) work without a fallback as
+# long as the launch grid is rounded up.
+_TILE_M = wp.constant(16)
+_TILE_N = wp.constant(16)
+_TILE_K = wp.constant(16)
+_TILE_THREADS = 128
+
 
 @wp.kernel
-def _gemm_transB_bias_kernel(
+def _gemm_transb_kernel(
     A: wp.array2d[float],
     B: wp.array2d[float],
     bias: wp.array[float],
@@ -57,61 +63,29 @@ def _gemm_transB_bias_kernel(
     alpha: float,
     beta: float,
 ):
+    """Tiled GEMM (16x16x16), B stored transposed as (N, K).
+
+    Loaded as (TILE_N, TILE_K) and transposed to (TILE_K, TILE_N) before
+    the tile matmul.
+    """
     i, j = wp.tid()
-    s = float(0.0)
-    for k in range(K):
-        s += A[i, k] * B[j, k]
-    C[i, j] = alpha * s + beta * bias[j]
 
+    sum_tile = wp.tile_zeros(shape=(_TILE_M, _TILE_N), dtype=wp.float32)
 
-@wp.kernel
-def _gemm_transB_kernel(
-    A: wp.array2d[float],
-    B: wp.array2d[float],
-    C: wp.array2d[float],
-    K: int,
-    alpha: float,
-):
-    i, j = wp.tid()
-    s = float(0.0)
-    for k in range(K):
-        s += A[i, k] * B[j, k]
-    C[i, j] = alpha * s
+    count = (K + _TILE_K - 1) // _TILE_K
+    for k in range(count):
+        a = wp.tile_load(A, shape=(_TILE_M, _TILE_K), offset=(i * _TILE_M, k * _TILE_K))
+        b_nk = wp.tile_load(B, shape=(_TILE_N, _TILE_K), offset=(j * _TILE_N, k * _TILE_K))
+        b = wp.tile_transpose(b_nk)
+        wp.tile_matmul(a, b, sum_tile)
 
+    sum_tile = sum_tile * alpha
 
-@wp.kernel
-def _gemm_kernel(
-    A: wp.array2d[float],
-    B: wp.array2d[float],
-    bias: wp.array[float],
-    C: wp.array2d[float],
-    K: int,
-    alpha: float,
-    beta: float,
-    has_bias: int,
-):
-    i, j = wp.tid()
-    s = float(0.0)
-    for k in range(K):
-        s += A[i, k] * B[k, j]
-    if has_bias != 0:
-        C[i, j] = alpha * s + beta * bias[j]
-    else:
-        C[i, j] = alpha * s
+    b_tile = wp.tile_load(bias, shape=_TILE_N, offset=j * _TILE_N)
+    b_tile = b_tile * beta
+    sum_tile = sum_tile + wp.tile_broadcast(b_tile, shape=(_TILE_M, _TILE_N))
 
-
-@wp.kernel
-def _matmul_kernel(
-    A: wp.array2d[float],
-    B: wp.array2d[float],
-    C: wp.array2d[float],
-    K: int,
-):
-    i, j = wp.tid()
-    s = float(0.0)
-    for k in range(K):
-        s += A[i, k] * B[k, j]
-    C[i, j] = s
+    wp.tile_store(C, sum_tile, offset=(i * _TILE_M, j * _TILE_N))
 
 
 @wp.kernel
@@ -125,103 +99,63 @@ def _elu_kernel(
     y[i, j] = wp.where(v >= 0.0, v, alpha * (wp.exp(v) - 1.0))
 
 
-@wp.kernel
-def _relu_kernel(x: wp.array2d[float], y: wp.array2d[float]):
-    i, j = wp.tid()
-    v = x[i, j]
-    y[i, j] = wp.max(v, 0.0)
-
-
-@wp.kernel
-def _tanh_kernel(x: wp.array2d[float], y: wp.array2d[float]):
-    i, j = wp.tid()
-    y[i, j] = wp.tanh(x[i, j])
-
-
-@wp.kernel
-def _sigmoid_kernel(x: wp.array2d[float], y: wp.array2d[float]):
-    i, j = wp.tid()
-    y[i, j] = 1.0 / (1.0 + wp.exp(-x[i, j]))
-
-
-@wp.kernel
-def _binop_kernel(
-    a: wp.array2d[float],
-    b: wp.array2d[float],
-    c: wp.array2d[float],
-    op: int,  # 0=add, 1=sub, 2=mul, 3=div
-    bcast_rows_a: int,  # 1 if a's rows broadcast (size 1)
-    bcast_cols_a: int,  # 1 if a's cols broadcast
-    bcast_rows_b: int,
-    bcast_cols_b: int,
-):
-    i, j = wp.tid()
-    ai = wp.where(bcast_rows_a != 0, 0, i)
-    aj = wp.where(bcast_cols_a != 0, 0, j)
-    bi = wp.where(bcast_rows_b != 0, 0, i)
-    bj = wp.where(bcast_cols_b != 0, 0, j)
-    av = a[ai, aj]
-    bv = b[bi, bj]
-    if op == 0:
-        c[i, j] = av + bv
-    elif op == 1:
-        c[i, j] = av - bv
-    elif op == 2:
-        c[i, j] = av * bv
-    else:
-        c[i, j] = av / bv
-
-
-@wp.kernel
-def _copy2d_kernel(src: wp.array2d[float], dst: wp.array2d[float]):
-    i, j = wp.tid()
-    dst[i, j] = src[i, j]
-
-
 # ---------------------------------------------------------------------------
-# LSTM kernel: per-timestep cell update, forward direction only.
+# LSTM cell.  Two on-device kernels: a tiled GEMM that computes the four
+# gates ``x @ W.T + h_prev @ R.T`` into a (batch, 4*hidden) workspace, and a
+# pointwise update that adds the biases, applies sigmoid/tanh, and writes
+# ``h_out`` / ``c_out``.  Both lower to ``wp.launch_tiled`` / ``wp.launch``
+# and are graph-capturable after kernel warmup.
 # ---------------------------------------------------------------------------
 
 
 @wp.kernel
-def _lstm_cell_kernel(
-    x: wp.array2d[float],          # (batch, input_size)
-    h_prev: wp.array2d[float],     # (batch, hidden_size)
-    c_prev: wp.array2d[float],     # (batch, hidden_size)
-    W: wp.array2d[float],          # (4*hidden_size, input_size)  -- gates IOFC
-    R: wp.array2d[float],          # (4*hidden_size, hidden_size)
-    Bx: wp.array[float],           # (4*hidden_size,)
-    Bh: wp.array[float],           # (4*hidden_size,)
-    h_out: wp.array2d[float],      # (batch, hidden_size)
-    c_out: wp.array2d[float],      # (batch, hidden_size)
+def _lstm_gates_kernel(
+    x: wp.array2d[float],  # (batch, input_size)
+    h_prev: wp.array2d[float],  # (batch, hidden_size)
+    W: wp.array2d[float],  # (4*hidden_size, input_size)
+    R: wp.array2d[float],  # (4*hidden_size, hidden_size)
+    gates: wp.array2d[float],  # (batch, 4*hidden_size) output
     input_size: int,
+    hidden_size: int,
+):
+    """Tile-GEMM: ``gates = x @ W.T + h_prev @ R.T``."""
+    i, j = wp.tid()
+
+    sum_tile = wp.tile_zeros(shape=(_TILE_M, _TILE_N), dtype=wp.float32)
+
+    count_in = (input_size + _TILE_K - 1) // _TILE_K
+    for k in range(count_in):
+        a = wp.tile_load(x, shape=(_TILE_M, _TILE_K), offset=(i * _TILE_M, k * _TILE_K))
+        w_nk = wp.tile_load(W, shape=(_TILE_N, _TILE_K), offset=(j * _TILE_N, k * _TILE_K))
+        w = wp.tile_transpose(w_nk)
+        wp.tile_matmul(a, w, sum_tile)
+
+    count_h = (hidden_size + _TILE_K - 1) // _TILE_K
+    for k in range(count_h):
+        a = wp.tile_load(h_prev, shape=(_TILE_M, _TILE_K), offset=(i * _TILE_M, k * _TILE_K))
+        r_nk = wp.tile_load(R, shape=(_TILE_N, _TILE_K), offset=(j * _TILE_N, k * _TILE_K))
+        r = wp.tile_transpose(r_nk)
+        wp.tile_matmul(a, r, sum_tile)
+
+    wp.tile_store(gates, sum_tile, offset=(i * _TILE_M, j * _TILE_N))
+
+
+@wp.kernel
+def _lstm_cell_update_kernel(
+    gates: wp.array2d[float],  # (batch, 4*hidden_size); already x@W.T + h_prev@R.T
+    c_prev: wp.array2d[float],  # (batch, hidden_size)
+    Bx: wp.array[float],  # (4*hidden_size,)
+    Bh: wp.array[float],  # (4*hidden_size,)
+    h_out: wp.array2d[float],  # (batch, hidden_size)
+    c_out: wp.array2d[float],  # (batch, hidden_size)
     hidden_size: int,
 ):
     b, h = wp.tid()
 
-    base_i = 0 * hidden_size + h
-    base_o = 1 * hidden_size + h
-    base_f = 2 * hidden_size + h
-    base_c = 3 * hidden_size + h
-
-    s_i = Bx[base_i] + Bh[base_i]
-    s_o = Bx[base_o] + Bh[base_o]
-    s_f = Bx[base_f] + Bh[base_f]
-    s_c = Bx[base_c] + Bh[base_c]
-
-    for k in range(input_size):
-        xv = x[b, k]
-        s_i += W[base_i, k] * xv
-        s_o += W[base_o, k] * xv
-        s_f += W[base_f, k] * xv
-        s_c += W[base_c, k] * xv
-
-    for k in range(hidden_size):
-        hv = h_prev[b, k]
-        s_i += R[base_i, k] * hv
-        s_o += R[base_o, k] * hv
-        s_f += R[base_f, k] * hv
-        s_c += R[base_c, k] * hv
+    s_i = gates[b, 0 * hidden_size + h] + Bx[0 * hidden_size + h] + Bh[0 * hidden_size + h]
+    s_o = gates[b, 1 * hidden_size + h] + Bx[1 * hidden_size + h] + Bh[1 * hidden_size + h]
+    s_f = gates[b, 2 * hidden_size + h] + Bx[2 * hidden_size + h] + Bh[2 * hidden_size + h]
+    s_c = gates[b, 3 * hidden_size + h] + Bx[3 * hidden_size + h] + Bh[3 * hidden_size + h]
 
     g_i = 1.0 / (1.0 + wp.exp(-s_i))
     g_o = 1.0 / (1.0 + wp.exp(-s_o))
@@ -238,6 +172,12 @@ def _lstm_cell_kernel(
 # ---------------------------------------------------------------------------
 
 
+_ATTR_DECODERS = {
+    1: lambda a: a.f,  # FLOAT
+    2: lambda a: a.i,  # INT
+}
+
+
 @dataclass
 class _Op:
     op_type: str
@@ -246,42 +186,18 @@ class _Op:
     attrs: dict[str, Any] = field(default_factory=dict)
 
 
-def _get_attr(node, name: str, default=None):
-    """Extract a named attribute from an ONNX ``NodeProto``."""
+def _decode_attrs(node) -> dict[str, Any]:
+    """Decode all attributes of an ONNX ``NodeProto`` in a single pass."""
+    out: dict[str, Any] = {}
     for attr in node.attribute:
-        if attr.name == name:
-            if attr.type == 1:  # FLOAT
-                return attr.f
-            if attr.type == 2:  # INT
-                return attr.i
-            if attr.type == 3:  # STRING
-                return attr.s.decode()
-            if attr.type == 4:  # TENSOR
-                return numpy_helper.to_array(attr.t)
-            if attr.type == 6:  # FLOATS
-                return list(attr.floats)
-            if attr.type == 7:  # INTS
-                return list(attr.ints)
-            if attr.type == 8:  # STRINGS
-                return [s.decode() for s in attr.strings]
-    return default
-
-
-def _alloc_array(shape: tuple[int, ...], device: wp.context.Device) -> wp.array:
-    """Allocate a zero-initialized Warp float32 array of the given shape."""
-    if len(shape) == 1:
-        return wp.zeros(shape[0], dtype=wp.float32, device=device)
-    if len(shape) == 2:
-        return wp.zeros(shape, dtype=wp.float32, device=device)
-    if len(shape) == 3:
-        return wp.zeros(shape, dtype=wp.float32, device=device)
-    return wp.zeros(shape, dtype=wp.float32, device=device)
+        decoder = _ATTR_DECODERS.get(attr.type)
+        if decoder is not None:
+            out[attr.name] = decoder(attr)
+    return out
 
 
 def _np_to_warp(arr_np: np.ndarray, device: wp.context.Device) -> wp.array:
-    arr_np = np.ascontiguousarray(arr_np.astype(np.float32))
-    if arr_np.ndim == 1:
-        return wp.array(arr_np, dtype=wp.float32, device=device)
+    arr_np = np.ascontiguousarray(arr_np, dtype=np.float32)
     return wp.array(arr_np, dtype=wp.float32, device=device)
 
 
@@ -291,7 +207,7 @@ def _np_to_warp(arr_np: np.ndarray, device: wp.context.Device) -> wp.array:
 
 
 class OnnxRuntime:
-    """Lightweight ONNX inference engine using Warp kernels.
+    """Lightweight ONNX inference engine for graph-capturable MLP policies.
 
     Args:
         path: Path to an ``.onnx`` file.
@@ -303,10 +219,8 @@ class OnnxRuntime:
 
     def __init__(self, path: str, device: str | None = None, batch_size: int = 1):
         self._device = wp.get_device(device)
-        self._batch_size = batch_size
 
         model = onnx.load(path)
-        onnx.checker.check_model(model, full_check=False)
         graph = model.graph
 
         self._tensors: dict[str, wp.array] = {}
@@ -332,35 +246,30 @@ class OnnxRuntime:
                     shape.append(batch_size)
             self._shapes[inp.name] = tuple(shape)
 
-        self._ops: list[_Op] = []
-        for node in graph.node:
-            attrs: dict[str, Any] = {}
-            for a in node.attribute:
-                attrs[a.name] = _get_attr(node, a.name)
-            self._ops.append(
-                _Op(
-                    op_type=node.op_type,
-                    inputs=list(node.input),
-                    outputs=list(node.output),
-                    attrs=attrs,
-                )
+        self._ops: list[_Op] = [
+            _Op(
+                op_type=node.op_type,
+                inputs=list(node.input),
+                outputs=list(node.output),
+                attrs=_decode_attrs(node),
             )
+            for node in graph.node
+        ]
 
-        self._preallocate_buffers(batch_size)
+        self._preallocate_buffers()
 
     # ------------------------------------------------------------------
     # Buffer pre-allocation
     # ------------------------------------------------------------------
 
-    def _preallocate_buffers(self, batch_size: int) -> None:
+    def _preallocate_buffers(self) -> None:
         for op in self._ops:
             handler = _SHAPE_DISPATCH.get(op.op_type)
             if handler is None:
                 raise NotImplementedError(
-                    f"OnnxRuntime: unsupported op '{op.op_type}'.  "
-                    f"Supported ops: {sorted(_OP_DISPATCH.keys())}"
+                    f"OnnxRuntime: unsupported op '{op.op_type}'.  Supported ops: {sorted(_OP_DISPATCH.keys())}"
                 )
-            handler(op, self._shapes, self._tensors, self._device, batch_size)
+            handler(op, self._shapes, self._tensors, self._device)
 
     # ------------------------------------------------------------------
     # Inference
@@ -378,9 +287,17 @@ class OnnxRuntime:
         """
         tensors = self._tensors
 
+        for name in self.input_names:
+            if name not in inputs:
+                raise KeyError(f"OnnxRuntime: missing input '{name}'")
+
         for name, arr in inputs.items():
+            if name not in self._shapes:
+                raise KeyError(f"OnnxRuntime: unknown input '{name}'")
+            expected_shape = self._shapes[name]
+            if tuple(arr.shape) != expected_shape:
+                raise ValueError(f"OnnxRuntime: input '{name}' has shape {tuple(arr.shape)}, expected {expected_shape}")
             tensors[name] = arr
-            self._shapes[name] = tuple(arr.shape)
 
         for op in self._ops:
             dispatch = _OP_DISPATCH.get(op.op_type)
@@ -396,13 +313,27 @@ class OnnxRuntime:
 # ---------------------------------------------------------------------------
 
 
-def _shape_gemm(op, shapes, tensors, device, batch_size):
+def _shape_gemm(op, shapes, tensors, device):
     A_shape = shapes[op.inputs[0]]
     B_shape = shapes[op.inputs[1]]
     transA = int(op.attrs.get("transA", 0))
     transB = int(op.attrs.get("transB", 0))
-    M = A_shape[1] if transA else A_shape[0]
-    N = B_shape[0] if transB else B_shape[1]
+    if transA:
+        raise NotImplementedError("OnnxRuntime Gemm: transA=1 is not graph-capturable in this runtime")
+    if transB != 1:
+        raise NotImplementedError("OnnxRuntime Gemm: only transB=1 policy weights are supported")
+    if len(op.inputs) < 3 or not op.inputs[2]:
+        raise NotImplementedError("OnnxRuntime Gemm: bias input is required for graph-capturable policy execution")
+    if len(A_shape) != 2 or len(B_shape) != 2:
+        raise NotImplementedError("OnnxRuntime Gemm: only 2-D tensors are supported")
+    M = A_shape[0]
+    N = B_shape[0]
+    K = A_shape[1]
+    if B_shape[1] != K:
+        raise ValueError(f"OnnxRuntime Gemm: incompatible shapes {A_shape} and {B_shape}")
+    bias_shape = shapes[op.inputs[2]]
+    if bias_shape != (N,):
+        raise ValueError(f"OnnxRuntime Gemm: bias '{op.inputs[2]}' has shape {bias_shape}, expected {(N,)}")
     out_shape = (M, N)
     out_name = op.outputs[0]
     if out_name not in tensors:
@@ -410,193 +341,133 @@ def _shape_gemm(op, shapes, tensors, device, batch_size):
     shapes[out_name] = out_shape
 
 
-def _shape_matmul(op, shapes, tensors, device, batch_size):
-    A_shape = shapes[op.inputs[0]]
-    B_shape = shapes[op.inputs[1]]
-    out_shape = (A_shape[0], B_shape[1])
-    out_name = op.outputs[0]
-    if out_name not in tensors:
-        tensors[out_name] = wp.zeros(out_shape, dtype=wp.float32, device=device)
-    shapes[out_name] = out_shape
-
-
-def _shape_elementwise_unary(op, shapes, tensors, device, batch_size):
+def _shape_elementwise_unary(op, shapes, tensors, device):
     in_shape = shapes[op.inputs[0]]
+    if len(in_shape) != 2:
+        raise NotImplementedError("OnnxRuntime Elu: only 2-D tensors are supported")
     out_name = op.outputs[0]
     if out_name not in tensors:
-        tensors[out_name] = _alloc_array(in_shape, device)
+        tensors[out_name] = wp.zeros(in_shape, dtype=wp.float32, device=device)
     shapes[out_name] = in_shape
 
 
-def _shape_binop(op, shapes, tensors, device, batch_size):
-    a_shape = shapes[op.inputs[0]]
-    b_shape = shapes[op.inputs[1]]
-    out_shape = tuple(max(a, b) for a, b in zip(_pad(a_shape, len(b_shape)), _pad(b_shape, len(a_shape)), strict=False))
-    out_name = op.outputs[0]
-    if out_name not in tensors:
-        tensors[out_name] = _alloc_array(out_shape, device)
-    shapes[out_name] = out_shape
+def _shape_squeeze(op, shapes, tensors, device):
+    """Squeeze is implemented as a no-copy alias on a 2-D Warp buffer.
 
-
-def _pad(shape, n):
-    return (1,) * (n - len(shape)) + tuple(shape)
-
-
-def _shape_concat(op, shapes, tensors, device, batch_size):
-    axis = int(op.attrs.get("axis", -1))
-    in_shapes = [shapes[i] for i in op.inputs]
-    rank = len(in_shapes[0])
-    if axis < 0:
-        axis += rank
-    out_shape = list(in_shapes[0])
-    out_shape[axis] = sum(s[axis] for s in in_shapes)
-    out_shape = tuple(out_shape)
-    out_name = op.outputs[0]
-    if out_name not in tensors:
-        tensors[out_name] = _alloc_array(out_shape, device)
-    shapes[out_name] = out_shape
-
-
-def _shape_split(op, shapes, tensors, device, batch_size):
+    The input is expected to be a higher-rank tensor whose unit dims will be
+    removed by the ``axes`` initializer; the resulting layout must be 2-D and
+    contiguous, which matches the LSTM ``Y -> Y_2d`` decoder pattern.
+    """
     in_shape = shapes[op.inputs[0]]
-    axis = int(op.attrs.get("axis", 0))
-    if axis < 0:
-        axis += len(in_shape)
-    num_outputs = len(op.outputs)
-
-    splits = op.attrs.get("split")
-    if splits is None and len(op.inputs) > 1 and op.inputs[1] in shapes:
-        # split sizes from input -- fall back to equal split when not constant
-        splits = None
-    if splits is None:
-        each = in_shape[axis] // num_outputs
-        splits = [each] * num_outputs
-    for out_name, sz in zip(op.outputs, splits, strict=False):
-        out_shape = list(in_shape)
-        out_shape[axis] = sz
-        out_shape = tuple(out_shape)
-        if out_name not in tensors:
-            tensors[out_name] = _alloc_array(out_shape, device)
-        shapes[out_name] = out_shape
-
-
-def _shape_reshape(op, shapes, tensors, device, batch_size):
-    in_shape = shapes[op.inputs[0]]
-    target = None
+    axes = None
     if len(op.inputs) > 1 and op.inputs[1] in tensors:
-        # shape comes from initializer
-        target = tuple(int(v) for v in tensors[op.inputs[1]].numpy().tolist())
-    if target is None:
-        target = in_shape
-    total_in = 1
-    for d in in_shape:
-        total_in *= d
-    out_shape = []
-    unknown = -1
-    known_prod = 1
-    for i, dim in enumerate(target):
-        d = in_shape[i] if dim == 0 else dim
-        if d == -1:
-            unknown = i
-            out_shape.append(-1)
-        else:
-            out_shape.append(d)
-            known_prod *= d
-    if unknown >= 0:
-        out_shape[unknown] = total_in // known_prod
-    out_shape = tuple(out_shape)
-    out_name = op.outputs[0]
-    if out_name not in tensors:
-        tensors[out_name] = _alloc_array(out_shape, device)
-    shapes[out_name] = out_shape
-
-
-def _shape_transpose(op, shapes, tensors, device, batch_size):
-    in_shape = shapes[op.inputs[0]]
-    perm = op.attrs.get("perm")
-    if perm is None:
-        perm = list(reversed(range(len(in_shape))))
-    out_shape = tuple(in_shape[p] for p in perm)
-    out_name = op.outputs[0]
-    if out_name not in tensors:
-        tensors[out_name] = _alloc_array(out_shape, device)
-    shapes[out_name] = out_shape
-
-
-def _shape_squeeze(op, shapes, tensors, device, batch_size):
-    in_shape = shapes[op.inputs[0]]
-    axes = op.attrs.get("axes")
-    if axes is None and len(op.inputs) > 1 and op.inputs[1] in tensors:
-        axes = [int(v) for v in tensors[op.inputs[1]].numpy().tolist()]
+        axes_tensor = tensors[op.inputs[1]]
+        if hasattr(axes_tensor, "numpy"):
+            axes = [int(v) for v in axes_tensor.numpy().tolist()]
     if axes is None:
         out_shape = tuple(d for d in in_shape if d != 1)
     else:
         rank = len(in_shape)
-        axes_norm = [a if a >= 0 else a + rank for a in axes]
+        axes_norm = {a if a >= 0 else a + rank for a in axes}
         out_shape = tuple(d for i, d in enumerate(in_shape) if i not in axes_norm)
-    out_name = op.outputs[0]
-    if out_name not in tensors:
-        tensors[out_name] = _alloc_array(out_shape, device)
-    shapes[out_name] = out_shape
+    if len(out_shape) != 2:
+        raise NotImplementedError(
+            f"OnnxRuntime Squeeze: only squeezes that produce a 2-D tensor are supported (got {out_shape})"
+        )
+    shapes[op.outputs[0]] = out_shape
+    op.attrs["_out_shape"] = out_shape
 
 
-def _shape_unsqueeze(op, shapes, tensors, device, batch_size):
-    in_shape = shapes[op.inputs[0]]
-    axes = op.attrs.get("axes")
-    if axes is None and len(op.inputs) > 1 and op.inputs[1] in tensors:
-        axes = [int(v) for v in tensors[op.inputs[1]].numpy().tolist()]
-    out_shape = list(in_shape)
-    rank = len(out_shape) + len(axes)
-    axes_norm = sorted(a if a >= 0 else a + rank for a in axes)
-    for a in axes_norm:
-        out_shape.insert(a, 1)
-    out_shape = tuple(out_shape)
-    out_name = op.outputs[0]
-    if out_name not in tensors:
-        tensors[out_name] = _alloc_array(out_shape, device)
-    shapes[out_name] = out_shape
+def _shape_lstm(op, shapes, tensors, device):
+    """Single-step (seq_length=1), single-direction, single-layer LSTM.
 
+    Weights are reshaped into device-resident 2-D tiles and the gates
+    workspace is preallocated, so per-call inference is two Warp launches.
+    """
+    direction = op.attrs.get("direction", "forward")
+    if direction not in ("forward", b"forward"):
+        raise NotImplementedError("OnnxRuntime LSTM: only forward direction is supported")
 
-def _shape_identity(op, shapes, tensors, device, batch_size):
-    in_shape = shapes[op.inputs[0]]
-    shapes[op.outputs[0]] = in_shape
-
-
-def _shape_constant(op, shapes, tensors, device, batch_size):
-    val = op.attrs.get("value")
-    arr = np.asarray(val, dtype=np.float32)
-    tensors[op.outputs[0]] = _np_to_warp(arr, device)
-    shapes[op.outputs[0]] = tuple(arr.shape)
-
-
-def _shape_lstm(op, shapes, tensors, device, batch_size):
-    X_shape = shapes[op.inputs[0]]   # (seq_len, batch, input_size) for layout=0
-    W_shape = shapes[op.inputs[1]]   # (1, 4H, input_size)
     layout = int(op.attrs.get("layout", 0))
+    if layout not in (0, 1):
+        raise NotImplementedError("OnnxRuntime LSTM: layout must be 0 or 1")
+
+    X_shape = shapes[op.inputs[0]]
+    if len(X_shape) != 3:
+        raise NotImplementedError("OnnxRuntime LSTM: input X must be 3-D")
+    if layout == 0:
+        seq_len, batch, input_size = X_shape
+    else:
+        batch, seq_len, input_size = X_shape
+    if seq_len != 1:
+        raise NotImplementedError("OnnxRuntime LSTM: only seq_length=1 is supported (single-step inference)")
+
+    W_shape = shapes[op.inputs[1]]
+    if len(W_shape) != 3 or W_shape[0] != 1:
+        raise NotImplementedError("OnnxRuntime LSTM: only num_directions=1 is supported")
     hidden_size = int(op.attrs.get("hidden_size", W_shape[1] // 4))
 
-    if layout == 0:
-        seq_len, batch, _ = X_shape
-        Y_shape = (seq_len, 1, batch, hidden_size)
-    else:
-        batch, seq_len, _ = X_shape
-        Y_shape = (batch, seq_len, 1, hidden_size)
+    R_shape = shapes[op.inputs[2]]
+    if R_shape != (1, 4 * hidden_size, hidden_size):
+        raise ValueError(f"OnnxRuntime LSTM: R has shape {R_shape}, expected {(1, 4 * hidden_size, hidden_size)}")
 
+    # Materialize reshaped W/R/B as device-resident 2-D arrays.  The
+    # initializers are already on device; use ``reshape`` to produce 2-D
+    # views without re-uploading.
+    W_full = tensors[op.inputs[1]]
+    R_full = tensors[op.inputs[2]]
+    cache: dict[str, wp.array] = {}
+    cache["W"] = W_full.reshape((4 * hidden_size, input_size))
+    cache["R"] = R_full.reshape((4 * hidden_size, hidden_size))
+
+    if len(op.inputs) > 3 and op.inputs[3] and op.inputs[3] in tensors:
+        B_full = tensors[op.inputs[3]]
+        B_shape_in = shapes[op.inputs[3]]
+        if B_shape_in != (1, 8 * hidden_size):
+            raise ValueError(f"OnnxRuntime LSTM: B has shape {B_shape_in}, expected {(1, 8 * hidden_size)}")
+        B_2d = B_full.reshape((8 * hidden_size,))
+        # Slice into the two 4H halves once at preallocation time.  Warp
+        # array slices are zero-copy views; per-call inference reuses them.
+        cache["Bx"] = B_2d[: 4 * hidden_size]
+        cache["Bh"] = B_2d[4 * hidden_size :]
+    else:
+        cache["Bx"] = wp.zeros(4 * hidden_size, dtype=wp.float32, device=device)
+        cache["Bh"] = wp.zeros(4 * hidden_size, dtype=wp.float32, device=device)
+
+    cache["gates"] = wp.zeros((batch, 4 * hidden_size), dtype=wp.float32, device=device)
+    cache["input_size"] = input_size
+    cache["hidden_size"] = hidden_size
+    cache["batch"] = batch
+    cache["layout"] = layout
+    op.attrs["_cache"] = cache
+
+    # Output Y has shape (seq, num_directions, batch, hidden) for layout=0
+    # and (batch, seq, num_directions, hidden) for layout=1.  We allocate a
+    # 2-D ``(batch, hidden)`` buffer that the kernel writes directly, plus a
+    # 4-D shape entry so downstream ops (like Squeeze) see the ONNX shape.
+    h_buf = wp.zeros((batch, hidden_size), dtype=wp.float32, device=device)
+    c_buf = wp.zeros((batch, hidden_size), dtype=wp.float32, device=device)
+    cache["h_out"] = h_buf
+    cache["c_out"] = c_buf
+
+    if layout == 0:
+        Y_shape = (1, 1, batch, hidden_size)
+    else:
+        Y_shape = (batch, 1, 1, hidden_size)
     Yh_shape = (1, batch, hidden_size)
-    Yc_shape = (1, batch, hidden_size)
 
     if len(op.outputs) > 0 and op.outputs[0]:
-        if op.outputs[0] not in tensors:
-            tensors[op.outputs[0]] = _alloc_array(Y_shape, device)
+        # Y is just the (batch, hidden) buffer with extra unit dims.  Store
+        # the same Warp buffer reshaped to the ONNX-expected rank so a
+        # following Squeeze can alias it back to 2-D for free.
+        tensors[op.outputs[0]] = h_buf.reshape(Y_shape)
         shapes[op.outputs[0]] = Y_shape
     if len(op.outputs) > 1 and op.outputs[1]:
-        if op.outputs[1] not in tensors:
-            tensors[op.outputs[1]] = _alloc_array(Yh_shape, device)
+        tensors[op.outputs[1]] = h_buf.reshape(Yh_shape)
         shapes[op.outputs[1]] = Yh_shape
     if len(op.outputs) > 2 and op.outputs[2]:
-        if op.outputs[2] not in tensors:
-            tensors[op.outputs[2]] = _alloc_array(Yc_shape, device)
-        shapes[op.outputs[2]] = Yc_shape
+        tensors[op.outputs[2]] = c_buf.reshape(Yh_shape)
+        shapes[op.outputs[2]] = Yh_shape
 
 
 # ---------------------------------------------------------------------------
@@ -604,68 +475,33 @@ def _shape_lstm(op, shapes, tensors, device, batch_size):
 # ---------------------------------------------------------------------------
 
 
+def _launch_gemm(A, B, bias, out, M, N, K, alpha, beta, device):
+    grid_m = (M + int(_TILE_M) - 1) // int(_TILE_M)
+    grid_n = (N + int(_TILE_N) - 1) // int(_TILE_N)
+    wp.launch_tiled(
+        _gemm_transb_kernel,
+        dim=(grid_m, grid_n),
+        inputs=[A, B, bias, out, K, alpha, beta],
+        block_dim=_TILE_THREADS,
+        device=device,
+    )
+
+
 def _exec_gemm(op, tensors, shapes, device):
     A = tensors[op.inputs[0]]
     B = tensors[op.inputs[1]]
-    bias = tensors[op.inputs[2]] if len(op.inputs) > 2 else None
+    bias = tensors[op.inputs[2]]
     alpha = float(op.attrs.get("alpha", 1.0))
     beta = float(op.attrs.get("beta", 1.0))
-    transA = int(op.attrs.get("transA", 0))
-    transB = int(op.attrs.get("transB", 0))
 
     A_shape = shapes[op.inputs[0]]
     B_shape = shapes[op.inputs[1]]
-
-    if transA:
-        raise NotImplementedError("OnnxRuntime Gemm: transA=1 is not supported")
-
     M = A_shape[0]
-    if transB:
-        N = B_shape[0]
-        K = B_shape[1]
-    else:
-        N = B_shape[1]
-        K = B_shape[0]
+    N = B_shape[0]
+    K = B_shape[1]
 
     out = tensors[op.outputs[0]]
-
-    if transB:
-        if bias is not None:
-            wp.launch(
-                _gemm_transB_bias_kernel,
-                dim=(M, N),
-                inputs=[A, B, bias, out, K, alpha, beta],
-                device=device,
-            )
-        else:
-            wp.launch(
-                _gemm_transB_kernel,
-                dim=(M, N),
-                inputs=[A, B, out, K, alpha],
-                device=device,
-            )
-    else:
-        zero_bias = bias if bias is not None else wp.zeros(N, dtype=wp.float32, device=device)
-        wp.launch(
-            _gemm_kernel,
-            dim=(M, N),
-            inputs=[A, B, zero_bias, out, K, alpha, beta, 1 if bias is not None else 0],
-            device=device,
-        )
-
-    shapes[op.outputs[0]] = (M, N)
-
-
-def _exec_matmul(op, tensors, shapes, device):
-    A = tensors[op.inputs[0]]
-    B = tensors[op.inputs[1]]
-    A_shape = shapes[op.inputs[0]]
-    B_shape = shapes[op.inputs[1]]
-    M = A_shape[0]
-    K = A_shape[1]
-    N = B_shape[1]
-    out = tensors[op.outputs[0]]
-    wp.launch(_matmul_kernel, dim=(M, N), inputs=[A, B, out, K], device=device)
+    _launch_gemm(A, B, bias, out, M, N, K, alpha, beta, device)
     shapes[op.outputs[0]] = (M, N)
 
 
@@ -678,226 +514,73 @@ def _exec_elu(op, tensors, shapes, device):
     shapes[op.outputs[0]] = shape
 
 
-def _exec_relu(op, tensors, shapes, device):
-    x = tensors[op.inputs[0]]
-    out = tensors[op.outputs[0]]
-    shape = shapes[op.inputs[0]]
-    wp.launch(_relu_kernel, dim=shape, inputs=[x, out], device=device)
-    shapes[op.outputs[0]] = shape
-
-
-def _exec_tanh(op, tensors, shapes, device):
-    x = tensors[op.inputs[0]]
-    out = tensors[op.outputs[0]]
-    shape = shapes[op.inputs[0]]
-    wp.launch(_tanh_kernel, dim=shape, inputs=[x, out], device=device)
-    shapes[op.outputs[0]] = shape
-
-
-def _exec_sigmoid(op, tensors, shapes, device):
-    x = tensors[op.inputs[0]]
-    out = tensors[op.outputs[0]]
-    shape = shapes[op.inputs[0]]
-    wp.launch(_sigmoid_kernel, dim=shape, inputs=[x, out], device=device)
-    shapes[op.outputs[0]] = shape
-
-
-def _exec_binop(op, tensors, shapes, device, op_id: int):
-    a = tensors[op.inputs[0]]
-    b = tensors[op.inputs[1]]
-    a_shape = shapes[op.inputs[0]]
-    b_shape = shapes[op.inputs[1]]
-    out = tensors[op.outputs[0]]
-    out_shape = shapes[op.outputs[0]]
-
-    a_view = _as_2d(a, a_shape, out_shape)
-    b_view = _as_2d(b, b_shape, out_shape)
-
-    bra = 1 if a_view.shape[0] == 1 and out_shape[0] != 1 else 0
-    bca = 1 if a_view.shape[1] == 1 and out_shape[1] != 1 else 0
-    brb = 1 if b_view.shape[0] == 1 and out_shape[0] != 1 else 0
-    bcb = 1 if b_view.shape[1] == 1 and out_shape[1] != 1 else 0
-
-    wp.launch(
-        _binop_kernel,
-        dim=out_shape,
-        inputs=[a_view, b_view, out, op_id, bra, bca, brb, bcb],
-        device=device,
-    )
-
-
-def _as_2d(arr: wp.array, src_shape, target_shape):
-    """Reshape a Warp array into a 2-D view that broadcasts to ``target_shape``."""
-    if len(src_shape) == 2:
-        return arr
-    if len(src_shape) == 1:
-        # treat 1-D as row vector (1, n), broadcast along axis 0
-        return arr.reshape((1, src_shape[0]))
-    if len(src_shape) == 0:
-        return arr.reshape((1, 1))
-    flat_rows = 1
-    for d in src_shape[:-1]:
-        flat_rows *= d
-    return arr.reshape((flat_rows, src_shape[-1]))
-
-
-def _exec_add(op, tensors, shapes, device):
-    _exec_binop(op, tensors, shapes, device, 0)
-
-
-def _exec_sub(op, tensors, shapes, device):
-    _exec_binop(op, tensors, shapes, device, 1)
-
-
-def _exec_mul(op, tensors, shapes, device):
-    _exec_binop(op, tensors, shapes, device, 2)
-
-
-def _exec_div(op, tensors, shapes, device):
-    _exec_binop(op, tensors, shapes, device, 3)
-
-
-def _exec_concat(op, tensors, shapes, device):
-    """Last-axis concat for 2-D tensors via numpy round-trip (tiny, infrequent)."""
-    arrs = [tensors[i].numpy() for i in op.inputs]
-    axis = int(op.attrs.get("axis", -1))
-    out_np = np.concatenate(arrs, axis=axis).astype(np.float32)
-    tensors[op.outputs[0]] = _np_to_warp(out_np, device)
-    shapes[op.outputs[0]] = tuple(out_np.shape)
-
-
-def _exec_split(op, tensors, shapes, device):
-    arr = tensors[op.inputs[0]].numpy()
-    axis = int(op.attrs.get("axis", 0))
-    splits = op.attrs.get("split")
-    if splits is None and len(op.inputs) > 1 and op.inputs[1] in tensors:
-        splits = [int(v) for v in tensors[op.inputs[1]].numpy().tolist()]
-    if splits is None:
-        each = arr.shape[axis] // len(op.outputs)
-        splits = [each] * len(op.outputs)
-    indices = np.cumsum(splits)[:-1]
-    parts = np.split(arr, indices, axis=axis)
-    for name, part in zip(op.outputs, parts, strict=False):
-        tensors[name] = _np_to_warp(part.astype(np.float32), device)
-        shapes[name] = tuple(part.shape)
-
-
-def _exec_reshape(op, tensors, shapes, device):
-    src = tensors[op.inputs[0]]
-    out_shape = shapes[op.outputs[0]]
-    arr_np = src.numpy().reshape(out_shape).astype(np.float32)
-    tensors[op.outputs[0]] = _np_to_warp(arr_np, device)
-
-
-def _exec_transpose(op, tensors, shapes, device):
-    src = tensors[op.inputs[0]]
-    perm = op.attrs.get("perm")
-    arr_np = src.numpy()
-    if perm is None:
-        arr_np = arr_np.T
-    else:
-        arr_np = np.transpose(arr_np, axes=perm)
-    arr_np = np.ascontiguousarray(arr_np.astype(np.float32))
-    tensors[op.outputs[0]] = _np_to_warp(arr_np, device)
-    shapes[op.outputs[0]] = tuple(arr_np.shape)
-
-
 def _exec_squeeze(op, tensors, shapes, device):
-    out_shape = shapes[op.outputs[0]]
-    src_np = tensors[op.inputs[0]].numpy()
-    arr_np = src_np.reshape(out_shape).astype(np.float32)
-    tensors[op.outputs[0]] = _np_to_warp(arr_np, device)
+    """Squeeze is an alias: the output Warp buffer reuses the input's storage.
 
-
-def _exec_unsqueeze(op, tensors, shapes, device):
-    out_shape = shapes[op.outputs[0]]
-    src_np = tensors[op.inputs[0]].numpy()
-    arr_np = src_np.reshape(out_shape).astype(np.float32)
-    tensors[op.outputs[0]] = _np_to_warp(arr_np, device)
-
-
-def _exec_identity(op, tensors, shapes, device):
-    tensors[op.outputs[0]] = tensors[op.inputs[0]]
-    shapes[op.outputs[0]] = shapes[op.inputs[0]]
-
-
-def _exec_constant(op, tensors, shapes, device):
-    pass  # already materialized in shape inference
+    The runtime shape table is updated to reflect the squeezed rank, so
+    downstream ops see a 2-D tensor without any data movement.
+    """
+    src = tensors[op.inputs[0]]
+    out_shape = op.attrs["_out_shape"]
+    tensors[op.outputs[0]] = src.reshape(out_shape)
+    shapes[op.outputs[0]] = out_shape
 
 
 def _exec_lstm(op, tensors, shapes, device):
-    """Forward, single-direction LSTM. Loops through ``seq_length`` on the host."""
-    X_shape = shapes[op.inputs[0]]
-    layout = int(op.attrs.get("layout", 0))
-    hidden_size = int(op.attrs.get("hidden_size", 0))
+    """Run one LSTM step entirely on device.
 
+    No host transfers, no allocation -- just two Warp launches into
+    preallocated buffers, so this path is graph-capturable after warmup.
+    """
+    cache = op.attrs["_cache"]
+    input_size: int = cache["input_size"]
+    hidden_size: int = cache["hidden_size"]
+    batch: int = cache["batch"]
+    layout: int = cache["layout"]
+
+    X = tensors[op.inputs[0]]
     if layout == 0:
-        seq_len, batch, input_size = X_shape
+        # X has shape (1, batch, input_size); reshape to (batch, input_size).
+        x_t = X.reshape((batch, input_size))
     else:
-        batch, seq_len, input_size = X_shape
+        # X has shape (batch, 1, input_size); reshape similarly.
+        x_t = X.reshape((batch, input_size))
 
-    # Inputs
-    X_np = tensors[op.inputs[0]].numpy()
-    if layout == 1:
-        X_np = np.transpose(X_np, (1, 0, 2))   # -> (seq_len, batch, input_size)
-    W_np = tensors[op.inputs[1]].numpy().reshape(4 * hidden_size, input_size)
-    R_np = tensors[op.inputs[2]].numpy().reshape(4 * hidden_size, hidden_size)
-    if len(op.inputs) > 3 and op.inputs[3] and op.inputs[3] in tensors:
-        B_np = tensors[op.inputs[3]].numpy().reshape(8 * hidden_size)
-        Bx_np = B_np[: 4 * hidden_size]
-        Bh_np = B_np[4 * hidden_size :]
-    else:
-        Bx_np = np.zeros(4 * hidden_size, dtype=np.float32)
-        Bh_np = np.zeros(4 * hidden_size, dtype=np.float32)
-
+    # Initial hidden / cell states are optional but always provided by
+    # ``ControllerNeuralLSTM``.  Reshape from (num_dirs, batch, hidden) to
+    # (batch, hidden) on the fly without copying.
     if len(op.inputs) > 5 and op.inputs[5] and op.inputs[5] in tensors:
-        h_np = tensors[op.inputs[5]].numpy().reshape(batch, hidden_size).astype(np.float32)
+        h_prev = tensors[op.inputs[5]].reshape((batch, hidden_size))
     else:
-        h_np = np.zeros((batch, hidden_size), dtype=np.float32)
+        if "h_prev_zero" not in cache:
+            cache["h_prev_zero"] = wp.zeros((batch, hidden_size), dtype=wp.float32, device=device)
+        h_prev = cache["h_prev_zero"]
     if len(op.inputs) > 6 and op.inputs[6] and op.inputs[6] in tensors:
-        c_np = tensors[op.inputs[6]].numpy().reshape(batch, hidden_size).astype(np.float32)
+        c_prev = tensors[op.inputs[6]].reshape((batch, hidden_size))
     else:
-        c_np = np.zeros((batch, hidden_size), dtype=np.float32)
+        if "c_prev_zero" not in cache:
+            cache["c_prev_zero"] = wp.zeros((batch, hidden_size), dtype=wp.float32, device=device)
+        c_prev = cache["c_prev_zero"]
 
-    W_wp = wp.array(np.ascontiguousarray(W_np), dtype=wp.float32, device=device)
-    R_wp = wp.array(np.ascontiguousarray(R_np), dtype=wp.float32, device=device)
-    Bx_wp = wp.array(np.ascontiguousarray(Bx_np), dtype=wp.float32, device=device)
-    Bh_wp = wp.array(np.ascontiguousarray(Bh_np), dtype=wp.float32, device=device)
+    gates = cache["gates"]
+    h_out = cache["h_out"]
+    c_out = cache["c_out"]
 
-    h_wp = wp.array(np.ascontiguousarray(h_np), dtype=wp.float32, device=device)
-    c_wp = wp.array(np.ascontiguousarray(c_np), dtype=wp.float32, device=device)
-    h_next = wp.zeros((batch, hidden_size), dtype=wp.float32, device=device)
-    c_next = wp.zeros((batch, hidden_size), dtype=wp.float32, device=device)
-
-    Y_np = np.zeros((seq_len, batch, hidden_size), dtype=np.float32) if op.outputs[0] else None
-
-    for t in range(seq_len):
-        x_t = wp.array(np.ascontiguousarray(X_np[t]), dtype=wp.float32, device=device)
-        wp.launch(
-            _lstm_cell_kernel,
-            dim=(batch, hidden_size),
-            inputs=[x_t, h_wp, c_wp, W_wp, R_wp, Bx_wp, Bh_wp, h_next, c_next, input_size, hidden_size],
-            device=device,
-        )
-        if Y_np is not None:
-            Y_np[t] = h_next.numpy()
-        h_wp, h_next = h_next, h_wp
-        c_wp, c_next = c_next, c_wp
-
-    if op.outputs[0]:
-        Y_np = Y_np.reshape((seq_len, 1, batch, hidden_size))
-        if layout == 1:
-            Y_np = np.transpose(Y_np, (2, 0, 1, 3))
-        tensors[op.outputs[0]] = _np_to_warp(Y_np, device)
-        shapes[op.outputs[0]] = tuple(Y_np.shape)
-    if len(op.outputs) > 1 and op.outputs[1]:
-        Yh_np = h_wp.numpy().reshape(1, batch, hidden_size)
-        tensors[op.outputs[1]] = _np_to_warp(Yh_np, device)
-        shapes[op.outputs[1]] = tuple(Yh_np.shape)
-    if len(op.outputs) > 2 and op.outputs[2]:
-        Yc_np = c_wp.numpy().reshape(1, batch, hidden_size)
-        tensors[op.outputs[2]] = _np_to_warp(Yc_np, device)
-        shapes[op.outputs[2]] = tuple(Yc_np.shape)
+    grid_m = (batch + int(_TILE_M) - 1) // int(_TILE_M)
+    grid_n = (4 * hidden_size + int(_TILE_N) - 1) // int(_TILE_N)
+    wp.launch_tiled(
+        _lstm_gates_kernel,
+        dim=(grid_m, grid_n),
+        inputs=[x_t, h_prev, cache["W"], cache["R"], gates, input_size, hidden_size],
+        block_dim=_TILE_THREADS,
+        device=device,
+    )
+    wp.launch(
+        _lstm_cell_update_kernel,
+        dim=(batch, hidden_size),
+        inputs=[gates, c_prev, cache["Bx"], cache["Bh"], h_out, c_out, hidden_size],
+        device=device,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -907,44 +590,14 @@ def _exec_lstm(op, tensors, shapes, device):
 
 _OP_DISPATCH: dict[str, Any] = {
     "Gemm": _exec_gemm,
-    "MatMul": _exec_matmul,
     "Elu": _exec_elu,
-    "Relu": _exec_relu,
-    "Tanh": _exec_tanh,
-    "Sigmoid": _exec_sigmoid,
-    "Add": _exec_add,
-    "Sub": _exec_sub,
-    "Mul": _exec_mul,
-    "Div": _exec_div,
-    "Concat": _exec_concat,
-    "Split": _exec_split,
-    "Reshape": _exec_reshape,
-    "Transpose": _exec_transpose,
     "Squeeze": _exec_squeeze,
-    "Unsqueeze": _exec_unsqueeze,
-    "Identity": _exec_identity,
-    "Constant": _exec_constant,
     "LSTM": _exec_lstm,
 }
 
 _SHAPE_DISPATCH: dict[str, Any] = {
     "Gemm": _shape_gemm,
-    "MatMul": _shape_matmul,
     "Elu": _shape_elementwise_unary,
-    "Relu": _shape_elementwise_unary,
-    "Tanh": _shape_elementwise_unary,
-    "Sigmoid": _shape_elementwise_unary,
-    "Add": _shape_binop,
-    "Sub": _shape_binop,
-    "Mul": _shape_binop,
-    "Div": _shape_binop,
-    "Concat": _shape_concat,
-    "Split": _shape_split,
-    "Reshape": _shape_reshape,
-    "Transpose": _shape_transpose,
     "Squeeze": _shape_squeeze,
-    "Unsqueeze": _shape_unsqueeze,
-    "Identity": _shape_identity,
-    "Constant": _shape_constant,
     "LSTM": _shape_lstm,
 }

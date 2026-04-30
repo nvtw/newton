@@ -72,9 +72,7 @@ def _build_mlp_onnx(
     y_vi = _onnx_helper.make_tensor_value_info("output", _TensorProto.FLOAT, [None, out_dim])
     W_init = _onnx_np.from_array(weights.astype(np.float32), name="W")
     b_init = _onnx_np.from_array(bias.astype(np.float32), name="b")
-    gemm = _onnx_helper.make_node(
-        "Gemm", ["input", "W", "b"], ["output"], alpha=1.0, beta=1.0, transB=1
-    )
+    gemm = _onnx_helper.make_node("Gemm", ["input", "W", "b"], ["output"], alpha=1.0, beta=1.0, transB=1)
     graph = _onnx_helper.make_graph([gemm], "mlp", [x_vi], [y_vi], initializer=[W_init, b_init])
     model = _onnx_helper.make_model(graph, opset_imports=[_onnx_helper.make_opsetid("", 17)])
     if metadata is not None:
@@ -136,9 +134,7 @@ def _build_lstm_onnx(
     initializers.append(squeeze_axes)
     sq = _onnx_helper.make_node("Squeeze", ["Y", "squeeze_axes"], ["Y_2d"])
     # Final linear decoder: Y_2d (N, H) @ Wd^T + bd -> (N, 1)
-    dec = _onnx_helper.make_node(
-        "Gemm", ["Y_2d", "Wd", "bd"], ["output"], alpha=1.0, beta=1.0, transB=1
-    )
+    dec = _onnx_helper.make_node("Gemm", ["Y_2d", "Wd", "bd"], ["output"], alpha=1.0, beta=1.0, transB=1)
 
     graph = _onnx_helper.make_graph(
         [lstm, sq, dec], "lstm_test", [x_in, h_in, c_in], [y_out, h_out, c_out], initializer=initializers

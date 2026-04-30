@@ -158,9 +158,7 @@ class Example:
         # Setup control policy
         self.control = self.model.control()
 
-        self.joint_pos_initial = np.asarray(
-            self.state_0.joint_q.numpy()[7:], dtype=np.float32
-        ).reshape(1, 12)
+        self.joint_pos_initial = np.asarray(self.state_0.joint_q.numpy()[7:], dtype=np.float32).reshape(1, 12)
         self.act = np.zeros((1, 12), dtype=np.float32)
 
         # Download the policy from the newton-assets repository
