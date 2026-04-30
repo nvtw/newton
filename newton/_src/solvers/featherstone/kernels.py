@@ -2133,9 +2133,13 @@ def compute_body_parent_f(
     and the :attr:`State.body_parent_f` convention -- linear ``[N]`` first,
     torque ``[N·m]`` referenced to the COM, both in world frame).
 
-    Free-floating roots have a zero net wrench from this sum (gravity is
-    already absorbed in ``body_f_s``), which is the desired behavior for
-    bodies that have no inbound joint constraint.
+    The kernel does not special-case roots: it writes the same
+    RNEA-backward-pass sum for every body.  For a FREE-jointed body that
+    has no kinematic parent the value is whatever wrench the recursion
+    produces -- e.g. the residual needed to balance gravity against
+    contacts/external forces in equilibrium, or the gyroscopic
+    ``v x* (I*v)`` term during tumbling.  Treat it as a diagnostic
+    rather than a true joint reaction in that case.
     """
     tid = wp.tid()
 

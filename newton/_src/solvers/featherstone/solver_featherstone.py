@@ -99,13 +99,18 @@ class SolverFeatherstone(SolverBase):
         :meth:`~newton.ModelBuilder.request_state_attributes`. The reported
         wrench is the per-body net spatial force from the RNEA backward pass
         translated to the body's COM (linear ``[N]`` first, torque ``[N·m]``
-        in world frame at the COM), matching :class:`~newton.solvers.SolverMuJoCo`'s
-        ``cfrc_int``-based convention. Joint actuator forces from
-        :attr:`~newton.Control.joint_f` are applied as external body wrenches
-        before integration and *are* included in ``body_parent_f`` (the same
-        sign convention as the existing :class:`~newton.solvers.SolverMuJoCo`
-        / :class:`~newton.solvers.SolverXPBD` implementations -- the joint
-        reaction must counter all applied forces in equilibrium).
+        in world frame at the COM), matching the wrench-transmitted-through-
+        the-inbound-joint convention used by :class:`~newton.solvers.SolverMuJoCo`'s
+        ``cfrc_int``. In equilibrium this reaction counters all forces acting
+        on the body's subtree (gravity, contacts, ``State.body_f``, and the
+        net effect of :attr:`~newton.Control.joint_f`) by Newton's third law.
+
+        Free-floating roots (bodies whose only inbound joint is FREE) are
+        not special-cased: the same RNEA sum is written, which for such
+        bodies is the residual force balance from the recursion (e.g.
+        contacts vs. gravity in equilibrium, or the gyroscopic
+        ``v x* (I*v)`` term during tumbling) rather than a true joint
+        reaction. Treat it as a diagnostic in that case.
 
     Example
     -------
@@ -606,6 +611,14 @@ class SolverFeatherstone(SolverBase):
                         outputs=[body_f],
                         device=model.device,
                     )
+
+                # ``body_parent_f`` is populated below from the RNEA
+                # backward-pass spatial forces. Zero it unconditionally so
+                # bodies that are not the child of any joint (or models
+                # without articulations) report a deterministic zero rather
+                # than stale buffer contents.
+                if state_out.body_parent_f is not None:
+                    state_out.body_parent_f.zero_()
 
                 if model.articulation_count:
                     # evaluate joint torques

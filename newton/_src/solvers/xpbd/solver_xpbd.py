@@ -57,11 +57,12 @@ class SolverXPBD(SolverBase):
         joint constraint correction, and with a finite ``iterations`` count
         residual constraint error remains at end-of-step, so the reported
         wrench is the *applied* constraint reaction rather than the exact
-        wrench needed to enforce the joint perfectly.  Joint actuator forces
-        from :attr:`~newton.Control.joint_f` are applied separately as
-        external body wrenches before integration and are *not* part of
-        ``body_parent_f`` (matching MuJoCo's ``cfrc_int`` convention, which is
-        the constraint-only wrench).
+        wrench needed to enforce the joint perfectly.  The convention matches
+        :class:`~newton.solvers.SolverMuJoCo`: it is the spatial wrench
+        transmitted from the parent through the inbound joint, in world frame
+        at the child body's COM. In equilibrium this reaction counters all
+        applied forces (gravity, contacts, ``State.body_f``, and the net
+        effect of :attr:`~newton.Control.joint_f`) by Newton's third law.
 
     Joint limitations:
         - Supported joint types: PRISMATIC, REVOLUTE, BALL, FIXED, FREE, DISTANCE, D6.
