@@ -161,8 +161,8 @@ class Example:
         self.joint_pos_initial = np.asarray(self.state_0.joint_q.numpy()[7:], dtype=np.float32).reshape(1, 12)
         self.act = np.zeros((1, 12), dtype=np.float32)
 
-        # Download the policy from the newton-assets repository
-        policy_path = str(asset_path / "rl_policies" / "anymal_walking_policy_physx.onnx")
+        # Load the ONNX policy bundled with Newton (Warp-backed runtime, no torch dependency).
+        policy_path = newton.examples.get_asset("rl_policies/anymal_walking_policy_physx.onnx")
         self.policy = newton.utils.OnnxRuntime(policy_path, device=str(self.device))
         self._policy_input_name = self.policy.input_names[0]
         self._policy_output_name = self.policy.output_names[0]

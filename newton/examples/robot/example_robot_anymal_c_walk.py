@@ -203,9 +203,8 @@ class Example:
         else:
             self.contacts = self.model.contacts()
 
-        # Load ONNX policy via Newton's Warp-backed runtime
-        policy_asset_path = newton.utils.download_asset("anybotics_anymal_c")
-        policy_path = str(policy_asset_path / "rl_policies" / "anymal_walking_policy_physx.onnx")
+        # Load ONNX policy bundled with Newton (Warp-backed runtime, no torch dependency).
+        policy_path = newton.examples.get_asset("rl_policies/anymal_walking_policy_physx.onnx")
 
         self.policy = newton.utils.OnnxRuntime(policy_path, device=str(self.device))
         self._policy_input_name = self.policy.input_names[0]

@@ -389,10 +389,10 @@ if __name__ == "__main__":
             print(f"[ERROR] PhysX policy not available for robot '{args.robot}'.")
             print(f"[INFO] Robots with PhysX support: {physx_robots}")
             exit(1)
-        policy_path = f"{asset_directory}/{robot_config.policy_path['physx']}"
+        policy_path = newton.examples.get_asset(robot_config.policy_path["physx"])
         mjc_to_physx, physx_to_mjc = find_physx_mjwarp_mapping(config["mjw_joint_names"], config["physx_joint_names"])
     else:
-        policy_path = f"{asset_directory}/{robot_config.policy_path['mjw']}"
+        policy_path = newton.examples.get_asset(robot_config.policy_path["mjw"])
 
     example = Example(viewer, robot_config, config, asset_directory, mjc_to_physx, physx_to_mjc)
 
