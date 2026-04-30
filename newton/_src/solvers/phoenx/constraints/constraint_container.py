@@ -468,6 +468,17 @@ DEFAULT_HERTZ_LINEAR = wp.constant(wp.float32(1.0e9))
 DEFAULT_HERTZ_ANGULAR = wp.constant(wp.float32(1.0e9))
 #: Hinge / cone limit stiffness; Nyquist-clamped so limits don't bounce.
 DEFAULT_HERTZ_LIMIT = wp.constant(wp.float32(1.0e9))
+
+#: Hard upper bound on per-row Nyquist headroom multipliers (the
+#: ``nyquist_boost`` argument to :func:`pd_coefficients` and friends).
+#: A boost of ``N`` lets PD rows accept stiffness up to
+#: ``N / (M_inv * dt^2)`` -- ``N = 1`` is the strict implicit-Euler
+#: bound, larger values trade headroom for high-frequency ringing
+#: risk. Per-row requests above this constant are silently clamped
+#: down so users cannot push past a known-safe limit. The cable
+#: bend / twist rows default to this value (``10``); revolute /
+#: prismatic drive / limit rows default to ``1``.
+_PD_NYQUIST_HEADROOM_MAX = wp.constant(wp.float32(10.0))
 #: Velocity-motor stiffness (only modulates the impulse coefficient
 #: since velocity targets carry no positional bias).
 DEFAULT_HERTZ_MOTOR = wp.constant(wp.float32(1.0e9))
@@ -523,6 +534,7 @@ def pd_coefficients(
     position_error: wp.float32,
     eff_mass_inv: wp.float32,
     dt: wp.float32,
+    nyquist_boost: wp.float32,
 ):
     """Map ``(k, c, C, M_inv, dt)`` to Jitter2 PGS spring-damper triple.
 
@@ -554,17 +566,35 @@ def pd_coefficients(
         position_error: ``C = actual - target`` [rad or m].
         eff_mass_inv: ``J M^{-1} J^T``; ``0`` short-circuits to no-op.
         dt: Substep [s], must be > 0.
+        nyquist_boost: Per-row headroom multiplier on the Nyquist
+            stiffness clamp. ``1`` = strict bound, larger values trade
+            headroom for ringing risk; clamped to
+            ``[1, _PD_NYQUIST_HEADROOM_MAX]``.
     """
     if eff_mass_inv <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
     if stiffness <= 0.0 and damping <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
 
+    # Nyquist stiffness clamp. Beyond ``omega_n * dt > 1`` (i.e.
+    # ``stiffness * eff_mass_inv * dt^2 > 1``) the implicit-Euler
+    # spring is still stable but the apparent stiffness is bounded
+    # by what the substep can resolve; PGS sees a "rigid" row whose
+    # bias spikes to ``C / dt`` and its effective mass collapses to
+    # ``1 / eff_mass_inv``. Capping ``k`` at the Nyquist limit
+    # keeps user-supplied gains in the regime where the soft-PD
+    # plumbing degrades smoothly. ``nyquist_boost`` lets a caller
+    # opt into more headroom; the global ``_PD_NYQUIST_HEADROOM_MAX``
+    # caps the boost so requests cannot push past a known-safe limit.
+    boost = wp.clamp(nyquist_boost, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
+    k_max = boost / (eff_mass_inv * dt * dt)
+    k_clamped = wp.min(stiffness, k_max)
+
     # Jitter2 SetSpringParameters, but with k/c already in absolute
     # units (Jitter2's version rescales by the edge m_eff; we let the
     # caller decide that).
-    softness = wp.float32(1.0) / (damping + dt * stiffness)
-    bias_factor = dt * stiffness * softness
+    softness = wp.float32(1.0) / (damping + dt * k_clamped)
+    bias_factor = dt * k_clamped * softness
     idt = wp.float32(1.0) / dt
 
     # Fold the 1/dt scale into gamma and bias so the kernel iterate is
@@ -574,3 +604,72 @@ def pd_coefficients(
     bias = position_error * bias_factor * idt
     eff_mass_soft = wp.float32(1.0) / (eff_mass_inv + gamma)
     return gamma, bias, eff_mass_soft
+
+
+@wp.func
+def pd_coefficients_split(
+    stiffness: wp.float32,
+    damping: wp.float32,
+    position_error: wp.float32,
+    eff_mass_inv: wp.float32,
+    dt: wp.float32,
+    nyquist_boost: wp.float32,
+):
+    """Spring / damping XPBD-style split of :func:`pd_coefficients`.
+
+    Returns ``(gamma_spring, bias_spring, eff_mass_spring,
+    damp_mass)``. The first three are the spring-only triple
+    (``c = 0``) used by the main PGS solve; ``damp_mass`` is the
+    velocity-only damping effective mass used by the relax pass:
+
+        lam_spring = -eff_mass_spring * (Jv - bias_spring + gamma_spring * acc)   # main solve
+        lam_damp   = -damp_mass * Jv                                              # relax (use_bias = False)
+
+    Splitting decouples the two physical effects:
+
+    * The spring row sees ``softness = 1 / (dt*k)``, so ``gamma`` and
+      ``bias`` are well-conditioned for any ``k`` (after the Nyquist
+      clamp). Convergence is independent of the damping gain.
+    * The damping row applies one implicit-Euler velocity update:
+      ``v_new = v / (1 + dt*c*M_inv)`` -> required impulse
+      ``lam = -dt*c / (1 + dt*c*M_inv) * Jv``. One PGS iteration
+      lands the exact result for an isolated body; chains converge
+      at the usual PGS rate without the rigid-bias artefact the
+      combined formulation suffers at high ``c``.
+
+    Equivalent steady state to the combined :func:`pd_coefficients`
+    up to ``O(dt^2)`` discretisation error.
+    """
+    if eff_mass_inv <= 0.0:
+        return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
+    if stiffness <= 0.0 and damping <= 0.0:
+        return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
+
+    idt = wp.float32(1.0) / dt
+
+    # ---- Spring-only soft constraint (damping = 0) -------------------
+    # Equivalent to ``pd_coefficients(k_clamped, 0, C, M_inv, dt)``;
+    # inlined to share the Nyquist clamp.
+    gamma_s = wp.float32(0.0)
+    bias_s = wp.float32(0.0)
+    eff_mass_s = wp.float32(0.0)
+    if stiffness > 0.0:
+        boost = wp.clamp(nyquist_boost, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
+        k_max = boost / (eff_mass_inv * dt * dt)
+        k_clamped = wp.min(stiffness, k_max)
+        softness_s = wp.float32(1.0) / (dt * k_clamped)
+        gamma_s = softness_s * idt
+        # ``bias_factor = dt * k / (0 + dt * k) = 1`` when damping = 0.
+        bias_s = position_error * idt
+        eff_mass_s = wp.float32(1.0) / (eff_mass_inv + gamma_s)
+
+    # ---- Damping-only velocity constraint ----------------------------
+    # Implicit Euler ``v_new = v - dt*c*M_inv*v_new`` -> per-iter
+    # impulse ``lam = m * (v_new - v) = -v * (dt*c) / (1 + dt*c*M_inv)``,
+    # so ``damp_mass = dt*c / (1 + dt*c*M_inv)``. Exact in one PGS
+    # iteration for an isolated body.
+    damp_mass = wp.float32(0.0)
+    if damping > 0.0:
+        damp_mass = (dt * damping) / (wp.float32(1.0) + dt * damping * eff_mass_inv)
+
+    return gamma_s, bias_s, eff_mass_s, damp_mass
