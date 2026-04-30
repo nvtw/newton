@@ -431,7 +431,7 @@ class Example:
             "--solver",
             type=str,
             choices=["xpbd", "mujoco", "phoenx"],
-            default="mujoco",
+            default="phoenx",
             help="Solver to use: 'xpbd', 'mujoco', or 'phoenx'.",
         )
         parser.add_argument(

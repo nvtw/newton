@@ -55,6 +55,16 @@ from newton._src.solvers.phoenx.solver_phoenx import (
 # this is a PhoenX-specific sticky-vs-fresh tradeoff.
 _CONTACT_MATCHING = "latest"
 
+# When ``True``, pin the bolt to the world (zero inv mass + inertia,
+# so :func:`init_phoenx_bodies_kernel` flags it as
+# :data:`MOTION_STATIC`). When ``False``, leave the bolt as a regular
+# rigid body driven by its mesh-derived mass and inertia -- useful for
+# stress-testing the nut-bolt contact pair when neither side is
+# anchored. The nut still drops onto the bolt either way; with a free
+# bolt the pair drifts together along the contact normal until the
+# threads catch.
+BOLT_IS_STATIC = False
+
 # Assembly + asset source -- identical to the jitter / XPBD / MuJoCo
 # nut-bolt examples so the same mesh pair is compared across solvers.
 ASSEMBLY_STR = "m20_loose"
@@ -148,7 +158,7 @@ class Example:
         self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 5
+        self.sim_substeps = 10
         self.solver_iterations = 10
         self._frame: int = 0
 
@@ -183,6 +193,13 @@ class Example:
         # ---- Build the Newton scene: bolt (static) + nut (dynamic) ----
         mb = newton.ModelBuilder()
         mb.default_shape_cfg.gap = shape_cfg.gap
+
+        # Ground plane below the bolt base. Catches a free-falling bolt
+        # when :data:`BOLT_IS_STATIC` is ``False`` and provides a
+        # consistent reference for the picking ray. The height tracks
+        # ``scene_scale`` so the plane stays below the assembly at any
+        # length scale.
+        mb.add_ground_plane(height=-0.06 * self.scene_scale)
 
         # Static bolt. The mesh is kept in mesh-local (unscaled)
         # units; the shape scale scales it up at runtime. The shape
@@ -232,17 +249,20 @@ class Example:
 
         self.model = mb.finalize()
 
-        # Pin the bolt: zero its inverse mass + inertia so
+        # Pin the bolt (default): zero its inverse mass + inertia so
         # :func:`init_phoenx_bodies_kernel` marks it
         # :data:`MOTION_STATIC`. The nut's density-derived mass is
         # unaffected because the mesh inertia computation already ran
-        # during ``finalize``.
-        body_inv_mass_np = self.model.body_inv_mass.numpy()
-        body_inv_inertia_np = self.model.body_inv_inertia.numpy()
-        body_inv_mass_np[bolt_body] = 0.0
-        body_inv_inertia_np[bolt_body] = np.zeros((3, 3), dtype=np.float32)
-        self.model.body_inv_mass.assign(wp.array(body_inv_mass_np, dtype=wp.float32))
-        self.model.body_inv_inertia.assign(wp.array(body_inv_inertia_np, dtype=wp.mat33))
+        # during ``finalize``. When :data:`BOLT_IS_STATIC` is
+        # ``False``, skip this step and let the bolt fall under gravity
+        # like the nut.
+        if BOLT_IS_STATIC:
+            body_inv_mass_np = self.model.body_inv_mass.numpy()
+            body_inv_inertia_np = self.model.body_inv_inertia.numpy()
+            body_inv_mass_np[bolt_body] = 0.0
+            body_inv_inertia_np[bolt_body] = np.zeros((3, 3), dtype=np.float32)
+            self.model.body_inv_mass.assign(wp.array(body_inv_mass_np, dtype=wp.float32))
+            self.model.body_inv_inertia.assign(wp.array(body_inv_inertia_np, dtype=wp.mat33))
 
         print(f"[PhoenX Nut-Bolt] bodies={self.model.body_count} shapes={self.model.shape_count}")
 
@@ -476,4 +496,5 @@ if __name__ == "__main__":
     parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)
+    viewer._paused = True
     newton.examples.run(example, args)

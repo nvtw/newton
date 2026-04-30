@@ -40,12 +40,14 @@ import newton
 _RING_RADIUS = 0.05  # m
 _TUBE_RADIUS = 0.01  # m
 _SEGMENTS_PER_RING = 6
-# 15 x 10 keeps the total body count (~210) and substep cost under
-# the 16 GB Blackwell budget while preserving the interlocking-net
-# topology. 20 x 12 reproduces the user-reported divergence more
-# strongly but is too slow for a routine unit test.
-_N_RINGS = 15
-_N_CHAINS = 10
+# Topology matches ``example_chain_mesh`` (31 x 15) so the scene
+# stresses the multi-world coloring path on the exact graph shape the
+# user reported as divergent. Each chain ring is one rigid body with
+# 6 capsule shapes (compound). The SAP broad-phase keeps memory
+# bounded at this body count -- the default NxN broad-phase blows up
+# quadratically.
+_N_RINGS = 31
+_N_CHAINS = 15
 _SEGMENT_HALF_HEIGHT = _RING_RADIUS * math.sin(math.pi / _SEGMENTS_PER_RING)
 _RING_SPACING = 2.0 * (_RING_RADIUS + _TUBE_RADIUS) + 0.005 - 0.05
 _DROP_HEIGHT = _TUBE_RADIUS + 0.01
@@ -61,11 +63,11 @@ _VELOCITY_ITERATIONS = 1
 _FRICTION = 0.4
 _GRAVITY = 9.81
 
-# Two physics steps per render frame, like the example.
-_STEPS_PER_FRAME = 2
-# 0.5 s of simulated time -- enough for the sphere to settle into the
-# net under gravity (with the example's substep/iteration budget).
-_SETTLE_FRAMES = 60
+# 300 physics steps at dt = 1/120 = 2.5 s simulated time. PhoenX
+# handles ``_SUBSTEPS = 15`` internally per step, matching
+# ``example_chain_mesh.py``. With graph capture this is a few hundred
+# milliseconds wallclock on Blackwell.
+_TOTAL_STEPS = 300
 
 
 def _add_chain_ring(builder: newton.ModelBuilder, body: int, *, static: bool = False) -> None:
@@ -159,8 +161,20 @@ def _build_chain_mesh_model() -> tuple[newton.Model, int]:
     return model, sphere_body
 
 
-def _make_solver(model: newton.Model, step_layout: str):
-    return newton.solvers.SolverPhoenX(
+def _make_solver_and_pipeline(model: newton.Model, step_layout: str):
+    """Attach an explicit SAP-broad-phase ``CollisionPipeline`` to the
+    model BEFORE constructing the solver. Otherwise ``SolverPhoenX``
+    builds its own pipeline internally without ``broad_phase="sap"``,
+    falling back to the O(N^2) NxN broad-phase that OOMs on the
+    full-resolution chain mesh."""
+    pipeline = newton.CollisionPipeline(
+        model,
+        contact_matching="sticky",
+        broad_phase="sap",
+    )
+    model._collision_pipeline = pipeline
+    contacts = pipeline.contacts()
+    solver = newton.solvers.SolverPhoenX(
         model,
         substeps=_SUBSTEPS,
         solver_iterations=_SOLVER_ITERATIONS,
@@ -168,22 +182,53 @@ def _make_solver(model: newton.Model, step_layout: str):
         default_friction=_FRICTION,
         step_layout=step_layout,
     )
+    return solver, pipeline, contacts
 
 
-def _step_n(model: newton.Model, solver, n_render_frames: int, dt: float):
-    """Advance ``n_render_frames`` frames, with ``_STEPS_PER_FRAME``
-    physics steps per frame (matches the example)."""
+def _step_n(model: newton.Model, solver, pipeline, contacts, total_steps: int, dt: float):
+    """Advance ``total_steps`` physics steps using CUDA graph capture.
+
+    PhoenX runs ``_SUBSTEPS = 15`` substeps inside each ``solver.step``
+    call (configured at solver construction). The captured graph
+    therefore covers one full physics step including its substep
+    loop -- replay is a single ``capture_launch`` per step.
+
+    Captures a *two-step pair* (s0 -> s1 then s1 -> s0) so the
+    in-place state swap lands at a fixed point after each replay;
+    ``s0`` is therefore always the post-replay output."""
+    device = wp.get_device()
     s0 = model.state()
     s1 = model.state()
     control = model.control()
-    contacts = model.contacts()
     newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
-    for _ in range(n_render_frames):
-        for _ in range(_STEPS_PER_FRAME):
-            s0.clear_forces()
-            model.collide(s0, contacts)
-            solver.step(s0, s1, control, contacts, dt)
-            s0, s1 = s1, s0
+
+    def _eager_pair() -> None:
+        # Two paired steps so s0 / s1 return to their starting roles.
+        for s_in, s_out in ((s0, s1), (s1, s0)):
+            s_in.clear_forces()
+            model.collide(s_in, contacts=contacts, collision_pipeline=pipeline)
+            solver.step(s_in, s_out, control, contacts, dt)
+
+    if not device.is_cuda or total_steps < 4:
+        for _ in range(total_steps // 2):
+            _eager_pair()
+        return s0
+
+    # Warm-up: one paired step (2 physics steps) to JIT every kernel
+    # before capture; otherwise the first capture would record JIT-time
+    # allocations into the graph and replay would crash.
+    _eager_pair()
+
+    with wp.ScopedCapture(device=device) as capture:
+        _eager_pair()
+    graph = capture.graph
+
+    # 4 steps already consumed (2 warm-up + 2 capture). Replay the
+    # remainder in pairs.
+    consumed = 4
+    remaining = max(0, total_steps - consumed)
+    for _ in range(remaining // 2):
+        wp.capture_launch(graph)
     return s0
 
 
@@ -216,8 +261,8 @@ class TestChainMeshNetCatchesSphere(unittest.TestCase):
         """Build the scene, step it, return the final sphere z."""
         dt = 1.0 / _FPS
         model, sphere_idx = _build_chain_mesh_model()
-        solver = _make_solver(model, step_layout)
-        s = _step_n(model, solver, n_render_frames=_SETTLE_FRAMES, dt=dt)
+        solver, pipeline, contacts = _make_solver_and_pipeline(model, step_layout)
+        s = _step_n(model, solver, pipeline, contacts, total_steps=_TOTAL_STEPS, dt=dt)
         body_q = s.body_q.numpy()
         self.assertTrue(np.isfinite(body_q).all(), msg=f"non-finite body_q under {step_layout}")
         return float(body_q[sphere_idx, 2])

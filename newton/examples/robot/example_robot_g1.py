@@ -178,7 +178,7 @@ class Example:
         parser.add_argument(
             "--solver",
             choices=["mujoco", "phoenx"],
-            default="mujoco",
+            default="phoenx",
             help="Rigid-body solver backend. 'mujoco' (default) uses the MuJoCo/Warp solver; 'phoenx' uses SolverPhoenX.",
         )
         parser.set_defaults(world_count=4)
