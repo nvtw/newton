@@ -56,14 +56,20 @@ def _scale_pair_kernel(
 
 @wp.kernel
 def _scale_and_copy_kernel(
-    src: wp.array2d[float],
-    dst: wp.array[float],
+    src: wp.array2d[float],  # (N, K) effort, row-major
+    dst: wp.array[float],  # (count,) forces
     scale: float,
-    n: int,
+    cols: int,
 ):
+    """Read the leading ``count`` entries of ``src`` (row-major) and scale them.
+
+    Effectively flattens ``src`` and copies the first ``count`` values into
+    ``dst`` after multiplying by ``scale``.
+    """
     i = wp.tid()
-    if i < n:
-        dst[i] = src[0, i] * scale
+    row = i // cols
+    col = i % cols
+    dst[i] = src[row, col] * scale
 
 
 @wp.kernel
@@ -258,10 +264,14 @@ class ControllerNeuralMLP(Controller):
         out = self._network({self._net_input_name: net_input_wp})
         effort = out[self._net_output_name]
 
+        # ``effort`` is the (N, output_size) tensor produced by the final
+        # Gemm; flatten its leading ``len(forces)`` row-major entries into
+        # ``forces`` in a single launch.
+        cols = effort.shape[1] if len(effort.shape) > 1 else 1
         wp.launch(
             _scale_and_copy_kernel,
             dim=len(forces),
-            inputs=[effort, forces, self.effort_scale, len(forces)],
+            inputs=[effort, forces, self.effort_scale, cols],
             device=device,
         )
 

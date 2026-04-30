@@ -88,6 +88,7 @@ def main() -> int:
             pt_path = asset_root / rel_path
             if not pt_path.exists():
                 print(f"  !! missing: {pt_path}")
+                failures.append((pt_path, FileNotFoundError(pt_path)))
                 continue
 
             try:

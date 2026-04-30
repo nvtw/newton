@@ -175,6 +175,7 @@ def _lstm_cell_update_kernel(
 _ATTR_DECODERS = {
     1: lambda a: a.f,  # FLOAT
     2: lambda a: a.i,  # INT
+    3: lambda a: a.s.decode("utf-8") if isinstance(a.s, (bytes, bytearray)) else a.s,  # STRING
 }
 
 
