@@ -532,6 +532,10 @@ def contact_prepare_for_iteration_at(
     total_ang_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
 
     mu_s_col = contact_get_friction(constraints, cid)
+    # ``2*pi`` literal hoisted out of the per-contact loop for the
+    # Material softness decode below. Float literal so Warp keeps it
+    # constant-folded.
+    two_pi = wp.float32(6.283185307179586)
 
     for i in range(contact_count):
         k = contact_first + i
@@ -650,44 +654,55 @@ def contact_prepare_for_iteration_at(
         cc_set_bias_t2(cc, k, bias_t2_val)
 
         # ---- Optional soft-contact PD plumbing -----------------------
-        # When Newton's per-contact stiffness / damping arrays are
-        # allocated (``Contacts(per_contact_shape_properties=True)``),
-        # route the normal row through the absolute PD spring-damper
-        # formula. The iterate then reads ``pd_eff_soft > 0`` as the
-        # switch and applies ``lam = -eff_soft * (jv - bias +
-        # gamma * acc)`` instead of the Box2D hertz-based row.
-        #
-        # Sentinel arrays (length 0) short-circuit this branch --
-        # ``pd_eff_soft = 0`` means "legacy path", which is the
-        # pre-soft-contact behaviour bit-for-bit.
+        # The per-contact ``rigid_contact_stiffness / damping`` arrays
+        # carry both narrow-phase absolute K/D (hydroelastic etc.,
+        # positive values) and Material-derived softness encoded as
+        # ``(-hertz, -damping_ratio)``. Sign of stiffness gates the
+        # decode:
+        #   * ``> 0``: absolute K/D, used as-is (hydroelastic).
+        #   * ``< 0``: Material-encoded; decode via
+        #     ``k = omega^2 * m_eff`` and
+        #     ``c = 2 * zeta * omega * m_eff`` so pd_coefficients sees
+        #     the same absolute units.
+        #   * ``== 0``: legacy Box2D-rigid normal row; pd_eff_soft = 0.
+        # Sentinel arrays (length 0) short-circuit to the legacy path,
+        # which keeps pre-soft-contact scenes bit-for-bit unchanged.
+        k_n = wp.float32(0.0)
+        c_n = wp.float32(0.0)
         stiffness_arr_len = contacts.rigid_contact_stiffness.shape[0]
         damping_arr_len = contacts.rigid_contact_damping.shape[0]
-        if stiffness_arr_len > k or damping_arr_len > k:
-            k_n = wp.float32(0.0)
-            c_n = wp.float32(0.0)
-            if stiffness_arr_len > k:
-                k_n = contacts.rigid_contact_stiffness[k]
-            if damping_arr_len > k:
-                c_n = contacts.rigid_contact_damping[k]
-            if (k_n > wp.float32(0.0) or c_n > wp.float32(0.0)) and eff_n > wp.float32(0.0):
-                # ``pd_coefficients`` wants inverse effective mass;
-                # ``eff_n`` is the forward mass.
-                eff_inv_n = wp.float32(1.0) / eff_n
-                # Sign: ``jv_n = (v2-v1).n`` (closing when >0),
-                # ``effective_gap`` >0 separated / <0 penetrating, so
-                # spring depth is ``-effective_gap``. Iterate enters
-                # ``lam = -eff_soft*(jv_n - bias + ...)``; positive
-                # depth -> positive bias -> positive normal impulse
-                # (pushes b2 off b1). Matches Box2D Baumgarte sign
-                # and the ``lam_n >= 0`` unilateral clamp.
-                pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(
-                    k_n, c_n, -effective_gap, eff_inv_n, dt_substep, PHOENX_BOOST_CONTACT_NORMAL
-                )
-                cc_set_pd_gamma(cc, k, pd_gamma_n)
-                cc_set_pd_bias(cc, k, pd_bias_n)
-                cc_set_pd_eff_soft(cc, k, pd_eff_soft_n)
-            else:
-                cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
+        if stiffness_arr_len > k:
+            k_n = contacts.rigid_contact_stiffness[k]
+        if damping_arr_len > k:
+            c_n = contacts.rigid_contact_damping[k]
+        # Material decode: negative stiffness encodes hertz; negative
+        # damping encodes damping_ratio. Convert to absolute K/C using
+        # ``eff_n`` (forward effective mass).
+        if k_n < wp.float32(0.0) and eff_n > wp.float32(0.0):
+            hertz = -k_n
+            damping_ratio = wp.float32(0.0)
+            if c_n < wp.float32(0.0):
+                damping_ratio = -c_n
+            omega = two_pi * hertz
+            k_n = omega * omega * eff_n
+            c_n = wp.float32(2.0) * damping_ratio * omega * eff_n
+        if (k_n > wp.float32(0.0) or c_n > wp.float32(0.0)) and eff_n > wp.float32(0.0):
+            # ``pd_coefficients`` wants inverse effective mass;
+            # ``eff_n`` is the forward mass. Sign: ``jv_n = (v2-v1).n``
+            # (closing when >0), ``effective_gap > 0`` separated /
+            # ``< 0`` penetrating, so spring depth is
+            # ``-effective_gap``. Iterate enters ``lam = -eff_soft *
+            # (jv_n - bias + ...)``; positive depth -> positive bias
+            # -> positive normal impulse (pushes b2 off b1). Matches
+            # Box2D Baumgarte sign and the ``lam_n >= 0`` unilateral
+            # clamp.
+            eff_inv_n = wp.float32(1.0) / eff_n
+            pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(
+                k_n, c_n, -effective_gap, eff_inv_n, dt_substep, PHOENX_BOOST_CONTACT_NORMAL
+            )
+            cc_set_pd_gamma(cc, k, pd_gamma_n)
+            cc_set_pd_bias(cc, k, pd_bias_n)
+            cc_set_pd_eff_soft(cc, k, pd_eff_soft_n)
         else:
             cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
 

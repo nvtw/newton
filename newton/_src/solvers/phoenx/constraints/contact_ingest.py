@@ -63,6 +63,7 @@ from newton._src.solvers.phoenx.materials import (
     MaterialData,
     resolve_friction_in_kernel,
     resolve_friction_static_in_kernel,
+    resolve_softness_in_kernel,
 )
 
 __all__ = [
@@ -704,6 +705,14 @@ def _contact_pack_columns_kernel(
     materials: wp.array[MaterialData],
     num_contact_columns: wp.array[wp.int32],
     default_friction: wp.float32,
+    # in / out: per-contact softness arrays. Hydroelastic narrow
+    # phases write absolute K/D (positive); this kernel encodes
+    # Material-derived softness as (-hertz, -damping_ratio) into the
+    # same slots when the narrow phase did not publish anything (i.e.,
+    # when ``rigid_contact_stiffness[k] == 0``). Empty arrays
+    # (length 0) opt out -- non-soft-contact scenes ignore both paths.
+    rigid_contact_stiffness: wp.array[wp.float32],
+    rigid_contact_damping: wp.array[wp.float32],
     # out
     contact_cols: ContactColumnContainer,
 ):
@@ -721,7 +730,9 @@ def _contact_pack_columns_kernel(
     Writes to :class:`ContactColumnContainer` directly -- contact
     column headers live in their own narrow storage so the
     joint-wide :class:`ConstraintContainer` can be sized to just
-    ``num_joints``.
+    ``num_joints``. Per-contact Material softness is sign-encoded into
+    the contact stiffness / damping arrays in a per-pair fan-out loop;
+    the prepare phase decodes the negative gate.
     """
     tid = wp.tid()
     if tid >= num_contact_columns[0]:
@@ -736,7 +747,7 @@ def _contact_pack_columns_kernel(
     b1 = shape_body[sa]
     b2 = shape_body[sb]
 
-    # Friction resolution via the per-shape materials table.
+    # Friction + softness resolution via the per-shape materials table.
     mat_a = wp.int32(-1)
     mat_b = wp.int32(-1)
     if shape_material.shape[0] > sa:
@@ -745,6 +756,12 @@ def _contact_pack_columns_kernel(
         mat_b = shape_material[sb]
     mu_static = resolve_friction_static_in_kernel(materials, mat_a, mat_b, default_friction)
     mu_dynamic = resolve_friction_in_kernel(materials, mat_a, mat_b, default_friction)
+    # ``softness`` packs (hertz, damping_ratio) blended under the
+    # materials' ``softness_combine_mode``. For pre-material scenes
+    # (no materials registered) this returns ``(0, 1)`` which keeps
+    # every column on the legacy Box2D-rigid normal row -- bit-for-bit
+    # unchanged.
+    softness = resolve_softness_in_kernel(materials, mat_a, mat_b)
 
     # Header is stored at offsets 0 / 1 / 2 (contract is
     # ``constraint_type / body1 / body2``). Dispatcher no longer reads
@@ -759,6 +776,26 @@ def _contact_pack_columns_kernel(
     contact_set_friction_dynamic(contact_cols, tid, mu_dynamic)
     contact_set_contact_first(contact_cols, tid, first)
     contact_set_contact_count(contact_cols, tid, count)
+
+    # ---- Material softness sign-encoding -------------------------
+    # When the resolved softness has a non-zero hertz, write
+    # ``(-hertz, -damping_ratio)`` into every per-contact slot in
+    # the pair whose stiffness is currently 0 (i.e., the narrow
+    # phase did not publish hydroelastic absolute K). Empty arrays
+    # (length 0) skip the loop entirely so soft-contact-disabled
+    # scenes pay nothing.
+    hertz = softness[0]
+    damp_ratio = softness[1]
+    if hertz > wp.float32(0.0) and rigid_contact_stiffness.shape[0] > 0:
+        encoded_k = -hertz
+        encoded_c = -damp_ratio
+        for i in range(count):
+            slot = first + i
+            if slot < rigid_contact_stiffness.shape[0]:
+                if rigid_contact_stiffness[slot] == wp.float32(0.0):
+                    rigid_contact_stiffness[slot] = encoded_k
+                    if slot < rigid_contact_damping.shape[0]:
+                        rigid_contact_damping[slot] = encoded_c
 
 
 # ---------------------------------------------------------------------------
@@ -1227,11 +1264,34 @@ def ingest_contacts(
         device=device,
     )
 
-    # Step 5: write the contact column headers + ranges.
+    # Step 5: write the contact column headers + ranges + per-contact
+    # softness encoding. The pack kernel writes ``-hertz`` /
+    # ``-damping_ratio`` into the contact stiffness / damping arrays
+    # for shape pairs whose materials carry softness; hydroelastic
+    # narrow phases publish positive absolute K/D into the same slots
+    # and that wins on a per-contact basis. The arrays the prepare
+    # phase will later read depend on whether body-pair grouping is
+    # on, so we route the encode writes to the matching scratch /
+    # upstream buffer here.
     if shape_material is None:
         shape_material = wp.array([-1], dtype=wp.int32, device=device)
     if materials is None:
         materials = wp.zeros(0, dtype=MaterialData, device=device)
+    if enable_body_pair_grouping:
+        # Sorted scratch is what ContactViews binds to in this mode.
+        encode_stiffness = scratch.sorted_stiffness
+        encode_damping = scratch.sorted_damping
+    else:
+        encode_stiffness = (
+            contacts.rigid_contact_stiffness
+            if getattr(contacts, "rigid_contact_stiffness", None) is not None
+            else wp.zeros(0, dtype=wp.float32, device=device)
+        )
+        encode_damping = (
+            contacts.rigid_contact_damping
+            if getattr(contacts, "rigid_contact_damping", None) is not None
+            else wp.zeros(0, dtype=wp.float32, device=device)
+        )
 
     wp.launch(
         kernel=_contact_pack_columns_kernel,
@@ -1247,6 +1307,8 @@ def ingest_contacts(
             materials,
             scratch.num_contact_columns,
             float(default_friction),
+            encode_stiffness,
+            encode_damping,
         ],
         outputs=[contact_cols],
         device=device,

@@ -3,11 +3,12 @@
 """Per-shape material system for :class:`PhoenXWorld`.
 
 PhysX-style: each shape carries a material index, the table holds
-``(static_friction, dynamic_friction, restitution,
-friction_combine_mode, restitution_combine_mode)``, and contact pairs
-resolve an effective friction / restitution by combining the two
-materials with the stricter combine mode
-(``max(mode_a, mode_b)`` wins; AVERAGE < MIN < MULTIPLY < MAX).
+``(static_friction, dynamic_friction, restitution, contact_hertz,
+contact_damping_ratio, friction_combine_mode,
+restitution_combine_mode, softness_combine_mode)``, and contact pairs
+resolve effective friction / softness by combining the two materials
+with the stricter combine mode (``max(mode_a, mode_b)`` wins;
+AVERAGE < MIN < MULTIPLY < MAX).
 
 Combine modes (PhysX ``PxCombineMode``):
 
@@ -16,7 +17,25 @@ Combine modes (PhysX ``PxCombineMode``):
 * :data:`COMBINE_MULTIPLY` -- ``a * b``; coefficient product.
 * :data:`COMBINE_MAX` -- grippier surface wins.
 
+Softness fields (Bepu Physics 2 / Box2D v3 model):
+
+* ``contact_hertz`` [Hz]: undamped natural frequency of the contact
+  spring. ``0`` falls through to the legacy Box2D-rigid normal row;
+  positive routes the normal row through the absolute-PD formulation.
+* ``contact_damping_ratio`` [-]: dimensionless damping ratio. ``1`` is
+  critical damping; ``0`` lets contacts ring at ``contact_hertz``;
+  ``> 1`` overdamps (no oscillation, slower settle).
+
+Restitution stays in the table for parity with the rest of Newton but
+PhoenX itself does not consume it -- bouncy contacts are expressed by
+lowering ``contact_damping_ratio`` instead. Bepu's
+``MaximumRecoveryVelocity`` cap is intentionally *not* exposed yet;
+the bouncy-ball recipe in Bepu's own ``BouncinessDemo`` only varies
+spring settings, so we ship those first and add a recovery cap if a
+specific scene needs it.
+
 Material 0 is reserved as the default (``mu = 0.5``, ``e = 0``,
+zero softness so legacy contact path is preserved,
 ``COMBINE_AVERAGE``) so un-assigned shapes behave like the
 pre-material code path.
 """
@@ -42,6 +61,7 @@ __all__ = [
     "pack_material_data",
     "resolve_friction_in_kernel",
     "resolve_friction_static_in_kernel",
+    "resolve_softness_in_kernel",
 ]
 
 
@@ -81,17 +101,43 @@ class Material:
     only ever sees the packed :class:`MaterialData` ``wp.struct`` form
     produced by :func:`pack_material_data`.
 
-    Units follow PhysX: ``static_friction`` / ``dynamic_friction`` are
-    dimensionless Coulomb coefficients; ``restitution`` is the normal
-    bounce coefficient in ``[0, 1]`` (0 = perfectly inelastic, 1 =
-    perfectly elastic).
+    Units follow PhysX / Bepu: ``static_friction`` / ``dynamic_friction``
+    are dimensionless Coulomb coefficients; ``restitution`` is the
+    normal bounce coefficient in ``[0, 1]`` (0 = perfectly inelastic,
+    1 = perfectly elastic; PhoenX itself does not consume restitution
+    -- see :data:`contact_damping_ratio`).
+
+    Softness fields (``contact_hertz``, ``contact_damping_ratio``)
+    replace classical restitution in PhoenX: bouncy contacts come from
+    low ``contact_damping_ratio``, soft contacts from low
+    ``contact_hertz``. Hydroelastic narrow phases publish their own
+    per-contact stiffness (positive absolute K [N/m]) and override
+    Material softness on a per-contact basis.
     """
 
     static_friction: float = 0.5
     dynamic_friction: float = 0.5
     restitution: float = 0.0
+    #: Contact-spring undamped natural frequency [Hz]. ``0`` keeps the
+    #: legacy Box2D-rigid normal row (default behaviour); positive
+    #: routes the contact through the absolute-PD formulation with
+    #: ``k = (2*pi*hertz)^2 * m_eff``. Encoded into
+    #: ``Contacts.rigid_contact_stiffness[k]`` as ``-hertz`` (sign
+    #: convention shared with PhoenX's other ``hertz <= 0`` fallthroughs)
+    #: at ingest time, so per-shape Material values coexist with
+    #: hydroelastic absolute-K writes in the same array.
+    contact_hertz: float = 0.0
+    #: Dimensionless damping ratio for the contact spring. ``1`` is
+    #: critical damping (default); ``0`` lets the contact oscillate at
+    #: ``contact_hertz``; values ``> 1`` overdamp. Encoded into
+    #: ``Contacts.rigid_contact_damping[k]`` as ``-damping_ratio``.
+    contact_damping_ratio: float = 1.0
     friction_combine_mode: int = COMBINE_AVERAGE
     restitution_combine_mode: int = COMBINE_AVERAGE
+    #: Combine mode for the softness fields (``contact_hertz``,
+    #: ``contact_damping_ratio``). Same enum as friction; ``max(a, b)``
+    #: wins per PhysX convention.
+    softness_combine_mode: int = COMBINE_AVERAGE
 
     def __post_init__(self) -> None:
         if self.static_friction < 0.0:
@@ -108,9 +154,14 @@ class Material:
             pass
         if not (0.0 <= self.restitution <= 1.0):
             raise ValueError(f"restitution must be in [0, 1] (got {self.restitution})")
+        if self.contact_hertz < 0.0:
+            raise ValueError(f"contact_hertz must be >= 0 (got {self.contact_hertz})")
+        if self.contact_damping_ratio < 0.0:
+            raise ValueError(f"contact_damping_ratio must be >= 0 (got {self.contact_damping_ratio})")
         for name, mode in (
             ("friction_combine_mode", self.friction_combine_mode),
             ("restitution_combine_mode", self.restitution_combine_mode),
+            ("softness_combine_mode", self.softness_combine_mode),
         ):
             if mode not in (
                 COMBINE_AVERAGE,
@@ -136,8 +187,11 @@ class MaterialData:
     static_friction: wp.float32
     dynamic_friction: wp.float32
     restitution: wp.float32
+    contact_hertz: wp.float32
+    contact_damping_ratio: wp.float32
     friction_combine_mode: wp.int32
     restitution_combine_mode: wp.int32
+    softness_combine_mode: wp.int32
 
 
 def pack_material_data(m: Material) -> MaterialData:
@@ -146,8 +200,11 @@ def pack_material_data(m: Material) -> MaterialData:
     d.static_friction = float(m.static_friction)
     d.dynamic_friction = float(m.dynamic_friction)
     d.restitution = float(m.restitution)
+    d.contact_hertz = float(m.contact_hertz)
+    d.contact_damping_ratio = float(m.contact_damping_ratio)
     d.friction_combine_mode = int(m.friction_combine_mode)
     d.restitution_combine_mode = int(m.restitution_combine_mode)
+    d.softness_combine_mode = int(m.softness_combine_mode)
     return d
 
 
@@ -170,8 +227,11 @@ def material_table_from_list(materials: list[Material], device: wp.context.Devic
             ("static_friction", np.float32),
             ("dynamic_friction", np.float32),
             ("restitution", np.float32),
+            ("contact_hertz", np.float32),
+            ("contact_damping_ratio", np.float32),
             ("friction_combine_mode", np.int32),
             ("restitution_combine_mode", np.int32),
+            ("softness_combine_mode", np.int32),
         ]
     )
     arr = np.zeros(len(materials), dtype=dtype)
@@ -179,8 +239,11 @@ def material_table_from_list(materials: list[Material], device: wp.context.Devic
         arr[i]["static_friction"] = m.static_friction
         arr[i]["dynamic_friction"] = m.dynamic_friction
         arr[i]["restitution"] = m.restitution
+        arr[i]["contact_hertz"] = m.contact_hertz
+        arr[i]["contact_damping_ratio"] = m.contact_damping_ratio
         arr[i]["friction_combine_mode"] = m.friction_combine_mode
         arr[i]["restitution_combine_mode"] = m.restitution_combine_mode
+        arr[i]["softness_combine_mode"] = m.softness_combine_mode
     return wp.from_numpy(arr, dtype=MaterialData, device=device)
 
 
@@ -274,3 +337,39 @@ def resolve_friction_static_in_kernel(
     mb = materials[mat_b]
     mode = wp.max(ma.friction_combine_mode, mb.friction_combine_mode)
     return _combine_values(ma.static_friction, mb.static_friction, mode)
+
+
+@wp.func
+def resolve_softness_in_kernel(
+    materials: wp.array[MaterialData],
+    mat_a: wp.int32,
+    mat_b: wp.int32,
+) -> wp.vec2f:
+    """Compute the effective per-pair contact softness.
+
+    Returns ``(hertz, damping_ratio)`` blended from the two shapes'
+    materials under
+    ``max(softness_combine_mode_a, softness_combine_mode_b)``. Falls
+    back to ``(0, 1)`` ("legacy rigid path") when materials aren't
+    registered or the indices are out of range, matching the
+    pre-Material default exactly.
+
+    Called per contact column at ingest time; the resolved
+    ``(hertz, damping_ratio)`` is then sign-encoded into the
+    per-contact ``rigid_contact_stiffness`` / ``rigid_contact_damping``
+    arrays as ``(-hertz, -damping_ratio)`` for every contact in the
+    pair, sharing those buffers with the hydroelastic absolute-K writer.
+    """
+    legacy_hertz = wp.float32(0.0)
+    legacy_damping = wp.float32(1.0)
+    if materials.shape[0] == 0:
+        return wp.vec2f(legacy_hertz, legacy_damping)
+    mat_count = materials.shape[0]
+    if mat_a < 0 or mat_a >= mat_count or mat_b < 0 or mat_b >= mat_count:
+        return wp.vec2f(legacy_hertz, legacy_damping)
+    ma = materials[mat_a]
+    mb = materials[mat_b]
+    mode = wp.max(ma.softness_combine_mode, mb.softness_combine_mode)
+    hertz = _combine_values(ma.contact_hertz, mb.contact_hertz, mode)
+    zeta = _combine_values(ma.contact_damping_ratio, mb.contact_damping_ratio, mode)
+    return wp.vec2f(hertz, zeta)
