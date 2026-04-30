@@ -1371,7 +1371,7 @@ class TestStateReset(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipUnless(HAS_USD and _HAS_TORCH, "pxr or torch not installed")
+@unittest.skipUnless(HAS_USD and _HAS_ONNX, "pxr or onnx not installed")
 class TestNeuralActuatorUsdParsing(unittest.TestCase):
     """Verify ``parse_actuator_prim`` correctly handles neural controller
     prims with asset-typed ``newton:modelPath`` attributes.
@@ -1382,35 +1382,23 @@ class TestNeuralActuatorUsdParsing(unittest.TestCase):
     """
 
     def setUp(self):
-        self.torch = _torch
         self._tmp_dir = tempfile.mkdtemp()
 
     def tearDown(self):
         shutil.rmtree(self._tmp_dir, ignore_errors=True)
 
     def _make_mlp_checkpoint(self, metadata: dict | None = None) -> str:
-        """Create a minimal TorchScript MLP checkpoint with optional metadata."""
-        net = self.torch.nn.Sequential(self.torch.nn.Linear(2, 1, bias=True))
-        with self.torch.no_grad():
-            net[0].weight.fill_(0.0)
-            net[0].bias.fill_(1.0)
-        path = os.path.join(self._tmp_dir, "mlp.pt")
-        scripted = self.torch.jit.script(net)
-        extra = {}
-        if metadata:
-            extra["metadata.json"] = json.dumps(metadata)
-        self.torch.jit.save(scripted, path, _extra_files=extra)
+        """Create a minimal ONNX MLP checkpoint with optional metadata."""
+        path = os.path.join(self._tmp_dir, "mlp.onnx")
+        weights = np.zeros((1, 2), dtype=np.float32)
+        bias = np.ones((1,), dtype=np.float32)
+        _build_mlp_onnx(path, weights, bias, metadata)
         return path
 
     def _make_lstm_checkpoint(self, metadata: dict | None = None) -> str:
-        """Create a minimal TorchScript LSTM checkpoint with optional metadata."""
-        net = _LSTMNet(hidden=8, layers=1)
-        path = os.path.join(self._tmp_dir, "lstm.pt")
-        scripted = self.torch.jit.script(net)
-        extra = {}
-        if metadata:
-            extra["metadata.json"] = json.dumps(metadata)
-        self.torch.jit.save(scripted, path, _extra_files=extra)
+        """Create a minimal ONNX LSTM checkpoint with optional metadata."""
+        path = os.path.join(self._tmp_dir, "lstm.onnx")
+        _build_lstm_onnx(path, hidden_size=8, num_layers=1, metadata=metadata)
         return path
 
     def _build_neural_stage(self, model_path: str) -> "Usd.Stage":

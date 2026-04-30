@@ -383,6 +383,9 @@ def _shape_lstm(op, shapes, tensors, device):
         raise NotImplementedError("OnnxRuntime LSTM: only num_directions=1 is supported")
     hidden_size = int(op.attrs.get("hidden_size", W_shape[1] // 4))
 
+    if W_shape != (1, 4 * hidden_size, input_size):
+        raise ValueError(f"OnnxRuntime LSTM: W has shape {W_shape}, expected {(1, 4 * hidden_size, input_size)}")
+
     R_shape = shapes[op.inputs[2]]
     if R_shape != (1, 4 * hidden_size, hidden_size):
         raise ValueError(f"OnnxRuntime LSTM: R has shape {R_shape}, expected {(1, 4 * hidden_size, hidden_size)}")

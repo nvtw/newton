@@ -6,7 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-import numpy as np
 import warp as wp
 
 from ..utils import load_checkpoint, load_metadata
@@ -36,22 +35,72 @@ def _compute_errors_and_zero_history_kernel(
 
 
 @wp.kernel
-def _scale_pair_kernel(
+def _assemble_net_input_kernel(
     pos_error: wp.array[float],
     vel_error: wp.array[float],
+    pos_history: wp.array2d[float],  # (history_length, N) past pos errors; row r = error from r+1 steps ago
+    vel_history: wp.array2d[float],  # (history_length, N) past vel errors
+    input_idx: wp.array[int],  # (K,) timestep offsets, 0 == current
     pos_scale: float,
     vel_scale: float,
+    k_per_block: int,  # = K = len(input_idx)
+    pos_first: int,  # 1 if input_order == "pos_vel"
+    has_history: int,  # 0 if history_length == 1 (history arrays unused)
     out: wp.array2d[float],
-    n_per_block: int,
-    pos_first: int,
 ):
-    i, k = wp.tid()  # i in [0, N), k in [0, 2*history_length)
-    block = k // n_per_block  # 0 -> first half, 1 -> second half
+    """Assemble scaled feature row ``out[i, :] = [pos_block | vel_block]`` (or vel|pos).
+
+    ``out`` has shape ``(N, 2*K)``.  Each block is K-wide and gathers
+    ``pos_error_history[input_idx[j]]`` (or current ``pos_error`` when
+    ``input_idx[j] == 0``) for j in [0, K).
+    """
+    i, k = wp.tid()  # i in [0, N), k in [0, 2*K)
+    block = k // k_per_block  # 0 -> first half, 1 -> second half
+    j = k % k_per_block
+    idx = input_idx[j]
     is_pos = block == 0 if pos_first != 0 else block == 1
     if is_pos:
-        out[i, k] = pos_error[i] * pos_scale
+        if idx == 0:
+            out[i, k] = pos_error[i] * pos_scale
+        else:
+            if has_history != 0:
+                out[i, k] = pos_history[idx - 1, i] * pos_scale
+            else:
+                out[i, k] = 0.0
     else:
-        out[i, k] = vel_error[i] * vel_scale
+        if idx == 0:
+            out[i, k] = vel_error[i] * vel_scale
+        else:
+            if has_history != 0:
+                out[i, k] = vel_history[idx - 1, i] * vel_scale
+            else:
+                out[i, k] = 0.0
+
+
+@wp.kernel
+def _roll_history_kernel(
+    cur_pos_history: wp.array2d[float],  # (H, N) current state
+    cur_vel_history: wp.array2d[float],
+    pos_error: wp.array[float],  # (N,) latest sample to insert at row 0
+    vel_error: wp.array[float],
+    next_pos_history: wp.array2d[float],  # (H, N) destination
+    next_vel_history: wp.array2d[float],
+    history_length: int,
+):
+    """Shift history by one timestep and write the latest error at row 0.
+
+    ``next_history[0, i] = error[i]``;
+    ``next_history[t, i] = cur_history[t - 1, i]`` for t in [1, H).
+    Equivalent to ``np.roll(history, 1, axis=0)`` followed by writing
+    the latest sample at index 0, but on-device.
+    """
+    t, i = wp.tid()
+    if t == 0:
+        next_pos_history[0, i] = pos_error[i]
+        next_vel_history[0, i] = vel_error[i]
+    else:
+        next_pos_history[t, i] = cur_pos_history[t - 1, i]
+        next_vel_history[t, i] = cur_vel_history[t - 1, i]
 
 
 @wp.kernel
@@ -169,6 +218,7 @@ class ControllerNeuralMLP(Controller):
         self._pos_error: wp.array[float] | None = None
         self._vel_error: wp.array[float] | None = None
         self._net_input: wp.array2d[float] | None = None
+        self._input_idx_wp: wp.array[int] | None = None
         self._net_output_name: str | None = None
         self._net_input_name: str | None = None
 
@@ -181,11 +231,12 @@ class ControllerNeuralMLP(Controller):
         self._net_input_name = runtime.input_names[0]
         self._net_output_name = runtime.output_names[0]
 
-        # input shape: (N, 2 * history_length)  (pos history, vel history)
+        # input shape: (N, 2 * K) where K = len(input_idx)
         feat = 2 * len(self.input_idx)
         self._net_input = wp.zeros((num_actuators, feat), dtype=wp.float32, device=device)
         self._pos_error = wp.zeros(num_actuators, dtype=wp.float32, device=device)
         self._vel_error = wp.zeros(num_actuators, dtype=wp.float32, device=device)
+        self._input_idx_wp = wp.array(self.input_idx, dtype=wp.int32, device=device)
 
     def is_stateful(self) -> bool:
         return True
@@ -236,32 +287,31 @@ class ControllerNeuralMLP(Controller):
             device=device,
         )
 
-        # Build net_input: stack [pos_error_history[i] for i in input_idx] then vel ones
-        # We do this on host since input_idx is small and may be non-contiguous.
-        pos_err_np = self._pos_error.numpy()
-        vel_err_np = self._vel_error.numpy()
-        history_pos = state.pos_error_history.numpy() if self.history_length > 1 else None
-        history_vel = state.vel_error_history.numpy() if self.history_length > 1 else None
+        # Assemble net_input on-device: gather [pos_error_history[idx] for idx in input_idx]
+        # and [vel_error_history[idx] ...] into preallocated self._net_input.
+        k_per_block = len(self.input_idx)
+        pos_first = 1 if self.input_order == "pos_vel" else 0
+        has_history = 1 if self.history_length > 1 else 0
+        wp.launch(
+            _assemble_net_input_kernel,
+            dim=(n, 2 * k_per_block),
+            inputs=[
+                self._pos_error,
+                self._vel_error,
+                state.pos_error_history,
+                state.vel_error_history,
+                self._input_idx_wp,
+                self.pos_scale,
+                self.vel_scale,
+                k_per_block,
+                pos_first,
+                has_history,
+                self._net_input,
+            ],
+            device=device,
+        )
 
-        pos_cols = []
-        vel_cols = []
-        for i in self.input_idx:
-            if i == 0:
-                pos_cols.append(pos_err_np)
-                vel_cols.append(vel_err_np)
-            else:
-                pos_cols.append(history_pos[i - 1])
-                vel_cols.append(history_vel[i - 1])
-        pos_stack = np.stack(pos_cols, axis=1).astype(np.float32) * self.pos_scale  # (N, k)
-        vel_stack = np.stack(vel_cols, axis=1).astype(np.float32) * self.vel_scale  # (N, k)
-
-        if self.input_order == "pos_vel":
-            net_input_np = np.concatenate([pos_stack, vel_stack], axis=1)
-        else:
-            net_input_np = np.concatenate([vel_stack, pos_stack], axis=1)
-
-        net_input_wp = wp.array(np.ascontiguousarray(net_input_np), dtype=wp.float32, device=device)
-        out = self._network({self._net_input_name: net_input_wp})
+        out = self._network({self._net_input_name: self._net_input})
         effort = out[self._net_output_name]
 
         # ``effort`` is the (N, output_size) tensor produced by the final
@@ -282,19 +332,19 @@ class ControllerNeuralMLP(Controller):
     ) -> None:
         if next_state is None:
             return
-        # Roll history along axis 0 (oldest sample drops out, newest at index 0).
-        cur_pos_np = current_state.pos_error_history.numpy()
-        cur_vel_np = current_state.vel_error_history.numpy()
-        rolled_pos = np.roll(cur_pos_np, 1, axis=0)
-        rolled_vel = np.roll(cur_vel_np, 1, axis=0)
-        rolled_pos[0] = self._pos_error.numpy()
-        rolled_vel[0] = self._vel_error.numpy()
-
-        wp.copy(
-            next_state.pos_error_history,
-            wp.array(np.ascontiguousarray(rolled_pos), dtype=wp.float32, device=self._device),
-        )
-        wp.copy(
-            next_state.vel_error_history,
-            wp.array(np.ascontiguousarray(rolled_vel), dtype=wp.float32, device=self._device),
+        # Roll history along axis 0 on-device (oldest sample drops out, newest at row 0).
+        h, n = current_state.pos_error_history.shape
+        wp.launch(
+            _roll_history_kernel,
+            dim=(h, n),
+            inputs=[
+                current_state.pos_error_history,
+                current_state.vel_error_history,
+                self._pos_error,
+                self._vel_error,
+                next_state.pos_error_history,
+                next_state.vel_error_history,
+                h,
+            ],
+            device=self._device,
         )
