@@ -85,6 +85,7 @@ from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num
 __all__ = [
     "CLOTH_TRIANGLE_DWORDS",
     "ClothTriangleData",
+    "cloth_lame_from_youngs_poisson_plane_stress",
     "cloth_triangle_get_alpha_lambda",
     "cloth_triangle_get_alpha_mu",
     "cloth_triangle_get_bias_lambda",
@@ -117,6 +118,66 @@ __all__ = [
     "cloth_triangle_set_rest_area",
     "cloth_triangle_set_type",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Lamé parameter conversion (host-side helper).
+# ---------------------------------------------------------------------------
+
+
+def cloth_lame_from_youngs_poisson_plane_stress(
+    youngs_modulus: float,
+    poisson_ratio: float,
+) -> tuple[float, float]:
+    """Convert Young's modulus + Poisson ratio to plane-stress Lamé
+    parameters ``(lam, mu)``.
+
+    Cloth is modelled as a thin sheet -- bending out of plane is
+    nearly free compared with in-plane stretch / shear, so the
+    in-plane elasticity is plane stress, not 3D. The plane-stress
+    Lamé conversion is::
+
+        mu = E / (2 * (1 + nu))  # shear modulus
+        lam = E * nu / (1 - nu**2)  # 1st Lamé (plane stress)
+
+    Compare with the 3D (plane strain) conversion ``lam = E*nu /
+    ((1+nu)*(1-2*nu))`` -- those denominators blow up at nu = 0.5
+    (incompressible solid), but plane stress's ``1 - nu**2``
+    stays finite for the entire physical range. This is the right
+    choice for cloth, where the thickness direction is unconstrained.
+
+    The PhoenX cloth iterate consumes ``mu`` as the shear-row
+    stiffness (Newton's ``tri_materials[t, 0]`` /
+    :attr:`~newton.ModelBuilder.default_tri_ke`) and ``lam`` as the
+    area-preservation row stiffness (``tri_materials[t, 1]`` /
+    :attr:`~newton.ModelBuilder.default_tri_ka`). XPBD compliance
+    is then ``alpha = 1 / (k * area)`` per row.
+
+    Args:
+        youngs_modulus: Young's modulus ``E`` [Pa]. Cotton-weight
+            cloth: ~1e7-1e8. Stiff garment / leather: 1e8-1e9.
+        poisson_ratio: Poisson ratio ``nu`` [-]. Typical cloth:
+            0.3-0.45. Must satisfy ``-1 < nu < 1`` (plane stress
+            allows the full range, but values near ``+/-1`` produce
+            very stiff area-preservation).
+
+    Returns:
+        ``(lam, mu)`` -- the Lamé first parameter (area-row
+        stiffness) and shear modulus (shear-row stiffness), both
+        in Pa. Pass to ``add_cloth_grid`` /
+        ``add_cloth_mesh`` as ``tri_ka=lam, tri_ke=mu``.
+
+    Raises:
+        ValueError: if ``youngs_modulus <= 0`` or ``not -1 <
+            poisson_ratio < 1``.
+    """
+    if youngs_modulus <= 0.0:
+        raise ValueError(f"youngs_modulus must be positive (got {youngs_modulus})")
+    if not -1.0 < poisson_ratio < 1.0:
+        raise ValueError(f"poisson_ratio must be in (-1, 1) (got {poisson_ratio})")
+    mu = youngs_modulus / (2.0 * (1.0 + poisson_ratio))
+    lam = youngs_modulus * poisson_ratio / (1.0 - poisson_ratio * poisson_ratio)
+    return float(lam), float(mu)
 
 
 # ---------------------------------------------------------------------------

@@ -33,13 +33,24 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    cloth_lame_from_youngs_poisson_plane_stress,
+)
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
 class Example:
     """A cloth strip pinned on one edge, falling under gravity."""
 
-    def __init__(self, viewer, args=None, width: int = 32, height: int = 16):
+    def __init__(
+        self,
+        viewer,
+        args=None,
+        width: int = 32,
+        height: int = 16,
+        youngs_modulus: float = 5.0e8,
+        poisson_ratio: float = 0.3,
+    ):
         self.viewer = viewer
         self.device = wp.get_device()
 
@@ -58,12 +69,20 @@ class Example:
         self.cell = 0.1
         self.particle_mass = 0.05
 
-        # Stiff cloth -- compliance is ``1 / (stiffness * area)``;
-        # at the chosen cell size and substep / iteration counts
-        # this is firm enough that the strip holds its shape under
-        # gravity rather than drooping like wet noodle.
-        self.tri_ke = 1.0e6
-        self.tri_ka = 1.0e6
+        # Public material parameters: Young's modulus E [Pa] and
+        # Poisson ratio nu [-]. Cloth is a thin sheet so the
+        # plane-stress Lamé conversion is what we want -- the 3D
+        # ``E*nu / ((1+nu)*(1-2*nu))`` formula blows up at
+        # nu = 0.5; plane stress's ``E*nu / (1 - nu**2)`` stays
+        # finite for the whole physical range.
+        #
+        # Defaults: E = 5e8 Pa is a stiff garment / heavy canvas;
+        # nu = 0.3 is in the middle of the typical 0.3-0.45 cloth
+        # range. The cloth iterate sees ``alpha = 1 / (k * area)``
+        # per row, so doubling E roughly halves visible stretch.
+        self.youngs_modulus = float(youngs_modulus)
+        self.poisson_ratio = float(poisson_ratio)
+        self.tri_ka, self.tri_ke = cloth_lame_from_youngs_poisson_plane_stress(self.youngs_modulus, self.poisson_ratio)
 
         # Build the Newton mesh. Cloth pinned along the entire left
         # edge (x == 0) -- those particles' inverse mass goes to
@@ -189,6 +208,25 @@ if __name__ == "__main__":
     parser = newton.examples.create_parser()
     parser.add_argument("--width", type=int, default=32, help="Cloth resolution along the long axis")
     parser.add_argument("--height", type=int, default=16, help="Cloth resolution along the short axis")
+    parser.add_argument(
+        "--youngs-modulus",
+        type=float,
+        default=5.0e8,
+        help="Young's modulus E [Pa]. Higher = less stretchy.",
+    )
+    parser.add_argument(
+        "--poisson-ratio",
+        type=float,
+        default=0.3,
+        help="Poisson ratio nu [-]. Higher = stronger area preservation.",
+    )
     viewer, args = newton.examples.init(parser)
-    example = Example(viewer, args, width=args.width, height=args.height)
+    example = Example(
+        viewer,
+        args,
+        width=args.width,
+        height=args.height,
+        youngs_modulus=args.youngs_modulus,
+        poisson_ratio=args.poisson_ratio,
+    )
     newton.examples.run(example, args)
