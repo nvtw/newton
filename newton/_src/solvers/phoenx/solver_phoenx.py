@@ -121,6 +121,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _constraint_relax_singleworld_kernel,
     _constraint_relax_singleworld_revolute_cloth_kernel,
     _constraint_relax_singleworld_revolute_kernel,
+    _constraints_to_elements_cloth_kernel,
     _constraints_to_elements_kernel,
     _count_elements_per_world_kernel,
     _integrate_velocities_kernel,
@@ -1411,8 +1412,11 @@ class PhoenXWorld:
         ``num_active_constraints`` early-out."""
         if self._constraint_capacity == 0:
             return
+        elements_kernel = (
+            _constraints_to_elements_cloth_kernel if self.num_cloth_triangles > 0 else _constraints_to_elements_kernel
+        )
         wp.launch(
-            _constraints_to_elements_kernel,
+            elements_kernel,
             dim=self._constraint_capacity,
             inputs=[
                 self.constraints,
@@ -1421,6 +1425,7 @@ class PhoenXWorld:
                 self._num_active_constraints,
                 wp.int32(self.num_joints),
                 self._elements,
+                self.body_or_particle,
             ],
             device=self.device,
         )

@@ -18,7 +18,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_STATIC,
     BodyContainer,
 )
-from newton._src.solvers.phoenx.body_or_particle import BodyOrParticleStore
+from newton._src.solvers.phoenx.body_or_particle import BodyOrParticleStore, get_inverse_mass
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     actuated_double_ball_socket_iterate,
     actuated_double_ball_socket_iterate_multi,
@@ -30,6 +30,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     revolute_prepare_for_iteration,
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    cloth_triangle_get_body3,
     cloth_triangle_iterate_at,
     cloth_triangle_prepare_for_iteration_at,
 )
@@ -920,49 +921,114 @@ _constraint_relax_fast_tail_kernel = _make_fast_tail_relax_kernel(revolute_only=
 _constraint_relax_fast_tail_revolute_kernel = _make_fast_tail_relax_kernel(revolute_only=True)
 
 
-@wp.kernel(enable_backward=False)
-def _constraints_to_elements_kernel(
-    constraints: ConstraintContainer,
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    num_constraints: wp.array[wp.int32],
-    num_joints: wp.int32,
-    elements: wp.array[ElementInteractionData],
-):
-    """Project every active constraint into ``ElementInteractionData``.
+def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
+    """Factory for ``_constraints_to_elements_kernel`` with optional
+    cloth support.
 
-    Only the two body indices matter to the graph colourer; static
-    bodies get collapsed to ``-1`` and the dynamic body (if any) is
-    compacted to slot 0.
+    Projects every active constraint into ``ElementInteractionData``
+    -- the per-cid (body1, body2, ..., body8) tuple the graph
+    colourer consumes. Only the bodies a constraint touches matter
+    to the colouring; static / unregistered slots are written as
+    ``-1`` and dynamic indices are compacted toward slot 0.
 
-    Joint cids (``tid < num_joints``) read from the joint-wide
-    :class:`ConstraintContainer`; contact cids read from the narrow
-    :class:`ContactColumnContainer` at local offset
-    ``tid - num_joints``. Launched at ``dim = constraint_capacity``
-    because the active count is device-held; inactive lanes early-out.
+    With ``cloth_support=True`` the kernel reads the per-cid
+    ``constraint_type`` tag at dword 0 and, when matched against
+    :data:`CONSTRAINT_TYPE_CLOTH_TRIANGLE`, also pulls the third
+    cloth-triangle endpoint (``body3``) and uses the unified
+    body-or-particle inverse-mass accessor so particle slots
+    (unified index ``>= num_bodies``) read from the
+    :class:`ParticleContainer`. ``cloth_support=False`` keeps the
+    pre-cloth dispatch byte-identical: no type-tag read, no
+    third-body read, and ``bodies.inverse_mass[b]`` is used
+    directly because every constraint endpoint resolves to a body
+    slot in rigid-only scenes.
     """
-    tid = wp.tid()
-    n = num_constraints[0]
-    if tid >= n:
-        return
-    if tid < num_joints:
-        b1 = constraint_get_body1(constraints, tid)
-        b2 = constraint_get_body2(constraints, tid)
-    else:
-        local_cid = tid - num_joints
-        b1 = contact_get_body1(contact_cols, local_cid)
-        b2 = contact_get_body2(contact_cols, local_cid)
-    if b1 >= 0 and bodies.inverse_mass[b1] == 0.0:
-        b1 = -1
-    if b2 >= 0 and bodies.inverse_mass[b2] == 0.0:
-        b2 = -1
-    # Compact: non-negative IDs must come first so the adjacency loop
-    # (which stops on the first -1) doesn't miss a dynamic body when
-    # the static one happens to sit in slot 0.
-    if b1 < 0 and b2 >= 0:
-        b1 = b2
-        b2 = -1
-    elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
+    cloth_type_tag = wp.constant(CONSTRAINT_TYPE_CLOTH_TRIANGLE)
+
+    @wp.kernel(enable_backward=False)
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        num_constraints: wp.array[wp.int32],
+        num_joints: wp.int32,
+        elements: wp.array[ElementInteractionData],
+        store: BodyOrParticleStore,
+    ):
+        tid = wp.tid()
+        n = num_constraints[0]
+        if tid >= n:
+            return
+        b1 = wp.int32(-1)
+        b2 = wp.int32(-1)
+        b3 = wp.int32(-1)
+        if tid < num_joints:
+            b1 = constraint_get_body1(constraints, tid)
+            b2 = constraint_get_body2(constraints, tid)
+            if wp.static(cloth_support):
+                ctype = read_int(constraints, wp.int32(0), tid)
+                if ctype == cloth_type_tag:
+                    # Cloth triangle's third endpoint sits next to
+                    # body1 / body2 at dword 3 -- read it via the
+                    # cloth-typed accessor so the offset comes from
+                    # the schema, not a hand-rolled constant.
+                    b3 = cloth_triangle_get_body3(constraints, tid)
+        else:
+            local_cid = tid - num_joints
+            b1 = contact_get_body1(contact_cols, local_cid)
+            b2 = contact_get_body2(contact_cols, local_cid)
+        # Static-body collapse: anything with inverse_mass == 0 maps
+        # to -1 so the colourer doesn't track it (statics never
+        # conflict). With cloth_support the inverse-mass lookup goes
+        # through the unified accessor so particle slots resolve to
+        # the ParticleContainer; without it we keep the existing
+        # direct read on the body store.
+        if wp.static(cloth_support):
+            if b1 >= 0 and get_inverse_mass(store, b1) == wp.float32(0.0):
+                b1 = wp.int32(-1)
+            if b2 >= 0 and get_inverse_mass(store, b2) == wp.float32(0.0):
+                b2 = wp.int32(-1)
+            if b3 >= 0 and get_inverse_mass(store, b3) == wp.float32(0.0):
+                b3 = wp.int32(-1)
+        else:
+            if b1 >= 0 and bodies.inverse_mass[b1] == wp.float32(0.0):
+                b1 = wp.int32(-1)
+            if b2 >= 0 and bodies.inverse_mass[b2] == wp.float32(0.0):
+                b2 = wp.int32(-1)
+        # Compact: non-negative IDs must come first so the adjacency
+        # loop (which stops on the first -1) doesn't miss a dynamic
+        # body when the static one happens to sit in slot 0.
+        if wp.static(cloth_support):
+            # 3-element compact for the cloth case. Sort the three
+            # IDs so non-negative ones come first; -1 in unused tail
+            # slots.
+            cnt = wp.int32(0)
+            slots = wp.vec3i(wp.int32(-1), wp.int32(-1), wp.int32(-1))
+            if b1 >= 0:
+                slots[cnt] = b1
+                cnt = cnt + wp.int32(1)
+            if b2 >= 0:
+                slots[cnt] = b2
+                cnt = cnt + wp.int32(1)
+            if b3 >= 0:
+                slots[cnt] = b3
+                cnt = cnt + wp.int32(1)
+            elements[tid] = element_interaction_data_make(
+                slots[0], slots[1], slots[2], wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1)
+            )
+        else:
+            if b1 < 0 and b2 >= 0:
+                b1 = b2
+                b2 = wp.int32(-1)
+            elements[tid] = element_interaction_data_make(
+                b1, b2, wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1)
+            )
+
+    return kernel
+
+
+_constraints_to_elements_kernel = _make_constraints_to_elements_kernel(cloth_support=False)
+_constraints_to_elements_cloth_kernel = _make_constraints_to_elements_kernel(cloth_support=True)
 
 
 @wp.kernel(enable_backward=False)
