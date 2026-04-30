@@ -22,21 +22,47 @@ integration step in :class:`SolverPhoenX.step` will pull these out
 of :class:`~newton._src.solvers.phoenx.body.BodyContainer` at the
 launch site.
 
-## Two construction paths
+## Setup paths
 
-The orchestrator works equally well with either build path on
-:class:`ContactPartitions`:
+Either build path on :class:`ContactPartitions` works:
 
-1. **Self-built MIS partitioning** -- the host-side greedy on
+1. **Self-built MIS partitioning** -- host-side greedy on
    :meth:`ContactPartitions.build`. Useful for tests / small scenes
    that don't already have a graph coloring.
 
 2. **Adopt an existing Newton coloring** -- pass the existing
    ``(element_ids_by_color, color_starts, num_colors)`` arrays
    from :mod:`newton._src.solvers.phoenx.graph_coloring` to
-   :meth:`ContactPartitions.wrap_color_arrays`. This is the
-   integration target; the eventual SolverPhoenX wiring will use
-   this path so we don't duplicate the per-step graph-coloring work.
+   :meth:`ContactPartitions.wrap_color_arrays`. Integration target
+   so the per-step graph-coloring work isn't duplicated.
+
+## Velocity-level vs position-level passes
+
+The same orchestrator handles both. C# PhoenX runs constraints in
+either regime by passing an ``accessMode`` argument to
+``ReadState``; this port mirrors that exactly via the
+:func:`~newton._src.solvers.phoenx.mass_splitting.read_state.read_state`
+``new_access_mode`` parameter. The infrastructure -- ``TinyRigidState``,
+broadcast, write-back -- is unchanged between regimes; only what
+the constraint kernel does between read and write changes:
+
+* **Velocity-level**: read with ``ACCESS_MODE_VELOCITY_LEVEL``,
+  mutate ``state.velocity`` / ``state.angular_velocity``, write
+  back. Box2D / Jitter sequential-impulse style.
+* **Position-level**: read with ``ACCESS_MODE_POSITION_LEVEL``,
+  mutate ``state.position`` / ``state.orientation``, write back.
+  XPBD projection style. The
+  :func:`~newton._src.solvers.phoenx.mass_splitting.state.tiny_rigid_state_set_access_mode`
+  helper inside ``read_state`` integrates pose forward when
+  flipping into the position regime; the
+  :func:`~newton._src.solvers.phoenx.mass_splitting.kernels.copy_state_into_rigids_kernel`
+  runs the XPBD finite-difference recovery
+  ``v = (state.position - body_position) * inv_dt`` at write-back.
+
+Mixing the two regimes inside a single substep is allowed: each
+constraint picks its own ``new_access_mode``; the synchronize
+helper handles the regime change lazily. See ``README.md`` for the
+recipe and the round-trip test in ``tests/test_isolated.py``.
 """
 
 from __future__ import annotations
