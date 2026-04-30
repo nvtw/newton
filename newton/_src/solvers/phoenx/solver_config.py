@@ -75,6 +75,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+import warp as wp
+
 #: Contact-matching mode fed into :class:`newton.CollisionPipeline`.
 #: See the module docstring; ``"sticky"`` is the production default.
 PHOENX_CONTACT_MATCHING: Literal["sticky", "latest"] = "sticky"
@@ -105,10 +107,75 @@ FUSE_TAIL_BLOCK_DIM: int = 256
 #: flip this off to recover the round-based JP.
 PHOENX_USE_GREEDY_COLORING: bool = True
 
+# ---------------------------------------------------------------------------
+# Per-row Nyquist headroom multipliers (compile-time)
+# ---------------------------------------------------------------------------
+#
+# Every PD-style soft constraint clamps user-supplied stiffness at the
+# substep's Nyquist limit so requesting "more spring than the timestep
+# can resolve" produces the stiffest resolvable lock instead of
+# aliasing. The strict implicit-Euler bound is
+#
+#     k <= 1 / (M_inv * dt^2)         <=>     N = 1
+#
+# beyond which the soft-PD's eff_mass collapses to ``1 / M_inv`` and
+# its bias spikes to ``C / dt``. The constants below let each PD-style
+# row request a multiplier ``N`` on that bound; the helper
+# (:func:`pd_coefficients` and the inline cable clamps) caps each row
+# at ``_PD_NYQUIST_HEADROOM_MAX`` (currently ``10``) so requests above
+# the global ceiling are silently truncated.
+#
+# Defaults: ``1`` (strict) for revolute / prismatic drive and limit;
+# ``10`` for cable bend / twist (matches the previous BEAM behaviour
+# the cable mode was promoted from). Tune per-row at compile time --
+# changing one of these constants triggers a kernel-cache miss and
+# rebuild but otherwise needs no API changes.
+
+#: Headroom on the revolute joint's PD drive row. Default ``10``: the
+#: drive is a single-axis scalar PD row, well-conditioned enough to
+#: tolerate the same headroom as the cable bend / twist rows. Aligns
+#: with the Box2D-soft limit's ``omega <= pi/dt`` convention
+#: (effective ``N ~ pi^2 ~ 9.87``) so the two limit formulations
+#: behave consistently.
+PHOENX_BOOST_REVOLUTE_DRIVE = wp.constant(wp.float32(10.0))
+#: Headroom on the revolute joint's PD limit row (PD path only;
+#: Box2D-soft limits use the omega-cap convention).
+PHOENX_BOOST_REVOLUTE_LIMIT = wp.constant(wp.float32(10.0))
+#: Headroom on the prismatic joint's PD drive row. Same rationale
+#: as :data:`PHOENX_BOOST_REVOLUTE_DRIVE`.
+PHOENX_BOOST_PRISMATIC_DRIVE = wp.constant(wp.float32(10.0))
+#: Headroom on the prismatic joint's PD limit row.
+PHOENX_BOOST_PRISMATIC_LIMIT = wp.constant(wp.float32(10.0))
+#: Headroom on the cable joint's bend (anchor-2 tangent 2-row PD)
+#: rows. Default ``10``: cable bends are visually "soft" springs, so
+#: chains routinely request stiff gains relative to dt; the headroom
+#: keeps them inside the resolvable band rather than saturating the
+#: cap.
+PHOENX_BOOST_CABLE_BEND = wp.constant(wp.float32(10.0))
+#: Headroom on the cable joint's twist (anchor-3 scalar 1-row PD)
+#: row. Same default rationale as the bend rows.
+PHOENX_BOOST_CABLE_TWIST = wp.constant(wp.float32(10.0))
+#: Headroom on the soft-contact normal PD row (used when contacts opt
+#: in to the implicit-Euler PD path via positive ``stiffness`` /
+#: ``damping`` material parameters; the Box2D-style normal path uses
+#: its own omega-cap convention and is unaffected). Default ``1``
+#: (strict): contacts already self-limit via ``effective_gap``
+#: clamping and a stiff impact regime, so extra headroom is rarely
+#: useful.
+PHOENX_BOOST_CONTACT_NORMAL = wp.constant(wp.float32(1.0))
+
+
 __all__ = [
     "FUSE_TAIL_BLOCK_DIM",
     "FUSE_TAIL_MAX_COLOR_SIZE",
     "NUM_INNER_WHILE_ITERATIONS",
+    "PHOENX_BOOST_CABLE_BEND",
+    "PHOENX_BOOST_CABLE_TWIST",
+    "PHOENX_BOOST_CONTACT_NORMAL",
+    "PHOENX_BOOST_PRISMATIC_DRIVE",
+    "PHOENX_BOOST_PRISMATIC_LIMIT",
+    "PHOENX_BOOST_REVOLUTE_DRIVE",
+    "PHOENX_BOOST_REVOLUTE_LIMIT",
     "PHOENX_CONTACT_MATCHING",
     "PHOENX_USE_GREEDY_COLORING",
 ]

@@ -653,9 +653,17 @@ def _per_world_greedy_coloring_kernel(
                         # Smallest free colour = first 0-bit in mask.
                         # ``_lowest_set_bit`` wraps ``__ffsll`` so the
                         # search is one HW instruction on CUDA.
+                        # ``__ffsll(0)`` -> wrapper returns -1, so a
+                        # saturated mask (all 64 colours forbidden)
+                        # surfaces as ``c < 0``. Treating that as
+                        # overflow -- not a valid colour -- keeps the
+                        # else branch from writing ``assigned[eid] =
+                        # 0`` (the uncoloured sentinel) and from
+                        # firing an OOB ``atomic_add(color_count, w,
+                        # -1, ...)``.
                         free_mask = forbidden_mask ^ _PER_WORLD_FREE_COLOR_FLIP
                         c = _lowest_set_bit(free_mask)
-                        if c >= GREEDY_MAX_COLORS:
+                        if c < wp.int32(0) or c >= GREEDY_MAX_COLORS:
                             overflow_local = wp.int32(1)
                         else:
                             assigned[eid] = c + wp.int32(1)
@@ -751,7 +759,6 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
         world_color_starts: wp.array2d[wp.int32],
         world_csr_offsets: wp.array[wp.int32],
         world_num_colors: wp.array[wp.int32],
-        sweep_offset: wp.array[wp.int32],
         cc: ContactContainer,
         contacts: ContactViews,
         num_iterations: wp.int32,
@@ -768,11 +775,8 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
 
         n_colors = world_num_colors[world_id]
         world_base = world_csr_offsets[world_id]
-        offset = sweep_offset[0]
 
         # ---- Prepare phase ----------------------------------------
-        # Prepare runs once over every colour (no convergence asymmetry
-        # to fight); skip the rotation here.
         c = wp.int32(0)
         while c < n_colors:
             start = world_base + world_color_starts[world_id, c]
@@ -808,17 +812,10 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
         outer_iters = num_iterations / inner_sweeps
         it_outer = wp.int32(0)
         while it_outer < outer_iters:
-            # Rotate which colour fires first across outer iters
-            # (symmetric Gauss-Seidel; evens out PGS's earlier /
-            # later-colour convergence bias on chains). ``offset``
-            # rotates per substep too -- every kernel launch reads
-            # the host-bumped device array.
-            iter_offset = (offset + it_outer) % n_colors
             c = wp.int32(0)
             while c < n_colors:
-                rc = (c + iter_offset) % n_colors
-                start = world_base + world_color_starts[world_id, rc]
-                end = world_base + world_color_starts[world_id, rc + 1]
+                start = world_base + world_color_starts[world_id, c]
+                end = world_base + world_color_starts[world_id, c + 1]
                 count = end - start
 
                 base = local_tid
@@ -856,7 +853,6 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
         world_color_starts: wp.array2d[wp.int32],
         world_csr_offsets: wp.array[wp.int32],
         world_num_colors: wp.array[wp.int32],
-        sweep_offset: wp.array[wp.int32],
         cc: ContactContainer,
         contacts: ContactViews,
         num_iterations: wp.int32,
@@ -873,7 +869,6 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
 
         n_colors = world_num_colors[world_id]
         world_base = world_csr_offsets[world_id]
-        offset = sweep_offset[0] % n_colors
 
         # Dispatch via the register-cached ``*_iterate_multi`` path
         # with ``num_sweeps = num_iterations`` so each cid gets one
@@ -881,12 +876,11 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
         # sweep. ``velocity_iterations`` is typically 1 so there's no
         # real cross-colour feedback to preserve -- running the full
         # relax in one multi call is equivalent to the classic outer-
-        # inner split. Per-substep ``offset`` rotation still applied.
+        # inner split.
         c = wp.int32(0)
         while c < n_colors:
-            rc = (c + offset) % n_colors
-            start = world_base + world_color_starts[world_id, rc]
-            end = world_base + world_color_starts[world_id, rc + 1]
+            start = world_base + world_color_starts[world_id, c]
+            end = world_base + world_color_starts[world_id, c + 1]
             count = end - start
 
             base = local_tid
@@ -1355,7 +1349,6 @@ def _singleworld_color_range(
     color_starts: wp.array[wp.int32],
     num_colors: wp.array[wp.int32],
     color_cursor: wp.array[wp.int32],
-    sweep_offset: wp.array[wp.int32],
 ):
     """Decode the current colour's cid range from the cursor.
 
@@ -1363,15 +1356,10 @@ def _singleworld_color_range(
     ``element_ids_by_color`` of the colour's first cid; ``count`` is
     how many cids belong to it; ``cursor`` is the snapshot of
     ``color_cursor[0]`` for the cursor-decrement at end of kernel.
-
-    ``sweep_offset[0]`` rotates which colour fires first across
-    successive sweeps (symmetric Gauss-Seidel; see
-    :func:`incremental_begin_sweep_kernel`).
     """
     cursor = color_cursor[0]
     n_colors = num_colors[0]
-    base = n_colors - cursor
-    c = (base + sweep_offset[0]) % n_colors
+    c = n_colors - cursor
     start = color_starts[c]
     end = color_starts[c + 1]
     count = end - start
@@ -1428,19 +1416,16 @@ def _singleworld_color_range_from_cursor(
     color_starts: wp.array[wp.int32],
     num_colors: wp.array[wp.int32],
     cursor: wp.int32,
-    sweep_offset: wp.array[wp.int32],
 ):
     """Variant of :func:`_singleworld_color_range` that takes a cursor
     value directly instead of reading it from an array.
 
     Used by the fused tail kernel which threads the cursor through
     registers across the internal colour loop so every lane observes
-    the same value without re-reading global memory. Same
-    ``sweep_offset`` rotation as :func:`_singleworld_color_range`.
+    the same value without re-reading global memory.
     """
     n_colors = num_colors[0]
-    base = n_colors - cursor
-    c = (base + sweep_offset[0]) % n_colors
+    c = n_colors - cursor
     start = color_starts[c]
     end = color_starts[c + 1]
     count = end - start
@@ -1503,7 +1488,6 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
         color_starts: wp.array[wp.int32],
         num_colors: wp.array[wp.int32],
         color_cursor: wp.array[wp.int32],
-        sweep_offset: wp.array[wp.int32],
         cc: ContactContainer,
         contacts: ContactViews,
         num_joints: wp.int32,
@@ -1516,7 +1500,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
             if tid == 0:
                 head_active[0] = 0
             return
-        start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor, sweep_offset)
+        start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
 
         if count <= fuse_threshold:
             if tid == 0:
@@ -1566,7 +1550,6 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool):
         color_starts: wp.array[wp.int32],
         num_colors: wp.array[wp.int32],
         color_cursor: wp.array[wp.int32],
-        sweep_offset: wp.array[wp.int32],
         cc: ContactContainer,
         contacts: ContactViews,
         num_joints: wp.int32,
@@ -1575,7 +1558,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
         while cursor > 0:
-            start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor, sweep_offset)
+            start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor)
             if count > fuse_threshold:
                 break
             if lane < count:

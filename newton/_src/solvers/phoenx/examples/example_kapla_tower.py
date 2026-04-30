@@ -507,7 +507,7 @@ class Example:
             wp.capture_launch(self.graph)
         else:
             self.simulate()
-        self._print_step_report()
+        # self._print_step_report()
         # Optional snapshot for the standalone coloring bench.
         dump_frame_env = os.environ.get("PHOENX_DUMP_COLORING_GRAPH")
         if dump_frame_env is not None and int(dump_frame_env) == self.frame_index:

@@ -152,12 +152,12 @@ class SolverPhoenX(SolverBase):
       limit;
     * :data:`JointType.BALL` -- 3-DoF point lock (no drive / limit);
     * :data:`JointType.FIXED` -- 6-DoF weld (no drive / limit);
-    * :data:`JointType.CABLE` -- rigid ball-socket at the parent
-      attachment point + 2 bend + 1 twist soft angular rows. Newton's
-      isotropic bend/twist stiffness (stored on the angular DoF) is
-      written to both the bend and twist slots; the stretch DoF is
-      treated as rigid (PhoenX has no axial-length compliance, so a
-      finite ``stretch_stiffness`` is informational only);
+    * :data:`JointType.CABLE` -- soft fixed joint with PD bend / twist
+      springs (3+2+1 row layout). Newton's isotropic bend/twist
+      stiffness (stored on the angular DoF) is written to both the
+      bend and twist slots; the stretch DoF is treated as rigid
+      (PhoenX has no axial-length compliance, so a finite
+      ``stretch_stiffness`` is informational only);
     * :data:`JointType.FREE` -- free-floating base (no constraint
       column; integration alone handles it).
 
@@ -185,7 +185,6 @@ class SolverPhoenX(SolverBase):
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
         max_thread_blocks: int | None = None,
-        rotate_color_order: bool = False,
         velocity_readout: str = "substep_end",
     ):
         """Build the PhoenX solver from ``model``.
@@ -393,6 +392,22 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
+        # Detect compound bodies (any body with > 1 collision shape) on
+        # the host. The result gates the body-pair contact grouping
+        # optimization, which sorts contacts by ``(min(b1, b2),
+        # max(b1, b2))`` so multiple shape-pair runs sharing one body
+        # pair collapse into a single contact column. Single-shape
+        # scenes pay nothing (the predicate keeps the optimization off
+        # and the matching scratch arrays are not allocated). See
+        # :file:`newton/_src/solvers/phoenx/CONTACT_GROUP_COMPOUND_OPT.md`.
+        has_compound_bodies = False
+        if model.shape_body is not None and model.shape_count > 0 and model.body_count > 0:
+            sb = model.shape_body.numpy()
+            sb = sb[sb >= 0]
+            if sb.size > 0:
+                counts = np.bincount(sb, minlength=int(model.body_count))
+                has_compound_bodies = bool((counts > 1).any())
+
         self.world = PhoenXWorld(
             bodies=self.bodies,
             constraints=self._constraints,
@@ -407,7 +422,7 @@ class SolverPhoenX(SolverBase):
             step_layout=step_layout,
             threads_per_world=threads_per_world,
             max_thread_blocks=max_thread_blocks,
-            rotate_color_order=rotate_color_order,
+            enable_body_pair_grouping=has_compound_bodies,
             device=self.device,
         )
 

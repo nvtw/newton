@@ -432,9 +432,20 @@ def partitioning_coloring_incremental_greedy_kernel(
             # one HW instruction on CUDA; the previous 64-iteration
             # linear scan was warp-divergent and burned cycles on
             # commits that landed in low colours.
+            #
+            # Overflow on this kernel is "no free bit in the 64-wide
+            # forbidden mask"; ``__ffsll(0)`` returns 0 which the
+            # wrapper turns into ``-1``. We MUST treat ``c < 0`` as
+            # overflow -- if we don't, the else branch writes
+            # ``color_tags[tid] = c + 1 = 0`` (the uncoloured
+            # sentinel), the vertex is re-processed every round and
+            # the per-commit ``atomic_sub(num_remaining, 1)`` drives
+            # the predicate negative, so the surrounding
+            # ``wp.capture_while(num_remaining, ...)`` never exits
+            # and the captured graph hangs the GPU.
             free_mask = forbidden_mask ^ _FREE_COLOR_FLIP
             c = _lowest_set_bit(free_mask)
-            if c >= GREEDY_MAX_COLORS:
+            if c < wp.int32(0) or c >= GREEDY_MAX_COLORS:
                 # Mask saturated: graph wants > GREEDY_MAX_COLORS
                 # distinct colours. We MUST still commit something
                 # and decrement ``num_remaining`` -- the outer
@@ -571,9 +582,6 @@ def incremental_init_csr_kernel(
     color_starts[0] = 0
 
 
-_SWEEP_OFFSET_WRAP = wp.constant(wp.int32(1024))
-
-
 @wp.kernel(enable_backward=False)
 def incremental_begin_sweep_kernel(
     num_colors: wp.array[int],
@@ -585,27 +593,6 @@ def incremental_begin_sweep_kernel(
     # can live inside a captured region when the caller wants to bake
     # the whole substep into a CUDA graph.
     color_cursor[0] = num_colors[0]
-
-
-@wp.kernel(enable_backward=False)
-def incremental_begin_sweep_rotate_kernel(
-    num_colors: wp.array[int],
-    color_cursor: wp.array[int],
-    sweep_offset: wp.array[int],
-):
-    # As :func:`incremental_begin_sweep_kernel`, plus bump
-    # ``sweep_offset`` modulo ``_SWEEP_OFFSET_WRAP``. The PGS kernels
-    # decode the active colour as ``(n_colors - cursor + offset) %
-    # n_colors``, so successive sweeps rotate which colour fires
-    # first (symmetric Gauss-Seidel). Evens out the convergence
-    # asymmetry PGS introduces between earlier-fired and later-fired
-    # colours (visible as alternating stiff / loose pairs along
-    # chains). Selected by ``SolverPhoenX(rotate_color_order=True)``.
-    color_cursor[0] = num_colors[0]
-    next_offset = sweep_offset[0] + wp.int32(1)
-    if next_offset >= _SWEEP_OFFSET_WRAP:
-        next_offset = wp.int32(0)
-    sweep_offset[0] = next_offset
 
 
 @wp.kernel(enable_backward=False)

@@ -30,6 +30,9 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.tests._mujoco_skip import require_mujoco_opt_in
+
+setUpModule = require_mujoco_opt_in
 
 try:
     import mujoco  # noqa: F401

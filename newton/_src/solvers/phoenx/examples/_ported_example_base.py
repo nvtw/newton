@@ -156,6 +156,13 @@ class PortedExample:
     #: viewers that don't expose a ``_paused`` attribute (e.g. headless
     #: stub viewers in tests / benchmarks).
     pause_after_step: bool = False
+    #: Emit PhoenX solver/contact coloring stats after each physics
+    #: step. Subclasses can leave this disabled and call
+    #: :meth:`_print_step_report` themselves when they need a more
+    #: specific cadence.
+    print_step_reports: bool = False
+    #: Human-readable scene name used in step report log prefixes.
+    step_report_label: str | None = None
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -164,6 +171,7 @@ class PortedExample:
 
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
+        self.frame_index = 0
 
         self._build()
 
@@ -378,13 +386,36 @@ class PortedExample:
             wp.capture_launch(self.graph)
         else:
             self.simulate()
+        if self.print_step_reports:
+            self._print_step_report()
         self.sim_time += self.frame_dt
+        self.frame_index += 1
         if self.pause_after_step and hasattr(self.viewer, "_paused"):
             # Re-arm the viewer's pause flag so ``newton.examples.run``'s
             # per-iteration ``if not viewer.is_paused():`` gate fires
             # exactly once per user-issued unpause. SPACE (ViewerGL) or
             # the side-panel "Pause" checkbox advances by one frame.
             self.viewer._paused = True
+
+    def _print_step_report(self) -> None:
+        report = self.world.step_report()
+        # ``max_body_degree`` is the chromatic lower bound; the ratio
+        # measures how close the colourer is to it.
+        slack = f"{report.num_colors / report.max_body_degree:.2f}x" if report.max_body_degree > 0 else "n/a"
+        fields = [
+            f"step={self.frame_index}",
+            f"contacts={report.num_contact_columns}",
+            f"active_constraints={report.num_active_constraints}",
+            f"colors={report.num_colors}",
+            f"max_body_degree={report.max_body_degree}",
+            f"colors/lower_bound={slack}",
+            f"color_sizes={report.color_sizes}",
+        ]
+        if report.per_world_num_colors is not None:
+            fields.append(f"per_world_num_colors={report.per_world_num_colors}")
+            fields.append(f"per_world_color_sizes={report.per_world_color_sizes}")
+        label = self.step_report_label or self.__class__.__name__
+        print(f"[PhoenX {label}] " + " ".join(fields))
 
     def render(self) -> None:
         # ``log_state`` uses ViewerGL's CUDA-OpenGL interop path: the

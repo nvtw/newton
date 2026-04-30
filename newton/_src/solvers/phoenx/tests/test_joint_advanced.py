@@ -383,30 +383,32 @@ class TestColoringPriorityBias(unittest.TestCase):
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX joint-advanced tests require CUDA + graph capture")
 class TestVelocityIterationsValidator(unittest.TestCase):
-    """``velocity_iterations`` is now load-bearing for soft-PD damping
-    (cable bend / twist, revolute / prismatic drive PD, PD limit
-    rows): the relax pass applies the velocity-only damping impulse
-    that was split out of the main solve. ``velocity_iterations = 0``
-    must raise -- silently zeroing damping is worse than failing
-    construction."""
+    """``velocity_iterations`` may be 0 since soft-PD damping moved
+    back into the main iterate loop via the combined
+    :func:`pd_coefficients` formulation (the previous split-based
+    cable damping ran only in the relax pass and forced
+    ``velocity_iterations >= 1``). Negative values are still
+    rejected."""
 
-    def test_zero_velocity_iters_rejected(self) -> None:
+    def test_negative_velocity_iters_rejected(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             _PhoenXScene(
                 substeps=4,
                 solver_iterations=8,
-                velocity_iterations=0,
+                velocity_iterations=-1,
             ).finalize()
         self.assertIn("velocity_iterations", str(ctx.exception))
 
-    def test_one_velocity_iter_settles_box(self) -> None:
-        """Sanity check that the new minimum (``velocity_iterations =
-        1``) still produces a sensible single-body settle on the
-        ground plane."""
+    def test_zero_velocity_iters_settles_box(self) -> None:
+        """``velocity_iterations = 0`` is now a valid configuration
+        (skips the relax pass entirely). A simple resting-box scene
+        must still settle to the ground plane -- if the contact
+        damping or positional drift cleanup actually needed the
+        relax pass, the box would oscillate or sink below the floor."""
         scene = _PhoenXScene(
             substeps=4,
             solver_iterations=8,
-            velocity_iterations=1,
+            velocity_iterations=0,
         )
         scene.add_ground_plane()
         scene.add_box(position=(0.0, 0.0, 0.5), half_extents=(0.5, 0.5, 0.5))
@@ -418,7 +420,7 @@ class TestVelocityIterationsValidator(unittest.TestCase):
         self.assertLess(
             abs(z - 0.5),
             0.05,
-            msg=f"cube z={z:.4f} did not settle near 0.5 with velocity_iterations=1",
+            msg=f"cube z={z:.4f} did not settle near 0.5 with velocity_iterations=0",
         )
 
 

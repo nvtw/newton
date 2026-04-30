@@ -168,7 +168,7 @@ class Example:
             )
         elif self.solver_type == "phoenx":
             self.solver = newton.solvers.SolverPhoenX(
-                self.model, substeps=4, solver_iterations=8, velocity_iterations=1
+                self.model, substeps=1, solver_iterations=10, velocity_iterations=1
             )
         else:
             raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd', 'mujoco', or 'phoenx'.")
@@ -382,12 +382,12 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
-        parser.set_defaults(world_count=100)
+        parser.set_defaults(world_count=1)
         parser.add_argument(
             "--solver",
             type=str,
             choices=["xpbd", "mujoco", "phoenx"],
-            default="mujoco",
+            default="phoenx",
             help="Rigid-body solver backend: 'xpbd', 'mujoco', or 'phoenx'.",
         )
         parser.add_argument("--num-per-world", type=int, default=1, help="Number of assemblies per world.")
@@ -400,5 +400,5 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init(parser)
 
     example = Example(viewer, args)
-
+    viewer._paused = True
     newton.examples.run(example, args)

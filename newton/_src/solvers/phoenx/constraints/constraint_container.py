@@ -37,7 +37,6 @@ __all__ = [
     "DEFAULT_HERTZ_MOTOR",
     "ConstraintBodies",
     "ConstraintContainer",
-    "angle_proportional_chord_bias",
     "assert_constraint_header",
     "constraint_bodies_make",
     "constraint_container_zeros",
@@ -469,6 +468,17 @@ DEFAULT_HERTZ_LINEAR = wp.constant(wp.float32(1.0e9))
 DEFAULT_HERTZ_ANGULAR = wp.constant(wp.float32(1.0e9))
 #: Hinge / cone limit stiffness; Nyquist-clamped so limits don't bounce.
 DEFAULT_HERTZ_LIMIT = wp.constant(wp.float32(1.0e9))
+
+#: Hard upper bound on per-row Nyquist headroom multipliers (the
+#: ``nyquist_boost`` argument to :func:`pd_coefficients` and friends).
+#: A boost of ``N`` lets PD rows accept stiffness up to
+#: ``N / (M_inv * dt^2)`` -- ``N = 1`` is the strict implicit-Euler
+#: bound, larger values trade headroom for high-frequency ringing
+#: risk. Per-row requests above this constant are silently clamped
+#: down so users cannot push past a known-safe limit. The cable
+#: bend / twist rows default to this value (``10``); revolute /
+#: prismatic drive / limit rows default to ``1``.
+_PD_NYQUIST_HEADROOM_MAX = wp.constant(wp.float32(10.0))
 #: Velocity-motor stiffness (only modulates the impulse coefficient
 #: since velocity targets carry no positional bias).
 DEFAULT_HERTZ_MOTOR = wp.constant(wp.float32(1.0e9))
@@ -483,12 +493,15 @@ def soft_constraint_coefficients(
     hertz: wp.float32,
     damping_ratio: wp.float32,
     dt: wp.float32,
-    clamp_nyquist: wp.bool,
 ):
     """Map ``(hertz, damping_ratio, dt)`` to PGS soft-constraint coefficients.
 
     Box2D v3 / Bepu / Nordby formulation
-    (https://box2d.org/posts/2024/02/solver2d/).
+    (https://box2d.org/posts/2024/02/solver2d/). ``omega = 2*pi*hertz``
+    is clamped at the per-substep Nyquist ``pi/dt``, so requesting
+    more stiffness than the current ``dt`` can resolve yields the
+    stiffest resolvable lock rather than aliasing. Substep-independent:
+    more substeps = higher Nyquist = more rigid.
 
     Returns ``(bias_rate [1/s], mass_coeff [-], impulse_coeff [-])``;
     the latter two lie in ``[0, 1]`` and feed straight into the PGS
@@ -496,31 +509,18 @@ def soft_constraint_coefficients(
 
     ``hertz <= 0`` yields a rigid constraint with no drift
     correction: ``(0, 1, 0)`` -- the un-softened plain-PGS row.
-
-    ``clamp_nyquist`` saturates ``omega = 2*pi*hertz`` at the
-    per-substep Nyquist rate ``pi/dt``. Pass ``True`` for rows where
-    the bias term can overshoot if ``omega`` aliases (contacts:
-    bias-rate spike causes inter-body separation jitter at low
-    substep counts). Pass ``False`` for rows where the user's intent
-    is "as rigid as possible at the substep budget paid for" --
-    joint anchor locks (ball-socket / revolute / prismatic / fixed)
-    and joint limit rows: clamping there caps drift correction at
-    ~``0.6 * idt`` and produces visible anchor offset / limit leak.
-    Unclamped omega makes ``mass_coeff -> 1``, ``impulse_coeff -> 0``,
-    ``bias_rate -> idt`` (effectively a hard PGS lock).
     """
     if hertz <= 0.0:
         return wp.float32(0.0), wp.float32(1.0), wp.float32(0.0)
 
-    omega = 2.0 * 3.14159265358979 * hertz
-    if clamp_nyquist:
-        # Clamp omega at the per-substep Nyquist rate: the fastest
-        # spring the integrator can resolve is one with half a cycle
-        # per step, i.e. ``omega * dt == pi``. Requests beyond that
-        # alias, so we saturate to the maximally-rigid response the
-        # current ``dt`` supports.
-        omega_nyquist = 3.14159265358979 / dt
-        omega = wp.min(omega, omega_nyquist)
+    # Clamp omega at the per-substep Nyquist rate: the fastest spring
+    # the integrator can resolve is one with half a cycle per step,
+    # i.e. ``omega * dt == pi``. Requests beyond that alias, so we
+    # saturate to the maximally-rigid response the current ``dt``
+    # supports. See the block comment above for the full rationale.
+    omega_request = 2.0 * 3.14159265358979 * hertz
+    omega_nyquist = 3.14159265358979 / dt
+    omega = wp.min(omega_request, omega_nyquist)
     a1 = 2.0 * damping_ratio + omega * dt
     a2 = dt * omega * a1
     a3 = 1.0 / (1.0 + a2)
@@ -534,6 +534,7 @@ def pd_coefficients(
     position_error: wp.float32,
     eff_mass_inv: wp.float32,
     dt: wp.float32,
+    nyquist_boost: wp.float32,
 ):
     """Map ``(k, c, C, M_inv, dt)`` to Jitter2 PGS spring-damper triple.
 
@@ -565,6 +566,10 @@ def pd_coefficients(
         position_error: ``C = actual - target`` [rad or m].
         eff_mass_inv: ``J M^{-1} J^T``; ``0`` short-circuits to no-op.
         dt: Substep [s], must be > 0.
+        nyquist_boost: Per-row headroom multiplier on the Nyquist
+            stiffness clamp. ``1`` = strict bound, larger values trade
+            headroom for ringing risk; clamped to
+            ``[1, _PD_NYQUIST_HEADROOM_MAX]``.
     """
     if eff_mass_inv <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
@@ -578,8 +583,11 @@ def pd_coefficients(
     # bias spikes to ``C / dt`` and its effective mass collapses to
     # ``1 / eff_mass_inv``. Capping ``k`` at the Nyquist limit
     # keeps user-supplied gains in the regime where the soft-PD
-    # plumbing degrades smoothly.
-    k_max = wp.float32(1.0) / (eff_mass_inv * dt * dt)
+    # plumbing degrades smoothly. ``nyquist_boost`` lets a caller
+    # opt into more headroom; the global ``_PD_NYQUIST_HEADROOM_MAX``
+    # caps the boost so requests cannot push past a known-safe limit.
+    boost = wp.clamp(nyquist_boost, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
+    k_max = boost / (eff_mass_inv * dt * dt)
     k_clamped = wp.min(stiffness, k_max)
 
     # Jitter2 SetSpringParameters, but with k/c already in absolute
@@ -605,7 +613,7 @@ def pd_coefficients_split(
     position_error: wp.float32,
     eff_mass_inv: wp.float32,
     dt: wp.float32,
-    clamp_nyquist: wp.bool,
+    nyquist_boost: wp.float32,
 ):
     """Spring / damping XPBD-style split of :func:`pd_coefficients`.
 
@@ -620,8 +628,8 @@ def pd_coefficients_split(
     Splitting decouples the two physical effects:
 
     * The spring row sees ``softness = 1 / (dt*k)``, so ``gamma`` and
-      ``bias`` are well-conditioned for any ``k``. Convergence is
-      independent of the damping gain.
+      ``bias`` are well-conditioned for any ``k`` (after the Nyquist
+      clamp). Convergence is independent of the damping gain.
     * The damping row applies one implicit-Euler velocity update:
       ``v_new = v / (1 + dt*c*M_inv)`` -> required impulse
       ``lam = -dt*c / (1 + dt*c*M_inv) * Jv``. One PGS iteration
@@ -631,17 +639,6 @@ def pd_coefficients_split(
 
     Equivalent steady state to the combined :func:`pd_coefficients`
     up to ``O(dt^2)`` discretisation error.
-
-    ``clamp_nyquist`` caps ``k`` at ``1 / (eff_mass_inv * dt^2)`` so
-    the implicit-Euler spring stays in the regime where the substep
-    can resolve it. Pass ``False`` for rows where the user's intent
-    is "as rigid as possible at the substep budget paid for" --
-    cable bend / twist rows and revolute / prismatic limit stops --
-    since clamping at ``k_max`` collapses the spring to a velocity
-    row that PGS can't propagate (chains droop, joint limits leak).
-    The split's spring half stays well-conditioned at any ``k``
-    (``softness = 1 / (dt * k)``, ``gamma`` and ``bias`` shrink as
-    ``k`` grows), so leaving the clamp off is safe.
     """
     if eff_mass_inv <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
@@ -651,15 +648,16 @@ def pd_coefficients_split(
     idt = wp.float32(1.0) / dt
 
     # ---- Spring-only soft constraint (damping = 0) -------------------
+    # Equivalent to ``pd_coefficients(k_clamped, 0, C, M_inv, dt)``;
+    # inlined to share the Nyquist clamp.
     gamma_s = wp.float32(0.0)
     bias_s = wp.float32(0.0)
     eff_mass_s = wp.float32(0.0)
     if stiffness > 0.0:
-        k_used = stiffness
-        if clamp_nyquist:
-            k_max = wp.float32(1.0) / (eff_mass_inv * dt * dt)
-            k_used = wp.min(stiffness, k_max)
-        softness_s = wp.float32(1.0) / (dt * k_used)
+        boost = wp.clamp(nyquist_boost, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
+        k_max = boost / (eff_mass_inv * dt * dt)
+        k_clamped = wp.min(stiffness, k_max)
+        softness_s = wp.float32(1.0) / (dt * k_clamped)
         gamma_s = softness_s * idt
         # ``bias_factor = dt * k / (0 + dt * k) = 1`` when damping = 0.
         bias_s = position_error * idt
@@ -675,48 +673,3 @@ def pd_coefficients_split(
         damp_mass = (dt * damping) / (wp.float32(1.0) + dt * damping * eff_mass_inv)
 
     return gamma_s, bias_s, eff_mass_s, damp_mass
-
-
-@wp.func
-def angle_proportional_chord_bias(
-    chord_along: wp.float32,
-    lever_arm: wp.float32,
-    idt: wp.float32,
-):
-    """Convert a chord-length displacement into an angle-proportional
-    velocity bias for a soft point-anchor row.
-
-    For a body rotated by angle ``theta`` about an axis perpendicular
-    to a body-frame anchor at lever arm ``L``, the world-frame anchor
-    chord length is ``2 * L * sin(theta / 2)``. A naive PGS bias
-    ``chord * idt`` produces a restoring torque ``tau ~ k * L^2 * sin(theta)``
-    -- linear in ``theta`` only for small angles, saturating at
-    ``theta = pi/2`` and wrapping back to zero at ``theta = pi``.
-
-    This helper recovers ``theta`` from the chord and returns
-    ``theta * L * idt``, the velocity bias that closes the angle in
-    one substep along the chord direction. The resulting per-iter
-    PGS update produces a restoring torque ``tau ~ k * L^2 * theta``
-    that stays linear in ``theta`` across the full angle range.
-
-    Args:
-        chord_along: Signed chord length along a known direction
-            (e.g. tangent ``t1`` projection of the anchor displacement).
-            Sign carries the rotation direction.
-        lever_arm: ``L`` -- the body-frame distance from the joint
-            origin to the helper anchor (must be > 0).
-        idt: ``1 / substep_dt``.
-
-    Returns:
-        Velocity bias ``theta * L * idt`` with the sign of
-        ``chord_along``. Equals ``chord_along * idt`` to first order
-        (small-angle limit).
-    """
-    if lever_arm <= 0.0:
-        return wp.float32(0.0)
-    # Clamp the half-chord to ``|chord| <= 2*L`` (numerically possible
-    # to exceed by epsilon at large drift; ``asin`` requires a valid
-    # input domain).
-    sin_half = wp.clamp(chord_along / (wp.float32(2.0) * lever_arm), wp.float32(-1.0), wp.float32(1.0))
-    theta = wp.float32(2.0) * wp.asin(sin_half)
-    return theta * lever_arm * idt

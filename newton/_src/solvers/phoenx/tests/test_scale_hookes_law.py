@@ -22,54 +22,23 @@ import unittest
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.examples.example_phoenx_scale import (
-    CUBE_GRID,
-    CUBE_MASS,
-    GRAVITY,
-    LIMIT_KD,
-    LIMIT_KE,
-    LIMIT_LOWER,
-    PLATFORM_MASS,
-)
-from newton._src.solvers.phoenx.examples.example_phoenx_scale import (
-    Example as ScaleExample,
-)
 
-
-class _NullViewer:
-    """Stub viewer so the example builds without a real GL window."""
-
-    ui = None
-
-    def set_model(self, m):
-        pass
-
-    def set_camera(self, **kw):
-        pass
-
-    def begin_frame(self, t):
-        pass
-
-    def log_state(self, s):
-        pass
-
-    def log_contacts(self, c, s):
-        pass
-
-    def end_frame(self):
-        pass
-
-    def register_ui_callback(self, *a, **kw):
-        pass
-
-    def apply_forces(self, s):
-        pass
+# Scale parameters. Standalone so this test does not depend on
+# any example module.
+_GRAVITY = 9.81
+_LIMIT_LOWER = -0.05
+_LIMIT_KE = 100_000.0
+_LIMIT_KD = 2.0 * math.sqrt(_LIMIT_KE * 5.0)  # critical damping for 5 kg platform
 
 
 def _build_isolated_scale(*, platform_mass: float, n_cubes: int, cube_mass: float, limit_ke: float, limit_kd: float):
-    """Standalone scale builder for the parametric Hooke's-law sweep --
-    avoids the example's hard-coded mass/cube count so the test can
-    sweep across loads."""
+    """Standalone scale builder for the parametric Hooke's-law sweep.
+
+    Builds a 1 m x 1 m x 5 cm platform on a +z prismatic joint with a
+    PD spring-damper at the lower limit. Optionally loads ``n_cubes``
+    14 cm cubes onto the platform in a roughly square grid. Mirrors
+    the reaction-force mathematics of a kitchen scale.
+    """
     mb = newton.ModelBuilder()
     mb.add_ground_plane()
     cfg_static = newton.ModelBuilder.ShapeConfig(density=0.0)
@@ -89,7 +58,7 @@ def _build_isolated_scale(*, platform_mass: float, n_cubes: int, cube_mass: floa
         parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.20), q=wp.quat_identity()),
         child_xform=wp.transform_identity(),
         axis=(0.0, 0.0, 1.0),
-        limit_lower=LIMIT_LOWER,
+        limit_lower=_LIMIT_LOWER,
         limit_upper=0.05,
         limit_ke=limit_ke,
         limit_kd=limit_kd,
@@ -119,7 +88,7 @@ def _build_isolated_scale(*, platform_mass: float, n_cubes: int, cube_mass: floa
                 )
                 mb.add_shape_box(cube, hx=cube_he, hy=cube_he, hz=cube_he, cfg=cfg_static)
 
-    mb.gravity = -GRAVITY
+    mb.gravity = -_GRAVITY
     model = mb.finalize()
     cp = newton.CollisionPipeline(model, contact_matching="sticky")
     contacts = cp.contacts()
@@ -171,8 +140,8 @@ class TestScaleHookesLaw(unittest.TestCase):
                     platform_mass=plat_m,
                     n_cubes=n_cubes,
                     cube_mass=cube_m,
-                    limit_ke=LIMIT_KE,
-                    limit_kd=LIMIT_KD,
+                    limit_ke=_LIMIT_KE,
+                    limit_kd=_LIMIT_KD,
                 )
                 q, qd = _settle_and_read_q(model, solver, cp, contacts, n_frames=600)
 
@@ -183,9 +152,9 @@ class TestScaleHookesLaw(unittest.TestCase):
                     msg=f"joint not settled: qd={qd:.5f} m/s (try more substeps or kd)",
                 )
 
-                f_total = (plat_m + n_cubes * cube_m) * GRAVITY
-                expected_deflection = f_total / LIMIT_KE
-                actual_deflection = LIMIT_LOWER - q
+                f_total = (plat_m + n_cubes * cube_m) * _GRAVITY
+                expected_deflection = f_total / _LIMIT_KE
+                actual_deflection = _LIMIT_LOWER - q
                 # Tolerance: 5% relative or 0.1 mm absolute, whichever is larger.
                 tol = max(0.05 * expected_deflection, 1.0e-4)
                 self.assertAlmostEqual(
@@ -195,7 +164,7 @@ class TestScaleHookesLaw(unittest.TestCase):
                     msg=f"plat_m={plat_m}, n_cubes={n_cubes}: "
                     f"deflection={actual_deflection * 1000:.3f} mm vs "
                     f"expected {expected_deflection * 1000:.3f} mm "
-                    f"(F_total={f_total:.2f} N, ke={LIMIT_KE:.0f} N/m)",
+                    f"(F_total={f_total:.2f} N, ke={_LIMIT_KE:.0f} N/m)",
                 )
 
     def test_stiffness_sweep_inverse_proportional(self) -> None:
@@ -216,9 +185,9 @@ class TestScaleHookesLaw(unittest.TestCase):
             )
             q, qd = _settle_and_read_q(model, solver, cp, contacts, n_frames=600)
             self.assertLess(abs(qd), 0.01, msg=f"ke={ke}: not settled")
-            deflections.append((ke, LIMIT_LOWER - q))
+            deflections.append((ke, _LIMIT_LOWER - q))
         # ke * deflection should be ~ constant (= F_total).
-        f_expected = plat_m * GRAVITY
+        f_expected = plat_m * _GRAVITY
         for ke, dx in deflections:
             product = ke * dx
             self.assertAlmostEqual(
@@ -227,37 +196,6 @@ class TestScaleHookesLaw(unittest.TestCase):
                 delta=0.05 * f_expected,
                 msg=f"ke={ke}: ke*dx = {product:.2f} N vs expected {f_expected:.2f} N",
             )
-
-    def test_full_scale_example_settles_at_hookes_law(self) -> None:
-        """The actual ``example_phoenx_scale.Example`` (5x5 cube grid on
-        a 5 kg platform) must settle at the predicted deflection."""
-        ex = ScaleExample(_NullViewer(), None)
-        # 1200 frames @ 60 Hz = 20 s; the cubes need a few seconds to
-        # settle on the platform before the platform itself reaches a
-        # clean steady state.
-        for _ in range(1200):
-            ex.step()
-
-        # Read the prismatic joint's q via eval_ik on the example's model.
-        jq = wp.zeros(ex.model.joint_coord_count, dtype=wp.float32, device=ex.device)
-        jqd = wp.zeros(ex.model.joint_dof_count, dtype=wp.float32, device=ex.device)
-        newton.eval_ik(ex.model, ex.state_0, jq, jqd)
-        q = float(jq.numpy()[0])
-        qd = float(jqd.numpy()[0])
-        self.assertLess(abs(qd), 0.01, msg=f"example not settled: qd={qd:.5f} m/s")
-
-        f_total = (PLATFORM_MASS + CUBE_GRID * CUBE_GRID * CUBE_MASS) * GRAVITY
-        expected_deflection = f_total / LIMIT_KE
-        actual_deflection = LIMIT_LOWER - q
-        # 10% tolerance for the contact-coupled test (cubes sliding slightly etc.).
-        self.assertAlmostEqual(
-            actual_deflection,
-            expected_deflection,
-            delta=0.10 * expected_deflection,
-            msg=f"example deflection={actual_deflection * 1000:.3f} mm vs expected "
-            f"{expected_deflection * 1000:.3f} mm "
-            f"(F_total={f_total:.2f} N)",
-        )
 
 
 if __name__ == "__main__":

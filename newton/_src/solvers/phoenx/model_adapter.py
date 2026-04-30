@@ -14,16 +14,15 @@ Mapping:
 
 * :data:`JointType.REVOLUTE` -> :data:`JOINT_MODE_REVOLUTE`.
 * :data:`JointType.PRISMATIC` -> :data:`JOINT_MODE_PRISMATIC`.
-* :data:`JointType.CABLE` -> :data:`JOINT_MODE_CABLE` (rigid
-  ball-socket at the parent attachment + 2 bend + 1 twist soft
-  angular rows; Newton's stretch DoF is treated as rigid because
-  PhoenX has no axial-length compliance).
+* :data:`JointType.CABLE` -> :data:`JOINT_MODE_CABLE` (soft fixed
+  joint with PD bend / twist softness; Newton's stretch DoF is
+  treated as rigid because PhoenX has no axial-length compliance).
 * :data:`JointType.BALL` -> :data:`JOINT_MODE_BALL_SOCKET` (drive /
   limit not supported, must be off in the Model).
 * :data:`JointType.FIXED` -> :data:`JOINT_MODE_FIXED`.
 * :data:`JointType.FREE` -> no constraint column (free-floating base).
-* :data:`JointType.DISTANCE`, :data:`JointType.D6`,
-  :data:`JointType.CABLE` -> unsupported; raises.
+* :data:`JointType.DISTANCE`, :data:`JointType.D6` -> unsupported;
+  raises.
 
 The PhoenX body container (built by :class:`SolverPhoenX`) reserves
 slot 0 as a static world anchor, so Newton body ``i`` maps to PhoenX
@@ -216,7 +215,10 @@ def _newton_target_mode_to_adbs_drive_mode(target_mode: int, stiffness: float, d
     return int(DRIVE_MODE_OFF)
 
 
-def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | None = None) -> AdbsInitArrays:
+def build_adbs_init_arrays(
+    model: newton.Model,
+    device: wp.context.Devicelike | None = None,
+) -> AdbsInitArrays:
     """Walk ``model``'s joint arrays, convert each supported joint to
     an ADBS descriptor, and upload the 19 kwargs as ``wp.array`` on
     ``device``.
@@ -378,10 +380,12 @@ def build_adbs_init_arrays(model: newton.Model, device: wp.context.Devicelike | 
             phoenx_mode = int(JOINT_MODE_CABLE)
             # Newton's CABLE joint has 2 DoFs: a linear stretch DoF
             # (qd_start) and a single isotropic angular bend/twist DoF
-            # (qd_start + 1). PhoenX's cable mode is a rigid ball-socket
-            # at ``anchor1`` plus 3 soft angular rows: 2 bend (perpendicular
-            # to ``anchor1 -> anchor2``) and 1 twist (along the axis).
-            # The two abstractions don't line up exactly:
+            # (qd_start + 1). PhoenX's cable mode is a soft fixed joint
+            # (3+2+1 row layout) with PD bend (anchor-2 tangent rows)
+            # and twist (anchor-3 scalar row) springs; gains are
+            # rescaled by ``1 / rest_length^2`` to convert N*m/rad ->
+            # N/m at the lever-armed anchors. The two abstractions
+            # don't line up exactly:
             #
             # * Newton models the cable's stretch as a 1-DoF spring; PhoenX
             #   has no axial-length compliance (the ball-socket lock at

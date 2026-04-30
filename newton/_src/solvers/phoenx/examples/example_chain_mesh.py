@@ -113,12 +113,16 @@ class Example(PortedExample):
     solver_iterations = 5
     velocity_iterations = 1
     default_friction = 0.4
-    start_paused = True
+    start_paused = False
     broad_phase = "sap"
     step_layout = "single_world"
     # Skip contact arrows so ``viewer.log_state`` stays on ViewerGL's
     # CUDA-OpenGL interop path (no per-frame host sync).
     show_contacts = False
+    step_report_label = "ChainMesh"
+    # Flip to ``True`` to print PhoenX contact/constraint coloring stats
+    # after each physics step.
+    print_step_reports = True
 
     def step(self) -> None:
         super().step()

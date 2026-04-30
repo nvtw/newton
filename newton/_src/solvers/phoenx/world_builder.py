@@ -104,13 +104,17 @@ class JointMode(IntEnum):
       (rotations free, no drive/limit).
     * :attr:`FIXED` -- 6-DoF weld along ``anchor1 -> anchor2``
       (no drive/limit).
-    * :attr:`CABLE` -- ball-socket with per-component soft angular
-      stiffness / damping: bend about the two axes perpendicular to
-      ``anchor1 -> anchor2`` and twist along it. ``bend_stiffness``
-      and ``twist_stiffness`` (plus their damping pair) are stored
-      in the ADBS column's drive / limit slots, which are otherwise
-      unused in cable mode; the actuator / limit dwords share
-      storage, so no column widening.
+    * :attr:`CABLE` -- soft fixed joint built on the same 3+2+1 row
+      layout as :attr:`FIXED` but with PD softness on the anchor-2
+      tangent rows (bend) and the anchor-3 scalar row (twist). User
+      supplies ``bend_stiffness`` / ``bend_damping`` [N*m/rad,
+      N*m*s/rad] and ``twist_stiffness`` / ``twist_damping``
+      [N*m/rad, N*m*s/rad]; gains are rescaled by ``1 / rest_length^2``
+      to obtain the equivalent positional spring at the lever-armed
+      anchors. Converges to revolute as ``k_bend -> infinity`` and to
+      :attr:`FIXED` as both gains diverge. The user-facing kwargs
+      reuse the ADBS column's drive / limit slots: ``bend_*`` ->
+      drive slots, ``twist_*`` -> limit slots.
     """
 
     REVOLUTE = int(JOINT_MODE_REVOLUTE)
@@ -761,7 +765,7 @@ class WorldBuilder:
         damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO),
         stiffness_limit: float = 0.0,
         damping_limit: float = 0.0,
-        # CABLE mode only -- per-component angular stiffness / damping.
+        # CABLE mode only -- per-component bend / twist stiffness and damping.
         bend_stiffness: float = 0.0,
         twist_stiffness: float = 0.0,
         bend_damping: float = 0.0,
@@ -782,12 +786,13 @@ class WorldBuilder:
           displacements [m], ``max_force_drive`` is force [N].
         * :attr:`JointMode.FIXED` -- 6-DoF weld along
           ``anchor1 -> anchor2``; no drive / limit.
-        * :attr:`JointMode.CABLE` -- rigid ball-socket at ``anchor1``
-          plus three soft angular rows (Darboux vector vs
-          :meth:`finalize`-time rest pose). ``bend_{stiffness,damping}``
+        * :attr:`JointMode.CABLE` -- soft fixed joint with PD bend /
+          twist springs (3+2+1 row layout). ``bend_{stiffness,damping}``
           [N*m/rad, N*m*s/rad] govern the two axes perp to
           ``anchor1 -> anchor2``, ``twist_{stiffness,damping}`` the
-          axis along it. No drive / limit rows.
+          axis along it. Gains are rescaled by ``1 / rest_length^2``
+          to convert rotational SI units to the equivalent positional
+          spring at the lever-armed anchors. No drive / limit rows.
 
         ``stiffness_drive == damping_drive == 0`` disables the drive
         (REVOLUTE / PRISMATIC); ``min_value > max_value`` disables
@@ -849,8 +854,9 @@ class WorldBuilder:
                 raise ValueError(
                     "add_joint(mode=CABLE) requires ``anchor2``; the line "
                     "anchor1 -> anchor2 defines the cable's reference "
-                    "(twist) axis and the plane perpendicular to it is "
-                    "the bend plane"
+                    "axis. Bend stiffness acts on the two axes "
+                    "perpendicular to it; twist stiffness on the axis "
+                    "itself."
                 )
             if drive_mode_enum is not DriveMode.OFF:
                 raise ValueError(
@@ -870,22 +876,19 @@ class WorldBuilder:
                 raise ValueError(
                     "add_joint(mode=CABLE) does not use stiffness_drive / "
                     "damping_drive directly -- pass bend_stiffness / "
-                    "bend_damping (they share the same column slots, set "
-                    "one or the other)"
+                    "bend_damping (they share the same column slots)"
                 )
             if stiffness_limit != 0.0 or damping_limit != 0.0:
                 raise ValueError(
                     "add_joint(mode=CABLE) does not use stiffness_limit / "
                     "damping_limit directly -- pass twist_stiffness / "
-                    "twist_damping (they share the same column slots, set "
-                    "one or the other)"
+                    "twist_damping (they share the same column slots)"
                 )
             if bend_stiffness < 0.0 or twist_stiffness < 0.0 or bend_damping < 0.0 or twist_damping < 0.0:
                 raise ValueError("add_joint(mode=CABLE) requires non-negative bend / twist stiffness and damping")
-            # Route the user-facing cable kwargs into the descriptor's
-            # existing drive / limit slots: the ADBS column reuses those
-            # dwords for bend / twist gains in cable mode and nothing
-            # else touches them.
+            # The kernel's cable prepare reads bend_* / twist_* from the
+            # drive / limit slots and rescales by 1 / rest_length^2 to
+            # convert N*m/rad -> N/m at the lever-armed anchors.
             stiffness_drive = float(bend_stiffness)
             damping_drive = float(bend_damping)
             stiffness_limit = float(twist_stiffness)
@@ -963,7 +966,6 @@ class WorldBuilder:
         rigid_contact_max: int = 0,
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
-        rotate_color_order: bool = False,
         device: wp.context.Devicelike = None,
     ) -> PhoenXWorld:
         """Allocate GPU storage and build a ready-to-step :class:`PhoenXWorld`.
@@ -1001,6 +1003,17 @@ class WorldBuilder:
             device=device,
         )
 
+        # Detect compound bodies (any rigid body with > 1 shape) so the
+        # contact ingest can opt into body-pair grouping. Single-shape
+        # scenes pay nothing.
+        has_compound_bodies = False
+        if self._shapes:
+            shape_bodies = np.asarray([int(s.body) for s in self._shapes], dtype=np.int32)
+            shape_bodies = shape_bodies[shape_bodies >= 0]
+            if shape_bodies.size > 0:
+                counts = np.bincount(shape_bodies)
+                has_compound_bodies = bool((counts > 1).any())
+
         world = PhoenXWorld(
             bodies=bodies,
             constraints=constraints,
@@ -1014,7 +1027,7 @@ class WorldBuilder:
             default_friction=default_friction,
             num_worlds=self._num_worlds,
             step_layout=step_layout,
-            rotate_color_order=rotate_color_order,
+            enable_body_pair_grouping=has_compound_bodies,
             device=device,
         )
 

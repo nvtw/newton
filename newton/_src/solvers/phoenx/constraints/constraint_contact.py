@@ -77,6 +77,9 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
     apply_pair_velocity_impulse,
     effective_mass_scalar,
 )
+from newton._src.solvers.phoenx.solver_config import (
+    PHOENX_BOOST_CONTACT_NORMAL,
+)
 
 __all__ = [
     "CONTACT_DWORDS",
@@ -503,7 +506,7 @@ def contact_prepare_for_iteration_at(
     # out without needing a ``penetration_slop`` dead zone.
     dt_substep = wp.float32(1.0) / idt
     bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
-        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep, True
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
     )
 
     # Friction-row position bias. Sub-millimetre ``friction_slop`` clamps
@@ -677,7 +680,9 @@ def contact_prepare_for_iteration_at(
                 # depth -> positive bias -> positive normal impulse
                 # (pushes b2 off b1). Matches Box2D Baumgarte sign
                 # and the ``lam_n >= 0`` unilateral clamp.
-                pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(k_n, c_n, -effective_gap, eff_inv_n, dt_substep)
+                pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(
+                    k_n, c_n, -effective_gap, eff_inv_n, dt_substep, PHOENX_BOOST_CONTACT_NORMAL
+                )
                 cc_set_pd_gamma(cc, k, pd_gamma_n)
                 cc_set_pd_bias(cc, k, pd_bias_n)
                 cc_set_pd_eff_soft(cc, k, pd_eff_soft_n)
@@ -749,7 +754,7 @@ def contact_iterate_at(
 
     dt_substep = wp.float32(1.0) / idt
     _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep, True
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
     )
 
     inv_mass1 = bodies.inverse_mass[b1]
@@ -981,7 +986,7 @@ def contact_iterate_at_multi(
 
     dt_substep = wp.float32(1.0) / idt
     _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep, True
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
     )
 
     inv_mass1 = bodies.inverse_mass[b1]

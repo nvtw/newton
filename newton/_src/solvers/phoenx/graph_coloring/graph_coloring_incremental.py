@@ -40,7 +40,6 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     greedy_reset_init_kernel,
     greedy_scatter_elements_by_color_kernel,
     incremental_begin_sweep_kernel,
-    incremental_begin_sweep_rotate_kernel,
     incremental_fill_minus_one_kernel,
     incremental_init_csr_kernel,
     incremental_init_kernel,
@@ -301,14 +300,6 @@ class IncrementalContactPartitioner:
         # a colour. ``capture_while`` on this array terminates the
         # sweep's colour loop when the counter reaches zero.
         self._color_cursor = wp.zeros(1, dtype=wp.int32, device=device)
-
-        # Per-sweep colour rotation offset. Bumped by :meth:`begin_sweep`
-        # modulo ``_SWEEP_OFFSET_WRAP``; the constraint kernel decodes
-        # the active colour as ``(n_colors - cursor + offset) %
-        # n_colors`` so successive sweeps rotate which colour fires
-        # first (symmetric Gauss-Seidel; evens out PGS's earlier /
-        # later-colour bias on chains).
-        self._sweep_offset = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Dummies so partitioning_prepare_kernel can be reused for adjacency zeroing.
         # max_num_partitions=0 -> partition_ends slot [0] is written; we never read it.
@@ -850,7 +841,7 @@ class IncrementalContactPartitioner:
                 block_dim=_GREEDY_BLOCK_DIM,
             )
 
-    def begin_sweep(self, rotate: bool = False) -> None:
+    def begin_sweep(self) -> None:
         """Reset the sweep-time colour cursor before a PGS sweep.
 
         Copies ``num_colors`` into ``color_cursor`` so downstream
@@ -859,27 +850,15 @@ class IncrementalContactPartitioner:
         ``color_cursor`` as each colour completes; when it reaches 0
         the capture_while exits.
 
-        ``rotate=True`` additionally bumps ``sweep_offset`` so
-        successive sweeps rotate which colour fires first (symmetric
-        Gauss-Seidel; opt-in via
-        ``SolverPhoenX(rotate_color_order=True)``).
-
         Must be called before every PGS sweep. Cheap -- a single
-        1-thread kernel writing one or two scalars -- and
-        graph-capture friendly.
+        1-thread kernel writing one scalar -- and graph-capture
+        friendly.
         """
-        if rotate:
-            wp.launch(
-                incremental_begin_sweep_rotate_kernel,
-                dim=1,
-                inputs=[self._num_colors, self._color_cursor, self._sweep_offset],
-            )
-        else:
-            wp.launch(
-                incremental_begin_sweep_kernel,
-                dim=1,
-                inputs=[self._num_colors, self._color_cursor],
-            )
+        wp.launch(
+            incremental_begin_sweep_kernel,
+            dim=1,
+            inputs=[self._num_colors, self._color_cursor],
+        )
 
     # ------------------------------------------------------------------
     # Public device arrays (results)
@@ -954,18 +933,6 @@ class IncrementalContactPartitioner:
         condition for the sweep's per-colour launch loop.
         """
         return self._color_cursor
-
-    @property
-    def sweep_offset(self) -> wp.array:
-        """Device-side per-sweep colour rotation offset.
-
-        Bumped by :meth:`begin_sweep` modulo ``_SWEEP_OFFSET_WRAP``;
-        the PGS constraint kernels read it to decode the active
-        colour as ``(n_colors - cursor + offset) % n_colors``,
-        which rotates which colour fires first across successive
-        sweeps. Symmetric Gauss-Seidel / chain anti-bias.
-        """
-        return self._sweep_offset
 
     @property
     def interaction_id_to_partition(self) -> wp.array:
