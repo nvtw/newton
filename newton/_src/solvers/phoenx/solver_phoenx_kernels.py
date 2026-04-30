@@ -18,6 +18,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_STATIC,
     BodyContainer,
 )
+from newton._src.solvers.phoenx.body_or_particle import BodyOrParticleStore
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     actuated_double_ball_socket_iterate,
     actuated_double_ball_socket_iterate_multi,
@@ -27,6 +28,10 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     revolute_iterate,
     revolute_iterate_multi,
     revolute_prepare_for_iteration,
+)
+from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    cloth_triangle_iterate_at,
+    cloth_triangle_prepare_for_iteration_at,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
@@ -40,9 +45,11 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_world_wrench,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
+    CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     ConstraintContainer,
     constraint_get_body1,
     constraint_get_body2,
+    read_int,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
@@ -827,7 +834,9 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                         else:
                             actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
                     else:
-                        contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps)
+                        contact_iterate_multi(
+                            contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps
+                        )
                     base += tpw
 
                 _sync_warp()
@@ -892,7 +901,9 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                     else:
                         actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
                 else:
-                    contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations)
+                    contact_iterate_multi(
+                        contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations
+                    )
                 base += tpw
 
             _sync_warp()
@@ -901,11 +912,9 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
     return kernel
 
 
-_constraint_prepare_plus_iterate_fast_tail_kernel = _make_fast_tail_prepare_plus_iterate_kernel(
-    revolute_only=False
-)
-_constraint_prepare_plus_iterate_fast_tail_revolute_kernel = (
-    _make_fast_tail_prepare_plus_iterate_kernel(revolute_only=True)
+_constraint_prepare_plus_iterate_fast_tail_kernel = _make_fast_tail_prepare_plus_iterate_kernel(revolute_only=False)
+_constraint_prepare_plus_iterate_fast_tail_revolute_kernel = _make_fast_tail_prepare_plus_iterate_kernel(
+    revolute_only=True
 )
 _constraint_relax_fast_tail_kernel = _make_fast_tail_relax_kernel(revolute_only=False)
 _constraint_relax_fast_tail_revolute_kernel = _make_fast_tail_relax_kernel(revolute_only=True)
@@ -1463,7 +1472,7 @@ def _singleworld_color_range_from_cursor(
 # 2 shapes) without copy-paste.
 
 
-def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
+def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, cloth_support: bool = False):
     """Build a persistent-grid PGS kernel for the requested phase /
     specialisation. ``phase`` is ``"prepare"``, ``"iterate"`` or
     ``"relax"``; ``revolute_only`` selects the joint dispatch path.
@@ -1473,10 +1482,21 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
     the multi-sweep register cache is the multi-world fast-tail's
     win and on contact-heavy single-world scenes (kapla) it shows a
     small net regression.
+
+    ``cloth_support`` is a third compile-time axis: when ``True``
+    the joint-side dispatcher reads the per-cid ``constraint_type``
+    tag and routes :data:`CONSTRAINT_TYPE_CLOTH_TRIANGLE` cids to
+    the cloth handler; otherwise the joint dispatcher takes the
+    fast (existing) ADBS / revolute path. Closed over as a Python
+    bool so Warp dead-code-eliminates the cloth branch when the
+    scene has no cloth -- bench-confirmed zero regression on
+    velocity-only workloads.
     """
     is_prepare = phase == "prepare"
     is_iterate = phase == "iterate"
+    is_relax = phase == "relax"
     use_bias = is_iterate  # iterate ON, relax OFF (prepare ignores)
+    cloth_type_tag = wp.constant(CONSTRAINT_TYPE_CLOTH_TRIANGLE)
 
     @wp.kernel(enable_backward=False)
     def kernel(
@@ -1494,6 +1514,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
         total_num_threads: wp.int32,
         fuse_threshold: wp.int32,
         head_active: wp.array[wp.int32],
+        store: BodyOrParticleStore,
     ):
         tid = wp.tid()
         if color_cursor[0] <= 0:
@@ -1510,16 +1531,33 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
         for t in range(tid, count, total_num_threads):
             cid = element_ids_by_color[start + t]
             if cid < num_joints:
-                if wp.static(is_prepare):
-                    if wp.static(revolute_only):
-                        revolute_prepare_for_iteration(constraints, cid, bodies, idt)
+                # Joint-container cid: ADBS joint, or (when
+                # ``cloth_support``) a cloth triangle. The cloth
+                # branch reads the per-cid ``constraint_type`` tag
+                # at dword 0 and routes accordingly; the read +
+                # compare are dead-code-eliminated when
+                # ``cloth_support=False``.
+                handled_by_cloth = wp.bool(False)
+                if wp.static(cloth_support):
+                    if wp.static(not is_relax):
+                        ctype = read_int(constraints, wp.int32(0), cid)
+                        if ctype == cloth_type_tag:
+                            if wp.static(is_prepare):
+                                cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
+                            else:
+                                cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store)
+                            handled_by_cloth = wp.bool(True)
+                if not handled_by_cloth:
+                    if wp.static(is_prepare):
+                        if wp.static(revolute_only):
+                            revolute_prepare_for_iteration(constraints, cid, bodies, idt)
+                        else:
+                            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
                     else:
-                        actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-                else:
-                    if wp.static(revolute_only):
-                        revolute_iterate(constraints, cid, bodies, idt, use_bias)
-                    else:
-                        actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
+                        if wp.static(revolute_only):
+                            revolute_iterate(constraints, cid, bodies, idt, use_bias)
+                        else:
+                            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
             else:
                 if wp.static(is_prepare):
                     contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
@@ -1532,13 +1570,15 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
     return kernel
 
 
-def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool):
+def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_support: bool = False):
     """Build a single-block tail-fused PGS kernel for the requested
     phase / specialisation. Same axes as
     :func:`_make_singleworld_persistent_kernel`."""
     is_prepare = phase == "prepare"
     is_iterate = phase == "iterate"
+    is_relax = phase == "relax"
     use_bias = is_iterate
+    cloth_type_tag = wp.constant(CONSTRAINT_TYPE_CLOTH_TRIANGLE)
 
     @wp.kernel(enable_backward=False)
     def kernel(
@@ -1554,6 +1594,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool):
         contacts: ContactViews,
         num_joints: wp.int32,
         fuse_threshold: wp.int32,
+        store: BodyOrParticleStore,
     ):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
@@ -1564,16 +1605,27 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool):
             if lane < count:
                 cid = element_ids_by_color[start + lane]
                 if cid < num_joints:
-                    if wp.static(is_prepare):
-                        if wp.static(revolute_only):
-                            revolute_prepare_for_iteration(constraints, cid, bodies, idt)
+                    handled_by_cloth = wp.bool(False)
+                    if wp.static(cloth_support):
+                        if wp.static(not is_relax):
+                            ctype = read_int(constraints, wp.int32(0), cid)
+                            if ctype == cloth_type_tag:
+                                if wp.static(is_prepare):
+                                    cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
+                                else:
+                                    cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store)
+                                handled_by_cloth = wp.bool(True)
+                    if not handled_by_cloth:
+                        if wp.static(is_prepare):
+                            if wp.static(revolute_only):
+                                revolute_prepare_for_iteration(constraints, cid, bodies, idt)
+                            else:
+                                actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
                         else:
-                            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-                    else:
-                        if wp.static(revolute_only):
-                            revolute_iterate(constraints, cid, bodies, idt, use_bias)
-                        else:
-                            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
+                            if wp.static(revolute_only):
+                                revolute_iterate(constraints, cid, bodies, idt, use_bias)
+                            else:
+                                actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
                 else:
                     if wp.static(is_prepare):
                         contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
@@ -1587,39 +1639,71 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool):
     return kernel
 
 
-_constraint_prepare_singleworld_kernel = _make_singleworld_persistent_kernel(
-    phase="prepare", revolute_only=False
-)
-_constraint_iterate_singleworld_kernel = _make_singleworld_persistent_kernel(
-    phase="iterate", revolute_only=False
-)
-_constraint_relax_singleworld_kernel = _make_singleworld_persistent_kernel(
-    phase="relax", revolute_only=False
-)
-_constraint_prepare_singleworld_fused_kernel = _make_singleworld_fused_kernel(
-    phase="prepare", revolute_only=False
-)
-_constraint_iterate_singleworld_fused_kernel = _make_singleworld_fused_kernel(
-    phase="iterate", revolute_only=False
-)
-_constraint_relax_singleworld_fused_kernel = _make_singleworld_fused_kernel(
-    phase="relax", revolute_only=False
-)
+_constraint_prepare_singleworld_kernel = _make_singleworld_persistent_kernel(phase="prepare", revolute_only=False)
+_constraint_iterate_singleworld_kernel = _make_singleworld_persistent_kernel(phase="iterate", revolute_only=False)
+_constraint_relax_singleworld_kernel = _make_singleworld_persistent_kernel(phase="relax", revolute_only=False)
+_constraint_prepare_singleworld_fused_kernel = _make_singleworld_fused_kernel(phase="prepare", revolute_only=False)
+_constraint_iterate_singleworld_fused_kernel = _make_singleworld_fused_kernel(phase="iterate", revolute_only=False)
+_constraint_relax_singleworld_fused_kernel = _make_singleworld_fused_kernel(phase="relax", revolute_only=False)
 _constraint_prepare_singleworld_revolute_kernel = _make_singleworld_persistent_kernel(
     phase="prepare", revolute_only=True
 )
 _constraint_iterate_singleworld_revolute_kernel = _make_singleworld_persistent_kernel(
     phase="iterate", revolute_only=True
 )
-_constraint_relax_singleworld_revolute_kernel = _make_singleworld_persistent_kernel(
-    phase="relax", revolute_only=True
-)
+_constraint_relax_singleworld_revolute_kernel = _make_singleworld_persistent_kernel(phase="relax", revolute_only=True)
 _constraint_prepare_singleworld_fused_revolute_kernel = _make_singleworld_fused_kernel(
     phase="prepare", revolute_only=True
 )
 _constraint_iterate_singleworld_fused_revolute_kernel = _make_singleworld_fused_kernel(
     phase="iterate", revolute_only=True
 )
-_constraint_relax_singleworld_fused_revolute_kernel = _make_singleworld_fused_kernel(
-    phase="relax", revolute_only=True
+_constraint_relax_singleworld_fused_revolute_kernel = _make_singleworld_fused_kernel(phase="relax", revolute_only=True)
+
+# Cloth-enabled variants. Same dispatch shape as the non-cloth
+# kernels above but the joint-side dispatcher branches on the
+# per-cid ``constraint_type`` tag and routes
+# :data:`CONSTRAINT_TYPE_CLOTH_TRIANGLE` cids to the cloth handler.
+# Selected by :class:`PhoenXWorld` when ``num_cloth_triangles > 0``.
+# Relax phase doesn't run cloth (cloth XPBD has no Box2D-style
+# relax pass) -- the ``cloth_support=True`` relax binary is
+# functionally identical to ``cloth_support=False`` because the
+# branch is gated on ``not is_relax`` inside the kernel; we still
+# bind a cloth-enabled relax variant for symmetry so the kernel
+# selection logic in PhoenXWorld doesn't have to special-case it.
+_constraint_prepare_singleworld_cloth_kernel = _make_singleworld_persistent_kernel(
+    phase="prepare", revolute_only=False, cloth_support=True
+)
+_constraint_iterate_singleworld_cloth_kernel = _make_singleworld_persistent_kernel(
+    phase="iterate", revolute_only=False, cloth_support=True
+)
+_constraint_relax_singleworld_cloth_kernel = _make_singleworld_persistent_kernel(
+    phase="relax", revolute_only=False, cloth_support=True
+)
+_constraint_prepare_singleworld_fused_cloth_kernel = _make_singleworld_fused_kernel(
+    phase="prepare", revolute_only=False, cloth_support=True
+)
+_constraint_iterate_singleworld_fused_cloth_kernel = _make_singleworld_fused_kernel(
+    phase="iterate", revolute_only=False, cloth_support=True
+)
+_constraint_relax_singleworld_fused_cloth_kernel = _make_singleworld_fused_kernel(
+    phase="relax", revolute_only=False, cloth_support=True
+)
+_constraint_prepare_singleworld_revolute_cloth_kernel = _make_singleworld_persistent_kernel(
+    phase="prepare", revolute_only=True, cloth_support=True
+)
+_constraint_iterate_singleworld_revolute_cloth_kernel = _make_singleworld_persistent_kernel(
+    phase="iterate", revolute_only=True, cloth_support=True
+)
+_constraint_relax_singleworld_revolute_cloth_kernel = _make_singleworld_persistent_kernel(
+    phase="relax", revolute_only=True, cloth_support=True
+)
+_constraint_prepare_singleworld_fused_revolute_cloth_kernel = _make_singleworld_fused_kernel(
+    phase="prepare", revolute_only=True, cloth_support=True
+)
+_constraint_iterate_singleworld_fused_revolute_cloth_kernel = _make_singleworld_fused_kernel(
+    phase="iterate", revolute_only=True, cloth_support=True
+)
+_constraint_relax_singleworld_fused_revolute_cloth_kernel = _make_singleworld_fused_kernel(
+    phase="relax", revolute_only=True, cloth_support=True
 )

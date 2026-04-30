@@ -93,21 +93,33 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
+    _constraint_iterate_singleworld_cloth_kernel,
+    _constraint_iterate_singleworld_fused_cloth_kernel,
     _constraint_iterate_singleworld_fused_kernel,
+    _constraint_iterate_singleworld_fused_revolute_cloth_kernel,
     _constraint_iterate_singleworld_fused_revolute_kernel,
     _constraint_iterate_singleworld_kernel,
+    _constraint_iterate_singleworld_revolute_cloth_kernel,
     _constraint_iterate_singleworld_revolute_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
     _constraint_prepare_plus_iterate_fast_tail_revolute_kernel,
+    _constraint_prepare_singleworld_cloth_kernel,
+    _constraint_prepare_singleworld_fused_cloth_kernel,
     _constraint_prepare_singleworld_fused_kernel,
+    _constraint_prepare_singleworld_fused_revolute_cloth_kernel,
     _constraint_prepare_singleworld_fused_revolute_kernel,
     _constraint_prepare_singleworld_kernel,
+    _constraint_prepare_singleworld_revolute_cloth_kernel,
     _constraint_prepare_singleworld_revolute_kernel,
     _constraint_relax_fast_tail_kernel,
     _constraint_relax_fast_tail_revolute_kernel,
+    _constraint_relax_singleworld_cloth_kernel,
+    _constraint_relax_singleworld_fused_cloth_kernel,
     _constraint_relax_singleworld_fused_kernel,
+    _constraint_relax_singleworld_fused_revolute_cloth_kernel,
     _constraint_relax_singleworld_fused_revolute_kernel,
     _constraint_relax_singleworld_kernel,
+    _constraint_relax_singleworld_revolute_cloth_kernel,
     _constraint_relax_singleworld_revolute_kernel,
     _constraints_to_elements_kernel,
     _count_elements_per_world_kernel,
@@ -309,6 +321,7 @@ class PhoenXWorld:
         rigid_contact_max: int = 0,
         num_joints: int = 0,
         num_particles: int = 0,
+        num_cloth_triangles: int = 0,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         num_worlds: int = 1,
@@ -424,6 +437,20 @@ class PhoenXWorld:
         self.particles: ParticleContainer | None = None
         if self.num_particles > 0:
             self.particles = particle_container_zeros(self.num_particles, device=device)
+
+        # Cloth triangles -- count of XPBD-cloth-triangle constraint
+        # rows the scene reserves in the joint-side
+        # :class:`ConstraintContainer`. ``> 0`` selects the
+        # ``cloth_support=True`` kernel binaries via
+        # :meth:`_singleworld_kernels`; the cloth dispatch branch
+        # reads each cid's ``constraint_type`` tag at dword 0 and
+        # routes :data:`CONSTRAINT_TYPE_CLOTH_TRIANGLE` cids to
+        # :func:`cloth_triangle_iterate_at`. Default ``0`` keeps
+        # rigid-only scenes on the existing kernel binaries
+        # bit-for-bit.
+        self.num_cloth_triangles: int = int(num_cloth_triangles)
+        if self.num_cloth_triangles < 0:
+            raise ValueError(f"num_cloth_triangles must be >= 0 (got {self.num_cloth_triangles})")
         # Cached :class:`BodyOrParticleStore` exposed via the
         # :attr:`body_or_particle` property; lazy so rigid-only scenes
         # never allocate the sentinel particle container.
@@ -1671,6 +1698,7 @@ class PhoenXWorld:
         """
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
+        store = self.body_or_particle
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
             wp.launch(
                 kernel,
@@ -1690,6 +1718,7 @@ class PhoenXWorld:
                     wp.int32(self._singleworld_total_threads),
                     wp.int32(self._fuse_threshold),
                     self._head_active,
+                    store,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=self.device,
@@ -1726,6 +1755,7 @@ class PhoenXWorld:
                 contact_views,
                 wp.int32(self.num_joints),
                 wp.int32(self._fuse_threshold),
+                self.body_or_particle,
             ],
             block_dim=self._fuse_tail_block_dim,
             device=self.device,
@@ -1810,7 +1840,17 @@ class PhoenXWorld:
         ``read_int(_OFF_JOINT_MODE)`` and four-way ``joint_mode``
         branch in :func:`actuated_double_ball_socket_iterate`. Otherwise
         returns the generic dispatchers."""
+        cloth_on = self.num_cloth_triangles > 0
         if self._use_revolute_specialization:
+            if cloth_on:
+                return (
+                    _constraint_prepare_singleworld_revolute_cloth_kernel,
+                    _constraint_prepare_singleworld_fused_revolute_cloth_kernel,
+                    _constraint_iterate_singleworld_revolute_cloth_kernel,
+                    _constraint_iterate_singleworld_fused_revolute_cloth_kernel,
+                    _constraint_relax_singleworld_revolute_cloth_kernel,
+                    _constraint_relax_singleworld_fused_revolute_cloth_kernel,
+                )
             return (
                 _constraint_prepare_singleworld_revolute_kernel,
                 _constraint_prepare_singleworld_fused_revolute_kernel,
@@ -1818,6 +1858,15 @@ class PhoenXWorld:
                 _constraint_iterate_singleworld_fused_revolute_kernel,
                 _constraint_relax_singleworld_revolute_kernel,
                 _constraint_relax_singleworld_fused_revolute_kernel,
+            )
+        if cloth_on:
+            return (
+                _constraint_prepare_singleworld_cloth_kernel,
+                _constraint_prepare_singleworld_fused_cloth_kernel,
+                _constraint_iterate_singleworld_cloth_kernel,
+                _constraint_iterate_singleworld_fused_cloth_kernel,
+                _constraint_relax_singleworld_cloth_kernel,
+                _constraint_relax_singleworld_fused_cloth_kernel,
             )
         return (
             _constraint_prepare_singleworld_kernel,
