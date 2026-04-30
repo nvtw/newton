@@ -75,9 +75,11 @@ class Example:
         self.device = wp.get_device()
         self.torch_device = wp.device_to_torch(self.device)
         self.is_test = args is not None and args.test
+        solver_name = getattr(args, "solver", "mujoco")
 
         builder = newton.ModelBuilder()
-        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        if solver_name == "mujoco":
+            newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
             armature=0.06,
             limit_ke=1.0e3,
@@ -170,15 +172,23 @@ class Example:
         self.model = builder.finalize()
         use_mujoco_contacts = getattr(args, "use_mujoco_contacts", False)
 
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            use_mujoco_contacts=use_mujoco_contacts,
-            solver="newton",
-            ls_parallel=False,
-            ls_iterations=50,  # Increased from default 10 for determinism
-            njmax=50,
-            nconmax=100,  # Increased from 75 to handle peak contact count of ~77
-        )
+        if solver_name == "phoenx":
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model,
+                substeps=4,
+                solver_iterations=8,
+                velocity_iterations=1,
+            )
+        else:
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                use_mujoco_contacts=use_mujoco_contacts,
+                solver="newton",
+                ls_parallel=False,
+                ls_iterations=50,  # Increased from default 10 for determinism
+                njmax=50,
+                nconmax=100,  # Increased from 75 to handle peak contact count of ~77
+            )
 
         self.viewer.set_model(self.model)
 
@@ -200,8 +210,8 @@ class Example:
         # Evaluate forward kinematics to update body poses based on initial joint configuration
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
-        # Initialize contacts
-        if use_mujoco_contacts:
+        # MuJoCo can keep contacts inside its backend; PhoenX uses Newton contacts.
+        if solver_name == "mujoco" and use_mujoco_contacts:
             self.contacts = None
         else:
             self.contacts = self.model.contacts()
@@ -355,6 +365,12 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_mujoco_contacts_arg(parser)
+        parser.add_argument(
+            "--solver",
+            choices=["mujoco", "phoenx"],
+            default="mujoco",
+            help="Rigid-body solver backend.",
+        )
         return parser
 
 
