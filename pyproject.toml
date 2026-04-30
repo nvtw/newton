@@ -286,6 +286,17 @@ ba = "ba"
 iz = "iz"
 HAA = "HAA"
 lod = "lod"
+# PhoenX is the name of Newton's rigid body solver.
+Phoen = "Phoen"
+PhoenX = "PhoenX"
+phoenx = "phoenx"
+# "Maximal Independent Set" -- the classic acronym used throughout the
+# PhoenX graph-coloring / Luby-MIS implementation.
+MIS = "MIS"
+mis = "mis"
+# Short for "prismatic" in the PhoenX ADBS joint column.
+pris = "pris"
+PRIS = "PRIS"
 # MuJoCo Menagerie brand/product names
 Pincher = "Pincher"
 Robotis = "Robotis"

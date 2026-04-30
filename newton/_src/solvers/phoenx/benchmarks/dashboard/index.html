@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhoenX vs MuJoCo-Warp local bench</title>
+  <link rel="icon" href="data:," />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #0f1215; --bg-card: #151b20; --text: #e9eef2; --text-dim: #9aa6b2;
+      --border: #24303a; --phoenx: #35c1a2; --mujoco: #6aa7ff; --danger: #f67373;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f4f6f8; --bg-card: #ffffff; --text: #1b1f23; --text-dim: #55606c;
+        --border: #d6dde5; --phoenx: #0f8c7a; --mujoco: #2563eb; --danger: #b42318;
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      background: var(--bg); color: var(--text); padding: 1.5rem; line-height: 1.4;
+    }
+    header { margin-bottom: 1.25rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border); }
+    header h1 { font-size: 1.4rem; }
+    header p { color: var(--text-dim); font-size: 0.9rem; margin-top: 0.25rem; }
+    .meta { color: var(--text-dim); font-size: 0.82rem; margin-top: 0.35rem; }
+    .scene-block { margin-top: 1.5rem; padding: 1rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; }
+    .scene-block h2 { font-size: 1.05rem; margin-bottom: 0.75rem; }
+    .charts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; }
+    .chart-wrap { background: rgba(0,0,0,0.15); padding: 0.5rem; border-radius: 6px; min-height: 260px; }
+    .chart-wrap canvas { max-height: 260px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 0.8rem; font-size: 0.82rem; }
+    th, td { padding: 4px 6px; text-align: right; border-bottom: 1px solid var(--border); }
+    th:first-child, td:first-child { text-align: left; }
+    .err { color: var(--danger); font-weight: 600; }
+    .empty { color: var(--text-dim); padding: 2rem; text-align: center; font-style: italic; }
+    .filters { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 0.75rem; font-size: 0.88rem; }
+    .filters label { display: inline-flex; gap: 0.25rem; align-items: center; }
+    @media (max-width: 960px) { .charts { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PhoenX vs MuJoCo-Warp &middot; local benchmark</h1>
+    <p>Hand-triggered sweep of <code>phoenx</code> and <code>mujoco</code> on the current machine.</p>
+    <p class="meta" id="meta"></p>
+  </header>
+
+  <div class="filters">
+    <label>substeps:
+      <select id="filter-substeps"><option value="all">all</option></select>
+    </label>
+    <label>PGS iterations:
+      <select id="filter-iters"><option value="all">all</option></select>
+    </label>
+    <label>
+      <input type="checkbox" id="log-x" checked /> log-scale <code>num_worlds</code>
+    </label>
+  </div>
+
+  <div id="scenes"></div>
+
+  <script>
+    const POINTS_URL = "../results/points.jsonl";
+    const COLOR = { phoenx: getCss("--phoenx"), mujoco: getCss("--mujoco") };
+
+    function getCss(name) {
+      return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+
+    async function fetchPoints() {
+      const res = await fetch(POINTS_URL, { cache: "no-store" });
+      if (!res.ok) throw new Error(`${POINTS_URL}: HTTP ${res.status}`);
+      const text = await res.text();
+      return text
+        .split(/\r?\n/)
+        .filter((l) => l.trim().length > 0)
+        .map((l) => JSON.parse(l));
+    }
+
+    function unique(vals) {
+      return [...new Set(vals)].sort((a, b) => a - b);
+    }
+
+    function renderMeta(points) {
+      const el = document.getElementById("meta");
+      if (points.length === 0) return;
+      const latest = points[points.length - 1];
+      el.textContent = `GPU: ${latest.gpu}  •  commit ${latest.commit_short}  •  latest row: ${latest.timestamp}  •  rows: ${points.length}`;
+    }
+
+    function populateFilter(id, values) {
+      const sel = document.getElementById(id);
+      for (const v of values) {
+        const opt = document.createElement("option");
+        opt.value = String(v);
+        opt.textContent = String(v);
+        sel.appendChild(opt);
+      }
+    }
+
+    function makeLineChart(canvas, series, { xLabel, yLabel, logX }) {
+      return new Chart(canvas, {
+        type: "line",
+        data: { datasets: series },
+        options: {
+          parsing: false,
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: {
+              type: logX ? "logarithmic" : "linear",
+              title: { display: true, text: xLabel },
+              grid: { color: "rgba(127,127,127,0.15)" },
+              ticks: { color: getCss("--text-dim") },
+            },
+            y: {
+              beginAtZero: !logX,
+              title: { display: true, text: yLabel },
+              grid: { color: "rgba(127,127,127,0.15)" },
+              ticks: { color: getCss("--text-dim") },
+            },
+          },
+          plugins: {
+            legend: { labels: { color: getCss("--text") } },
+            tooltip: { mode: "nearest", intersect: false },
+          },
+        },
+      });
+    }
+
+    function datasetsFor(points, valueKey) {
+      const bySolver = {};
+      for (const p of points) {
+        if (!p.ok) continue;
+        if (!bySolver[p.solver]) bySolver[p.solver] = [];
+        bySolver[p.solver].push({ x: p.num_worlds, y: p[valueKey] });
+      }
+      return Object.entries(bySolver).map(([solver, pts]) => ({
+        label: solver,
+        data: pts.sort((a, b) => a.x - b.x),
+        borderColor: COLOR[solver] || "#999",
+        backgroundColor: COLOR[solver] || "#999",
+        pointRadius: 4,
+        tension: 0.08,
+      }));
+    }
+
+    function renderScene(scene, points, state) {
+      const pts = points.filter((p) => p.scenario === scene)
+        .filter((p) => state.substeps === "all" || String(p.substeps) === state.substeps)
+        .filter((p) => state.iters === "all" || String(p.solver_iterations) === state.iters);
+
+      const block = document.createElement("div");
+      block.className = "scene-block";
+      block.innerHTML = `
+        <h2>${scene}</h2>
+        <div class="charts">
+          <div class="chart-wrap"><canvas></canvas></div>
+          <div class="chart-wrap"><canvas></canvas></div>
+          <div class="chart-wrap"><canvas></canvas></div>
+        </div>
+        <div class="table-wrap"></div>
+      `;
+      const [fpsCanvas, msCanvas, gpuCanvas] = block.querySelectorAll("canvas");
+
+      if (pts.length === 0) {
+        block.querySelector(".table-wrap").innerHTML =
+          '<div class="empty">no rows for this scene / filter combination</div>';
+        return block;
+      }
+
+      makeLineChart(fpsCanvas, datasetsFor(pts, "env_fps"), {
+        xLabel: "num_worlds", yLabel: "env_fps", logX: state.logX,
+      });
+      makeLineChart(msCanvas, datasetsFor(pts, "ms_per_step"), {
+        xLabel: "num_worlds", yLabel: "ms / world-step", logX: state.logX,
+      });
+      makeLineChart(gpuCanvas, datasetsFor(pts, "gpu_used_gb"), {
+        xLabel: "num_worlds", yLabel: "gpu used (GB)", logX: state.logX,
+      });
+
+      const rows = pts
+        .slice()
+        .sort((a, b) =>
+          a.solver.localeCompare(b.solver) ||
+          a.num_worlds - b.num_worlds ||
+          a.substeps - b.substeps ||
+          a.solver_iterations - b.solver_iterations
+        );
+      const tbl = document.createElement("table");
+      tbl.innerHTML = `
+        <thead>
+          <tr>
+            <th>solver</th><th>num_worlds</th><th>substeps</th><th>iter</th>
+            <th>env_fps</th><th>ms/step</th><th>gpu_used_gb</th><th>elapsed_s</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>`;
+      const tbody = tbl.querySelector("tbody");
+      for (const p of rows) {
+        const tr = document.createElement("tr");
+        if (!p.ok) tr.className = "err";
+        tr.innerHTML = `
+          <td>${p.solver}</td>
+          <td>${p.num_worlds}</td>
+          <td>${p.substeps}</td>
+          <td>${p.solver_iterations}</td>
+          <td>${p.ok ? p.env_fps.toLocaleString(undefined, { maximumFractionDigits: 0 }) : "-"}</td>
+          <td>${p.ok ? p.ms_per_step.toFixed(3) : "-"}</td>
+          <td>${p.ok ? p.gpu_used_gb.toFixed(2) : "-"}</td>
+          <td>${p.ok ? p.elapsed_s.toFixed(2) : "-"}</td>
+          <td>${p.ok ? "" : (p.error || "FAIL")}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+      block.querySelector(".table-wrap").appendChild(tbl);
+      return block;
+    }
+
+    function render(points) {
+      const container = document.getElementById("scenes");
+      container.innerHTML = "";
+      const scenes = [...new Set(points.map((p) => p.scenario))].sort();
+      const state = {
+        substeps: document.getElementById("filter-substeps").value,
+        iters: document.getElementById("filter-iters").value,
+        logX: document.getElementById("log-x").checked,
+      };
+      if (scenes.length === 0) {
+        container.innerHTML = '<div class="empty">No points yet. Run `python -m newton._src.solvers.phoenx.benchmarks.run_benchmarks`.</div>';
+        return;
+      }
+      for (const s of scenes) {
+        container.appendChild(renderScene(s, points, state));
+      }
+    }
+
+    async function main() {
+      let points;
+      try {
+        points = await fetchPoints();
+      } catch (exc) {
+        document.getElementById("scenes").innerHTML =
+          `<div class="empty">Failed to load ${POINTS_URL}: ${exc}. Did you run the sweep?</div>`;
+        return;
+      }
+      renderMeta(points);
+      populateFilter("filter-substeps", unique(points.map((p) => p.substeps)));
+      populateFilter("filter-iters", unique(points.map((p) => p.solver_iterations)));
+      render(points);
+      for (const id of ["filter-substeps", "filter-iters", "log-x"]) {
+        document.getElementById(id).addEventListener("input", () => render(points));
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>

@@ -1369,11 +1369,24 @@ class ViewerGL(ViewerBase):
                 device=self.device,
                 record_tape=False,
             )
-            wp.copy(self._packed_vbo_xforms_host, self._packed_vbo_xforms)
-            wp.synchronize()  # copy is async (pinned destination), must sync before CPU read
 
-            # ---- Upload pinned host slices to GL per instancer ----
-            host_np = self._packed_vbo_xforms_host.numpy()
+            # CUDA-GL interop: each instancer's VBO is registered as a
+            # CUDA buffer, so we can map it and copy the relevant slice
+            # of ``_packed_vbo_xforms`` straight into it on the device.
+            # That removes the ``wp.copy → pinned host → wp.synchronize
+            # → glBufferSubData`` round trip, which on large scenes
+            # (~10k+ shapes) was the dominant cost in ``log_state``
+            # because of the unconditional host sync. The pinned path
+            # remains as a fallback for the CPU device or when interop
+            # is disabled via ``NEWTON_VIEWER_CUDA_INTEROP=0``.
+            from .gl.opengl import ENABLE_CUDA_INTEROP  # noqa: PLC0415
+
+            use_cuda_interop = ENABLE_CUDA_INTEROP
+            host_np = None
+            if not use_cuda_interop:
+                wp.copy(self._packed_vbo_xforms_host, self._packed_vbo_xforms)
+                wp.synchronize()  # copy is async (pinned destination), must sync before CPU read
+                host_np = self._packed_vbo_xforms_host.numpy()
 
             for key, shapes, offset, count in self._packed_groups:
                 visible = self._should_show_shape(shapes.flags, shapes.static)
@@ -1394,12 +1407,27 @@ class ViewerGL(ViewerBase):
                     instancer = self.objects.get(shapes.name)
                     if instancer is not None:
                         instancer.hidden = not visible
-                        instancer.update_from_pinned(
-                            host_np[offset : offset + count],
-                            count,
-                            colors,
-                            materials,
-                        )
+                        if use_cuda_interop and getattr(instancer, "_instance_transform_cuda_buffer", None) is not None:
+                            instancer.update_from_packed_cuda(
+                                self._packed_vbo_xforms,
+                                offset,
+                                count,
+                                colors,
+                                materials,
+                            )
+                        else:
+                            # Lazy host materialisation: only sync + read
+                            # back if we actually need the host slice.
+                            if host_np is None:
+                                wp.copy(self._packed_vbo_xforms_host, self._packed_vbo_xforms)
+                                wp.synchronize()
+                                host_np = self._packed_vbo_xforms_host.numpy()
+                            instancer.update_from_pinned(
+                                host_np[offset : offset + count],
+                                count,
+                                colors,
+                                materials,
+                            )
 
                 shapes.colors_changed = False
 

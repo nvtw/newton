@@ -15,7 +15,9 @@
 # python -m newton.examples robot_policy --robot go2
 # python -m newton.examples robot_policy --robot anymal
 # python -m newton.examples robot_policy --robot anymal --physx
+# python -m newton.examples robot_policy --robot g1_29dof --solver phoenx
 # to run the example with a PhysX-trained policy run with --physx
+# to run the example with the PhoenX solver instead of MuJoCo run with --solver phoenx
 ###########################################################################
 
 import warnings
@@ -200,6 +202,7 @@ class Example:
         asset_directory: str,
         mjc_to_physx: list[int],
         physx_to_mjc: list[int],
+        solver_name: str = "mujoco",
     ):
         # Setup simulation parameters first
         fps = 200
@@ -220,6 +223,7 @@ class Example:
         self.use_mujoco = False
         self.config = config
         self.robot_config = robot_config
+        self.solver_name = solver_name
 
         # Device setup
         self.device = wp.get_device()
@@ -227,6 +231,9 @@ class Example:
 
         # Build the model
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        # MuJoCo's custom attributes (joint armature etc.) are read by
+        # the importer regardless of which backend ends up stepping the
+        # model -- registering them is harmless on the PhoenX path.
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
             armature=0.1,
@@ -237,6 +244,22 @@ class Example:
         builder.default_shape_cfg.kd = 5.0e2
         builder.default_shape_cfg.kf = 1.0e3
         builder.default_shape_cfg.mu = 0.75
+
+        if self.solver_name == "phoenx":
+            # Newton's default ``rigid_gap = 0.1`` (10 cm) is the
+            # speculative-contact band the :class:`CollisionPipeline`
+            # uses to inflate AABBs and pre-generate contacts before
+            # the surfaces actually touch. MuJoCo Warp runs its own
+            # collision pipeline (driven by ``geom_margin`` /
+            # ``geom_gap`` set up in ``solver_mujoco`` from the same
+            # shape arrays) and doesn't lean on this band the same
+            # way. For the G1 standing pose with feet at z = 0 a 10 cm
+            # gap means PhoenX sees speculative contacts on bodies
+            # that aren't actually touching the ground -- contributing
+            # to the contact-impulse asymmetry observed at step 0/1.
+            # Force gap = 0 on the PhoenX path so the contact set
+            # contains only real surface contacts.
+            builder.default_shape_cfg.gap = 0.01
 
         builder.add_usd(
             newton.examples.get_asset(asset_directory + "/" + robot_config.asset_path),
@@ -265,20 +288,78 @@ class Example:
         self.model = builder.finalize()
         self.model.set_gravity((0.0, 0.0, -9.81))
 
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            use_mujoco_cpu=self.use_mujoco,
-            solver="newton",
-            nconmax=30,
-            njmax=100,
-        )
+        if self.solver_name == "phoenx":
+            # PhoenX enforces stiction strictly (matches the analytic
+            # Coulomb law to within a few micrometres of creep over
+            # 10 s; see ``newton/_src/solvers/phoenx/tests/
+            # _actuator_compare.py``). MuJoCo Warp's solver lets the
+            # foot creep ~1 m / 10 s on a 30 deg incline at mu = 0.75
+            # and a MuJoCo-trained policy implicitly assumes that
+            # micro-creep is available. Without it, the entire ground-
+            # reaction torque funnels into the lowest-stiffness DoF
+            # (G1 ankle pitch, target_ke = 20 N*m/rad) and bends it,
+            # producing the "toes push into the floor" symptom.
+            #
+            # Scaling PhoenX's foot friction down lets a small amount
+            # of slip back into the contact and unloads the ankle.
+            # Tune this in-place; values < 1 reduce stiction, > 1
+            # increase it. 1.0 = no scaling.
+            phoenx_foot_friction_scale = 1.0
+            if phoenx_foot_friction_scale != 1.0:
+                self._scale_foot_friction(phoenx_foot_friction_scale)
+
+        if self.solver_name == "phoenx":
+            # PhoenX runs its own contacts (sticky CollisionPipeline
+            # auto-attached). 4 substeps + 8 PGS iterations matches the
+            # MuJoCo-parity sweep used by the Anymal walk demo and is
+            # the right cadence for PhysX-trained PD policies whose
+            # joint stiffnesses sit in the 100-1000 N*m/rad range.
+            #
+            # ``velocity_readout="finite_difference"`` stamps
+            # ``state.body_qd`` with the outer-step pose-delta velocity
+            # instead of PhoenX's substep-end value. Matches the
+            # post-integration ``qvel`` convention MuJoCo Warp returns
+            # (which is what the policy was trained against), and
+            # specifically removes the multi-rad/s per-step ringing
+            # that the stiff foot-ground contact resolution produces
+            # on the ankle DoFs (most visible after the first 1-2
+            # steps; see ``_g1_obs_diff.py``).
+            # ``velocity_readout="substep_end"`` was empirically the
+            # best of the three modes on the G1 standing pose: the
+            # finite_difference and substep_average modes both invert
+            # the trunk-pitch direction relative to MuJoCo Warp, which
+            # turned the policy's projected-gravity observation into
+            # an off-distribution signal. ``substep_end`` keeps the
+            # right sign (just at higher magnitude than MJ's
+            # post-integration qvel). See _g1_obs_diff.py for numbers.
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model,
+                substeps=20,
+                solver_iterations=8,
+                velocity_iterations=2,
+                velocity_readout="substep_end",
+            )
+        else:
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                use_mujoco_cpu=self.use_mujoco,
+                solver="newton",
+                nconmax=30,
+                njmax=100,
+            )
 
         # Initialize state objects
         self.state_temp = self.model.state()
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
+        # PhoenX drives ``model.collide`` from the per-frame loop and
+        # needs the standard contacts buffer; MuJoCo gets to size its
+        # own from ``get_max_contact_count``.
+        if self.solver_name == "phoenx":
+            self.contacts = self.model.contacts()
+        else:
+            self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
 
         # Set model in viewer
         self.viewer.set_model(self.model)
@@ -331,7 +412,13 @@ class Example:
             # Apply forces to the model for picking, wind, etc
             self.viewer.apply_forces(self.state_0)
 
-            self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
+            # PhoenX needs explicit collision detection per substep; MuJoCo
+            # runs its own internal contact solver and gets ``contacts=None``.
+            if self.solver_name == "phoenx":
+                self.model.collide(self.state_0, self.contacts)
+                self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            else:
+                self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
 
             # Swap states - handle CUDA graph case specially
             if need_state_copy and i == self.sim_substeps - 1:
@@ -341,7 +428,11 @@ class Example:
                 # We can just swap the state references
                 self.state_0, self.state_1 = self.state_1, self.state_0
 
-        self.solver.update_contacts(self.contacts, self.state_0)
+        # ``update_contacts`` is the MuJoCo viewer-side pull of the
+        # internal solver's contact buffer; PhoenX already populated
+        # ``self.contacts`` via ``model.collide`` above.
+        if self.solver_name != "phoenx":
+            self.solver.update_contacts(self.contacts, self.state_0)
 
     def reset(self):
         print("[INFO] Resetting example")
@@ -400,6 +491,35 @@ class Example:
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
+    def _scale_foot_friction(self, scale: float) -> None:
+        """Multiply ``model.shape_material_mu`` for shapes whose body
+        is a foot / ankle-roll link by ``scale``. Keyword matching
+        on the body label catches both Anymal (``*_FOOT``) and G1
+        (``*_ankle_roll_link``) without per-robot wiring.
+        """
+        body_labels = self.model.body_label
+        # Names suffixes that mark a "foot" body across the supported
+        # robots. Anymal: LF_FOOT/RF_FOOT/LH_FOOT/RH_FOOT. G1 / Go2:
+        # left_ankle_roll_link / right_ankle_roll_link.
+        foot_keywords = ("foot", "ankle_roll", "FOOT")
+        foot_bodies = {i for i, lbl in enumerate(body_labels) if any(kw in lbl for kw in foot_keywords)}
+        if not foot_bodies:
+            print("[WARN] foot-friction-scale: no foot bodies matched; flag is a no-op")
+            return
+
+        shape_body_np = self.model.shape_body.numpy()
+        mu_np = self.model.shape_material_mu.numpy()
+        n_scaled = 0
+        for shape_idx, body_idx in enumerate(shape_body_np):
+            if int(body_idx) in foot_bodies:
+                mu_np[shape_idx] *= float(scale)
+                n_scaled += 1
+        self.model.shape_material_mu.assign(mu_np)
+        print(
+            f"[INFO] foot-friction-scale: {scale:.2f} applied to {n_scaled} foot shapes "
+            f"(across {len(foot_bodies)} foot bodies)"
+        )
+
     def test_final(self):
         newton.examples.test_body_state(
             self.model,
@@ -417,6 +537,17 @@ if __name__ == "__main__":
         "--robot", type=str, default="g1_29dof", choices=list(ROBOT_CONFIGS.keys()), help="Robot name to load"
     )
     parser.add_argument("--physx", action="store_true", help="Run physX policy instead of MJWarp.")
+    parser.add_argument(
+        "--solver",
+        choices=["mujoco", "phoenx"],
+        default="mujoco",
+        help=(
+            "Rigid-body solver backend. 'mujoco' (default) is what the policies were trained "
+            "against. 'phoenx' steps the same model with SolverPhoenX -- useful for transfer "
+            "experiments, but the policy may behave differently since PhoenX's contact and "
+            "PD-drive dynamics are not bit-identical to MuJoCo's."
+        ),
+    )
 
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init(parser)
@@ -462,7 +593,15 @@ if __name__ == "__main__":
     else:
         policy_path = f"{asset_directory}/{robot_config.policy_path['mjw']}"
 
-    example = Example(viewer, robot_config, config, asset_directory, mjc_to_physx, physx_to_mjc)
+    example = Example(
+        viewer,
+        robot_config,
+        config,
+        asset_directory,
+        mjc_to_physx,
+        physx_to_mjc,
+        solver_name=args.solver,
+    )
 
     # Use utility function to load policy and setup tensors
     load_policy_and_setup_tensors(example, policy_path, config["num_dofs"], slice(7, None))

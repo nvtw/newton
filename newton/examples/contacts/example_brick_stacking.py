@@ -445,25 +445,33 @@ class Example:
         contact_max = 16384
         self.model.rigid_contact_max = contact_max
 
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model,
-            reduce_contacts=True,
-            rigid_contact_max=contact_max,
-            broad_phase="nxn",
-        )
+        solver_name = getattr(args, "solver", "mujoco") if args is not None else "mujoco"
+        self.solver_name = solver_name
+        # PhoenX requires the contacts buffer to be built with a
+        # non-disabled ``contact_matching`` mode so its persistent
+        # warm-start has stable cid-to-pair identities.
+        cp_kwargs = {"reduce_contacts": True, "rigid_contact_max": contact_max, "broad_phase": "nxn"}
+        if solver_name == "phoenx":
+            cp_kwargs["contact_matching"] = "sticky"
+        self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)
 
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            solver="newton",
-            integrator="implicitfast",
-            iterations=15,
-            ls_iterations=100,
-            nconmax=contact_max,
-            njmax=contact_max * 2,
-            cone="elliptic",
-            impratio=50.0,
-            use_mujoco_contacts=False,
-        )
+        if solver_name == "phoenx":
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model, substeps=4, solver_iterations=8, velocity_iterations=1
+            )
+        else:
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                solver="newton",
+                integrator="implicitfast",
+                iterations=15,
+                ls_iterations=100,
+                nconmax=contact_max,
+                njmax=contact_max * 2,
+                cone="elliptic",
+                impratio=50.0,
+                use_mujoco_contacts=False,
+            )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -1041,6 +1049,12 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
+    parser.add_argument(
+        "--solver",
+        choices=["mujoco", "phoenx"],
+        default="mujoco",
+        help="Rigid-body solver backend.",
+    )
 
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)

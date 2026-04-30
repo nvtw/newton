@@ -130,6 +130,15 @@ class Example:
 
         self.world_time = wp.zeros(self.world_count, dtype=wp.float32)
 
+        # PhoenX dispatch intentionally not added: this scene mutates
+        # ``joint_X_p`` every substep and calls
+        # ``self.solver.notify_model_changed(JOINT_PROPERTIES)`` to
+        # refresh the solver, but PhoenX's notify rebuilds the ADBS
+        # init arrays from host data (numpy roundtrip) which is not
+        # legal inside a captured CUDA graph. TODO: make
+        # ``SolverPhoenX.notify_model_changed`` graph-capture-safe by
+        # avoiding host data on the JOINT_PROPERTIES path, then add
+        # ``--solver phoenx`` here.
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
             solver="newton",
