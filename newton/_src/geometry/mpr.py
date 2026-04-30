@@ -35,8 +35,7 @@ from typing import Any
 
 import warp as wp
 
-from .support_function import GeoTypeEx, closest_point_on_triangle, unpack_mesh_ptr
-from .types import GeoType
+from .support_function import GeoTypeEx, closest_point_on_triangle
 
 
 @wp.struct
@@ -168,68 +167,39 @@ def create_support_map_function(support_func: Any):
         because the chosen ray direction can produce supports that all
         collapse onto a single vertex of the partner.
 
-        For most primitives the local origin is already a sensible
-        interior point, but for ``CONVEX_MESH`` (an arbitrary convex
-        hull) the authoring origin is not guaranteed to lie inside the
-        hull — many assets place hulls far from their body frame.  For
-        those shapes we compute the AABB of the (scaled) hull vertices
-        on the fly and use the AABB center, which is always inside the
-        hull's bounding box and typically very close to the hull
-        interior.
+        Each shape's interior point is read from
+        :attr:`GenericShapeData.local_center`, which is the local AABB
+        center precomputed by :func:`extract_shape_data`.  For
+        origin-centered primitives this is ``(0, 0, 0)``; for
+        ``CONVEX_MESH`` shapes whose authoring origin lies outside the
+        hull (common for imported collision assets) it is the AABB
+        interior, which avoids the portal degeneracy.
 
         For triangles (and triangle prisms) on shape A the center on
         shape A is replaced by the closest point on the triangle to
-        shape B's center (using the freshly computed B center), giving
-        MPR and GJK a much better starting point when the triangle is
-        large relative to the convex.
+        shape B's center (in A-local space), giving MPR and GJK a much
+        better starting point when the triangle is large relative to
+        the convex.
 
         Args:
             geom_a: Shape A geometry data
             geom_b: Shape B geometry data
-            orientation_b: Orientation of shape B
-            position_b: Position of shape B
+            orientation_b: Orientation of shape B (in A's local frame)
+            position_b: Position of shape B (in A's local frame)
             data_provider: Support mapping data provider
 
         Returns:
-            Vert containing geometric centers of both shapes.  ``B`` is
-            in world space; ``BtoA = center_a - center.B`` mixes A-local
-            with world space, which is the convention used by the
-            ``solve_mpr_core`` / ``solve_gjk_core`` callers.
+            Vert containing geometric centers of both shapes.  Both
+            ``B`` and ``BtoA`` are expressed in shape A's local frame,
+            matching the convention used by the ``solve_mpr_core`` /
+            ``solve_gjk_core`` callers.
         """
         center = Vert()
 
-        center_a = wp.vec3(0.0, 0.0, 0.0)
-        center_b_local = wp.vec3(0.0, 0.0, 0.0)
+        center_a = geom_a.local_center
 
-        if geom_a.shape_type == int(GeoType.CONVEX_MESH):
-            mesh_ptr_a = unpack_mesh_ptr(geom_a.auxiliary)
-            mesh_a = wp.mesh_get(mesh_ptr_a)
-            scale_a = geom_a.scale
-            num_verts_a = mesh_a.points.shape[0]
-            v0_a = wp.cw_mul(mesh_a.points[0], scale_a)
-            min_a = v0_a
-            max_a = v0_a
-            for i in range(1, num_verts_a):
-                v_a = wp.cw_mul(mesh_a.points[i], scale_a)
-                min_a = wp.min(min_a, v_a)
-                max_a = wp.max(max_a, v_a)
-            center_a = 0.5 * (min_a + max_a)
-
-        if geom_b.shape_type == int(GeoType.CONVEX_MESH):
-            mesh_ptr_b = unpack_mesh_ptr(geom_b.auxiliary)
-            mesh_b = wp.mesh_get(mesh_ptr_b)
-            scale_b = geom_b.scale
-            num_verts_b = mesh_b.points.shape[0]
-            v0_b = wp.cw_mul(mesh_b.points[0], scale_b)
-            min_b = v0_b
-            max_b = v0_b
-            for i in range(1, num_verts_b):
-                v_b = wp.cw_mul(mesh_b.points[i], scale_b)
-                min_b = wp.min(min_b, v_b)
-                max_b = wp.max(max_b, v_b)
-            center_b_local = 0.5 * (min_b + max_b)
-
-        center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
+        # Express shape B's interior point in A's local frame.
+        center_b = position_b + wp.quat_rotate(orientation_b, geom_b.local_center)
 
         if geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
             # Project shape B's center onto the triangle for a starting
@@ -251,12 +221,12 @@ def create_support_map_function(support_func: Any):
             tri_a = wp.vec3(0.0, 0.0, 0.0)
             tri_b = geom_a.scale
             tri_c = geom_a.auxiliary
-            proj = closest_point_on_triangle(center_b_world, tri_a, tri_b, tri_c)
+            proj = closest_point_on_triangle(center_b, tri_a, tri_b, tri_c)
             centroid = (tri_a + tri_b + tri_c) / 3.0
             center_a = proj + 0.01 * (centroid - proj)
 
-        center.B = center_b_world
-        center.BtoA = center_a - center_b_world
+        center.B = center_b
+        center.BtoA = center_a - center_b
 
         return center
 
