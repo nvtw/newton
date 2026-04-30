@@ -30,6 +30,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_KINEMATIC,
     BodyContainer,
 )
+from newton._src.solvers.phoenx.body_or_particle import BodyOrParticleStore
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     ADBS_DWORDS,
     JOINT_MODE_REVOLUTE,
@@ -72,6 +73,10 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int
 from newton._src.solvers.phoenx.materials import MaterialData
+from newton._src.solvers.phoenx.particle import (
+    ParticleContainer,
+    particle_container_zeros,
+)
 from newton._src.solvers.phoenx.solver_config import (
     FUSE_TAIL_BLOCK_DIM,
     FUSE_TAIL_MAX_COLOR_SIZE,
@@ -303,6 +308,7 @@ class PhoenXWorld:
         gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         rigid_contact_max: int = 0,
         num_joints: int = 0,
+        num_particles: int = 0,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         num_worlds: int = 1,
@@ -403,6 +409,25 @@ class PhoenXWorld:
         self.num_joints: int = int(num_joints)
         if self.num_joints < 0:
             raise ValueError(f"num_joints must be >= 0 (got {self.num_joints})")
+
+        # Particles -- allocated lazily, ``None`` when ``num_particles
+        # == 0`` so existing rigid-body-only scenes pay zero memory and
+        # zero substep-loop overhead. The unified body-or-particle index
+        # space (see :mod:`newton._src.solvers.phoenx.body_or_particle`)
+        # places particle slot ``i_p`` at unified index ``num_bodies +
+        # i_p``; constraint kernels that address either kind of "thing"
+        # consume the unified index via the
+        # :class:`BodyOrParticleStore` accessor helpers.
+        self.num_particles: int = int(num_particles)
+        if self.num_particles < 0:
+            raise ValueError(f"num_particles must be >= 0 (got {self.num_particles})")
+        self.particles: ParticleContainer | None = None
+        if self.num_particles > 0:
+            self.particles = particle_container_zeros(self.num_particles, device=device)
+        # Cached :class:`BodyOrParticleStore` exposed via the
+        # :attr:`body_or_particle` property; lazy so rigid-only scenes
+        # never allocate the sentinel particle container.
+        self._body_or_particle_store: BodyOrParticleStore | None = None
 
         self.substeps = int(substeps)
         if self.substeps <= 0:
@@ -2068,6 +2093,41 @@ class PhoenXWorld:
         :meth:`gather_constraint_wrenches` /
         :meth:`gather_constraint_errors`."""
         return self._constraint_capacity
+
+    @property
+    def body_or_particle(self) -> BodyOrParticleStore:
+        """Unified body-or-particle store for kernels that address
+        either kind of "thing" by a single integer index.
+
+        Mirrors the joint-or-contact cid scheme: unified indices
+        ``[0, num_bodies)`` resolve to body slots,
+        ``[num_bodies, num_bodies + num_particles)`` to particle
+        slots. The branch lives inside the
+        :func:`~newton._src.solvers.phoenx.body_or_particle.get_position`
+        / ``get_velocity`` / etc. accessors -- constraint kernels
+        consume this store directly without knowing or caring which
+        kind of thing they're addressing.
+
+        Lazy-allocated; rigid-only scenes that never touch this
+        property pay zero memory cost. When
+        :attr:`num_particles == 0` the cached store wraps a length-1
+        sentinel :class:`ParticleContainer` so the wp.struct fields
+        are valid; the threshold compare in the accessors guarantees
+        the sentinel is never read.
+        """
+        if self._body_or_particle_store is None:
+            particles = self.particles
+            if particles is None:
+                # Length-1 sentinel keeps the wp.struct field valid;
+                # the threshold compare in the accessors makes sure
+                # nothing ever indexes past num_bodies in this case.
+                particles = particle_container_zeros(1, device=self.device)
+            store = BodyOrParticleStore()
+            store.bodies = self.bodies
+            store.particles = particles
+            store.num_bodies = wp.int32(self.num_bodies)
+            self._body_or_particle_store = store
+        return self._body_or_particle_store
 
     def gather_constraint_wrenches(self, out: wp.array) -> None:
         """Per-cid world-frame wrench on ``body2`` averaged over the
