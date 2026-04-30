@@ -588,9 +588,15 @@ class PhoenXWorld:
         self._num_active_constraints: wp.array[int] = wp.array(
             [self._joint_container_cids], dtype=wp.int32, device=self.device
         )
+        # Graph-coloring node count covers both bodies and particles
+        # because cloth-triangle endpoints are unified indices in
+        # ``[num_bodies, num_bodies + num_particles)``. The colourer
+        # builds a CSR over interaction endpoints, so its node-count
+        # bound has to span the entire unified-index range or the
+        # particle-side adjacency lookups stomp out of bounds.
         self._partitioner = IncrementalContactPartitioner(
             max_num_interactions=self._constraint_capacity,
-            max_num_nodes=max(1, self.num_bodies),
+            max_num_nodes=max(1, self.num_bodies + self.num_particles),
             device=self.device,
             use_tile_scan=True,
         )
@@ -1724,15 +1730,29 @@ class PhoenXWorld:
             )
 
     def _integrate_forces_and_gravity(self) -> None:
-        """Apply per-body force / torque accumulators AND gravity in one
-        per-substep kernel launch (replaces two sequential launches with
-        identical dim / gating)."""
-        if self.num_bodies == 0:
+        """One per-substep launch over the unified body-or-particle
+        index space. The kernel internally dispatches on
+        :func:`is_particle`:
+
+        * Bodies: apply per-body force / torque accumulators and
+          gravity to ``velocity`` / ``angular_velocity``. Static and
+          kinematic slots early-return.
+        * Particles: substep-entry access-mode transition
+          (Velocity-level -> Position-level). Apply gravity +
+          external force, snapshot pre-predict position into
+          ``position_substep_start``, and advance ``position`` by
+          ``velocity * dt`` so the cloth iterate sees the predicted
+          pose. The substep-exit recovery happens inside
+          :meth:`_integrate_positions`, which also runs over the
+          unified index space.
+        """
+        n = self.num_bodies + self.num_particles
+        if n == 0:
             return
         wp.launch(
             _phoenx_apply_forces_and_gravity_kernel,
-            dim=self.num_bodies,
-            inputs=[self.bodies, self.gravity, wp.float32(self.substep_dt)],
+            dim=n,
+            inputs=[self.body_or_particle, self.gravity, wp.float32(self.substep_dt)],
             device=self.device,
         )
 
@@ -2098,17 +2118,33 @@ class PhoenXWorld:
         )
 
     def _integrate_positions(self) -> None:
-        """``x += v * dt`` and ``q = dq(w * dt) * q`` for dynamic
-        bodies. Static and kinematic bodies are skipped -- kinematic
-        pose advances via
-        :meth:`_kinematic_interpolate_substep`. Axis-angle quaternion
-        form keeps unit norm over many substeps."""
-        if self.num_bodies == 0:
+        """One post-iterate launch over the unified body-or-particle
+        index space. The kernel internally dispatches on
+        :func:`is_particle`:
+
+        * Bodies: ``x += v * dt`` and ``q = dq(w * dt) * q`` for
+          dynamic bodies. Static and kinematic bodies are skipped --
+          kinematic pose advances via
+          :meth:`_kinematic_interpolate_substep`. Axis-angle
+          quaternion form keeps unit norm over many substeps.
+        * Particles: substep-exit access-mode transition
+          (Position-level -> Velocity-level). The cloth iterate has
+          already written the constraint-projected position into
+          ``particles.position``; recover ``velocity = (position -
+          position_substep_start) * inv_dt`` so the next substep
+          starts from a consistent velocity-level state.
+        """
+        n = self.num_bodies + self.num_particles
+        if n == 0:
             return
         wp.launch(
             _integrate_velocities_kernel,
-            dim=self.num_bodies,
-            inputs=[self.bodies, wp.float32(self.substep_dt)],
+            dim=n,
+            inputs=[
+                self.body_or_particle,
+                wp.float32(self.substep_dt),
+                wp.float32(1.0 / self.substep_dt),
+            ],
             device=self.device,
         )
 
@@ -2159,17 +2195,25 @@ class PhoenXWorld:
         )
 
     def _update_inertia_and_clear_forces(self) -> None:
-        """Apply damping, rebuild ``inverse_inertia_world`` from the
-        final orientation, and zero the per-body force/torque
-        accumulators. One kernel launch per step instead of two -- the
-        two old per-body kernels were back-to-back and shared the same
-        body-state hot lines."""
-        if self.num_bodies == 0:
+        """One end-of-step launch over the unified body-or-particle
+        index space. The kernel internally dispatches on
+        :func:`is_particle`:
+
+        * Bodies: apply damping, rebuild ``inverse_inertia_world``
+          from the final orientation (``R * I^-1 * R^T``), and zero
+          the force / torque accumulators (every body slot, including
+          kinematic / static).
+        * Particles: zero the force accumulator. Particles have no
+          orientation / inertia / damping fields, so this is the only
+          work.
+        """
+        n = self.num_bodies + self.num_particles
+        if n == 0:
             return
         wp.launch(
             _phoenx_update_inertia_and_clear_forces_kernel,
-            dim=self.num_bodies,
-            inputs=[self.bodies],
+            dim=n,
+            inputs=[self.body_or_particle],
             device=self.device,
         )
 

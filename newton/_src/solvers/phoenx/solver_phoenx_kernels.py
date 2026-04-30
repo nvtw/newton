@@ -18,7 +18,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_STATIC,
     BodyContainer,
 )
-from newton._src.solvers.phoenx.body_or_particle import BodyOrParticleStore, get_inverse_mass
+from newton._src.solvers.phoenx.body_or_particle import BodyOrParticleStore, get_inverse_mass, is_particle
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     actuated_double_ball_socket_iterate,
     actuated_double_ball_socket_iterate_multi,
@@ -76,6 +76,10 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     element_interaction_data_make,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
+from newton._src.solvers.phoenx.particle import (
+    particle_predict_position,
+    particle_recover_velocity,
+)
 
 __all__ = [
     "_PER_WORLD_COLORING_BLOCK_DIM",
@@ -1203,26 +1207,49 @@ def _rotation_quaternion(omega: wp.vec3f, dt: wp.float32) -> wp.quatf:
 
 @wp.kernel(enable_backward=False)
 def _integrate_velocities_kernel(
-    bodies: BodyContainer,
+    store: BodyOrParticleStore,
     dt: wp.float32,
+    inv_dt: wp.float32,
 ):
-    """Advance position + orientation for dynamic bodies only.
+    """Per-substep post-iterate per-(body, particle) update,
+    dispatched through the unified body-or-particle index.
 
-    Static bodies skipped unconditionally. Kinematic bodies are
-    *also* skipped here -- their pose advances via explicit lerp /
-    slerp interpolation between ``position_prev`` and
+    Body branch: advance position + orientation for dynamic bodies
+    only. Static bodies skipped unconditionally. Kinematic bodies
+    are *also* skipped here -- their pose advances via explicit
+    lerp / slerp interpolation between ``position_prev`` and
     ``kinematic_target_pos`` in
     :func:`_kinematic_interpolate_substep_kernel`, so running the
     velocity integration on them would double-advance the pose.
+
+    Particle branch: substep-exit access-mode transition
+    (Position-level -> Velocity-level). The cloth iterate has
+    already written the constraint-projected position into
+    ``particles.position``; we recover ``velocity = (position -
+    position_substep_start) * inv_dt`` so the next substep starts
+    from a consistent velocity-level state. ``inverse_mass == 0``
+    pinned particles early-return.
+
+    Launch dim is ``num_bodies + num_particles`` -- one thread per
+    "thing" in the unified index space.
     """
     i = wp.tid()
-    mt = bodies.motion_type[i]
+    if is_particle(store, i):
+        i_p = i - store.num_bodies
+        if store.particles.inverse_mass[i_p] == wp.float32(0.0):
+            return
+        store.particles.velocity[i_p] = particle_recover_velocity(
+            store.particles.position[i_p],
+            store.particles.position_substep_start[i_p],
+            inv_dt,
+        )
+        return
+    mt = store.bodies.motion_type[i]
     if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
         return
-
-    bodies.position[i] = bodies.position[i] + bodies.velocity[i] * dt
-    q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
-    bodies.orientation[i] = wp.normalize(q_rot * bodies.orientation[i])
+    store.bodies.position[i] = store.bodies.position[i] + store.bodies.velocity[i] * dt
+    q_rot = _rotation_quaternion(store.bodies.angular_velocity[i], dt)
+    store.bodies.orientation[i] = wp.normalize(q_rot * store.bodies.orientation[i])
 
 
 @wp.kernel(enable_backward=False)
@@ -1393,56 +1420,95 @@ def _sync_num_active_constraints_kernel(
 
 @wp.kernel(enable_backward=False)
 def _phoenx_apply_forces_and_gravity_kernel(
-    bodies: BodyContainer,
+    store: BodyOrParticleStore,
     gravity: wp.array[wp.vec3f],
     substep_dt: wp.float32,
 ):
-    """Fused per-body velocity update at the top of every substep.
+    """Fused per-(body, particle) velocity update at the top of every
+    substep, dispatched through the unified body-or-particle index.
 
-    Combines the old ``apply_external_forces`` and ``integrate_gravity``
-    passes. Both kernels had the same dim / same gate / same per-body
-    velocity read-modify-write, so running two launches instead of one
-    only paid extra CUDA launch overhead (~4us each at 256 worlds, i.e.
-    ~32us / frame at substeps=4). Force accumulators are NOT cleared
-    here -- :func:`_phoenx_update_inertia_and_clear_forces_kernel`
-    runs once at the end of :meth:`PhoenXWorld.step` and zeros them.
+    Body branch (``i < num_bodies``) keeps the existing rigid logic:
+    apply force, torque, and gravity to ``velocity`` /
+    ``angular_velocity``; static / kinematic / inv_mass=0 slots
+    early-return. Force accumulators are NOT cleared here --
+    :func:`_phoenx_update_inertia_and_clear_forces_kernel` runs once
+    at the end of :meth:`PhoenXWorld.step` and zeros them.
+
+    Particle branch (``i >= num_bodies``) runs the substep-entry
+    access-mode transition (Velocity-level -> Position-level): apply
+    gravity + external force to velocity, snapshot the pre-predict
+    position into ``position_substep_start``, then advance position
+    by ``velocity * dt`` so the cloth iterate sees the predicted
+    pose. ``inverse_mass == 0`` pinned particles early-return.
+
+    Launch dim is ``num_bodies + num_particles`` -- one thread per
+    "thing" in the unified index space.
     """
     i = wp.tid()
-    if bodies.motion_type[i] != MOTION_DYNAMIC:
+    if is_particle(store, i):
+        i_p = i - store.num_bodies
+        inv_m = store.particles.inverse_mass[i_p]
+        if inv_m == wp.float32(0.0):
+            return
+        v = store.particles.velocity[i_p]
+        v = v + gravity[store.particles.world_id[i_p]] * substep_dt
+        v = v + store.particles.force[i_p] * (inv_m * substep_dt)
+        store.particles.velocity[i_p] = v
+        p = store.particles.position[i_p]
+        p_advanced, p_start = particle_predict_position(p, v, substep_dt)
+        store.particles.position[i_p] = p_advanced
+        store.particles.position_substep_start[i_p] = p_start
         return
-    if bodies.inverse_mass[i] == 0.0:
+    if store.bodies.motion_type[i] != MOTION_DYNAMIC:
         return
-    v = bodies.velocity[i]
-    w = bodies.angular_velocity[i]
-    inv_mass = bodies.inverse_mass[i]
-    inv_inertia_world = bodies.inverse_inertia_world[i]
-    v = v + bodies.force[i] * (inv_mass * substep_dt)
-    w = w + (inv_inertia_world * bodies.torque[i]) * substep_dt
-    if bodies.affected_by_gravity[i] != 0:
-        v = v + gravity[bodies.world_id[i]] * substep_dt
-    bodies.velocity[i] = v
-    bodies.angular_velocity[i] = w
+    if store.bodies.inverse_mass[i] == wp.float32(0.0):
+        return
+    v = store.bodies.velocity[i]
+    w = store.bodies.angular_velocity[i]
+    inv_mass = store.bodies.inverse_mass[i]
+    inv_inertia_world = store.bodies.inverse_inertia_world[i]
+    v = v + store.bodies.force[i] * (inv_mass * substep_dt)
+    w = w + (inv_inertia_world * store.bodies.torque[i]) * substep_dt
+    if store.bodies.affected_by_gravity[i] != 0:
+        v = v + gravity[store.bodies.world_id[i]] * substep_dt
+    store.bodies.velocity[i] = v
+    store.bodies.angular_velocity[i] = w
 
 
 @wp.kernel(enable_backward=False)
 def _phoenx_update_inertia_and_clear_forces_kernel(
-    bodies: BodyContainer,
+    store: BodyOrParticleStore,
 ):
-    """End-of-step per-body kernel: damping + rotated inertia refresh
-    **plus** force/torque accumulator zeroing. Runs once per step,
-    after the substep loop. Damping uses ``linear_damping`` /
-    ``angular_damping`` per body; the world-frame inertia is rebuilt
-    from the final orientation (``R * I^-1 * R^T``)."""
+    """End-of-step per-(body, particle) kernel: damping + rotated
+    inertia refresh **plus** force / torque accumulator zeroing,
+    dispatched through the unified body-or-particle index.
+
+    Body branch: damping is dynamic-only; the world-frame inertia is
+    rebuilt from the final orientation (``R * I^-1 * R^T``); force /
+    torque cleared on every body slot regardless of motion type so
+    kinematic / static slots also start the next step zeroed.
+
+    Particle branch: zero the force accumulator. Particles have no
+    orientation / inertia / damping fields, so this is the only
+    work.
+
+    Launch dim is ``num_bodies + num_particles`` -- one thread per
+    "thing" in the unified index space.
+    """
     i = wp.tid()
+    if is_particle(store, i):
+        i_p = i - store.num_bodies
+        store.particles.force[i_p] = wp.vec3f(0.0, 0.0, 0.0)
+        return
     # Damping + rotated inertia: dynamic-only.
-    if bodies.motion_type[i] == MOTION_DYNAMIC:
-        bodies.velocity[i] = bodies.velocity[i] * bodies.linear_damping[i]
-        bodies.angular_velocity[i] = bodies.angular_velocity[i] * bodies.angular_damping[i]
-        r = wp.quat_to_matrix(bodies.orientation[i])
-        bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
+    if store.bodies.motion_type[i] == MOTION_DYNAMIC:
+        store.bodies.velocity[i] = store.bodies.velocity[i] * store.bodies.linear_damping[i]
+        store.bodies.angular_velocity[i] = store.bodies.angular_velocity[i] * store.bodies.angular_damping[i]
+        r = wp.quat_to_matrix(store.bodies.orientation[i])
+        store.bodies.inverse_inertia_world[i] = rotate_inertia(r, store.bodies.inverse_inertia[i])
     # Force / torque clear: every body slot, including kinematic / static.
-    bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
-    bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
+    store.bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
+    store.bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
 
 
 @wp.kernel(enable_backward=False)

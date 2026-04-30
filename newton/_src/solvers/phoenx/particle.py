@@ -33,6 +33,8 @@ __all__ = [
     "PARTICLE_FLAG_NONE",
     "ParticleContainer",
     "particle_container_zeros",
+    "particle_predict_position",
+    "particle_recover_velocity",
 ]
 
 
@@ -105,6 +107,19 @@ class ParticleContainer:
     #: this to filter. ``0`` for single-world scenes.
     world_id: wp.array[wp.int32]
 
+    #: Position at substep entry (pre-predict). Written by the
+    #: substep-entry predict kernel (Velocity -> Position
+    #: transition); read by the substep-exit recover kernel to
+    #: derive ``velocity = (position - position_substep_start) *
+    #: inv_dt``. Mirrors the C# ``TinyRigidState`` access-mode
+    #: pattern -- the iterate operates on
+    #: :attr:`position` directly, and the access-mode flip back to
+    #: velocity-level at the end of the substep automatically
+    #: recovers velocity from the position delta. See
+    #: :func:`particle_predict_position` /
+    #: :func:`particle_recover_velocity`.
+    position_substep_start: wp.array[wp.vec3f]
+
 
 def particle_container_zeros(
     num_particles: int,
@@ -134,4 +149,76 @@ def particle_container_zeros(
     p.force = wp.zeros(num_particles, dtype=wp.vec3f, device=device)
     p.flags = wp.zeros(num_particles, dtype=wp.int32, device=device)
     p.world_id = wp.zeros(num_particles, dtype=wp.int32, device=device)
+    p.position_substep_start = wp.zeros(num_particles, dtype=wp.vec3f, device=device)
     return p
+
+
+# ---------------------------------------------------------------------------
+# Per-substep predict / recover helpers (access-mode pattern).
+# ---------------------------------------------------------------------------
+#
+# Particles operate at position-level inside the cloth iterate (the
+# iterate writes :attr:`ParticleContainer.position` directly), but the
+# physics state at the substep boundaries is velocity-level (Newton's
+# ``Model.particle_qd`` is a velocity, the integrator's ``v += g*dt``
+# step works on velocity). So each substep does two transitions:
+#
+# 1. Substep entry: Velocity-level -> Position-level.
+#    Apply forces / gravity to ``velocity``, snapshot the pre-predict
+#    position into ``position_substep_start``, then advance
+#    ``position`` by ``velocity * dt``. The cloth iterate sees the
+#    advanced position and projects it onto constraint manifolds.
+#
+# 2. Substep exit: Position-level -> Velocity-level.
+#    Recover ``velocity = (position - position_substep_start) * inv_dt``
+#    so the next substep starts from a consistent velocity-level state.
+#
+# These mirror the C# ``TinyRigidState.SynchronizeVelAndPosStateUpdates``
+# transitions for rigid bodies (BodyTypes.cs:268-304); ours are
+# simpler because particles don't have orientation.
+
+
+@wp.func
+def particle_predict_position(
+    position: wp.vec3f,
+    velocity: wp.vec3f,
+    dt: wp.float32,
+):
+    """Substep-entry transition: Velocity-level -> Position-level.
+
+    Returns ``(position_advanced, position_substep_start)``. The
+    caller writes ``position_advanced`` back to
+    :attr:`ParticleContainer.position` and snapshots
+    ``position_substep_start`` into
+    :attr:`ParticleContainer.position_substep_start`. ``velocity``
+    must already include the per-substep gravity / external-force
+    contribution; this helper does *not* mutate it.
+
+    Mirrors the C# ``Velocity -> Position`` branch of
+    ``TinyRigidState.SynchronizeVelAndPosStateUpdates``
+    (BodyTypes.cs:294-301): ``Position = bodyState.Position +
+    dt * Velocity``.
+    """
+    return position + dt * velocity, position
+
+
+@wp.func
+def particle_recover_velocity(
+    position: wp.vec3f,
+    position_substep_start: wp.vec3f,
+    inv_dt: wp.float32,
+) -> wp.vec3f:
+    """Substep-exit transition: Position-level -> Velocity-level.
+
+    Mirrors the C# ``Position -> Velocity`` branch of
+    ``TinyRigidState.SynchronizeVelAndPosStateUpdates``
+    (BodyTypes.cs:282-290): ``Velocity = (Position -
+    bodyState.Position) * invDt``. The cloth iterate has already
+    written the constraint-projected position into ``position``;
+    this helper just folds the delta over the substep into the
+    velocity field.
+
+    Returns the new velocity by value; caller writes it back to
+    :attr:`ParticleContainer.velocity`.
+    """
+    return (position - position_substep_start) * inv_dt
