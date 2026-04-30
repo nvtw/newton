@@ -33,6 +33,21 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_get_body3,
     cloth_triangle_iterate_at,
     cloth_triangle_prepare_for_iteration_at,
+    cloth_triangle_set_alpha_lambda,
+    cloth_triangle_set_alpha_mu,
+    cloth_triangle_set_bias_lambda,
+    cloth_triangle_set_bias_mu,
+    cloth_triangle_set_body1,
+    cloth_triangle_set_body2,
+    cloth_triangle_set_body3,
+    cloth_triangle_set_inv_mass_a,
+    cloth_triangle_set_inv_mass_b,
+    cloth_triangle_set_inv_mass_c,
+    cloth_triangle_set_inv_rest,
+    cloth_triangle_set_lambda_sum_lambda,
+    cloth_triangle_set_lambda_sum_mu,
+    cloth_triangle_set_rest_area,
+    cloth_triangle_set_type,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
@@ -1029,6 +1044,97 @@ def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
 
 _constraints_to_elements_kernel = _make_constraints_to_elements_kernel(cloth_support=False)
 _constraints_to_elements_cloth_kernel = _make_constraints_to_elements_kernel(cloth_support=True)
+
+
+# Tiny epsilon used to clip Newton ``Model.tri_materials`` stiffness
+# values before dividing into compliance. Values reach zero on a
+# default ``ModelBuilder.add_particles(...)`` particle that hasn't
+# been given explicit cloth gains; without the floor we'd produce
+# inf compliance which kills the XPBD update on the row.
+_PHOENX_CLOTH_STIFFNESS_FLOOR = wp.constant(wp.float32(1.0e-6))
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_init_cloth_triangle_rows_kernel(
+    constraints: ConstraintContainer,
+    cid_offset: wp.int32,
+    num_bodies: wp.int32,
+    # Newton's :class:`Model` stores ``tri_indices`` as a 2D array of
+    # shape ``(tri_count, 3)`` (one row per triangle, columns are the
+    # three particle indices). We index it with ``[t, k]`` rather than
+    # the old flat ``[3*t + k]`` form.
+    tri_indices: wp.array2d[wp.int32],
+    tri_poses: wp.array[wp.mat22f],
+    tri_areas: wp.array[wp.float32],
+    tri_materials: wp.array2d[wp.float32],
+):
+    """Stamp ``num_cloth_triangles`` cloth-triangle constraint rows
+    from Newton's mesh API.
+
+    Per triangle ``t`` (one thread per row):
+
+    * The three particle indices come from ``tri_indices[t, 0..3]``.
+      They live in PhoenX's particle slot space; the cloth iterate
+      consumes unified body-or-particle indices, so we shift each by
+      ``num_bodies`` here to land in
+      ``[num_bodies, num_bodies + num_particles)``.
+    * ``inv_rest = tri_poses[t]`` is already the 2x2 inverse
+      rest-pose matrix Newton's other solvers consume (style3d /
+      VBD); copy verbatim into the row.
+    * ``rest_area = tri_areas[t]``.
+    * Compliance is recovered from the elastic-stiffness columns of
+      ``tri_materials[t]`` (a ``[tri_count, 5]`` array). Column 0
+      ``tri_ke`` is shear / Young's-modulus-like stiffness (mu);
+      column 1 ``tri_ka`` is area-preservation stiffness (lambda).
+      XPBD compliance is the inverse of stiffness scaled by the
+      element's rest area: ``alpha = 1 / (stiffness * rest_area)``.
+      Stiffness floored at :data:`_PHOENX_CLOTH_STIFFNESS_FLOOR` so a
+      builder that left the per-element stiffness at zero produces a
+      finite (but very compliant) row instead of an infinite
+      compliance that would kill the XPBD update.
+    """
+    t = wp.tid()
+    cid = cid_offset + t
+
+    pa = tri_indices[t, 0]
+    pb = tri_indices[t, 1]
+    pc = tri_indices[t, 2]
+
+    cloth_triangle_set_type(constraints, cid)
+    cloth_triangle_set_body1(constraints, cid, num_bodies + pa)
+    cloth_triangle_set_body2(constraints, cid, num_bodies + pb)
+    cloth_triangle_set_body3(constraints, cid, num_bodies + pc)
+
+    cloth_triangle_set_inv_rest(constraints, cid, tri_poses[t])
+
+    rest_area = tri_areas[t]
+    cloth_triangle_set_rest_area(constraints, cid, rest_area)
+
+    # tri_materials columns -- mirrors Newton's tri_ke/tri_ka/...
+    # ordering. Floor before dividing.
+    k_mu = tri_materials[t, 0]
+    if k_mu < _PHOENX_CLOTH_STIFFNESS_FLOOR:
+        k_mu = _PHOENX_CLOTH_STIFFNESS_FLOOR
+    k_lambda = tri_materials[t, 1]
+    if k_lambda < _PHOENX_CLOTH_STIFFNESS_FLOOR:
+        k_lambda = _PHOENX_CLOTH_STIFFNESS_FLOOR
+    area_clamped = rest_area
+    if area_clamped < _PHOENX_CLOTH_STIFFNESS_FLOOR:
+        area_clamped = _PHOENX_CLOTH_STIFFNESS_FLOOR
+    cloth_triangle_set_alpha_lambda(constraints, cid, wp.float32(1.0) / (k_lambda * area_clamped))
+    cloth_triangle_set_alpha_mu(constraints, cid, wp.float32(1.0) / (k_mu * area_clamped))
+
+    # Zero per-substep / cross-iteration state. Prepare overwrites
+    # bias_* and inv_mass_* at substep entry; lambda_sum_* are reset
+    # there too. Initial zero just means the first prepare reads a
+    # consistent starting state.
+    cloth_triangle_set_inv_mass_a(constraints, cid, wp.float32(0.0))
+    cloth_triangle_set_inv_mass_b(constraints, cid, wp.float32(0.0))
+    cloth_triangle_set_inv_mass_c(constraints, cid, wp.float32(0.0))
+    cloth_triangle_set_bias_lambda(constraints, cid, wp.float32(0.0))
+    cloth_triangle_set_bias_mu(constraints, cid, wp.float32(0.0))
+    cloth_triangle_set_lambda_sum_lambda(constraints, cid, wp.float32(0.0))
+    cloth_triangle_set_lambda_sum_mu(constraints, cid, wp.float32(0.0))
 
 
 @wp.kernel(enable_backward=False)

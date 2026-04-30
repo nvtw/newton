@@ -36,6 +36,9 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     JOINT_MODE_REVOLUTE,
     actuated_double_ball_socket_initialize_kernel,
 )
+from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    CLOTH_TRIANGLE_DWORDS,
+)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     CONTACT_DWORDS,
     ContactColumnContainer,
@@ -131,6 +134,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
+    _phoenx_init_cloth_triangle_rows_kernel,
     _phoenx_refresh_world_inertia_kernel,
     _phoenx_update_inertia_and_clear_forces_kernel,
     _pick_threads_per_world_kernel,
@@ -452,6 +456,14 @@ class PhoenXWorld:
         self.num_cloth_triangles: int = int(num_cloth_triangles)
         if self.num_cloth_triangles < 0:
             raise ValueError(f"num_cloth_triangles must be >= 0 (got {self.num_cloth_triangles})")
+        # Total cid count in the joint-side :class:`ConstraintContainer`.
+        # Joints + cloth triangles all live in this container; the
+        # dispatcher uses ``cid < num_joint_container_cids`` as the
+        # boundary that separates joint-container cids (joints + cloth)
+        # from contact-column cids. ``self.num_joints`` keeps its
+        # original meaning -- just rigid joints -- so joint-init
+        # kernels stay scoped correctly.
+        self._joint_container_cids: int = self.num_joints + self.num_cloth_triangles
         # Cached :class:`BodyOrParticleStore` exposed via the
         # :attr:`body_or_particle` property; lazy so rigid-only scenes
         # never allocate the sentinel particle container.
@@ -537,7 +549,7 @@ class PhoenXWorld:
         self.substep_dt: float = 0.0
 
         # Joint cids at ``[0, num_joints)``; contact cids follow.
-        self._constraint_capacity: int = max(1, self.num_joints + self.max_contact_columns)
+        self._constraint_capacity: int = max(1, self._joint_container_cids + self.max_contact_columns)
 
         # Persistent grid size for the single-world PGS sweep kernels.
         # Fixed at construction so every colour launch uses the same
@@ -573,7 +585,9 @@ class PhoenXWorld:
             self._constraint_capacity, dtype=ElementInteractionData, device=self.device
         )
         # Joints are the only active cids until the first ingest.
-        self._num_active_constraints: wp.array[int] = wp.array([self.num_joints], dtype=wp.int32, device=self.device)
+        self._num_active_constraints: wp.array[int] = wp.array(
+            [self._joint_container_cids], dtype=wp.int32, device=self.device
+        )
         self._partitioner = IncrementalContactPartitioner(
             max_num_interactions=self._constraint_capacity,
             max_num_nodes=max(1, self.num_bodies),
@@ -727,8 +741,12 @@ class PhoenXWorld:
         :meth:`make_constraint_container` to build the constraint
         container -- the factory always emits the correct shape.
         """
-        expected_constraint_dwords = self.required_constraint_dwords(self.num_joints)
-        expected_constraint_cols = max(1, int(self.num_joints))
+        expected_constraint_dwords = self.required_constraint_dwords(self.num_joints, self.num_cloth_triangles)
+        # The joint-side ConstraintContainer holds rigid joints AND
+        # cloth triangles (mixed at any cid; per-cid type tag at
+        # dword 0 routes the dispatcher), so its column capacity is
+        # ``num_joints + num_cloth_triangles``.
+        expected_constraint_cols = max(1, int(self._joint_container_cids))
         actual_constraint_shape = self.constraints.data.shape
         assert actual_constraint_shape == (expected_constraint_dwords, expected_constraint_cols), (
             f"ConstraintContainer.data has shape {actual_constraint_shape}, expected "
@@ -879,41 +897,54 @@ class PhoenXWorld:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def required_constraint_dwords(num_joints: int) -> int:
-        """Dword width of the joint-only :class:`ConstraintContainer`.
+    def required_constraint_dwords(num_joints: int, num_cloth_triangles: int = 0) -> int:
+        """Dword width of the joint-side :class:`ConstraintContainer`.
 
         Contacts now live in a dedicated narrow
         :class:`ContactColumnContainer`; the
-        :class:`ConstraintContainer` is sized strictly for joints and
-        only needs the 154-dword ADBS header when any joints are
-        reserved (otherwise the minimal ``CONTACT_DWORDS = 7`` is
-        enough to satisfy the shared header contract on the unused
-        single-row allocation).
+        :class:`ConstraintContainer` is sized for the widest of the
+        joint-side constraint types actually present:
+
+        * Rigid joints contribute ``ADBS_DWORDS`` (154).
+        * Cloth triangles contribute ``CLOTH_TRIANGLE_DWORDS`` (~18).
+        * Otherwise, the minimal ``CONTACT_DWORDS = 7`` placeholder
+          satisfies the shared header contract on the unused
+          single-row allocation.
+
+        Mixed scenes get the max of all active types; that is wider
+        than strictly necessary for either type alone but the joint
+        container is column-sparse (one cid per joint / cloth row),
+        so the extra unused dwords are negligible.
         """
+        widest = int(CONTACT_DWORDS)
         if int(num_joints) > 0:
-            return int(ADBS_DWORDS)
-        return int(CONTACT_DWORDS)
+            widest = max(widest, int(ADBS_DWORDS))
+        if int(num_cloth_triangles) > 0:
+            widest = max(widest, int(CLOTH_TRIANGLE_DWORDS))
+        return widest
 
     @staticmethod
     def make_constraint_container(
         num_joints: int,
+        num_cloth_triangles: int = 0,
         device: wp.context.Devicelike = None,
     ) -> ConstraintContainer:
-        """Factory for a correctly-sized joint-only
+        """Factory for a correctly-sized joint-side
         :class:`ConstraintContainer`.
 
-        Capacity is ``max(1, num_joints)`` -- contact columns live in
-        :class:`ContactColumnContainer` and are sized separately, so
-        the joint-side container only needs a 1-row placeholder when
-        there are no joints. The dword width is the ADBS joint header
-        when joints exist (154 dwords) or the contact placeholder
-        width (7 dwords) otherwise; see
+        Capacity is ``max(1, num_joints + num_cloth_triangles)`` -- the
+        joint-side container holds rigid joints AND cloth triangles
+        (mixed at any cid; per-cid ``constraint_type`` tag at dword 0
+        routes the dispatcher). Contact columns live in their own
+        :class:`ContactColumnContainer` and are sized separately. The
+        dword width is the ADBS joint header (154 dwords) when joints
+        exist; otherwise the contact placeholder width (7 dwords). See
         :meth:`required_constraint_dwords`.
         """
-        cap = max(1, int(num_joints))
+        cap = max(1, int(num_joints) + int(num_cloth_triangles))
         return constraint_container_zeros(
             num_constraints=cap,
-            num_dwords=PhoenXWorld.required_constraint_dwords(num_joints),
+            num_dwords=PhoenXWorld.required_constraint_dwords(num_joints, num_cloth_triangles),
             device=device,
         )
 
@@ -1019,6 +1050,84 @@ class PhoenXWorld:
                 stiffness_limit,
                 damping_limit,
                 armature,
+            ],
+            device=self.device,
+        )
+
+    def populate_cloth_triangles_from_model(self, model: Any) -> None:
+        """Stamp ``num_cloth_triangles`` cloth-triangle constraint rows
+        from a Newton :class:`~newton.Model` and copy the model's
+        particle state into the :class:`ParticleContainer`.
+
+        Reads from the same VBD-compatible mesh API
+        (``model.particle_q`` / ``particle_qd`` / ``particle_inv_mass``
+        / ``tri_indices`` / ``tri_poses`` / ``tri_areas`` /
+        ``tri_materials``) Newton's other cloth solvers consume, then
+        packs into PhoenX's internal constraint-row format. Newton's
+        ``tri_poses[t]`` is already a 2x2 inverse rest-pose matrix
+        (``inv_dm`` in style3d / VBD), so it copies verbatim into the
+        cloth row.
+
+        Cloth cids occupy ``[num_joints, num_joints + num_cloth_triangles)``
+        in the joint-side :class:`ConstraintContainer`. Contacts (when
+        present) follow at ``cid >= num_joints + num_cloth_triangles``;
+        the dispatcher's ``cid < num_joints_kernel_param`` branch (the
+        kernel parameter is set to :attr:`_joint_container_cids` =
+        ``num_joints + num_cloth_triangles``) sends both joints and
+        cloth to the joint-side dispatch, where the per-cid type tag
+        routes between ADBS and cloth.
+
+        Args:
+            model: A finalised :class:`~newton.Model` whose particle /
+                triangle counts match :attr:`num_particles` /
+                :attr:`num_cloth_triangles`. Cloth nodes must live in
+                the model's particle store -- rigid-body cloth nodes
+                are deferred (PLAN_CLOTH_TRIANGLE.md).
+
+        Raises:
+            ValueError: if the model's particle count differs from
+                :attr:`num_particles`, or its triangle count differs
+                from :attr:`num_cloth_triangles`.
+        """
+        if self.num_cloth_triangles == 0:
+            # Nothing to do; rigid-only scenes don't reserve any cloth
+            # rows. Still allowed (e.g. user calls this defensively
+            # before checking ``model.tri_count``); silently no-op.
+            return
+        model_particle_count = int(model.particle_count)
+        model_tri_count = int(model.tri_count)
+        if model_particle_count != self.num_particles:
+            raise ValueError(
+                f"populate_cloth_triangles_from_model: model.particle_count "
+                f"({model_particle_count}) != world.num_particles ({self.num_particles}). "
+                "Construct PhoenXWorld with num_particles == model.particle_count."
+            )
+        if model_tri_count != self.num_cloth_triangles:
+            raise ValueError(
+                f"populate_cloth_triangles_from_model: model.tri_count "
+                f"({model_tri_count}) != world.num_cloth_triangles ({self.num_cloth_triangles}). "
+                "Construct PhoenXWorld with num_cloth_triangles == model.tri_count."
+            )
+        # Particle state: position / velocity / inverse_mass copy 1:1.
+        if self.particles is None:  # pragma: no cover -- guarded above
+            raise RuntimeError("self.particles is None despite num_particles > 0")
+        wp.copy(self.particles.position, model.particle_q)
+        wp.copy(self.particles.velocity, model.particle_qd)
+        wp.copy(self.particles.inverse_mass, model.particle_inv_mass)
+        # Stamp one cloth row per triangle. Cids start at
+        # ``num_joints`` (immediately after the rigid joints), one
+        # row per triangle.
+        wp.launch(
+            _phoenx_init_cloth_triangle_rows_kernel,
+            dim=self.num_cloth_triangles,
+            inputs=[
+                self.constraints,
+                wp.int32(self.num_joints),  # cid_offset
+                wp.int32(self.num_bodies),
+                model.tri_indices,
+                model.tri_poses,
+                model.tri_areas,
+                model.tri_materials,
             ],
             device=self.device,
         )
@@ -1134,7 +1243,9 @@ class PhoenXWorld:
         self._ingest_and_warmstart_contacts(contacts, shape_body)
         if self._ingest_scratch is not None:
             self._partitioner.set_costs_from_contacts(
-                self.num_joints,
+                # Contacts start at the cid past joints + cloth in
+                # the unified joint-container cid space.
+                self._joint_container_cids,
                 self._ingest_scratch.num_contact_columns,
                 self._contact_cols,
             )
@@ -1247,7 +1358,7 @@ class PhoenXWorld:
         contact counts on-device.
         """
         if contacts is None or self.max_contact_columns == 0 or self._ingest_scratch is None:
-            self._num_active_constraints.fill_(self.num_joints)
+            self._num_active_constraints.fill_(self._joint_container_cids)
             self._contact_views = None
             return
 
@@ -1383,7 +1494,9 @@ class PhoenXWorld:
 
         stamp_forward_contact_map(
             rigid_contact_max=self.rigid_contact_max,
-            cid_base=self.num_joints,
+            # Contacts begin in the cid space *after* both rigid joints
+            # and cloth triangles -- they live in the joint container.
+            cid_base=self._joint_container_cids,
             scratch=self._ingest_scratch,
             cid_of_contact=self._cid_of_contact_cur,
             device=self.device,
@@ -1399,7 +1512,10 @@ class PhoenXWorld:
             dim=1,
             inputs=[
                 self._ingest_scratch.num_contact_columns,
-                wp.int32(self.num_joints),
+                # Joint-container cids = rigid joints + cloth triangles;
+                # both are always active across substeps. The active
+                # contact count is added on top by the kernel.
+                wp.int32(self._joint_container_cids),
             ],
             outputs=[self._num_active_constraints],
             device=self.device,
@@ -1423,7 +1539,10 @@ class PhoenXWorld:
                 self._contact_cols,
                 self.bodies,
                 self._num_active_constraints,
-                wp.int32(self.num_joints),
+                # Joint-container boundary; ``cid < num_joints`` in the
+                # kernel routes joints + cloth to the joint dispatcher,
+                # else to contacts.
+                wp.int32(self._joint_container_cids),
                 self._elements,
                 self.body_or_particle,
             ],
@@ -1652,7 +1771,10 @@ class PhoenXWorld:
                 contact_views,
                 wp.int32(self.solver_iterations),
                 wp.int32(self.num_worlds),
-                wp.int32(self.num_joints),
+                # Joint-container boundary (= rigid joints + cloth);
+                # the multi-world dispatcher uses it the same way the
+                # single-world ones do.
+                wp.int32(self._joint_container_cids),
                 self._tpw_choice,
             ],
             device=self.device,
@@ -1719,7 +1841,7 @@ class PhoenXWorld:
                     self._partitioner.color_cursor,
                     self._contact_container,
                     contact_views,
-                    wp.int32(self.num_joints),
+                    wp.int32(self._joint_container_cids),
                     wp.int32(self._singleworld_total_threads),
                     wp.int32(self._fuse_threshold),
                     self._head_active,
@@ -1758,7 +1880,7 @@ class PhoenXWorld:
                 self._partitioner.color_cursor,
                 self._contact_container,
                 contact_views,
-                wp.int32(self.num_joints),
+                wp.int32(self._joint_container_cids),
                 wp.int32(self._fuse_threshold),
                 self.body_or_particle,
             ],
@@ -2202,7 +2324,12 @@ class PhoenXWorld:
                 self._contact_cols,
                 self.bodies,
                 wp.int32(self._constraint_capacity),
-                wp.int32(self.num_joints),
+                # Joint-container boundary; cloth cids in the joint
+                # range will route through the joint wrench helper
+                # which reads ADBS-typed fields. For pure rigid scenes
+                # this stays bit-for-bit unchanged; cloth wrench
+                # readout is a follow-up.
+                wp.int32(self._joint_container_cids),
                 idt,
                 self._contact_container,
                 contact_views,
@@ -2225,7 +2352,7 @@ class PhoenXWorld:
                 self._contact_cols,
                 self.bodies,
                 wp.int32(self._constraint_capacity),
-                wp.int32(self.num_joints),
+                wp.int32(self._joint_container_cids),
             ],
             outputs=[out],
             device=self.device,
