@@ -179,6 +179,17 @@ class ControllerNeuralLSTM(Controller):
         runtime, _ = load_checkpoint(self.model_path, device=str(device), batch_size=num_actuators)
         self._network = runtime
 
+        # The compute() copy assumes one effort per actuator, i.e. output shape
+        # exactly ``(num_actuators, 1)``.  A multi-column output would silently
+        # misalign actuator i with row 0, column i, dropping later rows; reject
+        # such models up front instead of producing wrong inferences.
+        out_shape = runtime._shapes[self._output_name]
+        if out_shape != (num_actuators, 1):
+            raise ValueError(
+                f"ControllerNeuralLSTM: ONNX output '{self._output_name}' has shape {out_shape}, "
+                f"expected {(num_actuators, 1)} (one scalar effort per actuator)"
+            )
+
         self._net_input = wp.zeros((1, num_actuators, 2), dtype=wp.float32, device=device)
         self._next_hidden = wp.zeros(
             (self._num_layers, num_actuators, self._hidden_size), dtype=wp.float32, device=device
@@ -255,14 +266,13 @@ class ControllerNeuralLSTM(Controller):
         wp.copy(self._next_hidden, hidden_new.reshape((self._num_layers, n, self._hidden_size)))
         wp.copy(self._next_cell, cell_new.reshape((self._num_layers, n, self._hidden_size)))
 
-        # ``effort`` is the (N, output_size) tensor produced by the final
-        # Gemm.  Scale it and copy the leading ``len(forces)`` entries into
-        # ``forces`` in a single launch.
-        cols = effort.shape[1] if len(effort.shape) > 1 else 1
+        # ``effort`` is guaranteed by ``finalize`` to be ``(N, 1)``; flatten
+        # the leading ``len(forces)`` entries into ``forces`` in a single
+        # launch.
         wp.launch(
             _scale_effort_to_forces_kernel,
             dim=len(forces),
-            inputs=[effort, forces, self.effort_scale, cols],
+            inputs=[effort, forces, self.effort_scale, 1],
             device=device,
         )
 

@@ -155,16 +155,25 @@ class _Op:
     inputs: list[str]
     outputs: list[str]
     attrs: dict[str, Any] = field(default_factory=dict)
+    attr_names: set[str] = field(default_factory=set)
 
 
-def _decode_attrs(node) -> dict[str, Any]:
-    """Decode all attributes of an ONNX ``NodeProto`` in a single pass."""
+def _decode_attrs(node) -> tuple[dict[str, Any], set[str]]:
+    """Decode all attributes of an ONNX ``NodeProto`` in a single pass.
+
+    Returns ``(decoded, all_names)`` where ``decoded`` only contains attributes
+    of supported types (FLOAT/INT/STRING) and ``all_names`` is the full set of
+    attribute names present on the node (used for fail-fast validation of
+    unsupported features even when their value type isn't decoded).
+    """
     out: dict[str, Any] = {}
+    all_names: set[str] = set()
     for attr in node.attribute:
+        all_names.add(attr.name)
         decoder = _ATTR_DECODERS.get(attr.type)
         if decoder is not None:
             out[attr.name] = decoder(attr)
-    return out
+    return out, all_names
 
 
 def _np_to_warp(arr_np: np.ndarray, device: wp.context.Device) -> wp.array:
@@ -217,15 +226,18 @@ class OnnxRuntime:
                     shape.append(batch_size)
             self._shapes[inp.name] = tuple(shape)
 
-        self._ops: list[_Op] = [
-            _Op(
-                op_type=node.op_type,
-                inputs=list(node.input),
-                outputs=list(node.output),
-                attrs=_decode_attrs(node),
+        self._ops: list[_Op] = []
+        for node in graph.node:
+            decoded, all_names = _decode_attrs(node)
+            self._ops.append(
+                _Op(
+                    op_type=node.op_type,
+                    inputs=list(node.input),
+                    outputs=list(node.output),
+                    attrs=decoded,
+                    attr_names=all_names,
+                )
             )
-            for node in graph.node
-        ]
 
         self._preallocate_buffers()
 
@@ -360,6 +372,24 @@ def _shape_lstm(op, shapes, tensors, device):
     Weights are reshaped into device-resident 2-D tiles and the gates
     workspace is preallocated, so per-call inference is two Warp launches.
     """
+    # The kernel hardcodes ONNX-default activations (sigmoid, tanh, tanh) and
+    # has no peephole / clip / input_forget / sequence_lens support.  Reject
+    # any model that asks for non-default behavior so we never silently
+    # produce wrong inferences.
+    for unsupported in ("activations", "activation_alpha", "activation_beta", "clip", "input_forget"):
+        if unsupported in op.attr_names:
+            raise NotImplementedError(
+                f"OnnxRuntime LSTM: attribute '{unsupported}' is not supported "
+                f"(only default sigmoid/tanh/tanh activations, no clip, no input_forget)"
+            )
+
+    # sequence_lens (input index 4) and P / peepholes (input index 7) are
+    # optional ONNX inputs.  Empty strings denote "not provided" in ONNX.
+    if len(op.inputs) > 4 and op.inputs[4]:
+        raise NotImplementedError("OnnxRuntime LSTM: 'sequence_lens' input is not supported")
+    if len(op.inputs) > 7 and op.inputs[7]:
+        raise NotImplementedError("OnnxRuntime LSTM: peephole input 'P' is not supported")
+
     direction = op.attrs.get("direction", "forward")
     if direction not in ("forward", b"forward"):
         raise NotImplementedError("OnnxRuntime LSTM: only forward direction is supported")

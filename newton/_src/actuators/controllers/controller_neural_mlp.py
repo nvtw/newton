@@ -231,6 +231,17 @@ class ControllerNeuralMLP(Controller):
         self._net_input_name = runtime.input_names[0]
         self._net_output_name = runtime.output_names[0]
 
+        # The compute() copy assumes one effort per actuator, i.e. output shape
+        # exactly ``(num_actuators, 1)``.  A multi-column output would silently
+        # misalign actuator i with row 0, column i, dropping later rows; reject
+        # such models up front instead of producing wrong inferences.
+        out_shape = runtime._shapes[self._net_output_name]
+        if out_shape != (num_actuators, 1):
+            raise ValueError(
+                f"ControllerNeuralMLP: ONNX output '{self._net_output_name}' has shape {out_shape}, "
+                f"expected {(num_actuators, 1)} (one scalar effort per actuator)"
+            )
+
         # input shape: (N, 2 * K) where K = len(input_idx)
         feat = 2 * len(self.input_idx)
         self._net_input = wp.zeros((num_actuators, feat), dtype=wp.float32, device=device)
@@ -314,14 +325,13 @@ class ControllerNeuralMLP(Controller):
         out = self._network({self._net_input_name: self._net_input})
         effort = out[self._net_output_name]
 
-        # ``effort`` is the (N, output_size) tensor produced by the final
-        # Gemm; flatten its leading ``len(forces)`` row-major entries into
-        # ``forces`` in a single launch.
-        cols = effort.shape[1] if len(effort.shape) > 1 else 1
+        # ``effort`` is guaranteed by ``finalize`` to be ``(N, 1)``; flatten
+        # the leading ``len(forces)`` entries into ``forces`` in a single
+        # launch.
         wp.launch(
             _scale_and_copy_kernel,
             dim=len(forces),
-            inputs=[effort, forces, self.effort_scale, cols],
+            inputs=[effort, forces, self.effort_scale, 1],
             device=device,
         )
 
