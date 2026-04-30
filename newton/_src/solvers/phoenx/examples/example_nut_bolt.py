@@ -31,6 +31,11 @@ from newton._src.solvers.phoenx.examples.example_common import (
     newton_to_phoenx_kernel,
     phoenx_to_newton_kernel,
 )
+from newton._src.solvers.phoenx.materials import (
+    COMBINE_MIN,
+    Material,
+    material_table_from_list,
+)
 from newton._src.solvers.phoenx.picking import (
     Picking,
     register_with_viewer_gl,
@@ -64,6 +69,36 @@ _CONTACT_MATCHING = "latest"
 # bolt the pair drifts together along the contact normal until the
 # threads catch.
 BOLT_IS_STATIC = False
+
+# How many render frames spend in the high-damping warm-up before
+# the live nut-bolt threading dynamics start. During warm-up the
+# solver zeroes all body velocities at every substep
+# (:meth:`PhoenXWorld.set_global_linear_damping(1.0)` plus
+# ``set_global_angular_damping(1.0)``); this lets the contact
+# resolver bleed off the frame-1 impulse spike that comes from the
+# nut, bolt and ground all establishing contact simultaneously
+# without injecting kinetic energy into the rest of the simulation.
+# After the warm-up the damping pin is released to ``0`` so the
+# scene runs with no artificial energy loss. Same warm-up trick
+# :class:`example_kapla_arena.Example` uses to settle the brick
+# arena.
+WARMUP_FRAMES: int = 20
+
+# Per-shape Coulomb friction. The nut-bolt contact pair *must* stay
+# at ``SHAPE_CFG.mu`` so the helical-thread torque story (see
+# :data:`SHAPE_CFG` docstring) still works; the bolt-ground pair, by
+# contrast, needs a high coefficient so the bolt can't slide
+# sideways out from under the falling nut. The ``COMBINE_MIN``
+# combine policy gives both:
+#
+#   * bolt-ground: ``min(BOLT_GROUND_FRICTION, BOLT_GROUND_FRICTION) = 1.0``
+#   * bolt-nut   : ``min(BOLT_GROUND_FRICTION, NUT_FRICTION)         = 0.01``
+#
+# i.e. whichever surface is slipperier wins, which is also what
+# physically happens for unlubricated steel-on-steel vs. a clamped
+# bolt-on-rubber-pad assembly.
+BOLT_GROUND_FRICTION: float = 1.0
+NUT_FRICTION: float = 0.01
 
 # Assembly + asset source -- identical to the jitter / XPBD / MuJoCo
 # nut-bolt examples so the same mesh pair is compared across solvers.
@@ -333,6 +368,67 @@ class Example:
             device=self.device,
         )
 
+        # ---- Per-shape materials (only matters when bolt is free) ----
+        # Three shapes in the model: 0 = ground plane (built by
+        # ``add_ground_plane``), 1 = bolt mesh, 2 = nut mesh. Three
+        # entries in the table at indices [1, 2, 3] (index 0 is the
+        # default fallback per the materials module convention) carry
+        # the per-shape ``mu``; ``COMBINE_MIN`` makes the slipperier
+        # surface win, so:
+        #   * ground & bolt: ``min(1.0, 1.0) = 1.0``  -> bolt clamps
+        #   * bolt  & nut  : ``min(1.0, 0.01) = 0.01`` -> threads
+        # The default ``Material()`` at index 0 is unused because we
+        # populate ``shape_material[*]`` for every real shape; it
+        # exists only so material 0 stays reserved per the
+        # ``DEFAULT_MATERIAL_INDEX`` convention.
+        materials = material_table_from_list(
+            [
+                Material(),  # index 0: reserved default
+                Material(  # index 1: bolt
+                    static_friction=BOLT_GROUND_FRICTION,
+                    dynamic_friction=BOLT_GROUND_FRICTION,
+                    friction_combine_mode=COMBINE_MIN,
+                ),
+                Material(  # index 2: nut
+                    static_friction=NUT_FRICTION,
+                    dynamic_friction=NUT_FRICTION,
+                    friction_combine_mode=COMBINE_MIN,
+                ),
+                Material(  # index 3: ground
+                    static_friction=BOLT_GROUND_FRICTION,
+                    dynamic_friction=BOLT_GROUND_FRICTION,
+                    friction_combine_mode=COMBINE_MIN,
+                ),
+            ],
+            device=self.device,
+        )
+        # Newton shape ordering: 0 = ground, 1 = bolt mesh, 2 = nut mesh.
+        shape_material_idx = wp.array(
+            np.array([3, 1, 2], dtype=np.int32),
+            dtype=wp.int32,
+            device=self.device,
+        )
+        self.world.set_materials(materials, shape_material_idx)
+
+        # ---- Warm-up damping (frame-1 overlap clean-up) ---------------
+        # Pin global damping at 1.0 so the captured graph zeroes
+        # body velocities every substep for the warm-up window. This
+        # is what keeps the scene from blowing up when (a) the nut /
+        # bolt SDFs already overlap on frame 1 (gap=0.005m and an
+        # imperfectly-aligned starting pose make this almost
+        # certain on the M20 mesh) and (b) the bolt has just been
+        # placed on the ground plane with zero clearance, so the
+        # bolt-ground contact also runs through one impulse cycle
+        # of penetration recovery. See :data:`WARMUP_FRAMES` for the
+        # rationale; the same trick is in
+        # :class:`~newton._src.solvers.phoenx.examples.example_kapla_arena.Example`.
+        # Released to 0 in :meth:`step` once ``self._frame ==
+        # WARMUP_FRAMES``; the captured graph reads the value out of
+        # a device slot at replay time, so the change takes effect
+        # without re-capture.
+        self.world.set_global_linear_damping(1.0)
+        self.world.set_global_angular_damping(1.0)
+
         # ---- Viewer ---------------------------------------------------
         self._xforms = wp.zeros(num_phoenx_bodies, dtype=wp.transform, device=self.device)
         self.viewer.set_model(self.model)
@@ -430,6 +526,14 @@ class Example:
         )
 
     def step(self) -> None:
+        # End of warm-up: release the damping pin so the live demo runs
+        # without artificial energy loss. The captured graph reads the
+        # damping factor out of a device slot, so this host-side write
+        # takes effect on the next ``capture_launch`` without
+        # re-capture. Mirrors the kapla-arena warm-up release.
+        if self._frame == WARMUP_FRAMES:
+            self.world.set_global_linear_damping(0.0)
+            self.world.set_global_angular_damping(0.0)
         if self.graph is not None:
             wp.capture_launch(self.graph)
         else:
@@ -450,29 +554,44 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self) -> None:
-        """After the settle run the nut must still be near the bolt
-        axis (no off-axis fly-off) and both bodies must have finite
-        state. The nut may have rotated significantly (threading) so
-        we don't assert on orientation.
+        """After the settle run both the nut and (when free) the bolt
+        must still be near the bolt's initial XY axis (no off-axis
+        fly-off) and have finite state. The nut may have rotated
+        significantly (threading) so we don't assert on orientation.
+        With ``BOLT_IS_STATIC = False`` the bolt is also checked --
+        if it had slid out from under the nut we'd see a large XY
+        drift here.
         """
         positions = self.bodies.position.numpy()
         velocities = self.bodies.velocity.numpy()
         nut_slot = self._nut_body + 1
+        bolt_slot = self._bolt_body + 1
         nut_pos = positions[nut_slot]
         nut_vel = velocities[nut_slot]
+        bolt_pos = positions[bolt_slot]
+        bolt_vel = velocities[bolt_slot]
         assert np.isfinite(nut_pos).all(), f"nut position non-finite ({nut_pos})"
         assert np.isfinite(nut_vel).all(), f"nut velocity non-finite ({nut_vel})"
+        assert np.isfinite(bolt_pos).all(), f"bolt position non-finite ({bolt_pos})"
+        assert np.isfinite(bolt_vel).all(), f"bolt velocity non-finite ({bolt_vel})"
+        max_drift = 0.1 * self.scene_scale
         nut_xy_dist = float(
             np.linalg.norm(
                 np.asarray(nut_pos[:2], dtype=np.float32) - np.asarray(self._nut_initial_xy, dtype=np.float32)
             )
         )
-        max_drift = 0.1 * self.scene_scale
         assert nut_xy_dist < max_drift, (
             f"nut flew off-axis: xy_dist={nut_xy_dist:.4f} m "
             f"(max={max_drift:.4f} m at scene_scale={self.scene_scale}; "
             f"pos={tuple(float(x) for x in nut_pos)})"
         )
+        if not BOLT_IS_STATIC:
+            bolt_xy_dist = float(np.linalg.norm(np.asarray(bolt_pos[:2], dtype=np.float32)))
+            assert bolt_xy_dist < max_drift, (
+                f"bolt slid off the ground: xy_dist={bolt_xy_dist:.4f} m "
+                f"(max={max_drift:.4f} m at scene_scale={self.scene_scale}; "
+                f"pos={tuple(float(x) for x in bolt_pos)})"
+            )
 
     @staticmethod
     def create_parser():
