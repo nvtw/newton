@@ -26,6 +26,7 @@ __all__ = [
     "CONSTRAINT_BODY1_OFFSET",
     "CONSTRAINT_BODY2_OFFSET",
     "CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET",
+    "CONSTRAINT_TYPE_CLOTH_TRIANGLE",
     "CONSTRAINT_TYPE_CONTACT",
     "CONSTRAINT_TYPE_INVALID",
     "CONSTRAINT_TYPE_OFFSET",
@@ -49,6 +50,7 @@ __all__ = [
     "pd_coefficients",
     "read_float",
     "read_int",
+    "read_mat22",
     "read_mat33",
     "read_mat44",
     "read_quat",
@@ -57,6 +59,7 @@ __all__ = [
     "soft_constraint_coefficients",
     "write_float",
     "write_int",
+    "write_mat22",
     "write_mat33",
     "write_mat44",
     "write_quat",
@@ -93,6 +96,13 @@ CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(8))
 #: pair. Persistent warm-start lives in :class:`ContactContainer` keyed
 #: by the contact index in the sorted Newton contact buffer.
 CONSTRAINT_TYPE_CONTACT = wp.constant(wp.int32(9))
+#: Position-based cloth triangle constraint -- one column per FEM
+#: triangle, two XPBD rows (area / shear) per Aachen 2018 *Fast
+#: Co-rotated FEM*. Constraint endpoints are three unified
+#: body-or-particle indices; for now particle-only (cloth nodes
+#: cannot yet be points on a rigid body). See
+#: :mod:`constraint_cloth_triangle`.
+CONSTRAINT_TYPE_CLOTH_TRIANGLE = wp.constant(wp.int32(10))
 
 #: Dword offsets of the three header fields. By contract these are
 #: 0 / 1 / 2 for every constraint schema (enforced by
@@ -238,6 +248,26 @@ def write_quat(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.quatf
     c.data[off + 1, cid] = v[1]
     c.data[off + 2, cid] = v[2]
     c.data[off + 3, cid] = v[3]
+
+
+@wp.func
+def read_mat22(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.mat22f:
+    """Read a 2x2 matrix from 4 consecutive dwords, row-major
+    (``[m00, m01, m10, m11]``)."""
+    return wp.mat22f(
+        c.data[off + 0, cid],
+        c.data[off + 1, cid],
+        c.data[off + 2, cid],
+        c.data[off + 3, cid],
+    )
+
+
+@wp.func
+def write_mat22(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.mat22f):
+    c.data[off + 0, cid] = v[0, 0]
+    c.data[off + 1, cid] = v[0, 1]
+    c.data[off + 2, cid] = v[1, 0]
+    c.data[off + 3, cid] = v[1, 1]
 
 
 @wp.func
