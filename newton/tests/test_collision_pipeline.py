@@ -1360,7 +1360,7 @@ def test_deterministic_pipeline_sticky_500_steps(test, device):
     the same state and stepping the same input must therefore evolve
     identical match indices and identical replayed contact geometry every
     step -- this is the regression test for the sticky-mode tie-break
-    determinism fix in :mod:`newton._src.geometry.contact_match`.
+    determinism fix in the contact matcher.
     """
     with wp.ScopedDevice(device):
         model = _build_deterministic_scene(device)
