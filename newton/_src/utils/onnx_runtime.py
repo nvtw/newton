@@ -258,13 +258,18 @@ class OnnxRuntime:
         """
         tensors = self._tensors
 
+        # Restrict provided keys to the declared graph inputs so callers
+        # cannot overwrite initializers (weights) or internal tensors by
+        # passing a matching name.
+        declared_inputs = set(self.input_names)
+        for name in inputs:
+            if name not in declared_inputs:
+                raise KeyError(f"OnnxRuntime: unknown input '{name}'")
+
         for name in self.input_names:
             if name not in inputs:
                 raise KeyError(f"OnnxRuntime: missing input '{name}'")
-
-        for name, arr in inputs.items():
-            if name not in self._shapes:
-                raise KeyError(f"OnnxRuntime: unknown input '{name}'")
+            arr = inputs[name]
             expected_shape = self._shapes[name]
             if tuple(arr.shape) != expected_shape:
                 raise ValueError(f"OnnxRuntime: input '{name}' has shape {tuple(arr.shape)}, expected {expected_shape}")
