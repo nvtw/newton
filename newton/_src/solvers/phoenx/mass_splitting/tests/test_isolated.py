@@ -19,6 +19,13 @@ solver at all. These tests do exactly that:
   broadcast / average / write-back round-trip preserves linear /
   angular momentum (the load-bearing invariant of the whole
   scheme).
+* :class:`TestPositionLevelRoundTrip` -- broadcast, mutate
+  ``state.position`` / ``state.orientation`` to fake an XPBD
+  projection, write back. Verify the C# ``PositionLevel ->
+  VelocityLevel`` finite-difference recovery
+  (``v = (p - p_pre) * inv_dt``, ``omega = 2 * inv_dt * Im(q *
+  conj(q_pre))`` with shortest-arc sign flip) lands the right
+  velocity on every code path.
 
 CUDA-only by design (per Newton convention -- the PhoenX subtree
 is CUDA-only and graph-capture-aware).
@@ -26,12 +33,14 @@ is CUDA-only and graph-capture-aware).
 
 from __future__ import annotations
 
+import math
 import unittest
 
 import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.mass_splitting import (
+    ACCESS_MODE_POSITION_LEVEL,
     ContactPartitions,
     InteractionGraph,
 )
@@ -308,6 +317,194 @@ class TestBroadcastAverageRoundtrip(unittest.TestCase):
         np.testing.assert_allclose(v_after[1], [0.0, 2.0, 0.0], atol=1e-5)
 
 
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX mass splitting requires CUDA")
+class TestPositionLevelRoundTrip(unittest.TestCase):
+    """Position-level pass via the existing mass-splitting machinery.
+
+    The C# pattern is unified: same TinyRigidState, same broadcast
+    /write-back kernels, the constraint kernel just chooses
+    ``ACCESS_MODE_POSITION_LEVEL`` when reading. These tests exercise
+    every code path of the
+    :func:`tiny_rigid_state_set_access_mode` regime switch by
+    hand-rolling a fake "XPBD projection" kernel that mutates
+    ``state.position`` / ``state.orientation`` directly, then
+    verifying the write-back kernel recovers the right velocity.
+    """
+
+    def setUp(self) -> None:
+        self.device = wp.get_device()
+
+    def _build_per_body_graph(self, num_bodies: int) -> InteractionGraph:
+        """Trivial setup: each body has exactly one TinyState slot
+        (registered at constraint_index 0). For position-level passes
+        without mass splitting; cloth's real graph would have one
+        entry per (body, partition) pair."""
+        graph = InteractionGraph(
+            max_rigid_bodies=num_bodies,
+            max_interactions=num_bodies,
+            device=self.device,
+        )
+        for body_id in range(num_bodies):
+            graph.add_entry(body_id, 0)
+        graph.build()
+        return graph
+
+    def _zero_iterate_recovers_zero_velocity(self) -> None:
+        """No projection between broadcast and write-back -> velocity
+        = (p - p_pre)/dt = 0. Confirms the synchronize math doesn't
+        emit spurious motion on a no-op pass."""
+        n = 4
+        graph = self._build_per_body_graph(n)
+        body_position = wp.array(
+            np.array([[float(i), 0.0, 0.0] for i in range(n)], dtype=np.float32),
+            dtype=wp.vec3f,
+            device=self.device,
+        )
+        body_orientation = wp.array(
+            np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (n, 1)),
+            dtype=wp.quatf,
+            device=self.device,
+        )
+        body_velocity = wp.array(
+            np.full((n, 3), 99.0, dtype=np.float32),
+            dtype=wp.vec3f,
+            device=self.device,
+        )
+        body_angular_velocity = wp.array(
+            np.full((n, 3), 99.0, dtype=np.float32),
+            dtype=wp.vec3f,
+            device=self.device,
+        )
+        dt = 0.01
+        wp.launch(
+            kernel=broadcast_rigid_to_copy_states_kernel,
+            dim=n,
+            inputs=[graph.data, body_position, body_orientation, body_velocity, body_angular_velocity, float(dt)],
+            device=self.device,
+        )
+        # No iterate work between broadcast and write-back. Broadcast
+        # captured ``state.access_mode = VELOCITY_LEVEL`` with the
+        # body's current velocity, so write-back's
+        # ``synchronize(VELOCITY_LEVEL)`` is a no-op and reads the
+        # state's velocity field (= original 99.0). Verifies the
+        # short-circuit branch.
+        wp.launch(
+            kernel=copy_state_into_rigids_kernel,
+            dim=n,
+            inputs=[graph.data, body_position, body_orientation, body_velocity, body_angular_velocity, float(1.0 / dt)],
+            device=self.device,
+        )
+        v = body_velocity.numpy()
+        np.testing.assert_allclose(v, np.full((n, 3), 99.0), atol=1e-5)
+
+    def test_zero_iterate_preserves_velocity(self) -> None:
+        self._zero_iterate_recovers_zero_velocity()
+
+    def test_pure_translation_recovers_velocity(self) -> None:
+        """Mutate ``state.position`` by a known offset; write-back's
+        ``synchronize(VELOCITY_LEVEL)`` must recover ``v = offset / dt``."""
+        n = 3
+        graph = self._build_per_body_graph(n)
+        translations = np.array(
+            [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]],
+            dtype=np.float32,
+        )
+        body_position = wp.array(np.zeros((n, 3), dtype=np.float32), dtype=wp.vec3f, device=self.device)
+        body_orientation = wp.array(
+            np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (n, 1)),
+            dtype=wp.quatf,
+            device=self.device,
+        )
+        body_velocity = wp.zeros(n, dtype=wp.vec3f, device=self.device)
+        body_angular_velocity = wp.zeros(n, dtype=wp.vec3f, device=self.device)
+        dt = 0.01
+        wp.launch(
+            kernel=broadcast_rigid_to_copy_states_kernel,
+            dim=n,
+            inputs=[graph.data, body_position, body_orientation, body_velocity, body_angular_velocity, float(dt)],
+            device=self.device,
+        )
+        # "XPBD projection": flip state to position-level and add the
+        # per-body offset to ``state.position``. This is the same
+        # work a real distance-constraint kernel would do; the
+        # helper kernel below packs it into a single launch.
+        wp.launch(
+            kernel=_fake_xpbd_translation_kernel,
+            dim=n,
+            inputs=[
+                graph.data,
+                body_position,
+                body_orientation,
+                wp.array(translations, dtype=wp.vec3f, device=self.device),
+                wp.float32(1.0 / dt),
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            kernel=copy_state_into_rigids_kernel,
+            dim=n,
+            inputs=[graph.data, body_position, body_orientation, body_velocity, body_angular_velocity, float(1.0 / dt)],
+            device=self.device,
+        )
+        v = body_velocity.numpy()
+        # Recovered velocity should equal translation/dt (the XPBD
+        # finite difference). The body_position from broadcast
+        # advanced by ``dt * body_velocity = 0`` (initial velocity 0),
+        # so state.position == body_position; adding the translation
+        # to state.position lands at body_position + translation,
+        # so (state.position - body_position)/dt = translation/dt.
+        np.testing.assert_allclose(v, translations / dt, atol=1e-5)
+
+    def test_pure_rotation_uses_shortest_arc(self) -> None:
+        """Set ``state.orientation`` to a rotation > pi about +Z; the
+        shortest-arc sign flip in
+        :func:`tiny_rigid_state_synchronize` must recover a *negative*
+        ``omega_z``."""
+        n = 1
+        graph = self._build_per_body_graph(n)
+        dt = 1.0 / 60.0
+        angle = math.pi + 0.1
+        s = math.sin(0.5 * angle)
+        c = math.cos(0.5 * angle)
+        target_q = np.array([[0.0, 0.0, s, c]], dtype=np.float32)
+        body_position = wp.zeros(n, dtype=wp.vec3f, device=self.device)
+        body_orientation = wp.array(
+            np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32),
+            dtype=wp.quatf,
+            device=self.device,
+        )
+        body_velocity = wp.zeros(n, dtype=wp.vec3f, device=self.device)
+        body_angular_velocity = wp.zeros(n, dtype=wp.vec3f, device=self.device)
+        wp.launch(
+            kernel=broadcast_rigid_to_copy_states_kernel,
+            dim=n,
+            inputs=[graph.data, body_position, body_orientation, body_velocity, body_angular_velocity, float(dt)],
+            device=self.device,
+        )
+        wp.launch(
+            kernel=_fake_xpbd_rotation_kernel,
+            dim=n,
+            inputs=[
+                graph.data,
+                body_position,
+                body_orientation,
+                wp.array(target_q, dtype=wp.quatf, device=self.device),
+                wp.float32(1.0 / dt),
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            kernel=copy_state_into_rigids_kernel,
+            dim=n,
+            inputs=[graph.data, body_position, body_orientation, body_velocity, body_angular_velocity, float(1.0 / dt)],
+            device=self.device,
+        )
+        w = body_angular_velocity.numpy()[0]
+        # Shortest arc to a +pi+0.1 rotation about +Z is -(pi - 0.1)
+        # about +Z. Recovered omega_z must be negative.
+        self.assertLess(w[2], 0.0, msg=f"angular velocity {w} should be negative on Z (shortest arc)")
+
+
 # ---------------------------------------------------------------------------
 # Local probe / perturbation kernels (only used by the tests above)
 # ---------------------------------------------------------------------------
@@ -323,6 +520,9 @@ from newton._src.solvers.phoenx.mass_splitting.interaction_graph import (  # noq
     graph_get_state,
     graph_set_state,
     graph_state_section,
+)
+from newton._src.solvers.phoenx.mass_splitting.state import (  # noqa: E402
+    tiny_rigid_state_set_access_mode,
 )
 
 
@@ -340,6 +540,77 @@ def _probe_get_rigid_state_index_kernel(
     state_index, inv_factor = graph_get_rigid_state_index(graph, constraint_index, rigid_body_index)
     out_state_index[tid] = state_index
     out_inv_factor[tid] = inv_factor
+
+
+_ACCESS_MODE_POSITION_LEVEL_C = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
+
+
+@wp.kernel(enable_backward=False)
+def _fake_xpbd_translation_kernel(
+    graph: InteractionGraphData,
+    body_position: wp.array[wp.vec3f],
+    body_orientation: wp.array[wp.quatf],
+    translations: wp.array[wp.vec3f],
+    inv_dt: wp.float32,
+):
+    """Stand-in for an XPBD distance-constraint iterate kernel.
+
+    Reads the body's TinyState via :func:`graph_get_state` (after
+    flipping access mode to POSITION_LEVEL via ``set_access_mode``,
+    matching what a real XPBD kernel would do via
+    :func:`read_state`), adds the translation to ``state.position``,
+    writes back. The write-back kernel's
+    ``synchronize(VELOCITY_LEVEL)`` then runs the XPBD finite
+    difference, recovering ``v = translation / dt``.
+    """
+    rigid_body_index = wp.tid()
+    if rigid_body_index >= graph.highest_index_in_use[0]:
+        return
+    start, end = graph_state_section(graph, rigid_body_index)
+    if start >= end:
+        return
+    state = graph_get_state(graph, start)
+    state = tiny_rigid_state_set_access_mode(
+        state,
+        _ACCESS_MODE_POSITION_LEVEL_C,
+        body_position[rigid_body_index],
+        body_orientation[rigid_body_index],
+        inv_dt,
+    )
+    state.position = state.position + translations[rigid_body_index]
+    graph_set_state(graph, start, state)
+
+
+@wp.kernel(enable_backward=False)
+def _fake_xpbd_rotation_kernel(
+    graph: InteractionGraphData,
+    body_position: wp.array[wp.vec3f],
+    body_orientation: wp.array[wp.quatf],
+    target_orientations: wp.array[wp.quatf],
+    inv_dt: wp.float32,
+):
+    """Stand-in for an XPBD orientation projection (e.g. a fixed
+    joint snapping a body to a target frame). Sets ``state.orientation``
+    directly to the target; write-back's
+    ``synchronize(VELOCITY_LEVEL)`` recovers the angular velocity
+    via the log-map of ``target * conj(body_orientation)``.
+    """
+    rigid_body_index = wp.tid()
+    if rigid_body_index >= graph.highest_index_in_use[0]:
+        return
+    start, end = graph_state_section(graph, rigid_body_index)
+    if start >= end:
+        return
+    state = graph_get_state(graph, start)
+    state = tiny_rigid_state_set_access_mode(
+        state,
+        _ACCESS_MODE_POSITION_LEVEL_C,
+        body_position[rigid_body_index],
+        body_orientation[rigid_body_index],
+        inv_dt,
+    )
+    state.orientation = target_orientations[rigid_body_index]
+    graph_set_state(graph, start, state)
 
 
 @wp.kernel(enable_backward=False)

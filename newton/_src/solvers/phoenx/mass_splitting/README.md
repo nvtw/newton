@@ -69,6 +69,64 @@ copy states they would race on body velocity. With copy states, each
 partition has its own state slice; averaging is the periodic
 consensus.
 
+## Velocity-level vs position-level passes (the access-mode pattern)
+
+Same C# pattern, no parallel infrastructure needed. The
+:class:`TinyRigidState` carries an ``access_mode`` field; the
+:func:`tiny_rigid_state_synchronize` helper bridges the two
+regimes lazily; ``read_state`` takes a ``new_access_mode`` argument
+that flips into the regime the constraint wants. **Both regimes
+ride on the same broadcast / write-back kernels** -- there's
+nothing extra to wire.
+
+A constraint kernel that wants to project positions XPBD-style
+just passes ``ACCESS_MODE_POSITION_LEVEL`` to ``read_state``,
+mutates ``state.position`` / ``state.orientation``, and calls
+``write_state``. At end-of-substep the
+``copy_state_into_rigids_kernel`` runs the XPBD finite-difference
+``v = (state.position - body_position) * inv_dt`` recovery and the
+angular-velocity log-map -- same kernel as for velocity-level
+solves, because the synchronize helper inside
+:func:`tiny_rigid_state_write_back` does the regime conversion
+based on whatever ``access_mode`` the state ended up in.
+
+Recipe (cloth-style XPBD distance constraints between particles):
+
+```python
+from newton._src.solvers.phoenx.mass_splitting import (
+    ACCESS_MODE_POSITION_LEVEL,
+    MassSplitting,
+)
+
+ms = MassSplitting(
+    num_bodies=num_particles,
+    num_constraints=num_distance_constraints,
+    max_partitions=12,
+)
+ms.setup_from_graph(constraint_bodies)   # cloth's distance constraints
+
+# Per substep:
+ms.broadcast(body_position, body_orientation, body_velocity, body_angular_velocity, dt)
+for _ in range(position_iterations):
+    for partition_index in range(ms.partitions.num_partitions):
+        # Cloth's distance-iterate kernel reads state with
+        # ACCESS_MODE_POSITION_LEVEL, mutates state.position,
+        # writes back. No average() needed if mass splitting is off
+        # (every body in 1 partition); ms.average(...) does it
+        # automatically when partitions overlap.
+        cloth_distance_iterate_kernel(
+            ms.graph.data, partition_index, ACCESS_MODE_POSITION_LEVEL, ...,
+        )
+    ms.average(body_position, body_orientation, inv_dt)  # consensus pass
+ms.write_back(body_position, body_orientation, body_velocity, body_angular_velocity, inv_dt)
+```
+
+Mixing velocity-level and position-level constraints in the same
+substep works: each constraint just passes its preferred
+``new_access_mode`` to ``read_state``. The synchronize helper
+fires on regime changes (typically zero per call inside one
+sweep, since one sweep usually targets one mode).
+
 ## What's NOT in this port (yet)
 
 * **GPU-side MIS partitioning kernels.** The C# code uses Luby's
