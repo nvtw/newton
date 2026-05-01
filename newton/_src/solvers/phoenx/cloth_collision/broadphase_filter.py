@@ -79,14 +79,7 @@ def phoenx_broadphase_filter(
     """
     a = pair[0]
     b = pair[1]
-    a_is_tri = wp.int32(0)
-    b_is_tri = wp.int32(0)
-    if a >= ud.num_rigid_shapes:
-        a_is_tri = wp.int32(1)
-    if b >= ud.num_rigid_shapes:
-        b_is_tri = wp.int32(1)
-
-    if a_is_tri == wp.int32(1) and b_is_tri == wp.int32(1):
+    if a >= ud.num_rigid_shapes and b >= ud.num_rigid_shapes:
         cid_a = ud.cloth_cid_offset + (a - ud.num_rigid_shapes)
         cid_b = ud.cloth_cid_offset + (b - ud.num_rigid_shapes)
         ai0 = cloth_triangle_get_body1(ud.constraints, cid_a)

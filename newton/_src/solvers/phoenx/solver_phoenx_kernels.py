@@ -84,6 +84,8 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     ElementInteractionData,
     _lowest_set_bit,
+    element_interaction_data_add,
+    element_interaction_data_empty,
     element_interaction_data_make,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
@@ -1075,101 +1077,25 @@ def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
         # loop (which stops on the first -1) doesn't miss a dynamic
         # body when the static one happens to sit in slot 0.
         if wp.static(cloth_support):
-            # Up to 6 endpoints (cloth tri-vs-tri contact). Stable
-            # compact: cascade non-negatives toward the lowest slots
-            # so the partitioner's adjacency-count loop (which stops
-            # at the first -1) sees every active endpoint.
-            s0 = wp.int32(-1)
-            s1 = wp.int32(-1)
-            s2 = wp.int32(-1)
-            s3 = wp.int32(-1)
-            s4 = wp.int32(-1)
-            s5 = wp.int32(-1)
-            cnt = wp.int32(0)
+            # Up to 6 endpoints (cloth tri-vs-tri contact). Funnel
+            # non-negatives into the lowest slots via the shared
+            # ``element_interaction_data_add`` helper so the
+            # partitioner's adjacency-count loop (which stops at the
+            # first -1) sees every active endpoint.
+            d = element_interaction_data_empty()
             if b1 >= 0:
-                if cnt == wp.int32(0):
-                    s0 = b1
-                elif cnt == wp.int32(1):
-                    s1 = b1
-                elif cnt == wp.int32(2):
-                    s2 = b1
-                elif cnt == wp.int32(3):
-                    s3 = b1
-                elif cnt == wp.int32(4):
-                    s4 = b1
-                else:
-                    s5 = b1
-                cnt = cnt + wp.int32(1)
+                d = element_interaction_data_add(d, b1)
             if b2 >= 0:
-                if cnt == wp.int32(0):
-                    s0 = b2
-                elif cnt == wp.int32(1):
-                    s1 = b2
-                elif cnt == wp.int32(2):
-                    s2 = b2
-                elif cnt == wp.int32(3):
-                    s3 = b2
-                elif cnt == wp.int32(4):
-                    s4 = b2
-                else:
-                    s5 = b2
-                cnt = cnt + wp.int32(1)
+                d = element_interaction_data_add(d, b2)
             if b3 >= 0:
-                if cnt == wp.int32(0):
-                    s0 = b3
-                elif cnt == wp.int32(1):
-                    s1 = b3
-                elif cnt == wp.int32(2):
-                    s2 = b3
-                elif cnt == wp.int32(3):
-                    s3 = b3
-                elif cnt == wp.int32(4):
-                    s4 = b3
-                else:
-                    s5 = b3
-                cnt = cnt + wp.int32(1)
+                d = element_interaction_data_add(d, b3)
             if b4 >= 0:
-                if cnt == wp.int32(0):
-                    s0 = b4
-                elif cnt == wp.int32(1):
-                    s1 = b4
-                elif cnt == wp.int32(2):
-                    s2 = b4
-                elif cnt == wp.int32(3):
-                    s3 = b4
-                elif cnt == wp.int32(4):
-                    s4 = b4
-                else:
-                    s5 = b4
-                cnt = cnt + wp.int32(1)
+                d = element_interaction_data_add(d, b4)
             if b5 >= 0:
-                if cnt == wp.int32(0):
-                    s0 = b5
-                elif cnt == wp.int32(1):
-                    s1 = b5
-                elif cnt == wp.int32(2):
-                    s2 = b5
-                elif cnt == wp.int32(3):
-                    s3 = b5
-                elif cnt == wp.int32(4):
-                    s4 = b5
-                else:
-                    s5 = b5
-                cnt = cnt + wp.int32(1)
+                d = element_interaction_data_add(d, b5)
             if b6 >= 0:
-                if cnt == wp.int32(0):
-                    s0 = b6
-                elif cnt == wp.int32(1):
-                    s1 = b6
-                elif cnt == wp.int32(2):
-                    s2 = b6
-                elif cnt == wp.int32(3):
-                    s3 = b6
-                elif cnt == wp.int32(4):
-                    s4 = b6
-                else:
-                    s5 = b6
-            elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5, wp.int32(-1), wp.int32(-1))
+                d = element_interaction_data_add(d, b6)
+            elements[tid] = d
         else:
             if b1 < 0 and b2 >= 0:
                 b1 = b2

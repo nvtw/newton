@@ -162,36 +162,44 @@ class PhoenxCollisionPipeline(CollisionPipeline):
         total = S + T
 
         # ---- Build extended per-shape arrays --------------------------
+        # Static defaults for the cloth-shape slots: every cloth slot
+        # gets the same fill (no per-tri customisation). Per-step
+        # values (transform, shape_data, shape_auxiliary, AABBs) are
+        # filled by the pre-broadphase hook each call.
         cloth_flags = int(ShapeFlags.COLLIDE_SHAPES)
-        # Static defaults for the cloth-shape slots. Per-step values
-        # (transform, shape_data, shape_auxiliary, AABBs) are filled
-        # by the pre-broadphase hook each call.
-        ext_shape_type = _extend_array(model.shape_type, T, int(GeoTypeEx.TRIANGLE), dtype=wp.int32, device=device)
-        ext_shape_body = _extend_array(model.shape_body, T, -1, dtype=wp.int32, device=device)
-        ext_shape_world = _extend_array(model.shape_world, T, int(cloth_world), dtype=wp.int32, device=device)
-        ext_shape_collision_group = _extend_array(
-            model.shape_collision_group, T, int(cloth_collision_group), dtype=wp.int32, device=device
-        )
-        ext_shape_flags = _extend_array(model.shape_flags, T, cloth_flags, dtype=wp.int32, device=device)
-        ext_shape_collision_radius = _extend_array(
-            model.shape_collision_radius, T, float(cloth_extra_margin), dtype=wp.float32, device=device
-        )
+        per_shape_int_defaults: dict[str, tuple[wp.array, int]] = {
+            "shape_type": (model.shape_type, int(GeoTypeEx.TRIANGLE)),
+            "shape_body": (model.shape_body, -1),
+            "shape_world": (model.shape_world, int(cloth_world)),
+            "shape_collision_group": (model.shape_collision_group, int(cloth_collision_group)),
+            "shape_flags": (model.shape_flags, cloth_flags),
+            "shape_sdf_index": (model.shape_sdf_index, -1),
+            "shape_heightfield_index": (model.shape_heightfield_index, -1),
+        }
+        per_shape_float_defaults: dict[str, tuple[wp.array, float]] = {
+            "shape_collision_radius": (model.shape_collision_radius, float(cloth_extra_margin)),
+            "shape_gap": (model.shape_gap, float(cloth_extra_margin)),
+        }
+        ext_int = {
+            k: _extend_array(src, T, fill, dtype=wp.int32, device=device)
+            for k, (src, fill) in per_shape_int_defaults.items()
+        }
+        ext_float = {
+            k: _extend_array(src, T, fill, dtype=wp.float32, device=device)
+            for k, (src, fill) in per_shape_float_defaults.items()
+        }
         ext_shape_source_ptr = _extend_array(model.shape_source_ptr, T, np.uint64(0), dtype=wp.uint64, device=device)
-        ext_shape_gap = _extend_array(model.shape_gap, T, float(cloth_extra_margin), dtype=wp.float32, device=device)
-        ext_shape_sdf_index = _extend_array(model.shape_sdf_index, T, -1, dtype=wp.int32, device=device)
-        ext_shape_heightfield_index = _extend_array(model.shape_heightfield_index, T, -1, dtype=wp.int32, device=device)
         # vec3 / transform extensions: zero-fill the cloth tail; the
         # hook overwrites those slots every step.
         ext_shape_transform = _zero_extend(model.shape_transform, T, dtype=wp.transform, device=device)
         ext_shape_collision_aabb_lower = _zero_extend(model.shape_collision_aabb_lower, T, dtype=wp.vec3, device=device)
         ext_shape_collision_aabb_upper = _zero_extend(model.shape_collision_aabb_upper, T, dtype=wp.vec3, device=device)
-        # The narrow phase reads ``shape_auxiliary[s]`` for TRIANGLE
-        # shapes (= C - A); the cloth-stamping hook fills it each step.
+        # ``shape_auxiliary`` (TRIANGLE C-A offset) and the broadphase
+        # AABB arrays own all S+T slots from scratch -- nothing on
+        # the rigid side feeds them, the cloth-stamping hook fills
+        # the cloth tail, and the parent's ``compute_shape_aabbs``
+        # writes the rigid prefix.
         ext_shape_auxiliary = wp.zeros(total, dtype=wp.vec3, device=device)
-        # The narrow phase's external AABB arrays must cover all S+T
-        # slots. Rigid prefix is written by ``compute_shape_aabbs`` in
-        # the parent's ``collide()``; cloth tail is overwritten by the
-        # hook.
         ext_aabb_lower = wp.zeros(total, dtype=wp.vec3, device=device)
         ext_aabb_upper = wp.zeros(total, dtype=wp.vec3, device=device)
 
@@ -203,21 +211,17 @@ class PhoenxCollisionPipeline(CollisionPipeline):
                 "prebuilt instance."
             )
         if broad_phase == "nxn":
-            bp = BroadPhaseAllPairs(
-                ext_shape_world,
-                shape_flags=ext_shape_flags,
-                device=device,
-                filter_func=phoenx_broadphase_filter,
-            )
+            bp_cls = BroadPhaseAllPairs
         elif broad_phase == "sap":
-            bp = BroadPhaseSAP(
-                ext_shape_world,
-                shape_flags=ext_shape_flags,
-                device=device,
-                filter_func=phoenx_broadphase_filter,
-            )
+            bp_cls = BroadPhaseSAP
         else:
             raise ValueError(f"PhoenxCollisionPipeline broad_phase must be 'nxn' or 'sap'; got {broad_phase!r}")
+        bp = bp_cls(
+            ext_int["shape_world"],
+            shape_flags=ext_int["shape_flags"],
+            device=device,
+            filter_func=phoenx_broadphase_filter,
+        )
 
         # ---- Build narrowphase with extended AABB arrays --------------
         if shape_pairs_max is None:
@@ -270,19 +274,14 @@ class PhoenxCollisionPipeline(CollisionPipeline):
         # The base class read ``model.shape_*`` into ``self.shape_*``;
         # swap in the extended copies so the rest of collide() picks
         # them up.
-        self.shape_type = ext_shape_type
-        self.shape_body = ext_shape_body
+        for k, v in ext_int.items():
+            setattr(self, k, v)
+        for k, v in ext_float.items():
+            setattr(self, k, v)
         self.shape_transform = ext_shape_transform
-        self.shape_collision_radius = ext_shape_collision_radius
         self.shape_source_ptr = ext_shape_source_ptr
-        self.shape_gap = ext_shape_gap
         self.shape_collision_aabb_lower = ext_shape_collision_aabb_lower
         self.shape_collision_aabb_upper = ext_shape_collision_aabb_upper
-        self.shape_collision_group = ext_shape_collision_group
-        self.shape_world = ext_shape_world
-        self.shape_flags = ext_shape_flags
-        self.shape_sdf_index = ext_shape_sdf_index
-        self.shape_heightfield_index = ext_shape_heightfield_index
         self.shape_auxiliary = ext_shape_auxiliary
         self._broadphase_filter_data = filter_data
 
@@ -296,13 +295,6 @@ class PhoenxCollisionPipeline(CollisionPipeline):
         self._cloth_particle_radius = particle_radius
         self._cloth_extra_margin = float(cloth_extra_margin)
         self._cloth_shape_data_margin = float(cloth_shape_data_margin)
-
-    def set_particle_q(self, particle_q: wp.array) -> None:
-        """Swap in a new particle-position array (e.g. between solver
-        states). The hook will read whichever array was set most
-        recently. For the typical phoenx flow there's only one
-        :class:`ParticleContainer` so this is rarely needed."""
-        self._cloth_particle_q = particle_q
 
     def _pre_broadphase_hook(self, state, contacts) -> None:
         if self._cloth_T == 0:
