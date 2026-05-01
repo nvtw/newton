@@ -1208,7 +1208,11 @@ class CollisionPipeline:
                 shape1=contacts.rigid_contact_shape1,
                 normal=contacts.rigid_contact_normal,
                 body_q=state.body_q,
-                shape_body=model.shape_body,
+                # Extended ``self.shape_body`` (covers virtual shapes
+                # injected by subclasses) -- the matcher indexes
+                # ``shape_body[shape_b]`` and ``shape_b`` can land in
+                # the cloth-triangle range when phoenx is active.
+                shape_body=self.shape_body,
                 match_index_out=contacts.rigid_contact_match_index,
                 device=self.device,
             )
@@ -1287,7 +1291,7 @@ class CollisionPipeline:
                 sorted_shape1=contacts.rigid_contact_shape1,
                 sorted_normal=contacts.rigid_contact_normal,
                 body_q=state.body_q,
-                shape_body=model.shape_body,
+                shape_body=self.shape_body,
                 device=self.device,
                 **sticky_offsets,
             )
@@ -1298,7 +1302,7 @@ class CollisionPipeline:
             launch_differentiable_contact_augment(
                 contacts=contacts,
                 body_q=state.body_q,
-                shape_body=model.shape_body,
+                shape_body=self.shape_body,
                 device=self.device,
             )
 
