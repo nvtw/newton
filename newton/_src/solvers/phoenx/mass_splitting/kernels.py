@@ -229,6 +229,6 @@ def copy_state_into_rigids_kernel(
 # Sentinel hint: kernels above are intentionally device-only.
 # Host-side launchers live in ``mass_splitting.py``. Keeping kernel
 # definitions and launch policy separate matches Newton's wider
-# convention (``constraint_contact.py`` exposes ``contact_iterate_at``,
+# convention (``constraint_contact.py`` exposes ``contact_iterate_at_RR``,
 # ``solver_phoenx.py`` decides the launch grid).
 # ---------------------------------------------------------------------------

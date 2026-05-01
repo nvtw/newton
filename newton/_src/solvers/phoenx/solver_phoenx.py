@@ -1796,6 +1796,7 @@ class PhoenXWorld:
                 # single-world ones do.
                 wp.int32(self._joint_container_cids),
                 self._tpw_choice,
+                self.body_or_particle,
             ],
             device=self.device,
         )
@@ -2113,6 +2114,7 @@ class PhoenXWorld:
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
                 self._tpw_choice,
+                self.body_or_particle,
             ],
             device=self.device,
         )

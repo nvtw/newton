@@ -34,10 +34,9 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_set_contact_first,
     contact_set_friction,
     contact_set_friction_dynamic,
+    contact_set_rigid_rigid_endpoints,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
-    CONSTRAINT_BODY1_OFFSET,
-    CONSTRAINT_BODY2_OFFSET,
     CONSTRAINT_TYPE_CONTACT,
     CONSTRAINT_TYPE_OFFSET,
 )
@@ -763,14 +762,20 @@ def _contact_pack_columns_kernel(
     # unchanged.
     softness = resolve_softness_in_kernel(materials, mat_a, mat_b)
 
-    # Header is stored at offsets 0 / 1 / 2 (contract is
-    # ``constraint_type / body1 / body2``). Dispatcher no longer reads
+    # Header (constraint_type at dword 0). Dispatcher no longer reads
     # the type tag for contacts (cid-based dispatch) but the slot is
     # written anyway to preserve the shared header invariant for any
     # diagnostic / future caller that does.
     _col_write_int(contact_cols, CONSTRAINT_TYPE_OFFSET, tid, CONSTRAINT_TYPE_CONTACT)
-    _col_write_int(contact_cols, CONSTRAINT_BODY1_OFFSET, tid, b1)
-    _col_write_int(contact_cols, CONSTRAINT_BODY2_OFFSET, tid, b2)
+
+    # Endpoint slots + subtype tag + barycentric weights. Rigid-rigid
+    # is the only subtype the per-shape-pair narrow-phase ingest
+    # produces today; triangle subtypes are emitted by the cloth-
+    # narrow-phase work tracked separately. The unified iterate's
+    # triangle-fetch helper still reads ``weights_a`` / ``weights_b``
+    # on this column, so neutral ``(1, 0, 0)`` defaults are stamped
+    # alongside the body indices.
+    contact_set_rigid_rigid_endpoints(contact_cols, tid, b1, b2)
 
     contact_set_friction(contact_cols, tid, mu_static)
     contact_set_friction_dynamic(contact_cols, tid, mu_dynamic)
@@ -1365,7 +1370,7 @@ def gather_contact_warmstart(
 
     Called after the pointer-swap (``cc.prev_lambdas`` now holds last
     step's persistent state; ``cc.lambdas`` is scratch) but before
-    :func:`contact_prepare_for_iteration_at`.
+    :func:`contact_prepare_at_RR`.
     """
     wp.launch(
         kernel=_contact_warmstart_gather_kernel,

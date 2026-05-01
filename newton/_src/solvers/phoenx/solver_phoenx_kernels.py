@@ -50,13 +50,20 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_set_type,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    CONTACT_SUBTYPE_TRIANGLE_RIGID,
+    CONTACT_SUBTYPE_TRIANGLE_TRIANGLE,
     ContactColumnContainer,
     ContactViews,
     contact_get_body1,
     contact_get_body2,
-    contact_iterate,
-    contact_iterate_multi,
-    contact_prepare_for_iteration,
+    contact_get_subtype,
+    contact_iterate_at_multi_RR,
+    contact_iterate_at_RR,
+    contact_iterate_at_TR,
+    contact_iterate_at_TT,
+    contact_prepare_at_RR,
+    contact_prepare_at_TR,
+    contact_prepare_at_TT,
     contact_world_error,
     contact_world_wrench,
 )
@@ -774,7 +781,14 @@ def _per_world_greedy_coloring_kernel(
 
 def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
     """Build the multi-world fused prepare + iterate fast-tail kernel
-    for the requested joint specialisation."""
+    for the requested joint specialisation.
+
+    The contact branch routes through the unified factory's ``_RR``
+    specialisation (:func:`contact_prepare_at_RR` /
+    :func:`contact_iterate_at_multi_RR`). Triangle branches inside
+    those funcs are dead code under
+    ``wp.static(side_*_kind == CONTACT_KIND_RIGID)`` so this kernel
+    stays as fast as the pre-unification rigid-only path."""
 
     @wp.kernel(enable_backward=False)
     def kernel(
@@ -792,6 +806,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
         num_worlds: wp.int32,
         num_joints: wp.int32,
         tpw_buf: wp.array[wp.int32],
+        store: BodyOrParticleStore,
     ):
         tid = wp.tid()
         tpw = tpw_buf[0]
@@ -819,7 +834,9 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                     else:
                         actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
                 else:
-                    contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+                    contact_prepare_at_RR(
+                        contact_cols, cid - num_joints, wp.int32(0), store, idt, cc, contacts
+                    )
                 base += tpw
 
             _sync_warp()
@@ -854,8 +871,16 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                         else:
                             actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
                     else:
-                        contact_iterate_multi(
-                            contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps
+                        contact_iterate_at_multi_RR(
+                            contact_cols,
+                            cid - num_joints,
+                            wp.int32(0),
+                            store,
+                            idt,
+                            cc,
+                            contacts,
+                            True,
+                            inner_sweeps,
                         )
                     base += tpw
 
@@ -870,7 +895,8 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
 def _make_fast_tail_relax_kernel(*, revolute_only: bool):
     """Build the multi-world relax fast-tail kernel
     (``use_bias = False``, ``num_sweeps = num_iterations``) for the
-    requested joint specialisation."""
+    requested joint specialisation. The contact branch routes through
+    :func:`contact_iterate_at_multi_RR`."""
 
     @wp.kernel(enable_backward=False)
     def kernel(
@@ -888,6 +914,7 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
         num_worlds: wp.int32,
         num_joints: wp.int32,
         tpw_buf: wp.array[wp.int32],
+        store: BodyOrParticleStore,
     ):
         tid = wp.tid()
         tpw = tpw_buf[0]
@@ -921,8 +948,16 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                     else:
                         actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
                 else:
-                    contact_iterate_multi(
-                        contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations
+                    contact_iterate_at_multi_RR(
+                        contact_cols,
+                        cid - num_joints,
+                        wp.int32(0),
+                        store,
+                        idt,
+                        cc,
+                        contacts,
+                        False,
+                        num_iterations,
                     )
                 base += tpw
 
@@ -1797,10 +1832,52 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                         else:
                             actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
             else:
-                if wp.static(is_prepare):
-                    contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+                # Unified contact branch. The rigid-rigid factory
+                # variant (``_RR``) is what every scene calls; the
+                # triangle subtype dispatch only runs when the kernel
+                # is built with ``cloth_support=True`` (``wp.static``
+                # erases the ``contact_get_subtype`` load + branch in
+                # rigid-only builds, so this path stays as fast as
+                # the pre-unification rigid-only kernel).
+                local_cid = cid - num_joints
+                if wp.static(cloth_support):
+                    subtype = contact_get_subtype(contact_cols, local_cid)
+                    if subtype == CONTACT_SUBTYPE_TRIANGLE_TRIANGLE:
+                        if wp.static(is_prepare):
+                            contact_prepare_at_TT(
+                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
+                            )
+                        else:
+                            contact_iterate_at_TT(
+                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
+                            )
+                    elif subtype == CONTACT_SUBTYPE_TRIANGLE_RIGID:
+                        if wp.static(is_prepare):
+                            contact_prepare_at_TR(
+                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
+                            )
+                        else:
+                            contact_iterate_at_TR(
+                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
+                            )
+                    else:
+                        if wp.static(is_prepare):
+                            contact_prepare_at_RR(
+                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
+                            )
+                        else:
+                            contact_iterate_at_RR(
+                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
+                            )
                 else:
-                    contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias)
+                    if wp.static(is_prepare):
+                        contact_prepare_at_RR(
+                            contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
+                        )
+                    else:
+                        contact_iterate_at_RR(
+                            contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
+                        )
 
         if tid == 0:
             color_cursor[0] = cursor - 1
@@ -1865,10 +1942,45 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                             else:
                                 actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
                 else:
-                    if wp.static(is_prepare):
-                        contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+                    local_cid = cid - num_joints
+                    if wp.static(cloth_support):
+                        subtype = contact_get_subtype(contact_cols, local_cid)
+                        if subtype == CONTACT_SUBTYPE_TRIANGLE_TRIANGLE:
+                            if wp.static(is_prepare):
+                                contact_prepare_at_TT(
+                                    contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
+                                )
+                            else:
+                                contact_iterate_at_TT(
+                                    contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
+                                )
+                        elif subtype == CONTACT_SUBTYPE_TRIANGLE_RIGID:
+                            if wp.static(is_prepare):
+                                contact_prepare_at_TR(
+                                    contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
+                                )
+                            else:
+                                contact_iterate_at_TR(
+                                    contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
+                                )
+                        else:
+                            if wp.static(is_prepare):
+                                contact_prepare_at_RR(
+                                    contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
+                                )
+                            else:
+                                contact_iterate_at_RR(
+                                    contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
+                                )
                     else:
-                        contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias)
+                        if wp.static(is_prepare):
+                            contact_prepare_at_RR(
+                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
+                            )
+                        else:
+                            contact_iterate_at_RR(
+                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
+                            )
             _sync_threads()
             cursor = cursor - 1
         if lane == 0:

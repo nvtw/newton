@@ -225,7 +225,7 @@ class TestPhoenXBunnyOnPlane(unittest.TestCase):
         # Tolerance: 0.5 mm. In practice the contact kernels -- once
         # the body-origin vs COM convention is handled correctly (see
         # :class:`BodyContainer.body_com` and
-        # :func:`contact_prepare_for_iteration_at`) -- keep the
+        # :func:`contact_prepare_at_RR`) -- keep the
         # minimum vertex z pinned within a few micrometres of the
         # plane. A regression that reverts the origin/COM fix would
         # make the rendered mesh dip by ``|body_com|`` (~10 cm on the

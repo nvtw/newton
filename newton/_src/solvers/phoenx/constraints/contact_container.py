@@ -123,7 +123,7 @@ _CC_OFF_BIAS_T1 = wp.constant(4)
 _CC_OFF_BIAS_T2 = wp.constant(5)
 # Soft-contact PD plumbing (pairs with ``pd_coefficients`` in
 # ``constraint_container.py``). Written by
-# :func:`contact_prepare_for_iteration_at` when the Newton
+# :func:`contact_prepare_at_RR` when the Newton
 # ``rigid_contact_stiffness`` / ``rigid_contact_damping`` arrays are
 # populated (per-contact, absolute units: N/m and N*s/m).
 # ``pd_eff_soft == 0`` is the per-contact opt-out -- iterate then
