@@ -1,0 +1,329 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""PhoenX-aware :class:`~newton._src.sim.collide.CollisionPipeline` subclass.
+
+Adds cloth-triangle "virtual shapes" to the standard rigid pipeline
+without forking it. Triangles occupy slots ``[S, S+T)`` in the
+pipeline's per-shape arrays (``S = model.shape_count``,
+``T = num_cloth_triangles``); rigid shapes keep their existing slots
+``[0, S)``. The pipeline reuses the standard broadphase + narrowphase
++ contact-matching machinery; only the per-step "stamp the cloth
+slots" work is phoenx-specific and lives in
+:meth:`PhoenxCollisionPipeline._pre_broadphase_hook`.
+
+Cloth triangles flow through the GJK/MPR narrow phase as
+:data:`~newton._src.geometry.support_function.GeoTypeEx.TRIANGLE`
+shapes (vertex A as the world-frame origin, B/C as offsets in
+``shape_data.xyz`` / ``shape_auxiliary``). Tri-tri pairs that share a
+node are dropped at broadphase time via the
+:func:`~newton._src.solvers.phoenx.cloth_collision.broadphase_filter.phoenx_broadphase_filter`
+``filter_func`` callback so the narrow phase doesn't waste time on
+adjacent triangles already coupled by the cloth elasticity rows.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+import warp as wp
+
+from newton._src.geometry.broad_phase_nxn import BroadPhaseAllPairs
+from newton._src.geometry.flags import ShapeFlags
+from newton._src.geometry.narrow_phase import NarrowPhase
+from newton._src.geometry.support_function import GeoTypeEx
+from newton._src.geometry.types import GeoType
+from newton._src.sim.collide import CollisionPipeline, write_contact
+from newton._src.solvers.phoenx.cloth_collision.broadphase_filter import (
+    PhoenxBroadphaseFilterData,
+    phoenx_broadphase_filter,
+)
+from newton._src.solvers.phoenx.cloth_collision.triangle_aabb import launch_cloth_triangle_aabbs
+from newton._src.solvers.phoenx.cloth_collision.triangle_shape_data import launch_cloth_triangle_shape_data
+
+__all__ = ["PhoenxCollisionPipeline"]
+
+
+def _extend_array(
+    src: wp.array,
+    extra_count: int,
+    fill_value: Any,
+    *,
+    dtype: Any,
+    device: wp.DeviceLike,
+) -> wp.array:
+    """Allocate ``len(src) + extra_count`` of ``dtype`` with the rigid
+    prefix copied from ``src`` and the tail filled with
+    ``fill_value``.
+
+    Used at finalize-time to build the extended per-shape arrays the
+    phoenx pipeline overrides on
+    :class:`~newton._src.sim.collide.CollisionPipeline`. Cheap (O(N+T)
+    on host, copies the prefix to device once).
+    """
+    s = int(src.shape[0]) if src is not None else 0
+    out_np = np.empty(s + extra_count, dtype=src.numpy().dtype if src is not None else np.int32)
+    if s > 0:
+        out_np[:s] = src.numpy()
+    if extra_count > 0:
+        out_np[s:] = fill_value
+    return wp.array(out_np, dtype=dtype, device=device)
+
+
+def _zero_extend(
+    src: wp.array,
+    extra_count: int,
+    *,
+    dtype: Any,
+    device: wp.DeviceLike,
+) -> wp.array:
+    """Like :func:`_extend_array` but the tail is zeroed rather than
+    filled with a Python scalar (for ``vec3`` / ``transform`` /
+    ``vec4`` arrays where a Python scalar can't be broadcast)."""
+    s = int(src.shape[0]) if src is not None else 0
+    total = s + extra_count
+    out = wp.zeros(total, dtype=dtype, device=device)
+    if s > 0:
+        wp.copy(out, src, dest_offset=0, src_offset=0, count=s)
+    return out
+
+
+class PhoenxCollisionPipeline(CollisionPipeline):
+    """Cloth-aware :class:`CollisionPipeline`.
+
+    Reuses every standard pipeline feature -- contact matching,
+    deterministic sort, hydroelastic, soft contacts -- and adds
+    cloth triangles as ``GeoTypeEx.TRIANGLE`` virtual shapes in
+    the slots ``[S, S+T)``.
+
+    Args:
+        model: Newton :class:`~newton.Model` for the rigid side.
+            ``model.shape_count`` rigid shapes occupy slots ``[0, S)``.
+        num_cloth_triangles: Cloth triangle count ``T`` (= ``model.tri_count``
+            for typical Newton cloth meshes).
+        tri_indices: ``(T, 3)`` particle indices per cloth triangle.
+        particle_q: World-space particle positions, ``(num_particles, 3)``.
+            Read every step by the cloth-stamping hook.
+        particle_radius: Per-particle cloth half-thickness; the
+            triangle's effective contact radius is the max of its
+            three vertex radii.
+        cloth_world: World index assigned to every cloth triangle
+            shape. ``-1`` (global, collide with all worlds) is the
+            default for single-world phoenx scenes; pass an explicit
+            world id for multi-world setups where cloth lives in a
+            specific world.
+        cloth_collision_group: Collision group for cloth shapes.
+            Newton's :func:`test_group_pair` rules: positive groups
+            collide with same-group + negatives, negatives collide
+            with everything except their counterpart, ``0`` doesn't
+            collide. Defaults to ``1`` so cloth shapes collide with
+            each other (modulo the shared-node filter) and with
+            rigids in group ``1`` or any negative group.
+        cloth_extra_margin: Extra contact-detection margin added to
+            cloth-triangle AABBs each step on top of the
+            ``max(vertex radius)`` expansion. Equivalent to the
+            rigid-shape ``shape_gap``; used by the broadphase
+            overlap test.
+        cloth_shape_data_margin: Margin written into ``shape_data.w``
+            for cloth shape slots; consumed by ``extract_shape_data``
+            as the per-shape margin offset.
+        shape_pairs_max: See :class:`CollisionPipeline`. The default
+            here scales with ``S + T`` instead of just ``S``.
+        kwargs: Forwarded to :class:`CollisionPipeline`.
+    """
+
+    def __init__(
+        self,
+        model,
+        *,
+        num_cloth_triangles: int,
+        tri_indices: wp.array,
+        particle_q: wp.array,
+        particle_radius: wp.array,
+        cloth_world: int = -1,
+        cloth_collision_group: int = 1,
+        cloth_extra_margin: float = 0.0,
+        cloth_shape_data_margin: float = 0.0,
+        shape_pairs_max: int | None = None,
+        broad_phase: Any = "nxn",
+        narrow_phase: NarrowPhase | None = None,
+        **kwargs,
+    ) -> None:
+        if num_cloth_triangles < 0:
+            raise ValueError(f"num_cloth_triangles must be >= 0 (got {num_cloth_triangles})")
+        if num_cloth_triangles > 0:
+            if int(tri_indices.shape[0]) != num_cloth_triangles:
+                raise ValueError(
+                    f"tri_indices.shape[0]={int(tri_indices.shape[0])} != num_cloth_triangles={num_cloth_triangles}"
+                )
+
+        S = int(model.shape_count)
+        T = int(num_cloth_triangles)
+        device = model.device
+        total = S + T
+
+        # ---- Build extended per-shape arrays --------------------------
+        cloth_flags = int(ShapeFlags.COLLIDE_SHAPES)
+        # Static defaults for the cloth-shape slots. Per-step values
+        # (transform, shape_data, shape_auxiliary, AABBs) are filled
+        # by the pre-broadphase hook each call.
+        ext_shape_type = _extend_array(model.shape_type, T, int(GeoTypeEx.TRIANGLE), dtype=wp.int32, device=device)
+        ext_shape_body = _extend_array(model.shape_body, T, -1, dtype=wp.int32, device=device)
+        ext_shape_world = _extend_array(model.shape_world, T, int(cloth_world), dtype=wp.int32, device=device)
+        ext_shape_collision_group = _extend_array(
+            model.shape_collision_group, T, int(cloth_collision_group), dtype=wp.int32, device=device
+        )
+        ext_shape_flags = _extend_array(model.shape_flags, T, cloth_flags, dtype=wp.int32, device=device)
+        ext_shape_collision_radius = _extend_array(
+            model.shape_collision_radius, T, float(cloth_extra_margin), dtype=wp.float32, device=device
+        )
+        ext_shape_source_ptr = _extend_array(model.shape_source_ptr, T, np.uint64(0), dtype=wp.uint64, device=device)
+        ext_shape_gap = _extend_array(model.shape_gap, T, float(cloth_extra_margin), dtype=wp.float32, device=device)
+        ext_shape_sdf_index = _extend_array(model.shape_sdf_index, T, -1, dtype=wp.int32, device=device)
+        ext_shape_heightfield_index = _extend_array(model.shape_heightfield_index, T, -1, dtype=wp.int32, device=device)
+        # vec3 / transform extensions: zero-fill the cloth tail; the
+        # hook overwrites those slots every step.
+        ext_shape_transform = _zero_extend(model.shape_transform, T, dtype=wp.transform, device=device)
+        ext_shape_collision_aabb_lower = _zero_extend(model.shape_collision_aabb_lower, T, dtype=wp.vec3, device=device)
+        ext_shape_collision_aabb_upper = _zero_extend(model.shape_collision_aabb_upper, T, dtype=wp.vec3, device=device)
+        # The narrow phase reads ``shape_auxiliary[s]`` for TRIANGLE
+        # shapes (= C - A); the cloth-stamping hook fills it each step.
+        ext_shape_auxiliary = wp.zeros(total, dtype=wp.vec3, device=device)
+        # The narrow phase's external AABB arrays must cover all S+T
+        # slots. Rigid prefix is written by ``compute_shape_aabbs`` in
+        # the parent's ``collide()``; cloth tail is overwritten by the
+        # hook.
+        ext_aabb_lower = wp.zeros(total, dtype=wp.vec3, device=device)
+        ext_aabb_upper = wp.zeros(total, dtype=wp.vec3, device=device)
+
+        # ---- Build broadphase with phoenx filter ----------------------
+        if isinstance(broad_phase, str) and broad_phase != "nxn":
+            raise NotImplementedError(
+                f"PhoenxCollisionPipeline currently only supports broad_phase='nxn'; got {broad_phase!r}. "
+                "SAP and Explicit support is straightforward; add when needed."
+            )
+        if not isinstance(broad_phase, str):
+            raise TypeError(
+                "PhoenxCollisionPipeline builds its own broadphase to register the cloth filter; "
+                "pass a string mode (currently only 'nxn') instead of a prebuilt instance."
+            )
+        bp = BroadPhaseAllPairs(
+            ext_shape_world,
+            shape_flags=ext_shape_flags,
+            device=device,
+            filter_func=phoenx_broadphase_filter,
+        )
+
+        # ---- Build narrowphase with extended AABB arrays --------------
+        if shape_pairs_max is None:
+            # NXN worst case across S+T shapes.  The phoenx filter
+            # discards cloth-cloth pairs sharing a node so the actual
+            # candidate count is much smaller, but the broadphase
+            # buffer must still bound the unfiltered count.
+            shape_pairs_max = max(1, total * (total - 1) // 2)
+
+        if narrow_phase is None:
+            # Mesh / heightfield support: derive from the rigid model's
+            # shape types. Cloth shapes are TRIANGLE only, never
+            # MESH/HFIELD, so they don't influence the flag.
+            shape_types_np = model.shape_type.numpy()
+            has_meshes = bool((shape_types_np == int(GeoType.MESH)).any())
+            has_heightfields = bool((shape_types_np == int(GeoType.HFIELD)).any())
+            np_kwargs = {
+                "max_candidate_pairs": shape_pairs_max,
+                "device": device,
+                "shape_aabb_lower": ext_aabb_lower,
+                "shape_aabb_upper": ext_aabb_upper,
+                "contact_writer_warp_func": write_contact,
+                "shape_voxel_resolution": getattr(model, "_shape_voxel_resolution", None),
+                "has_meshes": has_meshes,
+                "has_heightfields": has_heightfields,
+                "deterministic": kwargs.get("deterministic", False)
+                or kwargs.get("contact_matching", "disabled") != "disabled",
+                "contact_max": kwargs.get("rigid_contact_max"),
+                "verify_buffers": kwargs.get("verify_buffers", True),
+            }
+            narrow_phase = NarrowPhase(**np_kwargs)
+
+        # ---- Filter data carrier --------------------------------------
+        filter_data = PhoenxBroadphaseFilterData()
+        filter_data.num_rigid_shapes = wp.int32(S)
+        filter_data.tri_indices = tri_indices
+
+        # ---- Hand off to the standard pipeline ------------------------
+        super().__init__(
+            model,
+            broad_phase=bp,
+            narrow_phase=narrow_phase,
+            shape_pairs_max=shape_pairs_max,
+            extra_shape_count=T,
+            **kwargs,
+        )
+
+        # ---- Override per-shape arrays with extended versions ---------
+        # The base class read ``model.shape_*`` into ``self.shape_*``;
+        # swap in the extended copies so the rest of collide() picks
+        # them up.
+        self.shape_type = ext_shape_type
+        self.shape_body = ext_shape_body
+        self.shape_transform = ext_shape_transform
+        self.shape_collision_radius = ext_shape_collision_radius
+        self.shape_source_ptr = ext_shape_source_ptr
+        self.shape_gap = ext_shape_gap
+        self.shape_collision_aabb_lower = ext_shape_collision_aabb_lower
+        self.shape_collision_aabb_upper = ext_shape_collision_aabb_upper
+        self.shape_collision_group = ext_shape_collision_group
+        self.shape_world = ext_shape_world
+        self.shape_flags = ext_shape_flags
+        self.shape_sdf_index = ext_shape_sdf_index
+        self.shape_heightfield_index = ext_shape_heightfield_index
+        self.shape_auxiliary = ext_shape_auxiliary
+        self._broadphase_filter_data = filter_data
+
+        # ---- Cloth-side state for the per-step hook -------------------
+        self._cloth_S = S
+        self._cloth_T = T
+        self._cloth_tri_indices = tri_indices
+        self._cloth_particle_q = particle_q
+        self._cloth_particle_radius = particle_radius
+        self._cloth_extra_margin = float(cloth_extra_margin)
+        self._cloth_shape_data_margin = float(cloth_shape_data_margin)
+
+    def set_particle_q(self, particle_q: wp.array) -> None:
+        """Swap in a new particle-position array (e.g. between solver
+        states). The hook will read whichever array was set most
+        recently. For the typical phoenx flow there's only one
+        :class:`ParticleContainer` so this is rarely needed."""
+        self._cloth_particle_q = particle_q
+
+    def _pre_broadphase_hook(self, state, contacts) -> None:
+        if self._cloth_T == 0:
+            return
+        # Stamp cloth-triangle shape data (shape_type, transform,
+        # shape_data, shape_auxiliary) into the extended arrays. This
+        # runs every step because particle positions change.
+        launch_cloth_triangle_shape_data(
+            particle_q=self._cloth_particle_q,
+            tri_indices=self._cloth_tri_indices,
+            base_offset=self._cloth_S,
+            margin=self._cloth_shape_data_margin,
+            shape_type=self.shape_type,
+            shape_transform=self.geom_transform,
+            shape_data=self.geom_data,
+            shape_auxiliary=self.shape_auxiliary,
+            device=self.device,
+        )
+        # Refresh the cloth-triangle AABB slots.  The rigid prefix is
+        # populated by the standard ``compute_shape_aabbs`` pass that
+        # ran before this hook; we only fill ``[S, S+T)``.
+        launch_cloth_triangle_aabbs(
+            particle_q=self._cloth_particle_q,
+            particle_radius=self._cloth_particle_radius,
+            tri_indices=self._cloth_tri_indices,
+            base_offset=self._cloth_S,
+            extra_margin=self._cloth_extra_margin,
+            aabb_lower=self.narrow_phase.shape_aabb_lower,
+            aabb_upper=self.narrow_phase.shape_aabb_upper,
+            device=self.device,
+        )

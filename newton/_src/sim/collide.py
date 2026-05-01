@@ -417,7 +417,7 @@ def _compute_per_world_shape_pairs_max(model: Model) -> int:
     return max(0, total)
 
 
-def _resolve_shape_pairs_max(model: Model, override: int | None) -> int:
+def _resolve_shape_pairs_max(model: Model, override: int | None, extra_shape_count: int = 0) -> int:
     """Pick the broad-phase candidate-pair buffer capacity.
 
     ``override`` lets the caller cap the SAP/NXN pair buffer, which is
@@ -429,14 +429,26 @@ def _resolve_shape_pairs_max(model: Model, override: int | None) -> int:
     use ``None`` instead -- and values larger than the natural bound
     are silently clamped down (allocating beyond the bound is just
     burning memory, never required).
+
+    ``extra_shape_count`` is the number of subclass-injected virtual
+    shapes (e.g. PhoenX cloth triangles). When non-zero, the natural
+    bound is bumped to account for the extra slots; the override
+    upper limit grows accordingly.
     """
     natural = _compute_per_world_shape_pairs_max(model)
+    if extra_shape_count > 0:
+        # All-pairs bump: extra shapes contribute ``extra*(extra-1)/2``
+        # pairs amongst themselves plus ``extra*N`` cross pairs against
+        # the rigid set. This is conservative; world / collision-group
+        # gating cuts a lot of these in practice.
+        n_rigid = int(model.shape_count)
+        natural += extra_shape_count * (extra_shape_count - 1) // 2 + extra_shape_count * n_rigid
     if override is None:
-        return natural
+        return max(1, natural)
     if override <= 0:
         raise ValueError(f"shape_pairs_max must be a positive integer or None, got {override}")
     if override > natural:
-        return natural
+        return max(1, natural)
     return int(override)
 
 
@@ -684,7 +696,12 @@ class CollisionPipeline:
                 self.shape_pairs_excluded_count = 0
             else:
                 self.shape_pairs_filtered = None
-                self.shape_pairs_max = _compute_per_world_shape_pairs_max(model)
+                # Honour the caller-supplied ``shape_pairs_max`` when set
+                # (expert subclasses extending the shape space need this);
+                # fall back to the per-world default otherwise. The
+                # default also accounts for ``extra_shape_count`` virtual
+                # shapes injected by the subclass.
+                self.shape_pairs_max = _resolve_shape_pairs_max(model, shape_pairs_max, int(extra_shape_count))
                 self.shape_pairs_excluded = self._build_excluded_pairs(model)
                 self.shape_pairs_excluded_count = (
                     self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0

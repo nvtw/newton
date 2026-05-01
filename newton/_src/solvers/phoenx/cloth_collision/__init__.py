@@ -18,6 +18,7 @@ from newton._src.solvers.phoenx.cloth_collision.broadphase_filter import (
     PhoenxBroadphaseFilterData,
     phoenx_broadphase_filter,
 )
+from newton._src.solvers.phoenx.cloth_collision.pipeline import PhoenxCollisionPipeline
 from newton._src.solvers.phoenx.cloth_collision.triangle_aabb import (
     compute_cloth_triangle_aabbs_kernel,
     launch_cloth_triangle_aabbs,
@@ -29,6 +30,7 @@ from newton._src.solvers.phoenx.cloth_collision.triangle_shape_data import (
 
 __all__ = [
     "PhoenxBroadphaseFilterData",
+    "PhoenxCollisionPipeline",
     "compute_cloth_triangle_aabbs_kernel",
     "compute_cloth_triangle_shape_data_kernel",
     "launch_cloth_triangle_aabbs",
