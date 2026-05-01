@@ -852,62 +852,63 @@ def _contact_pack_columns_kernel(
     # diagnostic / future caller that does.
     _col_write_int(contact_cols, CONSTRAINT_TYPE_OFFSET, tid, CONSTRAINT_TYPE_CONTACT)
 
-    # Endpoint slots + subtype tag + barycentric weights.  Subtype is
+    # Endpoint slots + subtype tag + barycentric weights. Subtype is
     # derived from the shape-index threshold ``num_rigid_shapes``:
     # rigid shapes occupy ``[0, S)`` and cloth triangles occupy
-    # ``[S, S+T)``. With canonical ``shape_a < shape_b`` ordering, the
-    # cross case always has rigid on side A (RT subtype). Pure rigid
-    # scenes pass ``num_rigid_shapes`` equal to total shape count, so
-    # ``a_is_tri == b_is_tri == 0`` and only the legacy RR path runs.
-    a_is_tri = wp.int32(0)
-    b_is_tri = wp.int32(0)
-    if sa >= num_rigid_shapes:
-        a_is_tri = wp.int32(1)
-    if sb >= num_rigid_shapes:
-        b_is_tri = wp.int32(1)
-
-    if a_is_tri == wp.int32(0) and b_is_tri == wp.int32(0):
+    # ``[S, S+T)``. With canonical ``shape_a < shape_b`` ordering,
+    # cloth triangles (higher indices) can only land on side B in
+    # the cross case, so only RR / RT / TT are reachable -- never
+    # TR. Pure rigid scenes pass ``num_rigid_shapes`` equal to total
+    # shape count and only the legacy RR fast path runs.
+    a_is_tri = sa >= num_rigid_shapes
+    b_is_tri = sb >= num_rigid_shapes
+    # Cloth-involving shape pairs always emit a single contact
+    # (TRIANGLE shapes produce one GJK/MPR contact each), so
+    # reading the per-pair contact point from ``first`` is
+    # unambiguous.
+    k0 = first
+    if a_is_tri:
+        # TT case (a_is_tri implies b_is_tri by canonical ordering;
+        # TR is unreachable). Read unified body-or-particle indices
+        # straight from the constraint rows; the cloth-row stamping
+        # kernel added ``num_bodies`` once at populate time, so
+        # subtract it back to look up positions in ``particle_q``.
+        cid_a = cloth_cid_offset + (sa - num_rigid_shapes)
+        ua_a = cloth_triangle_get_body1(constraints, cid_a)
+        ua_b = cloth_triangle_get_body2(constraints, cid_a)
+        ua_c = cloth_triangle_get_body3(constraints, cid_a)
+        va_a = particle_q[ua_a - num_bodies]
+        vb_a = particle_q[ua_b - num_bodies]
+        vc_a = particle_q[ua_c - num_bodies]
+        w_a = _barycentric_from_local(rigid_contact_point0[k0] - va_a, vb_a - va_a, vc_a - va_a)
+        cid_b = cloth_cid_offset + (sb - num_rigid_shapes)
+        ub_a = cloth_triangle_get_body1(constraints, cid_b)
+        ub_b = cloth_triangle_get_body2(constraints, cid_b)
+        ub_c = cloth_triangle_get_body3(constraints, cid_b)
+        va_b = particle_q[ub_a - num_bodies]
+        vb_b = particle_q[ub_b - num_bodies]
+        vc_b = particle_q[ub_c - num_bodies]
+        w_b = _barycentric_from_local(rigid_contact_point1[k0] - va_b, vb_b - va_b, vc_b - va_b)
+        contact_set_triangle_triangle_endpoints(contact_cols, tid, ua_a, ua_b, ua_c, w_a, ub_a, ub_b, ub_c, w_b)
+    elif b_is_tri:
+        # RT case: side A rigid, side B cloth triangle.  Contact
+        # point on side B (``rigid_contact_point1[k]``) is in shape
+        # B's body frame; for cloth ``shape_body == -1`` the frame
+        # is identity so this is the world-space point we feed into
+        # the barycentric solve.
+        cid_b = cloth_cid_offset + (sb - num_rigid_shapes)
+        ub_a = cloth_triangle_get_body1(constraints, cid_b)
+        ub_b = cloth_triangle_get_body2(constraints, cid_b)
+        ub_c = cloth_triangle_get_body3(constraints, cid_b)
+        va_b = particle_q[ub_a - num_bodies]
+        vb_b = particle_q[ub_b - num_bodies]
+        vc_b = particle_q[ub_c - num_bodies]
+        w_b = _barycentric_from_local(rigid_contact_point1[k0] - va_b, vb_b - va_b, vc_b - va_b)
+        contact_set_rigid_triangle_endpoints(contact_cols, tid, b1, ub_a, ub_b, ub_c, w_b)
+    else:
         # Rigid-rigid: legacy fast path. Body indices straight from
         # ``shape_body``; weights default to ``(1, 0, 0)``.
         contact_set_rigid_rigid_endpoints(contact_cols, tid, b1, b2)
-    else:
-        # At least one side is a cloth triangle. Cloth-involving
-        # shape pairs always emit a single contact (TRIANGLE shapes
-        # produce one GJK/MPR contact each), so reading the per-pair
-        # contact point from ``first`` is unambiguous.
-        k0 = first
-        if b_is_tri == wp.int32(1):
-            # Side B is the triangle. Read unified body-or-particle
-            # indices straight from the constraint row, then look up
-            # particle positions via ``unified - num_bodies``. The
-            # contact point on side B (``rigid_contact_point1[k]``)
-            # is in shape B's body frame; for cloth ``shape_body ==
-            # -1`` the frame is identity so this is the world-space
-            # point we use to compute barycentric weights.
-            cid_b = cloth_cid_offset + (sb - num_rigid_shapes)
-            ub_a = cloth_triangle_get_body1(constraints, cid_b)
-            ub_b = cloth_triangle_get_body2(constraints, cid_b)
-            ub_c = cloth_triangle_get_body3(constraints, cid_b)
-            va_b = particle_q[ub_a - num_bodies]
-            vb_b = particle_q[ub_b - num_bodies]
-            vc_b = particle_q[ub_c - num_bodies]
-            p_local_b = rigid_contact_point1[k0] - va_b
-            w_b = _barycentric_from_local(p_local_b, vb_b - va_b, vc_b - va_b)
-        if a_is_tri == wp.int32(1):
-            # Side A is also a triangle (TT case).
-            cid_a = cloth_cid_offset + (sa - num_rigid_shapes)
-            ua_a = cloth_triangle_get_body1(constraints, cid_a)
-            ua_b = cloth_triangle_get_body2(constraints, cid_a)
-            ua_c = cloth_triangle_get_body3(constraints, cid_a)
-            va_a = particle_q[ua_a - num_bodies]
-            vb_a = particle_q[ua_b - num_bodies]
-            vc_a = particle_q[ua_c - num_bodies]
-            p_local_a = rigid_contact_point0[k0] - va_a
-            w_a = _barycentric_from_local(p_local_a, vb_a - va_a, vc_a - va_a)
-            contact_set_triangle_triangle_endpoints(contact_cols, tid, ua_a, ua_b, ua_c, w_a, ub_a, ub_b, ub_c, w_b)
-        else:
-            # Side A is rigid, side B is the triangle (RT case).
-            contact_set_rigid_triangle_endpoints(contact_cols, tid, b1, ub_a, ub_b, ub_c, w_b)
 
     contact_set_friction(contact_cols, tid, mu_static)
     contact_set_friction_dynamic(contact_cols, tid, mu_dynamic)

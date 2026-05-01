@@ -88,15 +88,12 @@ from newton._src.solvers.phoenx.body_or_particle import (
 
 __all__ = [
     "RigidColumnState",
-    "SideKinematics",
     "SidePose",
     "apply_rigid_side",
     "apply_rigid_side_batched",
     "apply_triangle_side",
     "fetch_rigid_pose",
-    "fetch_rigid_side",
     "fetch_triangle_pose",
-    "fetch_triangle_side",
     "read_rigid_column_state",
     "triangle_anchor_world",
     "write_rigid_column_velocity",
@@ -143,96 +140,6 @@ class SidePose:
     inv_inertia: wp.mat33f
 
 
-@wp.func
-def side_pose_zero() -> SidePose:
-    """Zero-initialised :class:`SidePose` -- handy as a return type
-    placeholder before the kind-specific branch fills it in."""
-    p = SidePose()
-    p.position = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
-    p.orientation = wp.quatf(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
-    p.body_com = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
-    p.inv_mass = wp.float32(0.0)
-    p.inv_inertia = wp.mat33f(
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-    )
-    return p
-
-
-@wp.struct
-class SideKinematics:
-    """Side-uniform kinematics for one contact endpoint, as the iterate
-    sees it.
-
-    Carries everything :func:`_make_contact_iterate_at` needs to compute the
-    contact-point velocity (``v_world``), the row's contribution to
-    ``J M^-1 J^T`` (``inv_mass`` + ``r`` + ``inv_inertia``), and to
-    scatter the impulse back to the underlying body / particles via
-    :func:`apply_rigid_side` / :func:`apply_triangle_side`.
-
-    Field semantics:
-
-    * Rigid side: ``v_world = v + omega x r`` with ``r = contact_p -
-      body_position``. ``inv_mass`` / ``inv_inertia`` come straight
-      from :class:`BodyContainer`.
-    * Triangle side: ``v_world = sum_i w_i * v_i``. ``inv_mass = sum_i
-      w_i^2 * inv_m_i``, ``r = 0``, ``inv_inertia = 0``: the
-      Galerkin-FEM projection collapses the angular contribution into
-      the diagonal mass. See module docstring.
-    """
-
-    #: World-space position of the contact point on this side. Used by
-    #: prepare for the gap residual; iterate doesn't read it (lever
-    #: arm is recomputed inline from the body pose / barycentric
-    #: weights).
-    p_world: wp.vec3f
-    #: World-space velocity at the contact point. Includes the
-    #: angular contribution ``omega x r`` for rigid sides; pure
-    #: weighted-sum of node velocities for triangle sides.
-    v_world: wp.vec3f
-    #: World-space angular velocity (rigid side only -- zero for
-    #: triangle). Threaded through so iterate can reconstruct
-    #: ``v_world`` after applying an impulse without re-fetching from
-    #: the body store. Triangle iterates never use this field.
-    w_world: wp.vec3f
-    #: World-space lever arm ``r``. Zero for triangle sides.
-    r: wp.vec3f
-    #: Diagonal inverse mass of the side at the contact point.
-    inv_mass: wp.float32
-    #: World-frame inverse inertia. Zero matrix for triangle sides.
-    inv_inertia: wp.mat33f
-
-
-@wp.func
-def side_kinematics_zero() -> SideKinematics:
-    """Zero-initialised :class:`SideKinematics`."""
-    s = SideKinematics()
-    s.p_world = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
-    s.v_world = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
-    s.w_world = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
-    s.r = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
-    s.inv_mass = wp.float32(0.0)
-    s.inv_inertia = wp.mat33f(
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-    )
-    return s
-
-
 # ---------------------------------------------------------------------------
 # Rigid side
 # ---------------------------------------------------------------------------
@@ -274,32 +181,6 @@ def fetch_rigid_pose(bodies: BodyContainer, b: wp.int32) -> SidePose:
             wp.float32(0.0),
         )
     return p
-
-
-@wp.func
-def fetch_rigid_side(
-    bodies: BodyContainer,
-    b: wp.int32,
-    contact_p_world: wp.vec3f,
-) -> SideKinematics:
-    """Read a rigid side's kinematics at the given contact point.
-
-    Computes ``r = contact_p_world - bodies.position[b]`` and
-    ``v_world = v + omega x r``; copies inv_mass + inv_inertia from
-    the body container. Used by the iterate's per-contact loop after
-    prepare has already published the contact frame + per-contact
-    biases into :class:`ContactContainer`.
-    """
-    s = SideKinematics()
-    s.p_world = contact_p_world
-    s.r = contact_p_world - bodies.position[b]
-    v = bodies.velocity[b]
-    w = bodies.angular_velocity[b]
-    s.v_world = v + wp.cross(w, s.r)
-    s.w_world = w
-    s.inv_mass = bodies.inverse_mass[b]
-    s.inv_inertia = bodies.inverse_inertia_world[b]
-    return s
 
 
 @wp.struct
@@ -403,7 +284,14 @@ def apply_rigid_side(
     :func:`~newton._src.solvers.phoenx.helpers.math_helpers.apply_pair_velocity_impulse`
     so per-contact body-velocity scatter stays batched at end-of-
     column (lower memory traffic, identical math).
+
+    ``b < 0`` (Newton's "no rigid body" sentinel for world-fixed
+    shapes) is a silent no-op so the helper is safe to call from
+    the cloth-bearing iterate variants where the rigid side may
+    be a ground plane attached to ``body=-1``.
     """
+    if b < wp.int32(0):
+        return
     inv_mass = bodies.inverse_mass[b]
     inv_inertia = bodies.inverse_inertia_world[b]
     bodies.velocity[b] = bodies.velocity[b] + (sign * inv_mass) * imp
@@ -521,69 +409,6 @@ def fetch_triangle_pose(
         wp.float32(0.0),
     )
     return p
-
-
-@wp.func
-def fetch_triangle_side(
-    store: BodyOrParticleStore,
-    body_a: wp.int32,
-    body_b: wp.int32,
-    body_c: wp.int32,
-    weights: wp.vec3f,
-) -> SideKinematics:
-    """Read a triangle side's kinematics at the barycentric contact
-    point.
-
-    ``v_world = sum_i w_i * v_i`` over the three nodes. ``r = 0`` and
-    ``inv_inertia = 0`` -- the angular DoF doesn't exist for a
-    barycentric point (see module docstring). ``inv_mass`` is the
-    Galerkin projection ``sum_i w_i^2 * inv_m_i``.
-
-    The store accessors handle pinned nodes (``inv_m_i = 0``) and the
-    rigid-attached-cloth-node case (a triangle node that happens to
-    sit on a rigid body) transparently.
-    """
-    s = SideKinematics()
-    x_a = get_position(store, body_a)
-    x_b = get_position(store, body_b)
-    x_c = get_position(store, body_c)
-    v_a = get_velocity(store, body_a)
-    v_b = get_velocity(store, body_b)
-    v_c = get_velocity(store, body_c)
-    s.p_world = weights[0] * x_a + weights[1] * x_b + weights[2] * x_c
-    s.v_world = weights[0] * v_a + weights[1] * v_b + weights[2] * v_c
-    s.w_world = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
-    s.r = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
-    inv_m_a = wp.float32(0.0)
-    inv_m_b = wp.float32(0.0)
-    inv_m_c = wp.float32(0.0)
-    if is_particle(store, body_a):
-        inv_m_a = store.particles.inverse_mass[body_a - store.num_bodies]
-    else:
-        inv_m_a = store.bodies.inverse_mass[body_a]
-    if is_particle(store, body_b):
-        inv_m_b = store.particles.inverse_mass[body_b - store.num_bodies]
-    else:
-        inv_m_b = store.bodies.inverse_mass[body_b]
-    if is_particle(store, body_c):
-        inv_m_c = store.particles.inverse_mass[body_c - store.num_bodies]
-    else:
-        inv_m_c = store.bodies.inverse_mass[body_c]
-    s.inv_mass = (
-        weights[0] * weights[0] * inv_m_a + weights[1] * weights[1] * inv_m_b + weights[2] * weights[2] * inv_m_c
-    )
-    s.inv_inertia = wp.mat33f(
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-        wp.float32(0.0),
-    )
-    return s
 
 
 @wp.func
