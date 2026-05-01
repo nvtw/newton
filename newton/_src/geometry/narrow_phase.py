@@ -632,6 +632,7 @@ def create_narrow_phase_kernel_gjk_mpr(
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],
         shape_source: wp.array[wp.uint64],
+        shape_auxiliary: wp.array[wp.vec3],
         shape_gap: wp.array[float],
         shape_collision_radius: wp.array[float],
         shape_aabb_lower: wp.array[wp.vec3],
@@ -669,10 +670,10 @@ def create_narrow_phase_kernel_gjk_mpr(
 
             # Extract shape data
             pos_a, quat_a, shape_data_a, scale_a, margin_offset_a = extract_shape_data(
-                shape_a, shape_transform, shape_types, shape_data, shape_source
+                shape_a, shape_transform, shape_types, shape_data, shape_source, shape_auxiliary
             )
             pos_b, quat_b, shape_data_b, scale_b, margin_offset_b = extract_shape_data(
-                shape_b, shape_transform, shape_types, shape_data, shape_source
+                shape_b, shape_transform, shape_types, shape_data, shape_source, shape_auxiliary
             )
 
             # Check for infinite planes
@@ -895,6 +896,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],
         shape_source: wp.array[wp.uint64],
+        shape_auxiliary: wp.array[wp.vec3],
         shape_gap: wp.array[float],  # Per-shape contact gaps
         shape_heightfield_index: wp.array[wp.int32],
         heightfield_data: wp.array[HeightfieldData],
@@ -944,6 +946,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
                 shape_types,
                 shape_data,
                 shape_source,
+                shape_auxiliary,
             )
 
             # Triangle position is vertex A in world space.
@@ -1730,6 +1733,7 @@ class NarrowPhase:
         heightfield_elevations: wp.array[wp.float32] | None = None,
         mesh_edge_indices: wp.array[wp.vec2i] | None = None,
         shape_edge_range: wp.array[wp.vec2i] | None = None,
+        shape_auxiliary: wp.array[wp.vec3] | None = None,  # Per-shape auxiliary vec3 (e.g. cloth-tri C-A offset)
         writer_data: Any,
         device: Devicelike | None = None,  # Device to launch on
     ) -> None:
@@ -1761,6 +1765,16 @@ class NarrowPhase:
         """
         if device is None:
             device = self.device if self.device is not None else candidate_pair.device
+
+        # Sentinel for the per-shape auxiliary array. ``extract_shape_data``
+        # only reads this for ``GeoTypeEx.TRIANGLE`` / ``TRIANGLE_PRISM``
+        # shape types and gates on ``shape_auxiliary.shape[0] >
+        # shape_idx``, so a length-zero sentinel is the safe default
+        # for scenes without phoenx cloth triangles.
+        if shape_auxiliary is None:
+            if not hasattr(self, "_empty_shape_auxiliary"):
+                self._empty_shape_auxiliary = wp.zeros(0, dtype=wp.vec3, device=device)
+            shape_auxiliary = self._empty_shape_auxiliary
 
         # Clear all counters with a single kernel launch (consolidated counter array)
         self._counter_array.zero_()
@@ -1815,6 +1829,7 @@ class NarrowPhase:
                 shape_data,
                 shape_transform,
                 shape_source,
+                shape_auxiliary,
                 shape_gap,
                 shape_collision_radius,
                 self.shape_aabb_lower,
@@ -1930,6 +1945,7 @@ class NarrowPhase:
                         shape_data,
                         shape_transform,
                         shape_source,
+                        shape_auxiliary,
                         shape_gap,
                         shape_heightfield_index,
                         heightfield_data,
@@ -1953,6 +1969,7 @@ class NarrowPhase:
                         shape_data,
                         shape_transform,
                         shape_source,
+                        shape_auxiliary,
                         shape_gap,
                         shape_heightfield_index,
                         heightfield_data,

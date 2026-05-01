@@ -354,6 +354,7 @@ def extract_shape_data(
     shape_types: wp.array[int],
     shape_data: wp.array[wp.vec4],  # scale (xyz), margin_offset (w) or other data
     shape_source: wp.array[wp.uint64],
+    shape_auxiliary: wp.array[wp.vec3],  # per-shape auxiliary vec3 (e.g. triangle's C-A offset)
 ):
     """
     Extract shape data from the narrow phase API arrays.
@@ -364,6 +365,13 @@ def extract_shape_data(
         shape_types: Shape types
         shape_data: Shape data (vec4 - scale xyz, margin_offset w)
         shape_source: Source pointers (mesh IDs etc.)
+        shape_auxiliary: Per-shape auxiliary ``vec3`` storage. Only
+            consulted for shape types that need a second world-space
+            vector beyond the ``vec4`` ``shape_data`` slot (today:
+            :data:`GeoTypeEx.TRIANGLE` / :data:`GeoTypeEx.TRIANGLE_PRISM`,
+            where ``auxiliary = C - A``). Pass a length-zero sentinel
+            array when the scene has no such shapes -- the function
+            checks the array length before indexing.
 
     Returns:
         tuple: (position, orientation, shape_data, scale, margin_offset)
@@ -389,6 +397,14 @@ def extract_shape_data(
     # For CONVEX_MESH, pack the mesh pointer into auxiliary
     if shape_types[shape_idx] == GeoType.CONVEX_MESH:
         result.auxiliary = pack_mesh_ptr(shape_source[shape_idx])
+    # For TRIANGLE / TRIANGLE_PRISM (e.g. PhoenX cloth triangles), read
+    # the third-vertex offset from the parallel ``shape_auxiliary``
+    # array. Length-zero sentinel arrays bypass this read so scenes
+    # without triangle shapes pay nothing.
+    elif shape_auxiliary.shape[0] > shape_idx and (
+        shape_types[shape_idx] == int(GeoTypeEx.TRIANGLE) or shape_types[shape_idx] == int(GeoTypeEx.TRIANGLE_PRISM)
+    ):
+        result.auxiliary = shape_auxiliary[shape_idx]
 
     return position, orientation, result, scale, margin_offset
 
