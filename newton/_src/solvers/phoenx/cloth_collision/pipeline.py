@@ -30,6 +30,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.geometry.broad_phase_nxn import BroadPhaseAllPairs
+from newton._src.geometry.broad_phase_sap import BroadPhaseSAP
 from newton._src.geometry.flags import ShapeFlags
 from newton._src.geometry.narrow_phase import NarrowPhase
 from newton._src.geometry.support_function import GeoTypeEx
@@ -40,6 +41,7 @@ from newton._src.solvers.phoenx.cloth_collision.broadphase_filter import (
     phoenx_broadphase_filter,
 )
 from newton._src.solvers.phoenx.cloth_collision.triangle_stamp import launch_cloth_triangle_stamp
+from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer
 
 __all__ = ["PhoenxCollisionPipeline"]
 
@@ -137,7 +139,9 @@ class PhoenxCollisionPipeline(CollisionPipeline):
         model,
         *,
         num_cloth_triangles: int,
-        tri_indices: wp.array,
+        constraints: ConstraintContainer,
+        cloth_cid_offset: int,
+        num_bodies: int,
         particle_q: wp.array,
         particle_radius: wp.array,
         cloth_world: int = -1,
@@ -151,11 +155,6 @@ class PhoenxCollisionPipeline(CollisionPipeline):
     ) -> None:
         if num_cloth_triangles < 0:
             raise ValueError(f"num_cloth_triangles must be >= 0 (got {num_cloth_triangles})")
-        if num_cloth_triangles > 0:
-            if int(tri_indices.shape[0]) != num_cloth_triangles:
-                raise ValueError(
-                    f"tri_indices.shape[0]={int(tri_indices.shape[0])} != num_cloth_triangles={num_cloth_triangles}"
-                )
 
         S = int(model.shape_count)
         T = int(num_cloth_triangles)
@@ -197,22 +196,28 @@ class PhoenxCollisionPipeline(CollisionPipeline):
         ext_aabb_upper = wp.zeros(total, dtype=wp.vec3, device=device)
 
         # ---- Build broadphase with phoenx filter ----------------------
-        if isinstance(broad_phase, str) and broad_phase != "nxn":
-            raise NotImplementedError(
-                f"PhoenxCollisionPipeline currently only supports broad_phase='nxn'; got {broad_phase!r}. "
-                "SAP and Explicit support is straightforward; add when needed."
-            )
         if not isinstance(broad_phase, str):
             raise TypeError(
-                "PhoenxCollisionPipeline builds its own broadphase to register the cloth filter; "
-                "pass a string mode (currently only 'nxn') instead of a prebuilt instance."
+                "PhoenxCollisionPipeline builds its own broadphase to register the cloth "
+                "filter callback; pass a string mode ('nxn' or 'sap') instead of a "
+                "prebuilt instance."
             )
-        bp = BroadPhaseAllPairs(
-            ext_shape_world,
-            shape_flags=ext_shape_flags,
-            device=device,
-            filter_func=phoenx_broadphase_filter,
-        )
+        if broad_phase == "nxn":
+            bp = BroadPhaseAllPairs(
+                ext_shape_world,
+                shape_flags=ext_shape_flags,
+                device=device,
+                filter_func=phoenx_broadphase_filter,
+            )
+        elif broad_phase == "sap":
+            bp = BroadPhaseSAP(
+                ext_shape_world,
+                shape_flags=ext_shape_flags,
+                device=device,
+                filter_func=phoenx_broadphase_filter,
+            )
+        else:
+            raise ValueError(f"PhoenxCollisionPipeline broad_phase must be 'nxn' or 'sap'; got {broad_phase!r}")
 
         # ---- Build narrowphase with extended AABB arrays --------------
         if shape_pairs_max is None:
@@ -248,7 +253,8 @@ class PhoenxCollisionPipeline(CollisionPipeline):
         # ---- Filter data carrier --------------------------------------
         filter_data = PhoenxBroadphaseFilterData()
         filter_data.num_rigid_shapes = wp.int32(S)
-        filter_data.tri_indices = tri_indices
+        filter_data.constraints = constraints
+        filter_data.cloth_cid_offset = wp.int32(cloth_cid_offset)
 
         # ---- Hand off to the standard pipeline ------------------------
         super().__init__(
@@ -283,7 +289,9 @@ class PhoenxCollisionPipeline(CollisionPipeline):
         # ---- Cloth-side state for the per-step hook -------------------
         self._cloth_S = S
         self._cloth_T = T
-        self._cloth_tri_indices = tri_indices
+        self._cloth_constraints = constraints
+        self._cloth_cid_offset = int(cloth_cid_offset)
+        self._cloth_num_bodies = int(num_bodies)
         self._cloth_particle_q = particle_q
         self._cloth_particle_radius = particle_radius
         self._cloth_extra_margin = float(cloth_extra_margin)
@@ -308,7 +316,10 @@ class PhoenxCollisionPipeline(CollisionPipeline):
         launch_cloth_triangle_stamp(
             particle_q=self._cloth_particle_q,
             particle_radius=self._cloth_particle_radius,
-            tri_indices=self._cloth_tri_indices,
+            constraints=self._cloth_constraints,
+            cloth_cid_offset=self._cloth_cid_offset,
+            num_bodies=self._cloth_num_bodies,
+            num_cloth_triangles=self._cloth_T,
             base_offset=self._cloth_S,
             aabb_extra_margin=self._cloth_extra_margin,
             shape_data_margin=self._cloth_shape_data_margin,

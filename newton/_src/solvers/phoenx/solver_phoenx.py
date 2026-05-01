@@ -458,11 +458,11 @@ class PhoenXWorld:
             raise ValueError(f"num_cloth_triangles must be >= 0 (got {self.num_cloth_triangles})")
 
         # Cloth-collision plumbing for the contact ingest pack kernel.
-        # ``populate_cloth_triangles_from_model`` fills these in from
-        # the Newton model; rigid-only scenes leave them ``None`` and
-        # the ingest pack kernel runs the legacy rigid-rigid path
-        # (sentinel arrays + ``num_rigid_shapes = INT_MAX`` semantically).
-        self._cloth_tri_indices: wp.array | None = None
+        # ``populate_cloth_triangles_from_model`` flips the rigid-shape
+        # count from ``None`` (semantically INT_MAX -> rigid-rigid
+        # always) to the real value, at which point the pack kernel
+        # starts looking up cloth-triangle rows in
+        # ``self.constraints`` at ``cid = num_joints + t``.
         self._num_rigid_shapes: int | None = None
         # Total cid count in the joint-side :class:`ConstraintContainer`.
         # Joints + cloth triangles all live in this container; the
@@ -1150,9 +1150,10 @@ class PhoenXWorld:
         # shapes in the contacts buffer. The
         # :class:`~newton._src.solvers.phoenx.cloth_collision.pipeline.PhoenxCollisionPipeline`
         # places cloth triangles at shape indices ``[S, S+T)`` where
-        # ``S = model.shape_count``; the ingest tests
-        # ``shape_idx >= num_rigid_shapes`` to detect them.
-        self._cloth_tri_indices = model.tri_indices
+        # ``S = model.shape_count``; the ingest tests ``shape_idx >=
+        # num_rigid_shapes`` to detect them and reads the triangle
+        # topology straight out of ``self.constraints`` at the cloth
+        # cid offset (= ``num_joints``).
         self._num_rigid_shapes = int(getattr(model, "shape_count", 0))
 
     def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
@@ -1442,17 +1443,17 @@ class PhoenXWorld:
             )
 
         # Cloth-collision plumbing: when the scene has cloth triangles
-        # registered (``populate_cloth_triangles_from_model`` was called
-        # with a model whose ``tri_indices`` is non-empty), thread the
-        # cloth tables through to ingest so it can decode contact rows
-        # whose shape indices land in the cloth slot range
+        # registered (``populate_cloth_triangles_from_model`` was called),
+        # thread the constraint container + cloth-cid offset + particle
+        # positions to ingest so it can decode contact rows whose shape
+        # indices land in the cloth slot range
         # ``[num_rigid_shapes, num_rigid_shapes + num_cloth_triangles)``.
-        # Particles' positions feed barycentric-weight resolution. For
-        # rigid-only scenes both ``self._cloth_tri_indices`` and
-        # ``self._num_rigid_shapes`` stay ``None`` and the ingest's
-        # legacy rigid-rigid path runs.
+        # Triangle topology is read straight from the cloth-triangle
+        # rows of ``self.constraints`` (no duplicate ``tri_indices``
+        # buffer). Rigid-only scenes leave ``self._num_rigid_shapes``
+        # at ``None`` and the ingest's legacy rigid-rigid path runs.
         cloth_particle_q: wp.array | None = None
-        if self._cloth_tri_indices is not None and self.particles is not None:
+        if self._num_rigid_shapes is not None and self.particles is not None:
             cloth_particle_q = self.particles.position
 
         ingest_contacts(
@@ -1470,7 +1471,8 @@ class PhoenXWorld:
             materials=self._materials,
             enable_body_pair_grouping=self._enable_body_pair_grouping,
             num_rigid_shapes=self._num_rigid_shapes,
-            cloth_tri_indices=self._cloth_tri_indices,
+            constraints=self.constraints,
+            cloth_cid_offset=self.num_joints,
             particle_q=cloth_particle_q,
         )
 

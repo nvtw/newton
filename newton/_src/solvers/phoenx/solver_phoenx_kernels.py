@@ -56,6 +56,10 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactViews,
     contact_get_body1,
     contact_get_body2,
+    contact_get_body_a2,
+    contact_get_body_a3,
+    contact_get_body_b2,
+    contact_get_body_b3,
     contact_get_subtype,
     contact_iterate_at_multi_RR,
     contact_iterate_at_RR,
@@ -986,11 +990,16 @@ def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
     With ``cloth_support=True`` the kernel reads the per-cid
     ``constraint_type`` tag at dword 0 and, when matched against
     :data:`CONSTRAINT_TYPE_CLOTH_TRIANGLE`, also pulls the third
-    cloth-triangle endpoint (``body3``) and uses the unified
-    body-or-particle inverse-mass accessor so particle slots
-    (unified index ``>= num_bodies``) read from the
-    :class:`ParticleContainer`. ``cloth_support=False`` keeps the
-    pre-cloth dispatch byte-identical: no type-tag read, no
+    cloth-triangle endpoint (``body3``); contact rows additionally
+    expose the four extra triangle slots (``body_a2``, ``body_a3``,
+    ``body_b2``, ``body_b3``) so cloth-bearing contact subtypes
+    (RT / TT) get their full triangle endpoints into the colouring
+    graph -- otherwise two contacts touching the same triangle
+    particle would land in the same colour and race on
+    apply_triangle_side. Inverse-mass lookups go through the
+    unified body-or-particle accessor so particle slots resolve to
+    the :class:`ParticleContainer`. ``cloth_support=False`` keeps
+    the pre-cloth dispatch byte-identical: no type-tag read, no
     third-body read, and ``bodies.inverse_mass[b]`` is used
     directly because every constraint endpoint resolves to a body
     slot in rigid-only scenes.
@@ -1011,24 +1020,33 @@ def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
         n = num_constraints[0]
         if tid >= n:
             return
+        # Up to six potential endpoints per constraint (cloth-tri pair).
         b1 = wp.int32(-1)
         b2 = wp.int32(-1)
         b3 = wp.int32(-1)
+        b4 = wp.int32(-1)
+        b5 = wp.int32(-1)
+        b6 = wp.int32(-1)
         if tid < num_joints:
             b1 = constraint_get_body1(constraints, tid)
             b2 = constraint_get_body2(constraints, tid)
             if wp.static(cloth_support):
                 ctype = read_int(constraints, wp.int32(0), tid)
                 if ctype == cloth_type_tag:
-                    # Cloth triangle's third endpoint sits next to
-                    # body1 / body2 at dword 3 -- read it via the
-                    # cloth-typed accessor so the offset comes from
-                    # the schema, not a hand-rolled constant.
                     b3 = cloth_triangle_get_body3(constraints, tid)
         else:
             local_cid = tid - num_joints
             b1 = contact_get_body1(contact_cols, local_cid)
             b2 = contact_get_body2(contact_cols, local_cid)
+            if wp.static(cloth_support):
+                # Cloth-bearing contact subtypes (RT / TT) carry
+                # extra triangle endpoints. The schema stores ``-1``
+                # in unused slots so the static-body collapse below
+                # turns them into no-ops on rigid-rigid columns.
+                b3 = contact_get_body_a2(contact_cols, local_cid)
+                b4 = contact_get_body_a3(contact_cols, local_cid)
+                b5 = contact_get_body_b2(contact_cols, local_cid)
+                b6 = contact_get_body_b3(contact_cols, local_cid)
         # Static-body collapse: anything with inverse_mass == 0 maps
         # to -1 so the colourer doesn't track it (statics never
         # conflict). With cloth_support the inverse-mass lookup goes
@@ -1042,6 +1060,12 @@ def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
                 b2 = wp.int32(-1)
             if b3 >= 0 and get_inverse_mass(store, b3) == wp.float32(0.0):
                 b3 = wp.int32(-1)
+            if b4 >= 0 and get_inverse_mass(store, b4) == wp.float32(0.0):
+                b4 = wp.int32(-1)
+            if b5 >= 0 and get_inverse_mass(store, b5) == wp.float32(0.0):
+                b5 = wp.int32(-1)
+            if b6 >= 0 and get_inverse_mass(store, b6) == wp.float32(0.0):
+                b6 = wp.int32(-1)
         else:
             if b1 >= 0 and bodies.inverse_mass[b1] == wp.float32(0.0):
                 b1 = wp.int32(-1)
@@ -1051,23 +1075,101 @@ def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
         # loop (which stops on the first -1) doesn't miss a dynamic
         # body when the static one happens to sit in slot 0.
         if wp.static(cloth_support):
-            # 3-element compact for the cloth case. Sort the three
-            # IDs so non-negative ones come first; -1 in unused tail
-            # slots.
+            # Up to 6 endpoints (cloth tri-vs-tri contact). Stable
+            # compact: cascade non-negatives toward the lowest slots
+            # so the partitioner's adjacency-count loop (which stops
+            # at the first -1) sees every active endpoint.
+            s0 = wp.int32(-1)
+            s1 = wp.int32(-1)
+            s2 = wp.int32(-1)
+            s3 = wp.int32(-1)
+            s4 = wp.int32(-1)
+            s5 = wp.int32(-1)
             cnt = wp.int32(0)
-            slots = wp.vec3i(wp.int32(-1), wp.int32(-1), wp.int32(-1))
             if b1 >= 0:
-                slots[cnt] = b1
+                if cnt == wp.int32(0):
+                    s0 = b1
+                elif cnt == wp.int32(1):
+                    s1 = b1
+                elif cnt == wp.int32(2):
+                    s2 = b1
+                elif cnt == wp.int32(3):
+                    s3 = b1
+                elif cnt == wp.int32(4):
+                    s4 = b1
+                else:
+                    s5 = b1
                 cnt = cnt + wp.int32(1)
             if b2 >= 0:
-                slots[cnt] = b2
+                if cnt == wp.int32(0):
+                    s0 = b2
+                elif cnt == wp.int32(1):
+                    s1 = b2
+                elif cnt == wp.int32(2):
+                    s2 = b2
+                elif cnt == wp.int32(3):
+                    s3 = b2
+                elif cnt == wp.int32(4):
+                    s4 = b2
+                else:
+                    s5 = b2
                 cnt = cnt + wp.int32(1)
             if b3 >= 0:
-                slots[cnt] = b3
+                if cnt == wp.int32(0):
+                    s0 = b3
+                elif cnt == wp.int32(1):
+                    s1 = b3
+                elif cnt == wp.int32(2):
+                    s2 = b3
+                elif cnt == wp.int32(3):
+                    s3 = b3
+                elif cnt == wp.int32(4):
+                    s4 = b3
+                else:
+                    s5 = b3
                 cnt = cnt + wp.int32(1)
-            elements[tid] = element_interaction_data_make(
-                slots[0], slots[1], slots[2], wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1)
-            )
+            if b4 >= 0:
+                if cnt == wp.int32(0):
+                    s0 = b4
+                elif cnt == wp.int32(1):
+                    s1 = b4
+                elif cnt == wp.int32(2):
+                    s2 = b4
+                elif cnt == wp.int32(3):
+                    s3 = b4
+                elif cnt == wp.int32(4):
+                    s4 = b4
+                else:
+                    s5 = b4
+                cnt = cnt + wp.int32(1)
+            if b5 >= 0:
+                if cnt == wp.int32(0):
+                    s0 = b5
+                elif cnt == wp.int32(1):
+                    s1 = b5
+                elif cnt == wp.int32(2):
+                    s2 = b5
+                elif cnt == wp.int32(3):
+                    s3 = b5
+                elif cnt == wp.int32(4):
+                    s4 = b5
+                else:
+                    s5 = b5
+                cnt = cnt + wp.int32(1)
+            if b6 >= 0:
+                if cnt == wp.int32(0):
+                    s0 = b6
+                elif cnt == wp.int32(1):
+                    s1 = b6
+                elif cnt == wp.int32(2):
+                    s2 = b6
+                elif cnt == wp.int32(3):
+                    s3 = b6
+                elif cnt == wp.int32(4):
+                    s4 = b6
+                else:
+                    s5 = b6
+            elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5, wp.int32(-1), wp.int32(-1))
         else:
             if b1 < 0 and b2 >= 0:
                 b1 = b2

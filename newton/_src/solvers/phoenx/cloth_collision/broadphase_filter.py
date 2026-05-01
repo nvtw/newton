@@ -21,11 +21,24 @@ to spend time on:
 The filter only fires when both shape indices are above the rigid
 threshold ``num_rigid_shapes`` (i.e. both are cloth triangles) -- a
 rigid-vs-triangle pair always survives.
+
+Topology is read **directly from the cloth-triangle constraint
+container** rather than a duplicate ``tri_indices`` buffer: every
+cloth row already stores its three particle indices in the
+``body1 / body2 / body3`` slots, so reusing them keeps the data in
+one place and avoids any risk of the topology going out of sync.
 """
 
 from __future__ import annotations
 
 import warp as wp
+
+from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    cloth_triangle_get_body1,
+    cloth_triangle_get_body2,
+    cloth_triangle_get_body3,
+)
+from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer
 
 
 @wp.struct
@@ -39,14 +52,17 @@ class PhoenxBroadphaseFilterData:
     Attributes:
         num_rigid_shapes: Number of rigid shapes ``S``. Shape indices
             ``s < S`` are rigid; ``s >= S`` index a cloth triangle
-            ``t = s - S`` in the ``tri_indices`` array.
-        tri_indices: Per-triangle ``vec3i`` of particle indices, of
-            length ``T``. Sourced from
-            :attr:`newton.Model.tri_indices` at finalize.
+            ``t = s - S``.
+        constraints: Phoenx :class:`ConstraintContainer` whose cloth
+            triangle rows hold the per-triangle particle indices.
+        cloth_cid_offset: Constraint-id offset for the cloth-triangle
+            block (= ``num_joints``). Triangle ``t``'s row lives at
+            ``cid = cloth_cid_offset + t``.
     """
 
     num_rigid_shapes: wp.int32
-    tri_indices: wp.array[wp.vec3i]
+    constraints: ConstraintContainer
+    cloth_cid_offset: wp.int32
 
 
 @wp.func
@@ -71,16 +87,22 @@ def phoenx_broadphase_filter(
         b_is_tri = wp.int32(1)
 
     if a_is_tri == wp.int32(1) and b_is_tri == wp.int32(1):
-        ti = a - ud.num_rigid_shapes
-        tj = b - ud.num_rigid_shapes
-        ia = ud.tri_indices[ti]
-        ib = ud.tri_indices[tj]
-        # 9-iteration node-share test.  For non-adjacent triangle
-        # pairs (the bulk on a typical cloth grid) every comparison
-        # is false and the filter accepts.  For shared-node pairs
-        # the early-out hits within the first few iterations.
-        for u in range(3):
-            for v in range(3):
-                if ia[u] == ib[v]:
-                    return wp.int32(0)
+        cid_a = ud.cloth_cid_offset + (a - ud.num_rigid_shapes)
+        cid_b = ud.cloth_cid_offset + (b - ud.num_rigid_shapes)
+        ai0 = cloth_triangle_get_body1(ud.constraints, cid_a)
+        ai1 = cloth_triangle_get_body2(ud.constraints, cid_a)
+        ai2 = cloth_triangle_get_body3(ud.constraints, cid_a)
+        bi0 = cloth_triangle_get_body1(ud.constraints, cid_b)
+        bi1 = cloth_triangle_get_body2(ud.constraints, cid_b)
+        bi2 = cloth_triangle_get_body3(ud.constraints, cid_b)
+        # 9-pair node-share test. Both arrays already carry unified
+        # body-or-particle indices (the cloth-row stamping kernel
+        # added ``num_bodies`` once at populate time), so equality
+        # is the same as comparing raw particle indices.
+        if ai0 == bi0 or ai0 == bi1 or ai0 == bi2:
+            return wp.int32(0)
+        if ai1 == bi0 or ai1 == bi1 or ai1 == bi2:
+            return wp.int32(0)
+        if ai2 == bi0 or ai2 == bi1 or ai2 == bi2:
+            return wp.int32(0)
     return wp.int32(1)

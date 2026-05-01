@@ -26,6 +26,11 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    cloth_triangle_get_body1,
+    cloth_triangle_get_body2,
+    cloth_triangle_get_body3,
+)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -41,6 +46,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CONTACT,
     CONSTRAINT_TYPE_OFFSET,
+    ConstraintContainer,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -571,6 +577,15 @@ def _pair_counts_and_columns_kernel(
     pair_shape_b: wp.array[wp.int32],
     shape_body: wp.array[wp.int32],
     num_bodies: wp.int32,
+    # ``num_rigid_shapes`` is the cloth-shape index threshold. When
+    # either shape index is ``>= num_rigid_shapes`` the pair involves
+    # a cloth triangle (whose ``shape_body`` is the sentinel ``-1``
+    # used for "no rigid body"); the same-body filter is skipped in
+    # that case so cloth-vs-static-rigid and cloth-vs-cloth pairs
+    # don't get erroneously dropped. Pure-rigid scenes pass
+    # ``num_rigid_shapes`` equal to (or greater than) total shape
+    # count, which keeps the legacy filter behaviour bit-equivalent.
+    num_rigid_shapes: wp.int32,
     filter_keys: wp.array[wp.int64],
     filter_count: wp.int32,
     # out
@@ -607,19 +622,30 @@ def _pair_counts_and_columns_kernel(
     sb = pair_shape_b[tid]
     ba = shape_body[sa]
     bb = shape_body[sb]
-    if ba == bb:
+    # The same-body filter only makes sense for two rigid shapes
+    # (where ``shape_body`` returns the actual rigid body index).
+    # Cloth triangles use the ``shape_body == -1`` sentinel for
+    # "no rigid body"; without the threshold check below, a cloth
+    # tri vs static box pair (both ``-1``) would be erroneously
+    # filtered out as same-body.
+    a_is_rigid = sa < num_rigid_shapes
+    b_is_rigid = sb < num_rigid_shapes
+    if a_is_rigid and b_is_rigid and ba == bb:
         pair_columns[tid] = wp.int32(0)
         return
-    if ba <= bb:
-        lo = ba
-        hi = bb
-    else:
-        lo = bb
-        hi = ba
-    body_key = wp.int64(lo) * wp.int64(num_bodies) + wp.int64(hi)
-    if _body_pair_filtered(filter_keys, filter_count, body_key) == wp.int32(1):
-        pair_columns[tid] = wp.int32(0)
-        return
+    # Body-pair filter applies only to rigid-rigid pairs (cloth
+    # triangle's "body" is a sentinel, not a real body to filter).
+    if a_is_rigid and b_is_rigid:
+        if ba <= bb:
+            lo = ba
+            hi = bb
+        else:
+            lo = bb
+            hi = ba
+        body_key = wp.int64(lo) * wp.int64(num_bodies) + wp.int64(hi)
+        if _body_pair_filtered(filter_keys, filter_count, body_key) == wp.int32(1):
+            pair_columns[tid] = wp.int32(0)
+            return
     pair_columns[tid] = wp.int32(1)
 
 
@@ -740,21 +766,25 @@ def _contact_pack_columns_kernel(
     # rather than a rigid shape. ``num_bodies`` is the rigid body
     # count, used to translate per-particle indices into the unified
     # body-or-particle space (``unified = num_bodies + particle_idx``).
-    # ``tri_indices`` maps ``shape_idx - num_rigid_shapes`` to the
-    # three particle indices of that cloth triangle. Per-contact
-    # ``rigid_contact_point0 / point1`` give the contact-point in each
-    # shape's body frame; for cloth shapes (``shape_body == -1``) the
-    # body-frame transform is identity so these are world-space points
-    # we can use directly to compute barycentric weights.
-    # ``particle_q`` is the world-space particle position array
-    # (consulted only when one of the pair's shapes is a triangle).
-    # Length-zero ``tri_indices`` / ``particle_q`` arrays + a
-    # ``num_rigid_shapes`` equal to total shape count disable the
-    # cloth path entirely; the kernel then runs the legacy rigid-rigid
-    # logic for every column.
+    # Triangle topology is read directly from the cloth-triangle
+    # rows of the phoenx :class:`ConstraintContainer` (single source
+    # of truth -- no duplicate ``tri_indices`` buffer): triangle
+    # ``t = shape_idx - num_rigid_shapes`` lives at
+    # ``cid = cloth_cid_offset + t`` and stores its three vertex
+    # indices (already unified) in body1 / body2 / body3.
+    # ``rigid_contact_point0 / point1`` give the contact point in
+    # each shape's body frame; for cloth shapes (``shape_body == -1``)
+    # the frame is identity so these are world-space points we can
+    # use directly to compute barycentric weights. ``particle_q`` is
+    # the world-space particle position array (consulted only when
+    # one of the pair's shapes is a triangle). A ``num_rigid_shapes``
+    # equal to (or greater than) the total shape count disables the
+    # cloth path entirely; the kernel then runs the legacy
+    # rigid-rigid logic for every column.
     num_rigid_shapes: wp.int32,
     num_bodies: wp.int32,
-    tri_indices: wp.array[wp.vec3i],
+    constraints: ConstraintContainer,
+    cloth_cid_offset: wp.int32,
     rigid_contact_point0: wp.array[wp.vec3f],
     rigid_contact_point1: wp.array[wp.vec3f],
     particle_q: wp.array[wp.vec3f],
@@ -847,33 +877,33 @@ def _contact_pack_columns_kernel(
         # contact point from ``first`` is unambiguous.
         k0 = first
         if b_is_tri == wp.int32(1):
-            # Side B is the triangle. Look up its particle indices
-            # and barycentric weights from the world-space contact
-            # point on side B (``rigid_contact_point1[k]`` is in
-            # shape B's body frame; for cloth ``shape_body == -1``
-            # the frame is identity so this is the world-space point).
-            t_b = sb - num_rigid_shapes
-            tib = tri_indices[t_b]
-            va_b = particle_q[tib[0]]
-            vb_b = particle_q[tib[1]]
-            vc_b = particle_q[tib[2]]
+            # Side B is the triangle. Read unified body-or-particle
+            # indices straight from the constraint row, then look up
+            # particle positions via ``unified - num_bodies``. The
+            # contact point on side B (``rigid_contact_point1[k]``)
+            # is in shape B's body frame; for cloth ``shape_body ==
+            # -1`` the frame is identity so this is the world-space
+            # point we use to compute barycentric weights.
+            cid_b = cloth_cid_offset + (sb - num_rigid_shapes)
+            ub_a = cloth_triangle_get_body1(constraints, cid_b)
+            ub_b = cloth_triangle_get_body2(constraints, cid_b)
+            ub_c = cloth_triangle_get_body3(constraints, cid_b)
+            va_b = particle_q[ub_a - num_bodies]
+            vb_b = particle_q[ub_b - num_bodies]
+            vc_b = particle_q[ub_c - num_bodies]
             p_local_b = rigid_contact_point1[k0] - va_b
             w_b = _barycentric_from_local(p_local_b, vb_b - va_b, vc_b - va_b)
-            ub_a = num_bodies + tib[0]
-            ub_b = num_bodies + tib[1]
-            ub_c = num_bodies + tib[2]
         if a_is_tri == wp.int32(1):
             # Side A is also a triangle (TT case).
-            t_a = sa - num_rigid_shapes
-            tia = tri_indices[t_a]
-            va_a = particle_q[tia[0]]
-            vb_a = particle_q[tia[1]]
-            vc_a = particle_q[tia[2]]
+            cid_a = cloth_cid_offset + (sa - num_rigid_shapes)
+            ua_a = cloth_triangle_get_body1(constraints, cid_a)
+            ua_b = cloth_triangle_get_body2(constraints, cid_a)
+            ua_c = cloth_triangle_get_body3(constraints, cid_a)
+            va_a = particle_q[ua_a - num_bodies]
+            vb_a = particle_q[ua_b - num_bodies]
+            vc_a = particle_q[ua_c - num_bodies]
             p_local_a = rigid_contact_point0[k0] - va_a
             w_a = _barycentric_from_local(p_local_a, vb_a - va_a, vc_a - va_a)
-            ua_a = num_bodies + tia[0]
-            ua_b = num_bodies + tia[1]
-            ua_c = num_bodies + tia[2]
             contact_set_triangle_triangle_endpoints(contact_cols, tid, ua_a, ua_b, ua_c, w_a, ub_a, ub_b, ub_c, w_b)
         else:
             # Side A is rigid, side B is the triangle (RT case).
@@ -1120,7 +1150,8 @@ def ingest_contacts(
     materials: wp.array | None = None,
     enable_body_pair_grouping: bool = False,
     num_rigid_shapes: int | None = None,
-    cloth_tri_indices: wp.array | None = None,
+    constraints: ConstraintContainer | None = None,
+    cloth_cid_offset: int = 0,
     particle_q: wp.array | None = None,
 ) -> None:
     """Materialise contact columns for one step.
@@ -1166,6 +1197,14 @@ def ingest_contacts(
             "sentinel array when no filters are registered; the kernel "
             "signature has no null-pointer path)."
         )
+
+    # Cloth-shape index threshold (see comment near the pack-kernel
+    # launch). Resolved here so the same value can be passed to both
+    # the per-pair filter kernel and the pack kernel.
+    if num_rigid_shapes is None:
+        nrs = 2_147_483_647
+    else:
+        nrs = int(num_rigid_shapes)
 
     if enable_body_pair_grouping:
         if scratch.body_pair_keys is None:
@@ -1332,6 +1371,7 @@ def ingest_contacts(
             scratch.pair_shape_b,
             shape_body,
             int(num_bodies),
+            wp.int32(nrs),
             filter_keys,
             int(filter_count),
         ],
@@ -1407,21 +1447,20 @@ def ingest_contacts(
         contact_point0 = contacts.rigid_contact_point0
         contact_point1 = contacts.rigid_contact_point1
 
-    # Cloth-collision plumbing: when the caller supplies cloth triangle
-    # data, the pack kernel detects shape indices ``>= num_rigid_shapes``
-    # and writes the right RT / TT subtype + barycentric weights.
-    # Defaults (``num_rigid_shapes = INT_MAX`` semantically + length-zero
-    # ``tri_indices`` / ``particle_q`` sentinel arrays) keep the legacy
+    # Cloth-collision plumbing: when the caller supplies a phoenx
+    # ConstraintContainer with cloth-triangle rows, the pack kernel
+    # detects shape indices ``>= num_rigid_shapes`` and writes the
+    # right RT / TT subtype + barycentric weights, reading the
+    # triangle topology straight from the constraint rows. Defaults
+    # (``num_rigid_shapes = INT_MAX`` semantically + a sentinel
+    # ConstraintContainer + length-zero particle_q) keep the legacy
     # rigid-rigid code path untouched.
-    if num_rigid_shapes is None:
-        # Effectively disable the cloth branch: every shape index
-        # tested will be ``< num_rigid_shapes`` so ``a_is_tri == 0``
-        # and the kernel runs the legacy RR path.
-        nrs = 2_147_483_647
-    else:
-        nrs = int(num_rigid_shapes)
-    if cloth_tri_indices is None:
-        cloth_tri_indices = wp.zeros(0, dtype=wp.vec3i, device=device)
+    if constraints is None:
+        # Sentinel container: never read because the threshold check
+        # above keeps us on the rigid-rigid branch.
+        from newton._src.solvers.phoenx.constraints.constraint_container import constraint_container_zeros
+
+        constraints = constraint_container_zeros(num_constraints=1, num_dwords=1, device=device)
     if particle_q is None:
         particle_q = wp.zeros(0, dtype=wp.vec3, device=device)
 
@@ -1441,7 +1480,8 @@ def ingest_contacts(
             float(default_friction),
             wp.int32(nrs),
             wp.int32(num_bodies),
-            cloth_tri_indices,
+            constraints,
+            wp.int32(cloth_cid_offset),
             contact_point0,
             contact_point1,
             particle_q,

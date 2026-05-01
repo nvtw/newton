@@ -20,18 +20,33 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.geometry.support_function import GeoTypeEx
+from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    cloth_triangle_get_body1,
+    cloth_triangle_get_body2,
+    cloth_triangle_get_body3,
+)
+from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer
 
 
 @wp.kernel(enable_backward=False)
 def compute_cloth_triangle_stamp_kernel(
     particle_q: wp.array[wp.vec3f],
     particle_radius: wp.array[wp.float32],
-    tri_indices: wp.array[wp.vec3i],
+    # Topology source: cloth-triangle rows in the phoenx
+    # ConstraintContainer. Triangle ``t`` lives at ``cid =
+    # cloth_cid_offset + t`` and stores its three vertex indices
+    # in the body1/body2/body3 slots as *unified* body-or-particle
+    # indices. ``num_bodies`` is the unified-index offset between
+    # rigid bodies and particles (subtract to recover the raw
+    # particle index for ``particle_q``).
+    constraints: ConstraintContainer,
+    cloth_cid_offset: wp.int32,
+    num_bodies: wp.int32,
     base_offset: wp.int32,
     aabb_extra_margin: wp.float32,
     shape_data_margin: wp.float32,
     # in / out: full-length [S + T] arrays. Only slots in
-    # [base_offset, base_offset + tri_indices.shape[0]) are written.
+    # [base_offset, base_offset + T) are written.
     shape_type: wp.array[wp.int32],
     shape_transform: wp.array[wp.transform],
     shape_data: wp.array[wp.vec4],
@@ -51,10 +66,13 @@ def compute_cloth_triangle_stamp_kernel(
     * ``aabb_lower / upper[s] = bbox(A, B, C) +/- (max_radius + aabb_extra_margin)``
     """
     t = wp.tid()
-    idx = tri_indices[t]
-    pa = particle_q[idx[0]]
-    pb = particle_q[idx[1]]
-    pc = particle_q[idx[2]]
+    cid = cloth_cid_offset + t
+    ia = cloth_triangle_get_body1(constraints, cid) - num_bodies
+    ib = cloth_triangle_get_body2(constraints, cid) - num_bodies
+    ic = cloth_triangle_get_body3(constraints, cid) - num_bodies
+    pa = particle_q[ia]
+    pb = particle_q[ib]
+    pc = particle_q[ic]
     s = base_offset + t
 
     # Shape descriptor: vertex A as world-space origin, B/C as
@@ -78,9 +96,9 @@ def compute_cloth_triangle_stamp_kernel(
         wp.max(wp.max(pa[1], pb[1]), pc[1]),
         wp.max(wp.max(pa[2], pb[2]), pc[2]),
     )
-    r0 = particle_radius[idx[0]]
-    r1 = particle_radius[idx[1]]
-    r2 = particle_radius[idx[2]]
+    r0 = particle_radius[ia]
+    r1 = particle_radius[ib]
+    r2 = particle_radius[ic]
     pad = wp.max(wp.max(r0, r1), r2) + aabb_extra_margin
     pad_v = wp.vec3f(pad, pad, pad)
     aabb_lower[s] = lo - pad_v
@@ -90,7 +108,10 @@ def compute_cloth_triangle_stamp_kernel(
 def launch_cloth_triangle_stamp(
     particle_q: wp.array,
     particle_radius: wp.array,
-    tri_indices: wp.array,
+    constraints: ConstraintContainer,
+    cloth_cid_offset: int,
+    num_bodies: int,
+    num_cloth_triangles: int,
     base_offset: int,
     aabb_extra_margin: float,
     shape_data_margin: float,
@@ -105,22 +126,21 @@ def launch_cloth_triangle_stamp(
 ) -> None:
     """Host launcher for :func:`compute_cloth_triangle_stamp_kernel`.
 
-    Replaces the previously separate
-    :func:`launch_cloth_triangle_aabbs` +
-    :func:`launch_cloth_triangle_shape_data` calls with a single
-    fused launch; the per-step cloth-collision overhead drops from
-    two kernel launches to one.
+    Reads triangle topology from the cloth-triangle rows of the
+    phoenx :class:`ConstraintContainer` (single source of truth --
+    no separate ``tri_indices`` buffer is maintained).
     """
-    t = int(tri_indices.shape[0])
-    if t == 0:
+    if num_cloth_triangles == 0:
         return
     wp.launch(
         compute_cloth_triangle_stamp_kernel,
-        dim=t,
+        dim=num_cloth_triangles,
         inputs=[
             particle_q,
             particle_radius,
-            tri_indices,
+            constraints,
+            wp.int32(cloth_cid_offset),
+            wp.int32(num_bodies),
             wp.int32(base_offset),
             wp.float32(aabb_extra_margin),
             wp.float32(shape_data_margin),
