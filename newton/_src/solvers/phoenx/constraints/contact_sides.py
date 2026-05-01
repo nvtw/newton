@@ -87,6 +87,7 @@ from newton._src.solvers.phoenx.body_or_particle import (
 )
 
 __all__ = [
+    "RigidColumnState",
     "SideKinematics",
     "SidePose",
     "apply_rigid_side",
@@ -96,7 +97,9 @@ __all__ = [
     "fetch_rigid_side",
     "fetch_triangle_pose",
     "fetch_triangle_side",
+    "read_rigid_column_state",
     "triangle_anchor_world",
+    "write_rigid_column_velocity",
 ]
 
 
@@ -241,17 +244,35 @@ def fetch_rigid_pose(bodies: BodyContainer, b: wp.int32) -> SidePose:
 
     Returns the body's world position / orientation / COM offset and
     its inverse mass + world-frame inverse inertia. ``b`` is a body
-    index into :class:`BodyContainer`; this helper is the rigid-only
-    counterpart of :func:`fetch_triangle_pose` -- the latter takes a
-    :class:`BodyOrParticleStore` because it touches particle data,
-    which a strictly rigid side never does.
+    index into :class:`BodyContainer`. ``b < 0`` (the Newton "no
+    rigid body" sentinel for world-fixed shapes) returns a
+    zero-mass identity-pose placeholder so reads / writes elsewhere
+    in the solver don't index ``bodies[-1]`` -- see
+    :func:`read_rigid_column_state` for the iterate-side companion.
     """
     p = SidePose()
-    p.position = bodies.position[b]
-    p.orientation = bodies.orientation[b]
-    p.body_com = bodies.body_com[b]
-    p.inv_mass = bodies.inverse_mass[b]
-    p.inv_inertia = bodies.inverse_inertia_world[b]
+    if b >= wp.int32(0):
+        p.position = bodies.position[b]
+        p.orientation = bodies.orientation[b]
+        p.body_com = bodies.body_com[b]
+        p.inv_mass = bodies.inverse_mass[b]
+        p.inv_inertia = bodies.inverse_inertia_world[b]
+    else:
+        p.position = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+        p.orientation = wp.quatf(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
+        p.body_com = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+        p.inv_mass = wp.float32(0.0)
+        p.inv_inertia = wp.mat33f(
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+        )
     return p
 
 
@@ -279,6 +300,88 @@ def fetch_rigid_side(
     s.inv_mass = bodies.inverse_mass[b]
     s.inv_inertia = bodies.inverse_inertia_world[b]
     return s
+
+
+@wp.struct
+class RigidColumnState:
+    """Cached body-side state hoisted out of the per-contact loop.
+
+    The contact iterate reads pose + inertia + velocity once per
+    column and updates ``v`` / ``w`` in registers across the
+    per-contact sweep, scattering once at end-of-column. This
+    struct packages all six fields so the read / write helpers
+    can transparently handle the ``b == -1`` "no rigid body"
+    sentinel by returning a zero-mass identity-pose state and
+    skipping the writes.
+    """
+
+    orientation: wp.quatf
+    body_com: wp.vec3f
+    inv_mass: wp.float32
+    inv_inertia: wp.mat33f
+    velocity: wp.vec3f
+    angular_velocity: wp.vec3f
+
+
+@wp.func
+def read_rigid_column_state(bodies: BodyContainer, b: wp.int32) -> RigidColumnState:
+    """Read a body's per-column state, or return a zero-mass static
+    placeholder when ``b < 0``.
+
+    Newton encodes "world-fixed" shapes as ``shape_body == -1`` --
+    the iterate then carries ``b == -1`` through the contact column.
+    Without this guard, the per-column hoists would do
+    ``bodies.velocity[-1]`` etc., which (a) reads garbage and (b)
+    writes garbage *into the byte before the bodies array* at
+    end-of-column scatter; the latter corrupts adjacent
+    allocations and crashes the partitioner on cloth-vs-static
+    scenes where multiple contacts hammer the same OOB address.
+    Returning a zero-state placeholder + skipping the write
+    (see :func:`write_rigid_column_velocity`) makes the rigid hot
+    path treat the static side as inert: every impulse term goes
+    to zero (``inv_mass = 0`` / ``inv_inertia = 0``) and no
+    bookkeeping write fires.
+    """
+    s = RigidColumnState()
+    if b >= wp.int32(0):
+        s.orientation = bodies.orientation[b]
+        s.body_com = bodies.body_com[b]
+        s.inv_mass = bodies.inverse_mass[b]
+        s.inv_inertia = bodies.inverse_inertia_world[b]
+        s.velocity = bodies.velocity[b]
+        s.angular_velocity = bodies.angular_velocity[b]
+    else:
+        s.orientation = wp.quatf(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
+        s.body_com = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+        s.inv_mass = wp.float32(0.0)
+        s.inv_inertia = wp.mat33f(
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+            wp.float32(0.0),
+        )
+        s.velocity = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+        s.angular_velocity = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    return s
+
+
+@wp.func
+def write_rigid_column_velocity(
+    bodies: BodyContainer,
+    b: wp.int32,
+    velocity: wp.vec3f,
+    angular_velocity: wp.vec3f,
+):
+    """Scatter the per-column register-cached ``(v, w)`` back to the
+    body store. ``b < 0`` (no rigid body) is silently skipped."""
+    if b >= wp.int32(0):
+        bodies.velocity[b] = velocity
+        bodies.angular_velocity[b] = angular_velocity
 
 
 @wp.func
@@ -404,9 +507,7 @@ def fetch_triangle_pose(
     else:
         inv_m_c = store.bodies.inverse_mass[body_c]
     p.inv_mass = (
-        weights[0] * weights[0] * inv_m_a
-        + weights[1] * weights[1] * inv_m_b
-        + weights[2] * weights[2] * inv_m_c
+        weights[0] * weights[0] * inv_m_a + weights[1] * weights[1] * inv_m_b + weights[2] * weights[2] * inv_m_c
     )
     p.inv_inertia = wp.mat33f(
         wp.float32(0.0),
@@ -469,9 +570,7 @@ def fetch_triangle_side(
     else:
         inv_m_c = store.bodies.inverse_mass[body_c]
     s.inv_mass = (
-        weights[0] * weights[0] * inv_m_a
-        + weights[1] * weights[1] * inv_m_b
-        + weights[2] * weights[2] * inv_m_c
+        weights[0] * weights[0] * inv_m_a + weights[1] * weights[1] * inv_m_b + weights[2] * weights[2] * inv_m_c
     )
     s.inv_inertia = wp.mat33f(
         wp.float32(0.0),

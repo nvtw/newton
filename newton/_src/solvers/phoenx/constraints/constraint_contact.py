@@ -106,6 +106,8 @@ from newton._src.solvers.phoenx.constraints.contact_sides import (
     apply_triangle_side,
     fetch_rigid_pose,
     fetch_triangle_pose,
+    read_rigid_column_state,
+    write_rigid_column_velocity,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import (
     dword_offset_of,
@@ -1500,16 +1502,22 @@ def _make_contact_prepare_at(*, side_a_kind: int, side_b_kind: int):
 
         # End-of-column register-batched scatter for the rigid-rigid
         # specialisation. The triangle-bearing variants already
-        # applied per-contact inside the loop.
+        # applied per-contact inside the loop. Each side's scatter is
+        # gated on ``b >= 0`` so the Newton "no rigid body" sentinel
+        # for world-fixed shapes (e.g. ground planes attached to
+        # ``body=-1``) doesn't read-modify-write past the bodies
+        # array's start.
         if wp.static(side_a_kind == CONTACT_KIND_RIGID and side_b_kind == CONTACT_KIND_RIGID):
-            store.bodies.velocity[b1_a] = store.bodies.velocity[b1_a] - pose_a.inv_mass * total_lin_imp_b
-            store.bodies.velocity[b1_b] = store.bodies.velocity[b1_b] + pose_b.inv_mass * total_lin_imp_b
-            store.bodies.angular_velocity[b1_a] = (
-                store.bodies.angular_velocity[b1_a] - pose_a.inv_inertia @ total_ang_imp_a
-            )
-            store.bodies.angular_velocity[b1_b] = (
-                store.bodies.angular_velocity[b1_b] + pose_b.inv_inertia @ total_ang_imp_b
-            )
+            if b1_a >= wp.int32(0):
+                store.bodies.velocity[b1_a] = store.bodies.velocity[b1_a] - pose_a.inv_mass * total_lin_imp_b
+                store.bodies.angular_velocity[b1_a] = (
+                    store.bodies.angular_velocity[b1_a] - pose_a.inv_inertia @ total_ang_imp_a
+                )
+            if b1_b >= wp.int32(0):
+                store.bodies.velocity[b1_b] = store.bodies.velocity[b1_b] + pose_b.inv_mass * total_lin_imp_b
+                store.bodies.angular_velocity[b1_b] = (
+                    store.bodies.angular_velocity[b1_b] + pose_b.inv_inertia @ total_ang_imp_b
+                )
 
     return prepare_at
 
@@ -1557,14 +1565,25 @@ def _make_contact_iterate_at(*, side_a_kind: int, side_b_kind: int):
         # Hoist body-side pose / inertia for rigid sides; triangle
         # sides re-fetch per contact because the per-node ``v_world``
         # is already a weighted sum over three nodes whose indices
-        # don't vary across the column.
+        # don't vary across the column. The rigid hoist routes
+        # through :func:`read_rigid_column_state`, which returns a
+        # zero-mass identity-pose placeholder when ``b == -1`` --
+        # the Newton "no rigid body" sentinel for world-fixed
+        # shapes. Without that guard the per-column read would do
+        # ``bodies.velocity[-1]`` and the end-of-column scatter
+        # would write back to byte ``X-12`` of the bodies array,
+        # corrupting whatever lives in front of it; the hot rigid
+        # path saw this OOB but happened not to hit allocator-
+        # adjacent state, while cloth-vs-static columns race many
+        # contacts on the same OOB and crash the partitioner.
         if wp.static(side_a_kind == CONTACT_KIND_RIGID):
-            orientation_a = store.bodies.orientation[b1_a]
-            body_com_a = store.bodies.body_com[b1_a]
-            inv_mass_a_rigid = store.bodies.inverse_mass[b1_a]
-            inv_inertia_a_rigid = store.bodies.inverse_inertia_world[b1_a]
-            v_a = store.bodies.velocity[b1_a]
-            w_a = store.bodies.angular_velocity[b1_a]
+            state_a = read_rigid_column_state(store.bodies, b1_a)
+            orientation_a = state_a.orientation
+            body_com_a = state_a.body_com
+            inv_mass_a_rigid = state_a.inv_mass
+            inv_inertia_a_rigid = state_a.inv_inertia
+            v_a = state_a.velocity
+            w_a = state_a.angular_velocity
         else:
             orientation_a = wp.quatf(0.0, 0.0, 0.0, 1.0)
             body_com_a = wp.vec3f(0.0, 0.0, 0.0)
@@ -1574,12 +1593,13 @@ def _make_contact_iterate_at(*, side_a_kind: int, side_b_kind: int):
             w_a = wp.vec3f(0.0, 0.0, 0.0)
 
         if wp.static(side_b_kind == CONTACT_KIND_RIGID):
-            orientation_b = store.bodies.orientation[b1_b]
-            body_com_b = store.bodies.body_com[b1_b]
-            inv_mass_b_rigid = store.bodies.inverse_mass[b1_b]
-            inv_inertia_b_rigid = store.bodies.inverse_inertia_world[b1_b]
-            v_b = store.bodies.velocity[b1_b]
-            w_b = store.bodies.angular_velocity[b1_b]
+            state_b = read_rigid_column_state(store.bodies, b1_b)
+            orientation_b = state_b.orientation
+            body_com_b = state_b.body_com
+            inv_mass_b_rigid = state_b.inv_mass
+            inv_inertia_b_rigid = state_b.inv_inertia
+            v_b = state_b.velocity
+            w_b = state_b.angular_velocity
         else:
             orientation_b = wp.quatf(0.0, 0.0, 0.0, 1.0)
             body_com_b = wp.vec3f(0.0, 0.0, 0.0)
@@ -1715,12 +1735,12 @@ def _make_contact_iterate_at(*, side_a_kind: int, side_b_kind: int):
             else:
                 apply_triangle_side(store, b1_b, b2_b, b3_b, weights_b, imp, wp.float32(1.0))
 
+        # End-of-column scatter goes through the safe writer so
+        # ``b == -1`` (no rigid body) becomes a silent no-op.
         if wp.static(side_a_kind == CONTACT_KIND_RIGID):
-            store.bodies.velocity[b1_a] = v_a
-            store.bodies.angular_velocity[b1_a] = w_a
+            write_rigid_column_velocity(store.bodies, b1_a, v_a, w_a)
         if wp.static(side_b_kind == CONTACT_KIND_RIGID):
-            store.bodies.velocity[b1_b] = v_b
-            store.bodies.angular_velocity[b1_b] = w_b
+            write_rigid_column_velocity(store.bodies, b1_b, v_b, w_b)
 
     return iterate_at
 
@@ -1771,12 +1791,13 @@ def _make_contact_iterate_at_multi(*, side_a_kind: int, side_b_kind: int):
         b1_b, b2_b, b3_b, weights_b = _read_side_indices_b(constraints, cid)
 
         if wp.static(side_a_kind == CONTACT_KIND_RIGID):
-            orientation_a = store.bodies.orientation[b1_a]
-            body_com_a = store.bodies.body_com[b1_a]
-            inv_mass_a_rigid = store.bodies.inverse_mass[b1_a]
-            inv_inertia_a_rigid = store.bodies.inverse_inertia_world[b1_a]
-            v_a = store.bodies.velocity[b1_a]
-            w_a = store.bodies.angular_velocity[b1_a]
+            state_a = read_rigid_column_state(store.bodies, b1_a)
+            orientation_a = state_a.orientation
+            body_com_a = state_a.body_com
+            inv_mass_a_rigid = state_a.inv_mass
+            inv_inertia_a_rigid = state_a.inv_inertia
+            v_a = state_a.velocity
+            w_a = state_a.angular_velocity
         else:
             orientation_a = wp.quatf(0.0, 0.0, 0.0, 1.0)
             body_com_a = wp.vec3f(0.0, 0.0, 0.0)
@@ -1786,12 +1807,13 @@ def _make_contact_iterate_at_multi(*, side_a_kind: int, side_b_kind: int):
             w_a = wp.vec3f(0.0, 0.0, 0.0)
 
         if wp.static(side_b_kind == CONTACT_KIND_RIGID):
-            orientation_b = store.bodies.orientation[b1_b]
-            body_com_b = store.bodies.body_com[b1_b]
-            inv_mass_b_rigid = store.bodies.inverse_mass[b1_b]
-            inv_inertia_b_rigid = store.bodies.inverse_inertia_world[b1_b]
-            v_b = store.bodies.velocity[b1_b]
-            w_b = store.bodies.angular_velocity[b1_b]
+            state_b = read_rigid_column_state(store.bodies, b1_b)
+            orientation_b = state_b.orientation
+            body_com_b = state_b.body_com
+            inv_mass_b_rigid = state_b.inv_mass
+            inv_inertia_b_rigid = state_b.inv_inertia
+            v_b = state_b.velocity
+            w_b = state_b.angular_velocity
         else:
             orientation_b = wp.quatf(0.0, 0.0, 0.0, 1.0)
             body_com_b = wp.vec3f(0.0, 0.0, 0.0)
@@ -1920,11 +1942,9 @@ def _make_contact_iterate_at_multi(*, side_a_kind: int, side_b_kind: int):
             it += 1
 
         if wp.static(side_a_kind == CONTACT_KIND_RIGID):
-            store.bodies.velocity[b1_a] = v_a
-            store.bodies.angular_velocity[b1_a] = w_a
+            write_rigid_column_velocity(store.bodies, b1_a, v_a, w_a)
         if wp.static(side_b_kind == CONTACT_KIND_RIGID):
-            store.bodies.velocity[b1_b] = v_b
-            store.bodies.angular_velocity[b1_b] = w_b
+            write_rigid_column_velocity(store.bodies, b1_b, v_b, w_b)
 
     return iterate_at_multi
 

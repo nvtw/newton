@@ -1027,31 +1027,63 @@ def _contact_warmstart_gather_kernel(
         # ``body_com`` when building the world-space lever arm so
         # asymmetric meshes (bunny, nut) don't appear shifted by
         # ``|body_com|`` relative to where the narrow phase saw them.
-        body_com1 = bodies.body_com[b1]
-        body_com2 = bodies.body_com[b2]
-        fresh_r1 = wp.quat_rotate(bodies.orientation[b1], fresh_local_p0 - body_com1)
-        fresh_r2 = wp.quat_rotate(bodies.orientation[b2], fresh_local_p1 - body_com2)
+        # Newton's ``shape_body == -1`` sentinel (world-fixed shapes,
+        # cloth triangles whose "body" is the unified-particle space)
+        # is treated as identity orientation + zero COM so the
+        # subsequent ``bodies[-1]`` reads never fire.
+        if b1 >= wp.int32(0):
+            body_com1 = bodies.body_com[b1]
+            orient1 = bodies.orientation[b1]
+        else:
+            body_com1 = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+            orient1 = wp.quatf(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
+        if b2 >= wp.int32(0):
+            body_com2 = bodies.body_com[b2]
+            orient2 = bodies.orientation[b2]
+        else:
+            body_com2 = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+            orient2 = wp.quatf(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
+        fresh_r1 = wp.quat_rotate(orient1, fresh_local_p0 - body_com1)
+        fresh_r2 = wp.quat_rotate(orient2, fresh_local_p1 - body_com2)
+
+        # Resolve per-body world pose / velocity once, treating the
+        # ``b == -1`` "no rigid body" sentinel as origin + zero so
+        # the OOB read past the bodies array never fires.
+        if b1 >= wp.int32(0):
+            pos1 = bodies.position[b1]
+            vel1 = bodies.velocity[b1]
+            avel1 = bodies.angular_velocity[b1]
+        else:
+            pos1 = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+            vel1 = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+            avel1 = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+        if b2 >= wp.int32(0):
+            pos2 = bodies.position[b2]
+            vel2 = bodies.velocity[b2]
+            avel2 = bodies.angular_velocity[b2]
+        else:
+            pos2 = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+            vel2 = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+            avel2 = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
 
         if prev_valid == wp.int32(1):
             prev_n = cc_get_prev_normal(cc, prev_k)
             prev_lp0 = cc_get_prev_local_p0(cc, prev_k)
             prev_lp1 = cc_get_prev_local_p1(cc, prev_k)
-            prev_r1 = wp.quat_rotate(bodies.orientation[b1], prev_lp0 - body_com1)
-            prev_r2 = wp.quat_rotate(bodies.orientation[b2], prev_lp1 - body_com2)
-            prev_p1_world = bodies.position[b1] + prev_r1
-            prev_p2_world = bodies.position[b2] + prev_r2
+            prev_r1 = wp.quat_rotate(orient1, prev_lp0 - body_com1)
+            prev_r2 = wp.quat_rotate(orient2, prev_lp1 - body_com2)
+            prev_p1_world = pos1 + prev_r1
+            prev_p2_world = pos2 + prev_r2
             prev_penetration = -wp.dot(prev_p2_world - prev_p1_world, prev_n)
 
-            fresh_p1_world = bodies.position[b1] + fresh_r1
-            fresh_p2_world = bodies.position[b2] + fresh_r2
+            fresh_p1_world = pos1 + fresh_r1
+            fresh_p2_world = pos2 + fresh_r2
             fresh_penetration = -wp.dot(fresh_p2_world - fresh_p1_world, fresh_n)
 
             if fresh_penetration > prev_penetration:
                 # Prev frame has grown stale -- overwrite anchors /
                 # normal / tangent but carry impulses forward.
-                dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
-                    bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
-                )
+                dv = (vel2 + wp.cross(avel2, fresh_r2)) - (vel1 + wp.cross(avel1, fresh_r1))
                 fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
 
                 cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
@@ -1075,9 +1107,7 @@ def _contact_warmstart_gather_kernel(
             continue
 
         # New contact -- PhoenX ``Initialize``.
-        dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
-            bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
-        )
+        dv = (vel2 + wp.cross(avel2, fresh_r2)) - (vel1 + wp.cross(avel1, fresh_r1))
         t1 = _build_tangent1_from_velocity(fresh_n, dv)
 
         cc_set_normal_lambda(cc, k, wp.float32(0.0))
