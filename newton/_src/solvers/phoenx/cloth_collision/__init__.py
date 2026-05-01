@@ -22,10 +22,16 @@ from newton._src.solvers.phoenx.cloth_collision.triangle_aabb import (
     compute_cloth_triangle_aabbs_kernel,
     launch_cloth_triangle_aabbs,
 )
+from newton._src.solvers.phoenx.cloth_collision.triangle_shape_data import (
+    compute_cloth_triangle_shape_data_kernel,
+    launch_cloth_triangle_shape_data,
+)
 
 __all__ = [
     "PhoenxBroadphaseFilterData",
     "compute_cloth_triangle_aabbs_kernel",
+    "compute_cloth_triangle_shape_data_kernel",
     "launch_cloth_triangle_aabbs",
+    "launch_cloth_triangle_shape_data",
     "phoenx_broadphase_filter",
 ]
