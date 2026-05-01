@@ -1068,8 +1068,11 @@ class CollisionPipeline:
 
         # Subclass extension point: populate any extra-shape slots
         # (cloth triangles, virtual shapes) before broadphase reads
-        # the AABB / shape arrays. Default implementation is a no-op.
-        self._pre_broadphase_hook(state, contacts)
+        # the AABB / shape arrays. Skipped entirely when the pipeline
+        # has no extras so the rigid-only path takes no extra Python
+        # call. Default implementation is a no-op anyway.
+        if self.extra_shape_count > 0:
+            self._pre_broadphase_hook(state, contacts)
 
         # Total shape count visible to the broadphase / narrowphase
         # (rigid + extras). The broadphase classes only use this for

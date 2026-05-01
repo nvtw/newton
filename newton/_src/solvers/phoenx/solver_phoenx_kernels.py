@@ -50,7 +50,7 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_set_type,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
-    CONTACT_SUBTYPE_TRIANGLE_RIGID,
+    CONTACT_SUBTYPE_RIGID_TRIANGLE,
     CONTACT_SUBTYPE_TRIANGLE_TRIANGLE,
     ContactColumnContainer,
     ContactViews,
@@ -59,10 +59,10 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_subtype,
     contact_iterate_at_multi_RR,
     contact_iterate_at_RR,
-    contact_iterate_at_TR,
+    contact_iterate_at_RT,
     contact_iterate_at_TT,
     contact_prepare_at_RR,
-    contact_prepare_at_TR,
+    contact_prepare_at_RT,
     contact_prepare_at_TT,
     contact_world_error,
     contact_world_wrench,
@@ -834,9 +834,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                     else:
                         actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
                 else:
-                    contact_prepare_at_RR(
-                        contact_cols, cid - num_joints, wp.int32(0), store, idt, cc, contacts
-                    )
+                    contact_prepare_at_RR(contact_cols, cid - num_joints, wp.int32(0), store, idt, cc, contacts)
                 base += tpw
 
             _sync_warp()
@@ -1844,40 +1842,30 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                     subtype = contact_get_subtype(contact_cols, local_cid)
                     if subtype == CONTACT_SUBTYPE_TRIANGLE_TRIANGLE:
                         if wp.static(is_prepare):
-                            contact_prepare_at_TT(
-                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
-                            )
+                            contact_prepare_at_TT(contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts)
                         else:
                             contact_iterate_at_TT(
                                 contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
                             )
-                    elif subtype == CONTACT_SUBTYPE_TRIANGLE_RIGID:
+                    elif subtype == CONTACT_SUBTYPE_RIGID_TRIANGLE:
                         if wp.static(is_prepare):
-                            contact_prepare_at_TR(
-                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
-                            )
+                            contact_prepare_at_RT(contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts)
                         else:
-                            contact_iterate_at_TR(
+                            contact_iterate_at_RT(
                                 contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
                             )
                     else:
                         if wp.static(is_prepare):
-                            contact_prepare_at_RR(
-                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
-                            )
+                            contact_prepare_at_RR(contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts)
                         else:
                             contact_iterate_at_RR(
                                 contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
                             )
                 else:
                     if wp.static(is_prepare):
-                        contact_prepare_at_RR(
-                            contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
-                        )
+                        contact_prepare_at_RR(contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts)
                     else:
-                        contact_iterate_at_RR(
-                            contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
-                        )
+                        contact_iterate_at_RR(contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias)
 
         if tid == 0:
             color_cursor[0] = cursor - 1
@@ -1947,36 +1935,28 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                         subtype = contact_get_subtype(contact_cols, local_cid)
                         if subtype == CONTACT_SUBTYPE_TRIANGLE_TRIANGLE:
                             if wp.static(is_prepare):
-                                contact_prepare_at_TT(
-                                    contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
-                                )
+                                contact_prepare_at_TT(contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts)
                             else:
                                 contact_iterate_at_TT(
                                     contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
                                 )
-                        elif subtype == CONTACT_SUBTYPE_TRIANGLE_RIGID:
+                        elif subtype == CONTACT_SUBTYPE_RIGID_TRIANGLE:
                             if wp.static(is_prepare):
-                                contact_prepare_at_TR(
-                                    contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
-                                )
+                                contact_prepare_at_RT(contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts)
                             else:
-                                contact_iterate_at_TR(
+                                contact_iterate_at_RT(
                                     contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
                                 )
                         else:
                             if wp.static(is_prepare):
-                                contact_prepare_at_RR(
-                                    contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
-                                )
+                                contact_prepare_at_RR(contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts)
                             else:
                                 contact_iterate_at_RR(
                                     contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias
                                 )
                     else:
                         if wp.static(is_prepare):
-                            contact_prepare_at_RR(
-                                contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts
-                            )
+                            contact_prepare_at_RR(contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts)
                         else:
                             contact_iterate_at_RR(
                                 contact_cols, local_cid, wp.int32(0), store, idt, cc, contacts, use_bias

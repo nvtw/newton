@@ -39,8 +39,7 @@ from newton._src.solvers.phoenx.cloth_collision.broadphase_filter import (
     PhoenxBroadphaseFilterData,
     phoenx_broadphase_filter,
 )
-from newton._src.solvers.phoenx.cloth_collision.triangle_aabb import launch_cloth_triangle_aabbs
-from newton._src.solvers.phoenx.cloth_collision.triangle_shape_data import launch_cloth_triangle_shape_data
+from newton._src.solvers.phoenx.cloth_collision.triangle_stamp import launch_cloth_triangle_stamp
 
 __all__ = ["PhoenxCollisionPipeline"]
 
@@ -300,29 +299,23 @@ class PhoenxCollisionPipeline(CollisionPipeline):
     def _pre_broadphase_hook(self, state, contacts) -> None:
         if self._cloth_T == 0:
             return
-        # Stamp cloth-triangle shape data (shape_type, transform,
-        # shape_data, shape_auxiliary) into the extended arrays. This
-        # runs every step because particle positions change.
-        launch_cloth_triangle_shape_data(
-            particle_q=self._cloth_particle_q,
-            tri_indices=self._cloth_tri_indices,
-            base_offset=self._cloth_S,
-            margin=self._cloth_shape_data_margin,
-            shape_type=self.shape_type,
-            shape_transform=self.geom_transform,
-            shape_data=self.geom_data,
-            shape_auxiliary=self.shape_auxiliary,
-            device=self.device,
-        )
-        # Refresh the cloth-triangle AABB slots.  The rigid prefix is
-        # populated by the standard ``compute_shape_aabbs`` pass that
-        # ran before this hook; we only fill ``[S, S+T)``.
-        launch_cloth_triangle_aabbs(
+        # Single fused per-cloth-triangle pass that fills both the
+        # shape descriptor (shape_type / shape_transform / shape_data
+        # / shape_auxiliary) and the broadphase AABB slots in one
+        # kernel launch.  The rigid AABB prefix [0, S) was already
+        # populated by ``compute_shape_aabbs`` upstream; we only
+        # touch slots [S, S+T).
+        launch_cloth_triangle_stamp(
             particle_q=self._cloth_particle_q,
             particle_radius=self._cloth_particle_radius,
             tri_indices=self._cloth_tri_indices,
             base_offset=self._cloth_S,
-            extra_margin=self._cloth_extra_margin,
+            aabb_extra_margin=self._cloth_extra_margin,
+            shape_data_margin=self._cloth_shape_data_margin,
+            shape_type=self.shape_type,
+            shape_transform=self.geom_transform,
+            shape_data=self.geom_data,
+            shape_auxiliary=self.shape_auxiliary,
             aabb_lower=self.narrow_phase.shape_aabb_lower,
             aabb_upper=self.narrow_phase.shape_aabb_upper,
             device=self.device,

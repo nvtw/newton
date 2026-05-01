@@ -125,7 +125,7 @@ __all__ = [
     "CONTACT_KIND_RIGID",
     "CONTACT_KIND_TRIANGLE",
     "CONTACT_SUBTYPE_RIGID_RIGID",
-    "CONTACT_SUBTYPE_TRIANGLE_RIGID",
+    "CONTACT_SUBTYPE_RIGID_TRIANGLE",
     "CONTACT_SUBTYPE_TRIANGLE_TRIANGLE",
     "ContactColumnContainer",
     "ContactConstraintData",
@@ -149,10 +149,10 @@ __all__ = [
     "contact_get_weights_a",
     "contact_get_weights_b",
     "contact_iterate_at_RR",
-    "contact_iterate_at_TR",
+    "contact_iterate_at_RT",
     "contact_iterate_at_TT",
     "contact_iterate_at_multi_RR",
-    "contact_iterate_at_multi_TR",
+    "contact_iterate_at_multi_RT",
     "contact_iterate_at_multi_TT",
     "contact_pair_wrench_kernel",
     "contact_per_contact_error_kernel",
@@ -160,7 +160,7 @@ __all__ = [
     "contact_per_k_error_at",
     "contact_per_k_wrench_at",
     "contact_prepare_at_RR",
-    "contact_prepare_at_TR",
+    "contact_prepare_at_RT",
     "contact_prepare_at_TT",
     "contact_set_body0",
     "contact_set_body1",
@@ -177,7 +177,9 @@ __all__ = [
     "contact_set_friction",
     "contact_set_friction_dynamic",
     "contact_set_rigid_rigid_endpoints",
+    "contact_set_rigid_triangle_endpoints",
     "contact_set_subtype",
+    "contact_set_triangle_triangle_endpoints",
     "contact_set_weights_a",
     "contact_set_weights_b",
     "contact_views_make",
@@ -227,9 +229,13 @@ CONTACT_KIND_TRIANGLE: int = 1
 #: stay ``-1`` and the weights are ``(1, 0, 0)`` so the same fetch
 #: helper works for rigid endpoints uniformly.
 CONTACT_SUBTYPE_RIGID_RIGID = wp.constant(wp.int32(0))
-#: Subtype tag -- side A is a cloth triangle (three particle indices
-#: + barycentric weights), side B is one rigid body.
-CONTACT_SUBTYPE_TRIANGLE_RIGID = wp.constant(wp.int32(1))
+#: Subtype tag -- side A is one rigid body, side B is a cloth
+#: triangle (three particle indices + barycentric weights).  Side
+#: ordering matches phoenx's natural shape index convention: rigid
+#: shapes occupy ``[0, S)`` and cloth triangles occupy ``[S, S+T)``,
+#: so the canonical ``shape_a < shape_b`` pair from the narrow phase
+#: always has the rigid on side A.
+CONTACT_SUBTYPE_RIGID_TRIANGLE = wp.constant(wp.int32(1))
 #: Subtype tag -- both sides are cloth triangles.
 CONTACT_SUBTYPE_TRIANGLE_TRIANGLE = wp.constant(wp.int32(2))
 
@@ -749,6 +755,67 @@ def contact_set_rigid_rigid_endpoints(
 
 
 @wp.func
+def contact_set_rigid_triangle_endpoints(
+    c: ContactColumnContainer,
+    local_cid: wp.int32,
+    b1: wp.int32,
+    tri_a: wp.int32,
+    tri_b: wp.int32,
+    tri_c: wp.int32,
+    weights_b: wp.vec3f,
+):
+    """Stamp side A rigid + side B cloth-triangle endpoints.
+
+    Side A: ``body1 = b1`` (rigid body index), ``body_a2 = body_a3 = -1``,
+    ``weights_a = (1, 0, 0)``. Side B: ``body2 = tri_a``, ``body_b2 = tri_b``,
+    ``body_b3 = tri_c`` (the three particle indices in the unified
+    body-or-particle space), ``weights_b = (w_a, w_b, w_c)`` (barycentric
+    coordinates of the contact point on the triangle).  Subtype tag is
+    :data:`CONTACT_SUBTYPE_RIGID_TRIANGLE`.
+    """
+    contact_set_body1(c, local_cid, b1)
+    contact_set_body2(c, local_cid, tri_a)
+    contact_set_body_a2(c, local_cid, wp.int32(-1))
+    contact_set_body_a3(c, local_cid, wp.int32(-1))
+    contact_set_body_b2(c, local_cid, tri_b)
+    contact_set_body_b3(c, local_cid, tri_c)
+    contact_set_weights_a(c, local_cid, wp.vec3f(wp.float32(1.0), wp.float32(0.0), wp.float32(0.0)))
+    contact_set_weights_b(c, local_cid, weights_b)
+    contact_set_subtype(c, local_cid, CONTACT_SUBTYPE_RIGID_TRIANGLE)
+
+
+@wp.func
+def contact_set_triangle_triangle_endpoints(
+    c: ContactColumnContainer,
+    local_cid: wp.int32,
+    tri_a_a: wp.int32,
+    tri_a_b: wp.int32,
+    tri_a_c: wp.int32,
+    weights_a: wp.vec3f,
+    tri_b_a: wp.int32,
+    tri_b_b: wp.int32,
+    tri_b_c: wp.int32,
+    weights_b: wp.vec3f,
+):
+    """Stamp side A + side B both as cloth triangles.
+
+    Side A: ``body1 = tri_a_a``, ``body_a2 = tri_a_b``, ``body_a3 = tri_a_c``;
+    ``weights_a`` = barycentric on triangle A.  Side B same with the
+    second triangle's particles + weights.  Subtype tag is
+    :data:`CONTACT_SUBTYPE_TRIANGLE_TRIANGLE`.
+    """
+    contact_set_body1(c, local_cid, tri_a_a)
+    contact_set_body_a2(c, local_cid, tri_a_b)
+    contact_set_body_a3(c, local_cid, tri_a_c)
+    contact_set_body2(c, local_cid, tri_b_a)
+    contact_set_body_b2(c, local_cid, tri_b_b)
+    contact_set_body_b3(c, local_cid, tri_b_c)
+    contact_set_weights_a(c, local_cid, weights_a)
+    contact_set_weights_b(c, local_cid, weights_b)
+    contact_set_subtype(c, local_cid, CONTACT_SUBTYPE_TRIANGLE_TRIANGLE)
+
+
+@wp.func
 def contact_get_friction(c: ContactColumnContainer, local_cid: wp.int32) -> wp.float32:
     return _col_read_float(c, _OFF_FRICTION, local_cid)
 
@@ -1098,7 +1165,7 @@ def contact_world_error(
 # factory-built specialisations below:
 #
 #   * contact_iterate_at_RR / contact_prepare_at_RR / contact_iterate_at_multi_RR
-#   * contact_iterate_at_TR / contact_prepare_at_TR / contact_iterate_at_multi_TR
+#   * contact_iterate_at_RT / contact_prepare_at_RT / contact_iterate_at_multi_RT
 #   * contact_iterate_at_TT / contact_prepare_at_TT / contact_iterate_at_multi_TT
 #
 # Rigid-only scenes (``cloth_support=False``) compile down to the
@@ -1256,12 +1323,16 @@ def _make_contact_prepare_at(*, side_a_kind: int, side_b_kind: int):
             # weights describe a fixed point on the triangle, not on
             # any individual node).
             if wp.static(side_a_kind == CONTACT_KIND_RIGID):
-                p_a_world = pose_a.position + wp.quat_rotate(pose_a.orientation, local_p0 - pose_a.body_com) + margin0 * n
+                p_a_world = (
+                    pose_a.position + wp.quat_rotate(pose_a.orientation, local_p0 - pose_a.body_com) + margin0 * n
+                )
             else:
                 p_a_world = pose_a.position + margin0 * n
 
             if wp.static(side_b_kind == CONTACT_KIND_RIGID):
-                p_b_world = pose_b.position + wp.quat_rotate(pose_b.orientation, local_p1 - pose_b.body_com) - margin1 * n
+                p_b_world = (
+                    pose_b.position + wp.quat_rotate(pose_b.orientation, local_p1 - pose_b.body_com) - margin1 * n
+                )
             else:
                 p_b_world = pose_b.position - margin1 * n
 
@@ -1279,9 +1350,15 @@ def _make_contact_prepare_at(*, side_a_kind: int, side_b_kind: int):
             else:
                 r_b = wp.vec3f(0.0, 0.0, 0.0)
 
-            eff_n = effective_mass_scalar(n, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia)
-            eff_t1 = effective_mass_scalar(t1_dir, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia)
-            eff_t2 = effective_mass_scalar(t2_dir, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia)
+            eff_n = effective_mass_scalar(
+                n, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia
+            )
+            eff_t1 = effective_mass_scalar(
+                t1_dir, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia
+            )
+            eff_t2 = effective_mass_scalar(
+                t2_dir, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia
+            )
 
             effective_gap = wp.dot(p_b_world - p_a_world, n)
 
@@ -1333,14 +1410,24 @@ def _make_contact_prepare_at(*, side_a_kind: int, side_b_kind: int):
                 # the contact point is by construction the same
                 # barycentric point on the triangle).
                 if wp.static(side_a_kind == CONTACT_KIND_RIGID):
-                    p_a_world = pose_a.position + wp.quat_rotate(pose_a.orientation, fresh_lp0 - pose_a.body_com) + margin0 * n
+                    p_a_world = (
+                        pose_a.position + wp.quat_rotate(pose_a.orientation, fresh_lp0 - pose_a.body_com) + margin0 * n
+                    )
                     r_a = p_a_world - pose_a.position
                 if wp.static(side_b_kind == CONTACT_KIND_RIGID):
-                    p_b_world = pose_b.position + wp.quat_rotate(pose_b.orientation, fresh_lp1 - pose_b.body_com) - margin1 * n
+                    p_b_world = (
+                        pose_b.position + wp.quat_rotate(pose_b.orientation, fresh_lp1 - pose_b.body_com) - margin1 * n
+                    )
                     r_b = p_b_world - pose_b.position
-                eff_n = effective_mass_scalar(n, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia)
-                eff_t1 = effective_mass_scalar(t1_dir, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia)
-                eff_t2 = effective_mass_scalar(t2_dir, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia)
+                eff_n = effective_mass_scalar(
+                    n, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia
+                )
+                eff_t1 = effective_mass_scalar(
+                    t1_dir, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia
+                )
+                eff_t2 = effective_mass_scalar(
+                    t2_dir, r_a, r_b, pose_a.inv_mass, pose_b.inv_mass, pose_a.inv_inertia, pose_b.inv_inertia
+                )
                 p_diff = p_b_world - p_a_world
                 drift_t1_raw = wp.dot(p_diff, t1_dir)
                 drift_t2_raw = wp.dot(p_diff, t2_dir)
@@ -1417,8 +1504,12 @@ def _make_contact_prepare_at(*, side_a_kind: int, side_b_kind: int):
         if wp.static(side_a_kind == CONTACT_KIND_RIGID and side_b_kind == CONTACT_KIND_RIGID):
             store.bodies.velocity[b1_a] = store.bodies.velocity[b1_a] - pose_a.inv_mass * total_lin_imp_b
             store.bodies.velocity[b1_b] = store.bodies.velocity[b1_b] + pose_b.inv_mass * total_lin_imp_b
-            store.bodies.angular_velocity[b1_a] = store.bodies.angular_velocity[b1_a] - pose_a.inv_inertia @ total_ang_imp_a
-            store.bodies.angular_velocity[b1_b] = store.bodies.angular_velocity[b1_b] + pose_b.inv_inertia @ total_ang_imp_b
+            store.bodies.angular_velocity[b1_a] = (
+                store.bodies.angular_velocity[b1_a] - pose_a.inv_inertia @ total_ang_imp_a
+            )
+            store.bodies.angular_velocity[b1_b] = (
+                store.bodies.angular_velocity[b1_b] + pose_b.inv_inertia @ total_ang_imp_b
+            )
 
     return prepare_at
 
@@ -1611,12 +1702,16 @@ def _make_contact_iterate_at(*, side_a_kind: int, side_b_kind: int):
             # column. Triangle sides scatter per contact because the
             # node indices vary per contact.
             if wp.static(side_a_kind == CONTACT_KIND_RIGID):
-                v_a, w_a = apply_rigid_side_batched(v_a, w_a, inv_mass_a_rigid, inv_inertia_a_rigid, r_a, imp, wp.float32(-1.0))
+                v_a, w_a = apply_rigid_side_batched(
+                    v_a, w_a, inv_mass_a_rigid, inv_inertia_a_rigid, r_a, imp, wp.float32(-1.0)
+                )
             else:
                 apply_triangle_side(store, b1_a, b2_a, b3_a, weights_a, imp, wp.float32(-1.0))
 
             if wp.static(side_b_kind == CONTACT_KIND_RIGID):
-                v_b, w_b = apply_rigid_side_batched(v_b, w_b, inv_mass_b_rigid, inv_inertia_b_rigid, r_b, imp, wp.float32(1.0))
+                v_b, w_b = apply_rigid_side_batched(
+                    v_b, w_b, inv_mass_b_rigid, inv_inertia_b_rigid, r_b, imp, wp.float32(1.0)
+                )
             else:
                 apply_triangle_side(store, b1_b, b2_b, b3_b, weights_b, imp, wp.float32(1.0))
 
@@ -1810,12 +1905,16 @@ def _make_contact_iterate_at_multi(*, side_a_kind: int, side_b_kind: int):
                 imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
 
                 if wp.static(side_a_kind == CONTACT_KIND_RIGID):
-                    v_a, w_a = apply_rigid_side_batched(v_a, w_a, inv_mass_a_rigid, inv_inertia_a_rigid, r_a, imp, wp.float32(-1.0))
+                    v_a, w_a = apply_rigid_side_batched(
+                        v_a, w_a, inv_mass_a_rigid, inv_inertia_a_rigid, r_a, imp, wp.float32(-1.0)
+                    )
                 else:
                     apply_triangle_side(store, b1_a, b2_a, b3_a, weights_a, imp, wp.float32(-1.0))
 
                 if wp.static(side_b_kind == CONTACT_KIND_RIGID):
-                    v_b, w_b = apply_rigid_side_batched(v_b, w_b, inv_mass_b_rigid, inv_inertia_b_rigid, r_b, imp, wp.float32(1.0))
+                    v_b, w_b = apply_rigid_side_batched(
+                        v_b, w_b, inv_mass_b_rigid, inv_inertia_b_rigid, r_b, imp, wp.float32(1.0)
+                    )
                 else:
                     apply_triangle_side(store, b1_b, b2_b, b3_b, weights_b, imp, wp.float32(1.0))
             it += 1
@@ -1833,16 +1932,27 @@ def _make_contact_iterate_at_multi(*, side_a_kind: int, side_b_kind: int):
 # Three specialisations -- one per (side_a_kind, side_b_kind) pair.
 # Names follow the schema's subtype convention:
 #   _RR -> CONTACT_SUBTYPE_RIGID_RIGID
-#   _TR -> CONTACT_SUBTYPE_TRIANGLE_RIGID
+#   _RT -> CONTACT_SUBTYPE_RIGID_TRIANGLE  (side A rigid, side B triangle)
 #   _TT -> CONTACT_SUBTYPE_TRIANGLE_TRIANGLE
+#
+# The mixed case is RT (not TR) because phoenx's natural shape index
+# ordering puts rigid shapes in ``[0, S)`` and cloth triangles in
+# ``[S, S+T)``, so the canonical ``shape_a < shape_b`` pair from the
+# narrow phase always has the rigid on side A.
 contact_prepare_at_RR = _make_contact_prepare_at(side_a_kind=CONTACT_KIND_RIGID, side_b_kind=CONTACT_KIND_RIGID)
-contact_prepare_at_TR = _make_contact_prepare_at(side_a_kind=CONTACT_KIND_TRIANGLE, side_b_kind=CONTACT_KIND_RIGID)
+contact_prepare_at_RT = _make_contact_prepare_at(side_a_kind=CONTACT_KIND_RIGID, side_b_kind=CONTACT_KIND_TRIANGLE)
 contact_prepare_at_TT = _make_contact_prepare_at(side_a_kind=CONTACT_KIND_TRIANGLE, side_b_kind=CONTACT_KIND_TRIANGLE)
 
 contact_iterate_at_RR = _make_contact_iterate_at(side_a_kind=CONTACT_KIND_RIGID, side_b_kind=CONTACT_KIND_RIGID)
-contact_iterate_at_TR = _make_contact_iterate_at(side_a_kind=CONTACT_KIND_TRIANGLE, side_b_kind=CONTACT_KIND_RIGID)
+contact_iterate_at_RT = _make_contact_iterate_at(side_a_kind=CONTACT_KIND_RIGID, side_b_kind=CONTACT_KIND_TRIANGLE)
 contact_iterate_at_TT = _make_contact_iterate_at(side_a_kind=CONTACT_KIND_TRIANGLE, side_b_kind=CONTACT_KIND_TRIANGLE)
 
-contact_iterate_at_multi_RR = _make_contact_iterate_at_multi(side_a_kind=CONTACT_KIND_RIGID, side_b_kind=CONTACT_KIND_RIGID)
-contact_iterate_at_multi_TR = _make_contact_iterate_at_multi(side_a_kind=CONTACT_KIND_TRIANGLE, side_b_kind=CONTACT_KIND_RIGID)
-contact_iterate_at_multi_TT = _make_contact_iterate_at_multi(side_a_kind=CONTACT_KIND_TRIANGLE, side_b_kind=CONTACT_KIND_TRIANGLE)
+contact_iterate_at_multi_RR = _make_contact_iterate_at_multi(
+    side_a_kind=CONTACT_KIND_RIGID, side_b_kind=CONTACT_KIND_RIGID
+)
+contact_iterate_at_multi_RT = _make_contact_iterate_at_multi(
+    side_a_kind=CONTACT_KIND_RIGID, side_b_kind=CONTACT_KIND_TRIANGLE
+)
+contact_iterate_at_multi_TT = _make_contact_iterate_at_multi(
+    side_a_kind=CONTACT_KIND_TRIANGLE, side_b_kind=CONTACT_KIND_TRIANGLE
+)
