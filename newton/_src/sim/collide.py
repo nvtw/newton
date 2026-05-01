@@ -507,6 +507,7 @@ class CollisionPipeline:
         contact_matching_normal_dot_threshold: float = 0.995,
         contact_report: bool = False,
         verify_buffers: bool = True,
+        extra_shape_count: int = 0,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -577,6 +578,18 @@ class CollisionPipeline:
                 ``True``.  Overhead is one extra kernel launch per collision
                 pass; disable in hot loops or CUDA graph capture once buffer
                 sizes are known to be adequate.
+            extra_shape_count: Reserve this many extra slots in the
+                pipeline-owned per-shape arrays (``geom_data``,
+                ``geom_transform``) and accept an extended
+                ``narrow_phase.shape_aabb_lower / upper`` of length
+                ``model.shape_count + extra_shape_count``. Subclasses that
+                need to inject "virtual" shapes beyond the rigid model
+                (e.g. PhoenX cloth triangles) use this to size internal
+                storage without forking the pipeline. The base class
+                writes only into ``[0, model.shape_count)`` -- the extra
+                slots are owned and populated by the subclass via the
+                :meth:`_pre_broadphase_hook` extension point. Defaults
+                to ``0``.
 
         .. note::
             When ``requires_grad`` is true (explicitly or via ``model.requires_grad``),
@@ -787,28 +800,75 @@ class CollisionPipeline:
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
+        # Total shape count includes any subclass-injected extras.
+        # Pipeline-owned per-shape arrays (``geom_data`` /
+        # ``geom_transform``) and the narrow phase's AABB arrays must
+        # carry one entry per slot; ``compute_shape_aabbs`` only writes
+        # the rigid ``[0, shape_count)`` prefix, while the extra slots
+        # are owned by the subclass and populated via
+        # :meth:`_pre_broadphase_hook`.
+        self.extra_shape_count = int(extra_shape_count)
+        if self.extra_shape_count < 0:
+            raise ValueError(f"extra_shape_count must be >= 0 (got {self.extra_shape_count})")
+        total_shape_count = shape_count + self.extra_shape_count
+
         # Allocate buffers
         with wp.ScopedDevice(device):
             self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
             self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
-            self.geom_data = wp.zeros(shape_count, dtype=wp.vec4, device=device)
-            self.geom_transform = wp.zeros(shape_count, dtype=wp.transform, device=device)
+            self.geom_data = wp.zeros(total_shape_count, dtype=wp.vec4, device=device)
+            self.geom_transform = wp.zeros(total_shape_count, dtype=wp.transform, device=device)
 
         if (
             getattr(self.narrow_phase, "shape_aabb_lower", None) is None
             or getattr(self.narrow_phase, "shape_aabb_upper", None) is None
         ):
             raise ValueError("narrow_phase must expose shape_aabb_lower and shape_aabb_upper arrays")
-        if self.narrow_phase.shape_aabb_lower.shape[0] != shape_count:
+        if self.narrow_phase.shape_aabb_lower.shape[0] != total_shape_count:
             raise ValueError(
-                "narrow_phase.shape_aabb_lower must have one entry per model shape "
-                f"(expected {shape_count}, got {self.narrow_phase.shape_aabb_lower.shape[0]})"
+                "narrow_phase.shape_aabb_lower must have one entry per shape slot "
+                f"(expected {total_shape_count} = {shape_count} + {self.extra_shape_count}, "
+                f"got {self.narrow_phase.shape_aabb_lower.shape[0]})"
             )
-        if self.narrow_phase.shape_aabb_upper.shape[0] != shape_count:
+        if self.narrow_phase.shape_aabb_upper.shape[0] != total_shape_count:
             raise ValueError(
-                "narrow_phase.shape_aabb_upper must have one entry per model shape "
-                f"(expected {shape_count}, got {self.narrow_phase.shape_aabb_upper.shape[0]})"
+                "narrow_phase.shape_aabb_upper must have one entry per shape slot "
+                f"(expected {total_shape_count} = {shape_count} + {self.extra_shape_count}, "
+                f"got {self.narrow_phase.shape_aabb_upper.shape[0]})"
             )
+
+        # Per-shape arrays consumed by broadphase / narrowphase / contact
+        # writer.  Subclasses with extra shapes (``extra_shape_count > 0``)
+        # override these with extended-length arrays after super().__init__.
+        # The base class also reads them in ``collide()`` so the
+        # subclass can swap them in once and the rest of the pipeline
+        # picks up the new arrays automatically.
+        self.shape_type = model.shape_type
+        self.shape_body = model.shape_body
+        self.shape_transform = model.shape_transform
+        self.shape_collision_radius = model.shape_collision_radius
+        self.shape_source_ptr = model.shape_source_ptr
+        self.shape_gap = model.shape_gap
+        self.shape_collision_aabb_lower = model.shape_collision_aabb_lower
+        self.shape_collision_aabb_upper = model.shape_collision_aabb_upper
+        self.shape_collision_group = model.shape_collision_group
+        self.shape_world = model.shape_world
+        self.shape_flags = model.shape_flags
+        self.shape_sdf_index = getattr(model, "shape_sdf_index", None)
+        self.shape_heightfield_index = getattr(model, "shape_heightfield_index", None)
+
+        # Optional per-shape ``vec3`` carrier read by extract_shape_data
+        # for shape types that need a second world-space vector beyond
+        # the ``vec4`` shape_data slot (e.g. PhoenX cloth triangles, where
+        # ``shape_auxiliary[s] = C - A``). ``None`` => narrow phase
+        # auto-allocates a length-zero sentinel; subclasses that emit
+        # such shapes override this with an extended array.
+        self.shape_auxiliary: wp.array | None = None
+
+        # Optional broadphase ``filter_data`` struct forwarded each
+        # launch when the underlying broadphase was constructed with a
+        # ``filter_func``. Subclasses set this in their ``__init__``.
+        self._broadphase_filter_data: Any | None = None
 
         if soft_contact_max is None:
             soft_contact_max = shape_count * particle_count
@@ -883,6 +943,16 @@ class CollisionPipeline:
         # attach custom attributes with assignment==CONTACT
         self.model._add_custom_attributes(contacts, Model.AttributeAssignment.CONTACT, requires_grad=self.requires_grad)
         return contacts
+
+    def _pre_broadphase_hook(self, state: State, contacts: Contacts) -> None:
+        """Subclass extension point. Runs after :func:`compute_shape_aabbs`
+        and before the broadphase launch. The base class does nothing;
+        subclasses with extra shapes (``extra_shape_count > 0``) use
+        this to populate the cloth / virtual-shape slots in
+        ``geom_data``, ``geom_transform``, ``shape_auxiliary``, and the
+        narrow phase's AABB arrays.
+        """
+        pass
 
     @staticmethod
     def _build_excluded_pairs(model: Model) -> wp.array[wp.vec2i] | None:
@@ -979,36 +1049,51 @@ class CollisionPipeline:
             record_tape=False,
         )
 
-        # Run broad phase (AABBs are already expanded by effective gaps, so pass None)
+        # Subclass extension point: populate any extra-shape slots
+        # (cloth triangles, virtual shapes) before broadphase reads
+        # the AABB / shape arrays. Default implementation is a no-op.
+        self._pre_broadphase_hook(state, contacts)
+
+        # Total shape count visible to the broadphase / narrowphase
+        # (rigid + extras). The broadphase classes only use this for
+        # an internal ``num_shapes_in_world`` upper bound; the actual
+        # iteration is driven by their precomputed world map.
+        total_shape_count = model.shape_count + self.extra_shape_count
+
+        # Run broad phase (AABBs are already expanded by effective gaps, so pass None).
+        # ``filter_data`` is forwarded when a subclass registered a filter callback;
+        # it is harmlessly ignored by broadphases without one.
         if isinstance(self.broad_phase, BroadPhaseAllPairs):
             self.broad_phase.launch(
                 self.narrow_phase.shape_aabb_lower,
                 self.narrow_phase.shape_aabb_upper,
                 None,  # AABBs are pre-expanded, no additional margin needed
-                model.shape_collision_group,
-                model.shape_world,
-                model.shape_count,
+                self.shape_collision_group,
+                self.shape_world,
+                total_shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=self.device,
                 filter_pairs=self.shape_pairs_excluded,
                 num_filter_pairs=self.shape_pairs_excluded_count,
                 skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
+                filter_data=self._broadphase_filter_data,
             )
         elif isinstance(self.broad_phase, BroadPhaseSAP):
             self.broad_phase.launch(
                 self.narrow_phase.shape_aabb_lower,
                 self.narrow_phase.shape_aabb_upper,
                 None,  # AABBs are pre-expanded, no additional margin needed
-                model.shape_collision_group,
-                model.shape_world,
-                model.shape_count,
+                self.shape_collision_group,
+                self.shape_world,
+                total_shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=self.device,
                 filter_pairs=self.shape_pairs_excluded,
                 num_filter_pairs=self.shape_pairs_excluded_count,
                 skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
+                filter_data=self._broadphase_filter_data,
             )
         else:  # BroadPhaseExplicit
             self.broad_phase.launch(
@@ -1021,14 +1106,15 @@ class CollisionPipeline:
                 self.broad_phase_pair_count,
                 device=self.device,
                 skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
+                filter_data=self._broadphase_filter_data,
             )
 
         # Create ContactWriterData struct for custom contact writing
         writer_data = ContactWriterData()
         writer_data.contact_max = contacts.rigid_contact_max
         writer_data.body_q = state.body_q
-        writer_data.shape_body = model.shape_body
-        writer_data.shape_gap = model.shape_gap
+        writer_data.shape_body = self.shape_body
+        writer_data.shape_gap = self.shape_gap
         writer_data.contact_count = contacts.rigid_contact_count
         writer_data.out_shape0 = contacts.rigid_contact_shape0
         writer_data.out_shape1 = contacts.rigid_contact_shape1
@@ -1054,27 +1140,33 @@ class CollisionPipeline:
             )
         writer_data.out_sort_key = self._sort_key_array
 
-        # Run narrow phase with custom contact writer (writes directly to Contacts format)
+        # Run narrow phase with custom contact writer (writes directly to Contacts format).
+        # Per-shape arrays come from ``self.shape_*`` (default: model's
+        # arrays; subclasses with extra shapes override with extended
+        # versions of length ``model.shape_count + extra_shape_count``).
         self.narrow_phase.launch_custom_write(
             candidate_pair=self.broad_phase_shape_pairs,
             candidate_pair_count=self.broad_phase_pair_count,
-            shape_types=model.shape_type,
+            shape_types=self.shape_type,
             shape_data=self.geom_data,
             shape_transform=self.geom_transform,
-            shape_source=model.shape_source_ptr,
-            shape_sdf_index=model.shape_sdf_index,
+            shape_source=self.shape_source_ptr,
+            shape_sdf_index=self.shape_sdf_index if self.shape_sdf_index is not None else model.shape_sdf_index,
             texture_sdf_data=model.texture_sdf_data,
-            shape_gap=model.shape_gap,
-            shape_collision_radius=model.shape_collision_radius,
-            shape_flags=model.shape_flags,
-            shape_collision_aabb_lower=model.shape_collision_aabb_lower,
-            shape_collision_aabb_upper=model.shape_collision_aabb_upper,
+            shape_gap=self.shape_gap,
+            shape_collision_radius=self.shape_collision_radius,
+            shape_flags=self.shape_flags,
+            shape_collision_aabb_lower=self.shape_collision_aabb_lower,
+            shape_collision_aabb_upper=self.shape_collision_aabb_upper,
             shape_voxel_resolution=self.narrow_phase.shape_voxel_resolution,
-            shape_heightfield_index=model.shape_heightfield_index,
+            shape_heightfield_index=self.shape_heightfield_index
+            if self.shape_heightfield_index is not None
+            else model.shape_heightfield_index,
             heightfield_data=model.heightfield_data,
             heightfield_elevations=model.heightfield_elevations,
             mesh_edge_indices=model.mesh_edge_indices,
             shape_edge_range=model.shape_edge_range,
+            shape_auxiliary=self.shape_auxiliary,
             writer_data=writer_data,
             device=self.device,
         )
