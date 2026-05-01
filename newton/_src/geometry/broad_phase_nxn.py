@@ -12,6 +12,8 @@ See Also:
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import warp as wp
 
@@ -214,6 +216,158 @@ def _nxn_broadphase_kernel(
         )
 
 
+# ---------------------------------------------------------------------------
+# Filter-callback variants (factory-built per filter ``wp.func``).
+#
+# Same logic as the legacy kernels above, with one extra ``filter_func``
+# call between the AABB-overlap test and ``write_pair``. The factory
+# closes over the filter at Python-time so each broadphase instance
+# compiles to its own kernel module; the legacy kernels stay untouched
+# for callers that pass no filter, keeping the rigid-only fast path
+# bit-equivalent to the pre-callback code.
+# ---------------------------------------------------------------------------
+
+
+def create_nxn_broadphase_kernel(filter_func: Any):
+    """Build a filter-aware NxN broadphase kernel.
+
+    ``filter_func`` is a ``@wp.func`` of signature
+    ``(pair: wp.vec2i, filter_data: <user_struct>) -> wp.int32``. It
+    runs after the AABB overlap test and before ``write_pair``;
+    returning ``0`` drops the pair, returning ``1`` keeps it. The
+    ``filter_data`` runtime parameter lets callers pass per-launch
+    state (the equivalent of ``contact_writer_data``).
+    """
+
+    _module = f"broad_phase_nxn_filtered_{filter_func.__name__}"
+
+    @wp.kernel(enable_backward=False, module=_module)
+    def kernel(
+        shape_bounding_box_lower: wp.array[wp.vec3],
+        shape_bounding_box_upper: wp.array[wp.vec3],
+        shape_gap: wp.array[float],
+        collision_group: wp.array[int],
+        shape_world: wp.array[int],
+        world_cumsum_lower_tri: wp.array[int],
+        world_slice_ends: wp.array[int],
+        world_index_map: wp.array[int],
+        num_regular_worlds: int,
+        filter_pairs: wp.array[wp.vec2i],
+        num_filter_pairs: int,
+        filter_data: Any,
+        candidate_pair: wp.array[wp.vec2i],
+        candidate_pair_count: wp.array[int],
+        max_candidate_pair: int,
+    ):
+        tid = wp.tid()
+
+        world_id, local_id = _find_world_and_local_id(tid, world_cumsum_lower_tri)
+
+        world_slice_start = 0
+        if world_id > 0:
+            world_slice_start = world_slice_ends[world_id - 1]
+        world_slice_end = world_slice_ends[world_id]
+        num_shapes_in_world = world_slice_end - world_slice_start
+
+        local_shape1, local_shape2 = _get_lower_triangular_indices(local_id, num_shapes_in_world)
+
+        shape1_tmp = world_index_map[world_slice_start + local_shape1]
+        shape2_tmp = world_index_map[world_slice_start + local_shape2]
+
+        shape1 = wp.min(shape1_tmp, shape2_tmp)
+        shape2 = wp.max(shape1_tmp, shape2_tmp)
+
+        world1 = shape_world[shape1]
+        world2 = shape_world[shape2]
+        collision_group1 = collision_group[shape1]
+        collision_group2 = collision_group[shape2]
+
+        is_dedicated_minus_one_segment = world_id >= num_regular_worlds
+        if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
+            return
+
+        if not test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
+            return
+
+        gap1 = 0.0
+        gap2 = 0.0
+        if shape_gap.shape[0] > 0:
+            gap1 = shape_gap[shape1]
+            gap2 = shape_gap[shape2]
+
+        if check_aabb_overlap(
+            shape_bounding_box_lower[shape1],
+            shape_bounding_box_upper[shape1],
+            gap1,
+            shape_bounding_box_lower[shape2],
+            shape_bounding_box_upper[shape2],
+            gap2,
+        ):
+            if num_filter_pairs > 0 and is_pair_excluded(wp.vec2i(shape1, shape2), filter_pairs, num_filter_pairs):
+                return
+            if filter_func(wp.vec2i(shape1, shape2), filter_data) == wp.int32(0):
+                return
+            write_pair(
+                wp.vec2i(shape1, shape2),
+                candidate_pair,
+                candidate_pair_count,
+                max_candidate_pair,
+            )
+
+    return kernel
+
+
+def create_nxn_broadphase_precomputed_pairs_kernel(filter_func: Any):
+    """Filter-aware variant of :func:`_nxn_broadphase_precomputed_pairs`.
+
+    See :func:`create_nxn_broadphase_kernel` for the contract.
+    """
+
+    _module = f"broad_phase_nxn_precomputed_filtered_{filter_func.__name__}"
+
+    @wp.kernel(enable_backward=False, module=_module)
+    def kernel(
+        shape_bounding_box_lower: wp.array[wp.vec3],
+        shape_bounding_box_upper: wp.array[wp.vec3],
+        shape_gap: wp.array[float],
+        nxn_shape_pair: wp.array[wp.vec2i],
+        filter_data: Any,
+        candidate_pair: wp.array[wp.vec2i],
+        candidate_pair_count: wp.array[int],
+        max_candidate_pair: int,
+    ):
+        elementid = wp.tid()
+
+        pair = nxn_shape_pair[elementid]
+        shape1 = pair[0]
+        shape2 = pair[1]
+
+        gap1 = 0.0
+        gap2 = 0.0
+        if shape_gap.shape[0] > 0:
+            gap1 = shape_gap[shape1]
+            gap2 = shape_gap[shape2]
+
+        if check_aabb_overlap(
+            shape_bounding_box_lower[shape1],
+            shape_bounding_box_upper[shape1],
+            gap1,
+            shape_bounding_box_lower[shape2],
+            shape_bounding_box_upper[shape2],
+            gap2,
+        ):
+            if filter_func(pair, filter_data) == wp.int32(0):
+                return
+            write_pair(
+                pair,
+                candidate_pair,
+                candidate_pair_count,
+                max_candidate_pair,
+            )
+
+    return kernel
+
+
 class BroadPhaseAllPairs:
     """A broad phase collision detection class that performs N x N collision checks between all geometry pairs.
 
@@ -235,6 +389,7 @@ class BroadPhaseAllPairs:
         shape_world: wp.array[wp.int32] | np.ndarray,
         shape_flags: wp.array[wp.int32] | np.ndarray | None = None,
         device: Devicelike | None = None,
+        filter_func: Any | None = None,
     ) -> None:
         """Initialize the broad phase with world ID information.
 
@@ -247,7 +402,18 @@ class BroadPhaseAllPairs:
                 This efficiently filters out visual-only shapes.
             device: Device to store the precomputed arrays on. If None, uses CPU for numpy
                 arrays or the device of the input warp array.
+            filter_func: Optional ``@wp.func`` of signature
+                ``(pair: wp.vec2i, filter_data) -> wp.int32`` that runs after the
+                AABB overlap check and before pair emission. Returning ``0`` drops
+                the pair, ``1`` keeps it. The runtime ``filter_data`` is supplied
+                via :meth:`launch`. When ``None``, the legacy unfiltered kernel is
+                used (bit-equivalent to the pre-callback path).
         """
+        self.filter_func = filter_func
+        if filter_func is not None:
+            self._filtered_kernel = create_nxn_broadphase_kernel(filter_func)
+        else:
+            self._filtered_kernel = None
         # Convert to numpy if it's a warp array
         if isinstance(shape_world, wp.array):
             shape_world_np = shape_world.numpy()
@@ -317,6 +483,7 @@ class BroadPhaseAllPairs:
         filter_pairs: wp.array[wp.vec2i] | None = None,  # Sorted excluded pairs
         num_filter_pairs: int | None = None,
         skip_count_zero: bool = False,  # Skip candidate_pair_count.zero_() if already zeroed by the caller
+        filter_data: Any | None = None,  # User struct for the broadphase ``filter_func`` callback
     ) -> None:
         """Launch the N x N broad phase collision detection.
 
@@ -368,27 +535,57 @@ class BroadPhaseAllPairs:
             filter_pairs_arr = filter_pairs
             n_filter = num_filter_pairs if num_filter_pairs is not None else filter_pairs.shape[0]
 
-        # Launch with the precomputed number of kernel threads
-        wp.launch(
-            _nxn_broadphase_kernel,
-            dim=self.num_kernel_threads,
-            inputs=[
-                shape_lower,
-                shape_upper,
-                shape_gap,
-                shape_collision_group,
-                shape_world,
-                self.world_cumsum_lower_tri,
-                self.world_slice_ends,
-                self.world_index_map,
-                self.num_regular_worlds,
-                filter_pairs_arr,
-                n_filter,
-            ],
-            outputs=[candidate_pair, candidate_pair_count, max_candidate_pair],
-            device=device,
-            record_tape=False,
-        )
+        # Launch with the precomputed number of kernel threads. Filter
+        # callback (if registered) routes through the factory-built
+        # filtered kernel; otherwise the legacy unfiltered kernel runs
+        # bit-equivalent to the pre-callback path.
+        if self._filtered_kernel is not None:
+            if filter_data is None:
+                raise ValueError(
+                    "BroadPhaseAllPairs constructed with filter_func=... requires filter_data on every launch()"
+                )
+            wp.launch(
+                self._filtered_kernel,
+                dim=self.num_kernel_threads,
+                inputs=[
+                    shape_lower,
+                    shape_upper,
+                    shape_gap,
+                    shape_collision_group,
+                    shape_world,
+                    self.world_cumsum_lower_tri,
+                    self.world_slice_ends,
+                    self.world_index_map,
+                    self.num_regular_worlds,
+                    filter_pairs_arr,
+                    n_filter,
+                    filter_data,
+                ],
+                outputs=[candidate_pair, candidate_pair_count, max_candidate_pair],
+                device=device,
+                record_tape=False,
+            )
+        else:
+            wp.launch(
+                _nxn_broadphase_kernel,
+                dim=self.num_kernel_threads,
+                inputs=[
+                    shape_lower,
+                    shape_upper,
+                    shape_gap,
+                    shape_collision_group,
+                    shape_world,
+                    self.world_cumsum_lower_tri,
+                    self.world_slice_ends,
+                    self.world_index_map,
+                    self.num_regular_worlds,
+                    filter_pairs_arr,
+                    n_filter,
+                ],
+                outputs=[candidate_pair, candidate_pair_count, max_candidate_pair],
+                device=device,
+                record_tape=False,
+            )
 
 
 class BroadPhaseExplicit:
@@ -402,8 +599,18 @@ class BroadPhaseExplicit:
     taking into account per-geometry cutoff distances.
     """
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, filter_func: Any | None = None) -> None:
+        """
+        Args:
+            filter_func: Optional broadphase filter ``@wp.func`` (see
+                :class:`BroadPhaseAllPairs`).  When ``None`` the legacy
+                unfiltered kernel is used.
+        """
+        self.filter_func = filter_func
+        if filter_func is not None:
+            self._filtered_kernel = create_nxn_broadphase_precomputed_pairs_kernel(filter_func)
+        else:
+            self._filtered_kernel = None
 
     def launch(
         self,
@@ -417,6 +624,7 @@ class BroadPhaseExplicit:
         candidate_pair_count: wp.array[int],
         device: Devicelike | None = None,  # Device to launch on
         skip_count_zero: bool = False,  # Skip candidate_pair_count.zero_() if already zeroed
+        filter_data: Any | None = None,  # User struct for the broadphase ``filter_func`` callback
     ) -> None:
         """Launch the explicit pairs broad phase collision detection.
 
@@ -455,18 +663,40 @@ class BroadPhaseExplicit:
         if shape_gap is None:
             shape_gap = wp.empty(0, dtype=wp.float32, device=device)
 
-        wp.launch(
-            kernel=_nxn_broadphase_precomputed_pairs,
-            dim=shape_pair_count,
-            inputs=[
-                shape_lower,
-                shape_upper,
-                shape_gap,
-                shape_pairs,
-                candidate_pair,
-                candidate_pair_count,
-                max_candidate_pair,
-            ],
-            device=device,
-            record_tape=False,
-        )
+        if self._filtered_kernel is not None:
+            if filter_data is None:
+                raise ValueError(
+                    "BroadPhaseExplicit constructed with filter_func=... requires filter_data on every launch()"
+                )
+            wp.launch(
+                kernel=self._filtered_kernel,
+                dim=shape_pair_count,
+                inputs=[
+                    shape_lower,
+                    shape_upper,
+                    shape_gap,
+                    shape_pairs,
+                    filter_data,
+                    candidate_pair,
+                    candidate_pair_count,
+                    max_candidate_pair,
+                ],
+                device=device,
+                record_tape=False,
+            )
+        else:
+            wp.launch(
+                kernel=_nxn_broadphase_precomputed_pairs,
+                dim=shape_pair_count,
+                inputs=[
+                    shape_lower,
+                    shape_upper,
+                    shape_gap,
+                    shape_pairs,
+                    candidate_pair,
+                    candidate_pair_count,
+                    max_candidate_pair,
+                ],
+                device=device,
+                record_tape=False,
+            )

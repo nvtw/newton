@@ -12,7 +12,7 @@ See Also:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import warp as wp
@@ -394,6 +394,132 @@ def _sap_broadphase_kernel(
         workid += nsweep_in
 
 
+# ---------------------------------------------------------------------------
+# Filter-callback variant -- factory closes over the user's filter ``wp.func``.
+#
+# Same structure as :func:`_sap_broadphase_kernel`; the per-pair check
+# inlines a ``filter_func(pair, filter_data)`` call between the AABB
+# overlap test and ``write_pair``. Default callers continue to launch
+# the unfiltered :func:`_sap_broadphase_kernel`, so the legacy fast
+# path stays bit-equivalent.
+# ---------------------------------------------------------------------------
+
+
+def create_sap_broadphase_kernel(filter_func: Any):
+    """Build a filter-aware SAP broadphase kernel.
+
+    See :func:`newton._src.geometry.broad_phase_nxn.create_nxn_broadphase_kernel`
+    for the contract; the only difference here is the SAP-specific
+    work-id binary-search dispatch.
+    """
+
+    _module = f"broad_phase_sap_filtered_{filter_func.__name__}"
+
+    @wp.kernel(enable_backward=False, module=_module)
+    def kernel(
+        shape_bounding_box_lower: wp.array[wp.vec3],
+        shape_bounding_box_upper: wp.array[wp.vec3],
+        shape_gap: wp.array[float],
+        collision_group: wp.array[int],
+        shape_world: wp.array[int],
+        world_index_map: wp.array[int],
+        world_slice_ends: wp.array[int],
+        sap_sort_index_in: wp.array[int],
+        sap_cumulative_sum_in: wp.array[int],
+        world_count: int,
+        max_shapes_per_world: int,
+        nsweep_in: int,
+        num_regular_worlds: int,
+        filter_pairs: wp.array[wp.vec2i],
+        num_filter_pairs: int,
+        filter_data: Any,
+        candidate_pair: wp.array[wp.vec2i],
+        candidate_pair_count: wp.array[int],
+        max_candidate_pair: int,
+    ):
+        tid = wp.tid()
+
+        total_work_packages = sap_cumulative_sum_in[world_count * max_shapes_per_world - 1]
+
+        workid = tid
+        while workid < total_work_packages:
+            flat_id = binary_search(sap_cumulative_sum_in, workid, 0, world_count * max_shapes_per_world)
+            j = flat_id + workid + 1
+            if flat_id > 0:
+                j -= sap_cumulative_sum_in[flat_id - 1]
+            world_id = flat_id // max_shapes_per_world
+            i = flat_id % max_shapes_per_world
+            j = j % max_shapes_per_world
+
+            world_slice_start = 0
+            if world_id > 0:
+                world_slice_start = world_slice_ends[world_id - 1]
+            world_slice_end = world_slice_ends[world_id]
+            num_shapes_in_world = world_slice_end - world_slice_start
+
+            if i >= num_shapes_in_world or j >= num_shapes_in_world:
+                workid += nsweep_in
+                continue
+
+            if i >= j:
+                workid += nsweep_in
+                continue
+
+            idx_i = world_id * max_shapes_per_world + i
+            idx_j = world_id * max_shapes_per_world + j
+            local_shape1 = sap_sort_index_in[idx_i]
+            local_shape2 = sap_sort_index_in[idx_j]
+
+            if local_shape1 < 0 or local_shape2 < 0:
+                workid += nsweep_in
+                continue
+
+            shape1_tmp = world_index_map[world_slice_start + local_shape1]
+            shape2_tmp = world_index_map[world_slice_start + local_shape2]
+
+            if shape1_tmp == shape2_tmp:
+                workid += nsweep_in
+                continue
+
+            shape1 = wp.min(shape1_tmp, shape2_tmp)
+            shape2 = wp.max(shape1_tmp, shape2_tmp)
+
+            col_group1 = collision_group[shape1]
+            col_group2 = collision_group[shape2]
+            world1 = shape_world[shape1]
+            world2 = shape_world[shape2]
+
+            is_dedicated_minus_one_segment = world_id >= num_regular_worlds
+            if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
+                workid += nsweep_in
+                continue
+
+            if test_world_and_group_pair(world1, world2, col_group1, col_group2):
+                pair = wp.vec2i(shape1, shape2)
+                if num_filter_pairs > 0 and is_pair_excluded(pair, filter_pairs, num_filter_pairs):
+                    workid += nsweep_in
+                    continue
+                gap1 = 0.0
+                gap2 = 0.0
+                if shape_gap.shape[0] > 0:
+                    gap1 = shape_gap[shape1]
+                    gap2 = shape_gap[shape2]
+                if check_aabb_overlap(
+                    shape_bounding_box_lower[shape1],
+                    shape_bounding_box_upper[shape1],
+                    gap1,
+                    shape_bounding_box_lower[shape2],
+                    shape_bounding_box_upper[shape2],
+                    gap2,
+                ):
+                    if filter_func(pair, filter_data) == wp.int32(1):
+                        write_pair(pair, candidate_pair, candidate_pair_count, max_candidate_pair)
+
+            workid += nsweep_in
+
+    return kernel
+
+
 class BroadPhaseSAP:
     """Sweep and Prune (SAP) broad phase collision detection.
 
@@ -410,6 +536,7 @@ class BroadPhaseSAP:
         sort_type: Literal["segmented", "tile"] = "segmented",
         tile_block_dim: int | None = None,
         device: Devicelike | None = None,
+        filter_func: Any | None = None,
     ) -> None:
         """Initialize arrays for sweep and prune broad phase collision detection.
 
@@ -428,7 +555,15 @@ class BroadPhaseSAP:
                 Minimum value is 32 (required by wp.tile_sort). If provided, will be clamped to [32, 1024].
             device: Device to store the precomputed arrays on. If None, uses CPU for numpy
                 arrays or the device of the input warp array.
+            filter_func: Optional broadphase filter ``@wp.func`` (see
+                :class:`~newton._src.geometry.broad_phase_nxn.BroadPhaseAllPairs`).
+                When ``None``, the legacy unfiltered kernel runs.
         """
+        self.filter_func = filter_func
+        if filter_func is not None:
+            self._filtered_kernel = create_sap_broadphase_kernel(filter_func)
+        else:
+            self._filtered_kernel = None
         self.sweep_thread_count_multiplier = sweep_thread_count_multiplier
         self.sort_type = _normalize_sort_mode(sort_type)
         self.tile_block_dim_override = tile_block_dim  # Store user override if provided
@@ -522,6 +657,7 @@ class BroadPhaseSAP:
         filter_pairs: wp.array[wp.vec2i] | None = None,  # Sorted excluded pairs
         num_filter_pairs: int | None = None,
         skip_count_zero: bool = False,  # Skip candidate_pair_count.zero_() if already zeroed by the caller
+        filter_data: Any | None = None,  # User struct for the broadphase ``filter_func`` callback
     ) -> None:
         """Launch the sweep and prune broad phase collision detection with per-world segmented sort.
 
@@ -646,32 +782,69 @@ class BroadPhaseSAP:
         total_elements = self.world_count * self.max_shapes_per_world
         nsweep_in = int(self.sweep_thread_count_multiplier * total_elements)
 
-        # Perform the sweep and generate candidate pairs
-        wp.launch(
-            kernel=_sap_broadphase_kernel,
-            dim=nsweep_in,
-            inputs=[
-                shape_lower,
-                shape_upper,
-                shape_gap,
-                shape_collision_group,
-                shape_world,
-                self.world_index_map,
-                self.world_slice_ends,
-                self.sap_sort_index,
-                self.sap_cumulative_sum,
-                self.world_count,
-                self.max_shapes_per_world,
-                nsweep_in,
-                self.num_regular_worlds,
-                filter_pairs_arr,
-                n_filter,
-            ],
-            outputs=[
-                candidate_pair,
-                candidate_pair_count,
-                max_candidate_pair,
-            ],
-            device=device,
-            record_tape=False,
-        )
+        # Perform the sweep and generate candidate pairs. Filtered
+        # variant routes through the factory-built kernel; legacy
+        # unfiltered path is bit-equivalent to the pre-callback code.
+        if self._filtered_kernel is not None:
+            if filter_data is None:
+                raise ValueError(
+                    "BroadPhaseSAP constructed with filter_func=... requires filter_data on every launch()"
+                )
+            wp.launch(
+                kernel=self._filtered_kernel,
+                dim=nsweep_in,
+                inputs=[
+                    shape_lower,
+                    shape_upper,
+                    shape_gap,
+                    shape_collision_group,
+                    shape_world,
+                    self.world_index_map,
+                    self.world_slice_ends,
+                    self.sap_sort_index,
+                    self.sap_cumulative_sum,
+                    int(self.world_count),
+                    int(self.max_shapes_per_world),
+                    nsweep_in,
+                    int(self.num_regular_worlds),
+                    filter_pairs_arr,
+                    n_filter,
+                    filter_data,
+                ],
+                outputs=[
+                    candidate_pair,
+                    candidate_pair_count,
+                    max_candidate_pair,
+                ],
+                device=device,
+                record_tape=False,
+            )
+        else:
+            wp.launch(
+                kernel=_sap_broadphase_kernel,
+                dim=nsweep_in,
+                inputs=[
+                    shape_lower,
+                    shape_upper,
+                    shape_gap,
+                    shape_collision_group,
+                    shape_world,
+                    self.world_index_map,
+                    self.world_slice_ends,
+                    self.sap_sort_index,
+                    self.sap_cumulative_sum,
+                    self.world_count,
+                    self.max_shapes_per_world,
+                    nsweep_in,
+                    self.num_regular_worlds,
+                    filter_pairs_arr,
+                    n_filter,
+                ],
+                outputs=[
+                    candidate_pair,
+                    candidate_pair_count,
+                    max_candidate_pair,
+                ],
+                device=device,
+                record_tape=False,
+            )

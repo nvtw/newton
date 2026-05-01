@@ -128,6 +128,40 @@ def write_pair(
     candidate_pair[pairid] = pair
 
 
+# Broadphase filter callback (optional)
+#
+# Mirrors the contact_writer pattern in NarrowPhase: a ``@wp.func`` is
+# closed into the broadphase kernel at factory time, and a runtime
+# ``filter_data`` struct is passed through ``launch()``. The filter
+# runs *after* the AABB overlap accepts a pair and *before*
+# ``write_pair``; returning 0 drops the pair, returning 1 keeps it.
+# Existing callers that pass no filter hit the legacy kernels
+# verbatim -- no compile-time change for rigid-only scenes.
+
+
+@wp.struct
+class EmptyFilterData:
+    """Placeholder ``wp.struct`` for the no-op filter.
+
+    A ``@wp.func`` always takes typed parameters, so the
+    no-op default needs *some* struct type to receive even though it
+    ignores it. Empty struct is the lightest the Warp ABI allows.
+    """
+
+    pass
+
+
+@wp.func
+def keep_all_filter(pair: wp.vec2i, data: EmptyFilterData) -> wp.int32:
+    """Default filter: keep every pair the AABB test admitted.
+
+    The compiler sees this returning a literal ``1`` and optimises the
+    surrounding ``if filter_func(...) == 1`` to a no-op, so the legacy
+    fast path stays bit-equivalent to the pre-callback kernel.
+    """
+    return wp.int32(1)
+
+
 # Collision filtering
 @wp.func
 def test_group_pair(group_a: int, group_b: int) -> bool:
