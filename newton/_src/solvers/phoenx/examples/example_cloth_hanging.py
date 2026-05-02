@@ -67,15 +67,17 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
 
-        # PhoenX cloth runs at substeps=8; each substep does one
-        # XPBD iterate sweep so the access-mode transitions happen
-        # 8x per frame. Bumped from substeps=4 (the cloth-only
-        # default) because the cloth-vs-rigid contact path has many
-        # more constraints to converge on each frame -- unsolved
-        # penetration drops sharply once both substep count and
-        # iteration count clear ~8.
+        # PhoenX cloth runs at substeps=8 / iters=8 in this scene.
+        # The cloth-rigid contact iterate is now position-level
+        # (apply_triangle_side updates particle position alongside
+        # velocity), so a handful of iterations per substep is enough
+        # to converge contact penetration to sub-millimetre. Beyond
+        # iters=8 the penetration plateaus while runtime keeps
+        # climbing linearly; substeps drives both stability and
+        # quality more than iterations once XPBD has positional
+        # influence over contacts.
         self.sim_substeps = 8
-        self.solver_iterations = 16
+        self.solver_iterations = 8
 
         self.dim_x = width
         self.dim_y = height
