@@ -1494,11 +1494,11 @@ def _make_contact_prepare_at(*, side_a_kind: int, side_b_kind: int):
                 if wp.static(side_a_kind == CONTACT_KIND_RIGID):
                     apply_rigid_side(store.bodies, b1_a, imp, r_a, wp.float32(-1.0))
                 else:
-                    apply_triangle_side(store, b1_a, b2_a, b3_a, weights_a, imp, wp.float32(-1.0))
+                    apply_triangle_side(store, b1_a, b2_a, b3_a, weights_a, imp, wp.float32(-1.0), dt_substep)
                 if wp.static(side_b_kind == CONTACT_KIND_RIGID):
                     apply_rigid_side(store.bodies, b1_b, imp, r_b, wp.float32(1.0))
                 else:
-                    apply_triangle_side(store, b1_b, b2_b, b3_b, weights_b, imp, wp.float32(1.0))
+                    apply_triangle_side(store, b1_b, b2_b, b3_b, weights_b, imp, wp.float32(1.0), dt_substep)
 
         # End-of-column register-batched scatter for the rigid-rigid
         # specialisation. The triangle-bearing variants already
@@ -1726,14 +1726,14 @@ def _make_contact_iterate_at(*, side_a_kind: int, side_b_kind: int):
                     v_a, w_a, inv_mass_a_rigid, inv_inertia_a_rigid, r_a, imp, wp.float32(-1.0)
                 )
             else:
-                apply_triangle_side(store, b1_a, b2_a, b3_a, weights_a, imp, wp.float32(-1.0))
+                apply_triangle_side(store, b1_a, b2_a, b3_a, weights_a, imp, wp.float32(-1.0), dt_substep)
 
             if wp.static(side_b_kind == CONTACT_KIND_RIGID):
                 v_b, w_b = apply_rigid_side_batched(
                     v_b, w_b, inv_mass_b_rigid, inv_inertia_b_rigid, r_b, imp, wp.float32(1.0)
                 )
             else:
-                apply_triangle_side(store, b1_b, b2_b, b3_b, weights_b, imp, wp.float32(1.0))
+                apply_triangle_side(store, b1_b, b2_b, b3_b, weights_b, imp, wp.float32(1.0), dt_substep)
 
         # End-of-column scatter goes through the safe writer so
         # ``b == -1`` (no rigid body) becomes a silent no-op.
@@ -1931,14 +1931,14 @@ def _make_contact_iterate_at_multi(*, side_a_kind: int, side_b_kind: int):
                         v_a, w_a, inv_mass_a_rigid, inv_inertia_a_rigid, r_a, imp, wp.float32(-1.0)
                     )
                 else:
-                    apply_triangle_side(store, b1_a, b2_a, b3_a, weights_a, imp, wp.float32(-1.0))
+                    apply_triangle_side(store, b1_a, b2_a, b3_a, weights_a, imp, wp.float32(-1.0), dt_substep)
 
                 if wp.static(side_b_kind == CONTACT_KIND_RIGID):
                     v_b, w_b = apply_rigid_side_batched(
                         v_b, w_b, inv_mass_b_rigid, inv_inertia_b_rigid, r_b, imp, wp.float32(1.0)
                     )
                 else:
-                    apply_triangle_side(store, b1_b, b2_b, b3_b, weights_b, imp, wp.float32(1.0))
+                    apply_triangle_side(store, b1_b, b2_b, b3_b, weights_b, imp, wp.float32(1.0), dt_substep)
             it += 1
 
         if wp.static(side_a_kind == CONTACT_KIND_RIGID):

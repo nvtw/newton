@@ -420,6 +420,7 @@ def apply_triangle_side(
     weights: wp.vec3f,
     imp: wp.vec3f,
     sign: wp.float32,
+    dt: wp.float32,
 ):
     """Scatter a contact impulse onto the three particles of a triangle
     side.
@@ -429,21 +430,40 @@ def apply_triangle_side(
     automatically no-ops because the multiplicative factor collapses
     to zero -- no branch needed.
 
-    Goes through :func:`set_velocity` (which routes to the body or
-    particle store via the unified-index threshold) so this helper
-    keeps working in the rigid-attached-cloth-node case where one of
-    the triangle's vertices is anchored to a rigid body. For pure
-    cloth triangles (the common case) every write lands in
-    :class:`ParticleContainer.velocity` directly.
+    For particle endpoints, both ``velocity`` *and* ``position`` get
+    the impulse applied: ``delta_x_i = delta_v_i * dt``. Without the
+    position update, the velocity-level contact resolution would not
+    survive substep exit. ``_integrate_velocities_kernel`` recovers
+    cloth particle velocity from ``(position - position_substep_start)
+    * inv_dt``, which means any velocity adjustment the contact iterate
+    applied gets overwritten unless the matching position delta also
+    lands. Folding the position update into this helper makes the
+    velocity-level cloth-rigid / cloth-cloth iterate behave the way
+    XPBD position-level constraints would: the per-iteration impulse
+    actually projects the particles out of the rigid surface (or off
+    the colliding triangle), and the recovered velocity at substep
+    exit reflects that projection. Pinned (``inv_m == 0``) particles
+    drop out cleanly because the multiplicative factor is zero for
+    both updates. Rigid endpoints (``body_x < num_bodies``) only get
+    the velocity update; their integrate kernel does the
+    ``position += velocity * dt`` separately, so a position write here
+    would double-count.
+
+    Goes through :func:`set_velocity` / :func:`set_position` (which
+    route to the body or particle store via the unified-index
+    threshold) so this helper keeps working in the rigid-attached-
+    cloth-node case where one of the triangle's vertices is anchored
+    to a rigid body. For pure cloth triangles (the common case) every
+    write lands in :class:`ParticleContainer` directly.
 
     Unlike :func:`apply_rigid_side_batched`, the per-contact triangle
     scatter is not register-batched across the column loop because
     the three node indices vary per contact (different contacts on
     the same shape pair routinely involve different triangle
-    sub-faces). Each contact does three particle-velocity reads +
-    writes; for typical cloth scenes this still sits well below the
-    rigid path's per-contact body cost because the particle store is
-    much narrower.
+    sub-faces). Each contact does three particle-velocity / position
+    reads + writes; for typical cloth scenes this still sits well
+    below the rigid path's per-contact body cost because the particle
+    store is much narrower.
     """
     v_a = get_velocity(store, body_a)
     v_b = get_velocity(store, body_b)
@@ -451,18 +471,37 @@ def apply_triangle_side(
     inv_m_a = wp.float32(0.0)
     inv_m_b = wp.float32(0.0)
     inv_m_c = wp.float32(0.0)
-    if is_particle(store, body_a):
+    a_is_p = is_particle(store, body_a)
+    b_is_p = is_particle(store, body_b)
+    c_is_p = is_particle(store, body_c)
+    if a_is_p:
         inv_m_a = store.particles.inverse_mass[body_a - store.num_bodies]
     else:
         inv_m_a = store.bodies.inverse_mass[body_a]
-    if is_particle(store, body_b):
+    if b_is_p:
         inv_m_b = store.particles.inverse_mass[body_b - store.num_bodies]
     else:
         inv_m_b = store.bodies.inverse_mass[body_b]
-    if is_particle(store, body_c):
+    if c_is_p:
         inv_m_c = store.particles.inverse_mass[body_c - store.num_bodies]
     else:
         inv_m_c = store.bodies.inverse_mass[body_c]
-    set_velocity(store, body_a, v_a + (sign * weights[0] * inv_m_a) * imp)
-    set_velocity(store, body_b, v_b + (sign * weights[1] * inv_m_b) * imp)
-    set_velocity(store, body_c, v_c + (sign * weights[2] * inv_m_c) * imp)
+    dv_a = (sign * weights[0] * inv_m_a) * imp
+    dv_b = (sign * weights[1] * inv_m_b) * imp
+    dv_c = (sign * weights[2] * inv_m_c) * imp
+    set_velocity(store, body_a, v_a + dv_a)
+    set_velocity(store, body_b, v_b + dv_b)
+    set_velocity(store, body_c, v_c + dv_c)
+    # Particle-only position update: encode the velocity-level impulse
+    # in position so the substep-exit ``vel = (pos - pos_start)/dt``
+    # recovery preserves it. Rigid endpoints get position updated by
+    # their own integrate kernel from the velocity write above.
+    if a_is_p:
+        i_a = body_a - store.num_bodies
+        store.particles.position[i_a] = store.particles.position[i_a] + dt * dv_a
+    if b_is_p:
+        i_b = body_b - store.num_bodies
+        store.particles.position[i_b] = store.particles.position[i_b] + dt * dv_b
+    if c_is_p:
+        i_c = body_c - store.num_bodies
+        store.particles.position[i_c] = store.particles.position[i_c] + dt * dv_c

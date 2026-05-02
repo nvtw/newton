@@ -223,6 +223,17 @@ class Example:
         # virtual TRIANGLE shapes appended after the rigid shapes,
         # runs broad/narrow phase across the unified set, and emits
         # contacts the phoenx PGS iterate consumes via the RT subtype.
+        # ``cloth_extra_margin`` widens both the broadphase AABB and
+        # the narrow-phase speculative range for cloth shapes. A
+        # value bigger than ~one cell-spacing turns flat cloth into a
+        # contact storm: every diagonal triangle pair (not vertex-
+        # sharing, so the broadphase filter keeps them) sits within
+        # margin of every neighbour, and the narrow phase emits a TT
+        # contact for each. With cell_x = 0.1 this produced ~8000
+        # spurious contacts on a 32x16 grid; dropping the margin to
+        # the same scale as ``particle_radius`` (0.04) cuts that to
+        # essentially zero with no loss in cloth-rigid quality
+        # because the rigid side already contributes its own gap.
         self.pipeline = PhoenxCollisionPipeline(
             self.model,
             num_cloth_triangles=int(self.model.tri_count),
@@ -231,7 +242,7 @@ class Example:
             num_bodies=self.world.num_bodies,
             particle_q=self.world.particles.position,
             particle_radius=self.model.particle_radius,
-            cloth_extra_margin=0.05,
+            cloth_extra_margin=0.005,
             cloth_shape_data_margin=0.0,
             broad_phase="sap",
             contact_matching="sticky",
@@ -334,12 +345,13 @@ class Example:
         if z_drop < 0.05:
             raise RuntimeError(f"free corner barely dropped (z_drop={z_drop:.4f} m)")
 
-        # Cloth didn't punch through the ground plane. The unsolved
-        # penetration scales with the number of cloth-rigid contacts
-        # competing for impulse budget in the PGS sweep; ~5x particle
-        # radius is a reasonable bound for the coarse demo settings.
+        # Cloth didn't punch through the ground plane. With the
+        # position-level cloth-rigid contact projection (the velocity
+        # impulse + matching position update in apply_triangle_side),
+        # PGS holds particles within a few millimetres of the plane on
+        # this scene -- well within particle_radius (0.04 m).
         z_min = float(positions[:, 2].min())
-        if z_min < -0.25:
+        if z_min < -0.04:
             raise RuntimeError(f"cloth fell through the ground plane (z_min={z_min:.4f} m)")
 
     def render(self) -> None:
