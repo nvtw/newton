@@ -1836,16 +1836,34 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                 # at dword 0 and routes accordingly; the read +
                 # compare are dead-code-eliminated when
                 # ``cloth_support=False``.
+                #
+                # Relax must still recognise cloth cids -- their
+                # XPBD elasticity has no velocity-level relax pass
+                # and does nothing here, but if we let the cid fall
+                # through to the joint dispatch, ``revolute_iterate``
+                # / ``actuated_double_ball_socket_iterate`` would
+                # interpret the cloth row's body slots as joint body
+                # indices and scribble over arbitrary slots in the
+                # body container. With ``num_bodies = 1`` and a
+                # single dynamic rigid body that landed at slot 0,
+                # the joint iterate routinely picks ``body_a = 0``
+                # for cloth rows and writes NaN orientation /
+                # angular velocity into the cube on every relax
+                # sweep -- the failure mode that motivated this
+                # branch.
                 handled_by_cloth = wp.bool(False)
                 if wp.static(cloth_support):
-                    if wp.static(not is_relax):
-                        ctype = read_int(constraints, wp.int32(0), cid)
-                        if ctype == cloth_type_tag:
-                            if wp.static(is_prepare):
-                                cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
-                            else:
-                                cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store)
-                            handled_by_cloth = wp.bool(True)
+                    ctype = read_int(constraints, wp.int32(0), cid)
+                    if ctype == cloth_type_tag:
+                        if wp.static(is_prepare):
+                            cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
+                        elif wp.static(is_iterate):
+                            cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store)
+                        # is_relax: no-op (cloth elasticity is
+                        # position-level XPBD), but we still mark the
+                        # cid handled so the joint fall-through stays
+                        # off.
+                        handled_by_cloth = wp.bool(True)
                 if not handled_by_cloth:
                     if wp.static(is_prepare):
                         if wp.static(revolute_only):
@@ -1936,16 +1954,25 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
             if lane < count:
                 cid = element_ids_by_color[start + lane]
                 if cid < num_joints:
+                    # See the persistent-kernel sibling above for why
+                    # cloth cids must still be marked handled in
+                    # ``relax`` even though the cloth elasticity has
+                    # no velocity-level relax pass: without the
+                    # mark-and-skip, the cid falls through to the
+                    # joint iterate which scribbles arbitrary body
+                    # slots based on the cloth row's vertex indices.
                     handled_by_cloth = wp.bool(False)
                     if wp.static(cloth_support):
-                        if wp.static(not is_relax):
-                            ctype = read_int(constraints, wp.int32(0), cid)
-                            if ctype == cloth_type_tag:
-                                if wp.static(is_prepare):
-                                    cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
-                                else:
-                                    cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store)
-                                handled_by_cloth = wp.bool(True)
+                        ctype = read_int(constraints, wp.int32(0), cid)
+                        if ctype == cloth_type_tag:
+                            if wp.static(is_prepare):
+                                cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
+                            elif wp.static(is_iterate):
+                                cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store)
+                            # is_relax: cloth has no velocity-level
+                            # relax; mark handled so the joint
+                            # dispatch below stays off this cid.
+                            handled_by_cloth = wp.bool(True)
                     if not handled_by_cloth:
                         if wp.static(is_prepare):
                             if wp.static(revolute_only):
