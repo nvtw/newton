@@ -25,6 +25,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_access_mode import ConstraintAccessMode
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
@@ -82,6 +83,7 @@ from newton._src.solvers.phoenx.solver_config import (
 )
 
 __all__ = [
+    "ACCESS_MODE",
     "CONTACT_DWORDS",
     "ContactColumnContainer",
     "ContactConstraintData",
@@ -116,6 +118,12 @@ __all__ = [
     "contact_world_wrench",
     "contact_world_wrench_at",
 ]
+
+
+#: Velocity-level: ``contact_iterate_at`` applies impulses to
+#: ``bodies.velocity`` / ``angular_velocity``. See
+#: :file:`CONSTRAINT_ACCESS_MODE.md`.
+ACCESS_MODE = ConstraintAccessMode.VELOCITY_LEVEL
 
 
 # ---------------------------------------------------------------------------

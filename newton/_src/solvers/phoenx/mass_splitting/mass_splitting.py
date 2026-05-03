@@ -63,6 +63,14 @@ Mixing the two regimes inside a single substep is allowed: each
 constraint picks its own ``new_access_mode``; the synchronize
 helper handles the regime change lazily. See ``README.md`` for the
 recipe and the round-trip test in ``tests/test_isolated.py``.
+
+.. note::
+    Production today uses a weaker variant of this contract -- per-
+    constraint ``ACCESS_MODE`` metadata + a constraint-owns-handoff
+    finite-diff at iterate exit, without ``TinyRigidState``. See
+    :file:`newton/_src/solvers/phoenx/CONSTRAINT_ACCESS_MODE.md`. The
+    tag values match so a future mass-splitting integration drops in
+    unchanged.
 """
 
 from __future__ import annotations

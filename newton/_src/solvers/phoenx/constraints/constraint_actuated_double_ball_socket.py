@@ -45,6 +45,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_access_mode import ConstraintAccessMode
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     _PD_NYQUIST_HEADROOM_MAX,
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
@@ -87,6 +88,7 @@ from newton._src.solvers.phoenx.solver_config import (
 )
 
 __all__ = [
+    "ACCESS_MODE",
     "ADBS_DWORDS",
     "DRIVE_MODE_OFF",
     "DRIVE_MODE_POSITION",
@@ -111,6 +113,12 @@ __all__ = [
     "revolute_iterate_multi",
     "revolute_prepare_for_iteration",
 ]
+
+
+#: Velocity-level: joint / drive / limit rows apply impulses to
+#: ``bodies.velocity`` / ``angular_velocity``. See
+#: :file:`CONSTRAINT_ACCESS_MODE.md`.
+ACCESS_MODE = ConstraintAccessMode.VELOCITY_LEVEL
 
 
 # ---------------------------------------------------------------------------

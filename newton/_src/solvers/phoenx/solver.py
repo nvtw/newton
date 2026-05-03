@@ -32,6 +32,12 @@ from newton._src.solvers.phoenx.body import (
     BodyContainer,
     body_container_zeros,
 )
+from newton._src.solvers.phoenx.constraints import (
+    constraint_actuated_double_ball_socket,
+    constraint_cloth_triangle,
+    constraint_contact,
+)
+from newton._src.solvers.phoenx.constraints.constraint_access_mode import ConstraintAccessMode
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     _OFF_DAMPING_DRIVE,
     _OFF_DRIVE_MODE,
@@ -604,9 +610,71 @@ class SolverPhoenX(SolverBase):
         # ---- Cached time step (for contact force reconstruction) ------
         self._last_dt: float = 0.0
 
+        # ---- Access-mode contract guard --------------------------------
+        # See ``CONSTRAINT_ACCESS_MODE.md``.
+        self._validate_access_mode_contract()
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    #: Constraint modules running inside the production step. Each
+    #: must export ``ACCESS_MODE: ConstraintAccessMode``; register new
+    #: kinds here so the contract guard sees them.
+    _REGISTERED_CONSTRAINT_MODULES: tuple = (
+        constraint_actuated_double_ball_socket,
+        constraint_contact,
+        constraint_cloth_triangle,
+    )
+
+    #: Subset that touches rigid-body unified indices and therefore
+    #: requires ``BodyContainer.position_substep_start`` /
+    #: ``orientation_substep_start`` snapshots when its ``ACCESS_MODE``
+    #: is ``POSITION_LEVEL``. Cloth-triangle is particle-only, so it's
+    #: omitted.
+    _RIGID_TOUCHING_CONSTRAINT_MODULES: frozenset = frozenset(
+        {
+            constraint_actuated_double_ball_socket,
+            constraint_contact,
+        }
+    )
+
+    def _validate_access_mode_contract(self) -> None:
+        """Reject constraint registrations that violate the access-mode contract.
+
+        See :file:`CONSTRAINT_ACCESS_MODE.md`.
+
+        Raises:
+            TypeError: a registered module lacks an ``ACCESS_MODE`` of
+                type :class:`ConstraintAccessMode`.
+            NotImplementedError: a ``POSITION_LEVEL`` rigid-touching
+                constraint is registered but
+                :class:`BodyContainer` has no
+                ``position_substep_start`` / ``orientation_substep_start``
+                snapshot. Wire those, swap the body branch of
+                :func:`writeback_position_to_velocity` for the
+                finite-diff math, and drop this arm.
+        """
+        for module in self._REGISTERED_CONSTRAINT_MODULES:
+            mode = getattr(module, "ACCESS_MODE", None)
+            if not isinstance(mode, ConstraintAccessMode):
+                raise TypeError(
+                    f"Constraint module {module.__name__!r} missing valid "
+                    f"ACCESS_MODE: ConstraintAccessMode tag (got {mode!r}). "
+                    "See CONSTRAINT_ACCESS_MODE.md."
+                )
+            if mode is not ConstraintAccessMode.POSITION_LEVEL:
+                continue
+            if module not in self._RIGID_TOUCHING_CONSTRAINT_MODULES:
+                continue
+            if not hasattr(self.bodies, "position_substep_start") or not hasattr(
+                self.bodies, "orientation_substep_start"
+            ):
+                raise NotImplementedError(
+                    f"{module.__name__!r} declares POSITION_LEVEL on rigid "
+                    "bodies but BodyContainer has no position_substep_start / "
+                    "orientation_substep_start. See CONSTRAINT_ACCESS_MODE.md."
+                )
 
     def _bake_joint_armature_into_body_inertia(self, model: Model) -> None:
         """Add per-joint axial armature into both attached bodies' inertia.

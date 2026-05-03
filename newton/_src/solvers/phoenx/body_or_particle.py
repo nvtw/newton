@@ -68,7 +68,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.particle import ParticleContainer
+from newton._src.solvers.phoenx.particle import ParticleContainer, particle_recover_velocity
 
 __all__ = [
     "BodyOrParticleStore",
@@ -80,6 +80,7 @@ __all__ = [
     "is_particle",
     "set_position",
     "set_velocity",
+    "writeback_position_to_velocity",
 ]
 
 
@@ -201,3 +202,39 @@ def set_velocity(store: BodyOrParticleStore, i: wp.int32, v: wp.vec3f):
         store.bodies.velocity[i] = v
     else:
         store.particles.velocity[i - store.num_bodies] = v
+
+
+@wp.func
+def writeback_position_to_velocity(
+    store: BodyOrParticleStore,
+    i: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Recover velocity from the substep position delta at unified index ``i``.
+
+    POSITION_LEVEL constraints call this for every touched entity at
+    iterate exit so downstream consumers see velocity-consistent state.
+    Mirrors the ``Position -> Velocity`` branch of
+    :func:`~newton._src.solvers.phoenx.mass_splitting.state.tiny_rigid_state_synchronize`.
+
+    Particle branch: ``velocity = (position - position_substep_start) * inv_dt``;
+    pinned particles (``inverse_mass == 0``) skip.
+
+    Body branch: no-op. :class:`BodyContainer` does not yet carry
+    ``position_substep_start`` / ``orientation_substep_start``, and
+    :class:`SolverPhoenX` rejects POSITION_LEVEL rigid constraints at
+    registration. To enable: add the snapshot fields, swap this
+    branch for the linear + quaternion finite-diff (reuse
+    :func:`tiny_rigid_state_synchronize`), drop the host-side guard.
+    """
+    if is_particle(store, i):
+        i_p = i - store.num_bodies
+        if store.particles.inverse_mass[i_p] == wp.float32(0.0):
+            return
+        store.particles.velocity[i_p] = particle_recover_velocity(
+            store.particles.position[i_p],
+            store.particles.position_substep_start[i_p],
+            inv_dt,
+        )
+        return
+    return

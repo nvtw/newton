@@ -19,7 +19,12 @@ from newton._src.solvers.phoenx.body import (
     MOTION_STATIC,
     BodyContainer,
 )
-from newton._src.solvers.phoenx.body_or_particle import BodyOrParticleStore, get_inverse_mass, is_particle
+from newton._src.solvers.phoenx.body_or_particle import (
+    BodyOrParticleStore,
+    get_inverse_mass,
+    is_particle,
+    writeback_position_to_velocity,
+)
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     actuated_double_ball_socket_iterate,
     actuated_double_ball_socket_iterate_multi,
@@ -81,7 +86,6 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 from newton._src.solvers.phoenx.particle import (
     particle_predict_position,
-    particle_recover_velocity,
 )
 
 __all__ = [
@@ -1238,14 +1242,7 @@ def _integrate_velocities_kernel(
     """
     i = wp.tid()
     if is_particle(store, i):
-        i_p = i - store.num_bodies
-        if store.particles.inverse_mass[i_p] == wp.float32(0.0):
-            return
-        store.particles.velocity[i_p] = particle_recover_velocity(
-            store.particles.position[i_p],
-            store.particles.position_substep_start[i_p],
-            inv_dt,
-        )
+        writeback_position_to_velocity(store, i, inv_dt)
         return
     mt = store.bodies.motion_type[i]
     if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
