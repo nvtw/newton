@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.geometry.support_function import GeoTypeEx
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -30,6 +31,8 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     revolute_prepare_for_iteration,
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    cloth_triangle_get_body1,
+    cloth_triangle_get_body2,
     cloth_triangle_get_body3,
     cloth_triangle_iterate_at,
     cloth_triangle_prepare_for_iteration_at,
@@ -1945,3 +1948,77 @@ _constraint_iterate_singleworld_fused_revolute_cloth_kernel = _make_singleworld_
 _constraint_relax_singleworld_fused_revolute_cloth_kernel = _make_singleworld_fused_kernel(
     phase="relax", revolute_only=True, cloth_support=True
 )
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_compute_triangle_aabbs_and_indices_kernel(
+    constraints: ConstraintContainer,
+    cloth_cid_offset: int,
+    num_bodies: int,
+    particle_q: wp.array[wp.vec3],
+    cloth_margin: float,
+    rigid_shape_count: int,
+    # outputs (suffix [S, S+T) of the pipeline-owned arrays;
+    # tri_indices is length T).
+    aabb_lower: wp.array[wp.vec3],
+    aabb_upper: wp.array[wp.vec3],
+    geom_data: wp.array[wp.vec4],
+    geom_transform: wp.array[wp.transform],
+    tri_indices: wp.array[wp.vec4i],
+):
+    """Per-step fill of the cloth-triangle suffix in the pipeline's unified geom arrays.
+
+    Reads the cloth-triangle constraint rows
+    ``constraints[cloth_cid_offset + t]`` for ``t in [0, T)`` and writes:
+
+    * ``aabb_lower[S + t]`` / ``aabb_upper[S + t]`` -- world-space AABB of
+      the triangle expanded by ``cloth_margin`` in every direction.
+    * ``geom_data[S + t] = (B-A, cloth_margin)`` packed as ``vec4`` (xyz =
+      ``B - A`` edge, w = margin).  ``C - A`` is recoverable from the
+      transform; the layout follows the convention used by Newton's
+      narrow phase for triangle-like primitives.
+    * ``geom_transform[S + t] = (translation = A, rotation = identity)``
+      so the narrow phase can treat the vertex A as the local-frame
+      origin without baking in arbitrary triangle frames.
+    * ``tri_indices[t] = (pa, pb, pc, -1)`` -- particle indices for the
+      three triangle vertices; the 4th component is reserved for future
+      tetrahedron support.
+
+    Particle indices are derived from the unified body-or-particle
+    indices stored in the constraint by subtracting ``num_bodies``.
+    The rigid prefix ``[0, S)`` of the AABB / ``geom_*`` arrays is left
+    untouched -- it is filled by Newton's standard
+    ``compute_shape_aabbs`` kernel inside
+    :meth:`CollisionPipeline.collide_with_external_aabbs`.  Static
+    cloth-triangle metadata (``shape_type``, ``shape_gap``,
+    ``shape_world``, ``shape_collision_group``, ``shape_flags``) is
+    stamped once on the host at solver init.
+    """
+    t = wp.tid()
+    cid = cloth_cid_offset + t
+
+    body1 = cloth_triangle_get_body1(constraints, cid)
+    body2 = cloth_triangle_get_body2(constraints, cid)
+    body3 = cloth_triangle_get_body3(constraints, cid)
+
+    pa = body1 - num_bodies
+    pb = body2 - num_bodies
+    pc = body3 - num_bodies
+
+    va = particle_q[pa]
+    vb = particle_q[pb]
+    vc = particle_q[pc]
+
+    lo = wp.min(wp.min(va, vb), vc)
+    hi = wp.max(wp.max(va, vb), vc)
+    margin = wp.vec3(cloth_margin, cloth_margin, cloth_margin)
+
+    slot = rigid_shape_count + t
+    aabb_lower[slot] = lo - margin
+    aabb_upper[slot] = hi + margin
+
+    edge_ab = vb - va
+    geom_data[slot] = wp.vec4(edge_ab[0], edge_ab[1], edge_ab[2], cloth_margin)
+    geom_transform[slot] = wp.transform(va, wp.quat_identity())
+
+    tri_indices[t] = wp.vec4i(pa, pb, pc, -1)

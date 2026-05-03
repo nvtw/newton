@@ -417,7 +417,7 @@ def _compute_per_world_shape_pairs_max(model: Model) -> int:
     return max(0, total)
 
 
-def _resolve_shape_pairs_max(model: Model, override: int | None) -> int:
+def _resolve_shape_pairs_max(model: Model, override: int | None, extra_shape_count: int = 0) -> int:
     """Pick the broad-phase candidate-pair buffer capacity.
 
     ``override`` lets the caller cap the SAP/NXN pair buffer, which is
@@ -429,8 +429,17 @@ def _resolve_shape_pairs_max(model: Model, override: int | None) -> int:
     use ``None`` instead -- and values larger than the natural bound
     are silently clamped down (allocating beyond the bound is just
     burning memory, never required).
+
+    ``extra_shape_count`` reserves additional candidate-pair capacity
+    for caller-injected virtual shapes (e.g. PhoenX cloth triangles
+    fed via :meth:`CollisionPipeline.collide_with_external_aabbs`).
+    The bump is conservative: ``E*(E-1)/2`` self-pairs plus ``E*N``
+    cross-pairs against the rigid set.
     """
     natural = _compute_per_world_shape_pairs_max(model)
+    if extra_shape_count > 0:
+        n_rigid = int(model.shape_count)
+        natural += extra_shape_count * (extra_shape_count - 1) // 2 + extra_shape_count * n_rigid
     if override is None:
         return natural
     if override <= 0:
@@ -507,6 +516,9 @@ class CollisionPipeline:
         contact_matching_normal_dot_threshold: float = 0.995,
         contact_report: bool = False,
         verify_buffers: bool = True,
+        extra_shape_count: int = 0,
+        unified_shape_world: wp.array[int] | None = None,
+        unified_shape_flags: wp.array[int] | None = None,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -577,6 +589,25 @@ class CollisionPipeline:
                 ``True``.  Overhead is one extra kernel launch per collision
                 pass; disable in hot loops or CUDA graph capture once buffer
                 sizes are known to be adequate.
+            extra_shape_count: Reserve broad-phase candidate-pair capacity for
+                this many caller-managed virtual shapes appended after the
+                rigid prefix when invoking
+                :meth:`collide_with_external_aabbs`.  The pipeline itself
+                does not allocate per-shape arrays for the virtual slots --
+                the caller owns the unified AABB / shape_world / collision-group
+                arrays and any virtual-shape narrow-phase logic.  Defaults
+                to ``0``.
+            unified_shape_world: Optional length-``S+extra_shape_count``
+                ``shape_world`` array used to build the NXN / SAP broad
+                phase's per-world index map.  Required (together with
+                ``unified_shape_flags``) when ``extra_shape_count > 0`` and
+                using a non-explicit broad phase, so that the suffix slots
+                are visible to the broad phase.  Defaults to
+                ``model.shape_world``.
+            unified_shape_flags: Optional length-``S+extra_shape_count``
+                ``shape_flags`` array used by the broad phase to filter
+                shapes by ``COLLIDE_SHAPES``.  Counterpart to
+                ``unified_shape_world``; defaults to ``model.shape_flags``.
 
         .. note::
             When ``requires_grad`` is true (explicitly or via ``model.requires_grad``),
@@ -627,17 +658,49 @@ class CollisionPipeline:
         self._rigid_contact_max = rigid_contact_max
         if max_triangle_pairs <= 0:
             raise ValueError("max_triangle_pairs must be > 0")
+        if extra_shape_count < 0:
+            raise ValueError(f"extra_shape_count must be >= 0 (got {extra_shape_count})")
+        self.extra_shape_count = int(extra_shape_count)
         # Keep model-level default in sync with the resolved pipeline capacity.
         # This avoids divergence between model- and contacts-based users (e.g. VBD init).
         model.rigid_contact_max = rigid_contact_max
         if requires_grad is None:
             requires_grad = model.requires_grad
 
-        shape_world = getattr(model, "shape_world", None)
-        shape_flags = getattr(model, "shape_flags", None)
+        # When ``extra_shape_count > 0`` the broad phase reads
+        # caller-supplied ``shape_world`` / ``shape_flags`` arrays
+        # extended to ``S + extra_shape_count`` so the virtual-shape
+        # suffix is visible to the per-world index map; otherwise we
+        # fall back to ``model.shape_*`` (legacy path).
+        if self.extra_shape_count > 0:
+            expected_len = model.shape_count + self.extra_shape_count
+            if unified_shape_world is None:
+                raise ValueError("unified_shape_world is required when extra_shape_count > 0")
+            if unified_shape_world.shape[0] != expected_len:
+                raise ValueError(
+                    f"unified_shape_world must have length S+extra_shape_count "
+                    f"({expected_len}); got {unified_shape_world.shape[0]}"
+                )
+            if unified_shape_flags is not None and unified_shape_flags.shape[0] != expected_len:
+                raise ValueError(
+                    f"unified_shape_flags must have length S+extra_shape_count "
+                    f"({expected_len}); got {unified_shape_flags.shape[0]}"
+                )
+            shape_world = unified_shape_world
+            shape_flags = unified_shape_flags if unified_shape_flags is not None else getattr(model, "shape_flags", None)
+        else:
+            shape_world = getattr(model, "shape_world", None)
+            shape_flags = getattr(model, "shape_flags", None)
+
+        # When ``extra_shape_count > 0`` the per-shape AABB arrays are
+        # extended to length ``S + extra_shape_count`` so suffix slots
+        # populated by :meth:`collide_with_external_aabbs` land in
+        # valid memory.  Rigid-only scenes keep the original
+        # length-``S`` allocation.
+        aabb_count = shape_count + self.extra_shape_count
         with wp.ScopedDevice(device):
-            shape_aabb_lower = wp.zeros(shape_count, dtype=wp.vec3, device=device)
-            shape_aabb_upper = wp.zeros(shape_count, dtype=wp.vec3, device=device)
+            shape_aabb_lower = wp.zeros(aabb_count, dtype=wp.vec3, device=device)
+            shape_aabb_upper = wp.zeros(aabb_count, dtype=wp.vec3, device=device)
 
         self.model = model
         self.shape_count = shape_count
@@ -671,7 +734,7 @@ class CollisionPipeline:
                 self.shape_pairs_excluded_count = 0
             else:
                 self.shape_pairs_filtered = None
-                self.shape_pairs_max = _compute_per_world_shape_pairs_max(model)
+                self.shape_pairs_max = _resolve_shape_pairs_max(model, None, self.extra_shape_count)
                 self.shape_pairs_excluded = self._build_excluded_pairs(model)
                 self.shape_pairs_excluded_count = (
                     self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
@@ -711,7 +774,7 @@ class CollisionPipeline:
                     raise ValueError("model.shape_world is required for broad_phase=NXN")
                 self.broad_phase = BroadPhaseAllPairs(shape_world, shape_flags=shape_flags, device=device)
                 self.shape_pairs_filtered = None
-                self.shape_pairs_max = _resolve_shape_pairs_max(model, shape_pairs_max)
+                self.shape_pairs_max = _resolve_shape_pairs_max(model, shape_pairs_max, self.extra_shape_count)
                 self.shape_pairs_excluded = self._build_excluded_pairs(model)
                 self.shape_pairs_excluded_count = (
                     self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
@@ -721,7 +784,7 @@ class CollisionPipeline:
                     raise ValueError("model.shape_world is required for broad_phase=SAP")
                 self.broad_phase = BroadPhaseSAP(shape_world, shape_flags=shape_flags, device=device)
                 self.shape_pairs_filtered = None
-                self.shape_pairs_max = _resolve_shape_pairs_max(model, shape_pairs_max)
+                self.shape_pairs_max = _resolve_shape_pairs_max(model, shape_pairs_max, self.extra_shape_count)
                 self.shape_pairs_excluded = self._build_excluded_pairs(model)
                 self.shape_pairs_excluded_count = (
                     self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
@@ -787,27 +850,39 @@ class CollisionPipeline:
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
-        # Allocate buffers
+        # Allocate buffers.  ``geom_data`` / ``geom_transform`` carry
+        # the same ``[0, S+E)`` layout as the AABB arrays; the rigid
+        # prefix is written each step by ``compute_shape_aabbs`` and
+        # the suffix by the caller's own per-virtual-shape kernel
+        # (typically just ahead of
+        # :meth:`collide_with_external_aabbs`).
         with wp.ScopedDevice(device):
             self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
             self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
-            self.geom_data = wp.zeros(shape_count, dtype=wp.vec4, device=device)
-            self.geom_transform = wp.zeros(shape_count, dtype=wp.transform, device=device)
+            self.geom_data = wp.zeros(aabb_count, dtype=wp.vec4, device=device)
+            self.geom_transform = wp.zeros(aabb_count, dtype=wp.transform, device=device)
+
+        # Pipeline-owned ``S+E`` per-shape arrays consumed by the narrow
+        # phase when running :meth:`collide_with_external_aabbs`.  Built
+        # only when ``extra_shape_count > 0``; the standard
+        # :meth:`collide` path reads ``model.shape_*`` directly.
+        if self.extra_shape_count > 0:
+            self._build_unified_per_shape_arrays(model, device, shape_world=shape_world, shape_flags=shape_flags)
 
         if (
             getattr(self.narrow_phase, "shape_aabb_lower", None) is None
             or getattr(self.narrow_phase, "shape_aabb_upper", None) is None
         ):
             raise ValueError("narrow_phase must expose shape_aabb_lower and shape_aabb_upper arrays")
-        if self.narrow_phase.shape_aabb_lower.shape[0] != shape_count:
+        if self.narrow_phase.shape_aabb_lower.shape[0] != aabb_count:
             raise ValueError(
-                "narrow_phase.shape_aabb_lower must have one entry per model shape "
-                f"(expected {shape_count}, got {self.narrow_phase.shape_aabb_lower.shape[0]})"
+                "narrow_phase.shape_aabb_lower must have one entry per shape "
+                f"(expected {aabb_count}, got {self.narrow_phase.shape_aabb_lower.shape[0]})"
             )
-        if self.narrow_phase.shape_aabb_upper.shape[0] != shape_count:
+        if self.narrow_phase.shape_aabb_upper.shape[0] != aabb_count:
             raise ValueError(
-                "narrow_phase.shape_aabb_upper must have one entry per model shape "
-                f"(expected {shape_count}, got {self.narrow_phase.shape_aabb_upper.shape[0]})"
+                "narrow_phase.shape_aabb_upper must have one entry per shape "
+                f"(expected {aabb_count}, got {self.narrow_phase.shape_aabb_upper.shape[0]})"
             )
 
         if soft_contact_max is None:
@@ -883,6 +958,82 @@ class CollisionPipeline:
         # attach custom attributes with assignment==CONTACT
         self.model._add_custom_attributes(contacts, Model.AttributeAssignment.CONTACT, requires_grad=self.requires_grad)
         return contacts
+
+    def _build_unified_per_shape_arrays(
+        self,
+        model: Model,
+        device,
+        *,
+        shape_world: wp.array[int],
+        shape_flags: wp.array[int] | None,
+    ) -> None:
+        """Allocate the length ``S+extra_shape_count`` per-shape arrays
+        consumed by :meth:`collide_with_external_aabbs` and seed the
+        rigid prefix from ``model.shape_*``.
+
+        ``shape_world`` and ``shape_flags`` are adopted from the
+        caller-supplied broad-phase inputs (the broad phase has already
+        captured them at construction time).  The remaining arrays
+        (``shape_type``, ``shape_gap``, ``shape_collision_group``,
+        ``shape_collision_radius``, ``shape_source_ptr``,
+        ``shape_sdf_index``, ``shape_heightfield_index``,
+        ``shape_collision_aabb_*``) have their suffix ``[S, S+E)``
+        stamped by the caller after construction.  Per-step suffix
+        updates (AABBs, ``geom_data``, ``geom_transform``) are written
+        by the caller right before invoking
+        :meth:`collide_with_external_aabbs`.
+        """
+        S = model.shape_count
+        E = self.extra_shape_count
+        total = S + E
+
+        def _extend_int(src: wp.array[int] | None, fill: int) -> wp.array[int]:
+            out = wp.zeros(total, dtype=wp.int32, device=device)
+            if src is not None and S > 0:
+                wp.copy(out, src, count=S)
+            if fill != 0:
+                arr = out.numpy()
+                arr[S:] = fill
+                out.assign(arr)
+            return out
+
+        def _extend_float(src: wp.array[float] | None, fill: float) -> wp.array[float]:
+            out = wp.zeros(total, dtype=wp.float32, device=device)
+            if src is not None and S > 0:
+                wp.copy(out, src, count=S)
+            if fill != 0.0:
+                arr = out.numpy()
+                arr[S:] = fill
+                out.assign(arr)
+            return out
+
+        def _extend_uint64(src: wp.array | None) -> wp.array:
+            out = wp.zeros(total, dtype=wp.uint64, device=device)
+            if src is not None and S > 0:
+                wp.copy(out, src, count=S)
+            return out
+
+        def _extend_vec3(src: wp.array | None) -> wp.array:
+            out = wp.zeros(total, dtype=wp.vec3, device=device)
+            if src is not None and S > 0:
+                wp.copy(out, src, count=S)
+            return out
+
+        with wp.ScopedDevice(device):
+            self.unified_shape_type = _extend_int(model.shape_type, 0)
+            self.unified_shape_gap = _extend_float(model.shape_gap, 0.0)
+            self.unified_shape_collision_radius = _extend_float(model.shape_collision_radius, 0.0)
+            self.unified_shape_source_ptr = _extend_uint64(model.shape_source_ptr)
+            self.unified_shape_sdf_index = _extend_int(getattr(model, "shape_sdf_index", None), -1)
+            self.unified_shape_heightfield_index = _extend_int(getattr(model, "shape_heightfield_index", None), -1)
+            self.unified_shape_collision_aabb_lower = _extend_vec3(model.shape_collision_aabb_lower)
+            self.unified_shape_collision_aabb_upper = _extend_vec3(model.shape_collision_aabb_upper)
+            self.unified_shape_collision_group = _extend_int(model.shape_collision_group, 0)
+        # ``shape_world`` / ``shape_flags`` were captured by the broad
+        # phase at construction time; reuse them so caller-side stamps
+        # remain authoritative.
+        self.unified_shape_world = shape_world
+        self.unified_shape_flags = shape_flags
 
     @staticmethod
     def _build_excluded_pairs(model: Model) -> wp.array[wp.vec2i] | None:
@@ -979,15 +1130,52 @@ class CollisionPipeline:
             record_tape=False,
         )
 
-        # Run broad phase (AABBs are already expanded by effective gaps, so pass None)
+        self._run_broad_phase(
+            shape_collision_group=model.shape_collision_group,
+            shape_world=model.shape_world,
+            shape_count=model.shape_count,
+        )
+
+        self._run_narrow_phase_and_post(
+            state=state,
+            contacts=contacts,
+            shape_type=model.shape_type,
+            shape_source_ptr=model.shape_source_ptr,
+            shape_sdf_index=model.shape_sdf_index,
+            shape_gap=model.shape_gap,
+            shape_collision_radius=model.shape_collision_radius,
+            shape_flags=model.shape_flags,
+            shape_collision_aabb_lower=model.shape_collision_aabb_lower,
+            shape_collision_aabb_upper=model.shape_collision_aabb_upper,
+            shape_heightfield_index=model.shape_heightfield_index,
+        )
+
+        self._generate_soft_contacts(state, contacts, soft_contact_margin)
+
+    def _run_broad_phase(
+        self,
+        *,
+        shape_collision_group: wp.array[int],
+        shape_world: wp.array[int],
+        shape_count: int,
+    ) -> None:
+        """Dispatch to the configured broad phase.
+
+        Reads AABBs from :attr:`narrow_phase.shape_aabb_lower/upper`
+        and writes candidate pairs to :attr:`broad_phase_shape_pairs`
+        / :attr:`broad_phase_pair_count`.  AABBs are assumed
+        pre-expanded by per-shape effective gaps so no additional
+        margin is forwarded; the pair counter must be zeroed by the
+        caller (e.g. via the fused ``compute_shape_aabbs`` path).
+        """
         if isinstance(self.broad_phase, BroadPhaseAllPairs):
             self.broad_phase.launch(
                 self.narrow_phase.shape_aabb_lower,
                 self.narrow_phase.shape_aabb_upper,
                 None,  # AABBs are pre-expanded, no additional margin needed
-                model.shape_collision_group,
-                model.shape_world,
-                model.shape_count,
+                shape_collision_group,
+                shape_world,
+                shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=self.device,
@@ -1000,9 +1188,9 @@ class CollisionPipeline:
                 self.narrow_phase.shape_aabb_lower,
                 self.narrow_phase.shape_aabb_upper,
                 None,  # AABBs are pre-expanded, no additional margin needed
-                model.shape_collision_group,
-                model.shape_world,
-                model.shape_count,
+                shape_collision_group,
+                shape_world,
+                shape_count,
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
                 device=self.device,
@@ -1023,12 +1211,42 @@ class CollisionPipeline:
                 skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
             )
 
+    def _run_narrow_phase_and_post(
+        self,
+        *,
+        state: State,
+        contacts: Contacts,
+        shape_type: wp.array[int],
+        shape_source_ptr: wp.array,
+        shape_sdf_index: wp.array[int] | None,
+        shape_gap: wp.array[float],
+        shape_collision_radius: wp.array[float],
+        shape_flags: wp.array[int] | None,
+        shape_collision_aabb_lower: wp.array[wp.vec3],
+        shape_collision_aabb_upper: wp.array[wp.vec3],
+        shape_heightfield_index: wp.array[int] | None,
+    ) -> None:
+        """Run the narrow phase + contact post-processing.
+
+        Per-shape array parameters let callers route either
+        ``model.shape_*`` (the standard :meth:`collide` path) or the
+        extended ``self.unified_shape_*`` arrays (the
+        :meth:`collide_with_external_aabbs` path) without duplicating
+        the post-processing tail.  Reads candidate pairs from
+        :attr:`broad_phase_shape_pairs` /
+        :attr:`broad_phase_pair_count`.  Particle-vs-shape soft
+        contacts are NOT generated here -- callers that need them
+        (currently only :meth:`collide`) launch
+        :meth:`_generate_soft_contacts` separately.
+        """
+        model = self.model
+
         # Create ContactWriterData struct for custom contact writing
         writer_data = ContactWriterData()
         writer_data.contact_max = contacts.rigid_contact_max
         writer_data.body_q = state.body_q
         writer_data.shape_body = model.shape_body
-        writer_data.shape_gap = model.shape_gap
+        writer_data.shape_gap = shape_gap
         writer_data.contact_count = contacts.rigid_contact_count
         writer_data.out_shape0 = contacts.rigid_contact_shape0
         writer_data.out_shape1 = contacts.rigid_contact_shape1
@@ -1058,19 +1276,19 @@ class CollisionPipeline:
         self.narrow_phase.launch_custom_write(
             candidate_pair=self.broad_phase_shape_pairs,
             candidate_pair_count=self.broad_phase_pair_count,
-            shape_types=model.shape_type,
+            shape_types=shape_type,
             shape_data=self.geom_data,
             shape_transform=self.geom_transform,
-            shape_source=model.shape_source_ptr,
-            shape_sdf_index=model.shape_sdf_index,
+            shape_source=shape_source_ptr,
+            shape_sdf_index=shape_sdf_index,
             texture_sdf_data=model.texture_sdf_data,
-            shape_gap=model.shape_gap,
-            shape_collision_radius=model.shape_collision_radius,
-            shape_flags=model.shape_flags,
-            shape_collision_aabb_lower=model.shape_collision_aabb_lower,
-            shape_collision_aabb_upper=model.shape_collision_aabb_upper,
+            shape_gap=shape_gap,
+            shape_collision_radius=shape_collision_radius,
+            shape_flags=shape_flags,
+            shape_collision_aabb_lower=shape_collision_aabb_lower,
+            shape_collision_aabb_upper=shape_collision_aabb_upper,
             shape_voxel_resolution=self.narrow_phase.shape_voxel_resolution,
-            shape_heightfield_index=model.shape_heightfield_index,
+            shape_heightfield_index=shape_heightfield_index,
             heightfield_data=model.heightfield_data,
             heightfield_elevations=model.heightfield_elevations,
             mesh_edge_indices=model.mesh_edge_indices,
@@ -1190,7 +1408,16 @@ class CollisionPipeline:
                 device=self.device,
             )
 
-        # Generate soft contacts for particles and shapes
+    def _generate_soft_contacts(self, state: State, contacts: Contacts, soft_contact_margin: float) -> None:
+        """Generate particle-vs-shape soft contacts.
+
+        Skipped by :meth:`collide_with_external_aabbs` because solvers
+        that route through that entry point (e.g. PhoenX) treat
+        particles purely as positional state for cloth nodes, not as
+        independent collision primitives -- cloth-rigid contacts flow
+        through the virtual-shape triangle path instead.
+        """
+        model = self.model
         particle_count = len(state.particle_q) if state.particle_q else 0
         if state.particle_q and model.shape_count > 0:
             wp.launch(
@@ -1227,3 +1454,107 @@ class CollisionPipeline:
                 ],
                 device=self.device,
             )
+
+    def collide_with_external_aabbs(
+        self,
+        state: State,
+        contacts: Contacts,
+    ) -> None:
+        """Run collision detection over the unified rigid + virtual-shape set.
+
+        Requires the pipeline to have been constructed with
+        ``extra_shape_count > 0``.  The pipeline owns length-``S+E``
+        per-shape arrays exposed as ``self.unified_shape_*``; the
+        rigid prefix ``[0, S)`` is seeded once at construction from
+        ``model.shape_*``, and the caller (e.g. PhoenX) stamps the
+        suffix ``[S, S+E)``:
+
+        * **once** at solver init for static metadata
+          (``unified_shape_type``, ``unified_shape_gap``,
+          ``unified_shape_collision_group``,
+          ``unified_shape_collision_radius``, etc.);
+        * **per step**, just before calling this method, for dynamic
+          quantities (suffix of :attr:`narrow_phase.shape_aabb_lower` /
+          :attr:`narrow_phase.shape_aabb_upper` / :attr:`geom_data` /
+          :attr:`geom_transform`).
+
+        The pipeline writes the rigid prefix ``[0, S)`` of the AABB /
+        ``geom_*`` arrays each step via :func:`compute_shape_aabbs`,
+        then runs the normal broad + narrow phase over the full
+        ``S+E`` set.  Virtual shapes (e.g. ``GeoTypeEx.TRIANGLE``) are
+        handled by the narrow-phase exactly like any other geometry
+        type.
+
+        Particle-vs-shape soft contacts (``contacts.soft_contact_*``)
+        are intentionally **not** generated by this entry point:
+        solvers that route through it (PhoenX) treat
+        ``state.particle_q`` as positional state for cloth nodes only,
+        not as standalone collision primitives -- cloth-rigid contacts
+        flow through the virtual-shape triangle path.
+
+        Args:
+            state: Current simulation state.
+            contacts: Rigid contacts buffer to populate.
+        """
+        if self.extra_shape_count == 0:
+            raise RuntimeError(
+                "collide_with_external_aabbs requires the CollisionPipeline to be "
+                "constructed with extra_shape_count > 0; use collide() for rigid-only scenes"
+            )
+        if contacts.clear_buffers:
+            contacts.clear(bump_generation=False)
+
+        model = self.model
+
+        # Fused AABB / counter-zero / generation-bump kernel writes the
+        # rigid prefix [0, S) of the unified AABB / geom_* arrays.  The
+        # suffix [S, S+E) was stamped by the caller just before this call.
+        wp.launch(
+            kernel=compute_shape_aabbs,
+            dim=model.shape_count,
+            inputs=[
+                state.body_q,
+                model.shape_transform,
+                model.shape_body,
+                model.shape_type,
+                model.shape_scale,
+                model.shape_collision_radius,
+                model.shape_source_ptr,
+                model.shape_margin,
+                model.shape_gap,
+                model.shape_collision_aabb_lower,
+                model.shape_collision_aabb_upper,
+                contacts.contact_counters,
+                contacts.contact_generation,
+                self.broad_phase_pair_count,
+                contacts.contact_counters.shape[0],
+            ],
+            outputs=[
+                self.narrow_phase.shape_aabb_lower,
+                self.narrow_phase.shape_aabb_upper,
+                self.geom_data,
+                self.geom_transform,
+            ],
+            device=self.device,
+            record_tape=False,
+        )
+
+        self._run_broad_phase(
+            shape_collision_group=self.unified_shape_collision_group,
+            shape_world=self.unified_shape_world,
+            shape_count=model.shape_count + self.extra_shape_count,
+        )
+
+        self._run_narrow_phase_and_post(
+            state=state,
+            contacts=contacts,
+            shape_type=self.unified_shape_type,
+            shape_source_ptr=self.unified_shape_source_ptr,
+            shape_sdf_index=self.unified_shape_sdf_index,
+            shape_gap=self.unified_shape_gap,
+            shape_collision_radius=self.unified_shape_collision_radius,
+            shape_flags=self.unified_shape_flags,
+            shape_collision_aabb_lower=self.unified_shape_collision_aabb_lower,
+            shape_collision_aabb_upper=self.unified_shape_collision_aabb_upper,
+            shape_heightfield_index=self.unified_shape_heightfield_index,
+        )
