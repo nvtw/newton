@@ -68,6 +68,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent2_lambda,
 )
 from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    ENDPOINT_KIND_TRIANGLE,
     endpoint_apply_impulse,
     endpoint_load,
     endpoint_warmstart_apply_impulse,
@@ -723,43 +724,59 @@ def contact_prepare_for_iteration_at(
         else:
             cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
 
-        # Warm-start impulse: scatter per contact via the endpoint
-        # helper. Loses the rigid pair's batched scatter, but keeps
-        # the math identical and works uniformly for triangles. Graph
-        # coloring guarantees no two cids in one colour share an
-        # endpoint, so the plain stores are race-free.
-        lam_n = cc_get_normal_lambda(cc, k)
-        lam_t1 = cc_get_tangent1_lambda(cc, k)
-        lam_t2 = cc_get_tangent2_lambda(cc, k)
-        imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
-        endpoint_warmstart_apply_impulse(
-            kind1,
-            idx1,
-            local_p0,
-            imp,
-            wp.cross(ep1.r, imp),
-            ep1.inv_mass,
-            ep1.inv_inertia,
-            wp.float32(-1.0),
-            dt_substep,
-            bodies,
-            particles,
-            tri_indices,
-        )
-        endpoint_warmstart_apply_impulse(
-            kind2,
-            idx2,
-            local_p1,
-            imp,
-            wp.cross(ep2.r, imp),
-            ep2.inv_mass,
-            ep2.inv_inertia,
-            wp.float32(+1.0),
-            dt_substep,
-            bodies,
-            particles,
-            tri_indices,
-        )
+        # Warm-start impulse: scatter ``lam_old`` as a re-applied
+        # impulse so the first iteration starts at the prev-step's
+        # solution.  This is standard Box2D-v3 behavior and is
+        # essential for rigid-rigid stacking convergence (without
+        # it, mu=0.1 sliding tests collapse to ~0 m of travel).
+        #
+        # CAVEAT: when *either* endpoint is a TRIANGLE (cloth
+        # particle), the per-vertex inverse mass is huge relative
+        # to the rigid endpoint's, so re-applying ``lam_old`` as an
+        # impulse on the cloth side translates the previous
+        # substep's contact force into a 10-30 m/s velocity kick
+        # per substep -- the cloth then "walks up" off the rigid
+        # surface across substeps (see
+        # ``scratch_systematic_debug.py``, hypothesis 1).  The
+        # PGS iterate's ``d_lam = lam_new - lam_old`` formulation
+        # already uses ``lam_old`` as the per-cid initial guess, so
+        # for cloth-involved contacts we skip the warmstart impulse
+        # but keep the lambda as the initial guess.  Rigid-rigid
+        # pairs are bit-for-bit unchanged.
+        triangle_endpoint = (kind1 == ENDPOINT_KIND_TRIANGLE) or (kind2 == ENDPOINT_KIND_TRIANGLE)
+        if not triangle_endpoint:
+            lam_n = cc_get_normal_lambda(cc, k)
+            lam_t1 = cc_get_tangent1_lambda(cc, k)
+            lam_t2 = cc_get_tangent2_lambda(cc, k)
+            imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
+            endpoint_warmstart_apply_impulse(
+                kind1,
+                idx1,
+                local_p0,
+                imp,
+                wp.cross(ep1.r, imp),
+                ep1.inv_mass,
+                ep1.inv_inertia,
+                wp.float32(-1.0),
+                dt_substep,
+                bodies,
+                particles,
+                tri_indices,
+            )
+            endpoint_warmstart_apply_impulse(
+                kind2,
+                idx2,
+                local_p1,
+                imp,
+                wp.cross(ep2.r, imp),
+                ep2.inv_mass,
+                ep2.inv_inertia,
+                wp.float32(+1.0),
+                dt_substep,
+                bodies,
+                particles,
+                tri_indices,
+            )
 
 
 @wp.func
