@@ -145,8 +145,53 @@ def _triangle_point_velocity(
     pc: wp.int32,
     bary: wp.vec3f,
 ) -> wp.vec3f:
-    """World linear velocity at a barycentric point on a triangle."""
+    """World linear velocity at a barycentric point on a triangle.
+
+    Reads :attr:`ParticleContainer.velocity` directly. Use this only
+    where the read is access-mode-safe (warm-start at substep start,
+    where ``position == position_substep_start``). Inside the iterate
+    the cloth constraint has already advanced ``particles.position``
+    without writing back to ``particles.velocity`` (the substep-end
+    finite-diff defers velocity recovery), so the velocity store is
+    stale; iterate-time consumers must use
+    :func:`_triangle_point_velocity_substep` instead.
+    """
     return bary[0] * particles.velocity[pa] + bary[1] * particles.velocity[pb] + bary[2] * particles.velocity[pc]
+
+
+@wp.func
+def _triangle_point_velocity_substep(
+    particles: ParticleContainer,
+    pa: wp.int32,
+    pb: wp.int32,
+    pc: wp.int32,
+    bary: wp.vec3f,
+    idt: wp.float32,
+) -> wp.vec3f:
+    """Iterate-time triangle-point velocity via lazy position-level sync.
+
+    Mirrors Jitter2's ``SetAccessMode(VelocityLevel)`` lazy synchronization:
+    inside a substep the cloth iterate runs in Position-level mode --
+    it edits :attr:`ParticleContainer.position` while leaving
+    :attr:`ParticleContainer.velocity` at its substep-entry value.
+    A consumer that needs an up-to-date velocity (the rigid-vs-triangle
+    contact iterate) must derive it on read from the
+    position-substep-start delta:
+
+    .. code-block:: text
+
+        v_p = (position[p] - position_substep_start[p]) * inv_substep_dt
+
+    This matches the substep-exit recovery kernel
+    (:func:`solver_phoenx_kernels._integrate_velocities_kernel`) exactly,
+    so a contact iterate that reads through this helper sees the same
+    velocity the next substep will start from. See
+    ``CONSTRAINT_ACCESS_MODE.md`` for the full contract.
+    """
+    va = (particles.position[pa] - particles.position_substep_start[pa]) * idt
+    vb = (particles.position[pb] - particles.position_substep_start[pb]) * idt
+    vc = (particles.position[pc] - particles.position_substep_start[pc]) * idt
+    return bary[0] * va + bary[1] * vb + bary[2] * vc
 
 
 @wp.func
@@ -185,11 +230,18 @@ def endpoint_load(
     margin: wp.float32,
     margin_sign: wp.float32,
     n: wp.vec3f,
+    idt: wp.float32,
     bodies: BodyContainer,
     particles: ParticleContainer,
     tri_indices: wp.array[wp.vec4i],
 ) -> EndpointState:
     """Build the per-contact state for one endpoint.
+
+    Iterate-time loader: triangle endpoints read velocity through the
+    Position-level lazy-sync helper
+    (:func:`_triangle_point_velocity_substep`), so the value stays
+    consistent with the cloth iterate's in-progress position writes.
+    See ``CONSTRAINT_ACCESS_MODE.md``.
 
     Args:
         kind: :data:`ENDPOINT_KIND_RIGID` or
@@ -203,6 +255,9 @@ def endpoint_load(
             sign convention in :func:`contact_iterate_at`.
         n: World-space contact normal (pointing endpoint 1 ->
             endpoint 2). Used to apply the surface-margin shift.
+        idt: Inverse substep dt ``[1/s]``. Drives the triangle's
+            position-level velocity recovery
+            ``v = (position - position_substep_start) * idt``.
         bodies: Rigid-body SoA (read).
         particles: Particle SoA (read; triangle endpoints only).
         tri_indices: Per-triangle ``vec4i`` particle indices
@@ -234,7 +289,7 @@ def endpoint_load(
     # along the contact normal -- the triangle endpoint has no
     # body-local frame, so the margin shift IS the only correction.
     out.p_world = _triangle_world_point(particles, pa, pb, pc, local_anchor) + margin_sign * margin * n
-    out.v = _triangle_point_velocity(particles, pa, pb, pc, local_anchor)
+    out.v = _triangle_point_velocity_substep(particles, pa, pb, pc, local_anchor, idt)
     out.w = wp.vec3f(0.0, 0.0, 0.0)
     out.r = wp.vec3f(0.0, 0.0, 0.0)
     out.inv_mass = _triangle_point_inv_mass(particles, pa, pb, pc, local_anchor)
@@ -252,6 +307,7 @@ def endpoint_apply_impulse(
     inv_inertia: wp.mat33f,
     r: wp.vec3f,
     sign: wp.float32,
+    dt: wp.float32,
     bodies: BodyContainer,
     particles: ParticleContainer,
     tri_indices: wp.array[wp.vec4i],
@@ -268,6 +324,8 @@ def endpoint_apply_impulse(
         imp: World-space impulse [N*s].
         inv_mass / inv_inertia / r: Endpoint mass-matrix entries.
         sign: ``+1`` for endpoint 2, ``-1`` for endpoint 1.
+        dt: Substep dt ``[s]``. Currently unused; reserved for the
+            Jitter2-style position-level write under investigation.
     """
     if kind == ENDPOINT_KIND_RIGID:
         bodies.velocity[idx] = bodies.velocity[idx] + sign * inv_mass * imp
@@ -296,6 +354,7 @@ def endpoint_warmstart_apply_impulse(
     inv_mass: wp.float32,
     inv_inertia: wp.mat33f,
     sign: wp.float32,
+    dt: wp.float32,
     bodies: BodyContainer,
     particles: ParticleContainer,
     tri_indices: wp.array[wp.vec4i],

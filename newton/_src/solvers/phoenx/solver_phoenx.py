@@ -134,6 +134,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
+    _phoenx_compute_triangle_aabbs_and_indices_kernel,
     _phoenx_init_cloth_triangle_rows_kernel,
     _phoenx_refresh_world_inertia_kernel,
     _phoenx_update_inertia_and_clear_forces_kernel,
@@ -147,9 +148,53 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
 
 __all__ = [
     "DEFAULT_SHAPE_GAP",
+    "PhoenXClothFilterData",
     "PhoenXWorld",
     "pack_body_xforms_kernel",
+    "phoenx_cloth_share_vertex_filter",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Cloth broad-phase filter
+# ---------------------------------------------------------------------------
+# Drops cloth-triangle pairs that share a vertex.  Adjacent triangles can
+# never produce a meaningful self-contact, but their AABBs almost always
+# overlap; without this filter the broad phase emits one candidate per
+# fan-edge.
+
+
+@wp.struct
+class PhoenXClothFilterData:
+    """Runtime data for :func:`phoenx_cloth_share_vertex_filter`.
+
+    ``num_rigid_shapes`` is ``model.shape_count`` (the boundary between
+    rigid and triangle shape indices in the unified ``S+T`` shape space).
+    ``tri_indices`` is the world-owned ``vec4i`` array of triangle
+    vertex indices (4th component is unused for triangles).
+    """
+
+    num_rigid_shapes: wp.int32
+    tri_indices: wp.array[wp.vec4i]
+
+
+@wp.func
+def phoenx_cloth_share_vertex_filter(pair: wp.vec2i, data: PhoenXClothFilterData) -> wp.int32:
+    """Return ``0`` when both endpoints are triangles sharing a vertex."""
+    s1 = pair[0]
+    s2 = pair[1]
+    if s1 < data.num_rigid_shapes or s2 < data.num_rigid_shapes:
+        return wp.int32(1)
+    t1 = s1 - data.num_rigid_shapes
+    t2 = s2 - data.num_rigid_shapes
+    vi = data.tri_indices[t1]
+    vj = data.tri_indices[t2]
+    for a in range(3):
+        ai = vi[a]
+        for b in range(3):
+            if ai == vj[b]:
+                return wp.int32(0)
+    return wp.int32(1)
 
 
 #: Default contact-detection gap [m] for shapes in PhoenX scenes.
@@ -181,6 +226,184 @@ def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]
             data.append((float(r[0]), float(r[1]), float(r[2])))
     arr_np = np.asarray(data, dtype=np.float32)
     return wp.array(arr_np, dtype=wp.vec3f, device=device)
+
+
+def _estimate_rigid_contact_max_phoenx(model) -> int | None:
+    """Tight ``rigid_contact_max`` estimate for the PhoenX solver.
+
+    Uses the precomputed ``model.shape_contact_pair_count`` (already
+    ``COLLIDE_SHAPES``-filtered) * primitive-CPP narrow-phase cap * 2
+    safety, rather than Newton's default ``num_meshes * 20 * 40``
+    which over-counts non-colliding visual meshes by ~7x in humanoid
+    scenes. Returns ``None`` when the pair count isn't available so
+    the caller falls back to Newton's default.
+    """
+    pair_count = int(getattr(model, "shape_contact_pair_count", 0) or 0)
+    if pair_count <= 0:
+        return None
+
+    # PhoenX's narrow phase uses the primitive-contacts path for
+    # shape-vs-shape collisions by default; the MESH=40 contacts-per-
+    # pair penalty in Newton's default is an opt-in hydroelastic
+    # upper bound, not what our GJK / MPR pipeline actually produces.
+    PRIMITIVE_CPP = 5
+    SAFETY = 2
+    return max(1000, pair_count * PRIMITIVE_CPP * SAFETY)
+
+
+def _build_cloth_collision_pipeline(
+    model: Any,
+    *,
+    device,
+    num_cloth_triangles: int,
+    cloth_margin: float,
+) -> tuple[Any, wp.array | None]:
+    """Construct (or upgrade) ``model._collision_pipeline`` for cloth+rigid scenes.
+
+    Builds a :class:`CollisionPipeline` with ``extra_shape_count =
+    num_cloth_triangles``, NXN broad phase (cloth scenes only), the
+    share-vertex filter, and stamps the static cloth-triangle suffix
+    metadata (``shape_type=TRIANGLE``, ``shape_gap=cloth_margin``,
+    ``shape_collision_group=1``).
+
+    Returns the pipeline and the per-triangle ``vec4i`` connectivity
+    array (length ``num_cloth_triangles``; the array is ``None`` on
+    rigid-only scenes, which is convenient for callers that don't
+    care). The pipeline is also assigned to ``model._collision_pipeline``.
+
+    This is a free helper so :class:`SolverPhoenX` can call it BEFORE
+    constructing :class:`PhoenXWorld` (the world's contact-column
+    container is sized from ``model.rigid_contact_max``, which the
+    pipeline's ``.contacts()`` call sets), while direct
+    :class:`PhoenXWorld` users go through
+    :meth:`PhoenXWorld.setup_cloth_collision_pipeline`.
+    """
+    import newton as _newton  # noqa: PLC0415  -- avoid import cycle
+    from newton._src.geometry.flags import ShapeFlags  # noqa: PLC0415
+    from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
+        PHOENX_CONTACT_MATCHING,
+    )
+
+    cloth_margin = float(cloth_margin)
+    num_cloth_triangles = int(num_cloth_triangles)
+
+    # The collision pipeline owns the unified rigid + virtual-shape
+    # arrays (length ``S + extra_shape_count``); we only need to
+    # supply ``unified_shape_world`` / ``unified_shape_flags`` *up
+    # front* because the NXN / SAP broad phase captures them at
+    # construction time to build its per-world index map.
+    # Everything else (``shape_type``, ``shape_gap``, etc.) is
+    # stamped on the pipeline-owned arrays *after* construction.
+    pre_unified_shape_world: wp.array[int] | None = None
+    pre_unified_shape_flags: wp.array[int] | None = None
+    tri_indices: wp.array | None = None
+    if num_cloth_triangles > 0:
+        S = int(model.shape_count)
+        T = num_cloth_triangles
+
+        with wp.ScopedDevice(device):
+            pre_unified_shape_world = wp.zeros(S + T, dtype=wp.int32, device=device)
+            pre_unified_shape_flags = wp.zeros(S + T, dtype=wp.int32, device=device)
+        if S > 0:
+            if model.shape_world is not None:
+                wp.copy(pre_unified_shape_world, model.shape_world, count=S)
+            if model.shape_flags is not None:
+                wp.copy(pre_unified_shape_flags, model.shape_flags, count=S)
+
+        # Cloth triangle world ids come from ``model.particle_world``
+        # at the triangle's first vertex (mirroring how the cloth
+        # solvers map per-particle world to per-element world).
+        tri_idx_np = model.tri_indices.numpy().reshape(-1, 3)
+        if model.particle_world is not None:
+            pworld = model.particle_world.numpy()
+            tri_world = pworld[tri_idx_np[:, 0]].astype(np.int32)
+        else:
+            tri_world = np.full(T, -1, dtype=np.int32)
+
+        world_np = pre_unified_shape_world.numpy()
+        world_np[S:] = tri_world
+        pre_unified_shape_world.assign(world_np)
+
+        flags_np = pre_unified_shape_flags.numpy()
+        flags_np[S:] = int(ShapeFlags.COLLIDE_SHAPES)
+        pre_unified_shape_flags.assign(flags_np)
+
+        # ``tri_indices`` is per-triangle-pair (vec4i) connectivity
+        # consumed by phoenx's narrow-phase -- the pipeline doesn't
+        # see it.
+        with wp.ScopedDevice(device):
+            tri_indices = wp.zeros(T, dtype=wp.vec4i, device=device)
+
+    if int(model.shape_count) > 0:
+        existing_cp = getattr(model, "_collision_pipeline", None)
+        needs_new_cp = existing_cp is None or not getattr(existing_cp, "contact_matching", False)
+        # Cloth scenes need the pipeline to reserve broad-phase
+        # candidate-pair capacity for the triangle suffix even
+        # when an existing pipeline was attached without it.
+        if (
+            not needs_new_cp
+            and num_cloth_triangles > 0
+            and getattr(existing_cp, "extra_shape_count", 0) < num_cloth_triangles
+        ):
+            needs_new_cp = True
+        if needs_new_cp:
+            # Override Newton's ``rigid_contact_max`` estimator with a
+            # PhoenX-tight one from ``shape_contact_pair_count``
+            # (COLLIDE_SHAPES-filtered).
+            tight_rcm = _estimate_rigid_contact_max_phoenx(model)
+            if tight_rcm is not None:
+                model.rigid_contact_max = 0  # bypass "already sized" short-circuit
+
+            # Cloth scenes force NXN broad phase: the explicit broad
+            # phase iterates ``model.shape_contact_pairs`` which has
+            # no entries for the cloth-triangle suffix, so suffix
+            # slots would never produce candidate pairs. Rigid-only
+            # scenes keep the default mode.
+            cp_kwargs = {
+                "contact_matching": PHOENX_CONTACT_MATCHING,
+                "rigid_contact_max": tight_rcm,
+                "extra_shape_count": num_cloth_triangles,
+            }
+            if num_cloth_triangles > 0:
+                cp_kwargs["broad_phase"] = "nxn"
+                cp_kwargs["unified_shape_world"] = pre_unified_shape_world
+                cp_kwargs["unified_shape_flags"] = pre_unified_shape_flags
+                cp_kwargs["broad_phase_filter"] = (
+                    phoenx_cloth_share_vertex_filter,
+                    PhoenXClothFilterData,
+                )
+            model._collision_pipeline = _newton.CollisionPipeline(model, **cp_kwargs)
+            model._collision_pipeline.contacts()  # forces buffer sizing
+
+            if num_cloth_triangles > 0:
+                cloth_filter_data = PhoenXClothFilterData()
+                cloth_filter_data.num_rigid_shapes = int(model.shape_count)
+                cloth_filter_data.tri_indices = tri_indices
+                model._collision_pipeline.set_broad_phase_filter_data(cloth_filter_data)
+
+        # Stamp static cloth-triangle metadata on the pipeline-owned
+        # unified arrays *after* pipeline construction. The broad
+        # phase doesn't read these (only ``shape_world`` /
+        # ``shape_flags``, which were stamped pre-construction); the
+        # narrow phase reads them at launch time.
+        if num_cloth_triangles > 0:
+            cp = model._collision_pipeline
+            S = int(model.shape_count)
+            T = num_cloth_triangles
+            from newton._src.geometry.support_function import GeoTypeEx  # noqa: PLC0415
+
+            def _stamp_suffix(arr: wp.array, value, dtype) -> None:
+                if arr is None:
+                    return
+                host = arr.numpy()
+                host[S : S + T] = value
+                arr.assign(host.astype(dtype, copy=False))
+
+            _stamp_suffix(cp.unified_shape_type, int(GeoTypeEx.TRIANGLE), np.int32)
+            _stamp_suffix(cp.unified_shape_gap, cloth_margin, np.float32)
+            _stamp_suffix(cp.unified_shape_collision_group, 1, np.int32)
+
+    return getattr(model, "_collision_pipeline", None), tri_indices
 
 
 #: Block dim used by the single-world PGS sweep kernels.
@@ -462,9 +685,7 @@ class PhoenXWorld:
         # :class:`SolverPhoenX` overwrites this with its own allocation
         # post-construction when cloth is present.
         with wp.ScopedDevice(device):
-            self.tri_indices: wp.array = wp.zeros(
-                max(self.num_cloth_triangles, 0), dtype=wp.vec4i, device=device
-            )
+            self.tri_indices: wp.array = wp.zeros(max(self.num_cloth_triangles, 0), dtype=wp.vec4i, device=device)
         # Total cid count in the joint-side :class:`ConstraintContainer`.
         # Joints + cloth triangles all live in this container; the
         # dispatcher uses ``cid < num_joint_container_cids`` as the
@@ -1147,6 +1368,114 @@ class PhoenXWorld:
             device=self.device,
         )
 
+    def setup_cloth_collision_pipeline(self, model: Any, *, cloth_margin: float = 0.005) -> Any:
+        """Build a unified rigid + cloth-triangle :class:`CollisionPipeline`.
+
+        Wires up the broad phase, share-vertex filter and stamps the
+        suffix metadata (``shape_type=TRIANGLE``, ``shape_gap=cloth_margin``,
+        ``shape_collision_group=1``) for the cloth-triangle suffix in the
+        unified ``[0, S+T)`` shape index space.
+
+        Stores ``self._cloth_margin`` and ``self._collision_pipeline``.
+        Also assigns the constructed pipeline to ``model._collision_pipeline``
+        for compatibility with callers that read ``model.contacts()``.
+        Allocates ``self.tri_indices`` (vec4i triangle connectivity) when
+        cloth is present.
+
+        On rigid-only scenes (``num_cloth_triangles == 0``) this falls
+        through to the standard rigid pipeline construction (no NXN broad
+        phase forcing, no filter, no suffix stamping).
+
+        Args:
+            model: A finalised Newton :class:`~newton.Model`.
+            cloth_margin: Speculative gap [m] applied to cloth-triangle
+                AABBs. Defaults to ``0.005`` (5 mm).
+
+        Returns:
+            The constructed (or pre-existing) :class:`CollisionPipeline`.
+
+        Raises:
+            ValueError: if the model carries cloth triangles but
+                ``self.num_cloth_triangles`` differs.
+        """
+        num_cloth_triangles = int(getattr(model, "tri_count", 0) or 0)
+        if num_cloth_triangles != self.num_cloth_triangles:
+            raise ValueError(
+                f"setup_cloth_collision_pipeline: model.tri_count "
+                f"({num_cloth_triangles}) != world.num_cloth_triangles "
+                f"({self.num_cloth_triangles}). Construct PhoenXWorld with "
+                "num_cloth_triangles == model.tri_count."
+            )
+        pipeline, tri_indices = _build_cloth_collision_pipeline(
+            model,
+            device=self.device,
+            num_cloth_triangles=num_cloth_triangles,
+            cloth_margin=cloth_margin,
+        )
+        if num_cloth_triangles > 0:
+            self.tri_indices = tri_indices
+        self._cloth_margin = float(cloth_margin)
+        self._collision_pipeline = pipeline
+        return pipeline
+
+    def update_external_geom(self, particle_q: wp.array[wp.vec3]) -> None:
+        """Refresh the cloth-triangle suffix of the pipeline's unified geom arrays.
+
+        Launches a single per-cloth-triangle kernel that fills the suffix
+        ``[shape_count, shape_count + tri_count)`` of the pipeline-owned
+        AABB / :attr:`CollisionPipeline.geom_data` /
+        :attr:`CollisionPipeline.geom_transform` arrays, plus the full
+        :attr:`tri_indices` ``vec4i`` array (4th component is ``-1`` --
+        reserved for future tetrahedron support). The rigid prefix
+        ``[0, shape_count)`` of the AABB / ``geom_*`` arrays is written
+        by ``compute_shape_aabbs`` inside
+        :meth:`CollisionPipeline.collide_with_external_aabbs`; the
+        static suffix metadata (``shape_type``, ``shape_gap``,
+        ``shape_world``, ``shape_collision_group``, ``shape_flags``) is
+        seeded once by :meth:`setup_cloth_collision_pipeline`.
+
+        Call this immediately before invoking
+        :meth:`CollisionPipeline.collide_with_external_aabbs`. When you
+        pass ``external_aabb_state`` to :meth:`step`, the world calls
+        this for you.
+
+        Args:
+            particle_q: Particle positions [m], shape ``[particle_count, 3]``.
+        """
+        if self.num_cloth_triangles == 0:
+            return
+        cp = getattr(self, "_collision_pipeline", None)
+        if cp is None:
+            raise RuntimeError(
+                "update_external_geom requires a collision pipeline; call setup_cloth_collision_pipeline(model) first."
+            )
+        if particle_q is None:
+            raise ValueError("update_external_geom requires a non-None particle_q")
+        # ``model.shape_count`` is the boundary of rigid vs. triangle
+        # suffix in the unified array. Recover it from the pipeline's
+        # extra-shape count.
+        shape_count = int(cp.unified_shape_type.shape[0]) - int(self.num_cloth_triangles)
+        wp.launch(
+            kernel=_phoenx_compute_triangle_aabbs_and_indices_kernel,
+            dim=self.num_cloth_triangles,
+            inputs=[
+                self.constraints,
+                int(self.num_joints),
+                int(self.num_bodies),
+                particle_q,
+                self._cloth_margin,
+                shape_count,
+            ],
+            outputs=[
+                cp.narrow_phase.shape_aabb_lower,
+                cp.narrow_phase.shape_aabb_upper,
+                cp.geom_data,
+                cp.geom_transform,
+                self.tri_indices,
+            ],
+            device=self.device,
+        )
+
     def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
         """Replace the registered body-pair contact filter. Pairs are
         canonicalised ``(min, max)`` and deduped; self-pairs rejected;
@@ -1223,13 +1552,14 @@ class PhoenXWorld:
         picking=None,
         vel_accum: wp.array[wp.vec3f] | None = None,
         omega_accum: wp.array[wp.vec3f] | None = None,
+        external_aabb_state: Any = None,
     ) -> None:
         """Advance the world by ``dt`` seconds.
 
-        Phases: ingest contacts -> rebuild elements + JP colouring ->
-        substep loop (forces, gravity, main solve, integrate
-        positions, position iterate, relax) -> damping + rotated
-        inertia -> clear forces.
+        Phases: optional cloth-aware collide -> ingest contacts ->
+        rebuild elements + JP colouring -> substep loop (forces,
+        gravity, main solve, integrate positions, position iterate,
+        relax) -> damping + rotated inertia -> clear forces.
 
         Args:
             dt: Time step [s]. Non-positive values no-op.
@@ -1245,6 +1575,16 @@ class PhoenXWorld:
                 start of every substep so the pick spring stays stiff
                 regardless of :attr:`substeps`. Callers driving
                 picking themselves should leave this ``None``.
+            external_aabb_state: Optional Newton-style state object
+                with ``body_q`` and ``particle_q`` populated. When
+                provided alongside a ``contacts`` buffer and a cloth
+                pipeline (set up via
+                :meth:`setup_cloth_collision_pipeline`), the world
+                will automatically refresh the cloth-triangle AABB
+                suffix and run ``CollisionPipeline.collide_with_external_aabbs``
+                before ingesting contacts. The state does not need to
+                be a fully-wired Newton state -- only ``body_q`` and
+                ``particle_q`` are read.
         """
         if dt < 0.0:
             raise ValueError("Time step cannot be negative.")
@@ -1254,6 +1594,21 @@ class PhoenXWorld:
         self.step_dt = dt
         self.inv_step_dt = 1.0 / dt
         self.substep_dt = dt / self.substeps
+
+        # Cloth-aware collide hand-off: callers driving cloth+rigid
+        # scenes through ``PhoenXWorld`` directly pass the Newton
+        # ``State`` they're going to feed to the renderer; we refresh
+        # the cloth-triangle suffix and run the pipeline here so the
+        # contacts buffer is ready by the time we ingest.
+        if external_aabb_state is not None and contacts is not None and self.num_cloth_triangles > 0:
+            cp = getattr(self, "_collision_pipeline", None)
+            if cp is None:
+                raise RuntimeError(
+                    "step(external_aabb_state=...) requires a collision pipeline; "
+                    "call setup_cloth_collision_pipeline(model) first."
+                )
+            self.update_external_geom(external_aabb_state.particle_q)
+            cp.collide_with_external_aabbs(external_aabb_state, contacts)
 
         self._ingest_and_warmstart_contacts(contacts, shape_body)
         if self._ingest_scratch is not None:

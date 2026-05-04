@@ -21,7 +21,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.geometry.broad_phase_nxn import BroadPhaseAllPairs
-from newton._src.solvers.phoenx.solver import (
+from newton._src.solvers.phoenx.solver_phoenx import (
     PhoenXClothFilterData,
     phoenx_cloth_share_vertex_filter,
 )

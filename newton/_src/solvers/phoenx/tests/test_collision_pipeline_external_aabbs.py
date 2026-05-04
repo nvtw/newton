@@ -34,7 +34,9 @@ import warp as wp
 import newton
 from newton._src.geometry.flags import ShapeFlags
 from newton._src.geometry.support_function import GeoTypeEx
+from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.solver import SolverPhoenX
+from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "External-AABB collision test requires CUDA")
@@ -198,6 +200,95 @@ class TestCollideWithExternalAabbsCloth(unittest.TestCase):
             np.any(max_idx >= self.S),
             "expected at least one candidate pair touching the cloth-triangle suffix",
         )
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "External-AABB cloth test requires CUDA")
+class TestCollideWithExternalAabbsClothViaPhoenXWorld(unittest.TestCase):
+    """Same scene as :class:`TestCollideWithExternalAabbsCloth`, but
+    constructed via :meth:`PhoenXWorld.setup_cloth_collision_pipeline`
+    instead of :class:`SolverPhoenX`. Confirms the *internal* PhoenX
+    API produces the same unified-array wiring without going through
+    the Newton-state adapter."""
+
+    def setUp(self) -> None:
+        self.device = wp.get_device()
+        mb = newton.ModelBuilder()
+        mb.add_ground_plane()
+        body = mb.add_body(
+            xform=wp.transform(p=wp.vec3(0.5, 0.5, 0.45), q=wp.quat_identity()),
+        )
+        mb.add_shape_box(
+            body,
+            hx=0.4,
+            hy=0.4,
+            hz=0.05,
+            cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.5),
+        )
+        mb.add_cloth_grid(
+            pos=wp.vec3(0.0, 0.0, 0.5),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=2,
+            dim_y=2,
+            cell_x=0.5,
+            cell_y=0.5,
+            mass=0.1,
+            tri_ke=1234.0,
+            tri_ka=9876.0,
+        )
+        mb.gravity = -9.81
+        self.model = mb.finalize(device=self.device)
+
+        # Plain PhoenXWorld: one anchor body, no joints, cloth
+        # triangles. We don't need a populated body container for the
+        # pipeline-wiring test.
+        bodies = body_container_zeros(int(self.model.body_count) + 1, device=self.device)
+        constraints = PhoenXWorld.make_constraint_container(
+            num_joints=0,
+            num_cloth_triangles=int(self.model.tri_count),
+            device=self.device,
+        )
+        self.world = PhoenXWorld(
+            bodies=bodies,
+            constraints=constraints,
+            num_joints=0,
+            num_particles=int(self.model.particle_count),
+            num_cloth_triangles=int(self.model.tri_count),
+            num_worlds=1,
+            rigid_contact_max=128,
+            device=self.device,
+        )
+        self.pipeline = self.world.setup_cloth_collision_pipeline(self.model, cloth_margin=0.01)
+        self.S = int(self.model.shape_count)
+        self.T = int(self.model.tri_count)
+
+    def test_pipeline_unified_arrays_have_st_length(self) -> None:
+        """PhoenXWorld's setup_cloth_collision_pipeline produces the
+        same unified rigid+triangle wiring as the SolverPhoenX adapter."""
+        total = self.S + self.T
+        self.assertEqual(self.pipeline.unified_shape_type.shape[0], total)
+        self.assertEqual(self.pipeline.unified_shape_gap.shape[0], total)
+        self.assertEqual(self.pipeline.unified_shape_flags.shape[0], total)
+        self.assertEqual(self.pipeline.unified_shape_world.shape[0], total)
+
+        suffix_type = self.pipeline.unified_shape_type.numpy()[self.S :]
+        suffix_gap = self.pipeline.unified_shape_gap.numpy()[self.S :]
+        suffix_flags = self.pipeline.unified_shape_flags.numpy()[self.S :]
+        self.assertTrue(np.all(suffix_type == int(GeoTypeEx.TRIANGLE)))
+        np.testing.assert_allclose(suffix_gap, 0.01, rtol=1e-6)
+        self.assertTrue(np.all(suffix_flags == int(ShapeFlags.COLLIDE_SHAPES)))
+
+    def test_update_external_geom_takes_particle_q_directly(self) -> None:
+        """The world-side ``update_external_geom`` accepts a ``wp.array``
+        directly (no Newton ``State`` wrapper) and populates
+        ``tri_indices`` + the AABB suffix."""
+        state = self.model.state()
+        self.world.update_external_geom(state.particle_q)
+        tri_idx = self.world.tri_indices.numpy()
+        self.assertEqual(tri_idx.shape[0], self.T)
+        self.assertTrue(np.all(tri_idx[:, 3] == -1))
+        model_tri = self.model.tri_indices.numpy().reshape(-1, 3)
+        np.testing.assert_array_equal(tri_idx[:, :3], model_tri)
 
 
 if __name__ == "__main__":

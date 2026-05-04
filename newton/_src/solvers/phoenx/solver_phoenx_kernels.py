@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.geometry.support_function import GeoTypeEx
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -867,8 +866,16 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                             actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
                     else:
                         contact_iterate_multi(
-                            contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps,
-                            particles, tri_indices,
+                            contact_cols,
+                            cid - num_joints,
+                            bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            True,
+                            inner_sweeps,
+                            particles,
+                            tri_indices,
                         )
                     base += tpw
 
@@ -937,8 +944,16 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                         actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
                 else:
                     contact_iterate_multi(
-                        contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations,
-                        particles, tri_indices,
+                        contact_cols,
+                        cid - num_joints,
+                        bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        False,
+                        num_iterations,
+                        particles,
+                        tri_indices,
                     )
                 base += tpw
 
@@ -1809,13 +1824,26 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
             else:
                 if wp.static(is_prepare):
                     contact_prepare_for_iteration(
-                        contact_cols, cid - num_joints, bodies, idt, cc, contacts,
-                        store.particles, tri_indices,
+                        contact_cols,
+                        cid - num_joints,
+                        bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        store.particles,
+                        tri_indices,
                     )
                 else:
                     contact_iterate(
-                        contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias,
-                        store.particles, tri_indices,
+                        contact_cols,
+                        cid - num_joints,
+                        bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        use_bias,
+                        store.particles,
+                        tri_indices,
                     )
 
         if tid == 0:
@@ -1884,13 +1912,26 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                 else:
                     if wp.static(is_prepare):
                         contact_prepare_for_iteration(
-                            contact_cols, cid - num_joints, bodies, idt, cc, contacts,
-                            store.particles, tri_indices,
+                            contact_cols,
+                            cid - num_joints,
+                            bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            store.particles,
+                            tri_indices,
                         )
                     else:
                         contact_iterate(
-                            contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias,
-                            store.particles, tri_indices,
+                            contact_cols,
+                            cid - num_joints,
+                            bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            use_bias,
+                            store.particles,
+                            tri_indices,
                         )
             _sync_threads()
             cursor = cursor - 1

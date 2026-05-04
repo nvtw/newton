@@ -70,8 +70,8 @@ SEGMENT_MASS = 0.002
 # forms.
 BEND_STIFFNESS = 50
 TWIST_STIFFNESS = 0.5
-BEND_DAMPING = 0.3*BEND_STIFFNESS
-TWIST_DAMPING = 0.3*TWIST_STIFFNESS
+BEND_DAMPING = 0.3 * BEND_STIFFNESS
+TWIST_DAMPING = 0.3 * TWIST_STIFFNESS
 
 # End-cap revolute motor knobs. ``DriveMode.VELOCITY`` requires
 # ``damping_drive > 0`` (PD velocity servo); the resulting torque per
@@ -580,7 +580,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--segment-mass", type=float, default=SEGMENT_MASS, help="Mass per capsule segment [kg].")
     parser.add_argument("--bend-stiffness", type=float, default=BEND_STIFFNESS, help="Cable bend stiffness [N*m/rad].")
-    parser.add_argument("--twist-stiffness", type=float, default=TWIST_STIFFNESS, help="Cable twist stiffness [N*m/rad].")
+    parser.add_argument(
+        "--twist-stiffness", type=float, default=TWIST_STIFFNESS, help="Cable twist stiffness [N*m/rad]."
+    )
     parser.add_argument("--bend-damping", type=float, default=BEND_DAMPING, help="Cable bend damping [N*m*s/rad].")
     parser.add_argument("--twist-damping", type=float, default=TWIST_DAMPING, help="Cable twist damping [N*m*s/rad].")
     parser.add_argument(

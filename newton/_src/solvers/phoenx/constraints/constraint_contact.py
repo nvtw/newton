@@ -35,12 +35,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     pd_coefficients,
     soft_constraint_coefficients,
 )
-from newton._src.solvers.phoenx.constraints.contact_endpoint import (
-    endpoint_apply_impulse,
-    endpoint_load,
-    endpoint_warmstart_apply_impulse,
-)
-from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_bias,
@@ -74,6 +68,11 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
+from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    endpoint_apply_impulse,
+    endpoint_load,
+    endpoint_warmstart_apply_impulse,
+)
 from newton._src.solvers.phoenx.helpers.data_packing import (
     dword_offset_of,
     num_dwords,
@@ -83,6 +82,7 @@ from newton._src.solvers.phoenx.helpers.data_packing import (
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     effective_mass_scalar,
 )
+from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_config import (
     PHOENX_BOOST_CONTACT_NORMAL,
 )
@@ -581,12 +581,10 @@ def contact_prepare_for_iteration_at(
         # ``margin_sign``: +1 for endpoint 1 (push along +n), -1 for
         # endpoint 2 (push along -n) -- matches the original rigid
         # form ``+ margin0 * n`` / ``- margin1 * n``.
-        ep1 = endpoint_load(kind1, idx1, local_p0, margin0, wp.float32(1.0), n, bodies, particles, tri_indices)
-        ep2 = endpoint_load(kind2, idx2, local_p1, margin1, wp.float32(-1.0), n, bodies, particles, tri_indices)
+        ep1 = endpoint_load(kind1, idx1, local_p0, margin0, wp.float32(1.0), n, idt, bodies, particles, tri_indices)
+        ep2 = endpoint_load(kind2, idx2, local_p1, margin1, wp.float32(-1.0), n, idt, bodies, particles, tri_indices)
 
-        eff_n = effective_mass_scalar(
-            n, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia
-        )
+        eff_n = effective_mass_scalar(n, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia)
         eff_t1 = effective_mass_scalar(
             t1_dir, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia
         )
@@ -650,11 +648,11 @@ def contact_prepare_for_iteration_at(
             if coulomb_saturated:
                 cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
-            ep1 = endpoint_load(kind1, idx1, fresh_lp0, margin0, wp.float32(1.0), n, bodies, particles, tri_indices)
-            ep2 = endpoint_load(kind2, idx2, fresh_lp1, margin1, wp.float32(-1.0), n, bodies, particles, tri_indices)
-            eff_n = effective_mass_scalar(
-                n, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia
+            ep1 = endpoint_load(kind1, idx1, fresh_lp0, margin0, wp.float32(1.0), n, idt, bodies, particles, tri_indices)
+            ep2 = endpoint_load(
+                kind2, idx2, fresh_lp1, margin1, wp.float32(-1.0), n, idt, bodies, particles, tri_indices
             )
+            eff_n = effective_mass_scalar(n, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia)
             eff_t1 = effective_mass_scalar(
                 t1_dir, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia
             )
@@ -743,12 +741,32 @@ def contact_prepare_for_iteration_at(
         lam_t2 = cc_get_tangent2_lambda(cc, k)
         imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
         endpoint_warmstart_apply_impulse(
-            kind1, idx1, local_p0, imp, wp.cross(ep1.r, imp), ep1.inv_mass, ep1.inv_inertia,
-            wp.float32(-1.0), bodies, particles, tri_indices,
+            kind1,
+            idx1,
+            local_p0,
+            imp,
+            wp.cross(ep1.r, imp),
+            ep1.inv_mass,
+            ep1.inv_inertia,
+            wp.float32(-1.0),
+            dt_substep,
+            bodies,
+            particles,
+            tri_indices,
         )
         endpoint_warmstart_apply_impulse(
-            kind2, idx2, local_p1, imp, wp.cross(ep2.r, imp), ep2.inv_mass, ep2.inv_inertia,
-            wp.float32(+1.0), bodies, particles, tri_indices,
+            kind2,
+            idx2,
+            local_p1,
+            imp,
+            wp.cross(ep2.r, imp),
+            ep2.inv_mass,
+            ep2.inv_inertia,
+            wp.float32(+1.0),
+            dt_substep,
+            bodies,
+            particles,
+            tri_indices,
         )
 
 
@@ -806,8 +824,8 @@ def contact_iterate_at(
         local_p1 = cc_get_local_p1(cc, k)
         margin0 = contacts.rigid_contact_margin0[k]
         margin1 = contacts.rigid_contact_margin1[k]
-        ep1 = endpoint_load(kind1, idx1, local_p0, margin0, wp.float32(1.0), n, bodies, particles, tri_indices)
-        ep2 = endpoint_load(kind2, idx2, local_p1, margin1, wp.float32(-1.0), n, bodies, particles, tri_indices)
+        ep1 = endpoint_load(kind1, idx1, local_p0, margin0, wp.float32(1.0), n, idt, bodies, particles, tri_indices)
+        ep2 = endpoint_load(kind2, idx2, local_p1, margin1, wp.float32(-1.0), n, idt, bodies, particles, tri_indices)
 
         eff_n = cc_get_eff_n(cc, k)
         eff_t1 = cc_get_eff_t1(cc, k)
@@ -904,12 +922,32 @@ def contact_iterate_at(
 
         imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
         endpoint_apply_impulse(
-            kind1, idx1, local_p0, imp, ep1.inv_mass, ep1.inv_inertia, ep1.r,
-            wp.float32(-1.0), bodies, particles, tri_indices,
+            kind1,
+            idx1,
+            local_p0,
+            imp,
+            ep1.inv_mass,
+            ep1.inv_inertia,
+            ep1.r,
+            wp.float32(-1.0),
+            dt_substep,
+            bodies,
+            particles,
+            tri_indices,
         )
         endpoint_apply_impulse(
-            kind2, idx2, local_p1, imp, ep2.inv_mass, ep2.inv_inertia, ep2.r,
-            wp.float32(+1.0), bodies, particles, tri_indices,
+            kind2,
+            idx2,
+            local_p1,
+            imp,
+            ep2.inv_mass,
+            ep2.inv_inertia,
+            ep2.r,
+            wp.float32(+1.0),
+            dt_substep,
+            bodies,
+            particles,
+            tri_indices,
         )
 
 
@@ -932,9 +970,7 @@ def contact_prepare_for_iteration(
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_prepare_for_iteration_at(
-        constraints, cid, 0, bodies, body_pair, idt, cc, contacts, particles, tri_indices
-    )
+    contact_prepare_for_iteration_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, particles, tri_indices)
 
 
 @wp.func
@@ -952,9 +988,7 @@ def contact_iterate(
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at(
-        constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias, particles, tri_indices
-    )
+    contact_iterate_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias, particles, tri_indices)
 
 
 @wp.func
@@ -1009,8 +1043,10 @@ def contact_iterate_at_multi(
             local_p1 = cc_get_local_p1(cc, k)
             margin0 = contacts.rigid_contact_margin0[k]
             margin1 = contacts.rigid_contact_margin1[k]
-            ep1 = endpoint_load(kind1, idx1, local_p0, margin0, wp.float32(1.0), n, bodies, particles, tri_indices)
-            ep2 = endpoint_load(kind2, idx2, local_p1, margin1, wp.float32(-1.0), n, bodies, particles, tri_indices)
+            ep1 = endpoint_load(kind1, idx1, local_p0, margin0, wp.float32(1.0), n, idt, bodies, particles, tri_indices)
+            ep2 = endpoint_load(
+                kind2, idx2, local_p1, margin1, wp.float32(-1.0), n, idt, bodies, particles, tri_indices
+            )
 
             eff_n = cc_get_eff_n(cc, k)
             eff_t1 = cc_get_eff_t1(cc, k)
@@ -1081,12 +1117,32 @@ def contact_iterate_at_multi(
 
             imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
             endpoint_apply_impulse(
-                kind1, idx1, local_p0, imp, ep1.inv_mass, ep1.inv_inertia, ep1.r,
-                wp.float32(-1.0), bodies, particles, tri_indices,
+                kind1,
+                idx1,
+                local_p0,
+                imp,
+                ep1.inv_mass,
+                ep1.inv_inertia,
+                ep1.r,
+                wp.float32(-1.0),
+                dt_substep,
+                bodies,
+                particles,
+                tri_indices,
             )
             endpoint_apply_impulse(
-                kind2, idx2, local_p1, imp, ep2.inv_mass, ep2.inv_inertia, ep2.r,
-                wp.float32(+1.0), bodies, particles, tri_indices,
+                kind2,
+                idx2,
+                local_p1,
+                imp,
+                ep2.inv_mass,
+                ep2.inv_inertia,
+                ep2.r,
+                wp.float32(+1.0),
+                dt_substep,
+                bodies,
+                particles,
+                tri_indices,
             )
         it += 1
 
