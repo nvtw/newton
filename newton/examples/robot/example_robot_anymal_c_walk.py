@@ -262,7 +262,9 @@ class Example:
     def capture(self):
         self.graph = None
         self.use_cuda_graph = False
-        if self.device.is_cuda:
+        # Mirror the gating used by example_robot_policy: graph capture only
+        # works when both CUDA and the Warp memory pool are available.
+        if self.device.is_cuda and wp.is_mempool_enabled(self.device):
             self.use_cuda_graph = True
             self.control.joint_target_pos = wp.zeros(18, dtype=wp.float32, device=self.device)
             # Capture the full step (obs build + policy + joint_target_pos +

@@ -161,17 +161,27 @@ def load_policy_and_setup_arrays(example: Any, policy_path: str, num_dofs: int, 
     else:
         example._joint_pos_initial_wp = wp.zeros(num_dofs, dtype=wp.float32, device=example.device)
 
-    obs_dim = int(example.config["num_observations"]) if "num_observations" in example.config else None
-    if obs_dim is None:
-        obs_dim = int(example.policy._shapes[example.policy_input_name][1])
+    # Cross-check three things that all have to agree: the YAML's declared
+    # obs size (when present), the ONNX model's input shape, and the
+    # 12 + 3*num_dofs layout that ``_compute_obs_kernel`` actually writes.
+    # If they drift, fail loudly here instead of producing wrong inferences
+    # at the first OnnxRuntime call.
+    model_obs_dim = int(example.policy._shapes[example.policy_input_name][1])
     expected = 12 + 3 * num_dofs
-    if obs_dim != expected:
+    config_obs_dim = int(example.config["num_observations"]) if "num_observations" in example.config else None
+    if config_obs_dim is not None and config_obs_dim != model_obs_dim:
         raise ValueError(
-            f"load_policy_and_setup_arrays: policy obs_dim={obs_dim} does not match the expected "
+            f"load_policy_and_setup_arrays: config num_observations={config_obs_dim} does not match "
+            f"the ONNX model's declared input shape ({model_obs_dim}); update the YAML or re-export "
+            f"the policy."
+        )
+    if model_obs_dim != expected:
+        raise ValueError(
+            f"load_policy_and_setup_arrays: policy obs_dim={model_obs_dim} does not match the expected "
             f"layout (12 + 3*num_dofs = {expected}); the on-device _compute_obs_kernel only "
             f"supports the IsaacLab-style 12 + 3N observation."
         )
-    example._obs_wp = wp.zeros((1, obs_dim), dtype=wp.float32, device=example.device)
+    example._obs_wp = wp.zeros((1, model_obs_dim), dtype=wp.float32, device=example.device)
     example._prev_act_wp = wp.zeros((1, num_dofs), dtype=wp.float32, device=example.device)
 
     # The two reorder permutations are pre-uploaded as int32 device arrays
@@ -343,6 +353,10 @@ class Example:
         wp.copy(self.state_1.joint_qd, self._initial_joint_qd)
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         newton.eval_fk(self.model, self.state_1.joint_q, self.state_1.joint_qd, self.state_1)
+        # Clear stale policy history so the first observation after reset is
+        # built purely from the restored kinematic state.
+        if self._prev_act_wp is not None:
+            self._prev_act_wp.zero_()
 
     def step(self):
         if hasattr(self.viewer, "is_key_down"):
