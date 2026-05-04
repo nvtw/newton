@@ -66,11 +66,14 @@ recipe and the round-trip test in ``tests/test_isolated.py``.
 
 .. note::
     Production today uses a weaker variant of this contract -- per-
-    constraint ``ACCESS_MODE`` metadata + a constraint-owns-handoff
-    finite-diff at iterate exit, without ``TinyRigidState``. See
-    :file:`newton/_src/solvers/phoenx/CONSTRAINT_ACCESS_MODE.md`. The
-    tag values match so a future mass-splitting integration drops in
-    unchanged.
+    per-entity ``access_mode`` field stamped on
+    :class:`~newton._src.solvers.phoenx.body.BodyContainer` /
+    :class:`~newton._src.solvers.phoenx.particle.ParticleContainer`
+    plus on-demand
+    :func:`~newton._src.solvers.phoenx.body_or_particle.set_access_mode`
+    flips. See :mod:`newton._src.solvers.phoenx.access_mode`. The
+    integer constants match so a future mass-splitting integration
+    drops in unchanged.
 """
 
 from __future__ import annotations

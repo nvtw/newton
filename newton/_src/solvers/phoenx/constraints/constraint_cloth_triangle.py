@@ -69,7 +69,6 @@ from newton._src.solvers.phoenx.body_or_particle import (
     get_position,
     set_position,
 )
-from newton._src.solvers.phoenx.constraints.constraint_access_mode import ConstraintAccessMode
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     ConstraintContainer,
@@ -84,7 +83,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 
 __all__ = [
-    "ACCESS_MODE",
     "CLOTH_TRIANGLE_DWORDS",
     "ClothTriangleData",
     "cloth_lame_from_youngs_poisson_plane_stress",
@@ -120,12 +118,6 @@ __all__ = [
     "cloth_triangle_set_rest_area",
     "cloth_triangle_set_type",
 ]
-
-
-#: Position-level: ``cloth_triangle_iterate_at`` mutates
-#: ``particles.position``; the post-pass ``_integrate_velocities_kernel``
-#: recovers velocity. See :file:`CONSTRAINT_ACCESS_MODE.md`.
-ACCESS_MODE = ConstraintAccessMode.POSITION_LEVEL
 
 
 # ---------------------------------------------------------------------------

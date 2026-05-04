@@ -47,41 +47,54 @@ angular impulse contribution. The cost is a few ALU ops on the
 particle branch; no memory waste in
 :class:`ParticleContainer` (the fields don't exist there).
 
-## Mass-splitting / position-pass compatibility
+## Access-mode compatibility
 
-The :class:`~newton._src.solvers.phoenx.mass_splitting.TinyRigidState`
-struct has both orientation and angular-velocity fields. Particles
-ride on the same struct: orientation = identity, angular_velocity
-= 0. The XPBD finite-difference recovery in
-:func:`~newton._src.solvers.phoenx.mass_splitting.state.tiny_rigid_state_synchronize`
-runs the quaternion math through unchanged -- the
-``identity * conj(identity) = identity`` algebra produces zero
-angular velocity for particles, which is correct. The 28 bytes of
-"unused" orientation + angular_velocity per particle TinyState
-slot are the cost of the unified state struct; a separate
-``TinyParticleState`` would save them but at the price of parallel
-buffers + parallel kernels. Defer until profiling demands it.
+Both :class:`~newton._src.solvers.phoenx.body.BodyContainer` and
+:class:`~newton._src.solvers.phoenx.particle.ParticleContainer`
+carry per-entity ``access_mode`` / ``position_prev_substep``
+(plus ``orientation_prev_substep`` for bodies) snapshots, so the
+generic helpers in
+:mod:`~newton._src.solvers.phoenx.access_mode` work uniformly
+across both. The body case runs the full 6-DoF finite-diff;
+the particle case is the 3-DoF subset. See
+:func:`writeback_position_to_velocity` /
+:func:`set_access_mode` for the unified-index entry points.
 """
 
 from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_POSITION_LEVEL,
+    ACCESS_MODE_STATIC,
+    ACCESS_MODE_VELOCITY_LEVEL,
+    synchronize_pose_velocity,
+    synchronize_position_velocity,
+)
 from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.particle import ParticleContainer, particle_recover_velocity
+from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
     "BodyOrParticleStore",
+    "body_set_access_mode",
     "get_angular_velocity",
     "get_inverse_mass",
     "get_orientation",
     "get_position",
     "get_velocity",
     "is_particle",
+    "particle_set_access_mode",
+    "set_access_mode",
     "set_position",
     "set_velocity",
     "writeback_position_to_velocity",
 ]
+
+
+_ACCESS_MODE_VELOCITY_LEVEL = wp.constant(wp.int32(ACCESS_MODE_VELOCITY_LEVEL))
+_ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
+_ACCESS_MODE_STATIC = wp.constant(wp.int32(ACCESS_MODE_STATIC))
 
 
 @wp.struct
@@ -187,21 +200,132 @@ def get_inverse_mass(store: BodyOrParticleStore, i: wp.int32) -> wp.float32:
 
 @wp.func
 def set_position(store: BodyOrParticleStore, i: wp.int32, p: wp.vec3f):
-    """Write ``p`` into the body's / particle's position slot.
-    Mirrors :func:`get_position`."""
+    """Write ``p`` into the body's / particle's position slot and flip
+    its access mode to ``POSITION_LEVEL``.
+
+    The access-mode flip is the contract that guarantees any
+    subsequent reader (another constraint kernel or the substep-end
+    recovery) sees the position write reflected in ``velocity`` after
+    the next ``synchronize_*`` flip. ``STATIC`` entities skip the
+    flag update so pinned particles / bodies stay short-circuited.
+    """
     if i < store.num_bodies:
         store.bodies.position[i] = p
+        if store.bodies.access_mode[i] != _ACCESS_MODE_STATIC:
+            store.bodies.access_mode[i] = _ACCESS_MODE_POSITION_LEVEL
     else:
-        store.particles.position[i - store.num_bodies] = p
+        i_p = i - store.num_bodies
+        store.particles.position[i_p] = p
+        if store.particles.access_mode[i_p] != _ACCESS_MODE_STATIC:
+            store.particles.access_mode[i_p] = _ACCESS_MODE_POSITION_LEVEL
 
 
 @wp.func
 def set_velocity(store: BodyOrParticleStore, i: wp.int32, v: wp.vec3f):
-    """Write ``v`` into the body's / particle's velocity slot."""
+    """Write ``v`` into the body's / particle's velocity slot and
+    flip its access mode to ``VELOCITY_LEVEL``.
+
+    Symmetric counterpart to :func:`set_position`. The access-mode
+    flip ensures the substep-end recovery treats this entity as
+    velocity-authoritative; if a position-level constraint touches
+    the same entity afterwards it must call its own
+    ``set_position`` (which flips back) so the contract holds at
+    every constraint boundary.
+    """
     if i < store.num_bodies:
         store.bodies.velocity[i] = v
+        if store.bodies.access_mode[i] != _ACCESS_MODE_STATIC:
+            store.bodies.access_mode[i] = _ACCESS_MODE_VELOCITY_LEVEL
     else:
-        store.particles.velocity[i - store.num_bodies] = v
+        i_p = i - store.num_bodies
+        store.particles.velocity[i_p] = v
+        if store.particles.access_mode[i_p] != _ACCESS_MODE_STATIC:
+            store.particles.access_mode[i_p] = _ACCESS_MODE_VELOCITY_LEVEL
+
+
+@wp.func
+def body_set_access_mode(
+    bodies: BodyContainer,
+    b: wp.int32,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Switch one rigid body's access mode, integrating the dual fields.
+
+    SoA wrapper around
+    :func:`~newton._src.solvers.phoenx.access_mode.synchronize_pose_velocity`:
+    reads the current dual state out of the body container, runs the
+    Jitter2-style synchronize, and scatters the result back. No-op
+    when the body is already in ``new_access_mode``.
+
+    Mirrors C# ``TinyRigidState.SetAccessMode`` (TinyRigidState.cs:108):
+    a thin SoA-aware wrapper over the value-based math.
+    """
+    p_new, q_new, v_new, w_new, mode_new = synchronize_pose_velocity(
+        bodies.position[b],
+        bodies.orientation[b],
+        bodies.velocity[b],
+        bodies.angular_velocity[b],
+        bodies.position_prev_substep[b],
+        bodies.orientation_prev_substep[b],
+        bodies.access_mode[b],
+        new_access_mode,
+        inv_dt,
+    )
+    bodies.position[b] = p_new
+    bodies.orientation[b] = q_new
+    bodies.velocity[b] = v_new
+    bodies.angular_velocity[b] = w_new
+    bodies.access_mode[b] = mode_new
+
+
+@wp.func
+def particle_set_access_mode(
+    particles: ParticleContainer,
+    p: wp.int32,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Switch one particle's access mode, integrating position / velocity.
+
+    SoA wrapper around
+    :func:`~newton._src.solvers.phoenx.access_mode.synchronize_position_velocity`.
+    Same role as :func:`body_set_access_mode` but for the 3-DoF
+    particle case.
+    """
+    pos_new, vel_new, mode_new = synchronize_position_velocity(
+        particles.position[p],
+        particles.velocity[p],
+        particles.position_prev_substep[p],
+        particles.access_mode[p],
+        new_access_mode,
+        inv_dt,
+    )
+    particles.position[p] = pos_new
+    particles.velocity[p] = vel_new
+    particles.access_mode[p] = mode_new
+
+
+@wp.func
+def set_access_mode(
+    store: BodyOrParticleStore,
+    i: wp.int32,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Unified-index entry point for :func:`body_set_access_mode` /
+    :func:`particle_set_access_mode`.
+
+    Branches on ``is_particle(store, i)`` and dispatches to the
+    matching SoA wrapper. Constraint kernels that operate on unified
+    body-or-particle indices call this; specialised kernels that
+    only ever touch one kind should call the typed helper directly
+    to avoid the branch.
+    """
+    if is_particle(store, i):
+        particle_set_access_mode(store.particles, i - store.num_bodies, new_access_mode, inv_dt)
+        return
+    body_set_access_mode(store.bodies, i, new_access_mode, inv_dt)
 
 
 @wp.func
@@ -210,31 +334,17 @@ def writeback_position_to_velocity(
     i: wp.int32,
     inv_dt: wp.float32,
 ):
-    """Recover velocity from the substep position delta at unified index ``i``.
+    """Force one entity back to ``VELOCITY_LEVEL``.
 
-    POSITION_LEVEL constraints call this for every touched entity at
-    iterate exit so downstream consumers see velocity-consistent state.
-    Mirrors the ``Position -> Velocity`` branch of
-    :func:`~newton._src.solvers.phoenx.mass_splitting.state.tiny_rigid_state_synchronize`.
-
-    Particle branch: ``velocity = (position - position_substep_start) * inv_dt``;
-    pinned particles (``inverse_mass == 0``) skip.
-
-    Body branch: no-op. :class:`BodyContainer` does not yet carry
-    ``position_substep_start`` / ``orientation_substep_start``, and
-    :class:`SolverPhoenX` rejects POSITION_LEVEL rigid constraints at
-    registration. To enable: add the snapshot fields, swap this
-    branch for the linear + quaternion finite-diff (reuse
-    :func:`tiny_rigid_state_synchronize`), drop the host-side guard.
+    Substep-exit recovery: every entity ``i`` ends the substep in
+    ``VELOCITY_LEVEL`` so the next substep starts from a
+    velocity-consistent state. Equivalent to Jitter2's
+    ``TinyRigidState.WriteBack`` (TinyRigidState.cs:92-100), which
+    just calls ``SynchronizeVelAndPosStateUpdates(VelocityLevel,
+    ...)`` before scattering the velocity back. The ``Position ->
+    Velocity`` branch of
+    :func:`~newton._src.solvers.phoenx.access_mode.synchronize_pose_velocity`
+    runs the linear + quaternion finite-diff; entities already in
+    ``VELOCITY_LEVEL`` short-circuit.
     """
-    if is_particle(store, i):
-        i_p = i - store.num_bodies
-        if store.particles.inverse_mass[i_p] == wp.float32(0.0):
-            return
-        store.particles.velocity[i_p] = particle_recover_velocity(
-            store.particles.position[i_p],
-            store.particles.position_substep_start[i_p],
-            inv_dt,
-        )
-        return
-    return
+    set_access_mode(store, i, _ACCESS_MODE_VELOCITY_LEVEL, inv_dt)

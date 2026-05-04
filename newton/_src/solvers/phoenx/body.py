@@ -13,6 +13,8 @@ All quantities are single precision (``float32``).
 
 import warp as wp
 
+from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
+
 __all__ = [
     "MOTION_DYNAMIC",
     "MOTION_KINEMATIC",
@@ -100,6 +102,41 @@ class BodyContainer:
     #: (either explicitly or by re-importing Newton state).
     kinematic_target_valid: wp.array[wp.int32]
 
+    # --- Access-mode synchronization (per-substep) ---------------------
+    #
+    # Mirrors Jitter2's ``TinyRigidState`` (``MassSplitting/TinyRigidState.cs``):
+    # constraint kernels can flip between Velocity-level and
+    # Position-level integration on a per-body basis inside a single
+    # substep. The "live" :attr:`position` / :attr:`orientation` /
+    # :attr:`velocity` / :attr:`angular_velocity` correspond to
+    # Jitter2's ``state.Position`` / ``state.Velocity`` etc.; the
+    # ``*_prev_substep`` snapshots correspond to Jitter2's
+    # ``body.Position`` / ``body.Orientation`` (the substep-entry
+    # reference frame the lazy synchronize helpers integrate against).
+    # See :mod:`newton._src.solvers.phoenx.access_mode`.
+
+    #: Position at substep entry (pre-predict). Snapshot taken by the
+    #: substep-entry force / gravity kernel; read by
+    #: :func:`~newton._src.solvers.phoenx.access_mode.synchronize_pose_velocity`
+    #: when a constraint flips this body's access mode. Equivalent to
+    #: Jitter2's ``body.Position`` viewed from ``TinyRigidState``.
+    position_prev_substep: wp.array[wp.vec3f]
+
+    #: Orientation at substep entry (pre-predict). Same role as
+    #: :attr:`position_prev_substep` for the angular dual; backs the
+    #: quaternion-finite-diff branch of
+    #: :func:`~newton._src.solvers.phoenx.access_mode.synchronize_pose_velocity`.
+    orientation_prev_substep: wp.array[wp.quatf]
+
+    #: Per-body access mode tag
+    #: (:data:`~newton._src.solvers.phoenx.access_mode.ACCESS_MODE_VELOCITY_LEVEL`
+    #: / ``POSITION_LEVEL`` / ``STATIC`` / ``NONE``). The substep-entry
+    #: kernel resets dynamic bodies to ``VELOCITY_LEVEL`` and pinned /
+    #: static / kinematic bodies to ``STATIC``; constraint kernels
+    #: call ``synchronize_pose_velocity`` to flip to ``POSITION_LEVEL``
+    #: on demand and the substep-exit recovery flips everyone back.
+    access_mode: wp.array[wp.int32]
+
 
 def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyContainer:
     """Allocate a zero-initialized :class:`BodyContainer` for ``num_bodies``
@@ -153,4 +190,13 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.kinematic_target_pos = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.kinematic_target_orient = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
     c.kinematic_target_valid = wp.zeros(num_bodies, dtype=wp.int32, device=device)
+    # Substep access-mode snapshots. ``position_prev_substep`` /
+    # ``orientation_prev_substep`` are overwritten at every substep
+    # entry; the zero-init here is just so unused / pre-step reads
+    # don't trip on uninitialised memory. ``access_mode`` defaults to
+    # VELOCITY_LEVEL -- a lazy ``synchronize`` from ``NONE`` would
+    # otherwise short-circuit on the wrong branch.
+    c.position_prev_substep = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
+    c.orientation_prev_substep = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
+    c.access_mode = wp.full(num_bodies, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
     return c

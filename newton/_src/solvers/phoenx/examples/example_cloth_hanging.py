@@ -15,7 +15,7 @@ end-to-end cloth pipeline:
 * Per-substep: gravity + position predict (Velocity-level ->
   Position-level access-mode transition); cloth iterate projects
   positions onto constraint manifolds; recover ``velocity =
-  (position - position_substep_start) * inv_dt``
+  (position - position_prev_substep) * inv_dt``
   (Position-level -> Velocity-level transition). All three phases
   are dispatched through unified body-or-particle-aware kernels --
   no particle-only launches.

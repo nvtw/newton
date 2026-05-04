@@ -2108,7 +2108,7 @@ class PhoenXWorld:
         * Particles: substep-entry access-mode transition
           (Velocity-level -> Position-level). Apply gravity +
           external force, snapshot pre-predict position into
-          ``position_substep_start``, and advance ``position`` by
+          ``position_prev_substep``, and advance ``position`` by
           ``velocity * dt`` so the cloth iterate sees the predicted
           pose. The substep-exit recovery happens inside
           :meth:`_integrate_positions`, which also runs over the
@@ -2505,7 +2505,7 @@ class PhoenXWorld:
           (Position-level -> Velocity-level). The cloth iterate has
           already written the constraint-projected position into
           ``particles.position``; recover ``velocity = (position -
-          position_substep_start) * inv_dt`` so the next substep
+          position_prev_substep) * inv_dt`` so the next substep
           starts from a consistent velocity-level state.
         """
         n = self.num_bodies + self.num_particles

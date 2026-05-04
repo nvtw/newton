@@ -1,58 +1,60 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validate the :class:`ConstraintAccessMode` contract.
+"""Validate the per-entity access-mode synchronization helpers.
 
-Covers (1) metadata presence on every registered constraint module,
-(2) position-level writeback round-trip on a cloth scene, and
-(3) the host-side guard rejecting POSITION_LEVEL rigid constraints
-that lack body-side snapshot fields.
+Covers (1) the integer constants line up with the parallel
+``mass_splitting.state`` definitions (so a future mass-splitting
+integration shares the tag space), (2) the position-level writeback
+round-trip on a cloth scene leaves ``particle_qd`` consistent with the
+per-step position delta, and (3) the substep-entry pre-pass resets
+every entity's ``access_mode`` field so a stale flag from a previous
+step can't bleed into the new substep.
 """
 
 from __future__ import annotations
 
-import types
 import unittest
 
 import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.constraints import (
-    constraint_actuated_double_ball_socket,
-    constraint_cloth_triangle,
-    constraint_contact,
+from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_NONE,
+    ACCESS_MODE_POSITION_LEVEL,
+    ACCESS_MODE_STATIC,
+    ACCESS_MODE_VELOCITY_LEVEL,
 )
-from newton._src.solvers.phoenx.constraints.constraint_access_mode import ConstraintAccessMode
 from newton._src.solvers.phoenx.solver import SolverPhoenX
 
 
-class TestConstraintAccessModeMetadata(unittest.TestCase):
-    def test_every_module_exports_access_mode(self) -> None:
-        for module in SolverPhoenX._REGISTERED_CONSTRAINT_MODULES:
-            with self.subTest(module=module.__name__):
-                self.assertTrue(hasattr(module, "ACCESS_MODE"))
-                self.assertIsInstance(module.ACCESS_MODE, ConstraintAccessMode)
-
-    def test_known_assignments(self) -> None:
-        self.assertIs(constraint_contact.ACCESS_MODE, ConstraintAccessMode.VELOCITY_LEVEL)
-        self.assertIs(
-            constraint_actuated_double_ball_socket.ACCESS_MODE,
-            ConstraintAccessMode.VELOCITY_LEVEL,
-        )
-        self.assertIs(
-            constraint_cloth_triangle.ACCESS_MODE,
-            ConstraintAccessMode.POSITION_LEVEL,
-        )
-
-    def test_enum_values_match_mass_splitting_constants(self) -> None:
+class TestAccessModeConstants(unittest.TestCase):
+    def test_constants_match_mass_splitting_state(self) -> None:
+        # The mass-splitting subsystem defines its own copy of the
+        # access-mode tag space; the values must agree byte-for-byte
+        # so a future merge into mass_splitting routes the same int
+        # without translation.
         from newton._src.solvers.phoenx.mass_splitting.state import (
-            ACCESS_MODE_POSITION_LEVEL,
-            ACCESS_MODE_VELOCITY_LEVEL,
+            ACCESS_MODE_NONE as MS_NONE,
+            ACCESS_MODE_POSITION_LEVEL as MS_POS,
+            ACCESS_MODE_VELOCITY_LEVEL as MS_VEL,
         )
 
-        self.assertEqual(int(ConstraintAccessMode.VELOCITY_LEVEL), ACCESS_MODE_VELOCITY_LEVEL)
-        self.assertEqual(int(ConstraintAccessMode.POSITION_LEVEL), ACCESS_MODE_POSITION_LEVEL)
+        self.assertEqual(ACCESS_MODE_NONE, MS_NONE)
+        self.assertEqual(ACCESS_MODE_VELOCITY_LEVEL, MS_VEL)
+        self.assertEqual(ACCESS_MODE_POSITION_LEVEL, MS_POS)
+
+    def test_constants_are_distinct_int_tags(self) -> None:
+        tags = {
+            ACCESS_MODE_NONE,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            ACCESS_MODE_POSITION_LEVEL,
+            ACCESS_MODE_STATIC,
+        }
+        self.assertEqual(len(tags), 4)
+        for v in tags:
+            self.assertIsInstance(v, int)
 
 
 @unittest.skipUnless(
@@ -119,46 +121,35 @@ class TestPositionLevelWritebackContract(unittest.TestCase):
     wp.get_preferred_device().is_cuda,
     "SolverPhoenX runs on CUDA only.",
 )
-class TestPositionLevelRigidGuard(unittest.TestCase):
-    def test_fake_position_level_rigid_constraint_raises(self) -> None:
+class TestSubstepEntryAccessModeReset(unittest.TestCase):
+    """The substep-entry pre-pass stamps every entity with a fresh
+    ``access_mode`` so iterate-time flips can't leak across steps."""
+
+    def test_dynamic_bodies_reset_to_velocity_level(self) -> None:
         device = wp.get_device()
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.5)))
         builder.add_shape_box(0, hx=0.1, hy=0.1, hz=0.1)
         model = builder.finalize(device=device)
+        solver = SolverPhoenX(model)
 
-        fake_module = types.ModuleType("newton._test_fake_position_level_rigid")
-        fake_module.ACCESS_MODE = ConstraintAccessMode.POSITION_LEVEL
+        # Manually corrupt the per-body access mode to a stale value
+        # before stepping; the substep-entry kernel must overwrite it.
+        access_mode = solver.bodies.access_mode.numpy().copy()
+        bogus = np.full_like(access_mode, ACCESS_MODE_POSITION_LEVEL)
+        solver.bodies.access_mode.assign(bogus)
 
-        original_registered = SolverPhoenX._REGISTERED_CONSTRAINT_MODULES
-        original_rigid = SolverPhoenX._RIGID_TOUCHING_CONSTRAINT_MODULES
-        SolverPhoenX._REGISTERED_CONSTRAINT_MODULES = original_registered + (fake_module,)
-        SolverPhoenX._RIGID_TOUCHING_CONSTRAINT_MODULES = original_rigid | {fake_module}
-        try:
-            with self.assertRaises(NotImplementedError) as ctx:
-                SolverPhoenX(model)
-            self.assertIn("position_substep_start", str(ctx.exception))
-        finally:
-            SolverPhoenX._REGISTERED_CONSTRAINT_MODULES = original_registered
-            SolverPhoenX._RIGID_TOUCHING_CONSTRAINT_MODULES = original_rigid
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        solver.step(state_0, state_1, control, None, 1.0 / 240.0)
 
-    def test_fake_module_without_access_mode_raises_typeerror(self) -> None:
-        device = wp.get_device()
-        builder = newton.ModelBuilder()
-        builder.add_ground_plane()
-        model = builder.finalize(device=device)
-
-        fake_module = types.ModuleType("newton._test_fake_no_access_mode")
-
-        original_registered = SolverPhoenX._REGISTERED_CONSTRAINT_MODULES
-        SolverPhoenX._REGISTERED_CONSTRAINT_MODULES = original_registered + (fake_module,)
-        try:
-            with self.assertRaises(TypeError) as ctx:
-                SolverPhoenX(model)
-            self.assertIn("ACCESS_MODE", str(ctx.exception))
-        finally:
-            SolverPhoenX._REGISTERED_CONSTRAINT_MODULES = original_registered
+        post = solver.bodies.access_mode.numpy()
+        # Static / kinematic / inv_mass=0 bodies become STATIC; the
+        # one dynamic body becomes VELOCITY_LEVEL. None should still
+        # be the corrupted POSITION_LEVEL value.
+        self.assertTrue(np.all((post == ACCESS_MODE_VELOCITY_LEVEL) | (post == ACCESS_MODE_STATIC)))
 
 
 if __name__ == "__main__":

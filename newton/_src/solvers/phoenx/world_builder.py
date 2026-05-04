@@ -26,6 +26,9 @@ from enum import IntEnum
 import numpy as np
 import warp as wp
 
+from newton._src.geometry.inertia import compute_inertia_shape, transform_inertia
+from newton._src.geometry.types import GeoType, Heightfield, Mesh
+from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -57,7 +60,6 @@ __all__ = [
     "JointMode",
     "RigidBodyDescriptor",
     "ShapeDescriptor",
-    "ShapeType",
     "WorldBuilder",
 ]
 
@@ -124,27 +126,13 @@ class JointMode(IntEnum):
     CABLE = int(JOINT_MODE_CABLE)
 
 
-class ShapeType(IntEnum):
-    """Primitive collider types that :class:`WorldBuilder` can attach
-    to a body.
-
-    Shapes are declarative: they carry a local transform relative to
-    the parent body and a geometry parametrisation. The builder uses
-    them for (1) mass / inertia accumulation when ``density`` /
-    ``mass`` is set, and (2) materialising the per-shape
-    ``shape_body`` / ``shape_material`` arrays the solver needs for
-    contact ingest.
-    """
-
-    SPHERE = 0
-    BOX = 1
-    CAPSULE = 2
-    PLANE = 3  # static-only, infinite half-space; contributes no mass
-
-
 # ---------------------------------------------------------------------------
 # Descriptors
 # ---------------------------------------------------------------------------
+
+#: Geometries that are always static and contribute no mass: infinite
+#: half-space (``PLANE``) and terrain heightfields (``HFIELD``).
+_MASSLESS_STATIC_TYPES = frozenset({GeoType.PLANE, GeoType.HFIELD})
 
 
 @dataclass
@@ -173,6 +161,20 @@ class RigidBodyDescriptor:
     #: Index of the world this body belongs to. Must be in
     #: ``[0, num_worlds)``.
     world_id: int = 0
+    #: Initial substep-start position snapshot, mirroring Jitter2's
+    #: ``body.Position`` viewed from ``TinyRigidState``
+    #: (``MassSplitting/TinyRigidState.cs``). Overwritten every
+    #: substep by the access-mode pre-pass; the descriptor value seeds
+    #: only the first substep so a constraint flipping a body to
+    #: ``POSITION_LEVEL`` before any substep ran sees a sensible
+    #: snapshot. Defaults to ``position`` if left at ``None``.
+    position_prev_substep: tuple[float, float, float] | None = None
+    #: Initial per-body access mode tag. See
+    #: :mod:`newton._src.solvers.phoenx.access_mode` for the integer
+    #: values. Defaults to
+    #: :data:`~newton._src.solvers.phoenx.access_mode.ACCESS_MODE_VELOCITY_LEVEL`,
+    #: matching the per-substep reset.
+    access_mode: int = int(ACCESS_MODE_VELOCITY_LEVEL)
 
 
 @dataclass
@@ -229,15 +231,26 @@ class JointHandle:
 class ShapeDescriptor:
     """Plain-Python description of one collider attached to a body.
 
-    Geometry parametrisation lives in the ``geom_*`` fields; which ones
-    are meaningful depends on :attr:`shape_type`:
+    Geometry parametrisation lives in :attr:`scale` (and, for mesh /
+    heightfield shapes, in :attr:`mesh` / :attr:`hfield`). The exact
+    meaning of ``scale`` is chosen to match
+    :func:`newton._src.geometry.inertia.compute_inertia_shape`, which
+    the builder defers to for mass / inertia. By type:
 
-    * :attr:`ShapeType.SPHERE`: ``geom_scalar_a = radius`` [m].
-    * :attr:`ShapeType.BOX`: ``geom_vec3 = (hx, hy, hz)`` half-extents [m].
-    * :attr:`ShapeType.CAPSULE`: ``geom_scalar_a = radius`` [m],
-      ``geom_scalar_b = half_height`` [m] of the cylindrical mid-section.
-    * :attr:`ShapeType.PLANE`: ``geom_vec3 = normal`` (unit),
-      ``geom_scalar_a = offset`` along the normal.
+    * :attr:`~newton.GeoType.SPHERE`: ``scale = (radius, _, _)`` [m].
+    * :attr:`~newton.GeoType.BOX`: ``scale = (hx, hy, hz)`` half-extents [m].
+    * :attr:`~newton.GeoType.CAPSULE` / :attr:`~newton.GeoType.CYLINDER`
+      / :attr:`~newton.GeoType.CONE`:
+      ``scale = (radius, half_height, _)`` [m], aligned along local +z.
+    * :attr:`~newton.GeoType.ELLIPSOID`: ``scale = (rx, ry, rz)``
+      semi-axes [m].
+    * :attr:`~newton.GeoType.MESH` / :attr:`~newton.GeoType.CONVEX_MESH`:
+      ``scale`` is a per-axis multiplier on :attr:`mesh` vertices.
+    * :attr:`~newton.GeoType.PLANE`: ``geom_vec3 = normal`` (unit),
+      ``geom_scalar_a = offset`` along the normal. Static-only,
+      infinite half-space; contributes no mass.
+    * :attr:`~newton.GeoType.HFIELD`: ``scale`` is the per-axis
+      multiplier on :attr:`hfield`. Always static; contributes no mass.
 
     ``local_pos`` / ``local_rot`` give the shape's pose in the parent
     body's local frame; at finalize the builder uses them to translate
@@ -246,114 +259,82 @@ class ShapeDescriptor:
     Mass sourcing: exactly one of ``density`` (kg/m^3) or ``mass`` (kg)
     may be set. If neither is set, the shape is mass-less (collision-
     only); :meth:`WorldBuilder.finalize` does not fold it into the
-    body's compound inertia.
+    body's compound inertia. ``is_solid`` / ``thickness`` are forwarded
+    to :func:`compute_inertia_shape` for hollow primitives.
     """
 
     body: int
-    shape_type: ShapeType
+    shape_type: GeoType
     local_pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
     local_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
-    geom_scalar_a: float = 0.0
-    geom_scalar_b: float = 0.0
-    geom_vec3: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    #: Plane normal (unit) in the parent body's local frame. Only used
+    #: when :attr:`shape_type` is :attr:`~newton.GeoType.PLANE`.
+    plane_normal: tuple[float, float, float] = (0.0, 1.0, 0.0)
+    #: Plane offset along :attr:`plane_normal` [m]. Only used when
+    #: :attr:`shape_type` is :attr:`~newton.GeoType.PLANE`.
+    plane_offset: float = 0.0
+    #: Mesh source for ``MESH`` / ``CONVEX_MESH`` shape types.
+    mesh: Mesh | None = None
+    #: Heightfield source for the ``HFIELD`` shape type.
+    hfield: Heightfield | None = None
+    is_solid: bool = True
+    thickness: float = 0.001
     density: float | None = None
     mass: float | None = None
     material_id: int | None = None
 
 
 # ---------------------------------------------------------------------------
-# Shape mass / inertia formulas
+# Shape mass / inertia
 # ---------------------------------------------------------------------------
 
 
-def _shape_volume_and_inertia(desc: ShapeDescriptor) -> tuple[float, np.ndarray]:
-    """Return ``(volume, local_inertia_tensor)`` for a unit-density
-    version of the shape (i.e. treat density = 1 kg/m^3). The caller
-    multiplies by the effective density (or scales so the given mass
-    matches) to get physical quantities.
+def _shape_mass_com_inertia(desc: ShapeDescriptor) -> tuple[float, np.ndarray, np.ndarray]:
+    """Return ``(mass, com_local, inertia_about_com)`` for one shape,
+    expressed in the *shape's* local frame.
 
-    The inertia tensor is the body-frame inertia about the shape's
-    origin (before translating to the parent body's COM). Symmetric
-    3x3 NumPy array.
+    Defers to :func:`newton._src.geometry.inertia.compute_inertia_shape`
+    for the per-type closed forms, then rescales the result if the user
+    pinned ``desc.mass`` instead of ``desc.density``.
     """
-    t = desc.shape_type
-    if t == ShapeType.SPHERE:
-        r = float(desc.geom_scalar_a)
-        v = 4.0 / 3.0 * math.pi * r * r * r
-        # Solid sphere: I = (2/5) m r^2 on every diagonal.
-        diag = 0.4 * v * r * r  # unit-density m = v, so I_i = 0.4 * v * r^2
-        return v, np.diag([diag, diag, diag])
-    if t == ShapeType.BOX:
-        hx, hy, hz = (float(x) for x in desc.geom_vec3)
-        v = 8.0 * hx * hy * hz
-        # Solid box half-extents (hx, hy, hz): I_xx = m/3 * (hy^2 + hz^2), etc.
-        ixx = v / 3.0 * (hy * hy + hz * hz)
-        iyy = v / 3.0 * (hx * hx + hz * hz)
-        izz = v / 3.0 * (hx * hx + hy * hy)
-        return v, np.diag([ixx, iyy, izz])
-    if t == ShapeType.CAPSULE:
-        r = float(desc.geom_scalar_a)
-        h = 2.0 * float(desc.geom_scalar_b)  # full cylindrical length
-        # Solid capsule = cylinder(radius=r, length=h) + sphere(radius=r).
-        # Closed-form, capsule aligned along local +z:
-        v_cyl = math.pi * r * r * h
-        v_sph = 4.0 / 3.0 * math.pi * r * r * r
-        v = v_cyl + v_sph
-        # Cylinder about its COM (aligned +z): Izz = (1/2) m r^2;
-        # Ixx = Iyy = (1/12) m (3 r^2 + h^2).
-        izz_cyl = 0.5 * v_cyl * r * r
-        ixx_cyl = v_cyl / 12.0 * (3.0 * r * r + h * h)
-        # Two hemispheres: solid sphere inertia about its COM =
-        # (2/5) m_sph r^2. Parallel-axis to the cylinder caps
-        # (distance = h/2 + 3 r / 8 for a hemisphere's COM; but we
-        # treat the pair as a full sphere centred at the cylinder's
-        # COM since the two hemispheres are symmetric, i.e. the
-        # combined capsule's two hemispheres together behave like a
-        # sphere displaced +/-(h/2 + 3r/8). A tighter closed form
-        # isn't worth the complexity for a collision primitive; the
-        # sphere-at-origin approximation is within a few percent for
-        # h ~ r and converges to the sphere as h -> 0).
-        izz_sph = 0.4 * v_sph * r * r
-        ixx_sph = 0.4 * v_sph * r * r + v_sph * (0.5 * h) * (0.5 * h)
-        ixx = ixx_cyl + ixx_sph
-        iyy = ixx
-        izz = izz_cyl + izz_sph
-        return v, np.diag([ixx, iyy, izz])
-    if t == ShapeType.PLANE:
-        return 0.0, np.zeros((3, 3))
-    raise ValueError(f"unknown shape_type: {t}")
+    if desc.shape_type in _MASSLESS_STATIC_TYPES or (desc.density is None and desc.mass is None):
+        return 0.0, np.zeros(3, dtype=np.float64), np.zeros((3, 3), dtype=np.float64)
 
-
-def _quat_to_mat33(q: tuple[float, float, float, float]) -> np.ndarray:
-    """``[x, y, z, w]`` unit quaternion to a 3x3 rotation matrix."""
-    x, y, z, w = (float(c) for c in q)
-    n = x * x + y * y + z * z + w * w
-    if n > 0:
-        s = 2.0 / n
+    src: Mesh | Heightfield | None
+    if desc.shape_type in (GeoType.MESH, GeoType.CONVEX_MESH):
+        src = desc.mesh
+    elif desc.shape_type == GeoType.HFIELD:
+        src = desc.hfield
     else:
-        s = 0.0
-    xs = x * s
-    ys = y * s
-    zs = z * s
-    return np.asarray(
-        [
-            [1.0 - (y * ys + z * zs), x * ys - w * zs, x * zs + w * ys],
-            [x * ys + w * zs, 1.0 - (x * xs + z * zs), y * zs - w * xs],
-            [x * zs - w * ys, y * zs + w * xs, 1.0 - (x * xs + y * ys)],
-        ],
-        dtype=np.float64,
+        src = None
+
+    # ``compute_inertia_shape`` takes density directly. When the user
+    # pinned ``mass`` instead, run with unit density to discover the
+    # shape's natural unit-density mass and then rescale.
+    density = float(desc.density) if desc.density is not None else 1.0
+    m, c, i = compute_inertia_shape(
+        type=int(desc.shape_type),
+        scale=wp.vec3(*(float(x) for x in desc.scale)),
+        src=src,
+        density=density,
+        is_solid=desc.is_solid,
+        thickness=float(desc.thickness),
     )
+    m = float(m)
+    com = np.array([c[0], c[1], c[2]], dtype=np.float64)
+    inertia = np.array(i, dtype=np.float64).reshape(3, 3)
 
-
-def _translate_inertia(inertia: np.ndarray, mass: float, offset: np.ndarray) -> np.ndarray:
-    """Parallel-axis theorem: shift a COM-frame inertia tensor by
-    ``offset`` (from shape COM to parent-body origin).
-
-    :math:`I' = I + m (|r|^2 \\mathbf{1} - r r^T)`
-    """
-    r2 = float(np.dot(offset, offset))
-    outer = np.outer(offset, offset)
-    return inertia + mass * (r2 * np.eye(3) - outer)
+    if desc.mass is not None:
+        if m <= 0.0:
+            raise ValueError(
+                f"shape of type {desc.shape_type.name} has zero unit-density "
+                "mass; cannot rescale to user-supplied mass (check geometry)"
+            )
+        rescale = float(desc.mass) / m
+        m = float(desc.mass)
+        inertia = inertia * rescale
+    return m, com, inertia
 
 
 # ---------------------------------------------------------------------------
@@ -574,11 +555,12 @@ class WorldBuilder:
             raise ValueError(f"add_shape(body={desc.body}): local_pos has non-finite component")
         if not _all_finite(desc.local_rot):
             raise ValueError(f"add_shape(body={desc.body}): local_rot has non-finite component")
-        # Plane is static-only and cannot carry mass (infinite volume).
-        if desc.shape_type == ShapeType.PLANE and (desc.density is not None or desc.mass is not None):
+        # Planes / heightfields are static-only and cannot carry mass.
+        if desc.shape_type in _MASSLESS_STATIC_TYPES and (desc.density is not None or desc.mass is not None):
+            kind = desc.shape_type.name.lower()
             raise ValueError(
-                f"add_shape_plane(body={desc.body}): planes are infinite "
-                "half-spaces and cannot contribute mass; omit density / mass"
+                f"add_shape_{kind}(body={desc.body}): {kind}s are infinite "
+                "static surfaces and cannot contribute mass; omit density / mass"
             )
         shape_id = len(self._shapes)
         self._shapes.append(desc)
@@ -593,10 +575,11 @@ class WorldBuilder:
         local_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
         density: float | None = None,
         mass: float | None = None,
+        is_solid: bool = True,
+        thickness: float = 0.001,
         material_id: int | None = None,
     ) -> int:
-        """Attach a solid-sphere collider to ``body``. Returns the
-        shape index.
+        """Attach a sphere collider to ``body``. Returns the shape index.
 
         Args:
             body: Parent body index.
@@ -611,6 +594,9 @@ class WorldBuilder:
                 automatically.
             mass: Total mass [kg]. Alternative to ``density``; exactly
                 one of the two may be set.
+            is_solid: If ``False``, treat the sphere as a hollow shell
+                of the given ``thickness`` for inertia purposes.
+            thickness: Wall thickness [m] for hollow shells.
             material_id: Index into the material table; ``None`` uses
                 the solver's ``default_friction`` at contact time.
         """
@@ -619,12 +605,14 @@ class WorldBuilder:
         return self._attach_shape(
             ShapeDescriptor(
                 body=body,
-                shape_type=ShapeType.SPHERE,
+                shape_type=GeoType.SPHERE,
                 local_pos=local_pos,
                 local_rot=local_rot,
-                geom_scalar_a=float(radius),
+                scale=(float(radius), float(radius), float(radius)),
                 density=density,
                 mass=mass,
+                is_solid=is_solid,
+                thickness=float(thickness),
                 material_id=material_id,
             )
         )
@@ -638,9 +626,11 @@ class WorldBuilder:
         local_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
         density: float | None = None,
         mass: float | None = None,
+        is_solid: bool = True,
+        thickness: float = 0.001,
         material_id: int | None = None,
     ) -> int:
-        """Attach a solid-box collider to ``body``.
+        """Attach a box collider to ``body``.
 
         Args:
             body: Parent body index.
@@ -648,6 +638,7 @@ class WorldBuilder:
                 each > 0.
             local_pos / local_rot: Shape pose in the body's local frame.
             density / mass: See :meth:`add_shape_sphere`.
+            is_solid / thickness: See :meth:`add_shape_sphere`.
             material_id: See :meth:`add_shape_sphere`.
         """
         if any((not _is_finite(h)) or h <= 0.0 for h in half_extents):
@@ -655,12 +646,56 @@ class WorldBuilder:
         return self._attach_shape(
             ShapeDescriptor(
                 body=body,
-                shape_type=ShapeType.BOX,
+                shape_type=GeoType.BOX,
                 local_pos=local_pos,
                 local_rot=local_rot,
-                geom_vec3=tuple(float(h) for h in half_extents),
+                scale=tuple(float(h) for h in half_extents),
                 density=density,
                 mass=mass,
+                is_solid=is_solid,
+                thickness=float(thickness),
+                material_id=material_id,
+            )
+        )
+
+    def _add_radius_height_shape(
+        self,
+        *,
+        kind: GeoType,
+        body: int,
+        radius: float,
+        half_height: float,
+        local_pos: tuple[float, float, float],
+        local_rot: tuple[float, float, float, float],
+        density: float | None,
+        mass: float | None,
+        is_solid: bool,
+        thickness: float,
+        material_id: int | None,
+        allow_zero_height: bool,
+    ) -> int:
+        """Shared validation for the capsule / cylinder / cone helpers.
+        All three are aligned along local +z and parametrised by
+        ``(radius, half_height)``.
+        """
+        name = f"add_shape_{kind.name.lower()}"
+        if radius <= 0.0 or not _is_finite(radius):
+            raise ValueError(f"{name}(body={body}): radius must be > 0 (got {radius})")
+        min_h = 0.0 if allow_zero_height else -math.inf
+        if half_height < min_h or not _is_finite(half_height):
+            cmp = ">= 0" if allow_zero_height else "finite"
+            raise ValueError(f"{name}(body={body}): half_height must be {cmp} (got {half_height})")
+        return self._attach_shape(
+            ShapeDescriptor(
+                body=body,
+                shape_type=kind,
+                local_pos=local_pos,
+                local_rot=local_rot,
+                scale=(float(radius), float(half_height), float(radius)),
+                density=density,
+                mass=mass,
+                is_solid=is_solid,
+                thickness=float(thickness),
                 material_id=material_id,
             )
         )
@@ -675,6 +710,8 @@ class WorldBuilder:
         local_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
         density: float | None = None,
         mass: float | None = None,
+        is_solid: bool = True,
+        thickness: float = 0.001,
         material_id: int | None = None,
     ) -> int:
         """Attach a capsule collider (cylinder + two hemispheres) to
@@ -685,25 +722,257 @@ class WorldBuilder:
             radius: Hemisphere / cylinder radius [m], > 0.
             half_height: Half-length of the cylindrical mid-section [m],
                 >= 0 (``0`` collapses to a sphere).
-            local_pos / local_rot / density / mass / material_id: As for
-                :meth:`add_shape_sphere`.
+            local_pos / local_rot / density / mass / is_solid /
+                thickness / material_id: As for :meth:`add_shape_sphere`.
         """
-        if radius <= 0.0 or not _is_finite(radius):
-            raise ValueError(f"add_shape_capsule(body={body}): radius must be > 0 (got {radius})")
-        if half_height < 0.0 or not _is_finite(half_height):
-            raise ValueError(f"add_shape_capsule(body={body}): half_height must be >= 0 (got {half_height})")
+        return self._add_radius_height_shape(
+            kind=GeoType.CAPSULE,
+            body=body,
+            radius=radius,
+            half_height=half_height,
+            local_pos=local_pos,
+            local_rot=local_rot,
+            density=density,
+            mass=mass,
+            is_solid=is_solid,
+            thickness=thickness,
+            material_id=material_id,
+            allow_zero_height=True,
+        )
+
+    def add_shape_cylinder(
+        self,
+        body: int,
+        radius: float,
+        half_height: float,
+        *,
+        local_pos: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        local_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+        density: float | None = None,
+        mass: float | None = None,
+        is_solid: bool = True,
+        thickness: float = 0.001,
+        material_id: int | None = None,
+    ) -> int:
+        """Attach a cylinder collider to ``body``. The cylinder is
+        aligned along its local +z axis.
+
+        Args:
+            body: Parent body index.
+            radius: Cylinder radius [m], > 0.
+            half_height: Half-length [m], > 0.
+            local_pos / local_rot / density / mass / is_solid /
+                thickness / material_id: As for :meth:`add_shape_sphere`.
+        """
+        if half_height <= 0.0:
+            raise ValueError(f"add_shape_cylinder(body={body}): half_height must be > 0 (got {half_height})")
+        return self._add_radius_height_shape(
+            kind=GeoType.CYLINDER,
+            body=body,
+            radius=radius,
+            half_height=half_height,
+            local_pos=local_pos,
+            local_rot=local_rot,
+            density=density,
+            mass=mass,
+            is_solid=is_solid,
+            thickness=thickness,
+            material_id=material_id,
+            allow_zero_height=False,
+        )
+
+    def add_shape_cone(
+        self,
+        body: int,
+        radius: float,
+        half_height: float,
+        *,
+        local_pos: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        local_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+        density: float | None = None,
+        mass: float | None = None,
+        is_solid: bool = True,
+        thickness: float = 0.001,
+        material_id: int | None = None,
+    ) -> int:
+        """Attach a cone collider to ``body``. The cone is aligned
+        along its local +z axis with its base at ``-half_height`` and
+        its apex at ``+half_height``.
+
+        Args:
+            body: Parent body index.
+            radius: Base radius [m], > 0.
+            half_height: Half-length along the axis [m], > 0.
+            local_pos / local_rot / density / mass / is_solid /
+                thickness / material_id: As for :meth:`add_shape_sphere`.
+        """
+        if half_height <= 0.0:
+            raise ValueError(f"add_shape_cone(body={body}): half_height must be > 0 (got {half_height})")
+        return self._add_radius_height_shape(
+            kind=GeoType.CONE,
+            body=body,
+            radius=radius,
+            half_height=half_height,
+            local_pos=local_pos,
+            local_rot=local_rot,
+            density=density,
+            mass=mass,
+            is_solid=is_solid,
+            thickness=thickness,
+            material_id=material_id,
+            allow_zero_height=False,
+        )
+
+    def add_shape_ellipsoid(
+        self,
+        body: int,
+        semi_axes: tuple[float, float, float],
+        *,
+        local_pos: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        local_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+        density: float | None = None,
+        mass: float | None = None,
+        is_solid: bool = True,
+        thickness: float = 0.001,
+        material_id: int | None = None,
+    ) -> int:
+        """Attach an ellipsoid collider to ``body``.
+
+        Args:
+            body: Parent body index.
+            semi_axes: ``(rx, ry, rz)`` semi-axes [m], each > 0.
+            local_pos / local_rot / density / mass / is_solid /
+                thickness / material_id: As for :meth:`add_shape_sphere`.
+        """
+        if any((not _is_finite(r)) or r <= 0.0 for r in semi_axes):
+            raise ValueError(f"add_shape_ellipsoid(body={body}): semi_axes must all be > 0 (got {semi_axes})")
         return self._attach_shape(
             ShapeDescriptor(
                 body=body,
-                shape_type=ShapeType.CAPSULE,
+                shape_type=GeoType.ELLIPSOID,
                 local_pos=local_pos,
                 local_rot=local_rot,
-                geom_scalar_a=float(radius),
-                geom_scalar_b=float(half_height),
+                scale=tuple(float(r) for r in semi_axes),
                 density=density,
                 mass=mass,
+                is_solid=is_solid,
+                thickness=float(thickness),
                 material_id=material_id,
             )
+        )
+
+    def _add_mesh_shape(
+        self,
+        *,
+        kind: GeoType,
+        body: int,
+        mesh: Mesh,
+        scale: tuple[float, float, float],
+        local_pos: tuple[float, float, float],
+        local_rot: tuple[float, float, float, float],
+        density: float | None,
+        mass: float | None,
+        is_solid: bool,
+        thickness: float,
+        material_id: int | None,
+    ) -> int:
+        name = f"add_shape_{kind.name.lower()}"
+        if mesh is None:
+            raise ValueError(f"{name}(body={body}): mesh must be a Mesh instance, got None")
+        if any((not _is_finite(s)) or s <= 0.0 for s in scale):
+            raise ValueError(f"{name}(body={body}): scale must be > 0 in every axis (got {scale})")
+        return self._attach_shape(
+            ShapeDescriptor(
+                body=body,
+                shape_type=kind,
+                local_pos=local_pos,
+                local_rot=local_rot,
+                scale=tuple(float(s) for s in scale),
+                mesh=mesh,
+                density=density,
+                mass=mass,
+                is_solid=is_solid,
+                thickness=float(thickness),
+                material_id=material_id,
+            )
+        )
+
+    def add_shape_mesh(
+        self,
+        body: int,
+        mesh: Mesh,
+        *,
+        scale: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        local_pos: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        local_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+        density: float | None = None,
+        mass: float | None = None,
+        is_solid: bool = True,
+        thickness: float = 0.001,
+        material_id: int | None = None,
+    ) -> int:
+        """Attach a triangle-mesh collider to ``body``. Mass / inertia
+        are computed from the mesh geometry (or read from
+        :attr:`Mesh.mass` / :attr:`Mesh.inertia` when available).
+
+        Args:
+            body: Parent body index.
+            mesh: :class:`newton.Mesh` source.
+            scale: Per-axis multiplier on the mesh vertices, all > 0.
+            local_pos / local_rot / density / mass / is_solid /
+                thickness / material_id: As for :meth:`add_shape_sphere`.
+        """
+        return self._add_mesh_shape(
+            kind=GeoType.MESH,
+            body=body,
+            mesh=mesh,
+            scale=scale,
+            local_pos=local_pos,
+            local_rot=local_rot,
+            density=density,
+            mass=mass,
+            is_solid=is_solid,
+            thickness=thickness,
+            material_id=material_id,
+        )
+
+    def add_shape_convex_mesh(
+        self,
+        body: int,
+        mesh: Mesh,
+        *,
+        scale: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        local_pos: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        local_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+        density: float | None = None,
+        mass: float | None = None,
+        is_solid: bool = True,
+        thickness: float = 0.001,
+        material_id: int | None = None,
+    ) -> int:
+        """Attach a convex-hull collider to ``body``. The hull is
+        derived from ``mesh``; mass / inertia are computed identically
+        to :meth:`add_shape_mesh`.
+
+        Args:
+            body: Parent body index.
+            mesh: :class:`newton.Mesh` source for the hull's input
+                vertices.
+            scale / local_pos / local_rot / density / mass / is_solid /
+                thickness / material_id: As for :meth:`add_shape_mesh`.
+        """
+        return self._add_mesh_shape(
+            kind=GeoType.CONVEX_MESH,
+            body=body,
+            mesh=mesh,
+            scale=scale,
+            local_pos=local_pos,
+            local_rot=local_rot,
+            density=density,
+            mass=mass,
+            is_solid=is_solid,
+            thickness=thickness,
+            material_id=material_id,
         )
 
     def add_shape_plane(
@@ -733,9 +1002,48 @@ class WorldBuilder:
         return self._attach_shape(
             ShapeDescriptor(
                 body=body,
-                shape_type=ShapeType.PLANE,
-                geom_vec3=unit,
-                geom_scalar_a=float(offset),
+                shape_type=GeoType.PLANE,
+                plane_normal=unit,
+                plane_offset=float(offset),
+                material_id=material_id,
+            )
+        )
+
+    def add_shape_hfield(
+        self,
+        body: int,
+        hfield: Heightfield,
+        *,
+        scale: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        local_pos: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        local_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+        material_id: int | None = None,
+    ) -> int:
+        """Attach a heightfield (terrain) collider to ``body``.
+        Heightfields carry no mass and must be attached to static
+        bodies.
+
+        Args:
+            body: Parent body index (must be static).
+            hfield: :class:`newton.Heightfield` source.
+            scale: Per-axis multiplier on the hfield extents.
+            local_pos / local_rot: Shape pose in the body's local frame.
+            material_id: Material table index for contact resolution.
+        """
+        if hfield is None:
+            raise ValueError(f"add_shape_hfield(body={body}): hfield must be a Heightfield instance, got None")
+        if int(self._bodies[body].motion_type) != int(MOTION_STATIC):
+            raise ValueError(f"add_shape_hfield(body={body}): heightfields may only be attached to static bodies")
+        if any((not _is_finite(s)) or s <= 0.0 for s in scale):
+            raise ValueError(f"add_shape_hfield(body={body}): scale must be > 0 in every axis (got {scale})")
+        return self._attach_shape(
+            ShapeDescriptor(
+                body=body,
+                shape_type=GeoType.HFIELD,
+                local_pos=local_pos,
+                local_rot=local_rot,
+                scale=tuple(float(s) for s in scale),
+                hfield=hfield,
                 material_id=material_id,
             )
         )
@@ -1120,40 +1428,38 @@ class WorldBuilder:
                     "mass, or drop density / mass from the shapes."
                 )
 
-            # Parallel-axis accumulation:
-            #   total_mass = Σ m_i
-            #   com = (Σ m_i r_i) / total_mass
-            #   I_body = Σ (R_i I_i^shape R_i^T + m_i (|r_i - com|^2 I - (r_i - com)(r_i - com)^T))
+            # Per-shape: get (mass, com-in-shape-frame, I-about-shape-COM)
+            # from ``compute_inertia_shape``, then transform each shape's
+            # inertia into the parent body frame about the *body origin*
+            # via :func:`transform_inertia` (rotation + Steiner shift),
+            # and sum.
             total_mass = 0.0
-            com = np.zeros(3, dtype=np.float64)
+            inertia = np.zeros((3, 3), dtype=np.float64)
             for s in mass_shapes:
-                v, _ = _shape_volume_and_inertia(s)
-                m_i = float(s.mass) if s.mass is not None else float(s.density) * v
+                m_i, com_local, i_about_com = _shape_mass_com_inertia(s)
                 if m_i <= 0.0:
                     raise ValueError(
                         f"body {body_idx}: shape of type {s.shape_type.name} produced "
-                        f"zero mass (density={s.density}, mass={s.mass}, volume={v}). "
+                        f"zero mass (density={s.density}, mass={s.mass}). "
                         "Check geometry parameters."
                     )
+                # Compose shape -> body offset: local_pos + R(local_rot) * com_local.
+                q = wp.quat(*(float(c) for c in s.local_rot))
+                R = np.asarray(wp.quat_to_matrix(q), dtype=np.float64).reshape(3, 3)
+                offset = np.asarray(s.local_pos, dtype=np.float64) + R @ com_local
+                I_body = np.asarray(
+                    transform_inertia(
+                        m_i,
+                        wp.mat33(*(float(v) for v in i_about_com.flatten())),
+                        wp.vec3(float(offset[0]), float(offset[1]), float(offset[2])),
+                        q,
+                    ),
+                    dtype=np.float64,
+                ).reshape(3, 3)
                 total_mass += m_i
-                com += m_i * np.asarray(s.local_pos, dtype=np.float64)
+                inertia += I_body
             if total_mass <= 0.0:
                 raise ValueError(f"body {body_idx}: compound mass is zero; check shape parameters")
-            com /= total_mass
-
-            inertia = np.zeros((3, 3), dtype=np.float64)
-            for s in mass_shapes:
-                v, i_local = _shape_volume_and_inertia(s)
-                if s.mass is not None:
-                    scale = float(s.mass) / v if v > 0.0 else 0.0
-                else:
-                    scale = float(s.density)
-                i_shape = scale * i_local
-                r_local = _quat_to_mat33(s.local_rot)
-                i_shape_body = r_local @ i_shape @ r_local.T
-                offset = np.asarray(s.local_pos, dtype=np.float64) - com
-                m_i = float(s.mass) if s.mass is not None else float(s.density) * v
-                inertia += _translate_inertia(i_shape_body, m_i, offset)
 
             # Invert into the descriptor's inverse-mass / inverse-
             # inertia fields. We leave the body's position AT the user-
@@ -1207,6 +1513,8 @@ class WorldBuilder:
         affected_by_gravity = np.ones(n, dtype=np.int32)
         motion_type = np.full(n, int(MOTION_STATIC), dtype=np.int32)
         world_id_arr = np.zeros(n, dtype=np.int32)
+        position_prev_substep = np.zeros((n, 3), dtype=np.float32)
+        access_mode = np.full(n, int(ACCESS_MODE_VELOCITY_LEVEL), dtype=np.int32)
 
         for i, b in enumerate(self._bodies):
             positions[i] = b.position
@@ -1220,6 +1528,8 @@ class WorldBuilder:
             affected_by_gravity[i] = 1 if b.affected_by_gravity else 0
             motion_type[i] = int(b.motion_type)
             world_id_arr[i] = int(b.world_id)
+            position_prev_substep[i] = b.position_prev_substep if b.position_prev_substep is not None else b.position
+            access_mode[i] = int(b.access_mode)
 
         # Seed inverse_inertia_world with the body-frame value; the
         # first _update_inertia launch will rotate it into world space.
@@ -1252,6 +1562,14 @@ class WorldBuilder:
         c.kinematic_target_pos = wp.array(positions, dtype=wp.vec3f, device=device)
         c.kinematic_target_orient = wp.array(orientations, dtype=wp.quatf, device=device)
         c.kinematic_target_valid = wp.zeros(n, dtype=wp.int32, device=device)
+        # Substep access-mode snapshots. Seeded from the descriptor;
+        # the per-substep pre-pass overwrites them on every step.
+        # Orientation snapshot mirrors the body's initial orientation
+        # so a constraint flipping a body to POSITION_LEVEL before the
+        # first substep ran sees a sensible reference frame.
+        c.position_prev_substep = wp.array(position_prev_substep, dtype=wp.vec3f, device=device)
+        c.orientation_prev_substep = wp.array(orientations, dtype=wp.quatf, device=device)
+        c.access_mode = wp.array(access_mode, dtype=wp.int32, device=device)
         return c
 
     def _pack_joint_arrays(self, device: wp.context.Device) -> dict:

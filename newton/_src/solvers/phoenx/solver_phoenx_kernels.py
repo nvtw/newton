@@ -12,6 +12,10 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_STATIC,
+    ACCESS_MODE_VELOCITY_LEVEL,
+)
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -1257,16 +1261,26 @@ def _integrate_velocities_kernel(
     (Position-level -> Velocity-level). The cloth iterate has
     already written the constraint-projected position into
     ``particles.position``; we recover ``velocity = (position -
-    position_substep_start) * inv_dt`` so the next substep starts
+    position_prev_substep) * inv_dt`` so the next substep starts
     from a consistent velocity-level state. ``inverse_mass == 0``
-    pinned particles early-return.
+    pinned particles short-circuit inside
+    :func:`writeback_position_to_velocity` (their access mode is
+    ``STATIC``).
+
+    Body branch: first force the body back to ``VELOCITY_LEVEL`` via
+    :func:`writeback_position_to_velocity` -- that's a no-op for
+    bodies no constraint flipped, and runs the linear + quaternion
+    finite-diff for ones that were flipped to ``POSITION_LEVEL`` in
+    this substep. Then advance ``position`` / ``orientation`` by the
+    (now consistent) ``velocity`` / ``angular_velocity`` for dynamic
+    bodies. Static and kinematic bodies skip the integration.
 
     Launch dim is ``num_bodies + num_particles`` -- one thread per
     "thing" in the unified index space.
     """
     i = wp.tid()
+    writeback_position_to_velocity(store, i, inv_dt)
     if is_particle(store, i):
-        writeback_position_to_velocity(store, i, inv_dt)
         return
     mt = store.bodies.motion_type[i]
     if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
@@ -1451,19 +1465,33 @@ def _phoenx_apply_forces_and_gravity_kernel(
     """Fused per-(body, particle) velocity update at the top of every
     substep, dispatched through the unified body-or-particle index.
 
-    Body branch (``i < num_bodies``) keeps the existing rigid logic:
-    apply force, torque, and gravity to ``velocity`` /
-    ``angular_velocity``; static / kinematic / inv_mass=0 slots
-    early-return. Force accumulators are NOT cleared here --
+    Also snapshots the per-entity ``position_prev_substep`` /
+    ``orientation_prev_substep`` fields and resets ``access_mode``
+    so the substep starts with consistent velocity-level state for
+    every entity. Mirrors the C# ``broadcast_rigid_to_copy_states``
+    path that primes ``TinyRigidState`` at substep entry
+    (``MassSplitting/TinyRigidState.cs``).
+
+    Body branch (``i < num_bodies``):
+
+    * ``DYNAMIC``: apply force / torque / gravity to ``velocity`` /
+      ``angular_velocity``; snapshot pose into ``*_prev_substep``;
+      reset ``access_mode = VELOCITY_LEVEL``.
+    * ``STATIC`` / ``KINEMATIC`` / ``inverse_mass == 0``: snapshot
+      pose; flag ``access_mode = STATIC`` so the synchronize helpers
+      short-circuit; skip the velocity update.
+
+    Force accumulators are NOT cleared here --
     :func:`_phoenx_update_inertia_and_clear_forces_kernel` runs once
     at the end of :meth:`PhoenXWorld.step` and zeros them.
 
     Particle branch (``i >= num_bodies``) runs the substep-entry
     access-mode transition (Velocity-level -> Position-level): apply
     gravity + external force to velocity, snapshot the pre-predict
-    position into ``position_substep_start``, then advance position
+    position into ``position_prev_substep``, then advance position
     by ``velocity * dt`` so the cloth iterate sees the predicted
-    pose. ``inverse_mass == 0`` pinned particles early-return.
+    pose. ``inverse_mass == 0`` pinned particles snapshot + flag
+    ``STATIC`` and early-return.
 
     Launch dim is ``num_bodies + num_particles`` -- one thread per
     "thing" in the unified index space.
@@ -1471,9 +1499,12 @@ def _phoenx_apply_forces_and_gravity_kernel(
     i = wp.tid()
     if is_particle(store, i):
         i_p = i - store.num_bodies
+        store.particles.position_prev_substep[i_p] = store.particles.position[i_p]
         inv_m = store.particles.inverse_mass[i_p]
         if inv_m == wp.float32(0.0):
+            store.particles.access_mode[i_p] = ACCESS_MODE_STATIC
             return
+        store.particles.access_mode[i_p] = ACCESS_MODE_VELOCITY_LEVEL
         v = store.particles.velocity[i_p]
         v = v + gravity[store.particles.world_id[i_p]] * substep_dt
         v = v + store.particles.force[i_p] * (inv_m * substep_dt)
@@ -1481,12 +1512,17 @@ def _phoenx_apply_forces_and_gravity_kernel(
         p = store.particles.position[i_p]
         p_advanced, p_start = particle_predict_position(p, v, substep_dt)
         store.particles.position[i_p] = p_advanced
-        store.particles.position_substep_start[i_p] = p_start
+        store.particles.position_prev_substep[i_p] = p_start
         return
+    store.bodies.position_prev_substep[i] = store.bodies.position[i]
+    store.bodies.orientation_prev_substep[i] = store.bodies.orientation[i]
     if store.bodies.motion_type[i] != MOTION_DYNAMIC:
+        store.bodies.access_mode[i] = ACCESS_MODE_STATIC
         return
     if store.bodies.inverse_mass[i] == wp.float32(0.0):
+        store.bodies.access_mode[i] = ACCESS_MODE_STATIC
         return
+    store.bodies.access_mode[i] = ACCESS_MODE_VELOCITY_LEVEL
     v = store.bodies.velocity[i]
     w = store.bodies.angular_velocity[i]
     inv_mass = store.bodies.inverse_mass[i]

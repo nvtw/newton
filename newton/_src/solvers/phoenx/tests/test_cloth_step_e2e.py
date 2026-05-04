@@ -7,12 +7,12 @@ Validates the per-substep particle access-mode pattern:
 
 * Substep entry transition (Velocity-level -> Position-level): the
   predict kernel applies gravity to particle velocity, snapshots
-  the pre-predict position into ``position_substep_start``, and
+  the pre-predict position into ``position_prev_substep``, and
   advances ``position`` by ``velocity * dt``. The cloth iterate
   consumes the predicted positions.
 * Substep exit transition (Position-level -> Velocity-level): the
   recover kernel writes
-  ``velocity = (position - position_substep_start) * inv_dt`` so
+  ``velocity = (position - position_prev_substep) * inv_dt`` so
   the next substep starts from a consistent velocity-level state.
 
 Mirrors the C# ``TinyRigidState.SynchronizeVelAndPosStateUpdates``

@@ -24,11 +24,13 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
+from newton._src.geometry.inertia import compute_inertia_shape
+from newton._src.geometry.types import GeoType
 from newton._src.solvers.phoenx.constraints.contact_ingest import (
     _pair_counts_and_columns_kernel,
 )
 from newton._src.solvers.phoenx.world_builder import (
-    ShapeType,
     WorldBuilder,
 )
 
@@ -248,13 +250,14 @@ class TestSelfContactFilter(unittest.TestCase):
 
 
 class TestShapeApiBasics(unittest.TestCase):
-    """Error paths and the ``ShapeType`` enum wiring."""
+    """Error paths and the public ``GeoType`` wiring used by the
+    PhoenX :class:`WorldBuilder`."""
 
     def test_shape_types_defined(self) -> None:
-        self.assertIn("SPHERE", ShapeType.__members__)
-        self.assertIn("BOX", ShapeType.__members__)
-        self.assertIn("CAPSULE", ShapeType.__members__)
-        self.assertIn("PLANE", ShapeType.__members__)
+        self.assertIn("SPHERE", GeoType.__members__)
+        self.assertIn("BOX", GeoType.__members__)
+        self.assertIn("CAPSULE", GeoType.__members__)
+        self.assertIn("PLANE", GeoType.__members__)
 
     def test_invalid_sphere_radius(self) -> None:
         b = WorldBuilder()
@@ -304,6 +307,239 @@ class TestShapeApiBasics(unittest.TestCase):
         sb = shape_body.numpy()
         self.assertEqual(int(sb[0]), ground)
         self.assertEqual(int(sb[1]), ball)
+
+
+class TestExtendedShapeTypes(unittest.TestCase):
+    """Sanity-check the shape helpers added on top of the original
+    sphere / box / capsule / plane menu. Mass values are cross-checked
+    against :func:`compute_inertia_shape` so the test asserts the
+    builder integration, not the closed-form math itself."""
+
+    @staticmethod
+    def _builder_inv_mass(b: WorldBuilder, body: int) -> float:
+        b._accumulate_mass_inertia_from_shapes()
+        return b._bodies[body].inverse_mass
+
+    def test_cylinder_matches_compute_inertia_shape(self) -> None:
+        radius, half_height, density = 0.3, 0.6, 800.0
+        m_ref, _, _ = compute_inertia_shape(
+            type=int(GeoType.CYLINDER),
+            scale=wp.vec3(radius, half_height, radius),
+            src=None,
+            density=density,
+        )
+        b = WorldBuilder()
+        body = b.add_dynamic_body()
+        b.add_shape_cylinder(body, radius=radius, half_height=half_height, density=density)
+        self.assertAlmostEqual(self._builder_inv_mass(b, body), 1.0 / float(m_ref), places=6)
+
+    def test_cone_matches_compute_inertia_shape(self) -> None:
+        radius, half_height, density = 0.4, 0.8, 1200.0
+        m_ref, _, _ = compute_inertia_shape(
+            type=int(GeoType.CONE),
+            scale=wp.vec3(radius, half_height, radius),
+            src=None,
+            density=density,
+        )
+        b = WorldBuilder()
+        body = b.add_dynamic_body()
+        b.add_shape_cone(body, radius=radius, half_height=half_height, density=density)
+        self.assertAlmostEqual(self._builder_inv_mass(b, body), 1.0 / float(m_ref), places=6)
+
+    def test_ellipsoid_matches_compute_inertia_shape(self) -> None:
+        rx, ry, rz, density = 0.5, 0.3, 0.2, 1500.0
+        m_ref, _, _ = compute_inertia_shape(
+            type=int(GeoType.ELLIPSOID),
+            scale=wp.vec3(rx, ry, rz),
+            src=None,
+            density=density,
+        )
+        b = WorldBuilder()
+        body = b.add_dynamic_body()
+        b.add_shape_ellipsoid(body, semi_axes=(rx, ry, rz), density=density)
+        self.assertAlmostEqual(self._builder_inv_mass(b, body), 1.0 / float(m_ref), places=6)
+
+    def test_hollow_sphere_lighter_than_solid(self) -> None:
+        b1 = WorldBuilder()
+        body1 = b1.add_dynamic_body()
+        b1.add_shape_sphere(body1, radius=0.5, density=2000.0, is_solid=True)
+        inv_solid = self._builder_inv_mass(b1, body1)
+
+        b2 = WorldBuilder()
+        body2 = b2.add_dynamic_body()
+        b2.add_shape_sphere(body2, radius=0.5, density=2000.0, is_solid=False, thickness=0.05)
+        inv_hollow = self._builder_inv_mass(b2, body2)
+
+        self.assertLess(1.0 / inv_hollow, 1.0 / inv_solid)
+
+    def test_mesh_unit_cube_matches_box(self) -> None:
+        """A unit-cube triangle mesh and an equivalent ``add_shape_box``
+        with the same density must produce the same compound inverse
+        mass at the body."""
+        # Unit cube centred at origin, half-extents 0.5.
+        h = 0.5
+        verts = np.array(
+            [
+                [-h, -h, -h],
+                [+h, -h, -h],
+                [+h, +h, -h],
+                [-h, +h, -h],
+                [-h, -h, +h],
+                [+h, -h, +h],
+                [+h, +h, +h],
+                [-h, +h, +h],
+            ],
+            dtype=np.float32,
+        )
+        # Counter-clockwise from outside on each face. 12 triangles.
+        idx = np.array(
+            [
+                # -z (bottom): outward normal -z, CCW when viewed from -z
+                0,
+                2,
+                1,
+                0,
+                3,
+                2,
+                # +z (top): outward +z, CCW from +z
+                4,
+                5,
+                6,
+                4,
+                6,
+                7,
+                # -y (front): outward -y, CCW from -y
+                0,
+                1,
+                5,
+                0,
+                5,
+                4,
+                # +y (back): outward +y, CCW from +y
+                3,
+                7,
+                6,
+                3,
+                6,
+                2,
+                # -x (left): outward -x, CCW from -x
+                0,
+                4,
+                7,
+                0,
+                7,
+                3,
+                # +x (right): outward +x, CCW from +x
+                1,
+                2,
+                6,
+                1,
+                6,
+                5,
+            ],
+            dtype=np.int32,
+        )
+        mesh = newton.Mesh(verts, idx, compute_inertia=True, is_solid=True)
+
+        density = 1000.0
+        b1 = WorldBuilder()
+        body1 = b1.add_dynamic_body()
+        b1.add_shape_mesh(body1, mesh, density=density)
+        inv_mesh = self._builder_inv_mass(b1, body1)
+
+        b2 = WorldBuilder()
+        body2 = b2.add_dynamic_body()
+        b2.add_shape_box(body2, half_extents=(h, h, h), density=density)
+        inv_box = self._builder_inv_mass(b2, body2)
+
+        self.assertAlmostEqual(inv_mesh, inv_box, places=4)
+
+    def test_convex_mesh_matches_mesh_inertia(self) -> None:
+        """For a convex source mesh, ``add_shape_convex_mesh`` and
+        ``add_shape_mesh`` go through the same ``compute_inertia_shape``
+        code path and must agree."""
+        # Tetrahedron.
+        verts = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        idx = np.array(
+            [
+                0,
+                2,
+                1,
+                0,
+                1,
+                3,
+                0,
+                3,
+                2,
+                1,
+                2,
+                3,
+            ],
+            dtype=np.int32,
+        )
+        mesh = newton.Mesh(verts, idx, compute_inertia=True, is_solid=True)
+
+        density = 500.0
+        b1 = WorldBuilder()
+        body1 = b1.add_dynamic_body()
+        b1.add_shape_mesh(body1, mesh, density=density)
+        inv_mesh = self._builder_inv_mass(b1, body1)
+
+        b2 = WorldBuilder()
+        body2 = b2.add_dynamic_body()
+        b2.add_shape_convex_mesh(body2, mesh, density=density)
+        inv_hull = self._builder_inv_mass(b2, body2)
+
+        self.assertAlmostEqual(inv_mesh, inv_hull, places=6)
+
+    def test_mesh_rejects_none(self) -> None:
+        b = WorldBuilder()
+        body = b.add_dynamic_body()
+        with self.assertRaisesRegex(ValueError, "mesh must be a Mesh instance"):
+            b.add_shape_mesh(body, None, density=1.0)  # type: ignore[arg-type]
+
+    def test_hfield_static_only(self) -> None:
+        """Heightfields are static-only and contribute no mass; they
+        accept neither ``density`` nor ``mass``. They must be attached
+        to a static body."""
+        # Trivial flat 2x2 hfield.
+        data = np.zeros((2, 2), dtype=np.float32)
+        hfield = newton.Heightfield(data=data, nrow=2, ncol=2, hx=1.0, hy=1.0)
+
+        # Reject on dynamic body.
+        b1 = WorldBuilder()
+        dyn = b1.add_dynamic_body()
+        with self.assertRaisesRegex(ValueError, "may only be attached to static bodies"):
+            b1.add_shape_hfield(dyn, hfield)
+
+        # Accept on static body; doesn't perturb body's mass.
+        b2 = WorldBuilder()
+        ground = b2.add_static_body()
+        b2.add_shape_hfield(ground, hfield)
+        b2._accumulate_mass_inertia_from_shapes()
+        self.assertEqual(b2._bodies[ground].inverse_mass, 0.0)
+
+    def test_invalid_cylinder_dimensions(self) -> None:
+        b = WorldBuilder()
+        body = b.add_dynamic_body()
+        with self.assertRaises(ValueError):
+            b.add_shape_cylinder(body, radius=0.0, half_height=1.0, density=1.0)
+        with self.assertRaises(ValueError):
+            b.add_shape_cylinder(body, radius=1.0, half_height=0.0, density=1.0)
+
+    def test_invalid_ellipsoid_axes(self) -> None:
+        b = WorldBuilder()
+        body = b.add_dynamic_body()
+        with self.assertRaises(ValueError):
+            b.add_shape_ellipsoid(body, semi_axes=(0.5, -0.1, 0.5), density=1.0)
 
 
 if __name__ == "__main__":

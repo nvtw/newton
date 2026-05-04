@@ -44,18 +44,35 @@ The contact column carries each endpoint as a ``(kind, idx)`` pair:
   the three particle indices come from
   ``solver.tri_indices[t]``.
 
-The mass-splitting subsystem
-(:mod:`newton._src.solvers.phoenx.mass_splitting`) is unchanged --
-its richer per-(body, partition) access-mode pattern is parallel to
-this one. See ``CONSTRAINT_ACCESS_MODE.md`` for how the production
-solver currently routes constraint access modes.
+## Cross-kind access-mode handling
+
+Cloth (POSITION_LEVEL) and rigid-vs-triangle contact (VELOCITY_LEVEL)
+share particle endpoints across alternating graph colours. Each
+particle carries a per-entity ``access_mode`` flag (see
+:mod:`newton._src.solvers.phoenx.access_mode`); the triangle branch
+of :func:`endpoint_load` flips its three vertices to
+``VELOCITY_LEVEL`` via :func:`particle_set_access_mode` before
+reading ``particles.velocity``. The flip is the
+:func:`~newton._src.solvers.phoenx.access_mode.synchronize_position_velocity`
+finite-diff: any cloth-written position correction in
+``particles.position`` is converted into the equivalent velocity
+delta against ``position_prev_substep``. The contact iterate then
+reads ``particles.velocity`` directly and writes velocity impulses
+into it; if a subsequent cloth iterate touches the same particle it
+flips back to ``POSITION_LEVEL`` and re-integrates ``position =
+position_prev_substep + velocity * dt``, which preserves both the
+cloth correction and the contact impulse. Direct port of Jitter2's
+``TinyRigidState.SetAccessMode`` pattern
+(``MassSplitting/TinyRigidState.cs``).
 """
 
 from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.body_or_particle import particle_set_access_mode
 from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
@@ -68,6 +85,9 @@ __all__ = [
     "endpoint_warmstart_apply_impulse",
     "endpoint_world_point",
 ]
+
+
+_ACCESS_MODE_VELOCITY_LEVEL = wp.constant(wp.int32(ACCESS_MODE_VELOCITY_LEVEL))
 
 
 #: Endpoint kind tags. Stored as int32 dwords on each contact column.
@@ -148,50 +168,41 @@ def _triangle_point_velocity(
     """World linear velocity at a barycentric point on a triangle.
 
     Reads :attr:`ParticleContainer.velocity` directly. Use this only
-    where the read is access-mode-safe (warm-start at substep start,
-    where ``position == position_substep_start``). Inside the iterate
-    the cloth constraint has already advanced ``particles.position``
-    without writing back to ``particles.velocity`` (the substep-end
-    finite-diff defers velocity recovery), so the velocity store is
-    stale; iterate-time consumers must use
-    :func:`_triangle_point_velocity_substep` instead.
+    where the per-vertex ``access_mode`` is known to be
+    ``VELOCITY_LEVEL`` (e.g., the warm-start gather at substep
+    start). Inside the iterate, callers must first sync each vertex
+    via :func:`_triangle_sync_to_velocity_level` so cloth's
+    position-level writes are folded into ``velocity``.
     """
     return bary[0] * particles.velocity[pa] + bary[1] * particles.velocity[pb] + bary[2] * particles.velocity[pc]
 
 
 @wp.func
-def _triangle_point_velocity_substep(
+def _triangle_sync_to_velocity_level(
     particles: ParticleContainer,
     pa: wp.int32,
     pb: wp.int32,
     pc: wp.int32,
-    bary: wp.vec3f,
     idt: wp.float32,
-) -> wp.vec3f:
-    """Iterate-time triangle-point velocity via lazy position-level sync.
+):
+    """Flip the three triangle vertices' access mode to ``VELOCITY_LEVEL``.
 
-    Mirrors Jitter2's ``SetAccessMode(VelocityLevel)`` lazy synchronization:
-    inside a substep the cloth iterate runs in Position-level mode --
-    it edits :attr:`ParticleContainer.position` while leaving
-    :attr:`ParticleContainer.velocity` at its substep-entry value.
-    A consumer that needs an up-to-date velocity (the rigid-vs-triangle
-    contact iterate) must derive it on read from the
-    position-substep-start delta:
-
-    .. code-block:: text
-
-        v_p = (position[p] - position_substep_start[p]) * inv_substep_dt
-
-    This matches the substep-exit recovery kernel
-    (:func:`solver_phoenx_kernels._integrate_velocities_kernel`) exactly,
-    so a contact iterate that reads through this helper sees the same
-    velocity the next substep will start from. See
-    ``CONSTRAINT_ACCESS_MODE.md`` for the full contract.
+    Direct call to
+    :func:`~newton._src.solvers.phoenx.body_or_particle.particle_set_access_mode`
+    on each vertex. For a vertex already in ``VELOCITY_LEVEL`` (or
+    ``STATIC``), the synchronize helper short-circuits; for a vertex
+    in ``POSITION_LEVEL`` (cloth has just written its position) the
+    helper runs the
+    :func:`~newton._src.solvers.phoenx.access_mode.synchronize_position_velocity`
+    finite-diff against ``position_prev_substep`` so the subsequent
+    ``particles.velocity[p]`` read picks up the cloth-corrected
+    velocity. Mirrors Jitter2's
+    ``TinyRigidState.SetAccessMode(VelocityLevel)``
+    (``MassSplitting/TinyRigidState.cs:108``).
     """
-    va = (particles.position[pa] - particles.position_substep_start[pa]) * idt
-    vb = (particles.position[pb] - particles.position_substep_start[pb]) * idt
-    vc = (particles.position[pc] - particles.position_substep_start[pc]) * idt
-    return bary[0] * va + bary[1] * vb + bary[2] * vc
+    particle_set_access_mode(particles, pa, _ACCESS_MODE_VELOCITY_LEVEL, idt)
+    particle_set_access_mode(particles, pb, _ACCESS_MODE_VELOCITY_LEVEL, idt)
+    particle_set_access_mode(particles, pc, _ACCESS_MODE_VELOCITY_LEVEL, idt)
 
 
 @wp.func
@@ -237,11 +248,13 @@ def endpoint_load(
 ) -> EndpointState:
     """Build the per-contact state for one endpoint.
 
-    Iterate-time loader: triangle endpoints read velocity through the
-    Position-level lazy-sync helper
-    (:func:`_triangle_point_velocity_substep`), so the value stays
-    consistent with the cloth iterate's in-progress position writes.
-    See ``CONSTRAINT_ACCESS_MODE.md``.
+    Iterate-time loader: triangle endpoints first sync their three
+    vertices to ``VELOCITY_LEVEL`` via
+    :func:`_triangle_sync_to_velocity_level`, then read
+    ``particles.velocity`` directly. Cloth's most recent position
+    correction is folded into the velocity field by the access-mode
+    sync, so contact reads stay consistent across alternating cloth
+    / contact colours within one PGS sweep.
 
     Args:
         kind: :data:`ENDPOINT_KIND_RIGID` or
@@ -255,9 +268,9 @@ def endpoint_load(
             sign convention in :func:`contact_iterate_at`.
         n: World-space contact normal (pointing endpoint 1 ->
             endpoint 2). Used to apply the surface-margin shift.
-        idt: Inverse substep dt ``[1/s]``. Drives the triangle's
-            position-level velocity recovery
-            ``v = (position - position_substep_start) * idt``.
+        idt: Inverse substep dt ``[1/s]``. Drives the per-vertex
+            access-mode sync (Position-level -> Velocity-level
+            finite-diff against ``position_prev_substep``).
         bodies: Rigid-body SoA (read).
         particles: Particle SoA (read; triangle endpoints only).
         tri_indices: Per-triangle ``vec4i`` particle indices
@@ -285,11 +298,15 @@ def endpoint_load(
     pa = verts[0]
     pb = verts[1]
     pc = verts[2]
+    # Sync each vertex to VELOCITY_LEVEL so cloth's just-written
+    # position correction is folded into ``particles.velocity`` via
+    # the access-mode finite-diff before we read it.
+    _triangle_sync_to_velocity_level(particles, pa, pb, pc, idt)
     # Push the contact point off the triangle surface by ``margin``
     # along the contact normal -- the triangle endpoint has no
     # body-local frame, so the margin shift IS the only correction.
     out.p_world = _triangle_world_point(particles, pa, pb, pc, local_anchor) + margin_sign * margin * n
-    out.v = _triangle_point_velocity_substep(particles, pa, pb, pc, local_anchor, idt)
+    out.v = _triangle_point_velocity(particles, pa, pb, pc, local_anchor)
     out.w = wp.vec3f(0.0, 0.0, 0.0)
     out.r = wp.vec3f(0.0, 0.0, 0.0)
     out.inv_mass = _triangle_point_inv_mass(particles, pa, pb, pc, local_anchor)
