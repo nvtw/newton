@@ -24,6 +24,29 @@ lab_to_mujoco = [0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11]
 mujoco_to_lab = [0, 4, 8, 2, 6, 10, 1, 5, 9, 3, 7, 11]
 
 
+@wp.kernel
+def _build_joint_target_pos_kernel(
+    act: wp.array2d[float],  # (1, num_dofs) on device
+    joint_pos_initial: wp.array[float],  # (num_dofs,) on device
+    reorder: wp.array[int],  # (num_dofs,) mjc_to_physx mapping
+    action_scale: float,
+    num_prefix_zeros: int,
+    out: wp.array[float],  # (num_prefix_zeros + num_dofs,)
+):
+    """Reorder, scale, and prepend ``num_prefix_zeros`` zeros into ``out``.
+
+    Avoids the device->host->device round-trip the NumPy version did each
+    policy step and keeps the value on-device for graph capture.
+    """
+    i = wp.tid()
+    if i < num_prefix_zeros:
+        out[i] = 0.0
+    else:
+        j = i - num_prefix_zeros
+        idx = reorder[j]
+        out[i] = joint_pos_initial[j] + action_scale * act[0, idx]
+
+
 def quat_rotate_inverse(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     """Rotate a vector by the inverse of a quaternion (NumPy implementation).
 
@@ -219,6 +242,15 @@ class Example:
         self.command = np.zeros((1, 3), dtype=np.float32)
         self.command[0, 0] = 1.0
 
+        # Pre-allocate device buffers for the policy step so the hot loop never
+        # allocates and never round-trips the action tensor to host.
+        self._obs_wp = wp.zeros((1, 48), dtype=wp.float32, device=self.device)
+        self._joint_pos_initial_wp = wp.array(self.joint_pos_initial.reshape(-1), dtype=wp.float32, device=self.device)
+        self._mujoco_to_lab_wp = wp.array(np.asarray(mujoco_to_lab, dtype=np.int32), dtype=wp.int32, device=self.device)
+        self._action_scale = 0.5
+        self._num_prefix_zeros = 6
+        self._num_dofs = 12
+
         self.capture()
 
     def capture(self):
@@ -253,15 +285,29 @@ class Example:
             self.command,
         )
 
-        obs_wp = wp.array(obs, dtype=wp.float32, device=self.device)
-        out = self.policy({self._policy_input_name: obs_wp})
-        self.act = out[self._policy_output_name].numpy().astype(np.float32)
+        # Reuse the preallocated obs buffer (avoids per-step device alloc).
+        self._obs_wp.assign(obs)
+        out = self.policy({self._policy_input_name: self._obs_wp})
+        act_wp = out[self._policy_output_name]
 
-        rearranged_act = self.act[:, self.mujoco_to_lab_indices]
-        a = self.joint_pos_initial + 0.5 * rearranged_act
-        a_with_zeros = np.concatenate([np.zeros(6, dtype=np.float32), a.squeeze(0)])
-        a_wp = wp.array(a_with_zeros, dtype=wp.float32, device=self.device)
-        wp.copy(self.control.joint_target_pos, a_wp)
+        # Build joint_target_pos directly on device: reorder, scale,
+        # prepend the six zeros for the floating base in a single launch.
+        wp.launch(
+            _build_joint_target_pos_kernel,
+            dim=self._num_prefix_zeros + self._num_dofs,
+            inputs=[
+                act_wp,
+                self._joint_pos_initial_wp,
+                self._mujoco_to_lab_wp,
+                self._action_scale,
+                self._num_prefix_zeros,
+                self.control.joint_target_pos,
+            ],
+            device=self.device,
+        )
+
+        # Keep a host-side copy of the action for the next observation.
+        self.act = act_wp.numpy().astype(np.float32)
 
         if self.graph:
             wp.capture_launch(self.graph)

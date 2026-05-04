@@ -128,8 +128,32 @@ def compute_obs(
     ).astype(np.float32)
 
 
+@wp.kernel
+def _build_joint_target_pos_kernel(
+    act: wp.array2d[float],  # (1, num_dofs) on device
+    joint_pos_initial: wp.array[float],  # (num_dofs,) on device
+    reorder: wp.array[int],  # (num_dofs,) mjc_to_physx mapping
+    action_scale: float,
+    num_prefix_zeros: int,
+    out: wp.array[float],  # (num_prefix_zeros + num_dofs,)
+):
+    """Reorder, scale, and prepend ``num_prefix_zeros`` zeros into ``out``.
+
+    Single kernel that replaces the NumPy reorder + concatenate + per-step
+    ``wp.array(..., device=device)`` upload, keeping the control target on
+    device for the rest of the simulation step.
+    """
+    i = wp.tid()
+    if i < num_prefix_zeros:
+        out[i] = 0.0
+    else:
+        j = i - num_prefix_zeros
+        idx = reorder[j]
+        out[i] = joint_pos_initial[j] + action_scale * act[0, idx]
+
+
 def load_policy_and_setup_arrays(example: Any, policy_path: str, num_dofs: int, joint_pos_slice: slice):
-    """Load ONNX policy and setup initial NumPy arrays for control."""
+    """Load ONNX policy and setup initial arrays (host + device) for control."""
     print("[INFO] Loading policy from:", policy_path)
     example.policy = newton.utils.OnnxRuntime(policy_path, device=str(example.device))
     example.policy_input_name = example.policy.input_names[0]
@@ -138,6 +162,21 @@ def load_policy_and_setup_arrays(example: Any, policy_path: str, num_dofs: int, 
     joint_q = example.state_0.joint_q.numpy() if example.state_0.joint_q is not None else np.zeros(7, dtype=np.float32)
     example.joint_pos_initial = np.asarray(joint_q[joint_pos_slice], dtype=np.float32).reshape(1, num_dofs)
     example.act = np.zeros((1, num_dofs), dtype=np.float32)
+
+    # Pre-allocate device buffers so the policy step never allocates and
+    # never uploads a fresh joint_target_pos to device each frame.
+    obs_dim = int(example.config["num_observations"]) if "num_observations" in example.config else None
+    if obs_dim is None:
+        # Infer obs_dim from the policy's declared input shape (batch, obs_dim).
+        obs_dim = int(example.policy._shapes[example.policy_input_name][1])
+    example._obs_wp = wp.zeros((1, obs_dim), dtype=wp.float32, device=example.device)
+    example._joint_pos_initial_wp = wp.array(
+        example.joint_pos_initial.reshape(-1), dtype=wp.float32, device=example.device
+    )
+    example._mjc_to_physx_wp = wp.array(
+        np.asarray(example.mjc_to_physx_indices, dtype=np.int32), dtype=wp.int32, device=example.device
+    )
+    example._num_dofs = num_dofs
 
 
 def find_physx_mjwarp_mapping(mjwarp_joint_names, physx_joint_names):
@@ -314,15 +353,28 @@ class Example:
             self.command,
         )
 
-        obs_wp = wp.array(obs, dtype=wp.float32, device=self.device)
-        out = self.policy({self.policy_input_name: obs_wp})
-        self.act = out[self.policy_output_name].numpy().astype(np.float32)
+        # Reuse preallocated obs buffer (no per-step device alloc).
+        self._obs_wp.assign(obs)
+        out = self.policy({self.policy_input_name: self._obs_wp})
+        act_wp = out[self.policy_output_name]
 
-        rearranged_act = self.act[:, self.mjc_to_physx_indices]
-        a = self.joint_pos_initial + self.config["action_scale"] * rearranged_act
-        a_with_zeros = np.concatenate([np.zeros(6, dtype=np.float32), a.squeeze(0)])
-        a_wp = wp.array(a_with_zeros, dtype=wp.float32, device=self.device)
-        wp.copy(self.control.joint_target_pos, a_wp)
+        # Build joint_target_pos on device: reorder, scale, prepend zeros.
+        wp.launch(
+            _build_joint_target_pos_kernel,
+            dim=6 + self._num_dofs,
+            inputs=[
+                act_wp,
+                self._joint_pos_initial_wp,
+                self._mjc_to_physx_wp,
+                float(self.config["action_scale"]),
+                6,
+                self.control.joint_target_pos,
+            ],
+            device=self.device,
+        )
+
+        # Keep a host copy of the action for the next obs computation.
+        self.act = act_wp.numpy().astype(np.float32)
 
         for _ in range(self.decimation):
             if self.graph:

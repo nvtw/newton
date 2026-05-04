@@ -253,7 +253,7 @@ class ControllerNeuralMLP(Controller):
         return True
 
     def is_graphable(self) -> bool:
-        return False
+        return True
 
     def state(self, num_actuators: int, device: wp.Device) -> ControllerNeuralMLP.State:
         return ControllerNeuralMLP.State(

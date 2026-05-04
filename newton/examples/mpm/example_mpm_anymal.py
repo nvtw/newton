@@ -18,7 +18,12 @@ import warp as wp
 import newton
 import newton.examples
 import newton.utils
-from newton.examples.robot.example_robot_anymal_c_walk import compute_obs, lab_to_mujoco, mujoco_to_lab
+from newton.examples.robot.example_robot_anymal_c_walk import (
+    _build_joint_target_pos_kernel,
+    compute_obs,
+    lab_to_mujoco,
+    mujoco_to_lab,
+)
 from newton.solvers import SolverImplicitMPM
 
 
@@ -173,6 +178,16 @@ class Example:
         self.gravity_vec = np.array([[0.0, 0.0, -1.0]], dtype=np.float32)
         self.command = np.zeros((1, 3), dtype=np.float32)
 
+        # Pre-allocate device buffers so apply_control() never allocates and
+        # never round-trips the joint_target_pos through host each step.
+        self._obs_wp = wp.zeros((1, 48), dtype=wp.float32, device=self.device)
+        self._joint_pos_initial_wp = wp.array(self.joint_pos_initial.reshape(-1), dtype=wp.float32, device=self.device)
+        self._mujoco_to_lab_wp = wp.array(np.asarray(mujoco_to_lab, dtype=np.int32), dtype=wp.int32, device=self.device)
+        # joint_target_pos is allocated by self.model.control() above; ensure
+        # it lives on device so the kernel can write to it directly.
+        if self.control.joint_target_pos is None or self.control.joint_target_pos.device != self.device:
+            self.control.joint_target_pos = wp.zeros(18, dtype=wp.float32, device=self.device)
+
         self._auto_forward = True
 
         # set model on viewer and setup capture
@@ -202,14 +217,25 @@ class Example:
             self.gravity_vec,
             self.command,
         )
-        obs_wp = wp.array(obs, dtype=wp.float32, device=self.device)
-        out = self.policy({self._policy_input_name: obs_wp})
-        self.act = out[self._policy_output_name].numpy().astype(np.float32)
-        rearranged_act = self.act[:, self.mujoco_to_lab_indices]
-        a = self.joint_pos_initial + 0.5 * rearranged_act
-        a_with_zeros = np.concatenate([np.zeros(6, dtype=np.float32), a.squeeze(0)])
-        a_wp = wp.array(a_with_zeros, dtype=wp.float32, device=self.device)
-        wp.copy(self.control.joint_target_pos, a_wp)
+        self._obs_wp.assign(obs)
+        out = self.policy({self._policy_input_name: self._obs_wp})
+        act_wp = out[self._policy_output_name]
+
+        wp.launch(
+            _build_joint_target_pos_kernel,
+            dim=6 + 12,
+            inputs=[
+                act_wp,
+                self._joint_pos_initial_wp,
+                self._mujoco_to_lab_wp,
+                0.5,
+                6,
+                self.control.joint_target_pos,
+            ],
+            device=self.device,
+        )
+
+        self.act = act_wp.numpy().astype(np.float32)
 
     def simulate_robot(self):
         # robot substeps

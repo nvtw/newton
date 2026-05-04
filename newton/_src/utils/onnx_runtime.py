@@ -34,9 +34,26 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
-import onnx
 import warp as wp
-from onnx import numpy_helper
+
+
+def _require_onnx():
+    """Lazy import of the ``onnx`` package with a friendly error message.
+
+    Returns ``(onnx, numpy_helper)``.  ``onnx`` is an optional dependency;
+    importing it eagerly at module load would force every Newton install to
+    pull protobuf and ml-dtypes even when the user never loads a policy.
+    """
+    try:
+        import onnx  # noqa: PLC0415 - lazy import keeps `onnx` an optional extra
+        from onnx import numpy_helper  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover - exercised only on missing dep
+        raise ImportError(
+            "OnnxRuntime requires the optional `onnx` package. "
+            "Install it with `pip install onnx>=1.16.0` or `pip install newton[onnx]`."
+        ) from exc
+    return onnx, numpy_helper
+
 
 # ---------------------------------------------------------------------------
 # Warp kernels
@@ -200,6 +217,7 @@ class OnnxRuntime:
     def __init__(self, path: str, device: str | None = None, batch_size: int = 1):
         self._device = wp.get_device(device)
 
+        onnx, numpy_helper = _require_onnx()
         model = onnx.load(path)
         graph = model.graph
 
@@ -504,7 +522,6 @@ def _exec_gemm(op, tensors, shapes, device):
         inputs=[A, B, bias, out, K, alpha, beta],
         device=device,
     )
-    shapes[op.outputs[0]] = (M, N)
 
 
 def _exec_elu(op, tensors, shapes, device):
@@ -513,7 +530,6 @@ def _exec_elu(op, tensors, shapes, device):
     out = tensors[op.outputs[0]]
     shape = shapes[op.inputs[0]]
     wp.launch(_elu_kernel, dim=shape, inputs=[x, out, alpha], device=device)
-    shapes[op.outputs[0]] = shape
 
 
 def _exec_squeeze(op, tensors, shapes, device):

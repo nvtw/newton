@@ -68,9 +68,9 @@ class ControllerNeuralLSTM(Controller):
     maintained across timesteps to capture temporal patterns.
 
     The exported ONNX model must have **three inputs** -- input,
-    initial_hidden, initial_cell -- and **two outputs** -- effort, hidden_out
-    (cell_out is read from the LSTM op directly).  The model's metadata
-    properties must specify which input/output names map to which roles.
+    initial_hidden, initial_cell -- and **three graph outputs** --
+    effort, hidden_out, cell_out.  The model's metadata properties must
+    specify which input/output names map to which roles.
 
     Required metadata properties:
 
@@ -135,6 +135,20 @@ class ControllerNeuralLSTM(Controller):
             model_path: Path to the ``.onnx`` checkpoint.
         """
         self.model_path = model_path
+
+        # ``.pt`` LSTM checkpoints require torch-specific introspection
+        # (network.lstm.num_layers, hidden tensors as torch.Tensor, etc.) that
+        # the new ONNX-only compute path can no longer perform.  The MLP
+        # adapter is single-input/single-output and not applicable here.
+        if model_path.lower().endswith((".pt", ".pth")):
+            raise NotImplementedError(
+                "ControllerNeuralLSTM no longer supports .pt/.pth TorchScript checkpoints. "
+                "Re-export the LSTM as an ONNX model with explicit input/output names and "
+                "the metadata properties listed in the class docstring "
+                "(input_name, hidden_in_name, cell_in_name, output_name, hidden_out_name, "
+                "cell_out_name, num_layers, hidden_size). See torch.onnx.export and the "
+                "test fixture _build_lstm_onnx in newton/tests/test_actuators.py for an example."
+            )
 
         metadata = load_metadata(model_path)
 
