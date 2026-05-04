@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import warp as wp
@@ -519,6 +519,7 @@ class CollisionPipeline:
         extra_shape_count: int = 0,
         unified_shape_world: wp.array[int] | None = None,
         unified_shape_flags: wp.array[int] | None = None,
+        broad_phase_filter: tuple[Any, Any] | None = None,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -608,6 +609,15 @@ class CollisionPipeline:
                 ``shape_flags`` array used by the broad phase to filter
                 shapes by ``COLLIDE_SHAPES``.  Counterpart to
                 ``unified_shape_world``; defaults to ``model.shape_flags``.
+            broad_phase_filter: Optional ``(filter_func, filter_data_type)``
+                pair installed on the constructed broad phase.  ``filter_func``
+                is a ``@wp.func(pair: wp.vec2i, data: filter_data_type) -> wp.int32``
+                that runs after the AABB overlap test; returning ``0`` drops
+                the pair.  Pass an instance of ``filter_data_type`` to
+                :meth:`set_broad_phase_filter_data` before stepping; the
+                pipeline forwards it to every broad-phase launch.  Ignored
+                when ``broad_phase`` is a pre-built instance (the caller
+                must construct that instance with the filter directly).
 
         .. note::
             When ``requires_grad`` is true (explicitly or via ``model.requires_grad``),
@@ -687,7 +697,9 @@ class CollisionPipeline:
                     f"({expected_len}); got {unified_shape_flags.shape[0]}"
                 )
             shape_world = unified_shape_world
-            shape_flags = unified_shape_flags if unified_shape_flags is not None else getattr(model, "shape_flags", None)
+            shape_flags = (
+                unified_shape_flags if unified_shape_flags is not None else getattr(model, "shape_flags", None)
+            )
         else:
             shape_world = getattr(model, "shape_world", None)
             shape_flags = getattr(model, "shape_flags", None)
@@ -709,12 +721,29 @@ class CollisionPipeline:
         self.requires_grad = requires_grad
         self.soft_contact_margin = soft_contact_margin
 
+        # Broad-phase filter callback: forwarded to whichever broad phase
+        # we construct below.  ``broad_phase_filter_data`` is set later
+        # by the caller via :meth:`set_broad_phase_filter_data`.
+        if broad_phase_filter is not None:
+            if not isinstance(broad_phase_filter, tuple) or len(broad_phase_filter) != 2:
+                raise ValueError("broad_phase_filter must be a (filter_func, filter_data_type) tuple")
+            self._broad_phase_filter_func, self._broad_phase_filter_data_type = broad_phase_filter
+        else:
+            self._broad_phase_filter_func = None
+            self._broad_phase_filter_data_type = None
+        self.broad_phase_filter_data: Any | None = None
+
         using_expert_components = broad_phase_instance is not None or narrow_phase is not None
         if using_expert_components:
             if broad_phase_instance is None or narrow_phase is None:
                 raise ValueError("Provide both broad_phase and narrow_phase for expert component construction")
             if sdf_hydroelastic_config is not None:
                 raise ValueError("sdf_hydroelastic_config cannot be used when narrow_phase is provided")
+            if broad_phase_filter is not None:
+                raise ValueError(
+                    "broad_phase_filter is ignored when broad_phase is a pre-built instance; "
+                    "construct that instance with filter_func=... directly."
+                )
 
             inferred_mode = _infer_broad_phase_mode_from_instance(broad_phase_instance)
             self.broad_phase_mode = inferred_mode
@@ -756,6 +785,11 @@ class CollisionPipeline:
         else:
             self.broad_phase_mode = mode_from_broad_phase if mode_from_broad_phase is not None else "explicit"
 
+            bp_filter_kwargs = {}
+            if self._broad_phase_filter_func is not None:
+                bp_filter_kwargs["filter_func"] = self._broad_phase_filter_func
+                bp_filter_kwargs["filter_data_type"] = self._broad_phase_filter_data_type
+
             if self.broad_phase_mode == "explicit":
                 if shape_pairs_filtered is None:
                     shape_pairs_filtered = getattr(model, "shape_contact_pairs", None)
@@ -764,7 +798,7 @@ class CollisionPipeline:
                         "shape_pairs_filtered must be provided for broad_phase=EXPLICIT "
                         "(or set model.shape_contact_pairs)"
                     )
-                self.broad_phase = BroadPhaseExplicit()
+                self.broad_phase = BroadPhaseExplicit(**bp_filter_kwargs)
                 self.shape_pairs_filtered = shape_pairs_filtered
                 self.shape_pairs_max = len(shape_pairs_filtered)
                 self.shape_pairs_excluded = None
@@ -772,7 +806,9 @@ class CollisionPipeline:
             elif self.broad_phase_mode == "nxn":
                 if shape_world is None:
                     raise ValueError("model.shape_world is required for broad_phase=NXN")
-                self.broad_phase = BroadPhaseAllPairs(shape_world, shape_flags=shape_flags, device=device)
+                self.broad_phase = BroadPhaseAllPairs(
+                    shape_world, shape_flags=shape_flags, device=device, **bp_filter_kwargs
+                )
                 self.shape_pairs_filtered = None
                 self.shape_pairs_max = _resolve_shape_pairs_max(model, shape_pairs_max, self.extra_shape_count)
                 self.shape_pairs_excluded = self._build_excluded_pairs(model)
@@ -782,7 +818,9 @@ class CollisionPipeline:
             elif self.broad_phase_mode == "sap":
                 if shape_world is None:
                     raise ValueError("model.shape_world is required for broad_phase=SAP")
-                self.broad_phase = BroadPhaseSAP(shape_world, shape_flags=shape_flags, device=device)
+                self.broad_phase = BroadPhaseSAP(
+                    shape_world, shape_flags=shape_flags, device=device, **bp_filter_kwargs
+                )
                 self.shape_pairs_filtered = None
                 self.shape_pairs_max = _resolve_shape_pairs_max(model, shape_pairs_max, self.extra_shape_count)
                 self.shape_pairs_excluded = self._build_excluded_pairs(model)
@@ -928,6 +966,26 @@ class CollisionPipeline:
     def soft_contact_max(self) -> int:
         """Maximum soft contact buffer capacity used by this pipeline."""
         return self._soft_contact_max
+
+    def set_broad_phase_filter_data(self, filter_data: Any) -> None:
+        """Install the runtime ``filter_data`` instance forwarded to broad-phase launches.
+
+        Pass an instance of the ``filter_data_type`` provided to
+        :class:`CollisionPipeline` via ``broad_phase_filter``.  The pipeline
+        forwards this object verbatim to the broad-phase ``launch()`` on
+        every step.  Callers may swap it between steps to vary filter
+        behaviour without rebuilding the pipeline.
+
+        Raises:
+            RuntimeError: If the pipeline was constructed without a
+                ``broad_phase_filter``.
+        """
+        if self._broad_phase_filter_func is None:
+            raise RuntimeError(
+                "set_broad_phase_filter_data() requires the pipeline to be constructed "
+                "with broad_phase_filter=(filter_func, filter_data_type)"
+            )
+        self.broad_phase_filter_data = filter_data
 
     def contacts(self) -> Contacts:
         """
@@ -1189,6 +1247,7 @@ class CollisionPipeline:
                 filter_pairs=self.shape_pairs_excluded,
                 num_filter_pairs=self.shape_pairs_excluded_count,
                 skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
+                filter_data=self.broad_phase_filter_data,
             )
         elif isinstance(self.broad_phase, BroadPhaseSAP):
             self.broad_phase.launch(
@@ -1204,6 +1263,7 @@ class CollisionPipeline:
                 filter_pairs=self.shape_pairs_excluded,
                 num_filter_pairs=self.shape_pairs_excluded_count,
                 skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
+                filter_data=self.broad_phase_filter_data,
             )
         else:  # BroadPhaseExplicit
             self.broad_phase.launch(
@@ -1216,6 +1276,7 @@ class CollisionPipeline:
                 self.broad_phase_pair_count,
                 device=self.device,
                 skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
+                filter_data=self.broad_phase_filter_data,
             )
 
     def _run_narrow_phase_and_post(

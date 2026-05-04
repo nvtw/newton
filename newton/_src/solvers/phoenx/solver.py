@@ -139,6 +139,48 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# Cloth broad-phase filter
+# ---------------------------------------------------------------------------
+# Drops cloth-triangle pairs that share a vertex.  Adjacent triangles can
+# never produce a meaningful self-contact, but their AABBs almost always
+# overlap; without this filter the broad phase emits one candidate per
+# fan-edge.
+
+
+@wp.struct
+class PhoenXClothFilterData:
+    """Runtime data for :func:`phoenx_cloth_share_vertex_filter`.
+
+    ``num_rigid_shapes`` is ``model.shape_count`` (the boundary between
+    rigid and triangle shape indices in the unified ``S+T`` shape space).
+    ``tri_indices`` is the solver-owned ``vec4i`` array of triangle
+    vertex indices (4th component is unused for triangles).
+    """
+
+    num_rigid_shapes: wp.int32
+    tri_indices: wp.array[wp.vec4i]
+
+
+@wp.func
+def phoenx_cloth_share_vertex_filter(pair: wp.vec2i, data: PhoenXClothFilterData) -> wp.int32:
+    """Return ``0`` when both endpoints are triangles sharing a vertex."""
+    s1 = pair[0]
+    s2 = pair[1]
+    if s1 < data.num_rigid_shapes or s2 < data.num_rigid_shapes:
+        return wp.int32(1)
+    t1 = s1 - data.num_rigid_shapes
+    t2 = s2 - data.num_rigid_shapes
+    vi = data.tri_indices[t1]
+    vj = data.tri_indices[t2]
+    for a in range(3):
+        ai = vi[a]
+        for b in range(3):
+            if ai == vj[b]:
+                return wp.int32(0)
+    return wp.int32(1)
+
+
+# ---------------------------------------------------------------------------
 # SolverPhoenX
 # ---------------------------------------------------------------------------
 
@@ -468,8 +510,18 @@ class SolverPhoenX(SolverBase):
                     cp_kwargs["broad_phase"] = "nxn"
                     cp_kwargs["unified_shape_world"] = pre_unified_shape_world
                     cp_kwargs["unified_shape_flags"] = pre_unified_shape_flags
+                    cp_kwargs["broad_phase_filter"] = (
+                        phoenx_cloth_share_vertex_filter,
+                        PhoenXClothFilterData,
+                    )
                 model._collision_pipeline = _newton.CollisionPipeline(model, **cp_kwargs)
                 model._collision_pipeline.contacts()  # forces buffer sizing
+
+                if num_cloth_triangles > 0:
+                    cloth_filter_data = PhoenXClothFilterData()
+                    cloth_filter_data.num_rigid_shapes = int(model.shape_count)
+                    cloth_filter_data.tri_indices = self.tri_indices
+                    model._collision_pipeline.set_broad_phase_filter_data(cloth_filter_data)
 
             # Stamp static cloth-triangle metadata on the pipeline-owned
             # unified arrays *after* pipeline construction.  The broad

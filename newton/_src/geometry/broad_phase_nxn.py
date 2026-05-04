@@ -12,58 +12,80 @@ See Also:
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import warp as wp
 
 from ..core.types import Devicelike
 from .broad_phase_common import (
+    EmptyFilterData,
     check_aabb_overlap,
     is_pair_excluded,
+    keep_all_filter,
     precompute_world_map,
     test_world_and_group_pair,
     write_pair,
 )
 
 
-@wp.kernel(enable_backward=False)
-def _nxn_broadphase_precomputed_pairs(
-    # Input arrays
-    shape_bounding_box_lower: wp.array[wp.vec3],
-    shape_bounding_box_upper: wp.array[wp.vec3],
-    shape_gap: wp.array[float],  # Optional per-shape effective gaps (can be empty if AABBs pre-expanded)
-    nxn_shape_pair: wp.array[wp.vec2i],
-    # Output arrays
-    candidate_pair: wp.array[wp.vec2i],
-    candidate_pair_count: wp.array[int],  # Size one array
-    max_candidate_pair: int,
-):
-    elementid = wp.tid()
+def create_nxn_broadphase_precomputed_pairs_kernel(filter_func: Any, filter_data_type: Any):
+    """Build an explicit-pairs NxN broad-phase kernel bound to ``filter_func``.
 
-    pair = nxn_shape_pair[elementid]
-    shape1 = pair[0]
-    shape2 = pair[1]
+    The returned kernel runs ``filter_func(pair, filter_data)`` after the
+    AABB overlap test and skips pairs for which it returns ``0``.  Using
+    :data:`broad_phase_common.keep_all_filter` /
+    :class:`broad_phase_common.EmptyFilterData` produces a kernel that is
+    bit-equivalent to the pre-callback path (Warp folds away the constant
+    return).
+    """
 
-    # Check if gaps are provided (empty array means AABBs are pre-expanded)
-    gap1 = 0.0
-    gap2 = 0.0
-    if shape_gap.shape[0] > 0:
-        gap1 = shape_gap[shape1]
-        gap2 = shape_gap[shape2]
+    _module = f"nxn_broadphase_explicit_{filter_func.__name__}_{filter_data_type.__name__}"
 
-    if check_aabb_overlap(
-        shape_bounding_box_lower[shape1],
-        shape_bounding_box_upper[shape1],
-        gap1,
-        shape_bounding_box_lower[shape2],
-        shape_bounding_box_upper[shape2],
-        gap2,
+    @wp.kernel(enable_backward=False, module=_module)
+    def kernel(
+        shape_bounding_box_lower: wp.array[wp.vec3],
+        shape_bounding_box_upper: wp.array[wp.vec3],
+        shape_gap: wp.array[float],
+        nxn_shape_pair: wp.array[wp.vec2i],
+        filter_data: Any,
+        candidate_pair: wp.array[wp.vec2i],
+        candidate_pair_count: wp.array[int],
+        max_candidate_pair: int,
     ):
-        write_pair(
-            pair,
-            candidate_pair,
-            candidate_pair_count,
-            max_candidate_pair,
-        )
+        elementid = wp.tid()
+
+        pair = nxn_shape_pair[elementid]
+        shape1 = pair[0]
+        shape2 = pair[1]
+
+        gap1 = 0.0
+        gap2 = 0.0
+        if shape_gap.shape[0] > 0:
+            gap1 = shape_gap[shape1]
+            gap2 = shape_gap[shape2]
+
+        if check_aabb_overlap(
+            shape_bounding_box_lower[shape1],
+            shape_bounding_box_upper[shape1],
+            gap1,
+            shape_bounding_box_lower[shape2],
+            shape_bounding_box_upper[shape2],
+            gap2,
+        ):
+            if filter_func(pair, filter_data) == wp.int32(0):
+                return
+            write_pair(
+                pair,
+                candidate_pair,
+                candidate_pair_count,
+                max_candidate_pair,
+            )
+
+    return kernel
+
+
+_nxn_broadphase_precomputed_pairs = create_nxn_broadphase_precomputed_pairs_kernel(keep_all_filter, EmptyFilterData)
 
 
 @wp.func
@@ -126,92 +148,94 @@ def _find_world_and_local_id(
     return world_id, local_id
 
 
-@wp.kernel(enable_backward=False)
-def _nxn_broadphase_kernel(
-    # Input arrays
-    shape_bounding_box_lower: wp.array[wp.vec3],
-    shape_bounding_box_upper: wp.array[wp.vec3],
-    shape_gap: wp.array[float],  # Optional per-shape effective gaps (can be empty if AABBs pre-expanded)
-    collision_group: wp.array[int],  # per-shape
-    shape_world: wp.array[int],  # per-shape world indices
-    world_cumsum_lower_tri: wp.array[int],  # Cumulative sum of lower tri elements per world
-    world_slice_ends: wp.array[int],  # End indices of each world slice
-    world_index_map: wp.array[int],  # Index map into source geometry
-    num_regular_worlds: int,  # Number of regular world segments (excluding dedicated -1 segment)
-    filter_pairs: wp.array[wp.vec2i],  # Sorted excluded pairs (empty if none)
-    num_filter_pairs: int,
-    # Output arrays
-    candidate_pair: wp.array[wp.vec2i],
-    candidate_pair_count: wp.array[int],  # Size one array
-    max_candidate_pair: int,
-):
-    tid = wp.tid()
+def create_nxn_broadphase_kernel(filter_func: Any, filter_data_type: Any):
+    """Build the NxN sweep broad-phase kernel bound to ``filter_func``.
 
-    # Find which world this thread belongs to and the local index within that world
-    world_id, local_id = _find_world_and_local_id(tid, world_cumsum_lower_tri)
+    See :func:`create_nxn_broadphase_precomputed_pairs_kernel` for the
+    semantics of the filter callback.
+    """
 
-    # Get the slice boundaries for this world in the index map
-    world_slice_start = 0
-    if world_id > 0:
-        world_slice_start = world_slice_ends[world_id - 1]
-    world_slice_end = world_slice_ends[world_id]
+    _module = f"nxn_broadphase_{filter_func.__name__}_{filter_data_type.__name__}"
 
-    # Number of geometries in this world
-    num_shapes_in_world = world_slice_end - world_slice_start
-
-    # Convert local_id to pair indices within the world
-    local_shape1, local_shape2 = _get_lower_triangular_indices(local_id, num_shapes_in_world)
-
-    # Map to actual geometry indices using the world_index_map
-    shape1_tmp = world_index_map[world_slice_start + local_shape1]
-    shape2_tmp = world_index_map[world_slice_start + local_shape2]
-
-    # Ensure canonical ordering (smaller index first)
-    # After mapping, the indices might not preserve local_shape1 < local_shape2 ordering
-    shape1 = wp.min(shape1_tmp, shape2_tmp)
-    shape2 = wp.max(shape1_tmp, shape2_tmp)
-
-    # Get world and collision groups
-    world1 = shape_world[shape1]
-    world2 = shape_world[shape2]
-    collision_group1 = collision_group[shape1]
-    collision_group2 = collision_group[shape2]
-
-    # Skip pairs where both geometries are global (world -1), unless we're in the dedicated -1 segment
-    # The dedicated -1 segment is the last segment (world_id >= num_regular_worlds)
-    is_dedicated_minus_one_segment = world_id >= num_regular_worlds
-    if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
-        return
-
-    # Check both world and collision groups
-    if not test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
-        return
-
-    # Check if gaps are provided (empty array means AABBs are pre-expanded)
-    gap1 = 0.0
-    gap2 = 0.0
-    if shape_gap.shape[0] > 0:
-        gap1 = shape_gap[shape1]
-        gap2 = shape_gap[shape2]
-
-    # Check AABB overlap
-    if check_aabb_overlap(
-        shape_bounding_box_lower[shape1],
-        shape_bounding_box_upper[shape1],
-        gap1,
-        shape_bounding_box_lower[shape2],
-        shape_bounding_box_upper[shape2],
-        gap2,
+    @wp.kernel(enable_backward=False, module=_module)
+    def kernel(
+        shape_bounding_box_lower: wp.array[wp.vec3],
+        shape_bounding_box_upper: wp.array[wp.vec3],
+        shape_gap: wp.array[float],
+        collision_group: wp.array[int],
+        shape_world: wp.array[int],
+        world_cumsum_lower_tri: wp.array[int],
+        world_slice_ends: wp.array[int],
+        world_index_map: wp.array[int],
+        num_regular_worlds: int,
+        filter_pairs: wp.array[wp.vec2i],
+        num_filter_pairs: int,
+        filter_data: Any,
+        candidate_pair: wp.array[wp.vec2i],
+        candidate_pair_count: wp.array[int],
+        max_candidate_pair: int,
     ):
-        # Skip explicitly excluded pairs (e.g. shape_collision_filter_pairs)
-        if num_filter_pairs > 0 and is_pair_excluded(wp.vec2i(shape1, shape2), filter_pairs, num_filter_pairs):
+        tid = wp.tid()
+
+        world_id, local_id = _find_world_and_local_id(tid, world_cumsum_lower_tri)
+
+        world_slice_start = 0
+        if world_id > 0:
+            world_slice_start = world_slice_ends[world_id - 1]
+        world_slice_end = world_slice_ends[world_id]
+
+        num_shapes_in_world = world_slice_end - world_slice_start
+
+        local_shape1, local_shape2 = _get_lower_triangular_indices(local_id, num_shapes_in_world)
+
+        shape1_tmp = world_index_map[world_slice_start + local_shape1]
+        shape2_tmp = world_index_map[world_slice_start + local_shape2]
+
+        shape1 = wp.min(shape1_tmp, shape2_tmp)
+        shape2 = wp.max(shape1_tmp, shape2_tmp)
+
+        world1 = shape_world[shape1]
+        world2 = shape_world[shape2]
+        collision_group1 = collision_group[shape1]
+        collision_group2 = collision_group[shape2]
+
+        is_dedicated_minus_one_segment = world_id >= num_regular_worlds
+        if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
             return
-        write_pair(
-            wp.vec2i(shape1, shape2),
-            candidate_pair,
-            candidate_pair_count,
-            max_candidate_pair,
-        )
+
+        if not test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
+            return
+
+        gap1 = 0.0
+        gap2 = 0.0
+        if shape_gap.shape[0] > 0:
+            gap1 = shape_gap[shape1]
+            gap2 = shape_gap[shape2]
+
+        if check_aabb_overlap(
+            shape_bounding_box_lower[shape1],
+            shape_bounding_box_upper[shape1],
+            gap1,
+            shape_bounding_box_lower[shape2],
+            shape_bounding_box_upper[shape2],
+            gap2,
+        ):
+            pair = wp.vec2i(shape1, shape2)
+            if num_filter_pairs > 0 and is_pair_excluded(pair, filter_pairs, num_filter_pairs):
+                return
+            if filter_func(pair, filter_data) == wp.int32(0):
+                return
+            write_pair(
+                pair,
+                candidate_pair,
+                candidate_pair_count,
+                max_candidate_pair,
+            )
+
+    return kernel
+
+
+_nxn_broadphase_kernel = create_nxn_broadphase_kernel(keep_all_filter, EmptyFilterData)
 
 
 class BroadPhaseAllPairs:
@@ -235,6 +259,8 @@ class BroadPhaseAllPairs:
         shape_world: wp.array[wp.int32] | np.ndarray,
         shape_flags: wp.array[wp.int32] | np.ndarray | None = None,
         device: Devicelike | None = None,
+        filter_func: Any | None = None,
+        filter_data_type: Any | None = None,
     ) -> None:
         """Initialize the broad phase with world ID information.
 
@@ -247,7 +273,24 @@ class BroadPhaseAllPairs:
                 This efficiently filters out visual-only shapes.
             device: Device to store the precomputed arrays on. If None, uses CPU for numpy
                 arrays or the device of the input warp array.
+            filter_func: Optional ``@wp.func`` invoked as
+                ``filter_func(pair: wp.vec2i, data: filter_data_type) -> wp.int32``
+                after the AABB overlap test. Returning ``0`` drops the pair.
+                When ``None``, the default no-op kernel is reused.
+            filter_data_type: ``wp.struct`` type for the ``filter_data`` argument
+                forwarded to :meth:`launch`.  Required when ``filter_func`` is set.
         """
+        if (filter_func is None) != (filter_data_type is None):
+            raise ValueError("filter_func and filter_data_type must be provided together")
+
+        if filter_func is None:
+            self._kernel = _nxn_broadphase_kernel
+            self._has_custom_filter = False
+        else:
+            self._kernel = create_nxn_broadphase_kernel(filter_func, filter_data_type)
+            self._has_custom_filter = True
+        self._empty_filter_data = EmptyFilterData()
+
         # Convert to numpy if it's a warp array
         if isinstance(shape_world, wp.array):
             shape_world_np = shape_world.numpy()
@@ -317,6 +360,7 @@ class BroadPhaseAllPairs:
         filter_pairs: wp.array[wp.vec2i] | None = None,  # Sorted excluded pairs
         num_filter_pairs: int | None = None,
         skip_count_zero: bool = False,  # Skip candidate_pair_count.zero_() if already zeroed by the caller
+        filter_data: Any | None = None,  # Instance of filter_data_type for the user-supplied filter callback
     ) -> None:
         """Launch the N x N broad phase collision detection.
 
@@ -368,9 +412,18 @@ class BroadPhaseAllPairs:
             filter_pairs_arr = filter_pairs
             n_filter = num_filter_pairs if num_filter_pairs is not None else filter_pairs.shape[0]
 
+        if self._has_custom_filter:
+            if filter_data is None:
+                raise ValueError(
+                    "BroadPhaseAllPairs was constructed with filter_func=...; launch() requires filter_data."
+                )
+            kernel_filter_data = filter_data
+        else:
+            kernel_filter_data = self._empty_filter_data
+
         # Launch with the precomputed number of kernel threads
         wp.launch(
-            _nxn_broadphase_kernel,
+            self._kernel,
             dim=self.num_kernel_threads,
             inputs=[
                 shape_lower,
@@ -384,6 +437,7 @@ class BroadPhaseAllPairs:
                 self.num_regular_worlds,
                 filter_pairs_arr,
                 n_filter,
+                kernel_filter_data,
             ],
             outputs=[candidate_pair, candidate_pair_count, max_candidate_pair],
             device=device,
@@ -402,8 +456,29 @@ class BroadPhaseExplicit:
     taking into account per-geometry cutoff distances.
     """
 
-    def __init__(self) -> None:
-        pass
+    def __init__(
+        self,
+        filter_func: Any | None = None,
+        filter_data_type: Any | None = None,
+    ) -> None:
+        """Initialize the explicit-pairs broad phase.
+
+        Args:
+            filter_func: Optional ``@wp.func`` invoked as
+                ``filter_func(pair, data) -> wp.int32`` after the AABB overlap test.
+                Returning ``0`` drops the pair.
+            filter_data_type: ``wp.struct`` type for the ``filter_data`` argument
+                forwarded to :meth:`launch`. Required when ``filter_func`` is set.
+        """
+        if (filter_func is None) != (filter_data_type is None):
+            raise ValueError("filter_func and filter_data_type must be provided together")
+        if filter_func is None:
+            self._kernel = _nxn_broadphase_precomputed_pairs
+            self._has_custom_filter = False
+        else:
+            self._kernel = create_nxn_broadphase_precomputed_pairs_kernel(filter_func, filter_data_type)
+            self._has_custom_filter = True
+        self._empty_filter_data = EmptyFilterData()
 
     def launch(
         self,
@@ -417,6 +492,7 @@ class BroadPhaseExplicit:
         candidate_pair_count: wp.array[int],
         device: Devicelike | None = None,  # Device to launch on
         skip_count_zero: bool = False,  # Skip candidate_pair_count.zero_() if already zeroed
+        filter_data: Any | None = None,  # Instance of filter_data_type for the user-supplied filter callback
     ) -> None:
         """Launch the explicit pairs broad phase collision detection.
 
@@ -455,14 +531,26 @@ class BroadPhaseExplicit:
         if shape_gap is None:
             shape_gap = wp.empty(0, dtype=wp.float32, device=device)
 
+        if self._has_custom_filter:
+            if filter_data is None:
+                raise ValueError(
+                    "BroadPhaseExplicit was constructed with filter_func=...; launch() requires filter_data."
+                )
+            kernel_filter_data = filter_data
+        else:
+            kernel_filter_data = self._empty_filter_data
+
         wp.launch(
-            kernel=_nxn_broadphase_precomputed_pairs,
+            kernel=self._kernel,
             dim=shape_pair_count,
             inputs=[
                 shape_lower,
                 shape_upper,
                 shape_gap,
                 shape_pairs,
+                kernel_filter_data,
+            ],
+            outputs=[
                 candidate_pair,
                 candidate_pair_count,
                 max_candidate_pair,
