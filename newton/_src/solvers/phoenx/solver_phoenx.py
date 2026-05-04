@@ -456,6 +456,15 @@ class PhoenXWorld:
         self.num_cloth_triangles: int = int(num_cloth_triangles)
         if self.num_cloth_triangles < 0:
             raise ValueError(f"num_cloth_triangles must be >= 0 (got {self.num_cloth_triangles})")
+        # Per-triangle particle indices (vec4i; 4th slot reserved for
+        # tets). Length 0 placeholder when there are no triangles --
+        # the contact kernels take ``tri_indices`` unconditionally.
+        # :class:`SolverPhoenX` overwrites this with its own allocation
+        # post-construction when cloth is present.
+        with wp.ScopedDevice(device):
+            self.tri_indices: wp.array = wp.zeros(
+                max(self.num_cloth_triangles, 0), dtype=wp.vec4i, device=device
+            )
         # Total cid count in the joint-side :class:`ConstraintContainer`.
         # Joints + cloth triangles all live in this container; the
         # dispatcher uses ``cid < num_joint_container_cids`` as the
@@ -1433,6 +1442,7 @@ class PhoenXWorld:
             default_friction=self.default_friction,
             device=self.device,
             num_bodies=self.num_bodies,
+            num_rigid_shapes=int(shape_body.shape[0]),
             filter_keys=self._collision_filter_keys,
             filter_count=self._collision_filter_count,
             shape_material=self._shape_material,
@@ -1495,6 +1505,9 @@ class PhoenXWorld:
             bodies=self.bodies,
             contacts=self._contact_views,
             cc=self._contact_container,
+            particles=self.body_or_particle.particles,
+            tri_indices=self.tri_indices,
+            num_rigid_shapes=int(shape_body.shape[0]),
             device=self.device,
         )
 
@@ -1796,6 +1809,8 @@ class PhoenXWorld:
                 # single-world ones do.
                 wp.int32(self._joint_container_cids),
                 self._tpw_choice,
+                self.body_or_particle.particles,
+                self.tri_indices,
             ],
             device=self.device,
         )
@@ -1866,6 +1881,7 @@ class PhoenXWorld:
                     wp.int32(self._fuse_threshold),
                     self._head_active,
                     store,
+                    self.tri_indices,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=self.device,
@@ -1903,6 +1919,7 @@ class PhoenXWorld:
                 wp.int32(self._joint_container_cids),
                 wp.int32(self._fuse_threshold),
                 self.body_or_particle,
+                self.tri_indices,
             ],
             block_dim=self._fuse_tail_block_dim,
             device=self.device,
@@ -2113,6 +2130,8 @@ class PhoenXWorld:
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
                 self._tpw_choice,
+                self.body_or_particle.particles,
+                self.tri_indices,
             ],
             device=self.device,
         )

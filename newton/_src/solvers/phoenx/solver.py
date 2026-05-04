@@ -416,7 +416,11 @@ class SolverPhoenX(SolverBase):
             with wp.ScopedDevice(self.device):
                 self.tri_indices = wp.zeros(T, dtype=wp.vec4i, device=self.device)
         else:
-            self.tri_indices = None
+            # Placeholder so the contact kernels (which take
+            # ``tri_indices`` unconditionally) have a valid empty
+            # array to receive on non-cloth scenes.
+            with wp.ScopedDevice(self.device):
+                self.tri_indices = wp.zeros(0, dtype=wp.vec4i, device=self.device)
 
         if int(model.shape_count) > 0:
             existing_cp = getattr(model, "_collision_pipeline", None)
@@ -552,6 +556,10 @@ class SolverPhoenX(SolverBase):
         )
         if num_cloth_triangles > 0:
             self.world.populate_cloth_triangles_from_model(model)
+        # Share the solver's pre-allocated ``tri_indices`` with the
+        # PhoenXWorld so the contact iterate / prepare kernels see the
+        # same vec4i array the solver populates each step.
+        self.world.tri_indices = self.tri_indices
 
         # Seed the PhoenX body container with the model's initial pose
         # (``model.body_q`` / ``body_qd``) BEFORE joint initialization --

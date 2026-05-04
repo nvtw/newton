@@ -17,8 +17,13 @@ adjacent contacts issues one coalesced transaction per field load.
 
 Per-contact dword budgets:
 
-* :data:`CC_DWORDS_PER_CONTACT` = 15 -- ``lam_n, lam_t1, lam_t2,
-  normal(3), tangent1(3), local_p0(3), local_p1(3)``.
+* :data:`CC_DWORDS_PER_CONTACT` = 19 -- ``lam_n, lam_t1, lam_t2,
+  normal(3), tangent1(3), local_p0(3), local_p1(3),
+  endpoint_kind1, endpoint_idx1, endpoint_kind2, endpoint_idx2``.
+  The endpoint tags are needed at warm-start time to interpret
+  ``local_p0/1`` (rigid: body-local origin-frame anchor; triangle:
+  barycentric weights) when reconstructing the prev-frame contact
+  anchor in world space.
 * :data:`CC_DERIVED_DWORDS_PER_CONTACT` = 12 -- ``r1(3), r2(3),
   eff_n, eff_t1, eff_t2, bias, bias_t1, bias_t2``.
 """
@@ -26,6 +31,11 @@ Per-contact dword budgets:
 from __future__ import annotations
 
 import warp as wp
+
+from newton._src.solvers.phoenx.helpers.data_packing import (
+    reinterpret_float_as_int,
+    reinterpret_int_as_float,
+)
 
 __all__ = [
     "CC_DERIVED_DWORDS_PER_CONTACT",
@@ -45,6 +55,10 @@ __all__ = [
     "cc_get_pd_bias",
     "cc_get_pd_eff_soft",
     "cc_get_pd_gamma",
+    "cc_get_prev_endpoint_idx1",
+    "cc_get_prev_endpoint_idx2",
+    "cc_get_prev_endpoint_kind1",
+    "cc_get_prev_endpoint_kind2",
     "cc_get_prev_local_p0",
     "cc_get_prev_local_p1",
     "cc_get_prev_normal",
@@ -61,6 +75,10 @@ __all__ = [
     "cc_set_eff_n",
     "cc_set_eff_t1",
     "cc_set_eff_t2",
+    "cc_set_endpoint_idx1",
+    "cc_set_endpoint_idx2",
+    "cc_set_endpoint_kind1",
+    "cc_set_endpoint_kind2",
     "cc_set_local_p0",
     "cc_set_local_p1",
     "cc_set_normal",
@@ -80,9 +98,13 @@ __all__ = [
 CC_LAMBDA_DWORDS_PER_CONTACT: int = 3
 
 #: Total persistent dwords per contact: ``lam_n, lam_t1, lam_t2`` +
-#: ``normal(3)`` + ``tangent1(3)`` + ``local_p0(3)`` + ``local_p1(3)``.
-#: Mirrors PhoenX's rigid-rigid contact per-point footprint.
-CC_DWORDS_PER_CONTACT: int = 15
+#: ``normal(3)`` + ``tangent1(3)`` + ``local_p0(3)`` + ``local_p1(3)`` +
+#: ``endpoint_kind1, endpoint_idx1, endpoint_kind2, endpoint_idx2``.
+#: The four endpoint tags are int32, bit-cast through the float32
+#: backing buffer via :func:`reinterpret_int_as_float` /
+#: :func:`reinterpret_float_as_int` (same pattern as
+#: :class:`ConstraintContainer`).
+CC_DWORDS_PER_CONTACT: int = 19
 
 #: Per-contact derived dwords filled by ``prepare_for_iteration``:
 #: ``eff_n, eff_t1, eff_t2, bias, bias_t1, bias_t2,
@@ -114,6 +136,17 @@ _CC_OFF_LOCAL_P0_Z = wp.constant(11)
 _CC_OFF_LOCAL_P1_X = wp.constant(12)
 _CC_OFF_LOCAL_P1_Y = wp.constant(13)
 _CC_OFF_LOCAL_P1_Z = wp.constant(14)
+# Endpoint tags. Stored as int32 bit-cast into the float32 buffer.
+# ``kind`` is :data:`ENDPOINT_KIND_RIGID` (0) / :data:`ENDPOINT_KIND_TRIANGLE` (1)
+# from :mod:`newton._src.solvers.phoenx.constraints.contact_endpoint`;
+# ``idx`` is a body index for RIGID and a triangle index for TRIANGLE.
+# Persisted alongside ``local_p0/1`` so the warm-start gather can
+# reconstruct the prev-frame anchor in world space (rigid: body-local;
+# triangle: barycentric).
+_CC_OFF_ENDPOINT_KIND1 = wp.constant(15)
+_CC_OFF_ENDPOINT_IDX1 = wp.constant(16)
+_CC_OFF_ENDPOINT_KIND2 = wp.constant(17)
+_CC_OFF_ENDPOINT_IDX2 = wp.constant(18)
 
 _CC_OFF_EFF_N = wp.constant(0)
 _CC_OFF_EFF_T1 = wp.constant(1)
@@ -312,6 +345,52 @@ def cc_get_prev_local_p1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
         cc.prev_lambdas[_CC_OFF_LOCAL_P1_Y, k],
         cc.prev_lambdas[_CC_OFF_LOCAL_P1_Z, k],
     )
+
+
+# ---- endpoint kind / idx (current frame, written by warm-start gather) ----
+
+
+@wp.func
+def cc_set_endpoint_kind1(cc: ContactContainer, k: wp.int32, v: wp.int32):
+    cc.lambdas[_CC_OFF_ENDPOINT_KIND1, k] = reinterpret_int_as_float(v)
+
+
+@wp.func
+def cc_set_endpoint_idx1(cc: ContactContainer, k: wp.int32, v: wp.int32):
+    cc.lambdas[_CC_OFF_ENDPOINT_IDX1, k] = reinterpret_int_as_float(v)
+
+
+@wp.func
+def cc_set_endpoint_kind2(cc: ContactContainer, k: wp.int32, v: wp.int32):
+    cc.lambdas[_CC_OFF_ENDPOINT_KIND2, k] = reinterpret_int_as_float(v)
+
+
+@wp.func
+def cc_set_endpoint_idx2(cc: ContactContainer, k: wp.int32, v: wp.int32):
+    cc.lambdas[_CC_OFF_ENDPOINT_IDX2, k] = reinterpret_int_as_float(v)
+
+
+# ---- endpoint kind / idx (prev frame, read during warm-start gather) ------
+
+
+@wp.func
+def cc_get_prev_endpoint_kind1(cc: ContactContainer, k: wp.int32) -> wp.int32:
+    return reinterpret_float_as_int(cc.prev_lambdas[_CC_OFF_ENDPOINT_KIND1, k])
+
+
+@wp.func
+def cc_get_prev_endpoint_idx1(cc: ContactContainer, k: wp.int32) -> wp.int32:
+    return reinterpret_float_as_int(cc.prev_lambdas[_CC_OFF_ENDPOINT_IDX1, k])
+
+
+@wp.func
+def cc_get_prev_endpoint_kind2(cc: ContactContainer, k: wp.int32) -> wp.int32:
+    return reinterpret_float_as_int(cc.prev_lambdas[_CC_OFF_ENDPOINT_KIND2, k])
+
+
+@wp.func
+def cc_get_prev_endpoint_idx2(cc: ContactContainer, k: wp.int32) -> wp.int32:
+    return reinterpret_float_as_int(cc.prev_lambdas[_CC_OFF_ENDPOINT_IDX2, k])
 
 
 # ---------------------------------------------------------------------------

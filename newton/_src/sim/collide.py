@@ -1029,6 +1029,13 @@ class CollisionPipeline:
             self.unified_shape_collision_aabb_lower = _extend_vec3(model.shape_collision_aabb_lower)
             self.unified_shape_collision_aabb_upper = _extend_vec3(model.shape_collision_aabb_upper)
             self.unified_shape_collision_group = _extend_int(model.shape_collision_group, 0)
+            # Suffix entries land on virtual (e.g. cloth-triangle)
+            # shapes that have no rigid body. ``-1`` makes
+            # :func:`write_contact` resolve them to identity transforms,
+            # so the per-contact ``rigid_contact_point0/1`` slot ends up
+            # in world space -- exactly what triangle-endpoint
+            # barycentric extraction at ingest time needs.
+            self.unified_shape_body = _extend_int(model.shape_body, -1)
         # ``shape_world`` / ``shape_flags`` were captured by the broad
         # phase at construction time; reuse them so caller-side stamps
         # remain authoritative.
@@ -1225,6 +1232,7 @@ class CollisionPipeline:
         shape_collision_aabb_lower: wp.array[wp.vec3],
         shape_collision_aabb_upper: wp.array[wp.vec3],
         shape_heightfield_index: wp.array[int] | None,
+        shape_body: wp.array[int] | None = None,
     ) -> None:
         """Run the narrow phase + contact post-processing.
 
@@ -1245,7 +1253,11 @@ class CollisionPipeline:
         writer_data = ContactWriterData()
         writer_data.contact_max = contacts.rigid_contact_max
         writer_data.body_q = state.body_q
-        writer_data.shape_body = model.shape_body
+        # Use caller-supplied (unified) ``shape_body`` when provided
+        # so virtual-shape entries (suffix ``[S, S+E)``) carry ``-1``
+        # and :func:`write_contact` falls back to identity transforms
+        # for them, leaving contact points in world space.
+        writer_data.shape_body = shape_body if shape_body is not None else model.shape_body
         writer_data.shape_gap = shape_gap
         writer_data.contact_count = contacts.rigid_contact_count
         writer_data.out_shape0 = contacts.rigid_contact_shape0
@@ -1314,7 +1326,7 @@ class CollisionPipeline:
                 shape1=contacts.rigid_contact_shape1,
                 normal=contacts.rigid_contact_normal,
                 body_q=state.body_q,
-                shape_body=model.shape_body,
+                shape_body=shape_body if shape_body is not None else model.shape_body,
                 match_index_out=contacts.rigid_contact_match_index,
                 device=self.device,
             )
@@ -1557,4 +1569,5 @@ class CollisionPipeline:
             shape_collision_aabb_lower=self.unified_shape_collision_aabb_lower,
             shape_collision_aabb_upper=self.unified_shape_collision_aabb_upper,
             shape_heightfield_index=self.unified_shape_heightfield_index,
+            shape_body=self.unified_shape_body,
         )

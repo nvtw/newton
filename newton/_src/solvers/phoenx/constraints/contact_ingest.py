@@ -32,6 +32,10 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     _col_write_int,
     contact_set_contact_count,
     contact_set_contact_first,
+    contact_set_endpoint_idx1,
+    contact_set_endpoint_idx2,
+    contact_set_endpoint_kind1,
+    contact_set_endpoint_kind2,
     contact_set_friction,
     contact_set_friction_dynamic,
 )
@@ -43,6 +47,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
+    cc_get_prev_endpoint_idx1,
+    cc_get_prev_endpoint_idx2,
+    cc_get_prev_endpoint_kind1,
+    cc_get_prev_endpoint_kind2,
     cc_get_prev_local_p0,
     cc_get_prev_local_p1,
     cc_get_prev_normal,
@@ -50,6 +58,10 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_prev_tangent1,
     cc_get_prev_tangent1_lambda,
     cc_get_prev_tangent2_lambda,
+    cc_set_endpoint_idx1,
+    cc_set_endpoint_idx2,
+    cc_set_endpoint_kind1,
+    cc_set_endpoint_kind2,
     cc_set_local_p0,
     cc_set_local_p1,
     cc_set_normal,
@@ -58,6 +70,12 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
+from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    ENDPOINT_KIND_RIGID,
+    ENDPOINT_KIND_TRIANGLE,
+    endpoint_velocity_at,
+    endpoint_world_point,
+)
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 from newton._src.solvers.phoenx.materials import (
     MaterialData,
@@ -65,6 +83,7 @@ from newton._src.solvers.phoenx.materials import (
     resolve_friction_static_in_kernel,
     resolve_softness_in_kernel,
 )
+from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
     "IngestScratch",
@@ -705,6 +724,12 @@ def _contact_pack_columns_kernel(
     materials: wp.array[MaterialData],
     num_contact_columns: wp.array[wp.int32],
     default_friction: wp.float32,
+    # Number of rigid-body shapes (= ``S``). Cloth-triangle shapes
+    # live in the unified shape suffix ``[S, S+T)``; this kernel uses
+    # ``S`` to discriminate endpoint kinds: ``shape_idx < S`` is a
+    # rigid endpoint, ``>= S`` is a triangle endpoint with triangle
+    # index ``shape_idx - S``.
+    num_rigid_shapes: wp.int32,
     # in / out: per-contact softness arrays. Hydroelastic narrow
     # phases write absolute K/D (positive); this kernel encodes
     # Material-derived softness as (-hertz, -damping_ratio) into the
@@ -744,8 +769,26 @@ def _contact_pack_columns_kernel(
 
     sa = pair_shape_a[p]
     sb = pair_shape_b[p]
-    b1 = shape_body[sa]
-    b2 = shape_body[sb]
+
+    # Endpoint discrimination. Rigid endpoints carry the body index;
+    # triangle endpoints carry triangle index ``s - S`` and ``b = 0``
+    # (shape_body has no entry for triangle shapes).
+    if sa < num_rigid_shapes:
+        kind1 = ENDPOINT_KIND_RIGID
+        idx1 = shape_body[sa]
+        b1 = idx1
+    else:
+        kind1 = ENDPOINT_KIND_TRIANGLE
+        idx1 = sa - num_rigid_shapes
+        b1 = wp.int32(0)
+    if sb < num_rigid_shapes:
+        kind2 = ENDPOINT_KIND_RIGID
+        idx2 = shape_body[sb]
+        b2 = idx2
+    else:
+        kind2 = ENDPOINT_KIND_TRIANGLE
+        idx2 = sb - num_rigid_shapes
+        b2 = wp.int32(0)
 
     # Friction + softness resolution via the per-shape materials table.
     mat_a = wp.int32(-1)
@@ -776,6 +819,10 @@ def _contact_pack_columns_kernel(
     contact_set_friction_dynamic(contact_cols, tid, mu_dynamic)
     contact_set_contact_first(contact_cols, tid, first)
     contact_set_contact_count(contact_cols, tid, count)
+    contact_set_endpoint_kind1(contact_cols, tid, kind1)
+    contact_set_endpoint_idx1(contact_cols, tid, idx1)
+    contact_set_endpoint_kind2(contact_cols, tid, kind2)
+    contact_set_endpoint_idx2(contact_cols, tid, idx2)
 
     # ---- Material softness sign-encoding -------------------------
     # When the resolved softness has a non-zero hertz, write
@@ -829,6 +876,45 @@ def _build_tangent1_from_velocity(n: wp.vec3f, dv: wp.vec3f) -> wp.vec3f:
     )
 
 
+@wp.func
+def _triangle_barycentrics_for_world_point(
+    particles: ParticleContainer,
+    tri_indices: wp.array[wp.vec4i],
+    t: wp.int32,
+    p_world: wp.vec3f,
+) -> wp.vec3f:
+    """Project a world point onto a triangle and return barycentrics.
+
+    Standard 3D-projection-then-barycentric (Real-Time Collision
+    Detection, Christer Ericson, ~p.47): build the local 2D basis on
+    the triangle plane, solve a 2x2 system for ``(u, v)``, recover
+    ``w = 1 - u - v``. The point is the contact location the narrow
+    phase reported, so it sits on or near the triangle face by
+    construction; clamping to the triangle interior would silently
+    move the anchor.
+    """
+    idx4 = tri_indices[t]
+    a = particles.position[idx4[0]]
+    b = particles.position[idx4[1]]
+    c = particles.position[idx4[2]]
+    v0 = b - a
+    v1 = c - a
+    v2 = p_world - a
+    d00 = wp.dot(v0, v0)
+    d01 = wp.dot(v0, v1)
+    d11 = wp.dot(v1, v1)
+    d20 = wp.dot(v2, v0)
+    d21 = wp.dot(v2, v1)
+    denom = d00 * d11 - d01 * d01
+    if denom == wp.float32(0.0):
+        return wp.vec3f(wp.float32(1.0) / wp.float32(3.0))
+    inv_denom = wp.float32(1.0) / denom
+    v = (d11 * d20 - d01 * d21) * inv_denom
+    w = (d00 * d21 - d01 * d20) * inv_denom
+    u = wp.float32(1.0) - v - w
+    return wp.vec3f(u, v, w)
+
+
 @wp.kernel(enable_backward=False)
 def _contact_warmstart_gather_kernel(
     pair_source_idx: wp.array[wp.int32],
@@ -842,19 +928,42 @@ def _contact_warmstart_gather_kernel(
     bodies: BodyContainer,
     contacts: ContactViews,
     cc: ContactContainer,
+    # Triangle endpoint plumbing.
+    particles: ParticleContainer,
+    tri_indices: wp.array[wp.vec4i],
+    num_rigid_shapes: wp.int32,
 ):
     """Seed this frame's ``cc`` slots from the prev frame (PhoenX model).
 
-    One thread per output column. For each contact ``k`` in the range:
+    One thread per output column, working on every contact ``k`` in the
+    pair's ``[start_contact, start_contact + count)`` range. Endpoint-
+    agnostic: the rigid / triangle distinction is captured in a
+    ``(kind, idx, local_anchor)`` triple per endpoint; the carry-forward
+    PGS math is identical.
 
-    * Matched (``prev_k = rigid_contact_match_index[k] >= 0``):
-      copy ``lambdas, normal, tangent1, local_p0, local_p1`` from
-      ``cc.prev_*[prev_k]``. Fixed-frame warm-start preserves impulse
-      meaning since the ``(n, t1, t2)`` basis is identical.
-    * Unmatched (``< 0``): run PhoenX ``Initialize`` -- pull
-      ``normal`` and body-local anchors from the upstream buffer,
-      derive ``tangent1`` from tangential relative velocity, zero
-      impulses.
+    For each contact:
+
+    * Matched (``prev_k = rigid_contact_match_index[k] >= 0`` and the
+      prev slot still belongs to the immediate-prev frame): carry
+      lambdas + frozen ``(n, t1)`` frame and prev anchors forward,
+      unless the fresh anchors are deeper-penetrating than the prev
+      ones (stale-anchor branch -- carry impulses, refresh anchors and
+      tangent).
+    * Unmatched: run PhoenX ``Initialize`` (zero impulses, fresh
+      anchors, tangent from contact-relative slip velocity).
+
+    ``local_p0/1`` interpretation depends on the endpoint kind: rigid
+    endpoints store the body-local origin-frame anchor; triangle
+    endpoints store barycentric weights ``(w_a, w_b, w_c)``. Both are
+    invariant under the endpoint's own motion, so the prev-frame
+    anchor reconstruction
+    (:func:`endpoint_world_point`) "follows" the endpoint correctly.
+
+    The prev endpoint kind / idx are persisted next to ``local_p0/1``
+    in :class:`ContactContainer.lambdas` and read back via
+    ``cc_get_prev_endpoint_*`` -- a triangle's ``tri_indices`` row may
+    have been re-mapped between frames (it isn't today, but the
+    persistence makes the warm-start independent of that assumption).
 
     ``prev_cid_of_contact`` gates reads of stale prev slots that
     belonged to an already-overwritten frame.
@@ -869,11 +978,52 @@ def _contact_warmstart_gather_kernel(
 
     sa = pair_shape_a[p]
     sb = pair_shape_b[p]
-    b1 = contacts.shape_body[sa]
-    b2 = contacts.shape_body[sb]
+
+    # Endpoint discrimination. Triangle endpoints have shape index
+    # ``>= num_rigid_shapes`` -- the triangle index inside
+    # ``tri_indices`` is ``shape - num_rigid_shapes``.
+    is_tri_a = sa >= num_rigid_shapes
+    is_tri_b = sb >= num_rigid_shapes
+
+    if is_tri_a:
+        kind1 = ENDPOINT_KIND_TRIANGLE
+        idx1 = sa - num_rigid_shapes
+    else:
+        kind1 = ENDPOINT_KIND_RIGID
+        idx1 = contacts.shape_body[sa]
+
+    if is_tri_b:
+        kind2 = ENDPOINT_KIND_TRIANGLE
+        idx2 = sb - num_rigid_shapes
+    else:
+        kind2 = ENDPOINT_KIND_RIGID
+        idx2 = contacts.shape_body[sb]
 
     for i in range(count):
         k = start_contact + i
+
+        # ---- Fresh-frame anchors ------------------------------------
+        # Rigid: body-local origin-frame anchors as written by the
+        # narrow phase. Triangle: convert the world contact point to
+        # barycentric weights against the current particle positions.
+        fresh_n = contacts.rigid_contact_normal[k]
+        fresh_local_p0 = contacts.rigid_contact_point0[k]
+        fresh_local_p1 = contacts.rigid_contact_point1[k]
+        if is_tri_a:
+            fresh_local_p0 = _triangle_barycentrics_for_world_point(particles, tri_indices, idx1, fresh_local_p0)
+        if is_tri_b:
+            fresh_local_p1 = _triangle_barycentrics_for_world_point(particles, tri_indices, idx2, fresh_local_p1)
+
+        fresh_p1_world = endpoint_world_point(kind1, idx1, fresh_local_p0, bodies, particles, tri_indices)
+        fresh_p2_world = endpoint_world_point(kind2, idx2, fresh_local_p1, bodies, particles, tri_indices)
+
+        # ---- Stamp endpoint tags for the next frame's gather --------
+        # Persisted alongside ``local_p0/1`` so next-frame reconstruction
+        # is independent of any future tri-index remapping.
+        cc_set_endpoint_kind1(cc, k, kind1)
+        cc_set_endpoint_idx1(cc, k, idx1)
+        cc_set_endpoint_kind2(cc, k, kind2)
+        cc_set_endpoint_idx2(cc, k, idx2)
 
         prev_k = rigid_contact_match_index[k]
         prev_valid = wp.int32(0)
@@ -881,41 +1031,28 @@ def _contact_warmstart_gather_kernel(
             if prev_cid_of_contact[prev_k] >= 0:
                 prev_valid = wp.int32(1)
 
-        fresh_local_p0 = contacts.rigid_contact_point0[k]
-        fresh_local_p1 = contacts.rigid_contact_point1[k]
-        fresh_n = contacts.rigid_contact_normal[k]
-
-        # The narrow phase gives anchors in each body's *origin* frame
-        # but :attr:`BodyContainer.position` is the body *COM*; subtract
-        # ``body_com`` when building the world-space lever arm so
-        # asymmetric meshes (bunny, nut) don't appear shifted by
-        # ``|body_com|`` relative to where the narrow phase saw them.
-        body_com1 = bodies.body_com[b1]
-        body_com2 = bodies.body_com[b2]
-        fresh_r1 = wp.quat_rotate(bodies.orientation[b1], fresh_local_p0 - body_com1)
-        fresh_r2 = wp.quat_rotate(bodies.orientation[b2], fresh_local_p1 - body_com2)
-
         if prev_valid == wp.int32(1):
+            prev_kind1 = cc_get_prev_endpoint_kind1(cc, prev_k)
+            prev_idx1 = cc_get_prev_endpoint_idx1(cc, prev_k)
+            prev_kind2 = cc_get_prev_endpoint_kind2(cc, prev_k)
+            prev_idx2 = cc_get_prev_endpoint_idx2(cc, prev_k)
             prev_n = cc_get_prev_normal(cc, prev_k)
             prev_lp0 = cc_get_prev_local_p0(cc, prev_k)
             prev_lp1 = cc_get_prev_local_p1(cc, prev_k)
-            prev_r1 = wp.quat_rotate(bodies.orientation[b1], prev_lp0 - body_com1)
-            prev_r2 = wp.quat_rotate(bodies.orientation[b2], prev_lp1 - body_com2)
-            prev_p1_world = bodies.position[b1] + prev_r1
-            prev_p2_world = bodies.position[b2] + prev_r2
-            prev_penetration = -wp.dot(prev_p2_world - prev_p1_world, prev_n)
 
-            fresh_p1_world = bodies.position[b1] + fresh_r1
-            fresh_p2_world = bodies.position[b2] + fresh_r2
+            prev_p1_world = endpoint_world_point(prev_kind1, prev_idx1, prev_lp0, bodies, particles, tri_indices)
+            prev_p2_world = endpoint_world_point(prev_kind2, prev_idx2, prev_lp1, bodies, particles, tri_indices)
+
+            prev_penetration = -wp.dot(prev_p2_world - prev_p1_world, prev_n)
             fresh_penetration = -wp.dot(fresh_p2_world - fresh_p1_world, fresh_n)
 
             if fresh_penetration > prev_penetration:
                 # Prev frame has grown stale -- overwrite anchors /
-                # normal / tangent but carry impulses forward.
-                dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
-                    bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
-                )
-                fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
+                # normal / tangent but carry impulses forward. Tangent
+                # is rebuilt from the contact-relative slip velocity.
+                v1 = endpoint_velocity_at(kind1, idx1, fresh_local_p0, bodies, particles, tri_indices)
+                v2 = endpoint_velocity_at(kind2, idx2, fresh_local_p1, bodies, particles, tri_indices)
+                fresh_t1 = _build_tangent1_from_velocity(fresh_n, v2 - v1)
 
                 cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
                 cc_set_tangent1_lambda(cc, k, cc_get_prev_tangent1_lambda(cc, prev_k))
@@ -927,7 +1064,9 @@ def _contact_warmstart_gather_kernel(
                 continue
 
             # Prev frame still describes the contact accurately --
-            # carry the full PhoenX state forward.
+            # carry the full PhoenX state forward (including the prev
+            # ``local_p0/1``, which references the prev endpoint kind
+            # already stamped above).
             cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
             cc_set_tangent1_lambda(cc, k, cc_get_prev_tangent1_lambda(cc, prev_k))
             cc_set_tangent2_lambda(cc, k, cc_get_prev_tangent2_lambda(cc, prev_k))
@@ -935,13 +1074,19 @@ def _contact_warmstart_gather_kernel(
             cc_set_tangent1(cc, k, cc_get_prev_tangent1(cc, prev_k))
             cc_set_local_p0(cc, k, prev_lp0)
             cc_set_local_p1(cc, k, prev_lp1)
+            # Prev anchors mean the prev endpoints win the kind/idx
+            # vote -- overwrite the just-stamped fresh tags.
+            cc_set_endpoint_kind1(cc, k, prev_kind1)
+            cc_set_endpoint_idx1(cc, k, prev_idx1)
+            cc_set_endpoint_kind2(cc, k, prev_kind2)
+            cc_set_endpoint_idx2(cc, k, prev_idx2)
             continue
 
-        # New contact -- PhoenX ``Initialize``.
-        dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
-            bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
-        )
-        t1 = _build_tangent1_from_velocity(fresh_n, dv)
+        # New contact -- PhoenX ``Initialize``. Tangent from contact-
+        # relative slip velocity at the fresh anchors.
+        v1 = endpoint_velocity_at(kind1, idx1, fresh_local_p0, bodies, particles, tri_indices)
+        v2 = endpoint_velocity_at(kind2, idx2, fresh_local_p1, bodies, particles, tri_indices)
+        t1 = _build_tangent1_from_velocity(fresh_n, v2 - v1)
 
         cc_set_normal_lambda(cc, k, wp.float32(0.0))
         cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
@@ -1007,6 +1152,7 @@ def ingest_contacts(
     device: wp.DeviceLike = None,
     *,
     num_bodies: int = 0,
+    num_rigid_shapes: int = 0,
     filter_keys: wp.array | None = None,
     filter_count: int = 0,
     shape_material: wp.array | None = None,
@@ -1307,6 +1453,7 @@ def ingest_contacts(
             materials,
             scratch.num_contact_columns,
             float(default_friction),
+            wp.int32(num_rigid_shapes),
             encode_stiffness,
             encode_damping,
         ],
@@ -1358,14 +1505,20 @@ def gather_contact_warmstart(
     bodies: BodyContainer,
     contacts: ContactViews,
     cc: ContactContainer,
+    particles: ParticleContainer,
+    tri_indices: wp.array,
+    num_rigid_shapes: int,
     device: wp.DeviceLike = None,
 ) -> None:
     """Copy prev-frame state into ``cc`` for matched contacts; initialise
     PhoenX-style for unmatched contacts.
 
-    Called after the pointer-swap (``cc.prev_lambdas`` now holds last
-    step's persistent state; ``cc.lambdas`` is scratch) but before
-    :func:`contact_prepare_for_iteration_at`.
+    Endpoint-agnostic: works for rigid-rigid, rigid-triangle, and
+    triangle-triangle pairs. Triangle endpoints store barycentric
+    weights as ``local_p0/1``; the warm-start gather reconstructs
+    prev-frame anchors via :func:`endpoint_world_point` and prev-
+    endpoint kind / idx tags persisted alongside ``local_p0/1`` in
+    :class:`ContactContainer.lambdas`.
     """
     wp.launch(
         kernel=_contact_warmstart_gather_kernel,
@@ -1381,7 +1534,10 @@ def gather_contact_warmstart(
             scratch.num_contact_columns,
             bodies,
             contacts,
+            cc,
+            particles,
+            tri_indices,
+            wp.int32(num_rigid_shapes),
         ],
-        outputs=[cc],
         device=device,
     )

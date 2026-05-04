@@ -35,6 +35,12 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     pd_coefficients,
     soft_constraint_coefficients,
 )
+from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    endpoint_apply_impulse,
+    endpoint_load,
+    endpoint_warmstart_apply_impulse,
+)
+from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_bias,
@@ -75,7 +81,6 @@ from newton._src.solvers.phoenx.helpers.data_packing import (
     reinterpret_int_as_float,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import (
-    apply_pair_velocity_impulse,
     effective_mass_scalar,
 )
 from newton._src.solvers.phoenx.solver_config import (
@@ -148,30 +153,32 @@ class ContactConstraintData:
     #: Tag -- :data:`CONSTRAINT_TYPE_CONTACT`. Must sit at dword 0 to
     #: satisfy the shared constraint-header contract.
     constraint_type: wp.int32
-    #: Body index of body 1 (``model.shape_body[shape_a]``).
+    #: Body index of body 1. RIGID endpoint: ``model.shape_body[shape_a]``.
+    #: TRIANGLE endpoint: ``0`` (anchor); the real triangle index lives
+    #: in :attr:`endpoint_idx1`.
     body1: wp.int32
-    #: Body index of body 2 (``model.shape_body[shape_b]``).
+    #: Body index of body 2. Same convention as :attr:`body1`.
     body2: wp.int32
 
-    #: Static Coulomb friction coefficient for the pair -- the "stick"
-    #: threshold the per-iteration raw tangent impulse must stay under
-    #: to keep the contact in the static-friction regime. Resolved at
-    #: ingest time from the material table; falls back to
-    #: ``default_friction`` when materials aren't configured.
+    #: Static Coulomb friction coefficient for the pair.
     friction: wp.float32
-    #: Kinetic (dynamic) Coulomb friction coefficient -- the clamp once
-    #: the static threshold has been crossed. Typically ``<=`` static
-    #: so slipping bodies decelerate less than they resisted starting
-    #: the slide.
+    #: Kinetic (dynamic) Coulomb friction coefficient.
     friction_dynamic: wp.float32
 
-    #: Start index into the sorted :class:`Contacts` buffer for the
-    #: first contact of this column.
+    #: Start / count into the sorted :class:`Contacts` buffer.
     contact_first: wp.int32
-    #: Number of contacts belonging to this column; the loop body in
-    #: each kernel runs from ``k = contact_first`` through
-    #: ``k < contact_first + contact_count``.
     contact_count: wp.int32
+
+    #: Endpoint kind tag for endpoint 1: :data:`ENDPOINT_KIND_RIGID` or
+    #: :data:`ENDPOINT_KIND_TRIANGLE`. See :mod:`contact_endpoint`.
+    endpoint_kind1: wp.int32
+    #: Endpoint index for endpoint 1. Body index for RIGID; triangle
+    #: index ``t in [0, T)`` for TRIANGLE.
+    endpoint_idx1: wp.int32
+    #: Endpoint kind / idx for endpoint 2. Same convention as
+    #: endpoint 1.
+    endpoint_kind2: wp.int32
+    endpoint_idx2: wp.int32
 
 
 assert_constraint_header(ContactConstraintData)
@@ -183,15 +190,16 @@ _OFF_FRICTION = wp.constant(dword_offset_of(ContactConstraintData, "friction"))
 _OFF_FRICTION_DYNAMIC = wp.constant(dword_offset_of(ContactConstraintData, "friction_dynamic"))
 _OFF_CONTACT_FIRST = wp.constant(dword_offset_of(ContactConstraintData, "contact_first"))
 _OFF_CONTACT_COUNT = wp.constant(dword_offset_of(ContactConstraintData, "contact_count"))
+_OFF_ENDPOINT_KIND1 = wp.constant(dword_offset_of(ContactConstraintData, "endpoint_kind1"))
+_OFF_ENDPOINT_IDX1 = wp.constant(dword_offset_of(ContactConstraintData, "endpoint_idx1"))
+_OFF_ENDPOINT_KIND2 = wp.constant(dword_offset_of(ContactConstraintData, "endpoint_kind2"))
+_OFF_ENDPOINT_IDX2 = wp.constant(dword_offset_of(ContactConstraintData, "endpoint_idx2"))
 
 
 #: Total dword count of one contact constraint column. The per-pair
-#: layout drops every per-slot field so this is now just the fixed
-#: header footprint -- 7 dwords, compared with the 154-dword ADBS
-#: joint header. Contact columns therefore live in their own
-#: narrow-width :class:`ContactColumnContainer` (below) rather than
-#: the joint-wide :class:`ConstraintContainer`, which is how the
-#: contact column storage stays ~22x smaller than the joints'.
+#: layout drops every per-slot field so the column carries only the
+#: fixed header (type tag, body / endpoint indices, friction, contact
+#: range). 11 dwords vs. the 154-dword ADBS joint header.
 CONTACT_DWORDS: int = num_dwords(ContactConstraintData)
 
 
@@ -439,6 +447,46 @@ def contact_set_contact_count(c: ContactColumnContainer, local_cid: wp.int32, v:
     _col_write_int(c, _OFF_CONTACT_COUNT, local_cid, v)
 
 
+@wp.func
+def contact_get_endpoint_kind1(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_ENDPOINT_KIND1, local_cid)
+
+
+@wp.func
+def contact_set_endpoint_kind1(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_ENDPOINT_KIND1, local_cid, v)
+
+
+@wp.func
+def contact_get_endpoint_idx1(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_ENDPOINT_IDX1, local_cid)
+
+
+@wp.func
+def contact_set_endpoint_idx1(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_ENDPOINT_IDX1, local_cid, v)
+
+
+@wp.func
+def contact_get_endpoint_kind2(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_ENDPOINT_KIND2, local_cid)
+
+
+@wp.func
+def contact_set_endpoint_kind2(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_ENDPOINT_KIND2, local_cid, v)
+
+
+@wp.func
+def contact_get_endpoint_idx2(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_ENDPOINT_IDX2, local_cid)
+
+
+@wp.func
+def contact_set_endpoint_idx2(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_ENDPOINT_IDX2, local_cid, v)
+
+
 # ---------------------------------------------------------------------------
 # Prepare / iterate / position_iterate
 # ---------------------------------------------------------------------------
@@ -462,44 +510,25 @@ def contact_prepare_for_iteration_at(
     idt: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
+    particles: ParticleContainer,
+    tri_indices: wp.array[wp.vec4i],
 ):
     """Prepare one contact column for the upcoming PGS iterations.
 
-    Per contact ``k`` in the column: re-project body-frame anchors to
-    world space, compute lever arms, effective masses for the normal
-    + two tangent rows (cached in ``ContactContainer.derived``), the
-    Baumgarte positional + static-friction tangent biases, then apply
-    the warm-start impulse to body velocities. Warm-start scatter is
-    batched: one write-back per body after all contacts are processed.
-
-    ``base_offset`` is unused (contact state lives in
-    :class:`ContactContainer`) but kept in the signature so the
-    dispatcher can call this ``wp.func`` uniformly with joints.
+    Endpoint-dispatched: each endpoint may be rigid or triangle.
+    :func:`endpoint_load` reconstructs the world contact point + per-
+    endpoint velocity / lever-arm / mass; the lambda math below is
+    endpoint-agnostic. Warm-start impulse scatter happens per-contact
+    via :func:`endpoint_warmstart_apply_impulse` (rigid endpoints lose
+    the batched scatter optimisation, but the math is identical).
     """
-    # Silence unused-parameter warnings; every contact column writes at
-    # header offset 0 of its cid, so there's no sub-block offset to
-    # thread through.
+    # ``base_offset`` / ``body_pair`` retained for signature compat
+    # with the joint dispatcher.
 
-    b1 = body_pair.b1
-    b2 = body_pair.b2
-
-    orientation1 = bodies.orientation[b1]
-    orientation2 = bodies.orientation[b2]
-    position1 = bodies.position[b1]
-    position2 = bodies.position[b2]
-    # Newton's narrow phase expresses contact anchors in each body's
-    # *origin* frame, but :attr:`BodyContainer.position` is the body's
-    # *COM* in world space. Pull the per-body origin-to-COM offset once
-    # so every ``local_p`` -> world projection below subtracts it and
-    # the resulting lever arm ``(p - COM)`` lines up with what the
-    # narrow phase actually sees. Zero for symmetric primitives; ~cm
-    # for asymmetric meshes like the bunny.
-    body_com1 = bodies.body_com[b1]
-    body_com2 = bodies.body_com[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    kind1 = contact_get_endpoint_kind1(constraints, cid)
+    kind2 = contact_get_endpoint_kind2(constraints, cid)
+    idx1 = contact_get_endpoint_idx1(constraints, cid)
+    idx2 = contact_get_endpoint_idx2(constraints, cid)
 
     contact_first = contact_get_contact_first(constraints, cid)
     contact_count = contact_get_contact_count(constraints, cid)
@@ -532,54 +561,40 @@ def contact_prepare_for_iteration_at(
     # Sticky-break thresholds.
     slip_threshold = wp.float32(0.002)
 
-    # Accumulated warm-start impulse we'll apply to the bodies after
-    # processing every contact; batched so the body-velocity scatter
-    # happens once, not ``contact_count`` times.
-    total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
-    total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
-    total_ang_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
-
     mu_s_col = contact_get_friction(constraints, cid)
-    # ``2*pi`` literal hoisted out of the per-contact loop for the
-    # Material softness decode below. Float literal so Warp keeps it
-    # constant-folded.
     two_pi = wp.float32(6.283185307179586)
 
     for i in range(contact_count):
         k = contact_first + i
 
-        # Persistent contact frame + anchors. Matched contacts carry
-        # these across frames; fresh contacts were PhoenX-``Initialize``-d
-        # at gather time.
         n = cc_get_normal(cc, k)
         t1_dir = cc_get_tangent1(cc, k)
         t2_dir = wp.cross(n, t1_dir)
         local_p0 = cc_get_local_p0(cc, k)
         local_p1 = cc_get_local_p1(cc, k)
 
-        # Body-local anchors -> world, including the per-shape surface
-        # margin shift so the lever arm lands on the actual surface
-        # contact point (not the body-frame anchor). Matters for
-        # sphere / SDF primitives where the anchor is the body centre.
-        # ``local_p`` is in the body-*origin* frame, so we subtract
-        # ``body_com`` to express the lever arm from the COM (which
-        # is what :attr:`bodies.position` tracks); otherwise asymmetric
-        # meshes see the contact anchor shifted by ``body_com`` in
-        # world space and the mesh visually sinks into the contact
-        # surface.
         margin0 = contacts.rigid_contact_margin0[k]
         margin1 = contacts.rigid_contact_margin1[k]
-        p1_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
-        p2_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
+        # Per-endpoint world contact point + velocity / mass. RIGID
+        # consumes a body-origin-frame anchor; TRIANGLE consumes
+        # barycentric weights ``(w_a, w_b, w_c)`` packed as a vec3.
+        # ``margin_sign``: +1 for endpoint 1 (push along +n), -1 for
+        # endpoint 2 (push along -n) -- matches the original rigid
+        # form ``+ margin0 * n`` / ``- margin1 * n``.
+        ep1 = endpoint_load(kind1, idx1, local_p0, margin0, wp.float32(1.0), n, bodies, particles, tri_indices)
+        ep2 = endpoint_load(kind2, idx2, local_p1, margin1, wp.float32(-1.0), n, bodies, particles, tri_indices)
 
-        r1 = p1_world - position1
-        r2 = p2_world - position2
+        eff_n = effective_mass_scalar(
+            n, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia
+        )
+        eff_t1 = effective_mass_scalar(
+            t1_dir, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia
+        )
+        eff_t2 = effective_mass_scalar(
+            t2_dir, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia
+        )
 
-        eff_n = effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-        eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-        eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-
-        effective_gap = wp.dot(p2_world - p1_world, n)
+        effective_gap = wp.dot(ep2.p_world - ep1.p_world, n)
 
         # Load-scaled correction: contacts under heavier normal load
         # get stronger position-level correction. Uses the previous
@@ -611,7 +626,7 @@ def contact_prepare_for_iteration_at(
         # saturation; reset to the fresh narrow-phase anchors and
         # (for Coulomb-saturation breaks) zero the tangent lambdas so
         # kinetic friction re-accumulates along the current slip axis.
-        p_diff = p2_world - p1_world
+        p_diff = ep2.p_world - ep1.p_world
         drift_t1_raw = wp.dot(p_diff, t1_dir)
         drift_t2_raw = wp.dot(p_diff, t2_dir)
         drift_sq = drift_t1_raw * drift_t1_raw + drift_t2_raw * drift_t2_raw
@@ -635,14 +650,18 @@ def contact_prepare_for_iteration_at(
             if coulomb_saturated:
                 cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
-            p1_world = position1 + wp.quat_rotate(orientation1, fresh_lp0 - body_com1) + margin0 * n
-            p2_world = position2 + wp.quat_rotate(orientation2, fresh_lp1 - body_com2) - margin1 * n
-            r1 = p1_world - position1
-            r2 = p2_world - position2
-            eff_n = effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-            eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-            eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-            p_diff = p2_world - p1_world
+            ep1 = endpoint_load(kind1, idx1, fresh_lp0, margin0, wp.float32(1.0), n, bodies, particles, tri_indices)
+            ep2 = endpoint_load(kind2, idx2, fresh_lp1, margin1, wp.float32(-1.0), n, bodies, particles, tri_indices)
+            eff_n = effective_mass_scalar(
+                n, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia
+            )
+            eff_t1 = effective_mass_scalar(
+                t1_dir, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia
+            )
+            eff_t2 = effective_mass_scalar(
+                t2_dir, ep1.r, ep2.r, ep1.inv_mass, ep2.inv_mass, ep1.inv_inertia, ep2.inv_inertia
+            )
+            p_diff = ep2.p_world - ep1.p_world
             drift_t1_raw = wp.dot(p_diff, t1_dir)
             drift_t2_raw = wp.dot(p_diff, t2_dir)
 
@@ -714,22 +733,23 @@ def contact_prepare_for_iteration_at(
         else:
             cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
 
-        # Warm-start impulse (current-buffer lambdas were seeded by the
-        # gather kernel before prepare). Accumulate in world space and
-        # scatter once after the full column has been processed.
+        # Warm-start impulse: scatter per contact via the endpoint
+        # helper. Loses the rigid pair's batched scatter, but keeps
+        # the math identical and works uniformly for triangles. Graph
+        # coloring guarantees no two cids in one colour share an
+        # endpoint, so the plain stores are race-free.
         lam_n = cc_get_normal_lambda(cc, k)
         lam_t1 = cc_get_tangent1_lambda(cc, k)
         lam_t2 = cc_get_tangent2_lambda(cc, k)
         imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
-        total_lin_imp_on_b2 += imp
-        total_ang_imp_on_b1 += wp.cross(r1, imp)
-        total_ang_imp_on_b2 += wp.cross(r2, imp)
-
-    # Contact impulse acts from body 1 onto body 2 along +normal.
-    bodies.velocity[b1] = bodies.velocity[b1] - inv_mass1 * total_lin_imp_on_b2
-    bodies.velocity[b2] = bodies.velocity[b2] + inv_mass2 * total_lin_imp_on_b2
-    bodies.angular_velocity[b1] = bodies.angular_velocity[b1] - inv_inertia1 @ total_ang_imp_on_b1
-    bodies.angular_velocity[b2] = bodies.angular_velocity[b2] + inv_inertia2 @ total_ang_imp_on_b2
+        endpoint_warmstart_apply_impulse(
+            kind1, idx1, local_p0, imp, wp.cross(ep1.r, imp), ep1.inv_mass, ep1.inv_inertia,
+            wp.float32(-1.0), bodies, particles, tri_indices,
+        )
+        endpoint_warmstart_apply_impulse(
+            kind2, idx2, local_p1, imp, wp.cross(ep2.r, imp), ep2.inv_mass, ep2.inv_inertia,
+            wp.float32(+1.0), bodies, particles, tri_indices,
+        )
 
 
 @wp.func
@@ -743,34 +763,30 @@ def contact_iterate_at(
     cc: ContactContainer,
     contacts: ContactViews,
     use_bias: wp.bool,
+    particles: ParticleContainer,
+    tri_indices: wp.array[wp.vec4i],
 ):
     """One PGS sweep over every contact of one shape pair.
 
-    Sequential Gauss-Seidel within the pair: contacts are processed in
-    order ``k = contact_first .. contact_first + contact_count`` and
-    each contact's lambda update modifies thread-local velocity
-    registers that the next contact's ``vel_rel`` reads. Body-velocity
-    writes happen once at the end; graph coloring guarantees the
-    plain store is race-free across threads.
-
-    Per contact, three scalar PGS rows are solved: normal first (clamp
-    ``lambda_n >= 0``), then the two tangent rows under the
-    two-regime circular Coulomb cone.
-
-    ``use_bias`` toggles the Box2D v3 TGS-soft behaviour: ``True``
-    during the main solve (positional drift + speculative separation
-    push velocity toward closing the gap), ``False`` during the relax
-    pass so the normal row enforces ``Jv = 0`` without re-injecting
-    the positional-correction velocity.
+    Endpoint-dispatched. Per contact: :func:`endpoint_load` builds the
+    per-endpoint state (world contact point, velocity, lever arm,
+    inverse mass / inertia) from the column's ``(kind, idx)`` tags,
+    the shared lambda math runs unchanged, and
+    :func:`endpoint_apply_impulse` scatters the contact impulse back
+    to the endpoint stores. The original rigid-pair register-resident
+    velocity optimisation is gone (loads happen per-contact); graph
+    coloring keeps stores race-free.
     """
-
-    b1 = body_pair.b1
-    b2 = body_pair.b2
 
     contact_first = contact_get_contact_first(constraints, cid)
     contact_count = contact_get_contact_count(constraints, cid)
     if contact_count == 0:
         return
+
+    kind1 = contact_get_endpoint_kind1(constraints, cid)
+    kind2 = contact_get_endpoint_kind2(constraints, cid)
+    idx1 = contact_get_endpoint_idx1(constraints, cid)
+    idx2 = contact_get_endpoint_idx2(constraints, cid)
 
     mu_s = contact_get_friction(constraints, cid)
     mu_k = contact_get_friction_dynamic(constraints, cid)
@@ -780,52 +796,25 @@ def contact_iterate_at(
         DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
     )
 
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
-
-    # Body pose for the per-contact lever-arm recompute. Hoisted out
-    # of the per-contact loop so the compiler can keep it in registers.
-    orientation1 = bodies.orientation[b1]
-    orientation2 = bodies.orientation[b2]
-    body_com1 = bodies.body_com[b1]
-    body_com2 = bodies.body_com[b2]
-
-    v1 = bodies.velocity[b1]
-    v2 = bodies.velocity[b2]
-    w1 = bodies.angular_velocity[b1]
-    w2 = bodies.angular_velocity[b2]
-
     for i in range(contact_count):
         k = contact_first + i
 
         n = cc_get_normal(cc, k)
         t1_dir = cc_get_tangent1(cc, k)
         t2_dir = wp.cross(n, t1_dir)
-        # Recompute lever arms from the body-local anchors + body pose.
-        # ``r1 / r2`` used to be cached in ``cc.derived``; matches the
-        # prepare's ``p_world - position`` form, including the per-shape
-        # margin shift along ``n``.
         local_p0 = cc_get_local_p0(cc, k)
         local_p1 = cc_get_local_p1(cc, k)
         margin0 = contacts.rigid_contact_margin0[k]
         margin1 = contacts.rigid_contact_margin1[k]
-        r1 = wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
-        r2 = wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
+        ep1 = endpoint_load(kind1, idx1, local_p0, margin0, wp.float32(1.0), n, bodies, particles, tri_indices)
+        ep2 = endpoint_load(kind2, idx2, local_p1, margin1, wp.float32(-1.0), n, bodies, particles, tri_indices)
+
         eff_n = cc_get_eff_n(cc, k)
         eff_t1 = cc_get_eff_t1(cc, k)
         eff_t2 = cc_get_eff_t2(cc, k)
         bias_val = cc_get_bias(cc, k)
         bias_t1_val = cc_get_bias_t1(cc, k)
         bias_t2_val = cc_get_bias_t2(cc, k)
-        # ``bias_val > 0`` = speculative (see prepare). Box2D's
-        # ``s > 0`` branch runs regardless of ``useBias``, so the
-        # relax pass MUST keep the speculative bias; zeroing it
-        # collapses the row to ``-eff_n * jv_n``, decelerating every
-        # falling body at the speculative shell (the "honey"
-        # artefact). Penetrating (``bias_val <= 0``) relax DOES zero
-        # the Baumgarte bias so the row settles on ``Jv = 0``.
         is_speculative = bias_val > wp.float32(0.0)
         if not use_bias:
             if not is_speculative:
@@ -833,12 +822,11 @@ def contact_iterate_at(
             bias_t1_val = wp.float32(0.0)
             bias_t2_val = wp.float32(0.0)
 
-        # Relative velocity at the contact point (body 2 from body 1).
-        # One vel_rel per contact; we project onto (n, t1, t2). The
-        # three row axes are orthonormal so this stays algorithmically
-        # equivalent to a full per-row GS re-projection while halving
-        # the cross-product work.
-        vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
+        # Relative velocity at the contact point (endpoint 2 from
+        # endpoint 1). Triangle endpoints carry zero angular velocity
+        # / zero ``r``, so the rigid-only ``v + w x r`` form collapses
+        # to the per-vertex barycentric reduction stored in ``ep.v``.
+        vel_rel = ep2.v + wp.cross(ep2.w, ep2.r) - ep1.v - wp.cross(ep1.w, ep1.r)
 
         jv_n = wp.dot(vel_rel, n)
         jv_t1 = wp.dot(vel_rel, t1_dir)
@@ -915,24 +903,14 @@ def contact_iterate_at(
         cc_set_tangent2_lambda(cc, k, lam_t2_new)
 
         imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
-        v1, v2, w1, w2 = apply_pair_velocity_impulse(
-            v1,
-            v2,
-            w1,
-            w2,
-            inv_mass1,
-            inv_mass2,
-            inv_inertia1,
-            inv_inertia2,
-            r1,
-            r2,
-            imp,
+        endpoint_apply_impulse(
+            kind1, idx1, local_p0, imp, ep1.inv_mass, ep1.inv_inertia, ep1.r,
+            wp.float32(-1.0), bodies, particles, tri_indices,
         )
-
-    bodies.velocity[b1] = v1
-    bodies.velocity[b2] = v2
-    bodies.angular_velocity[b1] = w1
-    bodies.angular_velocity[b2] = w2
+        endpoint_apply_impulse(
+            kind2, idx2, local_p1, imp, ep2.inv_mass, ep2.inv_inertia, ep2.r,
+            wp.float32(+1.0), bodies, particles, tri_indices,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -948,11 +926,15 @@ def contact_prepare_for_iteration(
     idt: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
+    particles: ParticleContainer,
+    tri_indices: wp.array[wp.vec4i],
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_prepare_for_iteration_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts)
+    contact_prepare_for_iteration_at(
+        constraints, cid, 0, bodies, body_pair, idt, cc, contacts, particles, tri_indices
+    )
 
 
 @wp.func
@@ -964,11 +946,15 @@ def contact_iterate(
     cc: ContactContainer,
     contacts: ContactViews,
     use_bias: wp.bool,
+    particles: ParticleContainer,
+    tri_indices: wp.array[wp.vec4i],
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias)
+    contact_iterate_at(
+        constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias, particles, tri_indices
+    )
 
 
 @wp.func
@@ -983,26 +969,25 @@ def contact_iterate_at_multi(
     contacts: ContactViews,
     use_bias: wp.bool,
     num_sweeps: wp.int32,
+    particles: ParticleContainer,
+    tri_indices: wp.array[wp.vec4i],
 ):
-    """``num_sweeps`` PGS sweeps on one contact column with body
-    velocity / inertia registers held across sweeps.
+    """``num_sweeps`` PGS sweeps on one contact column.
 
-    Cids in the same graph colour don't share bodies, so running
-    ``num_sweeps`` sweeps on cid A before moving to cid B within the
-    same colour is equivalent to round-robin. Between colours the
-    cross-colour PGS feedback drops from ``num_iterations`` rounds to
-    ``num_iterations / num_sweeps`` rounds; the caller must keep the
-    outer loop so stacks can converge. ``num_sweeps == 2`` keeps 4
-    outer rounds at the default solver_iterations = 8 and tolerates
-    the contact-force tests.
+    Endpoint-dispatched (see :func:`contact_iterate_at`). Cids in the
+    same graph colour don't share endpoints, so running ``num_sweeps``
+    sweeps before moving to the next cid is equivalent to round-robin
+    within the colour.
     """
-    b1 = body_pair.b1
-    b2 = body_pair.b2
-
     contact_first = contact_get_contact_first(constraints, cid)
     contact_count = contact_get_contact_count(constraints, cid)
     if contact_count == 0:
         return
+
+    kind1 = contact_get_endpoint_kind1(constraints, cid)
+    kind2 = contact_get_endpoint_kind2(constraints, cid)
+    idx1 = contact_get_endpoint_idx1(constraints, cid)
+    idx2 = contact_get_endpoint_idx2(constraints, cid)
 
     mu_s = contact_get_friction(constraints, cid)
     mu_k = contact_get_friction_dynamic(constraints, cid)
@@ -1011,23 +996,6 @@ def contact_iterate_at_multi(
     _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
         DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
     )
-
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
-
-    # Body pose for the per-contact lever-arm recompute (replaces the
-    # cached r1/r2 in cc.derived).
-    orientation1 = bodies.orientation[b1]
-    orientation2 = bodies.orientation[b2]
-    body_com1 = bodies.body_com[b1]
-    body_com2 = bodies.body_com[b2]
-
-    v1 = bodies.velocity[b1]
-    v2 = bodies.velocity[b2]
-    w1 = bodies.angular_velocity[b1]
-    w2 = bodies.angular_velocity[b2]
 
     it = wp.int32(0)
     while it < num_sweeps:
@@ -1041,8 +1009,9 @@ def contact_iterate_at_multi(
             local_p1 = cc_get_local_p1(cc, k)
             margin0 = contacts.rigid_contact_margin0[k]
             margin1 = contacts.rigid_contact_margin1[k]
-            r1 = wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
-            r2 = wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
+            ep1 = endpoint_load(kind1, idx1, local_p0, margin0, wp.float32(1.0), n, bodies, particles, tri_indices)
+            ep2 = endpoint_load(kind2, idx2, local_p1, margin1, wp.float32(-1.0), n, bodies, particles, tri_indices)
+
             eff_n = cc_get_eff_n(cc, k)
             eff_t1 = cc_get_eff_t1(cc, k)
             eff_t2 = cc_get_eff_t2(cc, k)
@@ -1056,7 +1025,7 @@ def contact_iterate_at_multi(
                 bias_t1_val = wp.float32(0.0)
                 bias_t2_val = wp.float32(0.0)
 
-            vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
+            vel_rel = ep2.v + wp.cross(ep2.w, ep2.r) - ep1.v - wp.cross(ep1.w, ep1.r)
             jv_n = wp.dot(vel_rel, n)
             jv_t1 = wp.dot(vel_rel, t1_dir)
             jv_t2 = wp.dot(vel_rel, t2_dir)
@@ -1111,25 +1080,15 @@ def contact_iterate_at_multi(
             cc_set_tangent2_lambda(cc, k, lam_t2_new)
 
             imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
-            v1, v2, w1, w2 = apply_pair_velocity_impulse(
-                v1,
-                v2,
-                w1,
-                w2,
-                inv_mass1,
-                inv_mass2,
-                inv_inertia1,
-                inv_inertia2,
-                r1,
-                r2,
-                imp,
+            endpoint_apply_impulse(
+                kind1, idx1, local_p0, imp, ep1.inv_mass, ep1.inv_inertia, ep1.r,
+                wp.float32(-1.0), bodies, particles, tri_indices,
+            )
+            endpoint_apply_impulse(
+                kind2, idx2, local_p1, imp, ep2.inv_mass, ep2.inv_inertia, ep2.r,
+                wp.float32(+1.0), bodies, particles, tri_indices,
             )
         it += 1
-
-    bodies.velocity[b1] = v1
-    bodies.velocity[b2] = v2
-    bodies.angular_velocity[b1] = w1
-    bodies.angular_velocity[b2] = w2
 
 
 @wp.func
@@ -1142,11 +1101,15 @@ def contact_iterate_multi(
     contacts: ContactViews,
     use_bias: wp.bool,
     num_sweeps: wp.int32,
+    particles: ParticleContainer,
+    tri_indices: wp.array[wp.vec4i],
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at_multi(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias, num_sweeps)
+    contact_iterate_at_multi(
+        constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias, num_sweeps, particles, tri_indices
+    )
 
 
 # ---------------------------------------------------------------------------

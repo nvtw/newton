@@ -85,6 +85,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 from newton._src.solvers.phoenx.particle import (
+    ParticleContainer,
     particle_predict_position,
 )
 
@@ -799,6 +800,8 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
         num_worlds: wp.int32,
         num_joints: wp.int32,
         tpw_buf: wp.array[wp.int32],
+        particles: ParticleContainer,
+        tri_indices: wp.array[wp.vec4i],
     ):
         tid = wp.tid()
         tpw = tpw_buf[0]
@@ -826,7 +829,9 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                     else:
                         actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
                 else:
-                    contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+                    contact_prepare_for_iteration(
+                        contact_cols, cid - num_joints, bodies, idt, cc, contacts, particles, tri_indices
+                    )
                 base += tpw
 
             _sync_warp()
@@ -862,7 +867,8 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                             actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
                     else:
                         contact_iterate_multi(
-                            contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps
+                            contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps,
+                            particles, tri_indices,
                         )
                     base += tpw
 
@@ -895,6 +901,8 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
         num_worlds: wp.int32,
         num_joints: wp.int32,
         tpw_buf: wp.array[wp.int32],
+        particles: ParticleContainer,
+        tri_indices: wp.array[wp.vec4i],
     ):
         tid = wp.tid()
         tpw = tpw_buf[0]
@@ -929,7 +937,8 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                         actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
                 else:
                     contact_iterate_multi(
-                        contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations
+                        contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations,
+                        particles, tri_indices,
                     )
                 base += tpw
 
@@ -1753,6 +1762,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
         fuse_threshold: wp.int32,
         head_active: wp.array[wp.int32],
         store: BodyOrParticleStore,
+        tri_indices: wp.array[wp.vec4i],
     ):
         tid = wp.tid()
         if color_cursor[0] <= 0:
@@ -1798,9 +1808,15 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                             actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
             else:
                 if wp.static(is_prepare):
-                    contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+                    contact_prepare_for_iteration(
+                        contact_cols, cid - num_joints, bodies, idt, cc, contacts,
+                        store.particles, tri_indices,
+                    )
                 else:
-                    contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias)
+                    contact_iterate(
+                        contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias,
+                        store.particles, tri_indices,
+                    )
 
         if tid == 0:
             color_cursor[0] = cursor - 1
@@ -1833,6 +1849,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
         num_joints: wp.int32,
         fuse_threshold: wp.int32,
         store: BodyOrParticleStore,
+        tri_indices: wp.array[wp.vec4i],
     ):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
@@ -1866,9 +1883,15 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                 actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
                 else:
                     if wp.static(is_prepare):
-                        contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+                        contact_prepare_for_iteration(
+                            contact_cols, cid - num_joints, bodies, idt, cc, contacts,
+                            store.particles, tri_indices,
+                        )
                     else:
-                        contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias)
+                        contact_iterate(
+                            contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias,
+                            store.particles, tri_indices,
+                        )
             _sync_threads()
             cursor = cursor - 1
         if lane == 0:
