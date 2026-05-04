@@ -1466,7 +1466,11 @@ class CollisionPipeline:
                 sorted_shape1=contacts.rigid_contact_shape1,
                 sorted_normal=contacts.rigid_contact_normal,
                 body_q=state.body_q,
-                shape_body=model.shape_body,
+                # Use the unified S+T shape_body so virtual cloth-
+                # triangle suffix indices resolve to the -1 sentinel
+                # (point already in world space) instead of OOB-reading
+                # ``model.shape_body``.
+                shape_body=self.unified_shape_body if self.extra_shape_count > 0 else model.shape_body,
                 device=self.device,
                 **sticky_offsets,
             )

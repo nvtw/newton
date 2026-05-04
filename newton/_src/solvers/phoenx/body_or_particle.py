@@ -87,6 +87,7 @@ __all__ = [
     "particle_set_access_mode",
     "set_access_mode",
     "set_position",
+    "set_position_raw",
     "set_velocity",
     "writeback_position_to_velocity",
 ]
@@ -218,6 +219,23 @@ def set_position(store: BodyOrParticleStore, i: wp.int32, p: wp.vec3f):
         store.particles.position[i_p] = p
         if store.particles.access_mode[i_p] != _ACCESS_MODE_STATIC:
             store.particles.access_mode[i_p] = _ACCESS_MODE_POSITION_LEVEL
+
+
+@wp.func
+def set_position_raw(store: BodyOrParticleStore, i: wp.int32, p: wp.vec3f):
+    """Write ``p`` into the body's / particle's position slot WITHOUT
+    flipping the access-mode flag.
+
+    Used by the relax wrapper for position-level constraints, which
+    must restore the pre-iterate position after extracting the
+    velocity contribution.  Plain accessors flip mode to POSITION_LEVEL,
+    which is the wrong invariant for the relax pass (relax must leave
+    the access mode at VELOCITY_LEVEL).
+    """
+    if i < store.num_bodies:
+        store.bodies.position[i] = p
+    else:
+        store.particles.position[i - store.num_bodies] = p
 
 
 @wp.func

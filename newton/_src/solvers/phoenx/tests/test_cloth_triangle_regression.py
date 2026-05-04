@@ -72,10 +72,11 @@ def _iterate_all_cloth_kernel(
     c: ConstraintContainer,
     cid_offset: wp.int32,
     store: BodyOrParticleStore,
+    idt: wp.float32,
 ):
     t = wp.tid()
     cid = cid_offset + t
-    cloth_triangle_iterate_at(c, cid, wp.int32(0), store)
+    cloth_triangle_iterate_at(c, cid, wp.int32(0), store, idt)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "Cloth-regression test requires CUDA")
@@ -162,6 +163,11 @@ class TestClothTriangleRegression(unittest.TestCase):
         # cloth plane). This drives the cloth iterate hard.
         positions[free_index] = rest_position + np.array([0.0, 0.0, -0.5], dtype=np.float32)
         world.particles.position.assign(positions)
+        # Snapshot position_prev_substep == position so the access-mode
+        # sync at the top of cloth_triangle_iterate_at is a no-op
+        # (real world.step path runs the substep-entry kernel which
+        # snapshots; this test bypasses that).
+        world.particles.position_prev_substep.assign(positions)
 
         # Capture pinned positions for the post-iterate compare.
         pinned_before = positions[pinned_indices].copy()
@@ -182,7 +188,7 @@ class TestClothTriangleRegression(unittest.TestCase):
             wp.launch(
                 kernel=_iterate_all_cloth_kernel,
                 dim=self.tri_count,
-                inputs=[world.constraints, wp.int32(0), world.body_or_particle],
+                inputs=[world.constraints, wp.int32(0), world.body_or_particle, idt],
                 device=self.device,
             )
 

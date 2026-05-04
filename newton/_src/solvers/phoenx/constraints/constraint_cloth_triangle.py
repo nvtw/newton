@@ -63,11 +63,17 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_POSITION_LEVEL,
+    ACCESS_MODE_VELOCITY_LEVEL,
+)
 from newton._src.solvers.phoenx.body_or_particle import (
     BodyOrParticleStore,
     get_inverse_mass,
     get_position,
+    set_access_mode,
     set_position,
+    set_position_raw,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
@@ -102,6 +108,7 @@ __all__ = [
     "cloth_triangle_get_rest_area",
     "cloth_triangle_iterate_at",
     "cloth_triangle_prepare_for_iteration_at",
+    "cloth_triangle_relax_at",
     "cloth_triangle_set_alpha_lambda",
     "cloth_triangle_set_alpha_mu",
     "cloth_triangle_set_bias_lambda",
@@ -503,6 +510,8 @@ def cloth_triangle_set_lambda_sum_mu(c: ConstraintContainer, cid: wp.int32, v: w
 _C_LAMBDA_EPS = wp.constant(wp.float32(1.0e-12))
 _C_MU_EPS = wp.constant(wp.float32(1.0e-6))
 _DET_EPS = wp.constant(wp.float32(1.0e-12))
+_ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
+_ACCESS_MODE_VELOCITY_LEVEL = wp.constant(wp.int32(ACCESS_MODE_VELOCITY_LEVEL))
 
 
 @wp.func
@@ -565,8 +574,19 @@ def cloth_triangle_iterate_at(
     cid: wp.int32,
     base_offset: wp.int32,
     store: BodyOrParticleStore,
+    idt: wp.float32,
 ):
     """One XPBD sweep over a cloth-triangle column.
+
+    Pre-syncs the three vertices to ``POSITION_LEVEL`` so any
+    pending velocity-level impulse from a prior contact iterate is
+    folded into ``position`` (via the
+    :func:`~newton._src.solvers.phoenx.access_mode.synchronize_position_velocity`
+    finite-diff against ``position_prev_substep``) before the PBD
+    math reads it. Mirrors the contact endpoint's
+    ``_triangle_sync_to_velocity_level`` pattern; together they
+    keep cloth and contact corrections lossless across alternating
+    graph colours within a substep.
 
     Reads the three particle positions, runs the area row first
     (sequential row Gauss-Seidel: row mu sees row lambda's
@@ -592,6 +612,15 @@ def cloth_triangle_iterate_at(
     body_a = cloth_triangle_get_body1(constraints, cid)
     body_b = cloth_triangle_get_body2(constraints, cid)
     body_c = cloth_triangle_get_body3(constraints, cid)
+
+    # Pre-sync the three vertices to POSITION_LEVEL.  If a contact
+    # iterate in the previous color/sweep wrote velocity, this folds
+    # it into ``particles.position`` via ``v -> dt * v`` against
+    # ``position_prev_substep`` so the PBD reads see the cumulative
+    # state.  No-op for vertices already in POSITION_LEVEL or STATIC.
+    set_access_mode(store, body_a, _ACCESS_MODE_POSITION_LEVEL, idt)
+    set_access_mode(store, body_b, _ACCESS_MODE_POSITION_LEVEL, idt)
+    set_access_mode(store, body_c, _ACCESS_MODE_POSITION_LEVEL, idt)
 
     inv_mass_a = cloth_triangle_get_inv_mass_a(constraints, cid)
     inv_mass_b = cloth_triangle_get_inv_mass_b(constraints, cid)
@@ -709,3 +738,64 @@ def cloth_triangle_iterate_at(
     set_position(store, body_a, x_a)
     set_position(store, body_b, x_b)
     set_position(store, body_c, x_c)
+
+
+@wp.func
+def cloth_triangle_relax_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    store: BodyOrParticleStore,
+    idt: wp.float32,
+):
+    """Relax-phase wrapper for the cloth-triangle XPBD iterate.
+
+    The relax kernel's invariant is that *only velocities* are
+    mutated -- positions go untouched.  Cloth's iterate is naturally
+    position-level, so we wrap it: snapshot positions, run the
+    standard iterate (writes new positions and flips mode to POS),
+    sync back to VELOCITY_LEVEL (the
+    :func:`~newton._src.solvers.phoenx.access_mode.synchronize_position_velocity`
+    finite-diff folds the position delta into the velocity field),
+    and restore the pre-iterate positions.  Net effect: velocity
+    has the cloth correction added; position is unchanged.
+
+    The sync round-trip is lossless thanks to the access-mode
+    pattern: any prior contact-relax velocity contribution gets
+    folded *into* position by the cloth iterate's internal
+    ``set_access_mode(POSITION_LEVEL)`` and back *out* into velocity
+    by our trailing ``set_access_mode(VELOCITY_LEVEL)``.
+
+    Args:
+        constraints: The cloth-triangle column container.
+        cid: Constraint id within the joint-container space.
+        base_offset: Reserved for future compound-cid layouts.
+        store: Body-or-particle store the iterate reads / writes.
+        idt: Inverse substep dt ``[1/s]`` -- drives the
+            access-mode finite-diff math.
+    """
+    body_a = cloth_triangle_get_body1(constraints, cid)
+    body_b = cloth_triangle_get_body2(constraints, cid)
+    body_c = cloth_triangle_get_body3(constraints, cid)
+
+    # Standard cloth iterate: writes new positions, flips mode=POS.
+    # Internally calls set_access_mode(POS) which folds any prior
+    # contact/cloth velocity-level deltas into position before the
+    # PBD math reads it.
+    cloth_triangle_iterate_at(constraints, cid, base_offset, store, idt)
+
+    # Sync POSITION->VELOCITY: ``velocity = (position - p_prev_substep) / dt``.
+    # The freshly-written position contains the cloth correction on
+    # top of the velocity-integrated state, so the delta from this
+    # sweep lands in the velocity field.  We DO NOT restore the
+    # position field afterwards: doing so creates an incoherence
+    # between the position and the velocity-implied position
+    # ``p_prev + dt*velocity``, and the next sync POS->VEL on this
+    # particle (e.g. the next contact iterate's
+    # ``_triangle_sync_to_velocity_level``) would erase the cloth
+    # contribution.  Letting position grow keeps both duals coherent
+    # and is bit-equivalent to the iterate phase's behavior.
+    set_access_mode(store, body_a, _ACCESS_MODE_VELOCITY_LEVEL, idt)
+    set_access_mode(store, body_b, _ACCESS_MODE_VELOCITY_LEVEL, idt)
+    set_access_mode(store, body_c, _ACCESS_MODE_VELOCITY_LEVEL, idt)
+

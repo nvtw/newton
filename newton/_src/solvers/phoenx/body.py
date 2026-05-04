@@ -197,6 +197,16 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     # VELOCITY_LEVEL -- a lazy ``synchronize`` from ``NONE`` would
     # otherwise short-circuit on the wrong branch.
     c.position_prev_substep = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
-    c.orientation_prev_substep = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
+    # Initialise to the identity quaternion so a synchronize_pose_velocity
+    # call that fires before the first substep-entry snapshot does not
+    # divide by a zero-norm quaternion (the early-return branch should
+    # cover this, but Warp may eagerly evaluate the dead arms and NaN
+    # whichever fields they touch).
+    import numpy as _np  # noqa: PLC0415
+    c.orientation_prev_substep = wp.array(
+        _np.tile([0.0, 0.0, 0.0, 1.0], (num_bodies, 1)).astype(_np.float32),
+        dtype=wp.quatf,
+        device=device,
+    )
     c.access_mode = wp.full(num_bodies, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
     return c

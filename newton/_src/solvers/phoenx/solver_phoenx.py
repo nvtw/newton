@@ -334,7 +334,10 @@ def _build_cloth_collision_pipeline(
         with wp.ScopedDevice(device):
             tri_indices = wp.zeros(T, dtype=wp.vec4i, device=device)
 
-    if int(model.shape_count) > 0:
+    # Build a pipeline whenever we have *anything* to collide -- rigid
+    # shapes (S > 0) or cloth triangles (T > 0).  Cloth-only scenes
+    # need the pipeline for tri-vs-tri broadphase + narrowphase.
+    if int(model.shape_count) > 0 or num_cloth_triangles > 0:
         existing_cp = getattr(model, "_collision_pipeline", None)
         needs_new_cp = existing_cp is None or not getattr(existing_cp, "contact_matching", False)
         # Cloth scenes need the pipeline to reserve broad-phase

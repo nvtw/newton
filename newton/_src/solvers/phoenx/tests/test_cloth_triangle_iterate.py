@@ -86,6 +86,10 @@ def _build_store(particle_positions, device):
     n = particle_positions.shape[0]
     particles = particle_container_zeros(n, device=device)
     particles.position.assign(particle_positions)
+    # Snapshot position_prev_substep == position so the access-mode
+    # sync VEL->POS is a no-op (the real substep-entry kernel would
+    # do the same; the unit test bypasses that path).
+    particles.position_prev_substep.assign(particle_positions)
     particles.inverse_mass.assign(np.ones(n, dtype=np.float32))
     store = BodyOrParticleStore()
     store.bodies = bodies
@@ -138,9 +142,10 @@ def _prepare_kernel(
 def _iterate_kernel(
     c: ConstraintContainer,
     store: BodyOrParticleStore,
+    idt: wp.float32,
 ):
     cid = wp.tid()
-    cloth_triangle_iterate_at(c, cid, wp.int32(0), store)
+    cloth_triangle_iterate_at(c, cid, wp.int32(0), store, idt)
 
 
 def _run_iterate_loop(device, container, store, num_iterations, dt):
@@ -155,7 +160,7 @@ def _run_iterate_loop(device, container, store, num_iterations, dt):
         wp.launch(
             kernel=_iterate_kernel,
             dim=1,
-            inputs=[container, store],
+            inputs=[container, store, wp.float32(idt)],
             device=device,
         )
 
@@ -323,7 +328,7 @@ class TestShearDecay(unittest.TestCase):
             wp.launch(
                 kernel=_iterate_kernel,
                 dim=1,
-                inputs=[container, store],
+                inputs=[container, store, wp.float32(idt)],
                 device=device,
             )
             if (it + 1) % 5 == 0:

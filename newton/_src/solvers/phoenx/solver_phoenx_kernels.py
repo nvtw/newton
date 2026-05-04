@@ -44,6 +44,7 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_get_body3,
     cloth_triangle_iterate_at,
     cloth_triangle_prepare_for_iteration_at,
+    cloth_triangle_relax_at,
     cloth_triangle_set_alpha_lambda,
     cloth_triangle_set_alpha_mu,
     cloth_triangle_set_bias_lambda,
@@ -1838,14 +1839,15 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                 # ``cloth_support=False``.
                 handled_by_cloth = wp.bool(False)
                 if wp.static(cloth_support):
-                    if wp.static(not is_relax):
-                        ctype = read_int(constraints, wp.int32(0), cid)
-                        if ctype == cloth_type_tag:
-                            if wp.static(is_prepare):
-                                cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
-                            else:
-                                cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store)
-                            handled_by_cloth = wp.bool(True)
+                    ctype = read_int(constraints, wp.int32(0), cid)
+                    if ctype == cloth_type_tag:
+                        handled_by_cloth = wp.bool(True)
+                        if wp.static(is_prepare):
+                            cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
+                        elif wp.static(is_relax):
+                            cloth_triangle_relax_at(constraints, cid, wp.int32(0), store, idt)
+                        else:
+                            cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store, idt)
                 if not handled_by_cloth:
                     if wp.static(is_prepare):
                         if wp.static(revolute_only):
@@ -1926,14 +1928,13 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                 if cid < num_joints:
                     handled_by_cloth = wp.bool(False)
                     if wp.static(cloth_support):
-                        if wp.static(not is_relax):
-                            ctype = read_int(constraints, wp.int32(0), cid)
-                            if ctype == cloth_type_tag:
-                                if wp.static(is_prepare):
-                                    cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
-                                else:
-                                    cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store)
-                                handled_by_cloth = wp.bool(True)
+                        ctype = read_int(constraints, wp.int32(0), cid)
+                        if ctype == cloth_type_tag:
+                            handled_by_cloth = wp.bool(True)
+                            if wp.static(is_prepare):
+                                cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
+                            elif wp.static(not is_relax):
+                                cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store, idt)
                     if not handled_by_cloth:
                         if wp.static(is_prepare):
                             if wp.static(revolute_only):
