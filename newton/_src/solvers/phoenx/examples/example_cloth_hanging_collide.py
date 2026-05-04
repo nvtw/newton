@@ -12,6 +12,10 @@ pairs in the broadphase, and the surviving pairs go through GJK/MPR
 plus the unified ``endpoint_load`` / ``endpoint_apply_impulse``
 contact iterate.
 
+A static ground plane is included so the swinging free edge also
+exercises the rigid-vs-triangle (RT) contact path against an
+infinite half-space.
+
 Cloth thickness ``cloth_margin = 0.01 m`` (1 cm) is used both as
 the per-shape ``shape_gap`` for the cloth-triangle suffix in the
 collision pipeline and as the surface offset applied at contact
@@ -78,10 +82,11 @@ class Example:
         )
 
         # ---- Build the model -----------------------------------------
-        # No rigid bodies, no ground plane -- just cloth.  The hanging
-        # cloth swings under gravity and the only non-trivial contact
-        # path is cloth-vs-cloth (TT).
+        # Static ground plane (z = 0) plus the hanging cloth: the cloth
+        # exercises both cloth-vs-cloth (TT) self-collision and
+        # rigid-vs-triangle (RT) contact against the ground half-space.
         builder = newton.ModelBuilder()
+        builder.add_ground_plane(height=1.0)
         builder.add_cloth_grid(
             pos=wp.vec3(0.0, 0.0, 4.0),
             rot=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), wp.pi * 0.5),
@@ -132,9 +137,12 @@ class Example:
         )
         self.contacts = self.collision_pipeline.contacts()
 
-        # No rigid bodies in this scene, so ``shape_body`` is the
-        # length-1 sentinel the cloth-only ingest path expects.
-        self._shape_body = wp.zeros(1, dtype=wp.int32, device=self.device)
+        # Only the static ground plane is a rigid shape in this scene,
+        # so map ``model.shape_body`` (-1 for static) into PhoenX's
+        # convention (0 sentinel slot for static / world-frame shapes).
+        shape_body_np = self.model.shape_body.numpy()
+        shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
+        self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
         # ---- Newton state for the renderer ---------------------------
         self.state_0 = self.model.state()
