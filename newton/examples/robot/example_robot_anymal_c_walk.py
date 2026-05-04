@@ -18,7 +18,7 @@ import warp as wp
 import newton
 import newton.examples
 import newton.utils
-from newton import GeoType, State
+from newton import GeoType
 
 lab_to_mujoco = [0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11]
 mujoco_to_lab = [0, 4, 8, 2, 6, 10, 1, 5, 9, 3, 7, 11]
@@ -47,54 +47,59 @@ def _build_joint_target_pos_kernel(
         out[i] = joint_pos_initial[j] + action_scale * act[0, idx]
 
 
-def quat_rotate_inverse(q: np.ndarray, v: np.ndarray) -> np.ndarray:
-    """Rotate a vector by the inverse of a quaternion (NumPy implementation).
+@wp.kernel
+def _compute_obs_kernel(
+    joint_q: wp.array[float],  # full joint_q, [px,py,pz, qx,qy,qz,qw, q0..q11]
+    joint_qd: wp.array[float],  # full joint_qd, [vx,vy,vz, wx,wy,wz, qd0..qd11]
+    joint_pos_initial: wp.array[float],  # (12,) reference posture (lab order)
+    lab_to_mujoco_idx: wp.array[int],  # (12,) reordering for joint pos/vel
+    gravity_w: wp.vec3,  # gravity unit vector in world frame
+    command: wp.vec3,  # (fwd, lat, yaw) command
+    prev_act: wp.array2d[float],  # (1, 12) previous policy action
+    obs: wp.array2d[float],  # (1, 48) destination
+):
+    """Build the 48-element ANYmal observation entirely on-device.
 
-    Args:
-        q: The quaternion in (x, y, z, w). Shape is (..., 4).
-        v: The vector in (x, y, z). Shape is (..., 3).
-
-    Returns:
-        The rotated vector in (x, y, z). Shape is (..., 3).
+    Layout:
+      [0:3]   body-frame linear velocity
+      [3:6]   body-frame angular velocity
+      [6:9]   body-frame projected gravity
+      [9:12]  command (fwd, lat, yaw)
+      [12:24] joint position error, reordered to mujoco order
+      [24:36] joint velocity, reordered to mujoco order
+      [36:48] previous action
     """
-    q_w = q[..., 3]
-    q_vec = q[..., :3]
-    a = v * (2.0 * q_w**2 - 1.0)[..., np.newaxis]
-    b = np.cross(q_vec, v, axis=-1) * (q_w * 2.0)[..., np.newaxis]
-    c = q_vec * np.sum(q_vec * v, axis=-1, keepdims=True) * 2.0
-    return a - b + c
+    # qx,qy,qz,qw is the XYZW layout used by both the URDF importer and
+    # warp.quat (warp expects XYZW too); reading 4 floats this way matches
+    # the previous NumPy code exactly.
+    q = wp.quat(joint_q[3], joint_q[4], joint_q[5], joint_q[6])
 
+    lin_w = wp.vec3(joint_qd[0], joint_qd[1], joint_qd[2])
+    ang_w = wp.vec3(joint_qd[3], joint_qd[4], joint_qd[5])
 
-def compute_obs(actions, state: State, joint_pos_initial, indices, gravity_vec, command):
-    """Compute the 48-element observation vector using NumPy."""
-    root_quat_w = np.asarray(state.joint_q.numpy()[3:7], dtype=np.float32).reshape(1, 4)
-    root_lin_vel_w = np.asarray(state.joint_qd.numpy()[:3], dtype=np.float32).reshape(1, 3)
-    root_ang_vel_w = np.asarray(state.joint_qd.numpy()[3:6], dtype=np.float32).reshape(1, 3)
-    joint_pos_current = np.asarray(state.joint_q.numpy()[7:], dtype=np.float32).reshape(1, 12)
-    joint_vel_current = np.asarray(state.joint_qd.numpy()[6:], dtype=np.float32).reshape(1, 12)
+    vel_b = wp.quat_rotate_inv(q, lin_w)
+    avel_b = wp.quat_rotate_inv(q, ang_w)
+    grav_b = wp.quat_rotate_inv(q, gravity_w)
 
-    vel_b = quat_rotate_inverse(root_quat_w, root_lin_vel_w)
-    a_vel_b = quat_rotate_inverse(root_quat_w, root_ang_vel_w)
-    grav = quat_rotate_inverse(root_quat_w, gravity_vec)
+    obs[0, 0] = vel_b[0]
+    obs[0, 1] = vel_b[1]
+    obs[0, 2] = vel_b[2]
+    obs[0, 3] = avel_b[0]
+    obs[0, 4] = avel_b[1]
+    obs[0, 5] = avel_b[2]
+    obs[0, 6] = grav_b[0]
+    obs[0, 7] = grav_b[1]
+    obs[0, 8] = grav_b[2]
+    obs[0, 9] = command[0]
+    obs[0, 10] = command[1]
+    obs[0, 11] = command[2]
 
-    joint_pos_rel = joint_pos_current - joint_pos_initial
-    joint_vel_rel = joint_vel_current
-
-    rearranged_joint_pos_rel = joint_pos_rel[:, indices]
-    rearranged_joint_vel_rel = joint_vel_rel[:, indices]
-
-    return np.concatenate(
-        [
-            vel_b,
-            a_vel_b,
-            grav,
-            command,
-            rearranged_joint_pos_rel,
-            rearranged_joint_vel_rel,
-            actions,
-        ],
-        axis=1,
-    ).astype(np.float32)
+    # Reorder joint pos error / vel from lab order into mujoco order.
+    for k in range(12):
+        idx = lab_to_mujoco_idx[k]
+        obs[0, 12 + k] = joint_q[7 + idx] - joint_pos_initial[idx]
+        obs[0, 24 + k] = joint_qd[6 + idx]
+        obs[0, 36 + k] = prev_act[0, k]
 
 
 class Example:
@@ -233,20 +238,21 @@ class Example:
         self._policy_input_name = self.policy.input_names[0]
         self._policy_output_name = self.policy.output_names[0]
 
-        self.joint_pos_initial = np.asarray(self.state_0.joint_q.numpy()[7:], dtype=np.float32).reshape(1, 12)
-        self.act = np.zeros((1, 12), dtype=np.float32)
-
-        self.lab_to_mujoco_indices = np.asarray(lab_to_mujoco, dtype=np.int64)
-        self.mujoco_to_lab_indices = np.asarray(mujoco_to_lab, dtype=np.int64)
-        self.gravity_vec = np.array([[0.0, 0.0, -1.0]], dtype=np.float32)
-        self.command = np.zeros((1, 3), dtype=np.float32)
-        self.command[0, 0] = 1.0
-
-        # Pre-allocate device buffers for the policy step so the hot loop never
-        # allocates and never round-trips the action tensor to host.
-        self._obs_wp = wp.zeros((1, 48), dtype=wp.float32, device=self.device)
-        self._joint_pos_initial_wp = wp.array(self.joint_pos_initial.reshape(-1), dtype=wp.float32, device=self.device)
+        # Everything the policy step touches is on-device.  The host never
+        # syncs joint state, builds the obs vector, or copies the action back.
+        # Reference posture is sliced on-device to avoid a startup host sync.
+        self._joint_pos_initial_wp = wp.clone(self.state_0.joint_q[7:])
+        self._lab_to_mujoco_wp = wp.array(np.asarray(lab_to_mujoco, dtype=np.int32), dtype=wp.int32, device=self.device)
         self._mujoco_to_lab_wp = wp.array(np.asarray(mujoco_to_lab, dtype=np.int32), dtype=wp.int32, device=self.device)
+        self._gravity_w = wp.vec3(0.0, 0.0, -1.0)
+        # Command is mutable host-side; the kernel reads it as a wp.vec3 value
+        # passed by argument, so it never lives in a device buffer.
+        self._command = wp.vec3(1.0, 0.0, 0.0)
+
+        self._obs_wp = wp.zeros((1, 48), dtype=wp.float32, device=self.device)
+        # Keeps the previous policy action on device so it can be fed back
+        # into the next obs without a host round-trip.
+        self._prev_act_wp = wp.zeros((1, 12), dtype=wp.float32, device=self.device)
         self._action_scale = 0.5
         self._num_prefix_zeros = 6
         self._num_dofs = 12
@@ -254,16 +260,28 @@ class Example:
         self.capture()
 
     def capture(self):
+        self.graph = None
+        self.use_cuda_graph = False
         if self.device.is_cuda:
+            self.use_cuda_graph = True
             self.control.joint_target_pos = wp.zeros(18, dtype=wp.float32, device=self.device)
+            # Capture the full step (obs build + policy + joint_target_pos +
+            # substeps) so the host issues a single ``wp.capture_launch`` per
+            # frame and the GPU never waits on Python.
             with wp.ScopedCapture() as capture:
+                self._policy_step()
                 self.simulate()
             self.graph = capture.graph
-        else:
-            self.graph = None
 
     def simulate(self):
-        for _ in range(self.sim_substeps):
+        # When the substep count is odd, swapping the python references at
+        # capture time leaves the captured graph reading from the *wrong*
+        # buffer on every replay.  Mirror the pattern used in
+        # example_robot_policy: copy state_1 into state_0 in-place on the
+        # last odd substep, swap python refs otherwise.
+        need_state_copy = self.use_cuda_graph and self.sim_substeps % 2 == 1
+
+        for i in range(self.sim_substeps):
             self.state_0.clear_forces()
 
             self.viewer.apply_forces(self.state_0)
@@ -273,20 +291,28 @@ class Example:
 
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
-            self.state_0, self.state_1 = self.state_1, self.state_0
+            if need_state_copy and i == self.sim_substeps - 1:
+                self.state_0.assign(self.state_1)
+            else:
+                self.state_0, self.state_1 = self.state_1, self.state_0
 
-    def step(self):
-        obs = compute_obs(
-            self.act,
-            self.state_0,
-            self.joint_pos_initial,
-            self.lab_to_mujoco_indices,
-            self.gravity_vec,
-            self.command,
+    def _policy_step(self):
+        """Build obs -> run policy -> write joint_target_pos.  All on-device."""
+        wp.launch(
+            _compute_obs_kernel,
+            dim=1,
+            inputs=[
+                self.state_0.joint_q,
+                self.state_0.joint_qd,
+                self._joint_pos_initial_wp,
+                self._lab_to_mujoco_wp,
+                self._gravity_w,
+                self._command,
+                self._prev_act_wp,
+                self._obs_wp,
+            ],
+            device=self.device,
         )
-
-        # Reuse the preallocated obs buffer (avoids per-step device alloc).
-        self._obs_wp.assign(obs)
         out = self.policy({self._policy_input_name: self._obs_wp})
         act_wp = out[self._policy_output_name]
 
@@ -306,12 +332,14 @@ class Example:
             device=self.device,
         )
 
-        # Keep a host-side copy of the action for the next observation.
-        self.act = act_wp.numpy().astype(np.float32)
+        # Stash the action for the *next* obs build, on device (no sync).
+        wp.copy(self._prev_act_wp, act_wp)
 
+    def step(self):
         if self.graph:
             wp.capture_launch(self.graph)
         else:
+            self._policy_step()
             self.simulate()
         self.sim_time += self.frame_dt
 

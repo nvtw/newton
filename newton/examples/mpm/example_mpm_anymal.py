@@ -20,7 +20,7 @@ import newton.examples
 import newton.utils
 from newton.examples.robot.example_robot_anymal_c_walk import (
     _build_joint_target_pos_kernel,
-    compute_obs,
+    _compute_obs_kernel,
     lab_to_mujoco,
     mujoco_to_lab,
 )
@@ -163,26 +163,24 @@ class Example:
         # Setup control policy
         self.control = self.model.control()
 
-        self.joint_pos_initial = np.asarray(self.state_0.joint_q.numpy()[7:], dtype=np.float32).reshape(1, 12)
-        self.act = np.zeros((1, 12), dtype=np.float32)
-
         # Load the ONNX policy bundled with Newton (Warp-backed runtime, no torch dependency).
         policy_path = newton.examples.get_asset("rl_policies/anymal_walking_policy_physx.onnx")
         self.policy = newton.utils.OnnxRuntime(policy_path, device=str(self.device))
         self._policy_input_name = self.policy.input_names[0]
         self._policy_output_name = self.policy.output_names[0]
 
-        # Pre-compute index arrays
-        self.lab_to_mujoco_indices = np.asarray(lab_to_mujoco, dtype=np.int64)
-        self.mujoco_to_lab_indices = np.asarray(mujoco_to_lab, dtype=np.int64)
-        self.gravity_vec = np.array([[0.0, 0.0, -1.0]], dtype=np.float32)
-        self.command = np.zeros((1, 3), dtype=np.float32)
-
-        # Pre-allocate device buffers so apply_control() never allocates and
-        # never round-trips the joint_target_pos through host each step.
-        self._obs_wp = wp.zeros((1, 48), dtype=wp.float32, device=self.device)
-        self._joint_pos_initial_wp = wp.array(self.joint_pos_initial.reshape(-1), dtype=wp.float32, device=self.device)
+        # Everything the policy step touches is on-device.  The host never
+        # syncs joint state, builds the obs vector, or copies the action back.
+        # Reference posture is sliced on-device to avoid a startup host sync.
+        self._joint_pos_initial_wp = wp.clone(self.state_0.joint_q[7:])
+        self._lab_to_mujoco_wp = wp.array(np.asarray(lab_to_mujoco, dtype=np.int32), dtype=wp.int32, device=self.device)
         self._mujoco_to_lab_wp = wp.array(np.asarray(mujoco_to_lab, dtype=np.int32), dtype=wp.int32, device=self.device)
+        self._gravity_w = wp.vec3(0.0, 0.0, -1.0)
+        self._command = wp.vec3(0.0, 0.0, 0.0)
+
+        self._obs_wp = wp.zeros((1, 48), dtype=wp.float32, device=self.device)
+        self._prev_act_wp = wp.zeros((1, 12), dtype=wp.float32, device=self.device)
+
         # joint_target_pos is allocated by self.model.control() above; ensure
         # it lives on device so the kernel can write to it directly.
         if self.control.joint_target_pos is None or self.control.joint_target_pos.device != self.device:
@@ -209,15 +207,22 @@ class Example:
             self.sand_graph = capture.graph
 
     def apply_control(self):
-        obs = compute_obs(
-            self.act,
-            self.state_0,
-            self.joint_pos_initial,
-            self.lab_to_mujoco_indices,
-            self.gravity_vec,
-            self.command,
+        # Build obs -> run policy -> write joint_target_pos, all on device.
+        wp.launch(
+            _compute_obs_kernel,
+            dim=1,
+            inputs=[
+                self.state_0.joint_q,
+                self.state_0.joint_qd,
+                self._joint_pos_initial_wp,
+                self._lab_to_mujoco_wp,
+                self._gravity_w,
+                self._command,
+                self._prev_act_wp,
+                self._obs_wp,
+            ],
+            device=self.device,
         )
-        self._obs_wp.assign(obs)
         out = self.policy({self._policy_input_name: self._obs_wp})
         act_wp = out[self._policy_output_name]
 
@@ -235,7 +240,8 @@ class Example:
             device=self.device,
         )
 
-        self.act = act_wp.numpy().astype(np.float32)
+        # Stash the action for the *next* obs build, on device (no sync).
+        wp.copy(self._prev_act_wp, act_wp)
 
     def simulate_robot(self):
         # robot substeps
@@ -251,6 +257,9 @@ class Example:
 
     def step(self):
         # Build command from viewer keyboard
+        fwd = 0.0
+        lat = 0.0
+        rot = 0.0
         if hasattr(self.viewer, "is_key_down"):
             fwd = 1.0 if self.viewer.is_key_down("i") else (-1.0 if self.viewer.is_key_down("k") else 0.0)
             lat = 0.5 if self.viewer.is_key_down("j") else (-0.5 if self.viewer.is_key_down("l") else 0.0)
@@ -260,12 +269,11 @@ class Example:
                 # disable forward motion
                 self._auto_forward = False
 
-            self.command[0, 0] = float(fwd)
-            self.command[0, 1] = float(lat)
-            self.command[0, 2] = float(rot)
-
         if self._auto_forward:
-            self.command[0, 0] = 1
+            fwd = 1.0
+        # ``wp.vec3`` is immutable; rebuild it so the next _compute_obs_kernel
+        # launch sees the latest command without touching device memory.
+        self._command = wp.vec3(float(fwd), float(lat), float(rot))
 
         # compute control before graph/step
         self.apply_control()

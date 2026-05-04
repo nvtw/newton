@@ -28,7 +28,7 @@ import yaml
 import newton
 import newton.examples
 import newton.utils
-from newton import JointTargetMode, State
+from newton import JointTargetMode
 
 
 @dataclass
@@ -71,61 +71,56 @@ ROBOT_CONFIGS = {
 }
 
 
-def quat_rotate_inverse(q: np.ndarray, v: np.ndarray) -> np.ndarray:
-    """Rotate a vector by the inverse of a quaternion (NumPy implementation).
+@wp.kernel
+def _compute_obs_kernel(
+    joint_q: wp.array[float],  # full joint_q, [px,py,pz, qx,qy,qz,qw, q0..]
+    joint_qd: wp.array[float],  # full joint_qd, [vx,vy,vz, wx,wy,wz, qd0..]
+    joint_pos_initial: wp.array[float],  # (num_dofs,) reference posture
+    physx_to_mjc_idx: wp.array[int],  # (num_dofs,) reordering
+    gravity_w: wp.vec3,
+    command: wp.vec3,
+    prev_act: wp.array2d[float],  # (1, num_dofs)
+    num_dofs: int,
+    obs: wp.array2d[float],  # (1, 12 + 3*num_dofs)
+):
+    """Build the IsaacLab-style observation entirely on-device.
 
-    Args:
-        q: The quaternion in (x, y, z, w). Shape is (..., 4).
-        v: The vector in (x, y, z). Shape is (..., 3).
-
-    Returns:
-        The rotated vector in (x, y, z). Shape is (..., 3).
+    Layout (constant 12-float prefix + three num_dofs blocks):
+      [0:3]                 body-frame linear velocity
+      [3:6]                 body-frame angular velocity
+      [6:9]                 body-frame projected gravity
+      [9:12]                command (fwd, lat, yaw)
+      [12 : 12+N]           joint position error, reordered
+      [12+N : 12+2N]        joint velocity, reordered
+      [12+2N : 12+3N]       previous action
     """
-    q_w = q[..., 3]
-    q_vec = q[..., :3]
-    a = v * (2.0 * q_w**2 - 1.0)[..., np.newaxis]
-    b = np.cross(q_vec, v, axis=-1) * (q_w * 2.0)[..., np.newaxis]
-    c = q_vec * np.sum(q_vec * v, axis=-1, keepdims=True) * 2.0
-    return a - b + c
+    q = wp.quat(joint_q[3], joint_q[4], joint_q[5], joint_q[6])
 
+    lin_w = wp.vec3(joint_qd[0], joint_qd[1], joint_qd[2])
+    ang_w = wp.vec3(joint_qd[3], joint_qd[4], joint_qd[5])
 
-def compute_obs(
-    actions: np.ndarray,
-    state: State,
-    joint_pos_initial: np.ndarray,
-    indices: np.ndarray,
-    gravity_vec: np.ndarray,
-    command: np.ndarray,
-) -> np.ndarray:
-    """Compute observation for robot policy."""
-    joint_q = state.joint_q.numpy() if state.joint_q is not None else np.zeros(7, dtype=np.float32)
-    joint_qd = state.joint_qd.numpy() if state.joint_qd is not None else np.zeros(6, dtype=np.float32)
+    vel_b = wp.quat_rotate_inv(q, lin_w)
+    avel_b = wp.quat_rotate_inv(q, ang_w)
+    grav_b = wp.quat_rotate_inv(q, gravity_w)
 
-    root_quat_w = np.asarray(joint_q[3:7], dtype=np.float32).reshape(1, 4)
-    root_lin_vel_w = np.asarray(joint_qd[:3], dtype=np.float32).reshape(1, 3)
-    root_ang_vel_w = np.asarray(joint_qd[3:6], dtype=np.float32).reshape(1, 3)
-    joint_pos_current = np.asarray(joint_q[7:], dtype=np.float32).reshape(1, -1)
-    joint_vel_current = np.asarray(joint_qd[6:], dtype=np.float32).reshape(1, -1)
+    obs[0, 0] = vel_b[0]
+    obs[0, 1] = vel_b[1]
+    obs[0, 2] = vel_b[2]
+    obs[0, 3] = avel_b[0]
+    obs[0, 4] = avel_b[1]
+    obs[0, 5] = avel_b[2]
+    obs[0, 6] = grav_b[0]
+    obs[0, 7] = grav_b[1]
+    obs[0, 8] = grav_b[2]
+    obs[0, 9] = command[0]
+    obs[0, 10] = command[1]
+    obs[0, 11] = command[2]
 
-    vel_b = quat_rotate_inverse(root_quat_w, root_lin_vel_w)
-    a_vel_b = quat_rotate_inverse(root_quat_w, root_ang_vel_w)
-    grav = quat_rotate_inverse(root_quat_w, gravity_vec)
-    joint_pos_rel = joint_pos_current - joint_pos_initial
-    joint_vel_rel = joint_vel_current
-    rearranged_joint_pos_rel = joint_pos_rel[:, indices]
-    rearranged_joint_vel_rel = joint_vel_rel[:, indices]
-    return np.concatenate(
-        [
-            vel_b,
-            a_vel_b,
-            grav,
-            command,
-            rearranged_joint_pos_rel,
-            rearranged_joint_vel_rel,
-            actions,
-        ],
-        axis=1,
-    ).astype(np.float32)
+    for k in range(num_dofs):
+        idx = physx_to_mjc_idx[k]
+        obs[0, 12 + k] = joint_q[7 + idx] - joint_pos_initial[idx]
+        obs[0, 12 + num_dofs + k] = joint_qd[6 + idx]
+        obs[0, 12 + 2 * num_dofs + k] = prev_act[0, k]
 
 
 @wp.kernel
@@ -153,25 +148,36 @@ def _build_joint_target_pos_kernel(
 
 
 def load_policy_and_setup_arrays(example: Any, policy_path: str, num_dofs: int, joint_pos_slice: slice):
-    """Load ONNX policy and setup initial arrays (host + device) for control."""
+    """Load ONNX policy and setup device buffers for the on-device policy step."""
     print("[INFO] Loading policy from:", policy_path)
     example.policy = newton.utils.OnnxRuntime(policy_path, device=str(example.device))
     example.policy_input_name = example.policy.input_names[0]
     example.policy_output_name = example.policy.output_names[0]
 
-    joint_q = example.state_0.joint_q.numpy() if example.state_0.joint_q is not None else np.zeros(7, dtype=np.float32)
-    example.joint_pos_initial = np.asarray(joint_q[joint_pos_slice], dtype=np.float32).reshape(1, num_dofs)
-    example.act = np.zeros((1, num_dofs), dtype=np.float32)
+    # All policy inputs and intermediate buffers live on device.  Reference
+    # posture is sliced on-device with wp.clone to avoid a startup host sync.
+    if example.state_0.joint_q is not None:
+        example._joint_pos_initial_wp = wp.clone(example.state_0.joint_q[joint_pos_slice])
+    else:
+        example._joint_pos_initial_wp = wp.zeros(num_dofs, dtype=wp.float32, device=example.device)
 
-    # Pre-allocate device buffers so the policy step never allocates and
-    # never uploads a fresh joint_target_pos to device each frame.
     obs_dim = int(example.config["num_observations"]) if "num_observations" in example.config else None
     if obs_dim is None:
-        # Infer obs_dim from the policy's declared input shape (batch, obs_dim).
         obs_dim = int(example.policy._shapes[example.policy_input_name][1])
+    expected = 12 + 3 * num_dofs
+    if obs_dim != expected:
+        raise ValueError(
+            f"load_policy_and_setup_arrays: policy obs_dim={obs_dim} does not match the expected "
+            f"layout (12 + 3*num_dofs = {expected}); the on-device _compute_obs_kernel only "
+            f"supports the IsaacLab-style 12 + 3N observation."
+        )
     example._obs_wp = wp.zeros((1, obs_dim), dtype=wp.float32, device=example.device)
-    example._joint_pos_initial_wp = wp.array(
-        example.joint_pos_initial.reshape(-1), dtype=wp.float32, device=example.device
+    example._prev_act_wp = wp.zeros((1, num_dofs), dtype=wp.float32, device=example.device)
+
+    # The two reorder permutations are pre-uploaded as int32 device arrays
+    # (the kernel takes them as wp.array[int]).
+    example._physx_to_mjc_wp = wp.array(
+        np.asarray(example.physx_to_mjc_indices, dtype=np.int32), dtype=wp.int32, device=example.device
     )
     example._mjc_to_physx_wp = wp.array(
         np.asarray(example.mjc_to_physx_indices, dtype=np.int32), dtype=wp.int32, device=example.device
@@ -282,15 +288,22 @@ class Example:
 
         self.physx_to_mjc_indices = np.asarray(physx_to_mjc, dtype=np.int64)
         self.mjc_to_physx_indices = np.asarray(mjc_to_physx, dtype=np.int64)
-        self.gravity_vec = np.array([[0.0, 0.0, -1.0]], dtype=np.float32)
-        self.command = np.zeros((1, 3), dtype=np.float32)
+        # Kernel reads these as wp.vec3 values passed by argument; the
+        # command is mutated each frame from keyboard input.
+        self._gravity_w = wp.vec3(0.0, 0.0, -1.0)
+        self._command = wp.vec3(0.0, 0.0, 0.0)
         self._reset_key_prev = False
 
         self.policy = None
         self.policy_input_name = None
         self.policy_output_name = None
-        self.joint_pos_initial = None
-        self.act = None
+        # Device-resident buffers; populated by load_policy_and_setup_arrays.
+        self._joint_pos_initial_wp = None
+        self._obs_wp = None
+        self._prev_act_wp = None
+        self._physx_to_mjc_wp = None
+        self._mjc_to_physx_wp = None
+        self._num_dofs = None
 
         self.capture()
 
@@ -336,25 +349,31 @@ class Example:
             fwd = 1.0 if self.viewer.is_key_down("i") else (-1.0 if self.viewer.is_key_down("k") else 0.0)
             lat = 0.5 if self.viewer.is_key_down("j") else (-0.5 if self.viewer.is_key_down("l") else 0.0)
             rot = 1.0 if self.viewer.is_key_down("u") else (-1.0 if self.viewer.is_key_down("o") else 0.0)
-            self.command[0, 0] = float(fwd)
-            self.command[0, 1] = float(lat)
-            self.command[0, 2] = float(rot)
+            # ``wp.vec3`` is immutable; rebuild it on key change so the next
+            # _compute_obs_kernel launch sees the latest command.
+            self._command = wp.vec3(float(fwd), float(lat), float(rot))
             reset_down = bool(self.viewer.is_key_down("p"))
             if reset_down and not self._reset_key_prev:
                 self.reset()
             self._reset_key_prev = reset_down
 
-        obs = compute_obs(
-            self.act,
-            self.state_0,
-            self.joint_pos_initial,
-            self.physx_to_mjc_indices,
-            self.gravity_vec,
-            self.command,
+        # Build obs on device.  No host syncs in the policy step pipeline.
+        wp.launch(
+            _compute_obs_kernel,
+            dim=1,
+            inputs=[
+                self.state_0.joint_q,
+                self.state_0.joint_qd,
+                self._joint_pos_initial_wp,
+                self._physx_to_mjc_wp,
+                self._gravity_w,
+                self._command,
+                self._prev_act_wp,
+                self._num_dofs,
+                self._obs_wp,
+            ],
+            device=self.device,
         )
-
-        # Reuse preallocated obs buffer (no per-step device alloc).
-        self._obs_wp.assign(obs)
         out = self.policy({self.policy_input_name: self._obs_wp})
         act_wp = out[self.policy_output_name]
 
@@ -373,8 +392,8 @@ class Example:
             device=self.device,
         )
 
-        # Keep a host copy of the action for the next obs computation.
-        self.act = act_wp.numpy().astype(np.float32)
+        # Stash the action for the *next* obs build, on device (no sync).
+        wp.copy(self._prev_act_wp, act_wp)
 
         for _ in range(self.decimation):
             if self.graph:

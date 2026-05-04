@@ -199,6 +199,21 @@ class _TorchModuleAdapter:
 
     def __call__(self, inputs):
         torch = self._torch
+        # The adapter only models the single-input/single-output MLP contract.
+        # Multi-input calls (e.g. ControllerNeuralLSTM, which passes the input
+        # tensor *and* hidden/cell states) would be silently truncated to just
+        # the observation, turning a stateful LSTM into a stateless MLP and
+        # returning wrong results.  Fail loudly instead.
+        if len(inputs) != 1:
+            raise NotImplementedError(
+                "_TorchModuleAdapter only supports single-input MLP-shaped policies "
+                f"(got {len(inputs)} inputs: {sorted(inputs)}). Stateful controllers "
+                "such as ControllerNeuralLSTM no longer accept .pt/.pth checkpoints; "
+                "re-export the model to ONNX with the metadata properties listed in the "
+                "ControllerNeuralLSTM class docstring (input_name, hidden_in_name, "
+                "cell_in_name, output_name, hidden_out_name, cell_out_name, num_layers, "
+                "hidden_size) and load the resulting .onnx file."
+            )
         in_name = self.input_names[0]
         if in_name not in inputs:
             raise KeyError(f"_TorchModuleAdapter: missing input '{in_name}'")
