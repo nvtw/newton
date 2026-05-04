@@ -422,21 +422,19 @@ def _resolve_shape_pairs_max(model: Model, override: int | None) -> int:
 
     ``override`` lets the caller cap the SAP/NXN pair buffer, which is
     otherwise sized to the worst-case ``N*(N-1)/2`` per-world bound.
-    SAP scenes with thousands of bodies typically emit only a tiny
-    fraction of that bound, so the default sizing is grossly wasteful
-    (multi-GB on 10k+ shape scenes). ``None`` keeps the legacy
+    SAP and NXN scenes with thousands of bodies typically emit only a
+    tiny fraction of that bound, so the default sizing is grossly
+    wasteful (multi-GB on 10k+ shape scenes). ``None`` keeps the legacy
     behaviour; a positive integer overrides it. ``0`` is rejected --
-    use ``None`` instead -- and values larger than the natural bound
-    are silently clamped down (allocating beyond the bound is just
-    burning memory, never required).
+    use ``None`` instead.  Values larger than the natural bound are
+    accepted as-is: allocating beyond the bound never produces more
+    pairs, but we honour the user's explicit capacity request rather
+    than silently shrinking it.
     """
-    natural = _compute_per_world_shape_pairs_max(model)
     if override is None:
-        return natural
+        return _compute_per_world_shape_pairs_max(model)
     if override <= 0:
         raise ValueError(f"shape_pairs_max must be a positive integer or None, got {override}")
-    if override > natural:
-        return natural
     return int(override)
 
 
@@ -541,12 +539,15 @@ class CollisionPipeline:
             shape_pairs_max: Override for the broad-phase candidate-pair
                 buffer capacity used by the ``"nxn"`` and ``"sap"`` modes.
                 Defaults to the worst-case ``N*(N-1)/2`` per-world bound,
-                which is correct for ``"nxn"`` but typically 10-100x
-                larger than what ``"sap"`` actually emits on sparse
-                scenes. Set this to a tighter value (e.g. measured peak
-                with ~25% headroom) to avoid multi-GB allocations on
-                large SAP scenes; a too-small value triggers a buffer
-                overflow warning at runtime. Ignored for the
+                which is rarely hit by either ``"nxn"`` or ``"sap"`` in
+                practice -- ``"nxn"`` still applies AABB overlap, group,
+                and excluded-pair filtering inside ``BroadPhaseAllPairs``
+                before writing, and ``"sap"`` is sparse by design -- so
+                the default sizing is typically 10-100x larger than what
+                gets emitted on real scenes. Set this to a tighter value
+                (e.g. measured peak with ~25% headroom) to avoid multi-GB
+                allocations on large scenes; a too-small value triggers
+                a buffer overflow warning at runtime. Ignored for the
                 ``"explicit"`` mode (which uses the filtered pair list
                 length directly) and for expert paths that pass a
                 pre-built ``narrow_phase``.

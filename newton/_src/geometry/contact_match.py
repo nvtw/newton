@@ -172,8 +172,23 @@ def _pack_claim(dist_sq: float, key_low32: wp.int64) -> wp.int64:
     Within a single shape pair the upper 40 bits of every contact's sort
     key are identical, so the low 32 bits hold the (shape_b LSBs +
     sort_sub_key) which uniquely identifies each contact in the pair as
-    long as ``sort_sub_key`` is unique per contact (the same invariant
-    the deterministic sort relies on).
+    long as ``sort_sub_key`` is unique per contact within the pair.
+
+    Note this is a *shared* assumption with the deterministic radix sort
+    upstream, not a hard guarantee enforced by it.  The multi-contact
+    and mesh/SDF paths build ``sort_sub_key`` from per-contact identifiers
+    (clip-vertex slot, triangle/edge/vertex index) that are unique per
+    pair by construction, but the reduced-contact path
+    (``contact_reduction_global.export_reduced_contacts_kernel``)
+    re-uses the original contact's fingerprint as ``sort_sub_key`` and
+    only deduplicates by ``contact_id``, so two reduced contacts in the
+    same pair can in principle land in different reduction slots and
+    still share a fingerprint.  When that happens the deterministic
+    sort and this tiebreak degrade together: the contacts are
+    indistinguishable to either, and frame-to-frame matching becomes
+    order-sensitive only to the same extent the sort itself does.  In
+    other words, this scheme is no worse than what the upstream sort
+    already provides.
     """
     flipped = wp.int64(_float_flip(dist_sq))
     return (flipped << wp.int64(32)) | (key_low32 & wp.int64(0xFFFFFFFF))
