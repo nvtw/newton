@@ -456,9 +456,7 @@ class HydroelasticSDF:
                 self.pressure_data.shape_kh = shape_material_kh
             else:
                 if self.config.pressure_data is None:
-                    raise ValueError(
-                        "HydroelasticSDF.Config.pressure_data must be provided when pressure_func is set."
-                    )
+                    raise ValueError("HydroelasticSDF.Config.pressure_data must be provided when pressure_func is set.")
                 self.pressure_func = self.config.pressure_func
                 self.pressure_data = self.config.pressure_data
 
@@ -1327,9 +1325,7 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any):
             y = y_id + corner_offset.y
             z = z_id + corner_offset.z
 
-            local_pos_a = sdf_data.sdf_box_lower + wp.cw_mul(
-                wp.vec3(float(x), float(y), float(z)), sdf_data.voxel_size
-            )
+            local_pos_a = sdf_data.sdf_box_lower + wp.cw_mul(wp.vec3(float(x), float(y), float(z)), sdf_data.voxel_size)
             point_b = wp.transform_point(X_a_to_b, local_pos_a)
             valA = texture_sample_sdf_at_voxel(sdf_data, x, y, z)
             valB = texture_sample_sdf(sdf_other_data, point_b)
