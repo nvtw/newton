@@ -68,7 +68,7 @@
 - Treat `stretch_stiffness` and `bend_stiffness` in `add_rod()` and `add_rod_graph()` as direct per-joint stiffness values, matching `add_joint_cable()` and other joint stiffness APIs
 - VBD solver uses augmented-Lagrangian hard constraints for body-body contacts by default (`rigid_contact_hard=True`)
 - Reduce collision-pipeline overhead in `SolverMuJoCo` via incremental contact conversion when the contact set is unchanged (~6× speedup on `example_robot_anymal_d` with 4096 worlds)
-- Streamline hydroelastic broadphase by deriving block coordinates arithmetically from per-shape SDF coarse-texture dimensions; remove the now-unused `Model.sdf_block_coords`, `Model.sdf_index2blocks`, `SDF.texture_block_coords`, and `subgrid_occupied` build-pipeline arrays. Bumps `_sdf_cache.CACHE_FORMAT_VERSION` to `2`; existing on-disk caches are transparently re-cooked
+- Streamline hydroelastic broadphase to derive block coordinates arithmetically from per-shape SDF coarse-texture dimensions; on-disk SDF caches written by earlier versions are transparently re-cooked on first load (`_sdf_cache.CACHE_FORMAT_VERSION` bumped to `2`)
 
 ### Deprecated
 

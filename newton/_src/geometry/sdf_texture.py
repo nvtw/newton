@@ -1411,12 +1411,10 @@ def create_texture_sdf_from_mesh(
             return signature.
 
     Returns:
-        Tuple of ``(texture_sdf, coarse_texture, subgrid_texture, block_coords)``.
+        Tuple of ``(texture_sdf, coarse_texture, subgrid_texture)``.
         When ``return_sparse_data`` is ``True``, an additional trailing
         ``sparse_data`` element is included.
         Caller must keep texture references alive to prevent GC.
-        ``block_coords`` is a list of ``wp.vec3us`` block coordinates for
-        hydroelastic broadphase.
     """
     if device is None:
         device = str(mesh.device)
@@ -1432,7 +1430,7 @@ def create_texture_sdf_from_mesh(
     ext = max_ext - min_ext
     max_ext_scalar = np.max(ext)
     if max_ext_scalar < 1e-10:
-        empty = (create_empty_texture_sdf_data(), None, None, [])
+        empty = (create_empty_texture_sdf_data(), None, None)
         return (*empty, None) if return_sparse_data else empty
 
     # Resolve max_resolution, honoring target_voxel_size when provided.
