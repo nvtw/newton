@@ -68,6 +68,7 @@
 - Treat `stretch_stiffness` and `bend_stiffness` in `add_rod()` and `add_rod_graph()` as direct per-joint stiffness values, matching `add_joint_cable()` and other joint stiffness APIs
 - VBD solver uses augmented-Lagrangian hard constraints for body-body contacts by default (`rigid_contact_hard=True`)
 - Reduce collision-pipeline overhead in `SolverMuJoCo` via incremental contact conversion when the contact set is unchanged (~6× speedup on `example_robot_anymal_d` with 4096 worlds)
+- Streamline hydroelastic broadphase by deriving block coordinates arithmetically from per-shape SDF coarse-texture dimensions; remove the now-unused `Model.sdf_block_coords`, `Model.sdf_index2blocks`, `SDF.texture_block_coords`, and `subgrid_occupied` build-pipeline arrays. Bumps `_sdf_cache.CACHE_FORMAT_VERSION` to `2`; existing on-disk caches are transparently re-cooked
 
 ### Deprecated
 
@@ -77,6 +78,7 @@
 
 ### Fixed
 
+- Fix hydroelastic SDF contact surfaces dropping the central region under deep interpenetration. The broadphase used to skip subgrids whose centers were deeper than the SDF narrow band, leaving a hole in the contact patch when overlap exceeded the narrow-band thickness. Broadphase now visits every subgrid in the SDF coarse grid; sampling at far-inside locations is correct because the coarse SDF is dense and accurate everywhere
 - Fix `remesh_convex_hull` raising `QhullError` on degenerate (coincident, collinear, or coplanar) point clouds; it now returns a zero-volume fallback mesh with a `UserWarning`, raises `ValueError` on empty input, and retries Qhull with `QJ` joggle as a last resort on the 3D path
 - Fix `ViewerGL` Step button remaining clickable while the simulation is running; the button is now greyed out when not paused
 - Fix `ModelBuilder.finalize()` crashing with 3+ articulations after `collapse_fixed_joints()` reordered `articulation_start` and dropped per-articulation metadata
