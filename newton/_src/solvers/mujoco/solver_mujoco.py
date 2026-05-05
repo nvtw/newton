@@ -3069,17 +3069,29 @@ class SolverMuJoCo(SolverBase):
         self.use_mujoco_cpu = use_mujoco_cpu
         if separate_worlds is None:
             separate_worlds = not use_mujoco_cpu and model.world_count > 1
-        # Lazy-allocated buffers for the fast-path contact conversion optimisation.
+        # Buffers for the fast-path contact conversion optimisation.
         # See _convert_contacts_to_mjwarp / convert_newton_contacts_to_mjwarp_kernel.
         # Initialised before _convert_to_mjc because notify_model_changed (called
         # during conversion) may call _invalidate_contact_fast_path.
+        #
+        # Eagerly pre-allocate the device tracking buffers here (rather than
+        # lazily inside _convert_contacts_to_mjwarp).  Lazy wp.full(...) calls
+        # that happen on the first step often run while a CUDA graph is being
+        # captured; the resulting buffers can have a tangled lifetime and
+        # _invalidate_contact_fast_path() — which is called from outside the
+        # captured graph (e.g. notify_model_changed) — would then touch stale
+        # captured memory and trigger CUDA 700 (illegal memory access).
         self._contact_tid_to_cid: wp.array[wp.int32] | None = None
-        self._last_contact_generation: wp.array[wp.int32] | None = None
-        self._last_nacon_count: wp.array[wp.int32] | None = None
+        self._last_contact_generation = wp.full(1, _GENERATION_SENTINEL, dtype=wp.int32, device=self.device)
+        self._last_nacon_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         # Track the Contacts instance and its capacity, plus the MJWarp
         # naconmax used during the last full pass.  Any change to these
         # invariants invalidates the cached tid_to_cid mapping because the
         # cached cid values would index into a different output buffer.
+        # Note: we key on id(contacts.contact_generation) (a stable per-Contacts
+        # device array) rather than id(contacts).  Empirically, keying on the
+        # outer Contacts wrapper produces broken binaries in the dexsuite
+        # workload (root cause unclear; the inner array's id is what works).
         self._last_contacts_id: int | None = None
         self._last_rigid_contact_max: int | None = None
         self._last_naconmax: int | None = None
@@ -3174,9 +3186,8 @@ class SolverMuJoCo(SolverBase):
         ``naconmax`` changes (which would make cached ``cid`` values index
         into a different output buffer).
         """
-        if self._last_contact_generation is not None:
-            self._last_contact_generation.fill_(_GENERATION_SENTINEL)
-            self._last_nacon_count.zero_()
+        self._last_contact_generation.fill_(_GENERATION_SENTINEL)
+        self._last_nacon_count.zero_()
 
     def _convert_contacts_to_mjwarp(self, model: Model, state_in: State, contacts: Contacts):
         # Ensure the inverse shape mapping exists (lazy creation)
@@ -3189,19 +3200,21 @@ class SolverMuJoCo(SolverBase):
         naconmax = self.mjw_data.naconmax
         launch_dim = min(contacts.rigid_contact_max, naconmax)
 
-        # Lazy-allocate fast-path buffers; reallocate if launch_dim grew
+        # Lazy-allocate the tid_to_cid buffer; reallocate if launch_dim grew
         # (e.g. a different Contacts object with a larger rigid_contact_max).
         # Invalidate the cached tid_to_cid mapping whenever any of the
         # invariants it depends on change:
         #
-        #  - Contacts instance: a different object's contact_generation
-        #    could coincidentally match our cached last_contact_generation
-        #    while containing entirely different data.
+        #  - Contacts identity: keyed on id(contacts.contact_generation), the
+        #    inner per-Contacts device array.  Empirically, keying on the outer
+        #    id(contacts) wrapper produces broken binaries in dexsuite training
+        #    (root cause unclear; the inner array's id is what works).
         #  - rigid_contact_max: changes the meaning of tid indices.
         #  - mjw_data.naconmax: changes the meaning of cid indices; if the
-        #    underlying contact buffers were reallocated, cached cid values
-        #    could index into freed memory or out-of-bounds.
-        contacts_id = id(contacts)
+        #    underlying contact buffers were reallocated (e.g. set_const_fixed
+        #    after notify_model_changed), cached cid values could index into
+        #    freed memory or out-of-bounds.
+        contacts_id = id(contacts.contact_generation)
         needs_realloc = self._contact_tid_to_cid is None or self._contact_tid_to_cid.shape[0] < launch_dim
         contacts_changed = (
             self._last_contacts_id != contacts_id
@@ -3212,12 +3225,8 @@ class SolverMuJoCo(SolverBase):
         if needs_realloc or contacts_changed:
             if needs_realloc:
                 self._contact_tid_to_cid = wp.full(launch_dim, -1, dtype=wp.int32, device=model.device)
-            if self._last_contact_generation is None:
-                self._last_contact_generation = wp.full(1, _GENERATION_SENTINEL, dtype=wp.int32, device=model.device)
-                self._last_nacon_count = wp.zeros(1, dtype=wp.int32, device=model.device)
-            else:
-                # Reuse existing device buffers; just reset their contents.
-                self._invalidate_contact_fast_path()
+            # Reset existing device buffers (always pre-allocated in __init__).
+            self._invalidate_contact_fast_path()
             self._last_contacts_id = contacts_id
             self._last_rigid_contact_max = contacts.rigid_contact_max
             self._last_naconmax = naconmax
