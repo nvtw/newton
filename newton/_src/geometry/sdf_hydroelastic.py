@@ -309,8 +309,15 @@ class HydroelasticSDF:
             def my_pressure(signed_depth: wp.float32, shape_idx: wp.int32, data: MyData) -> wp.float32:
                 ...
 
-        Invoked only on penetrating points (``signed_depth < 0``). When ``None``
-        the default :func:`linear_pressure` is used.
+        Invoked at every sampled point — including non-penetrating ones
+        (``signed_depth >= 0``) — by both the iso-voxel pruning kernel
+        (:func:`count_iso_voxels_block`) and the marching-cubes corner
+        evaluation (:func:`mc_iterate_voxel_vertices`). The callback must
+        therefore be defined and monotone non-increasing in ``signed_depth``
+        over its full domain; returning NaN or undefined values for
+        ``signed_depth >= 0`` will corrupt the prune intervals and the
+        marching-cubes interpolation that locates the iso-pressure surface.
+        When ``None`` the default :func:`linear_pressure` is used.
         """
         pressure_data: Any = None
         """Optional ``wp.struct`` instance carrying state for :attr:`pressure_func`.
@@ -449,8 +456,12 @@ class HydroelasticSDF:
 
             # Resolve the pressure callback. Defaults to the linear hydroelastic
             # law backed by ``shape_material_kh`` so behavior is unchanged when
-            # the user does not supply one.
+            # the user does not supply one. ``pressure_func`` and
+            # ``pressure_data`` must be supplied together; supplying only one
+            # is a configuration error rather than silently dropped.
             if self.config.pressure_func is None:
+                if self.config.pressure_data is not None:
+                    raise ValueError("HydroelasticSDF.Config.pressure_func must be provided when pressure_data is set.")
                 self.pressure_func = linear_pressure
                 self.pressure_data = LinearPressureData()
                 self.pressure_data.shape_kh = shape_material_kh
@@ -1173,7 +1184,7 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any):
     skip subblocks where these intervals can't overlap.
     """
 
-    @wp.kernel(enable_backward=False, module=f"sdf_hydroelastic_count_iso_{pressure_func.__name__}")
+    @wp.kernel(enable_backward=False)
     def count_iso_voxels_block(
         grid_size: int,
         in_buffer_collide_count: wp.array[int],
@@ -1515,9 +1526,8 @@ def get_generate_contacts_kernel(
         raise ValueError("get_generate_contacts_kernel requires a non-None pressure_func.")
 
     mc_iterate = create_mc_iterate_voxel_vertices_func(pressure_func)
-    _module = f"sdf_hydroelastic_generate_{pressure_func.__name__}_{int(output_vertices)}_{int(pre_prune)}"
 
-    @wp.kernel(enable_backward=False, module=_module)
+    @wp.kernel(enable_backward=False)
     def generate_contacts_kernel(
         grid_size: int,
         iso_voxel_count: wp.array[wp.int32],
