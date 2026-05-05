@@ -721,6 +721,84 @@ def test_reduced_vs_unreduced_contact_forces_cube_on_cube(test, device):
             )
 
 
+# User-defined pressure-callback equivalent to the built-in linear law
+# ``pressure = -kh * signed_depth``. Defined here (not imported from
+# ``newton._src``) to exercise the public callback API the same way user code
+# would, mirroring ``newton/examples/contacts/example_nut_bolt_hydro.py``.
+@wp.struct
+class _LinearPressureData:
+    shape_kh: wp.array[wp.float32]
+
+
+@wp.func
+def _linear_pressure(signed_depth: wp.float32, shape_idx: wp.int32, data: _LinearPressureData) -> wp.float32:
+    return -data.shape_kh[shape_idx] * signed_depth
+
+
+def test_custom_pressure_func_matches_default_linear(test, device):
+    """User-supplied linear ``pressure_func`` must match the built-in default within 1%."""
+    model, state, upper_body, rest_z = _build_cube_cube_scene(device)
+
+    pressure_data = _LinearPressureData()
+    pressure_data.shape_kh = model.shape_material_kh
+
+    cfg_default = HydroelasticSDF.Config(
+        output_contact_surface=True,
+        reduce_contacts=False,
+        anchor_contact=False,
+    )
+    cfg_callback = HydroelasticSDF.Config(
+        output_contact_surface=True,
+        reduce_contacts=False,
+        anchor_contact=False,
+        pressure_func=_linear_pressure,
+        pressure_data=pressure_data,
+    )
+    (pipe_default, contacts_default), (pipe_callback, contacts_callback) = _make_pipelines(
+        model, [cfg_default, cfg_callback], [50000, 50000]
+    )
+
+    for pen in [1e-4, 1e-3, 1e-2]:
+        upper_z = rest_z - pen
+        wp.launch(_set_body_z_kernel, dim=1, inputs=[state.body_q, upper_body, upper_z], device=device)
+
+        pipe_default.collide(state, contacts_default)
+        pipe_callback.collide(state, contacts_callback)
+
+        f_default = _compute_net_force(contacts_default, model, state)
+        f_callback = _compute_net_force(contacts_callback, model, state)
+
+        test.assertGreater(abs(f_default[2]), 0.0, f"pen={pen}: default Fz should be nonzero")
+        rel_z = abs(f_callback[2] - f_default[2]) / abs(f_default[2])
+        test.assertLess(
+            rel_z,
+            0.01,
+            f"pen={pen}: Fz mismatch {rel_z * 100:.2f}% (callback={f_callback[2]:.4f}, default={f_default[2]:.4f})",
+        )
+
+        for axis, label in [(0, "Fx"), (1, "Fy")]:
+            abs_diff = abs(f_callback[axis] - f_default[axis])
+            test.assertLess(
+                abs_diff / abs(f_default[2]),
+                0.01,
+                f"pen={pen}: {label} diff {abs_diff:.4f} > 1% of |Fz| {abs(f_default[2]):.4f}",
+            )
+
+
+def test_custom_pressure_func_requires_pressure_data(test, device):
+    """Setting ``pressure_func`` without ``pressure_data`` must raise."""
+    model, state, _, _ = _build_cube_cube_scene(device)
+    del state
+
+    cfg = HydroelasticSDF.Config(
+        output_contact_surface=True,
+        pressure_func=_linear_pressure,
+        pressure_data=None,
+    )
+    with test.assertRaises(ValueError):
+        newton.CollisionPipeline(model, sdf_hydroelastic_config=cfg)
+
+
 def test_reduced_vs_unreduced_contact_moments_cube_on_cube(test, device):
     """Reduced and unreduced hydroelastic moments must agree for cube-on-cube with moment_matching."""
     model, state, upper_body, rest_z = _build_cube_cube_scene(device)
@@ -1234,6 +1312,21 @@ add_function_test(
     test_reduced_vs_unreduced_contact_moments_cube_on_cube,
     devices=cuda_devices,
     check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_custom_pressure_func_matches_default_linear",
+    test_custom_pressure_func_matches_default_linear,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_custom_pressure_func_requires_pressure_data",
+    test_custom_pressure_func_requires_pressure_data,
+    devices=cuda_devices,
 )
 
 
