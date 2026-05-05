@@ -962,6 +962,74 @@ class ViewerBase(ABC):
             rz = geo_scale[2] if len(geo_scale) > 2 else rx
             mesh = newton.Mesh.create_ellipsoid(rx, ry, rz, compute_inertia=False)
 
+        elif geo_type == newton.GeoType.TETRAHEDRON:
+            # Canonical solid tet: A=(0,0,0), B=(0,0,edge_ab),
+            # C=(0,c_y,c_z), D=(d_x,d_y,d_z). The 4th vertex D arrives
+            # via ``geo_src`` as anything with ``.d_x/.d_y/.d_z``
+            # attributes (a ``_TetrahedronVertexD`` from the builder).
+            # Render the four triangular faces with outward-pointing
+            # face normals; each face uses 3 unique flat-shaded vertices
+            # so the GL viewer's per-vertex normal path works without
+            # smoothing across edges.
+            edge_ab = float(geo_scale[0])
+            c_y = float(geo_scale[1]) if len(geo_scale) > 1 else 0.0
+            c_z = float(geo_scale[2]) if len(geo_scale) > 2 else 0.0
+            d_x = 1.0
+            d_y = 0.5
+            d_z = 0.5
+            if geo_src is not None and all(hasattr(geo_src, a) for a in ("d_x", "d_y", "d_z")):
+                d_x = float(geo_src.d_x)
+                d_y = float(geo_src.d_y)
+                d_z = float(geo_src.d_z)
+            a_pt = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            b_pt = np.array([0.0, 0.0, edge_ab], dtype=np.float32)
+            c_pt = np.array([0.0, c_y, c_z], dtype=np.float32)
+            d_pt = np.array([d_x, d_y, d_z], dtype=np.float32)
+            faces = [
+                (a_pt, b_pt, c_pt, d_pt),  # face ABC, opposite vertex D
+                (a_pt, c_pt, d_pt, b_pt),  # face ACD, opposite vertex B
+                (a_pt, d_pt, b_pt, c_pt),  # face ADB, opposite vertex C
+                (b_pt, d_pt, c_pt, a_pt),  # face BDC, opposite vertex A
+            ]
+            verts: list[np.ndarray] = []
+            normals_list: list[np.ndarray] = []
+            uvs_list: list[np.ndarray] = []
+            inds: list[int] = []
+            for p0, p1, p2, opp in faces:
+                n = np.cross(p1 - p0, p2 - p0)
+                n_norm = float(np.linalg.norm(n))
+                if n_norm > 0.0:
+                    n = (n / n_norm).astype(np.float32)
+                else:
+                    n = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                # Flip winding (and normal) if normal currently points
+                # *toward* the opposite vertex; we want it outward.
+                if float(np.dot(n, opp - p0)) > 0.0:
+                    p1, p2 = p2, p1
+                    n = -n
+                base = len(verts)
+                verts.extend([p0, p1, p2])
+                normals_list.extend([n, n, n])
+                uvs_list.extend(
+                    [
+                        np.array([0.0, 0.0], dtype=np.float32),
+                        np.array([1.0, 0.0], dtype=np.float32),
+                        np.array([0.0, 1.0], dtype=np.float32),
+                    ]
+                )
+                inds.extend([base, base + 1, base + 2])
+            tet_vertices = np.asarray(verts, dtype=np.float32)
+            tet_normals = np.asarray(normals_list, dtype=np.float32)
+            tet_uvs = np.asarray(uvs_list, dtype=np.float32)
+            tet_indices = np.asarray(inds, dtype=np.int32)
+            mesh = newton.Mesh(
+                tet_vertices,
+                tet_indices,
+                normals=tet_normals,
+                uvs=tet_uvs,
+                compute_inertia=False,
+            )
+
         elif geo_type == newton.GeoType.TRIANGLE:
             # Canonical triangle: A=(0,0,0), B=(0,0,edge_ab), C=(0,c_y,c_z).
             # Render double-sided by emitting two faces with opposite
@@ -1474,6 +1542,7 @@ class ViewerBase(ABC):
             newton.GeoType.CONVEX_MESH: "convex_hull",
             newton.GeoType.HFIELD: "heightfield",
             newton.GeoType.TRIANGLE: "triangle",
+            newton.GeoType.TETRAHEDRON: "tetrahedron",
         }.get(geo_type)
 
         if base_name is None:
@@ -1487,7 +1556,13 @@ class ViewerBase(ABC):
             float(thickness),
             bool(is_solid),
             geo_src=geo_src
-            if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.HFIELD)
+            if geo_type
+            in (
+                newton.GeoType.MESH,
+                newton.GeoType.CONVEX_MESH,
+                newton.GeoType.HFIELD,
+                newton.GeoType.TETRAHEDRON,
+            )
             else None,
             hidden=True,
         )
@@ -1555,6 +1630,7 @@ class ViewerBase(ABC):
                         newton.GeoType.MESH,
                         newton.GeoType.CONVEX_MESH,
                         newton.GeoType.HFIELD,
+                        newton.GeoType.TETRAHEDRON,
                     )
                     else None,
                 )

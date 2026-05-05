@@ -22,6 +22,7 @@ from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
+    decode_vec3,
     pack_mesh_ptr,
 )
 from ..geometry.types import GeoType
@@ -258,9 +259,16 @@ def compute_shape_aabbs(
         shape_data.scale = geom_scale
         shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
 
-        # For CONVEX_MESH, pack the mesh pointer
+        # For CONVEX_MESH, pack the mesh pointer.
+        # For TETRAHEDRON, decode the 4th vertex ``D = (d_x, d_y, d_z)``
+        # from ``shape_source_ptr`` so the support-function-driven AABB
+        # actually bounds vertex D (without this, the AABB collapses to
+        # the triangle ABC's bounding box and broadphase misses pairs
+        # whenever the sphere lies on the +x side of the tet).
         if geo_type == GeoType.CONVEX_MESH:
             shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[shape_id])
+        elif geo_type == GeoType.TETRAHEDRON:
+            shape_data.auxiliary = decode_vec3(shape_source_ptr[shape_id])
 
         data_provider = SupportMapDataProvider()
 
@@ -850,7 +858,7 @@ class CollisionPipeline:
                 # Use lean GJK/MPR kernel when scene has no capsules, ellipsoids,
                 # cylinders, or cones (which need full support function and axial
                 # rolling post-processing). The lean support function handles
-                # CONVEX_MESH, BOX, SPHERE, and TRIANGLE.
+                # CONVEX_MESH, BOX, SPHERE, TRIANGLE and TETRAHEDRON.
                 lean_unsupported = {
                     int(GeoType.CAPSULE),
                     int(GeoType.ELLIPSOID),

@@ -95,6 +95,35 @@ class GeoType(enum.IntEnum):
     along X has no effect). The triangle is double-sided.
     """
 
+    TETRAHEDRON = 13
+    """Single solid tetrahedron primitive.
+
+    Canonical local frame:
+
+    - Vertex A at the origin ``(0, 0, 0)``.
+    - Edge AB lies along the +Z axis, so ``B = (0, 0, |AB|)``.
+    - Edge AC lies in the YZ plane with positive Y, so ``C = (0, c_y, c_z)``.
+    - Vertex D = ``(d_x, d_y, d_z)`` is unconstrained; it must lie off
+      the YZ plane so the four vertices are non-coplanar.
+
+    Storage:
+
+    * ``(|AB|, c_y, c_z)`` packs into :attr:`~newton.Model.shape_scale`
+      ``(x, y, z)`` -- identical to :attr:`TRIANGLE`.
+    * ``(d_x, d_y, d_z)`` are quantised into a single 64-bit word via
+      :func:`encode_vec3 <newton._src.geometry.support_function.encode_vec3>`
+      and stored in :attr:`~newton.Model.shape_source_ptr`. The codec
+      uses a shared 4-bit exponent + three 20-bit signed mantissas;
+      round-trip error is on the order of micrometres for vertex
+      magnitudes up to ~32 km.
+
+    Mass / inertia (when ``cfg.density`` is set) come from the closed-
+    form solid-tetrahedron formulas: ``mass = density * |AB . (AC x AD)|
+    / 6``, COM at the four-vertex centroid, and the standard tet
+    inertia tensor about that centroid. ``cfg.margin`` only inflates
+    the contact surface (it does *not* extrude the tet for inertia).
+    """
+
     @property
     def is_primitive(self) -> bool:
         """Return whether this is a primitive (analytically defined) shape type."""
@@ -107,6 +136,7 @@ class GeoType(enum.IntEnum):
             GeoType.ELLIPSOID,
             GeoType.PLANE,
             GeoType.TRIANGLE,
+            GeoType.TETRAHEDRON,
         }
 
     @property

@@ -85,6 +85,73 @@ else:
     UsdStage = Any
 
 
+@dataclass(frozen=True)
+class _TetrahedronVertexD:
+    """Carrier for the tetrahedron's 4th vertex during the build phase.
+
+    The first three canonical-tet vertices (A=origin, B along +Z, C in
+    YZ plane) fit in :attr:`Model.shape_scale` exactly as for
+    :data:`GeoType.TRIANGLE`. The 4th vertex ``D = (d_x, d_y, d_z)`` has
+    no remaining slot in :attr:`Model.shape_scale`, so we route it
+    through :attr:`ModelBuilder.shape_source` (the slot used by
+    mesh-based shapes for the source ``Mesh``) and have
+    :meth:`ModelBuilder.finalize` quantise it via
+    :func:`encode_vec3 <newton._src.geometry.support_function.encode_vec3>`
+    into the per-shape ``shape_source_ptr`` ``uint64`` that the narrow
+    phase already reads. Frozen + dataclass so it's hashable (the
+    finalize-time geometry dedup uses ``hash(geo)``).
+    """
+
+    d_x: float
+    d_y: float
+    d_z: float
+
+
+def _encode_vec3_uint64(x: float, y: float, z: float) -> int:
+    """Python-side mirror of
+    :func:`newton._src.geometry.support_function.encode_vec3`.
+
+    Bit-identical to the Warp kernel codec (same shared-exponent +
+    20-bit signed mantissa layout). Used by :meth:`ModelBuilder.finalize`
+    to encode the tetrahedron's 4th vertex into the per-shape
+    ``shape_source_ptr`` ``uint64`` slot; the narrow-phase
+    :func:`decode_vec3` reads it back on the GPU.
+
+    Returns:
+        A Python ``int`` in ``[0, 2^64)`` -- safe to push into a
+        ``wp.array(dtype=wp.uint64)``.
+    """
+    ax = abs(float(x))
+    ay = abs(float(y))
+    az = abs(float(z))
+    m = max(ax, ay, az)
+
+    if m > 1.0:
+        # ceil(log2(m)): smallest e with 2**e >= m, exactly matching
+        # the kernel's ``int(wp.ceil(wp.log2(m)))``.
+        e = math.ceil(math.log2(m))
+    else:
+        e = 0
+    e = max(0, min(15, int(e)))
+    scale = float(1 << e) if e <= 30 else 2.0**e  # power of two
+
+    # Defensive clamp: kernel does the same clamp post-divide.
+    nx = max(-1.0, min(1.0, float(x) / scale))
+    ny = max(-1.0, min(1.0, float(y) / scale))
+    nz = max(-1.0, min(1.0, float(z) / scale))
+
+    max_int = float((1 << 20) - 1)
+
+    # Symmetric 20-bit quantisation; ``round-half-to-even`` here matches
+    # ``wp.round`` (CUDA ``__float2int_rn``), which uses banker's
+    # rounding. Python's built-in ``round`` is also banker's rounding.
+    ix = int(round((nx * 0.5 + 0.5) * max_int))
+    iy = int(round((ny * 0.5 + 0.5) * max_int))
+    iz = int(round((nz * 0.5 + 0.5) * max_int))
+
+    return ((e & 0xF) << 60) | ((ix & 0xFFFFF) << 40) | ((iy & 0xFFFFF) << 20) | (iz & 0xFFFFF)
+
+
 class ModelBuilder:
     """A helper class for building simulation models at runtime.
 
@@ -365,7 +432,12 @@ class ModelBuilder:
                     f"sdf_max_resolution must be divisible by 8 (got {self.sdf_max_resolution}). "
                     "This is required because SDF volumes are allocated in 8x8x8 tiles."
                 )
-            hydroelastic_supported = shape_type not in (GeoType.PLANE, GeoType.HFIELD, GeoType.TRIANGLE)
+            hydroelastic_supported = shape_type not in (
+                GeoType.PLANE,
+                GeoType.HFIELD,
+                GeoType.TRIANGLE,
+                GeoType.TETRAHEDRON,
+            )
             hydroelastic_requires_configured_sdf = shape_type in (
                 GeoType.SPHERE,
                 GeoType.BOX,
@@ -6085,6 +6157,138 @@ class ModelBuilder:
             color=color,
         )
 
+    def add_shape_tetrahedron(
+        self,
+        body: int,
+        xform: Transform | None = None,
+        edge_ab: float = 1.0,
+        point_c: tuple[float, float] = (1.0, 0.0),
+        point_d: tuple[float, float, float] = (1.0, 0.5, 0.5),
+        cfg: ShapeConfig | None = None,
+        as_site: bool = False,
+        color: Vec3 | None = None,
+        label: str | None = None,
+        custom_attributes: dict[str, Any] | None = None,
+    ) -> int:
+        """Adds a single solid tetrahedron collision shape or site to a body.
+
+        The tetrahedron is defined in a canonical local frame:
+
+        - Vertex A is at the local origin ``(0, 0, 0)``.
+        - Edge AB is aligned with the local +Z axis, so ``B = (0, 0, edge_ab)``.
+        - Vertex C lies in the local YZ plane, so ``C = (0, point_c[0], point_c[1])``.
+        - Vertex D is unconstrained in the local frame: ``D = point_d``.
+
+        The first three canonical degrees of freedom (the shape origin,
+        orientation, and the mirror-symmetry of the YZ plane) are
+        absorbed by the rigid shape transform, leaving the six scalars
+        ``(edge_ab, c_y, c_z, d_x, d_y, d_z)`` as the unique parameters
+        of the tetrahedron's geometry. ``(edge_ab, c_y, c_z)`` pack
+        directly into :attr:`~newton.Model.shape_scale` -- exactly as
+        for :data:`~newton.GeoType.TRIANGLE`. ``D = point_d`` is
+        quantised into a single 64-bit word and stored in
+        :attr:`~newton.Model.shape_source_ptr` via
+        :func:`encode_vec3 <newton._src.geometry.support_function.encode_vec3>`;
+        the narrow phase decodes it back on the fly.
+
+        For mass / inertia (when ``cfg.density`` is set) the tetrahedron
+        is treated as a uniform-density solid: the body's mass is
+        ``density * |AB . (AC x AD)| / 6``, the COM lands at the
+        four-vertex centroid ``(A + B + C + D) / 4``, and the inertia
+        tensor about that centroid is the standard solid-tet form.
+        ``cfg.margin`` only inflates the contact surface (it does *not*
+        further extrude the tet for inertia, unlike the triangle's
+        prism interpretation). Hydroelastic contact is not supported.
+
+        Args:
+            body: The index of the parent body this shape belongs to. Use
+                ``-1`` for shapes not attached to any specific body.
+            xform: The transform of the tetrahedron in the parent body's
+                local frame. If ``None``, the identity transform is
+                used.
+            edge_ab [m]: Length ``|AB|`` of the first canonical edge.
+                Must be positive.
+            point_c [m]: Coordinates ``(c_y, c_z)`` of vertex C in the
+                local YZ plane. ``c_y`` must be non-zero so triangle
+                ABC has non-zero area.
+            point_d [m]: Coordinates ``(d_x, d_y, d_z)`` of the 4th
+                vertex in the local frame. ``d_x`` must be non-zero so
+                D is off the YZ plane and the four vertices are
+                non-coplanar (i.e. the tet has non-zero volume).
+            cfg: The configuration for the shape's properties. If
+                ``None``, uses :attr:`default_shape_cfg` (or
+                :attr:`default_site_cfg` when ``as_site=True``).
+            as_site: If ``True``, creates a site (non-colliding
+                reference point) instead of a collision shape.
+            color: Optional display RGB color with values in [0, 1]. If
+                ``None``, uses the per-shape palette color.
+            label: Optional unique label for identifying the shape.
+            custom_attributes: Dictionary of custom attribute values
+                for SHAPE frequency attributes.
+
+        Returns:
+            The index of the newly added shape or site.
+        """
+        if cfg is None:
+            cfg = self.default_site_cfg if as_site else self.default_shape_cfg
+        elif as_site:
+            cfg = cfg.copy()
+            cfg.mark_as_site()
+
+        if xform is None:
+            xform = wp.transform()
+        else:
+            xform = wp.transform(*xform)
+
+        if edge_ab <= 0.0:
+            raise ValueError(f"edge_ab must be positive, got {edge_ab}.")
+
+        c_y = float(point_c[0])
+        c_z = float(point_c[1])
+        d_x = float(point_d[0])
+        d_y = float(point_d[1])
+        d_z = float(point_d[2])
+
+        # Reject degenerate tetrahedra. Volume is
+        #     V = | det( B-A, C-A, D-A ) | / 6
+        # which with our canonical form simplifies to
+        #     det = (0, 0, edge_ab) . ( (0, c_y, c_z) x (d_x, d_y, d_z) )
+        #         = edge_ab * (0 * d_y - c_y * d_x)  (only z-component matters)
+        #         = -edge_ab * c_y * d_x
+        # so V = |edge_ab * c_y * d_x| / 6. Both ``c_y`` (triangle ABC
+        # non-degenerate) and ``d_x`` (D off the YZ plane) must be
+        # non-zero.
+        if abs(edge_ab * c_y) < 1.0e-12:
+            raise ValueError(
+                f"Degenerate tetrahedron: triangle ABC has zero area "
+                f"(edge_ab={edge_ab}, point_c={point_c}). "
+                "point_c[0] (c_y) must be non-zero."
+            )
+        if abs(d_x) < 1.0e-12:
+            raise ValueError(
+                f"Degenerate tetrahedron: point_d[0] (d_x = {d_x}) must "
+                "be non-zero so vertex D lies off the YZ plane and the "
+                "four vertices are non-coplanar."
+            )
+
+        scale = wp.vec3(float(edge_ab), c_y, c_z)
+        # The Python-side ``shape_source`` slot carries D until
+        # :meth:`finalize` encodes it into the ``shape_source_ptr``
+        # uint64. ``_TetrahedronVertexD`` is hashable and isinstance-
+        # detectable, which is exactly what finalize needs to special-
+        # case before the generic ``geo.finalize()`` path.
+        return self.add_shape(
+            body=body,
+            type=GeoType.TETRAHEDRON,
+            xform=xform,
+            cfg=cfg,
+            scale=scale,
+            src=_TetrahedronVertexD(d_x, d_y, d_z),
+            label=label,
+            custom_attributes=custom_attributes,
+            color=color,
+        )
+
     def add_shape_mesh(
         self,
         body: int,
@@ -9885,6 +10089,14 @@ class ModelBuilder:
             finalized_geos = {}  # do not duplicate geometry
             gaussians = []
             for geo in self.shape_source:
+                # GeoType.TETRAHEDRON: Python-side ``shape_source`` carries
+                # ``_TetrahedronVertexD(d_x, d_y, d_z)``; quantise it into
+                # the per-shape ``shape_source_ptr`` ``uint64`` slot via
+                # :func:`encode_vec3`. The narrow phase reads it back via
+                # :func:`decode_vec3` from ``extract_shape_data``.
+                if isinstance(geo, _TetrahedronVertexD):
+                    geo_sources.append(_encode_vec3_uint64(geo.d_x, geo.d_y, geo.d_z))
+                    continue
                 geo_hash = hash(geo)  # avoid repeated hash computations
                 if geo and not isinstance(geo, Heightfield):
                     if geo_hash not in finalized_geos:
