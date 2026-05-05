@@ -10,6 +10,9 @@
 #
 ###########################################################################
 
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import trimesh
 import warp as wp
@@ -25,6 +28,9 @@ ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 
 SDF_MAX_RESOLUTION = 256
 SDF_NARROW_BAND_RANGE = (-0.005, 0.005)
+# Persist cooked SDFs across runs so the (slow) cook only happens once.
+# Entries are content-addressed, so leftovers from older runs are harmless.
+MESH_SDF_CACHE_DIR = Path(tempfile.gettempdir()) / "newton_sdf_cache"
 
 SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
     margin=0.0,
@@ -127,6 +133,7 @@ def load_mesh_with_sdf(
         narrow_band_range=SDF_NARROW_BAND_RANGE,
         margin=shape_cfg.gap if shape_cfg and shape_cfg.gap is not None else 0.005,
         scale=(scale, scale, scale),
+        cache_dir=MESH_SDF_CACHE_DIR,
     )
     return mesh, center_vec
 
