@@ -79,6 +79,22 @@ class GeoType(enum.IntEnum):
     GAUSSIAN = 11
     """Gaussian splat."""
 
+    TRIANGLE = 12
+    """Single triangle primitive.
+
+    Canonical local frame:
+
+    - Vertex A at the origin ``(0, 0, 0)``.
+    - Edge AB lies along the +Z axis, so ``B = (0, 0, |AB|)``.
+    - Edge AC lies in the YZ plane with positive Y, so ``C = (0, c_y, c_z)``.
+
+    The three free shape parameters ``(|AB|, c_y, c_z)`` are stored in
+    :attr:`~newton.Model.shape_scale` ``(x, y, z)``. World placement is
+    handled entirely by the shape transform; non-uniform scale is *not*
+    used to deform the canonical triangle (it is planar in YZ, so scale
+    along X has no effect). The triangle is double-sided.
+    """
+
     @property
     def is_primitive(self) -> bool:
         """Return whether this is a primitive (analytically defined) shape type."""
@@ -90,6 +106,7 @@ class GeoType(enum.IntEnum):
             GeoType.BOX,
             GeoType.ELLIPSOID,
             GeoType.PLANE,
+            GeoType.TRIANGLE,
         }
 
     @property

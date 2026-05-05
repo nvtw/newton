@@ -365,7 +365,7 @@ class ModelBuilder:
                     f"sdf_max_resolution must be divisible by 8 (got {self.sdf_max_resolution}). "
                     "This is required because SDF volumes are allocated in 8x8x8 tiles."
                 )
-            hydroelastic_supported = shape_type not in (GeoType.PLANE, GeoType.HFIELD)
+            hydroelastic_supported = shape_type not in (GeoType.PLANE, GeoType.HFIELD, GeoType.TRIANGLE)
             hydroelastic_requires_configured_sdf = shape_type in (
                 GeoType.SPHERE,
                 GeoType.BOX,
@@ -5978,6 +5978,105 @@ class ModelBuilder:
         return self.add_shape(
             body=body,
             type=GeoType.CONE,
+            xform=xform,
+            cfg=cfg,
+            scale=scale,
+            label=label,
+            custom_attributes=custom_attributes,
+            color=color,
+        )
+
+    def add_shape_triangle(
+        self,
+        body: int,
+        xform: Transform | None = None,
+        edge_ab: float = 1.0,
+        point_c: tuple[float, float] = (1.0, 0.0),
+        cfg: ShapeConfig | None = None,
+        as_site: bool = False,
+        color: Vec3 | None = None,
+        label: str | None = None,
+        custom_attributes: dict[str, Any] | None = None,
+    ) -> int:
+        """Adds a single-triangle collision shape or site to a body.
+
+        The triangle is defined in a canonical local frame:
+
+        - Vertex A is at the local origin ``(0, 0, 0)``.
+        - Edge AB is aligned with the local +Z axis, so ``B = (0, 0, edge_ab)``.
+        - Vertex C lies in the local YZ plane, so ``C = (0, point_c[0], point_c[1])``.
+
+        Any triangle in world space can be represented by combining the
+        three shape parameters with the rigid transform ``xform`` (origin and
+        orientation). Non-uniform scale is *not* used to deform the triangle:
+        the canonical triangle is planar in YZ and scaling along X has no
+        effect, so the three vertex degrees of freedom are exposed as
+        explicit parameters instead.
+
+        The triangle is treated as a double-sided thin shell for collision
+        (no front/back distinction). For mass / inertia the triangle is
+        interpreted as a thin prism extruded symmetrically along the local
+        +X axis by ``±cfg.margin``, so the full prism thickness equals
+        ``2 * cfg.margin`` and the body's center of mass lands at the
+        triangle centroid ``(0, point_c[0]/3, (edge_ab + point_c[1])/3)``.
+        Hydroelastic contact is not supported for triangles.
+
+        Args:
+            body: The index of the parent body this shape belongs to. Use
+                ``-1`` for shapes not attached to any specific body.
+            xform: The transform of the triangle in the parent body's local
+                frame. If ``None``, the identity transform is used.
+            edge_ab [m]: Length ``|AB|`` of the first edge. Must be
+                positive.
+            point_c [m]: Coordinates ``(c_y, c_z)`` of vertex C in the local
+                YZ plane. The first component should be positive to keep the
+                triangle non-degenerate; either component may be zero or
+                negative as long as the resulting triangle has non-zero
+                area.
+            cfg: The configuration for the shape's properties. If ``None``,
+                uses :attr:`default_shape_cfg` (or :attr:`default_site_cfg`
+                when ``as_site=True``).
+            as_site: If ``True``, creates a site (non-colliding reference
+                point) instead of a collision shape.
+            color: Optional display RGB color with values in [0, 1]. If
+                ``None``, uses the per-shape palette color.
+            label: Optional unique label for identifying the shape.
+            custom_attributes: Dictionary of custom attribute values for
+                SHAPE frequency attributes.
+
+        Returns:
+            The index of the newly added shape or site.
+        """
+        if cfg is None:
+            cfg = self.default_site_cfg if as_site else self.default_shape_cfg
+        elif as_site:
+            cfg = cfg.copy()
+            cfg.mark_as_site()
+
+        if xform is None:
+            xform = wp.transform()
+        else:
+            xform = wp.transform(*xform)
+
+        if edge_ab <= 0.0:
+            raise ValueError(f"edge_ab must be positive, got {edge_ab}.")
+
+        c_y = float(point_c[0])
+        c_z = float(point_c[1])
+
+        # Reject triangles with vanishing area. The canonical triangle has
+        # vertices A=(0,0,0), B=(0,0,edge_ab), C=(0,c_y,c_z); its (signed) area
+        # along the local +X normal is 0.5 * |edge_ab * c_y|.
+        if abs(edge_ab * c_y) < 1.0e-12:
+            raise ValueError(
+                f"Degenerate triangle: edge_ab={edge_ab}, point_c={point_c} "
+                "produce zero area. point_c[0] (c_y) must be non-zero."
+            )
+
+        scale = wp.vec3(float(edge_ab), c_y, c_z)
+        return self.add_shape(
+            body=body,
+            type=GeoType.TRIANGLE,
             xform=xform,
             cfg=cfg,
             scale=scale,

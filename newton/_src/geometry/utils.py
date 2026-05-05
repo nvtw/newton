@@ -91,6 +91,12 @@ def compute_shape_radius(geo_type: int, scale: Vec3, src: Mesh | Heightfield | N
             return np.linalg.norm(scale) * 0.5
         else:
             return 1.0e6
+    elif geo_type == GeoType.TRIANGLE:
+        # Canonical triangle: A=(0,0,0), B=(0,0,scale[0]), C=(0,scale[1],scale[2]).
+        # Bounding sphere centered at the local origin (vertex A).
+        ab = abs(scale[0])
+        ac = float(np.sqrt(scale[1] * scale[1] + scale[2] * scale[2]))
+        return max(ab, ac)
     elif geo_type == GeoType.HFIELD:
         # Heightfield bounding sphere centered at the shape origin.
         # X/Y are symmetric ([-hx, +hx], [-hy, +hy]), but Z spans [min_z, max_z]

@@ -183,6 +183,91 @@ def compute_inertia_ellipsoid(density: float, rx: float, ry: float, rz: float) -
     return (m, wp.vec3(), I)
 
 
+def compute_inertia_triangle_prism(
+    density: float,
+    edge_ab: float,
+    c_y: float,
+    c_z: float,
+    margin: float,
+) -> tuple[float, wp.vec3, wp.mat33]:
+    """Mass and centroidal inertia of a thin triangular prism.
+
+    The canonical triangle has vertex A at the local origin, vertex B at
+    ``(0, 0, edge_ab)`` along the local +Z axis, and vertex C at
+    ``(0, c_y, c_z)`` in the local YZ plane. The prism is the triangle
+    extruded symmetrically along the local X axis by ``±margin``, so it
+    spans ``x ∈ [-margin, +margin]`` with full thickness ``t = 2·margin``.
+
+    Args:
+        density: Material density [kg/m³].
+        edge_ab [m]: Length ``|AB|`` of the first edge (local +Z direction).
+        c_y [m]: Vertex C's local Y coordinate.
+        c_z [m]: Vertex C's local Z coordinate.
+        margin [m]: Half-thickness of the prism along the local X axis;
+            the full thickness is ``2 * margin``. Must be non-negative.
+
+    Returns:
+        A tuple of ``(mass, com, inertia)`` where ``com`` is in the local
+        frame and ``inertia`` is expressed about ``com``. When the
+        thickness or triangle area is zero, returns
+        ``(0.0, centroid, mat33())`` (zero inertia, but a sensible COM
+        offset so external mass / inertia overrides resolve correctly).
+    """
+    L = float(edge_ab)
+    cy = float(c_y)
+    cz = float(c_z)
+    t = 2.0 * float(margin)
+
+    # Centroid of the triangle in the local frame:
+    # mean of (0,0,0), (0,0,L), (0,c_y,c_z).
+    com_y = cy / 3.0
+    com_z = (L + cz) / 3.0
+    com = wp.vec3(0.0, com_y, com_z)
+
+    area = 0.5 * abs(L * cy)  # half magnitude of AB cross AC
+
+    if t <= 0.0 or area == 0.0 or density <= 0.0:
+        return 0.0, com, wp.mat33()
+
+    mass = density * area * t
+
+    # Vertex offsets relative to centroid (q_i = p_i - com), local frame.
+    # Vertex A = (0, 0, 0), B = (0, 0, L), C = (0, c_y, c_z).
+    qa_y, qa_z = -com_y, -com_z
+    qb_y, qb_z = -com_y, L - com_z
+    qc_y, qc_z = cy - com_y, cz - com_z
+
+    # Triangle planar second moments about the centroid, normalised by area:
+    #   I^(2D)_ab / A = (1/12) Σ q_i^a q_i^b.
+    # (Standard result, e.g. Wikipedia "List of second moments of area".)
+    s_yy = qa_y * qa_y + qb_y * qb_y + qc_y * qc_y
+    s_zz = qa_z * qa_z + qb_z * qb_z + qc_z * qc_z
+    s_yz = qa_y * qa_z + qb_y * qb_z + qc_y * qc_z
+
+    inv12 = 1.0 / 12.0
+    iyy_over_area = inv12 * s_yy
+    izz_over_area = inv12 * s_zz
+    iyz_over_area = inv12 * s_yz
+
+    # 3D inertia of the prism about its centroid. The prism is symmetric
+    # in x ∈ [-t/2, t/2] so I_xy = I_xz = 0 and the x-thickness contributes
+    # m·t²/12 to I_yy and I_zz only.
+    t2_over_12 = (t * t) * inv12
+    Ixx = mass * (iyy_over_area + izz_over_area)
+    Iyy = mass * (t2_over_12 + izz_over_area)
+    Izz = mass * (t2_over_12 + iyy_over_area)
+    Iyz = -mass * iyz_over_area  # tensor convention: -∫ y·z dm
+
+    inertia = wp.mat33(
+        [
+            [Ixx, 0.0, 0.0],
+            [0.0, Iyy, Iyz],
+            [0.0, Iyz, Izz],
+        ]
+    )
+    return mass, com, inertia
+
+
 def compute_inertia_box_from_mass(mass: float, hx: float, hy: float, hz: float) -> wp.mat33:
     """Helper to compute 3x3 inertia matrix of a solid box with given mass and half-extents.
 
@@ -492,8 +577,27 @@ def compute_inertia_shape(
     Returns:
         The mass, center of mass and 3x3 inertia tensor of the shape
     """
-    if density == 0.0 or type == GeoType.PLANE:  # zero density means fixed
+    if density == 0.0 or type == GeoType.PLANE:
+        # Zero density means fixed; PLANE is a thin shell with zero volume
+        # so it contributes no mass or rotational inertia.
         return 0.0, wp.vec3(), wp.mat33()
+
+    if type == GeoType.TRIANGLE:
+        # Treat the triangle as a thin prism extruded along its local +X
+        # axis (the canonical face normal direction) by ±margin, so the
+        # full prism thickness equals ``2 * margin``. The ``thickness``
+        # argument is reused as that half-thickness -- the builder passes
+        # ``cfg.margin`` here, which is also the per-shape collision
+        # margin used for contact generation, so the inertia matches the
+        # solid the contact surface implicitly defines.
+        margin = float(thickness) if isinstance(thickness, (int, float)) else 0.0
+        return compute_inertia_triangle_prism(
+            density,
+            edge_ab=scale[0],
+            c_y=scale[1],
+            c_z=scale[2],
+            margin=margin,
+        )
 
     if type == GeoType.SPHERE:
         solid = compute_inertia_sphere(density, scale[0])

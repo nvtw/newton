@@ -961,6 +961,46 @@ class ViewerBase(ABC):
             ry = geo_scale[1] if len(geo_scale) > 1 else rx
             rz = geo_scale[2] if len(geo_scale) > 2 else rx
             mesh = newton.Mesh.create_ellipsoid(rx, ry, rz, compute_inertia=False)
+
+        elif geo_type == newton.GeoType.TRIANGLE:
+            # Canonical triangle: A=(0,0,0), B=(0,0,edge_ab), C=(0,c_y,c_z).
+            # Render double-sided by emitting two faces with opposite
+            # winding and duplicated vertices so each face carries its
+            # own per-vertex normal (the GL viewer needs explicit
+            # normals; ``Mesh.normals`` is otherwise ``None`` and the
+            # ``fill_vertex_data`` kernel rejects a null array).
+            edge_ab = geo_scale[0]
+            c_y = geo_scale[1] if len(geo_scale) > 1 else 0.0
+            c_z = geo_scale[2] if len(geo_scale) > 2 else 0.0
+            a = (0.0, 0.0, 0.0)
+            b = (0.0, 0.0, float(edge_ab))
+            c = (0.0, float(c_y), float(c_z))
+            tri_vertices = np.array([a, b, c, a, b, c], dtype=np.float32)
+            # Front face (winding A,B,C) faces local +X; back face
+            # (winding A,C,B) faces local -X.
+            tri_normals = np.array(
+                [
+                    [1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                ],
+                dtype=np.float32,
+            )
+            tri_uvs = np.array(
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                dtype=np.float32,
+            )
+            tri_indices = np.array([0, 1, 2, 3, 5, 4], dtype=np.int32)
+            mesh = newton.Mesh(
+                tri_vertices,
+                tri_indices,
+                normals=tri_normals,
+                uvs=tri_uvs,
+                compute_inertia=False,
+            )
         else:
             raise ValueError(f"log_geo does not support geo_type={geo_type} (name={name})")
 
@@ -1433,6 +1473,7 @@ class ViewerBase(ABC):
             newton.GeoType.MESH: "mesh",
             newton.GeoType.CONVEX_MESH: "convex_hull",
             newton.GeoType.HFIELD: "heightfield",
+            newton.GeoType.TRIANGLE: "triangle",
         }.get(geo_type)
 
         if base_name is None:

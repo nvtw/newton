@@ -117,7 +117,11 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
     - CONE: radius in x, half-height in y (axis along +Z, apex at +Z)
     - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
     - CONVEX_MESH: scale contains mesh scale, auxiliary contains packed mesh pointer
-    - TRIANGLE: scale contains vector B-A, auxiliary contains vector C-A (relative to vertex A at origin)
+    - GeoType.TRIANGLE: canonical first-class triangle. ``scale = (|AB|, c_y, c_z)``
+      with vertex A at the origin, B = (0, 0, |AB|) and C = (0, c_y, c_z).
+    - GeoTypeEx.TRIANGLE / TRIANGLE_PRISM: scale contains vector B-A, auxiliary
+      contains vector C-A (relative to vertex A at origin). Used by mesh-triangle
+      midphase and PhoenX cloth virtual triangles.
     """
 
     eps = 1.0e-12
@@ -172,6 +176,23 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         if geom.shape_type == GeoTypeEx.TRIANGLE_PRISM:
             if direction[2] < 0.0:
                 result = result + wp.vec3(0.0, 0.0, -1.0)
+    elif geom.shape_type == GeoType.TRIANGLE:
+        # Canonical first-class triangle: A at origin, B along +Z, C in YZ plane.
+        # scale = (|AB|, c_y, c_z) packs the three free parameters.
+        tri_a = wp.vec3(0.0, 0.0, 0.0)
+        tri_b = wp.vec3(0.0, 0.0, geom.scale[0])
+        tri_c = wp.vec3(0.0, geom.scale[1], geom.scale[2])
+
+        dot_a = wp.dot(tri_a, direction)
+        dot_b = wp.dot(tri_b, direction)
+        dot_c = wp.dot(tri_c, direction)
+
+        if dot_a >= dot_b and dot_a >= dot_c:
+            result = tri_a
+        elif dot_b >= dot_c:
+            result = tri_b
+        else:
+            result = tri_c
     elif geom.shape_type == GeoType.BOX:
         # Use a relative deadband so near-zero direction components
         # (from quaternion rotation noise ~1e-14) cannot flip the sign
@@ -307,11 +328,13 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
 @wp.func
 def support_map_lean(geom: GenericShapeData, direction: wp.vec3, data_provider: SupportMapDataProvider) -> wp.vec3:
     """
-    Lean support function for common shape types only: CONVEX_MESH, BOX, SPHERE.
+    Lean support function for common shape types only: CONVEX_MESH, BOX,
+    SPHERE, and the canonical first-class TRIANGLE primitive.
 
     This is a specialized version of support_map with reduced code size to improve
     GPU instruction cache utilization. It omits support for CAPSULE, ELLIPSOID,
-    CYLINDER, CONE, PLANE, and TRIANGLE shapes.
+    CYLINDER, CONE, and PLANE shapes (and the variable-vertex
+    ``GeoTypeEx.TRIANGLE`` / ``TRIANGLE_PRISM`` carriers).
     """
     result = wp.vec3(0.0, 0.0, 0.0)
 
@@ -343,6 +366,20 @@ def support_map_lean(geom: GenericShapeData, direction: wp.vec3, data_provider: 
         else:
             n = wp.vec3(1.0, 0.0, 0.0)
         result = n * radius
+
+    elif geom.shape_type == GeoType.TRIANGLE:
+        # Canonical triangle: A=(0,0,0), B=(0,0,scale[0]), C=(0,scale[1],scale[2]).
+        tri_b = wp.vec3(0.0, 0.0, geom.scale[0])
+        tri_c = wp.vec3(0.0, geom.scale[1], geom.scale[2])
+        dot_a = float(0.0)
+        dot_b = wp.dot(tri_b, direction)
+        dot_c = wp.dot(tri_c, direction)
+        if dot_a >= dot_b and dot_a >= dot_c:
+            result = wp.vec3(0.0, 0.0, 0.0)
+        elif dot_b >= dot_c:
+            result = tri_b
+        else:
+            result = tri_c
 
     return result
 

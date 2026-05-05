@@ -849,7 +849,8 @@ class CollisionPipeline:
                 has_meshes = bool((shape_types == int(GeoType.MESH)).any())
                 # Use lean GJK/MPR kernel when scene has no capsules, ellipsoids,
                 # cylinders, or cones (which need full support function and axial
-                # rolling post-processing)
+                # rolling post-processing). The lean support function handles
+                # CONVEX_MESH, BOX, SPHERE, and TRIANGLE.
                 lean_unsupported = {
                     int(GeoType.CAPSULE),
                     int(GeoType.ELLIPSOID),
