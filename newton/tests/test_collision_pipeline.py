@@ -945,15 +945,10 @@ def _collect_off_origin_signed_gaps(
     def _to_world(shape_idx: int, local: np.ndarray) -> np.ndarray:
         body_idx = int(shape_body[shape_idx])
         if body_idx < 0:
-            return local
+            return np.asarray(local, dtype=np.float64)
         bx = body_q[body_idx]
-        pos = bx[:3]
-        q = bx[3:]
-        # Rotate v by quaternion (xyzw): v + 2*q_xyz x (q_xyz x v + q_w v)
-        qv = q[:3]
-        t = 2.0 * np.cross(qv, local)
-        rotated = local + q[3] * t + np.cross(qv, t)
-        return pos + rotated
+        xform = wp.transform(wp.vec3(*bx[:3]), wp.quat(*bx[3:]))
+        return np.asarray(wp.transform_point(xform, wp.vec3(*local)), dtype=np.float64)
 
     gaps: list[float] = []
     pair_normals: list[np.ndarray] = []
