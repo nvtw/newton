@@ -92,6 +92,7 @@
 - Fix mesh-convex back-face contacts generating inverted normals that trap shapes inside meshes and cause solver divergence (NaN)
 - Fix finite plane geometry 2x too large in collision, bounding sphere, and raytrace sensor
 - Fix MPR convergence failure on large and extreme-aspect-ratio mesh triangles by projecting the starting point onto the triangle nearest the convex center
+- Fix MPR/GJK reporting wrong contacts for `CONVEX_MESH` shapes whose authoring origin lies outside the hull, and tighten heightfield-vs-convex midphase to use the convex's local AABB instead of an origin-centered bounding sphere
 - Fix O(W²·S²) memory explosion in `CollisionPipeline` shape-pair buffer allocation for NXN and SAP broad phase modes by computing per-world pair counts instead of a global N²
 - Fix `SensorRaycast` ignoring `PLANE` geometry
 - Fix `SensorRaycast` and viewer picking ignoring `HFIELD` (heightfield) geometry
