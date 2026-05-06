@@ -704,6 +704,276 @@ class TestSensorContactPhoenX(unittest.TestCase):
         )
 
     # ------------------------------------------------------------------
+    # Tilted-normal contacts: friction decomposition with non-+Z normals
+    # ------------------------------------------------------------------
+
+    def test_tilted_normal_corner_force_balance(self) -> None:
+        """Sphere wedged in a corner (ground + vertical wall) with
+        tilted gravity. Pinning multiple invariants:
+
+        1. Total force on the sphere = -gravity (force balance at rest).
+        2. Each per-counterpart force has a normal component along the
+           respective contact's outward normal AND a tangential
+           (friction) component perpendicular to it.
+        3. The sensor's :attr:`force_matrix_friction` field exactly
+           reproduces the tangential decomposition derived from
+           :attr:`force_matrix` and ``rigid_contact_normal``.
+
+        This is the test that catches a normal-direction mismatch
+        between cc.normal (used to assemble the readback) and
+        rigid_contact_normal (used for the friction projection).
+        Identical-vertical-normal scenes can't distinguish the two.
+        """
+        mass, radius = 1.0, 0.05
+        gx, gz = 4.0, -_G  # tilt gravity into +X so ball presses against +X wall
+
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane(label="ground")
+        builder.add_shape_box(
+            -1,
+            xform=wp.transform(p=wp.vec3(0.25, 0.0, 0.5)),
+            hx=0.05,
+            hy=0.5,
+            hz=0.5,
+            label="wall",
+        )
+        ixx = 0.4 * mass * radius * radius
+        body = builder.add_body(
+            xform=wp.transform((0.05, 0.0, radius + 0.01), wp.quat_identity()),
+            mass=mass,
+            inertia=((ixx, 0, 0), (0, ixx, 0), (0, 0, ixx)),
+        )
+        builder.add_shape_sphere(
+            body,
+            radius=radius,
+            cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
+            label="ball",
+        )
+        model = builder.finalize()
+        model.set_gravity((gx, 0.0, gz))
+
+        sensor = SensorContact(
+            model,
+            sensing_obj_shapes="ball",
+            counterpart_shapes=["ground", "wall"],
+            verbose=False,
+        )
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=4,
+            solver_iterations=40,
+            velocity_iterations=2,
+            default_friction=2.0,
+        )
+        self._settle_with_sensor(model, solver, [sensor], n_frames=600)
+
+        total = sensor.total_force.numpy()[0]
+        expected_total = np.array([-mass * gx, 0.0, -mass * gz], dtype=np.float32)
+        # Tilted-gravity scenes have a small residual oscillation after
+        # 600 frames; tolerate 0.5 % rel err on the magnitude.
+        np.testing.assert_allclose(
+            total,
+            expected_total,
+            atol=0.05,
+            rtol=5.0e-3,
+            err_msg=f"total force on sphere must equal -gravity, got {total} vs {expected_total}",
+        )
+
+        cp = sensor.counterpart_indices[0]
+        g_col = cp.index(model.shape_label.index("ground"))
+        w_col = cp.index(model.shape_label.index("wall"))
+        f_g = sensor.force_matrix.numpy()[0, g_col]
+        f_w = sensor.force_matrix.numpy()[0, w_col]
+
+        # Both contacts must carry a meaningful load (not converge to zero).
+        # Ground supports z; wall supports x. Scale guards: more than 5 % of total.
+        self.assertGreater(
+            abs(float(f_g[2])),
+            0.05 * float(np.linalg.norm(expected_total)),
+            f"ground should carry vertical load, got {f_g}",
+        )
+        self.assertGreater(
+            abs(float(f_w[0])),
+            0.05 * float(np.linalg.norm(expected_total)),
+            f"wall should carry horizontal load, got {f_w}",
+        )
+        # Per-counterpart sum must reconcile with total.
+        np.testing.assert_allclose(
+            f_g + f_w,
+            total,
+            atol=1.0e-2,
+            err_msg=f"per-counterpart sum {f_g + f_w} should match total {total}",
+        )
+
+        # Friction decomposition: ``force_matrix_friction[i,j]`` should
+        # equal ``f - (f.n) n`` analytically. Pick the contact normal
+        # from the contacts buffer post-step; phoenx's stored normal
+        # must agree with what the sensor uses.
+        fm_fric = sensor.force_matrix_friction.numpy()
+
+        # Ground normal is +Z; wall normal is along -X (wall at +X side of ball).
+        n_ground = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        n_wall = np.array([-1.0, 0.0, 0.0], dtype=np.float32)
+        analyt_fric_g = f_g - np.dot(f_g, n_ground) * n_ground
+        analyt_fric_w = f_w - np.dot(f_w, n_wall) * n_wall
+        np.testing.assert_allclose(
+            fm_fric[0, g_col],
+            analyt_fric_g,
+            atol=1.0e-2,
+            err_msg=(
+                f"sensor friction at ground {fm_fric[0, g_col]} should match analytical "
+                f"{analyt_fric_g} = f - (f.n)n. Mismatch flags a normal-direction "
+                "disagreement between cc.normal (readback) and rigid_contact_normal "
+                "(sensor projection)."
+            ),
+        )
+        np.testing.assert_allclose(
+            fm_fric[0, w_col],
+            analyt_fric_w,
+            atol=1.0e-2,
+            err_msg=(f"sensor friction at wall {fm_fric[0, w_col]} should match analytical {analyt_fric_w}"),
+        )
+
+    # ------------------------------------------------------------------
+    # Articulated robot: contact + joint coupling
+    # ------------------------------------------------------------------
+
+    def test_articulated_robot_per_link_weight(self) -> None:
+        """Two-link revolute robot lying flat on the ground: each link
+        must report exactly its own weight in vertical contact force.
+
+        The free joint anchoring link_a and the revolute joint
+        connecting the two links carry no vertical load in this
+        equilibrium (revolute axis is +Y so internal joint moments
+        live in the X-Z plane but cancel under symmetric gravity
+        loading). If phoenx's contact + ADBS constraint coupling
+        leaked any vertical impulse into the contact rows, per-link
+        Fz would deviate from m*g.
+        """
+        mass = 1.0
+        half = 0.05
+
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        ixx = mass / 3.0 * (half * half + half * half)
+        link_a = builder.add_body(
+            xform=wp.transform((0.0, 0.0, half + 0.005), wp.quat_identity()),
+            mass=mass,
+            inertia=((ixx, 0, 0), (0, ixx, 0), (0, 0, ixx)),
+        )
+        builder.add_shape_box(
+            link_a,
+            hx=half,
+            hy=half,
+            hz=half,
+            cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
+            label="link_a",
+        )
+        link_b = builder.add_body(
+            xform=wp.transform((2.05 * half, 0.0, half + 0.005), wp.quat_identity()),
+            mass=mass,
+            inertia=((ixx, 0, 0), (0, ixx, 0), (0, 0, ixx)),
+        )
+        builder.add_shape_box(
+            link_b,
+            hx=half,
+            hy=half,
+            hz=half,
+            cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
+            label="link_b",
+        )
+        builder.add_joint_free(parent=-1, child=link_a)
+        builder.add_joint_revolute(
+            parent=link_a,
+            child=link_b,
+            axis=newton.Axis.Y,
+            parent_xform=wp.transform((1.025 * half, 0.0, 0.0), wp.quat_identity()),
+            child_xform=wp.transform((-1.025 * half, 0.0, 0.0), wp.quat_identity()),
+        )
+        model = builder.finalize()
+
+        sensor_a = SensorContact(model, sensing_obj_shapes="link_a", verbose=False)
+        sensor_b = SensorContact(model, sensing_obj_shapes="link_b", verbose=False)
+        solver = newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=40, velocity_iterations=2)
+
+        self._settle_with_sensor(model, solver, [sensor_a, sensor_b], n_frames=600)
+
+        f_a = sensor_a.total_force.numpy()[0]
+        f_b = sensor_b.total_force.numpy()[0]
+        weight = mass * _G
+
+        # Each link reports exactly its own weight upward.
+        for label, f in (("link_a", f_a), ("link_b", f_b)):
+            rel_err = abs(float(f[2]) - weight) / weight
+            self.assertLess(
+                rel_err,
+                0.02,
+                f"{label} Fz = {float(f[2]):.4f} N vs m*g = {weight:.4f} N (rel err {rel_err:.2%})",
+            )
+        # Sum equals total weight.
+        np.testing.assert_allclose(
+            float(f_a[2] + f_b[2]),
+            2.0 * weight,
+            rtol=0.01,
+            err_msg=f"sum of per-link Fz = {f_a[2] + f_b[2]:.4f} should be 2 m*g = {2 * weight:.4f}",
+        )
+
+    # ------------------------------------------------------------------
+    # Multi-substep semantics
+    # ------------------------------------------------------------------
+
+    def test_substep_steady_state_invariant(self) -> None:
+        """``substeps=1`` and ``substeps=8`` must converge to the same
+        steady-state contact force.
+
+        The readback divides by ``_last_dt`` (the substep dt), so the
+        sensor reports a per-substep average. In steady state every
+        substep carries the same impulse, so the per-frame readout
+        must equal m*g regardless of substep count. A regression that
+        forgot to scale by 1/dt or used the wrong dt would surface
+        as a per-substep multiplier on Fz.
+        """
+
+        def settle_and_read(substeps: int) -> float:
+            mass, radius = 1.0, 0.05
+            builder = newton.ModelBuilder()
+            builder.add_ground_plane()
+            ixx = 0.4 * mass * radius * radius
+            body = builder.add_body(
+                xform=wp.transform((0.0, 0.0, radius + 0.05), wp.quat_identity()),
+                mass=mass,
+                inertia=((ixx, 0, 0), (0, ixx, 0), (0, 0, ixx)),
+            )
+            builder.add_shape_sphere(
+                body,
+                radius=radius,
+                cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
+                label="ball",
+            )
+            model = builder.finalize()
+            sensor = SensorContact(model, sensing_obj_shapes="ball", verbose=False)
+            solver = newton.solvers.SolverPhoenX(model, substeps=substeps, solver_iterations=20, velocity_iterations=2)
+            self._settle_with_sensor(model, solver, [sensor], n_frames=120)
+            return float(sensor.total_force.numpy()[0][2])
+
+        fz_1 = settle_and_read(1)
+        fz_8 = settle_and_read(8)
+        weight = 1.0 * _G
+        for label, fz in (("substeps=1", fz_1), ("substeps=8", fz_8)):
+            rel_err = abs(fz - weight) / weight
+            self.assertLess(
+                rel_err,
+                0.02,
+                f"{label}: settled Fz = {fz:.4f} N vs m*g = {weight:.4f} N (rel err {rel_err:.2%})",
+            )
+        # Both substep counts converge to the same answer.
+        self.assertLess(
+            abs(fz_1 - fz_8),
+            0.02 * weight,
+            f"substeps=1 ({fz_1:.4f}) and substeps=8 ({fz_8:.4f}) disagree by more than 2%",
+        )
+
+    # ------------------------------------------------------------------
     # Attribute-request flow
     # ------------------------------------------------------------------
 
