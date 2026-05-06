@@ -506,6 +506,11 @@ class SolverPhoenX(SolverBase):
             jt = self.model.joint_type.numpy()
             self._has_actuated_joints = bool((jt != int(JointType.FREE)).any())
 
+        # Length-1 placeholder fed to ``_contact_impulse_to_force_wrapper_kernel``
+        # when grouping is disabled (``has_perm=0`` makes the kernel
+        # ignore it). Avoids re-allocating per call.
+        self._sort_perm_placeholder = wp.zeros(1, dtype=wp.int32, device=self.device)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -1050,7 +1055,12 @@ class SolverPhoenX(SolverBase):
 
         Forces are reported at the contact point in world frame;
         torque is always zero (a per-point force has no torque about
-        its own application point).
+        its own application point). When the compound-body grouping
+        optimization is active, the writeback honors the ingest sort
+        permutation so ``contacts.force[k]`` aligns with
+        ``contacts.rigid_contact_shape0[k]`` and
+        ``contacts.rigid_contact_normal[k]`` -- matching the layout
+        consumed by :class:`~newton.sensors.SensorContact`.
         """
         if contacts.force is None:
             raise ValueError(
@@ -1062,6 +1072,19 @@ class SolverPhoenX(SolverBase):
             return
 
         cc = self.world._contact_container
+        # When body-pair grouping is on, the ContactContainer is keyed
+        # by sorted_k. ``sort_perm[sorted_k] = newton_k`` is built each
+        # step inside ``ingest_contacts``; the readback kernel uses it
+        # to land each force at the corresponding newton-order slot in
+        # ``Contacts.force``. With grouping off, the mapping is the
+        # identity and we pass ``has_perm=0``.
+        scratch = self.world._ingest_scratch
+        if scratch is not None and scratch.sort_perm is not None:
+            sort_perm = scratch.sort_perm
+            has_perm = wp.int32(1)
+        else:
+            sort_perm = self._sort_perm_placeholder
+            has_perm = wp.int32(0)
         # PhoenX stores lambda_n / lambda_t1 / lambda_t2 as 1D float
         # arrays inside the lambdas 2D buffer; extract them via the
         # existing cc_get_* helpers. We launch one thread per contact
@@ -1074,6 +1097,8 @@ class SolverPhoenX(SolverBase):
                 contacts.rigid_contact_count,
                 cc,
                 wp.float32(1.0 / self._last_dt),
+                sort_perm,
+                has_perm,
             ],
             outputs=[contacts.force],
             device=self.device,
