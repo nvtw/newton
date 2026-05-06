@@ -636,8 +636,6 @@ def create_narrow_phase_kernel_gjk_mpr(
         shape_collision_radius: wp.array[float],
         shape_aabb_lower: wp.array[wp.vec3],
         shape_aabb_upper: wp.array[wp.vec3],
-        shape_collision_aabb_lower: wp.array[wp.vec3],
-        shape_collision_aabb_upper: wp.array[wp.vec3],
         writer_data: Any,
         total_num_threads: int,
     ):
@@ -671,22 +669,10 @@ def create_narrow_phase_kernel_gjk_mpr(
 
             # Extract shape data
             pos_a, quat_a, shape_data_a, scale_a, margin_offset_a = extract_shape_data(
-                shape_a,
-                shape_transform,
-                shape_types,
-                shape_data,
-                shape_source,
-                shape_collision_aabb_lower,
-                shape_collision_aabb_upper,
+                shape_a, shape_transform, shape_types, shape_data, shape_source
             )
             pos_b, quat_b, shape_data_b, scale_b, margin_offset_b = extract_shape_data(
-                shape_b,
-                shape_transform,
-                shape_types,
-                shape_data,
-                shape_source,
-                shape_collision_aabb_lower,
-                shape_collision_aabb_upper,
+                shape_b, shape_transform, shape_types, shape_data, shape_source
             )
 
             # Check for infinite planes
@@ -910,8 +896,6 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
         shape_transform: wp.array[wp.transform],
         shape_source: wp.array[wp.uint64],
         shape_gap: wp.array[float],  # Per-shape contact gaps
-        shape_collision_aabb_lower: wp.array[wp.vec3],
-        shape_collision_aabb_upper: wp.array[wp.vec3],
         shape_heightfield_index: wp.array[wp.int32],
         heightfield_data: wp.array[HeightfieldData],
         heightfield_elevations: wp.array[wp.float32],
@@ -960,8 +944,6 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
                 shape_types,
                 shape_data,
                 shape_source,
-                shape_collision_aabb_lower,
-                shape_collision_aabb_upper,
             )
 
             # Triangle position is vertex A in world space.
@@ -1842,8 +1824,6 @@ class NarrowPhase:
                 shape_collision_radius,
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
-                shape_collision_aabb_lower,
-                shape_collision_aabb_upper,
                 writer_data,
                 self.total_num_threads,
             ],
@@ -1956,8 +1936,6 @@ class NarrowPhase:
                         shape_transform,
                         shape_source,
                         shape_gap,
-                        shape_collision_aabb_lower,
-                        shape_collision_aabb_upper,
                         shape_heightfield_index,
                         heightfield_data,
                         heightfield_elevations,
@@ -1981,8 +1959,6 @@ class NarrowPhase:
                         shape_transform,
                         shape_source,
                         shape_gap,
-                        shape_collision_aabb_lower,
-                        shape_collision_aabb_upper,
                         shape_heightfield_index,
                         heightfield_data,
                         heightfield_elevations,
