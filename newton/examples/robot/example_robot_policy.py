@@ -237,12 +237,12 @@ class Example:
                 raise ValueError(
                     f"PhysX policy not available for robot '{args.robot}'. Robots with PhysX support: {physx_robots}"
                 )
-            policy_path = newton.examples.get_asset(robot_config.policy_path["physx"])
+            policy_path = f"{asset_directory}/{robot_config.policy_path['physx']}"
             mjc_to_physx, physx_to_mjc = find_physx_mjwarp_mapping(
                 config["mjw_joint_names"], config["physx_joint_names"]
             )
         else:
-            policy_path = newton.examples.get_asset(robot_config.policy_path["mjw"])
+            policy_path = f"{asset_directory}/{robot_config.policy_path['mjw']}"
 
         fps = 200
         self.frame_dt = 1.0e0 / fps

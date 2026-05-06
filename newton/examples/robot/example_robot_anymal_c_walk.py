@@ -232,7 +232,7 @@ class Example:
             self.contacts = self.model.contacts()
 
         # Load ONNX policy bundled with Newton (Warp-backed runtime, no torch dependency).
-        policy_path = newton.examples.get_asset("rl_policies/anymal_walking_policy_physx.onnx")
+        policy_path = str(asset_path / "rl_policies" / "anymal_walking_policy_physx.onnx")
 
         self.policy = newton.utils.OnnxRuntime(policy_path, device=str(self.device))
         self._policy_input_name = self.policy.input_names[0]
