@@ -426,8 +426,13 @@ def _shape_lstm(op, shapes, tensors, device):
         raise NotImplementedError("OnnxRuntime LSTM: only forward direction is supported")
 
     layout = int(op.attrs.get("layout", 0))
-    if layout not in (0, 1):
-        raise NotImplementedError("OnnxRuntime LSTM: layout must be 0 or 1")
+    if layout != 0:
+        # layout=1 would require batch-major state shapes (batch, num_directions,
+        # hidden_size) for both the optional input states and the Yh/Yc output
+        # states, but the rest of this implementation hardcodes direction-major
+        # ((num_directions, batch, hidden_size)) shapes.  Reject layout=1 up
+        # front rather than silently producing incorrectly shaped state tensors.
+        raise NotImplementedError("OnnxRuntime LSTM: layout must be 0 (layout=1 not supported)")
 
     X_shape = shapes[op.inputs[0]]
     if len(X_shape) != 3:

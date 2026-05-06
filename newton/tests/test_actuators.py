@@ -512,6 +512,144 @@ class TestControllerNeuralLSTM(unittest.TestCase):
         self._run_lstm_compute(ctrl)
 
 
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class TestControllerNeuralLSTMLegacyTorchScript(unittest.TestCase):
+    """Regression tests for the deprecated ``.pt`` LSTM checkpoint path.
+
+    ``ControllerNeuralLSTM`` was rewritten to load ``.onnx`` checkpoints
+    backed by Newton's ONNX runtime, but legacy TorchScript / dict
+    checkpoints created against the pre-ONNX API are still supported via
+    ``_LegacyLstmTorchAdapter`` for one deprecation cycle.  These tests
+    pin that contract: a legacy ``.pt`` checkpoint exposing a
+    ``torch.nn.LSTM`` attribute named ``lstm`` (``batch_first=True``,
+    ``input_size=2``) must continue to load, finalize, and run end-to-end.
+    """
+
+    def setUp(self):
+        self.device = wp.get_device()
+        self._tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
+
+    def _build_legacy_lstm_checkpoint(self, path: str, hidden_size: int = 4, metadata: dict | None = None):
+        """Save a TorchScript LSTM module matching the pre-ONNX controller contract."""
+        import torch
+
+        class _LegacyLSTM(torch.nn.Module):
+            """Minimal stateful LSTM matching the legacy ``ControllerNeuralLSTM`` API.
+
+            Returns ``(effort, (h_new, c_new))`` from ``forward(net_input, (h, c))``
+            where ``net_input`` has shape ``(N, 1, 2)`` (``batch_first=True``).  The
+            explicit type annotation on ``hc`` is required for ``torch.jit.script``
+            to compile the ``self.lstm(x, hc)`` overload selection.
+            """
+
+            def __init__(self, hidden_size: int):
+                super().__init__()
+                self.lstm = torch.nn.LSTM(
+                    input_size=2,
+                    hidden_size=hidden_size,
+                    num_layers=1,
+                    batch_first=True,
+                )
+                self.fc = torch.nn.Linear(hidden_size, 1, bias=True)
+                with torch.no_grad():
+                    self.fc.weight.fill_(0.5)
+                    self.fc.bias.fill_(0.0)
+
+            def forward(
+                self, x: torch.Tensor, hc: tuple[torch.Tensor, torch.Tensor]
+            ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+                y, hc_new = self.lstm(x, hc)
+                effort = self.fc(y[:, -1, :])
+                return effort, hc_new
+
+        model = _LegacyLSTM(hidden_size).eval()
+        scripted = torch.jit.script(model)
+        extra_files = {"metadata.json": json.dumps(metadata or {})}
+        scripted.save(path, _extra_files=extra_files)
+
+    def test_load_emits_deprecation_warning(self):
+        """Legacy ``.pt`` LSTM checkpoints emit a ``DeprecationWarning`` on load."""
+        path = os.path.join(self._tmp_dir, "legacy_lstm.pt")
+        self._build_legacy_lstm_checkpoint(path)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ControllerNeuralLSTM(model_path=path)
+
+        deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        self.assertTrue(deprecations, "expected a DeprecationWarning when loading a .pt LSTM checkpoint")
+        self.assertIn(".pt", str(deprecations[0].message))
+
+    def test_synthesizes_metadata_from_torch_module(self):
+        """``num_layers`` / ``hidden_size`` are read from ``network.lstm`` when missing."""
+        path = os.path.join(self._tmp_dir, "legacy_lstm.pt")
+        hidden = 6
+        self._build_legacy_lstm_checkpoint(path, hidden_size=hidden, metadata={"effort_scale": 2.5})
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            ctrl = ControllerNeuralLSTM(model_path=path)
+
+        self.assertEqual(ctrl._num_layers, 1)
+        self.assertEqual(ctrl._hidden_size, hidden)
+        self.assertAlmostEqual(ctrl.effort_scale, 2.5)
+
+    def test_finalize_and_compute(self):
+        """Legacy ``.pt`` LSTM runs end-to-end through ``compute()`` / ``update_state()``.
+
+        Mirrors :class:`TestControllerNeuralLSTM` ONNX coverage but exercises the
+        ``_LegacyLstmTorchAdapter`` path so we catch any future regression that
+        breaks legacy checkpoint loading before the deprecation window closes.
+        """
+        path = os.path.join(self._tmp_dir, "legacy_lstm.pt")
+        self._build_legacy_lstm_checkpoint(path, hidden_size=4)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            ctrl = ControllerNeuralLSTM(model_path=path)
+
+        n = 1
+        ctrl.finalize(self.device, n)
+        # ``is_graphable`` must be False because the adapter round-trips through host.
+        self.assertFalse(ctrl.is_graphable())
+
+        state_a = ctrl.state(n, self.device)
+        state_b = ctrl.state(n, self.device)
+        np.testing.assert_array_equal(state_a.hidden.numpy(), 0.0)
+
+        indices = wp.array([0], dtype=wp.uint32, device=self.device)
+        positions = wp.zeros(n, dtype=wp.float32, device=self.device)
+        velocities = wp.array([1.0], dtype=wp.float32, device=self.device)
+        target_pos = wp.array([1.0], dtype=wp.float32, device=self.device)
+        target_vel = wp.zeros(n, dtype=wp.float32, device=self.device)
+        forces = wp.zeros(n, dtype=wp.float32, device=self.device)
+
+        ctrl.compute(
+            positions,
+            velocities,
+            target_pos,
+            target_vel,
+            None,
+            indices,
+            indices,
+            indices,
+            indices,
+            forces,
+            state_a,
+            0.01,
+            self.device,
+        )
+        ctrl.update_state(state_a, state_b)
+
+        # The legacy module returns a non-zero effort for non-zero pos/vel error
+        # and the LSTM hidden state should evolve away from zero.
+        self.assertNotAlmostEqual(float(forces.numpy()[0]), 0.0, places=6)
+        self.assertTrue(np.any(state_b.hidden.numpy() != 0.0))
+
+
 # ---------------------------------------------------------------------------
 # 2. Delay
 # ---------------------------------------------------------------------------

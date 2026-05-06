@@ -175,6 +175,157 @@ def _load_torch_checkpoint(path: str, device: str | None = None):
     return _TorchModuleAdapter(model, device=device), metadata
 
 
+def _load_legacy_lstm_torch_checkpoint(path: str, device: str | None = None):
+    """Load a legacy ``.pt`` LSTM checkpoint and wrap it for the ONNX-shaped LSTM controller.
+
+    Supports the pre-2.0 ``ControllerNeuralLSTM`` checkpoint contract: a
+    ``torch.nn.Module`` exposing a ``.lstm`` attribute (``torch.nn.LSTM`` with
+    ``batch_first=True``, ``input_size=2``, ``bidirectional=False``,
+    ``proj_size=0``).  The wrapped adapter speaks the new ``OnnxRuntime``
+    dict-in / dict-out protocol so :class:`ControllerNeuralLSTM` does not
+    need to special-case it on the hot path.
+
+    Returns:
+        ``(adapter, metadata)`` where ``metadata`` carries every required
+        ``ControllerNeuralLSTM`` ONNX-metadata key (``input_name``,
+        ``hidden_in_name``, ..., ``num_layers``, ``hidden_size``) so the
+        controller can route legacy and ONNX checkpoints through a single
+        code path.
+    """
+    warnings.warn(_TORCH_DEPRECATION_MSG, DeprecationWarning, stacklevel=3)
+    model, metadata = _load_torch_raw(path)
+    if hasattr(model, "eval"):
+        model = model.eval()
+    if not hasattr(model, "lstm"):
+        raise ValueError(
+            f"Legacy .pt LSTM checkpoint at '{path}' must expose a 'lstm' attribute (torch.nn.LSTM); "
+            "re-export to ONNX (see ControllerNeuralLSTM docstring) or supply a compatible checkpoint."
+        )
+    lstm = model.lstm
+    if not hasattr(lstm, "num_layers"):
+        raise ValueError("Legacy .pt LSTM checkpoint: network.lstm must be a torch.nn.LSTM (missing num_layers)")
+    if not getattr(lstm, "batch_first", False):
+        raise ValueError("Legacy .pt LSTM checkpoint: network.lstm.batch_first must be True")
+    if getattr(lstm, "input_size", None) != 2:
+        raise ValueError(
+            f"Legacy .pt LSTM checkpoint: network.lstm.input_size must be 2 (pos_error, vel_error); "
+            f"got {lstm.input_size}"
+        )
+    if getattr(lstm, "bidirectional", False):
+        raise ValueError("Legacy .pt LSTM checkpoint: network.lstm must not be bidirectional")
+    if getattr(lstm, "proj_size", 0) != 0:
+        raise ValueError(f"Legacy .pt LSTM checkpoint: network.lstm.proj_size must be 0; got {lstm.proj_size}")
+
+    legacy_meta = dict(metadata) if metadata else {}
+    legacy_meta.setdefault("input_name", "observation")
+    legacy_meta.setdefault("hidden_in_name", "hidden_in")
+    legacy_meta.setdefault("cell_in_name", "cell_in")
+    legacy_meta.setdefault("output_name", "effort")
+    legacy_meta.setdefault("hidden_out_name", "hidden_out")
+    legacy_meta.setdefault("cell_out_name", "cell_out")
+    legacy_meta["num_layers"] = int(lstm.num_layers)
+    legacy_meta["hidden_size"] = int(lstm.hidden_size)
+    return _LegacyLstmTorchAdapter(model, legacy_meta, device=device), legacy_meta
+
+
+class _LegacyLstmTorchAdapter:
+    """Legacy ``.pt`` LSTM adapter exposing the ``OnnxRuntime`` interface.
+
+    Bridges the dict-in / dict-out protocol expected by
+    :class:`ControllerNeuralLSTM` to the legacy positional torch call
+    ``effort, (h, c) = network(net_input, (hidden, cell))``.
+
+    Not graph-capturable: the call crosses the host boundary on each
+    ``.numpy()`` round-trip.  Legacy ``.pt`` users already lived with these
+    constraints; the adapter preserves that behavior so existing checkpoints
+    keep running until the deprecation window expires.
+    """
+
+    def __init__(self, model, metadata: dict[str, Any], device: str | None = None):
+        torch = _require_torch()
+        self._torch = torch
+        self._model = model
+        self._device = device
+        self._input_name: str = metadata["input_name"]
+        self._hidden_in_name: str = metadata["hidden_in_name"]
+        self._cell_in_name: str = metadata["cell_in_name"]
+        self._output_name: str = metadata["output_name"]
+        self._hidden_out_name: str = metadata["hidden_out_name"]
+        self._cell_out_name: str = metadata["cell_out_name"]
+        self._num_layers = int(metadata["num_layers"])
+        self._hidden_size = int(metadata["hidden_size"])
+        self.input_names: list[str] = [self._input_name, self._hidden_in_name, self._cell_in_name]
+        self.output_names: list[str] = [self._output_name, self._hidden_out_name, self._cell_out_name]
+        # Move the module onto the requested device once so per-call inference
+        # avoids repeated host transfers.
+        self._torch_device = self._resolve_torch_device(device)
+        self._model = self._model.to(self._torch_device)
+        self._shapes: dict[str, tuple[int, ...]] = {}
+
+    def _resolve_torch_device(self, device: str | None):
+        torch = self._torch
+        if device is None or device == "cpu":
+            return torch.device("cpu")
+        if device.startswith("cuda") and torch.cuda.is_available():
+            return torch.device(device)
+        # Warp may be on CUDA while the installed torch is a CPU-only build
+        # (or CUDA is unavailable for some other reason).  Fall back to CPU
+        # rather than crashing inside ``model.to(...)``; the adapter already
+        # round-trips through ``.numpy()`` so cross-device usage just adds
+        # one extra host-device copy.
+        return torch.device("cpu")
+
+    def _to_torch(self, arr):
+        torch = self._torch
+        if hasattr(arr, "numpy"):
+            np_arr = arr.numpy()
+        else:
+            np_arr = arr
+        return torch.as_tensor(np_arr, device=self._torch_device)
+
+    def __call__(self, inputs):
+        torch = self._torch
+        if self._input_name not in inputs:
+            raise KeyError(f"_LegacyLstmTorchAdapter: missing input '{self._input_name}'")
+        if self._hidden_in_name not in inputs:
+            raise KeyError(f"_LegacyLstmTorchAdapter: missing input '{self._hidden_in_name}'")
+        if self._cell_in_name not in inputs:
+            raise KeyError(f"_LegacyLstmTorchAdapter: missing input '{self._cell_in_name}'")
+
+        # Newton hands the LSTM input as ``(1, N, 2)`` (seq-major / layout=0)
+        # so the runtime/ONNX path can consume it directly.  The legacy torch
+        # ``LSTM`` was built with ``batch_first=True`` and expects ``(N, 1, 2)``;
+        # transpose the leading two dims to bridge the two contracts.
+        x = self._to_torch(inputs[self._input_name])
+        if x.dim() == 3 and x.shape[0] == 1:
+            x = x.transpose(0, 1).contiguous()
+        h = self._to_torch(inputs[self._hidden_in_name])
+        c = self._to_torch(inputs[self._cell_in_name])
+
+        with torch.inference_mode():
+            effort, (h_new, c_new) = self._model(x, (h, c))
+        if isinstance(effort, (tuple, list)):
+            effort = effort[0]
+
+        # ``effort`` is ``(N, 1)`` per the legacy contract; pass through as-is.
+        effort_np = effort.detach().cpu().numpy()
+        h_np = h_new.detach().cpu().numpy()
+        c_np = c_new.detach().cpu().numpy()
+        effort_wp = wp.array(effort_np, dtype=wp.float32, device=self._device)
+        h_wp = wp.array(h_np, dtype=wp.float32, device=self._device)
+        c_wp = wp.array(c_np, dtype=wp.float32, device=self._device)
+
+        self._shapes[self._output_name] = tuple(effort_wp.shape)
+        self._shapes[self._hidden_out_name] = tuple(h_wp.shape)
+        self._shapes[self._cell_out_name] = tuple(c_wp.shape)
+
+        return {
+            self._output_name: effort_wp,
+            self._hidden_out_name: h_wp,
+            self._cell_out_name: c_wp,
+        }
+
+
 class _TorchModuleAdapter:
     """Adapter that exposes a Torch module via the ``OnnxRuntime`` interface.
 

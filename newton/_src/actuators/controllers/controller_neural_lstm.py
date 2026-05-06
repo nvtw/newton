@@ -8,7 +8,13 @@ from typing import Any, ClassVar
 
 import warp as wp
 
-from ..utils import _TorchModuleAdapter, load_checkpoint, load_metadata
+from ..utils import (
+    _LegacyLstmTorchAdapter,
+    _load_legacy_lstm_torch_checkpoint,
+    _TorchModuleAdapter,
+    load_checkpoint,
+    load_metadata,
+)
 from .base import Controller
 
 
@@ -136,21 +142,20 @@ class ControllerNeuralLSTM(Controller):
         """
         self.model_path = model_path
 
-        # ``.pt`` LSTM checkpoints require torch-specific introspection
-        # (network.lstm.num_layers, hidden tensors as torch.Tensor, etc.) that
-        # the new ONNX-only compute path can no longer perform.  The MLP
-        # adapter is single-input/single-output and not applicable here.
+        # Legacy ``.pt`` / ``.pth`` LSTM checkpoints are still supported for
+        # backward compatibility but routed through the deprecated
+        # ``_LegacyLstmTorchAdapter``.  The adapter is built up front so the
+        # missing ONNX metadata keys (``input_name``, ``hidden_in_name``,
+        # ``num_layers`` ...) can be synthesized from ``network.lstm`` --
+        # callers don't need to embed any metadata in the legacy checkpoint
+        # to keep working.  The path emits a :class:`DeprecationWarning` and
+        # will be removed in a future release.
+        self._legacy_adapter: _LegacyLstmTorchAdapter | None = None
         if model_path.lower().endswith((".pt", ".pth")):
-            raise NotImplementedError(
-                "ControllerNeuralLSTM no longer supports .pt/.pth TorchScript checkpoints. "
-                "Re-export the LSTM as an ONNX model with explicit input/output names and "
-                "the metadata properties listed in the class docstring "
-                "(input_name, hidden_in_name, cell_in_name, output_name, hidden_out_name, "
-                "cell_out_name, num_layers, hidden_size). See torch.onnx.export and the "
-                "test fixture _build_lstm_onnx in newton/tests/test_actuators.py for an example."
-            )
-
-        metadata = load_metadata(model_path)
+            adapter, metadata = _load_legacy_lstm_torch_checkpoint(model_path)
+            self._legacy_adapter = adapter
+        else:
+            metadata = load_metadata(model_path)
 
         self.pos_scale = float(metadata.get("pos_scale", 1.0))
         self.vel_scale = float(metadata.get("vel_scale", 1.0))
@@ -190,19 +195,53 @@ class ControllerNeuralLSTM(Controller):
         self._device = device
         self._num_actuators = num_actuators
 
-        runtime, _ = load_checkpoint(self.model_path, device=str(device), batch_size=num_actuators)
-        self._network = runtime
+        if self._legacy_adapter is not None:
+            # Legacy ``.pt`` adapter was built in ``__init__`` against the
+            # default device; rebind it to the finalize-time device and skip
+            # the ONNX shape validation (the adapter's effort/h/c shapes are
+            # only populated after the first call).
+            self._legacy_adapter._device = str(device)
+            self._legacy_adapter._torch_device = self._legacy_adapter._resolve_torch_device(str(device))
+            self._legacy_adapter._model = self._legacy_adapter._model.to(self._legacy_adapter._torch_device)
+            self._network = self._legacy_adapter
+        else:
+            runtime, _ = load_checkpoint(self.model_path, device=str(device), batch_size=num_actuators)
+            self._network = runtime
 
-        # The compute() copy assumes one effort per actuator, i.e. output shape
-        # exactly ``(num_actuators, 1)``.  A multi-column output would silently
-        # misalign actuator i with row 0, column i, dropping later rows; reject
-        # such models up front instead of producing wrong inferences.
-        out_shape = runtime._shapes[self._output_name]
-        if out_shape != (num_actuators, 1):
-            raise ValueError(
-                f"ControllerNeuralLSTM: ONNX output '{self._output_name}' has shape {out_shape}, "
-                f"expected {(num_actuators, 1)} (one scalar effort per actuator)"
-            )
+            # The compute() copy assumes one effort per actuator, i.e. output
+            # shape exactly ``(num_actuators, 1)``.  A multi-column output
+            # would silently misalign actuator i with row 0, column i,
+            # dropping later rows; reject such models up front instead of
+            # producing wrong inferences.
+            out_shape = runtime._shapes[self._output_name]
+            if out_shape != (num_actuators, 1):
+                raise ValueError(
+                    f"ControllerNeuralLSTM: ONNX output '{self._output_name}' has shape {out_shape}, "
+                    f"expected {(num_actuators, 1)} (one scalar effort per actuator)"
+                )
+
+            # compute() unconditionally indexes ``out[hidden_out_name]`` and
+            # ``out[cell_out_name]`` and reshapes them to
+            # ``(num_layers, num_actuators, hidden_size)``.  Validate both
+            # recurrent outputs up front so an incorrectly exported checkpoint
+            # fails here with a clear message instead of raising ``KeyError``
+            # mid-step.
+            for role, name in (
+                ("hidden_out", self._hidden_out_name),
+                ("cell_out", self._cell_out_name),
+            ):
+                if name not in runtime._shapes:
+                    raise ValueError(
+                        f"ControllerNeuralLSTM: ONNX model is missing the '{role}' output '{name}'; "
+                        f"available outputs: {sorted(runtime._shapes)}"
+                    )
+                state_shape = runtime._shapes[name]
+                expected_state_shape = (self._num_layers, num_actuators, self._hidden_size)
+                if tuple(state_shape) != expected_state_shape:
+                    raise ValueError(
+                        f"ControllerNeuralLSTM: ONNX output '{name}' has shape {tuple(state_shape)}, "
+                        f"expected {expected_state_shape} (num_layers, num_actuators, hidden_size)"
+                    )
 
         self._net_input = wp.zeros((1, num_actuators, 2), dtype=wp.float32, device=device)
         self._next_hidden = wp.zeros(
@@ -216,10 +255,11 @@ class ControllerNeuralLSTM(Controller):
         return True
 
     def is_graphable(self) -> bool:
-        # The deprecated ``_TorchModuleAdapter`` round-trips through host
-        # ``.numpy()`` and PyTorch and is not safe inside a CUDA graph capture;
-        # only the Warp-backed ``OnnxRuntime`` path is graph-capturable.
-        return not isinstance(self._network, _TorchModuleAdapter)
+        # The deprecated torch adapters (``_TorchModuleAdapter``,
+        # ``_LegacyLstmTorchAdapter``) round-trip through host ``.numpy()``
+        # and PyTorch and are not safe inside a CUDA graph capture; only the
+        # Warp-backed ``OnnxRuntime`` path is graph-capturable.
+        return not isinstance(self._network, (_TorchModuleAdapter, _LegacyLstmTorchAdapter))
 
     def state(self, num_actuators: int, device: wp.Device) -> ControllerNeuralLSTM.State:
         return ControllerNeuralLSTM.State(
