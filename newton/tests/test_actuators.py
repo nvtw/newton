@@ -49,6 +49,7 @@ except ImportError:
     _HAS_LEGACY_ACTUATORS = False
 
 _HAS_ONNX = importlib.util.find_spec("onnx") is not None
+_HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 if _HAS_ONNX:
     import onnx as _onnx
@@ -367,6 +368,67 @@ class TestControllerNeuralMLP(unittest.TestCase):
             self.device,
         )
         self.assertAlmostEqual(forces.numpy()[0], 30.0, places=3, msg="bias=10 * effort_scale=3 -> 30")
+
+    @unittest.skipUnless(_HAS_TORCH, "torch not installed")
+    def test_finalize_legacy_torchscript_checkpoint(self):
+        """Legacy ``.pt`` checkpoints must finalize without a KeyError.
+
+        Regression test: the deprecated ``_TorchModuleAdapter`` populates its
+        ``_shapes`` dict only after the first ``__call__()``, so the output
+        shape lookup in ``finalize()`` previously raised ``KeyError("action")``
+        before any inference had happened.  ``finalize()`` should now probe the
+        shape with a dry forward and accept the legacy checkpoint.
+        """
+        import torch
+
+        n = 1
+        in_features = 2  # matches default input_idx=[0] -> 2*K = 2
+
+        class _BiasOnlyMLP(torch.nn.Module):
+            """Single Linear layer with zero weights and a known bias."""
+
+            def __init__(self):
+                super().__init__()
+                self.fc = torch.nn.Linear(in_features, 1, bias=True)
+                with torch.no_grad():
+                    self.fc.weight.zero_()
+                    self.fc.bias.fill_(7.0)
+
+            def forward(self, x):
+                return self.fc(x)
+
+        model = _BiasOnlyMLP().eval()
+        scripted = torch.jit.script(model)
+        path = os.path.join(self._tmp_dir, "legacy_mlp.pt")
+        scripted.save(path, _extra_files={"metadata.json": json.dumps({"effort_scale": 1.0})})
+
+        ctrl = ControllerNeuralMLP(model_path=path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            ctrl.finalize(self.device, n)
+
+        self.assertEqual(ctrl._net_output_name, "action")
+        self.assertEqual(ctrl._network._shapes["action"], (n, 1))
+
+        indices = wp.array([0], dtype=wp.uint32, device=self.device)
+        forces = wp.zeros(n, dtype=wp.float32, device=self.device)
+        state_a = ctrl.state(n, self.device)
+        ctrl.compute(
+            wp.zeros(n, dtype=wp.float32, device=self.device),
+            wp.zeros(n, dtype=wp.float32, device=self.device),
+            wp.array([1.0], dtype=wp.float32, device=self.device),
+            wp.zeros(n, dtype=wp.float32, device=self.device),
+            None,
+            indices,
+            indices,
+            indices,
+            indices,
+            forces,
+            state_a,
+            0.01,
+            self.device,
+        )
+        self.assertAlmostEqual(float(forces.numpy()[0]), 7.0, places=3)
 
 
 @unittest.skipUnless(_HAS_ONNX, "onnx not installed")

@@ -14,7 +14,7 @@ import warp as wp
 def _require_onnx():
     """Lazy import of the ``onnx`` package with a friendly error message."""
     try:
-        import onnx  # noqa: PLC0415 - lazy import keeps `onnx` an optional extra
+        import onnx
     except ImportError as exc:  # pragma: no cover - exercised only on missing dep
         raise ImportError(
             "Loading neural-controller checkpoints requires the optional `onnx` package. "

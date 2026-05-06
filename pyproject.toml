@@ -228,6 +228,7 @@ banned-module-level-imports = [
     "mujoco",
     "mujoco_warp",
     "networkx",
+    "onnx",
     "open3d",
     "openmesh",
     "PIL",

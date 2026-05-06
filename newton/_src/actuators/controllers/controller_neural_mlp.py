@@ -231,6 +231,21 @@ class ControllerNeuralMLP(Controller):
         self._net_input_name = runtime.input_names[0]
         self._net_output_name = runtime.output_names[0]
 
+        feat = 2 * len(self.input_idx)
+        self._net_input = wp.zeros((num_actuators, feat), dtype=wp.float32, device=device)
+        self._pos_error = wp.zeros(num_actuators, dtype=wp.float32, device=device)
+        self._vel_error = wp.zeros(num_actuators, dtype=wp.float32, device=device)
+        self._input_idx_wp = wp.array(self.input_idx, dtype=wp.int32, device=device)
+
+        # Probe the output shape.  ``OnnxRuntime`` populates ``_shapes`` eagerly
+        # during construction, but the deprecated ``_TorchModuleAdapter`` only
+        # learns shapes after the first inference call.  Run a one-shot dry
+        # forward with the zero-initialized ``_net_input`` if the shape is not
+        # already known so legacy ``.pt``/``.pth`` checkpoints can be validated
+        # the same way as ``.onnx`` ones.
+        if self._net_output_name not in runtime._shapes:
+            runtime({self._net_input_name: self._net_input})
+
         # The compute() copy assumes one effort per actuator, i.e. output shape
         # exactly ``(num_actuators, 1)``.  A multi-column output would silently
         # misalign actuator i with row 0, column i, dropping later rows; reject
@@ -238,16 +253,9 @@ class ControllerNeuralMLP(Controller):
         out_shape = runtime._shapes[self._net_output_name]
         if out_shape != (num_actuators, 1):
             raise ValueError(
-                f"ControllerNeuralMLP: ONNX output '{self._net_output_name}' has shape {out_shape}, "
+                f"ControllerNeuralMLP: network output '{self._net_output_name}' has shape {out_shape}, "
                 f"expected {(num_actuators, 1)} (one scalar effort per actuator)"
             )
-
-        # input shape: (N, 2 * K) where K = len(input_idx)
-        feat = 2 * len(self.input_idx)
-        self._net_input = wp.zeros((num_actuators, feat), dtype=wp.float32, device=device)
-        self._pos_error = wp.zeros(num_actuators, dtype=wp.float32, device=device)
-        self._vel_error = wp.zeros(num_actuators, dtype=wp.float32, device=device)
-        self._input_idx_wp = wp.array(self.input_idx, dtype=wp.int32, device=device)
 
     def is_stateful(self) -> bool:
         return True

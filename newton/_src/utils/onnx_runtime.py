@@ -45,8 +45,8 @@ def _require_onnx():
     pull protobuf and ml-dtypes even when the user never loads a policy.
     """
     try:
-        import onnx  # noqa: PLC0415 - lazy import keeps `onnx` an optional extra
-        from onnx import numpy_helper  # noqa: PLC0415
+        import onnx
+        from onnx import numpy_helper
     except ImportError as exc:  # pragma: no cover - exercised only on missing dep
         raise ImportError(
             "OnnxRuntime requires the optional `onnx` package. "
