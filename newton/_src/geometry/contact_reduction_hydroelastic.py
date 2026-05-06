@@ -665,14 +665,20 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 effective_depth = entry_total_depth
             total_depth_with_anchor = effective_depth + wp.float32(add_anchor) * anchor_depth
 
-            # Compute shared stiffness: c_stiffness = |agg_force| / total_depth.
-            # ``agg_force`` is accumulated as ``area * pressure_func(d) * normal``
-            # in the generate kernel, so it is already in physical force units;
-            # the previous ``k_eff_first *`` factor would double-count under a
-            # non-linear pressure law and is no longer applied here.
+            # Compute shared stiffness so the K reduced contacts reproduce
+            # ``agg_force_mag`` exactly. The solver applies
+            # ``F = c_stiffness * (-contact_distance) = c_stiffness * 2*|depth|``
+            # per reduced contact; summing across reduced contacts gives
+            #     sum_F_red = shared_stiffness * 2 * sum(|d_red|)
+            #               = shared_stiffness * 2 * total_depth_with_anchor.
+            # Setting shared_stiffness = agg_force_mag / (2 * total_depth_with_anchor)
+            # makes that sum match agg_force_mag. ``agg_force`` is accumulated
+            # as ``area * pressure_func(d) * normal`` in the generate kernel
+            # so it is already in physical force units (no ``k_eff_first``
+            # factor — that double-counts under a non-linear pressure law).
             shared_stiffness = float(0.0)
             if agg_force_mag > wp.static(EPS_SMALL) and total_depth_with_anchor > 0.0:
-                shared_stiffness = agg_force_mag / total_depth_with_anchor
+                shared_stiffness = agg_force_mag / (2.0 * total_depth_with_anchor)
 
             # Moment matching: hybrid uniform / per-contact strategy.
             moment_alpha = float(0.0)
@@ -748,7 +754,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                         # stays on the linear law (entry_k_eff = harmonic mean).
                         if depth < 0.0:
                             p_i = wp.static(pressure_func)(depth, shape_b, pressure_data)
-                            c_stiffness = area_i * p_i / wp.max(-depth, wp.static(EPS_SMALL))
+                            c_stiffness = area_i * p_i / (2.0 * wp.max(-depth, wp.static(EPS_SMALL)))
                         else:
                             c_stiffness = wp.static(margin_contact_area) * k_eff_first
 
@@ -802,11 +808,13 @@ def create_export_hydroelastic_reduced_contacts_kernel(
 
                         if nbin_agg_mag > wp.static(EPS_SMALL) and nbin_effective_depth > 0.0:
                             # Same physical-force argument as the normal-bin path:
-                            # nbin_agg_mag is in force units, no extra k_eff factor.
-                            c_stiffness = nbin_agg_mag / nbin_effective_depth
+                            # ``nbin_agg_mag`` is in force units; the solver
+                            # multiplies c_stiffness by 2*|depth|, so divide by
+                            # 2*nbin_effective_depth to recover total force.
+                            c_stiffness = nbin_agg_mag / (2.0 * nbin_effective_depth)
                         else:
                             p_i = wp.static(pressure_func)(depth, shape_b, pressure_data)
-                            c_stiffness = area_i * p_i / wp.max(-depth, wp.static(EPS_SMALL))
+                            c_stiffness = area_i * p_i / (2.0 * wp.max(-depth, wp.static(EPS_SMALL)))
 
                         # Moment matching friction adjustment (voxel entry)
                         if wp.static(moment_matching):
@@ -846,9 +854,11 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                                         )
                     elif depth < 0.0:
                         # Penetrating contact with no normal bin: per-contact
-                        # secant from the user pressure law (F = area * p(d)).
+                        # secant from the user pressure law. F_face = area * p
+                        # via solver multiplying by 2*|depth| (contact_distance
+                        # = 2*depth), so c_stiffness = area * p / (2*|d|).
                         p_i = wp.static(pressure_func)(depth, shape_b, pressure_data)
-                        c_stiffness = area_i * p_i / wp.max(-depth, wp.static(EPS_SMALL))
+                        c_stiffness = area_i * p_i / (2.0 * wp.max(-depth, wp.static(EPS_SMALL)))
                     else:
                         # Non-penetrating margin contact: linear-law regularization.
                         c_stiffness = wp.static(margin_contact_area) * k_eff_first

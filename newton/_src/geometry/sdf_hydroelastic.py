@@ -1402,11 +1402,15 @@ def get_decode_contacts_kernel(
 
             area = contact_area[tid]
 
-            # Solver applies F = c_stiffness * (-depth). For penetrating contacts
-            # we want |F| = area * pressure_func(depth) so the user-supplied
-            # pressure law drives the actual contact force, not just the patch
-            # geometry. Pressure is recomputed from ``depth`` and ``shape_b``
-            # rather than cached, since both are already in the buffer.
+            # Hydroelastic force per face: F = area * pressure_func(depth)
+            # (Elandt et al. 2019). The solver applies
+            # ``F = c_stiffness * (-contact_distance) = c_stiffness * 2*|depth|``
+            # because Newton stores ``contact_distance = 2*depth``, so the
+            # secant stiffness must absorb that factor of 2:
+            #     c_stiffness = area * p_face / (2 * |depth|)
+            # gives F_solver = area * p_face exactly, for any pressure law and
+            # any (kh_a, kh_b) pair. Pressure is recomputed from buffer state
+            # (``depth`` and ``shape_b``) rather than cached.
             #
             # Margin (non-penetrating) contacts are a constraint regularization
             # rather than a physical force: pressure_func is only required to be
@@ -1414,7 +1418,7 @@ def get_decode_contacts_kernel(
             # ``shape_material_kh`` so margin behavior stays well-defined.
             if depth < 0.0:
                 p_face = wp.static(pressure_func)(depth, shape_b, pressure_data)
-                c_stiffness = area * p_face / wp.max(-depth, EPS_SMALL)
+                c_stiffness = area * p_face / (2.0 * wp.max(-depth, EPS_SMALL))
             else:
                 k_a = shape_material_kh[shape_a]
                 k_b = shape_material_kh[shape_b]
