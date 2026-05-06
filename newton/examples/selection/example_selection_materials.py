@@ -24,6 +24,7 @@ import newton.examples
 from newton.selection import ArticulationView
 from newton.solvers import SolverNotifyFlags
 
+USE_TORCH = False
 COLLAPSE_FIXED_JOINTS = False
 VERBOSE = True
 
@@ -100,24 +101,35 @@ class Example:
             exclude_joint_types=[newton.JointType.FREE],
         )
 
-        # default ant root states
-        self.default_ant_root_transforms = wp.clone(self.ants.get_root_transforms(self.model))
-        self.default_ant_root_velocities = wp.clone(self.ants.get_root_velocities(self.model))
+        if USE_TORCH:
+            # default ant root states
+            self.default_ant_root_transforms = wp.to_torch(self.ants.get_root_transforms(self.model)).clone()
+            self.default_ant_root_velocities = wp.to_torch(self.ants.get_root_velocities(self.model)).clone()
 
-        # set ant DOFs to the middle of their range by default
-        dof_limit_lower = self.ants.get_attribute("joint_limit_lower", self.model)
-        dof_limit_upper = self.ants.get_attribute("joint_limit_upper", self.model)
-        self.default_ant_dof_positions = wp.empty_like(dof_limit_lower)
-        wp.launch(
-            compute_middle_kernel,
-            dim=self.default_ant_dof_positions.shape,
-            inputs=[
-                dof_limit_lower,
-                dof_limit_upper,
-                self.default_ant_dof_positions,
-            ],
-        )
-        self.default_ant_dof_velocities = wp.clone(self.ants.get_dof_velocities(self.model))
+            # set ant DOFs to the middle of their range by default
+            dof_limit_lower = wp.to_torch(self.ants.get_attribute("joint_limit_lower", self.model))
+            dof_limit_upper = wp.to_torch(self.ants.get_attribute("joint_limit_upper", self.model))
+            self.default_ant_dof_positions = 0.5 * (dof_limit_lower + dof_limit_upper)
+            self.default_ant_dof_velocities = wp.to_torch(self.ants.get_dof_velocities(self.model)).clone()
+        else:
+            # default ant root states
+            self.default_ant_root_transforms = wp.clone(self.ants.get_root_transforms(self.model))
+            self.default_ant_root_velocities = wp.clone(self.ants.get_root_velocities(self.model))
+
+            # set ant DOFs to the middle of their range by default
+            dof_limit_lower = self.ants.get_attribute("joint_limit_lower", self.model)
+            dof_limit_upper = self.ants.get_attribute("joint_limit_upper", self.model)
+            self.default_ant_dof_positions = wp.empty_like(dof_limit_lower)
+            wp.launch(
+                compute_middle_kernel,
+                dim=self.default_ant_dof_positions.shape,
+                inputs=[
+                    dof_limit_lower,
+                    dof_limit_upper,
+                    self.default_ant_dof_positions,
+                ],
+            )
+            self.default_ant_dof_velocities = wp.clone(self.ants.get_dof_velocities(self.model))
 
         self.viewer.set_model(self.model)
         self.viewer.set_world_offsets((4.0, 4.0, 0.0))
@@ -175,19 +187,36 @@ class Example:
         # ========================================
         # update velocities and materials
         # ========================================
-        # flip velocities
-        if self.reset_count % 2 == 0:
-            self.default_ant_root_velocities.fill_(wp.spatial_vector(0.0, 5.0, 0.0, 0.0, 0.0, 0.0))
-        else:
-            self.default_ant_root_velocities.fill_(wp.spatial_vector(0.0, -5.0, 0.0, 0.0, 0.0, 0.0))
+        if USE_TORCH:
+            import torch  # noqa: PLC0415
 
-        # randomize materials
-        material_mu = self.ants.get_attribute("shape_material_mu", self.model)
-        wp.launch(
-            reset_materials_kernel,
-            dim=material_mu.shape,
-            inputs=[material_mu, self.reset_count, self.ants.shape_count],
-        )
+            # flip velocities
+            if self.reset_count % 2 == 0:
+                self.default_ant_root_velocities[..., 1] = 5.0
+            else:
+                self.default_ant_root_velocities[..., 1] = -5.0
+
+            # randomize materials
+            if RANDOMIZE_PER_WORLD:
+                material_mu = 0.5 + 0.5 * torch.rand(self.ants.count, 1).unsqueeze(1).repeat(
+                    1, 1, self.ants.shape_count
+                )
+            else:
+                material_mu = 0.5 + 0.5 * torch.rand((self.ants.count, 1, self.ants.shape_count))
+        else:
+            # flip velocities
+            if self.reset_count % 2 == 0:
+                self.default_ant_root_velocities.fill_(wp.spatial_vector(0.0, 5.0, 0.0, 0.0, 0.0, 0.0))
+            else:
+                self.default_ant_root_velocities.fill_(wp.spatial_vector(0.0, -5.0, 0.0, 0.0, 0.0, 0.0))
+
+            # randomize materials
+            material_mu = self.ants.get_attribute("shape_material_mu", self.model)
+            wp.launch(
+                reset_materials_kernel,
+                dim=material_mu.shape,
+                inputs=[material_mu, self.reset_count, self.ants.shape_count],
+            )
 
         self.ants.set_attribute("shape_material_mu", self.model, material_mu)
 
@@ -237,6 +266,9 @@ if __name__ == "__main__":
 
     viewer, args = newton.examples.init(parser)
 
-    example = Example(viewer, args)
+    if USE_TORCH:
+        import torch
 
-    newton.examples.run(example, args)
+        torch.set_default_device(args.device)
+
+    newton.examples.run(Example(viewer, args), args)

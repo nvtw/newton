@@ -364,5 +364,4 @@ if __name__ == "__main__":
         print("Error: This example requires a GPU device.")
         sys.exit(1)
 
-    example = Example(viewer, args)
-    newton.examples.run(example, args)
+    newton.examples.run(Example(viewer, args), args)
