@@ -494,10 +494,27 @@ def _contact_impulse_to_force_wrapper_kernel(
     rigid_contact_count: wp.array[wp.int32],
     cc: ContactContainer,
     idt: wp.float32,
+    sort_perm: wp.array[wp.int32],
+    has_perm: wp.int32,
     # out
     force_out: wp.array[wp.spatial_vector],
 ):
     """Pack ``ContactContainer`` lambdas into ``Contacts.force``.
+
+    The container is keyed by ``sorted_k`` when compound-body grouping is
+    active, while ``Contacts.force`` is laid out in newton (narrow-phase)
+    order. ``sort_perm[sorted_k] = newton_k`` reroutes the write so
+    ``contacts.force[k]`` aligns with ``contacts.rigid_contact_shape0[k]``
+    and ``rigid_contact_normal[k]`` for downstream consumers like
+    :class:`~newton.sensors.SensorContact`.
+
+    Sign convention: ``lam_n * n + lam_t * t`` is the impulse the
+    contact applies to shape1 (the normal points from shape0 to shape1
+    in Newton's narrow phase, so a positive normal lambda pushes shape1
+    away from shape0). Newton's :class:`Contacts` stores
+    ``force = force on shape0``, matching MuJoCo's
+    ``_convert_mjw_contacts_to_newton_kernel``; we therefore negate
+    before writing.
 
     ``tangent2 = cross(normal, tangent1)`` is recomputed since the
     container only stores ``normal`` and ``tangent1``.
@@ -512,5 +529,10 @@ def _contact_impulse_to_force_wrapper_kernel(
     lam_n = cc_get_normal_lambda(cc, k)
     lam_t1 = cc_get_tangent1_lambda(cc, k)
     lam_t2 = cc_get_tangent2_lambda(cc, k)
-    f = (lam_n * n + lam_t1 * t1 + lam_t2 * t2) * idt
-    force_out[k] = wp.spatial_vector(f, wp.vec3f(0.0, 0.0, 0.0))
+    # Negate to convert "force on shape1" -> "force on shape0".
+    f = -(lam_n * n + lam_t1 * t1 + lam_t2 * t2) * idt
+    if has_perm != 0:
+        out_k = sort_perm[k]
+    else:
+        out_k = k
+    force_out[out_k] = wp.spatial_vector(f, wp.vec3f(0.0, 0.0, 0.0))
