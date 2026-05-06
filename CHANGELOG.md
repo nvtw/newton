@@ -10,6 +10,7 @@
 - Raise process priority automatically in `--benchmark` mode for more stable measurements; add `--realtime` for maximum priority.
 - Import per-shape authored color from USD stages into `ModelBuilder.shape_color`
 - Add `TRIANGLE_PRISM` support-function type for heightfield triangles, extruding 1 m along the heightfield's local -Z so GJK/MPR naturally resolves shapes on the back side
+- Add first-class `GeoType.TRIANGLE` primitive and `ModelBuilder.add_shape_triangle(edge_ab, point_c)`. The triangle is canonicalized so that vertex A sits at the local origin, edge AB lies along +Z, and vertex C lies in the local YZ plane; world placement uses the rigid shape transform. Routes through the shared GJK/MPR narrow phase, so it works with all rigid-body solvers including `SolverPhoenX` without any solver-side changes. Hydroelastic contact is intentionally not supported for triangles
 - Add `ViewerGL.log_scalar()` for live scalar time-series plots in the viewer
 - Add `Mesh.is_watertight` property (cached) that reports whether every geometric edge is shared by exactly two triangles
 - Add `deterministic` flag to `CollisionPipeline` and `NarrowPhase` for GPU-thread-scheduling-independent contact ordering via radix sort and deterministic fingerprint tiebreaking in contact reduction
