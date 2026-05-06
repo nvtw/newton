@@ -51,11 +51,19 @@ except ImportError:
 _HAS_ONNX = importlib.util.find_spec("onnx") is not None
 _HAS_TORCH = importlib.util.find_spec("torch") is not None
 
-if _HAS_ONNX:
-    import onnx as _onnx
-    from onnx import TensorProto as _TensorProto
-    from onnx import helper as _onnx_helper
-    from onnx import numpy_helper as _onnx_np
+
+def _onnx_modules():
+    """Lazily import ``onnx`` submodules used by the test ONNX builders.
+
+    Keeping these imports out of module scope so the optional ``onnx``
+    dependency is only loaded when an ONNX-gated test actually runs (and to
+    satisfy the ``TID253`` lint rule that bans module-level ``onnx`` imports
+    in ``newton/tests/**``).
+    """
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    return onnx, TensorProto, helper, numpy_helper
 
 
 def _build_mlp_onnx(
@@ -70,22 +78,24 @@ def _build_mlp_onnx(
         weights: (out_dim, in_dim) Linear weights (PyTorch convention).
         bias: (out_dim,) Linear bias.
     """
+    onnx_mod, TensorProto, helper, numpy_helper = _onnx_modules()
+
     in_dim = int(weights.shape[1])
     out_dim = int(weights.shape[0])
 
-    x_vi = _onnx_helper.make_tensor_value_info("input", _TensorProto.FLOAT, [None, in_dim])
-    y_vi = _onnx_helper.make_tensor_value_info("output", _TensorProto.FLOAT, [None, out_dim])
-    W_init = _onnx_np.from_array(weights.astype(np.float32), name="W")
-    b_init = _onnx_np.from_array(bias.astype(np.float32), name="b")
-    gemm = _onnx_helper.make_node("Gemm", ["input", "W", "b"], ["output"], alpha=1.0, beta=1.0, transB=1)
-    graph = _onnx_helper.make_graph([gemm], "mlp", [x_vi], [y_vi], initializer=[W_init, b_init])
-    model = _onnx_helper.make_model(graph, opset_imports=[_onnx_helper.make_opsetid("", 17)])
+    x_vi = helper.make_tensor_value_info("input", TensorProto.FLOAT, [None, in_dim])
+    y_vi = helper.make_tensor_value_info("output", TensorProto.FLOAT, [None, out_dim])
+    W_init = numpy_helper.from_array(weights.astype(np.float32), name="W")
+    b_init = numpy_helper.from_array(bias.astype(np.float32), name="b")
+    gemm = helper.make_node("Gemm", ["input", "W", "b"], ["output"], alpha=1.0, beta=1.0, transB=1)
+    graph = helper.make_graph([gemm], "mlp", [x_vi], [y_vi], initializer=[W_init, b_init])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
     if metadata is not None:
         meta_prop = model.metadata_props.add()
         meta_prop.key = "metadata"
         meta_prop.value = json.dumps(metadata)
-    _onnx.checker.check_model(model)
-    _onnx.save(model, path)
+    onnx_mod.checker.check_model(model)
+    onnx_mod.save(model, path)
 
 
 def _build_lstm_onnx(
@@ -103,6 +113,8 @@ def _build_lstm_onnx(
     if num_layers != 1:
         raise NotImplementedError("test fixture currently supports num_layers=1")
 
+    onnx_mod, TensorProto, helper, numpy_helper = _onnx_modules()
+
     rng = np.random.default_rng(rng_seed)
     input_size = 2
 
@@ -112,22 +124,22 @@ def _build_lstm_onnx(
     Wd = (rng.standard_normal((1, hidden_size)) * 0.3).astype(np.float32)
     bd = np.zeros((1,), dtype=np.float32)
 
-    x_in = _onnx_helper.make_tensor_value_info("input", _TensorProto.FLOAT, [1, None, input_size])
-    h_in = _onnx_helper.make_tensor_value_info("h_in", _TensorProto.FLOAT, [num_layers, None, hidden_size])
-    c_in = _onnx_helper.make_tensor_value_info("c_in", _TensorProto.FLOAT, [num_layers, None, hidden_size])
-    y_out = _onnx_helper.make_tensor_value_info("output", _TensorProto.FLOAT, [None, 1])
-    h_out = _onnx_helper.make_tensor_value_info("h_out", _TensorProto.FLOAT, [num_layers, None, hidden_size])
-    c_out = _onnx_helper.make_tensor_value_info("c_out", _TensorProto.FLOAT, [num_layers, None, hidden_size])
+    x_in = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, None, input_size])
+    h_in = helper.make_tensor_value_info("h_in", TensorProto.FLOAT, [num_layers, None, hidden_size])
+    c_in = helper.make_tensor_value_info("c_in", TensorProto.FLOAT, [num_layers, None, hidden_size])
+    y_out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [None, 1])
+    h_out = helper.make_tensor_value_info("h_out", TensorProto.FLOAT, [num_layers, None, hidden_size])
+    c_out = helper.make_tensor_value_info("c_out", TensorProto.FLOAT, [num_layers, None, hidden_size])
 
     initializers = [
-        _onnx_np.from_array(W, name="W"),
-        _onnx_np.from_array(R, name="R"),
-        _onnx_np.from_array(B, name="B"),
-        _onnx_np.from_array(Wd, name="Wd"),
-        _onnx_np.from_array(bd, name="bd"),
+        numpy_helper.from_array(W, name="W"),
+        numpy_helper.from_array(R, name="R"),
+        numpy_helper.from_array(B, name="B"),
+        numpy_helper.from_array(Wd, name="Wd"),
+        numpy_helper.from_array(bd, name="bd"),
     ]
 
-    lstm = _onnx_helper.make_node(
+    lstm = helper.make_node(
         "LSTM",
         ["input", "W", "R", "B", "", "h_in", "c_in"],
         ["Y", "h_out", "c_out"],
@@ -135,16 +147,16 @@ def _build_lstm_onnx(
         layout=0,
     )
     # Y has shape (1, 1, N, hidden_size).  Squeeze first two dims -> (N, hidden_size).
-    squeeze_axes = _onnx_np.from_array(np.array([0, 1], dtype=np.int64), name="squeeze_axes")
+    squeeze_axes = numpy_helper.from_array(np.array([0, 1], dtype=np.int64), name="squeeze_axes")
     initializers.append(squeeze_axes)
-    sq = _onnx_helper.make_node("Squeeze", ["Y", "squeeze_axes"], ["Y_2d"])
+    sq = helper.make_node("Squeeze", ["Y", "squeeze_axes"], ["Y_2d"])
     # Final linear decoder: Y_2d (N, H) @ Wd^T + bd -> (N, 1)
-    dec = _onnx_helper.make_node("Gemm", ["Y_2d", "Wd", "bd"], ["output"], alpha=1.0, beta=1.0, transB=1)
+    dec = helper.make_node("Gemm", ["Y_2d", "Wd", "bd"], ["output"], alpha=1.0, beta=1.0, transB=1)
 
-    graph = _onnx_helper.make_graph(
+    graph = helper.make_graph(
         [lstm, sq, dec], "lstm_test", [x_in, h_in, c_in], [y_out, h_out, c_out], initializer=initializers
     )
-    model = _onnx_helper.make_model(graph, opset_imports=[_onnx_helper.make_opsetid("", 17)])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
 
     full_meta = {
         "input_name": "input",
@@ -161,8 +173,8 @@ def _build_lstm_onnx(
     meta_prop = model.metadata_props.add()
     meta_prop.key = "metadata"
     meta_prop.value = json.dumps(full_meta)
-    _onnx.checker.check_model(model)
-    _onnx.save(model, path)
+    onnx_mod.checker.check_model(model)
+    onnx_mod.save(model, path)
 
 
 # ---------------------------------------------------------------------------

@@ -393,13 +393,26 @@ def _shape_lstm(op, shapes, tensors, device):
     # The kernel hardcodes ONNX-default activations (sigmoid, tanh, tanh) and
     # has no peephole / clip / input_forget / sequence_lens support.  Reject
     # any model that asks for non-default behavior so we never silently
-    # produce wrong inferences.
-    for unsupported in ("activations", "activation_alpha", "activation_beta", "clip", "input_forget"):
+    # produce wrong inferences.  ``activations`` / ``activation_alpha`` /
+    # ``activation_beta`` are rejected on presence (we don't decode them and
+    # any explicit setting overrides the defaults), but ``clip`` and
+    # ``input_forget`` are checked by value: many exporters serialize their
+    # default values (``clip=0.0``, ``input_forget=0``) explicitly, and those
+    # match our hardcoded behavior so we should accept them.
+    for unsupported in ("activations", "activation_alpha", "activation_beta"):
         if unsupported in op.attr_names:
             raise NotImplementedError(
                 f"OnnxRuntime LSTM: attribute '{unsupported}' is not supported "
-                f"(only default sigmoid/tanh/tanh activations, no clip, no input_forget)"
+                f"(only default sigmoid/tanh/tanh activations)"
             )
+    if op.attrs.get("clip", 0.0):
+        raise NotImplementedError(
+            f"OnnxRuntime LSTM: non-default 'clip' attribute is not supported (got {op.attrs['clip']})"
+        )
+    if op.attrs.get("input_forget", 0):
+        raise NotImplementedError(
+            f"OnnxRuntime LSTM: non-default 'input_forget' attribute is not supported (got {op.attrs['input_forget']})"
+        )
 
     # sequence_lens (input index 4) and P / peepholes (input index 7) are
     # optional ONNX inputs.  Empty strings denote "not provided" in ONNX.

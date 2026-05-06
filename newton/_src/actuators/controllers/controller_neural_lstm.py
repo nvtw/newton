@@ -8,7 +8,7 @@ from typing import Any, ClassVar
 
 import warp as wp
 
-from ..utils import load_checkpoint, load_metadata
+from ..utils import _TorchModuleAdapter, load_checkpoint, load_metadata
 from .base import Controller
 
 
@@ -216,7 +216,10 @@ class ControllerNeuralLSTM(Controller):
         return True
 
     def is_graphable(self) -> bool:
-        return True
+        # The deprecated ``_TorchModuleAdapter`` round-trips through host
+        # ``.numpy()`` and PyTorch and is not safe inside a CUDA graph capture;
+        # only the Warp-backed ``OnnxRuntime`` path is graph-capturable.
+        return not isinstance(self._network, _TorchModuleAdapter)
 
     def state(self, num_actuators: int, device: wp.Device) -> ControllerNeuralLSTM.State:
         return ControllerNeuralLSTM.State(
