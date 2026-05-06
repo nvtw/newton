@@ -1644,9 +1644,12 @@ def get_generate_contacts_kernel(
                         iso_vertex_shape_pair[contact_id] = pair
                     continue
 
-                # Local-first compaction: keep top-K penetrating faces by score.
+                # Local-first compaction: keep top-K penetrating faces by force
+                # magnitude (area * pressure). Under a non-linear pressure law
+                # this is no longer the same as area * |depth|, and ranking by
+                # force keeps the contacts that contribute most to agg_force.
                 if pen_depth < 0.0:
-                    score = area * (-pen_depth)
+                    score = area * face_pressure
                     if best_pen0_valid == 0 or score > best_pen0_score:
                         # Shift slot0 -> slot1
                         best_pen1_valid = best_pen0_valid

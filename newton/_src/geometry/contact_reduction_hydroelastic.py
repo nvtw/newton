@@ -8,7 +8,8 @@ building on the core ``GlobalContactReducer`` from ``contact_reduction_global.py
 
 **Hydroelastic Contact Features:**
 
-- Aggregate stiffness calculation: ``c_stiffness = k_eff * |agg_force| / total_depth``
+- Aggregate stiffness calculation: ``c_stiffness = |agg_force| / total_depth`` where
+  ``agg_force = sum(area * pressure_func(depth) * normal)`` is in physical force units
 - Normal matching: rotates reduced normals to align with aggregate force direction
 - Anchor contact: synthetic contact at center of pressure for moment balance
 
