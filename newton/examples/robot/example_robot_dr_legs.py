@@ -17,13 +17,27 @@
 # Example Robot DR Legs
 #
 # Loads the Disney Research bipedal-legs USD asset and simulates it with
-# SolverXPBD. The USD importer requires a tree topology, so the six
-# loop-closing joints (outer foot closers and parallel rods) are still
-# tagged with `physics:excludeFromArticulation` to keep them out of the
-# spanning tree. XPBD then treats every joint -- tree edge or loop closer
-# alike -- as a generic positional constraint, with no special equality
-# constraint plumbing required. Optionally drives the 12 actuated joints
-# from the bundled animation .npy.
+# SolverXPBD. The asset has six closed kinematic loops (parallel-rod
+# linkages and outer ankle brackets); XPBD's joint solver treats every
+# joint -- whether on a tree edge or a loop closer -- as a generic
+# positional constraint, so closed loops need no special equality
+# constraint plumbing.
+#
+# What we do still need is an articulation tree rooted at the pelvis,
+# so that ``add_usd(..., floating=True)`` can attach a FREE base joint
+# to it (without a base joint, XPBD has no way to anchor the floating
+# pelvis to inertial space and the system drifts). We give the
+# importer a clean tree by:
+#   - tagging the pelvis as the articulation root,
+#   - tagging the six joints that would otherwise create multi-parent
+#     bodies with ``physics:excludeFromArticulation`` -- they remain in
+#     the model as loop-closer joint constraints,
+#   - passing ``joint_ordering=None`` so the importer keeps the
+#     remaining tree edges in their authored body0=parent / body1=child
+#     orientation (no flipping needed).
+#
+# Optionally drives the 12 actuated joints from the bundled animation
+# .npy.
 #
 # Command: python -m newton.examples robot_dr_legs --world-count 16
 #
@@ -39,14 +53,14 @@ import newton
 import newton.examples
 import newton.utils
 
-# Joints whose body0/body1 (and matching local pose attrs) are swapped
-# before add_usd() so all hinges share the importer-required
-# body0=parent / body1=child convention.
-_FLIPPED_JOINTS = (
-    "/DR_Legs/Joints/j1_l_i",
-    "/DR_Legs/Joints/j2_l_i",
-    "/DR_Legs/Joints/j3_l_i",
-    "/DR_Legs/Joints/j4_l_i",
+# Joints whose authored ``body1`` is shared with another joint's
+# ``body1`` (i.e. they would create a body with multiple parents in the
+# tree). Tagging them with ``physics:excludeFromArticulation`` leaves
+# them as ordinary joints in the model -- XPBD enforces them just like
+# any other constraint -- but keeps the importer's articulation tree
+# valid. Derived from the raw USD authored joint graph; every other
+# joint stays on the pelvis-rooted tree.
+_LOOP_CLOSER_JOINTS = (
     "/DR_Legs/Joints/j6_l_i",
     "/DR_Legs/Joints/j6_r_i",
     "/DR_Legs/Joints/j9_l_i",
@@ -55,21 +69,11 @@ _FLIPPED_JOINTS = (
     "/DR_Legs/Joints/j9_r_o",
 )
 
-# Joints excluded from the articulation tree so the USD importer can
-# produce a cycle-free spanning tree. XPBD handles them as ordinary joint
-# constraints -- no loop-closure equality constraints needed.
-_LOOP_CLOSER_JOINTS = (
-    "/DR_Legs/Joints/j6_l_o",
-    "/DR_Legs/Joints/j6_r_o",
-    "/DR_Legs/Joints/j8_l_i",
-    "/DR_Legs/Joints/j8_l_o",
-    "/DR_Legs/Joints/j8_r_i",
-    "/DR_Legs/Joints/j8_r_o",
-)
-
-# Animation channel → joint path. The bundled .npy stores 12 columns in
-# this order. Channels marked here with a sign of -1 must be negated
-# because the corresponding joint was reoriented in _FLIPPED_JOINTS above.
+# Animation channel -> joint path. The bundled .npy stores 12 columns
+# in this order. With ``joint_ordering=None`` and the loop-closer set
+# below, every actuated joint's authored axis already matches the
+# .npy's sign convention -- a pinned-pelvis replay tracks each channel
+# with corr > 0.99 -- so the per-channel sign array is identically +1.
 _ANIMATION_JOINT_PATHS = (
     "/DR_Legs/Joints/j1_l_i",
     "/DR_Legs/Joints/j2_l_i",
@@ -84,42 +88,7 @@ _ANIMATION_JOINT_PATHS = (
     "/DR_Legs/Joints/j2_r_o",
     "/DR_Legs/Joints/j7_r_o",
 )
-_ANIMATION_CHANNEL_SIGN = np.array([-1, -1, -1, +1, +1, +1, +1, +1, -1, +1, +1, +1], dtype=np.float32)
-
-
-def _get_prim(stage: Usd.Stage, path: str):
-    prim = stage.GetPrimAtPath(path)
-    if not prim or not prim.IsValid():
-        raise RuntimeError(f"Expected prim at {path}")
-    return prim
-
-
-def _make_articulation_root(stage: Usd.Stage, root_path: str) -> None:
-    UsdPhysics.ArticulationRootAPI.Apply(_get_prim(stage, root_path))
-
-
-def _swap_attr_pair(prim, name_a: str, name_b: str) -> None:
-    a = prim.GetAttribute(name_a)
-    b = prim.GetAttribute(name_b)
-    va, vb = a.Get(), b.Get()
-    a.Set(vb)
-    b.Set(va)
-
-
-def _flip_joint(stage: Usd.Stage, joint_path: str) -> None:
-    joint = _get_prim(stage, joint_path)
-    body0 = joint.GetRelationship("physics:body0")
-    body1 = joint.GetRelationship("physics:body1")
-    t0, t1 = list(body0.GetTargets()), list(body1.GetTargets())
-    body0.SetTargets(t1)
-    body1.SetTargets(t0)
-    _swap_attr_pair(joint, "physics:localPos0", "physics:localPos1")
-    _swap_attr_pair(joint, "physics:localRot0", "physics:localRot1")
-
-
-def _exclude_from_articulation(stage: Usd.Stage, joint_path: str) -> None:
-    attr = _get_prim(stage, joint_path).CreateAttribute("physics:excludeFromArticulation", Sdf.ValueTypeNames.Bool)
-    attr.Set(True)
+_ANIMATION_CHANNEL_SIGN = np.ones(12, dtype=np.float32)
 
 
 class Example:
@@ -154,25 +123,22 @@ class Example:
         stage = Usd.Stage.Open(asset_file)
         if stage is None:
             raise RuntimeError(f"Failed to open dr_legs USD stage: {asset_file}")
-        # The USD importer needs a cycle-free tree with body0=parent on
-        # every joint. We flip the misoriented hinges to satisfy the
-        # importer and tag loop closers as excluded. XPBD then solves
-        # every joint -- tree edge or loop closer -- as a regular
-        # positional constraint, no equality-constraint setup needed.
-        _make_articulation_root(stage, "/DR_Legs/RigidBodies/pelvis")
-        for jp in _FLIPPED_JOINTS:
-            _flip_joint(stage, jp)
+        UsdPhysics.ArticulationRootAPI.Apply(stage.GetPrimAtPath("/DR_Legs/RigidBodies/pelvis"))
         for jp in _LOOP_CLOSER_JOINTS:
-            _exclude_from_articulation(stage, jp)
+            stage.GetPrimAtPath(jp).CreateAttribute(
+                "physics:excludeFromArticulation", Sdf.ValueTypeNames.Bool
+            ).Set(True)
 
-        # Lift the robot enough that even the lowest collision shape (the
-        # outer ankle brackets, ~5 cm below the pelvis origin) starts well
-        # above the ground plane. XPBD's hard positional contacts cannot
-        # recover from initial-frame penetrations the way MuJoCo's soft
-        # contact model can.
+        # Lift the robot enough that even the lowest collision shape
+        # (the outer ankle brackets, ~5 cm below the pelvis origin)
+        # starts well above the ground plane. ``floating=True`` adds
+        # the FREE base joint that XPBD needs to anchor the pelvis to
+        # inertial space.
         dr_legs.add_usd(
             stage,
             xform=wp.transform(wp.vec3(0, 0, 0.3)),
+            floating=True,
+            joint_ordering=None,
             collapse_fixed_joints=False,
             enable_self_collisions=False,
             hide_collision_shapes=True,
@@ -213,12 +179,11 @@ class Example:
         self.model = builder.finalize()
 
         # A tiny non-zero compliance turns the joint constraints from
-        # infinitely-stiff (compliance=0) into very stiff springs. This
-        # is essential for the closed kinematic loops in this asset:
-        # the six loop-closer hinges create over-determined constraint
-        # sets whose residuals cannot all be zero with finite
-        # iterations, and infinite stiffness amplifies that residual
-        # into an integrator-breaking impulse on frame 1.
+        # infinitely-stiff (compliance=0) into very stiff springs. The
+        # six loop-closer hinges create an over-determined constraint
+        # set whose residuals cannot all be zero with finite XPBD
+        # iterations; infinite stiffness amplifies that residual into
+        # an integrator-breaking impulse on frame 1.
         self.solver = newton.solvers.SolverXPBD(
             self.model,
             iterations=args.solver_iterations,
@@ -327,7 +292,7 @@ class Example:
         parser.add_argument(
             "--sim-substeps",
             type=int,
-            default=16,
+            default=20,
             help="Inner solver steps per visualization frame; XPBD relies on substepping to converge stiff loop closures.",
         )
         parser.add_argument(
