@@ -504,6 +504,21 @@ class SolverPhoenX(SolverBase):
         inertia tensors, recomputes ``inverse_inertia`` (body-local) and
         ``inverse_inertia_world`` (= R*I^-1*R^T at the rest pose), and
         re-uploads them.
+
+        Per-joint bake amount (``alpha`` per body):
+
+        * Fixed-anchor joints (``parent == world`` -> slot 0 has zero
+          inv-mass): ``alpha = a`` on the child only. Effective ``M_q
+          = M_chain + a`` exactly.
+        * Two-body joints: solve the quadratic
+          ``alpha^2 + alpha * (S - 2a - 2*M_chain) - a*S = 0`` (with
+          ``S = I_A + I_B``, ``M_chain = I_A*I_B/(I_A+I_B)``) for the
+          positive root. This makes the bake exact-MuJoCo for every
+          mass ratio: ``alpha = 2a`` for symmetric ``I_A = I_B`` and
+          ``alpha -> a`` as one body's axial inertia dominates.
+          Equivalent to picking the per-body inflation that makes
+          ``(I_A + alpha)*(I_B + alpha) / (I_A + I_B + 2*alpha) ==
+          M_chain + a``.
         """
         if model.joint_count == 0 or model.joint_armature is None:
             return
@@ -569,23 +584,74 @@ class SolverPhoenX(SolverBase):
                     axis_in_p = axis_in_p / np_p
                 if np_c > 1e-12:
                     axis_in_c = axis_in_c / np_c
-                # Splitting the armature equally across both bodies (each
-                # gets ``a``) is the same approximation the PhoenX-port
-                # prototype validated on the G1: it slightly over-counts
-                # inertia when both bodies have comparable mass along the
-                # axis, but never destabilises (errs on the conservative
-                # side) and exactly fixes the "skinny intermediate link"
-                # case where one body is the bottleneck.
-                if slot_p > 0:
-                    body_inertia[slot_p] = body_inertia[slot_p] + a * np.outer(axis_in_p, axis_in_p)
-                if slot_c > 0:
-                    body_inertia[slot_c] = body_inertia[slot_c] + a * np.outer(axis_in_c, axis_in_c)
+
+                # Per-body inflation depends on the joint's mass-ratio
+                # regime. Fixed-anchor joint: only the child gets ``a``
+                # (parent slot 0 has zero inv-mass, so its rank-1 add
+                # never reaches the constraint solver anyway). Two-body
+                # joint: solve the quadratic ``alpha^2 + alpha*(S - 2a
+                # - 2*M_chain) - a*S = 0`` for the positive root so
+                # that the post-bake effective inertia at the joint
+                # equals ``M_chain + a`` -- exact MuJoCo equivalence
+                # for any mass ratio.
+                if slot_p == 0:
+                    alpha_p = 0.0
+                    alpha_c = a
+                elif slot_c == 0:
+                    alpha_p = a
+                    alpha_c = 0.0
+                else:
+                    i_a = float(axis_in_p @ body_inertia[slot_p] @ axis_in_p)
+                    i_b = float(axis_in_c @ body_inertia[slot_c] @ axis_in_c)
+                    if i_a > 0.0 and i_b > 0.0:
+                        s_sum = i_a + i_b
+                        m_chain = i_a * i_b / s_sum
+                        b_coef = s_sum - 2.0 * a - 2.0 * m_chain
+                        c_coef = -a * s_sum
+                        disc = b_coef * b_coef - 4.0 * c_coef
+                        # ``c_coef <= 0`` so ``disc >= b_coef^2`` -- the
+                        # positive root is always real.
+                        alpha = 0.5 * (-b_coef + float(np.sqrt(max(disc, 0.0))))
+                    else:
+                        # Degenerate: fall back to the per-body ``a``
+                        # split (matches the pre-quadratic behaviour).
+                        alpha = a
+                    alpha_p = alpha
+                    alpha_c = alpha
+
+                if slot_p > 0 and alpha_p > 0.0:
+                    body_inertia[slot_p] = body_inertia[slot_p] + alpha_p * np.outer(axis_in_p, axis_in_p)
+                if slot_c > 0 and alpha_c > 0.0:
+                    body_inertia[slot_c] = body_inertia[slot_c] + alpha_c * np.outer(axis_in_c, axis_in_c)
             else:  # PRISMATIC
-                # Translational armature: add to mass on both bodies.
-                if slot_p > 0:
-                    body_mass[slot_p] = body_mass[slot_p] + a
-                if slot_c > 0:
-                    body_mass[slot_c] = body_mass[slot_c] + a
+                # Translational armature: scalar add to mass. Same
+                # quadratic argument as REVOLUTE applies (replace
+                # axial inertia with mass).
+                if slot_p == 0:
+                    alpha_p = 0.0
+                    alpha_c = a
+                elif slot_c == 0:
+                    alpha_p = a
+                    alpha_c = 0.0
+                else:
+                    m_a = body_mass[slot_p]
+                    m_b = body_mass[slot_c]
+                    if m_a > 0.0 and m_b > 0.0:
+                        s_sum = m_a + m_b
+                        m_chain = m_a * m_b / s_sum
+                        b_coef = s_sum - 2.0 * a - 2.0 * m_chain
+                        c_coef = -a * s_sum
+                        disc = b_coef * b_coef - 4.0 * c_coef
+                        alpha = 0.5 * (-b_coef + float(np.sqrt(max(disc, 0.0))))
+                    else:
+                        alpha = a
+                    alpha_p = alpha
+                    alpha_c = alpha
+
+                if slot_p > 0 and alpha_p > 0.0:
+                    body_mass[slot_p] = body_mass[slot_p] + alpha_p
+                if slot_c > 0 and alpha_c > 0.0:
+                    body_mass[slot_c] = body_mass[slot_c] + alpha_c
 
         if not any_baked:
             return
