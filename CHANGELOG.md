@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add linear HDR color output support to `SensorTiledCamera` via `hdr_color_image`.
 - Add composable actuator subsystem with pluggable `Controller` (`ControllerPD`, `ControllerPID`, `ControllerNeuralMLP`, `ControllerNeuralLSTM`), `Clamping` (`ClampingMaxEffort`, `ClampingDCMotor`, `ClampingPositionBased`), and `Delay` components; supports per-DOF delays, CUDA graph capture, and masked environment reset
 - Add heatmap rendering for scalar arrays logged through `ViewerGL.log_array()`
 - Add Blender-style orbit, pan, and dolly controls to the GL viewer using middle-mouse drag combinations
@@ -39,6 +40,8 @@
 - Add frame-by-frame step support to `ViewerGL`: press `.` while paused to advance one simulation frame
 - Add ViewerBase.should_step() — call once per frame to determine whether the simulation loop should advance; returns True when not paused.
 - Add Kamino-specific simulation examples in `newton/examples/kamino`
+- Add per-mesh `color` override to `ViewerBase.log_mesh()` for tinting individual meshes without authoring per-vertex colors
+- Add per-mesh `roughness` and `metallic` PBR overrides to `ViewerBase.log_mesh()`
 
 ### Changed
 
