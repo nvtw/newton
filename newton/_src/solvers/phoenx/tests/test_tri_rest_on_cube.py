@@ -66,12 +66,14 @@ TRI_VERTS_2D = np.array(
 )
 TRI_REST_Z = CUBE_TOP + 0.005  # 5 mm above cube top (within speculative gap)
 
-# Pass tolerance: 3 mm peak displacement over the 2 s run. Tight enough
-# that any regression in the cloth contact path (e.g. velocity-only
-# writes that XPBD's substep-exit recovery wipes out, or a missing
-# access-mode flip after the velocity update) is caught -- such bugs
-# raise the drift well above this threshold.
-PASS_DISP_MM = 3.0
+# Pass tolerance: 0.1 mm peak displacement over the 2 s run. The
+# observed steady-state drift on this scene is < 0.02 mm/s for both
+# rigid and cloth tris, so 0.1 mm is roughly 10x the steady-state floor
+# and tight enough to catch any regression in the cloth contact path
+# (e.g. dropping the warm-start impulse scatter, missing the
+# VELOCITY -> POSITION access-mode flip after the iterate's velocity
+# write, or any change that breaks prev-frame contact memory).
+PASS_DISP_MM = 0.1
 
 
 def _mat_to_quat(R: np.ndarray) -> np.ndarray:

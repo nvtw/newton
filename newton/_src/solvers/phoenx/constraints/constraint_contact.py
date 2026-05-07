@@ -68,7 +68,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent2_lambda,
 )
 from newton._src.solvers.phoenx.constraints.contact_endpoint import (
-    ENDPOINT_KIND_TRIANGLE,
     endpoint_apply_impulse,
     endpoint_load,
     endpoint_warmstart_apply_impulse,
@@ -743,40 +742,54 @@ def contact_prepare_for_iteration_at(
         # for cloth-involved contacts we skip the warmstart impulse
         # but keep the lambda as the initial guess.  Rigid-rigid
         # pairs are bit-for-bit unchanged.
-        triangle_endpoint = (kind1 == ENDPOINT_KIND_TRIANGLE) or (kind2 == ENDPOINT_KIND_TRIANGLE)
-        if not triangle_endpoint:
-            lam_n = cc_get_normal_lambda(cc, k)
-            lam_t1 = cc_get_tangent1_lambda(cc, k)
-            lam_t2 = cc_get_tangent2_lambda(cc, k)
-            imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
-            endpoint_warmstart_apply_impulse(
-                kind1,
-                idx1,
-                local_p0,
-                imp,
-                wp.cross(ep1.r, imp),
-                ep1.inv_mass,
-                ep1.inv_inertia,
-                wp.float32(-1.0),
-                dt_substep,
-                bodies,
-                particles,
-                tri_indices,
-            )
-            endpoint_warmstart_apply_impulse(
-                kind2,
-                idx2,
-                local_p1,
-                imp,
-                wp.cross(ep2.r, imp),
-                ep2.inv_mass,
-                ep2.inv_inertia,
-                wp.float32(+1.0),
-                dt_substep,
-                bodies,
-                particles,
-                tri_indices,
-            )
+        # Warm-start impulse: scatter ``lam_old`` as a re-applied
+        # impulse so the first iteration starts at the prev-step's
+        # solution. Standard Box2D-v3 behaviour, essential for stacking
+        # convergence and -- for cloth on rigid -- rest stability:
+        # without warm-start scatter, each frame starts with no
+        # velocity-side memory of the previous frame's contact balance,
+        # so cloth contacts on a heavier rigid creep at ~1 mm/s under
+        # gravity. Triangle (cloth particle) endpoints take the same
+        # path; the warm-start scatter is paired with a
+        # ``VELOCITY_LEVEL -> POSITION_LEVEL`` access-mode flip inside
+        # :func:`endpoint_warmstart_apply_impulse` that folds the
+        # impulse into ``particles.position`` via the same finite-diff
+        # the substep-exit recovery uses. That matches what the rigid
+        # branch's substep-exit ``pos += vel * dt`` does for bodies, so
+        # both kinds of endpoints maintain prev-frame contact memory
+        # symmetrically.
+        lam_n = cc_get_normal_lambda(cc, k)
+        lam_t1 = cc_get_tangent1_lambda(cc, k)
+        lam_t2 = cc_get_tangent2_lambda(cc, k)
+        imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
+        endpoint_warmstart_apply_impulse(
+            kind1,
+            idx1,
+            local_p0,
+            imp,
+            wp.cross(ep1.r, imp),
+            ep1.inv_mass,
+            ep1.inv_inertia,
+            wp.float32(-1.0),
+            dt_substep,
+            bodies,
+            particles,
+            tri_indices,
+        )
+        endpoint_warmstart_apply_impulse(
+            kind2,
+            idx2,
+            local_p1,
+            imp,
+            wp.cross(ep2.r, imp),
+            ep2.inv_mass,
+            ep2.inv_inertia,
+            wp.float32(+1.0),
+            dt_substep,
+            bodies,
+            particles,
+            tri_indices,
+        )
 
 
 @wp.func
