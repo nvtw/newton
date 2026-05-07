@@ -1,0 +1,467 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+###########################################################################
+# Example Robot DR Legs (PhoenX)
+#
+# Loads the Disney Research bipedal-legs USD asset and simulates it with
+# :class:`SolverPhoenX`. The asset has six closed kinematic loops
+# (parallel-rod linkages and outer ankle brackets).
+#
+# Topology choices follow the MuJoCo example
+# (``example_robot_dr_legs_mujoco.py``) because the actuated joints
+# must remain on the articulation tree -- if they end up as loop
+# closers, the stiff USD-authored PD drive on a loop-closure
+# constraint pins the bodies it spans (in the prior PhoenX
+# experiment, ``foot_l`` was effectively glued to its inner-chain
+# ankle bracket while the outer chain dangled, never moving).
+#
+# We therefore:
+#   - flip ten joints so all hinges share a consistent
+#     ``body0=parent`` orientation,
+#   - exclude six unactuated outer/parallel joints from the
+#     articulation tree (they remain in the model as ordinary joint
+#     constraints; PhoenX treats them just like any other
+#     constraint),
+#   - tag the pelvis as the articulation root.
+#
+# Drives the 12 actuated joints from the bundled walking animation.
+# Half of those joints were flipped, so their animation channels are
+# negated to compensate. PhoenX handles substepping internally:
+# per-frame we call ``solver.step(..., dt=frame_dt)`` exactly once
+# and the solver advances ``substeps`` PGS substeps under the hood.
+# ``--fps`` controls how often the broad/narrow-phase collision
+# detection runs.
+#
+# Command: python -m newton.examples robot_dr_legs_phoenx --world-count 4
+#
+###########################################################################
+
+import argparse
+
+import numpy as np
+import warp as wp
+from pxr import Sdf, Usd, UsdPhysics
+
+import newton
+import newton.examples
+import newton.utils
+
+# Joints whose body0/body1 (and matching local pose attrs) are swapped
+# before ``add_usd()`` so all hinges share a consistent
+# ``body0=parent`` convention. The j1-j4 inner-chain joints in this
+# asset are already authored with body0=parent (pelvis -> hip ->
+# upperleg -> lowerleg -> ankle); only the ankle inner-loop hinges
+# (j6_*_i: foot -> ankle_bracket_b) and the parallel-rod hinges
+# (j9_*_*: rod -> lowerleg) are inverted in the USD and need
+# flipping. Flipping a joint that is already in the right direction
+# pushes the importer's tree root onto a leaf body (e.g.
+# ankle_bracket_a_l_i) and leaves one side of the robot effectively
+# pinned to the floating-base inertia, which is the "left foot
+# glued to the world" symptom.
+_FLIPPED_JOINTS = (
+    "/DR_Legs/Joints/j6_l_i",
+    "/DR_Legs/Joints/j6_r_i",
+    "/DR_Legs/Joints/j9_l_i",
+    "/DR_Legs/Joints/j9_l_o",
+    "/DR_Legs/Joints/j9_r_i",
+    "/DR_Legs/Joints/j9_r_o",
+)
+
+# Joints excluded from the articulation tree so the USD importer sees
+# a clean parent-child graph. PhoenX still applies these as ordinary
+# joint constraints. All six are unactuated; keeping the actuated
+# joints on tree edges avoids stiff PD running through a
+# loop-closure constraint.
+_LOOP_CLOSER_JOINTS = (
+    "/DR_Legs/Joints/j6_l_o",
+    "/DR_Legs/Joints/j6_r_o",
+    "/DR_Legs/Joints/j8_l_i",
+    "/DR_Legs/Joints/j8_l_o",
+    "/DR_Legs/Joints/j8_r_i",
+    "/DR_Legs/Joints/j8_r_o",
+)
+
+# Animation channel -> joint path. The bundled .npy stores 12 columns
+# in this order. Channels marked here with a sign of -1 must be
+# negated because the corresponding joint was reoriented in
+# ``_FLIPPED_JOINTS``.
+_ANIMATION_JOINT_PATHS = (
+    "/DR_Legs/Joints/j1_l_i",
+    "/DR_Legs/Joints/j2_l_i",
+    "/DR_Legs/Joints/j6_l_i",
+    "/DR_Legs/Joints/j7_l_i",
+    "/DR_Legs/Joints/j2_l_o",
+    "/DR_Legs/Joints/j7_l_o",
+    "/DR_Legs/Joints/j1_r_i",
+    "/DR_Legs/Joints/j2_r_i",
+    "/DR_Legs/Joints/j6_r_i",
+    "/DR_Legs/Joints/j7_r_i",
+    "/DR_Legs/Joints/j2_r_o",
+    "/DR_Legs/Joints/j7_r_o",
+)
+_ANIMATION_CHANNEL_SIGN = np.array([+1, +1, -1, +1, +1, +1, +1, +1, -1, +1, +1, +1], dtype=np.float32)
+
+
+def _swap_attr_pair(prim, name_a: str, name_b: str) -> None:
+    a = prim.GetAttribute(name_a)
+    b = prim.GetAttribute(name_b)
+    va, vb = a.Get(), b.Get()
+    a.Set(vb)
+    b.Set(va)
+
+
+def _flip_joint(stage: Usd.Stage, joint_path: str) -> None:
+    joint = stage.GetPrimAtPath(joint_path)
+    body0 = joint.GetRelationship("physics:body0")
+    body1 = joint.GetRelationship("physics:body1")
+    t0, t1 = list(body0.GetTargets()), list(body1.GetTargets())
+    body0.SetTargets(t1)
+    body1.SetTargets(t0)
+    _swap_attr_pair(joint, "physics:localPos0", "physics:localPos1")
+    _swap_attr_pair(joint, "physics:localRot0", "physics:localRot1")
+
+
+class Example:
+    def __init__(self, viewer, args):
+        # ``--fps`` controls how often we enter the per-frame pipeline:
+        # broad/narrow-phase collide() once, then a single
+        # ``solver.step(..., dt=frame_dt)`` call. PhoenX runs
+        # ``args.sim_substeps`` PGS substeps internally per step, so
+        # the integrator dt is ``frame_dt / sim_substeps``.
+        self.fps = args.fps
+        self.frame_dt = 1.0 / self.fps
+        self.sim_time = 0.0
+
+        self.world_count = args.world_count
+
+        self.viewer = viewer
+
+        dr_legs = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        dr_legs.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
+            limit_ke=1.0e3, limit_kd=1.0e1, friction=1e-5, armature=1e-3
+        )
+        dr_legs.default_shape_cfg.ke = 2.0e3
+        dr_legs.default_shape_cfg.kd = 1.0e2
+        dr_legs.default_shape_cfg.kf = 1.0e3
+        dr_legs.default_shape_cfg.mu = 0.75
+
+        asset_path = newton.utils.download_asset("disneyresearch")
+        asset_file = str(asset_path / "dr_legs/usd" / "dr_legs_with_meshes_and_boxes.usda")
+
+        stage = Usd.Stage.Open(asset_file)
+        if stage is None:
+            raise RuntimeError(f"Failed to open dr_legs USD stage: {asset_file}")
+        UsdPhysics.ArticulationRootAPI.Apply(stage.GetPrimAtPath("/DR_Legs/RigidBodies/pelvis"))
+        for jp in _FLIPPED_JOINTS:
+            _flip_joint(stage, jp)
+        for jp in _LOOP_CLOSER_JOINTS:
+            stage.GetPrimAtPath(jp).CreateAttribute("physics:excludeFromArticulation", Sdf.ValueTypeNames.Bool).Set(
+                True
+            )
+
+        # Place the robot with the foot collision boxes resting just
+        # above the ground plane (added below at z = 0). The lowest
+        # body in neutral pose is the foot box at pelvis_z - 0.262, so
+        # a pelvis offset of 0.265 puts the feet ~3 mm above the
+        # ground at start-up -- enough to let contacts engage cleanly
+        # without a long free-fall.
+        dr_legs.add_usd(
+            stage,
+            xform=wp.transform(wp.vec3(0, 0, 0.265)),
+            collapse_fixed_joints=False,
+            enable_self_collisions=False,
+            hide_collision_shapes=True,
+        )
+
+        # Optionally rescale USD-authored kp/kd before replication.
+        kp_scale = args.animation_gain_scale if args.animation else 1.0
+        kd_scale = args.animation_kd_scale if (args.animation and args.animation_kd_scale is not None) else kp_scale
+        if kp_scale != 1.0 or kd_scale != 1.0:
+            none_mode = int(newton.JointTargetMode.NONE)
+            for dof_i, mode in enumerate(dr_legs.joint_target_mode):
+                if mode != none_mode:
+                    dr_legs.joint_target_ke[dof_i] *= kp_scale
+                    dr_legs.joint_target_kd[dof_i] *= kd_scale
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        builder.replicate(dr_legs, self.world_count)
+
+        builder.default_shape_cfg.ke = 1.0e3
+        builder.default_shape_cfg.kd = 1.0e2
+        builder.add_ground_plane()
+
+        self.model = builder.finalize()
+
+        # PhoenX handles substepping internally. ``substeps`` controls
+        # the number of PGS substeps per :meth:`step` call;
+        # ``solver_iterations`` is PGS iterations per substep;
+        # ``velocity_iterations`` is the TGS-soft relax sweep count.
+        self.solver = newton.solvers.SolverPhoenX(
+            self.model,
+            substeps=args.sim_substeps,
+            solver_iterations=args.solver_iterations,
+            velocity_iterations=args.velocity_iterations,
+        )
+
+        self.state_0 = self.model.state()
+        self.state_1 = self.model.state()
+        self.control = self.model.control()
+
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+
+        # PhoenX always uses the model's CollisionPipeline contacts
+        # buffer; the solver auto-attaches a sticky pipeline on
+        # construction so ``model.contacts()`` returns the right
+        # buffer.
+        self.contacts = self.model.contacts()
+
+        self._animation_data: np.ndarray | None = None
+        self._animation_speed: float = args.animation_speed
+        if args.animation:
+            self._init_animation(asset_path)
+
+        self.viewer.set_model(self.model)
+        self._fix_picking_effective_mass()
+
+        self.capture()
+
+    def _fix_picking_effective_mass(self) -> None:
+        """Override Newton picking's per-body effective-mass with the
+        true connected-component sum.
+
+        :func:`newton._src.viewer.picking.Picking._compute_effective_mass`
+        builds ``body_art`` by writing ``body_art[child] = joint_art[j]``
+        for every joint touching ``child`` -- last write wins. In the
+        DR Legs asset six bodies (the two feet plus the four
+        parallel-rods) are the *child* of both a tree-edge joint
+        (articulation=0) and an excluded loop-closer joint
+        (articulation=-1). The last-write-wins assignment leaves them
+        flagged as free bodies, so their picking ``effective_mass``
+        falls back to their own ``body_mass`` (foot 0.14 kg, parallel
+        rod 0.016 kg). With the default ``pick_max_acceleration=5 g``
+        the picking force on a parallel rod saturates at <1 N and on
+        a foot at ~7 N -- not enough to overcome the chain's foot
+        friction, which presents in the viewer as the picked body
+        being trapped inside a tiny cube.
+
+        We reseed ``Picking._pick_effective_mass`` with the
+        connected-component total mass: every body in the same
+        component as the pelvis gets the full articulation mass.
+        """
+        picking = getattr(self.viewer, "picking", None)
+        if picking is None or picking._pick_effective_mass is None:
+            return
+
+        body_mass = self.model.body_mass.numpy()
+        joint_parent = self.model.joint_parent.numpy()
+        joint_child = self.model.joint_child.numpy()
+        adj: dict[int, list[int]] = {b: [] for b in range(-1, self.model.body_count)}
+        for j in range(self.model.joint_count):
+            p = int(joint_parent[j])
+            c = int(joint_child[j])
+            adj[p].append(c)
+            adj[c].append(p)
+
+        component_id = np.full(self.model.body_count, -1, dtype=np.int32)
+        cid = 0
+        component_mass: list[float] = []
+        for start in range(self.model.body_count):
+            if component_id[start] >= 0:
+                continue
+            stack = [start]
+            mass = 0.0
+            while stack:
+                b = stack.pop()
+                if b < 0 or component_id[b] >= 0:
+                    continue
+                component_id[b] = cid
+                mass += float(body_mass[b])
+                for n in adj[b]:
+                    if n >= 0 and component_id[n] < 0:
+                        stack.append(n)
+            component_mass.append(mass)
+            cid += 1
+
+        eff = np.zeros(self.model.body_count, dtype=np.float32)
+        for b in range(self.model.body_count):
+            eff[b] = component_mass[component_id[b]]
+        picking._pick_effective_mass.assign(eff)
+
+    def _init_animation(self, asset_path) -> None:
+        anim_file = str(asset_path / "dr_legs/animation" / "dr_legs_animation_100fps.npy")
+        anim = np.load(anim_file).astype(np.float32)
+        if anim.shape[1] != len(_ANIMATION_JOINT_PATHS):
+            raise RuntimeError(f"animation has {anim.shape[1]} channels, expected {len(_ANIMATION_JOINT_PATHS)}")
+        joint_label = list(self.model.joint_label)
+        joint_qd_start = self.model.joint_qd_start.numpy()
+        try:
+            channel_dofs = np.array(
+                [joint_qd_start[joint_label.index(path)] for path in _ANIMATION_JOINT_PATHS],
+                dtype=np.int64,
+            )
+        except ValueError as e:
+            raise RuntimeError(f"animation joint not found in model.joint_label: {e}") from e
+        n_dof_per_world = self.model.joint_dof_count // self.world_count
+        world_offsets = np.arange(self.world_count, dtype=np.int64) * n_dof_per_world
+        # 2-D fancy-index assignment broadcasts a (12,) RHS across worlds.
+        self._animation_indices = channel_dofs[None, :] + world_offsets[:, None]
+        self._animation_data = anim * _ANIMATION_CHANNEL_SIGN[None, :]
+        self._animation_dt = 1.0 / 100.0
+        self._target_pos_host = self.control.joint_target_pos.numpy()
+
+    def _update_animation_targets(self):
+        n_frames = self._animation_data.shape[0]
+        frame = min(int(self.sim_time * self._animation_speed / self._animation_dt), n_frames - 1)
+        self._target_pos_host[self._animation_indices] = self._animation_data[frame]
+        self.control.joint_target_pos.assign(self._target_pos_host)
+
+    def capture(self):
+        self.graph = None
+        if wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self.simulate()
+            self.graph = capture.graph
+
+    def simulate(self):
+        # One collide() per frame -- ``--fps`` chooses how often
+        # broad/narrow-phase fires. PhoenX advances
+        # ``args.sim_substeps`` PGS substeps inside the single
+        # ``solver.step`` below.
+        #
+        # The pattern intentionally avoids swapping ``state_0`` and
+        # ``state_1`` after the step. Under CUDA graph capture the
+        # kernel sequence binds the body_q / body_qd buffers it reads
+        # by reference at capture time. A single Python-level swap
+        # leaves ``self.state_0`` aliased to the buffer the graph
+        # *writes*, so each subsequent replay re-reads the
+        # never-updated input buffer -- the pelvis gets pinned inside
+        # a ~1 cm cube. Working examples (h1 / anymal_d) hide this
+        # by running an even outer-substep loop so the swaps end at
+        # the captured-input buffer; here we step once per frame so
+        # we copy ``body_q`` / ``body_qd`` back into ``state_0``
+        # instead. The copy is captured alongside the kernel chain,
+        # so each replay refreshes ``state_0`` with the just-stepped
+        # pose.
+        self.model.collide(self.state_0, self.contacts)
+        self.state_0.clear_forces()
+        self.viewer.apply_forces(self.state_0)
+        self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.frame_dt)
+        wp.copy(self.state_0.body_q, self.state_1.body_q)
+        wp.copy(self.state_0.body_qd, self.state_1.body_qd)
+
+    def step(self):
+        if self._animation_data is not None:
+            self._update_animation_targets()
+
+        if self.graph:
+            wp.capture_launch(self.graph)
+        else:
+            self.simulate()
+
+        self.sim_time += self.frame_dt
+
+    def render(self):
+        self.viewer.begin_frame(self.sim_time)
+        self.viewer.log_state(self.state_0)
+        self.viewer.log_contacts(self.contacts, self.state_0)
+        self.viewer.end_frame()
+
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        newton.examples.add_world_count_arg(parser)
+        parser.add_argument(
+            "--fps",
+            type=int,
+            default=60,
+            choices=(60, 120),
+            help=(
+                "Frame rate (Hz) at which collision detection runs and the"
+                " solver is stepped. PhoenX advances ``--sim-substeps``"
+                " PGS substeps internally per step, so the integrator dt"
+                " is ``1 / (fps * sim_substeps)``."
+            ),
+        )
+        parser.add_argument(
+            "--animation",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Drive the 12 USD-actuated joints from dr_legs_animation_100fps.npy.",
+        )
+        parser.add_argument(
+            "--animation-gain-scale",
+            type=float,
+            default=1.0,
+            help="Multiplier on USD-authored kp/kd.",
+        )
+        parser.add_argument(
+            "--animation-kd-scale",
+            type=float,
+            default=None,
+            help="Optional separate multiplier on USD kd. Defaults to following --animation-gain-scale.",
+        )
+        parser.add_argument(
+            "--animation-speed",
+            type=float,
+            default=1.0,
+            help=(
+                "Animation playback rate; 1.0 plays the gait at the authored 100 Hz."
+                " The bundled animation is open-loop -- without a"
+                " balance / posture feedback term the robot eventually"
+                " falls and never alternates stance / swing legs. Lower"
+                " values (e.g. 0.25) let the COM track the support"
+                " polygon longer."
+            ),
+        )
+        parser.add_argument(
+            "--sim-substeps",
+            type=int,
+            default=80,
+            help=(
+                "PhoenX internal PGS substeps per ``solver.step`` call."
+                " The asset has ~6 g parallel-rod / ankle-bracket bodies"
+                " with min principal inertia ~2e-7 kg.m^2; with the"
+                " USD-authored kp=50 N.m/rad PD drive the natural period"
+                " falls to ~0.4 ms. At fps=60 the substep dt is"
+                " ``1/(fps * substeps)`` so the default (1/(60*80) ="
+                " 0.21 ms) is just under the CFL bound -- below ~40"
+                " substeps the lightweight bodies' iterates overshoot"
+                " and the chain blows up within seconds."
+            ),
+        )
+        parser.add_argument(
+            "--solver-iterations",
+            type=int,
+            default=8,
+            help="PhoenX PGS iterations per substep.",
+        )
+        parser.add_argument(
+            "--velocity-iterations",
+            type=int,
+            default=1,
+            help="PhoenX TGS-soft velocity-relaxation sweeps per substep.",
+        )
+        parser.set_defaults(world_count=4)
+        return parser
+
+
+if __name__ == "__main__":
+    parser = Example.create_parser()
+    viewer, args = newton.examples.init(parser)
+
+    example = Example(viewer, args)
+
+    newton.examples.run(example, args)
