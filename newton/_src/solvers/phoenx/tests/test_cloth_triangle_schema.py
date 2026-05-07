@@ -32,8 +32,9 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     CLOTH_TRIANGLE_DWORDS,
     cloth_triangle_get_alpha_lambda,
     cloth_triangle_get_alpha_mu,
-    cloth_triangle_get_bias_lambda,
-    cloth_triangle_get_bias_mu,
+    cloth_triangle_get_beta_lambda,
+    cloth_triangle_get_beta_mu,
+    cloth_triangle_get_rotation,
     cloth_triangle_get_body1,
     cloth_triangle_get_body2,
     cloth_triangle_get_body3,
@@ -46,8 +47,9 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_get_rest_area,
     cloth_triangle_set_alpha_lambda,
     cloth_triangle_set_alpha_mu,
-    cloth_triangle_set_bias_lambda,
-    cloth_triangle_set_bias_mu,
+    cloth_triangle_set_beta_lambda,
+    cloth_triangle_set_beta_mu,
+    cloth_triangle_set_rotation,
     cloth_triangle_set_body1,
     cloth_triangle_set_body2,
     cloth_triangle_set_body3,
@@ -73,9 +75,9 @@ class TestClothTriangleSchemaSize(unittest.TestCase):
 
     def test_dword_count_in_reasonable_range(self) -> None:
         # Header (3) + body3 (1) + inv_rest (4) + rest_area (1) +
-        # alpha_lambda/mu (2) + inv_mass_a/b/c (3) + bias_lambda/mu (2) +
-        # lambda_sum_lambda/mu (2) = 18.
-        self.assertEqual(CLOTH_TRIANGLE_DWORDS, 18)
+        # alpha_lambda/mu (2) + beta_lambda/mu (2) + inv_mass_a/b/c (3) +
+        # rotation (1) + lambda_sum_lambda/mu (2) = 19.
+        self.assertEqual(CLOTH_TRIANGLE_DWORDS, 19)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX cloth-triangle tests require CUDA")
@@ -109,8 +111,9 @@ class TestClothTriangleSchemaRoundTrip(unittest.TestCase):
         out_inv_mass_a = wp.zeros(n, dtype=wp.float32, device=self.device)
         out_inv_mass_b = wp.zeros(n, dtype=wp.float32, device=self.device)
         out_inv_mass_c = wp.zeros(n, dtype=wp.float32, device=self.device)
-        out_bias_lambda = wp.zeros(n, dtype=wp.float32, device=self.device)
-        out_bias_mu = wp.zeros(n, dtype=wp.float32, device=self.device)
+        out_beta_lambda = wp.zeros(n, dtype=wp.float32, device=self.device)
+        out_beta_mu = wp.zeros(n, dtype=wp.float32, device=self.device)
+        out_rotation = wp.zeros(n, dtype=wp.float32, device=self.device)
         out_lambda_sum_lambda = wp.zeros(n, dtype=wp.float32, device=self.device)
         out_lambda_sum_mu = wp.zeros(n, dtype=wp.float32, device=self.device)
 
@@ -130,8 +133,9 @@ class TestClothTriangleSchemaRoundTrip(unittest.TestCase):
                 out_inv_mass_a,
                 out_inv_mass_b,
                 out_inv_mass_c,
-                out_bias_lambda,
-                out_bias_mu,
+                out_beta_lambda,
+                out_beta_mu,
+                out_rotation,
                 out_lambda_sum_lambda,
                 out_lambda_sum_mu,
             ],
@@ -149,8 +153,9 @@ class TestClothTriangleSchemaRoundTrip(unittest.TestCase):
         inv_mass_a_arr = out_inv_mass_a.numpy()
         inv_mass_b_arr = out_inv_mass_b.numpy()
         inv_mass_c_arr = out_inv_mass_c.numpy()
-        bias_lambda_arr = out_bias_lambda.numpy()
-        bias_mu_arr = out_bias_mu.numpy()
+        beta_lambda_arr = out_beta_lambda.numpy()
+        beta_mu_arr = out_beta_mu.numpy()
+        rotation_arr = out_rotation.numpy()
         lambda_sum_lambda_arr = out_lambda_sum_lambda.numpy()
         lambda_sum_mu_arr = out_lambda_sum_mu.numpy()
 
@@ -173,8 +178,9 @@ class TestClothTriangleSchemaRoundTrip(unittest.TestCase):
                 self.assertAlmostEqual(inv_mass_a_arr[cid], 0.1 + cid, places=6)
                 self.assertAlmostEqual(inv_mass_b_arr[cid], 0.2 + cid, places=6)
                 self.assertAlmostEqual(inv_mass_c_arr[cid], 0.3 + cid, places=6)
-                self.assertAlmostEqual(bias_lambda_arr[cid], 10.0 + cid, places=5)
-                self.assertAlmostEqual(bias_mu_arr[cid], 20.0 + cid, places=5)
+                self.assertAlmostEqual(beta_lambda_arr[cid], 0.05 + 0.01 * cid, places=5)
+                self.assertAlmostEqual(beta_mu_arr[cid], 0.07 + 0.01 * cid, places=5)
+                self.assertAlmostEqual(rotation_arr[cid], 0.1 + 0.05 * cid, places=5)
                 self.assertAlmostEqual(lambda_sum_lambda_arr[cid], -0.5 + cid, places=6)
                 self.assertAlmostEqual(lambda_sum_mu_arr[cid], -1.5 + cid, places=6)
 
@@ -215,8 +221,9 @@ def _round_trip_kernel(
     out_inv_mass_a: wp.array[wp.float32],
     out_inv_mass_b: wp.array[wp.float32],
     out_inv_mass_c: wp.array[wp.float32],
-    out_bias_lambda: wp.array[wp.float32],
-    out_bias_mu: wp.array[wp.float32],
+    out_beta_lambda: wp.array[wp.float32],
+    out_beta_mu: wp.array[wp.float32],
+    out_rotation: wp.array[wp.float32],
     out_lambda_sum_lambda: wp.array[wp.float32],
     out_lambda_sum_mu: wp.array[wp.float32],
 ):
@@ -247,8 +254,9 @@ def _round_trip_kernel(
     cloth_triangle_set_inv_mass_b(c, cid, wp.float32(0.2) + cf)
     cloth_triangle_set_inv_mass_c(c, cid, wp.float32(0.3) + cf)
 
-    cloth_triangle_set_bias_lambda(c, cid, wp.float32(10.0) + cf)
-    cloth_triangle_set_bias_mu(c, cid, wp.float32(20.0) + cf)
+    cloth_triangle_set_beta_lambda(c, cid, wp.float32(0.05) + wp.float32(0.01) * cf)
+    cloth_triangle_set_beta_mu(c, cid, wp.float32(0.07) + wp.float32(0.01) * cf)
+    cloth_triangle_set_rotation(c, cid, wp.float32(0.1) + wp.float32(0.05) * cf)
 
     cloth_triangle_set_lambda_sum_lambda(c, cid, wp.float32(-0.5) + cf)
     cloth_triangle_set_lambda_sum_mu(c, cid, wp.float32(-1.5) + cf)
@@ -265,8 +273,9 @@ def _round_trip_kernel(
     out_inv_mass_a[cid] = cloth_triangle_get_inv_mass_a(c, cid)
     out_inv_mass_b[cid] = cloth_triangle_get_inv_mass_b(c, cid)
     out_inv_mass_c[cid] = cloth_triangle_get_inv_mass_c(c, cid)
-    out_bias_lambda[cid] = cloth_triangle_get_bias_lambda(c, cid)
-    out_bias_mu[cid] = cloth_triangle_get_bias_mu(c, cid)
+    out_beta_lambda[cid] = cloth_triangle_get_beta_lambda(c, cid)
+    out_beta_mu[cid] = cloth_triangle_get_beta_mu(c, cid)
+    out_rotation[cid] = cloth_triangle_get_rotation(c, cid)
     out_lambda_sum_lambda[cid] = cloth_triangle_get_lambda_sum_lambda(c, cid)
     out_lambda_sum_mu[cid] = cloth_triangle_get_lambda_sum_mu(c, cid)
 

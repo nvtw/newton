@@ -171,27 +171,34 @@ class TestPopulateClothTrianglesFromModel(unittest.TestCase):
             self.assertTrue(np.all(arr < nb + world.num_particles))
 
     def test_inv_rest_and_rest_area_transcribed(self) -> None:
-        """``inv_rest`` is verbatim ``model.tri_poses[t]`` and
-        ``rest_area`` is verbatim ``model.tri_areas[t]``."""
+        """``rest_area`` is verbatim ``model.tri_areas[t]`` (both compute
+        ``0.5 * |cross(AB, AC)|`` from the rest particle positions).
+
+        ``inv_rest`` follows Jitter2's :class:`FemTriProjector`
+        convention -- a 2x2 ``inv([xAB_2D | xAC_2D])`` in the in-plane
+        2D frame anchored on edge AB.  The same projector inside the
+        iterate guarantees that ``F = invRest * [xAB_2D | xAC_2D]``
+        equals identity at rest, so the byte-for-byte equality with
+        ``model.tri_poses`` (which uses a different 2D frame) does not
+        hold; the algebraic identity ``F == I @ rest`` is what we
+        assert here in :file:`test_cloth_triangle_iterate.py`.
+        """
         world = self._make_world()
         world.populate_cloth_triangles_from_model(self.model)
         rb = self._readback(world)
-        np.testing.assert_allclose(rb.inv_rest, self.model.tri_poses.numpy(), atol=1e-5)
         np.testing.assert_allclose(rb.rest_area, self.model.tri_areas.numpy(), atol=1e-6)
 
     def test_alpha_compliance_derived_from_materials(self) -> None:
-        """``alpha_lambda = 1 / (k_lambda * area)``,
-        ``alpha_mu = 1 / (k_mu * area)`` -- where the stiffness
-        columns come from ``tri_materials[t, 1]`` (k_lambda /
-        ``tri_ka``) and ``tri_materials[t, 0]`` (k_mu /
-        ``tri_ke``)."""
+        """Per ``FemTriPBD.cs`` line 60-61, ``alpha = 1 / k`` with no
+        explicit area factor.  Stiffness columns come from
+        ``tri_materials[t, 1]`` (``k_lambda`` / ``tri_ka``) and
+        ``tri_materials[t, 0]`` (``k_mu`` / ``tri_ke``)."""
         world = self._make_world()
         world.populate_cloth_triangles_from_model(self.model)
         rb = self._readback(world)
         materials = self.model.tri_materials.numpy()  # [tri, 5]
-        areas = self.model.tri_areas.numpy()
-        expected_alpha_mu = 1.0 / (materials[:, 0] * areas)
-        expected_alpha_lambda = 1.0 / (materials[:, 1] * areas)
+        expected_alpha_mu = 1.0 / materials[:, 0]
+        expected_alpha_lambda = 1.0 / materials[:, 1]
         np.testing.assert_allclose(rb.alpha_mu, expected_alpha_mu, rtol=1e-5)
         np.testing.assert_allclose(rb.alpha_lambda, expected_alpha_lambda, rtol=1e-5)
 

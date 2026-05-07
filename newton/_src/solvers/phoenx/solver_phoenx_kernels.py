@@ -47,8 +47,8 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_relax_at,
     cloth_triangle_set_alpha_lambda,
     cloth_triangle_set_alpha_mu,
-    cloth_triangle_set_bias_lambda,
-    cloth_triangle_set_bias_mu,
+    cloth_triangle_set_beta_lambda,
+    cloth_triangle_set_beta_mu,
     cloth_triangle_set_body1,
     cloth_triangle_set_body2,
     cloth_triangle_set_body3,
@@ -59,6 +59,7 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_set_lambda_sum_lambda,
     cloth_triangle_set_lambda_sum_mu,
     cloth_triangle_set_rest_area,
+    cloth_triangle_set_rotation,
     cloth_triangle_set_type,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
@@ -1189,9 +1190,10 @@ def _phoenx_init_cloth_triangle_rows_kernel(
     # three particle indices). We index it with ``[t, k]`` rather than
     # the old flat ``[3*t + k]`` form.
     tri_indices: wp.array2d[wp.int32],
-    tri_poses: wp.array[wp.mat22f],
-    tri_areas: wp.array[wp.float32],
+    particle_q: wp.array[wp.vec3f],
     tri_materials: wp.array2d[wp.float32],
+    default_beta_lambda: wp.float32,
+    default_beta_mu: wp.float32,
 ):
     """Stamp ``num_cloth_triangles`` cloth-triangle constraint rows
     from Newton's mesh API.
@@ -1239,10 +1241,60 @@ def _phoenx_init_cloth_triangle_rows_kernel(
     cloth_triangle_set_body2(constraints, cid, num_bodies + pb)
     cloth_triangle_set_body3(constraints, cid, num_bodies + pc)
 
-    cloth_triangle_set_inv_rest(constraints, cid, tri_poses[t])
-
-    rest_area = tri_areas[t]
-    cloth_triangle_set_rest_area(constraints, cid, rest_area)
+    # Build the in-plane projector for the rest configuration.  This is
+    # the same Jitter2 ``FemTriProjector`` convention the iterate uses:
+    # x_axis along ``B - A``, y_axis the in-plane perpendicular.
+    xa = particle_q[pa]
+    xb = particle_q[pb]
+    xc = particle_q[pc]
+    ab = xb - xa
+    ac = xc - xa
+    normal = wp.cross(ab, ac)
+    ab_len = wp.sqrt(wp.dot(ab, ab))
+    if ab_len < wp.float32(1.0e-12):
+        # Degenerate triangle.  Stamp identity invRest + zero rest area
+        # so the iterate's degeneracy guards short-circuit cleanly.
+        cloth_triangle_set_inv_rest(
+            constraints, cid, wp.mat22f(wp.float32(1.0), wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
+        )
+        cloth_triangle_set_rest_area(constraints, cid, wp.float32(0.0))
+    else:
+        x_axis = ab / ab_len
+        y_unnorm = wp.cross(normal, ab)
+        y_len = wp.sqrt(wp.dot(y_unnorm, y_unnorm))
+        if y_len < wp.float32(1.0e-12):
+            cloth_triangle_set_inv_rest(
+                constraints, cid, wp.mat22f(wp.float32(1.0), wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
+            )
+            cloth_triangle_set_rest_area(constraints, cid, wp.float32(0.0))
+        else:
+            y_axis = y_unnorm / y_len
+            # Rest 2D coords for AB and AC (column 0 and column 1 of the rest matrix).
+            ab_x = wp.dot(x_axis, ab)
+            ab_y = wp.dot(y_axis, ab)
+            ac_x = wp.dot(x_axis, ac)
+            ac_y = wp.dot(y_axis, ac)
+            # Rest matrix R = [AB_2D | AC_2D]; invRest = R^-1.
+            det = ab_x * ac_y - ab_y * ac_x
+            if det < wp.float32(1.0e-12) and det > wp.float32(-1.0e-12):
+                cloth_triangle_set_inv_rest(
+                    constraints, cid, wp.mat22f(wp.float32(1.0), wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
+                )
+                cloth_triangle_set_rest_area(constraints, cid, wp.float32(0.0))
+            else:
+                inv_det = wp.float32(1.0) / det
+                # invRest stored as Warp mat22 (M11, M12, M21, M22) in row-major.
+                # R = [[ab_x, ac_x], [ab_y, ac_y]];  R^-1 = (1/det) [[ac_y, -ac_x], [-ab_y, ab_x]].
+                inv_rest_m = wp.mat22f(
+                    ac_y * inv_det, -ac_x * inv_det,
+                    -ab_y * inv_det, ab_x * inv_det,
+                )
+                cloth_triangle_set_inv_rest(constraints, cid, inv_rest_m)
+                # Rest area = 0.5 * |cross(AB, AC)| -- the half-magnitude
+                # of the in-plane cross product (which equals the
+                # 3D-magnitude since ``normal`` is parallel to it).
+                rest_area = wp.float32(0.5) * wp.sqrt(wp.dot(normal, normal))
+                cloth_triangle_set_rest_area(constraints, cid, rest_area)
 
     # tri_materials columns -- mirrors Newton's tri_ke/tri_ka/...
     # ordering. Floor before dividing.
@@ -1252,25 +1304,19 @@ def _phoenx_init_cloth_triangle_rows_kernel(
     k_lambda = tri_materials[t, 1]
     if k_lambda < _PHOENX_CLOTH_STIFFNESS_FLOOR:
         k_lambda = _PHOENX_CLOTH_STIFFNESS_FLOOR
-    area_clamped = rest_area
-    if area_clamped < _PHOENX_CLOTH_STIFFNESS_FLOOR:
-        area_clamped = _PHOENX_CLOTH_STIFFNESS_FLOOR
     # Match Jitter2 ``FemTriPBD.cs`` line 60-61: ``alpha = 1 / stiffness``
     # without an explicit area factor. The area enters the gradients, so
     # the energy still scales correctly with element size.
     cloth_triangle_set_alpha_lambda(constraints, cid, wp.float32(1.0) / k_lambda)
     cloth_triangle_set_alpha_mu(constraints, cid, wp.float32(1.0) / k_mu)
-    _ = area_clamped
+    cloth_triangle_set_beta_lambda(constraints, cid, default_beta_lambda)
+    cloth_triangle_set_beta_mu(constraints, cid, default_beta_mu)
 
-    # Zero per-substep / cross-iteration state. Prepare overwrites
-    # bias_* and inv_mass_* at substep entry; lambda_sum_* are reset
-    # there too. Initial zero just means the first prepare reads a
-    # consistent starting state.
+    # Zero per-substep / cross-iteration state.
     cloth_triangle_set_inv_mass_a(constraints, cid, wp.float32(0.0))
     cloth_triangle_set_inv_mass_b(constraints, cid, wp.float32(0.0))
     cloth_triangle_set_inv_mass_c(constraints, cid, wp.float32(0.0))
-    cloth_triangle_set_bias_lambda(constraints, cid, wp.float32(0.0))
-    cloth_triangle_set_bias_mu(constraints, cid, wp.float32(0.0))
+    cloth_triangle_set_rotation(constraints, cid, wp.float32(0.0))
     cloth_triangle_set_lambda_sum_lambda(constraints, cid, wp.float32(0.0))
     cloth_triangle_set_lambda_sum_mu(constraints, cid, wp.float32(0.0))
 
@@ -1647,9 +1693,11 @@ def _phoenx_update_inertia_and_clear_forces_kernel(
     torque cleared on every body slot regardless of motion type so
     kinematic / static slots also start the next step zeroed.
 
-    Particle branch: zero the force accumulator. Particles have no
-    orientation / inertia / damping fields, so this is the only
-    work.
+    Particle branch: zero the force accumulator. Particles do not get
+    a global velocity-multiplier ("ether") damping -- that would
+    physically wrong-en free-fall. The cloth constraint applies
+    Rayleigh-style damping along its gradients internally; that's the
+    only velocity dissipation a free particle receives.
 
     Launch dim is ``num_bodies + num_particles`` -- one thread per
     "thing" in the unified index space.

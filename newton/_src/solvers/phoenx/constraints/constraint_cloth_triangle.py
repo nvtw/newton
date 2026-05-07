@@ -1,62 +1,57 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Position-based cloth triangle constraint for :class:`PhoenXWorld`.
+"""Position-level XPBD cloth-triangle constraint, Jitter2 ``FemTriPBD`` port.
 
-One constraint column per FEM triangle, two XPBD rows per column
-(area / λ row + shear / μ row) following Aachen 2018 *Fast
-Co-rotated FEM using Operator Splitting* energy density. Lives in
-the same :class:`~newton._src.solvers.phoenx.constraints.constraint_container.ConstraintContainer`
-ADBS joints live in -- the per-cid type tag at dword 0
-(:data:`CONSTRAINT_TYPE_CLOTH_TRIANGLE`) routes the dispatcher.
+Direct port of
+``experimentalsim/jitterphysics2/src/Jitter2/Dynamics/Constraints/FemTriPBD.cs``
+adapted to PhoenX's particle-or-body unified-index storage.  The two
+deviations from Jitter2 are addressing-only:
 
-This file is the *data* + *getters/setters* layer (Commit 1 of the
-plan in :file:`PLAN_CLOTH_TRIANGLE.md`); the prepare / iterate
-``@wp.func``s ship in Commit 2.
+* PhoenX's cloth nodes are *particles* (3-DoF point masses) rather than
+  zero-inertia rigid bodies.  Particles are accessed through the
+  :mod:`~newton._src.solvers.phoenx.body_or_particle` unified index so
+  this constraint can address either.
+* PhoenX uses a column-major dword-packed
+  :class:`~newton._src.solvers.phoenx.constraints.constraint_container.ConstraintContainer`
+  rather than C# struct layout; the field ordering and accessors below
+  mirror the C# struct field-for-field but read/write through
+  :func:`read_*` / :func:`write_*` helpers.
 
-## Constraint endpoints
+The math is otherwise identical to
+:cite:`Macklin2016 XPBD <https://mmacklin.com/xpbd.pdf>` /
+``FemTriPBD.cs`` line-for-line:
 
-Three unified body-or-particle indices (see
-:mod:`newton._src.solvers.phoenx.body_or_particle`). For now
-particle-only -- cloth nodes that are points on a rigid body are
-mathematically supported by the unified-index scheme but their
-iterate-side gradient handling differs (rigid 6-DOF Jacobian at
-local anchor vs. particle 3-DOF identity), so they're a separate
-code path on the same constraint type and ship later.
+#. Substep entry: :func:`cloth_triangle_prepare_for_iteration_at`
+   caches per-particle inverse masses and resets the warm-start
+   accumulators ``lambda_sum_X`` / ``lambda_sum_Y``.
+#. Each iterate sweep (one per colour, ``solver_iterations`` sweeps per
+   substep) runs :func:`cloth_triangle_iterate_at`:
 
-The mandatory header convention requires fields ``body1`` and
-``body2`` at dwords 1 and 2 (per
-:func:`~newton._src.solvers.phoenx.constraints.constraint_container.assert_constraint_header`).
-We honour that contract with ``body1`` / ``body2`` carrying the
-first two cloth-triangle endpoints; the third endpoint is
-``body3`` at dword 3.
+   * Build the in-plane projector :class:`FemTriProjector` from the
+     three current particle positions; project edges ``B - A`` and
+     ``C - A`` to 2D.
+   * Compute the 2x2 deformation gradient ``F = invRest * [xAB | xAC]``.
+   * Iterative angle extraction (warm-started across iterations via the
+     persisted ``rotation`` scalar) recovers the closest 2x2 rotation
+     ``R`` to ``F``.
+   * **Area row.** ``C_lambda = (det F - 1) * rest_area``.  XPBD update
+     in 2D, scattered back to 3D via the projector.
+   * Rebuild projector + ``F`` + extract rotation again so the shear
+     row sees the area-corrected positions.
+   * **Shear row.** ``C_mu = ||F - R||_F * rest_area``.  XPBD update
+     in 2D, scattered back to 3D.
+   * Accumulate ``lambda_sum_X`` / ``lambda_sum_Y`` for the next sweep.
 
-## Row layout (~18 dwords; well inside ``ADBS_DWORDS``)
+The relax wrapper :func:`cloth_triangle_relax_at` runs the same iterate
+and then forces ``VELOCITY_LEVEL`` on the three vertices so the
+substep's relax pass leaves vertices in a velocity-authoritative state
+the contact relax can read consistently.
 
-Header
-    * ``constraint_type`` -- :data:`CONSTRAINT_TYPE_CLOTH_TRIANGLE`.
-    * ``body1`` / ``body2`` / ``body3`` -- unified indices of the
-      three cloth nodes (A, B, C).
-Rest-shape (precomputed once at scene build)
-    * ``inv_rest`` -- 2x2 inverse rest-pose matrix (Newton's
-      ``Model.tri_poses[t]``). Maps rest tangent vectors to the
-      tangent-frame edge basis.
-    * ``rest_area`` -- triangle rest area [m²]
-      (``Model.tri_areas[t]``).
-XPBD compliance
-    * ``alpha_lambda`` -- compliance for the area row [m·s²/N].
-    * ``alpha_mu`` -- compliance for the shear row.
-Per-substep cache (filled by prepare; read by iterate)
-    * ``inv_mass_a/b/c`` -- looked up via
-      :func:`~newton._src.solvers.phoenx.body_or_particle.get_inverse_mass`
-      and parked in the row so iterate doesn't re-fetch.
-    * ``bias_lambda`` / ``bias_mu`` -- ``alphã = alpha · invDt²`` precomputed
-      per substep so iterate doesn't recompute the substep
-      timestep on every iteration.
-Cross-iteration accumulators
-    * ``lambda_sum_lambda`` / ``lambda_sum_mu`` -- XPBD warm-start
-      accumulators. Reset by prepare at substep entry; mutated by
-      iterate; survive substep boundaries via the column row.
+Compliance is set per-element from Newton's
+``Model.tri_materials[t]``: ``alpha_X = 1 / lambda`` for the area row,
+``alpha_Y = 1 / mu`` for the shear row -- exact match to
+``FemTriPBD.cs`` line 60-61.
 """
 
 from __future__ import annotations
@@ -71,9 +66,9 @@ from newton._src.solvers.phoenx.body_or_particle import (
     BodyOrParticleStore,
     get_inverse_mass,
     get_position,
+    get_position_prev_substep,
     set_access_mode,
     set_position,
-    set_position_raw,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
@@ -91,11 +86,10 @@ from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num
 __all__ = [
     "CLOTH_TRIANGLE_DWORDS",
     "ClothTriangleData",
+    "cloth_lame_from_youngs_poisson_plane_strain",
     "cloth_lame_from_youngs_poisson_plane_stress",
     "cloth_triangle_get_alpha_lambda",
     "cloth_triangle_get_alpha_mu",
-    "cloth_triangle_get_bias_lambda",
-    "cloth_triangle_get_bias_mu",
     "cloth_triangle_get_body1",
     "cloth_triangle_get_body2",
     "cloth_triangle_get_body3",
@@ -106,13 +100,12 @@ __all__ = [
     "cloth_triangle_get_lambda_sum_lambda",
     "cloth_triangle_get_lambda_sum_mu",
     "cloth_triangle_get_rest_area",
+    "cloth_triangle_get_rotation",
     "cloth_triangle_iterate_at",
     "cloth_triangle_prepare_for_iteration_at",
     "cloth_triangle_relax_at",
     "cloth_triangle_set_alpha_lambda",
     "cloth_triangle_set_alpha_mu",
-    "cloth_triangle_set_bias_lambda",
-    "cloth_triangle_set_bias_mu",
     "cloth_triangle_set_body1",
     "cloth_triangle_set_body2",
     "cloth_triangle_set_body3",
@@ -123,60 +116,76 @@ __all__ = [
     "cloth_triangle_set_lambda_sum_lambda",
     "cloth_triangle_set_lambda_sum_mu",
     "cloth_triangle_set_rest_area",
+    "cloth_triangle_set_rotation",
     "cloth_triangle_set_type",
 ]
 
 
 # ---------------------------------------------------------------------------
-# Lamé parameter conversion (host-side helper).
+# Lame parameter conversion (host-side helpers).
 # ---------------------------------------------------------------------------
+
+
+def cloth_lame_from_youngs_poisson_plane_strain(
+    youngs_modulus: float,
+    poisson_ratio: float,
+) -> tuple[float, float]:
+    """Plane-strain Lame parameters ``(lambda, mu)`` from ``(E, nu)``.
+
+    Direct port of ``ConstraintHelper.CalculateLameParameters``
+    (experimentalsim ``ConstraintHelper.cs:8-15``)::
+
+        lambda = E * nu / ((1 + nu) * (1 - 2 nu))
+        mu = E / (2 * (1 + nu))
+
+    Plane strain is what Jitter2's reference cloth uses.  For thin
+    cloth, plane stress (:func:`cloth_lame_from_youngs_poisson_plane_stress`)
+    is technically more correct, but the difference between the two is
+    a constant ``(1 - nu) / (1 - nu**2)`` factor on lambda that cloth
+    tuning can easily absorb.  We expose both so users can match the
+    reference they're calibrating against.
+
+    Args:
+        youngs_modulus: Young's modulus ``E`` ``[Pa]``.
+        poisson_ratio: Poisson ratio ``nu`` ``[-]``. Must satisfy
+            ``-1 < nu < 0.5``; values approaching ``0.5`` make
+            ``lambda`` blow up (incompressible limit).
+
+    Returns:
+        ``(lambda, mu)`` ``[Pa]``. Pass to
+        ``add_cloth_grid`` as ``tri_ka=lambda, tri_ke=mu``.
+    """
+    if youngs_modulus <= 0.0:
+        raise ValueError(f"youngs_modulus must be positive (got {youngs_modulus})")
+    if not -1.0 < poisson_ratio < 0.5:
+        raise ValueError(f"poisson_ratio must be in (-1, 0.5) (got {poisson_ratio})")
+    lam = youngs_modulus * poisson_ratio / ((1.0 + poisson_ratio) * (1.0 - 2.0 * poisson_ratio))
+    mu = youngs_modulus / (2.0 * (1.0 + poisson_ratio))
+    return float(lam), float(mu)
 
 
 def cloth_lame_from_youngs_poisson_plane_stress(
     youngs_modulus: float,
     poisson_ratio: float,
 ) -> tuple[float, float]:
-    """Convert Young's modulus + Poisson ratio to plane-stress Lamé
-    parameters ``(lam, mu)``.
+    """Plane-stress Lame parameters ``(lambda, mu)`` from ``(E, nu)``.
 
-    Cloth is modelled as a thin sheet -- bending out of plane is
-    nearly free compared with in-plane stretch / shear, so the
-    in-plane elasticity is plane stress, not 3D. The plane-stress
-    Lamé conversion is::
+    Thin-shell formulation::
 
-        mu = E / (2 * (1 + nu))  # shear modulus
-        lam = E * nu / (1 - nu**2)  # 1st Lamé (plane stress)
+        mu = E / (2 * (1 + nu))
+        lambda = E * nu / (1 - nu**2)
 
-    Compare with the 3D (plane strain) conversion ``lam = E*nu /
-    ((1+nu)*(1-2*nu))`` -- those denominators blow up at nu = 0.5
-    (incompressible solid), but plane stress's ``1 - nu**2``
-    stays finite for the entire physical range. This is the right
-    choice for cloth, where the thickness direction is unconstrained.
-
-    The PhoenX cloth iterate consumes ``mu`` as the shear-row
-    stiffness (Newton's ``tri_materials[t, 0]`` /
-    :attr:`~newton.ModelBuilder.default_tri_ke`) and ``lam`` as the
-    area-preservation row stiffness (``tri_materials[t, 1]`` /
-    :attr:`~newton.ModelBuilder.default_tri_ka`). XPBD compliance
-    is then ``alpha = 1 / (k * area)`` per row.
+    The plane-stress denominator ``1 - nu**2`` stays finite for the
+    full ``-1 < nu < 1`` range, unlike plane strain which blows up at
+    ``nu = 0.5``.
 
     Args:
-        youngs_modulus: Young's modulus ``E`` [Pa]. Cotton-weight
-            cloth: ~1e7-1e8. Stiff garment / leather: 1e8-1e9.
-        poisson_ratio: Poisson ratio ``nu`` [-]. Typical cloth:
-            0.3-0.45. Must satisfy ``-1 < nu < 1`` (plane stress
-            allows the full range, but values near ``+/-1`` produce
-            very stiff area-preservation).
+        youngs_modulus: Young's modulus ``E`` ``[Pa]``.
+        poisson_ratio: Poisson ratio ``nu`` ``[-]``. Must satisfy
+            ``-1 < nu < 1``.
 
     Returns:
-        ``(lam, mu)`` -- the Lamé first parameter (area-row
-        stiffness) and shear modulus (shear-row stiffness), both
-        in Pa. Pass to ``add_cloth_grid`` /
-        ``add_cloth_mesh`` as ``tri_ka=lam, tri_ke=mu``.
-
-    Raises:
-        ValueError: if ``youngs_modulus <= 0`` or ``not -1 <
-            poisson_ratio < 1``.
+        ``(lambda, mu)`` ``[Pa]``.
     """
     if youngs_modulus <= 0.0:
         raise ValueError(f"youngs_modulus must be positive (got {youngs_modulus})")
@@ -196,74 +205,84 @@ def cloth_lame_from_youngs_poisson_plane_stress(
 class ClothTriangleData:
     """Per-constraint dword-layout schema for one cloth triangle.
 
-    Two XPBD rows (area + shear) on a 3-particle FEM triangle, with
-    ``inv_rest`` / ``rest_area`` precomputed at scene build and
-    ``bias_*`` / ``inv_mass_*`` re-derived per substep in prepare.
-    The ``lambda_sum_*`` accumulators warm-start across substeps.
+    Field order is the dword layout the
+    :class:`~newton._src.solvers.phoenx.constraints.constraint_container.ConstraintContainer`
+    sees -- :func:`~newton._src.solvers.phoenx.helpers.data_packing.dword_offset_of`
+    reads it from this declaration.
 
-    Field order matches the dword layout in the
-    :class:`ConstraintContainer` -- the
-    :func:`~newton._src.solvers.phoenx.constraints.constraint_container.dword_offset_of`
-    helper reads the order from this declaration.
+    Mirrors ``FemTriPBD`` (experimentalsim ``FemTriPBD.cs:11-31``)
+    field for field, with PhoenX's mandatory three-field header
+    (``constraint_type`` / ``body1`` / ``body2`` at dwords 0, 1, 2).
     """
 
     # ---- Header (mandatory contract: dwords 0 / 1 / 2) ----------------
     constraint_type: wp.int32
-    #: Unified body-or-particle index of cloth node A. For now must
-    #: satisfy ``body1 >= num_bodies`` (particle-only); rigid-attached
-    #: cloth nodes ship later.
+    #: Unified body-or-particle index of cloth node A. Particle-only
+    #: for now (must satisfy ``body1 >= num_bodies``).
     body1: wp.int32
     #: Unified body-or-particle index of cloth node B.
     body2: wp.int32
 
-    # ---- Triangle endpoint C (the cloth-only third node) --------------
-    #: Unified body-or-particle index of cloth node C. Sits next to
-    #: ``body2`` so the three particle indices are contiguous in the
-    #: row.
+    # ---- Triangle endpoint C ------------------------------------------
+    #: Unified body-or-particle index of cloth node C.
     body3: wp.int32
 
     # ---- Rest-shape (precomputed once at scene build) -----------------
-    #: 2x2 inverse rest-pose matrix mapping rest tangent vectors to
-    #: the tangent-frame edge basis. ``F = [xB-xA | xC-xA] · inv_rest``
-    #: at iterate time. Stored row-major as 4 contiguous floats. Same
-    #: convention Newton's :attr:`~newton.Model.tri_poses` (and Style3D /
-    #: VBD) use.
+    #: 2x2 inverse rest-pose matrix in the triangle's in-plane 2D
+    #: frame.  Built from
+    #: ``inv([xAB_2D | xAC_2D])`` at scene build via the
+    #: :func:`FemTriProjector` projection of the rest configuration.
+    #: Mirrors ``FemTriPBD.invRest`` (``FemTriPBD.cs:20``).
     inv_rest: wp.mat22f
 
-    #: Triangle rest area ``[m²]``. Scales the constraint rows so the
-    #: stiffness has correct units. Comes from
-    #: :attr:`~newton.Model.tri_areas`.
+    #: Triangle rest area ``[m^2]``.  Mirrors ``FemTriPBD.restArea``
+    #: (``FemTriPBD.cs:19``).
     rest_area: wp.float32
 
     # ---- XPBD compliance (precomputed once at scene build) ------------
-    #: Compliance for the area row ``[m·s²/N]``. Pre-baked from Lamé λ
-    #: and rest area at scene build so the iterate hot loop just reads
-    #: a scalar.
+    #: ``alpha_X = 1 / lambda`` ``[m^2 s^2 / kg]`` -- area row
+    #: compliance.  Match to ``FemTriPBD.cs:60``.
     alpha_lambda: wp.float32
-    #: Compliance for the shear row.
+    #: ``alpha_Y = 1 / mu`` ``[m^2 s^2 / kg]`` -- shear row compliance.
+    #: Match to ``FemTriPBD.cs:61``.
     alpha_mu: wp.float32
 
+    # ---- XPBD Rayleigh damping coefficients ---------------------------
+    #: Dimensionless damping factor for the area row.  Per Macklin XPBD
+    #: 2016 eq. 26, damping enters the iterate as
+    #: ``gamma_tilde = beta * dt`` and only acts along the row's
+    #: gradient -- so a particle moving freely (zero gradient
+    #: contribution) sees no damping, but high-frequency oscillation
+    #: against the area constraint is dissipated.  Free fall is
+    #: unaffected.  Range ``[0, 1]``; cloth typically uses ``0.05`` to
+    #: ``0.3``.  Default is ``0.0`` (no damping); the populate kernel
+    #: stamps a sensible cloth default.
+    beta_lambda: wp.float32
+    #: Dimensionless damping factor for the shear row.
+    beta_mu: wp.float32
+
     # ---- Per-substep cache (filled by prepare; read by iterate) -------
-    #: Inverse mass of node A. Mirrored from
-    #: :func:`~newton._src.solvers.phoenx.body_or_particle.get_inverse_mass`
-    #: into the row so iterate avoids re-touching the body /
-    #: particle store per iteration.
+    #: Inverse mass of node A.  Mirrored from the body-or-particle
+    #: store at substep entry so iterate avoids re-touching the store
+    #: per iteration.
     inv_mass_a: wp.float32
     inv_mass_b: wp.float32
     inv_mass_c: wp.float32
 
-    #: ``alphã_λ = alpha_lambda · invDt²``, precomputed by prepare.
-    #: Substep-dependent so it can't move into the rest-shape block.
-    bias_lambda: wp.float32
-    #: ``alphã_μ = alpha_mu · invDt²``.
-    bias_mu: wp.float32
+    # ---- Cross-iteration warm-start ----------------------------------
+    #: Persisted angle ``[rad]`` of the closest in-plane rotation to
+    #: ``F`` -- iterative ``ExtractRotation`` warm-starts from this
+    #: across iterations and substeps, dramatically reducing the
+    #: per-call iteration count.  Mirrors ``FemTriPBD.rotation``
+    #: (``FemTriPBD.cs:21``).
+    rotation: wp.float32
 
-    # ---- Cross-iteration accumulators (warm-start) --------------------
-    #: XPBD ``λ_sum`` for the area row. Reset by prepare at substep
-    #: entry, mutated by iterate during the PGS sweeps; the substep
-    #: boundary lets the next substep warm-start from a near-converged
-    #: state on stiff fabric.
+    #: XPBD ``lambda_sum`` for the area row.  Reset by prepare; mutated
+    #: by iterate; persists across iterations within a substep.
+    #: Mirrors ``FemTriPBD.lambdaSum_X`` (``FemTriPBD.cs:26``).
     lambda_sum_lambda: wp.float32
+    #: XPBD ``lambda_sum`` for the shear row.  Mirrors
+    #: ``FemTriPBD.lambdaSum_Y`` (``FemTriPBD.cs:27``).
     lambda_sum_mu: wp.float32
 
 
@@ -273,10 +292,6 @@ assert_constraint_header(ClothTriangleData)
 # ---------------------------------------------------------------------------
 # Dword offsets -- single source of truth keyed off the struct above
 # ---------------------------------------------------------------------------
-#
-# All offsets are recovered from the schema rather than hand-coded so a
-# field reordering can never silently scramble the row layout. Same
-# pattern :file:`constraint_actuated_double_ball_socket.py` uses.
 
 _OFF_BODY1 = wp.constant(dword_offset_of(ClothTriangleData, "body1"))
 _OFF_BODY2 = wp.constant(dword_offset_of(ClothTriangleData, "body2"))
@@ -285,35 +300,28 @@ _OFF_INV_REST = wp.constant(dword_offset_of(ClothTriangleData, "inv_rest"))
 _OFF_REST_AREA = wp.constant(dword_offset_of(ClothTriangleData, "rest_area"))
 _OFF_ALPHA_LAMBDA = wp.constant(dword_offset_of(ClothTriangleData, "alpha_lambda"))
 _OFF_ALPHA_MU = wp.constant(dword_offset_of(ClothTriangleData, "alpha_mu"))
+_OFF_BETA_LAMBDA = wp.constant(dword_offset_of(ClothTriangleData, "beta_lambda"))
+_OFF_BETA_MU = wp.constant(dword_offset_of(ClothTriangleData, "beta_mu"))
 _OFF_INV_MASS_A = wp.constant(dword_offset_of(ClothTriangleData, "inv_mass_a"))
 _OFF_INV_MASS_B = wp.constant(dword_offset_of(ClothTriangleData, "inv_mass_b"))
 _OFF_INV_MASS_C = wp.constant(dword_offset_of(ClothTriangleData, "inv_mass_c"))
-_OFF_BIAS_LAMBDA = wp.constant(dword_offset_of(ClothTriangleData, "bias_lambda"))
-_OFF_BIAS_MU = wp.constant(dword_offset_of(ClothTriangleData, "bias_mu"))
+_OFF_ROTATION = wp.constant(dword_offset_of(ClothTriangleData, "rotation"))
 _OFF_LAMBDA_SUM_LAMBDA = wp.constant(dword_offset_of(ClothTriangleData, "lambda_sum_lambda"))
 _OFF_LAMBDA_SUM_MU = wp.constant(dword_offset_of(ClothTriangleData, "lambda_sum_mu"))
 
 
-#: Total dword count of one cloth-triangle constraint column. Useful
-#: for sizing assertions; the actual :class:`ConstraintContainer`
-#: width is ``max(ADBS_DWORDS, CLOTH_TRIANGLE_DWORDS, ...)``.
+#: Total dword count of one cloth-triangle constraint column.
 CLOTH_TRIANGLE_DWORDS: int = num_dwords(ClothTriangleData)
 
 
 # ---------------------------------------------------------------------------
-# Type-tag setter (the only writer of dword 0)
+# Type-tag setter
 # ---------------------------------------------------------------------------
 
 
 @wp.func
 def cloth_triangle_set_type(c: ConstraintContainer, cid: wp.int32):
-    """Stamp the constraint-type tag at dword 0.
-
-    Called once per row when the cloth scene-build pipeline
-    initialises the row; the iterate / dispatcher reads this tag
-    via :func:`~newton._src.solvers.phoenx.constraints.constraint_container.read_int`
-    at offset 0 to route to the cloth handler.
-    """
+    """Stamp the constraint-type tag at dword 0."""
     write_int(c, wp.int32(0), cid, CONSTRAINT_TYPE_CLOTH_TRIANGLE)
 
 
@@ -402,8 +410,28 @@ def cloth_triangle_set_alpha_mu(c: ConstraintContainer, cid: wp.int32, v: wp.flo
     write_float(c, _OFF_ALPHA_MU, cid, v)
 
 
+@wp.func
+def cloth_triangle_get_beta_lambda(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_BETA_LAMBDA, cid)
+
+
+@wp.func
+def cloth_triangle_set_beta_lambda(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_BETA_LAMBDA, cid, v)
+
+
+@wp.func
+def cloth_triangle_get_beta_mu(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_BETA_MU, cid)
+
+
+@wp.func
+def cloth_triangle_set_beta_mu(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_BETA_MU, cid, v)
+
+
 # ---------------------------------------------------------------------------
-# Per-substep cache accessors (inv_mass_*, bias_*)
+# Per-substep cache accessors
 # ---------------------------------------------------------------------------
 
 
@@ -437,29 +465,19 @@ def cloth_triangle_set_inv_mass_c(c: ConstraintContainer, cid: wp.int32, v: wp.f
     write_float(c, _OFF_INV_MASS_C, cid, v)
 
 
-@wp.func
-def cloth_triangle_get_bias_lambda(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_BIAS_LAMBDA, cid)
-
-
-@wp.func
-def cloth_triangle_set_bias_lambda(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_BIAS_LAMBDA, cid, v)
-
-
-@wp.func
-def cloth_triangle_get_bias_mu(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
-    return read_float(c, _OFF_BIAS_MU, cid)
-
-
-@wp.func
-def cloth_triangle_set_bias_mu(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_BIAS_MU, cid, v)
-
-
 # ---------------------------------------------------------------------------
-# Cross-iteration warm-start accumulators
+# Warm-start accessors
 # ---------------------------------------------------------------------------
+
+
+@wp.func
+def cloth_triangle_get_rotation(c: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return read_float(c, _OFF_ROTATION, cid)
+
+
+@wp.func
+def cloth_triangle_set_rotation(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_ROTATION, cid, v)
 
 
 @wp.func
@@ -483,35 +501,108 @@ def cloth_triangle_set_lambda_sum_mu(c: ConstraintContainer, cid: wp.int32, v: w
 
 
 # ---------------------------------------------------------------------------
-# Prepare + iterate (Aachen 2018 Fast Co-rotated FEM, XPBD form)
+# In-plane projector and rotation extraction
 # ---------------------------------------------------------------------------
-#
-# Two XPBD rows per triangle, sequential row Gauss-Seidel:
-#
-#   Row lambda (area-preservation):
-#     C_lam = current_area - rest_area = (sigma_0 * sigma_1 - 1) * rest_area
-#
-#   Row mu (deviatoric / shear, corotational):
-#     C_mu  = ||F - R||_F * rest_area
-#         = sqrt((sigma_0 - 1)^2 + (sigma_1 - 1)^2) * rest_area
-#
-# F is the 3x2 deformation gradient, R = polar(F) the closest 3x2
-# matrix with orthonormal columns. sigma_0, sigma_1 are the singular
-# values of F (recovered analytically from the 2x2 SPD F^T F).
-#
-# Per-row XPBD update (Macklin "Small Steps in Physics Simulation"):
-#   alpha_tilde = alpha * idt^2
-#   delta_lam   = -(C + alpha_tilde * lambda_sum)
-#                 / (sum_node inv_mass_node * |grad_node|^2 + alpha_tilde)
-#   x_node     += inv_mass_node * delta_lam * grad_node
-#   lambda_sum += delta_lam
 
 
-_C_LAMBDA_EPS = wp.constant(wp.float32(1.0e-12))
-_C_MU_EPS = wp.constant(wp.float32(1.0e-6))
-_DET_EPS = wp.constant(wp.float32(1.0e-12))
 _ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
 _ACCESS_MODE_VELOCITY_LEVEL = wp.constant(wp.int32(ACCESS_MODE_VELOCITY_LEVEL))
+_PROJECTOR_EPS = wp.constant(wp.float32(1.0e-12))
+_EXTRACT_ROT_EPS = wp.constant(wp.float32(1.0e-6))
+_EXTRACT_ROT_MAX_ITERS = wp.constant(wp.int32(15))
+_DET_F_EPS = wp.constant(wp.float32(1.0e-12))
+
+
+@wp.func
+def _project_to_2d(x_axis: wp.vec3f, y_axis: wp.vec3f, dir: wp.vec3f) -> wp.vec2f:
+    """Project a 3D direction into the (x_axis, y_axis) 2D frame.
+
+    Mirrors :class:`FemTriProjector.ProjectDirectionTo2D`
+    (``FemTri.cs:25-28``)."""
+    return wp.vec2f(wp.dot(x_axis, dir), wp.dot(y_axis, dir))
+
+
+@wp.func
+def _project_to_3d(x_axis: wp.vec3f, y_axis: wp.vec3f, dir2: wp.vec2f) -> wp.vec3f:
+    """Lift a 2D direction back to 3D in the projector's frame.
+
+    Mirrors :class:`FemTriProjector.ProjectDirectionTo3D`
+    (``FemTri.cs:30-33``)."""
+    return dir2[0] * x_axis + dir2[1] * y_axis
+
+
+@wp.func
+def _build_projector(xa: wp.vec3f, xb: wp.vec3f, xc: wp.vec3f):
+    """Build the in-plane (x_axis, y_axis) frame for a triangle.
+
+    ``x_axis`` runs along ``B - A``; ``y_axis`` is in-plane orthogonal
+    to ``x_axis`` (in the ``A B C`` plane).  Mirrors
+    :class:`FemTriProjector` (``FemTri.cs:11-23``).
+
+    Returns a degenerate ``(x, y)`` if the triangle is collinear / has
+    zero edge length; the iterate guards against that with a det-F
+    floor before scattering.
+    """
+    ab = xb - xa
+    ac = xc - xa
+    normal = wp.cross(ab, ac)
+    ab_len_sq = wp.dot(ab, ab)
+    if ab_len_sq < _PROJECTOR_EPS:
+        return wp.vec3f(1.0, 0.0, 0.0), wp.vec3f(0.0, 1.0, 0.0)
+    x_axis = ab * (wp.float32(1.0) / wp.sqrt(ab_len_sq))
+    y_unnorm = wp.cross(normal, ab)
+    y_len_sq = wp.dot(y_unnorm, y_unnorm)
+    if y_len_sq < _PROJECTOR_EPS:
+        # Collinear -- pick an arbitrary in-plane perp.  The constraint
+        # gradient will be near-zero in this state anyway; we just need
+        # a non-zero finite frame so the math doesn't divide by zero.
+        return x_axis, wp.vec3f(-x_axis[1], x_axis[0], wp.float32(0.0))
+    y_axis = y_unnorm * (wp.float32(1.0) / wp.sqrt(y_len_sq))
+    return x_axis, y_axis
+
+
+@wp.func
+def _extract_rotation_2d(
+    f00: wp.float32, f01: wp.float32, f10: wp.float32, f11: wp.float32, angle: wp.float32
+) -> wp.float32:
+    """Iterative closest-rotation extraction in 2D.
+
+    Direct port of ``ConstraintHelper.ExtractRotation(JMatrix2, ...)``
+    (``ConstraintHelper.cs:28-45``).  Iteratively refines ``angle`` so
+    that ``R(angle)`` is the closest 2D rotation to ``F``.
+
+    The 2D version of Mueller et al.'s polar decomposition by
+    quaternion-axis iteration.  Each step computes the gradient of
+    ``||F - R||^2`` along ``angle`` and damps it by the symmetric
+    diagonal sum of ``R^T F``::
+
+        crossSum = R[:,0] x F[:,0] + R[:,1] x F[:,1]
+        dotSum   = R[:,0] . F[:,0] + R[:,1] . F[:,1]
+        delta    = crossSum / (|dotSum| + eps)
+        angle   += delta
+
+    Where 2D cross is the scalar ``ax*by - ay*bx``.  Converges
+    quadratically near the optimum; warm-starting via the persisted
+    ``rotation`` field keeps the iteration count near 1 in steady
+    state.
+    """
+    a = angle
+    for _ in range(_EXTRACT_ROT_MAX_ITERS):
+        c = wp.cos(a)
+        s = wp.sin(a)
+        # R columns: col0 = (c, s), col1 = (-s, c).
+        cross_sum = (c * f10 - s * f00) + ((-s) * f11 - c * f01)
+        dot_sum = (c * f00 + s * f10) + ((-s) * f01 + c * f11)
+        delta = cross_sum / (wp.abs(dot_sum) + _EXTRACT_ROT_EPS)
+        a = a + delta
+        if delta < _EXTRACT_ROT_EPS and -delta < _EXTRACT_ROT_EPS:
+            break
+    return a
+
+
+# ---------------------------------------------------------------------------
+# Prepare + iterate
+# ---------------------------------------------------------------------------
 
 
 @wp.func
@@ -522,48 +613,28 @@ def cloth_triangle_prepare_for_iteration_at(
     store: BodyOrParticleStore,
     idt: wp.float32,
 ):
-    """Prepare a cloth-triangle column for one substep's iterations.
+    """Substep-entry prepare: cache inverse masses and reset XPBD warm
+    starts.
 
-    Caches per-substep quantities in the column row so the iterate
-    hot loop just reads scalars:
-
-    * ``inv_mass_a/b/c``  -- looked up from the body-or-particle
-      store (constants for a substep -- particles' inverse mass
-      doesn't change inside a step).
-    * ``bias_lambda``     -- ``alpha_lambda * idt^2`` (XPBD compliance
-      scaled by inverse-substep-squared per Macklin 2019).
-    * ``bias_mu``         -- ``alpha_mu * idt^2``.
-
-    Resets the warm-start accumulators ``lambda_sum_lambda`` /
-    ``lambda_sum_mu`` to zero at substep entry. Cross-substep
-    warm-starting works at a coarser level than a single solve --
-    starting each substep at zero gives the iterate sweeps a clean
-    XPBD trajectory; carrying lambda_sum across substeps would
-    couple substep timesteps in ways that void the
-    ``alpha_tilde = alpha * idt^2`` derivation.
+    The ``rotation`` warm start is *not* reset here -- the angle of
+    the closest rotation to the current ``F`` is a function of the
+    triangle's *pose*, which evolves continuously across substeps.
+    Resetting it to zero would force the iterative extractor to
+    re-converge from a cold start every substep, costing
+    ``ExtractRotation`` its iteration budget on a problem the
+    persistent state already solves for free.
     """
-    # ``base_offset`` reserved for future compound-cid layouts; cloth
-    # uses one block per cid so it's always 0.
     _ = base_offset
 
     body_a = cloth_triangle_get_body1(constraints, cid)
     body_b = cloth_triangle_get_body2(constraints, cid)
     body_c = cloth_triangle_get_body3(constraints, cid)
 
-    inv_mass_a = get_inverse_mass(store, body_a)
-    inv_mass_b = get_inverse_mass(store, body_b)
-    inv_mass_c = get_inverse_mass(store, body_c)
-    cloth_triangle_set_inv_mass_a(constraints, cid, inv_mass_a)
-    cloth_triangle_set_inv_mass_b(constraints, cid, inv_mass_b)
-    cloth_triangle_set_inv_mass_c(constraints, cid, inv_mass_c)
+    cloth_triangle_set_inv_mass_a(constraints, cid, get_inverse_mass(store, body_a))
+    cloth_triangle_set_inv_mass_b(constraints, cid, get_inverse_mass(store, body_b))
+    cloth_triangle_set_inv_mass_c(constraints, cid, get_inverse_mass(store, body_c))
 
-    alpha_lambda = cloth_triangle_get_alpha_lambda(constraints, cid)
-    alpha_mu = cloth_triangle_get_alpha_mu(constraints, cid)
-    idt_sq = idt * idt
-    cloth_triangle_set_bias_lambda(constraints, cid, alpha_lambda * idt_sq)
-    cloth_triangle_set_bias_mu(constraints, cid, alpha_mu * idt_sq)
-
-    # Substep-fresh XPBD accumulators.
+    # Substep-fresh XPBD accumulators -- per Macklin XPBD (Macklin 2019).
     cloth_triangle_set_lambda_sum_lambda(constraints, cid, wp.float32(0.0))
     cloth_triangle_set_lambda_sum_mu(constraints, cid, wp.float32(0.0))
 
@@ -576,36 +647,30 @@ def cloth_triangle_iterate_at(
     store: BodyOrParticleStore,
     idt: wp.float32,
 ):
-    """One XPBD sweep over a cloth-triangle column.
+    """One XPBD sweep on a cloth triangle (area + shear rows).
 
-    Pre-syncs the three vertices to ``POSITION_LEVEL`` so any
-    pending velocity-level impulse from a prior contact iterate is
-    folded into ``position`` (via the
-    :func:`~newton._src.solvers.phoenx.access_mode.synchronize_position_velocity`
-    finite-diff against ``position_prev_substep``) before the PBD
-    math reads it. Mirrors the contact endpoint's
-    ``_triangle_sync_to_velocity_level`` pattern; together they
-    keep cloth and contact corrections lossless across alternating
-    graph colours within a substep.
+    Direct port of ``FemTriPBD.Iterate`` (``FemTriPBD.cs:99-236``):
 
-    Reads the three particle positions, runs the area row first
-    (sequential row Gauss-Seidel: row mu sees row lambda's
-    update), runs the shear row, writes back. Direct particle-
-    position writes -- no mass-splitting indirection (deferred per
-    PLAN_CLOTH_TRIANGLE.md).
+    #. Sync the three vertices to ``POSITION_LEVEL`` so the read of
+       ``position`` reflects any prior contact-side velocity write.
+    #. Build the in-plane projector from the *current* positions.
+    #. Compute the 2x2 deformation gradient
+       ``F = invRest * [xAB_2D | xAC_2D]``.
+    #. Iterative ``ExtractRotation`` warm-started from
+       ``constraints[cid].rotation``.
+    #. **Area row (row lambda).**  ``C = (det F - 1) * rest_area``,
+       gradients in 2D (six scalars), XPBD update, scatter back to 3D.
+    #. **Shear row (row mu).**  Rebuild projector + ``F`` + extract
+       rotation again so the shear row sees the area-corrected state;
+       ``C = ||F - R||_F * rest_area``, gradients, XPBD update.
+    #. Persist the updated ``rotation``, ``lambda_sum_lambda``,
+       ``lambda_sum_mu`` for the next sweep.
 
-    Numerical guards:
-
-    * ``current_area < eps`` (degenerate triangle, or initial
-      collapsed state): the lambda row early-outs because its
-      gradient direction is ill-defined.
-    * ``f_norm < eps`` (no shear deformation): the mu row early-
-      outs because the gradient division by ``f_norm`` is
-      ill-conditioned. The constraint is satisfied at this
-      configuration so skipping is correct.
-    * ``det_M <= eps`` (collapsed deformation gradient -- triangle
-      mapped to a line): the polar decomposition diverges. Skip the
-      mu row; the lambda row will push the triangle area back.
+    The 2D-projected math is more numerically robust than a 3x2
+    deformation gradient in 3D: the projector strips out the
+    out-of-plane component, so a flat triangle with a small
+    out-of-plane perturbation gets a clean 2x2 ``F`` rather than a
+    near-singular 3x2 one.
     """
     _ = base_offset
 
@@ -613,11 +678,6 @@ def cloth_triangle_iterate_at(
     body_b = cloth_triangle_get_body2(constraints, cid)
     body_c = cloth_triangle_get_body3(constraints, cid)
 
-    # Pre-sync the three vertices to POSITION_LEVEL.  If a contact
-    # iterate in the previous color/sweep wrote velocity, this folds
-    # it into ``particles.position`` via ``v -> dt * v`` against
-    # ``position_prev_substep`` so the PBD reads see the cumulative
-    # state.  No-op for vertices already in POSITION_LEVEL or STATIC.
     set_access_mode(store, body_a, _ACCESS_MODE_POSITION_LEVEL, idt)
     set_access_mode(store, body_b, _ACCESS_MODE_POSITION_LEVEL, idt)
     set_access_mode(store, body_c, _ACCESS_MODE_POSITION_LEVEL, idt)
@@ -627,117 +687,156 @@ def cloth_triangle_iterate_at(
     inv_mass_c = cloth_triangle_get_inv_mass_c(constraints, cid)
     rest_area = cloth_triangle_get_rest_area(constraints, cid)
     inv_rest = cloth_triangle_get_inv_rest(constraints, cid)
-    bias_lambda = cloth_triangle_get_bias_lambda(constraints, cid)
-    bias_mu = cloth_triangle_get_bias_mu(constraints, cid)
+    alpha_lambda = cloth_triangle_get_alpha_lambda(constraints, cid)
+    alpha_mu = cloth_triangle_get_alpha_mu(constraints, cid)
+    beta_lambda = cloth_triangle_get_beta_lambda(constraints, cid)
+    beta_mu = cloth_triangle_get_beta_mu(constraints, cid)
+    rotation = cloth_triangle_get_rotation(constraints, cid)
+    lambda_sum_lambda = cloth_triangle_get_lambda_sum_lambda(constraints, cid)
+    lambda_sum_mu = cloth_triangle_get_lambda_sum_mu(constraints, cid)
 
     x_a = get_position(store, body_a)
     x_b = get_position(store, body_b)
     x_c = get_position(store, body_c)
+    # Per-vertex displacement within the substep -- the Rayleigh damping
+    # term ``gradC . dx`` projects this onto the constraint gradient.
+    # Free particles see ``gradC = 0``, so this damping does not affect
+    # free fall (no "ether"); only motion that loads the constraint is
+    # dissipated.  Mirrors the Macklin XPBD 2016 eq. 26 form.
+    dx_a = x_a - get_position_prev_substep(store, body_a)
+    dx_b = x_b - get_position_prev_substep(store, body_b)
+    dx_c = x_c - get_position_prev_substep(store, body_c)
 
-    # ----- Row lambda: area preservation ----------------------------------
-    # C_lam = 0.5 * |cross(xB-xA, xC-xA)| - rest_area.
-    e1 = x_b - x_a
-    e2 = x_c - x_a
-    n = wp.cross(e1, e2)
-    n_sq = wp.dot(n, n)
-    if n_sq > _C_LAMBDA_EPS:
-        n_norm = wp.sqrt(n_sq)
-        n_hat = n / n_norm
-        current_area = wp.float32(0.5) * n_norm
-        c_lambda = current_area - rest_area
-        # Translation-invariant gradients (sum to zero):
-        #   grad_A = 0.5 * cross(xB - xC, n_hat)
-        #   grad_B = 0.5 * cross(xC - xA, n_hat)
-        #   grad_C = 0.5 * cross(xA - xB, n_hat)
-        grad_a = wp.float32(0.5) * wp.cross(x_b - x_c, n_hat)
-        grad_b = wp.float32(0.5) * wp.cross(x_c - x_a, n_hat)
-        grad_c = wp.float32(0.5) * wp.cross(x_a - x_b, n_hat)
-        denom_lam = (
-            inv_mass_a * wp.dot(grad_a, grad_a)
-            + inv_mass_b * wp.dot(grad_b, grad_b)
-            + inv_mass_c * wp.dot(grad_c, grad_c)
-            + bias_lambda
+    dt = wp.float32(1.0) / idt
+    idt_sq = idt * idt
+    bias_lambda = idt_sq * alpha_lambda
+    bias_mu = idt_sq * alpha_mu
+    gamma_lambda = beta_lambda * dt
+    gamma_mu = beta_mu * dt
+
+    # ----- Pass 1: area row (row lambda) ------------------------------
+    x_axis, y_axis = _build_projector(x_a, x_b, x_c)
+    xab2 = _project_to_2d(x_axis, y_axis, x_b - x_a)
+    xac2 = _project_to_2d(x_axis, y_axis, x_c - x_a)
+
+    # F = invRest * [xAB_2D | xAC_2D] (matching FemTriPBD.cs:153-156).
+    f00 = inv_rest[0, 0] * xab2[0] + inv_rest[1, 0] * xac2[0]
+    f01 = inv_rest[0, 1] * xab2[0] + inv_rest[1, 1] * xac2[0]
+    f10 = inv_rest[0, 0] * xab2[1] + inv_rest[1, 0] * xac2[1]
+    f11 = inv_rest[0, 1] * xab2[1] + inv_rest[1, 1] * xac2[1]
+
+    rotation = _extract_rotation_2d(f00, f01, f10, f11, rotation)
+
+    # Constants for the gradient (FemTriPBD.cs:161-162).
+    q = inv_rest[0, 0] + inv_rest[1, 0]  # column-0 sum, [m^-1]
+    t = inv_rest[0, 1] + inv_rest[1, 1]  # column-1 sum, [m^-1]
+
+    # Gradients of ``C_lambda = (det F - 1) * rest_area`` w.r.t. each
+    # vertex's 2D position.  Direct port of FemTriPBD.cs:163-168.
+    g1_a_x = (-q * f11 + t * f10) * rest_area
+    g1_a_y = (-t * f00 + q * f01) * rest_area
+    g1_b_x = (inv_rest[0, 0] * f11 - f10 * inv_rest[0, 1]) * rest_area
+    g1_b_y = (inv_rest[0, 1] * f00 - f01 * inv_rest[0, 0]) * rest_area
+    g1_c_x = (inv_rest[1, 0] * f11 - f10 * inv_rest[1, 1]) * rest_area
+    g1_c_y = (inv_rest[1, 1] * f00 - f01 * inv_rest[1, 0]) * rest_area
+
+    c_lambda = (f00 * f11 - (wp.float32(1.0) + f10 * f01)) * rest_area
+
+    # Rayleigh damping numerator term: gamma * sum_i (grad_i . dx_i),
+    # projected to 2D via the per-vertex 2D gradients above.  ``dx_i``
+    # is the substep displacement; project it to the same 2D frame
+    # before dotting with the 2D gradient.
+    dx_a_2d_lam = _project_to_2d(x_axis, y_axis, dx_a)
+    dx_b_2d_lam = _project_to_2d(x_axis, y_axis, dx_b)
+    dx_c_2d_lam = _project_to_2d(x_axis, y_axis, dx_c)
+    grad_dot_dx_lambda = (
+        g1_a_x * dx_a_2d_lam[0] + g1_a_y * dx_a_2d_lam[1]
+        + g1_b_x * dx_b_2d_lam[0] + g1_b_y * dx_b_2d_lam[1]
+        + g1_c_x * dx_c_2d_lam[0] + g1_c_y * dx_c_2d_lam[1]
+    )
+
+    grad_dot_grad_inv_m_lambda = (
+        inv_mass_a * (g1_a_x * g1_a_x + g1_a_y * g1_a_y)
+        + inv_mass_b * (g1_b_x * g1_b_x + g1_b_y * g1_b_y)
+        + inv_mass_c * (g1_c_x * g1_c_x + g1_c_y * g1_c_y)
+    )
+    denom_lambda = (wp.float32(1.0) + gamma_lambda) * grad_dot_grad_inv_m_lambda + bias_lambda
+
+    if denom_lambda > wp.float32(0.0):
+        # Macklin XPBD 2016 eq. 26 with damping.
+        d_lam_lambda = -(c_lambda + bias_lambda * lambda_sum_lambda + gamma_lambda * grad_dot_dx_lambda) / denom_lambda
+        delta_a = wp.vec2f(inv_mass_a * g1_a_x * d_lam_lambda, inv_mass_a * g1_a_y * d_lam_lambda)
+        delta_b = wp.vec2f(inv_mass_b * g1_b_x * d_lam_lambda, inv_mass_b * g1_b_y * d_lam_lambda)
+        delta_c = wp.vec2f(inv_mass_c * g1_c_x * d_lam_lambda, inv_mass_c * g1_c_y * d_lam_lambda)
+        x_a = x_a + _project_to_3d(x_axis, y_axis, delta_a)
+        x_b = x_b + _project_to_3d(x_axis, y_axis, delta_b)
+        x_c = x_c + _project_to_3d(x_axis, y_axis, delta_c)
+        lambda_sum_lambda = lambda_sum_lambda + d_lam_lambda
+
+    # ----- Pass 2: shear row (row mu) ---------------------------------
+    # Rebuild projector + F so the shear row sees the area-corrected
+    # positions (FemTriPBD.cs:185-194).
+    x_axis, y_axis = _build_projector(x_a, x_b, x_c)
+    xab2 = _project_to_2d(x_axis, y_axis, x_b - x_a)
+    xac2 = _project_to_2d(x_axis, y_axis, x_c - x_a)
+    f00 = inv_rest[0, 0] * xab2[0] + inv_rest[1, 0] * xac2[0]
+    f01 = inv_rest[0, 1] * xab2[0] + inv_rest[1, 1] * xac2[0]
+    f10 = inv_rest[0, 0] * xab2[1] + inv_rest[1, 0] * xac2[1]
+    f11 = inv_rest[0, 1] * xab2[1] + inv_rest[1, 1] * xac2[1]
+    rotation = _extract_rotation_2d(f00, f01, f10, f11, rotation)
+    cr = wp.cos(rotation)
+    sr = wp.sin(rotation)
+    # R columns: col0 = (cr, sr), col1 = (-sr, cr) -> M11=cr, M12=-sr, M21=sr, M22=cr.
+    df = f00 - cr
+    dh = f01 - (-sr)
+    dm = f10 - sr
+    dq = f11 - cr
+    du_sq = df * df + dm * dm + dh * dh + dq * dq
+    if du_sq > _DET_F_EPS:
+        du = wp.sqrt(du_sq)
+        dx = rest_area / wp.max(_DET_F_EPS, wp.float32(2.0) * du)
+        # Gradients of ``C_mu = ||F - R||_F * rest_area`` (FemTriPBD.cs:203-208).
+        g2_a_x = wp.float32(-2.0) * (df * q + dh * t) * dx
+        g2_a_y = wp.float32(-2.0) * (dm * q + dq * t) * dx
+        g2_b_x = wp.float32(2.0) * (df * inv_rest[0, 0] + dh * inv_rest[0, 1]) * dx
+        g2_b_y = wp.float32(2.0) * (dm * inv_rest[0, 0] + dq * inv_rest[0, 1]) * dx
+        g2_c_x = wp.float32(2.0) * (df * inv_rest[1, 0] + dh * inv_rest[1, 1]) * dx
+        g2_c_y = wp.float32(2.0) * (dm * inv_rest[1, 0] + dq * inv_rest[1, 1]) * dx
+        c_mu = du * rest_area
+        # Rayleigh damping for the shear row, same form as the area row.
+        dx_a_2d_mu = _project_to_2d(x_axis, y_axis, dx_a)
+        dx_b_2d_mu = _project_to_2d(x_axis, y_axis, dx_b)
+        dx_c_2d_mu = _project_to_2d(x_axis, y_axis, dx_c)
+        grad_dot_dx_mu = (
+            g2_a_x * dx_a_2d_mu[0] + g2_a_y * dx_a_2d_mu[1]
+            + g2_b_x * dx_b_2d_mu[0] + g2_b_y * dx_b_2d_mu[1]
+            + g2_c_x * dx_c_2d_mu[0] + g2_c_y * dx_c_2d_mu[1]
         )
-        if denom_lam > wp.float32(0.0):
-            lambda_sum_lambda = cloth_triangle_get_lambda_sum_lambda(constraints, cid)
-            delta_lambda = -(c_lambda + bias_lambda * lambda_sum_lambda) / denom_lam
-            x_a = x_a + (inv_mass_a * delta_lambda) * grad_a
-            x_b = x_b + (inv_mass_b * delta_lambda) * grad_b
-            x_c = x_c + (inv_mass_c * delta_lambda) * grad_c
-            cloth_triangle_set_lambda_sum_lambda(constraints, cid, lambda_sum_lambda + delta_lambda)
+        grad_dot_grad_inv_m_mu = (
+            inv_mass_a * (g2_a_x * g2_a_x + g2_a_y * g2_a_y)
+            + inv_mass_b * (g2_b_x * g2_b_x + g2_b_y * g2_b_y)
+            + inv_mass_c * (g2_c_x * g2_c_x + g2_c_y * g2_c_y)
+        )
+        denom_mu = (wp.float32(1.0) + gamma_mu) * grad_dot_grad_inv_m_mu + bias_mu
+        if denom_mu > wp.float32(0.0):
+            d_lam_mu = -(c_mu + bias_mu * lambda_sum_mu + gamma_mu * grad_dot_dx_mu) / denom_mu
+            delta_a = wp.vec2f(inv_mass_a * g2_a_x * d_lam_mu, inv_mass_a * g2_a_y * d_lam_mu)
+            delta_b = wp.vec2f(inv_mass_b * g2_b_x * d_lam_mu, inv_mass_b * g2_b_y * d_lam_mu)
+            delta_c = wp.vec2f(inv_mass_c * g2_c_x * d_lam_mu, inv_mass_c * g2_c_y * d_lam_mu)
+            x_a = x_a + _project_to_3d(x_axis, y_axis, delta_a)
+            x_b = x_b + _project_to_3d(x_axis, y_axis, delta_b)
+            x_c = x_c + _project_to_3d(x_axis, y_axis, delta_c)
+            lambda_sum_mu = lambda_sum_mu + d_lam_mu
 
-    # ----- Row mu: shear / deviatoric (corotational) ----------------------
-    # F is 3x2: F[:,j] = invRest[0,j]*e1 + invRest[1,j]*e2.
-    e1 = x_b - x_a
-    e2 = x_c - x_a
-    f_col0 = inv_rest[0, 0] * e1 + inv_rest[1, 0] * e2
-    f_col1 = inv_rest[0, 1] * e1 + inv_rest[1, 1] * e2
-    # M = F^T F (2x2, SPD). Eigen-decomposition has a closed form:
-    #   sigma_prod^2 = det(M),  sigma_sum^2 = trace(M) + 2*sigma_prod
-    m00 = wp.dot(f_col0, f_col0)
-    m01 = wp.dot(f_col0, f_col1)
-    m11 = wp.dot(f_col1, f_col1)
-    tr_m = m00 + m11
-    det_m = m00 * m11 - m01 * m01
-    if det_m > _DET_EPS:
-        sigma_prod = wp.sqrt(det_m)
-        sigma_sum_sq = tr_m + wp.float32(2.0) * sigma_prod
-        if sigma_sum_sq > wp.float32(0.0):
-            sigma_sum = wp.sqrt(sigma_sum_sq)
-            # ||F-R||_F^2 = trace(M) - 2*(sigma_0+sigma_1) + 2.
-            f_norm_sq = tr_m - wp.float32(2.0) * sigma_sum + wp.float32(2.0)
-            if f_norm_sq > _C_MU_EPS:
-                f_norm = wp.sqrt(f_norm_sq)
-                c_mu = f_norm * rest_area
-                # Recover R = F * S^-1 from the closed-form S = sqrt(M):
-                #   S = (M + sigma_prod * I) / sigma_sum
-                #   det(S) = sigma_prod  =>  S^-1 = adj(S) / det(S)
-                # i.e. T = S^-1, with:
-                #   inv_factor = 1 / (sigma_sum * sigma_prod)
-                #   T00 = (m11 + sigma_prod) * inv_factor
-                #   T01 = -m01 * inv_factor
-                #   T10 = T01
-                #   T11 = (m00 + sigma_prod) * inv_factor
-                inv_factor = wp.float32(1.0) / (sigma_sum * sigma_prod)
-                t00 = (m11 + sigma_prod) * inv_factor
-                t01 = -m01 * inv_factor
-                t11 = (m00 + sigma_prod) * inv_factor
-                # R = F * T (3x2 = 3x2 * 2x2)
-                r_col0 = f_col0 * t00 + f_col1 * t01
-                r_col1 = f_col0 * t01 + f_col1 * t11
-                # G = F - R, then H = G * invRest^T (3x2 = 3x2 * 2x2).
-                g_col0 = f_col0 - r_col0
-                g_col1 = f_col1 - r_col1
-                h_col0 = inv_rest[0, 0] * g_col0 + inv_rest[0, 1] * g_col1
-                h_col1 = inv_rest[1, 0] * g_col0 + inv_rest[1, 1] * g_col1
-                # Gradients:
-                #   grad_A = -(rest_area / f_norm) * (H[:,0] + H[:,1])
-                #   grad_B =  (rest_area / f_norm) * H[:,0]
-                #   grad_C =  (rest_area / f_norm) * H[:,1]
-                inv_fnorm_area = rest_area / f_norm
-                grad_a_mu = -inv_fnorm_area * (h_col0 + h_col1)
-                grad_b_mu = inv_fnorm_area * h_col0
-                grad_c_mu = inv_fnorm_area * h_col1
-                denom_mu = (
-                    inv_mass_a * wp.dot(grad_a_mu, grad_a_mu)
-                    + inv_mass_b * wp.dot(grad_b_mu, grad_b_mu)
-                    + inv_mass_c * wp.dot(grad_c_mu, grad_c_mu)
-                    + bias_mu
-                )
-                if denom_mu > wp.float32(0.0):
-                    lambda_sum_mu = cloth_triangle_get_lambda_sum_mu(constraints, cid)
-                    delta_mu = -(c_mu + bias_mu * lambda_sum_mu) / denom_mu
-                    x_a = x_a + (inv_mass_a * delta_mu) * grad_a_mu
-                    x_b = x_b + (inv_mass_b * delta_mu) * grad_b_mu
-                    x_c = x_c + (inv_mass_c * delta_mu) * grad_c_mu
-                    cloth_triangle_set_lambda_sum_mu(constraints, cid, lambda_sum_mu + delta_mu)
-
-    # Scatter the (possibly mutated) particle positions back into the
-    # body-or-particle store. Direct write -- no mass splitting on
-    # cloth yet.
+    # Scatter the (possibly mutated) particle positions back.
     set_position(store, body_a, x_a)
     set_position(store, body_b, x_b)
     set_position(store, body_c, x_c)
+
+    # Persist warm-start state.
+    cloth_triangle_set_rotation(constraints, cid, rotation)
+    cloth_triangle_set_lambda_sum_lambda(constraints, cid, lambda_sum_lambda)
+    cloth_triangle_set_lambda_sum_mu(constraints, cid, lambda_sum_mu)
 
 
 @wp.func
@@ -748,54 +847,24 @@ def cloth_triangle_relax_at(
     store: BodyOrParticleStore,
     idt: wp.float32,
 ):
-    """Relax-phase wrapper for the cloth-triangle XPBD iterate.
+    """Relax-phase wrapper: run iterate, then sync vertices to ``VELOCITY_LEVEL``.
 
-    The relax kernel's invariant is that *only velocities* are
-    mutated -- positions go untouched.  Cloth's iterate is naturally
-    position-level, so we wrap it: snapshot positions, run the
-    standard iterate (writes new positions and flips mode to POS),
-    sync back to VELOCITY_LEVEL (the
-    :func:`~newton._src.solvers.phoenx.access_mode.synchronize_position_velocity`
-    finite-diff folds the position delta into the velocity field),
-    and restore the pre-iterate positions.  Net effect: velocity
-    has the cloth correction added; position is unchanged.
-
-    The sync round-trip is lossless thanks to the access-mode
-    pattern: any prior contact-relax velocity contribution gets
-    folded *into* position by the cloth iterate's internal
-    ``set_access_mode(POSITION_LEVEL)`` and back *out* into velocity
-    by our trailing ``set_access_mode(VELOCITY_LEVEL)``.
-
-    Args:
-        constraints: The cloth-triangle column container.
-        cid: Constraint id within the joint-container space.
-        base_offset: Reserved for future compound-cid layouts.
-        store: Body-or-particle store the iterate reads / writes.
-        idt: Inverse substep dt ``[1/s]`` -- drives the
-            access-mode finite-diff math.
+    PhoenX's TGS-soft loop alternates a position-iterate phase and a
+    velocity-relax phase.  Cloth XPBD is naturally position-level, so
+    the relax wrapper runs the standard iterate (which writes
+    positions) and then forces ``VELOCITY_LEVEL`` on the three
+    vertices.  The ``POSITION_LEVEL -> VELOCITY_LEVEL`` sync inside
+    :func:`set_access_mode` runs the finite-diff
+    ``vel = (pos - pos_prev) / dt`` so the position correction is
+    folded into the velocity field for the next velocity-level reader
+    (e.g. a subsequent contact-relax sweep on the same particle).
     """
     body_a = cloth_triangle_get_body1(constraints, cid)
     body_b = cloth_triangle_get_body2(constraints, cid)
     body_c = cloth_triangle_get_body3(constraints, cid)
 
-    # Standard cloth iterate: writes new positions, flips mode=POS.
-    # Internally calls set_access_mode(POS) which folds any prior
-    # contact/cloth velocity-level deltas into position before the
-    # PBD math reads it.
     cloth_triangle_iterate_at(constraints, cid, base_offset, store, idt)
 
-    # Sync POSITION->VELOCITY: ``velocity = (position - p_prev_substep) / dt``.
-    # The freshly-written position contains the cloth correction on
-    # top of the velocity-integrated state, so the delta from this
-    # sweep lands in the velocity field.  We DO NOT restore the
-    # position field afterwards: doing so creates an incoherence
-    # between the position and the velocity-implied position
-    # ``p_prev + dt*velocity``, and the next sync POS->VEL on this
-    # particle (e.g. the next contact iterate's
-    # ``_triangle_sync_to_velocity_level``) would erase the cloth
-    # contribution.  Letting position grow keeps both duals coherent
-    # and is bit-equivalent to the iterate phase's behavior.
     set_access_mode(store, body_a, _ACCESS_MODE_VELOCITY_LEVEL, idt)
     set_access_mode(store, body_b, _ACCESS_MODE_VELOCITY_LEVEL, idt)
     set_access_mode(store, body_c, _ACCESS_MODE_VELOCITY_LEVEL, idt)
-

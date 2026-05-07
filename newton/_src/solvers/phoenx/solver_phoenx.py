@@ -1300,7 +1300,13 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def populate_cloth_triangles_from_model(self, model: Any) -> None:
+    def populate_cloth_triangles_from_model(
+        self,
+        model: Any,
+        *,
+        beta_lambda: float = 0.1,
+        beta_mu: float = 0.1,
+    ) -> None:
         """Stamp ``num_cloth_triangles`` cloth-triangle constraint rows
         from a Newton :class:`~newton.Model` and copy the model's
         particle state into the :class:`ParticleContainer`.
@@ -1371,9 +1377,10 @@ class PhoenXWorld:
                 wp.int32(self.num_joints),  # cid_offset
                 wp.int32(self.num_bodies),
                 model.tri_indices,
-                model.tri_poses,
-                model.tri_areas,
+                model.particle_q,
                 model.tri_materials,
+                wp.float32(beta_lambda),
+                wp.float32(beta_mu),
             ],
             device=self.device,
         )

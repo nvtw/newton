@@ -59,10 +59,11 @@ class Example:
         self,
         viewer,
         args=None,
-        width: int = 24,
-        height: int = 24,
+        width: int = 12,
+        height: int = 12,
         youngs_modulus: float = 5.0e8,
         poisson_ratio: float = 0.3,
+        cube_density: float = 60.0,
     ):
         self.viewer = viewer
         self.device = wp.get_device()
@@ -132,7 +133,7 @@ class Example:
             hx=self.cube_he,
             hy=self.cube_he,
             hz=self.cube_he,
-            cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.6),
+            cfg=newton.ModelBuilder.ShapeConfig(density=cube_density, mu=0.6),
         )
         builder.gravity = -9.81
 

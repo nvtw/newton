@@ -82,6 +82,7 @@ __all__ = [
     "get_inverse_mass",
     "get_orientation",
     "get_position",
+    "get_position_prev_substep",
     "get_velocity",
     "is_particle",
     "particle_set_access_mode",
@@ -156,6 +157,22 @@ def get_position(store: BodyOrParticleStore, i: wp.int32) -> wp.vec3f:
     if i < store.num_bodies:
         return store.bodies.position[i]
     return store.particles.position[i - store.num_bodies]
+
+
+@wp.func
+def get_position_prev_substep(store: BodyOrParticleStore, i: wp.int32) -> wp.vec3f:
+    """Substep-entry position snapshot of the body / particle at
+    unified index ``i``.
+
+    Read by Rayleigh-style XPBD damping: the position delta within a
+    substep ``x - x_prev_substep`` projected onto the constraint
+    gradient gives the constraint-direction velocity, which the damping
+    term penalises.  Free particles (no constraint engaged) project to
+    zero and see no damping -- so this damping does NOT alter free-fall
+    velocity."""
+    if i < store.num_bodies:
+        return store.bodies.position_prev_substep[i]
+    return store.particles.position_prev_substep[i - store.num_bodies]
 
 
 @wp.func

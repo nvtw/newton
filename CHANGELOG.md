@@ -65,6 +65,7 @@
 - Fix multi-world coordinate conversion using the wrong body center of mass for replicated worlds
 - Fix MJCF importer ignoring `<default><equality/></default>` attribute defaults (e.g. `solref`, `solimp`) for `<connect>`/`<weld>`/`<joint>` equality constraints
 - Remove incorrect body-level `mjc:damping` -> `rigid_body_linear_damping` mapping from `SchemaResolverMjc`; `mjc:damping` is defined on `MjcJointAPI`, not on bodies
+- Rewrite `SolverPhoenX` cloth-triangle constraint as a faithful port of Jitter2's `FemTriPBD`. Use a 2D in-plane projector for numerical robustness, warm-start the closest-rotation extraction across iterations, fix the XPBD compliance to `alpha = 1/k` (was off by an `area` factor that under-stiffened cloth by 6 orders of magnitude), and add Macklin-2016 Rayleigh damping that acts only along the constraint gradient -- so cloth particles in free fall are unaffected, while high-frequency PGS oscillation is dissipated
 
 ## [1.1.0] - 2026-04-13
 
