@@ -26,7 +26,6 @@ __all__ = [
     "CONSTRAINT_BODY1_OFFSET",
     "CONSTRAINT_BODY2_OFFSET",
     "CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET",
-    "CONSTRAINT_TYPE_CLOTH_TRIANGLE",
     "CONSTRAINT_TYPE_CONTACT",
     "CONSTRAINT_TYPE_INVALID",
     "CONSTRAINT_TYPE_OFFSET",
@@ -96,13 +95,6 @@ CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(8))
 #: pair. Persistent warm-start lives in :class:`ContactContainer` keyed
 #: by the contact index in the sorted Newton contact buffer.
 CONSTRAINT_TYPE_CONTACT = wp.constant(wp.int32(9))
-#: Position-based cloth triangle constraint -- one column per FEM
-#: triangle, two XPBD rows (area / shear) per Aachen 2018 *Fast
-#: Co-rotated FEM*. Constraint endpoints are three unified
-#: body-or-particle indices; for now particle-only (cloth nodes
-#: cannot yet be points on a rigid body). See
-#: :mod:`constraint_cloth_triangle`.
-CONSTRAINT_TYPE_CLOTH_TRIANGLE = wp.constant(wp.int32(10))
 
 #: Dword offsets of the three header fields. By contract these are
 #: 0 / 1 / 2 for every constraint schema (enforced by

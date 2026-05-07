@@ -298,7 +298,6 @@ class Example:
 
         self.constraints = PhoenXWorld.make_constraint_container(
             num_joints=num_joints,
-            num_cloth_triangles=0,
             device=self.device,
         )
 
@@ -314,8 +313,6 @@ class Example:
             bodies=self.bodies,
             constraints=self.constraints,
             num_joints=num_joints,
-            num_particles=0,
-            num_cloth_triangles=0,
             num_worlds=1,
             substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,

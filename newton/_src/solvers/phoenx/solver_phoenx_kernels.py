@@ -12,21 +12,11 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.access_mode import (
-    ACCESS_MODE_STATIC,
-    ACCESS_MODE_VELOCITY_LEVEL,
-)
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
     MOTION_STATIC,
     BodyContainer,
-)
-from newton._src.solvers.phoenx.body_or_particle import (
-    BodyOrParticleStore,
-    get_inverse_mass,
-    is_particle,
-    writeback_position_to_velocity,
 )
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     actuated_double_ball_socket_iterate,
@@ -38,30 +28,6 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     revolute_iterate_multi,
     revolute_prepare_for_iteration,
 )
-from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
-    cloth_triangle_get_body1,
-    cloth_triangle_get_body2,
-    cloth_triangle_get_body3,
-    cloth_triangle_iterate_at,
-    cloth_triangle_prepare_for_iteration_at,
-    cloth_triangle_relax_at,
-    cloth_triangle_set_alpha_lambda,
-    cloth_triangle_set_alpha_mu,
-    cloth_triangle_set_beta_lambda,
-    cloth_triangle_set_beta_mu,
-    cloth_triangle_set_body1,
-    cloth_triangle_set_body2,
-    cloth_triangle_set_body3,
-    cloth_triangle_set_inv_mass_a,
-    cloth_triangle_set_inv_mass_b,
-    cloth_triangle_set_inv_mass_c,
-    cloth_triangle_set_inv_rest,
-    cloth_triangle_set_lambda_sum_lambda,
-    cloth_triangle_set_lambda_sum_mu,
-    cloth_triangle_set_rest_area,
-    cloth_triangle_set_rotation,
-    cloth_triangle_set_type,
-)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -69,23 +35,16 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_body2,
     contact_get_endpoint_idx1,
     contact_get_endpoint_idx2,
-    contact_get_endpoint_kind1,
-    contact_get_endpoint_kind2,
     contact_iterate,
     contact_iterate_multi,
     contact_prepare_for_iteration,
     contact_world_error,
     contact_world_wrench,
 )
-from newton._src.solvers.phoenx.constraints.contact_endpoint import (
-    ENDPOINT_KIND_TRIANGLE,
-)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
-    CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     ConstraintContainer,
     constraint_get_body1,
     constraint_get_body2,
-    read_int,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
@@ -96,10 +55,6 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     element_interaction_data_make,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
-from newton._src.solvers.phoenx.particle import (
-    ParticleContainer,
-    particle_predict_position,
-)
 
 __all__ = [
     "_PER_WORLD_COLORING_BLOCK_DIM",
@@ -812,8 +767,6 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
         num_worlds: wp.int32,
         num_joints: wp.int32,
         tpw_buf: wp.array[wp.int32],
-        particles: ParticleContainer,
-        tri_indices: wp.array[wp.vec4i],
     ):
         tid = wp.tid()
         tpw = tpw_buf[0]
@@ -842,7 +795,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                         actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
                 else:
                     contact_prepare_for_iteration(
-                        contact_cols, cid - num_joints, bodies, idt, cc, contacts, particles, tri_indices
+                        contact_cols, cid - num_joints, bodies, idt, cc, contacts
                     )
                 base += tpw
 
@@ -887,8 +840,6 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                             contacts,
                             True,
                             inner_sweeps,
-                            particles,
-                            tri_indices,
                         )
                     base += tpw
 
@@ -921,8 +872,6 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
         num_worlds: wp.int32,
         num_joints: wp.int32,
         tpw_buf: wp.array[wp.int32],
-        particles: ParticleContainer,
-        tri_indices: wp.array[wp.vec4i],
     ):
         tid = wp.tid()
         tpw = tpw_buf[0]
@@ -965,8 +914,6 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                         contacts,
                         False,
                         num_iterations,
-                        particles,
-                        tri_indices,
                     )
                 base += tpw
 
@@ -984,30 +931,15 @@ _constraint_relax_fast_tail_kernel = _make_fast_tail_relax_kernel(revolute_only=
 _constraint_relax_fast_tail_revolute_kernel = _make_fast_tail_relax_kernel(revolute_only=True)
 
 
-def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
-    """Factory for ``_constraints_to_elements_kernel`` with optional
-    cloth support.
+def _make_constraints_to_elements_kernel():
+    """Factory for ``_constraints_to_elements_kernel``.
 
     Projects every active constraint into ``ElementInteractionData``
     -- the per-cid (body1, body2, ..., body8) tuple the graph
     colourer consumes. Only the bodies a constraint touches matter
     to the colouring; static / unregistered slots are written as
     ``-1`` and dynamic indices are compacted toward slot 0.
-
-    With ``cloth_support=True`` the kernel reads the per-cid
-    ``constraint_type`` tag at dword 0 and, when matched against
-    :data:`CONSTRAINT_TYPE_CLOTH_TRIANGLE`, also pulls the third
-    cloth-triangle endpoint (``body3``) and uses the unified
-    body-or-particle inverse-mass accessor so particle slots
-    (unified index ``>= num_bodies``) read from the
-    :class:`ParticleContainer`. ``cloth_support=False`` keeps the
-    pre-cloth dispatch byte-identical: no type-tag read, no
-    third-body read, and ``bodies.inverse_mass[b]`` is used
-    directly because every constraint endpoint resolves to a body
-    slot in rigid-only scenes.
     """
-    cloth_type_tag = wp.constant(CONSTRAINT_TYPE_CLOTH_TRIANGLE)
-    triangle_kind = wp.constant(ENDPOINT_KIND_TRIANGLE)
 
     @wp.kernel(enable_backward=False)
     def kernel(
@@ -1017,308 +949,54 @@ def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
         num_constraints: wp.array[wp.int32],
         num_joints: wp.int32,
         num_bodies: wp.int32,
-        tri_indices: wp.array[wp.vec4i],
         elements: wp.array[ElementInteractionData],
-        store: BodyOrParticleStore,
     ):
         tid = wp.tid()
         n = num_constraints[0]
         if tid >= n:
             return
-        # Up to 6 unified body-or-particle endpoints per constraint:
-        # cloth-vs-cloth contact has 6 cloth particles, cloth-vs-rigid
-        # has 1 rigid body + 3 cloth particles, cloth elasticity has
-        # 3 cloth particles, rigid joints have 2 rigid bodies.
         s0 = wp.int32(-1)
         s1 = wp.int32(-1)
-        s2 = wp.int32(-1)
-        s3 = wp.int32(-1)
-        s4 = wp.int32(-1)
-        s5 = wp.int32(-1)
         cnt = wp.int32(0)
 
         if tid < num_joints:
-            # Joint / cloth-elasticity row.
             b1 = constraint_get_body1(constraints, tid)
             b2 = constraint_get_body2(constraints, tid)
-            b3 = wp.int32(-1)
-            if wp.static(cloth_support):
-                ctype = read_int(constraints, wp.int32(0), tid)
-                if ctype == cloth_type_tag:
-                    b3 = cloth_triangle_get_body3(constraints, tid)
-            if wp.static(cloth_support):
-                if b1 >= 0 and get_inverse_mass(store, b1) == wp.float32(0.0):
-                    b1 = wp.int32(-1)
-                if b2 >= 0 and get_inverse_mass(store, b2) == wp.float32(0.0):
-                    b2 = wp.int32(-1)
-                if b3 >= 0 and get_inverse_mass(store, b3) == wp.float32(0.0):
-                    b3 = wp.int32(-1)
-            else:
-                if b1 >= 0 and bodies.inverse_mass[b1] == wp.float32(0.0):
-                    b1 = wp.int32(-1)
-                if b2 >= 0 and bodies.inverse_mass[b2] == wp.float32(0.0):
-                    b2 = wp.int32(-1)
+            if b1 >= 0 and bodies.inverse_mass[b1] == wp.float32(0.0):
+                b1 = wp.int32(-1)
+            if b2 >= 0 and bodies.inverse_mass[b2] == wp.float32(0.0):
+                b2 = wp.int32(-1)
             if b1 >= 0:
-                if cnt == wp.int32(0):
-                    s0 = b1
-                elif cnt == wp.int32(1):
-                    s1 = b1
-                elif cnt == wp.int32(2):
-                    s2 = b1
+                s0 = b1
                 cnt = cnt + wp.int32(1)
             if b2 >= 0:
                 if cnt == wp.int32(0):
                     s0 = b2
-                elif cnt == wp.int32(1):
+                else:
                     s1 = b2
-                elif cnt == wp.int32(2):
-                    s2 = b2
-                cnt = cnt + wp.int32(1)
-            if b3 >= 0:
-                if cnt == wp.int32(0):
-                    s0 = b3
-                elif cnt == wp.int32(1):
-                    s1 = b3
-                elif cnt == wp.int32(2):
-                    s2 = b3
                 cnt = cnt + wp.int32(1)
         else:
-            # Contact row. Build endpoints from the per-cid (kind, idx)
-            # pair: RIGID -> the body slot, TRIANGLE -> the three cloth
-            # particles read from ``tri_indices`` and shifted into the
-            # unified body-or-particle index space (``num_bodies + p``).
             local_cid = tid - num_joints
-
-            # Up to 7 candidate endpoints (1 rigid + 3 cloth + 3 cloth):
-            # accumulate them then static-collapse + compact into s0..s5.
-            e0 = wp.int32(-1)
-            e1 = wp.int32(-1)
-            e2 = wp.int32(-1)
-            e3 = wp.int32(-1)
-            e4 = wp.int32(-1)
-            e5 = wp.int32(-1)
-            e6 = wp.int32(-1)
-
-            if wp.static(cloth_support):
-                kind1 = contact_get_endpoint_kind1(contact_cols, local_cid)
-                kind2 = contact_get_endpoint_kind2(contact_cols, local_cid)
-                if kind1 == triangle_kind:
-                    t1 = contact_get_endpoint_idx1(contact_cols, local_cid)
-                    idx_a = tri_indices[t1]
-                    e0 = num_bodies + idx_a[0]
-                    e1 = num_bodies + idx_a[1]
-                    e2 = num_bodies + idx_a[2]
-                else:
-                    e0 = contact_get_body1(contact_cols, local_cid)
-                if kind2 == triangle_kind:
-                    t2 = contact_get_endpoint_idx2(contact_cols, local_cid)
-                    idx_b = tri_indices[t2]
-                    e3 = num_bodies + idx_b[0]
-                    e4 = num_bodies + idx_b[1]
-                    e5 = num_bodies + idx_b[2]
-                else:
-                    e3 = contact_get_body2(contact_cols, local_cid)
-            else:
-                e0 = contact_get_body1(contact_cols, local_cid)
-                e3 = contact_get_body2(contact_cols, local_cid)
-
-            # Static-collapse + compact.
-            for j in range(7):
-                v = wp.int32(-1)
-                if j == 0:
-                    v = e0
-                elif j == 1:
-                    v = e1
-                elif j == 2:
-                    v = e2
-                elif j == 3:
-                    v = e3
-                elif j == 4:
-                    v = e4
-                elif j == 5:
-                    v = e5
-                elif j == 6:
-                    v = e6
-                if v < 0:
-                    continue
-                if wp.static(cloth_support):
-                    if get_inverse_mass(store, v) == wp.float32(0.0):
-                        continue
-                else:
-                    if bodies.inverse_mass[v] == wp.float32(0.0):
-                        continue
+            e0 = contact_get_body1(contact_cols, local_cid)
+            e1 = contact_get_body2(contact_cols, local_cid)
+            if e0 >= 0 and bodies.inverse_mass[e0] != wp.float32(0.0):
+                s0 = e0
+                cnt = cnt + wp.int32(1)
+            if e1 >= 0 and bodies.inverse_mass[e1] != wp.float32(0.0):
                 if cnt == wp.int32(0):
-                    s0 = v
-                elif cnt == wp.int32(1):
-                    s1 = v
-                elif cnt == wp.int32(2):
-                    s2 = v
-                elif cnt == wp.int32(3):
-                    s3 = v
-                elif cnt == wp.int32(4):
-                    s4 = v
-                elif cnt == wp.int32(5):
-                    s5 = v
+                    s0 = e1
+                else:
+                    s1 = e1
                 cnt = cnt + wp.int32(1)
 
         elements[tid] = element_interaction_data_make(
-            s0, s1, s2, s3, s4, s5, wp.int32(-1), wp.int32(-1)
+            s0, s1, wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1)
         )
 
     return kernel
 
 
-_constraints_to_elements_kernel = _make_constraints_to_elements_kernel(cloth_support=False)
-_constraints_to_elements_cloth_kernel = _make_constraints_to_elements_kernel(cloth_support=True)
-
-
-# Tiny epsilon used to clip Newton ``Model.tri_materials`` stiffness
-# values before dividing into compliance. Values reach zero on a
-# default ``ModelBuilder.add_particles(...)`` particle that hasn't
-# been given explicit cloth gains; without the floor we'd produce
-# inf compliance which kills the XPBD update on the row.
-_PHOENX_CLOTH_STIFFNESS_FLOOR = wp.constant(wp.float32(1.0e-6))
-
-
-@wp.kernel(enable_backward=False)
-def _phoenx_init_cloth_triangle_rows_kernel(
-    constraints: ConstraintContainer,
-    cid_offset: wp.int32,
-    num_bodies: wp.int32,
-    # Newton's :class:`Model` stores ``tri_indices`` as a 2D array of
-    # shape ``(tri_count, 3)`` (one row per triangle, columns are the
-    # three particle indices). We index it with ``[t, k]`` rather than
-    # the old flat ``[3*t + k]`` form.
-    tri_indices: wp.array2d[wp.int32],
-    particle_q: wp.array[wp.vec3f],
-    tri_materials: wp.array2d[wp.float32],
-    default_beta_lambda: wp.float32,
-    default_beta_mu: wp.float32,
-):
-    """Stamp ``num_cloth_triangles`` cloth-triangle constraint rows
-    from Newton's mesh API.
-
-    Per triangle ``t`` (one thread per row):
-
-    * The three particle indices come from ``tri_indices[t, 0..3]``.
-      They live in PhoenX's particle slot space; the cloth iterate
-      consumes unified body-or-particle indices, so we shift each by
-      ``num_bodies`` here to land in
-      ``[num_bodies, num_bodies + num_particles)``.
-    * ``inv_rest = tri_poses[t]`` is already the 2x2 inverse
-      rest-pose matrix Newton's other solvers consume (style3d /
-      VBD); copy verbatim into the row.
-    * ``rest_area = tri_areas[t]``.
-    * Compliance is recovered from the elastic-stiffness columns of
-      ``tri_materials[t]`` (a ``[tri_count, 5]`` array). Column 0
-      ``tri_ke`` is the shear modulus ``mu`` (Pa); column 1 ``tri_ka``
-      is the area-preservation Lame parameter ``lambda`` (Pa). The XPBD
-      compliance follows Jitter2's reference position-level FEM
-      triangle (``FemTriPBD.cs`` line 60-61): ``alpha = 1 / k`` with no
-      explicit area factor -- the rest area enters through the row
-      gradients (``grad`` carries an explicit ``rest_area`` factor in
-      both the area and shear formulations). The previous form
-      ``alpha = 1 / (k * A)`` over-counted the area scaling and made
-      the constraint behave like a ``k * A``-stiffness spring rather
-      than the intended Lame-parameter stiffness, leaving cloth at
-      ``E ~= 5e8 Pa`` behaving like a ``~5 kPa`` membrane that
-      collapsed under load.
-
-      Stiffness floored at :data:`_PHOENX_CLOTH_STIFFNESS_FLOOR` so a
-      builder that left the per-element stiffness at zero produces a
-      finite (but very compliant) row instead of an infinite
-      compliance that would kill the XPBD update.
-    """
-    t = wp.tid()
-    cid = cid_offset + t
-
-    pa = tri_indices[t, 0]
-    pb = tri_indices[t, 1]
-    pc = tri_indices[t, 2]
-
-    cloth_triangle_set_type(constraints, cid)
-    cloth_triangle_set_body1(constraints, cid, num_bodies + pa)
-    cloth_triangle_set_body2(constraints, cid, num_bodies + pb)
-    cloth_triangle_set_body3(constraints, cid, num_bodies + pc)
-
-    # Build the in-plane projector for the rest configuration.  This is
-    # the same Jitter2 ``FemTriProjector`` convention the iterate uses:
-    # x_axis along ``B - A``, y_axis the in-plane perpendicular.
-    xa = particle_q[pa]
-    xb = particle_q[pb]
-    xc = particle_q[pc]
-    ab = xb - xa
-    ac = xc - xa
-    normal = wp.cross(ab, ac)
-    ab_len = wp.sqrt(wp.dot(ab, ab))
-    if ab_len < wp.float32(1.0e-12):
-        # Degenerate triangle.  Stamp identity invRest + zero rest area
-        # so the iterate's degeneracy guards short-circuit cleanly.
-        cloth_triangle_set_inv_rest(
-            constraints, cid, wp.mat22f(wp.float32(1.0), wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
-        )
-        cloth_triangle_set_rest_area(constraints, cid, wp.float32(0.0))
-    else:
-        x_axis = ab / ab_len
-        y_unnorm = wp.cross(normal, ab)
-        y_len = wp.sqrt(wp.dot(y_unnorm, y_unnorm))
-        if y_len < wp.float32(1.0e-12):
-            cloth_triangle_set_inv_rest(
-                constraints, cid, wp.mat22f(wp.float32(1.0), wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
-            )
-            cloth_triangle_set_rest_area(constraints, cid, wp.float32(0.0))
-        else:
-            y_axis = y_unnorm / y_len
-            # Rest 2D coords for AB and AC (column 0 and column 1 of the rest matrix).
-            ab_x = wp.dot(x_axis, ab)
-            ab_y = wp.dot(y_axis, ab)
-            ac_x = wp.dot(x_axis, ac)
-            ac_y = wp.dot(y_axis, ac)
-            # Rest matrix R = [AB_2D | AC_2D]; invRest = R^-1.
-            det = ab_x * ac_y - ab_y * ac_x
-            if det < wp.float32(1.0e-12) and det > wp.float32(-1.0e-12):
-                cloth_triangle_set_inv_rest(
-                    constraints, cid, wp.mat22f(wp.float32(1.0), wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
-                )
-                cloth_triangle_set_rest_area(constraints, cid, wp.float32(0.0))
-            else:
-                inv_det = wp.float32(1.0) / det
-                # invRest stored as Warp mat22 (M11, M12, M21, M22) in row-major.
-                # R = [[ab_x, ac_x], [ab_y, ac_y]];  R^-1 = (1/det) [[ac_y, -ac_x], [-ab_y, ab_x]].
-                inv_rest_m = wp.mat22f(
-                    ac_y * inv_det, -ac_x * inv_det,
-                    -ab_y * inv_det, ab_x * inv_det,
-                )
-                cloth_triangle_set_inv_rest(constraints, cid, inv_rest_m)
-                # Rest area = 0.5 * |cross(AB, AC)| -- the half-magnitude
-                # of the in-plane cross product (which equals the
-                # 3D-magnitude since ``normal`` is parallel to it).
-                rest_area = wp.float32(0.5) * wp.sqrt(wp.dot(normal, normal))
-                cloth_triangle_set_rest_area(constraints, cid, rest_area)
-
-    # tri_materials columns -- mirrors Newton's tri_ke/tri_ka/...
-    # ordering. Floor before dividing.
-    k_mu = tri_materials[t, 0]
-    if k_mu < _PHOENX_CLOTH_STIFFNESS_FLOOR:
-        k_mu = _PHOENX_CLOTH_STIFFNESS_FLOOR
-    k_lambda = tri_materials[t, 1]
-    if k_lambda < _PHOENX_CLOTH_STIFFNESS_FLOOR:
-        k_lambda = _PHOENX_CLOTH_STIFFNESS_FLOOR
-    # Match Jitter2 ``FemTriPBD.cs`` line 60-61: ``alpha = 1 / stiffness``
-    # without an explicit area factor. The area enters the gradients, so
-    # the energy still scales correctly with element size.
-    cloth_triangle_set_alpha_lambda(constraints, cid, wp.float32(1.0) / k_lambda)
-    cloth_triangle_set_alpha_mu(constraints, cid, wp.float32(1.0) / k_mu)
-    cloth_triangle_set_beta_lambda(constraints, cid, default_beta_lambda)
-    cloth_triangle_set_beta_mu(constraints, cid, default_beta_mu)
-
-    # Zero per-substep / cross-iteration state.
-    cloth_triangle_set_inv_mass_a(constraints, cid, wp.float32(0.0))
-    cloth_triangle_set_inv_mass_b(constraints, cid, wp.float32(0.0))
-    cloth_triangle_set_inv_mass_c(constraints, cid, wp.float32(0.0))
-    cloth_triangle_set_rotation(constraints, cid, wp.float32(0.0))
-    cloth_triangle_set_lambda_sum_lambda(constraints, cid, wp.float32(0.0))
-    cloth_triangle_set_lambda_sum_mu(constraints, cid, wp.float32(0.0))
+_constraints_to_elements_kernel = _make_constraints_to_elements_kernel()
 
 
 @wp.kernel(enable_backward=False)
@@ -1387,52 +1065,23 @@ def _rotation_quaternion(omega: wp.vec3f, dt: wp.float32) -> wp.quatf:
 
 @wp.kernel(enable_backward=False)
 def _integrate_velocities_kernel(
-    store: BodyOrParticleStore,
+    bodies: BodyContainer,
     dt: wp.float32,
-    inv_dt: wp.float32,
 ):
-    """Per-substep post-iterate per-(body, particle) update,
-    dispatched through the unified body-or-particle index.
-
-    Body branch: advance position + orientation for dynamic bodies
-    only. Static bodies skipped unconditionally. Kinematic bodies
-    are *also* skipped here -- their pose advances via explicit
-    lerp / slerp interpolation between ``position_prev`` and
-    ``kinematic_target_pos`` in
-    :func:`_kinematic_interpolate_substep_kernel`, so running the
-    velocity integration on them would double-advance the pose.
-
-    Particle branch: substep-exit access-mode transition
-    (Position-level -> Velocity-level). The cloth iterate has
-    already written the constraint-projected position into
-    ``particles.position``; we recover ``velocity = (position -
-    position_prev_substep) * inv_dt`` so the next substep starts
-    from a consistent velocity-level state. ``inverse_mass == 0``
-    pinned particles short-circuit inside
-    :func:`writeback_position_to_velocity` (their access mode is
-    ``STATIC``).
-
-    Body branch: first force the body back to ``VELOCITY_LEVEL`` via
-    :func:`writeback_position_to_velocity` -- that's a no-op for
-    bodies no constraint flipped, and runs the linear + quaternion
-    finite-diff for ones that were flipped to ``POSITION_LEVEL`` in
-    this substep. Then advance ``position`` / ``orientation`` by the
-    (now consistent) ``velocity`` / ``angular_velocity`` for dynamic
-    bodies. Static and kinematic bodies skip the integration.
-
-    Launch dim is ``num_bodies + num_particles`` -- one thread per
-    "thing" in the unified index space.
+    """Per-substep post-iterate body update. Advance position +
+    orientation for dynamic bodies only. Static bodies skipped
+    unconditionally. Kinematic bodies are *also* skipped here --
+    their pose advances via explicit lerp / slerp interpolation
+    between ``position_prev`` and ``kinematic_target_pos`` in
+    :func:`_kinematic_interpolate_substep_kernel`.
     """
     i = wp.tid()
-    writeback_position_to_velocity(store, i, inv_dt)
-    if is_particle(store, i):
-        return
-    mt = store.bodies.motion_type[i]
+    mt = bodies.motion_type[i]
     if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
         return
-    store.bodies.position[i] = store.bodies.position[i] + store.bodies.velocity[i] * dt
-    q_rot = _rotation_quaternion(store.bodies.angular_velocity[i], dt)
-    store.bodies.orientation[i] = wp.normalize(q_rot * store.bodies.orientation[i])
+    bodies.position[i] = bodies.position[i] + bodies.velocity[i] * dt
+    q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
+    bodies.orientation[i] = wp.normalize(q_rot * bodies.orientation[i])
 
 
 @wp.kernel(enable_backward=False)
@@ -1603,119 +1252,60 @@ def _sync_num_active_constraints_kernel(
 
 @wp.kernel(enable_backward=False)
 def _phoenx_apply_forces_and_gravity_kernel(
-    store: BodyOrParticleStore,
+    bodies: BodyContainer,
     gravity: wp.array[wp.vec3f],
     substep_dt: wp.float32,
 ):
-    """Fused per-(body, particle) velocity update at the top of every
-    substep, dispatched through the unified body-or-particle index.
-
-    Also snapshots the per-entity ``position_prev_substep`` /
-    ``orientation_prev_substep`` fields and resets ``access_mode``
-    so the substep starts with consistent velocity-level state for
-    every entity. Mirrors the C# ``broadcast_rigid_to_copy_states``
-    path that primes ``TinyRigidState`` at substep entry
-    (``MassSplitting/TinyRigidState.cs``).
-
-    Body branch (``i < num_bodies``):
+    """Fused per-body velocity update at the top of every substep.
 
     * ``DYNAMIC``: apply force / torque / gravity to ``velocity`` /
-      ``angular_velocity``; snapshot pose into ``*_prev_substep``;
-      reset ``access_mode = VELOCITY_LEVEL``.
+      ``angular_velocity``; snapshot pose into ``*_prev_substep``.
     * ``STATIC`` / ``KINEMATIC`` / ``inverse_mass == 0``: snapshot
-      pose; flag ``access_mode = STATIC`` so the synchronize helpers
-      short-circuit; skip the velocity update.
+      pose; skip the velocity update.
 
     Force accumulators are NOT cleared here --
     :func:`_phoenx_update_inertia_and_clear_forces_kernel` runs once
     at the end of :meth:`PhoenXWorld.step` and zeros them.
-
-    Particle branch (``i >= num_bodies``) runs the substep-entry
-    access-mode transition (Velocity-level -> Position-level): apply
-    gravity + external force to velocity, snapshot the pre-predict
-    position into ``position_prev_substep``, then advance position
-    by ``velocity * dt`` so the cloth iterate sees the predicted
-    pose. ``inverse_mass == 0`` pinned particles snapshot + flag
-    ``STATIC`` and early-return.
-
-    Launch dim is ``num_bodies + num_particles`` -- one thread per
-    "thing" in the unified index space.
     """
     i = wp.tid()
-    if is_particle(store, i):
-        i_p = i - store.num_bodies
-        store.particles.position_prev_substep[i_p] = store.particles.position[i_p]
-        inv_m = store.particles.inverse_mass[i_p]
-        if inv_m == wp.float32(0.0):
-            store.particles.access_mode[i_p] = ACCESS_MODE_STATIC
-            return
-        store.particles.access_mode[i_p] = ACCESS_MODE_VELOCITY_LEVEL
-        v = store.particles.velocity[i_p]
-        v = v + gravity[store.particles.world_id[i_p]] * substep_dt
-        v = v + store.particles.force[i_p] * (inv_m * substep_dt)
-        store.particles.velocity[i_p] = v
-        p = store.particles.position[i_p]
-        p_advanced, p_start = particle_predict_position(p, v, substep_dt)
-        store.particles.position[i_p] = p_advanced
-        store.particles.position_prev_substep[i_p] = p_start
+    bodies.position_prev_substep[i] = bodies.position[i]
+    bodies.orientation_prev_substep[i] = bodies.orientation[i]
+    if bodies.motion_type[i] != MOTION_DYNAMIC:
         return
-    store.bodies.position_prev_substep[i] = store.bodies.position[i]
-    store.bodies.orientation_prev_substep[i] = store.bodies.orientation[i]
-    if store.bodies.motion_type[i] != MOTION_DYNAMIC:
-        store.bodies.access_mode[i] = ACCESS_MODE_STATIC
+    if bodies.inverse_mass[i] == wp.float32(0.0):
         return
-    if store.bodies.inverse_mass[i] == wp.float32(0.0):
-        store.bodies.access_mode[i] = ACCESS_MODE_STATIC
-        return
-    store.bodies.access_mode[i] = ACCESS_MODE_VELOCITY_LEVEL
-    v = store.bodies.velocity[i]
-    w = store.bodies.angular_velocity[i]
-    inv_mass = store.bodies.inverse_mass[i]
-    inv_inertia_world = store.bodies.inverse_inertia_world[i]
-    v = v + store.bodies.force[i] * (inv_mass * substep_dt)
-    w = w + (inv_inertia_world * store.bodies.torque[i]) * substep_dt
-    if store.bodies.affected_by_gravity[i] != 0:
-        v = v + gravity[store.bodies.world_id[i]] * substep_dt
-    store.bodies.velocity[i] = v
-    store.bodies.angular_velocity[i] = w
+    v = bodies.velocity[i]
+    w = bodies.angular_velocity[i]
+    inv_mass = bodies.inverse_mass[i]
+    inv_inertia_world = bodies.inverse_inertia_world[i]
+    v = v + bodies.force[i] * (inv_mass * substep_dt)
+    w = w + (inv_inertia_world * bodies.torque[i]) * substep_dt
+    if bodies.affected_by_gravity[i] != 0:
+        v = v + gravity[bodies.world_id[i]] * substep_dt
+    bodies.velocity[i] = v
+    bodies.angular_velocity[i] = w
 
 
 @wp.kernel(enable_backward=False)
 def _phoenx_update_inertia_and_clear_forces_kernel(
-    store: BodyOrParticleStore,
+    bodies: BodyContainer,
 ):
-    """End-of-step per-(body, particle) kernel: damping + rotated
-    inertia refresh **plus** force / torque accumulator zeroing,
-    dispatched through the unified body-or-particle index.
+    """End-of-step per-body kernel: damping + rotated inertia refresh
+    **plus** force / torque accumulator zeroing.
 
-    Body branch: damping is dynamic-only; the world-frame inertia is
-    rebuilt from the final orientation (``R * I^-1 * R^T``); force /
-    torque cleared on every body slot regardless of motion type so
-    kinematic / static slots also start the next step zeroed.
-
-    Particle branch: zero the force accumulator. Particles do not get
-    a global velocity-multiplier ("ether") damping -- that would
-    physically wrong-en free-fall. The cloth constraint applies
-    Rayleigh-style damping along its gradients internally; that's the
-    only velocity dissipation a free particle receives.
-
-    Launch dim is ``num_bodies + num_particles`` -- one thread per
-    "thing" in the unified index space.
+    Damping is dynamic-only; the world-frame inertia is rebuilt from
+    the final orientation (``R * I^-1 * R^T``); force / torque cleared
+    on every body slot regardless of motion type so kinematic / static
+    slots also start the next step zeroed.
     """
     i = wp.tid()
-    if is_particle(store, i):
-        i_p = i - store.num_bodies
-        store.particles.force[i_p] = wp.vec3f(0.0, 0.0, 0.0)
-        return
-    # Damping + rotated inertia: dynamic-only.
-    if store.bodies.motion_type[i] == MOTION_DYNAMIC:
-        store.bodies.velocity[i] = store.bodies.velocity[i] * store.bodies.linear_damping[i]
-        store.bodies.angular_velocity[i] = store.bodies.angular_velocity[i] * store.bodies.angular_damping[i]
-        r = wp.quat_to_matrix(store.bodies.orientation[i])
-        store.bodies.inverse_inertia_world[i] = rotate_inertia(r, store.bodies.inverse_inertia[i])
-    # Force / torque clear: every body slot, including kinematic / static.
-    store.bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
-    store.bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
+    if bodies.motion_type[i] == MOTION_DYNAMIC:
+        bodies.velocity[i] = bodies.velocity[i] * bodies.linear_damping[i]
+        bodies.angular_velocity[i] = bodies.angular_velocity[i] * bodies.angular_damping[i]
+        r = wp.quat_to_matrix(bodies.orientation[i])
+        bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
+    bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
+    bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
 
 
 @wp.kernel(enable_backward=False)
@@ -1917,7 +1507,7 @@ def _singleworld_color_range_from_cursor(
 # 2 shapes) without copy-paste.
 
 
-def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, cloth_support: bool = False):
+def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool):
     """Build a persistent-grid PGS kernel for the requested phase /
     specialisation. ``phase`` is ``"prepare"``, ``"iterate"`` or
     ``"relax"``; ``revolute_only`` selects the joint dispatch path.
@@ -1927,21 +1517,10 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
     the multi-sweep register cache is the multi-world fast-tail's
     win and on contact-heavy single-world scenes (kapla) it shows a
     small net regression.
-
-    ``cloth_support`` is a third compile-time axis: when ``True``
-    the joint-side dispatcher reads the per-cid ``constraint_type``
-    tag and routes :data:`CONSTRAINT_TYPE_CLOTH_TRIANGLE` cids to
-    the cloth handler; otherwise the joint dispatcher takes the
-    fast (existing) ADBS / revolute path. Closed over as a Python
-    bool so Warp dead-code-eliminates the cloth branch when the
-    scene has no cloth -- bench-confirmed zero regression on
-    velocity-only workloads.
     """
     is_prepare = phase == "prepare"
     is_iterate = phase == "iterate"
-    is_relax = phase == "relax"
     use_bias = is_iterate  # iterate ON, relax OFF (prepare ignores)
-    cloth_type_tag = wp.constant(CONSTRAINT_TYPE_CLOTH_TRIANGLE)
 
     @wp.kernel(enable_backward=False)
     def kernel(
@@ -1959,8 +1538,6 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
         total_num_threads: wp.int32,
         fuse_threshold: wp.int32,
         head_active: wp.array[wp.int32],
-        store: BodyOrParticleStore,
-        tri_indices: wp.array[wp.vec4i],
     ):
         tid = wp.tid()
         if color_cursor[0] <= 0:
@@ -1977,58 +1554,21 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
         for t in range(tid, count, total_num_threads):
             cid = element_ids_by_color[start + t]
             if cid < num_joints:
-                # Joint-container cid: ADBS joint, or (when
-                # ``cloth_support``) a cloth triangle. The cloth
-                # branch reads the per-cid ``constraint_type`` tag
-                # at dword 0 and routes accordingly; the read +
-                # compare are dead-code-eliminated when
-                # ``cloth_support=False``.
-                handled_by_cloth = wp.bool(False)
-                if wp.static(cloth_support):
-                    ctype = read_int(constraints, wp.int32(0), cid)
-                    if ctype == cloth_type_tag:
-                        handled_by_cloth = wp.bool(True)
-                        if wp.static(is_prepare):
-                            cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
-                        elif wp.static(is_relax):
-                            cloth_triangle_relax_at(constraints, cid, wp.int32(0), store, idt)
-                        else:
-                            cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store, idt)
-                if not handled_by_cloth:
-                    if wp.static(is_prepare):
-                        if wp.static(revolute_only):
-                            revolute_prepare_for_iteration(constraints, cid, bodies, idt)
-                        else:
-                            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+                if wp.static(is_prepare):
+                    if wp.static(revolute_only):
+                        revolute_prepare_for_iteration(constraints, cid, bodies, idt)
                     else:
-                        if wp.static(revolute_only):
-                            revolute_iterate(constraints, cid, bodies, idt, use_bias)
-                        else:
-                            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
+                        actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+                else:
+                    if wp.static(revolute_only):
+                        revolute_iterate(constraints, cid, bodies, idt, use_bias)
+                    else:
+                        actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
             else:
                 if wp.static(is_prepare):
-                    contact_prepare_for_iteration(
-                        contact_cols,
-                        cid - num_joints,
-                        bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        store.particles,
-                        tri_indices,
-                    )
+                    contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
                 else:
-                    contact_iterate(
-                        contact_cols,
-                        cid - num_joints,
-                        bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        use_bias,
-                        store.particles,
-                        tri_indices,
-                    )
+                    contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias)
 
         if tid == 0:
             color_cursor[0] = cursor - 1
@@ -2036,15 +1576,13 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
     return kernel
 
 
-def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_support: bool = False):
+def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool):
     """Build a single-block tail-fused PGS kernel for the requested
     phase / specialisation. Same axes as
     :func:`_make_singleworld_persistent_kernel`."""
     is_prepare = phase == "prepare"
     is_iterate = phase == "iterate"
-    is_relax = phase == "relax"
     use_bias = is_iterate
-    cloth_type_tag = wp.constant(CONSTRAINT_TYPE_CLOTH_TRIANGLE)
 
     @wp.kernel(enable_backward=False)
     def kernel(
@@ -2060,8 +1598,6 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
         contacts: ContactViews,
         num_joints: wp.int32,
         fuse_threshold: wp.int32,
-        store: BodyOrParticleStore,
-        tri_indices: wp.array[wp.vec4i],
     ):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
@@ -2072,50 +1608,21 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
             if lane < count:
                 cid = element_ids_by_color[start + lane]
                 if cid < num_joints:
-                    handled_by_cloth = wp.bool(False)
-                    if wp.static(cloth_support):
-                        ctype = read_int(constraints, wp.int32(0), cid)
-                        if ctype == cloth_type_tag:
-                            handled_by_cloth = wp.bool(True)
-                            if wp.static(is_prepare):
-                                cloth_triangle_prepare_for_iteration_at(constraints, cid, wp.int32(0), store, idt)
-                            elif wp.static(not is_relax):
-                                cloth_triangle_iterate_at(constraints, cid, wp.int32(0), store, idt)
-                    if not handled_by_cloth:
-                        if wp.static(is_prepare):
-                            if wp.static(revolute_only):
-                                revolute_prepare_for_iteration(constraints, cid, bodies, idt)
-                            else:
-                                actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+                    if wp.static(is_prepare):
+                        if wp.static(revolute_only):
+                            revolute_prepare_for_iteration(constraints, cid, bodies, idt)
                         else:
-                            if wp.static(revolute_only):
-                                revolute_iterate(constraints, cid, bodies, idt, use_bias)
-                            else:
-                                actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
+                            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+                    else:
+                        if wp.static(revolute_only):
+                            revolute_iterate(constraints, cid, bodies, idt, use_bias)
+                        else:
+                            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
                 else:
                     if wp.static(is_prepare):
-                        contact_prepare_for_iteration(
-                            contact_cols,
-                            cid - num_joints,
-                            bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            store.particles,
-                            tri_indices,
-                        )
+                        contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
                     else:
-                        contact_iterate(
-                            contact_cols,
-                            cid - num_joints,
-                            bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                            store.particles,
-                            tri_indices,
-                        )
+                        contact_iterate(contact_cols, cid - num_joints, bodies, idt, cc, contacts, use_bias)
             _sync_threads()
             cursor = cursor - 1
         if lane == 0:
@@ -2145,166 +1652,3 @@ _constraint_iterate_singleworld_fused_revolute_kernel = _make_singleworld_fused_
 )
 _constraint_relax_singleworld_fused_revolute_kernel = _make_singleworld_fused_kernel(phase="relax", revolute_only=True)
 
-# Cloth-enabled variants. Same dispatch shape as the non-cloth
-# kernels above but the joint-side dispatcher branches on the
-# per-cid ``constraint_type`` tag and routes
-# :data:`CONSTRAINT_TYPE_CLOTH_TRIANGLE` cids to the cloth handler.
-# Selected by :class:`PhoenXWorld` when ``num_cloth_triangles > 0``.
-# Relax phase doesn't run cloth (cloth XPBD has no Box2D-style
-# relax pass) -- the ``cloth_support=True`` relax binary is
-# functionally identical to ``cloth_support=False`` because the
-# branch is gated on ``not is_relax`` inside the kernel; we still
-# bind a cloth-enabled relax variant for symmetry so the kernel
-# selection logic in PhoenXWorld doesn't have to special-case it.
-_constraint_prepare_singleworld_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="prepare", revolute_only=False, cloth_support=True
-)
-_constraint_iterate_singleworld_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="iterate", revolute_only=False, cloth_support=True
-)
-_constraint_relax_singleworld_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="relax", revolute_only=False, cloth_support=True
-)
-_constraint_prepare_singleworld_fused_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="prepare", revolute_only=False, cloth_support=True
-)
-_constraint_iterate_singleworld_fused_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="iterate", revolute_only=False, cloth_support=True
-)
-_constraint_relax_singleworld_fused_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="relax", revolute_only=False, cloth_support=True
-)
-_constraint_prepare_singleworld_revolute_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="prepare", revolute_only=True, cloth_support=True
-)
-_constraint_iterate_singleworld_revolute_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="iterate", revolute_only=True, cloth_support=True
-)
-_constraint_relax_singleworld_revolute_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="relax", revolute_only=True, cloth_support=True
-)
-_constraint_prepare_singleworld_fused_revolute_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="prepare", revolute_only=True, cloth_support=True
-)
-_constraint_iterate_singleworld_fused_revolute_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="iterate", revolute_only=True, cloth_support=True
-)
-_constraint_relax_singleworld_fused_revolute_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="relax", revolute_only=True, cloth_support=True
-)
-
-
-@wp.kernel(enable_backward=False)
-def _phoenx_compute_triangle_aabbs_and_indices_kernel(
-    constraints: ConstraintContainer,
-    cloth_cid_offset: int,
-    num_bodies: int,
-    particle_q: wp.array[wp.vec3],
-    cloth_margin: float,
-    rigid_shape_count: int,
-    # outputs (suffix [S, S+T) of the pipeline-owned arrays;
-    # tri_indices is length T).
-    aabb_lower: wp.array[wp.vec3],
-    aabb_upper: wp.array[wp.vec3],
-    geom_data: wp.array[wp.vec4],
-    geom_transform: wp.array[wp.transform],
-    tri_indices: wp.array[wp.vec4i],
-):
-    """Per-step fill of the cloth-triangle suffix in the pipeline's unified geom arrays.
-
-    Stamps each cloth triangle as a canonical first-class :data:`GeoType.TRIANGLE`
-    shape (the same first-class triangle type rigid bodies use) so the existing
-    narrow-phase support map / extract handles cloth tris with no special-case
-    branches.  In the canonical local frame, vertex A sits at the origin, B on
-    local +Z, and C in the local YZ plane; the per-step transform rotates that
-    canonical frame onto the world-space triangle.
-
-    Reads the cloth-triangle constraint rows
-    ``constraints[cloth_cid_offset + t]`` for ``t in [0, T)`` and writes:
-
-    * ``aabb_lower[S + t]`` / ``aabb_upper[S + t]`` -- world-space AABB of
-      the triangle expanded by ``cloth_margin`` in every direction.
-    * ``geom_data[S + t] = (|AB|, c_y, c_z, cloth_margin)`` -- canonical
-      :data:`GeoType.TRIANGLE` parameterisation: ``B = (0, 0, |AB|)``,
-      ``C = (0, c_y, c_z)`` in local coordinates.
-    * ``geom_transform[S + t] = (A_world, Q)`` where ``Q`` rotates the
-      canonical local axes onto the world triangle frame: local +Z maps
-      to ``(B - A) / |AB|``; local +Y maps to the in-plane direction
-      orthogonal to AB pointing toward C; local +X is the triangle face
-      normal.
-    * ``tri_indices[t] = (pa, pb, pc, -1)`` -- particle indices for the
-      three triangle vertices; the 4th component is reserved for future
-      tetrahedron support.
-
-    Degenerate triangles (collinear vertices, ``|AB| < eps`` or zero
-    in-plane component) fall back to an identity orientation and zero
-    scale; they collapse to a point at A in the support map and contribute
-    nothing to the narrow phase.
-
-    Particle indices are derived from the unified body-or-particle
-    indices stored in the constraint by subtracting ``num_bodies``.
-    The rigid prefix ``[0, S)`` of the AABB / ``geom_*`` arrays is left
-    untouched -- it is filled by Newton's standard
-    ``compute_shape_aabbs`` kernel inside
-    :meth:`CollisionPipeline.collide_with_external_aabbs`.  Static
-    cloth-triangle metadata (``shape_type = GeoType.TRIANGLE``,
-    ``shape_gap``, ``shape_world``, ``shape_collision_group``,
-    ``shape_flags``) is stamped once on the host at solver init.
-    """
-    t = wp.tid()
-    cid = cloth_cid_offset + t
-
-    body1 = cloth_triangle_get_body1(constraints, cid)
-    body2 = cloth_triangle_get_body2(constraints, cid)
-    body3 = cloth_triangle_get_body3(constraints, cid)
-
-    pa = body1 - num_bodies
-    pb = body2 - num_bodies
-    pc = body3 - num_bodies
-
-    va = particle_q[pa]
-    vb = particle_q[pb]
-    vc = particle_q[pc]
-
-    lo = wp.min(wp.min(va, vb), vc)
-    hi = wp.max(wp.max(va, vb), vc)
-    margin = wp.vec3(cloth_margin, cloth_margin, cloth_margin)
-
-    slot = rigid_shape_count + t
-    aabb_lower[slot] = lo - margin
-    aabb_upper[slot] = hi + margin
-
-    # Canonical-frame parameterisation: rotate world (A, B, C) so A is at
-    # the origin, B lies on local +Z, and C lies in the local YZ plane.
-    # ``axis_z`` is the world-space direction onto which local +Z maps.
-    # ``axis_y`` is the in-plane direction orthogonal to AB pointing
-    # toward C (so c_y > 0 by construction). ``axis_x`` is the face
-    # normal so the basis (axis_x, axis_y, axis_z) is right-handed.
-    edge_ab = vb - va
-    edge_ac = vc - va
-    ab_len = wp.length(edge_ab)
-    eps = 1.0e-12
-    if ab_len > eps:
-        axis_z = edge_ab / ab_len
-        c_z = wp.dot(edge_ac, axis_z)
-        ac_perp = edge_ac - c_z * axis_z
-        ac_perp_len = wp.length(ac_perp)
-        if ac_perp_len > eps:
-            axis_y = ac_perp / ac_perp_len
-            axis_x = wp.cross(axis_y, axis_z)
-            rot = wp.matrix_from_cols(axis_x, axis_y, axis_z)
-            quat = wp.quat_from_matrix(rot)
-            geom_data[slot] = wp.vec4(ab_len, ac_perp_len, c_z, cloth_margin)
-            geom_transform[slot] = wp.transform(va, quat)
-        else:
-            # Collinear: triangle collapses to segment AB. Stamp zero
-            # scale so the support map returns vertex A; broad phase still
-            # rejects via the AABB.
-            geom_data[slot] = wp.vec4(0.0, 0.0, 0.0, cloth_margin)
-            geom_transform[slot] = wp.transform(va, wp.quat_identity())
-    else:
-        # Fully degenerate (A == B): collapse to a point.
-        geom_data[slot] = wp.vec4(0.0, 0.0, 0.0, cloth_margin)
-        geom_transform[slot] = wp.transform(va, wp.quat_identity())
-
-    tri_indices[t] = wp.vec4i(pa, pb, pc, -1)

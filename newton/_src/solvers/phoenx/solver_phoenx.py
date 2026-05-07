@@ -30,14 +30,10 @@ from newton._src.solvers.phoenx.body import (
     MOTION_KINEMATIC,
     BodyContainer,
 )
-from newton._src.solvers.phoenx.body_or_particle import BodyOrParticleStore
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     ADBS_DWORDS,
     JOINT_MODE_REVOLUTE,
     actuated_double_ball_socket_initialize_kernel,
-)
-from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
-    CLOTH_TRIANGLE_DWORDS,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     CONTACT_DWORDS,
@@ -76,10 +72,6 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int
 from newton._src.solvers.phoenx.materials import MaterialData
-from newton._src.solvers.phoenx.particle import (
-    ParticleContainer,
-    particle_container_zeros,
-)
 from newton._src.solvers.phoenx.solver_config import (
     FUSE_TAIL_BLOCK_DIM,
     FUSE_TAIL_MAX_COLOR_SIZE,
@@ -96,35 +88,22 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
-    _constraint_iterate_singleworld_cloth_kernel,
-    _constraint_iterate_singleworld_fused_cloth_kernel,
     _constraint_iterate_singleworld_fused_kernel,
-    _constraint_iterate_singleworld_fused_revolute_cloth_kernel,
     _constraint_iterate_singleworld_fused_revolute_kernel,
     _constraint_iterate_singleworld_kernel,
-    _constraint_iterate_singleworld_revolute_cloth_kernel,
     _constraint_iterate_singleworld_revolute_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
     _constraint_prepare_plus_iterate_fast_tail_revolute_kernel,
-    _constraint_prepare_singleworld_cloth_kernel,
-    _constraint_prepare_singleworld_fused_cloth_kernel,
     _constraint_prepare_singleworld_fused_kernel,
-    _constraint_prepare_singleworld_fused_revolute_cloth_kernel,
     _constraint_prepare_singleworld_fused_revolute_kernel,
     _constraint_prepare_singleworld_kernel,
-    _constraint_prepare_singleworld_revolute_cloth_kernel,
     _constraint_prepare_singleworld_revolute_kernel,
     _constraint_relax_fast_tail_kernel,
     _constraint_relax_fast_tail_revolute_kernel,
-    _constraint_relax_singleworld_cloth_kernel,
-    _constraint_relax_singleworld_fused_cloth_kernel,
     _constraint_relax_singleworld_fused_kernel,
-    _constraint_relax_singleworld_fused_revolute_cloth_kernel,
     _constraint_relax_singleworld_fused_revolute_kernel,
     _constraint_relax_singleworld_kernel,
-    _constraint_relax_singleworld_revolute_cloth_kernel,
     _constraint_relax_singleworld_revolute_kernel,
-    _constraints_to_elements_cloth_kernel,
     _constraints_to_elements_kernel,
     _count_elements_per_world_kernel,
     _integrate_velocities_kernel,
@@ -134,8 +113,6 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
-    _phoenx_compute_triangle_aabbs_and_indices_kernel,
-    _phoenx_init_cloth_triangle_rows_kernel,
     _phoenx_refresh_world_inertia_kernel,
     _phoenx_update_inertia_and_clear_forces_kernel,
     _pick_threads_per_world_kernel,
@@ -148,53 +125,9 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
 
 __all__ = [
     "DEFAULT_SHAPE_GAP",
-    "PhoenXClothFilterData",
     "PhoenXWorld",
     "pack_body_xforms_kernel",
-    "phoenx_cloth_share_vertex_filter",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Cloth broad-phase filter
-# ---------------------------------------------------------------------------
-# Drops cloth-triangle pairs that share a vertex.  Adjacent triangles can
-# never produce a meaningful self-contact, but their AABBs almost always
-# overlap; without this filter the broad phase emits one candidate per
-# fan-edge.
-
-
-@wp.struct
-class PhoenXClothFilterData:
-    """Runtime data for :func:`phoenx_cloth_share_vertex_filter`.
-
-    ``num_rigid_shapes`` is ``model.shape_count`` (the boundary between
-    rigid and triangle shape indices in the unified ``S+T`` shape space).
-    ``tri_indices`` is the world-owned ``vec4i`` array of triangle
-    vertex indices (4th component is unused for triangles).
-    """
-
-    num_rigid_shapes: wp.int32
-    tri_indices: wp.array[wp.vec4i]
-
-
-@wp.func
-def phoenx_cloth_share_vertex_filter(pair: wp.vec2i, data: PhoenXClothFilterData) -> wp.int32:
-    """Return ``0`` when both endpoints are triangles sharing a vertex."""
-    s1 = pair[0]
-    s2 = pair[1]
-    if s1 < data.num_rigid_shapes or s2 < data.num_rigid_shapes:
-        return wp.int32(1)
-    t1 = s1 - data.num_rigid_shapes
-    t2 = s2 - data.num_rigid_shapes
-    vi = data.tri_indices[t1]
-    vj = data.tri_indices[t2]
-    for a in range(3):
-        ai = vi[a]
-        for b in range(3):
-            if ai == vj[b]:
-                return wp.int32(0)
-    return wp.int32(1)
 
 
 #: Default contact-detection gap [m] for shapes in PhoenX scenes.
@@ -249,171 +182,6 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     PRIMITIVE_CPP = 5
     SAFETY = 2
     return max(1000, pair_count * PRIMITIVE_CPP * SAFETY)
-
-
-def _build_cloth_collision_pipeline(
-    model: Any,
-    *,
-    device,
-    num_cloth_triangles: int,
-    cloth_margin: float,
-) -> tuple[Any, wp.array | None]:
-    """Construct (or upgrade) ``model._collision_pipeline`` for cloth+rigid scenes.
-
-    Builds a :class:`CollisionPipeline` with ``extra_shape_count =
-    num_cloth_triangles``, NXN broad phase (cloth scenes only), the
-    share-vertex filter, and stamps the static cloth-triangle suffix
-    metadata (``shape_type=TRIANGLE``, ``shape_gap=cloth_margin``,
-    ``shape_collision_group=1``).
-
-    Returns the pipeline and the per-triangle ``vec4i`` connectivity
-    array (length ``num_cloth_triangles``; the array is ``None`` on
-    rigid-only scenes, which is convenient for callers that don't
-    care). The pipeline is also assigned to ``model._collision_pipeline``.
-
-    This is a free helper so :class:`SolverPhoenX` can call it BEFORE
-    constructing :class:`PhoenXWorld` (the world's contact-column
-    container is sized from ``model.rigid_contact_max``, which the
-    pipeline's ``.contacts()`` call sets), while direct
-    :class:`PhoenXWorld` users go through
-    :meth:`PhoenXWorld.setup_cloth_collision_pipeline`.
-    """
-    import newton as _newton  # noqa: PLC0415  -- avoid import cycle
-    from newton._src.geometry.flags import ShapeFlags  # noqa: PLC0415
-    from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
-        PHOENX_CONTACT_MATCHING,
-    )
-
-    cloth_margin = float(cloth_margin)
-    num_cloth_triangles = int(num_cloth_triangles)
-
-    # The collision pipeline owns the unified rigid + virtual-shape
-    # arrays (length ``S + extra_shape_count``); we only need to
-    # supply ``unified_shape_world`` / ``unified_shape_flags`` *up
-    # front* because the NXN / SAP broad phase captures them at
-    # construction time to build its per-world index map.
-    # Everything else (``shape_type``, ``shape_gap``, etc.) is
-    # stamped on the pipeline-owned arrays *after* construction.
-    pre_unified_shape_world: wp.array[int] | None = None
-    pre_unified_shape_flags: wp.array[int] | None = None
-    tri_indices: wp.array | None = None
-    if num_cloth_triangles > 0:
-        S = int(model.shape_count)
-        T = num_cloth_triangles
-
-        with wp.ScopedDevice(device):
-            pre_unified_shape_world = wp.zeros(S + T, dtype=wp.int32, device=device)
-            pre_unified_shape_flags = wp.zeros(S + T, dtype=wp.int32, device=device)
-        if S > 0:
-            if model.shape_world is not None:
-                wp.copy(pre_unified_shape_world, model.shape_world, count=S)
-            if model.shape_flags is not None:
-                wp.copy(pre_unified_shape_flags, model.shape_flags, count=S)
-
-        # Cloth triangle world ids come from ``model.particle_world``
-        # at the triangle's first vertex (mirroring how the cloth
-        # solvers map per-particle world to per-element world).
-        tri_idx_np = model.tri_indices.numpy().reshape(-1, 3)
-        if model.particle_world is not None:
-            pworld = model.particle_world.numpy()
-            tri_world = pworld[tri_idx_np[:, 0]].astype(np.int32)
-        else:
-            tri_world = np.full(T, -1, dtype=np.int32)
-
-        world_np = pre_unified_shape_world.numpy()
-        world_np[S:] = tri_world
-        pre_unified_shape_world.assign(world_np)
-
-        flags_np = pre_unified_shape_flags.numpy()
-        flags_np[S:] = int(ShapeFlags.COLLIDE_SHAPES)
-        pre_unified_shape_flags.assign(flags_np)
-
-        # ``tri_indices`` is per-triangle-pair (vec4i) connectivity
-        # consumed by phoenx's narrow-phase -- the pipeline doesn't
-        # see it.
-        with wp.ScopedDevice(device):
-            tri_indices = wp.zeros(T, dtype=wp.vec4i, device=device)
-
-    # Build a pipeline whenever we have *anything* to collide -- rigid
-    # shapes (S > 0) or cloth triangles (T > 0).  Cloth-only scenes
-    # need the pipeline for tri-vs-tri broadphase + narrowphase.
-    if int(model.shape_count) > 0 or num_cloth_triangles > 0:
-        existing_cp = getattr(model, "_collision_pipeline", None)
-        needs_new_cp = existing_cp is None or not getattr(existing_cp, "contact_matching", False)
-        # Cloth scenes need the pipeline to reserve broad-phase
-        # candidate-pair capacity for the triangle suffix even
-        # when an existing pipeline was attached without it.
-        if (
-            not needs_new_cp
-            and num_cloth_triangles > 0
-            and getattr(existing_cp, "extra_shape_count", 0) < num_cloth_triangles
-        ):
-            needs_new_cp = True
-        if needs_new_cp:
-            # Override Newton's ``rigid_contact_max`` estimator with a
-            # PhoenX-tight one from ``shape_contact_pair_count``
-            # (COLLIDE_SHAPES-filtered).
-            tight_rcm = _estimate_rigid_contact_max_phoenx(model)
-            if tight_rcm is not None:
-                model.rigid_contact_max = 0  # bypass "already sized" short-circuit
-
-            # Cloth scenes force NXN broad phase: the explicit broad
-            # phase iterates ``model.shape_contact_pairs`` which has
-            # no entries for the cloth-triangle suffix, so suffix
-            # slots would never produce candidate pairs. Rigid-only
-            # scenes keep the default mode.
-            cp_kwargs = {
-                "contact_matching": PHOENX_CONTACT_MATCHING,
-                "rigid_contact_max": tight_rcm,
-                "extra_shape_count": num_cloth_triangles,
-            }
-            if num_cloth_triangles > 0:
-                cp_kwargs["broad_phase"] = "nxn"
-                cp_kwargs["unified_shape_world"] = pre_unified_shape_world
-                cp_kwargs["unified_shape_flags"] = pre_unified_shape_flags
-                cp_kwargs["broad_phase_filter"] = (
-                    phoenx_cloth_share_vertex_filter,
-                    PhoenXClothFilterData,
-                )
-            model._collision_pipeline = _newton.CollisionPipeline(model, **cp_kwargs)
-            model._collision_pipeline.contacts()  # forces buffer sizing
-
-            if num_cloth_triangles > 0:
-                cloth_filter_data = PhoenXClothFilterData()
-                cloth_filter_data.num_rigid_shapes = int(model.shape_count)
-                cloth_filter_data.tri_indices = tri_indices
-                model._collision_pipeline.set_broad_phase_filter_data(cloth_filter_data)
-
-        # Stamp static cloth-triangle metadata on the pipeline-owned
-        # unified arrays *after* pipeline construction. The broad
-        # phase doesn't read these (only ``shape_world`` /
-        # ``shape_flags``, which were stamped pre-construction); the
-        # narrow phase reads them at launch time.
-        if num_cloth_triangles > 0:
-            cp = model._collision_pipeline
-            S = int(model.shape_count)
-            T = num_cloth_triangles
-            from newton._src.geometry.types import GeoType  # noqa: PLC0415
-
-            def _stamp_suffix(arr: wp.array, value, dtype) -> None:
-                if arr is None:
-                    return
-                host = arr.numpy()
-                host[S : S + T] = value
-                arr.assign(host.astype(dtype, copy=False))
-
-            # Stamp cloth tris as the canonical first-class GeoType.TRIANGLE
-            # (vertex A at origin, B on local +Z, C in YZ plane; ``geom_data``
-            # carries (|AB|, c_y, c_z, margin); ``geom_transform`` carries the
-            # per-step world frame).  The narrow-phase support map / extract
-            # already handle this type for rigid first-class triangles, so
-            # cloth tris flow through the same code path as rigid tris with
-            # no special-case branches.
-            _stamp_suffix(cp.unified_shape_type, int(GeoType.TRIANGLE), np.int32)
-            _stamp_suffix(cp.unified_shape_gap, cloth_margin, np.float32)
-            _stamp_suffix(cp.unified_shape_collision_group, 1, np.int32)
-
-    return getattr(model, "_collision_pipeline", None), tri_indices
 
 
 #: Block dim used by the single-world PGS sweep kernels.
@@ -558,8 +326,6 @@ class PhoenXWorld:
         gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         rigid_contact_max: int = 0,
         num_joints: int = 0,
-        num_particles: int = 0,
-        num_cloth_triangles: int = 0,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         num_worlds: int = 1,
@@ -661,53 +427,11 @@ class PhoenXWorld:
         if self.num_joints < 0:
             raise ValueError(f"num_joints must be >= 0 (got {self.num_joints})")
 
-        # Particles -- allocated lazily, ``None`` when ``num_particles
-        # == 0`` so existing rigid-body-only scenes pay zero memory and
-        # zero substep-loop overhead. The unified body-or-particle index
-        # space (see :mod:`newton._src.solvers.phoenx.body_or_particle`)
-        # places particle slot ``i_p`` at unified index ``num_bodies +
-        # i_p``; constraint kernels that address either kind of "thing"
-        # consume the unified index via the
-        # :class:`BodyOrParticleStore` accessor helpers.
-        self.num_particles: int = int(num_particles)
-        if self.num_particles < 0:
-            raise ValueError(f"num_particles must be >= 0 (got {self.num_particles})")
-        self.particles: ParticleContainer | None = None
-        if self.num_particles > 0:
-            self.particles = particle_container_zeros(self.num_particles, device=device)
-
-        # Cloth triangles -- count of XPBD-cloth-triangle constraint
-        # rows the scene reserves in the joint-side
-        # :class:`ConstraintContainer`. ``> 0`` selects the
-        # ``cloth_support=True`` kernel binaries via
-        # :meth:`_singleworld_kernels`; the cloth dispatch branch
-        # reads each cid's ``constraint_type`` tag at dword 0 and
-        # routes :data:`CONSTRAINT_TYPE_CLOTH_TRIANGLE` cids to
-        # :func:`cloth_triangle_iterate_at`. Default ``0`` keeps
-        # rigid-only scenes on the existing kernel binaries
-        # bit-for-bit.
-        self.num_cloth_triangles: int = int(num_cloth_triangles)
-        if self.num_cloth_triangles < 0:
-            raise ValueError(f"num_cloth_triangles must be >= 0 (got {self.num_cloth_triangles})")
-        # Per-triangle particle indices (vec4i; 4th slot reserved for
-        # tets). Length 0 placeholder when there are no triangles --
-        # the contact kernels take ``tri_indices`` unconditionally.
-        # :class:`SolverPhoenX` overwrites this with its own allocation
-        # post-construction when cloth is present.
-        with wp.ScopedDevice(device):
-            self.tri_indices: wp.array = wp.zeros(max(self.num_cloth_triangles, 0), dtype=wp.vec4i, device=device)
         # Total cid count in the joint-side :class:`ConstraintContainer`.
-        # Joints + cloth triangles all live in this container; the
-        # dispatcher uses ``cid < num_joint_container_cids`` as the
-        # boundary that separates joint-container cids (joints + cloth)
-        # from contact-column cids. ``self.num_joints`` keeps its
-        # original meaning -- just rigid joints -- so joint-init
-        # kernels stay scoped correctly.
-        self._joint_container_cids: int = self.num_joints + self.num_cloth_triangles
-        # Cached :class:`BodyOrParticleStore` exposed via the
-        # :attr:`body_or_particle` property; lazy so rigid-only scenes
-        # never allocate the sentinel particle container.
-        self._body_or_particle_store: BodyOrParticleStore | None = None
+        # Only rigid joints live here; the dispatcher uses
+        # ``cid < num_joint_container_cids`` as the boundary that
+        # separates joint-container cids from contact-column cids.
+        self._joint_container_cids: int = self.num_joints
 
         self.substeps = int(substeps)
         if self.substeps <= 0:
@@ -828,15 +552,9 @@ class PhoenXWorld:
         self._num_active_constraints: wp.array[int] = wp.array(
             [self._joint_container_cids], dtype=wp.int32, device=self.device
         )
-        # Graph-coloring node count covers both bodies and particles
-        # because cloth-triangle endpoints are unified indices in
-        # ``[num_bodies, num_bodies + num_particles)``. The colourer
-        # builds a CSR over interaction endpoints, so its node-count
-        # bound has to span the entire unified-index range or the
-        # particle-side adjacency lookups stomp out of bounds.
         self._partitioner = IncrementalContactPartitioner(
             max_num_interactions=self._constraint_capacity,
-            max_num_nodes=max(1, self.num_bodies + self.num_particles),
+            max_num_nodes=max(1, self.num_bodies),
             device=self.device,
             use_tile_scan=True,
         )
@@ -987,11 +705,9 @@ class PhoenXWorld:
         :meth:`make_constraint_container` to build the constraint
         container -- the factory always emits the correct shape.
         """
-        expected_constraint_dwords = self.required_constraint_dwords(self.num_joints, self.num_cloth_triangles)
-        # The joint-side ConstraintContainer holds rigid joints AND
-        # cloth triangles (mixed at any cid; per-cid type tag at
-        # dword 0 routes the dispatcher), so its column capacity is
-        # ``num_joints + num_cloth_triangles``.
+        expected_constraint_dwords = self.required_constraint_dwords(self.num_joints)
+        # The joint-side ConstraintContainer holds rigid joints; its
+        # column capacity is ``num_joints``.
         expected_constraint_cols = max(1, int(self._joint_container_cids))
         actual_constraint_shape = self.constraints.data.shape
         assert actual_constraint_shape == (expected_constraint_dwords, expected_constraint_cols), (
@@ -1143,54 +859,42 @@ class PhoenXWorld:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def required_constraint_dwords(num_joints: int, num_cloth_triangles: int = 0) -> int:
+    def required_constraint_dwords(num_joints: int) -> int:
         """Dword width of the joint-side :class:`ConstraintContainer`.
 
-        Contacts now live in a dedicated narrow
+        Contacts live in a dedicated narrow
         :class:`ContactColumnContainer`; the
-        :class:`ConstraintContainer` is sized for the widest of the
-        joint-side constraint types actually present:
+        :class:`ConstraintContainer` is sized for the widest active
+        joint-side constraint type:
 
         * Rigid joints contribute ``ADBS_DWORDS`` (154).
-        * Cloth triangles contribute ``CLOTH_TRIANGLE_DWORDS`` (~18).
-        * Otherwise, the minimal ``CONTACT_DWORDS = 7`` placeholder
+        * Otherwise, the minimal ``CONTACT_DWORDS`` placeholder
           satisfies the shared header contract on the unused
           single-row allocation.
-
-        Mixed scenes get the max of all active types; that is wider
-        than strictly necessary for either type alone but the joint
-        container is column-sparse (one cid per joint / cloth row),
-        so the extra unused dwords are negligible.
         """
         widest = int(CONTACT_DWORDS)
         if int(num_joints) > 0:
             widest = max(widest, int(ADBS_DWORDS))
-        if int(num_cloth_triangles) > 0:
-            widest = max(widest, int(CLOTH_TRIANGLE_DWORDS))
         return widest
 
     @staticmethod
     def make_constraint_container(
         num_joints: int,
-        num_cloth_triangles: int = 0,
         device: wp.context.Devicelike = None,
     ) -> ConstraintContainer:
         """Factory for a correctly-sized joint-side
         :class:`ConstraintContainer`.
 
-        Capacity is ``max(1, num_joints + num_cloth_triangles)`` -- the
-        joint-side container holds rigid joints AND cloth triangles
-        (mixed at any cid; per-cid ``constraint_type`` tag at dword 0
-        routes the dispatcher). Contact columns live in their own
-        :class:`ContactColumnContainer` and are sized separately. The
-        dword width is the ADBS joint header (154 dwords) when joints
-        exist; otherwise the contact placeholder width (7 dwords). See
-        :meth:`required_constraint_dwords`.
+        Capacity is ``max(1, num_joints)``. Contact columns live in
+        their own :class:`ContactColumnContainer` and are sized
+        separately. The dword width is the ADBS joint header
+        (154 dwords) when joints exist; otherwise a minimal
+        placeholder. See :meth:`required_constraint_dwords`.
         """
-        cap = max(1, int(num_joints) + int(num_cloth_triangles))
+        cap = max(1, int(num_joints))
         return constraint_container_zeros(
             num_constraints=cap,
-            num_dwords=PhoenXWorld.required_constraint_dwords(num_joints, num_cloth_triangles),
+            num_dwords=PhoenXWorld.required_constraint_dwords(num_joints),
             device=device,
         )
 
@@ -1300,199 +1004,6 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def populate_cloth_triangles_from_model(
-        self,
-        model: Any,
-        *,
-        beta_lambda: float = 0.1,
-        beta_mu: float = 0.1,
-    ) -> None:
-        """Stamp ``num_cloth_triangles`` cloth-triangle constraint rows
-        from a Newton :class:`~newton.Model` and copy the model's
-        particle state into the :class:`ParticleContainer`.
-
-        Reads from the same VBD-compatible mesh API
-        (``model.particle_q`` / ``particle_qd`` / ``particle_inv_mass``
-        / ``tri_indices`` / ``tri_poses`` / ``tri_areas`` /
-        ``tri_materials``) Newton's other cloth solvers consume, then
-        packs into PhoenX's internal constraint-row format. Newton's
-        ``tri_poses[t]`` is already a 2x2 inverse rest-pose matrix
-        (``inv_dm`` in style3d / VBD), so it copies verbatim into the
-        cloth row.
-
-        Cloth cids occupy ``[num_joints, num_joints + num_cloth_triangles)``
-        in the joint-side :class:`ConstraintContainer`. Contacts (when
-        present) follow at ``cid >= num_joints + num_cloth_triangles``;
-        the dispatcher's ``cid < num_joints_kernel_param`` branch (the
-        kernel parameter is set to :attr:`_joint_container_cids` =
-        ``num_joints + num_cloth_triangles``) sends both joints and
-        cloth to the joint-side dispatch, where the per-cid type tag
-        routes between ADBS and cloth.
-
-        Args:
-            model: A finalised :class:`~newton.Model` whose particle /
-                triangle counts match :attr:`num_particles` /
-                :attr:`num_cloth_triangles`. Cloth nodes must live in
-                the model's particle store -- rigid-body cloth nodes
-                are deferred (PLAN_CLOTH_TRIANGLE.md).
-
-        Raises:
-            ValueError: if the model's particle count differs from
-                :attr:`num_particles`, or its triangle count differs
-                from :attr:`num_cloth_triangles`.
-        """
-        if self.num_cloth_triangles == 0:
-            # Nothing to do; rigid-only scenes don't reserve any cloth
-            # rows. Still allowed (e.g. user calls this defensively
-            # before checking ``model.tri_count``); silently no-op.
-            return
-        model_particle_count = int(model.particle_count)
-        model_tri_count = int(model.tri_count)
-        if model_particle_count != self.num_particles:
-            raise ValueError(
-                f"populate_cloth_triangles_from_model: model.particle_count "
-                f"({model_particle_count}) != world.num_particles ({self.num_particles}). "
-                "Construct PhoenXWorld with num_particles == model.particle_count."
-            )
-        if model_tri_count != self.num_cloth_triangles:
-            raise ValueError(
-                f"populate_cloth_triangles_from_model: model.tri_count "
-                f"({model_tri_count}) != world.num_cloth_triangles ({self.num_cloth_triangles}). "
-                "Construct PhoenXWorld with num_cloth_triangles == model.tri_count."
-            )
-        # Particle state: position / velocity / inverse_mass copy 1:1.
-        if self.particles is None:  # pragma: no cover -- guarded above
-            raise RuntimeError("self.particles is None despite num_particles > 0")
-        wp.copy(self.particles.position, model.particle_q)
-        wp.copy(self.particles.velocity, model.particle_qd)
-        wp.copy(self.particles.inverse_mass, model.particle_inv_mass)
-        # Stamp one cloth row per triangle. Cids start at
-        # ``num_joints`` (immediately after the rigid joints), one
-        # row per triangle.
-        wp.launch(
-            _phoenx_init_cloth_triangle_rows_kernel,
-            dim=self.num_cloth_triangles,
-            inputs=[
-                self.constraints,
-                wp.int32(self.num_joints),  # cid_offset
-                wp.int32(self.num_bodies),
-                model.tri_indices,
-                model.particle_q,
-                model.tri_materials,
-                wp.float32(beta_lambda),
-                wp.float32(beta_mu),
-            ],
-            device=self.device,
-        )
-
-    def setup_cloth_collision_pipeline(self, model: Any, *, cloth_margin: float = 0.005) -> Any:
-        """Build a unified rigid + cloth-triangle :class:`CollisionPipeline`.
-
-        Wires up the broad phase, share-vertex filter and stamps the
-        suffix metadata (``shape_type=TRIANGLE``, ``shape_gap=cloth_margin``,
-        ``shape_collision_group=1``) for the cloth-triangle suffix in the
-        unified ``[0, S+T)`` shape index space.
-
-        Stores ``self._cloth_margin`` and ``self._collision_pipeline``.
-        Also assigns the constructed pipeline to ``model._collision_pipeline``
-        for compatibility with callers that read ``model.contacts()``.
-        Allocates ``self.tri_indices`` (vec4i triangle connectivity) when
-        cloth is present.
-
-        On rigid-only scenes (``num_cloth_triangles == 0``) this falls
-        through to the standard rigid pipeline construction (no NXN broad
-        phase forcing, no filter, no suffix stamping).
-
-        Args:
-            model: A finalised Newton :class:`~newton.Model`.
-            cloth_margin: Speculative gap [m] applied to cloth-triangle
-                AABBs. Defaults to ``0.005`` (5 mm).
-
-        Returns:
-            The constructed (or pre-existing) :class:`CollisionPipeline`.
-
-        Raises:
-            ValueError: if the model carries cloth triangles but
-                ``self.num_cloth_triangles`` differs.
-        """
-        num_cloth_triangles = int(getattr(model, "tri_count", 0) or 0)
-        if num_cloth_triangles != self.num_cloth_triangles:
-            raise ValueError(
-                f"setup_cloth_collision_pipeline: model.tri_count "
-                f"({num_cloth_triangles}) != world.num_cloth_triangles "
-                f"({self.num_cloth_triangles}). Construct PhoenXWorld with "
-                "num_cloth_triangles == model.tri_count."
-            )
-        pipeline, tri_indices = _build_cloth_collision_pipeline(
-            model,
-            device=self.device,
-            num_cloth_triangles=num_cloth_triangles,
-            cloth_margin=cloth_margin,
-        )
-        if num_cloth_triangles > 0:
-            self.tri_indices = tri_indices
-        self._cloth_margin = float(cloth_margin)
-        self._collision_pipeline = pipeline
-        return pipeline
-
-    def update_external_geom(self, particle_q: wp.array[wp.vec3]) -> None:
-        """Refresh the cloth-triangle suffix of the pipeline's unified geom arrays.
-
-        Launches a single per-cloth-triangle kernel that fills the suffix
-        ``[shape_count, shape_count + tri_count)`` of the pipeline-owned
-        AABB / :attr:`CollisionPipeline.geom_data` /
-        :attr:`CollisionPipeline.geom_transform` arrays, plus the full
-        :attr:`tri_indices` ``vec4i`` array (4th component is ``-1`` --
-        reserved for future tetrahedron support). The rigid prefix
-        ``[0, shape_count)`` of the AABB / ``geom_*`` arrays is written
-        by ``compute_shape_aabbs`` inside
-        :meth:`CollisionPipeline.collide_with_external_aabbs`; the
-        static suffix metadata (``shape_type``, ``shape_gap``,
-        ``shape_world``, ``shape_collision_group``, ``shape_flags``) is
-        seeded once by :meth:`setup_cloth_collision_pipeline`.
-
-        Call this immediately before invoking
-        :meth:`CollisionPipeline.collide_with_external_aabbs`. When you
-        pass ``external_aabb_state`` to :meth:`step`, the world calls
-        this for you.
-
-        Args:
-            particle_q: Particle positions [m], shape ``[particle_count, 3]``.
-        """
-        if self.num_cloth_triangles == 0:
-            return
-        cp = getattr(self, "_collision_pipeline", None)
-        if cp is None:
-            raise RuntimeError(
-                "update_external_geom requires a collision pipeline; call setup_cloth_collision_pipeline(model) first."
-            )
-        if particle_q is None:
-            raise ValueError("update_external_geom requires a non-None particle_q")
-        # ``model.shape_count`` is the boundary of rigid vs. triangle
-        # suffix in the unified array. Recover it from the pipeline's
-        # extra-shape count.
-        shape_count = int(cp.unified_shape_type.shape[0]) - int(self.num_cloth_triangles)
-        wp.launch(
-            kernel=_phoenx_compute_triangle_aabbs_and_indices_kernel,
-            dim=self.num_cloth_triangles,
-            inputs=[
-                self.constraints,
-                int(self.num_joints),
-                int(self.num_bodies),
-                particle_q,
-                self._cloth_margin,
-                shape_count,
-            ],
-            outputs=[
-                cp.narrow_phase.shape_aabb_lower,
-                cp.narrow_phase.shape_aabb_upper,
-                cp.geom_data,
-                cp.geom_transform,
-                self.tri_indices,
-            ],
-            device=self.device,
-        )
-
     def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
         """Replace the registered body-pair contact filter. Pairs are
         canonicalised ``(min, max)`` and deduped; self-pairs rejected;
@@ -1569,14 +1080,13 @@ class PhoenXWorld:
         picking=None,
         vel_accum: wp.array[wp.vec3f] | None = None,
         omega_accum: wp.array[wp.vec3f] | None = None,
-        external_aabb_state: Any = None,
     ) -> None:
         """Advance the world by ``dt`` seconds.
 
-        Phases: optional cloth-aware collide -> ingest contacts ->
-        rebuild elements + JP colouring -> substep loop (forces,
-        gravity, main solve, integrate positions, position iterate,
-        relax) -> damping + rotated inertia -> clear forces.
+        Phases: ingest contacts -> rebuild elements + JP colouring ->
+        substep loop (forces, gravity, main solve, integrate positions,
+        position iterate, relax) -> damping + rotated inertia -> clear
+        forces.
 
         Args:
             dt: Time step [s]. Non-positive values no-op.
@@ -1592,16 +1102,6 @@ class PhoenXWorld:
                 start of every substep so the pick spring stays stiff
                 regardless of :attr:`substeps`. Callers driving
                 picking themselves should leave this ``None``.
-            external_aabb_state: Optional Newton-style state object
-                with ``body_q`` and ``particle_q`` populated. When
-                provided alongside a ``contacts`` buffer and a cloth
-                pipeline (set up via
-                :meth:`setup_cloth_collision_pipeline`), the world
-                will automatically refresh the cloth-triangle AABB
-                suffix and run ``CollisionPipeline.collide_with_external_aabbs``
-                before ingesting contacts. The state does not need to
-                be a fully-wired Newton state -- only ``body_q`` and
-                ``particle_q`` are read.
         """
         if dt < 0.0:
             raise ValueError("Time step cannot be negative.")
@@ -1612,26 +1112,11 @@ class PhoenXWorld:
         self.inv_step_dt = 1.0 / dt
         self.substep_dt = dt / self.substeps
 
-        # Cloth-aware collide hand-off: callers driving cloth+rigid
-        # scenes through ``PhoenXWorld`` directly pass the Newton
-        # ``State`` they're going to feed to the renderer; we refresh
-        # the cloth-triangle suffix and run the pipeline here so the
-        # contacts buffer is ready by the time we ingest.
-        if external_aabb_state is not None and contacts is not None and self.num_cloth_triangles > 0:
-            cp = getattr(self, "_collision_pipeline", None)
-            if cp is None:
-                raise RuntimeError(
-                    "step(external_aabb_state=...) requires a collision pipeline; "
-                    "call setup_cloth_collision_pipeline(model) first."
-                )
-            self.update_external_geom(external_aabb_state.particle_q)
-            cp.collide_with_external_aabbs(external_aabb_state, contacts)
-
         self._ingest_and_warmstart_contacts(contacts, shape_body)
         if self._ingest_scratch is not None:
             self._partitioner.set_costs_from_contacts(
-                # Contacts start at the cid past joints + cloth in
-                # the unified joint-container cid space.
+                # Contacts start at the cid past joints in the
+                # unified joint-container cid space.
                 self._joint_container_cids,
                 self._ingest_scratch.num_contact_columns,
                 self._contact_cols,
@@ -1814,7 +1299,6 @@ class PhoenXWorld:
             default_friction=self.default_friction,
             device=self.device,
             num_bodies=self.num_bodies,
-            num_rigid_shapes=int(shape_body.shape[0]),
             filter_keys=self._collision_filter_keys,
             filter_count=self._collision_filter_count,
             shape_material=self._shape_material,
@@ -1877,16 +1361,11 @@ class PhoenXWorld:
             bodies=self.bodies,
             contacts=self._contact_views,
             cc=self._contact_container,
-            particles=self.body_or_particle.particles,
-            tri_indices=self.tri_indices,
-            num_rigid_shapes=int(shape_body.shape[0]),
             device=self.device,
         )
 
         stamp_forward_contact_map(
             rigid_contact_max=self.rigid_contact_max,
-            # Contacts begin in the cid space *after* both rigid joints
-            # and cloth triangles -- they live in the joint container.
             cid_base=self._joint_container_cids,
             scratch=self._ingest_scratch,
             cid_of_contact=self._cid_of_contact_cur,
@@ -1903,9 +1382,9 @@ class PhoenXWorld:
             dim=1,
             inputs=[
                 self._ingest_scratch.num_contact_columns,
-                # Joint-container cids = rigid joints + cloth triangles;
-                # both are always active across substeps. The active
-                # contact count is added on top by the kernel.
+                # Joint-container cids = rigid joints; always active
+                # across substeps. The active contact count is added
+                # on top by the kernel.
                 wp.int32(self._joint_container_cids),
             ],
             outputs=[self._num_active_constraints],
@@ -1917,46 +1396,23 @@ class PhoenXWorld:
         element view. Type-agnostic launch at
         ``dim = constraint_capacity``; threads beyond the device-held
         ``num_active_constraints`` early-out.
-
-        For cloth scenes, contact rows expose their cloth particle
-        endpoints (read from ``tri_indices``) in the unified
-        body-or-particle index space so the colourer can detect
-        contact ↔ contact and contact ↔ cloth-elasticity conflicts on
-        shared particles. Without it, two contacts that share a cloth
-        particle but no rigid body land in the same colour and race
-        on the particle's velocity / position writes.
         """
         if self._constraint_capacity == 0:
             return
-        cloth = self.num_cloth_triangles > 0
-        elements_kernel = (
-            _constraints_to_elements_cloth_kernel if cloth else _constraints_to_elements_kernel
-        )
-        # Rigid-only scenes don't need ``tri_indices`` at all but the
-        # cloth kernel reads it -- give it a cached length-1 sentinel
-        # so we don't allocate per step.
-        if cloth:
-            tri_indices = self.tri_indices
-        else:
-            if not hasattr(self, "_tri_indices_sentinel"):
-                self._tri_indices_sentinel = wp.zeros(1, dtype=wp.vec4i, device=self.device)
-            tri_indices = self._tri_indices_sentinel
         wp.launch(
-            elements_kernel,
+            _constraints_to_elements_kernel,
             dim=self._constraint_capacity,
             inputs=[
                 self.constraints,
                 self._contact_cols,
                 self.bodies,
                 self._num_active_constraints,
-                # Joint-container boundary; ``cid < num_joints`` in the
-                # kernel routes joints + cloth to the joint dispatcher,
+                # Joint-container boundary; ``cid < num_joints`` in
+                # the kernel routes joints to the joint dispatcher,
                 # else to contacts.
                 wp.int32(self._joint_container_cids),
                 wp.int32(self.num_bodies),
-                tri_indices,
                 self._elements,
-                self.body_or_particle,
             ],
             device=self.device,
         )
@@ -2136,29 +1592,17 @@ class PhoenXWorld:
             )
 
     def _integrate_forces_and_gravity(self) -> None:
-        """One per-substep launch over the unified body-or-particle
-        index space. The kernel internally dispatches on
-        :func:`is_particle`:
-
-        * Bodies: apply per-body force / torque accumulators and
-          gravity to ``velocity`` / ``angular_velocity``. Static and
-          kinematic slots early-return.
-        * Particles: substep-entry access-mode transition
-          (Velocity-level -> Position-level). Apply gravity +
-          external force, snapshot pre-predict position into
-          ``position_prev_substep``, and advance ``position`` by
-          ``velocity * dt`` so the cloth iterate sees the predicted
-          pose. The substep-exit recovery happens inside
-          :meth:`_integrate_positions`, which also runs over the
-          unified index space.
+        """One per-substep launch over all rigid bodies. Apply per-body
+        force / torque accumulators and gravity to ``velocity`` /
+        ``angular_velocity``. Static and kinematic slots early-return.
         """
-        n = self.num_bodies + self.num_particles
+        n = self.num_bodies
         if n == 0:
             return
         wp.launch(
             _phoenx_apply_forces_and_gravity_kernel,
             dim=n,
-            inputs=[self.body_or_particle, self.gravity, wp.float32(self.substep_dt)],
+            inputs=[self.bodies, self.gravity, wp.float32(self.substep_dt)],
             device=self.device,
         )
 
@@ -2197,13 +1641,8 @@ class PhoenXWorld:
                 contact_views,
                 wp.int32(self.solver_iterations),
                 wp.int32(self.num_worlds),
-                # Joint-container boundary (= rigid joints + cloth);
-                # the multi-world dispatcher uses it the same way the
-                # single-world ones do.
                 wp.int32(self._joint_container_cids),
                 self._tpw_choice,
-                self.body_or_particle.particles,
-                self.tri_indices,
             ],
             device=self.device,
         )
@@ -2253,7 +1692,6 @@ class PhoenXWorld:
         """
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
-        store = self.body_or_particle
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
             wp.launch(
                 kernel,
@@ -2273,8 +1711,6 @@ class PhoenXWorld:
                     wp.int32(self._singleworld_total_threads),
                     wp.int32(self._fuse_threshold),
                     self._head_active,
-                    store,
-                    self.tri_indices,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=self.device,
@@ -2311,8 +1747,6 @@ class PhoenXWorld:
                 contact_views,
                 wp.int32(self._joint_container_cids),
                 wp.int32(self._fuse_threshold),
-                self.body_or_particle,
-                self.tri_indices,
             ],
             block_dim=self._fuse_tail_block_dim,
             device=self.device,
@@ -2397,17 +1831,7 @@ class PhoenXWorld:
         ``read_int(_OFF_JOINT_MODE)`` and four-way ``joint_mode``
         branch in :func:`actuated_double_ball_socket_iterate`. Otherwise
         returns the generic dispatchers."""
-        cloth_on = self.num_cloth_triangles > 0
         if self._use_revolute_specialization:
-            if cloth_on:
-                return (
-                    _constraint_prepare_singleworld_revolute_cloth_kernel,
-                    _constraint_prepare_singleworld_fused_revolute_cloth_kernel,
-                    _constraint_iterate_singleworld_revolute_cloth_kernel,
-                    _constraint_iterate_singleworld_fused_revolute_cloth_kernel,
-                    _constraint_relax_singleworld_revolute_cloth_kernel,
-                    _constraint_relax_singleworld_fused_revolute_cloth_kernel,
-                )
             return (
                 _constraint_prepare_singleworld_revolute_kernel,
                 _constraint_prepare_singleworld_fused_revolute_kernel,
@@ -2415,15 +1839,6 @@ class PhoenXWorld:
                 _constraint_iterate_singleworld_fused_revolute_kernel,
                 _constraint_relax_singleworld_revolute_kernel,
                 _constraint_relax_singleworld_fused_revolute_kernel,
-            )
-        if cloth_on:
-            return (
-                _constraint_prepare_singleworld_cloth_kernel,
-                _constraint_prepare_singleworld_fused_cloth_kernel,
-                _constraint_iterate_singleworld_cloth_kernel,
-                _constraint_iterate_singleworld_fused_cloth_kernel,
-                _constraint_relax_singleworld_cloth_kernel,
-                _constraint_relax_singleworld_fused_cloth_kernel,
             )
         return (
             _constraint_prepare_singleworld_kernel,
@@ -2523,39 +1938,26 @@ class PhoenXWorld:
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
                 self._tpw_choice,
-                self.body_or_particle.particles,
-                self.tri_indices,
             ],
             device=self.device,
         )
 
     def _integrate_positions(self) -> None:
-        """One post-iterate launch over the unified body-or-particle
-        index space. The kernel internally dispatches on
-        :func:`is_particle`:
-
-        * Bodies: ``x += v * dt`` and ``q = dq(w * dt) * q`` for
-          dynamic bodies. Static and kinematic bodies are skipped --
-          kinematic pose advances via
-          :meth:`_kinematic_interpolate_substep`. Axis-angle
-          quaternion form keeps unit norm over many substeps.
-        * Particles: substep-exit access-mode transition
-          (Position-level -> Velocity-level). The cloth iterate has
-          already written the constraint-projected position into
-          ``particles.position``; recover ``velocity = (position -
-          position_prev_substep) * inv_dt`` so the next substep
-          starts from a consistent velocity-level state.
+        """Per-substep position integration. ``x += v * dt`` and
+        ``q = dq(w * dt) * q`` for dynamic bodies. Static and kinematic
+        bodies are skipped -- kinematic pose advances via
+        :meth:`_kinematic_interpolate_substep`. Axis-angle quaternion
+        form keeps unit norm over many substeps.
         """
-        n = self.num_bodies + self.num_particles
+        n = self.num_bodies
         if n == 0:
             return
         wp.launch(
             _integrate_velocities_kernel,
             dim=n,
             inputs=[
-                self.body_or_particle,
+                self.bodies,
                 wp.float32(self.substep_dt),
-                wp.float32(1.0 / self.substep_dt),
             ],
             device=self.device,
         )
@@ -2607,25 +2009,18 @@ class PhoenXWorld:
         )
 
     def _update_inertia_and_clear_forces(self) -> None:
-        """One end-of-step launch over the unified body-or-particle
-        index space. The kernel internally dispatches on
-        :func:`is_particle`:
-
-        * Bodies: apply damping, rebuild ``inverse_inertia_world``
-          from the final orientation (``R * I^-1 * R^T``), and zero
-          the force / torque accumulators (every body slot, including
-          kinematic / static).
-        * Particles: zero the force accumulator. Particles have no
-          orientation / inertia / damping fields, so this is the only
-          work.
+        """End-of-step launch over all rigid bodies. Apply damping,
+        rebuild ``inverse_inertia_world`` from the final orientation
+        (``R * I^-1 * R^T``), and zero the force / torque accumulators
+        (every body slot, including kinematic / static).
         """
-        n = self.num_bodies + self.num_particles
+        n = self.num_bodies
         if n == 0:
             return
         wp.launch(
             _phoenx_update_inertia_and_clear_forces_kernel,
             dim=n,
-            inputs=[self.body_or_particle],
+            inputs=[self.bodies],
             device=self.device,
         )
 
@@ -2726,41 +2121,6 @@ class PhoenXWorld:
         :meth:`gather_constraint_errors`."""
         return self._constraint_capacity
 
-    @property
-    def body_or_particle(self) -> BodyOrParticleStore:
-        """Unified body-or-particle store for kernels that address
-        either kind of "thing" by a single integer index.
-
-        Mirrors the joint-or-contact cid scheme: unified indices
-        ``[0, num_bodies)`` resolve to body slots,
-        ``[num_bodies, num_bodies + num_particles)`` to particle
-        slots. The branch lives inside the
-        :func:`~newton._src.solvers.phoenx.body_or_particle.get_position`
-        / ``get_velocity`` / etc. accessors -- constraint kernels
-        consume this store directly without knowing or caring which
-        kind of thing they're addressing.
-
-        Lazy-allocated; rigid-only scenes that never touch this
-        property pay zero memory cost. When
-        :attr:`num_particles == 0` the cached store wraps a length-1
-        sentinel :class:`ParticleContainer` so the wp.struct fields
-        are valid; the threshold compare in the accessors guarantees
-        the sentinel is never read.
-        """
-        if self._body_or_particle_store is None:
-            particles = self.particles
-            if particles is None:
-                # Length-1 sentinel keeps the wp.struct field valid;
-                # the threshold compare in the accessors makes sure
-                # nothing ever indexes past num_bodies in this case.
-                particles = particle_container_zeros(1, device=self.device)
-            store = BodyOrParticleStore()
-            store.bodies = self.bodies
-            store.particles = particles
-            store.num_bodies = wp.int32(self.num_bodies)
-            self._body_or_particle_store = store
-        return self._body_or_particle_store
-
     def gather_constraint_wrenches(self, out: wp.array) -> None:
         """Per-cid world-frame wrench on ``body2`` averaged over the
         last substep. ``out`` is
@@ -2780,11 +2140,6 @@ class PhoenXWorld:
                 self._contact_cols,
                 self.bodies,
                 wp.int32(self._constraint_capacity),
-                # Joint-container boundary; cloth cids in the joint
-                # range will route through the joint wrench helper
-                # which reads ADBS-typed fields. For pure rigid scenes
-                # this stays bit-for-bit unchanged; cloth wrench
-                # readout is a follow-up.
                 wp.int32(self._joint_container_cids),
                 idt,
                 self._contact_container,
