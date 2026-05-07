@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
+from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL, ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.body_or_particle import particle_set_access_mode
 from newton._src.solvers.phoenx.particle import ParticleContainer
@@ -88,6 +88,7 @@ __all__ = [
 
 
 _ACCESS_MODE_VELOCITY_LEVEL = wp.constant(wp.int32(ACCESS_MODE_VELOCITY_LEVEL))
+_ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
 
 
 #: Endpoint kind tags. Stored as int32 dwords on each contact column.
@@ -341,8 +342,10 @@ def endpoint_apply_impulse(
         imp: World-space impulse [N*s].
         inv_mass / inv_inertia / r: Endpoint mass-matrix entries.
         sign: ``+1`` for endpoint 2, ``-1`` for endpoint 1.
-        dt: Substep dt ``[s]``. Currently unused; reserved for the
-            Jitter2-style position-level write under investigation.
+        dt: Substep dt ``[s]``. Used to drive the per-vertex
+            ``VELOCITY_LEVEL -> POSITION_LEVEL`` flip after the velocity
+            write so cloth's substep-exit XPBD recovery preserves the
+            contact impulse via the access-mode finite-diff.
     """
     if kind == ENDPOINT_KIND_RIGID:
         bodies.velocity[idx] = bodies.velocity[idx] + sign * inv_mass * imp
@@ -356,9 +359,22 @@ def endpoint_apply_impulse(
     inv_m_a = particles.inverse_mass[pa]
     inv_m_b = particles.inverse_mass[pb]
     inv_m_c = particles.inverse_mass[pc]
+    # Velocity-level contact write per particle.
     particles.velocity[pa] = particles.velocity[pa] + sign * bary[0] * inv_m_a * imp
     particles.velocity[pb] = particles.velocity[pb] + sign * bary[1] * inv_m_b * imp
     particles.velocity[pc] = particles.velocity[pc] + sign * bary[2] * inv_m_c * imp
+    # Flip each touched vertex back to POSITION_LEVEL so the access-mode
+    # finite-diff (``pos = pos_prev_substep + dt * vel``) folds the
+    # contact impulse into ``particles.position``. Without this flip, the
+    # substep-exit ``writeback_position_to_velocity`` short-circuits
+    # (already at VELOCITY_LEVEL) and ``particles.position`` never sees
+    # the contact correction, so cloth drifts under gravity even when
+    # the velocity is being clamped each substep. Mirrors Jitter2's
+    # ``TinyRigidState.SetAccessMode`` pattern.
+    inv_dt = wp.float32(1.0) / dt
+    particle_set_access_mode(particles, pa, _ACCESS_MODE_POSITION_LEVEL, inv_dt)
+    particle_set_access_mode(particles, pb, _ACCESS_MODE_POSITION_LEVEL, inv_dt)
+    particle_set_access_mode(particles, pc, _ACCESS_MODE_POSITION_LEVEL, inv_dt)
 
 
 @wp.func
@@ -387,7 +403,10 @@ def endpoint_warmstart_apply_impulse(
 
     The angular impulse is ignored for triangle endpoints (no
     rotational DOF). The linear impulse goes through the same
-    barycentric per-vertex distribution as the iterate path.
+    barycentric per-vertex distribution as the iterate path, plus the
+    matching ``VELOCITY_LEVEL -> POSITION_LEVEL`` access-mode flip so
+    cloth's substep-exit recovery folds the warm-start impulse into
+    ``particles.position`` via the finite-diff identity.
     """
     if kind == ENDPOINT_KIND_RIGID:
         bodies.velocity[idx] = bodies.velocity[idx] + sign * inv_mass * lin_imp
@@ -404,6 +423,10 @@ def endpoint_warmstart_apply_impulse(
     particles.velocity[pa] = particles.velocity[pa] + sign * bary[0] * inv_m_a * lin_imp
     particles.velocity[pb] = particles.velocity[pb] + sign * bary[1] * inv_m_b * lin_imp
     particles.velocity[pc] = particles.velocity[pc] + sign * bary[2] * inv_m_c * lin_imp
+    inv_dt = wp.float32(1.0) / dt
+    particle_set_access_mode(particles, pa, _ACCESS_MODE_POSITION_LEVEL, inv_dt)
+    particle_set_access_mode(particles, pb, _ACCESS_MODE_POSITION_LEVEL, inv_dt)
+    particle_set_access_mode(particles, pc, _ACCESS_MODE_POSITION_LEVEL, inv_dt)
 
 
 # ---------------------------------------------------------------------------
