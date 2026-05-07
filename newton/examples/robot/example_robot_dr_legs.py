@@ -36,8 +36,15 @@
 #     remaining tree edges in their authored body0=parent / body1=child
 #     orientation (no flipping needed).
 #
-# Optionally drives the 12 actuated joints from the bundled animation
-# .npy.
+# Drives the 12 actuated joints from the bundled walking animation. The
+# animation is an open-loop joint-space gait that was authored for a
+# more capable solver pipeline (Kamino's implicit-PD + ZMP-aware
+# tracker); replaying it at full speed against pure XPBD position
+# drives is reactively unstable -- the robot tracks the joint targets
+# accurately but loses lateral balance and falls within a few seconds.
+# We default to ``--animation-speed 0.25`` so the legs step in slow
+# motion and the COM has time to remain over the support polygon. Set
+# ``--animation-speed 1.0`` to attempt full-rate playback.
 #
 # Command: python -m newton.examples robot_dr_legs --world-count 16
 #
@@ -125,18 +132,22 @@ class Example:
             raise RuntimeError(f"Failed to open dr_legs USD stage: {asset_file}")
         UsdPhysics.ArticulationRootAPI.Apply(stage.GetPrimAtPath("/DR_Legs/RigidBodies/pelvis"))
         for jp in _LOOP_CLOSER_JOINTS:
-            stage.GetPrimAtPath(jp).CreateAttribute(
-                "physics:excludeFromArticulation", Sdf.ValueTypeNames.Bool
-            ).Set(True)
+            stage.GetPrimAtPath(jp).CreateAttribute("physics:excludeFromArticulation", Sdf.ValueTypeNames.Bool).Set(
+                True
+            )
 
-        # Lift the robot enough that even the lowest collision shape
-        # (the outer ankle brackets, ~5 cm below the pelvis origin)
-        # starts well above the ground plane. ``floating=True`` adds
+        # Place the robot with the foot collision boxes just resting on
+        # the ground plane (added below at z = -0.1). The lowest body
+        # in neutral pose is the foot box at pelvis_z - 0.262, so a
+        # pelvis offset of 0.165 puts the feet ~3 mm above the ground
+        # at start-up -- enough to let contacts engage cleanly without
+        # a long free-fall (which would otherwise impact the legs hard
+        # before the PD drive can take effect). ``floating=True`` adds
         # the FREE base joint that XPBD needs to anchor the pelvis to
         # inertial space.
         dr_legs.add_usd(
             stage,
-            xform=wp.transform(wp.vec3(0, 0, 0.3)),
+            xform=wp.transform(wp.vec3(0, 0, 0.165)),
             floating=True,
             joint_ordering=None,
             collapse_fixed_joints=False,
@@ -174,7 +185,7 @@ class Example:
 
         builder.default_shape_cfg.ke = 1.0e3
         builder.default_shape_cfg.kd = 1.0e2
-        builder.add_ground_plane(height = -0.1)
+        builder.add_ground_plane(height=-0.1)
 
         self.model = builder.finalize()
 
@@ -200,12 +211,18 @@ class Example:
         self.contacts = self.model.contacts()
 
         self._animation_data: np.ndarray | None = None
+        self._animation_speed: float = args.animation_speed
         if args.animation:
             self._init_animation(asset_path)
 
         self.viewer.set_model(self.model)
 
+        # Compile + capture the per-frame CUDA graph. On a cold Warp
+        # cache the contact and XPBD kernels can take 30+ seconds to
+        # compile; let the user know the process is working.
+        print("Warming up Warp kernels and capturing CUDA graph...", flush=True)
         self.capture()
+        print("Ready.", flush=True)
 
     def _init_animation(self, asset_path) -> None:
         anim_file = str(asset_path / "dr_legs/animation" / "dr_legs_animation_100fps.npy")
@@ -231,7 +248,7 @@ class Example:
 
     def _update_animation_targets(self):
         n_frames = self._animation_data.shape[0]
-        frame = min(int(self.sim_time / self._animation_dt), n_frames - 1)
+        frame = min(int(self.sim_time * self._animation_speed / self._animation_dt), n_frames - 1)
         self._target_pos_host[self._animation_indices] = self._animation_data[frame]
         self.control.joint_target_pos.assign(self._target_pos_host)
 
@@ -267,6 +284,27 @@ class Example:
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
+    def test_final(self):
+        body_q = self.state_0.body_q.numpy()
+        # body_q layout is [px, py, pz, qx, qy, qz, qw] per row.
+        n_per_world = self.model.body_count // self.world_count
+        body_label = list(self.model.body_label)
+        pelvis_idx = next(
+            (i for i, lbl in enumerate(body_label[:n_per_world]) if "pelvis" in str(lbl).lower()),
+            0,
+        )
+        for w in range(self.world_count):
+            row = w * n_per_world + pelvis_idx
+            pz = float(body_q[row, 2])
+            qx, qy, qz, qw = body_q[row, 3:7]
+            sin_pitch = max(-1.0, min(1.0, 2.0 * (qw * qy - qz * qx)))
+            pitch = float(np.arcsin(sin_pitch))
+            roll = float(np.arctan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy)))
+            assert np.isfinite(pz), f"world {w}: pelvis z is non-finite ({pz})"
+            assert pz > 0.05, f"world {w}: pelvis collapsed to z={pz:.3f} (expected > 0.05)"
+            assert abs(roll) < np.pi / 4, f"world {w}: pelvis roll {np.degrees(roll):.1f} deg exceeds 45 deg"
+            assert abs(pitch) < np.pi / 4, f"world {w}: pelvis pitch {np.degrees(pitch):.1f} deg exceeds 45 deg"
+
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
@@ -290,6 +328,18 @@ class Example:
             help="Optional separate multiplier on USD kd. Defaults to following --animation-gain-scale.",
         )
         parser.add_argument(
+            "--animation-speed",
+            type=float,
+            default=0.25,
+            help=(
+                "Animation playback rate; 1.0 plays the gait at the authored 100 Hz."
+                " Defaults to 0.25 because the open-loop gait is reactively"
+                " unstable for pure XPBD position drives -- slowing playback"
+                " keeps the COM over the support polygon. Set to 1.0 to attempt"
+                " real-time playback (robot will fall over within ~2 s)."
+            ),
+        )
+        parser.add_argument(
             "--sim-substeps",
             type=int,
             default=20,
@@ -301,14 +351,13 @@ class Example:
             default=8,
             help="XPBD constraint iterations per substep; higher values tighten loop-closure residuals.",
         )
-        parser.set_defaults(world_count=4)
+        parser.set_defaults(world_count=1)
         return parser
 
 
 if __name__ == "__main__":
     parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
-    viewer._paused = True
 
     example = Example(viewer, args)
 
