@@ -66,11 +66,18 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactViews,
     contact_get_body1,
     contact_get_body2,
+    contact_get_endpoint_idx1,
+    contact_get_endpoint_idx2,
+    contact_get_endpoint_kind1,
+    contact_get_endpoint_kind2,
     contact_iterate,
     contact_iterate_multi,
     contact_prepare_for_iteration,
     contact_world_error,
     contact_world_wrench,
+)
+from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    ENDPOINT_KIND_TRIANGLE,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
@@ -999,6 +1006,7 @@ def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
     slot in rigid-only scenes.
     """
     cloth_type_tag = wp.constant(CONSTRAINT_TYPE_CLOTH_TRIANGLE)
+    triangle_kind = wp.constant(ENDPOINT_KIND_TRIANGLE)
 
     @wp.kernel(enable_backward=False)
     def kernel(
@@ -1007,6 +1015,8 @@ def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
         bodies: BodyContainer,
         num_constraints: wp.array[wp.int32],
         num_joints: wp.int32,
+        num_bodies: wp.int32,
+        tri_indices: wp.array[wp.vec4i],
         elements: wp.array[ElementInteractionData],
         store: BodyOrParticleStore,
     ):
@@ -1014,70 +1024,145 @@ def _make_constraints_to_elements_kernel(*, cloth_support: bool = False):
         n = num_constraints[0]
         if tid >= n:
             return
-        b1 = wp.int32(-1)
-        b2 = wp.int32(-1)
-        b3 = wp.int32(-1)
+        # Up to 6 unified body-or-particle endpoints per constraint:
+        # cloth-vs-cloth contact has 6 cloth particles, cloth-vs-rigid
+        # has 1 rigid body + 3 cloth particles, cloth elasticity has
+        # 3 cloth particles, rigid joints have 2 rigid bodies.
+        s0 = wp.int32(-1)
+        s1 = wp.int32(-1)
+        s2 = wp.int32(-1)
+        s3 = wp.int32(-1)
+        s4 = wp.int32(-1)
+        s5 = wp.int32(-1)
+        cnt = wp.int32(0)
+
         if tid < num_joints:
+            # Joint / cloth-elasticity row.
             b1 = constraint_get_body1(constraints, tid)
             b2 = constraint_get_body2(constraints, tid)
+            b3 = wp.int32(-1)
             if wp.static(cloth_support):
                 ctype = read_int(constraints, wp.int32(0), tid)
                 if ctype == cloth_type_tag:
-                    # Cloth triangle's third endpoint sits next to
-                    # body1 / body2 at dword 3 -- read it via the
-                    # cloth-typed accessor so the offset comes from
-                    # the schema, not a hand-rolled constant.
                     b3 = cloth_triangle_get_body3(constraints, tid)
-        else:
-            local_cid = tid - num_joints
-            b1 = contact_get_body1(contact_cols, local_cid)
-            b2 = contact_get_body2(contact_cols, local_cid)
-        # Static-body collapse: anything with inverse_mass == 0 maps
-        # to -1 so the colourer doesn't track it (statics never
-        # conflict). With cloth_support the inverse-mass lookup goes
-        # through the unified accessor so particle slots resolve to
-        # the ParticleContainer; without it we keep the existing
-        # direct read on the body store.
-        if wp.static(cloth_support):
-            if b1 >= 0 and get_inverse_mass(store, b1) == wp.float32(0.0):
-                b1 = wp.int32(-1)
-            if b2 >= 0 and get_inverse_mass(store, b2) == wp.float32(0.0):
-                b2 = wp.int32(-1)
-            if b3 >= 0 and get_inverse_mass(store, b3) == wp.float32(0.0):
-                b3 = wp.int32(-1)
-        else:
-            if b1 >= 0 and bodies.inverse_mass[b1] == wp.float32(0.0):
-                b1 = wp.int32(-1)
-            if b2 >= 0 and bodies.inverse_mass[b2] == wp.float32(0.0):
-                b2 = wp.int32(-1)
-        # Compact: non-negative IDs must come first so the adjacency
-        # loop (which stops on the first -1) doesn't miss a dynamic
-        # body when the static one happens to sit in slot 0.
-        if wp.static(cloth_support):
-            # 3-element compact for the cloth case. Sort the three
-            # IDs so non-negative ones come first; -1 in unused tail
-            # slots.
-            cnt = wp.int32(0)
-            slots = wp.vec3i(wp.int32(-1), wp.int32(-1), wp.int32(-1))
+            if wp.static(cloth_support):
+                if b1 >= 0 and get_inverse_mass(store, b1) == wp.float32(0.0):
+                    b1 = wp.int32(-1)
+                if b2 >= 0 and get_inverse_mass(store, b2) == wp.float32(0.0):
+                    b2 = wp.int32(-1)
+                if b3 >= 0 and get_inverse_mass(store, b3) == wp.float32(0.0):
+                    b3 = wp.int32(-1)
+            else:
+                if b1 >= 0 and bodies.inverse_mass[b1] == wp.float32(0.0):
+                    b1 = wp.int32(-1)
+                if b2 >= 0 and bodies.inverse_mass[b2] == wp.float32(0.0):
+                    b2 = wp.int32(-1)
             if b1 >= 0:
-                slots[cnt] = b1
+                if cnt == wp.int32(0):
+                    s0 = b1
+                elif cnt == wp.int32(1):
+                    s1 = b1
+                elif cnt == wp.int32(2):
+                    s2 = b1
                 cnt = cnt + wp.int32(1)
             if b2 >= 0:
-                slots[cnt] = b2
+                if cnt == wp.int32(0):
+                    s0 = b2
+                elif cnt == wp.int32(1):
+                    s1 = b2
+                elif cnt == wp.int32(2):
+                    s2 = b2
                 cnt = cnt + wp.int32(1)
             if b3 >= 0:
-                slots[cnt] = b3
+                if cnt == wp.int32(0):
+                    s0 = b3
+                elif cnt == wp.int32(1):
+                    s1 = b3
+                elif cnt == wp.int32(2):
+                    s2 = b3
                 cnt = cnt + wp.int32(1)
-            elements[tid] = element_interaction_data_make(
-                slots[0], slots[1], slots[2], wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1)
-            )
         else:
-            if b1 < 0 and b2 >= 0:
-                b1 = b2
-                b2 = wp.int32(-1)
-            elements[tid] = element_interaction_data_make(
-                b1, b2, wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1)
-            )
+            # Contact row. Build endpoints from the per-cid (kind, idx)
+            # pair: RIGID -> the body slot, TRIANGLE -> the three cloth
+            # particles read from ``tri_indices`` and shifted into the
+            # unified body-or-particle index space (``num_bodies + p``).
+            local_cid = tid - num_joints
+
+            # Up to 7 candidate endpoints (1 rigid + 3 cloth + 3 cloth):
+            # accumulate them then static-collapse + compact into s0..s5.
+            e0 = wp.int32(-1)
+            e1 = wp.int32(-1)
+            e2 = wp.int32(-1)
+            e3 = wp.int32(-1)
+            e4 = wp.int32(-1)
+            e5 = wp.int32(-1)
+            e6 = wp.int32(-1)
+
+            if wp.static(cloth_support):
+                kind1 = contact_get_endpoint_kind1(contact_cols, local_cid)
+                kind2 = contact_get_endpoint_kind2(contact_cols, local_cid)
+                if kind1 == triangle_kind:
+                    t1 = contact_get_endpoint_idx1(contact_cols, local_cid)
+                    idx_a = tri_indices[t1]
+                    e0 = num_bodies + idx_a[0]
+                    e1 = num_bodies + idx_a[1]
+                    e2 = num_bodies + idx_a[2]
+                else:
+                    e0 = contact_get_body1(contact_cols, local_cid)
+                if kind2 == triangle_kind:
+                    t2 = contact_get_endpoint_idx2(contact_cols, local_cid)
+                    idx_b = tri_indices[t2]
+                    e3 = num_bodies + idx_b[0]
+                    e4 = num_bodies + idx_b[1]
+                    e5 = num_bodies + idx_b[2]
+                else:
+                    e3 = contact_get_body2(contact_cols, local_cid)
+            else:
+                e0 = contact_get_body1(contact_cols, local_cid)
+                e3 = contact_get_body2(contact_cols, local_cid)
+
+            # Static-collapse + compact.
+            for j in range(7):
+                v = wp.int32(-1)
+                if j == 0:
+                    v = e0
+                elif j == 1:
+                    v = e1
+                elif j == 2:
+                    v = e2
+                elif j == 3:
+                    v = e3
+                elif j == 4:
+                    v = e4
+                elif j == 5:
+                    v = e5
+                elif j == 6:
+                    v = e6
+                if v < 0:
+                    continue
+                if wp.static(cloth_support):
+                    if get_inverse_mass(store, v) == wp.float32(0.0):
+                        continue
+                else:
+                    if bodies.inverse_mass[v] == wp.float32(0.0):
+                        continue
+                if cnt == wp.int32(0):
+                    s0 = v
+                elif cnt == wp.int32(1):
+                    s1 = v
+                elif cnt == wp.int32(2):
+                    s2 = v
+                elif cnt == wp.int32(3):
+                    s3 = v
+                elif cnt == wp.int32(4):
+                    s4 = v
+                elif cnt == wp.int32(5):
+                    s5 = v
+                cnt = cnt + wp.int32(1)
+
+        elements[tid] = element_interaction_data_make(
+            s0, s1, s2, s3, s4, s5, wp.int32(-1), wp.int32(-1)
+        )
 
     return kernel
 

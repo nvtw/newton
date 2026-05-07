@@ -1909,12 +1909,31 @@ class PhoenXWorld:
         """Project every active constraint into the partitioner's
         element view. Type-agnostic launch at
         ``dim = constraint_capacity``; threads beyond the device-held
-        ``num_active_constraints`` early-out."""
+        ``num_active_constraints`` early-out.
+
+        For cloth scenes, contact rows expose their cloth particle
+        endpoints (read from ``tri_indices``) in the unified
+        body-or-particle index space so the colourer can detect
+        contact ↔ contact and contact ↔ cloth-elasticity conflicts on
+        shared particles. Without it, two contacts that share a cloth
+        particle but no rigid body land in the same colour and race
+        on the particle's velocity / position writes.
+        """
         if self._constraint_capacity == 0:
             return
+        cloth = self.num_cloth_triangles > 0
         elements_kernel = (
-            _constraints_to_elements_cloth_kernel if self.num_cloth_triangles > 0 else _constraints_to_elements_kernel
+            _constraints_to_elements_cloth_kernel if cloth else _constraints_to_elements_kernel
         )
+        # Rigid-only scenes don't need ``tri_indices`` at all but the
+        # cloth kernel reads it -- give it a cached length-1 sentinel
+        # so we don't allocate per step.
+        if cloth:
+            tri_indices = self.tri_indices
+        else:
+            if not hasattr(self, "_tri_indices_sentinel"):
+                self._tri_indices_sentinel = wp.zeros(1, dtype=wp.vec4i, device=self.device)
+            tri_indices = self._tri_indices_sentinel
         wp.launch(
             elements_kernel,
             dim=self._constraint_capacity,
@@ -1927,6 +1946,8 @@ class PhoenXWorld:
                 # kernel routes joints + cloth to the joint dispatcher,
                 # else to contacts.
                 wp.int32(self._joint_container_cids),
+                wp.int32(self.num_bodies),
+                tri_indices,
                 self._elements,
                 self.body_or_particle,
             ],
