@@ -2066,21 +2066,34 @@ def _phoenx_compute_triangle_aabbs_and_indices_kernel(
 ):
     """Per-step fill of the cloth-triangle suffix in the pipeline's unified geom arrays.
 
+    Stamps each cloth triangle as a canonical first-class :data:`GeoType.TRIANGLE`
+    shape (the same first-class triangle type rigid bodies use) so the existing
+    narrow-phase support map / extract handles cloth tris with no special-case
+    branches.  In the canonical local frame, vertex A sits at the origin, B on
+    local +Z, and C in the local YZ plane; the per-step transform rotates that
+    canonical frame onto the world-space triangle.
+
     Reads the cloth-triangle constraint rows
     ``constraints[cloth_cid_offset + t]`` for ``t in [0, T)`` and writes:
 
     * ``aabb_lower[S + t]`` / ``aabb_upper[S + t]`` -- world-space AABB of
       the triangle expanded by ``cloth_margin`` in every direction.
-    * ``geom_data[S + t] = (B-A, cloth_margin)`` packed as ``vec4`` (xyz =
-      ``B - A`` edge, w = margin).  ``C - A`` is recoverable from the
-      transform; the layout follows the convention used by Newton's
-      narrow phase for triangle-like primitives.
-    * ``geom_transform[S + t] = (translation = A, rotation = identity)``
-      so the narrow phase can treat the vertex A as the local-frame
-      origin without baking in arbitrary triangle frames.
+    * ``geom_data[S + t] = (|AB|, c_y, c_z, cloth_margin)`` -- canonical
+      :data:`GeoType.TRIANGLE` parameterisation: ``B = (0, 0, |AB|)``,
+      ``C = (0, c_y, c_z)`` in local coordinates.
+    * ``geom_transform[S + t] = (A_world, Q)`` where ``Q`` rotates the
+      canonical local axes onto the world triangle frame: local +Z maps
+      to ``(B - A) / |AB|``; local +Y maps to the in-plane direction
+      orthogonal to AB pointing toward C; local +X is the triangle face
+      normal.
     * ``tri_indices[t] = (pa, pb, pc, -1)`` -- particle indices for the
       three triangle vertices; the 4th component is reserved for future
       tetrahedron support.
+
+    Degenerate triangles (collinear vertices, ``|AB| < eps`` or zero
+    in-plane component) fall back to an identity orientation and zero
+    scale; they collapse to a point at A in the support map and contribute
+    nothing to the narrow phase.
 
     Particle indices are derived from the unified body-or-particle
     indices stored in the constraint by subtracting ``num_bodies``.
@@ -2088,9 +2101,9 @@ def _phoenx_compute_triangle_aabbs_and_indices_kernel(
     untouched -- it is filled by Newton's standard
     ``compute_shape_aabbs`` kernel inside
     :meth:`CollisionPipeline.collide_with_external_aabbs`.  Static
-    cloth-triangle metadata (``shape_type``, ``shape_gap``,
-    ``shape_world``, ``shape_collision_group``, ``shape_flags``) is
-    stamped once on the host at solver init.
+    cloth-triangle metadata (``shape_type = GeoType.TRIANGLE``,
+    ``shape_gap``, ``shape_world``, ``shape_collision_group``,
+    ``shape_flags``) is stamped once on the host at solver init.
     """
     t = wp.tid()
     cid = cloth_cid_offset + t
@@ -2115,8 +2128,37 @@ def _phoenx_compute_triangle_aabbs_and_indices_kernel(
     aabb_lower[slot] = lo - margin
     aabb_upper[slot] = hi + margin
 
+    # Canonical-frame parameterisation: rotate world (A, B, C) so A is at
+    # the origin, B lies on local +Z, and C lies in the local YZ plane.
+    # ``axis_z`` is the world-space direction onto which local +Z maps.
+    # ``axis_y`` is the in-plane direction orthogonal to AB pointing
+    # toward C (so c_y > 0 by construction). ``axis_x`` is the face
+    # normal so the basis (axis_x, axis_y, axis_z) is right-handed.
     edge_ab = vb - va
-    geom_data[slot] = wp.vec4(edge_ab[0], edge_ab[1], edge_ab[2], cloth_margin)
-    geom_transform[slot] = wp.transform(va, wp.quat_identity())
+    edge_ac = vc - va
+    ab_len = wp.length(edge_ab)
+    eps = 1.0e-12
+    if ab_len > eps:
+        axis_z = edge_ab / ab_len
+        c_z = wp.dot(edge_ac, axis_z)
+        ac_perp = edge_ac - c_z * axis_z
+        ac_perp_len = wp.length(ac_perp)
+        if ac_perp_len > eps:
+            axis_y = ac_perp / ac_perp_len
+            axis_x = wp.cross(axis_y, axis_z)
+            rot = wp.matrix_from_cols(axis_x, axis_y, axis_z)
+            quat = wp.quat_from_matrix(rot)
+            geom_data[slot] = wp.vec4(ab_len, ac_perp_len, c_z, cloth_margin)
+            geom_transform[slot] = wp.transform(va, quat)
+        else:
+            # Collinear: triangle collapses to segment AB. Stamp zero
+            # scale so the support map returns vertex A; broad phase still
+            # rejects via the AABB.
+            geom_data[slot] = wp.vec4(0.0, 0.0, 0.0, cloth_margin)
+            geom_transform[slot] = wp.transform(va, wp.quat_identity())
+    else:
+        # Fully degenerate (A == B): collapse to a point.
+        geom_data[slot] = wp.vec4(0.0, 0.0, 0.0, cloth_margin)
+        geom_transform[slot] = wp.transform(va, wp.quat_identity())
 
     tri_indices[t] = wp.vec4i(pa, pb, pc, -1)

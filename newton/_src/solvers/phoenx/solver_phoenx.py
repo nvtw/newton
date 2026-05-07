@@ -393,7 +393,7 @@ def _build_cloth_collision_pipeline(
             cp = model._collision_pipeline
             S = int(model.shape_count)
             T = num_cloth_triangles
-            from newton._src.geometry.support_function import GeoTypeEx  # noqa: PLC0415
+            from newton._src.geometry.types import GeoType  # noqa: PLC0415
 
             def _stamp_suffix(arr: wp.array, value, dtype) -> None:
                 if arr is None:
@@ -402,7 +402,14 @@ def _build_cloth_collision_pipeline(
                 host[S : S + T] = value
                 arr.assign(host.astype(dtype, copy=False))
 
-            _stamp_suffix(cp.unified_shape_type, int(GeoTypeEx.TRIANGLE), np.int32)
+            # Stamp cloth tris as the canonical first-class GeoType.TRIANGLE
+            # (vertex A at origin, B on local +Z, C in YZ plane; ``geom_data``
+            # carries (|AB|, c_y, c_z, margin); ``geom_transform`` carries the
+            # per-step world frame).  The narrow-phase support map / extract
+            # already handle this type for rigid first-class triangles, so
+            # cloth tris flow through the same code path as rigid tris with
+            # no special-case branches.
+            _stamp_suffix(cp.unified_shape_type, int(GeoType.TRIANGLE), np.int32)
             _stamp_suffix(cp.unified_shape_gap, cloth_margin, np.float32)
             _stamp_suffix(cp.unified_shape_collision_group, 1, np.int32)
 
