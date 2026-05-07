@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import importlib.metadata as importlib_metadata
 import os
+import re
 import warnings
 from collections.abc import Iterable
 from enum import IntEnum
@@ -90,6 +92,80 @@ else:
 
 AttributeAssignment = Model.AttributeAssignment
 AttributeFrequency = Model.AttributeFrequency
+
+
+def _required_specifier(package: str, requirements: Iterable[str]) -> str | None:
+    pattern = re.compile(rf"^{re.escape(package)}(?=[<>=!~])([^;]+)")
+    for requirement in requirements:
+        match = pattern.match(requirement)
+        if match:
+            return match.group(1).strip().replace(" ", "")
+    return None
+
+
+def _warn_if_mujoco_versions_mismatch(mujoco: Any, mujoco_warp: Any) -> None:
+    try:
+        metadata_text = importlib_metadata.distribution("newton").read_text("METADATA")
+    except importlib_metadata.PackageNotFoundError:
+        return
+    if metadata_text is None:
+        return
+
+    requirements = [
+        line.removeprefix("Requires-Dist:").strip()
+        for line in metadata_text.splitlines()
+        if line.startswith("Requires-Dist:")
+    ]
+
+    mismatches = []
+    for package, module in (("mujoco", mujoco), ("mujoco-warp", mujoco_warp)):
+        specifier = _required_specifier(package, requirements)
+        installed_version = _installed_version(package, module)
+        if specifier and installed_version and not _version_satisfies(installed_version, specifier):
+            mismatches.append(f"{package}=={installed_version} (requires {specifier})")
+
+    if mismatches:
+        warnings.warn(
+            "MuJoCo dependency version mismatch with Newton's declared requirements: "
+            + "; ".join(mismatches)
+            + '. Reinstall Newton dependencies, for example `uv pip install -e ".[examples]"`.',
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
+def _installed_version(package: str, module: Any) -> str | None:
+    try:
+        return importlib_metadata.version(package)
+    except importlib_metadata.PackageNotFoundError:
+        module_version = getattr(module, "__version__", None)
+        return str(module_version) if module_version is not None else None
+
+
+def _version_satisfies(installed_version: str, specifier: str) -> bool:
+    installed = _release(installed_version)
+    if not installed:
+        return True
+
+    for required_version in re.findall(r">=\s*([0-9][^,;]*)", specifier):
+        if _version_lt(installed, _release(required_version)):
+            return False
+    for required_version in re.findall(r"~=\s*([0-9][^,;]*)", specifier):
+        required = _release(required_version)
+        prefix_width = max(len(required) - 1, 1)
+        if _version_lt(installed, required) or installed[:prefix_width] != required[:prefix_width]:
+            return False
+    return True
+
+
+def _release(version: str) -> tuple[int, ...]:
+    match = re.match(r"\d+(?:\.\d+)*", version)
+    return tuple(int(component) for component in match.group(0).split(".")) if match else ()
+
+
+def _version_lt(left: tuple[int, ...], right: tuple[int, ...]) -> bool:
+    width = max(len(left), len(right))
+    return left + (0,) * (width - len(left)) < right + (0,) * (width - len(right))
 
 
 class SolverMuJoCo(SolverBase):
@@ -205,6 +281,7 @@ class SolverMuJoCo(SolverBase):
     # Class variables to cache the imported modules
     _mujoco = None
     _mujoco_warp = None
+    _versions_checked = False
     _convert_mjw_contacts_to_newton_kernel = None
 
     @classmethod
@@ -226,6 +303,12 @@ class SolverMuJoCo(SolverBase):
                 raise ImportError(
                     "MuJoCo backend not installed. Please refer to https://github.com/google-deepmind/mujoco_warp for installation instructions."
                 ) from e
+        if not cls._versions_checked:
+            try:
+                _warn_if_mujoco_versions_mismatch(cls._mujoco, cls._mujoco_warp)
+            except Exception:
+                pass
+            cls._versions_checked = True
         return cls._mujoco, cls._mujoco_warp
 
     @staticmethod
@@ -251,7 +334,7 @@ class SolverMuJoCo(SolverBase):
     @staticmethod
     def _parse_named_int(value: str | int, mapping: dict[str, int], fallback_on_unknown: int | None = None) -> int:
         """Parse string-valued enums to int, otherwise return int(value)."""
-        if isinstance(value, (int, np.integer)):
+        if isinstance(value, int | np.integer):
             return int(value)
         lower_value = str(value).lower().strip()
         if lower_value in mapping:
@@ -983,7 +1066,7 @@ class SolverMuJoCo(SolverBase):
             """Parse MJCF/USD boolean values to bool."""
             if isinstance(value, bool):
                 return value
-            if isinstance(value, (int, np.integer)):
+            if isinstance(value, int | np.integer):
                 return bool(value)
             s = str(value).strip().lower()
             if s == "auto":
@@ -2997,22 +3080,40 @@ class SolverMuJoCo(SolverBase):
         """True when the NATIVECCD/MULTICCD margin workaround applies (#2106)."""
 
         enableflags = 0
-        if enable_multiccd:
-            enableflags |= mujoco.mjtEnableBit.mjENBL_MULTICCD
         disableflags = 0
+        if not enable_multiccd:
+            disableflags |= mujoco.mjtDisableBit.mjDSBL_MULTICCD
         if disable_contacts:
             disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
         self.use_mujoco_cpu = use_mujoco_cpu
         if separate_worlds is None:
             separate_worlds = not use_mujoco_cpu and model.world_count > 1
-        # Lazy-allocated buffers for the fast-path contact conversion optimisation.
+        # Buffers for the fast-path contact conversion optimisation.
         # See _convert_contacts_to_mjwarp / convert_newton_contacts_to_mjwarp_kernel.
         # Initialised before _convert_to_mjc because notify_model_changed (called
         # during conversion) may call _invalidate_contact_fast_path.
+        #
+        # Eagerly pre-allocate the device tracking buffers here (rather than
+        # lazily inside _convert_contacts_to_mjwarp).  Lazy wp.full(...) calls
+        # that happen on the first step often run while a CUDA graph is being
+        # captured; the resulting buffers can have a tangled lifetime and
+        # _invalidate_contact_fast_path() — which is called from outside the
+        # captured graph (e.g. notify_model_changed) — would then touch stale
+        # captured memory and trigger CUDA 700 (illegal memory access).
         self._contact_tid_to_cid: wp.array[wp.int32] | None = None
-        self._last_contact_generation: wp.array[wp.int32] | None = None
-        self._last_nacon_count: wp.array[wp.int32] | None = None
+        self._last_contact_generation = wp.full(1, _GENERATION_SENTINEL, dtype=wp.int32, device=self.device)
+        self._last_nacon_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        # Track the Contacts instance and its capacity, plus the MJWarp
+        # naconmax used during the last full pass.  Any change to these
+        # invariants invalidates the cached tid_to_cid mapping because the
+        # cached cid values would index into a different output buffer.
+        # Note: we key on id(contacts.contact_generation) (a stable per-Contacts
+        # device array) rather than id(contacts).  Empirically, keying on the
+        # outer Contacts wrapper produces broken binaries in the dexsuite
+        # workload (root cause unclear; the inner array's id is what works).
         self._last_contacts_id: int | None = None
+        self._last_rigid_contact_max: int | None = None
+        self._last_naconmax: int | None = None
 
         with wp.ScopedTimer("convert_model_to_mujoco", active=False):
             self._convert_to_mjc(
@@ -3100,11 +3201,12 @@ class SolverMuJoCo(SolverBase):
 
         Called when cached MJWarp contact fields (friction, solref, solimp,
         etc.) may be stale — e.g. after :meth:`notify_model_changed` updates
-        geom properties.
+        geom or body properties, or when the bound Contacts instance / MJWarp
+        ``naconmax`` changes (which would make cached ``cid`` values index
+        into a different output buffer).
         """
-        if self._last_contact_generation is not None:
-            self._last_contact_generation.fill_(_GENERATION_SENTINEL)
-            self._last_nacon_count.zero_()
+        self._last_contact_generation.fill_(_GENERATION_SENTINEL)
+        self._last_nacon_count.zero_()
 
     def _convert_contacts_to_mjwarp(self, model: Model, state_in: State, contacts: Contacts):
         # Ensure the inverse shape mapping exists (lazy creation)
@@ -3114,23 +3216,39 @@ class SolverMuJoCo(SolverBase):
         # The kernel only produces valid output for tid < naconmax (the full
         # path clamps count and rejects cid >= naconmax).  Launching more
         # threads than naconmax wastes GPU resources, so cap the grid size.
-        launch_dim = min(contacts.rigid_contact_max, self.mjw_data.naconmax)
+        naconmax = self.mjw_data.naconmax
+        launch_dim = min(contacts.rigid_contact_max, naconmax)
 
-        # Lazy-allocate fast-path buffers; reallocate if launch_dim grew
+        # Lazy-allocate the tid_to_cid buffer; reallocate if launch_dim grew
         # (e.g. a different Contacts object with a larger rigid_contact_max).
-        # Also invalidate when the Contacts instance changes — a different
-        # object's contact_generation could coincidentally match our cached
-        # last_contact_generation while containing entirely different data.
+        # Invalidate the cached tid_to_cid mapping whenever any of the
+        # invariants it depends on change:
+        #
+        #  - Contacts identity: keyed on id(contacts.contact_generation), the
+        #    inner per-Contacts device array.  Empirically, keying on the outer
+        #    id(contacts) wrapper produces broken binaries in dexsuite training
+        #    (root cause unclear; the inner array's id is what works).
+        #  - rigid_contact_max: changes the meaning of tid indices.
+        #  - mjw_data.naconmax: changes the meaning of cid indices; if the
+        #    underlying contact buffers were reallocated (e.g. set_const_fixed
+        #    after notify_model_changed), cached cid values could index into
+        #    freed memory or out-of-bounds.
         contacts_id = id(contacts.contact_generation)
         needs_realloc = self._contact_tid_to_cid is None or self._contact_tid_to_cid.shape[0] < launch_dim
-        contacts_changed = self._last_contacts_id != contacts_id
+        contacts_changed = (
+            self._last_contacts_id != contacts_id
+            or self._last_rigid_contact_max != contacts.rigid_contact_max
+            or self._last_naconmax != naconmax
+        )
 
         if needs_realloc or contacts_changed:
             if needs_realloc:
                 self._contact_tid_to_cid = wp.full(launch_dim, -1, dtype=wp.int32, device=model.device)
-            self._last_contact_generation = wp.full(1, _GENERATION_SENTINEL, dtype=wp.int32, device=model.device)
-            self._last_nacon_count = wp.zeros(1, dtype=wp.int32, device=model.device)
+            # Reset existing device buffers (always pre-allocated in __init__).
+            self._invalidate_contact_fast_path()
             self._last_contacts_id = contacts_id
+            self._last_rigid_contact_max = contacts.rigid_contact_max
+            self._last_naconmax = naconmax
 
         # Zero nacon before the kernel — the full path uses atomic_add to count
         # contacts; the fast path restores the count from last_nacon_count.
@@ -3223,6 +3341,12 @@ class SolverMuJoCo(SolverBase):
 
         if flags & SolverNotifyFlags.BODY_INERTIAL_PROPERTIES:
             self._update_model_inertial_properties()
+            # set_const_fixed / set_const_0 (called below) recompute MuJoCo
+            # constants that feed into contact solver parameters (invweight0,
+            # subtreemass, etc.).  Cached MJWarp contact fields written by
+            # the fast path are derived from those constants, so invalidate
+            # to force a full re-pack on the next contact conversion.
+            self._invalidate_contact_fast_path()
             need_const_fixed = True
             need_const_0 = True
         if flags & SolverNotifyFlags.JOINT_PROPERTIES:
@@ -3233,6 +3357,7 @@ class SolverMuJoCo(SolverBase):
             need_const_0 = True
         if flags & SolverNotifyFlags.JOINT_DOF_PROPERTIES:
             self._update_joint_dof_properties()
+            self._invalidate_contact_fast_path()
             need_const_0 = True
             need_length_range = True
         if flags & SolverNotifyFlags.SHAPE_PROPERTIES:
@@ -3241,6 +3366,7 @@ class SolverMuJoCo(SolverBase):
             self._invalidate_contact_fast_path()
         if flags & SolverNotifyFlags.MODEL_PROPERTIES:
             self._update_model_properties()
+            self._invalidate_contact_fast_path()
         if flags & SolverNotifyFlags.CONSTRAINT_PROPERTIES:
             self._update_eq_properties()
             self._update_mimic_eq_properties()
@@ -4314,36 +4440,41 @@ class SolverMuJoCo(SolverBase):
         # Collect shapes required by actuators targeting sites so they are not
         # skipped when include_sites=False.  USD actuators may still carry
         # sentinel trnid/trntype at this point (resolved later from
-        # actuator_target_label), so check labels first.
+        # actuator_target_label), so check labels too.
+        # Restrict everything to the template world so cost is O(per-world
+        # size) instead of O(world_count * per-world size), which dominated
+        # solver init for large world counts.
         actuator_required_shapes: set[int] = set()
         if mujoco_attrs is not None:
             _act_trntype = getattr(mujoco_attrs, "actuator_trntype", None)
             _act_trnid = getattr(mujoco_attrs, "actuator_trnid", None)
             _act_target_label = getattr(mujoco_attrs, "actuator_target_label", None)
             _act_world = getattr(mujoco_attrs, "actuator_world", None)
-            site_shape_by_label = {
-                label: idx
-                for idx, label in enumerate(model.shape_label)
-                if (shape_flags[idx] & ShapeFlags.SITE) and idx in selected_shapes_set
-            }
+            template_site_mask = (shape_flags[selected_shapes] & int(ShapeFlags.SITE)) != 0
+            template_site_indices = selected_shapes[template_site_mask]
+            site_shape_by_label = {model.shape_label[int(idx)]: int(idx) for idx in template_site_indices}
             if _act_trntype is not None and _act_trnid is not None:
                 act_trntype_np = _act_trntype.numpy()
                 act_trnid_np = _act_trnid.numpy()
-                act_world_np = _act_world.numpy() if _act_world is not None else None
-                for ai in range(len(act_trntype_np)):
-                    if act_world_np is not None:
-                        aw = int(act_world_np[ai])
-                        if aw != first_world and aw >= 0:
-                            continue
-                    # Try label-based resolution first (covers USD deferred targets)
-                    idx = -1
-                    if isinstance(_act_target_label, list) and ai < len(_act_target_label):
-                        idx = site_shape_by_label.get(_act_target_label[ai], -1)
-                    # Fall back to trnid for MJCF/direct site actuators
-                    if idx < 0 and int(act_trntype_np[ai]) == int(SolverMuJoCo.TrnType.SITE):
-                        idx = int(act_trnid_np[ai, 0])
-                    if idx >= 0:
-                        actuator_required_shapes.add(idx)
+                if _act_world is not None:
+                    act_world_np = _act_world.numpy()
+                    template_mask = (act_world_np == first_world) | (act_world_np < 0)
+                else:
+                    template_mask = np.ones(len(act_trntype_np), dtype=bool)
+                # Vectorized: every template-world actuator with trntype==SITE
+                # contributes its trnid as a required shape.
+                site_trntype_mask = template_mask & (act_trntype_np == int(SolverMuJoCo.TrnType.SITE))
+                trnid_targets = act_trnid_np[site_trntype_mask, 0]
+                actuator_required_shapes.update(trnid_targets[trnid_targets >= 0].tolist())
+                # Vectorized: USD-deferred actuators reference sites by label.
+                # Intersect template-world target labels with the site label
+                # dict instead of iterating over every actuator.
+                if isinstance(_act_target_label, list) and site_shape_by_label:
+                    template_indices = np.flatnonzero(template_mask).tolist()
+                    label_count = len(_act_target_label)
+                    template_target_labels = {_act_target_label[ai] for ai in template_indices if ai < label_count}
+                    for label in template_target_labels & site_shape_by_label.keys():
+                        actuator_required_shapes.add(site_shape_by_label[label])
 
         required_shapes = tendon_required_shapes | actuator_required_shapes
 
