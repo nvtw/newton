@@ -142,57 +142,6 @@ class Example:
             lambda q, qd: q[2] > -0.1,
         )
 
-        self._plot()
-
-    def _plot(self):
-        """Save diagnostics plots to a PNG file."""
-        try:
-            import matplotlib.pyplot as plt  # noqa: PLC0415
-        except ImportError:
-            self._print_summary()
-            return
-
-        n = len(self.log_iterations)
-        time = np.arange(n, dtype=np.float32) * self.frame_dt
-
-        _fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-
-        axs[0].step(time, self.log_iterations, color="blue")
-        axs[0].set_ylabel("Solver Iterations")
-        axs[0].set_title("MuJoCo Simulation Diagnostics")
-        axs[0].grid(True)
-
-        axs[1].plot(time, self.log_energy_kinetic, color="red", label="kinetic")
-        axs[1].plot(time, self.log_energy_potential, color="blue", label="potential")
-        total = np.array(self.log_energy_kinetic) + np.array(self.log_energy_potential)
-        axs[1].plot(time, total, color="black", linestyle="--", label="total")
-        axs[1].set_ylabel("Energy [J]")
-        axs[1].legend()
-        axs[1].grid(True)
-
-        axs[2].step(time, self.log_nefc, color="green")
-        axs[2].set_ylabel("Active Constraints")
-        axs[2].set_xlabel("Time [s]")
-        axs[2].grid(True)
-
-        plt.tight_layout()
-        plt.savefig("solver_convergence.png", dpi=150)
-        print("Diagnostics plot saved to solver_convergence.png")
-        plt.close()
-
-    def _print_summary(self):
-        """Print a text summary of diagnostics data."""
-        n = len(self.log_iterations)
-        if n == 0:
-            print("\nSimulation diagnostics summary: no steps recorded.")
-            return
-        iters = np.array(self.log_iterations)
-        print(f"\nSimulation diagnostics summary ({n} steps):")
-        print(f"  Iterations:   mean={np.mean(iters):.1f}, max={np.max(iters):.0f}")
-        print(f"  Kinetic E:    final={self.log_energy_kinetic[-1]:.4f}")
-        print(f"  Potential E:  final={self.log_energy_potential[-1]:.4f}")
-        print(f"  Constraints:  mean={np.mean(self.log_nefc):.1f}, max={np.max(self.log_nefc):.0f}")
-
     def gui(self, ui):
         n = len(self.log_iterations)
         if n == 0:
