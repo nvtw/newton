@@ -1209,10 +1209,19 @@ def _phoenx_init_cloth_triangle_rows_kernel(
     * ``rest_area = tri_areas[t]``.
     * Compliance is recovered from the elastic-stiffness columns of
       ``tri_materials[t]`` (a ``[tri_count, 5]`` array). Column 0
-      ``tri_ke`` is shear / Young's-modulus-like stiffness (mu);
-      column 1 ``tri_ka`` is area-preservation stiffness (lambda).
-      XPBD compliance is the inverse of stiffness scaled by the
-      element's rest area: ``alpha = 1 / (stiffness * rest_area)``.
+      ``tri_ke`` is the shear modulus ``mu`` (Pa); column 1 ``tri_ka``
+      is the area-preservation Lame parameter ``lambda`` (Pa). The XPBD
+      compliance follows Jitter2's reference position-level FEM
+      triangle (``FemTriPBD.cs`` line 60-61): ``alpha = 1 / k`` with no
+      explicit area factor -- the rest area enters through the row
+      gradients (``grad`` carries an explicit ``rest_area`` factor in
+      both the area and shear formulations). The previous form
+      ``alpha = 1 / (k * A)`` over-counted the area scaling and made
+      the constraint behave like a ``k * A``-stiffness spring rather
+      than the intended Lame-parameter stiffness, leaving cloth at
+      ``E ~= 5e8 Pa`` behaving like a ``~5 kPa`` membrane that
+      collapsed under load.
+
       Stiffness floored at :data:`_PHOENX_CLOTH_STIFFNESS_FLOOR` so a
       builder that left the per-element stiffness at zero produces a
       finite (but very compliant) row instead of an infinite
@@ -1246,8 +1255,12 @@ def _phoenx_init_cloth_triangle_rows_kernel(
     area_clamped = rest_area
     if area_clamped < _PHOENX_CLOTH_STIFFNESS_FLOOR:
         area_clamped = _PHOENX_CLOTH_STIFFNESS_FLOOR
-    cloth_triangle_set_alpha_lambda(constraints, cid, wp.float32(1.0) / (k_lambda * area_clamped))
-    cloth_triangle_set_alpha_mu(constraints, cid, wp.float32(1.0) / (k_mu * area_clamped))
+    # Match Jitter2 ``FemTriPBD.cs`` line 60-61: ``alpha = 1 / stiffness``
+    # without an explicit area factor. The area enters the gradients, so
+    # the energy still scales correctly with element size.
+    cloth_triangle_set_alpha_lambda(constraints, cid, wp.float32(1.0) / k_lambda)
+    cloth_triangle_set_alpha_mu(constraints, cid, wp.float32(1.0) / k_mu)
+    _ = area_clamped
 
     # Zero per-substep / cross-iteration state. Prepare overwrites
     # bias_* and inv_mass_* at substep entry; lambda_sum_* are reset

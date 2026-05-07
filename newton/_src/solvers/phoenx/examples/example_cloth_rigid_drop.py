@@ -74,8 +74,8 @@ class Example:
         # Cloth + cube need a denser substep budget than the bare
         # cloth demo because the rigid contact constraint shares the
         # PGS sweep with the cloth iterate.
-        self.sim_substeps = 8
-        self.solver_iterations = 12
+        self.sim_substeps = 20
+        self.solver_iterations = 5
 
         self.dim_x = width
         self.dim_y = height
@@ -122,7 +122,7 @@ class Example:
             builder.particle_flags[c] = builder.particle_flags[c] & ~ParticleFlags.ACTIVE
 
         # Free-floating rigid cube spawned above the cloth.
-        self.cube_he = 0.10
+        self.cube_he = 0.05
         self.cube_spawn_z = self.cloth_z + 0.4
         self.cube_body = builder.add_body(
             xform=wp.transform(p=wp.vec3(0.0, 0.0, self.cube_spawn_z), q=wp.quat_identity()),
@@ -132,7 +132,7 @@ class Example:
             hx=self.cube_he,
             hy=self.cube_he,
             hz=self.cube_he,
-            cfg=newton.ModelBuilder.ShapeConfig(density=60.0, mu=0.6),
+            cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.6),
         )
         builder.gravity = -9.81
 
