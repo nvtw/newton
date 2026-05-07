@@ -181,7 +181,18 @@ def synchronize_pose_velocity(
     """
     if current_access_mode == new_access_mode:
         return position, orientation, velocity, angular_velocity, current_access_mode
-    if current_access_mode == _ACCESS_MODE_STATIC or current_access_mode == _ACCESS_MODE_NONE:
+    # STATIC is sticky: a pinned entity stays STATIC even if a
+    # constraint's set_access_mode call asks for VEL or POS, so the
+    # synchronize finite-diff is never run on it (its position must
+    # never drift away from the substep-start snapshot).  Mirrors the
+    # ``access_mode != _ACCESS_MODE_STATIC`` guard in
+    # :func:`set_position` / :func:`set_velocity`.  ``NONE`` (the
+    # uninitialised default) is silently promoted to whatever the
+    # caller asked for so a freshly-built body doesn't spend its first
+    # constraint-touch in ``NONE``.
+    if current_access_mode == _ACCESS_MODE_STATIC:
+        return position, orientation, velocity, angular_velocity, _ACCESS_MODE_STATIC
+    if current_access_mode == _ACCESS_MODE_NONE:
         return position, orientation, velocity, angular_velocity, new_access_mode
 
     if new_access_mode == _ACCESS_MODE_VELOCITY_LEVEL and current_access_mode == _ACCESS_MODE_POSITION_LEVEL:
@@ -222,7 +233,9 @@ def synchronize_position_velocity(
     """
     if current_access_mode == new_access_mode:
         return position, velocity, current_access_mode
-    if current_access_mode == _ACCESS_MODE_STATIC or current_access_mode == _ACCESS_MODE_NONE:
+    if current_access_mode == _ACCESS_MODE_STATIC:
+        return position, velocity, _ACCESS_MODE_STATIC
+    if current_access_mode == _ACCESS_MODE_NONE:
         return position, velocity, new_access_mode
 
     if new_access_mode == _ACCESS_MODE_VELOCITY_LEVEL and current_access_mode == _ACCESS_MODE_POSITION_LEVEL:
