@@ -226,7 +226,12 @@ class ControllerNeuralMLP(Controller):
         self._device = device
         self._num_actuators = num_actuators
 
-        runtime, _ = load_checkpoint(self.model_path, device=str(device), batch_size=num_actuators)
+        runtime, _ = load_checkpoint(
+            self.model_path,
+            device=str(device),
+            batch_size=num_actuators,
+            input_batch_axes=0,
+        )
         self._network = runtime
         self._net_input_name = runtime.input_names[0]
         self._net_output_name = runtime.output_names[0]

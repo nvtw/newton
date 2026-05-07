@@ -47,7 +47,12 @@ def load_metadata(path: str) -> dict[str, Any]:
     return _extract_metadata(model)
 
 
-def load_checkpoint(path: str, device: str | None = None, batch_size: int = 1):
+def load_checkpoint(
+    path: str,
+    device: str | None = None,
+    batch_size: int = 1,
+    input_batch_axes: int | dict[str, int] | None = None,
+):
     """Load a neural-network checkpoint as ``(runtime, metadata)``.
 
     Both ONNX (``.onnx``) and TorchScript (``.pt`` / ``.pth``) checkpoints
@@ -63,6 +68,8 @@ def load_checkpoint(path: str, device: str | None = None, batch_size: int = 1):
             current default device.
         batch_size: Fixed batch dimension used to pre-allocate intermediate
             buffers.
+        input_batch_axes: Optional ONNX graph-input batch-axis override passed
+            to :class:`newton.utils.OnnxRuntime`.
 
     Returns:
         ``(runtime, metadata)`` where *runtime* is callable as
@@ -76,7 +83,7 @@ def load_checkpoint(path: str, device: str | None = None, batch_size: int = 1):
     # off the import path of every newton.actuators consumer.
     from ..utils.onnx_runtime import OnnxRuntime  # noqa: PLC0415
 
-    runtime = OnnxRuntime(path, device=device, batch_size=batch_size)
+    runtime = OnnxRuntime(path, device=device, batch_size=batch_size, input_batch_axes=input_batch_axes)
     return runtime, metadata
 
 

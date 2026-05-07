@@ -205,7 +205,16 @@ class ControllerNeuralLSTM(Controller):
             self._legacy_adapter._model = self._legacy_adapter._model.to(self._legacy_adapter._torch_device)
             self._network = self._legacy_adapter
         else:
-            runtime, _ = load_checkpoint(self.model_path, device=str(device), batch_size=num_actuators)
+            runtime, _ = load_checkpoint(
+                self.model_path,
+                device=str(device),
+                batch_size=num_actuators,
+                input_batch_axes={
+                    self._input_name: 1,
+                    self._hidden_in_name: 1,
+                    self._cell_in_name: 1,
+                },
+            )
             self._network = runtime
 
             # The compute() copy assumes one effort per actuator, i.e. output

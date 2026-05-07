@@ -71,6 +71,7 @@ def _build_mlp_onnx(
     weights: np.ndarray,
     bias: np.ndarray,
     metadata: dict | None = None,
+    batch_dim: int | None = None,
 ) -> None:
     """Build a single-Gemm (transB=1) ONNX MLP at ``path``.
 
@@ -83,8 +84,8 @@ def _build_mlp_onnx(
     in_dim = int(weights.shape[1])
     out_dim = int(weights.shape[0])
 
-    x_vi = helper.make_tensor_value_info("input", TensorProto.FLOAT, [None, in_dim])
-    y_vi = helper.make_tensor_value_info("output", TensorProto.FLOAT, [None, out_dim])
+    x_vi = helper.make_tensor_value_info("input", TensorProto.FLOAT, [batch_dim, in_dim])
+    y_vi = helper.make_tensor_value_info("output", TensorProto.FLOAT, [batch_dim, out_dim])
     W_init = numpy_helper.from_array(weights.astype(np.float32), name="W")
     b_init = numpy_helper.from_array(bias.astype(np.float32), name="b")
     gemm = helper.make_node("Gemm", ["input", "W", "b"], ["output"], alpha=1.0, beta=1.0, transB=1)
@@ -302,9 +303,9 @@ class TestControllerNeuralMLP(unittest.TestCase):
         self.device = wp.get_device()
         self._tmp_dir = tempfile.mkdtemp()
 
-    def _save_mlp(self, weights, bias, filename="mlp.onnx", metadata=None):
+    def _save_mlp(self, weights, bias, filename="mlp.onnx", metadata=None, batch_dim=None):
         path = os.path.join(self._tmp_dir, filename)
-        _build_mlp_onnx(path, weights, bias, metadata)
+        _build_mlp_onnx(path, weights, bias, metadata, batch_dim=batch_dim)
         return path
 
     def test_compute(self):
@@ -380,6 +381,37 @@ class TestControllerNeuralMLP(unittest.TestCase):
             self.device,
         )
         self.assertAlmostEqual(forces.numpy()[0], 30.0, places=3, msg="bias=10 * effort_scale=3 -> 30")
+
+    def test_finalize_fixed_batch_onnx_with_multiple_actuators(self):
+        """Fixed-batch ONNX exports can still run one scalar per actuator."""
+        weights = np.array([[2.0, 0.0]], dtype=np.float32)
+        bias = np.array([1.0], dtype=np.float32)
+        path = self._save_mlp(weights, bias, filename="fixed_batch_mlp.onnx", batch_dim=1)
+
+        n = 3
+        ctrl = ControllerNeuralMLP(model_path=path)
+        ctrl.finalize(self.device, n)
+        self.assertEqual(ctrl._network._shapes[ctrl._net_input_name], (n, 2))
+        self.assertEqual(ctrl._network._shapes[ctrl._net_output_name], (n, 1))
+
+        indices = wp.array([0, 1, 2], dtype=wp.uint32, device=self.device)
+        forces = wp.zeros(n, dtype=wp.float32, device=self.device)
+        ctrl.compute(
+            wp.zeros(n, dtype=wp.float32, device=self.device),
+            wp.zeros(n, dtype=wp.float32, device=self.device),
+            wp.array([1.0, 2.0, 3.0], dtype=wp.float32, device=self.device),
+            wp.zeros(n, dtype=wp.float32, device=self.device),
+            None,
+            indices,
+            indices,
+            indices,
+            indices,
+            forces,
+            ctrl.state(n, self.device),
+            0.01,
+            self.device,
+        )
+        np.testing.assert_allclose(forces.numpy(), np.array([3.0, 5.0, 7.0], dtype=np.float32), rtol=1e-5)
 
     @unittest.skipUnless(_HAS_TORCH, "torch not installed")
     def test_finalize_legacy_torchscript_checkpoint(self):

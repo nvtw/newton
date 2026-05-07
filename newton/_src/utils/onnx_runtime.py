@@ -212,9 +212,20 @@ class OnnxRuntime:
             current default device.
         batch_size: Fixed batch dimension used to pre-allocate intermediate
             buffers.  Defaults to ``1``.
+        input_batch_axes: Optional batch-axis override for graph inputs.  If
+            an integer is provided, it is applied to every graph input; if a
+            dictionary is provided, it maps graph input names to their batch
+            axis.  The selected axes are replaced with ``batch_size`` even
+            when the ONNX model exported them as fixed dimensions.
     """
 
-    def __init__(self, path: str, device: str | None = None, batch_size: int = 1):
+    def __init__(
+        self,
+        path: str,
+        device: str | None = None,
+        batch_size: int = 1,
+        input_batch_axes: int | dict[str, int] | None = None,
+    ):
         self._device = wp.get_device(device)
 
         onnx, numpy_helper = _require_onnx()
@@ -233,12 +244,36 @@ class OnnxRuntime:
         self.input_names: list[str] = [inp.name for inp in graph.input if inp.name not in initializer_names]
         self.output_names: list[str] = [out.name for out in graph.output]
 
+        if isinstance(input_batch_axes, dict):
+            unknown_inputs = set(input_batch_axes) - set(self.input_names)
+            if unknown_inputs:
+                raise KeyError(
+                    f"OnnxRuntime: input_batch_axes references unknown graph inputs {sorted(unknown_inputs)}"
+                )
+
         for inp in graph.input:
             if inp.name in initializer_names:
                 continue
+            dims = list(inp.type.tensor_type.shape.dim)
+            batch_axis = None
+            if input_batch_axes is not None:
+                if isinstance(input_batch_axes, dict):
+                    batch_axis = input_batch_axes.get(inp.name)
+                else:
+                    batch_axis = input_batch_axes
+                if batch_axis is not None:
+                    if batch_axis < 0:
+                        batch_axis += len(dims)
+                    if batch_axis < 0 or batch_axis >= len(dims):
+                        raise ValueError(
+                            f"OnnxRuntime: input '{inp.name}' batch axis {batch_axis} is out of range "
+                            f"for rank-{len(dims)} input"
+                        )
             shape = []
-            for d in inp.type.tensor_type.shape.dim:
-                if d.HasField("dim_value") and d.dim_value > 0:
+            for axis, d in enumerate(dims):
+                if axis == batch_axis:
+                    shape.append(batch_size)
+                elif d.HasField("dim_value") and d.dim_value > 0:
                     shape.append(d.dim_value)
                 else:
                     shape.append(batch_size)
