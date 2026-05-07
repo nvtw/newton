@@ -221,7 +221,7 @@ class Example:
             hx=self.cube_he,
             hy=self.cube_he,
             hz=self.cube_he,
-            cfg=newton.ModelBuilder.ShapeConfig(density=60.0, mu=0.6),
+            cfg=newton.ModelBuilder.ShapeConfig(density=600.0, mu=0.6),
         )
         builder.gravity = -9.81
 

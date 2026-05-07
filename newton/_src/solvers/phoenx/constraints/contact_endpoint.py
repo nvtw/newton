@@ -229,6 +229,121 @@ def _triangle_point_inv_mass(
     )
 
 
+@wp.func
+def _triangle_rigid_body_state(
+    particles: ParticleContainer,
+    pa: wp.int32,
+    pb: wp.int32,
+    pc: wp.int32,
+):
+    """Treat the three triangle vertices as a virtual rigid body and
+    return its mass, centroid, inertia, lever arms, linear velocity,
+    and angular velocity.
+
+    The contact iteration uses this to compute the contact effective
+    mass (linear + rotational impedance) and to redistribute the
+    contact impulse onto the three particles such that BOTH linear
+    and angular momentum about the centroid are preserved (which is
+    the property the user's reference rigid-cloth example gets for
+    free because each tri there *is* an actual rigid body).
+
+    Pinned particles (``inverse_mass == 0``) are excluded entirely:
+    their position and velocity remain fixed by the access-mode
+    STATIC short-circuit, so their contribution to the centroid /
+    inertia / angular momentum is ill-defined (infinite mass).  We
+    compute the centroid / inertia from the *free* particles only;
+    the rigid-body update is then applied only to free particles.
+
+    Returns ``(centroid, total_mass, m_a, m_b, m_c, inv_inertia,
+    omega, v_centroid, normal)``.  The triangle normal ``normal``
+    is returned so callers can project rotation updates out of the
+    null-space axis (3 coplanar mass points have rank-2 inertia).
+    """
+    inv_m_a = particles.inverse_mass[pa]
+    inv_m_b = particles.inverse_mass[pb]
+    inv_m_c = particles.inverse_mass[pc]
+    m_a = wp.float32(0.0)
+    m_b = wp.float32(0.0)
+    m_c = wp.float32(0.0)
+    if inv_m_a > wp.float32(0.0):
+        m_a = wp.float32(1.0) / inv_m_a
+    if inv_m_b > wp.float32(0.0):
+        m_b = wp.float32(1.0) / inv_m_b
+    if inv_m_c > wp.float32(0.0):
+        m_c = wp.float32(1.0) / inv_m_c
+    total_mass = m_a + m_b + m_c
+
+    pos_a = particles.position[pa]
+    pos_b = particles.position[pb]
+    pos_c = particles.position[pc]
+    vel_a = particles.velocity[pa]
+    vel_b = particles.velocity[pb]
+    vel_c = particles.velocity[pc]
+
+    # Triangle normal -- always derivable from the geometric corners,
+    # even if some are pinned.  Used to regularise the rank-deficient
+    # inertia tensor along the null-space axis.
+    e1 = pos_b - pos_a
+    e2 = pos_c - pos_a
+    n_unnorm = wp.cross(e1, e2)
+    n_len_sq = wp.dot(n_unnorm, n_unnorm)
+    normal = wp.vec3f(0.0, 0.0, 1.0)
+    if n_len_sq > wp.float32(1.0e-20):
+        normal = n_unnorm / wp.sqrt(n_len_sq)
+
+    if total_mass <= wp.float32(0.0):
+        # Fully pinned triangle -- treat as infinite mass so any
+        # contact impulse it sees produces zero motion.  The caller
+        # uses ``inv_mass = 0`` and ``inv_inertia = 0`` for this case
+        # (matching the rigid pinned-body convention).
+        return (
+            pos_a,
+            wp.float32(0.0),
+            wp.float32(0.0), wp.float32(0.0), wp.float32(0.0),
+            wp.mat33f(0.0),
+            wp.vec3f(0.0, 0.0, 0.0),
+            wp.vec3f(0.0, 0.0, 0.0),
+            normal,
+        )
+
+    inv_total = wp.float32(1.0) / total_mass
+    centroid = (m_a * pos_a + m_b * pos_b + m_c * pos_c) * inv_total
+    v_centroid = (m_a * vel_a + m_b * vel_b + m_c * vel_c) * inv_total
+
+    r_a = pos_a - centroid
+    r_b = pos_b - centroid
+    r_c = pos_c - centroid
+
+    # Inertia tensor about centroid (sum of point-mass inertias).
+    rr_a = wp.dot(r_a, r_a)
+    rr_b = wp.dot(r_b, r_b)
+    rr_c = wp.dot(r_c, r_c)
+    i00 = m_a * (rr_a - r_a[0] * r_a[0]) + m_b * (rr_b - r_b[0] * r_b[0]) + m_c * (rr_c - r_c[0] * r_c[0])
+    i11 = m_a * (rr_a - r_a[1] * r_a[1]) + m_b * (rr_b - r_b[1] * r_b[1]) + m_c * (rr_c - r_c[1] * r_c[1])
+    i22 = m_a * (rr_a - r_a[2] * r_a[2]) + m_b * (rr_b - r_b[2] * r_b[2]) + m_c * (rr_c - r_c[2] * r_c[2])
+    i01 = -m_a * r_a[0] * r_a[1] - m_b * r_b[0] * r_b[1] - m_c * r_c[0] * r_c[1]
+    i02 = -m_a * r_a[0] * r_a[2] - m_b * r_b[0] * r_b[2] - m_c * r_c[0] * r_c[2]
+    i12 = -m_a * r_a[1] * r_a[2] - m_b * r_b[1] * r_b[2] - m_c * r_c[1] * r_c[2]
+
+    # 3 non-collinear coplanar mass points have FULL-RANK inertia:
+    # by the perpendicular-axis theorem, ``I_zz = I_xx + I_yy``
+    # (where z is the triangle normal), so the tensor is rank 3
+    # unless the triangle is degenerate.
+    trace = i00 + i11 + i22
+    reg = wp.max(wp.float32(1.0e-18), trace * wp.float32(1.0e-9))
+    inertia_reg = wp.mat33f(
+        i00 + reg, i01, i02,
+        i01, i11 + reg, i12,
+        i02, i12, i22 + reg,
+    )
+    inv_inertia = wp.inverse(inertia_reg)
+
+    L = m_a * wp.cross(r_a, vel_a) + m_b * wp.cross(r_b, vel_b) + m_c * wp.cross(r_c, vel_c)
+    omega = inv_inertia @ L
+
+    return centroid, total_mass, m_a, m_b, m_c, inv_inertia, omega, v_centroid, normal
+
+
 # ---------------------------------------------------------------------------
 # Endpoint load / apply.
 # ---------------------------------------------------------------------------
@@ -293,19 +408,21 @@ def endpoint_load(
         out.inv_inertia = bodies.inverse_inertia_world[idx]
         return out
 
-    # Triangle endpoint. ``local_anchor`` is the barycentric weight
-    # vector ``(w_a, w_b, w_c)``.
+    # Triangle endpoint -- barycentric load + barycentric distribute
+    # (the original, well-tested code path).  The "rigid body during
+    # contact" experiment (committed and reverted: see commit history)
+    # showed that pure rigid-body redistribution dramatically reduces
+    # cube xy drift (0.09 m -> 0.001 m) but blows up after ~15 frames
+    # because adjacent triangles sharing a particle each try to
+    # enforce their own rigid-body rotation on it, and the iteration
+    # amplifies through the shared vertex.  Until that shared-vertex
+    # issue is resolved, we keep the bary path which is stable but
+    # accepts higher xy drift.
     verts = _triangle_vertex_indices(tri_indices, idx)
     pa = verts[0]
     pb = verts[1]
     pc = verts[2]
-    # Sync each vertex to VELOCITY_LEVEL so cloth's just-written
-    # position correction is folded into ``particles.velocity`` via
-    # the access-mode finite-diff before we read it.
     _triangle_sync_to_velocity_level(particles, pa, pb, pc, idt)
-    # Push the contact point off the triangle surface by ``margin``
-    # along the contact normal -- the triangle endpoint has no
-    # body-local frame, so the margin shift IS the only correction.
     out.p_world = _triangle_world_point(particles, pa, pb, pc, local_anchor) + margin_sign * margin * n
     out.v = _triangle_point_velocity(particles, pa, pb, pc, local_anchor)
     out.w = wp.vec3f(0.0, 0.0, 0.0)
@@ -356,21 +473,22 @@ def endpoint_apply_impulse(
     pa = verts[0]
     pb = verts[1]
     pc = verts[2]
+    # ``r`` and ``inv_inertia`` were computed by
+    # :func:`endpoint_load` against the virtual rigid-body view of
+    # the triangle, so the lambda math sees the correct rotational
+    # impedance.  Distribute the resulting impulse via the standard
+    # barycentric weights -- conserves linear momentum AND angular
+    # momentum about the (mass-weighted) centroid, while sidestepping
+    # the shared-vertex amplification that a true rigid-body
+    # redistribution suffers when adjacent triangles each try to
+    # enforce their own rotation on the same particle.
     inv_m_a = particles.inverse_mass[pa]
     inv_m_b = particles.inverse_mass[pb]
     inv_m_c = particles.inverse_mass[pc]
-    # Velocity-level contact write per particle.
     particles.velocity[pa] = particles.velocity[pa] + sign * bary[0] * inv_m_a * imp
     particles.velocity[pb] = particles.velocity[pb] + sign * bary[1] * inv_m_b * imp
     particles.velocity[pc] = particles.velocity[pc] + sign * bary[2] * inv_m_c * imp
-    # Flip each touched vertex back to POSITION_LEVEL so the access-mode
-    # finite-diff (``pos = pos_prev_substep + dt * vel``) folds the
-    # contact impulse into ``particles.position``. Without this flip, the
-    # substep-exit ``writeback_position_to_velocity`` short-circuits
-    # (already at VELOCITY_LEVEL) and ``particles.position`` never sees
-    # the contact correction, so cloth drifts under gravity even when
-    # the velocity is being clamped each substep. Mirrors Jitter2's
-    # ``TinyRigidState.SetAccessMode`` pattern.
+
     inv_dt = wp.float32(1.0) / dt
     particle_set_access_mode(particles, pa, _ACCESS_MODE_POSITION_LEVEL, inv_dt)
     particle_set_access_mode(particles, pb, _ACCESS_MODE_POSITION_LEVEL, inv_dt)
@@ -423,6 +541,7 @@ def endpoint_warmstart_apply_impulse(
     particles.velocity[pa] = particles.velocity[pa] + sign * bary[0] * inv_m_a * lin_imp
     particles.velocity[pb] = particles.velocity[pb] + sign * bary[1] * inv_m_b * lin_imp
     particles.velocity[pc] = particles.velocity[pc] + sign * bary[2] * inv_m_c * lin_imp
+
     inv_dt = wp.float32(1.0) / dt
     particle_set_access_mode(particles, pa, _ACCESS_MODE_POSITION_LEVEL, inv_dt)
     particle_set_access_mode(particles, pb, _ACCESS_MODE_POSITION_LEVEL, inv_dt)

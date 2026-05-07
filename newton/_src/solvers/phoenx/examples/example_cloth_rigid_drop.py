@@ -63,7 +63,7 @@ class Example:
         height: int = 12,
         youngs_modulus: float = 5.0e8,
         poisson_ratio: float = 0.3,
-        cube_density: float = 60.0,
+        cube_density: float = 300.0,
     ):
         self.viewer = viewer
         self.device = wp.get_device()
@@ -386,7 +386,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--youngs-modulus",
         type=float,
-        default=5.0e8,
+        default=5.0e7,
         help="Young's modulus E [Pa]. Higher = less stretchy.",
     )
     parser.add_argument(
