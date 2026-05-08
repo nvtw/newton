@@ -242,28 +242,36 @@ class SolverPhoenX(SolverBase):
                   augmented inertia. Pinned by
                   :class:`test_armature.TestPendulumPeriod`,
                   :class:`TestSymmetricTwoBodyPeriod`, etc.
-                * ``"exact"``: skip the bake; apply armature
-                  constraint-side at iterate time as
-                  ``M_q^{-1} := M_q^{-1} / (1 + a * M_q^{-1})`` paired
-                  with an impulse-side ``kappa = 1 - a * M_q_aug^{-1}``
-                  scaling. Closed-form, exact MuJoCo equivalence for
-                  the joint's drive / limit row across every mass
-                  ratio -- including chains, where ``"bake"`` is only
-                  approximate. **Caveat**: armature only enters via
-                  the axial drive / limit row. External force paths
+                * ``"exact"``: skip the bake; per-joint **virtual
+                  rotor** with inertia ``a`` rigidly coupled to the
+                  axial relative velocity through an extra
+                  constraint row. Drive PD impulse acts on the
+                  rotor; the rotor-coupling row redistributes
+                  through the constraint solver. Pass-through for
+                  ``armature == 0`` (rotor branch never fires).
+                  Bit-exact MuJoCo for **isolated** joints
+                  (anchored / symmetric / asymmetric) and for any
+                  single eigenmode of an armatured chain whose
+                  dominant motion runs through one rotor at a time
+                  (validated against the analytical
+                  ``M_q + a * I`` formula at the 1 % level for the
+                  symmetric two-body torsion fixture). For
+                  multi-armatured kinematic chains where the same
+                  body sits in multiple armatured joints (e.g. a
+                  slow chain mode where every body co-rotates), the
+                  per-joint rotor still under-couples the chain
+                  composition by a few tens of percent -- closing
+                  this gap requires either cross-rotor coupling at
+                  the constraint level or a reduced-coord (Featherstone)
+                  solver. Caveat: armature only enters via the
+                  axial drive / limit row, so external force paths
                   (gravity, contact impulses, ``state.body_f`` /
                   ``joint_f``, picking) still see the raw body
-                  inertias. With small body inertias relative to the
-                  armature value this leaves contacts and gravity
-                  amplified -- a gravity-driven pendulum oscillates
-                  at the un-armatured period, and a robot with
-                  near-zero-inertia parallel-rod links plus moderate
-                  armature can NaN under ground contacts. Use this
-                  mode for scenes that are constraint-driven (PD /
-                  limit dominated) and free of stiff external loads
-                  -- e.g. armatured chain RL toys, joint-driven
-                  fixtures. ``"bake"`` remains the right default for
-                  general robotics with gravity + contacts.
+                  inertias. For dr_legs-class scenes (light parallel
+                  rods + stiff PD + ground contact) this leaves
+                  contacts amplified and the simulation diverges --
+                  **stick with ``"bake"`` for any robot that touches
+                  the ground or has stiff external loads**.
                 * ``"off"``: armature is ignored entirely. Skips the
                   bake and zeroes the per-joint ADBS armature dword
                   so the iterate-side ``armature > 0`` branch never
