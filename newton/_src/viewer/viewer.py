@@ -612,16 +612,20 @@ class ViewerBase(ABC):
             self.log_arrows("/contacts", None, None, None)
             return
 
-        # Get contact count, clamped to buffer size (counter may exceed max on overflow)
+        # Buffer-size cap (counter may exceed max on overflow). The
+        # kernel writes ``vec3(nan, nan, nan)`` for slots beyond the
+        # active count or filtered-out worlds; NaN endpoints don't
+        # rasterize, so we can pass the full ``max_contacts`` slice
+        # without first reading the count back to host. This drops one
+        # device-to-host sync from the per-frame render path — under
+        # graph-captured stepping that sync was a stall point.
         max_contacts = contacts.rigid_contact_max
-        num_contacts = min(int(contacts.rigid_contact_count.numpy()[0]), max_contacts)
 
         # Ensure we have buffers for line endpoints
         if self._contact_points0 is None or len(self._contact_points0) < max_contacts:
             self._contact_points0 = wp.array(np.zeros((max_contacts, 3)), dtype=wp.vec3, device=self.device)
             self._contact_points1 = wp.array(np.zeros((max_contacts, 3)), dtype=wp.vec3, device=self.device)
 
-        # Always run the kernel to ensure buffers are properly cleared/updated
         if max_contacts > 0:
             from .kernels import compute_contact_lines  # noqa: PLC0415
 
@@ -648,20 +652,9 @@ class ViewerBase(ABC):
                 ],
                 device=self.device,
             )
-
-        # Always call log_arrows to update the renderer (handles zero contacts gracefully)
-        if num_contacts > 0:
-            # Slice arrays to only include active contacts
-            starts = self._contact_points0[:num_contacts]
-            ends = self._contact_points1[:num_contacts]
+            self.log_arrows("/contacts", self._contact_points0, self._contact_points1, (0.0, 1.0, 0.0))
         else:
-            # Create empty arrays for zero contacts case
-            starts = wp.array([], dtype=wp.vec3, device=self.device)
-            ends = wp.array([], dtype=wp.vec3, device=self.device)
-
-        colors = (0.0, 1.0, 0.0)
-
-        self.log_arrows("/contacts", starts, ends, colors)
+            self.log_arrows("/contacts", None, None, None)
 
     def log_hydro_contact_surface(
         self,

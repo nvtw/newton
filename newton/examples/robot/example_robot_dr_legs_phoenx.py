@@ -252,6 +252,17 @@ class Example:
         self.viewer.set_model(self.model)
         self._fix_picking_effective_mass()
 
+        # Cap rendered worlds. Render time scales ~linearly with visible
+        # robots (~0.1 ms/world for the dr_legs mesh-heavy asset on a
+        # Blackwell-class GPU); at world_count=1000 the GPU spends ~95 ms
+        # per frame on rasterisation alone (~10 fps), independent of
+        # physics. Limiting visible worlds keeps physics simulating all
+        # ``world_count`` robots while only drawing the first
+        # ``visible_world_count`` of them. ``0`` means render all.
+        n_visible = args.visible_world_count
+        if 0 < n_visible < self.world_count:
+            self.viewer.set_visible_worlds(list(range(n_visible)))
+
         self.capture()
 
     def _fix_picking_effective_mass(self) -> None:
@@ -483,8 +494,23 @@ class Example:
                 " matching the kamino reference example (``a_j``)."
             ),
         )
+        parser.add_argument(
+            "--visible-world-count",
+            type=int,
+            default=2000,
+            help=(
+                "Render only the first N replicated robots. Physics still"
+                " simulates all ``--world-count`` worlds; the cap only"
+                " limits GL draw work. Defaults to 32 because the"
+                " dr_legs mesh asset is rasterisation-bound at scale --"
+                " on a Blackwell-class GPU 1000 visible robots take ~95"
+                " ms/frame (10 fps) regardless of how fast physics runs,"
+                " 32 visible takes ~10 ms (100 fps). ``0`` means render"
+                " every world."
+            ),
+        )
 
-        parser.set_defaults(world_count=1000)
+        parser.set_defaults(world_count=2000)
         return parser
 
 
@@ -492,6 +518,8 @@ if __name__ == "__main__":
     parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
     viewer._paused = True
+    viewer.show_visual = False
+    viewer.show_inertia_boxes = True
 
     example = Example(viewer, args)
 
