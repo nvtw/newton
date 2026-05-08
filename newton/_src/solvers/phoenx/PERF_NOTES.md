@@ -115,6 +115,50 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 | `_SINGLEWORLD_BLOCK_DIM`            | `solver_phoenx.py`                                | Persistent-grid block size (= 256)               |
 | `_PER_WORLD_COLORING_BLOCK_DIM`     | `solver_phoenx_kernels.py`                        | Multi-world per-world coloring block size (= 64) |
 
+## Correctness gotchas (example / integration)
+
+### CUDA-graph capture + odd-count state-swap pins the simulation in a tiny cube
+
+Symptom: in a captured-graph example loop, every body appears trapped in a ~1 cm box. Joints articulate (they're driven by ``Control`` arrays the user can update from host code each frame), but the chain as a whole drifts a few mm and snaps back. Without graph capture (``ex.graph = None``) the same code progresses normally. Easy to misdiagnose as a constraint, drive, or contact issue inside PhoenX -- it isn't. The bug is in the example's own per-frame state-swap pattern.
+
+The pattern that breaks (one outer ``solver.step`` per frame, one swap):
+
+```python
+def simulate(self):
+    self.model.collide(self.state_0, self.contacts)
+    self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.frame_dt)
+    self.state_0, self.state_1 = self.state_1, self.state_0   # ← single swap
+```
+
+Why it fails under capture:
+
+1. The captured kernel chain binds the ``body_q`` / ``body_qd`` ``wp.array`` buffers it reads at capture time -- call them ``sA`` (read) and ``sB`` (write).
+2. The Python-level ``state_0, state_1 = state_1, state_0`` rebinds attributes; it is **not** captured.
+3. After capture, ``self.state_0`` aliases ``sB`` (the just-stepped buffer).
+4. Every subsequent ``wp.capture_launch`` replays the same sequence: read ``sA``, write ``sB``. ``sA`` is **never written** between replays, so each frame re-integrates the same starting pose into ``sB``. ``sB`` oscillates around ``step(initial)`` with float-noise amplitude -- the "tiny cube".
+
+Why most existing examples are fine: ``example_robot_h1`` and ``example_robot_anymal_d`` use ``sim_substeps=4`` with the swap inside the inner loop. Four swaps end with ``self.state_0`` rebound to its original buffer, so the captured chain reads ``sA``, writes ``sB``, reads ``sB``, writes ``sA``, ... and each replay correctly carries state forward. They get this for free because the count is even. Any example that does **one** outer step per frame (or any odd count) hits the bug.
+
+Two safe patterns:
+
+```python
+# (a) Even outer-substep count: swap inside the loop, count must be even.
+for _ in range(self.sim_substeps):  # sim_substeps even
+    self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+    self.state_0, self.state_1 = self.state_1, self.state_0
+```
+
+```python
+# (b) Single step + explicit copy-back. No swap, no even-count requirement.
+self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.frame_dt)
+wp.copy(self.state_0.body_q, self.state_1.body_q)
+wp.copy(self.state_0.body_qd, self.state_1.body_qd)
+```
+
+(b) is the right pattern when the example wants PhoenX's internal substepping to do all the work and only one ``solver.step`` per frame. Reference: ``newton/examples/robot/example_robot_dr_legs_phoenx.py``, where (b) was used after this bug was diagnosed.
+
+If you ever see a graph-captured PhoenX scene where bodies appear to be on rails / trapped in a small region: drop ``ex.graph = None``, re-run, and compare. Identical motion -> there is a real solver issue. Wildly different motion -> it's almost certainly the swap pattern, not PhoenX.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.
