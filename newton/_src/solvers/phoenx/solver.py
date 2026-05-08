@@ -186,6 +186,7 @@ class SolverPhoenX(SolverBase):
         threads_per_world: int | str = "auto",
         max_thread_blocks: int | None = None,
         velocity_readout: str = "substep_end",
+        armature_mode: str = "bake",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -223,6 +224,52 @@ class SolverPhoenX(SolverBase):
                 a renderer or a second solver) or to measure SM
                 occupancy. No effect on
                 ``step_layout="multi_world"``.
+            armature_mode: How joint armature
+                (``model.joint_armature``) is applied. Three modes,
+                all bit-identical when ``model.joint_armature`` is
+                identically zero (the default for builders that
+                never touched it):
+
+                * ``"bake"`` (default): augment each attached body's
+                  axial inertia with a per-joint quadratic ``alpha``
+                  at construction so the constraint solver and the
+                  external-force integrator both see the augmented
+                  ``M_q + a`` mass. Exact for fixed-anchor and
+                  isolated two-body joints (anchored, symmetric, or
+                  asymmetric), approximate for chains where bodies
+                  participate in multiple armatured joints. External
+                  forces (gravity, picking, ``joint_f``) feel the
+                  augmented inertia. Pinned by
+                  :class:`test_armature.TestPendulumPeriod`,
+                  :class:`TestSymmetricTwoBodyPeriod`, etc.
+                * ``"exact"``: skip the bake; apply armature
+                  constraint-side at iterate time as
+                  ``M_q^{-1} := M_q^{-1} / (1 + a * M_q^{-1})`` paired
+                  with an impulse-side ``kappa = 1 - a * M_q_aug^{-1}``
+                  scaling. Closed-form, exact MuJoCo equivalence for
+                  the joint's drive / limit row across every mass
+                  ratio -- including chains, where ``"bake"`` is only
+                  approximate. **Caveat**: armature only enters via
+                  the axial drive / limit row. External force paths
+                  (gravity, contact impulses, ``state.body_f`` /
+                  ``joint_f``, picking) still see the raw body
+                  inertias. With small body inertias relative to the
+                  armature value this leaves contacts and gravity
+                  amplified -- a gravity-driven pendulum oscillates
+                  at the un-armatured period, and a robot with
+                  near-zero-inertia parallel-rod links plus moderate
+                  armature can NaN under ground contacts. Use this
+                  mode for scenes that are constraint-driven (PD /
+                  limit dominated) and free of stiff external loads
+                  -- e.g. armatured chain RL toys, joint-driven
+                  fixtures. ``"bake"`` remains the right default for
+                  general robotics with gravity + contacts.
+                * ``"off"``: armature is ignored entirely. Skips the
+                  bake and zeroes the per-joint ADBS armature dword
+                  so the iterate-side ``armature > 0`` branch never
+                  fires. Fastest path; equivalent to a model with
+                  ``joint_armature = 0``.
+
             velocity_readout: Convention used when stamping
                 ``state_out.body_qd``. Three modes:
 
@@ -248,6 +295,10 @@ class SolverPhoenX(SolverBase):
         if velocity_readout not in valid_readouts:
             raise ValueError(f"velocity_readout must be one of {valid_readouts}, got {velocity_readout!r}")
         self._velocity_readout = velocity_readout
+        valid_armature_modes = ("bake", "exact", "off")
+        if armature_mode not in valid_armature_modes:
+            raise ValueError(f"armature_mode must be one of {valid_armature_modes}, got {armature_mode!r}")
+        self._armature_mode = armature_mode
 
         # ---- Build the PhoenX body container ---------------------------
         num_bodies_phoenx = int(model.body_count) + 1
@@ -305,16 +356,20 @@ class SolverPhoenX(SolverBase):
                 ],
                 device=self.device,
             )
-            # Joint armature: PhoenX is maximal-coordinate, so reduced-
-            # coord ``M_q = M_chain + armature`` doesn't drop in directly.
-            # Instead we bake the armature into both bodies' inertia along
-            # the joint axis so the constraint kernels' standard
-            # ``eff_inv = J M^-1 J^T`` and the body-velocity update both
-            # see the same augmented mass matrix. Without this, chains
-            # with skinny intermediate links (e.g. humanoid waist links
-            # of <0.1 kg) destabilise high-stiffness PD drives within a
-            # few substeps.
-            self._bake_joint_armature_into_body_inertia(model)
+            # Joint armature dispatch: ``"bake"`` augments body inertia
+            # at construction (current behaviour, exact for isolated
+            # joints, approximate for chains). ``"exact"`` skips the
+            # bake and instead applies the armature constraint-side at
+            # iterate time (closed-form, exact for the constraint path
+            # but doesn't augment external-force dynamics). ``"off"``
+            # ignores armature entirely. The kernel-side branch is
+            # gated by the per-joint ``armature`` dword stored in the
+            # ADBS column -- ``zero_out_adbs_armature`` below ensures
+            # the ``"bake"`` and ``"off"`` modes leave that dword at
+            # zero so the iterate-time ``if armature_a > 0`` branch
+            # never fires.
+            if self._armature_mode == "bake":
+                self._bake_joint_armature_into_body_inertia(model)
 
         # ---- Sync model.body_q with model.joint_q ---------------------
         # The adapter snapshots body-local joint anchors from
@@ -331,6 +386,17 @@ class SolverPhoenX(SolverBase):
         # ---- Build the joint (ADBS) column layout ----------------------
         self._adbs: AdbsInitArrays = build_adbs_init_arrays(model, device=self.device)
         num_joints = self._adbs.num_joint_columns
+
+        # ``build_adbs_init_arrays`` populates ``armature`` from
+        # ``model.joint_armature``. The constraint kernel reads this
+        # at iterate time and applies a closed-form M_q+a augmentation
+        # whenever ``armature > 0``. For ``armature_mode in {"bake",
+        # "off"}`` we want the iterate-time branch to be a no-op:
+        # ``"bake"`` already augmented the bodies' inertias; ``"off"``
+        # asks for armature to be ignored entirely. Zero the per-joint
+        # ADBS armature dword in those two cases so the kernel branch
+        # short-circuits.
+        self._zero_adbs_armature_for_modes(("bake", "off"))
 
         # ---- Collision-related sizing ---------------------------------
         # PhoenX's warm-start path requires ``contact_matching`` to be
@@ -491,6 +557,21 @@ class SolverPhoenX(SolverBase):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _zero_adbs_armature_for_modes(self, modes: tuple[str, ...]) -> None:
+        """Zero out the per-joint ADBS armature dword when the active
+        ``armature_mode`` is in ``modes``. The constraint kernel reads
+        ``armature`` from the ADBS column at iterate time and only
+        applies the M_q+a augmentation when it's strictly positive,
+        so zeroing here disables the kernel-side branch for the
+        ``"bake"`` (where the body-inertia bake already handled it)
+        and ``"off"`` (no augmentation desired) modes.
+        """
+        if self._armature_mode not in modes:
+            return
+        if self._adbs.num_joint_columns == 0 or self._adbs.armature is None:
+            return
+        self._adbs.armature.zero_()
 
     def _bake_joint_armature_into_body_inertia(self, model: Model) -> None:
         """Add per-joint axial armature into both attached bodies' inertia.
@@ -972,6 +1053,10 @@ class SolverPhoenX(SolverBase):
         """
         if flags & (int(SolverNotifyFlags.JOINT_PROPERTIES) | int(SolverNotifyFlags.JOINT_DOF_PROPERTIES)):
             self._adbs = build_adbs_init_arrays(self.model, device=self.device)
+            # Same kernel-side gate as construction: keep the bake/off
+            # modes' ADBS armature dword zero so the iterate path
+            # short-circuits.
+            self._zero_adbs_armature_for_modes(("bake", "off"))
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
         if flags & int(SolverNotifyFlags.MODEL_PROPERTIES):

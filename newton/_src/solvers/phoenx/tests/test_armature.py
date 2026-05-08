@@ -776,7 +776,7 @@ class TestArmatureMatchesMuJoCo(unittest.TestCase):
                     model_mujoco,
                     frames=frames,
                     dt=dt,
-                    solver_factory=lambda m: newton.solvers.SolverMuJoCo(m),
+                    solver_factory=newton.solvers.SolverMuJoCo,
                 )
                 T_mujoco = _measure_period_zero_crossings(history_mujoco, dt)
 
@@ -791,6 +791,135 @@ class TestArmatureMatchesMuJoCo(unittest.TestCase):
                     f"vs analytical T={T_expected:.4f} s: phoenx_err={rel_err_phoenx:.4f}, "
                     f"mujoco_err={rel_err_mujoco:.4f}",
                 )
+
+
+def _run_torsion_chain_with_mode(
+    model: newton.Model,
+    frames: int,
+    dt: float,
+    armature_mode: str,
+    init_angle: float = 0.05,
+) -> np.ndarray:
+    """Same captured-graph runner as :func:`_run_torsion_chain`, but
+    parameterised by ``armature_mode``."""
+    solver = newton.solvers.SolverPhoenX(
+        model,
+        substeps=8,
+        solver_iterations=8,
+        velocity_iterations=1,
+        armature_mode=armature_mode,
+    )
+    s0 = model.state()
+    s1 = model.state()
+    control = model.control()
+    s0.joint_q.assign(np.array([float(init_angle)], dtype=np.float32))
+    newton.eval_fk(model, s0.joint_q, s0.joint_qd, s0)
+
+    jq = wp.zeros(model.joint_coord_count, dtype=wp.float32, device=model.device)
+    jqd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=model.device)
+
+    def step_once() -> None:
+        s0.clear_forces()
+        solver.step(s0, s1, control, None, dt)
+        wp.copy(s0.body_q, s1.body_q)
+        wp.copy(s0.body_qd, s1.body_qd)
+        newton.eval_ik(model, s0, jq, jqd)
+
+    with wp.ScopedCapture() as cap:
+        step_once()
+    graph = cap.graph
+
+    history = np.empty(frames, dtype=np.float32)
+    for i in range(frames):
+        wp.capture_launch(graph)
+        history[i] = float(jq.numpy()[0])
+    return history
+
+
+@unittest.skipUnless(
+    _cuda_with_graph_capture(),
+    "PhoenX armature tests run on CUDA with graph-capture only.",
+)
+class TestExactModeIsolatedJoints(unittest.TestCase):
+    """``armature_mode="exact"`` skips the body-inertia bake and instead
+    applies the closed-form ``M_q^{-1} := M_q^{-1} / (1 + a * M_q^{-1})``
+    augmentation constraint-side at iterate time, paired with an
+    impulse-side ``kappa = 1 - a * M_q_aug^{-1}`` scaling. For an
+    isolated joint (constraint-driven dynamics, no external forces
+    coupled through the joint) the math is exact for any mass ratio.
+
+    Asserts the symmetric two-body torsion period to within 1 % --
+    ten times tighter than the 5 % tolerance the bake-mode test
+    uses, because the closed-form has no per-body alpha
+    approximation.
+    """
+
+    def test_symmetric_torsion_period_exact(self) -> None:
+        inertia = 1.0
+        mass = 1.0
+        target_ke = 100.0
+        dt = 1.0 / 400.0
+        frames = 1600
+        m_chain = inertia * inertia / (inertia + inertia)
+
+        for armature in (0.0, 0.5, 2.0, 8.0):
+            with self.subTest(armature=armature):
+                model = _build_two_body_torsion_chain(
+                    inertia=inertia,
+                    mass=mass,
+                    target_ke=target_ke,
+                    armature=armature,
+                )
+                history = _run_torsion_chain_with_mode(model, frames=frames, dt=dt, armature_mode="exact")
+                T_sim = _measure_period_zero_crossings(history, dt)
+                T_expected = 2.0 * np.pi * np.sqrt((m_chain + armature) / target_ke)
+                rel_err = abs(T_sim - T_expected) / T_expected
+                self.assertLess(
+                    rel_err,
+                    0.01,
+                    f"exact mode armature={armature}: T_sim={T_sim:.4f} s "
+                    f"vs T_expected={T_expected:.4f} s (1 % tolerance: closed-form "
+                    f"per-iteration kappa scaling should be near-bit-exact for "
+                    f"isolated joints)",
+                )
+
+
+@unittest.skipUnless(
+    _cuda_with_graph_capture(),
+    "PhoenX armature tests run on CUDA with graph-capture only.",
+)
+class TestOffModeIgnoresArmature(unittest.TestCase):
+    """``armature_mode="off"`` zeros the per-joint ADBS armature dword
+    so the kernel-side branch never fires, and skips the body-inertia
+    bake. Equivalent to running with ``model.joint_armature = 0``;
+    this test asserts the trajectory equals a model that was built
+    with ``armature = 0`` to begin with, to within float-noise.
+    """
+
+    def test_off_mode_matches_zero_armature(self) -> None:
+        # Two models, identical except one has armature in
+        # ``model.joint_armature`` and is run with ``mode="off"``;
+        # the other has armature == 0 and runs with the default
+        # ``"bake"``. Trajectories should match.
+        dt = 1.0 / 400.0
+        frames = 800
+        target_ke = 100.0
+
+        model_with_arm = _build_two_body_torsion_chain(inertia=1.0, mass=1.0, target_ke=target_ke, armature=4.0)
+        history_off = _run_torsion_chain_with_mode(model_with_arm, frames=frames, dt=dt, armature_mode="off")
+
+        model_zero = _build_two_body_torsion_chain(inertia=1.0, mass=1.0, target_ke=target_ke, armature=0.0)
+        history_bake = _run_torsion_chain_with_mode(model_zero, frames=frames, dt=dt, armature_mode="bake")
+
+        # Allow tiny float-noise differences. CUDA non-determinism
+        # gives a few ULPs of drift over hundreds of substeps.
+        np.testing.assert_allclose(
+            history_off,
+            history_bake,
+            rtol=1e-3,
+            atol=1e-4,
+            err_msg="armature_mode='off' should produce the same trajectory as a model with armature=0.",
+        )
 
 
 @unittest.skipUnless(
