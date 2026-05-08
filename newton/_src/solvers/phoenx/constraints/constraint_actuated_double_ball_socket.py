@@ -356,21 +356,6 @@ class ActuatedDoubleBallSocketData:
     axis_world: wp.vec3f
     accumulated_impulse_drive: wp.float32
     accumulated_impulse_limit: wp.float32
-    # Virtual rotor velocity for ``armature_mode == "exact"``
-    # (``SolverPhoenX``). When ``armature > 0`` the axial drive /
-    # limit row treats the joint as a 1-DoF rotor with inertia
-    # ``armature`` coupled to the joint's relative axial velocity
-    # through the constraint ``c = jv_axial - rotor_velocity == 0``
-    # (sign chosen so the body-application Jacobian matches
-    # PhoenX's existing ``+n_hat * lam`` to body 1 / ``-n_hat *
-    # lam`` to body 2). The drive PD impulse acts on the rotor
-    # only; the rotor-body coupling row redistributes via the
-    # constraint solver -- so chains where bodies sit in multiple
-    # armatured joints come out exact-MuJoCo (each rotor's velocity
-    # is independent state across PGS iterations). Always stored,
-    # read only when the per-joint ``armature`` dword is positive
-    # (zeroed in the ``"bake"`` / ``"off"`` modes).
-    rotor_velocity: wp.float32
 
 
 assert_constraint_header(ActuatedDoubleBallSocketData)
@@ -474,7 +459,6 @@ _OFF_CLAMP = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "clamp"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_world"))
 _OFF_ACC_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_drive"))
 _OFF_ACC_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_limit"))
-_OFF_ROTOR_VELOCITY = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "rotor_velocity"))
 
 #: Total dword count of one unified joint constraint.
 ADBS_DWORDS: int = num_dwords(ActuatedDoubleBallSocketData)
@@ -684,7 +668,6 @@ def actuated_double_ball_socket_initialize_kernel(
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, n_hat_init)
     write_float(constraints, _OFF_ACC_DRIVE, cid, 0.0)
     write_float(constraints, _OFF_ACC_LIMIT, cid, 0.0)
-    write_float(constraints, _OFF_ROTOR_VELOCITY, cid, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -743,21 +726,6 @@ def _axial_drive_limit_iterate(
     gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
     eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
     acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
-    armature_a = read_float(constraints, base_offset + _OFF_ARMATURE, cid)
-    rotor_active = armature_a > wp.float32(0.0)
-
-    # When the rotor branch is active (``armature_mode == "exact"``),
-    # the drive PD residual is taken against the rotor's velocity --
-    # which lives in its own per-cid slot and tracks the joint's
-    # axial velocity through the rotor-coupling row added below.
-    # Otherwise the residual is the body-only ``jv_axial`` that the
-    # caller passed in, matching the legacy single-row drive path
-    # bit-for-bit.
-    drive_residual_v = jv_axial
-    rotor_velocity = jv_axial
-    if rotor_active:
-        rotor_velocity = read_float(constraints, base_offset + _OFF_ROTOR_VELOCITY, cid)
-        drive_residual_v = rotor_velocity
 
     # ---- Drive row ----------------------------------------------------
     # The drive row is a PD spring-damper only; prepare writes
@@ -776,23 +744,16 @@ def _axial_drive_limit_iterate(
         # ``jv = n . (w1 - w2)`` convention, which is -1 * the
         # Jitter2 ``jv = n . (v2 - v1)`` convention):
         #   lam = -M_eff_soft * (jv - bias + gamma * acc)
-        lam_drive = -eff_mass_drive_soft * (drive_residual_v - bias_drive + gamma_drive * acc_drive)
+        lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
         old_acc = acc_drive
         acc_drive = acc_drive + lam_drive
         if max_force_drive > 0.0:
             acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
         lam_drive = acc_drive - old_acc
         write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
-        if rotor_active:
-            # Drive impulse acts on the rotor only; bodies see it
-            # through the coupling row below.
-            rotor_velocity = rotor_velocity + lam_drive / armature_a
 
     # ---- Limit row ----------------------------------------------------
     lam_limit = float(0.0)
-    limit_residual_v = jv_axial
-    if rotor_active:
-        limit_residual_v = rotor_velocity
     if clamp != _CLAMP_NONE:
         stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
         damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
@@ -807,7 +768,7 @@ def _axial_drive_limit_iterate(
             pd_gamma = read_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid)
             pd_beta = read_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid)
             if pd_mass > 0.0:
-                lam_limit = -pd_mass * (limit_residual_v - pd_beta + pd_gamma * acc_limit)
+                lam_limit = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
         else:
             # Box2D soft-constraint path. ``bias_limit_box2d`` is
             # prefolded as ``-C * bias_rate`` so the PGS step targets
@@ -818,7 +779,7 @@ def _axial_drive_limit_iterate(
             ic_limit = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
             if eff_inv > 0.0:
                 eff_axial = 1.0 / eff_inv
-                lam_unsoft = -eff_axial * (limit_residual_v + bias_box)
+                lam_unsoft = -eff_axial * (jv_axial + bias_box)
                 lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
         old_acc = acc_limit
         acc_limit = acc_limit + lam_limit
@@ -832,39 +793,20 @@ def _axial_drive_limit_iterate(
             acc_limit = wp.min(0.0, acc_limit)
         lam_limit = acc_limit - old_acc
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
-        if rotor_active:
-            rotor_velocity = rotor_velocity + lam_limit / armature_a
 
-    # ---- Rotor coupling row (only when rotor_active) ----------------
-    # Hard kinematic constraint linking rotor and bodies:
-    #   c = jv_axial - rotor_velocity = 0
-    # Sign chosen so the body-application Jacobian (caller's
-    # ``+n_hat * lam`` to body 1, ``-n_hat * lam`` to body 2)
-    # matches dc/d(omega): dc/dw1 = +n_hat, dc/dw2 = -n_hat.
-    # Rotor-side Jacobian is dc/d(rotor) = -1, so the rotor's
-    # impulse update is ``-lam / a``. Effective inverse mass is the
-    # bodies-only ``J M^{-1} J^T`` (= ``eff_inv_raw`` stored in
-    # ``_OFF_EFF_INV_AXIAL`` by prepare) plus the rotor's ``1/a``.
-    # Together that equals ``1 / (M_chain + a)`` -- the augmented
-    # joint inertia from MuJoCo's reduced-coord formulation, but
-    # arrived at *iteratively* so chains where bodies sit in
-    # multiple armatured joints come out exact (each rotor's
-    # velocity is independent state across PGS iterations, and
-    # bodies see the cross-joint coupling through the constraint
-    # solve).
-    if rotor_active:
-        eff_inv_raw = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
-        eff_mass_coupling = wp.float32(1.0) / (wp.float32(1.0) / armature_a + eff_inv_raw)
-        c_coupling = jv_axial - rotor_velocity
-        lam_coupling = -eff_mass_coupling * c_coupling
-        rotor_velocity = rotor_velocity - lam_coupling / armature_a
-        write_float(constraints, base_offset + _OFF_ROTOR_VELOCITY, cid, rotor_velocity)
-        # Caller spreads ``lam_coupling`` onto bodies as
-        # ``+/- n_hat * lam`` exactly like the legacy single-row
-        # impulse, so revolute / prismatic body application paths
-        # don't need a per-mode change.
-        return lam_coupling
-
+    # Constraint-side joint armature ("exact" mode). ``armature == 0``
+    # (the default ``"bake"`` / ``"off"`` ADBS-init values) collapses
+    # ``kappa`` to 1 and the multiplication is a no-op. ``eff_inv``
+    # stored in the column is already the *augmented*
+    # ``M_chain^{-1} / (1 + a * M_chain^{-1})``, so the closed-form
+    # ``kappa = 1 - a * eff_inv_aug`` recovers the velocity-update
+    # scaling without storing an extra dword. Per-iteration cost: one
+    # extra ``read_float`` and ~2 flops.
+    armature_a = read_float(constraints, base_offset + _OFF_ARMATURE, cid)
+    if armature_a > wp.float32(0.0):
+        eff_inv_aug = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
+        kappa = wp.float32(1.0) - armature_a * eff_inv_aug
+        return (lam_drive + lam_limit) * kappa
     return lam_drive + lam_limit
 
 
@@ -962,7 +904,6 @@ def _axial_drive_limit_prepare_at(
     base_offset: wp.int32,
     cumulative_value: wp.float32,
     eff_inv: wp.float32,
-    jv_axial_init: wp.float32,
     dt: wp.float32,
     drive_boost: wp.float32,
     limit_boost: wp.float32,
@@ -1004,26 +945,25 @@ def _axial_drive_limit_prepare_at(
     stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
     damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
 
-    # Joint-armature dispatch (per-cid). ``armature_a == 0`` (the
-    # default for ``armature_mode in {"bake", "off"}``) skips the
-    # rotor branch entirely -- everything below sees the raw
-    # ``eff_inv = J M^{-1} J^T`` and the rotor-coupling iterate is a
-    # no-op. When ``armature_a > 0`` (``armature_mode == "exact"``)
-    # the joint is treated as a 1-DoF virtual rotor of inertia
-    # ``a`` coupled to the relative axial velocity through the
-    # constraint ``c = jv_axial - rotor_velocity == 0``. The drive
-    # PD then runs against the rotor's effective inverse mass
-    # ``1/a`` (so ``eff_mass_drive_soft = a / (1 + a * gamma)``);
-    # the rotor velocity is reseeded each substep from the current
-    # joint velocity (``jv_axial_init``) so the coupling row starts
-    # with a satisfied constraint, and the iterate's coupling row
-    # then redistributes drive impulses onto bodies through the
-    # constraint solver.
+    # Constraint-side joint armature ("exact" mode). When ``armature``
+    # was set to zero in the ADBS init kwargs (the default for
+    # ``armature_mode in {"bake", "off"}``) this branch collapses --
+    # ``armature_a == 0`` makes ``eff_inv_aug = eff_inv`` and the
+    # warm-start scaling at the bottom is a no-op. When ``armature_a >
+    # 0`` (``armature_mode == "exact"``) we apply the closed-form
+    # MuJoCo augmentation
+    #   M_aug^{-1} = M_chain^{-1} / (1 + a * M_chain^{-1})
+    # and pair it with a per-iteration impulse scaling
+    #   kappa = 1 - a * M_aug^{-1}
+    # so that an impulse ``lambda`` computed against ``eff_mass_aug =
+    # M_chain + a`` produces the body-velocity change of the augmented
+    # dynamics when applied via the *raw* ``M_block^{-1}`` body
+    # inertias. ``kappa`` is recomputed on the fly in the iterate
+    # path, so no extra constraint-column field is needed.
     armature_a = read_float(constraints, base_offset + _OFF_ARMATURE, cid)
-    write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, eff_inv)
-    eff_inv_drive = eff_inv
     if armature_a > wp.float32(0.0):
-        eff_inv_drive = wp.float32(1.0) / armature_a
+        eff_inv = eff_inv / (wp.float32(1.0) + armature_a * eff_inv)
+    write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, eff_inv)
 
     # ---- Drive (PD only) ---------------------------------------------
     drive_C = float(0.0)
@@ -1031,7 +971,7 @@ def _axial_drive_limit_prepare_at(
         drive_C = cumulative_value - target
     if stiffness_drive > 0.0 or damping_drive > 0.0:
         gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients(
-            stiffness_drive, damping_drive, drive_C, eff_inv_drive, dt, drive_boost
+            stiffness_drive, damping_drive, drive_C, eff_inv, dt, drive_boost
         )
     else:
         gamma_drive = wp.float32(0.0)
@@ -1072,27 +1012,20 @@ def _axial_drive_limit_prepare_at(
         write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
 
     # Warm-start: sum of drive + limit accumulated impulses, with
-    # ``acc_limit`` forcibly zeroed when the limit is inactive. The
-    # caller spreads the returned ``axial_imp`` onto body velocities
-    # via ``+/- n_hat * imp``. In the rotor branch we scale by
-    # ``kappa = 1 / (1 + a * eff_inv_raw)`` so the body warm-start
-    # produces ``Delta jv = acc * eff_inv_raw * kappa = acc *
-    # eff_inv_aug`` -- the body share of the augmented-mass drive
-    # impulse. The rotor velocity is then reseeded to the
-    # post-warm-start joint velocity so the iterate's coupling row
-    # starts with ``c == 0``.
+    # ``acc_limit`` forcibly zeroed when the limit is inactive. Scale
+    # by ``kappa = 1 - a * eff_inv_aug`` (collapses to ``1`` when
+    # ``armature_a == 0``) so the body-velocity warm-start matches
+    # the augmented dynamics. The accumulator itself stays
+    # un-kappa-scaled; the iterate path applies the same scaling on
+    # the per-iteration impulse, so warm-start and iterate paths
+    # round-trip consistently.
     acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
     acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
     if clamp == _CLAMP_NONE:
         acc_limit = 0.0
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
-    axial_imp = acc_drive + acc_limit
-    if armature_a > wp.float32(0.0):
-        kappa = wp.float32(1.0) / (wp.float32(1.0) + armature_a * eff_inv)
-        axial_imp = axial_imp * kappa
-        rotor_seed = jv_axial_init + axial_imp * eff_inv
-        write_float(constraints, base_offset + _OFF_ROTOR_VELOCITY, cid, rotor_seed)
-    return axial_imp
+    kappa = wp.float32(1.0) - armature_a * eff_inv
+    return (acc_drive + acc_limit) * kappa
 
 
 # ---------------------------------------------------------------------------
@@ -1426,16 +1359,12 @@ def _revolute_prepare_at(
     # coefficients. Returns the warm-start axial impulse (sum of the
     # drive + limit accumulated impulses, with the limit one gated on
     # the clamp state). Pure torque on both bodies along ``n_hat``.
-    # When ``armature_mode == "exact"`` the warm-start is folded
-    # onto the rotor velocity instead and this helper returns ``0``.
-    jv_axial_init = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
     axial_imp = _axial_drive_limit_prepare_at(
         constraints,
         cid,
         base_offset,
         cumulative_angle,
         eff_inv,
-        jv_axial_init,
         dt,
         PHOENX_BOOST_REVOLUTE_DRIVE,
         PHOENX_BOOST_REVOLUTE_LIMIT,
@@ -1832,20 +1761,13 @@ def _prismatic_prepare_at(
     # impulse (drive + limit acc; limit gated on clamp state).
     # Prismatic applies it as a linear impulse at anchor 1 (with the
     # corresponding lever-arm torque on both bodies), the only
-    # per-mode difference from the revolute warm-start. The
-    # ``jv_axial_init`` is the relative slide rate at anchor 1 along
-    # ``n_hat`` measured *after* the positional warm-start; the
-    # rotor branch reseeds its velocity to this each substep.
-    v1_anchor = velocity1 + wp.cross(angular_velocity1, r1_b1)
-    v2_anchor = velocity2 + wp.cross(angular_velocity2, r1_b2)
-    jv_axial_init = wp.dot(n_hat, v1_anchor - v2_anchor)
+    # per-mode difference from the revolute warm-start.
     axial_imp = _axial_drive_limit_prepare_at(
         constraints,
         cid,
         base_offset,
         slide,
         eff_inv,
-        jv_axial_init,
         dt,
         PHOENX_BOOST_PRISMATIC_DRIVE,
         PHOENX_BOOST_PRISMATIC_LIMIT,
@@ -2890,26 +2812,6 @@ def _revolute_iterate_at_multi(
     if eff_mass_drive_soft <= wp.float32(0.0):
         drive_active = False
 
-    # ---- Rotor armature state (``armature_mode == "exact"``) -----
-    # When ``armature_a > 0`` (rotor formulation), drive / limit
-    # impulses act on a virtual 1-DoF rotor and the bodies see only
-    # the rotor-coupling impulse. ``rotor_velocity`` lives in the
-    # constraint column across substeps; load it once into a
-    # register, hold across sweeps, write back at the end. The
-    # ``armature_a == 0`` branch (``"bake"`` / ``"off"`` modes)
-    # short-circuits to the legacy single-row drive path bit-for-bit.
-    armature_a = read_float(constraints, base_offset + _OFF_ARMATURE, cid)
-    rotor_active = armature_a > wp.float32(0.0)
-    rotor_velocity = wp.float32(0.0)
-    inv_armature_a = wp.float32(0.0)
-    eff_inv_axial_raw = wp.float32(0.0)
-    eff_mass_coupling = wp.float32(0.0)
-    if rotor_active:
-        rotor_velocity = read_float(constraints, base_offset + _OFF_ROTOR_VELOCITY, cid)
-        inv_armature_a = wp.float32(1.0) / armature_a
-        eff_inv_axial_raw = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
-        eff_mass_coupling = wp.float32(1.0) / (inv_armature_a + eff_inv_axial_raw)
-
     acc_limit = wp.float32(0.0)
     pd_mode_limit = False
     pd_mass = wp.float32(0.0)
@@ -2980,43 +2882,26 @@ def _revolute_iterate_at_multi(
         acc1 = acc1 + lam1
         acc2_world = acc2_world + lam2_world
 
-        # Axial drive + limit scalar PGS. In rotor mode, drive /
-        # limit residuals are taken against ``rotor_velocity``
-        # (a 1-DoF virtual rotor of inertia ``armature_a`` coupled
-        # to the bodies via ``c = jv_axial - rotor_velocity == 0``).
-        # The drive / limit impulses act on the rotor only; the
-        # rotor-coupling row spreads onto bodies as ``+/- n_hat * lam``.
-        # In legacy mode (``armature_a == 0``), the drive / limit
-        # path is bit-for-bit identical to the original.
+        # Axial drive + limit scalar PGS
         jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-
-        drive_residual_v = jv_axial
-        limit_residual_v = jv_axial
-        if rotor_active:
-            drive_residual_v = rotor_velocity
-            limit_residual_v = rotor_velocity
 
         lam_drive = wp.float32(0.0)
         if drive_active:
-            lam_drive = -eff_mass_drive_soft * (drive_residual_v - bias_drive + gamma_drive * acc_drive)
+            lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
             old_acc = acc_drive
             acc_drive = acc_drive + lam_drive
             if max_force_drive > wp.float32(0.0):
                 acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
             lam_drive = acc_drive - old_acc
-            if rotor_active:
-                rotor_velocity = rotor_velocity + lam_drive * inv_armature_a
 
         lam_limit = wp.float32(0.0)
         if limit_active:
-            if rotor_active:
-                limit_residual_v = rotor_velocity
             if pd_mode_limit:
                 if pd_mass > wp.float32(0.0):
-                    lam_limit = -pd_mass * (limit_residual_v - pd_beta + pd_gamma * acc_limit)
+                    lam_limit = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
             else:
                 if eff_axial > wp.float32(0.0):
-                    lam_unsoft = -eff_axial * (limit_residual_v + bias_box)
+                    lam_unsoft = -eff_axial * (jv_axial + bias_box)
                     lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
             old_acc_l = acc_limit
             acc_limit = acc_limit + lam_limit
@@ -3025,22 +2910,10 @@ def _revolute_iterate_at_multi(
             else:
                 acc_limit = wp.min(wp.float32(0.0), acc_limit)
             lam_limit = acc_limit - old_acc_l
-            if rotor_active:
-                rotor_velocity = rotor_velocity + lam_limit * inv_armature_a
 
-        if rotor_active:
-            # Rotor-coupling row: c = jv_axial - rotor_velocity = 0.
-            # Bodies see ``+/- n_hat * lam_coupling``; rotor sees
-            # ``-lam_coupling / a``.
-            c_coupling = jv_axial - rotor_velocity
-            lam_coupling = -eff_mass_coupling * c_coupling
-            rotor_velocity = rotor_velocity - lam_coupling * inv_armature_a
-            angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * lam_coupling)
-            angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * lam_coupling)
-        else:
-            axial_lam = lam_drive + lam_limit
-            angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
-            angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
+        axial_lam = lam_drive + lam_limit
+        angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
+        angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
         it += 1
 
@@ -3056,8 +2929,6 @@ def _revolute_iterate_at_multi(
         write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
     if limit_active:
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
-    if rotor_active:
-        write_float(constraints, base_offset + _OFF_ROTOR_VELOCITY, cid, rotor_velocity)
 
 
 @wp.func
