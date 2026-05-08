@@ -152,6 +152,61 @@ def _encode_vec3_uint64(x: float, y: float, z: float) -> int:
     return ((e & 0xF) << 60) | ((ix & 0xFFFFF) << 40) | ((iy & 0xFFFFF) << 20) | (iz & 0xFFFFF)
 
 
+def _canonicalize_triangle(
+    point_a: Vec3,
+    point_b: Vec3,
+    point_c: Vec3,
+) -> tuple[wp.transform, float, float, float]:
+    """Map three triangle vertices to ``(xform, edge_ab, c_y, c_z)``.
+
+    The :data:`GeoType.TRIANGLE` and :data:`GeoType.TETRAHEDRON`
+    primitives store vertex A at the local origin, B at
+    ``(0, 0, edge_ab)`` along local +Z, and C at ``(0, c_y, c_z)`` in
+    the local YZ plane. The face normal points along local +X.
+
+    Given any three non-colinear input points, this returns the rigid
+    transform whose origin is ``A`` and whose rotation maps the
+    canonical local axes onto the world (or body-local) frame so that
+    placing the canonical triangle through ``xform`` recovers the
+    requested vertices. The face normal direction follows the
+    right-hand rule on ``(B - A) x (C - A)``.
+
+    Raises:
+        ValueError: If ``|B - A|`` is degenerate or A, B, C are
+            colinear (zero triangle area).
+    """
+    a = np.asarray(point_a, dtype=np.float64).reshape(3)
+    b = np.asarray(point_b, dtype=np.float64).reshape(3)
+    c = np.asarray(point_c, dtype=np.float64).reshape(3)
+
+    ab = b - a
+    ac = c - a
+    edge_ab = float(np.linalg.norm(ab))
+    if edge_ab <= 1.0e-12:
+        raise ValueError(f"Degenerate triangle: |B - A| = {edge_ab} is too small.")
+
+    # Canonical convention: local +Z = AB / |AB|, local +Y points from
+    # the AB edge toward C (so c_y > 0), and local +X = +Y x +Z so the
+    # face normal lies along local +X (right-handed frame).
+    local_z = ab / edge_ab
+    c_z = float(np.dot(ac, local_z))
+    perp = ac - c_z * local_z
+    perp_norm = float(np.linalg.norm(perp))
+    if perp_norm <= 1.0e-12 * edge_ab:
+        raise ValueError(
+            f"Degenerate triangle: A={tuple(a)}, B={tuple(b)}, C={tuple(c)} "
+            "are colinear (zero area)."
+        )
+    local_y = perp / perp_norm
+    c_y = perp_norm
+    local_x = np.cross(local_y, local_z)
+
+    rot = np.column_stack((local_x, local_y, local_z)).astype(np.float32)
+    q = wp.quat_from_matrix(wp.mat33(rot.flatten()))
+    xform = wp.transform(p=wp.vec3(float(a[0]), float(a[1]), float(a[2])), q=q)
+    return xform, edge_ab, c_y, c_z
+
+
 class ModelBuilder:
     """A helper class for building simulation models at runtime.
 
@@ -6061,9 +6116,9 @@ class ModelBuilder:
     def add_shape_triangle(
         self,
         body: int,
-        xform: Transform | None = None,
-        edge_ab: float = 1.0,
-        point_c: tuple[float, float] = (1.0, 0.0),
+        point_a: Vec3,
+        point_b: Vec3,
+        point_c: Vec3,
         cfg: ShapeConfig | None = None,
         as_site: bool = False,
         color: Vec3 | None = None,
@@ -6072,44 +6127,38 @@ class ModelBuilder:
     ) -> int:
         """Adds a single-triangle collision shape or site to a body.
 
-        The triangle is defined in a canonical local frame:
+        The triangle is defined directly by its three vertices ``A``,
+        ``B``, ``C`` in either world coordinates (``body=-1``) or
+        body-local coordinates (``body >= 0``).
 
-        - Vertex A is at the local origin ``(0, 0, 0)``.
-        - Edge AB is aligned with the local +Z axis, so ``B = (0, 0, edge_ab)``.
-        - Vertex C lies in the local YZ plane, so ``C = (0, point_c[0], point_c[1])``.
+        Internally the three points are rebased to the engine's
+        canonical local frame -- vertex A at the local origin, edge AB
+        along local +Z, and vertex C in the local YZ plane on the
+        ``c_y > 0`` side -- and the rigid offset that places the
+        canonical triangle at the supplied vertices is folded into the
+        shape's transform.
 
-        Any triangle in world space can be represented by combining the
-        three shape parameters with the rigid transform ``xform`` (origin and
-        orientation). Non-uniform scale is *not* used to deform the triangle:
-        the canonical triangle is planar in YZ and scaling along X has no
-        effect, so the three vertex degrees of freedom are exposed as
-        explicit parameters instead.
-
-        The triangle is treated as a double-sided thin shell for collision
-        (no front/back distinction). For mass / inertia the triangle is
-        interpreted as a thin prism extruded symmetrically along the local
-        +X axis by ``±cfg.margin``, so the full prism thickness equals
-        ``2 * cfg.margin`` and the body's center of mass lands at the
-        triangle centroid ``(0, point_c[0]/3, (edge_ab + point_c[1])/3)``.
+        The triangle is treated as a double-sided thin shell for
+        collision (no front/back distinction). For mass / inertia the
+        triangle is interpreted as a thin prism extruded symmetrically
+        along the face normal by ``±cfg.margin``, so the full prism
+        thickness equals ``2 * cfg.margin`` and the body's center of
+        mass lands at the triangle centroid ``(A + B + C) / 3``.
         Hydroelastic contact is not supported for triangles.
 
         Args:
-            body: The index of the parent body this shape belongs to. Use
-                ``-1`` for shapes not attached to any specific body.
-            xform: The transform of the triangle in the parent body's local
-                frame. If ``None``, the identity transform is used.
-            edge_ab [m]: Length ``|AB|`` of the first edge. Must be
-                positive.
-            point_c [m]: Coordinates ``(c_y, c_z)`` of vertex C in the local
-                YZ plane. The first component should be positive to keep the
-                triangle non-degenerate; either component may be zero or
-                negative as long as the resulting triangle has non-zero
-                area.
-            cfg: The configuration for the shape's properties. If ``None``,
-                uses :attr:`default_shape_cfg` (or :attr:`default_site_cfg`
-                when ``as_site=True``).
-            as_site: If ``True``, creates a site (non-colliding reference
-                point) instead of a collision shape.
+            body: The index of the parent body this shape belongs to.
+                Use ``-1`` for shapes not attached to any specific body.
+            point_a [m]: First triangle vertex.
+            point_b [m]: Second triangle vertex. Must differ from
+                ``point_a``.
+            point_c [m]: Third triangle vertex. Must not be colinear
+                with ``A`` and ``B``.
+            cfg: The configuration for the shape's properties. If
+                ``None``, uses :attr:`default_shape_cfg` (or
+                :attr:`default_site_cfg` when ``as_site=True``).
+            as_site: If ``True``, creates a site (non-colliding
+                reference point) instead of a collision shape.
             color: Optional display RGB color with values in [0, 1]. If
                 ``None``, uses the per-shape palette color.
             label: Optional unique label for identifying the shape.
@@ -6125,27 +6174,9 @@ class ModelBuilder:
             cfg = cfg.copy()
             cfg.mark_as_site()
 
-        if xform is None:
-            xform = wp.transform()
-        else:
-            xform = wp.transform(*xform)
+        xform, edge_ab, c_y, c_z = _canonicalize_triangle(point_a, point_b, point_c)
 
-        if edge_ab <= 0.0:
-            raise ValueError(f"edge_ab must be positive, got {edge_ab}.")
-
-        c_y = float(point_c[0])
-        c_z = float(point_c[1])
-
-        # Reject triangles with vanishing area. The canonical triangle has
-        # vertices A=(0,0,0), B=(0,0,edge_ab), C=(0,c_y,c_z); its (signed) area
-        # along the local +X normal is 0.5 * |edge_ab * c_y|.
-        if abs(edge_ab * c_y) < 1.0e-12:
-            raise ValueError(
-                f"Degenerate triangle: edge_ab={edge_ab}, point_c={point_c} "
-                "produce zero area. point_c[0] (c_y) must be non-zero."
-            )
-
-        scale = wp.vec3(float(edge_ab), c_y, c_z)
+        scale = wp.vec3(edge_ab, c_y, c_z)
         return self.add_shape(
             body=body,
             type=GeoType.TRIANGLE,
@@ -6160,10 +6191,10 @@ class ModelBuilder:
     def add_shape_tetrahedron(
         self,
         body: int,
-        xform: Transform | None = None,
-        edge_ab: float = 1.0,
-        point_c: tuple[float, float] = (1.0, 0.0),
-        point_d: tuple[float, float, float] = (1.0, 0.5, 0.5),
+        point_a: Vec3,
+        point_b: Vec3,
+        point_c: Vec3,
+        point_d: Vec3,
         cfg: ShapeConfig | None = None,
         as_site: bool = False,
         color: Vec3 | None = None,
@@ -6172,24 +6203,21 @@ class ModelBuilder:
     ) -> int:
         """Adds a single solid tetrahedron collision shape or site to a body.
 
-        The tetrahedron is defined in a canonical local frame:
+        The tetrahedron is defined directly by its four vertices ``A``,
+        ``B``, ``C``, ``D`` in either world coordinates (``body=-1``) or
+        body-local coordinates (``body >= 0``).
 
-        - Vertex A is at the local origin ``(0, 0, 0)``.
-        - Edge AB is aligned with the local +Z axis, so ``B = (0, 0, edge_ab)``.
-        - Vertex C lies in the local YZ plane, so ``C = (0, point_c[0], point_c[1])``.
-        - Vertex D is unconstrained in the local frame: ``D = point_d``.
-
-        The first three canonical degrees of freedom (the shape origin,
-        orientation, and the mirror-symmetry of the YZ plane) are
-        absorbed by the rigid shape transform, leaving the six scalars
-        ``(edge_ab, c_y, c_z, d_x, d_y, d_z)`` as the unique parameters
-        of the tetrahedron's geometry. ``(edge_ab, c_y, c_z)`` pack
-        directly into :attr:`~newton.Model.shape_scale` -- exactly as
-        for :data:`~newton.GeoType.TRIANGLE`. ``D = point_d`` is
-        quantised into a single 64-bit word and stored in
-        :attr:`~newton.Model.shape_source_ptr` via
-        :func:`encode_vec3 <newton._src.geometry.support_function.encode_vec3>`;
-        the narrow phase decodes it back on the fly.
+        Internally the four points are rebased to the engine's canonical
+        local frame -- vertex A at the local origin, edge AB along
+        local +Z, vertex C in the local YZ plane, vertex D unconstrained
+        -- so that the canonical tet placed through the shape's
+        transform recovers the supplied vertices. The first three
+        canonical parameters ``(edge_ab, c_y, c_z)`` pack directly into
+        :attr:`~newton.Model.shape_scale`; vertex D's local coordinates
+        are quantised into the per-shape ``shape_source_ptr`` ``uint64``
+        slot via
+        :func:`encode_vec3 <newton._src.geometry.support_function.encode_vec3>`,
+        and the narrow phase decodes it on the GPU.
 
         For mass / inertia (when ``cfg.density`` is set) the tetrahedron
         is treated as a uniform-density solid: the body's mass is
@@ -6201,20 +6229,14 @@ class ModelBuilder:
         prism interpretation). Hydroelastic contact is not supported.
 
         Args:
-            body: The index of the parent body this shape belongs to. Use
-                ``-1`` for shapes not attached to any specific body.
-            xform: The transform of the tetrahedron in the parent body's
-                local frame. If ``None``, the identity transform is
-                used.
-            edge_ab [m]: Length ``|AB|`` of the first canonical edge.
-                Must be positive.
-            point_c [m]: Coordinates ``(c_y, c_z)`` of vertex C in the
-                local YZ plane. ``c_y`` must be non-zero so triangle
-                ABC has non-zero area.
-            point_d [m]: Coordinates ``(d_x, d_y, d_z)`` of the 4th
-                vertex in the local frame. ``d_x`` must be non-zero so
-                D is off the YZ plane and the four vertices are
-                non-coplanar (i.e. the tet has non-zero volume).
+            body: The index of the parent body this shape belongs to.
+                Use ``-1`` for shapes not attached to any specific body.
+            point_a [m]: First vertex.
+            point_b [m]: Second vertex. Must differ from ``point_a``.
+            point_c [m]: Third vertex. Must not be colinear with A
+                and B.
+            point_d [m]: Fourth vertex. Must not be coplanar with A,
+                B, C (else the tet has zero volume).
             cfg: The configuration for the shape's properties. If
                 ``None``, uses :attr:`default_shape_cfg` (or
                 :attr:`default_site_cfg` when ``as_site=True``).
@@ -6235,43 +6257,28 @@ class ModelBuilder:
             cfg = cfg.copy()
             cfg.mark_as_site()
 
-        if xform is None:
-            xform = wp.transform()
-        else:
-            xform = wp.transform(*xform)
+        xform, edge_ab, c_y, c_z = _canonicalize_triangle(point_a, point_b, point_c)
 
-        if edge_ab <= 0.0:
-            raise ValueError(f"edge_ab must be positive, got {edge_ab}.")
+        # Express D in the canonical local frame: subtract A and rotate
+        # by the inverse of the canonical rotation. ``transform_inverse``
+        # does exactly that for the position part of a rigid transform.
+        d_world = wp.vec3(float(point_d[0]), float(point_d[1]), float(point_d[2]))
+        d_local = wp.transform_point(wp.transform_inverse(xform), d_world)
+        d_x = float(d_local[0])
+        d_y = float(d_local[1])
+        d_z = float(d_local[2])
 
-        c_y = float(point_c[0])
-        c_z = float(point_c[1])
-        d_x = float(point_d[0])
-        d_y = float(point_d[1])
-        d_z = float(point_d[2])
-
-        # Reject degenerate tetrahedra. Volume is
-        #     V = | det( B-A, C-A, D-A ) | / 6
-        # which with our canonical form simplifies to
-        #     det = (0, 0, edge_ab) . ( (0, c_y, c_z) x (d_x, d_y, d_z) )
-        #         = edge_ab * (0 * d_y - c_y * d_x)  (only z-component matters)
-        #         = -edge_ab * c_y * d_x
-        # so V = |edge_ab * c_y * d_x| / 6. Both ``c_y`` (triangle ABC
-        # non-degenerate) and ``d_x`` (D off the YZ plane) must be
-        # non-zero.
-        if abs(edge_ab * c_y) < 1.0e-12:
-            raise ValueError(
-                f"Degenerate tetrahedron: triangle ABC has zero area "
-                f"(edge_ab={edge_ab}, point_c={point_c}). "
-                "point_c[0] (c_y) must be non-zero."
-            )
+        # Volume = | det(B-A, C-A, D-A) | / 6. With (edge_ab, c_y, c_z)
+        # well-defined by ``_canonicalize_triangle``, the only remaining
+        # degeneracy is D coplanar with ABC, which corresponds to
+        # ``d_x == 0`` (D in the canonical YZ plane).
         if abs(d_x) < 1.0e-12:
             raise ValueError(
-                f"Degenerate tetrahedron: point_d[0] (d_x = {d_x}) must "
-                "be non-zero so vertex D lies off the YZ plane and the "
-                "four vertices are non-coplanar."
+                f"Degenerate tetrahedron: vertex D={tuple(point_d)} is "
+                "coplanar with A, B, C (zero volume)."
             )
 
-        scale = wp.vec3(float(edge_ab), c_y, c_z)
+        scale = wp.vec3(edge_ab, c_y, c_z)
         # The Python-side ``shape_source`` slot carries D until
         # :meth:`finalize` encodes it into the ``shape_source_ptr``
         # uint64. ``_TetrahedronVertexD`` is hashable and isinstance-

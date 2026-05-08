@@ -33,15 +33,15 @@ def _make_sphere_on_triangle_model() -> newton.Model:
     """Static triangle (face up) + dynamic sphere just above the face."""
     mb = newton.ModelBuilder()
 
-    # Place the triangle flat so its face normal points along world +Z.
-    # Canonical triangle face normal is local +X. Rotate +X -> +Z via
-    # a +90 deg rotation about world +Y.
-    rot = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 2.0)
+    # Right triangle in the world XY plane with vertex A at the origin.
+    # ``add_shape_triangle`` derives the canonical local frame from the
+    # three points and orients the triangle so its face normal points
+    # along (B - A) x (C - A) -- here world +Z.
     mb.add_shape_triangle(
         body=-1,
-        xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), rot),
-        edge_ab=2.0,
-        point_c=(2.0, 0.0),
+        point_a=wp.vec3(0.0, 0.0, 0.0),
+        point_b=wp.vec3(2.0, 0.0, 0.0),
+        point_c=wp.vec3(0.0, 2.0, 0.0),
         cfg=newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5),
     )
 

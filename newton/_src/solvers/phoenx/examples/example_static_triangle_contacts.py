@@ -6,15 +6,24 @@
 #
 # Scene contents:
 #   * Ground plane (static, ``shape_body == -1``).
-#   * Two single-triangle meshes intentionally placed so their geometry
-#     interpenetrates. Both are static (``body=-1``). Used to inspect
-#     whether the collision pipeline emits contacts between two
+#   * Two :data:`newton.GeoType.TRIANGLE` primitives stacked parallel
+#     to each other and separated along world +Z by 0.01 m. Both are
+#     static (``body=-1``). Each has ``margin=0.005`` and ``gap=0.03``
+#     so the broad / narrow phase pair lookups should fire even though
+#     the geometric surfaces don't intersect. Used to inspect whether
+#     the collision pipeline emits contacts between two
 #     ``shape_body == -1`` shapes.
+#
+#     ``GeoType.TRIANGLE`` is a first-class primitive: the three
+#     vertices are packed into ``shape_scale`` (12 B) plus the rigid
+#     ``shape_transform`` (28 B). No ``wp.Mesh``, no BVH, no per-vertex
+#     buffers -- the cheapest possible triangle representation, which
+#     is exactly what we want for a debug scene.
 #   * One ordinary dynamic sphere dropped onto the ground plane. Its
 #     sphere-vs-plane contact is the control case that confirms the
 #     viewer's contact arrows are being rendered at all.
 #
-# Starts paused so the initial overlap is visible. Press SPACE in the
+# Starts paused so the initial layout is visible. Press SPACE in the
 # ViewerGL window to step.
 #
 # Run: python -m newton._src.solvers.phoenx.examples.example_static_triangle_contacts
@@ -22,7 +31,8 @@
 
 from __future__ import annotations
 
-import numpy as np
+import math
+
 import warp as wp
 
 import newton
@@ -32,36 +42,43 @@ from newton._src.solvers.phoenx.examples._ported_example_base import (
     run_ported_example,
 )
 
-#: Half edge length of each debug triangle. The two triangles share the
-#: world origin in XY and are offset along Z by less than their height
-#: so their volumes interpenetrate.
-TRI_HALF_EDGE = 1.0
+#: Equilateral debug triangle. Side length ``s``; the three corners
+#: lie in a horizontal plane and are arranged around the origin.
+TRI_SIDE = 1.5
+_HALF = 0.5 * TRI_SIDE
+_HEIGHT = TRI_SIDE * math.sqrt(3.0) / 2.0
+#: Centroid offset from vertex C in the canonical equilateral layout.
+_C_OFFSET_Y = (1.0 / 3.0) * _HEIGHT
+
+
+def _equilateral_corners(z: float) -> tuple[wp.vec3, wp.vec3, wp.vec3]:
+    """Three corners of a horizontal equilateral triangle at height z."""
+    return (
+        wp.vec3(-_HALF, -_C_OFFSET_Y, z),
+        wp.vec3(_HALF, -_C_OFFSET_Y, z),
+        wp.vec3(0.0, _HEIGHT - _C_OFFSET_Y, z),
+    )
+
+
+#: Two parallel triangles, identical XY footprint, separated along world
+#: +Z by ``TRI_SEPARATION``. With margin=0.005 per triangle the combined
+#: contact corridor is 0.01 m, exactly the geometric gap, so the broad
+#: phase should still flag the pair if it considers the margins (and
+#: produce a near-zero distance contact).
 TRI_Z_A = 1.0
-TRI_Z_B = 1.3
+TRI_SEPARATION = 0.01
+TRI_Z_B = TRI_Z_A + TRI_SEPARATION
+
+#: Per-shape collision parameters for the two debug triangles. ``margin``
+#: extrudes the triangle's contact surface symmetrically along its face
+#: normal; ``gap`` is the additional broad-phase / contact-report
+#: distance band around the shape.
+TRI_MARGIN = 0.005
+TRI_GAP = 0.03
 
 #: Falling sphere parameters (control case for contact rendering).
 SPHERE_RADIUS = 0.3
 SPHERE_START = (3.0, 0.0, 2.0)
-
-
-def _equilateral_triangle_mesh(half_edge: float) -> newton.Mesh:
-    """Single CCW-wound triangle in the XY plane, centred at the origin.
-
-    The triangle is a flat sheet (one face). It's added as a regular
-    ``GeoType.MESH``; PhoenX's narrow phase treats it as a thin
-    triangle-soup collider.
-    """
-    h = float(half_edge)
-    vertices = np.array(
-        [
-            [-h, -h * 0.577, 0.0],
-            [h, -h * 0.577, 0.0],
-            [0.0, h * 1.155, 0.0],
-        ],
-        dtype=np.float32,
-    )
-    indices = np.array([0, 1, 2], dtype=np.int32)
-    return newton.Mesh(vertices, indices)
 
 
 class Example(PortedExample):
@@ -75,33 +92,40 @@ class Example(PortedExample):
     start_paused = True
 
     def build_scene(self, builder: newton.ModelBuilder):
-        builder.add_ground_plane()
+        builder.add_ground_plane(height=-5)
 
-        # ---- Two overlapping static triangles ------------------------
+        # ---- Two parallel static triangles ---------------------------
         # Both attach to the world (body=-1). The builder auto-adds a
         # collision-filter pair between shapes that share the same body
         # bucket -- including the ``-1`` (no-body) bucket -- so by
         # default these two will be filtered out. We undo that filter
         # below so we can actually observe whether the pipeline would
         # have emitted contacts between them.
-        tri_mesh = _equilateral_triangle_mesh(TRI_HALF_EDGE)
-        cfg_static = newton.ModelBuilder.ShapeConfig(density=0.0)
+        cfg_static = newton.ModelBuilder.ShapeConfig(
+            density=0.0,
+            margin=TRI_MARGIN,
+            gap=TRI_GAP,
+        )
 
-        tri_a = builder.add_shape_mesh(
+        a_a, a_b, a_c = _equilateral_corners(TRI_Z_A)
+        tri_a = builder.add_shape_triangle(
             body=-1,
-            mesh=tri_mesh,
-            xform=wp.transform(p=wp.vec3(0.0, 0.0, TRI_Z_A), q=wp.quat_identity()),
+            point_a=a_a,
+            point_b=a_b,
+            point_c=a_c,
             cfg=cfg_static,
             color=(0.85, 0.25, 0.25),
             label="static_tri_a",
         )
-        tri_b = builder.add_shape_mesh(
+
+        # Second triangle: same XY footprint, lifted by ``TRI_SEPARATION``
+        # along world +Z so the two triangles are parallel and stacked.
+        b_a, b_b, b_c = _equilateral_corners(TRI_Z_B)
+        tri_b = builder.add_shape_triangle(
             body=-1,
-            mesh=tri_mesh,
-            xform=wp.transform(
-                p=wp.vec3(0.2, 0.0, TRI_Z_B),
-                q=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.4),
-            ),
+            point_a=b_a,
+            point_b=b_b,
+            point_c=b_c,
             cfg=cfg_static,
             color=(0.25, 0.55, 0.85),
             label="static_tri_b",

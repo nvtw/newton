@@ -304,8 +304,6 @@ def build_adbs_init_arrays(
     effort_limit = _pull_dof_f(model.joint_effort_limit)
     limit_lower = _pull_dof_f(model.joint_limit_lower)
     limit_upper = _pull_dof_f(model.joint_limit_upper)
-    limit_ke = _pull_dof_f(model.joint_limit_ke)
-    limit_kd = _pull_dof_f(model.joint_limit_kd)
     joint_enabled = model.joint_enabled.numpy() if model.joint_enabled is not None else np.ones(n_joints, dtype=bool)
 
     # ---- Walk joints --------------------------------------------------
@@ -472,21 +470,30 @@ def build_adbs_init_arrays(
                 max_force = raw if np.isfinite(raw) else 0.0
             if target_mode is not None:
                 drive_mode = _newton_target_mode_to_adbs_drive_mode(int(target_mode[qd_start]), stiff_drive, damp_drive)
-            # Limits (PhoenX PD path if either gain is > 0). PhoenX's
-            # cumulative angle is relative to the init pose, not
-            # absolute; subtract the init joint coord so the limit
-            # window means the same angle range as Newton's
-            # absolute [limit_lower, limit_upper].
+            # Limits act as rigid hard stops. Newton's ``limit_ke`` /
+            # ``limit_kd`` (defaults 1e4 N/m, 10 N*s/m for prismatic;
+            # equivalent for revolute) are XPBD-tuned soft penalty
+            # gains that don't translate cleanly to PhoenX's absolute
+            # SI PD path -- on a 1 kg slider with gravity they engage
+            # as a barely-stiff spring and let the body overshoot the
+            # limit by ~0.2 m. SolverXPBD also ignores ``limit_ke`` /
+            # ``limit_kd`` and treats limits as hard positional
+            # constraints (see :class:`SolverXPBD` docstring), so
+            # forwarding through the rigid Box2D path
+            # (``hertz_limit = DEFAULT_HERTZ_LIMIT = 1e9``) matches the
+            # Newton-side contract. Users who explicitly want a soft
+            # PD limit can drive PhoenX's
+            # :meth:`PhoenXWorld.initialize_actuated_double_ball_socket_joints`
+            # directly. PhoenX's cumulative angle/slide is relative to
+            # the init pose, not absolute; the ``init_q`` offset below
+            # remaps Newton's absolute limit window onto that
+            # cumulative-from-init coordinate.
             if limit_lower is not None and limit_upper is not None:
                 lo = float(limit_lower[qd_start])
                 hi = float(limit_upper[qd_start])
                 if lo <= hi:
                     min_val = lo
                     max_val = hi
-            if limit_ke is not None:
-                stiff_limit = float(limit_ke[qd_start])
-            if limit_kd is not None:
-                damp_limit = float(limit_kd[qd_start])
             if joint_armature is not None and qd_start < len(joint_armature):
                 armature_val = float(joint_armature[qd_start])
         else:  # pragma: no cover -- defensive

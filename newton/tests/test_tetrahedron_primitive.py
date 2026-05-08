@@ -3,13 +3,14 @@
 
 """Tests for the first-class :data:`newton.GeoType.TETRAHEDRON` primitive.
 
-The tetrahedron primitive is a single solid-tet collider with the
-canonical local frame:
+The tetrahedron primitive is a single solid-tet collider built from four
+explicit vertices. Internally the points are rebased to a canonical
+local frame:
 
-    A = (0, 0, 0)
-    B = (0, 0, edge_ab)
-    C = (0, c_y, c_z)
-    D = (d_x, d_y, d_z)
+    A_local = (0, 0, 0)
+    B_local = (0, 0, edge_ab)
+    C_local = (0, c_y, c_z)
+    D_local = (d_x, d_y, d_z)
 
 The first three free parameters ``(edge_ab, c_y, c_z)`` pack into
 ``shape_scale`` exactly as for :data:`newton.GeoType.TRIANGLE`. The 4th
@@ -21,7 +22,8 @@ narrow phase decodes it back on the fly.
 
 These tests cover:
 
-1. ``ModelBuilder.add_shape_tetrahedron`` parameter validation.
+1. ``ModelBuilder.add_shape_tetrahedron`` parameter validation and
+   point-based -> canonical-frame mapping.
 2. ``encode_vec3`` / ``decode_vec3`` Python-vs-Warp parity (the
    builder encodes on the host, the kernel decodes on the device --
    if these drift the support function reads garbage).
@@ -44,13 +46,23 @@ from newton._src.geometry.types import GeoType
 _cuda_available = wp.is_cuda_available()
 
 
+# Canonical "default" tet vertices used throughout the tests as a
+# reference shape: matches the old default ``(edge_ab=1, point_c=(1,0),
+# point_d=(0.5, 0.5, 0.5))`` parameterisation laid out in the world frame
+# with A at the origin so the body-local and world-local interpretations
+# coincide.
+DEFAULT_TET_VERTICES = (
+    (0.0, 0.0, 0.0),  # A
+    (0.0, 0.0, 1.0),  # B
+    (0.0, 1.0, 0.0),  # C
+    (0.5, 0.5, 0.5),  # D
+)
+
+
 def _build_sphere_vs_tetrahedron(
     sphere_pos,
     sphere_radius=0.2,
-    edge_ab=1.0,
-    point_c=(1.0, 0.0),
-    point_d=(0.5, 0.5, 0.5),
-    tet_xform=None,
+    tet_vertices=DEFAULT_TET_VERTICES,
 ):
     """Build a scene with a static tetrahedron (body=-1) and a sphere body."""
     builder = newton.ModelBuilder()
@@ -58,15 +70,13 @@ def _build_sphere_vs_tetrahedron(
     builder.default_shape_cfg.margin = 0.0
     builder.default_shape_cfg.gap = 0.0
 
-    if tet_xform is None:
-        tet_xform = wp.transform_identity()
-
+    a, b, c, d = tet_vertices
     builder.add_shape_tetrahedron(
         body=-1,
-        xform=tet_xform,
-        edge_ab=edge_ab,
-        point_c=point_c,
-        point_d=point_d,
+        point_a=wp.vec3(*a),
+        point_b=wp.vec3(*b),
+        point_c=wp.vec3(*c),
+        point_d=wp.vec3(*d),
     )
 
     body = builder.add_body(xform=wp.transform(wp.vec3(*sphere_pos), wp.quat_identity()))
@@ -86,34 +96,30 @@ def _collide(model, cp, state):
 class TestTetrahedronBuilder(unittest.TestCase):
     """``add_shape_tetrahedron`` parameter handling and storage."""
 
-    def test_default_parameters_create_unit_tet(self):
-        builder = newton.ModelBuilder()
-        idx = builder.add_shape_tetrahedron(body=-1)
-        self.assertEqual(builder.shape_type[idx], GeoType.TETRAHEDRON)
-        scale = builder.shape_scale[idx]
-        self.assertAlmostEqual(scale[0], 1.0)
-        self.assertAlmostEqual(scale[1], 1.0)
-        self.assertAlmostEqual(scale[2], 0.0)
-        # ``shape_source[idx]`` is the ``_TetrahedronVertexD`` carrier.
-        d = builder.shape_source[idx]
-        self.assertAlmostEqual(d.d_x, 1.0)
-        self.assertAlmostEqual(d.d_y, 0.5)
-        self.assertAlmostEqual(d.d_z, 0.5)
-
-    def test_custom_parameters_stored_in_scale(self):
+    def test_default_vertices_round_trip_through_canonicalisation(self):
         builder = newton.ModelBuilder()
         idx = builder.add_shape_tetrahedron(
             body=-1,
-            edge_ab=2.5,
-            point_c=(1.5, -0.75),
-            point_d=(0.4, -0.2, 1.1),
+            point_a=wp.vec3(*DEFAULT_TET_VERTICES[0]),
+            point_b=wp.vec3(*DEFAULT_TET_VERTICES[1]),
+            point_c=wp.vec3(*DEFAULT_TET_VERTICES[2]),
+            point_d=wp.vec3(*DEFAULT_TET_VERTICES[3]),
         )
-        self.assertEqual(idx, 0)
-        np.testing.assert_allclose(
-            tuple(builder.shape_scale[idx]),
-            (2.5, 1.5, -0.75),
-            atol=1e-6,
-        )
+        self.assertEqual(builder.shape_type[idx], GeoType.TETRAHEDRON)
+        scale = builder.shape_scale[idx]
+        # |AB| = 1, AC perpendicular to AB so c_y = |AC| = 1 and c_z = 0.
+        self.assertAlmostEqual(scale[0], 1.0, places=5)
+        self.assertAlmostEqual(scale[1], 1.0, places=5)
+        self.assertAlmostEqual(scale[2], 0.0, places=5)
+        # ``shape_source[idx]`` is the ``_TetrahedronVertexD`` carrier
+        # holding D's coordinates in the canonical local frame.
+        d = builder.shape_source[idx]
+        # In the canonical frame for default vertices, D lies at
+        # (d_x = 0.5, d_y = 0.5, d_z = 0.5) (the chosen rotation
+        # matches the historical default exactly).
+        self.assertAlmostEqual(d.d_x, 0.5, places=5)
+        self.assertAlmostEqual(d.d_y, 0.5, places=5)
+        self.assertAlmostEqual(d.d_z, 0.5, places=5)
 
     def test_finalize_round_trips_d_through_encode_decode(self):
         # The builder host-encodes D into ``shape_source_ptr``; the test
@@ -125,18 +131,18 @@ class TestTetrahedronBuilder(unittest.TestCase):
         if not _cuda_available:
             self.skipTest("encode/decode round-trip kernel needs a CUDA device")
 
+        # Build a tet whose canonical D ends up at known coordinates.
+        # Using the vertices below the canonical local frame is exactly
+        # the world frame (A at origin, AB along +Z, AC in YZ plane), so
+        # D's local coordinates equal its world coordinates.
+        d_x, d_y, d_z = 0.55, -0.32, 1.18
         builder = newton.ModelBuilder()
-        edge_ab = 1.7
-        c_y = 1.3
-        c_z = 0.4
-        d_x = 0.55
-        d_y = -0.32
-        d_z = 1.18
         builder.add_shape_tetrahedron(
             body=-1,
-            edge_ab=edge_ab,
-            point_c=(c_y, c_z),
-            point_d=(d_x, d_y, d_z),
+            point_a=wp.vec3(0.0, 0.0, 0.0),
+            point_b=wp.vec3(0.0, 0.0, 1.7),
+            point_c=wp.vec3(0.0, 1.3, 0.4),
+            point_d=wp.vec3(d_x, d_y, d_z),
         )
         model = builder.finalize()
         encoded = model.shape_source_ptr.numpy()[0]
@@ -154,26 +160,39 @@ class TestTetrahedronBuilder(unittest.TestCase):
         decoded = out_arr.numpy()[0]
         np.testing.assert_allclose(decoded, (d_x, d_y, d_z), atol=5e-6)
 
-    def test_negative_edge_ab_raises(self):
+    def test_degenerate_a_equals_b_raises(self):
         builder = newton.ModelBuilder()
         with self.assertRaises(ValueError):
-            builder.add_shape_tetrahedron(body=-1, edge_ab=-1.0)
+            builder.add_shape_tetrahedron(
+                body=-1,
+                point_a=wp.vec3(0.0, 0.0, 0.0),
+                point_b=wp.vec3(0.0, 0.0, 0.0),
+                point_c=wp.vec3(0.0, 1.0, 0.0),
+                point_d=wp.vec3(0.5, 0.5, 0.5),
+            )
 
-    def test_zero_edge_ab_raises(self):
+    def test_degenerate_collinear_abc_raises(self):
         builder = newton.ModelBuilder()
         with self.assertRaises(ValueError):
-            builder.add_shape_tetrahedron(body=-1, edge_ab=0.0)
+            builder.add_shape_tetrahedron(
+                body=-1,
+                point_a=wp.vec3(0.0, 0.0, 0.0),
+                point_b=wp.vec3(0.0, 0.0, 1.0),
+                point_c=wp.vec3(0.0, 0.0, 0.5),  # on AB line
+                point_d=wp.vec3(0.5, 0.5, 0.5),
+            )
 
-    def test_degenerate_zero_c_y_raises(self):
+    def test_degenerate_d_coplanar_with_abc_raises(self):
+        # Place D exactly on the ABC plane (here YZ, x = 0) -> zero volume.
         builder = newton.ModelBuilder()
         with self.assertRaises(ValueError):
-            builder.add_shape_tetrahedron(body=-1, point_c=(0.0, 0.5))
-
-    def test_degenerate_d_in_yz_plane_raises(self):
-        # d_x = 0 leaves D in the YZ plane (coplanar with A/B/C) -> zero volume.
-        builder = newton.ModelBuilder()
-        with self.assertRaises(ValueError):
-            builder.add_shape_tetrahedron(body=-1, point_d=(0.0, 0.5, 0.5))
+            builder.add_shape_tetrahedron(
+                body=-1,
+                point_a=wp.vec3(0.0, 0.0, 0.0),
+                point_b=wp.vec3(0.0, 0.0, 1.0),
+                point_c=wp.vec3(0.0, 1.0, 0.0),
+                point_d=wp.vec3(0.0, 0.5, 0.5),
+            )
 
     def test_geo_type_is_classified_as_primitive(self):
         self.assertTrue(GeoType.TETRAHEDRON.is_primitive)
@@ -301,7 +320,14 @@ class TestTetrahedronHydroelasticValidation(unittest.TestCase):
         cfg.validate(shape_type=GeoType.TETRAHEDRON)
 
         builder = newton.ModelBuilder()
-        idx = builder.add_shape_tetrahedron(body=-1, cfg=cfg)
+        idx = builder.add_shape_tetrahedron(
+            body=-1,
+            point_a=wp.vec3(*DEFAULT_TET_VERTICES[0]),
+            point_b=wp.vec3(*DEFAULT_TET_VERTICES[1]),
+            point_c=wp.vec3(*DEFAULT_TET_VERTICES[2]),
+            point_d=wp.vec3(*DEFAULT_TET_VERTICES[3]),
+            cfg=cfg,
+        )
         self.assertEqual(builder.shape_type[idx], GeoType.TETRAHEDRON)
 
 
@@ -313,19 +339,15 @@ class TestTetrahedronNarrowPhase(unittest.TestCase):
         # Place the sphere very close to the tet's centroid -- it must
         # be inside (or at least overlapping) so the narrow phase picks
         # up at least one contact.
-        edge_ab, c_y, c_z = 1.0, 1.0, 0.0
-        d_x, d_y, d_z = 1.0, 0.5, 0.5
+        a, b, c, d = DEFAULT_TET_VERTICES
         centroid = (
-            d_x * 0.25,
-            (c_y + d_y) * 0.25,
-            (edge_ab + c_z + d_z) * 0.25,
+            (a[0] + b[0] + c[0] + d[0]) * 0.25,
+            (a[1] + b[1] + c[1] + d[1]) * 0.25,
+            (a[2] + b[2] + c[2] + d[2]) * 0.25,
         )
         model, cp, state = _build_sphere_vs_tetrahedron(
             sphere_pos=centroid,
             sphere_radius=0.2,
-            edge_ab=edge_ab,
-            point_c=(c_y, c_z),
-            point_d=(d_x, d_y, d_z),
         )
         contacts = _collide(model, cp, state)
         count = int(contacts.rigid_contact_count.numpy()[0])
@@ -340,24 +362,27 @@ class TestTetrahedronNarrowPhase(unittest.TestCase):
         count = int(contacts.rigid_contact_count.numpy()[0])
         self.assertEqual(count, 0)
 
-    def test_world_transform_places_tetrahedron(self):
-        tet_origin = wp.vec3(10.0, 20.0, 30.0)
-        # Centroid for default tet (edge_ab=1, point_c=(1,0), point_d=(0.5,0.5,0.5)):
-        # ((0+0+0+0.5)/4, (0+0+1+0.5)/4, (0+1+0+0.5)/4) = (0.125, 0.375, 0.375)
-        sphere_local = wp.vec3(0.125, 0.375, 0.375)
-        sphere_world = (
-            float(tet_origin[0] + sphere_local[0]),
-            float(tet_origin[1] + sphere_local[1]),
-            float(tet_origin[2] + sphere_local[2]),
+    def test_translated_tetrahedron_collides(self):
+        # Translate every vertex by a fixed offset; sphere placed at the
+        # translated centroid should still collide.
+        offset = (10.0, 20.0, 30.0)
+        translated = tuple(
+            (v[0] + offset[0], v[1] + offset[1], v[2] + offset[2]) for v in DEFAULT_TET_VERTICES
+        )
+        a, b, c, d = translated
+        centroid = (
+            (a[0] + b[0] + c[0] + d[0]) * 0.25,
+            (a[1] + b[1] + c[1] + d[1]) * 0.25,
+            (a[2] + b[2] + c[2] + d[2]) * 0.25,
         )
         model, cp, state = _build_sphere_vs_tetrahedron(
-            sphere_pos=sphere_world,
+            sphere_pos=centroid,
             sphere_radius=0.2,
-            tet_xform=wp.transform(tet_origin, wp.quat_identity()),
+            tet_vertices=translated,
         )
         contacts = _collide(model, cp, state)
         count = int(contacts.rigid_contact_count.numpy()[0])
-        self.assertGreater(count, 0, "Tet should be translated in world space and collide")
+        self.assertGreater(count, 0, "Translated tet should still collide with overlapping sphere")
 
 
 if __name__ == "__main__":

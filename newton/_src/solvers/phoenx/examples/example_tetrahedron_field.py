@@ -202,9 +202,10 @@ class Example(PortedExample):
                     body = builder.add_body(xform=_random_tet_xform(rng, px, py, pz))
                     builder.add_shape_tetrahedron(
                         body=body,
-                        edge_ab=edge_ab,
-                        point_c=(c_y, c_z),
-                        point_d=(d_x, d_y, d_z),
+                        point_a=wp.vec3(0.0, 0.0, 0.0),
+                        point_b=wp.vec3(0.0, 0.0, edge_ab),
+                        point_c=wp.vec3(0.0, c_y, c_z),
+                        point_d=wp.vec3(d_x, d_y, d_z),
                         cfg=tet_cfg,
                     )
                     extents.append(_tet_picking_extent(edge_ab, c_y, c_z, d_x, d_y, d_z))

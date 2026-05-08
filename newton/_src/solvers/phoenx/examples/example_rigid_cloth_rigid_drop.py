@@ -55,81 +55,8 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
 # ---------------------------------------------------------------------
-# Triangle construction helpers (mirrored from example_triangle_cloth)
+# Triangle construction helpers
 # ---------------------------------------------------------------------
-
-
-def _quat_from_matrix(m: np.ndarray) -> tuple[float, float, float, float]:
-    """Convert a 3x3 rotation matrix to ``(x, y, z, w)``.
-
-    Branch-on-trace algorithm; numerically stable for any proper
-    rotation. Inlined to avoid pulling in scipy.
-    """
-    trace = m[0, 0] + m[1, 1] + m[2, 2]
-    if trace > 0.0:
-        s = 0.5 / float(np.sqrt(trace + 1.0))
-        w = 0.25 / s
-        x = (m[2, 1] - m[1, 2]) * s
-        y = (m[0, 2] - m[2, 0]) * s
-        z = (m[1, 0] - m[0, 1]) * s
-    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
-        s = 2.0 * float(np.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]))
-        w = (m[2, 1] - m[1, 2]) / s
-        x = 0.25 * s
-        y = (m[0, 1] + m[1, 0]) / s
-        z = (m[0, 2] + m[2, 0]) / s
-    elif m[1, 1] > m[2, 2]:
-        s = 2.0 * float(np.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]))
-        w = (m[0, 2] - m[2, 0]) / s
-        x = (m[0, 1] + m[1, 0]) / s
-        y = 0.25 * s
-        z = (m[1, 2] + m[2, 1]) / s
-    else:
-        s = 2.0 * float(np.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]))
-        w = (m[1, 0] - m[0, 1]) / s
-        x = (m[0, 2] + m[2, 0]) / s
-        y = (m[1, 2] + m[2, 1]) / s
-        z = 0.25 * s
-    return float(x), float(y), float(z), float(w)
-
-
-def _triangle_canonical_from_corners(
-    p_a: tuple[float, float, float],
-    p_b: tuple[float, float, float],
-    p_c: tuple[float, float, float],
-) -> tuple[wp.transform, float, float, float]:
-    """Map three world-space corners to the canonical triangle params + xform.
-
-    :data:`newton.GeoType.TRIANGLE` is parameterised in a canonical
-    local frame: A at the origin, B at ``(0, 0, edge_ab)`` along local
-    +Z, and C at ``(0, c_y, c_z)`` in the local YZ plane (``c_y > 0``).
-    Returns the rigid transform that places that canonical triangle on
-    the supplied world corners, plus ``(edge_ab, c_y, c_z)``.
-    """
-    a = np.asarray(p_a, dtype=np.float64)
-    b = np.asarray(p_b, dtype=np.float64)
-    c = np.asarray(p_c, dtype=np.float64)
-
-    ab = b - a
-    edge_ab = float(np.linalg.norm(ab))
-    if edge_ab <= 1.0e-12:
-        raise ValueError(f"Degenerate triangle: |AB| = 0 (a={p_a}, b={p_b})")
-    local_z = ab / edge_ab
-
-    ac = c - a
-    c_z = float(np.dot(ac, local_z))
-    perp = ac - c_z * local_z
-    perp_norm = float(np.linalg.norm(perp))
-    if perp_norm <= 1.0e-12:
-        raise ValueError(f"Degenerate triangle: A, B, C collinear (a={p_a}, b={p_b}, c={p_c})")
-    local_y = perp / perp_norm
-    c_y = perp_norm
-    local_x = np.cross(local_y, local_z)
-
-    rot_mat = np.column_stack((local_x, local_y, local_z)).astype(np.float64)
-    quat = _quat_from_matrix(rot_mat)
-    xform = wp.transform(p=wp.vec3(float(a[0]), float(a[1]), float(a[2])), q=wp.quat(*quat))
-    return xform, edge_ab, c_y, c_z
 
 
 def _world_to_local(
@@ -413,18 +340,23 @@ class Example:
                 )
                 for tri_verts, color in tri_specs:
                     p_a, p_b, p_c = (corners[v] for v in tri_verts)
-                    xform, edge_ab, c_y, c_z = _triangle_canonical_from_corners(p_a, p_b, p_c)
 
-                    body = builder.add_body(xform=xform)
+                    # Body frame == world frame; ``add_shape_triangle``
+                    # rebases the three vertices onto its canonical local
+                    # frame internally and folds the offset into the
+                    # shape's transform.
+                    body_xform = wp.transform_identity()
+                    body = builder.add_body(xform=body_xform)
                     builder.add_shape_triangle(
                         body=body,
-                        edge_ab=edge_ab,
-                        point_c=(c_y, c_z),
+                        point_a=wp.vec3(*p_a),
+                        point_b=wp.vec3(*p_b),
+                        point_c=wp.vec3(*p_c),
                         cfg=tri_cfg,
                         color=color,
                     )
                     for v in tri_verts:
-                        incident.setdefault(v, []).append((body, xform))
+                        incident.setdefault(v, []).append((body, body_xform))
 
         # ---- Pass 2: ball-socket joints at every shared corner ------
         # Chain consecutive incident bodies via the same anchor so the

@@ -199,8 +199,9 @@ class Example(PortedExample):
             body = builder.add_body(xform=_dynamic_triangle_xform(z, yaw, pitch))
             builder.add_shape_triangle(
                 body=body,
-                edge_ab=edge_ab,
-                point_c=(c_y, c_z),
+                point_a=wp.vec3(0.0, 0.0, 0.0),
+                point_b=wp.vec3(0.0, 0.0, edge_ab),
+                point_c=wp.vec3(0.0, c_y, c_z),
                 cfg=dyn_tri_cfg,
             )
             # Picking OBB: enclose vertices A, B, C in the canonical
