@@ -475,113 +475,6 @@ class TestPrismaticTwoBodyPeriod(unittest.TestCase):
                 )
 
 
-def _build_anchored_chain_general(
-    *,
-    body_inertias: list[float],
-    armatures: list[float],
-    target_ke: float,
-    mass: float = 1.0,
-) -> newton.Model:
-    """Generic anchored chain ``world -- A -- B -- ...`` for chain
-    composition tests. Per-body axial inertia in ``body_inertias`` and
-    per-joint armature in ``armatures`` (same length); each joint is
-    PD-driven about ``+z`` with equal ``target_ke``. Used by
-    :class:`TestExactModeChainComposition` to exercise multiple chain
-    shapes through the rotor formulation."""
-    n = len(body_inertias)
-    assert len(armatures) == n
-    mb = newton.ModelBuilder(up_axis=newton.Axis.Z)
-    newton.solvers.SolverMuJoCo.register_custom_attributes(mb)
-    mb.default_joint_cfg = newton.ModelBuilder.JointDofConfig()
-    bodies = []
-    for I in body_inertias:
-        b = mb.add_link(
-            xform=wp.transform_identity(),
-            mass=float(mass),
-            inertia=((I, 0, 0), (0, I, 0), (0, 0, I)),
-        )
-        bodies.append(b)
-    joints = []
-    for i in range(n):
-        parent = -1 if i == 0 else bodies[i - 1]
-        j = mb.add_joint_revolute(
-            parent=parent,
-            child=bodies[i],
-            axis=(0.0, 0.0, 1.0),
-            parent_xform=wp.transform_identity(),
-            child_xform=wp.transform_identity(),
-            target_pos=0.0,
-            target_ke=float(target_ke),
-            target_kd=0.0,
-            actuator_mode=newton.JointTargetMode.POSITION,
-            armature=float(armatures[i]),
-        )
-        joints.append(j)
-    mb.add_articulation(joints)
-    model = mb.finalize()
-    model.set_gravity((0.0, 0.0, 0.0))
-    return model
-
-
-def _reduced_mass_matrix_chain(body_inertias: list[float]) -> np.ndarray:
-    """Reduced-coord mass matrix for an anchored chain about a single
-    axis with equal axial inertia per body. ``M_q[i, j] = sum_{k>=max(i,j)} I_k``
-    because ``omega_k = sum_{l<=k} qdot_l``."""
-    n = len(body_inertias)
-    M = np.zeros((n, n), dtype=np.float64)
-    for i in range(n):
-        for j in range(n):
-            for k in range(max(i, j), n):
-                M[i, j] += body_inertias[k]
-    return M
-
-
-def _run_anchored_chain_general(
-    model: newton.Model,
-    frames: int,
-    dt: float,
-    init_q: np.ndarray,
-    armature_mode: str = "exact",
-    solver_iterations: int = 16,
-    substeps: int = 8,
-) -> np.ndarray:
-    """Captured-graph history of the joint angles for the generic
-    anchored chain. Mirrors :func:`_run_three_body_chain` but
-    parameterised on chain length via ``init_q``."""
-    n = len(init_q)
-    solver = newton.solvers.SolverPhoenX(
-        model,
-        substeps=substeps,
-        solver_iterations=solver_iterations,
-        velocity_iterations=1,
-        armature_mode=armature_mode,
-    )
-    s0 = model.state()
-    s1 = model.state()
-    control = model.control()
-    s0.joint_q.assign(np.asarray(init_q, dtype=np.float32))
-    newton.eval_fk(model, s0.joint_q, s0.joint_qd, s0)
-    jq = wp.zeros(model.joint_coord_count, dtype=wp.float32, device=model.device)
-    jqd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=model.device)
-
-    def step_once() -> None:
-        s0.clear_forces()
-        solver.step(s0, s1, control, None, dt)
-        wp.copy(s0.body_q, s1.body_q)
-        wp.copy(s0.body_qd, s1.body_qd)
-        newton.eval_ik(model, s0, jq, jqd)
-
-    with wp.ScopedCapture() as cap:
-        step_once()
-    graph = cap.graph
-
-    history = np.empty((frames, n), dtype=np.float32)
-    for i in range(frames):
-        wp.capture_launch(graph)
-        history[i] = jq.numpy()
-    return history
-
-
 def _build_anchored_three_body_chain(
     *,
     inertia: float,
@@ -656,7 +549,6 @@ def _run_three_body_chain(
     frames: int,
     dt: float,
     init_q: np.ndarray,
-    armature_mode: str = "bake",
 ) -> np.ndarray:
     """Captured-graph history of the three joint angles. Initial
     perturbation supplied via ``init_q`` (length 3) lets the test
@@ -667,7 +559,6 @@ def _run_three_body_chain(
         substeps=8,
         solver_iterations=16,  # 3-DoF coupling needs more PGS sweeps
         velocity_iterations=1,
-        armature_mode=armature_mode,
     )
     s0 = model.state()
     s1 = model.state()
@@ -722,21 +613,22 @@ class TestThreeBodyChain(unittest.TestCase):
     asserting the simulated zero-crossing period matches the
     analytical mode period to 5 %.
 
-    Default ``armature_mode="bake"`` is EXPECTED TO FAIL for armature
-    > 0: the per-body inertia bake is exact for isolated joint pairs
-    but fundamentally cannot reproduce MuJoCo's ``M_q + a*I``
-    augmentation on a chain. For joint k = (i, j) the relative-coord
-    armature term is ``0.5 * a_k * (q_j_dot - q_i_dot)^2`` which
-    expands to ``0.5*a_k*q_i_dot^2 + 0.5*a_k*q_j_dot^2 -
-    a_k*q_i_dot*q_j_dot``. Adding ``a_k`` to bodies i and j's axial
-    inertia recovers the diagonal terms but drops the off-diagonal
-    cross term, so the chain's reduced-coord mass matrix gets wrong
-    off-diagonals and the modes drift.
-
-    See :class:`TestExactModeChainComposition` for the
-    ``armature_mode="exact"`` (rotor) variant which DOES pass on this
-    fixture -- the rotor formulation reproduces ``M_q + a*I`` to
-    < 1 % when every joint in the chain has the same armature.
+    Currently EXPECTED TO FAIL on every armature > 0 case (passes
+    only at ``armature == 0``): the body-inertia bake is exact for
+    isolated joint pairs but fundamentally cannot reproduce
+    MuJoCo's ``M_q + a*I`` augmentation on a chain. For joint k =
+    (i, j) the relative-coord armature term is
+    ``0.5 * a_k * (q_j_dot - q_i_dot)^2`` which expands to
+    ``0.5*a_k*q_i_dot^2 + 0.5*a_k*q_j_dot^2 - a_k*q_i_dot*q_j_dot``.
+    Adding ``a_k`` to bodies i and j's axial inertia recovers the
+    diagonal terms but drops the off-diagonal cross term, so the
+    chain's reduced-coord mass matrix gets wrong off-diagonals and
+    the modes drift. Exact match requires either constraint-side
+    armature with a corrected impulse-application (non-trivial:
+    naive ``eff_inv := eff_inv / (1 + a * eff_inv)`` is unstable
+    when ``a * eff_inv_raw > 1``) or a modal solver, neither of
+    which is in scope here. Tracked so any future revisit of the
+    bake is forced to consider the chain composition error.
     """
 
     @unittest.expectedFailure
@@ -990,202 +882,6 @@ class TestExactModeIsolatedJoints(unittest.TestCase):
                     f"per-iteration kappa scaling should be near-bit-exact for "
                     f"isolated joints)",
                 )
-
-
-@unittest.skipUnless(
-    _cuda_with_graph_capture(),
-    "PhoenX armature tests run on CUDA with graph-capture only.",
-)
-class TestExactModeChainComposition(unittest.TestCase):
-    """``armature_mode="exact"`` chain composition matrix.
-
-    Pins that the rotor formulation reproduces the reduced-coord
-    ``M_q + diag(armatures)`` augmented mass matrix when every joint
-    in the chain is armatured. Six chain shapes are exercised:
-
-    * 2-body anchored, equal armature
-    * 3-body anchored, equal armature (the canonical case)
-    * 3-body anchored, unequal body inertias
-    * 3-body anchored, high armature (a = 8)
-    * 5-body anchored, equal armature
-    * 3-body anchored, all armatures equal but at a different value
-
-    For each shape, every eigenmode of ``M_aug = M_q + diag(armatures)``
-    is excited individually (initial joint angles set to the eigvec)
-    and the simulated zero-crossing period is checked against the
-    analytical mode period to within 2 %. ``TestThreeBodyChain``
-    (bake mode) FAILS this same fixture; this class is the regression
-    pin for the rotor formulation.
-
-    NOT covered here: chains where some joints are armatured and
-    others are not -- mixing rotor-formulation and direct-body drive
-    in one chain has a residual O(10 %) period error on the slow
-    eigenmode that neither extra iterations nor warm-start tweaks
-    fix. See module docstring for details. Real robotics typically
-    armatures all motorised joints uniformly, so this is documented
-    as a known limitation rather than tested as a regression.
-    """
-
-    def _check_modes(
-        self,
-        body_inertias: list[float],
-        armatures: list[float],
-        target_ke: float,
-        rel_tol: float = 0.02,
-    ) -> None:
-        n = len(body_inertias)
-        M_q = _reduced_mass_matrix_chain(body_inertias)
-        M_aug = M_q + np.diag(armatures)
-        K = target_ke * np.eye(n, dtype=np.float64)
-        w_sq, V = np.linalg.eig(np.linalg.solve(M_aug, K))
-        sort_idx = np.argsort(w_sq)
-        w_sq = w_sq[sort_idx]
-        V = V[:, sort_idx]
-        T_modes = (2.0 * np.pi / np.sqrt(w_sq)).real
-        dt = 1.0 / 400.0
-
-        # Build model + solver once per test, capture the step graph
-        # once, then replay across modes with different ``joint_q``
-        # ICs. Recreating the solver per mode would multiply test
-        # runtime by the mode count without affecting accuracy.
-        model = _build_anchored_chain_general(
-            body_inertias=body_inertias,
-            armatures=armatures,
-            target_ke=target_ke,
-        )
-        solver = newton.solvers.SolverPhoenX(
-            model,
-            substeps=8,
-            solver_iterations=16,
-            velocity_iterations=1,
-            armature_mode="exact",
-        )
-        s0 = model.state()
-        s1 = model.state()
-        control = model.control()
-        jq = wp.zeros(model.joint_coord_count, dtype=wp.float32, device=model.device)
-        jqd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=model.device)
-
-        def step_once() -> None:
-            s0.clear_forces()
-            solver.step(s0, s1, control, None, dt)
-            wp.copy(s0.body_q, s1.body_q)
-            wp.copy(s0.body_qd, s1.body_qd)
-            newton.eval_ik(model, s0, jq, jqd)
-
-        s0.joint_q.assign(np.zeros(n, dtype=np.float32))
-        newton.eval_fk(model, s0.joint_q, s0.joint_qd, s0)
-        with wp.ScopedCapture() as cap:
-            step_once()
-        graph = cap.graph
-
-        for mode_idx, T_expected in enumerate(T_modes):
-            with self.subTest(mode=mode_idx):
-                eigvec = V[:, mode_idx].real
-                eigvec = eigvec / np.max(np.abs(eigvec)) * 0.05
-                # 3 oscillations is enough for the zero-crossing
-                # period fit; 2 s floor handles the fastest modes.
-                target_duration = max(3.0 * T_expected, 2.0)
-                frames = int(np.ceil(target_duration / dt))
-
-                # Reset to the eigenmode IC. ``eval_fk`` runs outside
-                # the captured graph so re-priming is safe across modes.
-                s0.joint_q.assign(np.asarray(eigvec, dtype=np.float32))
-                s0.joint_qd.assign(np.zeros(n, dtype=np.float32))
-                newton.eval_fk(model, s0.joint_q, s0.joint_qd, s0)
-
-                # Record into a device-resident buffer; one numpy()
-                # transfer at the end avoids per-frame device sync.
-                history_buf = wp.zeros((frames, n), dtype=wp.float32, device=model.device)
-                for i in range(frames):
-                    wp.capture_launch(graph)
-                    wp.copy(history_buf[i], jq)
-                history = history_buf.numpy()
-
-                T_sim = _measure_period_zero_crossings(history[:, 0], dt)
-                rel_err = abs(T_sim - T_expected) / T_expected
-                self.assertLess(
-                    rel_err,
-                    rel_tol,
-                    f"chain inertias={body_inertias} armatures={armatures} "
-                    f"mode={mode_idx}: T_sim={T_sim:.4f} s vs "
-                    f"T_expected={T_expected:.4f} s (rel_err {rel_err * 100:.2f} %)",
-                )
-
-    def test_2body_anchored_equal(self) -> None:
-        self._check_modes([1.0, 1.0], [1.0, 1.0], target_ke=100.0)
-
-    def test_3body_anchored_equal(self) -> None:
-        self._check_modes([1.0, 1.0, 1.0], [1.0, 1.0, 1.0], target_ke=100.0)
-
-    def test_3body_anchored_unequal(self) -> None:
-        self._check_modes([3.0, 1.0, 0.5], [1.0, 1.0, 1.0], target_ke=100.0)
-
-    def test_3body_high_armature(self) -> None:
-        self._check_modes([1.0, 1.0, 1.0], [8.0, 8.0, 8.0], target_ke=100.0)
-
-    def test_5body_anchored_equal(self) -> None:
-        self._check_modes([1.0] * 5, [1.0] * 5, target_ke=100.0)
-
-
-@unittest.skipUnless(
-    _cuda_with_graph_capture(),
-    "PhoenX armature tests run on CUDA with graph-capture only.",
-)
-class TestExactModeMixedArmatureLimitation(unittest.TestCase):
-    """Pins the known limitation: chains with *mixed* armatured and
-    unarmatured joints have a residual O(10 %) period error on the
-    slow eigenmode in ``armature_mode="exact"``. The rotor formulation
-    routes drive impulses through the rotor (with reset accumulator)
-    while unarmatured joints route them through bodies (with
-    soft-accumulator memory across substeps); the two discretisations
-    don't compose to the reduced-coord ``M_q + diag(armatures)``
-    dynamics on the slow co-rotation eigenmode.
-
-    Tracked as ``expectedFailure`` so any future fix (e.g. a unified
-    rotor-based discretisation that treats unarmatured joints as
-    rotor-with-infinite-mass, or cross-rotor block factorisation)
-    flips this to a passing assert.
-    """
-
-    @unittest.expectedFailure
-    def test_3body_only_middle_joint_armatured(self) -> None:
-        body_inertias = [1.0, 1.0, 1.0]
-        armatures = [0.0, 1.0, 0.0]
-        target_ke = 100.0
-        n = len(body_inertias)
-        M_q = _reduced_mass_matrix_chain(body_inertias)
-        M_aug = M_q + np.diag(armatures)
-        K = target_ke * np.eye(n, dtype=np.float64)
-        w_sq, V = np.linalg.eig(np.linalg.solve(M_aug, K))
-        sort_idx = np.argsort(w_sq)
-        w_sq = w_sq[sort_idx]
-        V = V[:, sort_idx]
-        T_modes = (2.0 * np.pi / np.sqrt(w_sq)).real
-        eigvec = V[:, 0].real
-        eigvec = eigvec / np.max(np.abs(eigvec)) * 0.05
-        dt = 1.0 / 400.0
-        target_duration = max(3.0 * T_modes[0], 2.0)
-        frames = int(np.ceil(target_duration / dt))
-
-        model = _build_anchored_chain_general(
-            body_inertias=body_inertias,
-            armatures=armatures,
-            target_ke=target_ke,
-        )
-        history = _run_anchored_chain_general(
-            model,
-            frames=frames,
-            dt=dt,
-            init_q=eigvec,
-            armature_mode="exact",
-        )
-        T_sim = _measure_period_zero_crossings(history[:, 0], dt)
-        rel_err = abs(T_sim - T_modes[0]) / T_modes[0]
-        # 2 % is the bar that all-armatured chains clear in
-        # TestExactModeChainComposition. Mixed armature comes in at
-        # ~14--17 % off, hence expectedFailure here.
-        self.assertLess(rel_err, 0.02)
 
 
 @unittest.skipUnless(

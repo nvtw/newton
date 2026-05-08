@@ -103,7 +103,6 @@ __all__ = [
     "actuated_double_ball_socket_iterate_multi",
     "actuated_double_ball_socket_prepare_for_iteration",
     "actuated_double_ball_socket_prepare_for_iteration_at",
-    "adbs_rotor_sync_post_warmstart",
     "actuated_double_ball_socket_world_error",
     "actuated_double_ball_socket_world_error_at",
     "actuated_double_ball_socket_world_wrench",
@@ -1087,18 +1086,6 @@ def _axial_drive_limit_prepare_at(
     if clamp == _CLAMP_NONE:
         acc_limit = 0.0
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
-    # OPT4: in rotor mode, reset ``acc_drive`` at substep start. The
-    # accumulator only modulates the rotor's drive PD (it never
-    # touches bodies in rotor mode), so carrying it across substeps
-    # injects stale drive state from a different body configuration.
-    # Resetting lets each substep build the drive impulse fresh
-    # against the current body / rotor velocities -- and for hard
-    # PD where ``gamma * eff_mass_drive_soft ≈ 1`` (PhoenX's typical
-    # operating point) the soft accumulator collapses to ~0 each
-    # substep anyway.
-    if armature_a > wp.float32(0.0):
-        acc_drive = wp.float32(0.0)
-        write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, wp.float32(0.0))
     axial_imp = acc_drive + acc_limit
     if armature_a > wp.float32(0.0):
         kappa = wp.float32(1.0) / (wp.float32(1.0) + armature_a * eff_inv)
@@ -3043,6 +3030,8 @@ def _revolute_iterate_at_multi(
 
         if rotor_active:
             # Rotor-coupling row: c = jv_axial - rotor_velocity = 0.
+            # Bodies see ``+/- n_hat * lam_coupling``; rotor sees
+            # ``-lam_coupling / a``.
             c_coupling = jv_axial - rotor_velocity
             lam_coupling = -eff_mass_coupling * c_coupling
             rotor_velocity = rotor_velocity - lam_coupling * inv_armature_a
@@ -3202,37 +3191,6 @@ def actuated_double_ball_socket_prepare_for_iteration(
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
     actuated_double_ball_socket_prepare_for_iteration_at(constraints, cid, 0, bodies, body_pair, idt)
-
-
-@wp.func
-def adbs_rotor_sync_post_warmstart(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    bodies: BodyContainer,
-):
-    """OPT2: post-warm-start rotor sync.
-
-    After all per-cid prepare passes have applied their body warm-starts
-    (positional + axial), each armatured joint's actual ``jv_axial``
-    differs from the rotor seed written during prepare by the
-    *off-diagonal* contribution of neighbour-joints' axial warm-starts
-    (``Σ_{j≠k} A_kj · imp_j``). Re-syncing once here zeroes ``c`` for
-    the rotor coupling row so PGS doesn't burn iterations untangling
-    that residual. No-op for ``armature == 0`` joints.
-
-    Cheap: 1 read of ``armature``, 2 body reads, 1 axis read, 1 dot,
-    1 write of ``rotor_velocity``. Called between prepare phase and
-    iterate phase, once per cid per substep.
-    """
-    armature_a = read_float(constraints, _OFF_ARMATURE, cid)
-    if armature_a > wp.float32(0.0):
-        b1 = read_int(constraints, _OFF_BODY1, cid)
-        b2 = read_int(constraints, _OFF_BODY2, cid)
-        n_hat = read_vec3(constraints, _OFF_AXIS_WORLD, cid)
-        w1 = bodies.angular_velocity[b1]
-        w2 = bodies.angular_velocity[b2]
-        rotor_velocity = wp.dot(n_hat, w1 - w2)
-        write_float(constraints, _OFF_ROTOR_VELOCITY, cid, rotor_velocity)
 
 
 @wp.func
