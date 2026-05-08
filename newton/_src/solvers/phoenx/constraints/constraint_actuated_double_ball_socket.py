@@ -1,43 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Unified ball-socket / revolute / prismatic joint with optional PD
-drive and limit on the free DoF. Runtime ``joint_mode`` picks the
-locked DoF set; everything else (soft-constraint plumbing,
-warm-starting, Schur blocks) is shared.
+"""Unified ball-socket / revolute / prismatic / fixed / cable joint with
+optional PD drive + limit. Runtime ``joint_mode`` picks the locked DoF set;
+everything else (soft-constraint plumbing, warm-starting, Schur blocks) is shared.
 
-Ball-socket (:data:`JOINT_MODE_BALL_SOCKET`)
-    3-row point lock at ``anchor1``; all 3 rotations free; no drive
-    / limit. ``anchor2`` unused.
+* BALL_SOCKET — 3-row point lock at anchor1.
+* REVOLUTE — 5-DoF hinge about ``anchor2 - anchor1``; 3x3 + 2x2 Schur. Drive/
+  limit act on twist (rad, N·m).
+* PRISMATIC — 5-DoF slider along the same axis; 4x4 + 1x1 Schur. Drive/limit
+  act on slide (m, N).
+* FIXED — 6-DoF weld (3+2+1).
+* CABLE — soft FIXED with PD bend (anchor-2 tangents) and PD twist (anchor-3
+  scalar). Gains rescaled by 1/rest_length^2.
 
-Revolute (:data:`JOINT_MODE_REVOLUTE`)
-    5-DoF hinge about ``n_hat = anchor2 - anchor1``. Anchor 1: full
-    3-row lock. Anchor 2: 2-row tangent-plane lock (axial row is the
-    analytical null-space of the 6-row stack). Solved as a 3x3 + 2x2
-    Schur. Drive / limit act on the twist about ``n_hat``; ``target``,
-    ``min_value``, ``max_value`` are in rad, ``max_force_drive`` in N*m.
-
-Prismatic (:data:`JOINT_MODE_PRISMATIC`)
-    5-DoF slider along ``n_hat``. Anchors 1+2 each contribute 2
-    tangent rows; a third auto-derived off-axis anchor contributes
-    one scalar row along ``t2`` that kills rotation about ``n_hat``.
-    Basis ``(t1, t2)`` is rebuilt per substep so the scalar row is a
-    unit-gain tangential velocity gate (avoids ``cos(alpha)``
-    mismatches in block-GS chains). Solved as a 4x4 + 1x1 Schur.
-    Drive / limit act on the slide; units are m and N.
-
-Drive row -- always PD. ``DRIVE_MODE_POSITION`` / ``DRIVE_MODE_VELOCITY``
-decide whether the bias folds in ``target`` or ``target_velocity``;
-both require caller-supplied ``stiffness_drive`` and/or
-``damping_drive`` (``DRIVE_MODE_VELOCITY`` further requires
-``damping_drive > 0``). ``max_force_drive > 0`` caps the per-substep
-impulse; ``0`` means unlimited (POSITION) or disables the drive
-(VELOCITY). Both gains zero disables the drive row entirely.
-
-Limit row -- unilateral ``[min_value, max_value]`` spring-damper
-(``min_value > max_value`` disables). Dual softness: both PD gains zero
-uses Box2D ``(hertz_limit, damping_ratio_limit)``; either gain
-positive selects PD with absolute SI gains. Drive and limit share the
-same scalar PGS row; the limit is unilateral and always wins.
+Drive: PD; POSITION/VELOCITY chooses target vs target_velocity in the bias.
+``max_force_drive=0`` means unlimited (POSITION) or disabled (VELOCITY).
+Limit: unilateral [min, max]; ``min > max`` disables. Either limit PD gain > 0
+selects the PD path; otherwise Box2D (hertz_limit, damping_ratio_limit).
+Drive and limit share the same scalar row; limit always wins.
 """
 
 from __future__ import annotations

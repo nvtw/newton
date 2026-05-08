@@ -2,32 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Host-side conversion from Newton :class:`Model` joints to ADBS init arrays.
 
-:class:`SolverPhoenX` uses this once at construction (and again on
-:meth:`notify_model_changed` with joint-property flags) to translate
-the flat Newton joint arrays (``joint_type`` / ``joint_parent`` /
-``joint_child`` / ``joint_X_p`` / ``joint_X_c`` / ``joint_axis`` /
-per-DOF drive + limit fields) into the 19 ``wp.array`` kwargs
-:meth:`PhoenXWorld.initialize_actuated_double_ball_socket_joints`
-expects.
-
-Mapping:
-
-* :data:`JointType.REVOLUTE` -> :data:`JOINT_MODE_REVOLUTE`.
-* :data:`JointType.PRISMATIC` -> :data:`JOINT_MODE_PRISMATIC`.
-* :data:`JointType.CABLE` -> :data:`JOINT_MODE_CABLE` (soft fixed
-  joint with PD bend / twist softness; Newton's stretch DoF is
-  treated as rigid because PhoenX has no axial-length compliance).
-* :data:`JointType.BALL` -> :data:`JOINT_MODE_BALL_SOCKET` (drive /
-  limit not supported, must be off in the Model).
-* :data:`JointType.FIXED` -> :data:`JOINT_MODE_FIXED`.
-* :data:`JointType.FREE` -> no constraint column (free-floating base).
-* :data:`JointType.DISTANCE`, :data:`JointType.D6` -> unsupported;
-  raises.
-
-The PhoenX body container (built by :class:`SolverPhoenX`) reserves
-slot 0 as a static world anchor, so Newton body ``i`` maps to PhoenX
-slot ``i + 1``, and ``joint_parent == -1`` (or ``joint_child == -1``)
-maps to slot 0.
+Mapping: REVOLUTE/PRISMATIC/BALL/FIXED/CABLE -> ADBS joint modes; FREE -> no
+column; DISTANCE/D6 unsupported. PhoenX slot 0 is the static world anchor, so
+Newton body ``i`` maps to PhoenX slot ``i + 1`` and ``joint_parent == -1`` maps
+to slot 0.
 """
 
 from __future__ import annotations
@@ -92,15 +70,8 @@ def _transform_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 
 class AdbsInitArrays:
-    """Bundle of the 19 ``wp.array`` kwargs
-    :meth:`PhoenXWorld.initialize_actuated_double_ball_socket_joints`
-    expects, plus the joint-index -> cid map used by per-step control
-    writeback.
-
-    Populated by :func:`build_adbs_init_arrays`. ``joint_idx_to_cid``
-    is ``-1`` for Newton joints that don't map to a constraint column
-    (FREE, disabled, unsupported).
-    """
+    """ADBS init kwargs plus joint-index -> cid map for per-step control writeback.
+    ``joint_idx_to_cid`` is ``-1`` for joints without a constraint column."""
 
     def __init__(
         self,
@@ -152,12 +123,9 @@ class AdbsInitArrays:
         self.armature = armature
         self.joint_idx_to_cid = joint_idx_to_cid
         self.joint_idx_to_dof_start = joint_idx_to_dof_start
-        #: Per-ADBS-column initial Newton joint coordinate. PhoenX's
-        #: revolution tracker measures *displacement from init*, so
-        #: Newton's absolute ``target_pos`` and limit arrays must be
-        #: offset by this value before being written into the ADBS
-        #: column. Length equals ``num_joint_columns``; indexed by
-        #: the ADBS cid.
+        #: Per-ADBS-column initial Newton joint coordinate. PhoenX measures
+        #: displacement from init, so Newton's absolute target/limit values
+        #: must be offset by this before being written into the ADBS column.
         self.joint_q_at_init = joint_q_at_init
         self.num_joint_columns = num_joint_columns
 
@@ -189,16 +157,8 @@ class AdbsInitArrays:
 
 
 def _newton_target_mode_to_adbs_drive_mode(target_mode: int, stiffness: float, damping: float) -> int:
-    """Map Newton's :class:`JointTargetMode` to PhoenX :class:`DriveMode`.
-
-    * ``NONE`` / ``EFFORT`` -> :data:`DRIVE_MODE_OFF` (torque is
-      applied externally via :func:`apply_joint_forces`).
-    * ``POSITION`` or ``POSITION_VELOCITY`` -> :data:`DRIVE_MODE_POSITION`
-      when ``stiffness > 0``, otherwise ``DRIVE_MODE_OFF``.
-    * ``VELOCITY`` -> :data:`DRIVE_MODE_VELOCITY` when ``damping > 0``,
-      otherwise ``DRIVE_MODE_OFF`` (PhoenX's VELOCITY drive requires
-      a positive damping gain).
-    """
+    """Map Newton :class:`JointTargetMode` to PhoenX :class:`DriveMode`. POSITION/
+    VELOCITY drive modes require positive stiffness/damping respectively, else OFF."""
     mode = newton.JointTargetMode(int(target_mode))
     if mode in (
         newton.JointTargetMode.POSITION,
@@ -219,25 +179,10 @@ def build_adbs_init_arrays(
     model: newton.Model,
     device: wp.context.Devicelike | None = None,
 ) -> AdbsInitArrays:
-    """Walk ``model``'s joint arrays, convert each supported joint to
-    an ADBS descriptor, and upload the 19 kwargs as ``wp.array`` on
-    ``device``.
-
-    Args:
-        model: The :class:`Model` to mirror. ``model.body_q`` is
-            read at its current state and used to compute world-frame
-            anchor positions.
-        device: Warp device. Defaults to ``model.device``.
-
-    Returns:
-        An :class:`AdbsInitArrays` bundle. ``joint_idx_to_cid`` maps
-        every Newton joint (by index) to its cid in the PhoenX
-        constraint container, or ``-1`` when the joint is skipped
-        (FREE base, disabled, unsupported type).
+    """Convert ``model``'s joints to ADBS init arrays on ``device``.
 
     Raises:
-        NotImplementedError: If any joint has ``JointType.DISTANCE``,
-            ``JointType.D6``, or ``JointType.CABLE``.
+        NotImplementedError: If any joint is DISTANCE or D6.
     """
     if device is None:
         device = model.device
@@ -344,8 +289,7 @@ def build_adbs_init_arrays(
 
         anchor1_world = _transform_translation(X_w_p)
         qd_start = int(joint_qd_start[j])
-        # FIXED / BALL have no 1-axis DoF that the control kernel can
-        # index into; leave ``dof_start = -1`` so the kernel skips them.
+        # FIXED/BALL have no 1-axis DoF; -1 lets the control kernel skip them.
         dof_start_for_control = qd_start if jtype in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC) else -1
         joint_idx_to_dof_start_np[j] = dof_start_for_control
 
@@ -363,63 +307,32 @@ def build_adbs_init_arrays(
         damp_limit = 0.0
         hertz_limit_val = float(DEFAULT_HERTZ_LIMIT)
         damping_ratio_limit_val = float(DEFAULT_DAMPING_RATIO)
-        # Joint armature only applies to the axial drive / limit row of
-        # REVOLUTE / PRISMATIC joints; left at 0 for BALL / FIXED so the
-        # constraint kernel's ``eff_inv = eff_inv_raw / (1 + a *
-        # eff_inv_raw)`` reduces to the un-armatured behaviour for
-        # those modes.
+        # Armature only applies to REVOLUTE/PRISMATIC axial rows; 0 elsewhere.
         armature_val = 0.0
 
         if jtype is newton.JointType.BALL:
             phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
-            # Ball-socket has no drive/limit; the ADBS builder enforces
-            # this for us. BALL's axes in ``joint_axis`` are unused.
         elif jtype is newton.JointType.CABLE:
             phoenx_mode = int(JOINT_MODE_CABLE)
-            # Newton's CABLE joint has 2 DoFs: a linear stretch DoF
-            # (qd_start) and a single isotropic angular bend/twist DoF
-            # (qd_start + 1). PhoenX's cable mode is a soft fixed joint
-            # (3+2+1 row layout) with PD bend (anchor-2 tangent rows)
-            # and twist (anchor-3 scalar row) springs; gains are
-            # rescaled by ``1 / rest_length^2`` to convert N*m/rad ->
-            # N/m at the lever-armed anchors. The two abstractions
-            # don't line up exactly:
-            #
-            # * Newton models the cable's stretch as a 1-DoF spring; PhoenX
-            #   has no axial-length compliance (the ball-socket lock at
-            #   ``anchor1`` is rigid). We accept Newton's stretch_stiffness
-            #   as informational and treat the bond as rigid -- with
-            #   Newton's default ``stretch_stiffness = 1e9`` this is a
-            #   tight approximation.
-            # * Newton's angular DoF is isotropic ("bend/twist"), so we
-            #   feed the same stiffness/damping to PhoenX's bend AND twist
-            #   slots.
-            #
-            # Anchor convention: ``anchor1`` is the parent attachment in
-            # world (``parent_pose * joint_X_p``); ``anchor2`` is the
-            # child attachment in world (``child_pose * joint_X_c``). The
-            # vector ``anchor1 -> anchor2`` defines the cable's reference
-            # axis at finalize time; the bend rows are the two directions
-            # perpendicular to it. If both attachments coincide we
-            # synthesize a 1 m offset along the joint X axis so the
-            # bend basis stays well-defined.
+            # Newton CABLE has 2 DoFs (linear stretch + isotropic angular bend/twist).
+            # PhoenX cable is a soft fixed joint (3+2+1 rows) with PD bend/twist; the
+            # axial bond is treated as rigid (PhoenX has no axial compliance) and
+            # Newton's isotropic angular gain feeds both bend AND twist slots.
+            # If anchor1 and anchor2 coincide, synthesize a 1 m offset along the
+            # joint X axis so the bend basis stays well-defined.
             if child_idx >= 0:
                 X_w_c = _transform_multiply(
                     np.asarray(body_q[child_idx], dtype=np.float32),
                     np.asarray(joint_X_c[j], dtype=np.float32),
                 )
-            else:  # pragma: no cover -- world-anchored cables are unusual but legal
+            else:  # pragma: no cover
                 X_w_c = np.asarray(joint_X_c[j], dtype=np.float32)
             anchor2_world = _transform_translation(X_w_c)
             if float(np.linalg.norm(anchor2_world - anchor1_world)) < 1e-6:
-                # Coincident attachments -- pick the joint frame X axis
-                # so bend/twist have a stable reference basis.
                 axis_world = _quat_rotate_np(X_w_p[3:], np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
                 anchor2_world = anchor1_world + axis_world
 
-            # Map Newton's isotropic bend/twist gains (stored on the
-            # angular DoF, ``qd_start + 1``) onto PhoenX's bend (drive
-            # slot) and twist (limit slot) -- same value on both.
+            # Bend/twist gains live on the angular DoF (qd_start + 1).
             bend_qd = qd_start + 1
             bend_ke = float(target_ke[bend_qd]) if (target_ke is not None and bend_qd < len(target_ke)) else 0.0
             bend_kd = float(target_kd[bend_qd]) if (target_kd is not None and bend_qd < len(target_kd)) else 0.0
@@ -427,14 +340,9 @@ def build_adbs_init_arrays(
             damp_drive = bend_kd
             stiff_limit = bend_ke
             damp_limit = bend_kd
-            # Drive mode stays OFF (cable has no PD position target);
-            # leave ``min_value > max_value`` so the limit row stays
-            # disabled in the cable formulation.
         elif jtype is newton.JointType.FIXED:
             phoenx_mode = int(JOINT_MODE_FIXED)
-            # Axis doesn't matter physically for FIXED; derive one
-            # from the joint frame rotation so the anchor-3 basis is
-            # well-defined. Pick the joint-frame X axis.
+            # Pick joint-frame X axis so the anchor-3 basis is well-defined.
             axis_world = _quat_rotate_np(X_w_p[3:], np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
             anchor2_world = anchor1_world + axis_world
         elif jtype is newton.JointType.REVOLUTE or jtype is newton.JointType.PRISMATIC:
@@ -463,31 +371,15 @@ def build_adbs_init_arrays(
             if target_vel is not None:
                 target_vel_val = float(target_vel[qd_start])
             if effort_limit is not None:
-                # Newton's effort_limit may be infinite; PhoenX reads
-                # ``0`` as "unlimited" for POSITION drives, so clamp
-                # inf/NaN to 0.
+                # PhoenX reads 0 as "unlimited" for POSITION drives, so clamp inf/NaN to 0.
                 raw = float(effort_limit[qd_start])
                 max_force = raw if np.isfinite(raw) else 0.0
             if target_mode is not None:
                 drive_mode = _newton_target_mode_to_adbs_drive_mode(int(target_mode[qd_start]), stiff_drive, damp_drive)
-            # Limits act as rigid hard stops. Newton's ``limit_ke`` /
-            # ``limit_kd`` (defaults 1e4 N/m, 10 N*s/m for prismatic;
-            # equivalent for revolute) are XPBD-tuned soft penalty
-            # gains that don't translate cleanly to PhoenX's absolute
-            # SI PD path -- on a 1 kg slider with gravity they engage
-            # as a barely-stiff spring and let the body overshoot the
-            # limit by ~0.2 m. SolverXPBD also ignores ``limit_ke`` /
-            # ``limit_kd`` and treats limits as hard positional
-            # constraints (see :class:`SolverXPBD` docstring), so
-            # forwarding through the rigid Box2D path
-            # (``hertz_limit = DEFAULT_HERTZ_LIMIT = 1e9``) matches the
-            # Newton-side contract. Users who explicitly want a soft
-            # PD limit can drive PhoenX's
-            # :meth:`PhoenXWorld.initialize_actuated_double_ball_socket_joints`
-            # directly. PhoenX's cumulative angle/slide is relative to
-            # the init pose, not absolute; the ``init_q`` offset below
-            # remaps Newton's absolute limit window onto that
-            # cumulative-from-init coordinate.
+            # Limits are hard stops via DEFAULT_HERTZ_LIMIT (matches SolverXPBD's
+            # rigid-limit contract; Newton's limit_ke/limit_kd are XPBD-only soft
+            # penalties that don't map to PhoenX's absolute SI PD path). Users who
+            # want soft PD limits should drive ADBS init directly.
             if limit_lower is not None and limit_upper is not None:
                 lo = float(limit_lower[qd_start])
                 hi = float(limit_upper[qd_start])
@@ -499,20 +391,15 @@ def build_adbs_init_arrays(
         else:  # pragma: no cover -- defensive
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
-        # Read the init joint coordinate for this joint's first DOF.
-        # For REVOLUTE / PRISMATIC this is a single-coord, single-DOF
-        # joint. For BALL / FIXED the drive/limit path is unused; we
-        # still publish an entry so the per-joint array has the same
-        # length as the ADBS column array.
+        # Init joint coord for this joint's first DOF. BALL/FIXED publish 0 to
+        # keep the per-joint array length aligned with the ADBS column array.
         q_start_idx = int(joint_q_start[j])
         if jtype in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC) and len(joint_q_arr) > q_start_idx:
             init_q = float(joint_q_arr[q_start_idx])
         else:
             init_q = 0.0
 
-        # Offset limit window by ``init_q`` so Newton's absolute limit
-        # range is interpreted correctly against PhoenX's rotation-
-        # from-init cumulative angle.
+        # Offset limit window into PhoenX's cumulative-from-init coordinate.
         if min_val <= max_val:
             min_val -= init_q
             max_val -= init_q
@@ -527,12 +414,8 @@ def build_adbs_init_arrays(
                 "damping_ratio": float(DEFAULT_DAMPING_RATIO),
                 "joint_mode": phoenx_mode,
                 "drive_mode": drive_mode,
-                # Per-joint ``target`` likewise needs the init-offset so
-                # Newton's absolute drive target lines up with PhoenX's
-                # cumulative-angle-from-init. The per-step control kernel
-                # redoes this offset each frame as the user updates
-                # ``control.joint_target_pos``; we only set it here for
-                # the very first step (before any control update fires).
+                # Init-offset target for first step; per-step control kernel
+                # re-applies the offset on each control update.
                 "target": target_val - init_q,
                 "target_velocity": target_vel_val,
                 "max_force_drive": max_force,

@@ -2,23 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-shape material system for :class:`PhoenXWorld`.
 
-PhysX-style: each shape carries a material index, the table holds
-``(static_friction, dynamic_friction, restitution,
-friction_combine_mode, restitution_combine_mode)``, and contact pairs
-resolve an effective friction / restitution by combining the two
-materials with the stricter combine mode
-(``max(mode_a, mode_b)`` wins; AVERAGE < MIN < MULTIPLY < MAX).
-
-Combine modes (PhysX ``PxCombineMode``):
-
-* :data:`COMBINE_AVERAGE` -- ``(a + b) / 2`` (default).
-* :data:`COMBINE_MIN` -- slippier surface wins.
-* :data:`COMBINE_MULTIPLY` -- ``a * b``; coefficient product.
-* :data:`COMBINE_MAX` -- grippier surface wins.
-
-Material 0 is reserved as the default (``mu = 0.5``, ``e = 0``,
-``COMBINE_AVERAGE``) so un-assigned shapes behave like the
-pre-material code path.
+PhysX-style: each shape carries a material index. Contact pairs combine the two
+materials with the stricter combine mode (max(mode_a, mode_b) wins;
+AVERAGE < MIN < MULTIPLY < MAX). Material 0 is the default fallback.
 """
 
 from __future__ import annotations
@@ -46,11 +32,7 @@ __all__ = [
 
 
 class CombineMode(IntEnum):
-    """PhysX-style combine modes for per-pair material resolution.
-
-    Numeric values match the PhysX ``PxCombineMode`` enum exactly so
-    the "stricter wins" tie-break is a plain ``max(mode_a, mode_b)``.
-    """
+    """PhysX ``PxCombineMode``. Numeric order = "stricter wins" via ``max``."""
 
     AVERAGE = 0
     MIN = 1
@@ -58,34 +40,18 @@ class CombineMode(IntEnum):
     MAX = 3
 
 
-#: Module-level constants so kernels can import them as compile-time
-#: literals (``wp.constant``-wrapped at the bottom of this module) and
-#: Python callers can use them without importing the enum.
 COMBINE_AVERAGE = int(CombineMode.AVERAGE)
 COMBINE_MIN = int(CombineMode.MIN)
 COMBINE_MULTIPLY = int(CombineMode.MULTIPLY)
 COMBINE_MAX = int(CombineMode.MAX)
 
-#: Material index 0 is always the default material. Shapes whose
-#: ``shape_material[s]`` is unset (-1 sentinel) or exactly 0 fall
-#: back to it so the pre-material contact path (``default_friction``)
-#: survives as "every shape has material 0".
 DEFAULT_MATERIAL_INDEX: int = 0
 
 
 @dataclass
 class Material:
-    """Plain-Python handle for a single material.
-
-    Used host-side in :meth:`WorldBuilder.add_material`; the solver
-    only ever sees the packed :class:`MaterialData` ``wp.struct`` form
-    produced by :func:`pack_material_data`.
-
-    Units follow PhysX: ``static_friction`` / ``dynamic_friction`` are
-    dimensionless Coulomb coefficients; ``restitution`` is the normal
-    bounce coefficient in ``[0, 1]`` (0 = perfectly inelastic, 1 =
-    perfectly elastic).
-    """
+    """Host-side material handle. Frictions are dimensionless Coulomb coefficients;
+    restitution is the normal bounce coefficient in [0, 1]."""
 
     static_friction: float = 0.5
     dynamic_friction: float = 0.5
@@ -98,14 +64,6 @@ class Material:
             raise ValueError(f"static_friction must be >= 0 (got {self.static_friction})")
         if self.dynamic_friction < 0.0:
             raise ValueError(f"dynamic_friction must be >= 0 (got {self.dynamic_friction})")
-        if self.dynamic_friction > self.static_friction + 1e-6:
-            # PhysX enforces this as a hard error; we only warn via
-            # assertion because the solver currently only consumes
-            # dynamic_friction (the tangent clamp is ``mu_k *
-            # lam_n``) and a small inversion is harmless. Tighten to
-            # a hard error if the solver ever grows a separate stick
-            # row.
-            pass
         if not (0.0 <= self.restitution <= 1.0):
             raise ValueError(f"restitution must be in [0, 1] (got {self.restitution})")
         for name, mode in (
@@ -125,13 +83,7 @@ class Material:
 
 @wp.struct
 class MaterialData:
-    """Kernel-visible packed material record.
-
-    Mirrors :class:`Material` field-for-field. Kept as its own struct
-    (rather than two parallel float/int arrays) so the materials
-    table stays a single ``wp.array[MaterialData]`` with natural
-    indexed access in the contact-pack kernel.
-    """
+    """Kernel-visible packed material record. Mirrors :class:`Material`."""
 
     static_friction: wp.float32
     dynamic_friction: wp.float32
@@ -152,19 +104,10 @@ def pack_material_data(m: Material) -> MaterialData:
 
 
 def material_table_from_list(materials: list[Material], device: wp.context.Devicelike = None) -> wp.array:
-    """Build a ``wp.array[MaterialData]`` from a Python list.
-
-    Element 0 is *always* the default material (same defaults as
-    :class:`Material`'s dataclass). If the caller's list is empty
-    the returned array still has one element. If the caller supplies
-    their own material at index 0 we keep it -- they're explicitly
-    overriding the default.
-    """
+    """Build a ``wp.array[MaterialData]`` from a Python list. Element 0 is always
+    populated (default :class:`Material` if list is empty)."""
     if not materials:
         materials = [Material()]
-    # Structured numpy dtype matching MaterialData layout. Warp's
-    # ``from_numpy`` can take an array of this dtype and reinterpret
-    # it as ``MaterialData``.
     dtype = np.dtype(
         [
             ("static_friction", np.float32),
@@ -184,14 +127,7 @@ def material_table_from_list(materials: list[Material], device: wp.context.Devic
     return wp.from_numpy(arr, dtype=MaterialData, device=device)
 
 
-# ---------------------------------------------------------------------------
-# Kernel-side combine helpers
-# ---------------------------------------------------------------------------
-#
-# The contact pack kernel imports these ``@wp.func`` helpers so the
-# combine logic lives in one place. Per PhysX, the effective mode is
-# ``max(mode_a, mode_b)`` -- the stricter policy wins.
-
+# Kernel-side combine helpers. Per PhysX, the effective mode is max(mode_a, mode_b).
 
 _COMBINE_AVERAGE_C = wp.constant(wp.int32(COMBINE_AVERAGE))
 _COMBINE_MIN_C = wp.constant(wp.int32(COMBINE_MIN))
@@ -208,7 +144,6 @@ def _combine_values(a: wp.float32, b: wp.float32, mode: wp.int32) -> wp.float32:
         return a * b
     if mode == _COMBINE_MAX_C:
         return wp.max(a, b)
-    # Default / AVERAGE
     return (a + b) * wp.float32(0.5)
 
 
@@ -219,19 +154,8 @@ def resolve_friction_in_kernel(
     mat_b: wp.int32,
     default_friction: wp.float32,
 ) -> wp.float32:
-    """Compute the effective per-pair friction coefficient.
-
-    Matches PhysX semantics: the effective friction combines the two
-    materials' ``dynamic_friction`` values under whichever
-    ``friction_combine_mode`` is stricter (larger enum value).
-    A negative material index short-circuits to ``default_friction``
-    so callers that haven't wired in a materials table still get the
-    old constant-friction behaviour.
-
-    Called per contact column during :func:`ingest_contacts` -- the
-    per-pair friction is written into the contact constraint header
-    and reused across every PGS iteration for the rest of the step.
-    """
+    """Effective per-pair dynamic friction. Falls back to ``default_friction`` if
+    materials table is empty or indices are out of range."""
     if materials.shape[0] == 0:
         return default_friction
     mat_count = materials.shape[0]
@@ -250,21 +174,8 @@ def resolve_friction_static_in_kernel(
     mat_b: wp.int32,
     default_friction: wp.float32,
 ) -> wp.float32:
-    """Compute the effective per-pair *static* friction coefficient.
-
-    Twin of :func:`resolve_friction_in_kernel` -- same combine-mode
-    selection but reads each material's ``static_friction`` instead
-    of ``dynamic_friction``. The solver uses this as the "stick"
-    threshold in the contact iterate: when the raw tangent impulse
-    magnitude stays inside ``mu_static * lam_n`` the contact is in
-    the static regime; once it breaches that threshold the impulse
-    is clamped to ``mu_dynamic * lam_n`` (kinetic regime).
-
-    Falls back to ``default_friction`` when no materials are
-    registered, so pre-material scenes get ``mu_static ==
-    mu_dynamic == default_friction`` and the two-regime clamp
-    collapses to the single-coefficient circular cone.
-    """
+    """Effective per-pair static friction (stick threshold). Same combine logic as
+    :func:`resolve_friction_in_kernel` but reads ``static_friction``."""
     if materials.shape[0] == 0:
         return default_friction
     mat_count = materials.shape[0]

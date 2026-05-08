@@ -2,14 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Column-major dword-packed storage for constraint state.
 
-State is one ``wp.array2d[wp.float32]`` of shape ``(num_dwords, num_constraints)``
--- column-major by cid. A partitioned PGS kernel reading any row hits
-32 contiguous lanes in one coalesced load. Dword offsets per field are
-derived at import time via :func:`dword_offset_of`.
-
-Sharing one container across constraint types uses
-``num_dwords = max(ADBS_DWORDS, CONTACT_DWORDS)``; a per-cid type tag at
-dword 0 drives the dispatcher's ``if/elif``.
+One ``wp.array2d[wp.float32]`` shaped ``(num_dwords, num_constraints)``; cid
+is the inner dim so a row read coalesces across the warp. Dword offsets come
+from :func:`dword_offset_of` at import time. Per-cid type tag at dword 0
+drives dispatch.
 """
 
 from __future__ import annotations
@@ -65,61 +61,26 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Constraint header layout (type tag + body indices)
-# ---------------------------------------------------------------------------
-#
-# Every per-type constraint schema MUST start with three int32 dwords:
-#   dword 0: constraint_type,  dword 1: body1,  dword 2: body2.
-# This lets the generic dispatcher / element-projection kernels read
-# the type tag and body pair from any column without knowing the
-# per-type schema. :func:`assert_constraint_header` verifies the
-# layout at import time so reorderings fail loudly.
-#
-# Type tags: add monotonically, no holes, mirror the value in the
-# per-type ``constraint_set_type`` call. Never reuse retired tag
-# values -- bump the highest so stale persisted state shows up loudly.
+# Constraint header: every schema starts with int32 (constraint_type, body1,
+# body2) at dwords 0/1/2. Lets the generic dispatcher route any column.
+# Type tags: monotonic, never reuse retired values.
 
-#: Sentinel for unwritten / cleared columns.
 CONSTRAINT_TYPE_INVALID = wp.constant(wp.int32(0))
-#: Unified revolute / prismatic / ball-socket joint -- 5-DoF pure-point
-#: positional lock solved as one PGS column via a rank-5 Schur complement,
-#: plus an optional scalar actuator row that drives the free axis with a
-#: soft position or velocity setpoint and clamps it to ``[min_value,
-#: max_value]`` (one-sided spring-damper limits). See
-#: :mod:`constraint_actuated_double_ball_socket`.
+#: Unified revolute/prismatic/ball-socket/fixed/cable joint. 5-DoF positional
+#: lock + optional scalar actuator row.
 CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(8))
-#: Rigid-rigid contact constraint -- one column per ``(shape_a, shape_b)``
-#: pair. Persistent warm-start lives in :class:`ContactContainer` keyed
-#: by the contact index in the sorted Newton contact buffer.
+#: Rigid-rigid contact, one column per (shape_a, shape_b). Warm-start state
+#: lives in :class:`ContactContainer`.
 CONSTRAINT_TYPE_CONTACT = wp.constant(wp.int32(9))
 
-#: Dword offsets of the three header fields. By contract these are
-#: 0 / 1 / 2 for every constraint schema (enforced by
-#: :func:`assert_constraint_header`).
 CONSTRAINT_TYPE_OFFSET = wp.constant(wp.int32(0))
 CONSTRAINT_BODY1_OFFSET = wp.constant(wp.int32(1))
 CONSTRAINT_BODY2_OFFSET = wp.constant(wp.int32(2))
 
 
 def assert_constraint_header(struct_type: object) -> None:
-    """Validate the three-field constraint header contract.
-
-    Every per-type constraint schema must start with::
-
-        @wp.struct
-        class FooConstraintData:
-            constraint_type: wp.int32  # dword 0
-            body1: wp.int32  # dword 1
-            body2: wp.int32  # dword 2
-            # ... type-specific fields ...
-
-    Each per-type module calls this at import time with its schema. If a
-    future edit reorders or removes any of these three fields, the
-    importing module fails immediately with a clear error rather than
-    silently mis-routing constraint dispatch or scrambling body indices
-    at runtime.
-    """
+    """Validate the (constraint_type, body1, body2) header at dwords 0/1/2.
+    Called at import time by each per-type module."""
     expected = [("constraint_type", 0), ("body1", 1), ("body2", 2)]
     for field, want in expected:
         try:
@@ -141,14 +102,8 @@ def assert_constraint_header(struct_type: object) -> None:
 
 @wp.struct
 class ConstraintContainer:
-    """Column-major dword-packed storage for all constraint types.
-
-    ``data`` shape is ``(num_dwords, num_constraints)`` so that the
-    constraint index ``cid`` is the inner (contiguous) dimension. A
-    single field load like ``read_vec3(c, off, cid)`` issues 3
-    ``data[off+i, cid]`` reads -- across a warp these become coalesced
-    transactions because ``cid`` varies by lane and ``off`` is constant.
-    """
+    """``data`` shape: (num_dwords, num_constraints), cid is inner dim for
+    coalesced loads."""
 
     data: wp.array2d[wp.float32]
 
@@ -158,34 +113,14 @@ def constraint_container_zeros(
     num_dwords: int,
     device: wp.DeviceLike = None,
 ) -> ConstraintContainer:
-    """Allocate a zero-initialised :class:`ConstraintContainer`.
-
-    Args:
-        num_constraints: Total number of constraints to store. Constraint
-            indices ``[0, num_constraints)`` are globally unique across
-            constraint types (ball-socket, motor, ...).
-        num_dwords: Per-constraint dword count -- the maximum of the
-            registered constraint types' ``num_dwords(StructType)``.
-        device: Warp device.
-    """
+    """Allocate a zero-initialised :class:`ConstraintContainer`."""
     c = ConstraintContainer()
     c.data = wp.zeros((num_dwords, num_constraints), dtype=wp.float32, device=device)
     return c
 
 
-# ---------------------------------------------------------------------------
-# Column-major dword accessors
-# ---------------------------------------------------------------------------
-#
-# All read_* / write_* helpers take a fixed ``off`` (Python int wrapped in
-# a wp.constant by the caller) and the per-thread ``cid``. They expand
-# inside the kernel to plain indexed array accesses so the compiler sees
-# them as ordinary loads/stores; nothing fancy.
-#
-# vec3 / quat / mat33 are addressed as 3 / 4 / 9 individual dwords with
-# *no padding*. The compiler may or may not fuse the loads -- the win
-# here comes from coalescing across the warp, not from wider per-thread
-# transactions.
+# Column-major dword accessors. vec3/quat/mat33 are 3/4/9 individual dwords
+# (no padding); the warp-coalesce is the win, not per-thread fusion.
 
 
 @wp.func
@@ -242,12 +177,7 @@ def write_quat(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.quatf
 
 @wp.func
 def read_mat33(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.mat33f:
-    """Read a 3x3 matrix from 9 consecutive dwords, row-major.
-
-    Field stored as ``[m00, m01, m02, m10, m11, m12, m20, m21, m22]``
-    in struct order; we reconstruct the ``wp.mat33f`` with the same
-    convention.
-    """
+    """Row-major 3x3 from 9 consecutive dwords."""
     return wp.mat33f(
         c.data[off + 0, cid],
         c.data[off + 1, cid],
@@ -294,13 +224,7 @@ def write_vec4(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.vec4f
 
 @wp.func
 def read_mat44(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.mat44f:
-    """Read a 4x4 matrix from 16 consecutive dwords, row-major.
-
-    Field stored as ``[m00, m01, m02, m03, m10, ..., m33]`` in struct
-    order; we reconstruct the ``wp.mat44f`` with the same convention.
-    Used by the prismatic-mode Schur cache in
-    :mod:`constraint_actuated_double_ball_socket`.
-    """
+    """Row-major 4x4 from 16 consecutive dwords."""
     return wp.mat44f(
         c.data[off + 0, cid],
         c.data[off + 1, cid],
@@ -341,48 +265,25 @@ def write_mat44(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.mat4
     c.data[off + 15, cid] = v[3, 3]
 
 
-# ---------------------------------------------------------------------------
-# Generic header accessors -- valid for any constraint type
-# ---------------------------------------------------------------------------
-#
-# These intentionally do *not* import any per-type schema. The contract
-# (asserted at module load by ``assert_constraint_header``) is that
-# every schema's first three dwords are constraint_type / body1 / body2
-# in that order, so the dispatcher and element-projection kernels can
-# read them from any column without knowing which schema packed it.
+# Type-agnostic header accessors (work on any column thanks to the dword
+# 0/1/2 contract enforced by :func:`assert_constraint_header`).
 
 
 @wp.func
 def constraint_get_type(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
-    """Read the ``CONSTRAINT_TYPE_*`` tag of constraint ``cid``.
-
-    Works on any column regardless of which per-type init kernel packed
-    it. Used by the generic dispatch path to route each cid to the
-    right prepare/iterate ``wp.func``.
-    """
+    """Read the ``CONSTRAINT_TYPE_*`` tag of constraint ``cid``."""
     return read_int(c, CONSTRAINT_TYPE_OFFSET, cid)
 
 
 @wp.func
 def constraint_set_type(c: ConstraintContainer, cid: wp.int32, t: wp.int32):
-    """Write the ``CONSTRAINT_TYPE_*`` tag of constraint ``cid``.
-
-    Called from each per-type initialise kernel to stamp the column
-    with its type so :func:`constraint_get_type` can later route it.
-    """
+    """Write the ``CONSTRAINT_TYPE_*`` tag of constraint ``cid``."""
     write_int(c, CONSTRAINT_TYPE_OFFSET, cid, t)
 
 
 @wp.func
 def constraint_get_body1(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
-    """Read the body 1 index of constraint ``cid``.
-
-    Type-agnostic; works because every constraint schema is required to
-    place ``body1`` at dword 1 (see :func:`assert_constraint_header`).
-    Used by the unified element-projection kernel that builds the
-    partitioner's element view from the shared container without having
-    to dispatch on type.
-    """
+    """Read body1 of constraint ``cid``."""
     return read_int(c, CONSTRAINT_BODY1_OFFSET, cid)
 
 
@@ -393,8 +294,7 @@ def constraint_set_body1(c: ConstraintContainer, cid: wp.int32, b: wp.int32):
 
 @wp.func
 def constraint_get_body2(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
-    """Read the body 2 index of constraint ``cid``. See
-    :func:`constraint_get_body1` for the contract."""
+    """Read body2 of constraint ``cid``."""
     return read_int(c, CONSTRAINT_BODY2_OFFSET, cid)
 
 
@@ -403,30 +303,13 @@ def constraint_set_body2(c: ConstraintContainer, cid: wp.int32, b: wp.int32):
     write_int(c, CONSTRAINT_BODY2_OFFSET, cid, b)
 
 
-# ---------------------------------------------------------------------------
-# Body-pair carrier for composable constraint funcs
-# ---------------------------------------------------------------------------
-#
-# When a *composite* constraint (e.g. the fused HingeJoint) wants to call
-# its sub-component ``*_at`` funcs, those sub-funcs must not re-fetch
-# body1 / body2 from the shared header (the composite's sub-blocks don't
-# carry their own body indices -- there's only one header per column).
-# Instead the composite reads the pair once and threads it through every
-# sub-call as a tiny carrier struct, which the compiler treats as two
-# scratch ints that stay in registers across the sequential sub-calls.
+# Body-pair carrier for composable sub-constraint calls (header is per-column,
+# so composites read body1/body2 once and thread through).
 
 
 @wp.struct
 class ConstraintBodies:
-    """Body indices of the (body1, body2) pair a constraint operates on.
-
-    Threaded through composable ``*_at`` constraint funcs so they can
-    address ``BodyContainer`` without going back to the constraint
-    column. Used by both the *direct* path (where the wrapper extracts
-    the pair from the column header and forwards it) and the *composite*
-    path (where the fused constraint reads the pair from its shared
-    header once and forwards the same instance to all sub-funcs).
-    """
+    """(body1, body2) carrier threaded through composable constraint funcs."""
 
     b1: wp.int32
     b2: wp.int32
@@ -434,57 +317,28 @@ class ConstraintBodies:
 
 @wp.func
 def constraint_bodies_make(b1: wp.int32, b2: wp.int32) -> ConstraintBodies:
-    """Construct a :class:`ConstraintBodies` carrier from two body indices."""
+    """Build a :class:`ConstraintBodies` from two body indices."""
     bp = ConstraintBodies()
     bp.b1 = b1
     bp.b2 = b2
     return bp
 
 
-# ---------------------------------------------------------------------------
-# Soft-constraint coefficients (Box2D v3 / Bepu / Nordby formulation)
-# ---------------------------------------------------------------------------
-#
-# User specifies an undamped natural frequency ``hertz`` (Hz) and a
-# non-dimensional ``damping_ratio`` (1 = critically damped); per-substep
-# PGS coefficients fall out from ``(hertz, damping_ratio, dt)``. Mass-
-# and substep-independent; requested ``omega = 2*pi*hertz`` is clamped
-# at the per-substep Nyquist rate so asking for more stiffness than the
-# integrator can resolve yields the stiffest resolvable lock, never an
-# aliased response. Defaults below sit above any realistic Nyquist so
-# they always clamp, producing maximally-rigid locks; pass a smaller
-# finite ``hertz`` for honest spring compliance.
-#
-# See https://box2d.org/posts/2024/02/solver2d/ ("Soft Constraints") for
-# the derivation.
+# Soft-constraint coefficients (Box2D v3 / Bepu / Nordby; see
+# https://box2d.org/posts/2024/02/solver2d/). User picks (hertz, damping_ratio).
+# omega = 2*pi*hertz is Nyquist-clamped (pi/dt). Defaults are above any realistic
+# Nyquist -> maximally rigid; pass a smaller hertz for compliance, or 0 for a
+# rigid PGS row with no drift correction.
 
-#: Critically damped by default -- no overshoot, no underdamped ringing.
 DEFAULT_DAMPING_RATIO = wp.constant(wp.float32(1.0))
-#: Linear joint stiffness; Nyquist-clamped -> maximally rigid.
-#: Override with a smaller finite ``hertz`` for compliance, or ``0`` for
-#: a rigid PGS row with no drift correction.
 DEFAULT_HERTZ_LINEAR = wp.constant(wp.float32(1.0e9))
-#: Angular lock stiffness; same contract as :data:`DEFAULT_HERTZ_LINEAR`.
 DEFAULT_HERTZ_ANGULAR = wp.constant(wp.float32(1.0e9))
-#: Hinge / cone limit stiffness; Nyquist-clamped so limits don't bounce.
 DEFAULT_HERTZ_LIMIT = wp.constant(wp.float32(1.0e9))
 
-#: Hard upper bound on per-row Nyquist headroom multipliers (the
-#: ``nyquist_boost`` argument to :func:`pd_coefficients` and friends).
-#: A boost of ``N`` lets PD rows accept stiffness up to
-#: ``N / (M_inv * dt^2)`` -- ``N = 1`` is the strict implicit-Euler
-#: bound, larger values trade headroom for high-frequency ringing
-#: risk. Per-row requests above this constant are silently clamped
-#: down so users cannot push past a known-safe limit. The cable
-#: bend / twist rows default to this value (``10``); revolute /
-#: prismatic drive / limit rows default to ``1``.
+#: Cap on per-row ``nyquist_boost``. Boost N allows stiffness up to
+#: N / (M_inv * dt^2); N=1 is the strict implicit-Euler bound.
 _PD_NYQUIST_HEADROOM_MAX = wp.constant(wp.float32(10.0))
-#: Velocity-motor stiffness (only modulates the impulse coefficient
-#: since velocity targets carry no positional bias).
 DEFAULT_HERTZ_MOTOR = wp.constant(wp.float32(1.0e9))
-#: Contact-pair stiffness; Nyquist-clamped. The big first-substep
-#: impulse on initial deep penetration is bounded by the prepare
-#: kernel's ``max_push_speed`` recovery-speed cap.
 DEFAULT_HERTZ_CONTACT = wp.constant(wp.float32(1.0e9))
 
 
@@ -494,30 +348,12 @@ def soft_constraint_coefficients(
     damping_ratio: wp.float32,
     dt: wp.float32,
 ):
-    """Map ``(hertz, damping_ratio, dt)`` to PGS soft-constraint coefficients.
-
-    Box2D v3 / Bepu / Nordby formulation
-    (https://box2d.org/posts/2024/02/solver2d/). ``omega = 2*pi*hertz``
-    is clamped at the per-substep Nyquist ``pi/dt``, so requesting
-    more stiffness than the current ``dt`` can resolve yields the
-    stiffest resolvable lock rather than aliasing. Substep-independent:
-    more substeps = higher Nyquist = more rigid.
-
-    Returns ``(bias_rate [1/s], mass_coeff [-], impulse_coeff [-])``;
-    the latter two lie in ``[0, 1]`` and feed straight into the PGS
-    update.
-
-    ``hertz <= 0`` yields a rigid constraint with no drift
-    correction: ``(0, 1, 0)`` -- the un-softened plain-PGS row.
-    """
+    """Box2D-v3 PGS soft-constraint coefficients. omega = 2*pi*hertz clamped to
+    Nyquist (pi/dt). Returns (bias_rate, mass_coeff, impulse_coeff). hertz <= 0
+    -> rigid (0, 1, 0)."""
     if hertz <= 0.0:
         return wp.float32(0.0), wp.float32(1.0), wp.float32(0.0)
 
-    # Clamp omega at the per-substep Nyquist rate: the fastest spring
-    # the integrator can resolve is one with half a cycle per step,
-    # i.e. ``omega * dt == pi``. Requests beyond that alias, so we
-    # saturate to the maximally-rigid response the current ``dt``
-    # supports. See the block comment above for the full rationale.
     omega_request = 2.0 * 3.14159265358979 * hertz
     omega_nyquist = 3.14159265358979 / dt
     omega = wp.min(omega_request, omega_nyquist)
@@ -536,70 +372,29 @@ def pd_coefficients(
     dt: wp.float32,
     nyquist_boost: wp.float32,
 ):
-    """Map ``(k, c, C, M_inv, dt)`` to Jitter2 PGS spring-damper triple.
+    """Jitter2 implicit-Euler spring-damper triple (k absolute, not mass-baked).
 
-    Implicit-Euler spring-damper from Jitter2 ``SpringConstraint.
-    SetSpringParameters``. User specifies absolute gains ``k`` [N/m
-    or N*m/rad] and ``c`` [N*s/m or N*m*s/rad]; unlike the Box2D-style
-    :func:`soft_constraint_coefficients` these do *not* bake in the
-    effective mass, so for mass-invariant behaviour the caller
-    rescales.
-
-    Returns ``(gamma, bias, eff_mass_softened)`` with ``idt = 1/dt``
-    already folded in so the PGS iterate is one update:
-
-    * ``gamma             = 1 / (c + dt*k) * idt``       [s^-1]
-    * ``bias              = C * dt*k / (c + dt*k) * idt`` [m/s or rad/s]
-    * ``eff_mass_softened = 1 / (M_inv + gamma)``         [kg or kg*m^2]
-
-    yielding ``lambda = -M_eff_soft * (J v - bias_signed +
-    gamma * lambda_acc)`` (caller sign-flips ``bias`` to match its
-    Jacobian convention).
-
-    Short-circuits to ``(0, 0, 0)`` -- a no-op PGS row -- when
-    ``eff_mass_inv <= 0`` or both gains are zero. Callers additionally
-    guard on a "drive off" flag to skip the solve entirely.
-
-    Args:
-        stiffness: Positional stiffness ``k >= 0``; ``0`` = pure damper.
-        damping: Viscous damping ``c >= 0``; ``0`` = pure spring.
-        position_error: ``C = actual - target`` [rad or m].
-        eff_mass_inv: ``J M^{-1} J^T``; ``0`` short-circuits to no-op.
-        dt: Substep [s], must be > 0.
-        nyquist_boost: Per-row headroom multiplier on the Nyquist
-            stiffness clamp. ``1`` = strict bound, larger values trade
-            headroom for ringing risk; clamped to
-            ``[1, _PD_NYQUIST_HEADROOM_MAX]``.
+    Returns ``(gamma, bias, eff_mass_softened)`` (idt folded in):
+        gamma = 1 / (c + dt*k) * idt
+        bias  = C * dt*k / (c + dt*k) * idt
+        eff   = 1 / (M_inv + gamma)
+    Yielding ``lambda = -eff * (Jv - bias_signed + gamma * lambda_acc)``.
+    Short-circuits to (0,0,0) when M_inv<=0 or both gains zero.
     """
     if eff_mass_inv <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
     if stiffness <= 0.0 and damping <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
 
-    # Nyquist stiffness clamp. Beyond ``omega_n * dt > 1`` (i.e.
-    # ``stiffness * eff_mass_inv * dt^2 > 1``) the implicit-Euler
-    # spring is still stable but the apparent stiffness is bounded
-    # by what the substep can resolve; PGS sees a "rigid" row whose
-    # bias spikes to ``C / dt`` and its effective mass collapses to
-    # ``1 / eff_mass_inv``. Capping ``k`` at the Nyquist limit
-    # keeps user-supplied gains in the regime where the soft-PD
-    # plumbing degrades smoothly. ``nyquist_boost`` lets a caller
-    # opt into more headroom; the global ``_PD_NYQUIST_HEADROOM_MAX``
-    # caps the boost so requests cannot push past a known-safe limit.
+    # Nyquist clamp on k: beyond ~1/(M_inv * dt^2) PGS sees a rigid row.
     boost = wp.clamp(nyquist_boost, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
     k_max = boost / (eff_mass_inv * dt * dt)
     k_clamped = wp.min(stiffness, k_max)
 
-    # Jitter2 SetSpringParameters, but with k/c already in absolute
-    # units (Jitter2's version rescales by the edge m_eff; we let the
-    # caller decide that).
     softness = wp.float32(1.0) / (damping + dt * k_clamped)
     bias_factor = dt * k_clamped * softness
     idt = wp.float32(1.0) / dt
 
-    # Fold the 1/dt scale into gamma and bias so the kernel iterate is
-    # identical to the pure-velocity-motor path modulo these two
-    # scalars.
     gamma = softness * idt
     bias = position_error * bias_factor * idt
     eff_mass_soft = wp.float32(1.0) / (eff_mass_inv + gamma)
@@ -615,31 +410,10 @@ def pd_coefficients_split(
     dt: wp.float32,
     nyquist_boost: wp.float32,
 ):
-    """Spring / damping XPBD-style split of :func:`pd_coefficients`.
-
-    Returns ``(gamma_spring, bias_spring, eff_mass_spring,
-    damp_mass)``. The first three are the spring-only triple
-    (``c = 0``) used by the main PGS solve; ``damp_mass`` is the
-    velocity-only damping effective mass used by the relax pass:
-
-        lam_spring = -eff_mass_spring * (Jv - bias_spring + gamma_spring * acc)   # main solve
-        lam_damp   = -damp_mass * Jv                                              # relax (use_bias = False)
-
-    Splitting decouples the two physical effects:
-
-    * The spring row sees ``softness = 1 / (dt*k)``, so ``gamma`` and
-      ``bias`` are well-conditioned for any ``k`` (after the Nyquist
-      clamp). Convergence is independent of the damping gain.
-    * The damping row applies one implicit-Euler velocity update:
-      ``v_new = v / (1 + dt*c*M_inv)`` -> required impulse
-      ``lam = -dt*c / (1 + dt*c*M_inv) * Jv``. One PGS iteration
-      lands the exact result for an isolated body; chains converge
-      at the usual PGS rate without the rigid-bias artefact the
-      combined formulation suffers at high ``c``.
-
-    Equivalent steady state to the combined :func:`pd_coefficients`
-    up to ``O(dt^2)`` discretisation error.
-    """
+    """XPBD-style spring/damping split of :func:`pd_coefficients`. Returns
+    ``(gamma_s, bias_s, eff_mass_s, damp_mass)``. Main solve uses spring triple
+    + bias=True; relax uses damp_mass + bias=False. Decouples k and c so
+    convergence is independent of damping; equivalent steady state up to O(dt^2)."""
     if eff_mass_inv <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
     if stiffness <= 0.0 and damping <= 0.0:
@@ -647,9 +421,7 @@ def pd_coefficients_split(
 
     idt = wp.float32(1.0) / dt
 
-    # ---- Spring-only soft constraint (damping = 0) -------------------
-    # Equivalent to ``pd_coefficients(k_clamped, 0, C, M_inv, dt)``;
-    # inlined to share the Nyquist clamp.
+    # Spring-only soft (damping=0); inlined to share the Nyquist clamp.
     gamma_s = wp.float32(0.0)
     bias_s = wp.float32(0.0)
     eff_mass_s = wp.float32(0.0)
@@ -659,15 +431,11 @@ def pd_coefficients_split(
         k_clamped = wp.min(stiffness, k_max)
         softness_s = wp.float32(1.0) / (dt * k_clamped)
         gamma_s = softness_s * idt
-        # ``bias_factor = dt * k / (0 + dt * k) = 1`` when damping = 0.
+        # bias_factor = dt*k / (0 + dt*k) = 1 when damping = 0.
         bias_s = position_error * idt
         eff_mass_s = wp.float32(1.0) / (eff_mass_inv + gamma_s)
 
-    # ---- Damping-only velocity constraint ----------------------------
-    # Implicit Euler ``v_new = v - dt*c*M_inv*v_new`` -> per-iter
-    # impulse ``lam = m * (v_new - v) = -v * (dt*c) / (1 + dt*c*M_inv)``,
-    # so ``damp_mass = dt*c / (1 + dt*c*M_inv)``. Exact in one PGS
-    # iteration for an isolated body.
+    # Damping-only: implicit Euler -> damp_mass = dt*c / (1 + dt*c*M_inv).
     damp_mass = wp.float32(0.0)
     if damping > 0.0:
         damp_mass = (dt * damping) / (wp.float32(1.0) + dt * damping * eff_mass_inv)

@@ -244,9 +244,10 @@ class Example:
         # buffer.
         self.contacts = self.model.contacts()
 
-        self._animation_data: np.ndarray | None = None
+        self._animation_enabled: bool = bool(args.animation)
         self._animation_speed: float = args.animation_speed
-        if args.animation:
+        self._sim_time_wp = wp.array([0.0], dtype=float)
+        if self._animation_enabled:
             self._init_animation(asset_path)
 
         self.viewer.set_model(self.model)
@@ -328,6 +329,13 @@ class Example:
         picking._pick_effective_mass.assign(eff)
 
     def _init_animation(self, asset_path) -> None:
+        # The full trajectory is uploaded once into a GPU-resident
+        # ``wp.array2d[float]`` of shape ``(n_frames, n_channels)``.
+        # Per-frame target updates are then a single Warp kernel
+        # launch that reads the current frame from
+        # ``self._sim_time_wp`` and scatters it into
+        # ``control.joint_target_pos`` -- no host->device copy and no
+        # Python work in the hot loop.
         anim_file = str(asset_path / "dr_legs/animation" / "dr_legs_animation_100fps.npy")
         anim = np.load(anim_file).astype(np.float32)
         if anim.shape[1] != len(_ANIMATION_JOINT_PATHS):
@@ -337,23 +345,18 @@ class Example:
         try:
             channel_dofs = np.array(
                 [joint_qd_start[joint_label.index(path)] for path in _ANIMATION_JOINT_PATHS],
-                dtype=np.int64,
+                dtype=np.int32,
             )
         except ValueError as e:
             raise RuntimeError(f"animation joint not found in model.joint_label: {e}") from e
         n_dof_per_world = self.model.joint_dof_count // self.world_count
-        world_offsets = np.arange(self.world_count, dtype=np.int64) * n_dof_per_world
-        # 2-D fancy-index assignment broadcasts a (12,) RHS across worlds.
-        self._animation_indices = channel_dofs[None, :] + world_offsets[:, None]
-        self._animation_data = anim * _ANIMATION_CHANNEL_SIGN[None, :]
-        self._animation_dt = 1.0 / 100.0
-        self._target_pos_host = self.control.joint_target_pos.numpy()
+        world_offsets = np.arange(self.world_count, dtype=np.int32) * n_dof_per_world
+        animation_indices = channel_dofs[None, :] + world_offsets[:, None]
 
-    def _update_animation_targets(self):
-        n_frames = self._animation_data.shape[0]
-        frame = min(int(self.sim_time * self._animation_speed / self._animation_dt), n_frames - 1)
-        self._target_pos_host[self._animation_indices] = self._animation_data[frame]
-        self.control.joint_target_pos.assign(self._target_pos_host)
+        self._animation_n_frames = anim.shape[0]
+        self._animation_fps = 100.0
+        self._animation_data_wp = wp.array(anim * _ANIMATION_CHANNEL_SIGN[None, :], dtype=float)
+        self._animation_indices_wp = wp.array(animation_indices, dtype=int)
 
     def capture(self):
         self.graph = None
@@ -382,17 +385,38 @@ class Example:
         # instead. The copy is captured alongside the kernel chain,
         # so each replay refreshes ``state_0`` with the just-stepped
         # pose.
+        #
+        # Animation targets are scattered into
+        # ``control.joint_target_pos`` by a Warp kernel that reads
+        # the GPU-resident frame counter ``self._sim_time_wp``; the
+        # trajectory itself lives in ``self._animation_data_wp``.
+        # The advance kernel at the end bumps the counter so
+        # successive graph replays walk the clip without any
+        # Python-side bookkeeping.
+        if self._animation_enabled:
+            wp.launch(
+                _scatter_animation_targets,
+                dim=(self.world_count, len(_ANIMATION_JOINT_PATHS)),
+                inputs=[
+                    self._sim_time_wp,
+                    self._animation_speed,
+                    self._animation_fps,
+                    self._animation_n_frames,
+                    self._animation_data_wp,
+                    self._animation_indices_wp,
+                    self.control.joint_target_pos,
+                ],
+            )
         self.model.collide(self.state_0, self.contacts)
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
         self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.frame_dt)
         wp.copy(self.state_0.body_q, self.state_1.body_q)
         wp.copy(self.state_0.body_qd, self.state_1.body_qd)
+        if self._animation_enabled:
+            wp.launch(_advance_sim_time, dim=1, inputs=[self._sim_time_wp, self.frame_dt])
 
     def step(self):
-        if self._animation_data is not None:
-            self._update_animation_targets()
-
         if self.graph:
             wp.capture_launch(self.graph)
         else:

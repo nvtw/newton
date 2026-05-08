@@ -1,21 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Warp port of PhoenX's ``Scene.Step`` driver -- contacts + actuated
-double-ball-socket joints.
-
-Supports :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET` (ball-socket
-/ revolute / prismatic with optional PD drives and limits) and
-:data:`CONSTRAINT_TYPE_CONTACT`. Newton's :class:`CollisionPipeline`
+"""Warp port of PhoenX's ``Scene.Step``: contacts + actuated double-ball-socket
+joints (ball/revolute/prismatic/fixed/cable). Newton's CollisionPipeline
 produces contacts; this solver consumes them.
 
-Per-step flow mirrors ``World.Step.cs``:
-    1. Ingest contacts.
-    2. Rebuild element view + Jones-Plassmann colouring once.
-    3. Substep loop: integrate forces + gravity, main PGS solve
-       (bias=True), integrate positions, position iterate, relax
-       (bias=False).
-    4. Damping + rotated-inertia refresh.
-    5. Clear force accumulators.
+Per-step: ingest contacts -> JP colouring -> substep loop (forces+gravity,
+main PGS, integrate, relax) -> damping + inertia refresh -> clear forces.
 """
 
 from __future__ import annotations
@@ -130,18 +120,14 @@ __all__ = [
 ]
 
 
-#: Default contact-detection gap [m] for shapes in PhoenX scenes.
-#: Generous (5 cm) so contacts emit a few frames before impact;
-#: PhoenX's speculative branch decelerates closing bodies while they
-#: still have a gap, which is easier to stabilise than penetration
-#: recovery. Scene-scale-sensitive: override for MEMS / vehicle scales.
+#: Default contact-detection gap [m]. 5 cm is generous so PhoenX's speculative
+#: branch decelerates closing bodies while still apart. Override for MEMS/vehicles.
 DEFAULT_SHAPE_GAP: float = 0.05
 
 
 def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]:
-    """Coerce ``gravity`` into a ``wp.array[wp.vec3f]`` of length
-    ``num_worlds``. Accepts a single 3-tuple (broadcast) or an
-    iterable of ``num_worlds`` 3-tuples."""
+    """Coerce ``gravity`` into wp.array[wp.vec3f] of length ``num_worlds``.
+    Accepts a 3-tuple (broadcast) or an iterable of num_worlds 3-tuples."""
     g_list = list(gravity) if hasattr(gravity, "__iter__") else None
     if g_list is not None and len(g_list) == 3 and not hasattr(g_list[0], "__iter__"):
         vec = (float(g_list[0]), float(g_list[1]), float(g_list[2]))
@@ -161,10 +147,6 @@ def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]
     return wp.array(arr_np, dtype=wp.vec3f, device=device)
 
 
-#: Block dim used by the single-world PGS sweep kernels.
-#: 256 threads / block matches Warp's default and NarrowPhase's choice;
-#: the kernels are register-heavy (~168 registers/thread) so a smaller
-#: block would not improve occupancy further.
 _SINGLEWORLD_BLOCK_DIM: int = 256
 
 
@@ -173,125 +155,60 @@ def _singleworld_total_threads(
     device,
     max_thread_blocks: int | None = None,
 ) -> int:
-    """Persistent grid size for the single-world PGS sweep kernels.
-
-    Mirrors :class:`NarrowPhase`'s "saturate without overprovisioning"
-    sizing: 4 blocks/SM on CUDA (capped by capacity and a 32-block
-    floor) so the CUDA graph stays stable while avoiding the old
-    one-thread-per-cid 900K-grid waste.
-
-    Args:
-        constraint_capacity: Upper bound on active cids per colour.
-        device: Warp device (only ``sm_count`` is read).
-        max_thread_blocks: Optional hard cap on the persistent grid's
-            block count. When set, replaces the default ``4 *
-            sm_count`` (CUDA) / ``256`` (CPU) cap *and* the 32-block
-            floor; the grid is sized to ``min(capacity_blocks,
-            max_thread_blocks)`` (still at least 1 block). Use this
-            to share the GPU with a co-resident workload or to
-            measure SM-occupancy effects. Only the single-world
-            layout's PGS sweeps (prepare, main iterate, velocity
-            relax) read this; the multi-world fast-tail path is
-            unaffected.
-
-    Returns:
-        Persistent grid size in threads, multiple of
-        :data:`_SINGLEWORLD_BLOCK_DIM`.
-    """
+    """Persistent grid size for the single-world PGS kernels: ``clamp(ceil(cap /
+    256), 32, 4 * sm_count)`` blocks of 256 threads. ``max_thread_blocks`` opts
+    out of the floor + SM cap and uses ``min(capacity_blocks, max_thread_blocks)``."""
     block_dim = _SINGLEWORLD_BLOCK_DIM
     capacity_blocks = (max(1, int(constraint_capacity)) + block_dim - 1) // block_dim
     if max_thread_blocks is not None:
         if int(max_thread_blocks) < 1:
             raise ValueError(f"max_thread_blocks must be >= 1 (got {max_thread_blocks})")
-        # Opt-in mode: respect the user's cap verbatim, bypassing the
-        # 32-block floor and SM-derived ceiling. Still clamped above
-        # by ``capacity_blocks`` because launching more blocks than
-        # there are cids strands work without benefit.
         num_blocks = max(1, min(capacity_blocks, int(max_thread_blocks)))
         return block_dim * num_blocks
     device_obj = wp.get_device(device)
     if device_obj.is_cuda:
-        # 4 blocks/SM hits good occupancy without overprovisioning.
         max_blocks_limit = device_obj.sm_count * 4
     else:
         max_blocks_limit = 256
-    # ``min_blocks = 32`` gives 8K threads minimum -- enough to keep
-    # every SM warm on small GPUs without stranding work on large
-    # ones. The ``capacity_blocks`` cap prevents a 900K-cid capacity
-    # from demanding more threads than there are cids.
     min_blocks = 32
     num_blocks = max(min_blocks, min(capacity_blocks, max_blocks_limit))
     return block_dim * num_blocks
 
 
 class PhoenXWorld:
-    """PhoenX solver driver. Owns a :class:`BodyContainer`, a
-    :class:`ConstraintContainer`, and per-step contact ingest /
-    warm-start state. :meth:`step` advances every rigid body by ``dt``
-    seconds.
-
-    Joint columns occupy cids ``[0, num_joints)``; contact columns
-    occupy ``[num_joints, num_joints + max_contact_columns)``. Only
-    :data:`CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET` joints are
-    supported; call :meth:`initialize_actuated_double_ball_socket_joints`
-    to populate them before the first :meth:`step`.
+    """PhoenX solver driver. Joint cids in [0, num_joints); contact cids in
+    [num_joints, num_joints + max_contact_columns). Only ADBS joints supported
+    (populate via :meth:`initialize_actuated_double_ball_socket_joints`).
     """
 
     @dataclass
     class StepReport:
-        """Diagnostic snapshot of the most recent :meth:`step`.
-
-        All counters refer to the just-finished step; producing the
-        report performs a handful of device-to-host copies and is not
-        graph-capture safe -- only call it from host code outside the
-        captured region.
-        """
+        """Diagnostic snapshot. Triggers D2H copies; not graph-capture safe."""
 
         num_colors: int
-        """Number of graph colours used by the last PGS colouring.
-
-        For ``step_layout="single_world"`` this is the global colour
-        count. For ``"multi_world"`` it is the maximum colour count
-        across all worlds (i.e. the depth of the per-world PGS sweep)."""
+        """Graph colour count from the last PGS. Multi-world: max across worlds."""
 
         color_sizes: list[int]
-        """Element count per colour, length :attr:`num_colors`.
-
-        Single-world: per-colour element counts of the global
-        colouring. Multi-world: sum across worlds of the elements
-        assigned to each colour index ``c`` (worlds with fewer than
-        ``c+1`` colours contribute zero)."""
+        """Element count per colour. Multi-world: sum across worlds per index."""
 
         per_world_num_colors: list[int] | None
-        """Per-world colour counts, length ``num_worlds``. ``None`` for
-        the single-world layout."""
+        """Per-world colour counts; None for single-world."""
 
         per_world_color_sizes: list[list[int]] | None
-        """Per-world per-colour element counts. Outer list has one
-        entry per world; inner list ``i`` has length
-        ``per_world_num_colors[i]``. ``None`` for the single-world
-        layout."""
+        """Per-world per-colour element counts; None for single-world."""
 
         num_contact_columns: int
-        """Active contact columns processed in the last step (zero if
-        :meth:`step` was called without contacts)."""
+        """Active contact columns from the last step."""
 
         num_joints: int
-        """Number of joint constraint columns; static for the lifetime
-        of the world."""
+        """Joint constraint columns (static for the world's lifetime)."""
 
         num_active_constraints: int
-        """``num_joints + num_contact_columns`` -- total cids that the
-        last colouring partitioned."""
+        """num_joints + num_contact_columns."""
 
         max_body_degree: int
-        """Maximum number of active constraint columns incident to any
-        single body in the last :meth:`step`. This is a hard lower
-        bound on the number of colours any valid graph colouring of
-        the constraint conflict graph can use, so comparing it against
-        :attr:`num_colors` shows how close the colourer is to the
-        theoretical optimum. ``0`` if :meth:`step` has not been called
-        or there are no active constraints."""
+        """Max constraints incident to any single body. Hard lower bound on the
+        colour count any valid colouring can achieve. 0 if no step yet."""
 
     def __init__(
         self,
@@ -315,58 +232,20 @@ class PhoenXWorld:
         """Take ownership of pre-built body and constraint containers.
 
         Args:
-            bodies: Rigid body SoA. Caller sets initial pose, mass,
-                inertia; solver reads/writes velocity, position,
-                orientation, forces, rotated inertia.
-            constraints: Shared container. Joints at cids
-                ``[0, num_joints)``; contacts at
-                ``[num_joints, num_joints + max_contact_columns)``.
-                Per-constraint dword width must be at least
-                ``max(CONTACT_DWORDS, ADBS_DWORDS)`` when
-                ``num_joints > 0``. :meth:`make_constraint_container`
-                handles the sizing.
-            substeps: Substeps per :meth:`step` call.
-            solver_iterations: PGS iterations per substep (main solve,
-                bias=True).
-            velocity_iterations: TGS-soft relax sweeps per substep
-                (bias=False). Defaults to ``1``; ``0`` recovers raw
-                PhoenX but accumulates Baumgarte drift on tall stacks.
-            gravity: Constant world-space gravity [m/s^2]. A 3-tuple
-                broadcasts; an iterable of 3-tuples gives each world
-                its own vector.
-            rigid_contact_max: Upper bound on the Newton ``Contacts``
-                buffer's rigid-contact range. Sizes the contact-column
-                capacity 1:1 (one column per ``(shape_a, shape_b)``
-                pair); ``0`` disables contact paths entirely.
-            num_joints: Actuated-DBS joint columns reserved at
-                ``[0, num_joints)``. Populate via
-                :meth:`initialize_actuated_double_ball_socket_joints`
-                before the first step.
-            collision_filter_pairs: Optional ``(body_a, body_b)`` pairs
-                whose contacts are dropped on ingest.
-            default_friction: Friction used when no per-shape material
-                is registered (see :meth:`set_materials`).
-            num_worlds: Number of independent sub-worlds. Gating uses
-                ``BodyContainer.world_id``.
-            step_layout: ``"multi_world"`` (default) uses the per-world
-                fast-tail path (one warp per world; scales beyond ~256
-                worlds). ``"single_world"`` drives the global
-                Jones-Plassmann colouring with per-colour persistent
-                grid launches via ``wp.capture_while``; wins when the
-                scene is one or a few very big worlds.
-            threads_per_world: Effective threads-per-world for the
-                multi-world fast-tail kernels. ``"auto"`` (default)
-                picks per-step from the colour-size histogram;
-                ``32`` = one warp per world (legacy), ``16`` = two,
-                ``8`` = four (rarely wins). Grid is always
-                ``num_worlds * 32`` lanes with the surplus
-                early-exiting, so this knob is graph-capture safe.
-            max_thread_blocks: Optional hard cap on the persistent
-                grid used by the single-world PGS sweeps (prepare,
-                main iterate, velocity relax). When ``None``
-                (default) the grid is sized as
-                ``clamp(ceil(cap / 256), 32, 4 * sm_count)`` blocks
-                of 256 threads. When set, replaces both the
+            bodies, constraints: Pre-built containers. Joint cids occupy
+                [0, num_joints); contact cids occupy [num_joints, ...).
+            substeps, solver_iterations, velocity_iterations: PGS schedule.
+                ``velocity_iterations=0`` recovers raw PhoenX; ``1`` (default)
+                runs TGS-soft relax for stable tall stacks.
+            gravity: 3-tuple (broadcast) or iterable of num_worlds 3-tuples.
+            rigid_contact_max: Upper bound on Newton's Contacts buffer; sizes
+                contact-column capacity 1:1. ``0`` disables contacts.
+            step_layout: ``"multi_world"`` (per-world fast-tail; scales beyond
+                ~256 worlds) or ``"single_world"`` (global JP colouring with
+                wp.capture_while; wins for a few big worlds).
+            threads_per_world: ``"auto"`` (default), 32, 16, or 8 (multi-world).
+            max_thread_blocks: Hard cap on the single-world PGS persistent grid.
+                ``None`` keeps the auto-size ``clamp(ceil(cap/256), 32, 4*sm)``
                 32-block floor and the SM-derived ceiling, so the
                 grid becomes ``min(ceil(cap / 256),
                 max_thread_blocks)`` blocks. Use this to share the
@@ -443,10 +322,8 @@ class PhoenXWorld:
                 raise ValueError(f"threads_per_world must be 'auto' or one of (8, 16, 32) (got {threads_per_world!r})")
             # Host-side fast-path: the picker's saturation gate for
             # tpw=16 is "num_worlds >= 8 * sm_count". Below that, the
-            # picker would always emit tpw=32, so we skip the per-step
-            # launch entirely and pin to 32. Avoids ~10us/step of
-            # picker overhead on small fleets where it would never
-            # pay off anyway.
+            # Below 8*sm_count worlds the picker would always emit tpw=32,
+            # so pin and skip the per-step picker (~10us saved).
             _sm = getattr(self.device, "sm_count", 0) or 1
             if self.num_worlds < 8 * _sm:
                 self._tpw_auto: bool = False
@@ -467,14 +344,8 @@ class PhoenXWorld:
         self.gravity: wp.array[wp.vec3f] = _build_gravity_array(gravity, self.num_worlds, self.device)
         self.default_friction = float(default_friction)
 
-        # Global per-substep damping. ``None`` until the user opts in via
-        # :meth:`set_global_linear_damping` / :meth:`set_global_angular_damping`;
-        # while ``None`` the per-substep kernel is skipped entirely (zero
-        # cost). Once allocated, kept allocated for the lifetime of the
-        # solver -- changing the factor between graph replays is safe (the
-        # captured graph reads from the same device slot), but **opting in
-        # mid-simulation requires re-capturing any existing CUDA graph**
-        # since the captured graph doesn't include the new kernel launch.
+        # Global per-substep damping; lazy-alloc on opt-in. Mid-simulation
+        # opt-in requires re-capturing any existing CUDA graph.
         self._global_damping: wp.array[wp.float32] | None = None
         self._global_damping_host: np.ndarray | None = None
 
@@ -486,13 +357,7 @@ class PhoenXWorld:
         # Joint cids at ``[0, num_joints)``; contact cids follow.
         self._constraint_capacity: int = max(1, self.num_joints + self.max_contact_columns)
 
-        # Persistent grid size for the single-world PGS sweep kernels.
-        # Fixed at construction so every colour launch uses the same
-        # ``dim`` -- required to keep the outer CUDA graph capture
-        # stable across varying per-colour active counts. The
-        # optional ``max_thread_blocks`` opt-in caps the persistent
-        # grid (and bypasses the 32-block floor); see
-        # :func:`_singleworld_total_threads`.
+        # Persistent grid fixed at construction (graph-capture stability).
         if max_thread_blocks is not None and int(max_thread_blocks) < 1:
             raise ValueError(f"max_thread_blocks must be >= 1 (got {max_thread_blocks})")
         self._max_thread_blocks: int | None = int(max_thread_blocks) if max_thread_blocks is not None else None
@@ -502,15 +367,8 @@ class PhoenXWorld:
             max_thread_blocks=self._max_thread_blocks,
         )
 
-        # Head capture-while predicate. Starts each sweep at 1; the
-        # persistent-grid sweep zeroes it on the hand-off to the fused
-        # tail kernel (colour size ``<= FUSE_TAIL_MAX_COLOR_SIZE``).
-        # A separate flag (vs. reusing ``color_cursor``) is what lets
-        # the tail kernel resume at the exact cursor position. When
-        # the feature is disabled (``fuse_threshold = 0``), the hand-
-        # off branch is unreachable; termination then comes from the
-        # kernel's ``color_cursor == 0`` early-exit and the reset
-        # kernel below is the only per-sweep bookkeeping needed.
+        # Head capture-while predicate. Persistent-grid sweep zeroes it on
+        # hand-off to the fused tail kernel.
         self._head_active: wp.array[wp.int32] = wp.ones(1, dtype=wp.int32, device=self.device)
         self._fuse_threshold: int = int(FUSE_TAIL_MAX_COLOR_SIZE)
         self._fuse_tail_block_dim: int = int(FUSE_TAIL_BLOCK_DIM)
@@ -527,12 +385,9 @@ class PhoenXWorld:
             device=self.device,
             use_tile_scan=True,
         )
-        # Tracks the live single-world coloring choice. Starts at the
-        # config default; flipped to False (round-based JP) by
-        # :meth:`step` if a non-captured greedy build overflows the
-        # 64-color bitmask. Once flipped, we never flip back -- the
-        # JP path has no chromatic-number bound and is the safe
-        # fallback for any graph the greedy variant can't fit.
+        # Live single-world coloring choice. Flipped to False (round-based JP)
+        # if a non-captured greedy build overflows the 64-color bitmask; never
+        # flipped back (JP has no chromatic bound).
         self._use_greedy_coloring: bool = bool(PHOENX_USE_GREEDY_COLORING)
 
         cap = self._constraint_capacity
@@ -542,51 +397,20 @@ class PhoenXWorld:
             (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
         )
         self._world_csr_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
-        # Shifted staging buffer for the cross-world prefix scan. Sized
-        # ``num_worlds + 1`` so the inclusive scan input/output lengths
-        # match and the scan result lands directly in
-        # ``world_csr_offsets``.
+        # Sized nw+1 so the inclusive scan output lands in world_csr_offsets.
         self._world_totals_shifted: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._world_num_colors: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
 
-        # ----- Per-world coloring scratch (for parallel JP path) -----
-        #
-        # The per-world coloring path parallelises the JP MIS loop over
-        # worlds (one block per world); it's the only multi_world
-        # coloring strategy now. Single-world layouts route through
-        # ``partitioner.build_csr`` instead -- see the dispatch in
-        # :meth:`step`.
+        # Per-world JP scratch. _per_world_elements / _per_world_scatter_keys
+        # are 2*cap (radix-sort ping-pong); _per_world_assigned is 1-based
+        # colour (0 = unassigned).
         self._per_world_element_count: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
-        # Exclusive prefix of per-world counts; sized nw+1 so
-        # ``world_element_offsets[w+1] - world_element_offsets[w]`` is
-        # always a legal read.
         self._per_world_element_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
-        # Flat buffer that holds each world's active cids contiguously
-        # (bucketed by world_id of ``bodies[0]``). Sized to ``2 * cap``
-        # because the deterministic scatter uses
-        # :func:`wp.utils.radix_sort_pairs`, which needs a ping-pong
-        # second half. Only the first ``cap`` entries (the sort
-        # output) are read by the JP coloring; the second half is
-        # scratch.
         self._per_world_elements: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
-        # Per-cid world-id keys for the scatter sort. Same ping-pong
-        # sizing as ``_per_world_elements``.
         self._per_world_scatter_keys: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
-        # Per-element colour assignment (1-based; 0 = unassigned). This
-        # is the primary output of the per-world JP kernel and also
-        # doubles as the scratch the kernel clears at the start of each
-        # step.
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
-        # ----- Greedy variant scratch (per-world) ----------------------
-        #
-        # Used only by ``_per_world_greedy_coloring_kernel`` (the
-        # PHOENX_USE_GREEDY_COLORING=True path). Each row holds one
-        # world's per-colour histogram bucket and live scatter cursor.
-        # ``_per_world_greedy_overflow`` is a single-element flag the
-        # kernel sets if any world's coloring exceeds GREEDY_MAX_COLORS;
-        # surfaced via :meth:`step_report` for debugging but not raised
-        # mid-step (the greedy fallback is "use the round-based JP
-        # path", which the user can pick by flipping the config flag).
+        # Greedy per-world scratch. overflow flag is surfaced via step_report
+        # but not raised mid-step (fallback is to flip _use_greedy_coloring off).
         self._per_world_greedy_color_count: wp.array2d[wp.int32] = wp.zeros(
             (nw, int(GREEDY_MAX_COLORS)), dtype=wp.int32, device=self.device
         )
@@ -595,18 +419,9 @@ class PhoenXWorld:
         )
         self._per_world_greedy_overflow: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
 
-        # ----- Contact infrastructure -----
-        # Contact state in two narrow containers (vs stuffing contacts
-        # into the 154-dword joint container) -- saved ~1.3 GB at
-        # h1_flat 4096 worlds.
-        #
-        #   :class:`ContactContainer`       -- keyed by contact index
-        #     ``k`` into the rigid_contact_max buffer. Warm-start
-        #     lambdas, prev-step lambdas, per-substep scratch.
-        #   :class:`ContactColumnContainer` -- keyed by local column
-        #     cid ``[0, max_contact_columns)``. 7-dword column header
-        #     (type, body1/2, friction, friction_dynamic,
-        #     contact_first, contact_count).
+        # Contact state split across two narrow containers:
+        # ContactContainer: keyed by contact index k (warm-start, prev lambdas).
+        # ContactColumnContainer: keyed by local cid (column header).
         if self.max_contact_columns > 0:
             self._contact_container: ContactContainer = contact_container_zeros(
                 self.rigid_contact_max, device=self.device
@@ -621,8 +436,6 @@ class PhoenXWorld:
                 device=self.device,
                 enable_body_pair_grouping=self._enable_body_pair_grouping,
             )
-            # Forward map stamps cid (no slot); prev-frame state is
-            # keyed by the contact's sorted-buffer index ``k``.
             self._cid_of_contact_cur = wp.full(self.rigid_contact_max, -1, dtype=wp.int32, device=self.device)
             self._cid_of_contact_prev = wp.full(self.rigid_contact_max, -1, dtype=wp.int32, device=self.device)
         else:
@@ -643,37 +456,16 @@ class PhoenXWorld:
         # ----- Optional material table -----
         self._shape_material: wp.array[wp.int32] | None = None
         self._materials: wp.array[MaterialData] | None = None
-        # Optional internally-stored shape_body. Set by
-        # :class:`WorldBuilder` via :meth:`set_shape_body` when shapes
-        # were declared through the builder API. When set, ``step()``
-        # reads from here if the caller doesn't pass ``shape_body``
-        # explicitly (Newton-Model callers still pass it through).
+        # Optional shape_body installed via set_shape_body (used when callers
+        # don't pass shape_body to step()).
         self._shape_body_internal: wp.array[wp.int32] | None = None
-        # Lazy zero-length sentinel substituted for optional
-        # per-contact stiffness / damping / friction arrays when the
-        # user's :class:`~newton.Contacts` didn't allocate them.
-        # Allocated on first step that needs it.
+        # Lazy sentinel for optional per-contact stiffness/damping/friction.
         self._soft_contact_sentinel: wp.array[wp.float32] | None = None
 
-        # Validate that the caller-supplied containers match the
-        # solver's per-step sizing. Bypass-the-factory mistakes
-        # (allocating ``ConstraintContainer`` with the wrong shape,
-        # passing a body container of the wrong length) get caught
-        # here at construction instead of producing silent
-        # out-of-range reads in the kernels.
         self._assert_invariants()
 
     def _assert_invariants(self) -> None:
-        """Validate per-step buffer dimensions against the documented
-        schema. Runs once at the end of ``__init__``; cost is a few
-        Python ``assert`` checks on ``.shape`` tuples (no GPU work).
-
-        Raises ``AssertionError`` with a descriptive message on
-        mismatch; the message names which container, what shape it
-        actually has, and what shape the kernels expected. Use
-        :meth:`make_constraint_container` to build the constraint
-        container -- the factory always emits the correct shape.
-        """
+        """Validate per-step buffer shapes against the documented schema."""
         expected_constraint_dwords = self.required_constraint_dwords(self.num_joints)
         expected_constraint_cols = max(1, int(self.num_joints))
         actual_constraint_shape = self.constraints.data.shape
@@ -690,8 +482,6 @@ class PhoenXWorld:
             f"expected ({CONTACT_DWORDS}, {expected_col_cols})"
         )
 
-        # Contact container is sized to ``rigid_contact_max`` (or 1
-        # when contacts are disabled).
         expected_cc_cols = max(1, int(self.rigid_contact_max))
         for name, expected_rows in (
             ("lambdas", CC_DWORDS_PER_CONTACT),
@@ -708,34 +498,22 @@ class PhoenXWorld:
             f"gravity array has length {gravity_n}, expected num_worlds={self.num_worlds}"
         )
 
-    # ------------------------------------------------------------------
-    # Material system / collision filters / placeholder contact views
-    # ------------------------------------------------------------------
+    # Material system / collision filters / placeholder contact views.
 
     def set_materials(
         self,
         materials: wp.array | None,
         shape_material: wp.array | None,
     ) -> None:
-        """Install per-shape friction materials. ``materials`` is a
-        ``wp.array[MaterialData]``; ``shape_material`` is an
-        ``wp.array[int32]`` mapping shape index -> material index."""
+        """Install per-shape friction materials."""
         self._materials = materials
         self._shape_material = shape_material
 
     def set_shape_body(self, shape_body: wp.array | None) -> None:
-        """Install the shape -> body map used by contact ingest.
-
-        Populated by :class:`WorldBuilder` after shapes are declared;
-        once set, :meth:`step` doesn't need ``shape_body=...`` from
-        the caller. Pass ``None`` to clear (e.g. when switching to a
-        Newton-Model-driven flow that supplies the array per step).
-        """
+        """Install the shape->body map used by contact ingest. ``None`` clears."""
         self._shape_body_internal = shape_body
 
-    # ------------------------------------------------------------------
-    # Kinematic pose scripting
-    # ------------------------------------------------------------------
+    # Kinematic pose scripting.
 
     def set_kinematic_pose(
         self,
@@ -743,26 +521,9 @@ class PhoenXWorld:
         position: tuple[float, float, float],
         orientation: tuple[float, float, float, float],
     ) -> None:
-        """Script a kinematic body's end-of-next-step pose.
-
-        The next :meth:`step` snapshots the current pose as the lerp /
-        slerp origin, infers the linear and angular velocity to land
-        on the target by end-of-step, and lerps / slerps across
-        substeps so contacts see smooth motion.
-
-        Args:
-            body: Kinematic body index (dynamic/static raises
-                ``ValueError``).
-            position: Target origin, world frame [m].
-            orientation: Target quaternion ``(x, y, z, w)``.
-
-        Use :meth:`set_kinematic_poses_batch` for many bodies to
-        avoid per-call H2D round-trips.
-        """
-        # Host-side motion-type validation. Fetching one int per call
-        # is not free, but it trades a GPU sync for a clear error when
-        # users misaddress bodies, which matches the "hard to screw up"
-        # ethos of the WorldBuilder API.
+        """Script a kinematic body's end-of-next-step pose. The next step
+        infers velocity and lerps/slerps across substeps. Use
+        :meth:`set_kinematic_poses_batch` for many bodies."""
         if body < 0 or body >= self.num_bodies:
             raise IndexError(f"set_kinematic_pose: body index {body} out of range [0, {self.num_bodies})")
         mt = int(self.bodies.motion_type.numpy()[body])
@@ -792,19 +553,8 @@ class PhoenXWorld:
         positions: wp.array,
         orientations: wp.array,
     ) -> None:
-        """Batched variant of :meth:`set_kinematic_pose`.
-
-        Args:
-            body_ids: ``wp.array[int32]`` of kinematic body indices.
-            positions: ``wp.array[wp.vec3f]``, parallel to ``body_ids``.
-            orientations: ``wp.array[wp.quatf]``, parallel to ``body_ids``.
-
-        Non-kinematic entries in ``body_ids`` are silently ignored by
-        the kernel -- the caller is expected to pre-filter on the
-        host if strict validation matters. This matches the Newton
-        adapter, which pushes *all* body indices through the same
-        kernel and lets the motion-type check gate.
-        """
+        """Batched :meth:`set_kinematic_pose`. Non-kinematic body_ids are
+        silently ignored by the kernel; pre-filter on host for strict validation."""
         n = int(body_ids.shape[0])
         if n == 0:
             return
@@ -821,22 +571,11 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    # ------------------------------------------------------------------
-    # Joint initialisation
-    # ------------------------------------------------------------------
+    # Joint initialisation.
 
     @staticmethod
     def required_constraint_dwords(num_joints: int) -> int:
-        """Dword width of the joint-only :class:`ConstraintContainer`.
-
-        Contacts now live in a dedicated narrow
-        :class:`ContactColumnContainer`; the
-        :class:`ConstraintContainer` is sized strictly for joints and
-        only needs the 154-dword ADBS header when any joints are
-        reserved (otherwise the minimal ``CONTACT_DWORDS = 7`` is
-        enough to satisfy the shared header contract on the unused
-        single-row allocation).
-        """
+        """Dword width: ADBS_DWORDS (154) when joints exist, else CONTACT_DWORDS (7)."""
         if int(num_joints) > 0:
             return int(ADBS_DWORDS)
         return int(CONTACT_DWORDS)
@@ -846,17 +585,7 @@ class PhoenXWorld:
         num_joints: int,
         device: wp.context.Devicelike = None,
     ) -> ConstraintContainer:
-        """Factory for a correctly-sized joint-only
-        :class:`ConstraintContainer`.
-
-        Capacity is ``max(1, num_joints)`` -- contact columns live in
-        :class:`ContactColumnContainer` and are sized separately, so
-        the joint-side container only needs a 1-row placeholder when
-        there are no joints. The dword width is the ADBS joint header
-        when joints exist (154 dwords) or the contact placeholder
-        width (7 dwords) otherwise; see
-        :meth:`required_constraint_dwords`.
-        """
+        """Factory for a correctly-sized joint-only :class:`ConstraintContainer`."""
         cap = max(1, int(num_joints))
         return constraint_container_zeros(
             num_constraints=cap,
@@ -887,13 +616,9 @@ class PhoenXWorld:
         damping_limit: wp.array,
         armature: wp.array | None = None,
     ) -> None:
-        """Pack ``num_joints`` actuated-DBS joint columns.
-
-        One-shot launch over cids ``[0, num_joints)``. All input
-        arrays must be length ``num_joints``, live on ``device``, and
-        match the kernel's dtypes (see the kernel signature in
-        :mod:`constraint_actuated_double_ball_socket`). Call once,
-        after :meth:`__init__`, before the first :meth:`step`.
+        """Pack ``num_joints`` actuated-DBS joint columns. Call once after
+        :meth:`__init__`, before the first :meth:`step`. All input arrays must
+        be length ``num_joints``.
 
         Args:
             body1, body2: ``wp.array[int32]`` per-joint body indices.
@@ -971,9 +696,7 @@ class PhoenXWorld:
         )
 
     def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
-        """Replace the registered body-pair contact filter. Pairs are
-        canonicalised ``(min, max)`` and deduped; self-pairs rejected;
-        contact lookup is a device-side binary search."""
+        """Replace the body-pair contact filter (canonical (min, max), deduped)."""
         self._set_collision_filter_pairs_impl(pairs)
 
     def _set_collision_filter_pairs_impl(self, pairs: Iterable[tuple[int, int]]) -> None:
@@ -1007,16 +730,11 @@ class PhoenXWorld:
         self._collision_filter_count = int(len(packed))
 
     def _make_placeholder_contact_views(self) -> ContactViews:
-        """Size-1 dummy :class:`ContactViews` for contact-free steps.
-        Never actually read because the contact branch only fires for
-        cids tagged :data:`CONSTRAINT_TYPE_CONTACT`."""
+        """Size-1 dummy ContactViews for contact-free steps."""
         dummy_int = wp.zeros(1, dtype=wp.int32, device=self.device)
         dummy_vec3 = wp.zeros(1, dtype=wp.vec3f, device=self.device)
         dummy_float = wp.zeros(1, dtype=wp.float32, device=self.device)
-        # Soft-contact stiffness / damping / friction arrays can be
-        # sentinel length 0 when the caller's ``Contacts`` didn't
-        # allocate them. The prepare kernel gates on the array
-        # length per-contact.
+        # Length-0 soft-contact arrays; prepare kernel gates on shape per-contact.
         sentinel_float = wp.zeros(0, dtype=wp.float32, device=self.device)
         return contact_views_make(
             rigid_contact_count=dummy_int,
@@ -1034,10 +752,6 @@ class PhoenXWorld:
             rigid_contact_friction=sentinel_float,
         )
 
-    # ------------------------------------------------------------------
-    # Public driver
-    # ------------------------------------------------------------------
-
     def step(
         self,
         dt: float,
@@ -1049,25 +763,9 @@ class PhoenXWorld:
     ) -> None:
         """Advance the world by ``dt`` seconds.
 
-        Phases: ingest contacts -> rebuild elements + JP colouring ->
-        substep loop (forces, gravity, main solve, integrate
-        positions, position iterate, relax) -> damping + rotated
-        inertia -> clear forces.
-
-        Args:
-            dt: Time step [s]. Non-positive values no-op.
-            contacts: Newton :class:`Contacts` buffer. Must have been
-                built with a non-disabled ``contact_matching`` mode
-                (``"sticky"`` recommended for stable stacking).
-                ``None`` runs a free-fall step with no contact
-                constraints.
-            shape_body: ``model.shape_body`` (shape id -> body id).
-                Required when ``contacts`` is provided.
-            picking: Optional :class:`Picking` instance. When
-                provided, its ``apply_force()`` is called at the
-                start of every substep so the pick spring stays stiff
-                regardless of :attr:`substeps`. Callers driving
-                picking themselves should leave this ``None``.
+        Phases: ingest contacts -> JP colouring -> substep loop (forces+gravity,
+        main solve, integrate, relax) -> damping + inertia refresh -> clear forces.
+        ``contacts`` requires non-disabled contact_matching ("sticky" recommended).
         """
         if dt < 0.0:
             raise ValueError("Time step cannot be negative.")
@@ -1090,52 +788,21 @@ class PhoenXWorld:
         if self._constraint_capacity > 0:
             self._partitioner.reset(self._elements, self._num_active_constraints)
             if self.step_layout == "single_world":
-                # Greedy gives 2-3x fewer colours on dense graphs but
-                # is bounded at 64 colours (single int64 forbidden
-                # mask). If the kernel raises its overflow flag on a
-                # non-captured step we silently flip
-                # ``_use_greedy_coloring`` and rebuild with the
-                # round-based JP path (which has no such bound).
                 if self._use_greedy_coloring:
-                    # Greedy with in-graph JP fallback: the
-                    # partitioner runs the round-based JP build
-                    # inside a ``wp.capture_while`` keyed on the
-                    # overflow flag, so a graph that overflows the
-                    # 64-colour bitmask still gets a valid CSR within
-                    # the same captured frame. No host probe needed.
+                    # In-graph JP fallback if greedy's 64-colour bitmask overflows.
                     self._partitioner.build_csr_greedy_with_jp_fallback()
                 else:
                     self._partitioner.build_csr()
             else:
-                # Multi-world: parallel per-world JP coloring. The
-                # adjacency build is still global (per-body CSR of
-                # element neighbours), but the MIS loop runs one
-                # block per world and is the only multi_world
-                # strategy now.
                 self._build_per_world_coloring()
 
-            # Per-step adaptive threads-per-world pick. Reads the freshly
-            # built per-world colour stats and writes ``_tpw_choice[0]``;
-            # the fast-tail kernels read it at every launch in the
-            # substep loop below. Skipped when the user pinned a static
-            # tpw at construction or when the single-world layout is in
-            # use (its kernels don't read ``_tpw_choice``).
             if self._tpw_auto and self.step_layout != "single_world":
                 self._pick_tpw()
 
-        # Once-per-step kinematic prepare: snapshot ``position`` ->
-        # ``position_prev``, resolve this step's pose target
-        # (user-scripted or auto from constant velocity), and infer
-        # the linear / angular velocity the solver exposes to contacts.
-        # Dynamic and static bodies are a no-op.
         self._kinematic_prepare_step()
 
-        # Substep loop ordering: solve with bias ON, integrate, position
-        # iterate, then relax with bias OFF. Running relax before
-        # integrate would throw away the positional bias's contribution
-        # to penetration recovery. Kinematic bodies are slotted into
-        # their lerp/slerp-interpolated pose at each substep's tail so
-        # contacts prepared at the *next* substep see smooth motion.
+        # Substep order: bias-on solve -> integrate -> bias-off relax. Reversing
+        # would discard the positional bias's penetration recovery.
         inv_n = 1.0 / float(self.substeps)
         for k in range(self.substeps):
             if picking is not None:
@@ -1181,18 +848,9 @@ class PhoenXWorld:
 
         self._update_inertia_and_clear_forces()
 
-    # ------------------------------------------------------------------
-    # Phase implementations
-    # ------------------------------------------------------------------
-
     def _ingest_and_warmstart_contacts(self, contacts, shape_body) -> None:
-        """Translate Newton's ``Contacts`` buffer into contact columns.
-
-        No contacts this step -> fall back to the joint-only active
-        count. Otherwise swap prev/current per-cid state, run
-        ingest -> warm-start -> forward-map stamp, then fuse joint +
-        contact counts on-device.
-        """
+        """Translate Newton ``Contacts`` -> contact columns. Swap prev/current
+        per-cid state, ingest -> warm-start -> forward-map stamp, fuse counts."""
         if contacts is None or self.max_contact_columns == 0 or self._ingest_scratch is None:
             self._num_active_constraints.fill_(self.num_joints)
             self._contact_views = None
@@ -1200,26 +858,18 @@ class PhoenXWorld:
 
         if getattr(contacts, "contact_matching", False) is False:
             raise ValueError(
-                "PhoenX solver requires the Contacts buffer to be built with "
-                "a non-disabled contact_matching mode (needed for persistent "
-                'warm-starting; use contact_matching="sticky" for stable '
-                "stacking)."
+                'PhoenX requires Contacts with non-disabled contact_matching (use "sticky").'
             )
         if shape_body is None:
             shape_body = self._shape_body_internal
         if shape_body is None:
             raise ValueError(
-                "step(dt, contacts=...) requires shape_body to resolve contact "
-                "shape ids to rigid-body ids. Pass it explicitly (e.g. "
-                "``model.shape_body``), or register shapes via "
-                "``WorldBuilder.add_shape_*`` so it gets installed at finalize."
+                "step(contacts=...) requires shape_body. Pass model.shape_body or "
+                "register shapes via WorldBuilder.add_shape_*."
             )
 
-        # Soft-contact per-contact arrays are optional on Newton's
-        # ``Contacts``: only allocated when
-        # ``per_contact_shape_properties=True``. When missing we pass
-        # a length-0 sentinel so the Warp kernels' per-contact
-        # ``array.shape[0] > k`` check short-circuits cleanly.
+        # Soft-contact arrays are optional; length-0 sentinel short-circuits
+        # the per-contact shape check in the kernels.
         if self._soft_contact_sentinel is None:
             self._soft_contact_sentinel = wp.zeros(0, dtype=wp.float32, device=self.device)
         contact_stiffness = (
@@ -1238,11 +888,8 @@ class PhoenXWorld:
             else self._soft_contact_sentinel
         )
 
-        # Swap lambda buffers + forward map (pointer swap, O(1)). Also
-        # swap the prev/curr inverse-permutation buffers when grouping
-        # is on -- next frame's gather translates Newton-order match
-        # indices through ``prev_inv_sort_perm`` (= this frame's
-        # ``inv_sort_perm`` after the swap).
+        # Pointer-swap prev/current. With grouping on, also swap inv_sort_perm
+        # so next frame's gather can translate match indices through prev's perm.
         contact_container_swap_prev_current(self._contact_container)
         self._cid_of_contact_cur, self._cid_of_contact_prev = (
             self._cid_of_contact_prev,
@@ -1270,10 +917,8 @@ class PhoenXWorld:
             enable_body_pair_grouping=self._enable_body_pair_grouping,
         )
 
-        # Build ContactViews. In compound-grouping mode the views point
-        # at PhoenX's sorted scratch (per-contact data is in sorted-k
-        # order, match index is already prev-frame sorted-k); otherwise
-        # they point at Newton's narrow-phase arrays directly.
+        # Compound grouping: views point at PhoenX's sorted scratch.
+        # Otherwise: views point at Newton's narrow-phase arrays directly.
         if self._enable_body_pair_grouping:
             self._contact_views = contact_views_make(
                 rigid_contact_count=contacts.rigid_contact_count,
@@ -1307,12 +952,7 @@ class PhoenXWorld:
                 rigid_contact_friction=contact_friction,
             )
 
-        # Warm-start gather: in compound mode the match index is
-        # already in prev-frame sorted-k space (translated during
-        # ingest), so we pass the views' field directly. In
-        # non-compound mode it is Newton-order match_index, which is
-        # the same convention ``cc.prev_*`` was keyed by last frame
-        # (no resort), so the gather unwinds correctly.
+        # match_index is already in prev-sorted-k for compound, Newton-order otherwise.
         gather_match_index = (
             self._ingest_scratch.sorted_match_index
             if self._enable_body_pair_grouping
@@ -1339,8 +979,7 @@ class PhoenXWorld:
         self._sync_num_active_constraints()
 
     def _sync_num_active_constraints(self) -> None:
-        """Fuse ``num_joints + num_contact_columns`` into
-        ``_num_active_constraints`` on-device (graph-capture safe)."""
+        """Fuse num_joints + num_contact_columns into _num_active_constraints on-device."""
         wp.launch(
             _sync_num_active_constraints_kernel,
             dim=1,
@@ -1353,10 +992,7 @@ class PhoenXWorld:
         )
 
     def _rebuild_elements(self) -> None:
-        """Project every active constraint into the partitioner's
-        element view. Type-agnostic launch at
-        ``dim = constraint_capacity``; threads beyond the device-held
-        ``num_active_constraints`` early-out."""
+        """Project active constraints into the partitioner's element view."""
         if self._constraint_capacity == 0:
             return
         wp.launch(
@@ -1411,30 +1047,12 @@ class PhoenXWorld:
         )
 
     def _build_per_world_coloring(self) -> None:
-        """Parallel per-world Jones-Plassmann coloring.
-
-        1. ``_count_elements_per_world_kernel`` -- atomic count of
-           active cids per world (commutative atomics, deterministic).
-        2. Inclusive scan -> ``per_world_element_offsets``.
-        3. ``_build_scatter_keys_kernel`` + stable
-           ``radix_sort_pairs`` -- bucket cids by world id; stable
-           sort keeps order deterministic.
-        4. ``_per_world_jp_coloring_kernel`` -- one block per world
-           runs the full JP MIS loop on its bucket and emits into
-           ``world_element_ids_by_color`` / ``world_color_starts`` /
-           ``world_num_colors``. Intra-colour slots use
-           ``wp.tile_scan_exclusive`` (deterministic).
-
-        Reuses the adjacency CSR from ``partitioner.reset`` (worlds
-        are disjoint after static-null-out, so all neighbours live in
-        the same world).
-        """
+        """Parallel per-world JP coloring: count -> scan -> stable bucket sort
+        -> one block per world runs JP MIS. Reuses partitioner adjacency CSR
+        (worlds are disjoint after static-null-out)."""
         nw = self.num_worlds
         cap = self._constraint_capacity
 
-        # Phase 1: count elements per world (and seed the shifted-offset
-        # buffer so the inclusive scan below produces exclusive offsets
-        # + trailing total).
         self._per_world_element_count.zero_()
         self._world_totals_shifted.zero_()
         wp.launch(
@@ -1445,20 +1063,9 @@ class PhoenXWorld:
             device=self.device,
         )
 
-        # Phase 2: inclusive scan of shifted counts -> per_world_element_offsets[0]=0,
-        # [w+1] = sum(counts[0..w]). Deterministic.
         wp.utils.array_scan(self._world_totals_shifted, self._per_world_element_offsets, inclusive=True)
 
-        # Phase 3: deterministic scatter via stable sort by world id.
-        # ``_build_scatter_keys_kernel`` populates per-cid (key=world_id,
-        # value=cid) pairs (with INT32_MAX keys masking inactive
-        # cids); ``sort_variable_length_int`` runs a stable
-        # ``radix_sort_pairs`` so that the value array becomes the
-        # per-world bucketed cid stream, ordered by cid within each
-        # world. This replaces an atomic-cursor scatter whose order
-        # depended on GPU thread scheduling -- the sort is a function
-        # of (world_id, cid) and therefore bit-deterministic across
-        # runs.
+        # Stable sort scatter (deterministic; replaces atomic-cursor scatter).
         wp.launch(
             _build_scatter_keys_kernel,
             dim=cap,
@@ -1472,22 +1079,10 @@ class PhoenXWorld:
             self._num_active_constraints,
         )
 
-        # Phase 4: per-world coloring. One block per world.
+        # Per-world JP/greedy. launch_tiled gives (block, lane) for (world, lane).
         self._per_world_assigned.zero_()
-        # The output CSR base offsets (world_csr_offsets) match the
-        # per-world element offsets (every active element belongs to
-        # some colour in some world, so offsets[w] identifies both the
-        # bucket start and the start of world w's colour sequence).
         wp.copy(self._world_csr_offsets, self._per_world_element_offsets)
-        # ``launch_tiled`` returns (block_idx, lane) from ``wp.tid()`` --
-        # exactly the (world, lane) pair the kernel expects. Plain
-        # ``launch`` would return a global thread index instead, which
-        # would silently mis-address every block-scoped read/write.
         if self._use_greedy_coloring:
-            # Greedy variant: each MIS commit picks the smallest free
-            # colour. Drops per-world colour counts toward the
-            # max-body-degree lower bound (mirrors the single-world
-            # path in IncrementalContactPartitioner.build_csr_greedy).
             wp.launch_tiled(
                 _per_world_greedy_coloring_kernel,
                 dim=[nw],
@@ -1514,15 +1109,10 @@ class PhoenXWorld:
                 block_dim=_PER_WORLD_COLORING_BLOCK_DIM,
                 device=self.device,
             )
-            # Same overflow-fallback contract as the single-world
-            # path: if the per-world greedy kernel exhausted the
-            # 64-color bitmask in any world, flip the live mode to
-            # JP and rerun *this* step's per-world coloring with it.
             self._maybe_fallback_from_per_world_greedy_overflow(nw)
         else:
-            # Round-equals-colour Jones-Plassmann (legacy). Cost-biased
-            # priorities: contacts use their per-column contact count
-            # as the high priority word, while joints stay at cost 0.
+            # Round-equals-colour JP. Cost-biased priorities: contacts use
+            # contact_count, joints stay at cost 0.
             wp.launch_tiled(
                 _per_world_jp_coloring_kernel,
                 dim=[nw],
@@ -1548,9 +1138,7 @@ class PhoenXWorld:
             )
 
     def _integrate_forces_and_gravity(self) -> None:
-        """Apply per-body force / torque accumulators AND gravity in one
-        per-substep kernel launch (replaces two sequential launches with
-        identical dim / gating)."""
+        """Apply force/torque + gravity in one per-substep launch."""
         if self.num_bodies == 0:
             return
         wp.launch(
@@ -1561,14 +1149,8 @@ class PhoenXWorld:
         )
 
     def _solve_main(self) -> None:
-        """Main PGS solve per substep: prepare + ``solver_iterations``
-        iterate sweeps with bias ON.
-
-        Launches the fused prepare+iterate kernel so the per-world
-        setup (``world_id``, ``n_colors``, ``world_base``) is computed
-        once and the one kernel-launch boundary between prepare and
-        iterate is removed.
-        """
+        """Per-substep main PGS solve: prepare + solver_iterations iterate sweeps
+        with bias=True (fused into one launch)."""
         if self._constraint_capacity == 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
@@ -1602,8 +1184,7 @@ class PhoenXWorld:
         )
 
     def _relax_velocities(self) -> None:
-        """TGS-soft relax sweeps with bias OFF. Removes the drift
-        velocity the positional bias injected during the main solve."""
+        """TGS-soft relax (bias=False) — removes drift velocity from main bias."""
         if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
@@ -1620,30 +1201,12 @@ class PhoenXWorld:
             contact_views,
         )
 
-    # ------------------------------------------------------------------
-    # Single-world dispatch (capture-while over the global colour CSR)
-    # ------------------------------------------------------------------
+    # Single-world dispatch (wp.capture_while over the global colour CSR).
 
     def _capture_singleworld_sweep(self, kernel, **kw) -> None:
-        """``wp.capture_while`` body: sweep up to
-        :data:`NUM_INNER_WHILE_ITERATIONS` colours on the
-        persistent-grid ("head") path in one outer step.
-
-        Uses a persistent fixed-size grid (``_singleworld_total_threads``)
-        with an internal grid-stride loop over the colour's active cid
-        range -- same strategy as
-        :class:`newton._src.geometry.narrow_phase.NarrowPhase`. Thread
-        0 decrements ``color_cursor`` and, on either convergence
-        (``color_cursor == 0``) or tail-fuse hand-off
-        (``count <= fuse_threshold``), clears ``head_active[0]`` to
-        terminate the head capture-while.
-
-        The body is unrolled ``NUM_INNER_WHILE_ITERATIONS`` times on
-        the host to amortise the per-outer-iteration capture-while
-        overhead. Each launch re-enters one of the kernel's early-exit
-        branches once ``head_active`` has been cleared within the same
-        outer iteration, so the tail launches are cheap no-ops.
-        """
+        """capture_while body: head-path sweep on the persistent grid, unrolled
+        NUM_INNER_WHILE_ITERATIONS times. Tail launches no-op once head_active
+        clears within the same outer iter."""
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
@@ -1671,18 +1234,8 @@ class PhoenXWorld:
             )
 
     def _capture_singleworld_tail_sweep(self, kernel, **kw) -> None:
-        """``wp.capture_while`` body: drain the remaining small colours
-        via the fused single-block kernel.
-
-        Launched as ``wp.launch_tiled(dim=[1], block_dim=FUSE_TAIL_BLOCK_DIM)``
-        so the whole sweep runs in one block and ``_sync_threads``
-        (``__syncthreads``) can order body-velocity writes between
-        consecutive colours. The kernel internally walks colours until
-        either ``color_cursor`` hits 0 or a colour exceeds
-        ``fuse_threshold`` (hand-off back to the head path); it always
-        publishes the final cursor value, so the outer capture-while
-        terminates naturally on the cursor == 0 predicate.
-        """
+        """capture_while body: drain remaining small colours in one block via
+        wp.launch_tiled. Hands back to the head path on a colour > fuse_threshold."""
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
         wp.launch_tiled(
@@ -1707,26 +1260,8 @@ class PhoenXWorld:
         )
 
     def _singleworld_head_plus_tail_sweep(self, head_kernel, tail_kernel, idt: wp.float32) -> None:
-        """Drive a single PGS sweep as "persistent-grid head + fused
-        single-block tail".
-
-        The head ``capture_while`` is gated by :attr:`_head_active` so
-        the head kernel can terminate by either (a) draining the
-        cursor or (b) encountering a small colour that should be
-        handled by the fused tail kernel. The tail ``capture_while``
-        is gated by the colour cursor and runs the fused kernel which
-        drains every remaining small colour in a single block using
-        ``_sync_threads`` between colours.
-
-        When :attr:`_fuse_threshold` is 0, the head kernel never takes
-        the hand-off branch; it drains the cursor itself and the tail
-        capture-while's predicate (``color_cursor``) is already 0, so
-        the tail kernel is never launched -- behaviour identical to
-        the pre-fuse path.
-        """
-        # Reset head_active = 1 so the head capture-while gets at
-        # least one launch in which to decide (converge, hand off, or
-        # do real work).
+        """Persistent-grid head + fused single-block tail. Head's capture_while
+        gated by :attr:`_head_active`; tail's by the colour cursor."""
         wp.launch(_reset_head_active_kernel, dim=1, inputs=[self._head_active], device=self.device)
 
         wp.capture_while(
@@ -1743,14 +1278,8 @@ class PhoenXWorld:
         )
 
     def _solve_main_singleworld(self) -> None:
-        """Single-world prepare + main PGS iterate path.
-
-        One head+tail sweep for prepare, then ``solver_iterations``
-        more head+tail sweeps for the bias-on iterate. Each sweep
-        runs the persistent-grid kernel for large colours then hands
-        off to the single-block fused kernel for the tail of small
-        colours.
-        """
+        """Single-world prepare + main PGS iterate. Each sweep is head (large
+        colours) then fused tail (small colours)."""
         if self._constraint_capacity == 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
@@ -1775,16 +1304,9 @@ class PhoenXWorld:
             self._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
 
     def _singleworld_kernels(self):
-        """Resolve the single-world kernel set for this solver.
-
-        Returns ``(prepare_head, prepare_fused, iterate_head,
-        iterate_fused, relax_head, relax_fused)``. When
-        :attr:`_use_revolute_specialization` is set (no joints, or
-        every joint is :data:`JointMode.REVOLUTE`), returns the
-        revolute-only variants which skip the per-cid
-        ``read_int(_OFF_JOINT_MODE)`` and four-way ``joint_mode``
-        branch in :func:`actuated_double_ball_socket_iterate`. Otherwise
-        returns the generic dispatchers."""
+        """Returns (prepare_head, prepare_fused, iterate_head, iterate_fused,
+        relax_head, relax_fused). Revolute-only specialisation skips the
+        joint_mode branch."""
         if self._use_revolute_specialization:
             return (
                 _constraint_prepare_singleworld_revolute_kernel,
@@ -1804,44 +1326,20 @@ class PhoenXWorld:
         )
 
     def _fast_tail_block_dim(self) -> int:
-        """Resolve the fast-tail block size for this solver instance.
-
-        Always ``_STRAGGLER_BLOCK_DIM * wpb`` so the block holds an
-        integer number of warps (``__syncwarp`` correctness). ``wpb``
-        depends on ``num_worlds`` -- see
-        :func:`_choose_fast_tail_worlds_per_block`. The block_dim is
-        independent of the adaptive ``threads_per_world`` choice; the
-        latter only affects how many lanes inside each warp do real
-        work.
-        """
+        """``_STRAGGLER_BLOCK_DIM * worlds_per_block`` (integer warps for __syncwarp)."""
         return _STRAGGLER_BLOCK_DIM * _choose_fast_tail_worlds_per_block(self.num_worlds)
 
     def _fast_tail_launch_dim(self) -> int:
-        """Launch dim for the fast-tail kernels, padded up to the block
-        size so we can use a block_dim wider than a single warp.
-
-        Sized for the maximum threads-per-world (``_STRAGGLER_BLOCK_DIM
-        = 32``); when the adaptive picker drops the effective tpw to 16
-        or 8, the surplus lanes resolve a ``world_id`` past
-        ``num_worlds`` and early-exit. Keeping the launch shape fixed
-        is what lets the per-step picker live inside the captured CUDA
-        graph -- changing ``dim`` would require re-capturing.
-        """
+        """Padded launch dim. Sized for max tpw = _STRAGGLER_BLOCK_DIM=32; lower
+        tpw early-exits surplus lanes. Fixed shape so the per-step picker stays
+        inside the captured graph."""
         block_dim = self._fast_tail_block_dim()
         raw = self.num_worlds * _STRAGGLER_BLOCK_DIM
         return ((raw + block_dim - 1) // block_dim) * block_dim
 
     def _pick_tpw(self) -> None:
-        """Run the per-step threads-per-world picker on the GPU.
-
-        Two-kernel pipeline so the cost stays ~constant in
-        ``num_worlds``: a parallel atomic reduction over
-        ``_world_num_colors`` totals the colour count, then a 1-thread
-        kernel reads the precomputed total cid count
-        (``_world_csr_offsets[num_worlds]``) plus the device's SM count
-        and writes the chosen tpw to ``_tpw_choice[0]``. No host sync;
-        the whole pipeline lands in the captured CUDA graph.
-        """
+        """Per-step GPU tpw picker: parallel reduction over _world_num_colors,
+        then a 1-thread kernel writes _tpw_choice[0]. Captured-graph safe."""
         sm_count = getattr(self.device, "sm_count", 0) or 0
         self._tpw_total_colours.zero_()
         wp.launch(
@@ -1871,8 +1369,7 @@ class PhoenXWorld:
         idt: wp.float32,
         contact_views: ContactViews,
     ) -> None:
-        """Launch an iterate / relax kernel that runs
-        ``num_iterations`` sweeps internally, one warp per world."""
+        """Launch an iterate/relax kernel running ``num_iterations`` sweeps internally."""
         wp.launch(
             kernel,
             dim=self._fast_tail_launch_dim(),
@@ -1897,11 +1394,8 @@ class PhoenXWorld:
         )
 
     def _integrate_positions(self) -> None:
-        """``x += v * dt`` and ``q = dq(w * dt) * q`` for dynamic
-        bodies. Static and kinematic bodies are skipped -- kinematic
-        pose advances via
-        :meth:`_kinematic_interpolate_substep`. Axis-angle quaternion
-        form keeps unit norm over many substeps."""
+        """x += v*dt; q = dq(w*dt) * q for dynamic bodies. Kinematic poses
+        advance via :meth:`_kinematic_interpolate_substep`."""
         if self.num_bodies == 0:
             return
         wp.launch(
@@ -1912,11 +1406,8 @@ class PhoenXWorld:
         )
 
     def _kinematic_prepare_step(self) -> None:
-        """Once-per-step kinematic prepare: snapshot prev pose,
-        resolve target, infer velocity. No-op when no kinematic bodies
-        are present in the model -- the kernel's per-thread guard
-        would early-return on every thread anyway, so we can skip
-        launching the grid entirely and save ~4us."""
+        """Per-step kinematic prepare: snapshot prev, resolve target, infer
+        velocity. Skipped when no kinematic bodies (saves ~4us)."""
         if self.num_bodies == 0 or self._num_kinematic_bodies == 0:
             return
         wp.launch(
@@ -1927,10 +1418,7 @@ class PhoenXWorld:
         )
 
     def _kinematic_interpolate_substep(self, alpha: float) -> None:
-        """Per-substep kinematic pose update via lerp / slerp. Skipped
-        when no kinematic bodies exist (see :meth:`_kinematic_prepare_step`
-        rationale); at substeps=4 this is ~16us / step reclaimed in
-        the common dynamic-only case."""
+        """Per-substep kinematic pose lerp/slerp. Skipped when no kinematic bodies."""
         if self.num_bodies == 0 or self._num_kinematic_bodies == 0:
             return
         wp.launch(
@@ -1941,13 +1429,8 @@ class PhoenXWorld:
         )
 
     def _refresh_world_inertia(self) -> None:
-        """Per-substep refresh of ``bodies.inverse_inertia_world``.
-
-        Rebuilds ``R * I_local^-1 * R^T`` from the body's current
-        orientation, no damping, no force-clear. Must run after
-        :meth:`_integrate_positions` so the next solve / next substep
-        sees an inertia rotation consistent with the body's pose.
-        """
+        """Per-substep refresh of inverse_inertia_world (R * I^-1 * R^T) after
+        :meth:`_integrate_positions`."""
         if self.num_bodies == 0:
             return
         wp.launch(
@@ -1958,11 +1441,7 @@ class PhoenXWorld:
         )
 
     def _update_inertia_and_clear_forces(self) -> None:
-        """Apply damping, rebuild ``inverse_inertia_world`` from the
-        final orientation, and zero the per-body force/torque
-        accumulators. One kernel launch per step instead of two -- the
-        two old per-body kernels were back-to-back and shared the same
-        body-state hot lines."""
+        """End-of-step: damping + inertia rebuild + force/torque zeroing (fused)."""
         if self.num_bodies == 0:
             return
         wp.launch(
@@ -1973,10 +1452,7 @@ class PhoenXWorld:
         )
 
     def _apply_global_damping(self) -> None:
-        """Per-substep tail kernel: apply :attr:`_global_damping` to every
-        dynamic body's linear / angular velocity. No-op (no kernel
-        launch) until the user opts in via
-        :meth:`set_global_linear_damping` / :meth:`set_global_angular_damping`."""
+        """Per-substep global damping. No-op until user opts in."""
         if self._global_damping is None or self.num_bodies == 0:
             return
         wp.launch(
@@ -1986,41 +1462,18 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    # ------------------------------------------------------------------
-    # Global damping API
-    # ------------------------------------------------------------------
+    # Global damping API.
 
     def _ensure_global_damping_allocated(self) -> None:
-        """Lazily allocate the device array on first opt-in. Subsequent
-        setter calls reuse the allocation."""
+        """Lazy-allocate the device array on first opt-in."""
         if self._global_damping is None:
             self._global_damping = wp.zeros(2, dtype=wp.float32, device=self.device)
             self._global_damping_host = np.zeros(2, dtype=np.float32)
 
     def set_global_linear_damping(self, value: float) -> None:
-        """Set the per-substep global linear-velocity damping factor.
-
-        Applied as ``v *= 1 - value`` at the end of every substep, on
-        top of the per-body :attr:`linear_damping`. ``value`` must lie
-        in ``[0, 1]``: ``0`` is a no-op; ``1`` zeroes the linear velocity
-        of every dynamic body each substep (useful for a settle
-        warm-up before live simulation).
-
-        **Opt-in semantics.** The first call to this (or
-        :meth:`set_global_angular_damping`) lazily allocates the
-        backing :class:`wp.array` and starts launching the per-substep
-        damping kernel. While neither setter has been called, the
-        kernel is skipped entirely (zero cost).
-
-        **Graph-capture rules.** Once the array exists, the value lives
-        in a device slot the captured graph reads at replay time, so
-        changing the factor between replays is safe. **Opting in for
-        the first time mid-simulation invalidates any already-captured
-        graph** (the new kernel launch isn't in it) -- either
-        re-capture, or call ``set_global_*_damping(0.0)`` once *before*
-        capture to lock the kernel in upfront and toggle the value
-        later without re-capture.
-        """
+        """v *= 1 - value at the end of every substep. Value in [0, 1].
+        First opt-in mid-simulation invalidates already-captured graphs;
+        call ``set_global_*_damping(0.0)`` before capture to lock the kernel in."""
         v = float(value)
         if not (0.0 <= v <= 1.0):
             raise ValueError(f"global_linear_damping must be in [0, 1] (got {v})")
@@ -2029,13 +1482,7 @@ class PhoenXWorld:
         self._global_damping.assign(self._global_damping_host)
 
     def set_global_angular_damping(self, value: float) -> None:
-        """Set the per-substep global angular-velocity damping factor.
-
-        Applied as ``w *= 1 - value`` at the end of every substep, on
-        top of the per-body :attr:`angular_damping`. See
-        :meth:`set_global_linear_damping` for opt-in and graph-capture
-        rules.
-        """
+        """w *= 1 - value per substep. See :meth:`set_global_linear_damping`."""
         v = float(value)
         if not (0.0 <= v <= 1.0):
             raise ValueError(f"global_angular_damping must be in [0, 1] (got {v})")
@@ -2044,35 +1491,26 @@ class PhoenXWorld:
         self._global_damping.assign(self._global_damping_host)
 
     def get_global_linear_damping(self) -> float:
-        """Current global linear damping factor; ``0.0`` if the user
-        has never opted in. Host-shadow read, no device sync."""
+        """Current factor; 0.0 if never opted in."""
         if self._global_damping_host is None:
             return 0.0
         return float(self._global_damping_host[0])
 
     def get_global_angular_damping(self) -> float:
-        """Current global angular damping factor; ``0.0`` if the user
-        has never opted in. Host-shadow read, no device sync."""
+        """Current factor; 0.0 if never opted in."""
         if self._global_damping_host is None:
             return 0.0
         return float(self._global_damping_host[1])
 
-    # ------------------------------------------------------------------
-    # Diagnostics
-    # ------------------------------------------------------------------
+    # Diagnostics.
 
     @property
     def num_constraints(self) -> int:
-        """Total allocated cid capacity (joints + contact columns).
-        Use this to size output arrays for
-        :meth:`gather_constraint_wrenches` /
-        :meth:`gather_constraint_errors`."""
+        """Total allocated cid capacity (joints + contact columns)."""
         return self._constraint_capacity
 
     def gather_constraint_wrenches(self, out: wp.array) -> None:
-        """Per-cid world-frame wrench on ``body2`` averaged over the
-        last substep. ``out`` is
-        ``wp.array[wp.spatial_vector]`` of length :attr:`num_constraints`."""
+        """Per-cid world-frame wrench on body2 (last-substep average)."""
         if self._constraint_capacity == 0:
             return
         out.zero_()
@@ -2098,8 +1536,7 @@ class PhoenXWorld:
         )
 
     def gather_constraint_errors(self, out: wp.array) -> None:
-        """Per-cid position-level constraint residual. ``out`` is
-        ``wp.array[wp.spatial_vector]`` of length :attr:`num_constraints`."""
+        """Per-cid position-level residual."""
         if self._constraint_capacity == 0:
             return
         out.zero_()
@@ -2118,36 +1555,13 @@ class PhoenXWorld:
         )
 
     def num_colors_used(self) -> int:
-        """Number of graph colours the last PGS colouring used.
-        Performs a device-to-host copy -- do not call inside a
-        :func:`wp.ScopedCapture` region.
-
-        For richer diagnostics (per-colour element counts, active
-        contact column count, per-world breakdown), use
-        :meth:`step_report`.
-        """
+        """Number of graph colours from the last PGS. Triggers D2H copy."""
         if self.step_layout == "single_world":
             return int(self._partitioner.num_colors.numpy()[0])
-        # Multi-world: report the maximum colour depth across worlds,
-        # matching what step_report().num_colors returns.
         return int(self._world_num_colors.numpy().max(initial=0))
 
     def step_report(self) -> PhoenXWorld.StepReport:
-        """Snapshot of colouring + active-constraint diagnostics for
-        the last :meth:`step`.
-
-        Performs a handful of device-to-host copies (all gated on this
-        call -- the step itself never reads them on the host) so the
-        steady-state path stays graph-capture clean. Do not call
-        inside a :func:`wp.ScopedCapture` region.
-
-        Returns:
-            A :class:`StepReport` populated with the colour count,
-            per-colour element histogram, and active-contact-column
-            count from the last :meth:`step`. If :meth:`step` has not
-            been called yet (or was called with ``contacts=None`` and
-            no joints exist) the report counts are all zero.
-        """
+        """Diagnostic snapshot of the last step. Triggers D2H copies."""
         num_contact_columns = (
             int(self._ingest_scratch.num_contact_columns.numpy()[0])
             if self._contact_views is not None and self._ingest_scratch is not None
@@ -2156,12 +1570,7 @@ class PhoenXWorld:
         num_active = self.num_joints + num_contact_columns
 
         # Per-body degree from the partitioner's adjacency CSR end array.
-        # After ``partitioning_adjacency_store_kernel`` runs, slot ``v``
-        # holds the inclusive end of body ``v``'s element-id list, so
-        # ``deg(v) = end[v] - end[v-1]`` (with a 0 sentinel for v == 0).
-        # The lower bound on any valid graph colouring is the maximum
-        # degree, so this is the right number to compare ``num_colors``
-        # against.
+        # max_body_degree is the lower bound on any valid graph colouring.
         if num_active > 0 and self.num_bodies > 0:
             ends = self._partitioner._adjacency_section_end_indices.numpy()
             n_bodies = min(int(self.num_bodies), int(ends.shape[0]))
@@ -2192,9 +1601,6 @@ class PhoenXWorld:
                 max_body_degree=max_body_degree,
             )
 
-        # Multi-world: per-world coloring. ``_world_num_colors`` is
-        # length ``num_worlds`` and ``_world_color_starts`` is shape
-        # ``[num_worlds, MAX_COLORS + 1]``.
         nc_per_world = self._world_num_colors.numpy().astype(np.int32, copy=False)
         starts_2d = self._world_color_starts.numpy().astype(np.int32, copy=False)
         per_world_num_colors: list[int] = [int(n) for n in nc_per_world]
@@ -2206,9 +1612,6 @@ class PhoenXWorld:
             per_world_color_sizes.append(sizes)
             if n > max_nc:
                 max_nc = n
-        # Aggregate per-colour-index totals across worlds. Worlds with
-        # fewer than ``max_nc`` colours contribute zero to higher
-        # indices.
         agg = [0] * max_nc
         for sizes in per_world_color_sizes:
             for c, s in enumerate(sizes):
@@ -2225,9 +1628,7 @@ class PhoenXWorld:
         )
 
     def gather_contact_wrenches(self, out: wp.array) -> None:
-        """Per-individual-contact wrench (force + torque) from the
-        last substep. ``out`` is ``wp.array[wp.spatial_vector]`` of
-        length :attr:`rigid_contact_max`."""
+        """Per-contact wrench (force + torque) from the last substep."""
         if self.max_contact_columns == 0:
             out.zero_()
             return

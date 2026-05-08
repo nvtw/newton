@@ -2,15 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Self-contained picking helper for :class:`PhoenXWorld` examples.
 
-Mirrors :class:`newton._src.viewer.picking.Picking` but operates
-directly on a :class:`BodyContainer` instead of on a
-:class:`newton.Model` / :class:`newton.State`. Pick model: per-body
-OBB raycast against the body-frame half-extents, then a PD spring on
-the picked point clamped to a multiple of ``g * mass``. All state
-lives in a fixed-size device buffer so the whole flow is
-graph-capture-friendly. :func:`register_with_viewer_gl` appends the
-mouse callbacks to the GL viewer without touching its own picking
-state.
+Per-body OBB raycast, then a PD spring on the picked point clamped to a multiple
+of ``g * mass``. State lives in fixed-size device buffers (graph-capture-friendly).
 """
 
 from __future__ import annotations
@@ -26,39 +19,19 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Kernels
-# ---------------------------------------------------------------------------
-#
-# All state lives in length-1 device arrays so reads/writes don't need a
-# host sync. The host -> device pieces (ray start/dir, stiffness, ...) are
-# passed as plain kernel arguments because they only change per mouse event
-# (not per simulation step) so the trip through ``wp.launch`` is fine.
-
-
 @wp.kernel(enable_backward=False)
 def _raycast_obb_kernel(
     bodies: BodyContainer,
     half_extents: wp.array[wp.vec3f],
     ray_start: wp.vec3f,
     ray_dir: wp.vec3f,
-    # Outputs (length-1 arrays, atomically updated)
     out_dist: wp.array[wp.float32],
     out_body: wp.array[wp.int32],
     out_local_hit: wp.array[wp.vec3f],
     lock: wp.array[wp.int32],
 ):
-    """Per-body OBB raycast.
-
-    Each thread tests one body. A body whose ``half_extents`` has any
-    component <= 0 is skipped (used to mark non-pickable bodies like the
-    world anchor at index 0).
-
-    On hit, the thread takes a spinlock and updates the shared min-dist
-    output if its hit is closer. We use a spinlock instead of a CAS
-    because we also need to atomically update the body index and local
-    hit point alongside the distance.
-    """
+    """Per-body OBB raycast. Bodies with non-positive half_extents are skipped
+    (marker for non-pickable bodies like the world anchor)."""
     bid = wp.tid()
 
     he = half_extents[bid]
@@ -68,16 +41,11 @@ def _raycast_obb_kernel(
     pos = bodies.position[bid]
     rot = bodies.orientation[bid]
 
-    # Transform the ray into the body's local frame: rotate by inverse
-    # orientation and translate by negated position.
     inv_rot = wp.quat_inverse(rot)
     p_local = wp.quat_rotate(inv_rot, ray_start - pos)
     d_local = wp.quat_rotate(inv_rot, ray_dir)
 
-    # Slab test against the AABB [-he, +he]. ``inv_d`` may overflow when
-    # ``d_local[k]`` is zero, but that just makes the corresponding pair
-    # of slab planes never bound this axis (one becomes +inf, the other
-    # -inf), which is the right behaviour for parallel rays.
+    # Slab test against the AABB [-he, +he].
     t_min = wp.float32(-1.0e30)
     t_max = wp.float32(1.0e30)
 
@@ -102,16 +70,13 @@ def _raycast_obb_kernel(
     if t_max < t_min or t_max < 0.0:
         return
 
-    # Use the entry point if the ray origin is outside, else the exit.
+    # Entry point if origin is outside, else exit.
     t_hit = t_min
     if t_hit < 0.0:
         t_hit = t_max
 
     local_hit = p_local + d_local * t_hit
 
-    # Spinlock-protected min-reduction across all hitting threads.
-    # Reuses Newton's existing raycast spinlock helpers so we get the
-    # same well-tested CAS + atomic_exch pattern.
     if t_hit < out_dist[0]:
         _spinlock_acquire(lock)
         old_min = wp.atomic_min(out_dist, 0, t_hit)
@@ -128,12 +93,7 @@ def _update_pick_target_kernel(
     pick_dist: wp.array[wp.float32],
     out_target: wp.array[wp.vec3f],
 ):
-    """Reproject the mouse ray to the picked point's depth.
-
-    Matches Newton's behaviour: the target tracks the mouse cursor at
-    constant distance from the camera, equal to the distance at which
-    the body was originally hit. That feels right interactively because
-    near objects move less than far ones for the same mouse delta."""
+    """Reproject the mouse ray to the picked point's depth (constant from camera)."""
     out_target[0] = ray_start + ray_dir * pick_dist[0]
 
 
@@ -149,15 +109,8 @@ def _apply_pick_force_kernel(
     inv_mass_floor: wp.float32,
 ):
     """PD spring-damper from the picked point to the mouse target.
-
-    Mirrors :func:`newton._src.viewer.kernels.apply_picking_force_kernel`
-    but reads/writes the Jitter ``BodyContainer`` directly and skips
-    the kinematic-flag check (we mark the world anchor non-pickable via
-    its zero half-extents instead).
-
-    ``inv_mass_floor`` lets the caller cap the effective mass so the
-    force clamp is meaningful for very-light or massless picked bodies
-    (mirrors the ``effective_mass`` table in Newton's picking)."""
+    ``inv_mass_floor`` caps the effective mass so the force clamp stays meaningful
+    for very-light bodies."""
     bid = pick_body[0]
     if bid < 0:
         return
@@ -165,23 +118,16 @@ def _apply_pick_force_kernel(
     pos = bodies.position[bid]
     rot = bodies.orientation[bid]
 
-    # World-space pick attach point (the same body-local point we
-    # latched at pick time, transformed by the body's *current* pose).
     world_attach = pos + wp.quat_rotate(rot, pick_local[0])
 
     target = pick_target[0]
 
-    # Velocity of the attach point: linear COM velocity + omega x r.
     inv_m = bodies.inverse_mass[bid]
     v_com = bodies.velocity[bid]
     omega = bodies.angular_velocity[bid]
-    r = world_attach - pos  # offset from COM to attach point in world frame
+    r = world_attach - pos
     v_attach = v_com + wp.cross(omega, r)
 
-    # PD force. Match Newton's "force_multiplier = 10 + mass" by
-    # converting back from inv_mass: a body with inv_m == 0 (static) is
-    # filtered out above by the bid < 0 / pickability checks, so we can
-    # treat 0 here as "1 kg surrogate" without harm.
     if inv_m > 0.0:
         mass = 1.0 / inv_m
     else:
@@ -190,9 +136,7 @@ def _apply_pick_force_kernel(
 
     f = force_multiplier * (stiffness * (target - world_attach) - damping * v_attach)
 
-    # Clamp |f| to ``max_acc_g * g * effective_mass`` so light objects
-    # near stiff contacts don't fly off. ``inv_mass_floor`` lets the
-    # caller pretend a chain has more mass than its picked link does.
+    # Clamp |f| to max_acc_g * g * effective_mass.
     eff_inv_m = wp.min(inv_m, inv_mass_floor)
     if eff_inv_m > 0.0:
         eff_mass = 1.0 / eff_inv_m
@@ -205,33 +149,18 @@ def _apply_pick_force_kernel(
 
     torque = wp.cross(r, f)
 
-    # Add to the Jitter accumulators (gravity / user code may have
-    # already written here this substep).
     wp.atomic_add(bodies.force, bid, f)
     wp.atomic_add(bodies.torque, bid, torque)
 
 
-# ---------------------------------------------------------------------------
-# Picking
-# ---------------------------------------------------------------------------
-
-
 class Picking:
-    """Holds the per-pick device state and exposes Newton-Picking-shaped
-    methods (:meth:`pick`, :meth:`update`, :meth:`release`,
-    :meth:`is_picking`).
-
-    The example owns a single :class:`Picking`, registers the
-    mouse callbacks via :func:`register_with_viewer_gl`, and calls
-    :meth:`apply_force` from inside its simulate loop right before each
-    ``world.step(dt)``.
+    """Per-pick device state with Newton-Picking-shaped methods.
 
     Example::
 
         picking = Picking(world, half_extents)
         register_with_viewer_gl(viewer, picking)
-
-        # ... inside simulate() ...
+        # inside simulate():
         picking.apply_force()
         world.step(dt)
     """
@@ -245,20 +174,9 @@ class Picking:
         damping: float = 5.0,
         max_acceleration: float = 5.0,
     ) -> None:
-        """Create a picking helper bound to ``world``.
-
-        Args:
-            world: The :class:`World` whose :class:`BodyContainer` will
-                be raycast against / forced.
-            half_extents: ``wp.array[wp.vec3f]`` of length
-                ``world.num_bodies``, giving each body's half-extents in
-                its local frame. Bodies with any component <= 0 are
-                non-pickable (used to suppress the world anchor at
-                index 0).
-            stiffness, damping: PD spring parameters.
-            max_acceleration: Force clamp expressed as a multiple of g
-                (``9.81 m/s^2``); same convention as Newton's picking.
-        """
+        """Bind picking to ``world``. ``half_extents`` is per-body local-frame
+        half-extents (vec3f, length ``world.num_bodies``); non-positive components
+        mark the body non-pickable. ``max_acceleration`` is a multiple of g."""
         self.world = world
         self.half_extents = half_extents
         self.stiffness = float(stiffness)
@@ -293,14 +211,7 @@ class Picking:
         self._is_picking = False
 
     def pick(self, ray_start, ray_dir) -> None:
-        """Cast a world-space ray and latch onto the closest hit body.
-
-        Mirrors the right-click handler of Newton's GL viewer: prime the
-        scratch buffers, run the per-body raycast, then on hit copy the
-        winner into the persistent pick state and seed
-        ``pick_target = ray_start + ray_dir * dist``.
-        """
-        # Reset reduction scratch.
+        """Cast a world-space ray and latch onto the closest hit body."""
         self._scratch_dist.fill_(1.0e30)
         self._scratch_body.fill_(-1)
         self._scratch_local.zero_()
@@ -325,9 +236,7 @@ class Picking:
             device=self.device,
         )
 
-        # Need a sync to know whether we actually hit something. This
-        # only runs on the right-click event (not in the per-frame hot
-        # path), so the sync is cheap.
+        # Sync only fires on the right-click event, not the hot path.
         wp.synchronize_device(self.device)
         body_idx = int(self._scratch_body.numpy()[0])
         if body_idx < 0:
@@ -338,8 +247,7 @@ class Picking:
         self._pick_body.assign([body_idx])
         self._pick_local.assign([self._scratch_local.numpy()[0]])
         self._pick_dist.assign([dist])
-        # Seed target at the current mouse-ray depth so the first frame
-        # of dragging doesn't yank the body.
+        # Seed target at current mouse-ray depth so the first drag doesn't yank.
         self._pick_target.assign(
             [
                 wp.vec3f(
@@ -352,10 +260,7 @@ class Picking:
         self._is_picking = True
 
     def update(self, ray_start, ray_dir) -> None:
-        """Re-project the mouse ray to the latched depth.
-
-        Called from the mouse-drag callback. Pure kernel launch; no
-        sync, so this is cheap to call every drag event."""
+        """Re-project the mouse ray to the latched depth (no sync)."""
         if not self._is_picking:
             return
         rs = wp.vec3f(float(ray_start[0]), float(ray_start[1]), float(ray_start[2]))
@@ -367,22 +272,10 @@ class Picking:
             device=self.device,
         )
 
-    # --- Per-step force application -----------------------------------
-
     def apply_force(self, inv_mass_floor: float = 1.0) -> None:
-        """Add the current picking force to the body force/torque
-        accumulators.
-
-        Always launches the kernel (even when not picking) so the call
-        is graph-capture safe -- the kernel itself short-circuits on
-        ``pick_body[0] < 0``.
-
-        Args:
-            inv_mass_floor: Lower bound on the inverse mass used for
-                the force clamp. ``1.0`` means "treat anything lighter
-                than 1 kg as 1 kg for clamping purposes", which keeps
-                light bodies controllable without runaway force on
-                stiff-contact divergence."""
+        """Add the picking force to body force/torque accumulators. Always launches
+        (graph-capture safe); kernel short-circuits when not picking.
+        ``inv_mass_floor=1.0`` treats sub-1-kg bodies as 1 kg for the clamp."""
         wp.launch(
             _apply_pick_force_kernel,
             dim=1,
@@ -400,22 +293,9 @@ class Picking:
         )
 
 
-# ---------------------------------------------------------------------------
-# GL viewer wiring
-# ---------------------------------------------------------------------------
-
-
 def register_with_viewer_gl(viewer, picking: Picking) -> None:
     """Hook ``picking`` into a :class:`ViewerGL`'s mouse callbacks.
-
-    Right mouse button picks; right-drag updates the target; release
-    drops the pick. We do not touch ``viewer.picking`` -- the viewer's
-    own handler will see ``viewer.picking is None`` and silently no-op,
-    after which our handler runs and does the real work.
-
-    No-op for non-GL viewers (file / null / rerun / viser). They have
-    no interactive surface to wire up.
-    """
+    Right-click picks, right-drag updates, release drops. No-op for non-GL viewers."""
     renderer = getattr(viewer, "renderer", None)
     register_press = getattr(renderer, "register_mouse_press", None) if renderer else None
     if register_press is None:

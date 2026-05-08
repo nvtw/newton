@@ -49,8 +49,7 @@ def partitioning_adjacency_finalize_pre_sort_kernel(
 ):
     tid = wp.tid()
 
-    # Serial header, done by thread 0 only. No cross-phase dependency with the
-    # parallel body below, so other threads can run the body concurrently.
+    # Serial header on thread 0; rest of the threads run the body in parallel.
     if tid == 0:
         added_to_set_counter = int(0)
         for i in range(max_num_partitions + 1):
@@ -70,8 +69,7 @@ def partitioning_adjacency_finalize_pre_sort_kernel(
     if tid >= num_elements[0]:
         return
 
-    # Bit 62 (unpartitioned marker) also falls in the ">> 32" window; strip it
-    # first so overflow elements get mapped to max_num_partitions (clamped).
+    # Strip bit 62 (unpartitioned marker) before extracting the colour.
     tagged = partition_data_concat[tid] & _TAG_MASK
     color_plus_one = int(tagged >> _COLOR_SHIFT)
     interaction_id_to_partition[tid] = wp.min(max_num_partitions, color_plus_one - 1)
@@ -88,8 +86,6 @@ def partitioning_adjacency_finalize_post_sort_kernel(
     if tid >= num_elements[0]:
         return
 
-    # Strip color bits and overflow marker, keeping only the element id in
-    # the low 32 bits. Write into the int32 output buffer used by callers.
     partition_data_elements[tid] = int(partition_data_concat[tid] & _ID_MASK)
 
 
@@ -110,11 +106,9 @@ def maximal_independent_set_partitioning(
     cost_values: wp.array[int],
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
-    # Scratch buffer required by Warp's key-value radix sort.
+    # Radix-sort scratch (size 2*N).
     partition_data_concat_sort_values: wp.array[int],
-    # 1-element device array used to feed the current color into the coloring
-    # kernel. Allocated by :class:`ContactPartitioner`; supply a fresh one when
-    # calling this function directly.
+    # Per-color loop counter (1-elem device array).
     color_arr: wp.array[int],
 ) -> None:
     max_num_interactions = partition_data_concat.shape[0] // 2
@@ -182,8 +176,6 @@ def maximal_independent_set_partitioning(
         ],
     )
 
-    # We widened partition_data_concat to int64 to fit (color+1) in bits 32..61;
-    # signed int64 order == unsigned int64 order here because bit 63 stays clear.
     sort_variable_length_int64(partition_data_concat, partition_data_concat_sort_values, num_elements)
 
     wp.launch(
@@ -194,16 +186,8 @@ def maximal_independent_set_partitioning(
 
 
 class ContactPartitioner:
-    """User-friendly wrapper around :func:`maximal_independent_set_partitioning`.
-
-    The constructor allocates all scratch/output buffers once and generates the
-    Jones-Plassmann random-priority array. Each call to :meth:`launch` runs the
-    full colouring pipeline on caller-supplied ``elements`` and writes results
-    into the owned buffers, accessible via the ``partition_*`` properties.
-
-    C# equivalent: ``ContactPartitions`` / ``ContactPartitionsGpu`` from
-    PhoenX ``MassSplitting/ContactPartitions.cs``.
-    """
+    """Wrapper around :func:`maximal_independent_set_partitioning`. Pre-allocates
+    scratch/output buffers and the Jones-Plassmann priority array."""
 
     def __init__(
         self,
@@ -217,9 +201,7 @@ class ContactPartitioner:
         self.max_num_nodes = max_num_nodes
         self.max_num_partitions = max_num_partitions
 
-        # Pairwise-distinct Jones-Plassmann priorities. A permutation of [1, N]
-        # guarantees uniqueness, which the algorithm needs to break ties
-        # between neighbouring elements.
+        # JP priorities: permutation of [1, N] for guaranteed uniqueness.
         import numpy as np  # noqa: PLC0415
 
         rng = np.random.default_rng(seed)
@@ -237,21 +219,14 @@ class ContactPartitioner:
             max_num_interactions * int(MAX_BODIES), dtype=wp.int32, device=device
         )
 
-        # 2*N ping-pong buffer required by Warp's radix sort. int64 so the
-        # (unpartitioned_marker | color_plus_one | tid) packing is lossless
-        # for any realistic partition count.
+        # 2*N ping-pong (radix sort). int64 packs (marker | color+1 | tid).
         self._partition_data_concat = wp.zeros(2 * max_num_interactions, dtype=wp.int64, device=device)
         self._partition_data_concat_sort_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
-        # int32 element-id view, filled by the post-sort finalize kernel.
         self._partition_data_elements = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
-        # int32 colour-tag mirror used by the greedy variant; the
-        # batch partitioner runs round-based JP only, so this array is
-        # never read here -- it just satisfies
-        # ``partitioning_adjacency_store_kernel``'s signature.
+        # color_tags is unused here (greedy variant only); kept for kernel signature.
         self._color_tags = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
-        # 1-element device array feeding the coloring kernel's per-color loop.
         self._color_arr = wp.zeros(1, dtype=wp.int32, device=device)
 
     def launch(
@@ -260,15 +235,7 @@ class ContactPartitioner:
         num_elements: wp.array[int],
         cost_values=None,
     ) -> None:
-        """Run the colouring pipeline on ``elements[:num_elements[0]]``.
-
-        Args:
-            elements: Per-interaction body lists. Capacity must be
-                ``>= max_num_interactions``.
-            num_elements: Single-element device array holding the active count.
-            cost_values: Optional per-interaction JP cost. If omitted, all costs
-                are zero and the colourer uses the seeded jitter only.
-        """
+        """Run the colouring pipeline on ``elements[:num_elements[0]]``."""
         if cost_values is None:
             cost_values = self._cost_values
 
@@ -293,36 +260,29 @@ class ContactPartitioner:
             color_arr=self._color_arr,
         )
 
-    # ------------------------------------------------------------------
-    # Results (populated by the most recent ``launch`` call).
-    # ------------------------------------------------------------------
+    # Results from the most recent launch.
 
     @property
     def num_partitions(self) -> wp.array:
-        """Number of non-overflow partitions used (device scalar array)."""
+        """Number of non-overflow partitions (device scalar)."""
         return self._num_partitions
 
     @property
     def has_additional_partition(self) -> wp.array:
-        """1 if an overflow partition at index ``num_partitions`` is present,
-        else 0 (device scalar array)."""
+        """1 if an overflow partition at index num_partitions is present, else 0."""
         return self._has_additional_partition
 
     @property
     def partition_ends(self) -> wp.array:
-        """Inclusive cumulative sum: ``partition_ends[i]`` is the exclusive end
-        index into :attr:`partition_data_concat` of partition ``i``."""
+        """Exclusive end index into partition_data_concat per partition."""
         return self._partition_ends
 
     @property
     def partition_data_concat(self) -> wp.array:
-        """Sorted, concatenated element ids grouped by partition (int32).
-        Length ``max_num_interactions``; only the first ``num_elements[0]``
-        entries are meaningful."""
+        """Element ids grouped by partition. First num_elements[0] entries valid."""
         return self._partition_data_elements
 
     @property
     def interaction_id_to_partition(self) -> wp.array:
-        """``interaction_id_to_partition[i]`` holds the partition index that
-        element ``i`` was assigned to."""
+        """Partition index per element."""
         return self._interaction_id_to_partition

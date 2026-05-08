@@ -1,23 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Rigid-rigid contact constraint for :class:`PhoenXWorld`.
+"""Rigid-rigid contact constraint.
 
-One :data:`CONSTRAINT_TYPE_CONTACT` column covers one whole
-``(shape_a, shape_b)`` pair, storing only the contiguous index range
-``[contact_first, contact_first + contact_count)`` into the sorted
-:class:`newton._src.sim.contacts.Contacts` buffer. Per-contact
-persistent state (lambdas, contact frame, body-local anchors) and
-per-substep derived quantities (lever arms, effective masses, bias)
-live in :class:`ContactContainer` keyed by the contact's
-sorted-buffer index ``k``. The PGS loop walks each pair's contact
-range serially inside one kernel call, which is Gauss-Seidel within
-the pair by construction.
+One CONTACT column per (shape_a, shape_b) pair, storing only the index range
+[contact_first, contact_first + contact_count) into Newton's sorted Contacts.
+Per-contact state lives in :class:`ContactContainer`, keyed by sorted-buffer k.
+PGS walks each pair's range serially (Gauss-Seidel within the pair).
 
-Friction: two-tangent pyramidal PGS. Each contact contributes a
-normal row (``lambda_n >= 0``) plus two tangential rows clamped to
-``[-mu * lambda_n, +mu * lambda_n]``. Same "simple friction" pattern
-as Box2D v3; the full Coulomb cone is approximated by the circular
-clamp inside the iterate kernel.
+Friction: two-tangent pyramidal PGS. Normal lambda_n >= 0; tangents clamped to
+[-mu*lambda_n, +mu*lambda_n] with circular clamp (Coulomb cone approximation).
 """
 
 from __future__ import annotations

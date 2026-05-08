@@ -1,18 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Host-side builder assembling a :class:`PhoenXWorld` from plain Python.
+"""Host-side builder assembling a :class:`PhoenXWorld` from Python descriptors.
 
-Two-phase construction:
-
-1. *Append* -- ``add_static_body`` / ``add_dynamic_body`` / ``add_joint``
-   record descriptors. Nothing touches the GPU.
-2. *Finalize* -- :meth:`WorldBuilder.finalize` allocates containers,
-   packs descriptors via NumPy, launches one init kernel for the
-   joints, and returns a ready-to-step :class:`PhoenXWorld`.
-
-Body 0 is the static world anchor for single-world scenes; for
-``num_worlds > 1`` bodies ``[0, num_worlds)`` are each world's anchor.
-User descriptors start after that.
+Two-phase: append descriptors, then :meth:`WorldBuilder.finalize` packs them and
+returns the ready :class:`PhoenXWorld`. Bodies ``[0, num_worlds)`` are each
+world's static anchor; user bodies start at index ``num_worlds``.
 """
 
 from __future__ import annotations
@@ -96,25 +88,15 @@ class DriveMode(IntEnum):
 
 
 class JointMode(IntEnum):
-    """Which physical joint an ADBS descriptor materialises.
+    """ADBS joint mode.
 
-    * :attr:`REVOLUTE` -- 5-DoF hinge along ``anchor1 -> anchor2``.
-    * :attr:`PRISMATIC` -- 5-DoF slider along ``anchor1 -> anchor2``.
-    * :attr:`BALL_SOCKET` -- 3-DoF point lock at ``anchor1``
-      (rotations free, no drive/limit).
-    * :attr:`FIXED` -- 6-DoF weld along ``anchor1 -> anchor2``
-      (no drive/limit).
-    * :attr:`CABLE` -- soft fixed joint built on the same 3+2+1 row
-      layout as :attr:`FIXED` but with PD softness on the anchor-2
-      tangent rows (bend) and the anchor-3 scalar row (twist). User
-      supplies ``bend_stiffness`` / ``bend_damping`` [N*m/rad,
-      N*m*s/rad] and ``twist_stiffness`` / ``twist_damping``
-      [N*m/rad, N*m*s/rad]; gains are rescaled by ``1 / rest_length^2``
-      to obtain the equivalent positional spring at the lever-armed
-      anchors. Converges to revolute as ``k_bend -> infinity`` and to
-      :attr:`FIXED` as both gains diverge. The user-facing kwargs
-      reuse the ADBS column's drive / limit slots: ``bend_*`` ->
-      drive slots, ``twist_*`` -> limit slots.
+    * REVOLUTE — 5-DoF hinge along ``anchor1 -> anchor2``.
+    * PRISMATIC — 5-DoF slider along ``anchor1 -> anchor2``.
+    * BALL_SOCKET — 3-DoF point lock at ``anchor1`` (no drive/limit).
+    * FIXED — 6-DoF weld (no drive/limit).
+    * CABLE — soft fixed joint with PD bend (anchor-2 tangent rows) and PD twist
+      (anchor-3 scalar row). User-facing ``bend_*`` reuses drive slots; ``twist_*``
+      reuses limit slots. Gains rescaled by ``1 / rest_length^2``.
     """
 
     REVOLUTE = int(JOINT_MODE_REVOLUTE)
@@ -125,21 +107,13 @@ class JointMode(IntEnum):
 
 
 class ShapeType(IntEnum):
-    """Primitive collider types that :class:`WorldBuilder` can attach
-    to a body.
-
-    Shapes are declarative: they carry a local transform relative to
-    the parent body and a geometry parametrisation. The builder uses
-    them for (1) mass / inertia accumulation when ``density`` /
-    ``mass`` is set, and (2) materialising the per-shape
-    ``shape_body`` / ``shape_material`` arrays the solver needs for
-    contact ingest.
-    """
+    """Primitive collider types. Shapes carry a local transform + geometry; the
+    builder uses them for mass/inertia accumulation and contact ingest."""
 
     SPHERE = 0
     BOX = 1
     CAPSULE = 2
-    PLANE = 3  # static-only, infinite half-space; contributes no mass
+    PLANE = 3  # static-only half-space, contributes no mass
 
 
 # ---------------------------------------------------------------------------
@@ -177,21 +151,10 @@ class RigidBodyDescriptor:
 
 @dataclass
 class JointDescriptor:
-    """Plain-Python description of one actuated double-ball-socket joint.
-
-    The ``mode`` selects ball-socket / revolute / prismatic. For
-    revolute and prismatic, ``anchor1`` and ``anchor2`` are two
-    world-space points on the joint axis at finalize() time. For
-    ball-socket, ``anchor2`` is internally set to ``anchor1``.
-
-    Drive: ``stiffness_drive == damping_drive == 0`` disables the
-    drive row. ``max_force_drive > 0`` caps the per-substep impulse.
-
-    Limit: ``min_value > max_value`` disables the limit row. If either
-    PD gain (``stiffness_limit`` / ``damping_limit``) is positive the
-    PD formulation is used; otherwise the Box2D
-    ``(hertz_limit, damping_ratio_limit)`` formulation applies.
-    """
+    """One ADBS joint. ``anchor1``/``anchor2`` are world points on the joint axis
+    at finalize() time. Drive disabled when stiffness_drive == damping_drive == 0;
+    limit disabled when min_value > max_value. Positive limit PD gains use the PD
+    path, else the Box2D (hertz, damping_ratio) formulation."""
 
     body1: int
     body2: int
@@ -227,27 +190,15 @@ class JointHandle:
 
 @dataclass
 class ShapeDescriptor:
-    """Plain-Python description of one collider attached to a body.
+    """One collider. Geometry depends on :attr:`shape_type`:
 
-    Geometry parametrisation lives in the ``geom_*`` fields; which ones
-    are meaningful depends on :attr:`shape_type`:
+    * SPHERE: geom_scalar_a = radius [m].
+    * BOX: geom_vec3 = (hx, hy, hz) half-extents [m].
+    * CAPSULE: geom_scalar_a = radius, geom_scalar_b = half-height [m].
+    * PLANE: geom_vec3 = normal (unit), geom_scalar_a = offset.
 
-    * :attr:`ShapeType.SPHERE`: ``geom_scalar_a = radius`` [m].
-    * :attr:`ShapeType.BOX`: ``geom_vec3 = (hx, hy, hz)`` half-extents [m].
-    * :attr:`ShapeType.CAPSULE`: ``geom_scalar_a = radius`` [m],
-      ``geom_scalar_b = half_height`` [m] of the cylindrical mid-section.
-    * :attr:`ShapeType.PLANE`: ``geom_vec3 = normal`` (unit),
-      ``geom_scalar_a = offset`` along the normal.
-
-    ``local_pos`` / ``local_rot`` give the shape's pose in the parent
-    body's local frame; at finalize the builder uses them to translate
-    / rotate the per-shape inertia tensor into body coordinates.
-
-    Mass sourcing: exactly one of ``density`` (kg/m^3) or ``mass`` (kg)
-    may be set. If neither is set, the shape is mass-less (collision-
-    only); :meth:`WorldBuilder.finalize` does not fold it into the
-    body's compound inertia.
-    """
+    Mass: at most one of ``density`` (kg/m^3) or ``mass`` (kg). If neither, the
+    shape is collision-only (not folded into the body's inertia)."""
 
     body: int
     shape_type: ShapeType
@@ -267,15 +218,7 @@ class ShapeDescriptor:
 
 
 def _shape_volume_and_inertia(desc: ShapeDescriptor) -> tuple[float, np.ndarray]:
-    """Return ``(volume, local_inertia_tensor)`` for a unit-density
-    version of the shape (i.e. treat density = 1 kg/m^3). The caller
-    multiplies by the effective density (or scales so the given mass
-    matches) to get physical quantities.
-
-    The inertia tensor is the body-frame inertia about the shape's
-    origin (before translating to the parent body's COM). Symmetric
-    3x3 NumPy array.
-    """
+    """``(volume, body-frame inertia tensor)`` for a unit-density version of the shape."""
     t = desc.shape_type
     if t == ShapeType.SPHERE:
         r = float(desc.geom_scalar_a)
@@ -303,16 +246,7 @@ def _shape_volume_and_inertia(desc: ShapeDescriptor) -> tuple[float, np.ndarray]
         # Ixx = Iyy = (1/12) m (3 r^2 + h^2).
         izz_cyl = 0.5 * v_cyl * r * r
         ixx_cyl = v_cyl / 12.0 * (3.0 * r * r + h * h)
-        # Two hemispheres: solid sphere inertia about its COM =
-        # (2/5) m_sph r^2. Parallel-axis to the cylinder caps
-        # (distance = h/2 + 3 r / 8 for a hemisphere's COM; but we
-        # treat the pair as a full sphere centred at the cylinder's
-        # COM since the two hemispheres are symmetric, i.e. the
-        # combined capsule's two hemispheres together behave like a
-        # sphere displaced +/-(h/2 + 3r/8). A tighter closed form
-        # isn't worth the complexity for a collision primitive; the
-        # sphere-at-origin approximation is within a few percent for
-        # h ~ r and converges to the sphere as h -> 0).
+        # Two hemispheres treated as a sphere displaced +/-h/2 (within a few percent).
         izz_sph = 0.4 * v_sph * r * r
         ixx_sph = 0.4 * v_sph * r * r + v_sph * (0.5 * h) * (0.5 * h)
         ixx = ixx_cyl + ixx_sph
@@ -423,8 +357,7 @@ class WorldBuilder:
         if num_worlds < 1:
             raise ValueError(f"num_worlds must be >= 1 (got {num_worlds})")
         self._num_worlds: int = int(num_worlds)
-        # One static world anchor per world. The ``world_id`` field
-        # drives the per-world CSR bucketing.
+        # One static world anchor per world (drives per-world CSR bucketing).
         self._bodies: list[RigidBodyDescriptor] = [
             RigidBodyDescriptor(
                 inverse_mass=0.0,
@@ -547,19 +480,9 @@ class WorldBuilder:
             )
         )
 
-    # ------------------------------------------------------------------
-    # Shape API
-    # ------------------------------------------------------------------
-    #
-    # Optional: users can manage mass/inertia by hand via explicit
-    # ``inverse_mass`` / ``inverse_inertia`` on :meth:`add_dynamic_body`,
-    # or attach shapes with ``density`` (kg/m^3) or ``mass`` (kg) and
-    # let :meth:`finalize` sum via the parallel-axis theorem (overwriting
-    # the body's inverse mass/inertia).
-    #
-    # Mixing modes is an error: a shape with a mass source AND a body
-    # with explicit non-default mass/inertia makes :meth:`finalize`
-    # raise ``ValueError`` -- intent is declared once, on the shape.
+    # Shape API. Optionally set density/mass on shapes for finalize() to
+    # auto-compute the body's compound inertia (parallel-axis). Mixing this
+    # with explicit body inverse_mass/inertia raises in finalize().
 
     def _attach_shape(self, desc: ShapeDescriptor) -> int:
         """Validate + append a shape, return its index."""
@@ -595,25 +518,8 @@ class WorldBuilder:
         mass: float | None = None,
         material_id: int | None = None,
     ) -> int:
-        """Attach a solid-sphere collider to ``body``. Returns the
-        shape index.
-
-        Args:
-            body: Parent body index.
-            radius: Sphere radius [m], must be > 0.
-            local_pos: Shape origin in the body's local frame [m].
-            local_rot: Shape orientation relative to the body as a
-                ``(x, y, z, w)`` quaternion. Meaningless for a sphere
-                (rotation-invariant) but accepted for symmetry with
-                the other shape types.
-            density: Uniform density [kg / m^3]. Set this to have the
-                builder compute the body's compound mass / inertia
-                automatically.
-            mass: Total mass [kg]. Alternative to ``density``; exactly
-                one of the two may be set.
-            material_id: Index into the material table; ``None`` uses
-                the solver's ``default_friction`` at contact time.
-        """
+        """Attach a solid-sphere collider. Set ``density`` (kg/m^3) or ``mass``
+        (kg) for auto-computed inertia (at most one)."""
         if radius <= 0.0 or not _is_finite(radius):
             raise ValueError(f"add_shape_sphere(body={body}): radius must be > 0 (got {radius})")
         return self._attach_shape(
@@ -640,16 +546,7 @@ class WorldBuilder:
         mass: float | None = None,
         material_id: int | None = None,
     ) -> int:
-        """Attach a solid-box collider to ``body``.
-
-        Args:
-            body: Parent body index.
-            half_extents: ``(hx, hy, hz)`` in the shape's local frame [m],
-                each > 0.
-            local_pos / local_rot: Shape pose in the body's local frame.
-            density / mass: See :meth:`add_shape_sphere`.
-            material_id: See :meth:`add_shape_sphere`.
-        """
+        """Attach a solid-box collider. ``half_extents`` (hx, hy, hz) all > 0."""
         if any((not _is_finite(h)) or h <= 0.0 for h in half_extents):
             raise ValueError(f"add_shape_box(body={body}): half_extents must all be > 0 (got {half_extents})")
         return self._attach_shape(
@@ -677,17 +574,8 @@ class WorldBuilder:
         mass: float | None = None,
         material_id: int | None = None,
     ) -> int:
-        """Attach a capsule collider (cylinder + two hemispheres) to
-        ``body``. The capsule is aligned along its local +z axis.
-
-        Args:
-            body: Parent body index.
-            radius: Hemisphere / cylinder radius [m], > 0.
-            half_height: Half-length of the cylindrical mid-section [m],
-                >= 0 (``0`` collapses to a sphere).
-            local_pos / local_rot / density / mass / material_id: As for
-                :meth:`add_shape_sphere`.
-        """
+        """Attach a capsule collider (cylinder + two hemispheres) along local +z.
+        ``half_height = 0`` collapses to a sphere."""
         if radius <= 0.0 or not _is_finite(radius):
             raise ValueError(f"add_shape_capsule(body={body}): radius must be > 0 (got {radius})")
         if half_height < 0.0 or not _is_finite(half_height):
@@ -714,16 +602,7 @@ class WorldBuilder:
         offset: float = 0.0,
         material_id: int | None = None,
     ) -> int:
-        """Attach an infinite-plane collider to ``body``. Planes
-        carry no mass and must be attached to static bodies.
-
-        Args:
-            body: Parent body index (must be static).
-            normal: World-space outward normal (unit vector).
-            offset: Signed distance from the body's origin to the
-                plane along ``normal`` [m].
-            material_id: Material table index for contact resolution.
-        """
+        """Attach an infinite plane (static body only, no mass)."""
         nlen = math.sqrt(sum(float(c) * float(c) for c in normal))
         if nlen <= 1e-12:
             raise ValueError(f"add_shape_plane(body={body}): normal must be non-zero")
@@ -771,38 +650,13 @@ class WorldBuilder:
         bend_damping: float = 0.0,
         twist_damping: float = 0.0,
     ) -> JointHandle:
-        """Append an actuated double-ball-socket joint and return its handle.
+        """Append an actuated double-ball-socket joint. Returns a handle whose
+        ``cid`` is rewritten by :meth:`finalize`.
 
-        Modes:
-
-        * :attr:`JointMode.BALL_SOCKET` -- 3-DoF point lock at
-          ``anchor1``. ``anchor2`` must be ``None``; drive / limit
-          must stay at defaults.
-        * :attr:`JointMode.REVOLUTE` -- 5-DoF hinge about
-          ``anchor1 -> anchor2``. Drive / limit values are angles
-          [rad], ``max_force_drive`` is torque [N*m].
-        * :attr:`JointMode.PRISMATIC` -- 5-DoF slider along
-          ``anchor1 -> anchor2``. Drive / limit values are
-          displacements [m], ``max_force_drive`` is force [N].
-        * :attr:`JointMode.FIXED` -- 6-DoF weld along
-          ``anchor1 -> anchor2``; no drive / limit.
-        * :attr:`JointMode.CABLE` -- soft fixed joint with PD bend /
-          twist springs (3+2+1 row layout). ``bend_{stiffness,damping}``
-          [N*m/rad, N*m*s/rad] govern the two axes perp to
-          ``anchor1 -> anchor2``, ``twist_{stiffness,damping}`` the
-          axis along it. Gains are rescaled by ``1 / rest_length^2``
-          to convert rotational SI units to the equivalent positional
-          spring at the lever-armed anchors. No drive / limit rows.
-
-        ``stiffness_drive == damping_drive == 0`` disables the drive
-        (REVOLUTE / PRISMATIC); ``min_value > max_value`` disables
-        the limit. Any positive ``{stiffness,damping}_limit`` selects
-        the PD limit formulation over Box2D ``(hertz_limit,
-        damping_ratio_limit)``.
-
-        Returns:
-            A :class:`JointHandle` whose ``cid`` is rewritten by
-            :meth:`finalize` to the joint's global cid.
+        REVOLUTE/PRISMATIC use ``anchor1 -> anchor2`` as the joint axis (drive/
+        limit in rad/[N·m] or m/[N]); FIXED welds along that line; CABLE adds PD
+        bend (perp axes) and PD twist (along axis). BALL_SOCKET point-locks at
+        anchor1. ``min_value > max_value`` disables the limit.
         """
         self._validate_body(body1)
         self._validate_body(body2)
@@ -886,9 +740,8 @@ class WorldBuilder:
                 )
             if bend_stiffness < 0.0 or twist_stiffness < 0.0 or bend_damping < 0.0 or twist_damping < 0.0:
                 raise ValueError("add_joint(mode=CABLE) requires non-negative bend / twist stiffness and damping")
-            # The kernel's cable prepare reads bend_* / twist_* from the
-            # drive / limit slots and rescales by 1 / rest_length^2 to
-            # convert N*m/rad -> N/m at the lever-armed anchors.
+            # The kernel reads bend_*/twist_* from drive/limit slots; gains
+            # rescaled by 1/rest_length^2 to convert N·m/rad -> N/m.
             stiffness_drive = float(bend_stiffness)
             damping_drive = float(bend_damping)
             stiffness_limit = float(twist_stiffness)
@@ -901,9 +754,6 @@ class WorldBuilder:
                     "the line anchor1 -> anchor2 defines the joint axis"
                 )
             anchor2_effective = anchor2
-            # VELOCITY drive requires damping_drive > 0. A zero-damping
-            # VELOCITY drive used to fall through to a pure-velocity
-            # motor; that path is gone in the unified joint.
             if drive_mode_enum is DriveMode.VELOCITY and damping_drive <= 0.0:
                 raise ValueError(
                     f"add_joint(mode={mode_enum.name}, drive_mode=VELOCITY) "
@@ -945,8 +795,7 @@ class WorldBuilder:
         return handle
 
     def add_collision_filter_pair(self, body_a: int, body_b: int) -> None:
-        """Ignore contacts between bodies ``body_a`` and ``body_b``.
-        Pair is stored canonical ``(min, max)``; self-pair rejected."""
+        """Ignore contacts between ``body_a`` and ``body_b`` (canonical (min, max))."""
         self._validate_body(body_a)
         self._validate_body(body_b)
         if body_a == body_b:
@@ -970,42 +819,23 @@ class WorldBuilder:
     ) -> PhoenXWorld:
         """Allocate GPU storage and build a ready-to-step :class:`PhoenXWorld`.
 
-        Descriptor lists are consumed in place (cleared after
-        success). Calling :meth:`finalize` twice returns a new empty
-        world the second time.
-
-        If shapes were attached via :meth:`add_shape_*`, the builder:
-
-        1. Folds shape-provided density / mass into each body's
-           compound inverse mass and body-frame inverse inertia,
-           transferring shape local-frame inertias to the body origin
-           via the parallel-axis theorem.
-        2. Emits ``shape_body`` and (optionally) ``shape_material``
-           arrays, stores them on the :class:`PhoenXWorld` so
-           :meth:`PhoenXWorld.step` can resolve contact shape ids
-           without the caller threading them through manually.
+        Descriptor lists are consumed (cleared on success). Shapes attached via
+        :meth:`add_shape_*` fold density/mass into per-body compound inertia
+        (parallel-axis); shape_body / shape_material are stored on the world.
         """
         device = wp.get_device(device)
 
-        # Shape-driven mass / inertia must happen BEFORE the body
-        # container is materialised, since the container reads the
-        # final ``inverse_mass`` / ``inverse_inertia`` on each
-        # descriptor.
+        # Shape mass/inertia must run before _build_body_container reads it.
         self._accumulate_mass_inertia_from_shapes()
 
         num_joints = len(self._joint_descriptors)
         bodies = self._build_body_container(device)
-        # One constraint column per ``(shape_a, shape_b)`` pair covers
-        # an arbitrary contact count per pair, so the column buffer
-        # sizes 1:1 against ``rigid_contact_max``.
         constraints = PhoenXWorld.make_constraint_container(
             num_joints=num_joints,
             device=device,
         )
 
-        # Detect compound bodies (any rigid body with > 1 shape) so the
-        # contact ingest can opt into body-pair grouping. Single-shape
-        # scenes pay nothing.
+        # Detect compound bodies (>1 shape) for body-pair grouping in ingest.
         has_compound_bodies = False
         if self._shapes:
             shape_bodies = np.asarray([int(s.body) for s in self._shapes], dtype=np.int32)
@@ -1038,10 +868,6 @@ class WorldBuilder:
             for i, handle in enumerate(self._joint_handles):
                 handle.cid = i
 
-        # Shape-driven column state: shape_body always, shape_material
-        # only when any shape declared a material_id. Stored on the
-        # world so ``world.step()`` doesn't require the caller to
-        # re-supply them each frame.
         if self._shapes:
             shape_body_np = np.asarray([int(s.body) for s in self._shapes], dtype=np.int32)
             shape_body_wp = wp.array(shape_body_np, dtype=wp.int32, device=device)
@@ -1052,15 +878,9 @@ class WorldBuilder:
                     dtype=np.int32,
                 )
                 shape_material_wp = wp.array(shape_material_np, dtype=wp.int32, device=device)
-                # Preserve an externally-installed material table;
-                # callers who want custom materials should register
-                # them via :meth:`PhoenXWorld.set_materials` before
-                # stepping, or augment this path with a builder-side
-                # material table.
                 world.set_materials(world._materials, shape_material_wp)
 
-        # Reset internal state so the builder can't leak references
-        # into a second finalize call.
+        # Reset state so a second finalize starts clean.
         self._bodies = [
             RigidBodyDescriptor(
                 inverse_mass=0.0,
@@ -1077,11 +897,8 @@ class WorldBuilder:
         return world
 
     def _accumulate_mass_inertia_from_shapes(self) -> None:
-        """Fold shape density / mass into compound body mass + body-
-        frame inertia. Raises ``ValueError`` if a body has shapes
-        with mass *and* the descriptor carries a non-default explicit
-        mass or inertia (declare the intent once, on the shape).
-        """
+        """Fold shape density/mass into per-body compound mass + body-frame inertia.
+        Raises if a body declares mass twice (explicit body fields + shape mass)."""
         if not self._shapes:
             return
         # Bucket shapes by body.
@@ -1103,13 +920,8 @@ class WorldBuilder:
                     f"body {body_idx}: mass-providing shapes are only meaningful "
                     "for DYNAMIC bodies (static / kinematic bodies carry no mass)"
                 )
-            # Reject ambiguous mass sources: if the user attached
-            # shapes with density / mass AND also set non-default
-            # ``inverse_mass`` / ``inverse_inertia`` on the body,
-            # we can't tell which one they meant. Demand they remove
-            # one. ``inverse_mass == 1.0`` / ``inverse_inertia ==
-            # identity`` is the ``add_dynamic_body`` default and is
-            # treated as "no explicit override".
+            # Reject body-level mass override + shape-derived mass.
+            # inverse_mass=1.0 / inverse_inertia=identity is the default = no override.
             if desc.inverse_mass != 1.0 or desc.inverse_inertia != _IDENTITY_INERTIA:
                 raise ValueError(
                     f"body {body_idx}: mass is declared both on the body "
@@ -1155,15 +967,8 @@ class WorldBuilder:
                 m_i = float(s.mass) if s.mass is not None else float(s.density) * v
                 inertia += _translate_inertia(i_shape_body, m_i, offset)
 
-            # Invert into the descriptor's inverse-mass / inverse-
-            # inertia fields. We leave the body's position AT the user-
-            # provided origin rather than shifting it to the COM -- the
-            # solver consumes inverse_inertia in the *body frame*, so
-            # any COM offset is baked into the inertia tensor via the
-            # parallel-axis theorem above. (PhoenX currently assumes
-            # the body origin coincides with its COM; if the shapes'
-            # aggregate COM is non-zero, ``inertia`` already accounts
-            # for that offset about the body origin.)
+            # The solver consumes inverse_inertia in the body frame; any COM
+            # offset is already baked in via parallel-axis above.
             inv_m = 1.0 / total_mass
             try:
                 inv_i = np.linalg.inv(inertia)
@@ -1184,17 +989,12 @@ class WorldBuilder:
                 ),
             )
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _validate_body(self, idx: int) -> None:
         if not (0 <= idx < len(self._bodies)):
             raise IndexError(f"body index {idx} out of range [0, {len(self._bodies)})")
 
     def _build_body_container(self, device: wp.context.Device) -> BodyContainer:
-        """Pack descriptors into a :class:`BodyContainer`. One
-        host-to-device transfer per field."""
+        """Pack descriptors into a :class:`BodyContainer`."""
         n = len(self._bodies)
         positions = np.zeros((n, 3), dtype=np.float32)
         orientations = np.zeros((n, 4), dtype=np.float32)
@@ -1221,15 +1021,13 @@ class WorldBuilder:
             motion_type[i] = int(b.motion_type)
             world_id_arr[i] = int(b.world_id)
 
-        # Seed inverse_inertia_world with the body-frame value; the
-        # first _update_inertia launch will rotate it into world space.
+        # First _update_inertia launch rotates inverse_inertia_world into world space.
         c = BodyContainer()
         c.position = wp.array(positions, dtype=wp.vec3f, device=device)
         c.velocity = wp.array(velocities, dtype=wp.vec3f, device=device)
         c.angular_velocity = wp.array(angular_velocities, dtype=wp.vec3f, device=device)
         c.orientation = wp.array(orientations, dtype=wp.quatf, device=device)
-        # Bodies added via the builder assume mesh origin == COM;
-        # callers with meshed offsets set ``bodies.body_com`` directly.
+        # Builder bodies assume mesh origin == COM; meshed offsets must set body_com directly.
         c.body_com = wp.zeros(n, dtype=wp.vec3f, device=device)
         c.inverse_inertia_world = wp.array(inverse_inertia, dtype=wp.mat33f, device=device)
         c.inverse_inertia = wp.array(inverse_inertia, dtype=wp.mat33f, device=device)
@@ -1241,12 +1039,8 @@ class WorldBuilder:
         c.affected_by_gravity = wp.array(affected_by_gravity, dtype=wp.int32, device=device)
         c.motion_type = wp.array(motion_type, dtype=wp.int32, device=device)
         c.world_id = wp.array(world_id_arr, dtype=wp.int32, device=device)
-        # Kinematic pose-scripting scratch. ``position_prev`` must be
-        # seeded with the initial pose so the first step's velocity
-        # inference sees zero delta for bodies the user hasn't scripted
-        # yet; the kinematic_target_* fields are likewise seeded so a
-        # constant-velocity kinematic body's first step synthesises a
-        # correct target from (initial pose + velocity * dt).
+        # Seed prev=target=initial pose so the first step infers zero delta
+        # for un-scripted kinematic bodies.
         c.position_prev = wp.array(positions, dtype=wp.vec3f, device=device)
         c.orientation_prev = wp.array(orientations, dtype=wp.quatf, device=device)
         c.kinematic_target_pos = wp.array(positions, dtype=wp.vec3f, device=device)
@@ -1255,7 +1049,7 @@ class WorldBuilder:
         return c
 
     def _pack_joint_arrays(self, device: wp.context.Device) -> dict:
-        """Pack the joint descriptor list into ``wp.array`` kwargs for
+        """Pack joint descriptors into init kwargs for
         :meth:`PhoenXWorld.initialize_actuated_double_ball_socket_joints`."""
         n = len(self._joint_descriptors)
         body1 = np.empty(n, dtype=np.int32)

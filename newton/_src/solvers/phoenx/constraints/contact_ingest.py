@@ -2,23 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Convert Newton's sorted ``Contacts`` buffer into PhoenX contact columns.
 
-Called once per :meth:`PhoenXWorld.step`. Newton's
-:class:`~newton._src.sim.contacts.Contacts` is already sorted by
-``(shape_a, shape_b)`` (contacts for one pair are contiguous), so
-ingest detects pair boundaries by comparing adjacent
-``(shape0, shape1)`` pairs, inclusive-scans the boundary marks into a
-1-based run id per contact, and scatters per-pair metadata at those
-boundaries to emit one :data:`CONSTRAINT_TYPE_CONTACT` column per
-non-filtered shape pair with the pair's
-``[contact_first, contact_first + contact_count)`` stamped into the
-header.
+Newton sorts Contacts by (shape_a, shape_b). Ingest scans adjacent-pair
+boundaries, inclusive-scans into a 1-based run id, and scatters per-pair
+metadata to emit one CONTACT column per non-filtered shape pair.
 
-Fully graph-capture-safe: ``num_contact_columns`` is a device-side
-scalar, never host-read during the step; all kernels launch at fixed
-sizes (``rigid_contact_max`` / ``max_contact_columns``) and gate
-internally on device-held counters. The adjacency-mark design has no
-int32 shape-count limit (an earlier ``sa * num_shapes + sb`` packing
-silently wrapped above ~46 340 shapes — see Bug.md #1).
+Graph-capture-safe: num_contact_columns is device-side; all kernels launch at
+fixed sizes and gate on device counters.
 """
 
 from __future__ import annotations
@@ -74,30 +63,12 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Host-side scratch -- reused across steps to avoid per-step allocs.
-# ---------------------------------------------------------------------------
-
-
 class IngestScratch:
-    """Pre-allocated device buffers the ingest pipeline reuses each step.
+    """Pre-allocated device buffers reused each step. Sized to
+    rigid_contact_max (per-contact + per-pair, worst case) and
+    max_contact_columns (per-column). Compound-grouping arrays are None
+    when enable_body_pair_grouping is False."""
 
-    Sized to the upstream ``Contacts.rigid_contact_max`` (per-contact
-    arrays) and to ``max_contact_columns`` (per-column arrays).
-    Per-pair arrays are sized to ``rigid_contact_max`` too because in
-    the worst case (every contact is its own shape pair)
-    ``num_pairs == rigid_contact_max``.
-
-    All scratch lives on ``device`` and is never resized after
-    construction -- the shapes drive the launch sizes of every ingest
-    kernel, which is what keeps the sequence graph-capture safe.
-    """
-
-    # Naturally sorted (RUF023). Compound-grouping scratch arrays
-    # (``body_pair_keys``, ``inv_sort_perm``, ``prev_inv_sort_perm``,
-    # ``sort_perm``, ``sorted_*``) are only allocated when the solver
-    # opts in via ``enable_body_pair_grouping``; ``None`` otherwise so
-    # memory cost is zero in the common single-shape case.
     __slots__ = (
         "_device",
         "body_pair_keys",
@@ -143,16 +114,10 @@ class IngestScratch:
         n_pairs_max = max(1, self.rigid_contact_max)
         n_cols_max = max(1, self.max_contact_columns)
 
-        # Per-contact run-start marker: ``pair_boundary[i] = 1`` iff
-        # contact ``i`` starts a new ``(shape_a, shape_b)`` run (contact
-        # 0 is always a boundary, tail past ``rigid_contact_count[0]``
-        # is zeroed). Replaces a packed ``int32`` key array that
-        # overflowed above ~46_340 shapes (see Bug.md #1).
+        # pair_boundary[i] = 1 iff contact i starts a new (shape_a, shape_b) run.
         self.pair_boundary = wp.zeros(self.rigid_contact_max, dtype=wp.int32, device=device)
 
-        # Inclusive scan of ``pair_boundary``: ``pair_id[i]`` is the
-        # 1-based run id that contact ``i`` belongs to. Used to scatter
-        # each pair's metadata into its unique slot.
+        # Inclusive scan of pair_boundary -> 1-based pair id per contact.
         self.pair_id = wp.zeros(self.rigid_contact_max, dtype=wp.int32, device=device)
 
         # Per-pair arrays.
@@ -160,11 +125,7 @@ class IngestScratch:
         self.pair_count = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
         self.pair_shape_a = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
         self.pair_shape_b = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
-        # 0 or 1 per pair in the new per-pair design -- the column-count
-        # is binary (filtered pairs emit zero columns, everyone else
-        # emits exactly one). Kept as ``int32`` so the same
-        # :func:`wp.utils.array_scan` step that the old ceil-based code
-        # used still applies.
+        # 0/1 per pair: filtered pairs emit zero columns, others emit one.
         self.pair_columns = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
         self.pair_col_offset = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
 
@@ -175,31 +136,18 @@ class IngestScratch:
         self.num_pairs = wp.zeros(1, dtype=wp.int32, device=device)
         self.num_contact_columns = wp.zeros(1, dtype=wp.int32, device=device)
 
-        # ---- Compound-body grouping scratch ---------------------------
-        #
-        # When ``enable_body_pair_grouping=True`` we precede the per-
-        # shape-pair pipeline with a body-pair sort step: contacts that
-        # share a ``(min(b1, b2), max(b1, b2))`` body pair group together
-        # in the sorted order, so the pair-boundary scan emits one
-        # column per *body pair* instead of per *shape pair*. That
-        # collapses the 4-color forced spread of a 2x2 compound (A:{S1,S2}
-        # touching B:{T1,T2}) down to 1 color. Cost: one ``int64``
-        # radix sort + one gather kernel per ingest call.
-        #
-        # ``radix_sort_pairs`` requires ping-pong buffers at ``2 * N``;
-        # the helper's ``count = keys.shape[0] // 2`` convention expects
-        # the same. Sized to ``2 * rigid_contact_max`` accordingly.
+        # Compound-body grouping (opt-in): pre-sort contacts by body pair so
+        # the boundary scan emits one column per body pair instead of per shape
+        # pair (collapses a 2x2 compound's 4 colours to 1). int64 radix sort
+        # needs 2*N ping-pong buffers.
         if enable_body_pair_grouping:
             n_sort = 2 * max(1, self.rigid_contact_max)
             n_perm = max(1, self.rigid_contact_max)
             self.body_pair_keys = wp.zeros(n_sort, dtype=wp.int64, device=device)
             self.sort_perm = wp.zeros(n_sort, dtype=wp.int32, device=device)
             self.inv_sort_perm = wp.full(n_perm, -1, dtype=wp.int32, device=device)
-            #: Previous frame's inverse permutation, swapped each step.
-            #: The warm-start gather translates Newton-order match
-            #: indices through this so ``cc.prev_*`` lookups land at the
-            #: prev frame's PhoenX-sorted index (which is what ``cc.*``
-            #: was keyed by last frame).
+            #: Prev-frame inverse perm; lets warm-start translate Newton-order
+            #: match indices to last frame's PhoenX-sorted index.
             self.prev_inv_sort_perm = wp.full(n_perm, -1, dtype=wp.int32, device=device)
             self.sorted_shape0 = wp.zeros(n_perm, dtype=wp.int32, device=device)
             self.sorted_shape1 = wp.zeros(n_perm, dtype=wp.int32, device=device)
@@ -245,16 +193,8 @@ def allocate_ingest_scratch(
     )
 
 
-# ---------------------------------------------------------------------------
-# Step 1: mark per-contact run boundaries.
-#
-# Contacts arrive sorted by ``(shape_a, shape_b)`` from the narrow-phase
-# pipeline (this was the whole reason the pre-Bug-#1 code RLE'd a packed
-# key: the RLE only works if same-pair contacts are adjacent). So we can
-# detect run boundaries directly from adjacency -- no key packing, no
-# int32 overflow, cleanly scales to any shape count representable in
-# int32.
-# ---------------------------------------------------------------------------
+# Step 1: mark per-contact run boundaries directly from adjacency
+# (contacts already arrive sorted by (shape_a, shape_b)).
 
 
 @wp.kernel(enable_backward=False)
@@ -265,16 +205,8 @@ def _contact_pair_boundary_kernel(
     # out
     pair_boundary: wp.array[wp.int32],
 ):
-    """Write ``pair_boundary[i] = 1`` iff contact ``i`` starts a new
-    ``(shape_a, shape_b)`` run.
-
-    Boundary rule: ``i == 0``, or ``(shape0[i], shape1[i])`` differs
-    from ``(shape0[i - 1], shape1[i - 1])``. Tail entries past
-    ``rigid_contact_count[0]`` are set to 0 so the downstream inclusive
-    scan produces a stable result regardless of stale previous-frame
-    data. Replaces the old ``sa * num_shapes + sb`` int32 key packing
-    that silently wrapped at ~46_340 shapes (see Bug.md #1).
-    """
+    """pair_boundary[i] = 1 iff contact i starts a new (shape_a, shape_b) run.
+    Tail past rigid_contact_count[0] is zeroed."""
     tid = wp.tid()
     count = rigid_contact_count[0]
     if tid >= count:
@@ -293,12 +225,7 @@ def _contact_pair_boundary_kernel(
         pair_boundary[tid] = wp.int32(0)
 
 
-# ---------------------------------------------------------------------------
-# Compound-body grouping (opt-in): sort contacts by body pair before
-# the boundary scan so multiple shape-pair runs sharing one body pair
-# collapse into a single contact column. See
-# :file:`CONTACT_GROUP_COMPOUND_OPT.md` for the design rationale.
-# ---------------------------------------------------------------------------
+# Compound-body grouping (opt-in). See CONTACT_GROUP_COMPOUND_OPT.md.
 
 
 @wp.kernel(enable_backward=False)

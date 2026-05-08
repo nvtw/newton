@@ -2,22 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """PhoenX solver wrapped in Newton's :class:`SolverBase` interface.
 
-Drives :class:`PhoenXWorld` from Newton's standard
-``Model`` / ``State`` / ``Control`` / ``Contacts`` surface. Constraint
-and contact storage stays column-major inside PhoenX; only per-step
-body state (pose + twist + wrench) round-trips through Newton SoA.
-
-Construction: allocate ``body_count + 1`` body buffers (slot 0 =
-static world anchor), copy mass / inertia / com / world_id / flags
-from ``Model``, walk ``model.joint_*`` to stamp one ADBS column per
-supported joint (REVOLUTE, PRISMATIC, BALL, FIXED; FREE gets none).
-
-Per step (on top of PhoenX's own step): one import kernel (Newton ->
-PhoenX body fields + ``joint_f`` -> wrenches), one joint-control
-writeback kernel (``Control`` + ``Model`` gains -> drive dwords),
-one export kernel (PhoenX -> ``State.body_q`` / ``body_qd``).
-PhoenX's internal substep loop is preserved; pass ``substeps=1`` to
-substep outside.
+Drives :class:`PhoenXWorld` from Newton's Model/State/Control/Contacts. Per step:
+import (Newton -> PhoenX body fields + joint_f), joint-control writeback (Control
++ Model gains -> drive dwords), export (PhoenX -> body_q / body_qd).
+PhoenX slot 0 is the static world anchor; pass ``substeps=1`` to substep outside.
 """
 
 from __future__ import annotations
@@ -62,9 +50,7 @@ from newton._src.solvers.xpbd.kernels import apply_joint_forces
 __all__ = ["SolverPhoenX"]
 
 
-# ---------------------------------------------------------------------------
-# Host-side quaternion / rotation helpers (used by the armature bake)
-# ---------------------------------------------------------------------------
+# Host-side quaternion / rotation helpers (used by the armature bake).
 
 
 def _quat_rotate_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -101,77 +87,30 @@ def _quat_to_rot_np(q: np.ndarray) -> np.ndarray:
     )
 
 
-# ---------------------------------------------------------------------------
-# Contact-buffer sizing for the PhoenX path
-# ---------------------------------------------------------------------------
-
-
 def _estimate_rigid_contact_max_phoenx(model) -> int | None:
-    """Tight ``rigid_contact_max`` estimate for the PhoenX solver.
-
-    Uses the precomputed ``model.shape_contact_pair_count`` (already
-    ``COLLIDE_SHAPES``-filtered) * primitive-CPP narrow-phase cap * 2
-    safety, rather than Newton's default ``num_meshes * 20 * 40``
-    which over-counts non-colliding visual meshes by ~7x in humanoid
-    scenes. Returns ``None`` when the pair count isn't available so
-    the caller falls back to Newton's default.
-    """
+    """Tight rigid_contact_max from shape_contact_pair_count * 5 (CPP) * 2 (safety).
+    None when pair count is unavailable (caller falls back to Newton's default)."""
     pair_count = int(getattr(model, "shape_contact_pair_count", 0) or 0)
     if pair_count <= 0:
         return None
 
-    # PhoenX's narrow phase uses the primitive-contacts path for
-    # shape-vs-shape collisions by default; the MESH=40 contacts-per-
-    # pair penalty in Newton's default is an opt-in hydroelastic
-    # upper bound, not what our GJK / MPR pipeline actually produces.
+    # GJK/MPR primitive contacts cap at ~5/pair; Newton's default 40 is for
+    # opt-in hydroelastic and overshoots us.
     PRIMITIVE_CPP = 5
     SAFETY = 2
     return max(1000, pair_count * PRIMITIVE_CPP * SAFETY)
 
 
-# ---------------------------------------------------------------------------
-# SolverPhoenX
-# ---------------------------------------------------------------------------
-
-
 class SolverPhoenX(SolverBase):
     """Newton :class:`SolverBase` wrapper around :class:`PhoenXWorld`.
 
-    Build once from a finalised :class:`Model`; call :meth:`step`
-    each frame with :class:`State` / :class:`Control` / :class:`Contacts`.
-    PhoenX's internal substep loop is preserved (``substeps``
-    controls the count); callers that prefer outer substepping should
-    pass ``substeps=1``.
+    Supports REVOLUTE/PRISMATIC (PD drive + limit), BALL, FIXED, CABLE (soft
+    fixed with PD bend/twist; stretch DoF is rigid), FREE (no column).
+    DISTANCE and D6 raise at construction.
 
-    Supported joint types (automatic, based on
-    :attr:`Model.joint_type`):
-
-    * :data:`JointType.REVOLUTE` -- hinge with optional PD drive +
-      limit;
-    * :data:`JointType.PRISMATIC` -- slider with optional PD drive +
-      limit;
-    * :data:`JointType.BALL` -- 3-DoF point lock (no drive / limit);
-    * :data:`JointType.FIXED` -- 6-DoF weld (no drive / limit);
-    * :data:`JointType.CABLE` -- soft fixed joint with PD bend / twist
-      springs (3+2+1 row layout). Newton's isotropic bend/twist
-      stiffness (stored on the angular DoF) is written to both the
-      bend and twist slots; the stretch DoF is treated as rigid
-      (PhoenX has no axial-length compliance, so a finite
-      ``stretch_stiffness`` is informational only);
-    * :data:`JointType.FREE` -- free-floating base (no constraint
-      column; integration alone handles it).
-
-    :data:`JointType.DISTANCE` and :data:`JointType.D6` are not
-    supported and raise at construction.
-
-    **Newton :class:`~newton._src.viewer.picking.Picking`**: works out
-    of the box. The viewer's ``apply_forces(state)`` (or a direct
-    :meth:`Picking._apply_picking_force` call) atomically adds the pick
-    spring's force/torque to ``state.body_f``; :meth:`step` imports
-    ``state.body_f`` into PhoenX's per-body force accumulator before
-    integrating, so picks are applied uniformly across substeps. Use
-    Newton's :class:`Picking` directly with a ``Model`` -- there is no
-    PhoenX-specific integration shim.
+    Newton :class:`Picking` works out of the box: pick force/torque is added to
+    ``state.body_f``, which :meth:`step` imports into PhoenX's force accumulators
+    before integrating.
     """
 
     def __init__(
@@ -190,58 +129,20 @@ class SolverPhoenX(SolverBase):
         """Build the PhoenX solver from ``model``.
 
         Args:
-            model: The finalised Newton :class:`Model`. Must be built;
-                ``model.body_q`` / ``body_com`` / ``body_inv_mass`` /
-                ``body_inv_inertia`` / ``joint_*`` arrays are read
-                once here.
             substeps: PhoenX internal substeps per :meth:`step` call.
             solver_iterations: PGS iterations per substep.
             velocity_iterations: TGS-soft relax sweeps per substep.
-            default_friction: Fallback friction when the Contacts
-                buffer carries no per-contact or per-shape material.
-            step_layout: ``"multi_world"`` (default) -- per-world
-                fast-tail kernels, one warp per world (scales to
-                thousands of small worlds). ``"single_world"`` --
-                per-colour grid launches via ``wp.capture_while``
-                over the global JP colouring; wins for one or a few
-                very big worlds.
-            threads_per_world: Effective threads-per-world for the
-                multi-world fast-tail kernels. ``"auto"`` (default)
-                picks per-step from the colour-size histogram;
-                ``32`` = one warp per world (legacy), ``16`` = two,
-                ``8`` = four (rarely wins). Graph-capture safe.
-            max_thread_blocks: Optional hard cap on the persistent
-                grid used by the single-world PGS sweeps
-                (constraint prepare, main iterate, and velocity
-                relax). ``None`` (default) keeps the auto-sized
-                grid -- 256 threads per block, ``clamp(ceil(cap /
-                256), 32, 4 * sm_count)`` blocks on CUDA. When set,
-                the grid is sized to ``min(ceil(cap / 256),
-                max_thread_blocks)`` blocks, bypassing both the
-                32-block floor and the SM-derived ceiling. Use this
-                to share the GPU with a co-resident workload (e.g.
-                a renderer or a second solver) or to measure SM
-                occupancy. No effect on
-                ``step_layout="multi_world"``.
-            velocity_readout: Convention used when stamping
-                ``state_out.body_qd``. Three modes:
-
-                * ``"substep_end"`` (default) writes PhoenX's
-                  substep-end velocity straight through -- bit-faithful
-                  to the internal state, but carries whatever
-                  high-frequency contact-impulse content the last
-                  substep produced.
-                * ``"finite_difference"`` writes
-                  ``(body_q_now - body_q_prev) / dt_outer``, i.e. the
-                  pose-delta-only readout over the entire :meth:`step`.
-                  Cheap, samples only the endpoints.
-                * ``"substep_average"`` accumulates ``velocity *
-                  substep_dt`` over every internal substep and divides
-                  by ``dt_outer``. Filters per-substep ringing more
-                  aggressively than ``finite_difference`` (samples
-                  N points instead of 2). Recommended for RL inference
-                  scenes where the policy was trained against
-                  MuJoCo Warp's post-integration ``qvel`` convention.
+            default_friction: Fallback when Contacts/shapes carry no material.
+            step_layout: ``"multi_world"`` (default, per-world fast-tail; scales
+                to many small worlds) or ``"single_world"`` (per-colour grid
+                launches; wins for a few big worlds).
+            threads_per_world: ``"auto"`` (default), 32, 16, or 8. Multi-world only.
+            max_thread_blocks: Optional cap on the single-world PGS persistent grid.
+                ``None`` keeps the auto-size (clamp(ceil(cap/256), 32, 4*sm_count)).
+            velocity_readout: ``"substep_end"`` (default; bit-faithful),
+                ``"finite_difference"`` (pose-delta over the outer step), or
+                ``"substep_average"`` (∫ velocity dt / dt_outer; matches MuJoCo
+                Warp's post-integration qvel).
         """
         super().__init__(model)
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -249,37 +150,20 @@ class SolverPhoenX(SolverBase):
             raise ValueError(f"velocity_readout must be one of {valid_readouts}, got {velocity_readout!r}")
         self._velocity_readout = velocity_readout
 
-        # ---- Build the PhoenX body container ---------------------------
         num_bodies_phoenx = int(model.body_count) + 1
         self.bodies: BodyContainer = body_container_zeros(num_bodies_phoenx, device=self.device)
 
-        # Pre-step pose snapshot buffers for the FD velocity readout
-        # mode. One slot per *Newton* body (slot 0 of the PhoenX body
-        # container is the static world anchor and isn't reflected
-        # back to ``state.body_q``). Allocated unconditionally because
-        # graph capture needs the array references stable, but the
-        # snapshot kernel is only launched when
-        # ``velocity_readout == "finite_difference"``.
+        # FD/substep-avg readout buffers — always allocated so graph capture
+        # has stable refs; only written when the corresponding readout fires.
         n_newton_bodies = int(model.body_count)
         self._fd_pos_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
         self._fd_orient_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.quatf, device=self.device)
-
-        # Substep-velocity accumulators for the ``substep_average``
-        # readout mode. PhoenXWorld.step() accumulates ``velocity *
-        # substep_dt`` and ``angular_velocity * substep_dt`` per
-        # substep; the export kernel divides by ``step_dt`` to get
-        # the time-averaged velocity over the outer step. Same
-        # always-allocated graph-capture-stability rationale as the
-        # FD pre-step buffers.
         self._substep_vel_accum = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
         self._substep_omega_accum = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
 
-        # Identity orientation for every slot (including slot 0) so the
-        # first _update_inertia doesn't see a zero quaternion.
+        # Identity orientation everywhere so the first _update_inertia is well-defined.
         self.bodies.orientation.assign(np.tile([0.0, 0.0, 0.0, 1.0], (num_bodies_phoenx, 1)).astype(np.float32))
 
-        # Static property copy. Launches over N + 1 threads (slot 0 is
-        # the static anchor).
         if model.body_count:
             wp.launch(
                 _init_phoenx_body_container_kernel,
@@ -305,55 +189,30 @@ class SolverPhoenX(SolverBase):
                 ],
                 device=self.device,
             )
-            # Joint armature: PhoenX is maximal-coordinate, so reduced-
-            # coord ``M_q = M_chain + armature`` doesn't drop in directly.
-            # Instead we bake the armature into both bodies' inertia along
-            # the joint axis so the constraint kernels' standard
-            # ``eff_inv = J M^-1 J^T`` and the body-velocity update both
-            # see the same augmented mass matrix. Without this, chains
-            # with skinny intermediate links (e.g. humanoid waist links
-            # of <0.1 kg) destabilise high-stiffness PD drives within a
-            # few substeps.
+            # PhoenX is maximal-coordinate; bake reduced-coord armature into both
+            # bodies' inertia along the joint axis so eff_inv = J M^-1 J^T sees
+            # the augmented mass. Skinny links (<0.1 kg) need this for stable PD.
             self._bake_joint_armature_into_body_inertia(model)
 
-        # ---- Sync model.body_q with model.joint_q ---------------------
-        # The adapter snapshots body-local joint anchors from
-        # ``model.body_q``; if the caller set non-zero ``builder.joint_q``
-        # before ``finalize()`` (as URDF rigs and the Anymal walking
-        # example do), ``model.body_q`` is still at the URDF rest pose
-        # and FK hasn't run yet. Without this FK pass every joint
-        # anchor would be baked at the wrong configuration and the
-        # constraint columns would pull bodies back to the rest pose
-        # on every step.
+        # FK so model.body_q reflects model.joint_q (URDF rigs may set joint_q
+        # before finalize without running FK).
         if int(model.body_count) > 0 and int(model.joint_count) > 0:
             newton.eval_fk(model, model.joint_q, model.joint_qd, model)
 
-        # ---- Build the joint (ADBS) column layout ----------------------
         self._adbs: AdbsInitArrays = build_adbs_init_arrays(model, device=self.device)
         num_joints = self._adbs.num_joint_columns
 
-        # ---- Collision-related sizing ---------------------------------
-        # PhoenX's warm-start path requires ``contact_matching`` to be
-        # non-disabled. If the model doesn't already have a pipeline
-        # (or has one with matching off), attach a sticky pipeline so
-        # ``model.contacts()`` produces the right buffer. This makes
-        # SolverPhoenX self-sized: the user never has to allocate
-        # Contacts up-front.
+        # PhoenX's warm-start path needs contact_matching != "disabled".
+        # Auto-attach a sticky pipeline so users don't have to size Contacts.
         if int(model.shape_count) > 0:
             existing_cp = getattr(model, "_collision_pipeline", None)
             needs_new_cp = existing_cp is None or not getattr(existing_cp, "contact_matching", False)
             if needs_new_cp:
                 import newton as _newton  # noqa: PLC0415  -- local to keep the import cycle tight
 
-                # Override Newton's ``rigid_contact_max`` estimator
-                # with a PhoenX-tight one from
-                # ``shape_contact_pair_count`` (COLLIDE_SHAPES-filtered).
-                # Newton's default ignores the flag when counting
-                # meshes, which inflates the budget ~15x in models
-                # with visual-only mesh shapes (1.3 GB unused at
-                # h1_flat/4096). Clear any stale value first -- the
-                # builder may have set one from an earlier
-                # ``model.contacts()``.
+                # PhoenX-tight rigid_contact_max from shape_contact_pair_count;
+                # Newton's default ignores COLLIDE_SHAPES filter and overshoots
+                # ~15x with visual-only meshes.
                 tight_rcm = _estimate_rigid_contact_max_phoenx(model)
                 if tight_rcm is not None:
                     model.rigid_contact_max = 0  # bypass "already sized" short-circuit
@@ -369,9 +228,6 @@ class SolverPhoenX(SolverBase):
                 model._collision_pipeline.contacts()  # forces buffer sizing
         rigid_contact_max = int(model.rigid_contact_max)
 
-        # ---- PhoenX gravity: aggregate Model gravity ------------------
-        # Model stores gravity per world in ``model.gravity`` with
-        # shape (num_worlds, 3). PhoenX takes the same.
         gravity_np = (
             model.gravity.numpy() if model.gravity is not None else np.asarray([[0.0, 0.0, -9.81]], dtype=np.float32)
         )
@@ -382,24 +238,13 @@ class SolverPhoenX(SolverBase):
         else:
             gravity_arg = gravity_tuples
 
-        # ---- Make the constraint container + world --------------------
-        # One constraint column per ``(shape_a, shape_b)`` pair covers
-        # an arbitrary contact count per pair; size the column buffer
-        # 1:1 against ``rigid_contact_max`` (the same number
-        # ``PhoenXWorld.__init__`` derives internally).
         self._constraints: ConstraintContainer = PhoenXWorld.make_constraint_container(
             num_joints=num_joints,
             device=self.device,
         )
 
-        # Detect compound bodies (any body with > 1 collision shape) on
-        # the host. The result gates the body-pair contact grouping
-        # optimization, which sorts contacts by ``(min(b1, b2),
-        # max(b1, b2))`` so multiple shape-pair runs sharing one body
-        # pair collapse into a single contact column. Single-shape
-        # scenes pay nothing (the predicate keeps the optimization off
-        # and the matching scratch arrays are not allocated). See
-        # :file:`newton/_src/solvers/phoenx/CONTACT_GROUP_COMPOUND_OPT.md`.
+        # Compound bodies (>1 shape) gate body-pair contact grouping. See
+        # CONTACT_GROUP_COMPOUND_OPT.md.
         has_compound_bodies = False
         if model.shape_body is not None and model.shape_count > 0 and model.body_count > 0:
             sb = model.shape_body.numpy()
@@ -426,15 +271,9 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
-        # Seed the PhoenX body container with the model's initial pose
-        # (``model.body_q`` / ``body_qd``) BEFORE joint initialization --
-        # the ADBS init kernel reads body positions to snapshot
-        # body-local anchors. Without this seed every body appears at
-        # the origin and welds pull the child body to slot 0's world
-        # anchor instead of its intended rest pose.
+        # Seed body pose BEFORE joint init — ADBS init reads body positions to
+        # snapshot body-local anchors. Without this, welds pull child to origin.
         if int(model.body_count) > 0:
-            # Zero body_f / particle_f on the temp state; only pose/
-            # twist matter for joint init.
             zero_wrench = wp.zeros(int(model.body_count), dtype=wp.spatial_vector, device=self.device)
             wp.launch(
                 _import_body_state_kernel,
@@ -448,10 +287,6 @@ class SolverPhoenX(SolverBase):
                 ],
                 device=self.device,
             )
-            # Seed kinematic bodies' ``position`` / ``orientation``
-            # from the target slots the import kernel just filled.
-            # See :func:`_seed_kinematic_initial_pose_kernel` for the
-            # why.
             wp.launch(
                 _seed_kinematic_initial_pose_kernel,
                 dim=int(model.body_count) + 1,  # +1 for slot 0 (world anchor)
@@ -462,14 +297,10 @@ class SolverPhoenX(SolverBase):
         if num_joints > 0:
             self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
 
-        # Install per-shape materials (friction only for now; Newton's
-        # shape_material_mu maps directly).
         if model.shape_material_mu is not None and model.shape_count > 0:
             self._install_shape_materials()
 
-        # ---- Shape -> PhoenX-slot map for contact ingest --------------
-        # Newton's shape_body uses -1 for world; PhoenX's slot 0 is
-        # the static world anchor.
+        # Newton shape_body uses -1 for world; PhoenX slot 0 is the world anchor.
         if model.shape_body is not None and model.shape_count > 0:
             shape_body_np = model.shape_body.numpy()
             shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
@@ -477,48 +308,23 @@ class SolverPhoenX(SolverBase):
         else:
             self._shape_body = None
 
-        # ---- Scratch for apply_joint_forces ---------------------------
         self._has_joint_forces = model.joint_dof_count > 0
-
-        # ---- Cached time step (for contact force reconstruction) ------
         self._last_dt: float = 0.0
 
-        # Length-1 placeholder fed to ``_contact_impulse_to_force_wrapper_kernel``
-        # when grouping is disabled (``has_perm=0`` makes the kernel
-        # ignore it). Avoids re-allocating per call.
+        # Placeholder for _contact_impulse_to_force_wrapper_kernel when grouping
+        # is off (has_perm=0 makes the kernel ignore it).
         self._sort_perm_placeholder = wp.zeros(1, dtype=wp.int32, device=self.device)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     def _bake_joint_armature_into_body_inertia(self, model: Model) -> None:
-        """Add per-joint axial armature into both attached bodies' inertia.
+        """Add per-joint axial armature into both attached bodies' inertia so the
+        constraint solve sees ``M_chain + armature`` along the joint axis.
 
-        For each REVOLUTE / PRISMATIC joint with ``armature > 0``,
-        augments the parent and child PhoenX-slot inverse inertia / mass
-        so the constraint solve sees an effective inertia of
-        ``M_chain + armature`` along the joint axis. Skipped on FREE,
-        BALL, and FIXED joints (no axial DoF). Done once at construction
-        on the host: pulls model arrays back to numpy, rebuilds the
-        inertia tensors, recomputes ``inverse_inertia`` (body-local) and
-        ``inverse_inertia_world`` (= R*I^-1*R^T at the rest pose), and
-        re-uploads them.
-
-        Per-joint bake amount (``alpha`` per body):
-
-        * Fixed-anchor joints (``parent == world`` -> slot 0 has zero
-          inv-mass): ``alpha = a`` on the child only. Effective ``M_q
-          = M_chain + a`` exactly.
-        * Two-body joints: solve the quadratic
-          ``alpha^2 + alpha * (S - 2a - 2*M_chain) - a*S = 0`` (with
-          ``S = I_A + I_B``, ``M_chain = I_A*I_B/(I_A+I_B)``) for the
-          positive root. This makes the bake exact-MuJoCo for every
-          mass ratio: ``alpha = 2a`` for symmetric ``I_A = I_B`` and
-          ``alpha -> a`` as one body's axial inertia dominates.
-          Equivalent to picking the per-body inflation that makes
-          ``(I_A + alpha)*(I_B + alpha) / (I_A + I_B + 2*alpha) ==
-          M_chain + a``.
+        Bake amount per body (``alpha``):
+        * Fixed-anchor: ``alpha = a`` on child only.
+        * Two-body: solve ``alpha^2 + alpha*(S - 2a - 2*M_chain) - a*S = 0`` for
+          the positive root (S = I_A + I_B, M_chain = I_A*I_B/S). Yields
+          ``(I_A + alpha)*(I_B + alpha) / (I_A + I_B + 2*alpha) == M_chain + a``,
+          giving exact-MuJoCo equivalence for any mass ratio.
         """
         if model.joint_count == 0 or model.joint_armature is None:
             return
@@ -537,8 +343,6 @@ class SolverPhoenX(SolverBase):
         body_inv_inertia_world = self.bodies.inverse_inertia_world.numpy().copy()
         body_orientation = self.bodies.orientation.numpy()
 
-        # Reconstruct local inertia tensor (3x3) per body from inv_inertia.
-        # PhoenX stores inverse_inertia as a 3x3 mat33 (body-local).
         n_phoenx = body_inv_inertia.shape[0]
         body_inertia = np.zeros_like(body_inv_inertia)
         body_mass = np.zeros(n_phoenx, dtype=np.float32)
@@ -572,8 +376,7 @@ class SolverPhoenX(SolverBase):
 
             if jt == rev_t:
                 axis_jf = joint_axis[qd] if qd < len(joint_axis) else np.array([1.0, 0.0, 0.0])
-                # Axis in each attached body's local frame: rotate the
-                # joint-frame axis by the joint frame's body-local rotation.
+                # Rotate joint axis into each body's local frame.
                 Xp_q = joint_X_p[j][3:7]
                 Xc_q = joint_X_c[j][3:7]
                 axis_in_p = _quat_rotate_np(Xp_q, axis_jf)
@@ -585,15 +388,6 @@ class SolverPhoenX(SolverBase):
                 if np_c > 1e-12:
                     axis_in_c = axis_in_c / np_c
 
-                # Per-body inflation depends on the joint's mass-ratio
-                # regime. Fixed-anchor joint: only the child gets ``a``
-                # (parent slot 0 has zero inv-mass, so its rank-1 add
-                # never reaches the constraint solver anyway). Two-body
-                # joint: solve the quadratic ``alpha^2 + alpha*(S - 2a
-                # - 2*M_chain) - a*S = 0`` for the positive root so
-                # that the post-bake effective inertia at the joint
-                # equals ``M_chain + a`` -- exact MuJoCo equivalence
-                # for any mass ratio.
                 if slot_p == 0:
                     alpha_p = 0.0
                     alpha_c = a
@@ -609,12 +403,9 @@ class SolverPhoenX(SolverBase):
                         b_coef = s_sum - 2.0 * a - 2.0 * m_chain
                         c_coef = -a * s_sum
                         disc = b_coef * b_coef - 4.0 * c_coef
-                        # ``c_coef <= 0`` so ``disc >= b_coef^2`` -- the
-                        # positive root is always real.
+                        # c_coef <= 0 so disc >= b_coef^2 (positive root real).
                         alpha = 0.5 * (-b_coef + float(np.sqrt(max(disc, 0.0))))
                     else:
-                        # Degenerate: fall back to the per-body ``a``
-                        # split (matches the pre-quadratic behaviour).
                         alpha = a
                     alpha_p = alpha
                     alpha_c = alpha
@@ -623,10 +414,7 @@ class SolverPhoenX(SolverBase):
                     body_inertia[slot_p] = body_inertia[slot_p] + alpha_p * np.outer(axis_in_p, axis_in_p)
                 if slot_c > 0 and alpha_c > 0.0:
                     body_inertia[slot_c] = body_inertia[slot_c] + alpha_c * np.outer(axis_in_c, axis_in_c)
-            else:  # PRISMATIC
-                # Translational armature: scalar add to mass. Same
-                # quadratic argument as REVOLUTE applies (replace
-                # axial inertia with mass).
+            else:  # PRISMATIC: scalar add to mass (same quadratic as REVOLUTE).
                 if slot_p == 0:
                     alpha_p = 0.0
                     alpha_c = a
@@ -674,10 +462,8 @@ class SolverPhoenX(SolverBase):
         self.bodies.inverse_inertia_world.assign(body_inv_inertia_world)
 
     def _install_shape_materials(self) -> None:
-        """Stream Model's per-shape friction into PhoenX's material
-        table. Each shape gets a unique material index; the table
-        carries ``(mu_static, mu_dynamic, restitution)`` via the
-        existing :mod:`materials` plumbing."""
+        """Stream Model's per-shape (mu_static, mu_dynamic, restitution) into
+        PhoenX's material table; each shape gets its own material index."""
         from newton._src.solvers.phoenx.materials import (  # noqa: PLC0415
             CombineMode,
             Material,
@@ -709,13 +495,11 @@ class SolverPhoenX(SolverBase):
         self.world.set_materials(material_data, shape_material_idx)
 
     def _apply_joint_control(self, control: Control) -> None:
-        """Rewrite the ADBS column drive dwords from ``control`` +
-        ``model``. Joint-count threads; out-of-scope joints early-out."""
+        """Rewrite ADBS drive dwords from control + model. Falls back to Model
+        targets if Control doesn't supply them."""
         if self._adbs.num_joint_columns == 0:
             return
         model = self.model
-        # Fall back to Model-held targets / gains if Control doesn't
-        # supply them.
         target_pos = (
             control.joint_target_pos
             if control is not None and control.joint_target_pos is not None
@@ -759,11 +543,7 @@ class SolverPhoenX(SolverBase):
         )
 
     def _accumulate_joint_forces(self, state_in: State, control: Control) -> None:
-        """Fold ``control.joint_f`` (generalized joint forces) into
-        ``state_in.body_f`` via the stock Newton
-        :func:`apply_joint_forces` kernel. This is the EFFORT path
-        (joints that pass scalar torque / linear force directly rather
-        than via PD drive)."""
+        """Fold ``control.joint_f`` into ``state_in.body_f`` (Newton's EFFORT path)."""
         if control is None or control.joint_f is None:
             return
         if not self._has_joint_forces:
@@ -793,16 +573,8 @@ class SolverPhoenX(SolverBase):
         )
 
     def _import_body_state(self, state_in: State) -> None:
-        """Pull ``state_in.body_q`` / ``body_qd`` / ``body_f`` into
-        the PhoenX body container (slot ``i + 1``).
-
-        Kinematic bodies route their pose to the
-        ``kinematic_target_{pos,orient}`` slots with ``valid=1`` so
-        the solver infers velocity from the per-step pose delta and
-        interpolates between substeps; dynamic / static bodies get
-        their pose and velocity written directly. See
-        :func:`_import_body_state_kernel` for the branch.
-        """
+        """Pull state_in into the PhoenX body container (slot i+1).
+        Kinematic bodies go to kinematic_target_*; dynamic/static go direct."""
         n = int(self.model.body_count)
         if n == 0:
             return
@@ -820,9 +592,7 @@ class SolverPhoenX(SolverBase):
         )
 
     def _snapshot_pre_step_pose(self) -> None:
-        """Copy the PhoenX body container's COM-in-world pose into the
-        FD pre-step buffers. Called at step entry only when the FD
-        readout is enabled."""
+        """Snapshot pre-step COM-in-world pose for the FD readout."""
         n = int(self.model.body_count)
         if n == 0:
             return
@@ -835,9 +605,8 @@ class SolverPhoenX(SolverBase):
         )
 
     def _export_body_state(self, state_out: State, dt: float) -> None:
-        """Pack PhoenX's body state back into ``state_out.body_q`` /
-        ``body_qd``. Picks substep-end or finite-difference velocity
-        based on ``self._velocity_readout``."""
+        """Pack PhoenX body state back into state_out.body_q / body_qd, switching
+        on ``self._velocity_readout``."""
         n = int(self.model.body_count)
         if n == 0:
             return
@@ -891,10 +660,6 @@ class SolverPhoenX(SolverBase):
                 device=self.device,
             )
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def step(
         self,
         state_in: State,
@@ -903,38 +668,21 @@ class SolverPhoenX(SolverBase):
         contacts: Contacts | None,
         dt: float,
     ) -> None:
-        """Advance ``state_in`` to ``state_out`` by ``dt``.
-
-        Order:
-            1. Fold Control into State: write joint drive targets into
-               the ADBS columns; accumulate joint effort forces into
-               ``state_in.body_f``.
-            2. Import body state (Newton State -> PhoenX body container).
-            3. :meth:`PhoenXWorld.step`.
-            4. Export body state (PhoenX -> ``state_out``).
-        """
+        """Advance ``state_in`` to ``state_out`` by ``dt``: control writeback +
+        effort forces -> import -> PhoenXWorld.step -> export."""
         if control is None:
-            # ``clone_variables=False`` aliases the Model's per-DOF arrays
-            # (joint_target_pos / joint_target_vel / joint_act / joint_f)
-            # straight onto the new Control instead of cloning four
-            # ``wp.array``s every step. Matches XPBD / Featherstone.
+            # Alias Model per-DOF arrays (no clone). Matches XPBD/Featherstone.
             control = self.model.control(clone_variables=False)
 
         self._apply_joint_control(control)
         self._accumulate_joint_forces(state_in, control)
         self._import_body_state(state_in)
 
-        # FD velocity readout snapshots the *imported* (i.e.
-        # state_in-aligned) PhoenX pose so the post-step delta covers
-        # the entire outer dt -- no off-by-substep error and no
-        # contamination from the pre-import state.
+        # FD readout snapshots the imported (state_in-aligned) pose so the
+        # post-step delta covers the full outer dt.
         if self._velocity_readout == "finite_difference":
             self._snapshot_pre_step_pose()
 
-        # Substep-average readout: zero the accumulators here so the
-        # next outer step starts clean. ``PhoenXWorld.step`` adds
-        # ``velocity * substep_dt`` after every substep when both
-        # buffers are passed in.
         if self._velocity_readout == "substep_average":
             self._substep_vel_accum.zero_()
             self._substep_omega_accum.zero_()
@@ -954,22 +702,13 @@ class SolverPhoenX(SolverBase):
         self._last_dt = float(dt) / max(1, self.world.substeps)
 
         self._export_body_state(state_out, dt=float(dt))
-        # Sync the canonical joint coordinates. Policies that read
-        # ``state.joint_q`` / ``state.joint_qd`` (e.g. the Anymal PyTorch
-        # rig) need these kept current; eval_ik is the inverse of the
-        # FK that produced ``body_q`` / ``body_qd`` in the first place.
+        # Sync joint_q/joint_qd via eval_ik for policies that read them.
         if state_out.joint_q is not None and state_out.joint_qd is not None and int(self.model.joint_count) > 0:
             newton.eval_ik(self.model, state_out, state_out.joint_q, state_out.joint_qd)
 
     def notify_model_changed(self, flags: int) -> None:
-        """Refresh internal state when the caller edits ``Model``.
-
-        We alias most Model arrays directly (``body_inv_mass`` /
-        ``body_inv_inertia`` are *copied* once at construction so
-        slot 0 can hold the world anchor; all other arrays are read
-        per-step). Joint-property changes rebuild the ADBS init arrays
-        from scratch. Gravity is reread from ``model.gravity``.
-        """
+        """Refresh state on Model edits. Joint-property changes rebuild the ADBS
+        init arrays from scratch; gravity is reread from ``model.gravity``."""
         if flags & (int(SolverNotifyFlags.JOINT_PROPERTIES) | int(SolverNotifyFlags.JOINT_DOF_PROPERTIES)):
             self._adbs = build_adbs_init_arrays(self.model, device=self.device)
             if self._adbs.num_joint_columns > 0:
@@ -981,11 +720,7 @@ class SolverPhoenX(SolverBase):
                 else np.asarray([[0.0, 0.0, -9.81]], dtype=np.float32)
             )
             self.world.gravity = wp.array(gravity_np, dtype=wp.vec3f, device=self.device)
-        # ``BODY_PROPERTIES`` covers body_flags edits (which the kernel
-        # uses to rederive ``motion_type`` / ``affected_by_gravity``);
-        # ``BODY_INERTIAL_PROPERTIES`` covers body_inv_mass / body_com.
-        # The kernel is the union of those refreshes, so a single launch
-        # handles either flag.
+        # Single body refresh kernel covers both BODY_PROPERTIES and BODY_INERTIAL_PROPERTIES.
         body_refresh_mask = int(SolverNotifyFlags.BODY_INERTIAL_PROPERTIES | SolverNotifyFlags.BODY_PROPERTIES)
         if flags & body_refresh_mask:
             if self.model.body_count > 0:
@@ -1013,16 +748,10 @@ class SolverPhoenX(SolverBase):
                     ],
                     device=self.device,
                 )
-                # Re-bake armature: ``_init_phoenx_body_container_kernel``
-                # just overwrote ``inverse_mass`` / ``inverse_inertia``
-                # with the model's raw values, so the previous bake is
-                # gone.
+                # _init_phoenx_body_container_kernel just overwrote inertia,
+                # so re-bake armature.
                 self._bake_joint_armature_into_body_inertia(self.model)
         if flags & int(SolverNotifyFlags.SHAPE_PROPERTIES):
-            # Friction / restitution lives in our material table; rebuild
-            # it from the current Model arrays. Cheap (host walk over
-            # ``shape_count``) and only fires when the user explicitly
-            # signals a shape edit.
             if self.model.shape_material_mu is not None and self.model.shape_count > 0:
                 self._install_shape_materials()
 
@@ -1050,12 +779,7 @@ class SolverPhoenX(SolverBase):
             return
 
         cc = self.world._contact_container
-        # When body-pair grouping is on, the ContactContainer is keyed
-        # by sorted_k. ``sort_perm[sorted_k] = newton_k`` is built each
-        # step inside ``ingest_contacts``; the readback kernel uses it
-        # to land each force at the corresponding newton-order slot in
-        # ``Contacts.force``. With grouping off, the mapping is the
-        # identity and we pass ``has_perm=0``.
+        # Body-pair grouping keys cc by sorted_k; sort_perm maps to newton_k.
         scratch = self.world._ingest_scratch
         if scratch is not None and scratch.sort_perm is not None:
             sort_perm = scratch.sort_perm
@@ -1063,10 +787,6 @@ class SolverPhoenX(SolverBase):
         else:
             sort_perm = self._sort_perm_placeholder
             has_perm = wp.int32(0)
-        # PhoenX stores lambda_n / lambda_t1 / lambda_t2 as 1D float
-        # arrays inside the lambdas 2D buffer; extract them via the
-        # existing cc_get_* helpers. We launch one thread per contact
-        # slot and decompose the impulse into (n, t1, t2) world axes.
         contacts.force.zero_()
         wp.launch(
             _contact_impulse_to_force_wrapper_kernel,
@@ -1083,13 +803,6 @@ class SolverPhoenX(SolverBase):
         )
 
     def step_report(self) -> PhoenXWorld.StepReport:
-        """Diagnostic snapshot of the most recent :meth:`step`.
-
-        Forwards to :meth:`PhoenXWorld.step_report`. Reports the graph
-        colour count, per-colour element histogram, and active contact
-        column count from the just-finished step. Performs a few
-        device-to-host copies on demand and is not graph-capture
-        safe; only call from host code outside any
-        :func:`wp.ScopedCapture` region.
-        """
+        """Diagnostic snapshot. Forwards to :meth:`PhoenXWorld.step_report`.
+        Triggers D2H copies — not graph-capture safe."""
         return self.world.step_report()
