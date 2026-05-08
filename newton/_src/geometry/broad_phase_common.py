@@ -128,6 +128,29 @@ def write_pair(
     candidate_pair[pairid] = pair
 
 
+# ---------------------------------------------------------------------------
+# Broad-phase pair filter callback
+# ---------------------------------------------------------------------------
+# A user-supplied ``wp.func`` runs after the AABB overlap test and before
+# ``write_pair`` to drop candidate pairs that the caller knows are invalid
+# (e.g. two cloth triangles that share a vertex).  The default
+# ``keep_all_filter`` returns 1 for every pair, which Warp folds away so the
+# kernel is bit-equivalent to the pre-callback path.
+
+
+@wp.struct
+class EmptyFilterData:
+    """Placeholder filter data for callers that don't need any."""
+
+    pass
+
+
+@wp.func
+def keep_all_filter(pair: wp.vec2i, data: EmptyFilterData) -> wp.int32:
+    """Default broad-phase filter: keep every pair."""
+    return wp.int32(1)
+
+
 # Collision filtering
 @wp.func
 def test_group_pair(group_a: int, group_b: int) -> bool:

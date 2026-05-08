@@ -230,7 +230,6 @@ class Example:
             substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
-            armature_mode=args.armature_mode,
         )
 
         self.state_0 = self.model.state()
@@ -476,7 +475,7 @@ class Example:
         parser.add_argument(
             "--armature",
             type=float,
-            default=0.001, # 0.011,
+            default=0.001,  # 0.011,
             help=(
                 "Per-joint axial armature [kg*m^2] applied as the"
                 " builder default. 0.011 is the Dynamixel XH540-V150"
@@ -484,26 +483,8 @@ class Example:
                 " matching the kamino reference example (``a_j``)."
             ),
         )
-        parser.add_argument(
-            "--armature-mode",
-            choices=("bake", "exact", "off"),
-            default="bake",
-            help=(
-                "How PhoenX applies joint armature. ``bake`` (default)"
-                " augments each attached body's axial inertia at"
-                " construction so contacts and gravity see the"
-                " armatured mass -- required for this asset because"
-                " the parallel-rod / ankle-bracket bodies have"
-                " ~2e-7 kg.m^2 raw inertia and stiff USD-authored"
-                " contact / PD impulses on raw inertia diverge."
-                " ``exact`` uses a per-joint virtual rotor (correct"
-                " for isolated joints, but the PhoenX docstring"
-                " warns it diverges for dr_legs-class scenes -- the"
-                " robot launches off-screen on the first contact)."
-                " ``off`` ignores armature entirely."
-            ),
-        )
-        parser.set_defaults(world_count=4)
+
+        parser.set_defaults(world_count=1000)
         return parser
 
 

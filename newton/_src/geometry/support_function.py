@@ -79,6 +79,96 @@ def unpack_mesh_ptr(arr: wp.vec3) -> wp.uint64:
     return chunk1 | chunk2 | chunk3
 
 
+@wp.func
+def encode_vec3(v: wp.vec3) -> wp.uint64:
+    """Pack a ``wp.vec3`` into a single 64-bit word, lossy.
+
+    Layout (bit 0 = LSB, bit 63 = MSB):
+
+    * bits ``[0, 20)``  -- signed-quantised z (20 bits, ``[-scale, +scale]``).
+    * bits ``[20, 40)`` -- signed-quantised y (20 bits).
+    * bits ``[40, 60)`` -- signed-quantised x (20 bits).
+    * bits ``[60, 64)`` -- unsigned exponent ``e`` (4 bits), so the
+      shared per-component scale is ``2^e``.
+
+    The codec is shared-exponent / per-component-mantissa, similar to a
+    block-floating-point format. Because ``e`` is unsigned, the smallest
+    representable shared scale is ``2^0 = 1``; magnitudes ``< 1`` are
+    quantised against scale=1 with precision ``2 * scale / (2^20 - 1)
+    ~ 1.9e-6`` (i.e. about 2 micrometres at the meter scale, plenty for
+    rigid-body collision). The largest representable magnitude is
+    ``2^15 = 32768``. All vertices of any reasonable tetrahedron
+    primitive (coordinates in meters) round-trip to within a few
+    micrometres.
+
+    Used to pack the 4th tetrahedron vertex ``D = (d_x, d_y, d_z)``
+    into ``shape_source`` so the narrow-phase can read it without a
+    parallel array. See :func:`decode_vec3` for the inverse.
+    """
+    ax = wp.abs(v[0])
+    ay = wp.abs(v[1])
+    az = wp.abs(v[2])
+
+    m = wp.max(ax, wp.max(ay, az))
+
+    e = int(0)
+    if m > 1.0:
+        # Smallest e such that 2^e >= m, so v / 2^e lies in [-1, 1].
+        # ``ceil(log2(m))`` is exact for m a power of two.
+        e = int(wp.ceil(wp.log2(m)))
+
+    # 4-bit exponent storage; magnitudes above 2^15 are clipped.
+    e = wp.clamp(e, 0, 15)
+
+    inv_scale = 1.0 / wp.pow(2.0, float(e))
+
+    nx = v[0] * inv_scale
+    ny = v[1] * inv_scale
+    nz = v[2] * inv_scale
+
+    # Defensive clamp in case scale is below the actual max magnitude
+    # (e.g. ``m`` clipped at e=15 and ``|v| > 32768``).
+    nx = wp.clamp(nx, -1.0, 1.0)
+    ny = wp.clamp(ny, -1.0, 1.0)
+    nz = wp.clamp(nz, -1.0, 1.0)
+
+    # Symmetric 20-bit quantisation of n in [-1, 1] -> i in [0, 2^20-1].
+    max_int = float((1 << 20) - 1)
+
+    ix = wp.uint64(int(wp.round((nx * 0.5 + 0.5) * max_int)))
+    iy = wp.uint64(int(wp.round((ny * 0.5 + 0.5) * max_int)))
+    iz = wp.uint64(int(wp.round((nz * 0.5 + 0.5) * max_int)))
+
+    return (wp.uint64(e) << wp.uint64(60)) | (ix << wp.uint64(40)) | (iy << wp.uint64(20)) | iz
+
+
+@wp.func
+def decode_vec3(p: wp.uint64) -> wp.vec3:
+    """Inverse of :func:`encode_vec3`.
+
+    Reverses the shared-exponent + per-component-20-bit quantisation;
+    see ``encode_vec3`` for the bit layout. Round-trip error is
+    bounded by one quantisation step, ``scale * 2 / (2^20 - 1)``.
+    """
+    e = int((p >> wp.uint64(60)) & wp.uint64(0xF))
+
+    mask20 = wp.uint64((1 << 20) - 1)
+    ix = int((p >> wp.uint64(40)) & mask20)
+    iy = int((p >> wp.uint64(20)) & mask20)
+    iz = int(p & mask20)
+
+    max_int = float((1 << 20) - 1)
+
+    # Recover normalised mantissas in [-1, 1].
+    nx = (float(ix) / max_int) * 2.0 - 1.0
+    ny = (float(iy) / max_int) * 2.0 - 1.0
+    nz = (float(iz) / max_int) * 2.0 - 1.0
+
+    scale = wp.pow(2.0, float(e))
+
+    return wp.vec3(nx * scale, ny * scale, nz * scale)
+
+
 @wp.struct
 class GenericShapeData:
     """
@@ -94,8 +184,13 @@ class GenericShapeData:
       - CYLINDER: radius in x, half-height in y (axis +Z)
       - CONE: radius in x, half-height in y (axis +Z, apex at +Z)
       - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
-      - TRIANGLE: vertex B-A stored in scale, vertex C-A stored in auxiliary
-      - TRIANGLE_PRISM: same as TRIANGLE; support function extrudes 1 m along -Z
+      - GeoType.TRIANGLE: scale = (|AB|, c_y, c_z); A at origin, B on local +Z,
+        C in local YZ plane. ``auxiliary`` unused.
+      - GeoType.TETRAHEDRON: scale carries A/B/C as for TRIANGLE; ``auxiliary``
+        carries the 4th vertex ``D = (d_x, d_y, d_z)`` (decoded from the
+        encoded ``shape_source`` slot by ``extract_shape_data``).
+      - GeoTypeEx.TRIANGLE: vertex B-A stored in scale, vertex C-A stored in auxiliary
+      - GeoTypeEx.TRIANGLE_PRISM: same as GeoTypeEx.TRIANGLE; support function extrudes 1 m along -Z
     """
 
     shape_type: int
@@ -117,7 +212,15 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
     - CONE: radius in x, half-height in y (axis along +Z, apex at +Z)
     - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
     - CONVEX_MESH: scale contains mesh scale, auxiliary contains packed mesh pointer
-    - TRIANGLE: scale contains vector B-A, auxiliary contains vector C-A (relative to vertex A at origin)
+    - GeoType.TRIANGLE: canonical first-class triangle. ``scale = (|AB|, c_y, c_z)``
+      with vertex A at the origin, B = (0, 0, |AB|) and C = (0, c_y, c_z).
+    - GeoType.TETRAHEDRON: canonical first-class solid tetrahedron. Vertices
+      A/B/C are encoded in ``scale`` exactly as for TRIANGLE; the 4th vertex
+      ``D = (d_x, d_y, d_z)`` is decoded into ``auxiliary`` by
+      ``extract_shape_data`` from the encoded ``shape_source`` slot.
+    - GeoTypeEx.TRIANGLE / TRIANGLE_PRISM: scale contains vector B-A, auxiliary
+      contains vector C-A (relative to vertex A at origin). Used by mesh-triangle
+      midphase and PhoenX cloth virtual triangles.
     """
 
     eps = 1.0e-12
@@ -172,6 +275,50 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         if geom.shape_type == GeoTypeEx.TRIANGLE_PRISM:
             if direction[2] < 0.0:
                 result = result + wp.vec3(0.0, 0.0, -1.0)
+    elif geom.shape_type == GeoType.TRIANGLE:
+        # Canonical first-class triangle: A at origin, B along +Z, C in YZ plane.
+        # scale = (|AB|, c_y, c_z) packs the three free parameters.
+        tri_a = wp.vec3(0.0, 0.0, 0.0)
+        tri_b = wp.vec3(0.0, 0.0, geom.scale[0])
+        tri_c = wp.vec3(0.0, geom.scale[1], geom.scale[2])
+
+        dot_a = wp.dot(tri_a, direction)
+        dot_b = wp.dot(tri_b, direction)
+        dot_c = wp.dot(tri_c, direction)
+
+        if dot_a >= dot_b and dot_a >= dot_c:
+            result = tri_a
+        elif dot_b >= dot_c:
+            result = tri_b
+        else:
+            result = tri_c
+    elif geom.shape_type == GeoType.TETRAHEDRON:
+        # Canonical solid tetrahedron: A at origin, B along +Z, C in YZ plane,
+        # D unconstrained. scale = (|AB|, c_y, c_z) carries A/B/C exactly as
+        # for GeoType.TRIANGLE; auxiliary = (d_x, d_y, d_z) is decoded from
+        # ``shape_source`` by ``extract_shape_data``. Support point is
+        # ``argmax_v dot(v, direction)`` over the four vertices.
+        tet_b = wp.vec3(0.0, 0.0, geom.scale[0])
+        tet_c = wp.vec3(0.0, geom.scale[1], geom.scale[2])
+        tet_d = geom.auxiliary
+
+        dot_a = float(0.0)  # dot(A, direction) where A = origin
+        dot_b = wp.dot(tet_b, direction)
+        dot_c = wp.dot(tet_c, direction)
+        dot_d = wp.dot(tet_d, direction)
+
+        # Compare pairwise; ties fall back to the first vertex of each pair.
+        best = wp.vec3(0.0, 0.0, 0.0)
+        best_dot = dot_a
+        if dot_b > best_dot:
+            best = tet_b
+            best_dot = dot_b
+        if dot_c > best_dot:
+            best = tet_c
+            best_dot = dot_c
+        if dot_d > best_dot:
+            best = tet_d
+        result = best
     elif geom.shape_type == GeoType.BOX:
         # Use a relative deadband so near-zero direction components
         # (from quaternion rotation noise ~1e-14) cannot flip the sign
@@ -307,11 +454,13 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
 @wp.func
 def support_map_lean(geom: GenericShapeData, direction: wp.vec3, data_provider: SupportMapDataProvider) -> wp.vec3:
     """
-    Lean support function for common shape types only: CONVEX_MESH, BOX, SPHERE.
+    Lean support function for common shape types only: CONVEX_MESH, BOX,
+    SPHERE, and the canonical first-class TRIANGLE primitive.
 
     This is a specialized version of support_map with reduced code size to improve
     GPU instruction cache utilization. It omits support for CAPSULE, ELLIPSOID,
-    CYLINDER, CONE, PLANE, and TRIANGLE shapes.
+    CYLINDER, CONE, and PLANE shapes (and the variable-vertex
+    ``GeoTypeEx.TRIANGLE`` / ``TRIANGLE_PRISM`` carriers).
     """
     result = wp.vec3(0.0, 0.0, 0.0)
 
@@ -343,6 +492,44 @@ def support_map_lean(geom: GenericShapeData, direction: wp.vec3, data_provider: 
         else:
             n = wp.vec3(1.0, 0.0, 0.0)
         result = n * radius
+
+    elif geom.shape_type == GeoType.TRIANGLE:
+        # Canonical triangle: A=(0,0,0), B=(0,0,scale[0]), C=(0,scale[1],scale[2]).
+        tri_b = wp.vec3(0.0, 0.0, geom.scale[0])
+        tri_c = wp.vec3(0.0, geom.scale[1], geom.scale[2])
+        dot_a = float(0.0)
+        dot_b = wp.dot(tri_b, direction)
+        dot_c = wp.dot(tri_c, direction)
+        if dot_a >= dot_b and dot_a >= dot_c:
+            result = wp.vec3(0.0, 0.0, 0.0)
+        elif dot_b >= dot_c:
+            result = tri_b
+        else:
+            result = tri_c
+
+    elif geom.shape_type == GeoType.TETRAHEDRON:
+        # Canonical tetrahedron: A=origin, B=(0,0,scale[0]), C=(0,scale[1],scale[2]),
+        # D = auxiliary (decoded from shape_source by extract_shape_data).
+        tet_b = wp.vec3(0.0, 0.0, geom.scale[0])
+        tet_c = wp.vec3(0.0, geom.scale[1], geom.scale[2])
+        tet_d = geom.auxiliary
+
+        dot_a = float(0.0)
+        dot_b = wp.dot(tet_b, direction)
+        dot_c = wp.dot(tet_c, direction)
+        dot_d = wp.dot(tet_d, direction)
+
+        best = wp.vec3(0.0, 0.0, 0.0)
+        best_dot = dot_a
+        if dot_b > best_dot:
+            best = tet_b
+            best_dot = dot_b
+        if dot_c > best_dot:
+            best = tet_c
+            best_dot = dot_c
+        if dot_d > best_dot:
+            best = tet_d
+        result = best
 
     return result
 
@@ -386,9 +573,18 @@ def extract_shape_data(
     result.scale = scale
     result.auxiliary = wp.vec3(0.0, 0.0, 0.0)
 
-    # For CONVEX_MESH, pack the mesh pointer into auxiliary
-    if shape_types[shape_idx] == GeoType.CONVEX_MESH:
+    # For CONVEX_MESH, pack the mesh pointer into auxiliary.
+    # For TETRAHEDRON, ``shape_source[shape_idx]`` carries the encoded
+    # 4th vertex ``D = (d_x, d_y, d_z)`` packed via :func:`encode_vec3`;
+    # decode it directly into ``auxiliary`` so the support map can read
+    # all four canonical vertices from ``(scale, auxiliary)`` without
+    # any extra plumbing. Vertices A/B/C come from ``scale`` exactly as
+    # for ``GeoType.TRIANGLE``.
+    shape_type_local = shape_types[shape_idx]
+    if shape_type_local == GeoType.CONVEX_MESH:
         result.auxiliary = pack_mesh_ptr(shape_source[shape_idx])
+    elif shape_type_local == GeoType.TETRAHEDRON:
+        result.auxiliary = decode_vec3(shape_source[shape_idx])
 
     return position, orientation, result, scale, margin_offset
 
