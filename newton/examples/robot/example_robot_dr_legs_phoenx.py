@@ -150,8 +150,16 @@ class Example:
         self.viewer = viewer
 
         dr_legs = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        # Mirror the kamino DR Legs reference example: ``armature``
+        # = 0.011 kg.m^2 is the Dynamixel XH540-V150 reflected rotor
+        # inertia ("a_j" in kamino). Kamino additionally sets a
+        # viscous joint damping ``b_j = 0.044 N.m.s/rad``; PhoenX has
+        # no separate viscous-damping field on JointDofConfig, so
+        # that contribution lives inside the USD-authored
+        # ``target_kd`` PD term (effectively kd_total = kd_USD + b_j
+        # at small angular velocities).
         dr_legs.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
-            limit_ke=1.0e3, limit_kd=1.0e1, friction=1e-5, armature=1e-3
+            limit_ke=1.0e3, limit_kd=1.0e1, friction=1e-5, armature=args.armature
         )
         dr_legs.default_shape_cfg.ke = 2.0e3
         dr_legs.default_shape_cfg.kd = 1.0e2
@@ -209,11 +217,20 @@ class Example:
         # the number of PGS substeps per :meth:`step` call;
         # ``solver_iterations`` is PGS iterations per substep;
         # ``velocity_iterations`` is the TGS-soft relax sweep count.
+        # ``armature_mode`` defaults to ``"bake"``; ``"exact"`` is
+        # physically the more principled per-joint virtual-rotor
+        # treatment, but the PhoenX docstring warns it diverges for
+        # dr_legs-class scenes (light parallel rods + stiff PD +
+        # ground contact) because external-force paths still see the
+        # raw 2e-7 kg.m^2 rod inertia, and a stiff contact impulse
+        # against that raw inertia launches the chain instantly.
+        # ``"bake"`` is the empirically working choice for this asset.
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
             substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
+            armature_mode=args.armature_mode,
         )
 
         self.state_0 = self.model.state()
@@ -433,13 +450,15 @@ class Example:
             help=(
                 "PhoenX internal PGS substeps per ``solver.step`` call."
                 " The asset has ~6 g parallel-rod / ankle-bracket bodies"
-                " with min principal inertia ~2e-7 kg.m^2; with the"
-                " USD-authored kp=50 N.m/rad PD drive the natural period"
-                " falls to ~0.4 ms. At fps=60 the substep dt is"
-                " ``1/(fps * substeps)`` so the default (1/(60*80) ="
-                " 0.21 ms) is just under the CFL bound -- below ~40"
-                " substeps the lightweight bodies' iterates overshoot"
-                " and the chain blows up within seconds."
+                " with min principal inertia ~2e-7 kg.m^2. The actuated"
+                " joints carry a ``--armature`` rotor (0.011 kg.m^2 by"
+                " default) that dominates the drive PD inertia, but the"
+                " unactuated parallel-rod / ankle-bracket loop closers"
+                " run on the raw body inertia and set the CFL bound."
+                " At fps=60 the substep dt is ``1/(fps * substeps)``"
+                " so the default 1/(60*80) = 0.21 ms keeps the rod"
+                " chain stable; below ~40 substeps the iterates"
+                " overshoot and the chain blows up within seconds."
             ),
         )
         parser.add_argument(
@@ -454,6 +473,36 @@ class Example:
             default=1,
             help="PhoenX TGS-soft velocity-relaxation sweeps per substep.",
         )
+        parser.add_argument(
+            "--armature",
+            type=float,
+            default=0.001, # 0.011,
+            help=(
+                "Per-joint axial armature [kg*m^2] applied as the"
+                " builder default. 0.011 is the Dynamixel XH540-V150"
+                " reflected rotor inertia used as the DR Legs drive,"
+                " matching the kamino reference example (``a_j``)."
+            ),
+        )
+        parser.add_argument(
+            "--armature-mode",
+            choices=("bake", "exact", "off"),
+            default="bake",
+            help=(
+                "How PhoenX applies joint armature. ``bake`` (default)"
+                " augments each attached body's axial inertia at"
+                " construction so contacts and gravity see the"
+                " armatured mass -- required for this asset because"
+                " the parallel-rod / ankle-bracket bodies have"
+                " ~2e-7 kg.m^2 raw inertia and stiff USD-authored"
+                " contact / PD impulses on raw inertia diverge."
+                " ``exact`` uses a per-joint virtual rotor (correct"
+                " for isolated joints, but the PhoenX docstring"
+                " warns it diverges for dr_legs-class scenes -- the"
+                " robot launches off-screen on the first contact)."
+                " ``off`` ignores armature entirely."
+            ),
+        )
         parser.set_defaults(world_count=4)
         return parser
 
@@ -461,6 +510,7 @@ class Example:
 if __name__ == "__main__":
     parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
+    viewer._paused = True
 
     example = Example(viewer, args)
 
