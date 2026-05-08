@@ -1377,14 +1377,22 @@ def _revolute_iterate_at(
     t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
     t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
 
-    cr1_b1 = wp.skew(r1_b1)
-    cr1_b2 = wp.skew(r1_b2)
-    cr2_b1 = wp.skew(r2_b1)
-    cr2_b2 = wp.skew(r2_b2)
+    # ``skew(r) @ v`` ≡ ``wp.cross(r, v)``; ``wp.transpose(skew(r)) @ v`` ≡
+    # ``wp.cross(v, r)`` (skew is antisymmetric). Using crosses keeps r* in
+    # registers as vec3 instead of materialising 4 skew mat33s — same math,
+    # ~36 floats less register pressure across the sweep loop.
 
     a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
-    ut_ai = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
-    s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
+    # ``ut_ai`` mat33 only consumed rows 0,1 below — read 6 dwords.
+    ut_ai_row0 = read_vec3(constraints, base_offset + _OFF_UT_AI, cid)
+    ut_ai_row1 = read_vec3(constraints, base_offset + _OFF_UT_AI + 3, cid)
+    # ``s_inv`` is 2x2 stored at top-left of a mat33 — read 4 dwords.
+    s_inv_22 = wp.mat22f(
+        constraints.data[base_offset + _OFF_S_INV + 0, cid],
+        constraints.data[base_offset + _OFF_S_INV + 1, cid],
+        constraints.data[base_offset + _OFF_S_INV + 3, cid],
+        constraints.data[base_offset + _OFF_S_INV + 4, cid],
+    )
     if use_bias:
         bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
         bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
@@ -1400,8 +1408,8 @@ def _revolute_iterate_at(
     acc2_t2 = wp.dot(t2, acc2_world)
     acc2_tan = wp.vec2f(acc2_t1, acc2_t2)
 
-    jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
-    jv2_world = -velocity1 + cr2_b1 @ angular_velocity1 + velocity2 - cr2_b2 @ angular_velocity2
+    jv1 = -velocity1 + wp.cross(r1_b1, angular_velocity1) + velocity2 - wp.cross(r1_b2, angular_velocity2)
+    jv2_world = -velocity1 + wp.cross(r2_b1, angular_velocity1) + velocity2 - wp.cross(r2_b2, angular_velocity2)
     jv2_t1 = wp.dot(t1, jv2_world)
     jv2_t2 = wp.dot(t2, jv2_world)
     jv2 = wp.vec2f(jv2_t1, jv2_t2)
@@ -1410,15 +1418,8 @@ def _revolute_iterate_at(
     rhs1 = jv1 + bias1
     rhs2 = jv2 + bias2_tan
 
-    ut_ai_rhs1_3 = ut_ai @ rhs1
-    ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
+    ut_ai_rhs1 = wp.vec2f(wp.dot(ut_ai_row0, rhs1), wp.dot(ut_ai_row1, rhs1))
 
-    s_inv_22 = wp.mat22f(
-        s_inv_packed[0, 0],
-        s_inv_packed[0, 1],
-        s_inv_packed[1, 0],
-        s_inv_packed[1, 1],
-    )
     lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
     lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
 
@@ -1426,8 +1427,8 @@ def _revolute_iterate_at(
     lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
 
     u_lam2_us = (inv_mass1 + inv_mass2) * lam2_us_world
-    u_lam2_us = u_lam2_us + cr1_b1 @ (inv_inertia1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
-    u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
+    u_lam2_us = u_lam2_us + wp.cross(r1_b1, inv_inertia1 @ wp.cross(lam2_us_world, r2_b1))
+    u_lam2_us = u_lam2_us + wp.cross(r1_b2, inv_inertia2 @ wp.cross(lam2_us_world, r2_b2))
 
     lam1_us = -(a1_inv @ (rhs1 + u_lam2_us))
     lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
@@ -1435,9 +1436,9 @@ def _revolute_iterate_at(
     total_lin = lam1 + lam2_world
 
     velocity1 = velocity1 - inv_mass1 * total_lin
-    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1 + cr2_b1 @ lam2_world)
+    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (wp.cross(r1_b1, lam1) + wp.cross(r2_b1, lam2_world))
     velocity2 = velocity2 + inv_mass2 * total_lin
-    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1 + cr2_b2 @ lam2_world)
+    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (wp.cross(r1_b2, lam1) + wp.cross(r2_b2, lam2_world))
 
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
     write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world + lam2_world)
@@ -2729,19 +2730,25 @@ def _revolute_iterate_at_multi(
     t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
     t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
 
-    cr1_b1 = wp.skew(r1_b1)
-    cr1_b2 = wp.skew(r1_b2)
-    cr2_b1 = wp.skew(r2_b1)
-    cr2_b2 = wp.skew(r2_b2)
+    # ``skew(r) @ v`` ≡ ``wp.cross(r, v)``; ``wp.transpose(skew(r)) @ v`` ≡
+    # ``wp.cross(v, r)`` (skew is antisymmetric). Using crosses keeps r* in
+    # registers as vec3 instead of materialising 4 skew mat33s — same math,
+    # ~36 floats less register pressure across the sweep loop.
 
     a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
-    ut_ai = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
-    s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
+    # ``ut_ai`` is stored row-major mat33 but only rows 0,1 are consumed
+    # below (we form a 2-vec from the matmul). Read just the 6 dwords we
+    # need — saves 3 register-resident floats across the sweep loop.
+    ut_ai_row0 = read_vec3(constraints, base_offset + _OFF_UT_AI, cid)
+    ut_ai_row1 = read_vec3(constraints, base_offset + _OFF_UT_AI + 3, cid)
+    # ``s_inv`` is a 2x2 dense block stored as the top-left of a row-major
+    # mat33 (col 2 / row 2 unused). Read only the 4 dwords — saves 5
+    # register-resident floats and 5 global reads per cid.
     s_inv_22 = wp.mat22f(
-        s_inv_packed[0, 0],
-        s_inv_packed[0, 1],
-        s_inv_packed[1, 0],
-        s_inv_packed[1, 1],
+        constraints.data[base_offset + _OFF_S_INV + 0, cid],
+        constraints.data[base_offset + _OFF_S_INV + 1, cid],
+        constraints.data[base_offset + _OFF_S_INV + 3, cid],
+        constraints.data[base_offset + _OFF_S_INV + 4, cid],
     )
     if use_bias:
         bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
@@ -2809,8 +2816,8 @@ def _revolute_iterate_at_multi(
         acc2_t2 = wp.dot(t2, acc2_world)
         acc2_tan = wp.vec2f(acc2_t1, acc2_t2)
 
-        jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
-        jv2_world = -velocity1 + cr2_b1 @ angular_velocity1 + velocity2 - cr2_b2 @ angular_velocity2
+        jv1 = -velocity1 + wp.cross(r1_b1, angular_velocity1) + velocity2 - wp.cross(r1_b2, angular_velocity2)
+        jv2_world = -velocity1 + wp.cross(r2_b1, angular_velocity1) + velocity2 - wp.cross(r2_b2, angular_velocity2)
         jv2_t1 = wp.dot(t1, jv2_world)
         jv2_t2 = wp.dot(t2, jv2_world)
         jv2 = wp.vec2f(jv2_t1, jv2_t2)
@@ -2818,8 +2825,7 @@ def _revolute_iterate_at_multi(
         rhs1 = jv1 + bias1
         rhs2 = jv2 + bias2_tan
 
-        ut_ai_rhs1_3 = ut_ai @ rhs1
-        ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
+        ut_ai_rhs1 = wp.vec2f(wp.dot(ut_ai_row0, rhs1), wp.dot(ut_ai_row1, rhs1))
 
         lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
         lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
@@ -2828,8 +2834,8 @@ def _revolute_iterate_at_multi(
         lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
 
         u_lam2_us = (inv_mass1 + inv_mass2) * lam2_us_world
-        u_lam2_us = u_lam2_us + cr1_b1 @ (inv_inertia1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
-        u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
+        u_lam2_us = u_lam2_us + wp.cross(r1_b1, inv_inertia1 @ wp.cross(lam2_us_world, r2_b1))
+        u_lam2_us = u_lam2_us + wp.cross(r1_b2, inv_inertia2 @ wp.cross(lam2_us_world, r2_b2))
 
         lam1_us = -(a1_inv @ (rhs1 + u_lam2_us))
         lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
@@ -2837,9 +2843,9 @@ def _revolute_iterate_at_multi(
         total_lin = lam1 + lam2_world
 
         velocity1 = velocity1 - inv_mass1 * total_lin
-        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1 + cr2_b1 @ lam2_world)
+        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (wp.cross(r1_b1, lam1) + wp.cross(r2_b1, lam2_world))
         velocity2 = velocity2 + inv_mass2 * total_lin
-        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1 + cr2_b2 @ lam2_world)
+        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (wp.cross(r1_b2, lam1) + wp.cross(r2_b2, lam2_world))
 
         acc1 = acc1 + lam1
         acc2_world = acc2_world + lam2_world

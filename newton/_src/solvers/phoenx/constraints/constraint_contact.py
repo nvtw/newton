@@ -930,6 +930,17 @@ def contact_iterate_at_multi(
     Cids in the same graph colour don't share endpoints, so running
     ``num_sweeps`` sweeps before moving to the next cid is equivalent
     to round-robin within the colour.
+
+    Body state (position, orientation, COM, inverse mass, inverse
+    inertia, velocity, angular velocity) is hoisted into registers
+    once per column — every contact in the column shares the same
+    ``(idx1, idx2)`` body pair. Within the sweep loop, velocity and
+    angular velocity update in registers across all contacts; only
+    the column's final v/w write back to ``bodies``. The previous
+    code routed each contact through ``endpoint_load`` /
+    ``endpoint_apply_impulse``, reissuing 7 SoA loads + 2 RMW writes
+    per body per contact per sweep — for a 4-contact column with
+    ``num_sweeps=2`` that's 144 SoA accesses; this version does 14.
     """
     contact_first = contact_get_contact_first(constraints, cid)
     contact_count = contact_get_contact_count(constraints, cid)
@@ -947,6 +958,23 @@ def contact_iterate_at_multi(
         DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
     )
 
+    # ---- Hoist body state out of the (sweep × contact) loop ---------
+    pos1 = bodies.position[idx1]
+    orient1 = bodies.orientation[idx1]
+    com1 = bodies.body_com[idx1]
+    inv_mass1 = bodies.inverse_mass[idx1]
+    inv_inertia1 = bodies.inverse_inertia_world[idx1]
+    vel1 = bodies.velocity[idx1]
+    angvel1 = bodies.angular_velocity[idx1]
+
+    pos2 = bodies.position[idx2]
+    orient2 = bodies.orientation[idx2]
+    com2 = bodies.body_com[idx2]
+    inv_mass2 = bodies.inverse_mass[idx2]
+    inv_inertia2 = bodies.inverse_inertia_world[idx2]
+    vel2 = bodies.velocity[idx2]
+    angvel2 = bodies.angular_velocity[idx2]
+
     it = wp.int32(0)
     while it < num_sweeps:
         for i in range(contact_count):
@@ -959,8 +987,10 @@ def contact_iterate_at_multi(
             local_p1 = cc_get_local_p1(cc, k)
             margin0 = contacts.rigid_contact_margin0[k]
             margin1 = contacts.rigid_contact_margin1[k]
-            ep1 = endpoint_load(idx1, local_p0, margin0, wp.float32(1.0), n, bodies)
-            ep2 = endpoint_load(idx2, local_p1, margin1, wp.float32(-1.0), n, bodies)
+            # Lever arms in world frame. Same expression as
+            # ``endpoint_load`` but operating on the hoisted body state.
+            r1 = wp.quat_rotate(orient1, local_p0 - com1) + margin0 * n
+            r2 = wp.quat_rotate(orient2, local_p1 - com2) - margin1 * n
 
             eff_n = cc_get_eff_n(cc, k)
             eff_t1 = cc_get_eff_t1(cc, k)
@@ -975,7 +1005,7 @@ def contact_iterate_at_multi(
                 bias_t1_val = wp.float32(0.0)
                 bias_t2_val = wp.float32(0.0)
 
-            vel_rel = ep2.v + wp.cross(ep2.w, ep2.r) - ep1.v - wp.cross(ep1.w, ep1.r)
+            vel_rel = vel2 + wp.cross(angvel2, r2) - vel1 - wp.cross(angvel1, r1)
             jv_n = wp.dot(vel_rel, n)
             jv_t1 = wp.dot(vel_rel, t1_dir)
             jv_t2 = wp.dot(vel_rel, t2_dir)
@@ -1030,25 +1060,18 @@ def contact_iterate_at_multi(
             cc_set_tangent2_lambda(cc, k, lam_t2_new)
 
             imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
-            endpoint_apply_impulse(
-                idx1,
-                imp,
-                ep1.inv_mass,
-                ep1.inv_inertia,
-                ep1.r,
-                wp.float32(-1.0),
-                bodies,
-            )
-            endpoint_apply_impulse(
-                idx2,
-                imp,
-                ep2.inv_mass,
-                ep2.inv_inertia,
-                ep2.r,
-                wp.float32(+1.0),
-                bodies,
-            )
+            # Apply impulse to register-cached body state.
+            vel1 = vel1 - inv_mass1 * imp
+            angvel1 = angvel1 - inv_inertia1 @ wp.cross(r1, imp)
+            vel2 = vel2 + inv_mass2 * imp
+            angvel2 = angvel2 + inv_inertia2 @ wp.cross(r2, imp)
         it += 1
+
+    # ---- Writeback ---------------------------------------------------
+    bodies.velocity[idx1] = vel1
+    bodies.angular_velocity[idx1] = angvel1
+    bodies.velocity[idx2] = vel2
+    bodies.angular_velocity[idx2] = angvel2
 
 
 @wp.func
