@@ -794,19 +794,6 @@ def _axial_drive_limit_iterate(
         lam_limit = acc_limit - old_acc
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
 
-    # Constraint-side joint armature ("exact" mode). ``armature == 0``
-    # (the default ``"bake"`` / ``"off"`` ADBS-init values) collapses
-    # ``kappa`` to 1 and the multiplication is a no-op. ``eff_inv``
-    # stored in the column is already the *augmented*
-    # ``M_chain^{-1} / (1 + a * M_chain^{-1})``, so the closed-form
-    # ``kappa = 1 - a * eff_inv_aug`` recovers the velocity-update
-    # scaling without storing an extra dword. Per-iteration cost: one
-    # extra ``read_float`` and ~2 flops.
-    armature_a = read_float(constraints, base_offset + _OFF_ARMATURE, cid)
-    if armature_a > wp.float32(0.0):
-        eff_inv_aug = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
-        kappa = wp.float32(1.0) - armature_a * eff_inv_aug
-        return (lam_drive + lam_limit) * kappa
     return lam_drive + lam_limit
 
 
@@ -945,24 +932,6 @@ def _axial_drive_limit_prepare_at(
     stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
     damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
 
-    # Constraint-side joint armature ("exact" mode). When ``armature``
-    # was set to zero in the ADBS init kwargs (the default for
-    # ``armature_mode in {"bake", "off"}``) this branch collapses --
-    # ``armature_a == 0`` makes ``eff_inv_aug = eff_inv`` and the
-    # warm-start scaling at the bottom is a no-op. When ``armature_a >
-    # 0`` (``armature_mode == "exact"``) we apply the closed-form
-    # MuJoCo augmentation
-    #   M_aug^{-1} = M_chain^{-1} / (1 + a * M_chain^{-1})
-    # and pair it with a per-iteration impulse scaling
-    #   kappa = 1 - a * M_aug^{-1}
-    # so that an impulse ``lambda`` computed against ``eff_mass_aug =
-    # M_chain + a`` produces the body-velocity change of the augmented
-    # dynamics when applied via the *raw* ``M_block^{-1}`` body
-    # inertias. ``kappa`` is recomputed on the fly in the iterate
-    # path, so no extra constraint-column field is needed.
-    armature_a = read_float(constraints, base_offset + _OFF_ARMATURE, cid)
-    if armature_a > wp.float32(0.0):
-        eff_inv = eff_inv / (wp.float32(1.0) + armature_a * eff_inv)
     write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, eff_inv)
 
     # ---- Drive (PD only) ---------------------------------------------
@@ -1012,20 +981,13 @@ def _axial_drive_limit_prepare_at(
         write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
 
     # Warm-start: sum of drive + limit accumulated impulses, with
-    # ``acc_limit`` forcibly zeroed when the limit is inactive. Scale
-    # by ``kappa = 1 - a * eff_inv_aug`` (collapses to ``1`` when
-    # ``armature_a == 0``) so the body-velocity warm-start matches
-    # the augmented dynamics. The accumulator itself stays
-    # un-kappa-scaled; the iterate path applies the same scaling on
-    # the per-iteration impulse, so warm-start and iterate paths
-    # round-trip consistently.
+    # ``acc_limit`` forcibly zeroed when the limit is inactive.
     acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
     acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
     if clamp == _CLAMP_NONE:
         acc_limit = 0.0
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
-    kappa = wp.float32(1.0) - armature_a * eff_inv
-    return (acc_drive + acc_limit) * kappa
+    return acc_drive + acc_limit
 
 
 # ---------------------------------------------------------------------------
