@@ -14,6 +14,8 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_NONE,
+    ACCESS_MODE_STATIC,
     ACCESS_MODE_VELOCITY_LEVEL,
     synchronize_position_velocity,
 )
@@ -77,14 +79,25 @@ def particle_set_access_mode(
     new_access_mode: wp.int32,
     inv_dt: wp.float32,
 ):
-    """SoA wrapper around :func:`synchronize_position_velocity`. Reads
-    the four dual-state fields out of the container, runs the
-    Jitter2-style synchronize, and scatters the result back."""
+    """Lazy SoA wrapper around :func:`synchronize_position_velocity`.
+
+    Same hot-path optimisation as :func:`body_set_access_mode`: gate
+    every other field read behind a single ``access_mode[p]`` load so
+    the no-op flip (current already matches new) costs one int read.
+    """
+    current = particles.access_mode[p]
+    if current == new_access_mode:
+        return
+    if current == ACCESS_MODE_STATIC:
+        return
+    if current == ACCESS_MODE_NONE:
+        particles.access_mode[p] = new_access_mode
+        return
     pos_new, vel_new, mode_new = synchronize_position_velocity(
         particles.position[p],
         particles.velocity[p],
         particles.position_prev_substep[p],
-        particles.access_mode[p],
+        current,
         new_access_mode,
         inv_dt,
     )

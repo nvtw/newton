@@ -6,6 +6,8 @@ One ``wp.array`` per field, indexed by body id. All fields are float32.
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_NONE,
+    ACCESS_MODE_STATIC,
     ACCESS_MODE_VELOCITY_LEVEL,
     synchronize_pose_velocity,
 )
@@ -122,9 +124,32 @@ def body_set_access_mode(
     new_access_mode: wp.int32,
     inv_dt: wp.float32,
 ):
-    """SoA wrapper around :func:`synchronize_pose_velocity`. Reads the
-    six dual-state fields out of the container, runs the Jitter2-style
-    synchronize, and scatters the result back."""
+    """Lazy SoA wrapper around :func:`synchronize_pose_velocity`.
+
+    Hot-path optimisation: gate every other field read behind a single
+    ``access_mode[b]`` load. The common case in rigid scenes is
+    ``current == new`` (every constraint just touched the same body
+    or the body is permanently STATIC) -- early-returning before
+    touching the six dual fields keeps this wrapper at one int read +
+    one branch per body-touch.
+
+    Mirrors Jitter2 ``TinyRigidState.SynchronizeVelAndPosStateUpdates``
+    (``MassSplitting/TinyRigidState.cs:62-65``), which also returns at
+    the top before touching the dual state.
+    """
+    current = bodies.access_mode[b]
+    # Early-out paths -- match the no-op short-circuits in
+    # :func:`synchronize_pose_velocity`. Skipping the function call
+    # avoids reading the six pose / velocity arrays on a no-op flip,
+    # which is the common case for rigid-only scenes (every body
+    # stays in VELOCITY_LEVEL after the substep-entry kernel sets it).
+    if current == new_access_mode:
+        return
+    if current == ACCESS_MODE_STATIC:
+        return
+    if current == ACCESS_MODE_NONE:
+        bodies.access_mode[b] = new_access_mode
+        return
     p_new, q_new, v_new, w_new, mode_new = synchronize_pose_velocity(
         bodies.position[b],
         bodies.orientation[b],
@@ -132,7 +157,7 @@ def body_set_access_mode(
         bodies.angular_velocity[b],
         bodies.position_prev_substep[b],
         bodies.orientation_prev_substep[b],
-        bodies.access_mode[b],
+        current,
         new_access_mode,
         inv_dt,
     )

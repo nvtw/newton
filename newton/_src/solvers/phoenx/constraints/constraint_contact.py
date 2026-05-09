@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
+from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
@@ -919,6 +920,12 @@ def contact_prepare_for_iteration(
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
+    # Velocity-level constraint: flip both endpoints to VELOCITY_LEVEL
+    # so any prior position-level write (e.g. cloth iterate) is
+    # finite-diffed into velocity before we use it. No-op when the
+    # body is already in VELOCITY_LEVEL or STATIC.
+    body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
+    body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     contact_prepare_for_iteration_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts)
 
@@ -935,6 +942,8 @@ def contact_iterate(
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
+    body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
+    body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     contact_iterate_at(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias)
 
@@ -1113,6 +1122,8 @@ def contact_iterate_multi(
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
+    body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
+    body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     contact_iterate_at_multi(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias, num_sweeps)
 
