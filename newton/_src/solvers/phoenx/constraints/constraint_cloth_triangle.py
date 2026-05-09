@@ -286,21 +286,25 @@ def cloth_triangle_prepare_for_iteration_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
     particles: ParticleContainer,
+    num_bodies: wp.int32,
 ):
     """Substep-entry prepare: cache inverse masses; reset XPBD warm starts.
 
-    The persisted ``rotation`` warm start is intentionally NOT reset:
-    the closest-rotation angle evolves continuously with the triangle's
-    pose, so resetting it would force the iterative extractor to
-    re-converge from cold every substep.
+    Body fields are unified indices: ``i_p = body - num_bodies`` is the
+    particle slot. The persisted ``rotation`` warm start is intentionally
+    NOT reset -- the closest-rotation angle evolves continuously with
+    the triangle's pose.
     """
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
     body_c = read_int(constraints, _OFF_BODY3, cid)
+    p_a = body_a - num_bodies
+    p_b = body_b - num_bodies
+    p_c = body_c - num_bodies
 
-    write_float(constraints, _OFF_INV_MASS_A, cid, particles.inverse_mass[body_a])
-    write_float(constraints, _OFF_INV_MASS_B, cid, particles.inverse_mass[body_b])
-    write_float(constraints, _OFF_INV_MASS_C, cid, particles.inverse_mass[body_c])
+    write_float(constraints, _OFF_INV_MASS_A, cid, particles.inverse_mass[p_a])
+    write_float(constraints, _OFF_INV_MASS_B, cid, particles.inverse_mass[p_b])
+    write_float(constraints, _OFF_INV_MASS_C, cid, particles.inverse_mass[p_c])
 
     write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, wp.float32(0.0))
     write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, wp.float32(0.0))
@@ -311,24 +315,30 @@ def cloth_triangle_iterate_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
     particles: ParticleContainer,
+    num_bodies: wp.int32,
     idt: wp.float32,
 ):
     """One XPBD sweep on a cloth triangle (area + shear rows).
 
     Direct port of ``FemTriPBD.Iterate`` (``FemTriPBD.cs:99-236``).
+    Body fields are unified indices: ``i_p = body - num_bodies`` is the
+    particle slot.
     """
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
     body_c = read_int(constraints, _OFF_BODY3, cid)
+    p_a = body_a - num_bodies
+    p_b = body_b - num_bodies
+    p_c = body_c - num_bodies
 
     # Flip the three vertices to POSITION_LEVEL so the position read
     # below reflects any prior velocity-level write (e.g. a contact
     # relax sweep) before we project. No-op on subsequent sweeps in
     # the same substep (mode already POSITION_LEVEL); no-op on STATIC
     # pinned vertices.
-    particle_set_access_mode(particles, body_a, _ACCESS_MODE_POSITION_LEVEL, idt)
-    particle_set_access_mode(particles, body_b, _ACCESS_MODE_POSITION_LEVEL, idt)
-    particle_set_access_mode(particles, body_c, _ACCESS_MODE_POSITION_LEVEL, idt)
+    particle_set_access_mode(particles, p_a, _ACCESS_MODE_POSITION_LEVEL, idt)
+    particle_set_access_mode(particles, p_b, _ACCESS_MODE_POSITION_LEVEL, idt)
+    particle_set_access_mode(particles, p_c, _ACCESS_MODE_POSITION_LEVEL, idt)
 
     inv_mass_a = read_float(constraints, _OFF_INV_MASS_A, cid)
     inv_mass_b = read_float(constraints, _OFF_INV_MASS_B, cid)
@@ -343,12 +353,12 @@ def cloth_triangle_iterate_at(
     lambda_sum_lambda = read_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid)
     lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
 
-    x_a = particles.position[body_a]
-    x_b = particles.position[body_b]
-    x_c = particles.position[body_c]
-    dx_a = x_a - particles.position_prev_substep[body_a]
-    dx_b = x_b - particles.position_prev_substep[body_b]
-    dx_c = x_c - particles.position_prev_substep[body_c]
+    x_a = particles.position[p_a]
+    x_b = particles.position[p_b]
+    x_c = particles.position[p_c]
+    dx_a = x_a - particles.position_prev_substep[p_a]
+    dx_b = x_b - particles.position_prev_substep[p_b]
+    dx_c = x_c - particles.position_prev_substep[p_c]
 
     dt = wp.float32(1.0) / idt
     idt_sq = idt * idt
@@ -454,9 +464,9 @@ def cloth_triangle_iterate_at(
             x_c = x_c + _project_to_3d(x_axis, y_axis, delta_c)
             lambda_sum_mu = lambda_sum_mu + d_lam_mu
 
-    particles.position[body_a] = x_a
-    particles.position[body_b] = x_b
-    particles.position[body_c] = x_c
+    particles.position[p_a] = x_a
+    particles.position[p_b] = x_b
+    particles.position[p_c] = x_c
 
     write_float(constraints, _OFF_ROTATION, cid, rotation)
     write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, lambda_sum_lambda)

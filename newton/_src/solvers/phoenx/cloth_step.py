@@ -1,28 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Cloth-only substep kernels for :class:`PhoenXWorld`.
+"""Cloth substep entry / exit kernels and triangle row stamper.
 
-Self-contained pipeline that runs alongside (but independent of) the
-rigid PGS pipeline. When :class:`PhoenXWorld` is constructed with
-``num_particles > 0`` and ``num_cloth_triangles > 0`` and
-:meth:`~PhoenXWorld.step` is called with ``contacts=None``, the cloth
-path runs:
+Cloth integrates with the rigid PGS pipeline via the partitioner-driven
+graph coloring -- see ``_constraints_to_elements_kernel`` and the
+``cloth_support=True`` factory variants of the singleworld iterate /
+prepare / relax kernels in ``solver_phoenx_kernels.py``. The kernels
+in this file are the bookkeeping pieces that don't fit into the per-cid
+type-tag dispatch:
 
-#. ``cloth_predict_kernel`` -- per particle: snapshot pose into
-   ``position_prev_substep``, apply gravity to velocity, advance
-   position.
-#. Per iteration: per color group, ``cloth_iterate_kernel`` -- one
-   thread per triangle in the group, runs
-   :func:`cloth_triangle_iterate_at`. The host-side coloring guarantees
-   no two triangles in the same group share a vertex, so the parallel
-   writes to ``particles.position`` are race-free.
-#. ``cloth_recover_kernel`` -- per particle: ``velocity = (position -
-   position_prev_substep) * inv_dt``.
-
-A single ``cloth_prepare_kernel`` runs once per substep before the
-iteration loop to seed the per-triangle inverse-mass cache and zero
-the XPBD lambda accumulators.
+* ``cloth_predict_kernel`` -- per particle: snapshot pose into
+  ``position_prev_substep``, set ``access_mode``, apply gravity, predict.
+* ``cloth_recover_kernel`` -- per particle: flip access_mode to
+  ``VELOCITY_LEVEL`` so the position delta is folded back into velocity.
+* ``cloth_init_triangle_rows_kernel`` -- one-shot row populator from a
+  Newton :class:`~newton.Model`'s triangle mesh.
 """
 
 from __future__ import annotations
@@ -35,8 +28,6 @@ from newton._src.solvers.phoenx.access_mode import (
     synchronize_position_velocity,
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
-    cloth_triangle_iterate_at,
-    cloth_triangle_prepare_for_iteration_at,
     cloth_triangle_set_alpha_lambda,
     cloth_triangle_set_alpha_mu,
     cloth_triangle_set_beta_lambda,
@@ -53,11 +44,8 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
     "cloth_init_triangle_rows_kernel",
-    "cloth_iterate_kernel",
     "cloth_predict_kernel",
-    "cloth_prepare_kernel",
     "cloth_recover_kernel",
-    "color_cloth_triangles",
 ]
 
 
@@ -121,32 +109,10 @@ def cloth_recover_kernel(
 
 
 @wp.kernel
-def cloth_prepare_kernel(
-    constraints: ConstraintContainer,
-    particles: ParticleContainer,
-    cid_offset: wp.int32,
-):
-    """Per-triangle: cache inv_mass, zero lambda accumulators."""
-    t = wp.tid()
-    cloth_triangle_prepare_for_iteration_at(constraints, cid_offset + t, particles)
-
-
-@wp.kernel
-def cloth_iterate_kernel(
-    constraints: ConstraintContainer,
-    particles: ParticleContainer,
-    color_cids: wp.array[wp.int32],
-    idt: wp.float32,
-):
-    """Iterate every triangle in one color group in parallel."""
-    t = wp.tid()
-    cloth_triangle_iterate_at(constraints, color_cids[t], particles, idt)
-
-
-@wp.kernel
 def cloth_init_triangle_rows_kernel(
     constraints: ConstraintContainer,
     cid_offset: wp.int32,
+    num_bodies: wp.int32,
     tri_indices: wp.array2d[wp.int32],
     particle_q: wp.array[wp.vec3f],
     tri_materials: wp.array2d[wp.float32],
@@ -154,6 +120,13 @@ def cloth_init_triangle_rows_kernel(
     default_beta_mu: wp.float32,
 ):
     """Stamp one cloth-triangle row from Newton mesh API.
+
+    Body fields are stamped in **unified indexing**: rigid bodies live
+    at ``[0, num_bodies)`` and particles at
+    ``[num_bodies, num_bodies + num_particles)``. The cloth iterate
+    subtracts ``num_bodies`` before indexing the particle SoA; the
+    graph-coloring partitioner reads the body fields verbatim and sees
+    one element with three unified-index members per cloth triangle.
 
     ``tri_materials[t, 0]`` is ``tri_ke`` (shear modulus mu, Pa);
     ``tri_materials[t, 1]`` is ``tri_ka`` (area Lame parameter lambda,
@@ -168,9 +141,9 @@ def cloth_init_triangle_rows_kernel(
     pc = tri_indices[t, 2]
 
     cloth_triangle_set_type(constraints, cid)
-    cloth_triangle_set_body1(constraints, cid, pa)
-    cloth_triangle_set_body2(constraints, cid, pb)
-    cloth_triangle_set_body3(constraints, cid, pc)
+    cloth_triangle_set_body1(constraints, cid, num_bodies + pa)
+    cloth_triangle_set_body2(constraints, cid, num_bodies + pb)
+    cloth_triangle_set_body3(constraints, cid, num_bodies + pc)
 
     xa = particle_q[pa]
     xb = particle_q[pb]
@@ -225,48 +198,3 @@ def cloth_init_triangle_rows_kernel(
     cloth_triangle_set_alpha_mu(constraints, cid, wp.float32(1.0) / k_mu)
     cloth_triangle_set_beta_lambda(constraints, cid, default_beta_lambda)
     cloth_triangle_set_beta_mu(constraints, cid, default_beta_mu)
-
-
-def color_cloth_triangles(tri_indices, num_particles: int) -> list[list[int]]:
-    """Greedy graph coloring on triangles: two triangles share a color
-    only if they touch no common particle.
-
-    Args:
-        tri_indices: ``np.ndarray`` of shape ``(num_tris, 3)``, host-side.
-        num_particles: Particle count (for the per-particle adjacency
-            scratch).
-
-    Returns:
-        List of color groups; each group is a list of triangle ids
-        (cids relative to the cloth block, not absolute).
-    """
-    import numpy as np  # noqa: PLC0415
-
-    tri = np.asarray(tri_indices, dtype=np.int64)
-    num_tris = int(tri.shape[0])
-    if num_tris == 0:
-        return []
-
-    particle_tris: list[list[int]] = [[] for _ in range(num_particles)]
-    for t in range(num_tris):
-        for k in range(3):
-            particle_tris[int(tri[t, k])].append(t)
-
-    color = [-1] * num_tris
-    for t in range(num_tris):
-        used: set[int] = set()
-        for k in range(3):
-            v = int(tri[t, k])
-            for nt in particle_tris[v]:
-                if nt != t and color[nt] >= 0:
-                    used.add(color[nt])
-        c = 0
-        while c in used:
-            c += 1
-        color[t] = c
-
-    num_colors = max(color) + 1
-    groups: list[list[int]] = [[] for _ in range(num_colors)]
-    for t, c in enumerate(color):
-        groups[c].append(t)
-    return groups

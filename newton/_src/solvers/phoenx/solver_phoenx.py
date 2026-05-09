@@ -65,11 +65,8 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
 )
 from newton._src.solvers.phoenx.cloth_step import (
     cloth_init_triangle_rows_kernel,
-    cloth_iterate_kernel,
     cloth_predict_kernel,
-    cloth_prepare_kernel,
     cloth_recover_kernel,
-    color_cloth_triangles,
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int
 from newton._src.solvers.phoenx.materials import MaterialData
@@ -90,21 +87,33 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
+    _constraint_iterate_singleworld_cloth_kernel,
+    _constraint_iterate_singleworld_fused_cloth_kernel,
     _constraint_iterate_singleworld_fused_kernel,
+    _constraint_iterate_singleworld_fused_revolute_cloth_kernel,
     _constraint_iterate_singleworld_fused_revolute_kernel,
     _constraint_iterate_singleworld_kernel,
+    _constraint_iterate_singleworld_revolute_cloth_kernel,
     _constraint_iterate_singleworld_revolute_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
     _constraint_prepare_plus_iterate_fast_tail_revolute_kernel,
+    _constraint_prepare_singleworld_cloth_kernel,
+    _constraint_prepare_singleworld_fused_cloth_kernel,
     _constraint_prepare_singleworld_fused_kernel,
+    _constraint_prepare_singleworld_fused_revolute_cloth_kernel,
     _constraint_prepare_singleworld_fused_revolute_kernel,
     _constraint_prepare_singleworld_kernel,
+    _constraint_prepare_singleworld_revolute_cloth_kernel,
     _constraint_prepare_singleworld_revolute_kernel,
     _constraint_relax_fast_tail_kernel,
     _constraint_relax_fast_tail_revolute_kernel,
+    _constraint_relax_singleworld_cloth_kernel,
+    _constraint_relax_singleworld_fused_cloth_kernel,
     _constraint_relax_singleworld_fused_kernel,
+    _constraint_relax_singleworld_fused_revolute_cloth_kernel,
     _constraint_relax_singleworld_fused_revolute_kernel,
     _constraint_relax_singleworld_kernel,
+    _constraint_relax_singleworld_revolute_cloth_kernel,
     _constraint_relax_singleworld_revolute_kernel,
     _constraints_to_elements_kernel,
     _count_elements_per_world_kernel,
@@ -307,10 +316,11 @@ class PhoenXWorld:
         self.particles: ParticleContainer | None = None
         if self.num_particles > 0:
             self.particles = particle_container_zeros(self.num_particles, device=self.device)
-        # Per-color triangle cid arrays, populated by
-        # :meth:`populate_cloth_triangles_from_model`. ``None`` until
-        # then.
-        self._cloth_color_cids: list[wp.array[wp.int32]] | None = None
+        # Length-1 sentinel :class:`ParticleContainer` for rigid-only
+        # scenes -- kernels that take a particle parameter (cloth
+        # element-emission, type-tag dispatch) need a non-empty SoA to
+        # bind to even when the cloth branch is dead-eliminated.
+        self._particle_sentinel: ParticleContainer | None = None
 
         self.substeps = int(substeps)
         if self.substeps <= 0:
@@ -383,8 +393,13 @@ class PhoenXWorld:
         self.inv_step_dt: float = 0.0
         self.substep_dt: float = 0.0
 
-        # Joint cids at ``[0, num_joints)``; contact cids follow.
-        self._constraint_capacity: int = max(1, self.num_joints + self.max_contact_columns)
+        # cid layout in the shared :class:`ConstraintContainer`:
+        #   [0, num_joints):                                     joints
+        #   [num_joints, num_joints + num_cloth_triangles):      cloth tris
+        #   [num_joints + num_cloth_triangles, ...):             contacts
+        self._constraint_capacity: int = max(
+            1, self.num_joints + self.num_cloth_triangles + self.max_contact_columns
+        )
 
         # Persistent grid fixed at construction (graph-capture stability).
         if max_thread_blocks is not None and int(max_thread_blocks) < 1:
@@ -406,11 +421,18 @@ class PhoenXWorld:
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
             self._constraint_capacity, dtype=ElementInteractionData, device=self.device
         )
-        # Joints are the only active cids until the first ingest.
-        self._num_active_constraints: wp.array[int] = wp.array([self.num_joints], dtype=wp.int32, device=self.device)
+        # Joints + cloth tris are the only active cids until the first
+        # contact ingest (cloth tris are populated immediately by
+        # :meth:`populate_cloth_triangles_from_model`).
+        self._num_active_constraints: wp.array[int] = wp.array(
+            [self.num_joints + self.num_cloth_triangles], dtype=wp.int32, device=self.device
+        )
+        # Unified body-or-particle node space for the partitioner:
+        # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
+        # num_bodies + num_particles)`` are particles.
         self._partitioner = IncrementalContactPartitioner(
             max_num_interactions=self._constraint_capacity,
-            max_num_nodes=max(1, self.num_bodies),
+            max_num_nodes=max(1, self.num_bodies + self.num_particles),
             device=self.device,
             use_tile_scan=True,
         )
@@ -768,6 +790,16 @@ class PhoenXWorld:
         self._collision_filter_keys = wp.array(arr, dtype=wp.int64, device=self.device)
         self._collision_filter_count = int(len(packed))
 
+    def _particles_or_sentinel(self) -> ParticleContainer:
+        """Return the particle SoA, allocating a length-1 sentinel for
+        rigid-only scenes so kernels with a particle parameter still
+        have something to bind."""
+        if self.particles is not None:
+            return self.particles
+        if self._particle_sentinel is None:
+            self._particle_sentinel = particle_container_zeros(1, device=self.device)
+        return self._particle_sentinel
+
     def populate_cloth_triangles_from_model(
         self,
         model,
@@ -810,6 +842,7 @@ class PhoenXWorld:
             inputs=[
                 self.constraints,
                 wp.int32(self.num_joints),  # cid_offset
+                wp.int32(self.num_bodies),
                 model.tri_indices,
                 model.particle_q,
                 model.tri_materials,
@@ -818,58 +851,9 @@ class PhoenXWorld:
             ],
             device=self.device,
         )
-
-        # Host-side greedy coloring on the triangle adjacency graph.
-        # Produced once; the per-substep iterate launches one kernel
-        # per color group with these cid arrays as inputs.
-        tri_indices_host = model.tri_indices.numpy()
-        groups = color_cloth_triangles(tri_indices_host, self.num_particles)
-        cloth_offset = int(self.num_joints)
-        self._cloth_color_cids = [
-            wp.array(
-                np.asarray([cloth_offset + t for t in group], dtype=np.int32),
-                dtype=wp.int32,
-                device=self.device,
-            )
-            for group in groups
-        ]
-
-    def _step_cloth_only(self, dt: float) -> None:
-        """Cloth-only substep loop. Called from :meth:`step` when the
-        scene has cloth particles and no rigid contacts to process."""
-        substep_dt = dt / self.substeps
-        substep_idt = 1.0 / substep_dt
-        particles = self.particles
-        for _ in range(self.substeps):
-            wp.launch(
-                cloth_predict_kernel,
-                dim=self.num_particles,
-                inputs=[particles, self.gravity, wp.float32(substep_dt)],
-                device=self.device,
-            )
-            wp.launch(
-                cloth_prepare_kernel,
-                dim=self.num_cloth_triangles,
-                inputs=[self.constraints, particles, wp.int32(self.num_joints)],
-                device=self.device,
-            )
-            for _it in range(self.solver_iterations):
-                for color_cids in self._cloth_color_cids:
-                    n = int(color_cids.shape[0])
-                    if n == 0:
-                        continue
-                    wp.launch(
-                        cloth_iterate_kernel,
-                        dim=n,
-                        inputs=[self.constraints, particles, color_cids, wp.float32(substep_idt)],
-                        device=self.device,
-                    )
-            wp.launch(
-                cloth_recover_kernel,
-                dim=self.num_particles,
-                inputs=[particles, wp.float32(substep_idt)],
-                device=self.device,
-            )
+        # Bump the active-constraint count so the partitioner sees the
+        # cloth-triangle suffix from the very first step.
+        self._num_active_constraints.fill_(self.num_joints + self.num_cloth_triangles)
 
     def _make_placeholder_contact_views(self) -> ContactViews:
         """Size-1 dummy ContactViews for contact-free steps."""
@@ -918,25 +902,12 @@ class PhoenXWorld:
         self.inv_step_dt = 1.0 / dt
         self.substep_dt = dt / self.substeps
 
-        # Cloth-only fast path: when the scene has cloth particles and
-        # no rigid joints / contacts, run the standalone cloth substep
-        # loop and skip the rigid PGS pipeline entirely. Rigid-only
-        # scenes (num_particles == 0) hit the regular code path with
-        # zero added overhead.
-        if (
-            self.num_particles > 0
-            and self.num_cloth_triangles > 0
-            and self.num_joints == 0
-            and contacts is None
-            and self._cloth_color_cids is not None
-        ):
-            self._step_cloth_only(dt)
-            return
-
         self._ingest_and_warmstart_contacts(contacts, shape_body)
         if self._ingest_scratch is not None:
+            # Contacts begin after the joint + cloth-tri blocks in the
+            # cid space.
             self._partitioner.set_costs_from_contacts(
-                self.num_joints,
+                self.num_joints + self.num_cloth_triangles,
                 self._ingest_scratch.num_contact_columns,
                 self._contact_cols,
             )
@@ -973,6 +944,11 @@ class PhoenXWorld:
                 self._solve_main()
                 self._integrate_positions()
                 self._relax_velocities()
+            # Particle substep exit: flip POSITION_LEVEL writes (cloth
+            # iterate) into VELOCITY_LEVEL via the access-mode
+            # synchronize. No-op for STATIC pinned particles and for
+            # rigid-only scenes (num_particles == 0).
+            self._recover_particle_velocities()
             # Inertia refresh: ``_integrate_positions`` rotated every
             # dynamic body via ``q_new = dq(omega * substep_dt) * q``;
             # the world-frame inverse inertia tensor stored in
@@ -1009,7 +985,7 @@ class PhoenXWorld:
         """Translate Newton ``Contacts`` -> contact columns. Swap prev/current
         per-cid state, ingest -> warm-start -> forward-map stamp, fuse counts."""
         if contacts is None or self.max_contact_columns == 0 or self._ingest_scratch is None:
-            self._num_active_constraints.fill_(self.num_joints)
+            self._num_active_constraints.fill_(self.num_joints + self.num_cloth_triangles)
             self._contact_views = None
             return
 
@@ -1127,7 +1103,7 @@ class PhoenXWorld:
 
         stamp_forward_contact_map(
             rigid_contact_max=self.rigid_contact_max,
-            cid_base=self.num_joints,
+            cid_base=self.num_joints + self.num_cloth_triangles,
             scratch=self._ingest_scratch,
             cid_of_contact=self._cid_of_contact_cur,
             device=self.device,
@@ -1136,13 +1112,13 @@ class PhoenXWorld:
         self._sync_num_active_constraints()
 
     def _sync_num_active_constraints(self) -> None:
-        """Fuse num_joints + num_contact_columns into _num_active_constraints on-device."""
+        """Fuse joint+cloth+contact column count into _num_active_constraints on-device."""
         wp.launch(
             _sync_num_active_constraints_kernel,
             dim=1,
             inputs=[
                 self._ingest_scratch.num_contact_columns,
-                wp.int32(self.num_joints),
+                wp.int32(self.num_joints + self.num_cloth_triangles),
             ],
             outputs=[self._num_active_constraints],
             device=self.device,
@@ -1159,8 +1135,11 @@ class PhoenXWorld:
                 self.constraints,
                 self._contact_cols,
                 self.bodies,
+                self._particles_or_sentinel(),
                 self._num_active_constraints,
                 wp.int32(self.num_joints),
+                wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_bodies),
                 self._elements,
             ],
             device=self.device,
@@ -1295,13 +1274,37 @@ class PhoenXWorld:
             )
 
     def _integrate_forces_and_gravity(self) -> None:
-        """Apply force/torque + gravity in one per-substep launch."""
-        if self.num_bodies == 0:
+        """Apply force/torque + gravity in one per-substep launch.
+
+        Bodies and particles share the same substep-entry semantics:
+        snapshot pose into ``*_prev_substep``, set ``access_mode``,
+        apply gravity. The two launches are independent and can fuse
+        in CUDA-graph capture.
+        """
+        if self.num_bodies > 0:
+            wp.launch(
+                _phoenx_apply_forces_and_gravity_kernel,
+                dim=self.num_bodies,
+                inputs=[self.bodies, self.gravity, wp.float32(self.substep_dt)],
+                device=self.device,
+            )
+        if self.num_particles > 0 and self.particles is not None:
+            wp.launch(
+                cloth_predict_kernel,
+                dim=self.num_particles,
+                inputs=[self.particles, self.gravity, wp.float32(self.substep_dt)],
+                device=self.device,
+            )
+
+    def _recover_particle_velocities(self) -> None:
+        """Substep exit: flip every particle to ``VELOCITY_LEVEL``,
+        which finite-diffs the position delta into velocity."""
+        if self.num_particles == 0 or self.particles is None:
             return
         wp.launch(
-            _phoenx_apply_forces_and_gravity_kernel,
-            dim=self.num_bodies,
-            inputs=[self.bodies, self.gravity, wp.float32(self.substep_dt)],
+            cloth_recover_kernel,
+            dim=self.num_particles,
+            inputs=[self.particles, wp.float32(1.0 / self.substep_dt)],
             device=self.device,
         )
 
@@ -1374,6 +1377,7 @@ class PhoenXWorld:
                     self.constraints,
                     self._contact_cols,
                     self.bodies,
+                    self._particles_or_sentinel(),
                     idt,
                     self._partitioner.element_ids_by_color,
                     self._partitioner.color_starts,
@@ -1382,6 +1386,8 @@ class PhoenXWorld:
                     self._contact_container,
                     contact_views,
                     wp.int32(self.num_joints),
+                    wp.int32(self.num_cloth_triangles),
+                    wp.int32(self.num_bodies),
                     wp.int32(self._singleworld_total_threads),
                     wp.int32(self._fuse_threshold),
                     self._head_active,
@@ -1402,6 +1408,7 @@ class PhoenXWorld:
                 self.constraints,
                 self._contact_cols,
                 self.bodies,
+                self._particles_or_sentinel(),
                 idt,
                 self._partitioner.element_ids_by_color,
                 self._partitioner.color_starts,
@@ -1410,6 +1417,8 @@ class PhoenXWorld:
                 self._contact_container,
                 contact_views,
                 wp.int32(self.num_joints),
+                wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_bodies),
                 wp.int32(self._fuse_threshold),
             ],
             block_dim=self._fuse_tail_block_dim,
@@ -1462,9 +1471,28 @@ class PhoenXWorld:
 
     def _singleworld_kernels(self):
         """Returns (prepare_head, prepare_fused, iterate_head, iterate_fused,
-        relax_head, relax_fused). Revolute-only specialisation skips the
-        joint_mode branch."""
+        relax_head, relax_fused).
+
+        Two factory axes:
+
+        * ``revolute_only``: every joint is revolute -> skip the
+          ``joint_mode`` branch in the iterate hot loop.
+        * ``cloth_support``: ``num_cloth_triangles > 0`` -> include the
+          cloth-triangle dispatch in the type-tag if/elif. The
+          rigid-only variant is byte-identical to the pre-cloth
+          implementation so rigid scenes pay zero cost.
+        """
+        cloth_on = self.num_cloth_triangles > 0
         if self._use_revolute_specialization:
+            if cloth_on:
+                return (
+                    _constraint_prepare_singleworld_revolute_cloth_kernel,
+                    _constraint_prepare_singleworld_fused_revolute_cloth_kernel,
+                    _constraint_iterate_singleworld_revolute_cloth_kernel,
+                    _constraint_iterate_singleworld_fused_revolute_cloth_kernel,
+                    _constraint_relax_singleworld_revolute_cloth_kernel,
+                    _constraint_relax_singleworld_fused_revolute_cloth_kernel,
+                )
             return (
                 _constraint_prepare_singleworld_revolute_kernel,
                 _constraint_prepare_singleworld_fused_revolute_kernel,
@@ -1472,6 +1500,15 @@ class PhoenXWorld:
                 _constraint_iterate_singleworld_fused_revolute_kernel,
                 _constraint_relax_singleworld_revolute_kernel,
                 _constraint_relax_singleworld_fused_revolute_kernel,
+            )
+        if cloth_on:
+            return (
+                _constraint_prepare_singleworld_cloth_kernel,
+                _constraint_prepare_singleworld_fused_cloth_kernel,
+                _constraint_iterate_singleworld_cloth_kernel,
+                _constraint_iterate_singleworld_fused_cloth_kernel,
+                _constraint_relax_singleworld_cloth_kernel,
+                _constraint_relax_singleworld_fused_cloth_kernel,
             )
         return (
             _constraint_prepare_singleworld_kernel,
