@@ -18,6 +18,7 @@ from enum import IntEnum
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -1046,6 +1047,15 @@ class WorldBuilder:
         c.kinematic_target_pos = wp.array(positions, dtype=wp.vec3f, device=device)
         c.kinematic_target_orient = wp.array(orientations, dtype=wp.quatf, device=device)
         c.kinematic_target_valid = wp.zeros(n, dtype=wp.int32, device=device)
+        # Substep-entry pose snapshot + access-mode tag (see
+        # :mod:`newton._src.solvers.phoenx.access_mode`). Seed
+        # snapshots to the initial pose so the first synchronize call
+        # finite-diffs against a sensible anchor; mode defaults to
+        # VELOCITY_LEVEL (the apply-forces kernel re-stamps every
+        # substep).
+        c.position_prev_substep = wp.array(positions, dtype=wp.vec3f, device=device)
+        c.orientation_prev_substep = wp.array(orientations, dtype=wp.quatf, device=device)
+        c.access_mode = wp.full(n, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
         return c
 
     def _pack_joint_arrays(self, device: wp.context.Device) -> dict:
