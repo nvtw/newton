@@ -23,6 +23,10 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_POSITION_LEVEL,
+    synchronize_position_velocity,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     ConstraintContainer,
@@ -35,7 +39,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_mat22,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
-from newton._src.solvers.phoenx.particle import ParticleContainer
+from newton._src.solvers.phoenx.particle import ParticleContainer, particle_set_access_mode
 
 __all__ = [
     "CLOTH_TRIANGLE_DWORDS",
@@ -217,6 +221,7 @@ def cloth_triangle_set_beta_mu(c: ConstraintContainer, cid: wp.int32, v: wp.floa
 # ---------------------------------------------------------------------------
 
 
+_ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
 _PROJECTOR_EPS = wp.constant(wp.float32(1.0e-12))
 _EXTRACT_ROT_EPS = wp.constant(wp.float32(1.0e-6))
 _EXTRACT_ROT_MAX_ITERS = wp.constant(wp.int32(15))
@@ -315,6 +320,15 @@ def cloth_triangle_iterate_at(
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
     body_c = read_int(constraints, _OFF_BODY3, cid)
+
+    # Flip the three vertices to POSITION_LEVEL so the position read
+    # below reflects any prior velocity-level write (e.g. a contact
+    # relax sweep) before we project. No-op on subsequent sweeps in
+    # the same substep (mode already POSITION_LEVEL); no-op on STATIC
+    # pinned vertices.
+    particle_set_access_mode(particles, body_a, _ACCESS_MODE_POSITION_LEVEL, idt)
+    particle_set_access_mode(particles, body_b, _ACCESS_MODE_POSITION_LEVEL, idt)
+    particle_set_access_mode(particles, body_c, _ACCESS_MODE_POSITION_LEVEL, idt)
 
     inv_mass_a = read_float(constraints, _OFF_INV_MASS_A, cid)
     inv_mass_b = read_float(constraints, _OFF_INV_MASS_B, cid)

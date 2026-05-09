@@ -6,6 +6,10 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_STATIC,
+    ACCESS_MODE_VELOCITY_LEVEL,
+)
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -955,14 +959,27 @@ def _phoenx_apply_forces_and_gravity_kernel(
     gravity: wp.array[wp.vec3f],
     substep_dt: wp.float32,
 ):
-    """Per-body velocity update at the top of every substep: external forces +
-    gravity, fused. Force accumulators are zeroed in
-    :func:`_phoenx_update_inertia_and_clear_forces_kernel` at end-of-step."""
+    """Per-body substep entry: snapshot pose into ``*_prev_substep``,
+    set :attr:`access_mode`, then apply external forces + gravity to
+    velocity (dynamic only). Force accumulators are zeroed in
+    :func:`_phoenx_update_inertia_and_clear_forces_kernel` at end-of-step.
+
+    The substep-start pose snapshot is the finite-diff anchor used by
+    :mod:`newton._src.solvers.phoenx.access_mode` when a constraint
+    flips a body between velocity- and position-level. It must run
+    once per substep regardless of motion type so non-dynamic bodies
+    also have a valid anchor.
+    """
     i = wp.tid()
+    bodies.position_prev_substep[i] = bodies.position[i]
+    bodies.orientation_prev_substep[i] = bodies.orientation[i]
     if bodies.motion_type[i] != MOTION_DYNAMIC:
+        bodies.access_mode[i] = ACCESS_MODE_STATIC
         return
     if bodies.inverse_mass[i] == 0.0:
+        bodies.access_mode[i] = ACCESS_MODE_STATIC
         return
+    bodies.access_mode[i] = ACCESS_MODE_VELOCITY_LEVEL
     v = bodies.velocity[i]
     w = bodies.angular_velocity[i]
     inv_mass = bodies.inverse_mass[i]

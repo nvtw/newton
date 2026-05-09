@@ -29,6 +29,11 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_STATIC,
+    ACCESS_MODE_VELOCITY_LEVEL,
+    synchronize_position_velocity,
+)
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_iterate_at,
     cloth_triangle_prepare_for_iteration_at,
@@ -65,18 +70,25 @@ def cloth_predict_kernel(
     gravity: wp.array[wp.vec3f],
     substep_dt: wp.float32,
 ):
-    """Substep entry: snapshot, apply gravity, predict.
+    """Substep entry: snapshot pose, set access_mode, apply gravity, predict.
 
-    Particles with ``inverse_mass == 0`` are pinned: snapshot only,
-    no velocity / position update so the iterate's mass-weighted
-    projection sees them as immovable anchors. ``gravity[0]`` is the
-    single-world gravity vector (cloth-only path runs at world 0).
+    The position is advanced to ``p + dt * v`` in the position field
+    while ``access_mode = VELOCITY_LEVEL`` -- the
+    :mod:`access_mode.synchronize_position_velocity` V->P branch
+    integrates the same expression, so a subsequent constraint flip
+    to ``POSITION_LEVEL`` is consistent with the predicted state.
+
+    Particles with ``inverse_mass == 0`` get ``access_mode = STATIC``
+    so synchronize is a no-op on them; the snapshot anchors them in
+    place.
     """
     i = wp.tid()
     p = particles.position[i]
     particles.position_prev_substep[i] = p
     if particles.inverse_mass[i] == wp.float32(0.0):
+        particles.access_mode[i] = ACCESS_MODE_STATIC
         return
+    particles.access_mode[i] = ACCESS_MODE_VELOCITY_LEVEL
     v = particles.velocity[i] + gravity[0] * substep_dt
     particles.velocity[i] = v
     particles.position[i] = p + substep_dt * v
@@ -87,11 +99,25 @@ def cloth_recover_kernel(
     particles: ParticleContainer,
     inv_dt: wp.float32,
 ):
-    """Substep exit: ``velocity = (pos - pos_prev) * inv_dt``."""
+    """Substep exit: flip every particle to ``VELOCITY_LEVEL``.
+
+    Routed through :func:`synchronize_position_velocity` so the
+    finite-diff math stays in one place and ``STATIC`` particles are
+    short-circuited consistently with the rest of the access-mode
+    pattern.
+    """
     i = wp.tid()
-    if particles.inverse_mass[i] == wp.float32(0.0):
-        return
-    particles.velocity[i] = (particles.position[i] - particles.position_prev_substep[i]) * inv_dt
+    pos_new, vel_new, mode_new = synchronize_position_velocity(
+        particles.position[i],
+        particles.velocity[i],
+        particles.position_prev_substep[i],
+        particles.access_mode[i],
+        ACCESS_MODE_VELOCITY_LEVEL,
+        inv_dt,
+    )
+    particles.position[i] = pos_new
+    particles.velocity[i] = vel_new
+    particles.access_mode[i] = mode_new
 
 
 @wp.kernel

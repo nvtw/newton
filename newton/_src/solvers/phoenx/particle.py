@@ -13,9 +13,15 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_VELOCITY_LEVEL,
+    synchronize_position_velocity,
+)
+
 __all__ = [
     "ParticleContainer",
     "particle_container_zeros",
+    "particle_set_access_mode",
 ]
 
 
@@ -36,8 +42,16 @@ class ParticleContainer:
     inverse_mass: wp.array[wp.float32]
 
     #: Position at substep entry (pre-predict). Read by the XPBD
-    #: damping term as ``dx = pos - pos_prev_substep``.
+    #: damping term as ``dx = pos - pos_prev_substep`` and by the
+    #: :mod:`newton._src.solvers.phoenx.access_mode` synchronize helper
+    #: as the finite-diff anchor for the position->velocity flip.
     position_prev_substep: wp.array[wp.vec3f]
+
+    #: Per-particle access-mode tag (see
+    #: :mod:`newton._src.solvers.phoenx.access_mode`). Predict sets
+    #: ``VELOCITY_LEVEL`` for dynamic particles and ``STATIC`` for
+    #: pinned (``inv_mass == 0``).
+    access_mode: wp.array[wp.int32]
 
 
 def particle_container_zeros(
@@ -52,4 +66,28 @@ def particle_container_zeros(
     p.velocity = wp.zeros(num_particles, dtype=wp.vec3f, device=device)
     p.inverse_mass = wp.zeros(num_particles, dtype=wp.float32, device=device)
     p.position_prev_substep = wp.zeros(num_particles, dtype=wp.vec3f, device=device)
+    p.access_mode = wp.full(num_particles, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
     return p
+
+
+@wp.func
+def particle_set_access_mode(
+    particles: ParticleContainer,
+    p: wp.int32,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+):
+    """SoA wrapper around :func:`synchronize_position_velocity`. Reads
+    the four dual-state fields out of the container, runs the
+    Jitter2-style synchronize, and scatters the result back."""
+    pos_new, vel_new, mode_new = synchronize_position_velocity(
+        particles.position[p],
+        particles.velocity[p],
+        particles.position_prev_substep[p],
+        particles.access_mode[p],
+        new_access_mode,
+        inv_dt,
+    )
+    particles.position[p] = pos_new
+    particles.velocity[p] = vel_new
+    particles.access_mode[p] = mode_new
