@@ -22,6 +22,7 @@ __all__ = [
     "CONSTRAINT_BODY1_OFFSET",
     "CONSTRAINT_BODY2_OFFSET",
     "CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET",
+    "CONSTRAINT_TYPE_CLOTH_TRIANGLE",
     "CONSTRAINT_TYPE_CONTACT",
     "CONSTRAINT_TYPE_INVALID",
     "CONSTRAINT_TYPE_OFFSET",
@@ -45,6 +46,7 @@ __all__ = [
     "pd_coefficients",
     "read_float",
     "read_int",
+    "read_mat22",
     "read_mat33",
     "read_mat44",
     "read_quat",
@@ -53,6 +55,7 @@ __all__ = [
     "soft_constraint_coefficients",
     "write_float",
     "write_int",
+    "write_mat22",
     "write_mat33",
     "write_mat44",
     "write_quat",
@@ -72,6 +75,9 @@ CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(8))
 #: Rigid-rigid contact, one column per (shape_a, shape_b). Warm-start state
 #: lives in :class:`ContactContainer`.
 CONSTRAINT_TYPE_CONTACT = wp.constant(wp.int32(9))
+#: XPBD cloth triangle (FemTriPBD area + shear rows). Endpoints body1/body2/body3
+#: are particle indices. See :mod:`constraint_cloth_triangle`.
+CONSTRAINT_TYPE_CLOTH_TRIANGLE = wp.constant(wp.int32(10))
 
 CONSTRAINT_TYPE_OFFSET = wp.constant(wp.int32(0))
 CONSTRAINT_BODY1_OFFSET = wp.constant(wp.int32(1))
@@ -173,6 +179,25 @@ def write_quat(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.quatf
     c.data[off + 1, cid] = v[1]
     c.data[off + 2, cid] = v[2]
     c.data[off + 3, cid] = v[3]
+
+
+@wp.func
+def read_mat22(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.mat22f:
+    """Row-major 2x2 from 4 consecutive dwords."""
+    return wp.mat22f(
+        c.data[off + 0, cid],
+        c.data[off + 1, cid],
+        c.data[off + 2, cid],
+        c.data[off + 3, cid],
+    )
+
+
+@wp.func
+def write_mat22(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.mat22f):
+    c.data[off + 0, cid] = v[0, 0]
+    c.data[off + 1, cid] = v[0, 1]
+    c.data[off + 2, cid] = v[1, 0]
+    c.data[off + 3, cid] = v[1, 1]
 
 
 @wp.func

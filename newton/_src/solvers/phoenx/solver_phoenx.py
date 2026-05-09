@@ -35,6 +35,9 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_per_contact_wrench_kernel,
     contact_views_make,
 )
+from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    CLOTH_TRIANGLE_DWORDS,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     constraint_container_zeros,
@@ -60,8 +63,17 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
     MAX_COLORS,
     IncrementalContactPartitioner,
 )
+from newton._src.solvers.phoenx.cloth_step import (
+    cloth_init_triangle_rows_kernel,
+    cloth_iterate_kernel,
+    cloth_predict_kernel,
+    cloth_prepare_kernel,
+    cloth_recover_kernel,
+    color_cloth_triangles,
+)
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int
 from newton._src.solvers.phoenx.materials import MaterialData
+from newton._src.solvers.phoenx.particle import ParticleContainer, particle_container_zeros
 from newton._src.solvers.phoenx.solver_config import (
     FUSE_TAIL_BLOCK_DIM,
     FUSE_TAIL_MAX_COLOR_SIZE,
@@ -220,6 +232,8 @@ class PhoenXWorld:
         gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         rigid_contact_max: int = 0,
         num_joints: int = 0,
+        num_particles: int = 0,
+        num_cloth_triangles: int = 0,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         num_worlds: int = 1,
@@ -282,6 +296,21 @@ class PhoenXWorld:
         self.num_joints: int = int(num_joints)
         if self.num_joints < 0:
             raise ValueError(f"num_joints must be >= 0 (got {self.num_joints})")
+        self.num_particles: int = int(num_particles)
+        if self.num_particles < 0:
+            raise ValueError(f"num_particles must be >= 0 (got {self.num_particles})")
+        self.num_cloth_triangles: int = int(num_cloth_triangles)
+        if self.num_cloth_triangles < 0:
+            raise ValueError(f"num_cloth_triangles must be >= 0 (got {self.num_cloth_triangles})")
+        # Lazily allocate the particle store only when cloth is present;
+        # rigid-only scenes pay zero memory for particles.
+        self.particles: ParticleContainer | None = None
+        if self.num_particles > 0:
+            self.particles = particle_container_zeros(self.num_particles, device=self.device)
+        # Per-color triangle cid arrays, populated by
+        # :meth:`populate_cloth_triangles_from_model`. ``None`` until
+        # then.
+        self._cloth_color_cids: list[wp.array[wp.int32]] | None = None
 
         self.substeps = int(substeps)
         if self.substeps <= 0:
@@ -466,8 +495,10 @@ class PhoenXWorld:
 
     def _assert_invariants(self) -> None:
         """Validate per-step buffer shapes against the documented schema."""
-        expected_constraint_dwords = self.required_constraint_dwords(self.num_joints)
-        expected_constraint_cols = max(1, int(self.num_joints))
+        expected_constraint_dwords = self.required_constraint_dwords(
+            self.num_joints, self.num_cloth_triangles
+        )
+        expected_constraint_cols = max(1, int(self.num_joints) + int(self.num_cloth_triangles))
         actual_constraint_shape = self.constraints.data.shape
         assert actual_constraint_shape == (expected_constraint_dwords, expected_constraint_cols), (
             f"ConstraintContainer.data has shape {actual_constraint_shape}, expected "
@@ -574,22 +605,30 @@ class PhoenXWorld:
     # Joint initialisation.
 
     @staticmethod
-    def required_constraint_dwords(num_joints: int) -> int:
-        """Dword width: ADBS_DWORDS (154) when joints exist, else CONTACT_DWORDS (7)."""
+    def required_constraint_dwords(num_joints: int, num_cloth_triangles: int = 0) -> int:
+        """Dword width = max(ADBS, CONTACT, CLOTH_TRIANGLE) over the active types."""
+        widths = [int(CONTACT_DWORDS)]
         if int(num_joints) > 0:
-            return int(ADBS_DWORDS)
-        return int(CONTACT_DWORDS)
+            widths.append(int(ADBS_DWORDS))
+        if int(num_cloth_triangles) > 0:
+            widths.append(int(CLOTH_TRIANGLE_DWORDS))
+        return max(widths)
 
     @staticmethod
     def make_constraint_container(
         num_joints: int,
         device: wp.context.Devicelike = None,
+        num_cloth_triangles: int = 0,
     ) -> ConstraintContainer:
-        """Factory for a correctly-sized joint-only :class:`ConstraintContainer`."""
-        cap = max(1, int(num_joints))
+        """Factory for a correctly-sized :class:`ConstraintContainer`.
+
+        Joint cids occupy ``[0, num_joints)``; cloth-triangle cids
+        occupy ``[num_joints, num_joints + num_cloth_triangles)``.
+        """
+        cap = max(1, int(num_joints) + int(num_cloth_triangles))
         return constraint_container_zeros(
             num_constraints=cap,
-            num_dwords=PhoenXWorld.required_constraint_dwords(num_joints),
+            num_dwords=PhoenXWorld.required_constraint_dwords(num_joints, num_cloth_triangles),
             device=device,
         )
 
@@ -729,6 +768,109 @@ class PhoenXWorld:
         self._collision_filter_keys = wp.array(arr, dtype=wp.int64, device=self.device)
         self._collision_filter_count = int(len(packed))
 
+    def populate_cloth_triangles_from_model(
+        self,
+        model,
+        *,
+        beta_lambda: float = 0.1,
+        beta_mu: float = 0.1,
+    ) -> None:
+        """Stamp cloth-triangle constraint rows from a Newton :class:`Model`.
+
+        Reads ``model.particle_q`` / ``particle_qd`` / ``particle_inv_mass``
+        / ``tri_indices`` / ``tri_materials``. Triangle cids occupy
+        ``[num_joints, num_joints + num_cloth_triangles)`` in the
+        :class:`ConstraintContainer`. Also runs a host-side greedy
+        graph coloring pass (one-shot at populate time) so the
+        per-substep iterate kernel can launch parallel-safe kernels
+        per color group.
+        """
+        if self.num_cloth_triangles == 0:
+            return
+        if self.particles is None:
+            raise RuntimeError("populate_cloth_triangles_from_model requires num_particles > 0")
+        model_particle_count = int(model.particle_count)
+        model_tri_count = int(model.tri_count)
+        if model_particle_count != self.num_particles:
+            raise ValueError(
+                f"populate_cloth_triangles_from_model: model.particle_count "
+                f"({model_particle_count}) != world.num_particles ({self.num_particles})"
+            )
+        if model_tri_count != self.num_cloth_triangles:
+            raise ValueError(
+                f"populate_cloth_triangles_from_model: model.tri_count "
+                f"({model_tri_count}) != world.num_cloth_triangles ({self.num_cloth_triangles})"
+            )
+        wp.copy(self.particles.position, model.particle_q)
+        wp.copy(self.particles.velocity, model.particle_qd)
+        wp.copy(self.particles.inverse_mass, model.particle_inv_mass)
+        wp.launch(
+            cloth_init_triangle_rows_kernel,
+            dim=self.num_cloth_triangles,
+            inputs=[
+                self.constraints,
+                wp.int32(self.num_joints),  # cid_offset
+                model.tri_indices,
+                model.particle_q,
+                model.tri_materials,
+                wp.float32(beta_lambda),
+                wp.float32(beta_mu),
+            ],
+            device=self.device,
+        )
+
+        # Host-side greedy coloring on the triangle adjacency graph.
+        # Produced once; the per-substep iterate launches one kernel
+        # per color group with these cid arrays as inputs.
+        tri_indices_host = model.tri_indices.numpy()
+        groups = color_cloth_triangles(tri_indices_host, self.num_particles)
+        cloth_offset = int(self.num_joints)
+        self._cloth_color_cids = [
+            wp.array(
+                np.asarray([cloth_offset + t for t in group], dtype=np.int32),
+                dtype=wp.int32,
+                device=self.device,
+            )
+            for group in groups
+        ]
+
+    def _step_cloth_only(self, dt: float) -> None:
+        """Cloth-only substep loop. Called from :meth:`step` when the
+        scene has cloth particles and no rigid contacts to process."""
+        substep_dt = dt / self.substeps
+        substep_idt = 1.0 / substep_dt
+        particles = self.particles
+        for _ in range(self.substeps):
+            wp.launch(
+                cloth_predict_kernel,
+                dim=self.num_particles,
+                inputs=[particles, self.gravity, wp.float32(substep_dt)],
+                device=self.device,
+            )
+            wp.launch(
+                cloth_prepare_kernel,
+                dim=self.num_cloth_triangles,
+                inputs=[self.constraints, particles, wp.int32(self.num_joints)],
+                device=self.device,
+            )
+            for _it in range(self.solver_iterations):
+                for color_cids in self._cloth_color_cids:
+                    n = int(color_cids.shape[0])
+                    if n == 0:
+                        continue
+                    wp.launch(
+                        cloth_iterate_kernel,
+                        dim=n,
+                        inputs=[self.constraints, particles, color_cids, wp.float32(substep_idt)],
+                        device=self.device,
+                    )
+            wp.launch(
+                cloth_recover_kernel,
+                dim=self.num_particles,
+                inputs=[particles, wp.float32(substep_idt)],
+                device=self.device,
+            )
+
     def _make_placeholder_contact_views(self) -> ContactViews:
         """Size-1 dummy ContactViews for contact-free steps."""
         dummy_int = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -775,6 +917,21 @@ class PhoenXWorld:
         self.step_dt = dt
         self.inv_step_dt = 1.0 / dt
         self.substep_dt = dt / self.substeps
+
+        # Cloth-only fast path: when the scene has cloth particles and
+        # no rigid joints / contacts, run the standalone cloth substep
+        # loop and skip the rigid PGS pipeline entirely. Rigid-only
+        # scenes (num_particles == 0) hit the regular code path with
+        # zero added overhead.
+        if (
+            self.num_particles > 0
+            and self.num_cloth_triangles > 0
+            and self.num_joints == 0
+            and contacts is None
+            and self._cloth_color_cids is not None
+        ):
+            self._step_cloth_only(dt)
+            return
 
         self._ingest_and_warmstart_contacts(contacts, shape_body)
         if self._ingest_scratch is not None:
