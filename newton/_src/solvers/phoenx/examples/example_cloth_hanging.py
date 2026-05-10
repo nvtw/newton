@@ -1,11 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""PhoenX hanging-cloth demo.
+"""PhoenX hanging-cloth + cloth-rigid contact demo.
 
-A cloth grid pinned along its left edge falls under gravity through
-PhoenX's position-based cloth iterate (Jitter2 ``FemTriPBD`` port). No
-rigid bodies, no contacts -- just particles + cloth-triangle XPBD rows.
+A cloth strip pinned along its left edge falls under gravity. A free
+rigid cube drops onto the cloth from above, and a static ground plane
+catches everything below. This exercises the full cloth-aware
+contact pipeline:
+
+* Cloth-tri PBD elasticity (Jitter2 ``FemTriPBD`` port)
+* Cloth-vs-rigid contacts (the cube vs. the cloth, the ground plane
+  vs. either side)
+* Share-vertex broad-phase filter (no spurious adjacent-tri contacts)
+* Cloth-aware contact iterate via the unified endpoint helpers
 
 Run::
 
@@ -23,11 +30,16 @@ from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_lame_from_youngs_poisson_plane_stress,
 )
+from newton._src.solvers.phoenx.examples.example_common import (
+    init_phoenx_bodies_kernel,
+    newton_to_phoenx_kernel,
+    phoenx_to_newton_kernel,
+)
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
 class Example:
-    """A cloth strip pinned on one edge, falling under gravity."""
+    """Hanging cloth + a falling rigid cube + a static ground plane."""
 
     def __init__(
         self,
@@ -37,6 +49,10 @@ class Example:
         height: int = 16,
         youngs_modulus: float = 5.0e8,
         poisson_ratio: float = 0.3,
+        cube_size: float = 0.4,
+        cube_drop_height: float = 5.0,
+        cloth_thickness: float = 0.005,
+        cloth_gap: float = 0.010,
     ):
         self.viewer = viewer
         self.device = wp.get_device()
@@ -58,8 +74,24 @@ class Example:
         self.tri_ka, self.tri_ke = cloth_lame_from_youngs_poisson_plane_stress(
             self.youngs_modulus, self.poisson_ratio
         )
+        self._cube_drop_height = float(cube_drop_height)
 
         builder = newton.ModelBuilder()
+
+        # Static ground plane at z = 0. ``add_ground_plane`` creates an
+        # infinite-plane shape attached to the world body; it stops
+        # the cloth (and the cube) from falling forever.
+        builder.add_ground_plane()
+
+        # Free rigid cube starting above the cloth so it drops onto
+        # the cloth's free corner. Mass-1 unit cube; default inertia.
+        self._cube_body = builder.add_body(
+            xform=wp.transform(p=wp.vec3(-1.0, 1.0, cube_drop_height), q=wp.quat_identity()),
+            mass=1.0,
+        )
+        builder.add_shape_box(self._cube_body, hx=cube_size, hy=cube_size, hz=cube_size)
+
+        # Hanging cloth pinned along the left edge.
         builder.add_cloth_grid(
             pos=wp.vec3(0.0, 0.0, 4.0),
             rot=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), wp.pi * 0.5),
@@ -77,9 +109,46 @@ class Example:
 
         self.model = builder.finalize(device=self.device)
 
-        # PhoenX scene: one anchor body slot (so BodyContainer is non-empty),
-        # no joints, no contacts -- only cloth particles + cloth triangles.
-        bodies = body_container_zeros(1, device=self.device)
+        # PhoenX bodies layout: slot 0 is the static "world" anchor
+        # body, slots 1..N+1 are Newton's dynamic bodies. The cube
+        # lives at slot 1.
+        num_phoenx_bodies = int(self.model.body_count) + 1
+        bodies = body_container_zeros(num_phoenx_bodies, device=self.device)
+        # Identity orientation default for slot 0 (the world anchor).
+        bodies.orientation.assign(
+            wp.array(
+                np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32),
+                dtype=wp.quatf,
+                device=self.device,
+            )
+        )
+        if self.model.body_count > 0:
+            self.state_init = self.model.state()
+            wp.launch(
+                init_phoenx_bodies_kernel,
+                dim=self.model.body_count,
+                inputs=[
+                    self.model.body_q,
+                    self.state_init.body_qd,
+                    self.model.body_com,
+                    self.model.body_inv_mass,
+                    self.model.body_inv_inertia,
+                ],
+                outputs=[
+                    bodies.position,
+                    bodies.orientation,
+                    bodies.velocity,
+                    bodies.angular_velocity,
+                    bodies.inverse_mass,
+                    bodies.inverse_inertia,
+                    bodies.inverse_inertia_world,
+                    bodies.motion_type,
+                    bodies.body_com,
+                ],
+                device=self.device,
+            )
+        self.bodies = bodies
+
         constraints = PhoenXWorld.make_constraint_container(
             num_joints=0,
             num_cloth_triangles=int(self.model.tri_count),
@@ -94,22 +163,70 @@ class Example:
             num_worlds=1,
             substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,
+            rigid_contact_max=8192,
             step_layout="single_world",
             device=self.device,
         )
         self.world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
         self.world.populate_cloth_triangles_from_model(self.model)
+        self.collision_pipeline = self.world.setup_cloth_collision_pipeline(
+            self.model,
+            cloth_thickness=cloth_thickness,
+            cloth_gap=cloth_gap,
+            rigid_contact_max=8192,
+        )
+        self.contacts = self.collision_pipeline.contacts()
 
-        self.state_0 = self.model.state()
+        self.state = self.model.state()
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(pos=wp.vec3(6.0, 0.0, 4.0), pitch=-15.0, yaw=180.0)
 
         self._capture()
 
+    def _sync_newton_to_phoenx(self) -> None:
+        """Push current Newton body state into PhoenX (slot 0 = anchor)."""
+        n = int(self.model.body_count)
+        if n == 0:
+            return
+        wp.launch(
+            newton_to_phoenx_kernel,
+            dim=n,
+            inputs=[self.state.body_q, self.state.body_qd, self.model.body_com],
+            outputs=[
+                self.bodies.position[1 : 1 + n],
+                self.bodies.orientation[1 : 1 + n],
+                self.bodies.velocity[1 : 1 + n],
+                self.bodies.angular_velocity[1 : 1 + n],
+            ],
+            device=self.device,
+        )
+
+    def _sync_phoenx_to_newton(self) -> None:
+        """Reverse: PhoenX body state -> Newton state for rendering."""
+        n = int(self.model.body_count)
+        if n == 0:
+            return
+        wp.launch(
+            phoenx_to_newton_kernel,
+            dim=n,
+            inputs=[
+                self.bodies.position[1 : 1 + n],
+                self.bodies.orientation[1 : 1 + n],
+                self.bodies.velocity[1 : 1 + n],
+                self.bodies.angular_velocity[1 : 1 + n],
+                self.model.body_com,
+            ],
+            outputs=[self.state.body_q, self.state.body_qd],
+            device=self.device,
+        )
+        # Also push particle state into Newton's state for rendering.
+        wp.copy(self.state.particle_q, self.world.particles.position)
+        wp.copy(self.state.particle_qd, self.world.particles.velocity)
+
     def _capture(self) -> None:
         if self.device.is_cuda:
-            self.world.step(self.frame_dt, contacts=None)  # warm-up
+            self._simulate_one_frame()  # warm-up
             with wp.ScopedCapture(device=self.device) as capture:
                 self._simulate_one_frame()
             self.graph = capture.graph
@@ -117,9 +234,14 @@ class Example:
             self.graph = None
 
     def _simulate_one_frame(self) -> None:
-        self.world.step(self.frame_dt, contacts=None)
-        wp.copy(self.state_0.particle_q, self.world.particles.position)
-        wp.copy(self.state_0.particle_qd, self.world.particles.velocity)
+        # Newton -> PhoenX (cube state may have been touched by the
+        # outer host between frames).
+        self._sync_newton_to_phoenx()
+        # Run the cloth-aware collision pipeline + solver step.
+        self.world.collide(self.state, self.contacts)
+        self.world.step(self.frame_dt, contacts=self.contacts)
+        # PhoenX -> Newton for rendering.
+        self._sync_phoenx_to_newton()
 
     def step(self) -> None:
         if self.graph is not None:
@@ -129,27 +251,33 @@ class Example:
         self.sim_time += self.frame_dt
 
     def test_final(self) -> None:
-        positions = self.state_0.particle_q.numpy()
+        positions = self.state.particle_q.numpy()
         pinned_indices = [j * (self.dim_x + 1) for j in range(self.dim_y + 1)]
-        free_corner = self.dim_y * (self.dim_x + 1) + self.dim_x
 
         if not np.all(np.isfinite(positions)):
             raise RuntimeError("non-finite particle position in final state")
 
+        # Pinned particles haven't drifted (small numerical floor).
         pinned_drift = np.linalg.norm(
             positions[pinned_indices] - self.model.particle_q.numpy()[pinned_indices], axis=1
         )
         if pinned_drift.max() > 1.0e-3:
             raise RuntimeError(f"pinned particle drifted: max={pinned_drift.max():.4f} m")
 
-        z_initial = self.model.particle_q.numpy()[free_corner, 2]
-        z_drop = z_initial - positions[free_corner, 2]
-        if z_drop < 0.05:
-            raise RuntimeError(f"free corner barely dropped (z_drop={z_drop:.4f} m)")
+        # Cube fell under gravity (no constraint), so it should have
+        # dropped at least a few cm from its initial height.
+        cube_q = self.state.body_q.numpy()
+        cube_z = float(cube_q[self._cube_body, 2])
+        if cube_z > self._cube_drop_height - 0.05:
+            raise RuntimeError(
+                f"cube didn't fall (z={cube_z:.4f}, started at {self._cube_drop_height:.4f})"
+            )
+        if not np.isfinite(cube_z):
+            raise RuntimeError(f"cube z went non-finite: {cube_z}")
 
     def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)
-        self.viewer.log_state(self.state_0)
+        self.viewer.log_state(self.state)
         self.viewer.end_frame()
 
 
@@ -159,6 +287,10 @@ if __name__ == "__main__":
     parser.add_argument("--height", type=int, default=16)
     parser.add_argument("--youngs-modulus", type=float, default=5.0e8)
     parser.add_argument("--poisson-ratio", type=float, default=0.3)
+    parser.add_argument("--cube-size", type=float, default=0.4)
+    parser.add_argument("--cube-drop-height", type=float, default=5.0)
+    parser.add_argument("--cloth-thickness", type=float, default=0.005)
+    parser.add_argument("--cloth-gap", type=float, default=0.010)
     viewer, args = newton.examples.init(parser)
     example = Example(
         viewer,
@@ -167,5 +299,9 @@ if __name__ == "__main__":
         height=args.height,
         youngs_modulus=args.youngs_modulus,
         poisson_ratio=args.poisson_ratio,
+        cube_size=args.cube_size,
+        cube_drop_height=args.cube_drop_height,
+        cloth_thickness=args.cloth_thickness,
+        cloth_gap=args.cloth_gap,
     )
     newton.examples.run(example, args)
