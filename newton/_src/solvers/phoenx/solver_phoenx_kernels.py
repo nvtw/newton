@@ -52,6 +52,9 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
 from newton._src.solvers.phoenx.mass_splitting.interaction_graph import (
     InteractionGraphData,
 )
+from newton._src.solvers.phoenx.mass_splitting.iterate_contact_cloth_split import (
+    contact_iterate_cloth_aware_split,
+)
 from newton._src.solvers.phoenx.mass_splitting.iterate_contact_split import (
     contact_iterate_split,
 )
@@ -89,7 +92,9 @@ __all__ = [
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
     "_constraint_iterate_singleworld_cloth_kernel",
+    "_constraint_iterate_singleworld_cloth_split_kernel",
     "_constraint_iterate_singleworld_fused_cloth_kernel",
+    "_constraint_iterate_singleworld_fused_cloth_split_kernel",
     "_constraint_iterate_singleworld_fused_revolute_cloth_kernel",
     "_constraint_iterate_singleworld_fused_revolute_kernel",
     "_constraint_iterate_singleworld_fused_split_kernel",
@@ -1357,10 +1362,17 @@ def _make_singleworld_persistent_kernel(
                             bodies, particles, num_bodies, idt, cc, contacts,
                         )
                     else:
-                        contact_iterate_cloth_aware(
-                            contact_cols, cid - num_joints - num_cloth_triangles,
-                            bodies, particles, num_bodies, idt, cc, contacts, use_bias,
-                        )
+                        if wp.static(mass_split):
+                            contact_iterate_cloth_aware_split(
+                                contact_cols, cid - num_joints - num_cloth_triangles,
+                                bodies, particles, num_bodies, idt, cc, contacts, use_bias,
+                                mass_split_graph, cid_to_partition_constraint_id,
+                            )
+                        else:
+                            contact_iterate_cloth_aware(
+                                contact_cols, cid - num_joints - num_cloth_triangles,
+                                bodies, particles, num_bodies, idt, cc, contacts, use_bias,
+                            )
                 else:
                     if wp.static(is_prepare):
                         contact_prepare_for_iteration(
@@ -1453,10 +1465,17 @@ def _make_singleworld_fused_kernel(
                                 bodies, particles, num_bodies, idt, cc, contacts,
                             )
                         else:
-                            contact_iterate_cloth_aware(
-                                contact_cols, cid - num_joints - num_cloth_triangles,
-                                bodies, particles, num_bodies, idt, cc, contacts, use_bias,
-                            )
+                            if wp.static(mass_split):
+                                contact_iterate_cloth_aware_split(
+                                    contact_cols, cid - num_joints - num_cloth_triangles,
+                                    bodies, particles, num_bodies, idt, cc, contacts, use_bias,
+                                    mass_split_graph, cid_to_partition_constraint_id,
+                                )
+                            else:
+                                contact_iterate_cloth_aware(
+                                    contact_cols, cid - num_joints - num_cloth_triangles,
+                                    bodies, particles, num_bodies, idt, cc, contacts, use_bias,
+                                )
                     else:
                         if wp.static(is_prepare):
                             contact_prepare_for_iteration(
@@ -1603,4 +1622,14 @@ _constraint_iterate_singleworld_split_kernel = _make_singleworld_persistent_kern
 )
 _constraint_iterate_singleworld_fused_split_kernel = _make_singleworld_fused_kernel(
     phase="iterate", revolute_only=False, cloth_support=False, mass_split=True,
+)
+# Cloth-aware mass-splitting variants. Cube-on-cloth (the
+# motivating scene) hits the cloth-aware contact path; without
+# these the iterate kernel still walks the (capped) colour set but
+# the overflow bucket races on shared bodies.
+_constraint_iterate_singleworld_cloth_split_kernel = _make_singleworld_persistent_kernel(
+    phase="iterate", revolute_only=False, cloth_support=True, mass_split=True,
+)
+_constraint_iterate_singleworld_fused_cloth_split_kernel = _make_singleworld_fused_kernel(
+    phase="iterate", revolute_only=False, cloth_support=True, mass_split=True,
 )

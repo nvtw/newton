@@ -99,7 +99,9 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
     _constraint_iterate_singleworld_cloth_kernel,
+    _constraint_iterate_singleworld_cloth_split_kernel,
     _constraint_iterate_singleworld_fused_cloth_kernel,
+    _constraint_iterate_singleworld_fused_cloth_split_kernel,
     _constraint_iterate_singleworld_fused_kernel,
     _constraint_iterate_singleworld_fused_revolute_cloth_kernel,
     _constraint_iterate_singleworld_fused_revolute_kernel,
@@ -2186,6 +2188,21 @@ class PhoenXWorld:
                 _constraint_relax_singleworld_fused_revolute_kernel,
             )
         if cloth_on:
+            # Cloth-aware path. When mass splitting is wired in,
+            # swap the iterate kernels for the cloth-split variants
+            # so the per-cid contact dispatch routes through
+            # ``contact_iterate_cloth_aware_split`` (rigid sides
+            # via read_state / write_state, cloth sides direct on
+            # particles). Prepare and relax stay unsplit.
+            if self._mass_splitting is not None and self._mass_splitting._setup_complete:
+                return (
+                    _constraint_prepare_singleworld_cloth_kernel,
+                    _constraint_prepare_singleworld_fused_cloth_kernel,
+                    _constraint_iterate_singleworld_cloth_split_kernel,
+                    _constraint_iterate_singleworld_fused_cloth_split_kernel,
+                    _constraint_relax_singleworld_cloth_kernel,
+                    _constraint_relax_singleworld_fused_cloth_kernel,
+                )
             return (
                 _constraint_prepare_singleworld_cloth_kernel,
                 _constraint_prepare_singleworld_fused_cloth_kernel,
