@@ -67,15 +67,16 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
 from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
 )
-from newton._src.solvers.phoenx.particle import ParticleContainer
+from newton._src.solvers.phoenx.particle import ParticleContainer, particle_set_access_mode
 
 __all__ = [
     "contact_endpoint_apply_impulse",
     "contact_endpoint_inv_mass_along",
+    "contact_endpoint_set_access_mode",
     "contact_endpoint_velocity_at_point",
 ]
 
@@ -203,3 +204,32 @@ def contact_endpoint_apply_impulse(
     inv_i = bodies.inverse_inertia_world[b]
     bodies.velocity[b] = bodies.velocity[b] + impulse * inv_m
     bodies.angular_velocity[b] = bodies.angular_velocity[b] + inv_i @ wp.cross(r, impulse)
+
+
+@wp.func
+def contact_endpoint_set_access_mode(
+    kind: wp.int32,
+    nodes: wp.vec3i,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Flip every node on this side to ``new_access_mode``.
+
+    Cloth: flip all three particles. Rigid: flip the body
+    (if ``nodes[0] >= 0``; static-anchor world shapes are no-ops).
+    No-op when the entity is already in the requested mode (the
+    underlying ``*_set_access_mode`` early-returns); the cost is one
+    int read per node in the steady state.
+    """
+    if kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
+        particle_set_access_mode(particles, nodes[0] - num_bodies, new_access_mode, inv_dt)
+        particle_set_access_mode(particles, nodes[1] - num_bodies, new_access_mode, inv_dt)
+        particle_set_access_mode(particles, nodes[2] - num_bodies, new_access_mode, inv_dt)
+        return
+    b = nodes[0]
+    if b < 0:
+        return
+    body_set_access_mode(bodies, b, new_access_mode, inv_dt)

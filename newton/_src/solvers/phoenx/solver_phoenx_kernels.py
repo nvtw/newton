@@ -45,6 +45,10 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_iterate_at,
     cloth_triangle_prepare_for_iteration_at,
 )
+from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
+    contact_iterate_cloth_aware,
+    contact_prepare_for_iteration_cloth_aware,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     ConstraintContainer,
@@ -1324,14 +1328,26 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
             #    range we dispatch on the type tag (each schema stamps its
             #    type into dword 0 at populate time).
             if cid >= num_joints + num_cloth_triangles:
-                if wp.static(is_prepare):
-                    contact_prepare_for_iteration(
-                        contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
-                    )
+                if wp.static(cloth_support):
+                    if wp.static(is_prepare):
+                        contact_prepare_for_iteration_cloth_aware(
+                            contact_cols, cid - num_joints - num_cloth_triangles,
+                            bodies, particles, num_bodies, idt, cc, contacts,
+                        )
+                    else:
+                        contact_iterate_cloth_aware(
+                            contact_cols, cid - num_joints - num_cloth_triangles,
+                            bodies, particles, num_bodies, idt, cc, contacts, use_bias,
+                        )
                 else:
-                    contact_iterate(
-                        contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts, use_bias
-                    )
+                    if wp.static(is_prepare):
+                        contact_prepare_for_iteration(
+                            contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
+                        )
+                    else:
+                        contact_iterate(
+                            contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts, use_bias
+                        )
                 continue
             ctype = constraint_get_type(constraints, cid)
             if wp.static(cloth_support):
@@ -1397,20 +1413,32 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                 # separate contact cids (which live in a different
                 # container), then type-tag for joint vs cloth.
                 if cid >= num_joints + num_cloth_triangles:
-                    if wp.static(is_prepare):
-                        contact_prepare_for_iteration(
-                            contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
-                        )
+                    if wp.static(cloth_support):
+                        if wp.static(is_prepare):
+                            contact_prepare_for_iteration_cloth_aware(
+                                contact_cols, cid - num_joints - num_cloth_triangles,
+                                bodies, particles, num_bodies, idt, cc, contacts,
+                            )
+                        else:
+                            contact_iterate_cloth_aware(
+                                contact_cols, cid - num_joints - num_cloth_triangles,
+                                bodies, particles, num_bodies, idt, cc, contacts, use_bias,
+                            )
                     else:
-                        contact_iterate(
-                            contact_cols,
-                            cid - num_joints - num_cloth_triangles,
-                            bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                        )
+                        if wp.static(is_prepare):
+                            contact_prepare_for_iteration(
+                                contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
+                            )
+                        else:
+                            contact_iterate(
+                                contact_cols,
+                                cid - num_joints - num_cloth_triangles,
+                                bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                use_bias,
+                            )
                 else:
                     ctype = constraint_get_type(constraints, cid)
                     dispatched = False
