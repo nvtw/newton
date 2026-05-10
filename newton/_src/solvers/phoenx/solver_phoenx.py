@@ -63,6 +63,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
     MAX_COLORS,
     IncrementalContactPartitioner,
 )
+from newton._src.solvers.phoenx.mass_splitting import MassSplitting
 from newton._src.solvers.phoenx.cloth_collision import (
     PhoenXClothShareVertexFilterData,
     ShapeEndpoint,
@@ -260,6 +261,7 @@ class PhoenXWorld:
         threads_per_world: int | str = "auto",
         max_thread_blocks: int | None = None,
         enable_body_pair_grouping: bool = False,
+        mass_split_max_partitions: int | None = None,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -285,6 +287,20 @@ class PhoenXWorld:
                 GPU with a co-resident workload or to measure
                 occupancy. No effect on
                 ``step_layout="multi_world"``.
+            mass_split_max_partitions: When set, cap the constraint-graph
+                colouring at ``K`` MIS colours and dump everything else
+                into a single overflow bucket (Jitter2 ``ContactPartitions``
+                pattern). The overflow is meant to be processed with mass
+                splitting (per-(body, partition) ``TinyRigidState`` copies +
+                ``invFactor`` impulse scaling). PhoenX 0.x ships the
+                cap + the :class:`~newton._src.solvers.phoenx.mass_splitting.MassSplitting`
+                orchestrator, but the iterate kernel that consumes the
+                overflow with copy states is *not yet wired in* -- step()
+                raises :class:`NotImplementedError` when the cap was hit
+                (i.e. the scene's chromatic number > ``K``). For now
+                this is useful as a colour-count cap on scenes that fit
+                in ``K`` colours unaided. ``None`` (default) keeps the
+                uncapped ``MAX_COLORS=1024`` behaviour.
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -459,12 +475,30 @@ class PhoenXWorld:
         # Unified body-or-particle node space for the partitioner:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
         # num_bodies + num_particles)`` are particles.
+        self.mass_split_max_partitions: int | None = (
+            int(mass_split_max_partitions) if mass_split_max_partitions is not None else None
+        )
         self._partitioner = IncrementalContactPartitioner(
             max_num_interactions=self._constraint_capacity,
             max_num_nodes=max(1, self.num_bodies + self.num_particles),
             device=self.device,
             use_tile_scan=True,
+            max_partitions=self.mass_split_max_partitions,
         )
+        # Mass-splitting orchestrator. Allocated only when the cap is
+        # set; ``setup_from_coloring`` runs in :meth:`step` after each
+        # ``build_csr`` (Phase C.2 wiring). The split-aware iterate
+        # kernel that consumes the overflow bucket via
+        # ``read_state`` / ``write_state`` is *not yet implemented* --
+        # see :meth:`_check_mass_split_overflow_gate`.
+        self._mass_splitting: MassSplitting | None = None
+        if self.mass_split_max_partitions is not None:
+            self._mass_splitting = MassSplitting(
+                num_bodies=max(1, self.num_bodies),
+                num_constraints=max(1, self._constraint_capacity),
+                max_partitions=int(self.mass_split_max_partitions),
+                device=self.device,
+            )
         # Live single-world coloring choice. Flipped to False (round-based JP)
         # if a non-captured greedy build overflows the 64-color bitmask; never
         # flipped back (JP has no chromatic bound).
@@ -1190,6 +1224,14 @@ class PhoenXWorld:
 
             if self._tpw_auto and self.step_layout != "single_world":
                 self._pick_tpw()
+            # Phase C.1 gate: when the partitioner cap is set and the
+            # build dumped survivors into the overflow bucket, the
+            # currently wired iterate kernels would race on shared
+            # bodies (no copy states yet). Fail loudly outside graph
+            # capture so the user can re-run with a larger cap, fewer
+            # contacts per body, or wait for Phase C.2 (the
+            # ``read_state`` / ``write_state`` iterate variant).
+            self._check_mass_split_overflow_gate()
 
         self._kinematic_prepare_step()
 
@@ -1244,6 +1286,41 @@ class PhoenXWorld:
                 )
 
         self._update_inertia_and_clear_forces()
+
+    @property
+    def mass_splitting(self) -> MassSplitting | None:
+        """Mass-splitting orchestrator (or ``None`` when the cap is
+        unset). Constructed eagerly when ``mass_split_max_partitions``
+        is passed to :class:`PhoenXWorld`; per-step
+        :meth:`~newton._src.solvers.phoenx.mass_splitting.MassSplitting.setup_from_coloring`
+        wiring lands in Phase C.2."""
+        return self._mass_splitting
+
+    def _check_mass_split_overflow_gate(self) -> None:
+        """Phase C.1 stop-gap: outside graph capture, raise a clear
+        ``NotImplementedError`` if the partitioner produced a
+        non-empty overflow bucket. The bucket contents need the
+        Phase C.2 splitting iterate kernel to be processed
+        race-free; the existing iterate kernels would silently race
+        on shared bodies."""
+        if self.mass_split_max_partitions is None:
+            return
+        device = self._partitioner.has_overflow_partition.device
+        if device.is_cuda and device.is_capturing:
+            # D2H reads are illegal during capture. The first
+            # uncaptured warm-up step (or the first capture-launch)
+            # will catch overflow before any user-visible bug.
+            return
+        if int(self._partitioner.has_overflow_partition.numpy()[0]) != 0:
+            raise NotImplementedError(
+                "PhoenX mass-splitting overflow bucket is non-empty (cap = "
+                f"{self.mass_split_max_partitions}). The splitting iterate "
+                "kernel (Phase C.2) is not yet wired in; until then the "
+                "scene's chromatic number must fit in `mass_split_max_partitions` "
+                "colours. Either increase the cap, reduce contacts per body, or "
+                "leave `mass_split_max_partitions=None` to use the uncapped "
+                "JP+greedy colouring."
+            )
 
     def _ingest_and_warmstart_contacts(self, contacts, shape_body) -> None:
         """Translate Newton ``Contacts`` -> contact columns. Swap prev/current

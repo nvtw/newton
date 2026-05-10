@@ -340,5 +340,102 @@ class TestClothContactPartitioner(unittest.TestCase):
             )
 
 
+    def test_phoenx_world_cap_steps_through_when_chromatic_fits(self):
+        """End-to-end: ``PhoenXWorld`` constructed with
+        ``mass_split_max_partitions=64`` (well above the chromatic
+        number of any small scene) takes one ``step()`` without
+        tripping the Phase C.1 overflow gate.
+
+        Validates that the cap parameter plumbs through to the
+        partitioner *and* that the gate stays quiet when the build
+        produces no overflow."""
+        device = wp.get_preferred_device()
+
+        builder = newton.ModelBuilder()
+        b = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity()), mass=1.0)
+        builder.add_shape_box(body=b, hx=0.5, hy=0.5, hz=0.5)
+        builder.add_ground_plane()
+        model = builder.finalize(device=device)
+
+        num_phoenx_bodies = int(model.body_count) + 1
+        bodies = body_container_zeros(num_phoenx_bodies, device=device)
+        if int(model.body_count) > 0:
+            inv_mass_host = np.zeros(num_phoenx_bodies, dtype=np.float32)
+            inv_mass_host[1:] = 1.0
+            bodies.inverse_mass.assign(inv_mass_host)
+        constraints = PhoenXWorld.make_constraint_container(
+            num_joints=0, num_cloth_triangles=0, device=device,
+        )
+        world = PhoenXWorld(
+            bodies=bodies, constraints=constraints, num_joints=0,
+            num_particles=0, num_cloth_triangles=0,
+            rigid_contact_max=512, num_worlds=1, substeps=1, solver_iterations=4,
+            step_layout="single_world", device=device,
+            mass_split_max_partitions=64,
+        )
+        # Public API spot-check.
+        self.assertIsNotNone(world.mass_splitting, "mass_split_max_partitions=64 must allocate the orchestrator")
+        self.assertEqual(world.mass_split_max_partitions, 64)
+        self.assertEqual(world._partitioner.max_partitions, 64)
+
+        # One step must run cleanly. There are no contacts ingested
+        # here (we don't pass `contacts`), so the partitioner sees
+        # zero active cids -- exercise of the cap and gate without
+        # any iteration kernel work.
+        world.step(1.0 / 60.0)
+
+    def test_phoenx_world_cap_raises_on_overflow(self):
+        """When the cap is set tight enough that the partitioner
+        produces an overflow bucket, ``step()`` raises a clear
+        ``NotImplementedError`` (Phase C.1 gate)."""
+        device = wp.get_preferred_device()
+
+        builder = newton.ModelBuilder()
+        b = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()), mass=1.0)
+        builder.add_shape_box(body=b, hx=0.5, hy=0.5, hz=0.1)
+        tri_ka, tri_ke = cloth_lame_from_youngs_poisson_plane_stress(5.0e8, 0.3)
+        builder.add_cloth_grid(
+            pos=wp.vec3(-0.5, -0.5, 0.11), rot=wp.quat_identity(), vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=4, dim_y=4, cell_x=0.25, cell_y=0.25,
+            mass=0.05, fix_left=False, tri_ke=tri_ke, tri_ka=tri_ka, particle_radius=0.04,
+        )
+        builder.add_cloth_grid(
+            pos=wp.vec3(-0.5, -0.5, 0.13), rot=wp.quat_identity(), vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=4, dim_y=4, cell_x=0.25, cell_y=0.25,
+            mass=0.05, fix_left=False, tri_ke=tri_ke, tri_ka=tri_ka, particle_radius=0.04,
+        )
+        model = builder.finalize(device=device)
+
+        num_phoenx_bodies = int(model.body_count) + 1
+        bodies = body_container_zeros(num_phoenx_bodies, device=device)
+        if int(model.body_count) > 0:
+            inv_mass_host = np.zeros(num_phoenx_bodies, dtype=np.float32)
+            inv_mass_host[1:] = 1.0
+            bodies.inverse_mass.assign(inv_mass_host)
+        constraints = PhoenXWorld.make_constraint_container(
+            num_joints=0, num_cloth_triangles=int(model.tri_count), device=device,
+        )
+        world = PhoenXWorld(
+            bodies=bodies, constraints=constraints, num_joints=0,
+            num_particles=int(model.particle_count),
+            num_cloth_triangles=int(model.tri_count),
+            rigid_contact_max=4096, num_worlds=1, substeps=1, solver_iterations=4,
+            step_layout="single_world", device=device,
+            mass_split_max_partitions=2,
+        )
+        world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
+        world.populate_cloth_triangles_from_model(model)
+        pipeline = world.setup_cloth_collision_pipeline(model, rigid_contact_max=4096)
+
+        state = model.state()
+        contacts = pipeline.contacts()
+        world.collide(state, contacts)
+
+        with self.assertRaises(NotImplementedError) as cm:
+            world.step(1.0 / 60.0, contacts=contacts)
+        self.assertIn("overflow", str(cm.exception).lower())
+        self.assertIn("Phase C.2", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
