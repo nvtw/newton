@@ -82,6 +82,7 @@ class _PhoenXScene:
         velocity_iterations: int = 1,
         friction: float = 0.5,
         step_layout: str = "multi_world",
+        mass_split_max_partitions: int | None = None,
     ) -> None:
         self.device = wp.get_device("cuda:0")
         self.fps = int(fps)
@@ -91,6 +92,7 @@ class _PhoenXScene:
         self.velocity_iterations = int(velocity_iterations)
         self.friction = float(friction)
         self.step_layout = step_layout
+        self.mass_split_max_partitions = mass_split_max_partitions
 
         self.mb = newton.ModelBuilder()
         # Pick up the PhoenX contact-ahead-of-impact default so every
@@ -328,6 +330,7 @@ class _PhoenXScene:
             default_friction=self.friction,
             step_layout=self.step_layout,
             device=self.device,
+            mass_split_max_partitions=self.mass_split_max_partitions,
         )
 
         # Defer the CUDA graph capture until the first :meth:`step`
