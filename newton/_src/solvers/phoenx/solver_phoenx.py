@@ -512,6 +512,27 @@ class PhoenXWorld:
         self._mass_split_graph_sentinel.build()
 
         self._mass_splitting: MassSplitting | None = None
+        # Phase C.3 device-side setup buffers. Only the construction
+        # buffer's int64 keys + the unique-flag/offset arrays + the
+        # ``cid_to_partition_constraint_id`` lookup get allocated
+        # here -- everything else lives on the :class:`MassSplitting`
+        # orchestrator. Allocated unconditionally (sized for the
+        # max_interactions even when mass splitting is off) so the
+        # iterate kernel signature stays uniform.
+        self._mass_split_construction_keys: wp.array[wp.int64] | None = None
+        self._mass_split_construction_values: wp.array[wp.int32] | None = None
+        self._mass_split_construction_count: wp.array[wp.int32] | None = None
+        self._mass_split_unique_flags: wp.array[wp.int32] | None = None
+        self._mass_split_unique_offsets: wp.array[wp.int32] | None = None
+        self._mass_split_unique_keys: wp.array[wp.int64] | None = None
+        self._mass_split_unique_count: wp.array[wp.int32] | None = None
+        # Lookup populated by the device setup kernel; consumed by
+        # the iterate kernel via ``cid_to_partition_constraint_id[cid]``.
+        # Length = constraint capacity (joint + cloth + contact slots).
+        # Always allocated so the iterate kernel has something to bind.
+        self._mass_split_cid_to_partition_id: wp.array[wp.int32] = wp.zeros(
+            max(1, self._constraint_capacity), dtype=wp.int32, device=self.device
+        )
         if self.mass_split_max_partitions is not None:
             # The partitioner's cap ``K`` produces up to ``K`` regular
             # MIS colours plus one overflow bucket at index ``K``.
@@ -530,6 +551,37 @@ class PhoenXWorld:
                 max_partitions=int(self.mass_split_max_partitions) + 1,
                 device=self.device,
             )
+            # Construction-pipeline buffers: sized 2 * max_interactions
+            # because the radix sort uses ping-pong. ``max_interactions``
+            # is the InteractionGraph's capacity -- already chosen by
+            # MassSplitting.__init__ as ``max(num_bodies,
+            # num_constraints * 2 + num_constraints // 4)``.
+            max_interactions = self._mass_splitting.graph.max_interactions
+            self._mass_split_construction_keys = wp.zeros(
+                2 * max_interactions, dtype=wp.int64, device=self.device
+            )
+            self._mass_split_construction_values = wp.zeros(
+                2 * max_interactions, dtype=wp.int32, device=self.device
+            )
+            self._mass_split_construction_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+            self._mass_split_unique_flags = wp.zeros(
+                2 * max_interactions, dtype=wp.int32, device=self.device
+            )
+            self._mass_split_unique_offsets = wp.zeros(
+                2 * max_interactions, dtype=wp.int32, device=self.device
+            )
+            self._mass_split_unique_keys = wp.zeros(
+                max_interactions, dtype=wp.int64, device=self.device
+            )
+            self._mass_split_unique_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+            # Eagerly call ``InteractionGraph.build()`` with the empty
+            # host accumulator so the orchestrator allocates its
+            # device buffers (``partition_list``, ``tiny_states``,
+            # ``state_section_end_indices``, ``highest_index_in_use``).
+            # The Phase C.3 device-side ``_setup_mass_splitting_for_step``
+            # overwrites them in place each step; we just need a
+            # valid view to bind to the iterate kernel signature.
+            self._mass_splitting.graph.build()
         # Live single-world coloring choice. Flipped to False (round-based JP)
         # if a non-captured greedy build overflows the 64-color bitmask; never
         # flipped back (JP has no chromatic bound).
@@ -1347,70 +1399,176 @@ class PhoenXWorld:
         return self._mass_splitting
 
     def _setup_mass_splitting_for_step(self) -> None:
-        """Refresh the :class:`MassSplitting` orchestrator against the
-        partitioner's just-built colouring.
+        """Refresh the device-resident :class:`MassSplitting`
+        orchestrator against the partitioner's just-built colouring.
 
-        Reads ``element_ids_by_color`` / ``color_starts`` /
-        ``num_colors`` and the per-element body lists from
-        ``self._elements`` via ``.numpy()``, builds the host-side
-        interaction graph, and uploads it to device. The next
-        substep's iterate sweep picks up the per-(body, partition)
-        ``TinyRigidState`` copies through
-        :func:`_singleworld_kernels` switching to the
-        ``mass_split=True`` variant.
+        Phase C.3 -- runs entirely on device so the per-step setup
+        is graph-capture-safe. Pipeline mirrors C# PhoenX
+        (``PartitioningKernels.RecordAllInteractionsKernel`` +
+        ``MassSplittingKernels.BuildInteractionGraphPrepare/Build/Finalize``):
 
-        Skipped when ``mass_split_max_partitions is None`` (the
-        uncapped colouring path doesn't need copy states). Skipped
-        during graph capture -- the host roundtrip would error.
+        1. Reset the construction count, ``state_section_end_indices``,
+           and ``cid_to_partition_constraint_id``.
+        2. ``record_all_interactions_kernel`` -- atomic-append
+           ``(body, partition_constraint_id)`` int64 keys, and
+           populate ``cid_to_partition_constraint_id``.
+        3. Sort the keys with the existing radix-sort helper.
+        4. Mark / scan / scatter to compact unique keys.
+        5. ``build_partition_list_kernel`` -- write per-unique-key
+           ``partition_list`` slot and stamp section-end indices at
+           body boundaries.
+        6. ``prefix_max_scan_kernel`` -- inclusive prefix-max so
+           bodies with no interactions inherit the previous body's
+           end index.
+        7. ``write_highest_index_kernel`` -- safe over-estimate for
+           ``read_state``'s static-fallback range check.
+
+        Skipped when ``mass_split_max_partitions is None`` (uncapped
+        colouring path doesn't need copy states).
         """
         if self._mass_splitting is None:
             return
-        device = self._partitioner.has_overflow_partition.device
-        if device.is_cuda and device.is_capturing:
-            # Setup is host-side; cannot run during capture.
-            return
-        # Reset the orchestrator for this step. ``setup_from_coloring``
-        # rebuilds the partition table + the interaction graph from
-        # scratch each call; mark the prior setup as stale so a fresh
-        # build doesn't trip the idempotency check.
-        self._mass_splitting._setup_complete = False
-        self._mass_splitting.partitions._data = None
-        self._mass_splitting.graph._entries = []
-        self._mass_splitting.graph._built = False
-        self._mass_splitting.graph._data = None
-
-        # Read the per-element body lists from device. The slice
-        # ``[:n_active]`` keeps the host transfer small; the rest of
-        # ``self._elements`` is unused capacity.
-        n_active = int(self._num_active_constraints.numpy()[0])
-        if n_active == 0:
-            # Nothing to set up; bail. The iterate kernel will run
-            # against the sentinel graph; ``mass_split=True`` will be
-            # a no-op since no body is registered.
-            self._mass_splitting._setup_complete = False
-            return
-        elements_np = self._elements.numpy()[:n_active]
-        # Each element has up to 8 body slots; -1 marks unused.
-        # ``setup_from_coloring`` wants iterables-of-iterables. Particle
-        # endpoints (``b >= num_bodies``) live in the unified
-        # body-or-particle index space; the interaction graph only
-        # tracks rigid bodies (``b < num_bodies``), so we filter them
-        # out here.
-        bodies_per_element = []
-        nb = int(self.num_bodies)
-        for cid in range(n_active):
-            slot = elements_np[cid]["bodies"]
-            row = [int(b) for b in slot if int(b) >= 0 and int(b) < nb]
-            bodies_per_element.append(row)
-        # Adopt the partitioner's CSR colouring as the partition
-        # table. ``num_colors`` may include the overflow bucket --
-        # ``setup_from_coloring`` handles that uniformly.
-        self._mass_splitting.setup_from_coloring(
-            element_ids_by_color=self._partitioner.element_ids_by_color,
-            color_starts=self._partitioner.color_starts,
-            num_colors=int(self._partitioner.num_colors.numpy()[0]),
-            constraint_bodies=bodies_per_element,
+        # Lazy imports keep top-of-module imports clean.
+        from newton._src.solvers.phoenx.helpers.scan_and_sort import (  # noqa: PLC0415
+            scan_variable_length,
+            sort_variable_length_int64,
         )
+        from newton._src.solvers.phoenx.mass_splitting.setup_kernels import (  # noqa: PLC0415
+            build_partition_list_kernel,
+            compact_unique_keys_kernel,
+            mark_unique_keys_kernel,
+            prefix_max_scan_kernel,
+            record_all_interactions_kernel,
+            reset_construction_buffers_kernel,
+            write_highest_index_kernel,
+        )
+
+        ms = self._mass_splitting
+        graph_data = ms.graph.data
+        max_interactions = int(ms.graph.max_interactions)
+        num_bodies = int(self.num_bodies)
+        # Tonge-style overflow batching constant. 32 matches the C#
+        # default (``MassSplitting.cs:43`` ``ConstraintBatchSize = 32``);
+        # it controls the count of distinct ``constraint_id``s the
+        # overflow bucket spawns. Smaller batches => more parallelism
+        # but stronger ``inv_factor`` scaling.
+        batch_size = wp.int32(32)
+        max_partitions_p = wp.int32(int(self.mass_split_max_partitions))
+
+        # 1) Reset.
+        reset_dim = max(num_bodies, max_interactions, self._constraint_capacity, 1)
+        wp.launch(
+            reset_construction_buffers_kernel,
+            dim=reset_dim,
+            inputs=[
+                self._mass_split_construction_count,
+                graph_data.state_section_end_indices,
+                self._mass_split_cid_to_partition_id,
+                self._num_active_constraints,
+            ],
+            device=self.device,
+        )
+
+        # 2) Record interactions: per CSR slot, append (body, pcid)
+        #    and stamp ``cid_to_partition_constraint_id``.
+        wp.launch(
+            record_all_interactions_kernel,
+            dim=self._partitioner.element_ids_by_color.shape[0],
+            inputs=[
+                self._elements,
+                self._partitioner.interaction_id_to_partition,
+                self._partitioner.element_ids_by_color,
+                self._partitioner.color_starts,
+                self._num_active_constraints,
+                wp.int32(num_bodies),
+                max_partitions_p,
+                batch_size,
+                self._mass_split_construction_keys,
+                self._mass_split_construction_count,
+                self._mass_split_cid_to_partition_id,
+            ],
+            device=self.device,
+        )
+
+        # 3) Sort the appended keys. ``sort_variable_length_int64``
+        #    masks the inactive tail with ``INT64_MAX`` so they sort
+        #    to the end and stay disjoint from real keys.
+        sort_variable_length_int64(
+            self._mass_split_construction_keys,
+            self._mass_split_construction_values,
+            self._mass_split_construction_count,
+        )
+
+        # 4a) Mark unique flags after sort.
+        unique_dim = self._mass_split_construction_keys.shape[0] // 2
+        wp.launch(
+            mark_unique_keys_kernel,
+            dim=unique_dim,
+            inputs=[
+                self._mass_split_construction_keys,
+                self._mass_split_construction_count,
+                self._mass_split_unique_flags,
+            ],
+            device=self.device,
+        )
+
+        # 4b) Inclusive scan over flags -> 1-based offsets for the
+        #     scatter. Then 4c) scatter unique keys into a dense
+        #     buffer.
+        wp.copy(self._mass_split_unique_offsets, self._mass_split_unique_flags)
+        scan_variable_length(
+            self._mass_split_unique_offsets,
+            self._mass_split_construction_count,
+            inclusive=True,
+        )
+        wp.launch(
+            compact_unique_keys_kernel,
+            dim=unique_dim,
+            inputs=[
+                self._mass_split_construction_keys,
+                self._mass_split_unique_flags,
+                self._mass_split_unique_offsets,
+                self._mass_split_construction_count,
+                self._mass_split_unique_keys,
+                self._mass_split_unique_count,
+            ],
+            device=self.device,
+        )
+
+        # 5) Build partition_list + state_section_end_indices.
+        wp.launch(
+            build_partition_list_kernel,
+            dim=max_interactions,
+            inputs=[
+                self._mass_split_unique_keys,
+                self._mass_split_unique_count,
+                graph_data.partition_list,
+                graph_data.state_section_end_indices,
+            ],
+            device=self.device,
+        )
+
+        # 6) Prefix-max scan to fill body gaps (single thread).
+        wp.launch(
+            prefix_max_scan_kernel,
+            dim=1,
+            inputs=[graph_data.state_section_end_indices, wp.int32(num_bodies)],
+            device=self.device,
+        )
+
+        # 7) Write highest_index_in_use.
+        wp.launch(
+            write_highest_index_kernel,
+            dim=1,
+            inputs=[graph_data.highest_index_in_use, wp.int32(num_bodies)],
+            device=self.device,
+        )
+
+        # The orchestrator's ``_setup_complete`` flag flips on so
+        # ``_singleworld_kernels`` returns the split iterate kernel.
+        # No host roundtrip needed here -- the flag is a Python
+        # attribute, not a device array.
+        ms._setup_complete = True
 
     def _ingest_and_warmstart_contacts(self, contacts, shape_body) -> None:
         """Translate Newton ``Contacts`` -> contact columns. Swap prev/current
@@ -1868,6 +2026,7 @@ class PhoenXWorld:
                     wp.int32(self._fuse_threshold),
                     self._head_active,
                     mass_split_graph,
+                    self._mass_split_cid_to_partition_id,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=self.device,
@@ -1899,6 +2058,7 @@ class PhoenXWorld:
                 wp.int32(self.num_bodies),
                 wp.int32(self._fuse_threshold),
                 mass_split_graph,
+                self._mass_split_cid_to_partition_id,
             ],
             block_dim=self._fuse_tail_block_dim,
             device=self.device,

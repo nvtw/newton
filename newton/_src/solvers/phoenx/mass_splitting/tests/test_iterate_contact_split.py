@@ -51,6 +51,7 @@ def _drive_contact_iterate_at_split(
     cc: ContactContainer,
     views: ContactViews,
     graph: InteractionGraphData,
+    cid_to_partition_constraint_id: wp.array[wp.int32],
     idt: wp.float32,
     use_bias: wp.bool,
 ):
@@ -68,6 +69,7 @@ def _drive_contact_iterate_at_split(
     body_pair.b2 = wp.int32(1)
     contact_iterate_at_split(
         constraints, wp.int32(0), wp.int32(0), bodies, body_pair, idt, cc, views, use_bias, graph,
+        cid_to_partition_constraint_id,
     )
 
 
@@ -126,10 +128,11 @@ class TestContactIterateSplitCompile(unittest.TestCase):
         # codegen smoke check.
         graph.build()
 
+        cid_to_pcid = wp.zeros(8, dtype=wp.int32, device=device)
         wp.launch(
             kernel=_drive_contact_iterate_at_split,
             dim=1,
-            inputs=[constraints, bodies, cc, views, graph.data, wp.float32(60.0), wp.bool(True)],
+            inputs=[constraints, bodies, cc, views, graph.data, cid_to_pcid, wp.float32(60.0), wp.bool(True)],
             device=device,
         )
         wp.synchronize()

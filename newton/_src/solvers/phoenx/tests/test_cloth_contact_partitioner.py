@@ -438,5 +438,60 @@ class TestClothContactPartitioner(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(body_pos)), f"non-finite body position: {body_pos}")
 
 
+    def test_phoenx_world_cap_runs_under_graph_capture(self):
+        """Phase C.3 -- the primary win of the device-side
+        ``_setup_mass_splitting_for_step`` chain. Captures one
+        ``world.step()`` into a CUDA graph and replays it; the run
+        must finish cleanly + produce finite body state without any
+        host roundtrip during replay.
+
+        Two-cubes-on-plane scene with ``mass_split_max_partitions=1``
+        forces overflow on the first step (so the orchestrator wires
+        copy states), then the captured graph carries that wiring
+        through replays.
+        """
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("graph capture requires CUDA")
+
+        builder = newton.ModelBuilder()
+        b1 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.5), q=wp.quat_identity()), mass=1.0)
+        builder.add_shape_box(body=b1, hx=0.5, hy=0.5, hz=0.5)
+        b2 = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.6), q=wp.quat_identity()), mass=1.0)
+        builder.add_shape_box(body=b2, hx=0.5, hy=0.5, hz=0.5)
+        builder.add_ground_plane()
+        model = builder.finalize(device=device)
+
+        num_phoenx_bodies = int(model.body_count) + 1
+        bodies = body_container_zeros(num_phoenx_bodies, device=device)
+        inv_mass_host = np.zeros(num_phoenx_bodies, dtype=np.float32)
+        inv_mass_host[1:] = 1.0
+        bodies.inverse_mass.assign(inv_mass_host)
+        constraints = PhoenXWorld.make_constraint_container(
+            num_joints=0, num_cloth_triangles=0, device=device,
+        )
+        world = PhoenXWorld(
+            bodies=bodies, constraints=constraints, num_joints=0,
+            num_particles=0, num_cloth_triangles=0,
+            rigid_contact_max=64, num_worlds=1, substeps=1, solver_iterations=2,
+            step_layout="single_world", device=device,
+            mass_split_max_partitions=1,
+        )
+        world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
+
+        # Warm-up step (compiles kernels, populates partitioner CSR).
+        world.step(1.0 / 60.0)
+
+        # Capture + replay.
+        with wp.ScopedCapture(device=device) as capture:
+            world.step(1.0 / 60.0)
+        graph = capture.graph
+        wp.capture_launch(graph)
+        wp.synchronize()
+
+        body_pos = world.bodies.position.numpy()
+        self.assertTrue(np.all(np.isfinite(body_pos)), f"non-finite body position after graph replay: {body_pos}")
+
+
 if __name__ == "__main__":
     unittest.main()

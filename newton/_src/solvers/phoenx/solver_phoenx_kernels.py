@@ -1324,6 +1324,7 @@ def _make_singleworld_persistent_kernel(
         fuse_threshold: wp.int32,
         head_active: wp.array[wp.int32],
         mass_split_graph: InteractionGraphData,
+        cid_to_partition_constraint_id: wp.array[wp.int32],
     ):
         tid = wp.tid()
         if color_cursor[0] <= 0:
@@ -1370,6 +1371,7 @@ def _make_singleworld_persistent_kernel(
                             contact_iterate_split(
                                 contact_cols, cid - num_joints - num_cloth_triangles,
                                 bodies, idt, cc, contacts, use_bias, mass_split_graph,
+                                cid_to_partition_constraint_id,
                             )
                         else:
                             contact_iterate(
@@ -1429,6 +1431,7 @@ def _make_singleworld_fused_kernel(
         num_bodies: wp.int32,
         fuse_threshold: wp.int32,
         mass_split_graph: InteractionGraphData,
+        cid_to_partition_constraint_id: wp.array[wp.int32],
     ):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
@@ -1464,6 +1467,7 @@ def _make_singleworld_fused_kernel(
                                 contact_iterate_split(
                                     contact_cols, cid - num_joints - num_cloth_triangles,
                                     bodies, idt, cc, contacts, use_bias, mass_split_graph,
+                                    cid_to_partition_constraint_id,
                                 )
                             else:
                                 contact_iterate(

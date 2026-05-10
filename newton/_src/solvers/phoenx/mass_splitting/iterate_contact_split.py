@@ -136,6 +136,7 @@ def contact_iterate_at_split(
     contacts: ContactViews,
     use_bias: wp.bool,
     graph: InteractionGraphData,
+    cid_to_partition_constraint_id: wp.array[wp.int32],
 ):
     """Split-aware mirror of
     :func:`~newton._src.solvers.phoenx.constraints.constraint_contact.contact_iterate_at`.
@@ -170,17 +171,24 @@ def contact_iterate_at_split(
     body_com1 = bodies.body_com[b1]
     body_com2 = bodies.body_com[b2]
 
-    # Read the partition-local copies. Pose comes from the copy too
-    # so the lever-arm recompute uses the same state the prepare
-    # step saw.
+    # Read the partition-local copies. The InteractionGraph keys are
+    # ``(rigid, partition_constraint_id)`` where
+    # ``partition_constraint_id`` is 0 for regular MIS partitions and
+    # ``j / batch_size`` for cids in the overflow bucket. The setup
+    # kernel pre-populates ``cid_to_partition_constraint_id[cid]``
+    # with the right value so this lookup hits the matching graph
+    # entry. Passing ``cid`` directly would always miss (the keys
+    # use the partition-id space, not the global cid space) and
+    # silently fall through to the static-body path.
+    pcid = cid_to_partition_constraint_id[cid]
     state1, inv_factor1, idx1 = read_state(
-        graph, cid, b1,
+        graph, pcid, b1,
         bodies.position[b1], bodies.orientation[b1],
         bodies.velocity[b1], bodies.angular_velocity[b1],
         _ACCESS_MODE_VELOCITY_LEVEL_C, idt,
     )
     state2, inv_factor2, idx2 = read_state(
-        graph, cid, b2,
+        graph, pcid, b2,
         bodies.position[b2], bodies.orientation[b2],
         bodies.velocity[b2], bodies.angular_velocity[b2],
         _ACCESS_MODE_VELOCITY_LEVEL_C, idt,
@@ -316,6 +324,7 @@ def contact_iterate_split(
     contacts: ContactViews,
     use_bias: wp.bool,
     graph: InteractionGraphData,
+    cid_to_partition_constraint_id: wp.array[wp.int32],
 ):
     """Convenience wrapper that mirrors
     :func:`~newton._src.solvers.phoenx.constraints.constraint_contact.contact_iterate`."""
@@ -326,4 +335,5 @@ def contact_iterate_split(
     body_pair.b2 = b2
     contact_iterate_at_split(
         constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias, graph,
+        cid_to_partition_constraint_id,
     )
