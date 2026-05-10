@@ -57,6 +57,7 @@ from newton._src.solvers.phoenx.mass_splitting.iterate_contact_cloth_split impor
 )
 from newton._src.solvers.phoenx.mass_splitting.iterate_contact_split import (
     contact_iterate_split,
+    contact_prepare_for_iteration_split,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
@@ -1375,9 +1376,16 @@ def _make_singleworld_persistent_kernel(
                             )
                 else:
                     if wp.static(is_prepare):
-                        contact_prepare_for_iteration(
-                            contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
-                        )
+                        if wp.static(mass_split):
+                            contact_prepare_for_iteration_split(
+                                contact_cols, cid - num_joints - num_cloth_triangles,
+                                bodies, idt, cc, contacts, mass_split_graph,
+                                cid_to_partition_constraint_id,
+                            )
+                        else:
+                            contact_prepare_for_iteration(
+                                contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
+                            )
                     else:
                         if wp.static(mass_split):
                             contact_iterate_split(
@@ -1478,9 +1486,16 @@ def _make_singleworld_fused_kernel(
                                 )
                     else:
                         if wp.static(is_prepare):
-                            contact_prepare_for_iteration(
-                                contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
-                            )
+                            if wp.static(mass_split):
+                                contact_prepare_for_iteration_split(
+                                    contact_cols, cid - num_joints - num_cloth_triangles,
+                                    bodies, idt, cc, contacts, mass_split_graph,
+                                    cid_to_partition_constraint_id,
+                                )
+                            else:
+                                contact_prepare_for_iteration(
+                                    contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
+                                )
                         else:
                             if wp.static(mass_split):
                                 contact_iterate_split(

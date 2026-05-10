@@ -72,6 +72,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_eff_n,
     cc_set_eff_t1,
     cc_set_eff_t2,
+    cc_set_local_p0,
+    cc_set_local_p1,
     cc_set_normal_lambda,
     cc_set_pd_bias,
     cc_set_pd_eff_soft,
@@ -105,10 +107,48 @@ from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
 __all__ = [
     "contact_iterate_at_split",
     "contact_iterate_split",
+    "contact_prepare_for_iteration_at_split",
+    "contact_prepare_for_iteration_split",
+    "effective_mass_scalar_split",
 ]
 
 
 _ACCESS_MODE_VELOCITY_LEVEL_C = wp.constant(wp.int32(ACCESS_MODE_VELOCITY_LEVEL))
+
+
+@wp.func
+def effective_mass_scalar_split(
+    axis: wp.vec3f,
+    r1: wp.vec3f,
+    r2: wp.vec3f,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_inertia1_world: wp.mat33f,
+    inv_inertia2_world: wp.mat33f,
+    inv_factor1: wp.float32,
+    inv_factor2: wp.float32,
+) -> wp.float32:
+    """C# Tonge ``effMass = 1/(sum invM_i * invFactor_i + ...)`` --
+    each body's contribution to the row's inverse effective mass is
+    scaled by its partition count. Mirrors
+    ``ContactTypesRT.cuh:724`` exactly.
+
+    For ``invFactor1 == invFactor2 == 1`` this collapses to the
+    unsplit :func:`effective_mass_scalar`. Mismatched invFactors
+    matter for tower / stack scenes where different bodies sit in
+    different numbers of partitions; without this scaling the per-
+    iter response violates momentum conservation."""
+    rc1 = wp.cross(r1, axis)
+    rc2 = wp.cross(r2, axis)
+    w = (
+        inv_mass1 * inv_factor1
+        + inv_mass2 * inv_factor2
+        + wp.dot(rc1, inv_inertia1_world @ rc1) * inv_factor1
+        + wp.dot(rc2, inv_inertia2_world @ rc2) * inv_factor2
+    )
+    if w > wp.float32(1.0e-12):
+        return wp.float32(1.0) / w
+    return wp.float32(0.0)
 
 
 @wp.func
@@ -122,6 +162,256 @@ def _safe_inv(inv_factor: wp.int32) -> wp.float32:
         return wp.float32(0.0)
     return wp.float32(1.0) / wp.float32(inv_factor)
 
+
+@wp.func
+def contact_prepare_for_iteration_at_split(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    graph: InteractionGraphData,
+    cid_to_partition_constraint_id: wp.array[wp.int32],
+):
+    """Split-aware mirror of
+    :func:`~newton._src.solvers.phoenx.constraints.constraint_contact.contact_prepare_for_iteration_at`.
+
+    Differs from the unsplit version in three places:
+
+    1. Body pose / velocity reads come from the per-(body,
+       partition) ``TinyRigidState`` copy via :func:`read_state`
+       (with the partition_constraint_id from
+       ``cid_to_partition_constraint_id[cid]``).
+    2. Effective masses use ``invM * invFactor`` per body via
+       :func:`effective_mass_scalar_split` -- matches C# line 724.
+    3. Warm-start velocity / angular-velocity updates are scaled
+       by ``invFactor`` per body before being committed to the
+       copy via :func:`write_state` -- matches C# line 759.
+
+    For ``invFactor == 1`` everywhere this is bit-equivalent to the
+    unsplit prepare. For mismatched invFactors (tower / stack
+    scenes) the C# scaling preserves momentum conservation that
+    the unsplit math breaks.
+    """
+    _ = base_offset
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    pcid = cid_to_partition_constraint_id[cid]
+
+    # Body invariants (mass / inertia / com) live outside copy states.
+    body_com1 = bodies.body_com[b1]
+    body_com2 = bodies.body_com[b2]
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    state1, inv_factor1, idx1 = read_state(
+        graph, pcid, b1,
+        bodies.position[b1], bodies.orientation[b1],
+        bodies.velocity[b1], bodies.angular_velocity[b1],
+        _ACCESS_MODE_VELOCITY_LEVEL_C, idt,
+    )
+    state2, inv_factor2, idx2 = read_state(
+        graph, pcid, b2,
+        bodies.position[b2], bodies.orientation[b2],
+        bodies.velocity[b2], bodies.angular_velocity[b2],
+        _ACCESS_MODE_VELOCITY_LEVEL_C, idt,
+    )
+    inv_factor1_f = wp.float32(wp.max(inv_factor1, wp.int32(1)))
+    inv_factor2_f = wp.float32(wp.max(inv_factor2, wp.int32(1)))
+    orientation1 = state1.orientation
+    orientation2 = state2.orientation
+    position1 = state1.position
+    position2 = state2.position
+
+    contact_first = contact_get_contact_first(constraints, cid)
+    contact_count = contact_get_contact_count(constraints, cid)
+    if contact_count == 0:
+        return
+
+    dt_substep = wp.float32(1.0) / idt
+    bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+    )
+
+    friction_bias_factor = wp.float32(0.08)
+    friction_slop = wp.float32(0.001)
+    max_push_speed = wp.float32(2.0)
+    max_approach_speed = wp.float32(10.0)
+    slip_threshold = wp.float32(0.002)
+
+    total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
+    total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
+    total_ang_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
+
+    mu_s_col = contact_get_friction(constraints, cid)
+
+    for i in range(contact_count):
+        k = contact_first + i
+
+        n = cc_get_normal(cc, k)
+        t1_dir = cc_get_tangent1(cc, k)
+        t2_dir = wp.cross(n, t1_dir)
+        local_p0 = cc_get_local_p0(cc, k)
+        local_p1 = cc_get_local_p1(cc, k)
+
+        margin0 = contacts.rigid_contact_margin0[k]
+        margin1 = contacts.rigid_contact_margin1[k]
+        p1_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
+        p2_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
+
+        r1 = p1_world - position1
+        r2 = p2_world - position2
+
+        eff_n = effective_mass_scalar_split(
+            n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
+            inv_factor1_f, inv_factor2_f,
+        )
+        eff_t1 = effective_mass_scalar_split(
+            t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
+            inv_factor1_f, inv_factor2_f,
+        )
+        eff_t2 = effective_mass_scalar_split(
+            t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
+            inv_factor1_f, inv_factor2_f,
+        )
+
+        effective_gap = wp.dot(p2_world - p1_world, n)
+
+        lam_n_ws = cc_get_normal_lambda(cc, k)
+        lam_n_ref = wp.float32(1.0) / wp.max(eff_n * idt, wp.float32(1.0e-6))
+        load_boost = wp.min(wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0))
+
+        if effective_gap > wp.float32(0.0):
+            bias_val = effective_gap * idt
+        else:
+            bias_val = effective_gap * bias_rate
+        bias_val = wp.clamp(bias_val, -max_push_speed, max_approach_speed)
+
+        p_diff = p2_world - p1_world
+        drift_t1_raw = wp.dot(p_diff, t1_dir)
+        drift_t2_raw = wp.dot(p_diff, t2_dir)
+        drift_sq = drift_t1_raw * drift_t1_raw + drift_t2_raw * drift_t2_raw
+
+        fresh_n = contacts.rigid_contact_normal[k]
+        normal_aligned = wp.dot(n, fresh_n)
+        lam_t1_prev = cc_get_tangent1_lambda(cc, k)
+        lam_t2_prev = cc_get_tangent2_lambda(cc, k)
+        lam_n_prev = cc_get_normal_lambda(cc, k)
+        fric_limit_prev = mu_s_col * lam_n_prev
+        cone_margin = wp.float32(0.98)
+        lam_t_mag_sq = lam_t1_prev * lam_t1_prev + lam_t2_prev * lam_t2_prev
+        coulomb_saturated = lam_n_prev > wp.float32(0.0) and lam_t_mag_sq >= (cone_margin * fric_limit_prev) * (
+            cone_margin * fric_limit_prev
+        )
+        if drift_sq > slip_threshold * slip_threshold or normal_aligned < wp.float32(0.95) or coulomb_saturated:
+            fresh_lp0 = contacts.rigid_contact_point0[k]
+            fresh_lp1 = contacts.rigid_contact_point1[k]
+            cc_set_local_p0(cc, k, fresh_lp0)
+            cc_set_local_p1(cc, k, fresh_lp1)
+            if coulomb_saturated:
+                cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+                cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+            p1_world = position1 + wp.quat_rotate(orientation1, fresh_lp0 - body_com1) + margin0 * n
+            p2_world = position2 + wp.quat_rotate(orientation2, fresh_lp1 - body_com2) - margin1 * n
+            r1 = p1_world - position1
+            r2 = p2_world - position2
+            eff_n = effective_mass_scalar_split(
+                n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
+                inv_factor1_f, inv_factor2_f,
+            )
+            eff_t1 = effective_mass_scalar_split(
+                t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
+                inv_factor1_f, inv_factor2_f,
+            )
+            eff_t2 = effective_mass_scalar_split(
+                t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
+                inv_factor1_f, inv_factor2_f,
+            )
+            p_diff = p2_world - p1_world
+            drift_t1_raw = wp.dot(p_diff, t1_dir)
+            drift_t2_raw = wp.dot(p_diff, t2_dir)
+
+        drift_t1 = wp.clamp(drift_t1_raw, -friction_slop, friction_slop)
+        drift_t2 = wp.clamp(drift_t2_raw, -friction_slop, friction_slop)
+        bias_t1_val = friction_bias_factor * drift_t1 * idt * load_boost
+        bias_t2_val = friction_bias_factor * drift_t2 * idt * load_boost
+
+        cc_set_eff_n(cc, k, eff_n)
+        cc_set_eff_t1(cc, k, eff_t1)
+        cc_set_eff_t2(cc, k, eff_t2)
+        cc_set_bias(cc, k, bias_val)
+        cc_set_bias_t1(cc, k, bias_t1_val)
+        cc_set_bias_t2(cc, k, bias_t2_val)
+
+        stiffness_arr_len = contacts.rigid_contact_stiffness.shape[0]
+        damping_arr_len = contacts.rigid_contact_damping.shape[0]
+        if stiffness_arr_len > k or damping_arr_len > k:
+            k_n = wp.float32(0.0)
+            c_n = wp.float32(0.0)
+            if stiffness_arr_len > k:
+                k_n = contacts.rigid_contact_stiffness[k]
+            if damping_arr_len > k:
+                c_n = contacts.rigid_contact_damping[k]
+            if (k_n > wp.float32(0.0) or c_n > wp.float32(0.0)) and eff_n > wp.float32(0.0):
+                eff_inv_n = wp.float32(1.0) / eff_n
+                pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(
+                    k_n, c_n, -effective_gap, eff_inv_n, dt_substep, PHOENX_BOOST_CONTACT_NORMAL
+                )
+                cc_set_pd_gamma(cc, k, pd_gamma_n)
+                cc_set_pd_bias(cc, k, pd_bias_n)
+                cc_set_pd_eff_soft(cc, k, pd_eff_soft_n)
+            else:
+                cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
+        else:
+            cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
+
+        # Warm-start impulse accumulation (in world space).
+        lam_n = cc_get_normal_lambda(cc, k)
+        lam_t1 = cc_get_tangent1_lambda(cc, k)
+        lam_t2 = cc_get_tangent2_lambda(cc, k)
+        imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
+        total_lin_imp_on_b2 += imp
+        total_ang_imp_on_b1 += wp.cross(r1, imp)
+        total_ang_imp_on_b2 += wp.cross(r2, imp)
+
+    # Commit warm-start to the per-partition copies. C# convention
+    # (``ContactTypesRT.cuh:759``): velocity_update *= invM * invFactor.
+    state1.velocity = state1.velocity - inv_factor1_f * inv_mass1 * total_lin_imp_on_b2
+    state2.velocity = state2.velocity + inv_factor2_f * inv_mass2 * total_lin_imp_on_b2
+    state1.angular_velocity = state1.angular_velocity - inv_factor1_f * (inv_inertia1 @ total_ang_imp_on_b1)
+    state2.angular_velocity = state2.angular_velocity + inv_factor2_f * (inv_inertia2 @ total_ang_imp_on_b2)
+    write_state(graph, idx1, state1)
+    write_state(graph, idx2, state2)
+
+
+@wp.func
+def contact_prepare_for_iteration_split(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    graph: InteractionGraphData,
+    cid_to_partition_constraint_id: wp.array[wp.int32],
+):
+    """Convenience wrapper that mirrors
+    :func:`~newton._src.solvers.phoenx.constraints.constraint_contact.contact_prepare_for_iteration`."""
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = ConstraintBodies()
+    body_pair.b1 = b1
+    body_pair.b2 = b2
+    contact_prepare_for_iteration_at_split(
+        constraints, cid, 0, bodies, body_pair, idt, cc, contacts, graph,
+        cid_to_partition_constraint_id,
+    )
 
 
 @wp.func
@@ -299,23 +589,24 @@ def contact_iterate_at_split(
             r1, r2, imp,
         )
 
-    # Commit the full per-copy delta (no inv_factor scaling). With
-    # ``batch_size=1`` (Newton's choice -- one cid per copy, no
-    # races), invFactor for a body equals the count of cids that
-    # touch it. Each cid updates its OWN unique copy with the
-    # unsplit delta. ``average_and_broadcast`` averages across the
-    # body's copies; with N copies each holding one cid's update,
-    # the average equals (N * delta) / N = delta -- matching an
-    # unsplit GS-with-one-shape-pair response. Multiplying by
-    # invFactor here would overshoot by factor N
-    # (each copy = N*delta, avg over N still = N*delta -> tower
-    # explodes). The C# pattern uses batch_size>1 with shared copies
-    # AND multiplies; with batch_size=1 / unique copies, no scaling
-    # is the algebraically correct equivalent.
-    state1.velocity = v1
-    state2.velocity = v2
-    state1.angular_velocity = w1
-    state2.angular_velocity = w2
+    # C# convention (``ContactTypesRT.cuh:940``): velocity update
+    # is scaled by ``invM * invFactor``. Here we already have
+    # ``v1 = v1_pre + (-invM * imp)`` from the unsplit
+    # ``apply_pair_velocity_impulse``; multiply the delta by
+    # ``invFactor`` (the body's partition count) so the per-copy
+    # update matches C# numerically. This ONLY works because the
+    # split prepare populated the contact container's effMass with
+    # the C# split formula (``invM * invFactor`` in the
+    # denominator) -- the lambda used by ``apply_pair_velocity_impulse``
+    # is therefore already C#-equivalent. Without scaling here,
+    # the per-copy update is too large by ``invFactor`` and bodies
+    # with ``invFactor > 1`` see runaway impulses (tower explodes).
+    inv_factor1_count = wp.float32(wp.max(inv_factor1, wp.int32(1)))
+    inv_factor2_count = wp.float32(wp.max(inv_factor2, wp.int32(1)))
+    state1.velocity = v1_pre + inv_factor1_count * (v1 - v1_pre)
+    state2.velocity = v2_pre + inv_factor2_count * (v2 - v2_pre)
+    state1.angular_velocity = w1_pre + inv_factor1_count * (w1 - w1_pre)
+    state2.angular_velocity = w2_pre + inv_factor2_count * (w2 - w2_pre)
 
     write_state(graph, idx1, state1)
     write_state(graph, idx2, state2)
