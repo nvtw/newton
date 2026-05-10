@@ -542,13 +542,21 @@ class PhoenXWorld:
             # is therefore ``K + 1`` so ``wrap_color_arrays`` can adopt
             # all of them. Adopting the overflow as just another
             # partition slot is equivalent to the C# pattern: every
-            # ``(body, partition)`` pair the colouring touches becomes
+            # ``(node, partition)`` pair the colouring touches becomes
             # a ``TinyRigidState`` slot regardless of whether the
             # partition is an MIS or the Jacobi remainder, and
             # ``inv_factor`` falls out as the count of partitions a
-            # body participates in.
+            # node participates in.
+            #
+            # ``num_bodies`` here is the *unified* node count
+            # (rigid bodies + particles). The C# pattern keeps cloth
+            # particles in the same ``TinyRigidState`` table -- the
+            # particle uses identity orientation and zero angular
+            # velocity but otherwise looks just like a rigid body
+            # to the broadcast / average / write-back pipeline.
+            num_nodes = max(1, self.num_bodies + self.num_particles)
             self._mass_splitting = MassSplitting(
-                num_bodies=max(1, self.num_bodies),
+                num_bodies=num_nodes,
                 num_constraints=max(1, self._constraint_capacity),
                 max_partitions=int(self.mass_split_max_partitions) + 1,
                 device=self.device,
@@ -1449,6 +1457,13 @@ class PhoenXWorld:
         graph_data = ms.graph.data
         max_interactions = int(ms.graph.max_interactions)
         num_bodies = int(self.num_bodies)
+        # Unified node count -- rigid bodies and cloth particles
+        # share the InteractionGraph's section_end_indices /
+        # tiny_states tables. The setup kernels treat any
+        # ``node_id < num_bodies`` as rigid and ``node_id >= num_bodies``
+        # as a particle (with body-or-particle dispatch in the
+        # broadcast / average / write-back kernels).
+        num_nodes = num_bodies + int(self.num_particles)
         # Tonge-style overflow batching constant. 32 matches the C#
         # default (``MassSplitting.cs:43`` ``ConstraintBatchSize = 32``);
         # it controls the count of distinct ``constraint_id``s the
@@ -1457,8 +1472,10 @@ class PhoenXWorld:
         batch_size = wp.int32(32)
         max_partitions_p = wp.int32(int(self.mass_split_max_partitions))
 
-        # 1) Reset.
-        reset_dim = max(num_bodies, max_interactions, self._constraint_capacity, 1)
+        # 1) Reset. ``state_section_end_indices`` is sized for all
+        #    nodes (bodies + particles), so the reset's dim must
+        #    cover that range too.
+        reset_dim = max(num_nodes, max_interactions, self._constraint_capacity, 1)
         wp.launch(
             reset_construction_buffers_kernel,
             dim=reset_dim,
@@ -1550,11 +1567,11 @@ class PhoenXWorld:
             device=self.device,
         )
 
-        # 6) Prefix-max scan to fill body gaps (single thread).
+        # 6) Prefix-max scan to fill node gaps (single thread).
         wp.launch(
             prefix_max_scan_kernel,
             dim=1,
-            inputs=[graph_data.state_section_end_indices, wp.int32(num_bodies)],
+            inputs=[graph_data.state_section_end_indices, wp.int32(num_nodes)],
             device=self.device,
         )
 
@@ -1562,7 +1579,7 @@ class PhoenXWorld:
         wp.launch(
             write_highest_index_kernel,
             dim=1,
-            inputs=[graph_data.highest_index_in_use, wp.int32(num_bodies)],
+            inputs=[graph_data.highest_index_in_use, wp.int32(num_nodes)],
             device=self.device,
         )
 
@@ -2118,31 +2135,69 @@ class PhoenXWorld:
             self._mass_splitting is not None and self._mass_splitting._setup_complete
         )
         if mass_split_active:
-            self._mass_splitting.broadcast(
-                body_position=self.bodies.position,
-                body_orientation=self.bodies.orientation,
-                body_velocity=self.bodies.velocity,
-                body_angular_velocity=self.bodies.angular_velocity,
-                dt=substep_dt,
+            # Use the unified kernels (bodies + particles) from
+            # ``setup_kernels`` rather than the rigid-only ones on
+            # the ``MassSplitting`` orchestrator. The unified path
+            # ensures cloth particles also get state copies and
+            # consensus -- without this, cloth-vs-rigid contacts in
+            # the overflow bucket race on shared particle writes.
+            from newton._src.solvers.phoenx.mass_splitting.setup_kernels import (  # noqa: PLC0415
+                average_and_broadcast_unified_kernel,
+                broadcast_to_copy_states_unified_kernel,
+                copy_state_into_unified_kernel,
+            )
+            graph_data = self._mass_splitting.graph.data
+            num_total_nodes = self.num_bodies + self.num_particles
+            particles_arg = self._particles_or_sentinel()
+            wp.launch(
+                broadcast_to_copy_states_unified_kernel,
+                dim=num_total_nodes,
+                inputs=[
+                    graph_data,
+                    self.bodies.position,
+                    self.bodies.orientation,
+                    self.bodies.velocity,
+                    self.bodies.angular_velocity,
+                    particles_arg,
+                    wp.int32(self.num_bodies),
+                    wp.float32(substep_dt),
+                ],
+                device=self.device,
             )
 
         for _ in range(self.solver_iterations):
             self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
             if mass_split_active:
-                self._mass_splitting.average(
-                    body_position=self.bodies.position,
-                    body_orientation=self.bodies.orientation,
-                    inv_dt=inv_substep_dt,
+                wp.launch(
+                    average_and_broadcast_unified_kernel,
+                    dim=num_total_nodes,
+                    inputs=[
+                        graph_data,
+                        self.bodies.position,
+                        self.bodies.orientation,
+                        particles_arg,
+                        wp.int32(self.num_bodies),
+                        wp.float32(inv_substep_dt),
+                    ],
+                    device=self.device,
                 )
 
         if mass_split_active:
-            self._mass_splitting.write_back(
-                body_position=self.bodies.position,
-                body_orientation=self.bodies.orientation,
-                body_velocity=self.bodies.velocity,
-                body_angular_velocity=self.bodies.angular_velocity,
-                inv_dt=inv_substep_dt,
+            wp.launch(
+                copy_state_into_unified_kernel,
+                dim=num_total_nodes,
+                inputs=[
+                    graph_data,
+                    self.bodies.position,
+                    self.bodies.orientation,
+                    self.bodies.velocity,
+                    self.bodies.angular_velocity,
+                    particles_arg,
+                    wp.int32(self.num_bodies),
+                    wp.float32(inv_substep_dt),
+                ],
+                device=self.device,
             )
 
     def _relax_velocities_singleworld(self) -> None:

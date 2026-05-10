@@ -114,6 +114,29 @@ def _safe_inv(inv_factor: wp.int32) -> wp.float32:
 
 
 @wp.func
+def _read_particle_velocity(
+    graph: InteractionGraphData,
+    pcid: wp.int32,
+    node_id: wp.int32,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    inv_dt: wp.float32,
+) -> wp.vec3f:
+    """Particle's velocity for ``(constraint, particle)``: copy state
+    when registered, particle store otherwise (static fallback)."""
+    p = node_id - num_bodies
+    state, _inv_factor, idx = read_state(
+        graph, pcid, node_id,
+        particles.position[p], wp.quat_identity(),
+        particles.velocity[p], wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)),
+        _ACCESS_MODE_VELOCITY_LEVEL_C, inv_dt,
+    )
+    if idx < wp.int32(0):
+        return particles.velocity[p]
+    return state.velocity
+
+
+@wp.func
 def _endpoint_velocity_at_point_split(
     kind: wp.int32,
     nodes: wp.vec3i,
@@ -124,30 +147,76 @@ def _endpoint_velocity_at_point_split(
     rigid_v: wp.vec3f,
     rigid_w: wp.vec3f,
     contact_point_world: wp.vec3f,
+    graph: InteractionGraphData,
+    pcid: wp.int32,
+    inv_dt: wp.float32,
 ) -> wp.vec3f:
     """Velocity at the contact point (world frame).
 
-    Cloth side: ``sum_i bary_i * particles.velocity[node_i]``.
-    Rigid dynamic side: ``rigid_v + rigid_w x (p_world - bodies.position[b])``,
-    where ``rigid_v`` / ``rigid_w`` are the caller's local registers
-    (typically initialised from the per-partition ``TinyRigidState``
-    copy and mutated in-place across the GS loop).
+    Cloth side: bary-weighted particle velocities. Each particle's
+    velocity comes from its per-(particle, partition) copy state via
+    :func:`read_state` so multiple cids in the same partition that
+    share a particle don't race -- ``inv_factor`` scaling at the
+    write-state boundary keeps the accumulation conservative.
+    Rigid dynamic side: ``rigid_v + rigid_w x r``, where the
+    caller's registers are pre-loaded from the rigid copy state.
     Static / anchor side: zero.
     """
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
-        p_a = nodes[0] - num_bodies
-        p_b = nodes[1] - num_bodies
-        p_c = nodes[2] - num_bodies
-        return (
-            bary[0] * particles.velocity[p_a]
-            + bary[1] * particles.velocity[p_b]
-            + bary[2] * particles.velocity[p_c]
-        )
+        v_a = _read_particle_velocity(graph, pcid, nodes[0], particles, num_bodies, inv_dt)
+        v_b = _read_particle_velocity(graph, pcid, nodes[1], particles, num_bodies, inv_dt)
+        v_c = _read_particle_velocity(graph, pcid, nodes[2], particles, num_bodies, inv_dt)
+        return bary[0] * v_a + bary[1] * v_b + bary[2] * v_c
     b = nodes[0]
     if b < 0:
         return wp.vec3f(0.0, 0.0, 0.0)
     r = contact_point_world - bodies.position[b]
     return rigid_v + wp.cross(rigid_w, r)
+
+
+@wp.func
+def _apply_particle_impulse_split(
+    graph: InteractionGraphData,
+    pcid: wp.int32,
+    node_id: wp.int32,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    bary_weight: wp.float32,
+    impulse: wp.vec3f,
+    inv_dt: wp.float32,
+):
+    """Per-particle impulse application: route through the
+    particle's per-(partition) copy state when registered. Scales
+    the delta by ``1 / inv_factor`` so multiple cids in the same
+    partition that share this particle accumulate consistently
+    (Tonge averaging across iterations); the
+    :func:`average_and_broadcast_unified_kernel` reconstructs the
+    consensus.
+
+    Static / unregistered particles fall through to the direct
+    ``particles.velocity[p]`` write -- inv_factor=0 means the
+    static-body fallback wasn't part of any partition, so a direct
+    write doesn't race with anything.
+    """
+    p = node_id - num_bodies
+    inv_m = particles.inverse_mass[p]
+    if inv_m <= wp.float32(0.0):
+        return
+    state, inv_factor, idx = read_state(
+        graph, pcid, node_id,
+        particles.position[p], wp.quat_identity(),
+        particles.velocity[p], wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)),
+        _ACCESS_MODE_VELOCITY_LEVEL_C, inv_dt,
+    )
+    dv = bary_weight * impulse * inv_m
+    if idx < wp.int32(0):
+        # Static-fallback: not in graph. Direct write (no race
+        # since the partitioner wouldn't have produced this case).
+        particles.velocity[p] = particles.velocity[p] + dv
+        return
+    inv_factor_f = wp.float32(1.0) / wp.float32(wp.max(inv_factor, wp.int32(1)))
+    state.velocity = state.velocity + inv_factor_f * dv
+    write_state(graph, idx, state)
 
 
 @wp.func
@@ -162,36 +231,32 @@ def _endpoint_apply_impulse_split(
     impulse: wp.vec3f,
     rigid_v: wp.vec3f,
     rigid_w: wp.vec3f,
+    graph: InteractionGraphData,
+    pcid: wp.int32,
+    inv_dt: wp.float32,
 ):
     """Apply a 3D impulse to this side's nodes.
 
-    Cloth: same as the unsplit
-    :func:`contact_endpoint_apply_impulse` -- writes directly to
-    ``particles.velocity[node_i] += bary_i * impulse * inv_mass_i``.
-    Particles aren't part of the rigid mass-splitting graph; per-
-    iteration averaging is irrelevant for them.
+    Cloth: routes each particle through its per-(particle, partition)
+    copy state via :func:`_apply_particle_impulse_split` --
+    ``read_state`` / mutate / ``write_state`` with ``1/inv_factor``
+    scaling. Multiple cids in the same partition that share this
+    particle accumulate via the iteration loop, with the
+    :func:`average_and_broadcast_unified_kernel` reconstructing the
+    consensus between iterations.
 
     Rigid: instead of writing to ``bodies.velocity[b]``, return the
     updated ``(rigid_v, rigid_w)`` registers so the caller can keep
     them in scope across the per-contact GS loop and commit the
-    scaled delta to the ``TinyRigidState`` copy at the end.
+    scaled delta to the rigid ``TinyRigidState`` copy at the end.
 
-    The function returns ``(rigid_v_new, rigid_w_new)`` regardless of
-    kind (cloth and static returns the unchanged registers).
+    Returns ``(rigid_v_new, rigid_w_new)`` regardless of kind
+    (cloth and static return the unchanged registers).
     """
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
-        p_a = nodes[0] - num_bodies
-        p_b = nodes[1] - num_bodies
-        p_c = nodes[2] - num_bodies
-        inv_m_a = particles.inverse_mass[p_a]
-        inv_m_b = particles.inverse_mass[p_b]
-        inv_m_c = particles.inverse_mass[p_c]
-        if inv_m_a > wp.float32(0.0):
-            particles.velocity[p_a] = particles.velocity[p_a] + bary[0] * impulse * inv_m_a
-        if inv_m_b > wp.float32(0.0):
-            particles.velocity[p_b] = particles.velocity[p_b] + bary[1] * impulse * inv_m_b
-        if inv_m_c > wp.float32(0.0):
-            particles.velocity[p_c] = particles.velocity[p_c] + bary[2] * impulse * inv_m_c
+        _apply_particle_impulse_split(graph, pcid, nodes[0], particles, num_bodies, bary[0], impulse, inv_dt)
+        _apply_particle_impulse_split(graph, pcid, nodes[1], particles, num_bodies, bary[1], impulse, inv_dt)
+        _apply_particle_impulse_split(graph, pcid, nodes[2], particles, num_bodies, bary[2], impulse, inv_dt)
         return rigid_v, rigid_w
     b = nodes[0]
     if b < 0:
@@ -333,11 +398,11 @@ def contact_iterate_at_cloth_aware_split(
 
         v0_at_p = _endpoint_velocity_at_point_split(
             side0_kind, side0_nodes, bary0, bodies, particles, num_bodies,
-            v0, w0, p0_world,
+            v0, w0, p0_world, graph, pcid, idt,
         )
         v1_at_p = _endpoint_velocity_at_point_split(
             side1_kind, side1_nodes, bary1, bodies, particles, num_bodies,
-            v1, w1, p1_world,
+            v1, w1, p1_world, graph, pcid, idt,
         )
         vel_rel = v1_at_p - v0_at_p
         jv_n = wp.dot(vel_rel, n)
@@ -399,11 +464,11 @@ def contact_iterate_at_cloth_aware_split(
         # accumulates in scope.
         v0, w0 = _endpoint_apply_impulse_split(
             side0_kind, side0_nodes, bary0, bodies, particles, num_bodies,
-            p0_world, -imp, v0, w0,
+            p0_world, -imp, v0, w0, graph, pcid, idt,
         )
         v1, w1 = _endpoint_apply_impulse_split(
             side1_kind, side1_nodes, bary1, bodies, particles, num_bodies,
-            p1_world, imp, v1, w1,
+            p1_world, imp, v1, w1, graph, pcid, idt,
         )
 
     # Commit rigid-side deltas to the per-partition copies. Tonge

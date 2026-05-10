@@ -198,17 +198,14 @@ class Example:
             rigid_contact_max=RIGID_CONTACT_MAX,
             step_layout="single_world",
             device=self.device,
-            # Cap the constraint-graph colouring at 12 MIS partitions
-            # + one overflow bucket (Jitter2 ``ContactPartitions``
-            # convention). When the cube touches the cloth the
-            # uncapped coloring spikes to ~192 colours -> ~192
-            # iterate kernel launches per PGS iteration; with the
-            # cap it stays at 13 colours, and the overflow bucket
-            # is processed via mass splitting (per-(body, partition)
-            # ``TinyRigidState`` copies + ``1/inv_factor`` impulse
-            # scaling). The cloth-aware split iterate variant
-            # ensures the cloth-vs-cube contacts are race-free
-            # under the cap.
+            # Cap colouring at 12 MIS partitions + 1 overflow
+            # (Jitter2 ``ContactPartitions`` convention). Mass
+            # splitting now covers both rigid bodies *and*
+            # particles -- cloth-vs-rigid contacts in the overflow
+            # bucket route every node (cube body + each cloth-tri
+            # particle) through its per-(node, partition)
+            # ``TinyRigidState`` copy with ``1/inv_factor`` impulse
+            # scaling, so the overflow processing stays race-free.
             mass_split_max_partitions=12,
         )
         self.world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))

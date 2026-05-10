@@ -66,16 +66,36 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     element_interaction_data_get,
 )
+from newton._src.solvers.phoenx.mass_splitting.interaction_graph import (
+    InteractionGraphData,
+    graph_get_state,
+    graph_set_state,
+    graph_state_section,
+)
+from newton._src.solvers.phoenx.mass_splitting.state import (
+    ACCESS_MODE_VELOCITY_LEVEL,
+    TinyRigidState,
+    tiny_rigid_state_from_body,
+    tiny_rigid_state_set_access_mode,
+    tiny_rigid_state_write_back,
+)
+from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
+    "average_and_broadcast_unified_kernel",
+    "broadcast_to_copy_states_unified_kernel",
     "build_partition_list_kernel",
     "compact_unique_keys_kernel",
+    "copy_state_into_unified_kernel",
     "mark_unique_keys_kernel",
     "prefix_max_scan_kernel",
     "record_all_interactions_kernel",
     "reset_construction_buffers_kernel",
     "write_highest_index_kernel",
 ]
+
+
+_ACCESS_MODE_VELOCITY_LEVEL_C = wp.constant(wp.int32(ACCESS_MODE_VELOCITY_LEVEL))
 
 
 # Bit layout of the int64 construction keys.
@@ -164,11 +184,15 @@ def record_all_interactions_kernel(
          (overflow bucket; multiple distinct constraint_ids drive
          multiple TinyRigidState copies per body).
     4. Stamp ``cid_to_partition_constraint_id[cid] = partition_constraint_id``.
-    5. For each body slot in ``elements[cid]`` (rigid bodies only;
-       particles >= num_bodies and -1 sentinels are skipped),
+    5. For each node slot in ``elements[cid]`` (rigid body OR
+       particle in unified node space; -1 sentinels are skipped),
        atomic-append the int64 key
-       ``(body << 32) | partition_constraint_id`` into
-       ``construction_keys``.
+       ``(node << 32) | partition_constraint_id`` into
+       ``construction_keys``. Both rigid bodies (``node < num_bodies``)
+       and cloth particles (``node >= num_bodies``) get state copies
+       in the InteractionGraph -- the C# convention
+       (``RecordAllInteractionsKernel`` registers every entry of
+       ``ElementInteractionData``, regardless of kind).
     """
     i = wp.tid()
     n_active = num_active_constraints[0]
@@ -202,15 +226,16 @@ def record_all_interactions_kernel(
 
     el = elements[cid]
     for k in range(MAX_BODIES):
-        body = element_interaction_data_get(el, k)
-        if body < wp.int32(0):
+        node = element_interaction_data_get(el, k)
+        if node < wp.int32(0):
             break
-        if body >= num_bodies:
-            # Particle-space index; mass splitting is rigid-only.
-            continue
+        # Both rigid bodies (``node < num_bodies``) and particles
+        # (``node >= num_bodies``) get registered. Particles use
+        # the unified node id directly so their section in the
+        # InteractionGraph lives at indices >= num_bodies.
         slot = wp.atomic_add(construction_count, 0, wp.int32(1))
         if slot < construction_keys.shape[0]:
-            construction_keys[slot] = _pack_construction_key(body, partition_constraint_id)
+            construction_keys[slot] = _pack_construction_key(node, partition_constraint_id)
 
 
 @wp.kernel(enable_backward=False)
@@ -296,7 +321,7 @@ def build_partition_list_kernel(
 @wp.kernel(enable_backward=False)
 def prefix_max_scan_kernel(
     state_section_end_indices: wp.array[wp.int32],
-    num_bodies: wp.int32,
+    num_nodes: wp.int32,
 ):
     """Single-thread inclusive prefix-max over
     ``state_section_end_indices[0..num_bodies)``. After this every
@@ -309,7 +334,7 @@ def prefix_max_scan_kernel(
     if wp.tid() != 0:
         return
     running = wp.int32(0)
-    n = wp.min(num_bodies, state_section_end_indices.shape[0])
+    n = wp.min(num_nodes, state_section_end_indices.shape[0])
     for i in range(n):
         v = state_section_end_indices[i]
         if v > running:
@@ -320,13 +345,145 @@ def prefix_max_scan_kernel(
 @wp.kernel(enable_backward=False)
 def write_highest_index_kernel(
     highest_index_in_use: wp.array[wp.int32],
-    num_bodies: wp.int32,
+    num_nodes: wp.int32,
 ):
-    """Set ``highest_index_in_use[0] = num_bodies``. The C# reference
-    computes the actual max-rigid-with-interactions per-build; using
-    the static ``num_bodies`` is a safe over-estimate -- ``read_state``
-    falls back to the static-body path for any body whose section
-    happens to be empty, regardless of where the high-water mark sits."""
+    """Set ``highest_index_in_use[0] = num_nodes``. The C# reference
+    computes the actual max-node-with-interactions per-build; using
+    the static ``num_nodes`` (= num_bodies + num_particles) is a
+    safe over-estimate -- ``read_state`` falls back to the
+    static-body path for any node whose section happens to be empty,
+    regardless of where the high-water mark sits."""
     if wp.tid() != 0:
         return
-    highest_index_in_use[0] = num_bodies
+    highest_index_in_use[0] = num_nodes
+
+
+# ---------------------------------------------------------------------------
+# Unified broadcast / average / write-back -- bodies + particles in one
+# pass. The mass_splitting/kernels.py versions only handle rigid bodies;
+# these unified variants also cover cloth particles (node_id >= num_bodies).
+# Particles use identity orientation and zero angular velocity in the
+# TinyRigidState; the broadcast / average / write_back paths still
+# operate on velocity correctly.
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel(enable_backward=False)
+def broadcast_to_copy_states_unified_kernel(
+    graph: InteractionGraphData,
+    body_position: wp.array[wp.vec3f],
+    body_orientation: wp.array[wp.quatf],
+    body_velocity: wp.array[wp.vec3f],
+    body_angular_velocity: wp.array[wp.vec3f],
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    dt: wp.float32,
+):
+    """One thread per node. ``node < num_bodies`` -> rigid body
+    broadcast (read body store). ``node >= num_bodies`` -> particle
+    broadcast (read particle store, identity orientation, zero
+    angular velocity)."""
+    node = wp.tid()
+    if node >= graph.highest_index_in_use[0]:
+        return
+    start, end = graph_state_section(graph, node)
+    if start >= end:
+        return
+    if node < num_bodies:
+        new_state = tiny_rigid_state_from_body(
+            body_position[node],
+            body_orientation[node],
+            body_velocity[node],
+            body_angular_velocity[node],
+            dt,
+        )
+    else:
+        p = node - num_bodies
+        new_state = tiny_rigid_state_from_body(
+            particles.position[p],
+            wp.quat_identity(),
+            particles.velocity[p],
+            wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)),
+            dt,
+        )
+    for i in range(start, end):
+        graph_set_state(graph, i, new_state)
+
+
+@wp.kernel(enable_backward=False)
+def average_and_broadcast_unified_kernel(
+    graph: InteractionGraphData,
+    body_position: wp.array[wp.vec3f],
+    body_orientation: wp.array[wp.quatf],
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    inv_dt: wp.float32,
+):
+    """One thread per node. Same averaging logic as the rigid-only
+    ``average_and_broadcast_kernel``; just reads pose from the
+    appropriate store (body vs particle) for the velocity-level
+    sync that ``tiny_rigid_state_set_access_mode`` needs.
+    """
+    node = wp.tid()
+    if node >= graph.highest_index_in_use[0]:
+        return
+    start, end = graph_state_section(graph, node)
+    count = end - start
+    if count <= wp.int32(1):
+        return
+    if node < num_bodies:
+        node_pos = body_position[node]
+        node_ori = body_orientation[node]
+    else:
+        p = node - num_bodies
+        node_pos = particles.position[p]
+        node_ori = wp.quat_identity()
+    sum_vel = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    sum_ang_vel = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    for i in range(start, end):
+        s = graph_get_state(graph, i)
+        s = tiny_rigid_state_set_access_mode(s, _ACCESS_MODE_VELOCITY_LEVEL_C, node_pos, node_ori, inv_dt)
+        sum_vel = sum_vel + s.velocity
+        sum_ang_vel = sum_ang_vel + s.angular_velocity
+    avg_scale = wp.float32(1.0) / wp.float32(count)
+    avg_vel = sum_vel * avg_scale
+    avg_ang_vel = sum_ang_vel * avg_scale
+    for i in range(start, end):
+        s = graph_get_state(graph, i)
+        s.velocity = avg_vel
+        s.angular_velocity = avg_ang_vel
+        s.access_mode = _ACCESS_MODE_VELOCITY_LEVEL_C
+        graph_set_state(graph, i, s)
+
+
+@wp.kernel(enable_backward=False)
+def copy_state_into_unified_kernel(
+    graph: InteractionGraphData,
+    body_position: wp.array[wp.vec3f],
+    body_orientation: wp.array[wp.quatf],
+    body_velocity: wp.array[wp.vec3f],
+    body_angular_velocity: wp.array[wp.vec3f],
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    inv_dt: wp.float32,
+):
+    """End-of-substep write-back: tiny_states[start] -> body store
+    (for rigid nodes) or particle store (for particle nodes)."""
+    node = wp.tid()
+    if node >= graph.highest_index_in_use[0]:
+        return
+    start, end = graph_state_section(graph, node)
+    if start >= end:
+        return
+    state = graph_get_state(graph, start)
+    if node < num_bodies:
+        body_pos = body_position[node]
+        body_orient = body_orientation[node]
+        velocity, angular_velocity = tiny_rigid_state_write_back(state, body_pos, body_orient, inv_dt)
+        body_velocity[node] = velocity
+        body_angular_velocity[node] = angular_velocity
+    else:
+        p = node - num_bodies
+        node_pos = particles.position[p]
+        velocity, _angular_velocity = tiny_rigid_state_write_back(state, node_pos, wp.quat_identity(), inv_dt)
+        particles.velocity[p] = velocity
