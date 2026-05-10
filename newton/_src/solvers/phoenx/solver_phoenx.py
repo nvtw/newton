@@ -2134,12 +2134,12 @@ class PhoenXWorld:
 
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = self._singleworld_kernels()
 
-        self._partitioner.begin_sweep()
-        self._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
-
         mass_split_active = (
             self._mass_splitting is not None and self._mass_splitting._setup_complete
         )
+        graph_data = None
+        num_total_nodes = 0
+        particles_arg = None
         if mass_split_active:
             # Use the unified kernels (bodies + particles) from
             # ``setup_kernels`` rather than the rigid-only ones on
@@ -2155,6 +2155,16 @@ class PhoenXWorld:
             graph_data = self._mass_splitting.graph.data
             num_total_nodes = self.num_bodies + self.num_particles
             particles_arg = self._particles_or_sentinel()
+            # C# order (``MassSplitting.cs:RunMethodParallelPrepare``):
+            # broadcast FIRST (body store -> copies), THEN prepare adds
+            # warm-start to copies. Reversing this -- running prepare
+            # before broadcast -- causes broadcast to overwrite the
+            # warm-start writes the split prepare just made, losing
+            # all accumulated lambda response between frames. Tower
+            # scenes blew up because warm-start was effectively zero
+            # every frame and the iterate had to re-resolve all
+            # contacts from scratch with mass-splitting's slower
+            # convergence.
             wp.launch(
                 broadcast_to_copy_states_unified_kernel,
                 dim=num_total_nodes,
@@ -2167,6 +2177,33 @@ class PhoenXWorld:
                     particles_arg,
                     wp.int32(self.num_bodies),
                     wp.float32(substep_dt),
+                ],
+                device=self.device,
+            )
+
+        # Prepare AFTER broadcast (when mass_split is active) so the
+        # split prepare's warm-start writes land on the just-broadcast
+        # copy states. When mass_split is OFF, the unsplit prepare
+        # writes to body store directly -- no broadcast needed.
+        self._partitioner.begin_sweep()
+        self._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
+
+        if mass_split_active:
+            # Pre-iter average pass (C# does this -- syncs the
+            # warm-start copies into a per-body consensus before the
+            # iterate sweeps start). Without it, bodies in multiple
+            # partitions see different prepare-time warm-starts
+            # across copies; the iterate's first sweep diverges.
+            wp.launch(
+                average_and_broadcast_unified_kernel,
+                dim=num_total_nodes,
+                inputs=[
+                    graph_data,
+                    self.bodies.position,
+                    self.bodies.orientation,
+                    particles_arg,
+                    wp.int32(self.num_bodies),
+                    wp.float32(inv_substep_dt),
                 ],
                 device=self.device,
             )
