@@ -59,6 +59,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
     ConstraintBodies,
+    pd_coefficients,
     soft_constraint_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
@@ -79,10 +80,20 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_set_bias,
+    cc_set_bias_t1,
+    cc_set_bias_t2,
+    cc_set_eff_n,
+    cc_set_eff_t1,
+    cc_set_eff_t2,
     cc_set_normal_lambda,
+    cc_set_pd_bias,
+    cc_set_pd_eff_soft,
+    cc_set_pd_gamma,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
+from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
 from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     _side_world_contact_point,
 )
@@ -99,6 +110,8 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 __all__ = [
     "contact_iterate_at_cloth_aware_split",
     "contact_iterate_cloth_aware_split",
+    "contact_prepare_for_iteration_at_cloth_aware_split",
+    "contact_prepare_for_iteration_cloth_aware_split",
 ]
 
 
@@ -269,6 +282,306 @@ def _endpoint_apply_impulse_split(
     new_v = rigid_v + impulse * inv_m
     new_w = rigid_w + inv_i @ wp.cross(r, impulse)
     return new_v, new_w
+
+
+@wp.func
+def _endpoint_inv_mass_along_split(
+    kind: wp.int32,
+    nodes: wp.vec3i,
+    bary: wp.vec3f,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    contact_point_world: wp.vec3f,
+    direction: wp.vec3f,
+    graph: InteractionGraphData,
+    pcid: wp.int32,
+    inv_dt: wp.float32,
+) -> wp.float32:
+    """C# Tonge effMass denominator contribution per side, with each
+    node's term scaled by its ``invFactor``. Cloth: per-particle
+    ``bary_i^2 * invM_i * invFactor_i``. Rigid: ``invM*invFactor +
+    (r x dir).invI*invFactor.(r x dir)``."""
+    if kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
+        total = wp.float32(0.0)
+        for slot in range(3):
+            node_id = nodes[slot]
+            p = node_id - num_bodies
+            inv_m = particles.inverse_mass[p]
+            if inv_m <= wp.float32(0.0):
+                continue
+            _state, inv_factor, idx = read_state(
+                graph, pcid, node_id,
+                particles.position[p], wp.quat_identity(),
+                particles.velocity[p], wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)),
+                _ACCESS_MODE_VELOCITY_LEVEL_C, inv_dt,
+            )
+            inv_factor_f = wp.float32(wp.max(inv_factor, wp.int32(1)))
+            if idx < wp.int32(0):
+                inv_factor_f = wp.float32(1.0)
+            total = total + bary[slot] * bary[slot] * inv_m * inv_factor_f
+        return total
+    b = nodes[0]
+    if b < 0:
+        return wp.float32(0.0)
+    inv_m = bodies.inverse_mass[b]
+    if inv_m == wp.float32(0.0):
+        return wp.float32(0.0)
+    _state, inv_factor, idx = read_state(
+        graph, pcid, b,
+        bodies.position[b], bodies.orientation[b],
+        bodies.velocity[b], bodies.angular_velocity[b],
+        _ACCESS_MODE_VELOCITY_LEVEL_C, inv_dt,
+    )
+    inv_factor_f = wp.float32(wp.max(inv_factor, wp.int32(1)))
+    if idx < wp.int32(0):
+        inv_factor_f = wp.float32(1.0)
+    r = contact_point_world - bodies.position[b]
+    rc = wp.cross(r, direction)
+    inv_i = bodies.inverse_inertia_world[b]
+    return (inv_m + wp.dot(rc, inv_i @ rc)) * inv_factor_f
+
+
+@wp.func
+def contact_prepare_for_iteration_at_cloth_aware_split(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    graph: InteractionGraphData,
+    cid_to_partition_constraint_id: wp.array[wp.int32],
+):
+    """Cloth-aware split-aware prepare. Mirrors
+    :func:`~newton._src.solvers.phoenx.constraints.constraint_contact_cloth.contact_prepare_for_iteration_at_cloth_aware`
+    line for line; only differences are at the body / particle I/O
+    boundary, where state reads / writes route through copy states
+    and effMass + warm-start velocity updates pick up ``invFactor``
+    scaling per the C# Tonge convention.
+    """
+    _ = base_offset
+
+    side0_kind = contact_get_side0_kind(constraints, cid)
+    side1_kind = contact_get_side1_kind(constraints, cid)
+    side0_extra = contact_get_side0_nodes_extra(constraints, cid)
+    side1_extra = contact_get_side1_nodes_extra(constraints, cid)
+    side0_nodes = wp.vec3i(body_pair.b1, side0_extra[0], side0_extra[1])
+    side1_nodes = wp.vec3i(body_pair.b2, side1_extra[0], side1_extra[1])
+
+    contact_first = contact_get_contact_first(constraints, cid)
+    contact_count = contact_get_contact_count(constraints, cid)
+    if contact_count == 0:
+        return
+
+    pcid = cid_to_partition_constraint_id[cid]
+
+    dt_substep = wp.float32(1.0) / idt
+    bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+    )
+
+    friction_bias_factor = wp.float32(0.08)
+    friction_slop = wp.float32(0.001)
+    max_push_speed = wp.float32(2.0)
+    max_approach_speed = wp.float32(10.0)
+
+    mu_s_col = contact_get_friction(constraints, cid)
+
+    for i in range(contact_count):
+        k = contact_first + i
+
+        n = cc_get_normal(cc, k)
+        t1_dir = cc_get_tangent1(cc, k)
+        t2_dir = wp.cross(n, t1_dir)
+        bary0 = cc_get_side0_bary(cc, k)
+        bary1 = cc_get_side1_bary(cc, k)
+        margin0 = contacts.rigid_contact_margin0[k]
+        margin1 = contacts.rigid_contact_margin1[k]
+
+        p0_world = _side_world_contact_point(
+            side0_kind, side0_nodes, bary0, bodies, particles, num_bodies,
+            cc, k, False, margin0, n,
+        )
+        p1_world = _side_world_contact_point(
+            side1_kind, side1_nodes, bary1, bodies, particles, num_bodies,
+            cc, k, True, margin1, n,
+        )
+
+        # Split effMass: per-side inv_mass_along scaled by per-node invFactor.
+        inv_n = (
+            _endpoint_inv_mass_along_split(side0_kind, side0_nodes, bary0, bodies, particles, num_bodies, p0_world, n, graph, pcid, idt)
+            + _endpoint_inv_mass_along_split(side1_kind, side1_nodes, bary1, bodies, particles, num_bodies, p1_world, n, graph, pcid, idt)
+        )
+        inv_t1 = (
+            _endpoint_inv_mass_along_split(side0_kind, side0_nodes, bary0, bodies, particles, num_bodies, p0_world, t1_dir, graph, pcid, idt)
+            + _endpoint_inv_mass_along_split(side1_kind, side1_nodes, bary1, bodies, particles, num_bodies, p1_world, t1_dir, graph, pcid, idt)
+        )
+        inv_t2 = (
+            _endpoint_inv_mass_along_split(side0_kind, side0_nodes, bary0, bodies, particles, num_bodies, p0_world, t2_dir, graph, pcid, idt)
+            + _endpoint_inv_mass_along_split(side1_kind, side1_nodes, bary1, bodies, particles, num_bodies, p1_world, t2_dir, graph, pcid, idt)
+        )
+        eff_n = wp.float32(0.0)
+        if inv_n > wp.float32(1.0e-12):
+            eff_n = wp.float32(1.0) / inv_n
+        eff_t1 = wp.float32(0.0)
+        if inv_t1 > wp.float32(1.0e-12):
+            eff_t1 = wp.float32(1.0) / inv_t1
+        eff_t2 = wp.float32(0.0)
+        if inv_t2 > wp.float32(1.0e-12):
+            eff_t2 = wp.float32(1.0) / inv_t2
+
+        effective_gap = wp.dot(p1_world - p0_world, n)
+        lam_n_ws = cc_get_normal_lambda(cc, k)
+        lam_n_ref = wp.float32(1.0) / wp.max(eff_n * idt, wp.float32(1.0e-6))
+        load_boost = wp.min(wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0))
+
+        if effective_gap > wp.float32(0.0):
+            bias_val = effective_gap * idt
+        else:
+            bias_val = effective_gap * bias_rate
+        bias_val = wp.clamp(bias_val, -max_push_speed, max_approach_speed)
+
+        p_diff = p1_world - p0_world
+        drift_t1_raw = wp.dot(p_diff, t1_dir)
+        drift_t2_raw = wp.dot(p_diff, t2_dir)
+        drift_t1 = wp.clamp(drift_t1_raw, -friction_slop, friction_slop)
+        drift_t2 = wp.clamp(drift_t2_raw, -friction_slop, friction_slop)
+        bias_t1_val = friction_bias_factor * drift_t1 * idt * load_boost
+        bias_t2_val = friction_bias_factor * drift_t2 * idt * load_boost
+
+        cc_set_eff_n(cc, k, eff_n)
+        cc_set_eff_t1(cc, k, eff_t1)
+        cc_set_eff_t2(cc, k, eff_t2)
+        cc_set_bias(cc, k, bias_val)
+        cc_set_bias_t1(cc, k, bias_t1_val)
+        cc_set_bias_t2(cc, k, bias_t2_val)
+
+        # Soft-contact PD plumbing (same as unsplit).
+        stiffness_arr_len = contacts.rigid_contact_stiffness.shape[0]
+        damping_arr_len = contacts.rigid_contact_damping.shape[0]
+        if stiffness_arr_len > k or damping_arr_len > k:
+            k_n = wp.float32(0.0)
+            c_n = wp.float32(0.0)
+            if stiffness_arr_len > k:
+                k_n = contacts.rigid_contact_stiffness[k]
+            if damping_arr_len > k:
+                c_n = contacts.rigid_contact_damping[k]
+            if (k_n > wp.float32(0.0) or c_n > wp.float32(0.0)) and eff_n > wp.float32(0.0):
+                eff_inv_n = wp.float32(1.0) / eff_n
+                pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(
+                    k_n, c_n, -effective_gap, eff_inv_n, dt_substep, PHOENX_BOOST_CONTACT_NORMAL
+                )
+                cc_set_pd_gamma(cc, k, pd_gamma_n)
+                cc_set_pd_bias(cc, k, pd_bias_n)
+                cc_set_pd_eff_soft(cc, k, pd_eff_soft_n)
+            else:
+                cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
+        else:
+            cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
+
+        # Warm-start scatter via the split endpoint helper. Each side
+        # routes through copy states with invFactor scaling.
+        lam_n = cc_get_normal_lambda(cc, k)
+        lam_t1 = cc_get_tangent1_lambda(cc, k)
+        lam_t2 = cc_get_tangent2_lambda(cc, k)
+        imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
+        # For warm-start, no rigid_v / rigid_w registers are needed
+        # because the helper's rigid path now writes through state
+        # copies directly. Pass dummies; they're returned unchanged
+        # for cloth side.
+        zero_v = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+        _v0_unused, _w0_unused = _endpoint_apply_impulse_split_to_state(
+            side0_kind, side0_nodes, bary0, bodies, particles, num_bodies, p0_world, -imp,
+            zero_v, zero_v, graph, pcid, idt,
+        )
+        _v1_unused, _w1_unused = _endpoint_apply_impulse_split_to_state(
+            side1_kind, side1_nodes, bary1, bodies, particles, num_bodies, p1_world, imp,
+            zero_v, zero_v, graph, pcid, idt,
+        )
+
+
+@wp.func
+def _endpoint_apply_impulse_split_to_state(
+    kind: wp.int32,
+    nodes: wp.vec3i,
+    bary: wp.vec3f,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    contact_point_world: wp.vec3f,
+    impulse: wp.vec3f,
+    rigid_v: wp.vec3f,
+    rigid_w: wp.vec3f,
+    graph: InteractionGraphData,
+    pcid: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Variant of :func:`_endpoint_apply_impulse_split` for the
+    prepare's warm-start phase: instead of taking rigid registers
+    and returning updated registers, this commits the rigid impulse
+    DIRECTLY to the (rigid, pcid) copy state via read_state /
+    write_state -- with ``invFactor`` scaling. Cloth particles go
+    through the same per-particle copy-state path as the iterate.
+
+    Used by the prepare because there's no per-pair register loop
+    here -- each contact's warm-start impulse stands alone.
+    """
+    if kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
+        _apply_particle_impulse_split(graph, pcid, nodes[0], particles, num_bodies, bary[0], impulse, inv_dt)
+        _apply_particle_impulse_split(graph, pcid, nodes[1], particles, num_bodies, bary[1], impulse, inv_dt)
+        _apply_particle_impulse_split(graph, pcid, nodes[2], particles, num_bodies, bary[2], impulse, inv_dt)
+        return rigid_v, rigid_w
+    b = nodes[0]
+    if b < 0:
+        return rigid_v, rigid_w
+    inv_m = bodies.inverse_mass[b]
+    if inv_m == wp.float32(0.0):
+        return rigid_v, rigid_w
+    state, inv_factor, idx = read_state(
+        graph, pcid, b,
+        bodies.position[b], bodies.orientation[b],
+        bodies.velocity[b], bodies.angular_velocity[b],
+        _ACCESS_MODE_VELOCITY_LEVEL_C, inv_dt,
+    )
+    if idx < wp.int32(0):
+        return rigid_v, rigid_w
+    inv_factor_f = wp.float32(wp.max(inv_factor, wp.int32(1)))
+    r = contact_point_world - bodies.position[b]
+    inv_i = bodies.inverse_inertia_world[b]
+    state.velocity = state.velocity + inv_factor_f * impulse * inv_m
+    state.angular_velocity = state.angular_velocity + inv_factor_f * (inv_i @ wp.cross(r, impulse))
+    write_state(graph, idx, state)
+    return rigid_v, rigid_w
+
+
+@wp.func
+def contact_prepare_for_iteration_cloth_aware_split(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    graph: InteractionGraphData,
+    cid_to_partition_constraint_id: wp.array[wp.int32],
+):
+    """Public entry point mirroring
+    :func:`~newton._src.solvers.phoenx.constraints.constraint_contact_cloth.contact_prepare_for_iteration_cloth_aware`."""
+    body_pair = ConstraintBodies()
+    body_pair.b1 = contact_get_body1(constraints, cid)
+    body_pair.b2 = contact_get_body2(constraints, cid)
+    contact_prepare_for_iteration_at_cloth_aware_split(
+        constraints, cid, 0, bodies, particles, num_bodies,
+        body_pair, idt, cc, contacts, graph,
+        cid_to_partition_constraint_id,
+    )
 
 
 @wp.func
