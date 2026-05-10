@@ -50,6 +50,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
+    "PhoenXClothShareVertexFilterData",
     "SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE",
     "SHAPE_ENDPOINT_KIND_RIGID",
     "ShapeEndpoint",
@@ -58,6 +59,7 @@ __all__ = [
     "_phoenx_populate_shape_endpoints_kernel",
     "_phoenx_update_cloth_shape_geometry_kernel",
     "canonicalize_triangle",
+    "phoenx_cloth_share_vertex_filter",
     "shape_endpoints_zeros",
 ]
 
@@ -119,21 +121,33 @@ def _phoenx_populate_shape_endpoints_kernel(
     cloth_shape_offset: wp.int32,
     num_cloth_triangles: wp.int32,
     num_bodies: wp.int32,
+    phoenx_body_offset: wp.int32,
     # out
     shape_endpoints: wp.array[ShapeEndpoint],
 ):
     """One thread per shape ``s`` in ``[0, S + T)``: stamp its
     :class:`ShapeEndpoint`.
 
-    * ``s < cloth_shape_offset`` -> rigid: nodes = (shape_body[s], -1, -1).
-      ``shape_body[s] == -1`` (anchored to world) is preserved as-is so
-      the partitioner sees ``-1`` for static-anchor shapes.
+    * ``s < cloth_shape_offset`` -> rigid: ``nodes = (newton_body +
+      phoenx_body_offset, -1, -1)``.
+
+      Newton's :attr:`Model.shape_body` uses Newton's body indexing
+      (``[0, model.body_count)`` for dynamic bodies, ``-1`` for shapes
+      anchored to the world). PhoenX's :class:`BodyContainer` may use
+      a different layout: the "ported example" / cloth-aware convention
+      reserves slot 0 for a static world-anchor body and shifts every
+      Newton body by ``+1`` (so ``phoenx_body_offset = 1``); raw
+      ``WorldBuilder`` scenes pass ``phoenx_body_offset = 0``.
+      ``-1`` (no body) is preserved as-is so the iterate's static-anchor
+      branch fires.
     * ``s >= cloth_shape_offset`` -> cloth tri: nodes = unified-index
-      triplet from ``tri_indices[s - S]``.
+      triplet ``num_bodies + particle_id`` from ``tri_indices[s - S]``.
     """
     s = wp.tid()
     if s < cloth_shape_offset:
         b = shape_body[s]
+        if b >= 0:
+            b = b + phoenx_body_offset
         ep = ShapeEndpoint()
         ep.nodes = wp.vec3i(b, wp.int32(-1), wp.int32(-1))
         ep.kind = wp.int32(SHAPE_ENDPOINT_KIND_RIGID)
@@ -411,3 +425,74 @@ def _phoenx_pack_cloth_contact_barycentric_kernel(
             particles.position[p_c],
         )
         cc_set_side1_bary(cc, k, bary)
+
+
+# ---------------------------------------------------------------------------
+# Broad-phase filter: drop cloth-tri pairs that share a particle node.
+# ---------------------------------------------------------------------------
+#
+# Without this filter, every adjacent triangle pair in a cloth grid
+# (~5-6 per triangle for a regular grid) generates a contact column,
+# which is both wasteful and physically incorrect: triangles connected
+# via a shared vertex are already linked by the cloth's XPBD elasticity
+# constraints; treating their geometric overlap as a contact would
+# double-count the same constraint.
+#
+# Rigid-rigid pairs and cloth-vs-rigid pairs pass through unchanged --
+# the filter only fires on pairs where *both* shapes are cloth tris.
+# Cloth-cloth pairs that don't share a vertex (real self-collision in
+# a folded cloth) also pass through.
+#
+# Installed on the broad phase via the ``broad_phase_filter`` arg of
+# :class:`CollisionPipeline` (see :meth:`PhoenXWorld.setup_cloth_collision_pipeline`).
+
+
+@wp.struct
+class PhoenXClothShareVertexFilterData:
+    """Runtime data for :func:`phoenx_cloth_share_vertex_filter`.
+
+    Attributes:
+        num_rigid_shapes: ``S`` in the unified shape index space.
+            Shape indices ``< num_rigid_shapes`` are rigid (filter
+            passes through); indices ``>= num_rigid_shapes`` are cloth
+            tris with index ``t = shape - S`` into ``tri_indices``.
+        tri_indices: Per-triangle particle indices, shape
+            ``(num_cloth_triangles, 3)``. Read at broad-phase time to
+            test whether two cloth tris share a vertex.
+    """
+
+    num_rigid_shapes: wp.int32
+    tri_indices: wp.array2d[wp.int32]
+
+
+@wp.func
+def phoenx_cloth_share_vertex_filter(
+    pair: wp.vec2i,
+    data: PhoenXClothShareVertexFilterData,
+) -> wp.int32:
+    """Broad-phase callback. Returns ``0`` to drop the pair, ``1`` to keep.
+
+    Drop iff both shapes are cloth tris AND they share at least one
+    vertex (any of the 3 particle indices match between the two
+    triangles). Otherwise pass through.
+    """
+    sa = pair[0]
+    sb = pair[1]
+    S = data.num_rigid_shapes
+    if sa < S or sb < S:
+        return wp.int32(1)  # not both cloth: pass through
+    ta = sa - S
+    tb = sb - S
+    a0 = data.tri_indices[ta, 0]
+    a1 = data.tri_indices[ta, 1]
+    a2 = data.tri_indices[ta, 2]
+    b0 = data.tri_indices[tb, 0]
+    b1 = data.tri_indices[tb, 1]
+    b2 = data.tri_indices[tb, 2]
+    if a0 == b0 or a0 == b1 or a0 == b2:
+        return wp.int32(0)
+    if a1 == b0 or a1 == b1 or a1 == b2:
+        return wp.int32(0)
+    if a2 == b0 or a2 == b1 or a2 == b2:
+        return wp.int32(0)
+    return wp.int32(1)

@@ -5,11 +5,14 @@
 correctly: no two elements in the same colour share any unified-index
 node.
 
-Builds an 8x8 cloth grid resting on a dynamic box (so cloth-rigid
-contacts produce 4-node elements; against a *static* rigid the
-partitioner correctly drops the static-anchor node and the element
-collapses to 3 nodes), runs the contact ingest + element emission +
-partitioner.build_csr, then asserts:
+Builds two overlapping cloth grids dropping onto a dynamic box --
+the two grids have disjoint particle sets, so the share-vertex
+broad-phase filter passes their cloth-vs-cloth pairs through, giving
+6-node cloth-cloth elements. The dynamic box gives 4-node cloth-rigid
+elements (against a static box the rigid node would correctly
+collapse to -1 and the element would only have 3 nodes).
+
+Asserts:
 
 * The element-emission kernel produces cloth-tri (3-node),
   cloth-rigid (4-node), and cloth-cloth (6-node) elements.
@@ -46,29 +49,45 @@ class TestClothContactPartitioner(unittest.TestCase):
 
         builder = newton.ModelBuilder()
         # Dynamic box -- gives 4-node (cloth + rigid) elements when
-        # cloth tris contact it; against a body=-1 static box the
-        # rigid node would correctly collapse to -1 and the element
-        # would only have 3 nodes (just the cloth triangle).
+        # cloth tris contact it.
         b = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()), mass=1.0)
         builder.add_shape_box(body=b, hx=0.5, hy=0.5, hz=0.1)
         tri_ka, tri_ke = cloth_lame_from_youngs_poisson_plane_stress(5.0e8, 0.3)
+        # Two stacked cloth grids: their particle sets are disjoint,
+        # so the share-vertex broad-phase filter passes their
+        # cross-cloth tri pairs through, giving genuine 6-node
+        # cloth-cloth elements when the two grids overlap.
         builder.add_cloth_grid(
             pos=wp.vec3(-0.5, -0.5, 0.11),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
-            dim_x=8, dim_y=8, cell_x=0.125, cell_y=0.125,
+            dim_x=4, dim_y=4, cell_x=0.25, cell_y=0.25,
+            mass=0.05, fix_left=False,
+            tri_ke=tri_ke, tri_ka=tri_ka, particle_radius=0.04,
+        )
+        builder.add_cloth_grid(
+            pos=wp.vec3(-0.5, -0.5, 0.13),  # 2 cm above the first grid
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=4, dim_y=4, cell_x=0.25, cell_y=0.25,
             mass=0.05, fix_left=False,
             tri_ke=tri_ke, tri_ka=tri_ka, particle_radius=0.04,
         )
         model = builder.finalize(device=device)
 
-        bodies = body_container_zeros(max(1, int(model.body_count)), device=device)
-        # Populate the box body's inverse mass so the element-emission
-        # kernel treats it as dynamic (else it collapses to -1 like a
-        # static rigid). The actual value doesn't matter for the
-        # colouring test -- we just need it strictly positive.
+        # Standard PhoenX convention: slot 0 is the world-anchor body,
+        # Newton body i lands at PhoenX slot i+1. The cloth-aware
+        # ``setup_cloth_collision_pipeline`` defaults to
+        # ``phoenx_body_offset=1`` to match this layout.
+        num_phoenx_bodies = int(model.body_count) + 1
+        bodies = body_container_zeros(num_phoenx_bodies, device=device)
+        # Populate the dynamic box's inverse mass at PhoenX slot 1 so
+        # the element-emission kernel treats it as dynamic (else it
+        # collapses to -1 like a static rigid).
         if int(model.body_count) > 0:
-            bodies.inverse_mass.assign(np.full(int(model.body_count), 1.0, dtype=np.float32))
+            inv_mass_host = np.zeros(num_phoenx_bodies, dtype=np.float32)
+            inv_mass_host[1:] = 1.0
+            bodies.inverse_mass.assign(inv_mass_host)
         constraints = PhoenXWorld.make_constraint_container(
             num_joints=0,
             num_cloth_triangles=int(model.tri_count),

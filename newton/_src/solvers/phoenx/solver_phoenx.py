@@ -64,11 +64,13 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
     IncrementalContactPartitioner,
 )
 from newton._src.solvers.phoenx.cloth_collision import (
+    PhoenXClothShareVertexFilterData,
     ShapeEndpoint,
     _phoenx_pack_cloth_contact_barycentric_kernel,
     _phoenx_pack_cloth_contact_endpoints_kernel,
     _phoenx_populate_shape_endpoints_kernel,
     _phoenx_update_cloth_shape_geometry_kernel,
+    phoenx_cloth_share_vertex_filter,
     shape_endpoints_zeros,
 )
 from newton._src.solvers.phoenx.cloth_step import (
@@ -892,6 +894,7 @@ class PhoenXWorld:
         contact_matching: str = "sticky",
         rigid_contact_max: int | None = None,
         shape_pairs_max: int | None = None,
+        phoenx_body_offset: int = 1,
     ):
         """Construct (and stash on ``model._collision_pipeline``) a
         unified rigid + cloth-triangle :class:`CollisionPipeline`.
@@ -973,7 +976,23 @@ class PhoenXWorld:
             extra_shape_count=T,
             unified_shape_world=unified_shape_world,
             unified_shape_flags=unified_shape_flags,
+            broad_phase_filter=(
+                phoenx_cloth_share_vertex_filter,
+                PhoenXClothShareVertexFilterData,
+            ),
         )
+
+        # Bind the share-vertex filter's per-step data: triangle index
+        # array + cloth-shape offset. The filter callback reads this
+        # at every broad-phase pair test to drop pairs of cloth tris
+        # that share at least one particle (the elasticity rows
+        # already couple them; treating their geometric overlap as a
+        # contact would double-count). Rigid + cloth-vs-rigid pairs
+        # pass through unchanged.
+        share_vertex_data = PhoenXClothShareVertexFilterData()
+        share_vertex_data.num_rigid_shapes = wp.int32(S)
+        share_vertex_data.tri_indices = model.tri_indices
+        pipeline.set_broad_phase_filter_data(share_vertex_data)
 
         # Stamp the static cloth-triangle suffix metadata. Per-step
         # quantities (geom_xform, geom_data, AABB) are written by
@@ -1040,6 +1059,7 @@ class PhoenXWorld:
                 wp.int32(S),
                 wp.int32(T),
                 wp.int32(self.num_bodies),
+                wp.int32(phoenx_body_offset),
             ],
             outputs=[self._shape_endpoints],
             device=self.device,
