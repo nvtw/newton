@@ -102,11 +102,37 @@ class IncrementalContactPartitioner:
         device: wp.DeviceLike = None,
         seed: int = 0,
         use_tile_scan: bool = True,
+        max_partitions: int | None = None,
     ) -> None:
         self.max_num_interactions = max_num_interactions
         self.max_num_nodes = max_num_nodes
         # Tile-scan: single-block, graph-capture safe, no implicit allocations.
         self.use_tile_scan = use_tile_scan
+
+        # Mass-splitting cap: when set, the build clamps to this many
+        # MIS partitions (Jitter2 ``MaxNumPartitions`` -- typically 8 or
+        # 12) and dumps any leftover elements into one extra "overflow"
+        # colour at index ``max_partitions``. Mass splitting consumes
+        # the overflow with copy states. ``None`` keeps the legacy
+        # uncapped behaviour (raise on hitting MAX_COLORS).
+        if max_partitions is not None:
+            if max_partitions <= 0:
+                raise ValueError(f"max_partitions must be > 0 (got {max_partitions})")
+            # The overflow bucket sits at index ``max_partitions``, so
+            # we need ``color_starts[max_partitions + 1]`` to be a
+            # valid slot. ``color_starts`` is sized ``MAX_COLORS + 1``;
+            # ensure ``max_partitions + 1 <= MAX_COLORS``.
+            if max_partitions + 1 > MAX_COLORS:
+                raise ValueError(
+                    f"max_partitions {max_partitions} + overflow exceeds MAX_COLORS {MAX_COLORS}"
+                )
+            # Greedy-mode forbidden-mask bound. ``color_cap`` is
+            # clamped against the int64 budget regardless.
+            if max_partitions > int(GREEDY_MAX_COLORS):
+                raise ValueError(
+                    f"max_partitions {max_partitions} exceeds GREEDY_MAX_COLORS {int(GREEDY_MAX_COLORS)}"
+                )
+        self.max_partitions: int | None = max_partitions
 
         import numpy as np  # noqa: PLC0415
 
@@ -156,6 +182,11 @@ class IncrementalContactPartitioner:
         self._num_colors = wp.zeros(1, dtype=wp.int32, device=device)
         # Set to 1 if num_colors would exceed MAX_COLORS; checked host-side post-build.
         self._overflow_flag = wp.zeros(1, dtype=wp.int32, device=device)
+        # Mass-splitting overflow bucket flag. When ``max_partitions``
+        # is set and the build hit the cap, this is 1 and the last
+        # colour (``num_colors[0] - 1`` == ``max_partitions``) holds
+        # the elements that didn't fit into any independent set.
+        self._has_overflow_partition = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Greedy build scratch. Bounded at GREEDY_MAX_COLORS by the int64 forbidden mask.
         self._greedy_color_count: wp.array[wp.int32] = wp.zeros(int(GREEDY_MAX_COLORS), dtype=wp.int32, device=device)
@@ -355,6 +386,11 @@ class IncrementalContactPartitioner:
         device = self._overflow_flag.device
         if device.is_cuda and device.is_capturing:
             return
+        # In mass-splitting mode the kernel handles "cap exceeded" by
+        # writing the survivors into the overflow bucket instead of
+        # setting ``overflow_flag``; nothing to raise here.
+        if self.max_partitions is not None:
+            return
         if int(self._overflow_flag.numpy()[0]) != 0:
             raise RuntimeError(
                 f"PhoenX graph coloring exceeded MAX_COLORS (={MAX_COLORS}). "
@@ -376,6 +412,11 @@ class IncrementalContactPartitioner:
         )
         # Reset the MAX_COLORS overflow flag for this build.
         self._overflow_flag.zero_()
+        # Reset the mass-splitting overflow-bucket flag too. Must run
+        # every build (not just when ``max_partitions`` is set) because
+        # the JP fallback path may flip into mass-splitting mode after
+        # a previous greedy build set this flag.
+        self._has_overflow_partition.zero_()
         wp.launch(
             incremental_reset_loop_state_kernel,
             dim=self.max_num_interactions,
@@ -399,6 +440,18 @@ class IncrementalContactPartitioner:
     def _capture_build_csr_step(self) -> None:
         """build_csr capture_while body, unrolled NUM_INNER_WHILE_ITERATIONS times.
         Tail rounds after convergence early-exit cheaply."""
+        # When mass-splitting cap is active, the JP loop runs at most
+        # ``max_partitions`` rounds; round ``max_partitions`` itself
+        # drains the survivors into the overflow bucket. ``max_colors``
+        # passed to the kernel is the *per-MIS-colour* cap so it
+        # triggers the overflow path on the (max_partitions+1)-th
+        # round, not after MAX_COLORS rounds.
+        if self.max_partitions is not None:
+            jp_max_colors = int(self.max_partitions)
+            overflow_partition_id = int(self.max_partitions)
+        else:
+            jp_max_colors = int(MAX_COLORS)
+            overflow_partition_id = -1
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
             wp.launch(
                 partitioning_coloring_incremental_kernel,
@@ -427,8 +480,10 @@ class IncrementalContactPartitioner:
                     self._element_ids_by_color,
                     self._color_starts,
                     self._interaction_id_to_partition,
-                    int(MAX_COLORS),
+                    jp_max_colors,
                     self._overflow_flag,
+                    overflow_partition_id,
+                    self._has_overflow_partition,
                 ],
                 block_dim=int(TILE_SCAN_BLOCK_DIM),
             )
@@ -438,7 +493,13 @@ class IncrementalContactPartitioner:
     def build_csr_greedy(self) -> None:
         """Greedy build, capped at :data:`GREEDY_MAX_COLORS` (64) by the int64
         forbidden mask. Raises ``RuntimeError`` on overflow. Prefer
-        :meth:`build_csr_greedy_with_jp_fallback` for in-graph fallback."""
+        :meth:`build_csr_greedy_with_jp_fallback` for in-graph fallback.
+
+        With ``max_partitions`` set, this method has no overflow
+        bucket of its own -- if greedy can't place every element in
+        the first ``max_partitions`` colours, the user must use
+        :meth:`build_csr_greedy_with_jp_fallback` (the JP fallback
+        is what materialises the overflow bucket)."""
         assert self._elements is not None and self._num_elements is not None, (
             "reset() must be called before build_csr_greedy()"
         )
@@ -447,8 +508,9 @@ class IncrementalContactPartitioner:
         if device.is_cuda and device.is_capturing:
             return
         if int(self._overflow_flag.numpy()[0]) != 0:
+            cap = int(self.max_partitions) if self.max_partitions is not None else int(GREEDY_MAX_COLORS)
             raise RuntimeError(
-                f"PhoenX greedy coloring exceeded GREEDY_MAX_COLORS (={int(GREEDY_MAX_COLORS)}). "
+                f"PhoenX greedy coloring exceeded color cap (={cap}). "
                 "Use build_csr_greedy_with_jp_fallback or build_csr instead."
             )
 
@@ -538,6 +600,14 @@ class IncrementalContactPartitioner:
     def _capture_build_csr_greedy_step(self) -> None:
         """build_csr_greedy capture_while body. Unrolled NUM_INNER_WHILE_ITERATIONS
         times to amortise the outer overhead."""
+        # Mass-splitting cap: forbid greedy colour assignments past
+        # ``max_partitions``. Anything that would overflow trips the
+        # JP fallback (where the explicit overflow bucket lives), so
+        # the cap propagates correctly through both build paths.
+        if self.max_partitions is not None:
+            color_cap = wp.int32(int(self.max_partitions))
+        else:
+            color_cap = wp.int32(int(GREEDY_MAX_COLORS))
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
             wp.launch(
                 partitioning_coloring_incremental_greedy_kernel,
@@ -554,6 +624,7 @@ class IncrementalContactPartitioner:
                     wp.int32(self._greedy_grid_size),
                     self._num_remaining,
                     self._overflow_flag,
+                    color_cap,
                 ],
                 block_dim=_GREEDY_BLOCK_DIM,
             )
@@ -605,6 +676,14 @@ class IncrementalContactPartitioner:
     def num_colors(self) -> wp.array:
         """Number of colours produced by the last build_csr call."""
         return self._num_colors
+
+    @property
+    def has_overflow_partition(self) -> wp.array:
+        """1 if the last build hit the ``max_partitions`` cap and dumped
+        survivors into the overflow bucket at colour ``num_colors[0]-1``,
+        0 otherwise. Always 0 when ``max_partitions is None``.
+        Length-1 device array."""
+        return self._has_overflow_partition
 
     @property
     def color_cursor(self) -> wp.array:

@@ -273,6 +273,7 @@ def partitioning_coloring_incremental_greedy_kernel(
     total_num_threads: wp.int32,
     num_remaining: wp.array[int],
     overflow_flag: wp.array[int],
+    color_cap: wp.int32,
 ):
     """JP-MIS with greedy colour selection. Vertex commits iff highest priority
     among uncoloured neighbours; gets the smallest colour not used by already-
@@ -282,6 +283,12 @@ def partitioning_coloring_incremental_greedy_kernel(
     ``num_remaining`` is decremented per commit, read by outer
     ``wp.capture_while``. Forbidden mask is int64 (cap GREEDY_MAX_COLORS=64);
     overflow sets ``overflow_flag[0]`` for host-side error reporting.
+
+    ``color_cap`` clamps the in-kernel free-colour search to
+    ``[0, color_cap)``. Pass ``GREEDY_MAX_COLORS`` for the legacy
+    behaviour or a smaller value (e.g. 12 for mass splitting) to
+    force every element that would land at colour ``>= color_cap``
+    onto the JP fallback path via ``overflow_flag``.
     """
     n = num_elements[0]
     for tid in range(wp.tid(), n, total_num_threads):
@@ -319,18 +326,18 @@ def partitioning_coloring_incremental_greedy_kernel(
                         break
                 else:
                     ncolor = ntag - wp.int32(1)
-                    if ncolor < GREEDY_MAX_COLORS:
+                    if ncolor < color_cap:
                         forbidden_mask = forbidden_mask | (wp.int64(1) << wp.int64(ncolor))
 
         if is_local_max:
             # Smallest free colour = lowest 0-bit in forbidden mask.
             free_mask = forbidden_mask ^ _FREE_COLOR_FLIP
             c = _lowest_set_bit(free_mask)
-            if c < wp.int32(0) or c >= GREEDY_MAX_COLORS:
+            if c < wp.int32(0) or c >= color_cap:
                 # Mask saturated. Stamp poison colour and flag overflow;
                 # we still must commit + decrement to let capture_while exit.
                 overflow_flag[0] = 1
-                fallback_c = wp.int32(GREEDY_MAX_COLORS - wp.int32(1))
+                fallback_c = color_cap - wp.int32(1)
                 color_tags[tid] = fallback_c + wp.int32(1)
                 partition_data_concat[tid] = (wp.int64(fallback_c + wp.int32(1)) << _COLOR_SHIFT) | wp.int64(tid)
                 wp.atomic_sub(num_remaining, 0, 1)
@@ -567,6 +574,8 @@ def incremental_tile_compact_csr_and_advance_kernel(
     interaction_id_to_partition: wp.array[int],
     max_colors: int,
     overflow_flag: wp.array[int],
+    overflow_partition_id: int,
+    has_overflow_partition: wp.array[int],
 ):
     """CSR variant of :func:`incremental_tile_compact_remaining_and_advance_kernel`.
 
@@ -577,6 +586,15 @@ def incremental_tile_compact_csr_and_advance_kernel(
     ``num_colors`` sentinel slot -- starts at the right offset) and
     mirrors ``current_color`` into ``num_colors`` for the outer
     sweep-time ``capture_while``.
+
+    When ``overflow_partition_id >= 0`` the kernel treats colour
+    ``overflow_partition_id`` (= ``max_colors``) as a Jitter2-style
+    overflow bucket: hitting the cap with elements still uncoloured
+    drains them all into colour ``overflow_partition_id`` (no MIS
+    constraint -- the bucket may share bodies between elements) and
+    sets ``has_overflow_partition[0] = 1``. Mass splitting consumes
+    that bucket with copy states. ``overflow_partition_id < 0``
+    preserves the legacy "raise on overflow" behaviour.
     """
     _block, lane = wp.tid()
 
@@ -595,12 +613,32 @@ def incremental_tile_compact_csr_and_advance_kernel(
     # Overflow guard. ``color_starts`` is sized ``max_colors + 1`` so
     # the largest writable end-offset slot is ``color_starts[max_colors]``
     # -- i.e. valid ``cc`` values are ``0 .. max_colors - 1``. If the
-    # coloring exhausts the budget, raise an overflow flag, force the
-    # outer ``capture_while`` to terminate by zeroing ``num_remaining``,
-    # and early-return before any buffer writes. The host side of
-    # ``build_csr`` reads the flag after the capture_while exits and
-    # raises a descriptive error so this cannot silently corrupt memory.
+    # coloring exhausts the budget, either dump all survivors into
+    # the overflow bucket (mass-splitting mode) or raise an overflow
+    # flag and exit (legacy mode).
     if cc >= max_colors:
+        if overflow_partition_id >= 0:
+            # Mass-splitting overflow: dump remaining_ids[0..n) into
+            # colour ``overflow_partition_id``. The bucket starts at
+            # ``color_starts[overflow_partition_id]`` (already set by
+            # the round that ran colour ``overflow_partition_id - 1``).
+            base = color_starts[overflow_partition_id]
+            offset = int(0)
+            while offset < n:
+                slot = offset + lane
+                if slot < n:
+                    eid = remaining_ids[slot]
+                    out_idx = base + slot
+                    element_ids_by_color[out_idx] = eid
+                    interaction_id_to_partition[eid] = overflow_partition_id
+                offset = offset + TILE_SCAN_BLOCK_DIM
+            if lane == 0:
+                color_starts[overflow_partition_id + 1] = base + n
+                num_remaining[0] = 0
+                current_color[0] = overflow_partition_id + 1
+                num_colors[0] = overflow_partition_id + 1
+                has_overflow_partition[0] = 1
+            return
         if lane == 0:
             overflow_flag[0] = 1
             num_remaining[0] = 0
