@@ -299,23 +299,23 @@ def contact_iterate_at_split(
             r1, r2, imp,
         )
 
-    # C# Tonge convention (``ContactTypesRT.cuh:759``):
-    # ``b.S.Velocity += dimpulse * invM * invFactor`` -- multiply the
-    # per-copy velocity delta by ``invFactor`` (the count of
-    # partitions this body participates in). Reasoning: only ONE of
-    # the body's N copies receives this contact's update. After
-    # ``average_and_broadcast`` divides the sum by N, the body's
-    # net velocity change is ``(N * delta) / N = delta`` -- i.e.,
-    # the same as an unsplit GS step. Without the multiplication,
-    # the response is divided by N → momentum non-conservation when
-    # bodies in the same contact have different invFactors → tower
-    # scenes explode.
-    inv_factor1_count = wp.float32(wp.max(inv_factor1, wp.int32(1)))
-    inv_factor2_count = wp.float32(wp.max(inv_factor2, wp.int32(1)))
-    state1.velocity = v1_pre + inv_factor1_count * (v1 - v1_pre)
-    state2.velocity = v2_pre + inv_factor2_count * (v2 - v2_pre)
-    state1.angular_velocity = w1_pre + inv_factor1_count * (w1 - w1_pre)
-    state2.angular_velocity = w2_pre + inv_factor2_count * (w2 - w2_pre)
+    # Commit the full per-copy delta (no inv_factor scaling). With
+    # ``batch_size=1`` (Newton's choice -- one cid per copy, no
+    # races), invFactor for a body equals the count of cids that
+    # touch it. Each cid updates its OWN unique copy with the
+    # unsplit delta. ``average_and_broadcast`` averages across the
+    # body's copies; with N copies each holding one cid's update,
+    # the average equals (N * delta) / N = delta -- matching an
+    # unsplit GS-with-one-shape-pair response. Multiplying by
+    # invFactor here would overshoot by factor N
+    # (each copy = N*delta, avg over N still = N*delta -> tower
+    # explodes). The C# pattern uses batch_size>1 with shared copies
+    # AND multiplies; with batch_size=1 / unique copies, no scaling
+    # is the algebraically correct equivalent.
+    state1.velocity = v1
+    state2.velocity = v2
+    state1.angular_velocity = w1
+    state2.angular_velocity = w2
 
     write_state(graph, idx1, state1)
     write_state(graph, idx2, state2)
