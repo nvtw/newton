@@ -1464,12 +1464,18 @@ class PhoenXWorld:
         # as a particle (with body-or-particle dispatch in the
         # broadcast / average / write-back kernels).
         num_nodes = num_bodies + int(self.num_particles)
-        # Tonge-style overflow batching constant. 32 matches the C#
-        # default (``MassSplitting.cs:43`` ``ConstraintBatchSize = 32``);
-        # it controls the count of distinct ``constraint_id``s the
-        # overflow bucket spawns. Smaller batches => more parallelism
-        # but stronger ``inv_factor`` scaling.
-        batch_size = wp.int32(32)
+        # Overflow batch size = 1 -- every cid in the overflow bucket
+        # gets its own ``partition_constraint_id`` and therefore its
+        # own ``TinyRigidState`` copy in the InteractionGraph. Larger
+        # batches share a copy across multiple cids in the same
+        # batch, which is correct in C# only because the C# kernel
+        # processes a batch's cids *sequentially within one thread*
+        # (one thread = one batch). Newton's iterate kernel processes
+        # one cid per thread, so any shared copy = race. Using
+        # ``batch_size=1`` removes the race at the cost of a larger
+        # ``inv_factor`` per body, but the per-iteration averaging
+        # still converges in the same number of PGS iterations.
+        batch_size = wp.int32(1)
         max_partitions_p = wp.int32(int(self.mass_split_max_partitions))
 
         # 1) Reset. ``state_section_end_indices`` is sized for all

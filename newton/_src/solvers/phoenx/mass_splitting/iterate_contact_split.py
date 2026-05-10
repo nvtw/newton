@@ -299,15 +299,23 @@ def contact_iterate_at_split(
             r1, r2, imp,
         )
 
-    # Tonge split: store ``v_pre + (v_final - v_pre) / inv_factor``.
-    # With ``inv_factor == 1`` this collapses to ``v_final`` -- the
-    # unsplit semantics. With ``inv_factor > 1`` each partition only
-    # commits its share of the accumulated impulse to its copy, and
-    # the AverageAndBroadcast pass reconstructs the consensus.
-    state1.velocity = v1_pre + inv_factor1_f * (v1 - v1_pre)
-    state2.velocity = v2_pre + inv_factor2_f * (v2 - v2_pre)
-    state1.angular_velocity = w1_pre + inv_factor1_f * (w1 - w1_pre)
-    state2.angular_velocity = w2_pre + inv_factor2_f * (w2 - w2_pre)
+    # C# Tonge convention (``ContactTypesRT.cuh:759``):
+    # ``b.S.Velocity += dimpulse * invM * invFactor`` -- multiply the
+    # per-copy velocity delta by ``invFactor`` (the count of
+    # partitions this body participates in). Reasoning: only ONE of
+    # the body's N copies receives this contact's update. After
+    # ``average_and_broadcast`` divides the sum by N, the body's
+    # net velocity change is ``(N * delta) / N = delta`` -- i.e.,
+    # the same as an unsplit GS step. Without the multiplication,
+    # the response is divided by N → momentum non-conservation when
+    # bodies in the same contact have different invFactors → tower
+    # scenes explode.
+    inv_factor1_count = wp.float32(wp.max(inv_factor1, wp.int32(1)))
+    inv_factor2_count = wp.float32(wp.max(inv_factor2, wp.int32(1)))
+    state1.velocity = v1_pre + inv_factor1_count * (v1 - v1_pre)
+    state2.velocity = v2_pre + inv_factor2_count * (v2 - v2_pre)
+    state1.angular_velocity = w1_pre + inv_factor1_count * (w1 - w1_pre)
+    state2.angular_velocity = w2_pre + inv_factor2_count * (w2 - w2_pre)
 
     write_state(graph, idx1, state1)
     write_state(graph, idx2, state2)

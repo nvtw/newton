@@ -84,6 +84,15 @@ GROUND_HEIGHT: float = 0.35 * GLOBAL_SCALING
 USE_BIG_WORLD_MODE: bool = True
 STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
 
+# Cap the constraint-graph colouring at 12 MIS partitions + 1
+# overflow bucket (Jitter2 ``ContactPartitions`` convention) and
+# route the overflow through the mass-splitting orchestrator.
+# Setup is device-only (see
+# ``_setup_mass_splitting_for_step``), so this composes with the
+# CUDA-graph capture below.
+ENABLE_MASS_SPLITTING: bool = True
+MASS_SPLIT_MAX_PARTITIONS: int = 12
+
 # Tile the single ``KaplaTower2.usda`` instancer into a 2D grid centred
 # on the origin. ``(1, 1)`` reproduces the original scene; bigger
 # grids scale brick count, SAP candidates and contact pool linearly,
@@ -325,6 +334,7 @@ class Example:
             step_layout=STEP_LAYOUT,
             max_thread_blocks=256,
             device=self.device,
+            mass_split_max_partitions=(MASS_SPLIT_MAX_PARTITIONS if ENABLE_MASS_SPLITTING else None),
         )
 
         self.viewer.set_model(self.model)
@@ -381,9 +391,17 @@ class Example:
         # Capture the per-frame pipeline into a single CUDA graph.
         # The PGS sweep uses ``wp.capture_while`` internally, which
         # only takes its conditional-graph fast path when there's an
-        # outer capture active.
+        # outer capture active. Both the partitioner (``build_csr``)
+        # and ``_setup_mass_splitting_for_step`` are device-only, so
+        # mass splitting composes with capture (cf.
+        # ``example_cloth_hanging.py``).
         self.graph = None
         if self.device.is_cuda:
+            # Warm-up replay so first-touch allocations / module
+            # loads happen outside capture, matching the cloth
+            # example's idiom.
+            if ENABLE_MASS_SPLITTING:
+                self.simulate()
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph

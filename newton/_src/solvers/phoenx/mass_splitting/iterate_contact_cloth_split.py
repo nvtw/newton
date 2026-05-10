@@ -210,12 +210,15 @@ def _apply_particle_impulse_split(
     )
     dv = bary_weight * impulse * inv_m
     if idx < wp.int32(0):
-        # Static-fallback: not in graph. Direct write (no race
-        # since the partitioner wouldn't have produced this case).
+        # Static-fallback (particle not registered in graph). Write
+        # directly; with ``batch_size=1`` no other concurrent writers.
         particles.velocity[p] = particles.velocity[p] + dv
         return
-    inv_factor_f = wp.float32(1.0) / wp.float32(wp.max(inv_factor, wp.int32(1)))
-    state.velocity = state.velocity + inv_factor_f * dv
+    # C# Tonge convention: multiply the per-copy delta by invFactor
+    # so the post-averaging response equals an unsplit GS step.
+    # See ``contact_iterate_at_split`` for the full derivation.
+    inv_factor_count = wp.float32(wp.max(inv_factor, wp.int32(1)))
+    state.velocity = state.velocity + inv_factor_count * dv
     write_state(graph, idx, state)
 
 
@@ -471,18 +474,22 @@ def contact_iterate_at_cloth_aware_split(
             p1_world, imp, v1, w1, graph, pcid, idt,
         )
 
-    # Commit rigid-side deltas to the per-partition copies. Tonge
-    # split: ``state.velocity = v_pre + (v - v_pre) / inv_factor``.
-    # ``inv_factor == 1`` => full delta committed (matches unsplit).
-    # ``inv_factor > 1`` => partition takes its share; AverageAndBroadcast
-    # reconstructs the consensus across all copies for this body.
+    # C# Tonge convention -- multiply the per-copy delta by
+    # ``invFactor`` (count of partitions this node participates in).
+    # See the matching docstring in
+    # :func:`~newton._src.solvers.phoenx.mass_splitting.iterate_contact_split.contact_iterate_at_split`
+    # for the full derivation; tl;dr: only one of the body's N
+    # copies receives this contact's update, so multiplying here
+    # makes the post-averaging response equal an unsplit GS step.
     if side0_is_rigid_dyn and idx0 >= wp.int32(0):
-        state0.velocity = v0_pre + inv_factor0_f * (v0 - v0_pre)
-        state0.angular_velocity = w0_pre + inv_factor0_f * (w0 - w0_pre)
+        inv_factor0_count = wp.float32(wp.max(inv_factor0, wp.int32(1)))
+        state0.velocity = v0_pre + inv_factor0_count * (v0 - v0_pre)
+        state0.angular_velocity = w0_pre + inv_factor0_count * (w0 - w0_pre)
         write_state(graph, idx0, state0)
     if side1_is_rigid_dyn and idx1 >= wp.int32(0):
-        state1.velocity = v1_pre + inv_factor1_f * (v1 - v1_pre)
-        state1.angular_velocity = w1_pre + inv_factor1_f * (w1 - w1_pre)
+        inv_factor1_count = wp.float32(wp.max(inv_factor1, wp.int32(1)))
+        state1.velocity = v1_pre + inv_factor1_count * (v1 - v1_pre)
+        state1.angular_velocity = w1_pre + inv_factor1_count * (w1 - w1_pre)
         write_state(graph, idx1, state1)
 
 

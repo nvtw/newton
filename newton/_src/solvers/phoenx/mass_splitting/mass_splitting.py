@@ -137,7 +137,16 @@ class MassSplitting:
         # body-count-per-constraint). For typical 1- or 2-body
         # constraints, ``num_constraints * 2`` is enough; we add
         # a 25% safety margin so callers don't have to fiddle.
-        max_interactions = max(num_bodies, num_constraints * 2 + num_constraints // 4)
+        # Per-(node, partition_constraint_id) entries. With
+        # ``batch_size=1`` (Newton's choice -- avoids per-thread
+        # races on shared copy states), every cid registers up to
+        # ``MAX_BODIES`` entries, and each cid has its own
+        # ``partition_constraint_id`` in the overflow path. Worst
+        # case is therefore ``num_constraints * MAX_BODIES`` entries.
+        # ``MAX_BODIES`` is 8 in PhoenX's ``ElementInteractionData``;
+        # using 9 here gives a 1-slot margin so the atomic-append
+        # in ``record_all_interactions_kernel`` never truncates.
+        max_interactions = max(num_bodies, num_constraints * 9)
         self.partitions = ContactPartitions(
             max_num_rigids=self.num_bodies,
             max_num_constraints=self.num_constraints,
