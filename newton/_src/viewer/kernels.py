@@ -282,9 +282,21 @@ def compute_contact_lines(
         line_end[tid] = nan_line
         return
 
-    # Filter by visible worlds
-    world_a = shape_world[shape_a]
-    world_b = shape_world[shape_b]
+    # Cloth-aware collision pipelines extend the contact-shape index
+    # space past Newton's rigid ``Model.shape_*`` arrays (the suffix
+    # holds per-cloth-tri shapes). When this kernel is launched with
+    # the rigid-only arrays, those suffix indices would be OOB --
+    # treat them as world-anchored (body = -1, world = -1) so reads
+    # stay in bounds.
+    n_shapes = shape_world.shape[0]
+    world_a = int(-1)
+    world_b = int(-1)
+    body_a = int(-1)
+    if shape_a >= 0 and shape_a < n_shapes:
+        world_a = shape_world[shape_a]
+        body_a = shape_body[shape_a]
+    if shape_b >= 0 and shape_b < n_shapes:
+        world_b = shape_world[shape_b]
     if visible_worlds_mask:
         w = world_a if world_a >= 0 else world_b
         if w >= 0:
@@ -294,7 +306,6 @@ def compute_contact_lines(
                 return
 
     # Get world transforms for both shapes
-    body_a = shape_body[shape_a]
     X_wb_a = wp.transform_identity()
     if body_a >= 0:
         X_wb_a = body_q[body_a]

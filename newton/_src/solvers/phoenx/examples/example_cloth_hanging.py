@@ -37,6 +37,38 @@ from newton._src.solvers.phoenx.examples.example_common import (
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
+#: Set to ``True`` to draw the contact arrows in the GL viewer
+#: (``viewer.log_contacts`` per frame). Off by default because the
+#: contact log path reads ``rigid_contact_count`` via ``.numpy()`` every
+#: frame, forcing a host sync that breaks the ViewerGL CUDA-OpenGL
+#: interop fast path. Toggle this constant or the "Show Contacts"
+#: ImGui checkbox to enable; the example calls ``log_contacts`` only
+#: when this flag is ``True``, so the checkbox alone is not enough.
+SHOW_CONTACTS: bool = True
+
+#: Print PhoenX coloring + contact stats once per frame. Useful to
+#: investigate cloth-on-rigid framerate drops (every contact column
+#: that shares the rigid body lands in a different colour, so a cube
+#: touching N cloth-tris generates ~N colours which translate to ~N
+#: kernel launches per PGS iteration).
+PRINT_STEP_REPORTS: bool = False
+
+#: Hard caps on the collision-pipeline buffers. Set explicitly here
+#: (rather than relying on Newton's heuristics) so the user can tune
+#: them deterministically; the GL contact-arrow VBO is sized by
+#: ``RIGID_CONTACT_MAX``, so smaller values trade contact headroom
+#: for less GPU memory pressure when the "Show Contacts" debug path
+#: is on. With the default 32x16 cloth + cube + ground, peak active
+#: contacts is well under 4096 (cloth-vs-ground 1024, cloth-vs-cube
+#: up to ~1024, plus a handful of cube-ground); 4096 leaves plenty
+#: of slack.
+RIGID_CONTACT_MAX: int = 4096
+#: Broad-phase candidate-pair budget. Worst case is
+#: ``num_cloth_tris + num_cloth_tris + 1`` cube-and-ground pairs plus
+#: any cloth-cloth pair the share-vertex filter doesn't drop -- a few
+#: thousand for the default scene. 8192 is conservative.
+SHAPE_PAIRS_MAX: int = 8192
+
 
 class Example:
     """Hanging cloth + a falling rigid cube + a static ground plane."""
@@ -81,7 +113,7 @@ class Example:
         # Static ground plane at z = 0. ``add_ground_plane`` creates an
         # infinite-plane shape attached to the world body; it stops
         # the cloth (and the cube) from falling forever.
-        builder.add_ground_plane()
+        builder.add_ground_plane(height=1.0)
 
         # Free rigid cube starting above the cloth so it drops onto
         # the cloth's free corner. Mass-1 unit cube; default inertia.
@@ -163,7 +195,7 @@ class Example:
             num_worlds=1,
             substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,
-            rigid_contact_max=8192,
+            rigid_contact_max=RIGID_CONTACT_MAX,
             step_layout="single_world",
             device=self.device,
         )
@@ -173,7 +205,8 @@ class Example:
             self.model,
             cloth_thickness=cloth_thickness,
             cloth_gap=cloth_gap,
-            rigid_contact_max=8192,
+            rigid_contact_max=RIGID_CONTACT_MAX,
+            shape_pairs_max=SHAPE_PAIRS_MAX,
         )
         self.contacts = self.collision_pipeline.contacts()
 
@@ -182,6 +215,21 @@ class Example:
         self.viewer.set_model(self.model)
         self.viewer.set_camera(pos=wp.vec3(6.0, 0.0, 4.0), pitch=-15.0, yaw=180.0)
 
+        # Pre-warm the contact-arrow GL/CUDA-interop buffer. The first
+        # ``viewer.log_contacts`` call lazily allocates a
+        # ``RegisteredGLBuffer`` sized to ``rigid_contact_max``; doing
+        # that lazily inside ``render()`` AFTER the captured step
+        # graph has been replayed N times has been observed to fail
+        # with "Failed to allocate ..." on some Warp/CUDA setups.
+        # Forcing the alloc before the graph is captured side-steps
+        # the issue.
+        if SHOW_CONTACTS:
+            prev_show = getattr(self.viewer, "show_contacts", False)
+            self.viewer.show_contacts = True
+            self.viewer.log_contacts(self.contacts, self.state)
+            self.viewer.show_contacts = prev_show
+
+        self.frame_index = 0
         self._capture()
 
     def _sync_newton_to_phoenx(self) -> None:
@@ -249,6 +297,34 @@ class Example:
         else:
             self._simulate_one_frame()
         self.sim_time += self.frame_dt
+        self.frame_index += 1
+        if PRINT_STEP_REPORTS:
+            self._print_step_report()
+
+    def _print_step_report(self) -> None:
+        """One-line summary of the partitioner / contact state.
+
+        Prints active constraints, contact-column count, and per-colour
+        sizes. When the cube touches the cloth, every contact column
+        sharing the cube body forces its own colour, so the colour
+        count spikes and per-colour sizes drop to 1 -- look for that
+        if the framerate suddenly drops.
+        """
+        report = self.world.step_report()
+        slack = (
+            f"{report.num_colors / report.max_body_degree:.2f}x"
+            if report.max_body_degree > 0
+            else "n/a"
+        )
+        print(
+            f"[cloth_hanging] step={self.frame_index} "
+            f"contacts={report.num_contact_columns} "
+            f"active={report.num_active_constraints} "
+            f"colors={report.num_colors} "
+            f"max_body_degree={report.max_body_degree} "
+            f"colors/lower_bound={slack} "
+            f"color_sizes={report.color_sizes}"
+        )
 
     def test_final(self) -> None:
         positions = self.state.particle_q.numpy()
@@ -278,6 +354,14 @@ class Example:
     def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state)
+        if SHOW_CONTACTS:
+            # ``log_contacts`` reads ``rigid_contact_count`` via
+            # ``.numpy()`` each frame -- forces a host sync that breaks
+            # the ViewerGL CUDA-OpenGL interop fast path. Off by
+            # default; flip ``SHOW_CONTACTS`` at the top of this file
+            # AND tick the "Show Contacts" checkbox in the GL viewer
+            # to draw normal arrows for every active contact.
+            self.viewer.log_contacts(self.contacts, self.state)
         self.viewer.end_frame()
 
 
