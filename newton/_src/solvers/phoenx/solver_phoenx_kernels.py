@@ -49,6 +49,12 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_iterate_cloth_aware,
     contact_prepare_for_iteration_cloth_aware,
 )
+from newton._src.solvers.phoenx.mass_splitting.interaction_graph import (
+    InteractionGraphData,
+)
+from newton._src.solvers.phoenx.mass_splitting.iterate_contact_split import (
+    contact_iterate_split,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     ConstraintContainer,
@@ -86,7 +92,9 @@ __all__ = [
     "_constraint_iterate_singleworld_fused_cloth_kernel",
     "_constraint_iterate_singleworld_fused_revolute_cloth_kernel",
     "_constraint_iterate_singleworld_fused_revolute_kernel",
+    "_constraint_iterate_singleworld_fused_split_kernel",
     "_constraint_iterate_singleworld_kernel",
+    "_constraint_iterate_singleworld_split_kernel",
     "_constraint_iterate_singleworld_revolute_cloth_kernel",
     "_constraint_iterate_singleworld_revolute_kernel",
     "_constraint_prepare_plus_iterate_fast_tail_kernel",
@@ -1272,13 +1280,25 @@ def _singleworld_color_range_from_cursor(
 # are compile-time so Warp constant-folds + dead-code-eliminates the unused branch.
 
 
-def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, cloth_support: bool):
+def _make_singleworld_persistent_kernel(
+    *, phase: str, revolute_only: bool, cloth_support: bool, mass_split: bool = False
+):
     """Persistent-grid PGS kernel for the requested phase + specialisation.
 
     Per-cid dispatch reads the constraint type tag (dword 0) and routes
     to the matching ``@wp.func`` -- joint, cloth-triangle, or contact.
     The cloth branch is gated by the compile-time ``cloth_support``
     flag so rigid-only scenes get a binary with no cloth code at all.
+
+    ``mass_split=True`` swaps the rigid-rigid contact iterate dispatch
+    from :func:`contact_iterate` (direct body-store reads/writes) to
+    :func:`contact_iterate_split` (per-(body, partition) ``TinyRigidState``
+    copies with ``1/inv_factor`` impulse scaling). Only meaningful for
+    ``phase="iterate"``; prepare and relax always run against the body
+    store. The kernel signature carries ``mass_split_graph`` regardless
+    so the host launch code can use a single call shape across
+    split / unsplit variants -- a sentinel ``InteractionGraphData``
+    works fine for the unsplit case (the parameter is dead code).
     """
     is_prepare = phase == "prepare"
     is_iterate = phase == "iterate"
@@ -1303,6 +1323,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
         total_num_threads: wp.int32,
         fuse_threshold: wp.int32,
         head_active: wp.array[wp.int32],
+        mass_split_graph: InteractionGraphData,
     ):
         tid = wp.tid()
         if color_cursor[0] <= 0:
@@ -1345,9 +1366,15 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                             contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
                         )
                     else:
-                        contact_iterate(
-                            contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts, use_bias
-                        )
+                        if wp.static(mass_split):
+                            contact_iterate_split(
+                                contact_cols, cid - num_joints - num_cloth_triangles,
+                                bodies, idt, cc, contacts, use_bias, mass_split_graph,
+                            )
+                        else:
+                            contact_iterate(
+                                contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts, use_bias
+                            )
                 continue
             ctype = constraint_get_type(constraints, cid)
             if wp.static(cloth_support):
@@ -1375,7 +1402,9 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
     return kernel
 
 
-def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_support: bool):
+def _make_singleworld_fused_kernel(
+    *, phase: str, revolute_only: bool, cloth_support: bool, mass_split: bool = False
+):
     """Single-block tail-fused PGS kernel; same axes as
     :func:`_make_singleworld_persistent_kernel`."""
     is_prepare = phase == "prepare"
@@ -1399,6 +1428,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
         num_cloth_triangles: wp.int32,
         num_bodies: wp.int32,
         fuse_threshold: wp.int32,
+        mass_split_graph: InteractionGraphData,
     ):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
@@ -1430,15 +1460,21 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                 contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
                             )
                         else:
-                            contact_iterate(
-                                contact_cols,
-                                cid - num_joints - num_cloth_triangles,
-                                bodies,
-                                idt,
-                                cc,
-                                contacts,
-                                use_bias,
-                            )
+                            if wp.static(mass_split):
+                                contact_iterate_split(
+                                    contact_cols, cid - num_joints - num_cloth_triangles,
+                                    bodies, idt, cc, contacts, use_bias, mass_split_graph,
+                                )
+                            else:
+                                contact_iterate(
+                                    contact_cols,
+                                    cid - num_joints - num_cloth_triangles,
+                                    bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    use_bias,
+                                )
                 else:
                     ctype = constraint_get_type(constraints, cid)
                     dispatched = False
@@ -1545,4 +1581,22 @@ _constraint_iterate_singleworld_fused_revolute_cloth_kernel = _make_singleworld_
 )
 _constraint_relax_singleworld_fused_revolute_cloth_kernel = _make_singleworld_fused_kernel(
     phase="relax", revolute_only=True, cloth_support=True
+)
+
+# Mass-splitting iterate variants. Only the iterate phase ships a
+# ``mass_split=True`` build today: prepare and relax always run
+# directly against the body store (broadcast initialises copy states
+# from the post-prepare body store at substep start, and write_back
+# commits the consensus before relax runs). Restricted to the
+# rigid-only path (``revolute_only=False, cloth_support=False``) for
+# the first integration; joints + cloth-aware contacts will get
+# their own split variants in a later phase. Both the persistent
+# (head) and the fused (tail) kernels exist so the same head + tail
+# sweep machinery can drive the split iterate without code changes
+# downstream.
+_constraint_iterate_singleworld_split_kernel = _make_singleworld_persistent_kernel(
+    phase="iterate", revolute_only=False, cloth_support=False, mass_split=True,
+)
+_constraint_iterate_singleworld_fused_split_kernel = _make_singleworld_fused_kernel(
+    phase="iterate", revolute_only=False, cloth_support=False, mass_split=True,
 )

@@ -103,9 +103,11 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _constraint_iterate_singleworld_fused_kernel,
     _constraint_iterate_singleworld_fused_revolute_cloth_kernel,
     _constraint_iterate_singleworld_fused_revolute_kernel,
+    _constraint_iterate_singleworld_fused_split_kernel,
     _constraint_iterate_singleworld_kernel,
     _constraint_iterate_singleworld_revolute_cloth_kernel,
     _constraint_iterate_singleworld_revolute_kernel,
+    _constraint_iterate_singleworld_split_kernel,
     _constraint_prepare_plus_iterate_fast_tail_kernel,
     _constraint_prepare_plus_iterate_fast_tail_revolute_kernel,
     _constraint_prepare_singleworld_cloth_kernel,
@@ -491,12 +493,41 @@ class PhoenXWorld:
         # kernel that consumes the overflow bucket via
         # ``read_state`` / ``write_state`` is *not yet implemented* --
         # see :meth:`_check_mass_split_overflow_gate`.
+        # Eager sentinel allocation. The iterate kernel takes
+        # ``mass_split_graph: InteractionGraphData`` as a parameter
+        # regardless of whether mass splitting is wired in this step;
+        # lazy-allocating the fallback inside the captured graph
+        # (when capture_while was already armed) trips
+        # "Conditional body graph contains an unsupported operation
+        # (memory allocation)". Allocate once up front so every step
+        # -- captured or not -- has a valid view to bind.
+        from newton._src.solvers.phoenx.mass_splitting.interaction_graph import (
+            InteractionGraph,
+        )
+        self._mass_split_graph_sentinel = InteractionGraph(
+            max_rigid_bodies=max(1, self.num_bodies),
+            max_interactions=1,
+            device=self.device,
+        )
+        self._mass_split_graph_sentinel.build()
+
         self._mass_splitting: MassSplitting | None = None
         if self.mass_split_max_partitions is not None:
+            # The partitioner's cap ``K`` produces up to ``K`` regular
+            # MIS colours plus one overflow bucket at index ``K``.
+            # The orchestrator's :class:`ContactPartitions` capacity
+            # is therefore ``K + 1`` so ``wrap_color_arrays`` can adopt
+            # all of them. Adopting the overflow as just another
+            # partition slot is equivalent to the C# pattern: every
+            # ``(body, partition)`` pair the colouring touches becomes
+            # a ``TinyRigidState`` slot regardless of whether the
+            # partition is an MIS or the Jacobi remainder, and
+            # ``inv_factor`` falls out as the count of partitions a
+            # body participates in.
             self._mass_splitting = MassSplitting(
                 num_bodies=max(1, self.num_bodies),
                 num_constraints=max(1, self._constraint_capacity),
-                max_partitions=int(self.mass_split_max_partitions),
+                max_partitions=int(self.mass_split_max_partitions) + 1,
                 device=self.device,
             )
         # Live single-world coloring choice. Flipped to False (round-based JP)
@@ -863,6 +894,22 @@ class PhoenXWorld:
             self._particle_sentinel = particle_container_zeros(1, device=self.device)
         return self._particle_sentinel
 
+    def _mass_split_graph_or_sentinel(self):
+        """Return the live :class:`InteractionGraphData` view when mass
+        splitting is wired in for this step, or the eager sentinel
+        otherwise.
+
+        Every iterate-kernel launch carries the graph parameter
+        unconditionally (kernel-signature consistency between the
+        ``mass_split=True`` and ``mass_split=False`` factory builds).
+        For the unsplit path the kernel never indexes into it -- the
+        ``wp.static(mass_split)`` branch is dead-eliminated -- so the
+        small sentinel allocated in :meth:`__init__` is fine.
+        """
+        if self._mass_splitting is not None and self._mass_splitting._setup_complete:
+            return self._mass_splitting.graph.data
+        return self._mass_split_graph_sentinel.data
+
     def populate_cloth_triangles_from_model(
         self,
         model,
@@ -1224,14 +1271,17 @@ class PhoenXWorld:
 
             if self._tpw_auto and self.step_layout != "single_world":
                 self._pick_tpw()
-            # Phase C.1 gate: when the partitioner cap is set and the
-            # build dumped survivors into the overflow bucket, the
-            # currently wired iterate kernels would race on shared
-            # bodies (no copy states yet). Fail loudly outside graph
-            # capture so the user can re-run with a larger cap, fewer
-            # contacts per body, or wait for Phase C.2 (the
-            # ``read_state`` / ``write_state`` iterate variant).
-            self._check_mass_split_overflow_gate()
+            # Phase C.2 mass-splitting setup. After the colouring is
+            # built, refresh the :class:`MassSplitting` orchestrator
+            # against the new ``(element_ids_by_color, color_starts,
+            # num_colors)`` triple. Host roundtrip on
+            # ``self._elements`` is acceptable because this happens
+            # once per ``step()``, not per substep / per iteration.
+            # CUDA-graph capture is incompatible with the host-side
+            # interaction-graph build; callers using
+            # ``mass_split_max_partitions != None`` must run an
+            # un-captured ``step()``.
+            self._setup_mass_splitting_for_step()
 
         self._kinematic_prepare_step()
 
@@ -1296,31 +1346,71 @@ class PhoenXWorld:
         wiring lands in Phase C.2."""
         return self._mass_splitting
 
-    def _check_mass_split_overflow_gate(self) -> None:
-        """Phase C.1 stop-gap: outside graph capture, raise a clear
-        ``NotImplementedError`` if the partitioner produced a
-        non-empty overflow bucket. The bucket contents need the
-        Phase C.2 splitting iterate kernel to be processed
-        race-free; the existing iterate kernels would silently race
-        on shared bodies."""
-        if self.mass_split_max_partitions is None:
+    def _setup_mass_splitting_for_step(self) -> None:
+        """Refresh the :class:`MassSplitting` orchestrator against the
+        partitioner's just-built colouring.
+
+        Reads ``element_ids_by_color`` / ``color_starts`` /
+        ``num_colors`` and the per-element body lists from
+        ``self._elements`` via ``.numpy()``, builds the host-side
+        interaction graph, and uploads it to device. The next
+        substep's iterate sweep picks up the per-(body, partition)
+        ``TinyRigidState`` copies through
+        :func:`_singleworld_kernels` switching to the
+        ``mass_split=True`` variant.
+
+        Skipped when ``mass_split_max_partitions is None`` (the
+        uncapped colouring path doesn't need copy states). Skipped
+        during graph capture -- the host roundtrip would error.
+        """
+        if self._mass_splitting is None:
             return
         device = self._partitioner.has_overflow_partition.device
         if device.is_cuda and device.is_capturing:
-            # D2H reads are illegal during capture. The first
-            # uncaptured warm-up step (or the first capture-launch)
-            # will catch overflow before any user-visible bug.
+            # Setup is host-side; cannot run during capture.
             return
-        if int(self._partitioner.has_overflow_partition.numpy()[0]) != 0:
-            raise NotImplementedError(
-                "PhoenX mass-splitting overflow bucket is non-empty (cap = "
-                f"{self.mass_split_max_partitions}). The splitting iterate "
-                "kernel (Phase C.2) is not yet wired in; until then the "
-                "scene's chromatic number must fit in `mass_split_max_partitions` "
-                "colours. Either increase the cap, reduce contacts per body, or "
-                "leave `mass_split_max_partitions=None` to use the uncapped "
-                "JP+greedy colouring."
-            )
+        # Reset the orchestrator for this step. ``setup_from_coloring``
+        # rebuilds the partition table + the interaction graph from
+        # scratch each call; mark the prior setup as stale so a fresh
+        # build doesn't trip the idempotency check.
+        self._mass_splitting._setup_complete = False
+        self._mass_splitting.partitions._data = None
+        self._mass_splitting.graph._entries = []
+        self._mass_splitting.graph._built = False
+        self._mass_splitting.graph._data = None
+
+        # Read the per-element body lists from device. The slice
+        # ``[:n_active]`` keeps the host transfer small; the rest of
+        # ``self._elements`` is unused capacity.
+        n_active = int(self._num_active_constraints.numpy()[0])
+        if n_active == 0:
+            # Nothing to set up; bail. The iterate kernel will run
+            # against the sentinel graph; ``mass_split=True`` will be
+            # a no-op since no body is registered.
+            self._mass_splitting._setup_complete = False
+            return
+        elements_np = self._elements.numpy()[:n_active]
+        # Each element has up to 8 body slots; -1 marks unused.
+        # ``setup_from_coloring`` wants iterables-of-iterables. Particle
+        # endpoints (``b >= num_bodies``) live in the unified
+        # body-or-particle index space; the interaction graph only
+        # tracks rigid bodies (``b < num_bodies``), so we filter them
+        # out here.
+        bodies_per_element = []
+        nb = int(self.num_bodies)
+        for cid in range(n_active):
+            slot = elements_np[cid]["bodies"]
+            row = [int(b) for b in slot if int(b) >= 0 and int(b) < nb]
+            bodies_per_element.append(row)
+        # Adopt the partitioner's CSR colouring as the partition
+        # table. ``num_colors`` may include the overflow bucket --
+        # ``setup_from_coloring`` handles that uniformly.
+        self._mass_splitting.setup_from_coloring(
+            element_ids_by_color=self._partitioner.element_ids_by_color,
+            color_starts=self._partitioner.color_starts,
+            num_colors=int(self._partitioner.num_colors.numpy()[0]),
+            constraint_bodies=bodies_per_element,
+        )
 
     def _ingest_and_warmstart_contacts(self, contacts, shape_body) -> None:
         """Translate Newton ``Contacts`` -> contact columns. Swap prev/current
@@ -1754,6 +1844,7 @@ class PhoenXWorld:
         clears within the same outer iter."""
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
+        mass_split_graph = self._mass_split_graph_or_sentinel()
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
             wp.launch(
                 kernel,
@@ -1776,6 +1867,7 @@ class PhoenXWorld:
                     wp.int32(self._singleworld_total_threads),
                     wp.int32(self._fuse_threshold),
                     self._head_active,
+                    mass_split_graph,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=self.device,
@@ -1786,6 +1878,7 @@ class PhoenXWorld:
         wp.launch_tiled. Hands back to the head path on a colour > fuse_threshold."""
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
+        mass_split_graph = self._mass_split_graph_or_sentinel()
         wp.launch_tiled(
             kernel,
             dim=[1],
@@ -1805,6 +1898,7 @@ class PhoenXWorld:
                 wp.int32(self.num_cloth_triangles),
                 wp.int32(self.num_bodies),
                 wp.int32(self._fuse_threshold),
+                mass_split_graph,
             ],
             block_dim=self._fuse_tail_block_dim,
             device=self.device,
@@ -1830,19 +1924,64 @@ class PhoenXWorld:
 
     def _solve_main_singleworld(self) -> None:
         """Single-world prepare + main PGS iterate. Each sweep is head (large
-        colours) then fused tail (small colours)."""
+        colours) then fused tail (small colours).
+
+        With mass splitting active (``mass_split_max_partitions``
+        set + scene fits the rigid-only iterate path), the substep
+        order becomes:
+
+        1. Prepare against the body store (same as unsplit).
+        2. ``broadcast`` -- copy body state into every TinyRigidState.
+        3. Per PGS iteration: split iterate sweep (reads / writes
+           the copies, scales impulses by ``1/inv_factor``) -> ``average``
+           (per-body consensus across that body's partition copies).
+        4. ``write_back`` once after the last iterate -- the consensus
+           position / orientation / velocity / angular-velocity goes
+           back to the body store so :meth:`_integrate_positions`
+           and :meth:`_relax_velocities_singleworld` read fresh
+           values.
+        """
         if self._constraint_capacity == 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
+        substep_dt = float(self.substep_dt)
+        inv_substep_dt = float(idt)
 
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = self._singleworld_kernels()
 
         self._partitioner.begin_sweep()
         self._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
 
+        mass_split_active = (
+            self._mass_splitting is not None and self._mass_splitting._setup_complete
+        )
+        if mass_split_active:
+            self._mass_splitting.broadcast(
+                body_position=self.bodies.position,
+                body_orientation=self.bodies.orientation,
+                body_velocity=self.bodies.velocity,
+                body_angular_velocity=self.bodies.angular_velocity,
+                dt=substep_dt,
+            )
+
         for _ in range(self.solver_iterations):
             self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
+            if mass_split_active:
+                self._mass_splitting.average(
+                    body_position=self.bodies.position,
+                    body_orientation=self.bodies.orientation,
+                    inv_dt=inv_substep_dt,
+                )
+
+        if mass_split_active:
+            self._mass_splitting.write_back(
+                body_position=self.bodies.position,
+                body_orientation=self.bodies.orientation,
+                body_velocity=self.bodies.velocity,
+                body_angular_velocity=self.bodies.angular_velocity,
+                inv_dt=inv_substep_dt,
+            )
 
     def _relax_velocities_singleworld(self) -> None:
         """Single-world TGS-soft relax sweeps (bias OFF)."""
@@ -1894,6 +2033,24 @@ class PhoenXWorld:
                 _constraint_iterate_singleworld_fused_cloth_kernel,
                 _constraint_relax_singleworld_cloth_kernel,
                 _constraint_relax_singleworld_fused_cloth_kernel,
+            )
+        # Rigid-only path. When mass splitting is wired in for this
+        # step (cap is set + the orchestrator was set up against the
+        # current colouring), swap in the ``mass_split=True`` iterate
+        # variants so the contact dispatch routes through
+        # ``contact_iterate_split`` (read_state / write_state on the
+        # per-(body, partition) ``TinyRigidState`` copies). Prepare
+        # and relax stay unsplit -- prepare runs once per substep
+        # against the body store before broadcast initialises copies,
+        # relax runs after write_back commits the consensus back.
+        if self._mass_splitting is not None and self._mass_splitting._setup_complete:
+            return (
+                _constraint_prepare_singleworld_kernel,
+                _constraint_prepare_singleworld_fused_kernel,
+                _constraint_iterate_singleworld_split_kernel,
+                _constraint_iterate_singleworld_fused_split_kernel,
+                _constraint_relax_singleworld_kernel,
+                _constraint_relax_singleworld_fused_kernel,
             )
         return (
             _constraint_prepare_singleworld_kernel,
