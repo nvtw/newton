@@ -494,7 +494,7 @@ def _pair_counts_and_columns_kernel(
     pair_first: wp.array[wp.int32],
     pair_shape_a: wp.array[wp.int32],
     pair_shape_b: wp.array[wp.int32],
-    shape_body: wp.array[wp.int32],
+    shape_filter_id: wp.array[wp.int32],
     num_bodies: wp.int32,
     filter_keys: wp.array[wp.int64],
     filter_count: wp.int32,
@@ -506,13 +506,13 @@ def _pair_counts_and_columns_kernel(
     emit ``pair_columns = 1`` iff the pair is not self-contact /
     body-pair-filtered.
 
-    Fuses the old ``_pair_counts_from_starts`` + ``_pair_columns_binary``
-    kernels: they both launched at ``dim=rigid_contact_max``, both
-    gated on ``tid < num_pairs[0]``, and their outputs had no
-    cross-dependency (the binary kernel's ``pair_count > 0`` check
-    used to guard zero-run pairs, but the adjacency-mark pipeline
-    never produces those so the check was defensive-only and is
-    dropped here).
+    ``shape_filter_id[s]`` is the per-shape "filter group" -- shapes
+    sharing the same id collide as one body for the self-collision
+    filter. For rigid-only scenes this is just ``model.shape_body``;
+    for cloth-aware scenes the cloth-tri suffix gets unique negative
+    ids so distinct cloth tris (each individually anchored to the
+    world) don't collapse into a single "world body" group and lose
+    cloth-vs-cloth + cloth-vs-static-rigid contacts.
     """
     tid = wp.tid()
     n = num_pairs[0]
@@ -527,11 +527,11 @@ def _pair_counts_and_columns_kernel(
         nxt = rigid_contact_count[0]
     pair_count[tid] = nxt - cur
 
-    # pair_columns: 1 iff distinct dynamic bodies + not body-pair-filtered.
+    # pair_columns: 1 iff distinct filter groups + not body-pair-filtered.
     sa = pair_shape_a[tid]
     sb = pair_shape_b[tid]
-    ba = shape_body[sa]
-    bb = shape_body[sb]
+    ba = shape_filter_id[sa]
+    bb = shape_filter_id[sb]
     if ba == bb:
         pair_columns[tid] = wp.int32(0)
         return
@@ -902,6 +902,7 @@ def ingest_contacts(
     shape_material: wp.array | None = None,
     materials: wp.array | None = None,
     enable_body_pair_grouping: bool = False,
+    shape_filter_id: wp.array | None = None,
 ) -> None:
     """Materialise contact columns for one step.
 
@@ -1101,6 +1102,11 @@ def ingest_contacts(
     # Step 3b: derive per-pair contact counts from adjacent pair_first
     # AND compute the 0/1 pair_columns flag in one pass. Fused from two
     # back-to-back per-pair kernels that had identical launch geometry.
+    # When the caller doesn't pass a custom filter id array, fall back
+    # to ``shape_body``. This preserves the legacy rigid-only same-body
+    # filter semantics; cloth-aware callers pass a unified array where
+    # cloth tris have unique negative ids.
+    filter_id_arr = shape_filter_id if shape_filter_id is not None else shape_body
     wp.launch(
         kernel=_pair_counts_and_columns_kernel,
         dim=rigid_contact_max,
@@ -1110,7 +1116,7 @@ def ingest_contacts(
             scratch.pair_first,
             scratch.pair_shape_a,
             scratch.pair_shape_b,
-            shape_body,
+            filter_id_arr,
             int(num_bodies),
             filter_keys,
             int(filter_count),

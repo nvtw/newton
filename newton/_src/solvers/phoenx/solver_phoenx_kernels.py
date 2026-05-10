@@ -31,6 +31,10 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactViews,
     contact_get_body1,
     contact_get_body2,
+    contact_get_side0_kind,
+    contact_get_side0_nodes_extra,
+    contact_get_side1_kind,
+    contact_get_side1_nodes_extra,
     contact_iterate,
     contact_iterate_multi,
     contact_prepare_for_iteration,
@@ -827,14 +831,92 @@ def _constraints_to_elements_kernel(
     local_cid = tid - num_joints - num_cloth_triangles
     b1 = contact_get_body1(contact_cols, local_cid)
     b2 = contact_get_body2(contact_cols, local_cid)
-    if b1 >= 0 and bodies.inverse_mass[b1] == 0.0:
-        b1 = -1
-    if b2 >= 0 and bodies.inverse_mass[b2] == 0.0:
-        b2 = -1
-    if b1 < 0 and b2 >= 0:
-        b1 = b2
-        b2 = -1
-    elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
+    side0_kind = contact_get_side0_kind(contact_cols, local_cid)
+    side1_kind = contact_get_side1_kind(contact_cols, local_cid)
+    side0_extra = contact_get_side0_nodes_extra(contact_cols, local_cid)
+    side1_extra = contact_get_side1_nodes_extra(contact_cols, local_cid)
+
+    # Resolve a unified-index node to ``-1`` when its inverse mass is
+    # zero (anchored). The lookup container depends on the side's
+    # kind: rigid -> bodies; cloth -> particles (subtract num_bodies
+    # to land in the particle SoA). ``b < 0`` is the "no node" case
+    # (rigid sides without a body, e.g. world-attached shapes).
+    if b1 >= 0:
+        if side0_kind == wp.int32(0):
+            if bodies.inverse_mass[b1] == 0.0:
+                b1 = -1
+        else:
+            if particles.inverse_mass[b1 - num_bodies] == 0.0:
+                b1 = -1
+    if b2 >= 0:
+        if side1_kind == wp.int32(0):
+            if bodies.inverse_mass[b2] == 0.0:
+                b2 = -1
+        else:
+            if particles.inverse_mass[b2 - num_bodies] == 0.0:
+                b2 = -1
+
+    # Resolve the four extra nodes (cloth side only). Rigid sides have
+    # extras at -1 and the static check is skipped.
+    e0a = wp.int32(-1)
+    e0b = wp.int32(-1)
+    if side0_kind == wp.int32(1):
+        e0a = side0_extra[0]
+        e0b = side0_extra[1]
+        if e0a >= 0 and particles.inverse_mass[e0a - num_bodies] == 0.0:
+            e0a = -1
+        if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
+            e0b = -1
+    e1a = wp.int32(-1)
+    e1b = wp.int32(-1)
+    if side1_kind == wp.int32(1):
+        e1a = side1_extra[0]
+        e1b = side1_extra[1]
+        if e1a >= 0 and particles.inverse_mass[e1a - num_bodies] == 0.0:
+            e1a = -1
+        if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
+            e1b = -1
+
+    # Compact: drop -1s into a contiguous prefix (the partitioner's
+    # adjacency loop stops on the first -1). Up to 6 nodes for a
+    # cloth-cloth contact (3 + 3); cloth-rigid is 4; rigid-rigid is 2.
+    s0 = wp.int32(-1)
+    s1 = wp.int32(-1)
+    s2 = wp.int32(-1)
+    s3 = wp.int32(-1)
+    s4 = wp.int32(-1)
+    s5 = wp.int32(-1)
+    cnt = wp.int32(0)
+    for cand in range(6):
+        v = wp.int32(-1)
+        if cand == 0:
+            v = b1
+        elif cand == 1:
+            v = b2
+        elif cand == 2:
+            v = e0a
+        elif cand == 3:
+            v = e0b
+        elif cand == 4:
+            v = e1a
+        else:
+            v = e1b
+        if v < 0:
+            continue
+        if cnt == 0:
+            s0 = v
+        elif cnt == 1:
+            s1 = v
+        elif cnt == 2:
+            s2 = v
+        elif cnt == 3:
+            s3 = v
+        elif cnt == 4:
+            s4 = v
+        else:
+            s5 = v
+        cnt = cnt + 1
+    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5, -1, -1)
 
 
 @wp.kernel(enable_backward=False)

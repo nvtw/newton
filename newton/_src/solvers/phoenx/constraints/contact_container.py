@@ -26,6 +26,8 @@ __all__ = [
     "cc_get_eff_t2",
     "cc_get_local_p0",
     "cc_get_local_p1",
+    "cc_get_side0_bary",
+    "cc_get_side1_bary",
     "cc_get_normal",
     "cc_get_normal_lambda",
     "cc_get_pd_bias",
@@ -49,6 +51,8 @@ __all__ = [
     "cc_set_eff_t2",
     "cc_set_local_p0",
     "cc_set_local_p1",
+    "cc_set_side0_bary",
+    "cc_set_side1_bary",
     "cc_set_normal",
     "cc_set_normal_lambda",
     "cc_set_pd_bias",
@@ -65,8 +69,13 @@ __all__ = [
 #: Dwords of persistent impulse per contact: normal + two tangent lambdas.
 CC_LAMBDA_DWORDS_PER_CONTACT: int = 3
 
-#: 15 = lam_n + lam_t1 + lam_t2 + normal(3) + tangent1(3) + local_p0(3) + local_p1(3).
-CC_DWORDS_PER_CONTACT: int = 15
+#: 21 = lam_n + lam_t1 + lam_t2 + normal(3) + tangent1(3) + local_p0(3) + local_p1(3) +
+#: side0_bary(3) + side1_bary(3). The two ``bary`` slots are populated by the contact
+#: ingest when a side is a cloth triangle (``shape_endpoints[s].kind == 1``); rigid
+#: sides leave them at zero. Read by :func:`_read_endpoint_state` /
+#: :func:`_apply_endpoint_impulse` (Phase 5) to distribute contact impulses across
+#: the three triangle nodes via barycentric weights.
+CC_DWORDS_PER_CONTACT: int = 21
 
 #: 9 = eff_n + eff_t1 + eff_t2 + bias + bias_t1 + bias_t2 + pd_gamma + pd_bias + pd_eff_soft.
 #: pd_* are non-zero only for soft contacts (user K/D); pd_eff_soft > 0 switches
@@ -90,6 +99,12 @@ _CC_OFF_LOCAL_P0_Z = wp.constant(11)
 _CC_OFF_LOCAL_P1_X = wp.constant(12)
 _CC_OFF_LOCAL_P1_Y = wp.constant(13)
 _CC_OFF_LOCAL_P1_Z = wp.constant(14)
+_CC_OFF_SIDE0_BARY_X = wp.constant(15)
+_CC_OFF_SIDE0_BARY_Y = wp.constant(16)
+_CC_OFF_SIDE0_BARY_Z = wp.constant(17)
+_CC_OFF_SIDE1_BARY_X = wp.constant(18)
+_CC_OFF_SIDE1_BARY_Y = wp.constant(19)
+_CC_OFF_SIDE1_BARY_Z = wp.constant(20)
 
 _CC_OFF_EFF_N = wp.constant(0)
 _CC_OFF_EFF_T1 = wp.constant(1)
@@ -209,6 +224,44 @@ def cc_set_local_p1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
     cc.lambdas[_CC_OFF_LOCAL_P1_X, k] = v[0]
     cc.lambdas[_CC_OFF_LOCAL_P1_Y, k] = v[1]
     cc.lambdas[_CC_OFF_LOCAL_P1_Z, k] = v[2]
+
+
+# Per-side barycentric weights for cloth-aware endpoints. Populated by
+# the contact ingest only when the corresponding ``side*_kind`` is
+# ``CLOTH``; rigid sides leave them at zero (the iterate's endpoint
+# helper just consumes them once it knows the kind).
+
+
+@wp.func
+def cc_get_side0_bary(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
+    return wp.vec3f(
+        cc.lambdas[_CC_OFF_SIDE0_BARY_X, k],
+        cc.lambdas[_CC_OFF_SIDE0_BARY_Y, k],
+        cc.lambdas[_CC_OFF_SIDE0_BARY_Z, k],
+    )
+
+
+@wp.func
+def cc_set_side0_bary(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
+    cc.lambdas[_CC_OFF_SIDE0_BARY_X, k] = v[0]
+    cc.lambdas[_CC_OFF_SIDE0_BARY_Y, k] = v[1]
+    cc.lambdas[_CC_OFF_SIDE0_BARY_Z, k] = v[2]
+
+
+@wp.func
+def cc_get_side1_bary(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
+    return wp.vec3f(
+        cc.lambdas[_CC_OFF_SIDE1_BARY_X, k],
+        cc.lambdas[_CC_OFF_SIDE1_BARY_Y, k],
+        cc.lambdas[_CC_OFF_SIDE1_BARY_Z, k],
+    )
+
+
+@wp.func
+def cc_set_side1_bary(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
+    cc.lambdas[_CC_OFF_SIDE1_BARY_X, k] = v[0]
+    cc.lambdas[_CC_OFF_SIDE1_BARY_Y, k] = v[1]
+    cc.lambdas[_CC_OFF_SIDE1_BARY_Z, k] = v[2]
 
 
 # ---- prev-step views ------------------------------------------------

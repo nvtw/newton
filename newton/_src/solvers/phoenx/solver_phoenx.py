@@ -63,7 +63,14 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
     MAX_COLORS,
     IncrementalContactPartitioner,
 )
-from newton._src.solvers.phoenx.cloth_collision import _phoenx_update_cloth_shape_geometry_kernel
+from newton._src.solvers.phoenx.cloth_collision import (
+    ShapeEndpoint,
+    _phoenx_pack_cloth_contact_barycentric_kernel,
+    _phoenx_pack_cloth_contact_endpoints_kernel,
+    _phoenx_populate_shape_endpoints_kernel,
+    _phoenx_update_cloth_shape_geometry_kernel,
+    shape_endpoints_zeros,
+)
 from newton._src.solvers.phoenx.cloth_step import (
     cloth_init_triangle_rows_kernel,
     cloth_predict_kernel,
@@ -331,6 +338,16 @@ class PhoenXWorld:
         self._cloth_thickness: float = 0.0
         self._cloth_gap: float = 0.0
         self._cloth_tri_indices = None
+        # Per-shape endpoint table -- length S + T, populated alongside
+        # the collision pipeline. Read by the contact-ingest kernel to
+        # translate ``(shape_a, shape_b)`` into unified body-or-particle
+        # nodes + kind tags for the contact column header.
+        self._shape_endpoints: wp.array | None = None
+        # Per-shape filter id for the contact-ingest same-body filter.
+        # ``None`` means rigid-only behaviour (ingest falls back to
+        # ``shape_body``); cloth-aware setups install a custom array
+        # so distinct cloth tris don't collapse into one filter group.
+        self._shape_filter_id: wp.array | None = None
 
         self.substeps = int(substeps)
         if self.substeps <= 0:
@@ -991,6 +1008,43 @@ class PhoenXWorld:
         self._cloth_gap: float = float(cloth_gap)
         self._cloth_tri_indices = model.tri_indices
 
+        # Per-shape filter id array. Length S + T. Rigid prefix
+        # mirrors model.shape_body so the existing same-body collision
+        # filter behaviour is preserved. Cloth-tri suffix gets unique
+        # negative ids ``-(2 + t)`` so distinct cloth tris (each
+        # nominally anchored to the world via shape_body=-1) don't
+        # collapse into a single filter group -- that would lose
+        # cloth-vs-cloth and cloth-vs-static-rigid contacts. Negative
+        # ids stay distinct from any rigid body index (>= 0) and from
+        # the -1 world-anchor sentinel.
+        S_int = int(S)
+        T_int = int(T)
+        filter_host = np.zeros(S_int + T_int, dtype=np.int32)
+        if S_int > 0 and getattr(model, "shape_body", None) is not None:
+            filter_host[:S_int] = model.shape_body.numpy()
+        for t_i in range(T_int):
+            filter_host[S_int + t_i] = -(2 + t_i)
+        self._shape_filter_id = wp.array(filter_host, dtype=wp.int32, device=self.device)
+
+        # Per-shape endpoint table for cloth-aware contact ingest.
+        # Allocated for the full unified shape range and populated
+        # once: rigid prefix copies model.shape_body, cloth suffix
+        # decodes tri_indices into unified-index triplets.
+        self._shape_endpoints = shape_endpoints_zeros(S + T, device=self.device)
+        wp.launch(
+            _phoenx_populate_shape_endpoints_kernel,
+            dim=S + T,
+            inputs=[
+                model.shape_body,
+                model.tri_indices,
+                wp.int32(S),
+                wp.int32(T),
+                wp.int32(self.num_bodies),
+            ],
+            outputs=[self._shape_endpoints],
+            device=self.device,
+        )
+
         # Wire as the model's default pipeline so model.collide(...)
         # picks it up. The user calls :meth:`collide` on this world
         # for the cloth-aware extended-AABB code path.
@@ -1185,6 +1239,15 @@ class PhoenXWorld:
             )
         if shape_body is None:
             shape_body = self._shape_body_internal
+        # When the cloth-aware pipeline is active, contact slots can
+        # reference shape indices up to S + T -- the user-supplied
+        # shape_body (length S) doesn't cover the cloth suffix, so use
+        # the pipeline's unified_shape_body (length S + T, with cloth
+        # shapes mapped to -1) instead.
+        if self._collision_pipeline is not None and getattr(
+            self._collision_pipeline, "unified_shape_body", None
+        ) is not None:
+            shape_body = self._collision_pipeline.unified_shape_body
         if shape_body is None:
             raise ValueError(
                 "step(contacts=...) requires shape_body. Pass model.shape_body or "
@@ -1238,6 +1301,7 @@ class PhoenXWorld:
             shape_material=self._shape_material,
             materials=self._materials,
             enable_body_pair_grouping=self._enable_body_pair_grouping,
+            shape_filter_id=self._shape_filter_id,
         )
 
         # Compound grouping: views point at PhoenX's sorted scratch.
@@ -1290,6 +1354,40 @@ class PhoenXWorld:
             cc=self._contact_container,
             device=self.device,
         )
+
+        # Cloth-aware overlay: when shape_endpoints is populated
+        # (i.e. setup_cloth_collision_pipeline was called), re-stamp
+        # the contact column header with unified-index nodes + kind
+        # tags, and compute barycentric weights for any cloth-side
+        # contacts. Rigid-only scenes skip this -- the existing
+        # _contact_pack_columns_kernel above already wrote correct
+        # rigid-rigid headers.
+        if self._shape_endpoints is not None:
+            wp.launch(
+                _phoenx_pack_cloth_contact_endpoints_kernel,
+                dim=max(1, self.max_contact_columns),
+                inputs=[
+                    self._ingest_scratch.pair_source_idx,
+                    self._ingest_scratch.pair_shape_a,
+                    self._ingest_scratch.pair_shape_b,
+                    self._ingest_scratch.num_contact_columns,
+                    self._shape_endpoints,
+                ],
+                outputs=[self._contact_cols],
+                device=self.device,
+            )
+            wp.launch(
+                _phoenx_pack_cloth_contact_barycentric_kernel,
+                dim=max(1, self.rigid_contact_max),
+                inputs=[
+                    self._contact_views,
+                    self._shape_endpoints,
+                    self._particles_or_sentinel(),
+                    wp.int32(self.num_bodies),
+                ],
+                outputs=[self._contact_container],
+                device=self.device,
+            )
 
         stamp_forward_contact_map(
             rigid_contact_max=self.rigid_contact_max,

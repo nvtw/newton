@@ -32,12 +32,123 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    ContactColumnContainer,
+    ContactViews,
+    contact_set_body1,
+    contact_set_body2,
+    contact_set_side0_kind,
+    contact_set_side0_nodes_extra,
+    contact_set_side1_kind,
+    contact_set_side1_nodes_extra,
+)
+from newton._src.solvers.phoenx.constraints.contact_container import (
+    ContactContainer,
+    cc_set_side0_bary,
+    cc_set_side1_bary,
+)
 from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
+    "SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE",
+    "SHAPE_ENDPOINT_KIND_RIGID",
+    "ShapeEndpoint",
+    "_phoenx_pack_cloth_contact_barycentric_kernel",
+    "_phoenx_pack_cloth_contact_endpoints_kernel",
+    "_phoenx_populate_shape_endpoints_kernel",
     "_phoenx_update_cloth_shape_geometry_kernel",
     "canonicalize_triangle",
+    "shape_endpoints_zeros",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Per-shape endpoint table
+# ---------------------------------------------------------------------------
+#
+# Every shape in the unified shape array (rigid prefix [0, S), cloth-tri
+# suffix [S, S+T)) carries an endpoint descriptor that the contact ingest
+# kernel uses to translate ``(shape_a, shape_b)`` pairs into:
+#
+# * a primary unified body-or-particle node index per side (= ``body1`` /
+#   ``body2`` of the contact column),
+# * up to two extra unified-index particle nodes per cloth side
+#   (= ``side*_nodes_extra``), and
+# * a kind tag (rigid / cloth) so the iterate's endpoint helper knows
+#   which container (BodyContainer / ParticleContainer) to read.
+#
+# The descriptor is populated once at scene build via
+# :meth:`PhoenXWorld.setup_cloth_collision_pipeline` and read by the
+# contact-ingest kernel as a single 16-byte load per shape.
+
+#: Shape is owned by a rigid body. ``nodes`` holds ``(body_unified, -1, -1)``.
+SHAPE_ENDPOINT_KIND_RIGID: int = 0
+
+#: Shape is a cloth triangle. ``nodes`` holds three particle indices in
+#: unified body-or-particle space ``(num_bodies + p_a, num_bodies + p_b,
+#: num_bodies + p_c)``.
+SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE: int = 1
+
+
+@wp.struct
+class ShapeEndpoint:
+    """Per-shape mapping ``shape_index -> (kind, nodes)``.
+
+    For rigid shapes, ``nodes[0]`` is the rigid body index in unified
+    body-or-particle space (``[0, num_bodies)``); ``nodes[1]`` and
+    ``nodes[2]`` are ``-1``.
+
+    For cloth-triangle shapes, ``nodes[0/1/2]`` are the three triangle
+    particle indices in unified space (``num_bodies + particle_id``).
+    """
+
+    nodes: wp.vec3i
+    kind: wp.int32
+
+
+def shape_endpoints_zeros(num_shapes: int, device=None) -> wp.array[ShapeEndpoint]:
+    """Allocate a zero-initialised :class:`ShapeEndpoint` array of
+    length ``num_shapes``."""
+    return wp.zeros(int(num_shapes), dtype=ShapeEndpoint, device=device)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_populate_shape_endpoints_kernel(
+    shape_body: wp.array[wp.int32],
+    tri_indices: wp.array2d[wp.int32],
+    cloth_shape_offset: wp.int32,
+    num_cloth_triangles: wp.int32,
+    num_bodies: wp.int32,
+    # out
+    shape_endpoints: wp.array[ShapeEndpoint],
+):
+    """One thread per shape ``s`` in ``[0, S + T)``: stamp its
+    :class:`ShapeEndpoint`.
+
+    * ``s < cloth_shape_offset`` -> rigid: nodes = (shape_body[s], -1, -1).
+      ``shape_body[s] == -1`` (anchored to world) is preserved as-is so
+      the partitioner sees ``-1`` for static-anchor shapes.
+    * ``s >= cloth_shape_offset`` -> cloth tri: nodes = unified-index
+      triplet from ``tri_indices[s - S]``.
+    """
+    s = wp.tid()
+    if s < cloth_shape_offset:
+        b = shape_body[s]
+        ep = ShapeEndpoint()
+        ep.nodes = wp.vec3i(b, wp.int32(-1), wp.int32(-1))
+        ep.kind = wp.int32(SHAPE_ENDPOINT_KIND_RIGID)
+        shape_endpoints[s] = ep
+        return
+    t = s - cloth_shape_offset
+    if t >= num_cloth_triangles:
+        return
+    pa = tri_indices[t, 0]
+    pb = tri_indices[t, 1]
+    pc = tri_indices[t, 2]
+    ep = ShapeEndpoint()
+    ep.nodes = wp.vec3i(num_bodies + pa, num_bodies + pb, num_bodies + pc)
+    ep.kind = wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE)
+    shape_endpoints[s] = ep
 
 
 _DEGENERATE_EPS = wp.constant(wp.float32(1.0e-12))
@@ -150,3 +261,153 @@ def _phoenx_update_cloth_shape_geometry_kernel(
     )
     aabb_lower[s] = lo - enlargement_vec
     aabb_upper[s] = hi + enlargement_vec
+
+
+# ---------------------------------------------------------------------------
+# Cloth-aware contact ingest (post-process to the rigid pack kernel)
+# ---------------------------------------------------------------------------
+#
+# These two kernels run after the standard contact ingest pipeline has
+# materialised the contact columns from the rigid-only path. They
+# overlay the cloth-aware fields:
+#
+# * `_phoenx_pack_cloth_contact_endpoints_kernel` -- per contact
+#   *column*: re-stamps body1 / body2 to unified-index node[0] of each
+#   side, fills side*_kind and side*_nodes_extra.
+#
+# * `_phoenx_pack_cloth_contact_barycentric_kernel` -- per individual
+#   *contact* k: when a side is a cloth triangle, projects the
+#   narrow-phase contact point onto the triangle plane and computes the
+#   barycentric weights, stored in :class:`ContactContainer.lambdas`.
+#
+# Both kernels are no-ops when both sides are rigid (the kind tag short-
+# circuits the cloth branch); rigid-only scenes simply don't launch
+# them.
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_pack_cloth_contact_endpoints_kernel(
+    pair_source_idx: wp.array[wp.int32],
+    pair_shape_a: wp.array[wp.int32],
+    pair_shape_b: wp.array[wp.int32],
+    num_contact_columns: wp.array[wp.int32],
+    shape_endpoints: wp.array[ShapeEndpoint],
+    # out
+    contact_cols: ContactColumnContainer,
+):
+    """Per contact column: stamp the cloth-aware endpoint metadata.
+
+    Re-stamps :attr:`ContactConstraintData.body1` / :attr:`body2` with
+    the unified body-or-particle index of each side's primary node
+    (rigid -> rigid body unified-index; cloth -> first triangle
+    particle's unified index). Then fills ``side*_kind`` and
+    ``side*_nodes_extra`` so the iterate's endpoint helper has all the
+    node info per side without re-touching the shape table.
+    """
+    tid = wp.tid()
+    if tid >= num_contact_columns[0]:
+        return
+
+    p = pair_source_idx[tid]
+    sa = pair_shape_a[p]
+    sb = pair_shape_b[p]
+
+    ep_a = shape_endpoints[sa]
+    ep_b = shape_endpoints[sb]
+
+    # Primary node per side (= nodes[0]) lands in the existing
+    # ``body1`` / ``body2`` header dwords; extras land in side*_nodes_extra.
+    contact_set_body1(contact_cols, tid, ep_a.nodes[0])
+    contact_set_body2(contact_cols, tid, ep_b.nodes[0])
+    contact_set_side0_kind(contact_cols, tid, ep_a.kind)
+    contact_set_side1_kind(contact_cols, tid, ep_b.kind)
+    contact_set_side0_nodes_extra(contact_cols, tid, wp.vec2i(ep_a.nodes[1], ep_a.nodes[2]))
+    contact_set_side1_nodes_extra(contact_cols, tid, wp.vec2i(ep_b.nodes[1], ep_b.nodes[2]))
+
+
+@wp.func
+def _barycentric_in_plane(p: wp.vec3f, xa: wp.vec3f, xb: wp.vec3f, xc: wp.vec3f) -> wp.vec3f:
+    """Project ``p`` onto the plane of triangle ``(xa, xb, xc)`` and
+    return its barycentric weights ``(alpha, beta, gamma)`` with
+    ``alpha + beta + gamma == 1`` (within float precision).
+
+    Uses the standard 3x3 dot-product Cramer system on the in-plane
+    edge basis; out-of-plane displacement is automatically removed by
+    the projection (the in-plane gram matrix has rank 2).
+
+    Returns ``(1, 0, 0)`` for degenerate triangles so subsequent reads
+    don't NaN.
+    """
+    e1 = xb - xa
+    e2 = xc - xa
+    d = p - xa
+    d00 = wp.dot(e1, e1)
+    d01 = wp.dot(e1, e2)
+    d11 = wp.dot(e2, e2)
+    d20 = wp.dot(d, e1)
+    d21 = wp.dot(d, e2)
+    denom = d00 * d11 - d01 * d01
+    if denom < _DEGENERATE_EPS and denom > -_DEGENERATE_EPS:
+        return wp.vec3f(1.0, 0.0, 0.0)
+    inv_denom = wp.float32(1.0) / denom
+    beta = (d11 * d20 - d01 * d21) * inv_denom
+    gamma = (d00 * d21 - d01 * d20) * inv_denom
+    alpha = wp.float32(1.0) - beta - gamma
+    return wp.vec3f(alpha, beta, gamma)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_pack_cloth_contact_barycentric_kernel(
+    contacts: ContactViews,
+    shape_endpoints: wp.array[ShapeEndpoint],
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    # out
+    cc: ContactContainer,
+):
+    """Per individual contact ``k``: when a side is a cloth triangle,
+    compute the in-plane barycentric coords of the narrow-phase contact
+    point against that side's three particle positions and store them
+    in :class:`ContactContainer.lambdas`.
+
+    Rigid sides leave ``side*_bary`` at zero (no-op). Inactive contact
+    slots (``k >= rigid_contact_count``) early-return.
+
+    The contact point used is the narrow-phase ``rigid_contact_point0``
+    / ``rigid_contact_point1`` -- already in world space for cloth
+    sides because :func:`CollisionPipeline._build_unified_shape_arrays`
+    sets ``shape_body == -1`` for cloth shapes (forcing identity in the
+    body-frame transform on the narrow-phase output).
+    """
+    k = wp.tid()
+    if k >= contacts.rigid_contact_count[0]:
+        return
+
+    sa = contacts.rigid_contact_shape0[k]
+    sb = contacts.rigid_contact_shape1[k]
+    ep_a = shape_endpoints[sa]
+    ep_b = shape_endpoints[sb]
+
+    if ep_a.kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
+        p_a = ep_a.nodes[0] - num_bodies
+        p_b = ep_a.nodes[1] - num_bodies
+        p_c = ep_a.nodes[2] - num_bodies
+        bary = _barycentric_in_plane(
+            contacts.rigid_contact_point0[k],
+            particles.position[p_a],
+            particles.position[p_b],
+            particles.position[p_c],
+        )
+        cc_set_side0_bary(cc, k, bary)
+
+    if ep_b.kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
+        p_a = ep_b.nodes[0] - num_bodies
+        p_b = ep_b.nodes[1] - num_bodies
+        p_c = ep_b.nodes[2] - num_bodies
+        bary = _barycentric_in_plane(
+            contacts.rigid_contact_point1[k],
+            particles.position[p_a],
+            particles.position[p_b],
+            particles.position[p_c],
+        )
+        cc_set_side1_bary(cc, k, bary)

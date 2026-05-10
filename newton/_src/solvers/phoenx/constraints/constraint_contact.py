@@ -96,6 +96,14 @@ __all__ = [
     "contact_per_k_wrench_at",
     "contact_prepare_for_iteration",
     "contact_prepare_for_iteration_at",
+    "contact_get_side0_kind",
+    "contact_get_side0_nodes_extra",
+    "contact_get_side1_kind",
+    "contact_get_side1_nodes_extra",
+    "contact_set_side0_kind",
+    "contact_set_side0_nodes_extra",
+    "contact_set_side1_kind",
+    "contact_set_side1_nodes_extra",
     "contact_set_body1",
     "contact_set_body2",
     "contact_set_contact_count",
@@ -157,6 +165,20 @@ class ContactConstraintData:
     #: ``k < contact_first + contact_count``.
     contact_count: wp.int32
 
+    #: Per-side endpoint kind: ``0`` = rigid body, ``1`` = cloth-triangle.
+    #: ``side0`` corresponds to ``shape_a`` (the shape stored at
+    #: :attr:`body1`'s side), ``side1`` to ``shape_b``. The ``body1`` /
+    #: ``body2`` dwords store the *first* unified body-or-particle index
+    #: of each side; ``nodes_extra`` (below) holds the two additional
+    #: cloth particle indices for cloth sides (``(-1, -1)`` for rigid).
+    side0_kind: wp.int32
+    side1_kind: wp.int32
+    #: For cloth side: ``(num_bodies + p_b, num_bodies + p_c)`` -- the
+    #: 2nd and 3rd particles of the triangle endpoint, in unified
+    #: body-or-particle index space. For rigid side: ``(-1, -1)``.
+    side0_nodes_extra: wp.vec2i
+    side1_nodes_extra: wp.vec2i
+
 
 assert_constraint_header(ContactConstraintData)
 
@@ -167,6 +189,10 @@ _OFF_FRICTION = wp.constant(dword_offset_of(ContactConstraintData, "friction"))
 _OFF_FRICTION_DYNAMIC = wp.constant(dword_offset_of(ContactConstraintData, "friction_dynamic"))
 _OFF_CONTACT_FIRST = wp.constant(dword_offset_of(ContactConstraintData, "contact_first"))
 _OFF_CONTACT_COUNT = wp.constant(dword_offset_of(ContactConstraintData, "contact_count"))
+_OFF_SIDE0_KIND = wp.constant(dword_offset_of(ContactConstraintData, "side0_kind"))
+_OFF_SIDE1_KIND = wp.constant(dword_offset_of(ContactConstraintData, "side1_kind"))
+_OFF_SIDE0_NODES_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "side0_nodes_extra"))
+_OFF_SIDE1_NODES_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "side1_nodes_extra"))
 
 
 #: Total dword count of one contact constraint column. The per-pair
@@ -421,6 +447,57 @@ def contact_get_contact_count(c: ContactColumnContainer, local_cid: wp.int32) ->
 @wp.func
 def contact_set_contact_count(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
     _col_write_int(c, _OFF_CONTACT_COUNT, local_cid, v)
+
+
+# Per-side endpoint metadata for cloth-aware contact iterate.
+
+
+@wp.func
+def contact_get_side0_kind(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_SIDE0_KIND, local_cid)
+
+
+@wp.func
+def contact_set_side0_kind(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_SIDE0_KIND, local_cid, v)
+
+
+@wp.func
+def contact_get_side1_kind(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_SIDE1_KIND, local_cid)
+
+
+@wp.func
+def contact_set_side1_kind(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_SIDE1_KIND, local_cid, v)
+
+
+@wp.func
+def contact_get_side0_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32) -> wp.vec2i:
+    return wp.vec2i(
+        _col_read_int(c, _OFF_SIDE0_NODES_EXTRA + wp.int32(0), local_cid),
+        _col_read_int(c, _OFF_SIDE0_NODES_EXTRA + wp.int32(1), local_cid),
+    )
+
+
+@wp.func
+def contact_set_side0_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32, v: wp.vec2i):
+    _col_write_int(c, _OFF_SIDE0_NODES_EXTRA + wp.int32(0), local_cid, v[0])
+    _col_write_int(c, _OFF_SIDE0_NODES_EXTRA + wp.int32(1), local_cid, v[1])
+
+
+@wp.func
+def contact_get_side1_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32) -> wp.vec2i:
+    return wp.vec2i(
+        _col_read_int(c, _OFF_SIDE1_NODES_EXTRA + wp.int32(0), local_cid),
+        _col_read_int(c, _OFF_SIDE1_NODES_EXTRA + wp.int32(1), local_cid),
+    )
+
+
+@wp.func
+def contact_set_side1_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32, v: wp.vec2i):
+    _col_write_int(c, _OFF_SIDE1_NODES_EXTRA + wp.int32(0), local_cid, v[0])
+    _col_write_int(c, _OFF_SIDE1_NODES_EXTRA + wp.int32(1), local_cid, v[1])
 
 
 # ---------------------------------------------------------------------------
