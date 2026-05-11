@@ -35,9 +35,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_side0_nodes_extra,
     contact_get_side1_kind,
     contact_get_side1_nodes_extra,
-    contact_iterate,
     contact_iterate_multi,
-    contact_prepare_for_iteration,
     contact_world_error,
     contact_world_wrench,
 )
@@ -46,7 +44,9 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_prepare_for_iteration_at,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
+    contact_iterate,
     contact_iterate_cloth_aware,
+    contact_prepare_for_iteration,
     contact_prepare_for_iteration_cloth_aware,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -617,6 +617,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
         bodies: BodyContainer,
+        particles: ParticleContainer,
         idt: wp.float32,
         world_element_ids_by_color: wp.array[wp.int32],
         world_color_starts: wp.array2d[wp.int32],
@@ -627,6 +628,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
         num_iterations: wp.int32,
         num_worlds: wp.int32,
         num_joints: wp.int32,
+        num_bodies: wp.int32,
         tpw_buf: wp.array[wp.int32],
     ):
         tid = wp.tid()
@@ -655,7 +657,9 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                     else:
                         actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
                 else:
-                    contact_prepare_for_iteration(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+                    contact_prepare_for_iteration(
+                        contact_cols, cid - num_joints, bodies, particles, num_bodies, idt, cc, contacts,
+                    )
                 base += tpw
 
             _sync_warp()
@@ -1342,11 +1346,13 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                 else:
                     if wp.static(is_prepare):
                         contact_prepare_for_iteration(
-                            contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
+                            contact_cols, cid - num_joints - num_cloth_triangles,
+                            bodies, particles, num_bodies, idt, cc, contacts,
                         )
                     else:
                         contact_iterate(
-                            contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts, use_bias
+                            contact_cols, cid - num_joints - num_cloth_triangles,
+                            bodies, particles, num_bodies, idt, cc, contacts, use_bias,
                         )
                 continue
             ctype = constraint_get_type(constraints, cid)
@@ -1427,17 +1433,13 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                     else:
                         if wp.static(is_prepare):
                             contact_prepare_for_iteration(
-                                contact_cols, cid - num_joints - num_cloth_triangles, bodies, idt, cc, contacts
+                                contact_cols, cid - num_joints - num_cloth_triangles,
+                                bodies, particles, num_bodies, idt, cc, contacts,
                             )
                         else:
                             contact_iterate(
-                                contact_cols,
-                                cid - num_joints - num_cloth_triangles,
-                                bodies,
-                                idt,
-                                cc,
-                                contacts,
-                                use_bias,
+                                contact_cols, cid - num_joints - num_cloth_triangles,
+                                bodies, particles, num_bodies, idt, cc, contacts, use_bias,
                             )
                 else:
                     ctype = constraint_get_type(constraints, cid)

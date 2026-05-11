@@ -81,7 +81,7 @@ class Example:
         # Static ground plane at z = 0. ``add_ground_plane`` creates an
         # infinite-plane shape attached to the world body; it stops
         # the cloth (and the cube) from falling forever.
-        builder.add_ground_plane()
+        builder.add_ground_plane(height=1.0)
 
         # Free rigid cube starting above the cloth so it drops onto
         # the cloth's free corner. Mass-1 unit cube; default inertia.

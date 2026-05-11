@@ -69,7 +69,9 @@ class TestInvariants(unittest.TestCase):
         kw["constraints"] = constraint_container_zeros(
             num_constraints=4200, num_dwords=CONTACT_DWORDS, device=wp.get_device()
         )
-        with self.assertRaisesRegex(AssertionError, r"ConstraintContainer\.data has shape \(7, 4200\)"):
+        with self.assertRaisesRegex(
+            AssertionError, rf"ConstraintContainer\.data has shape \({int(CONTACT_DWORDS)}, 4200\)"
+        ):
             PhoenXWorld(**kw)
 
 
