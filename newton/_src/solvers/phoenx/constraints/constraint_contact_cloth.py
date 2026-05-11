@@ -95,6 +95,14 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
     apply_pair_velocity_impulse,
     effective_mass_scalar,
 )
+from newton._src.solvers.phoenx.mass_splitting.access import (
+    get_state_index,
+    read_angular_velocity_unified,
+    read_velocity_unified,
+    write_angular_velocity_unified,
+    write_velocity_unified,
+)
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
 
@@ -136,9 +144,7 @@ def _side_world_contact_point(
         p_b = nodes[1] - num_bodies
         p_c = nodes[2] - num_bodies
         anchor = (
-            bary[0] * particles.position[p_a]
-            + bary[1] * particles.position[p_b]
-            + bary[2] * particles.position[p_c]
+            bary[0] * particles.position[p_a] + bary[1] * particles.position[p_b] + bary[2] * particles.position[p_c]
         )
         return anchor + (sign * margin) * n
     b = nodes[0]
@@ -173,6 +179,8 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
         idt: wp.float32,
         cc: ContactContainer,
         contacts: ContactViews,
+        copy_state: CopyStateContainer,
+        parallel_id: wp.int32,
     ):
         """Prepare one contact column for PGS.
 
@@ -215,17 +223,26 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
             side0_nodes = wp.vec3i(b1, side0_extra[0], side0_extra[1])
             side1_nodes = wp.vec3i(b2, side1_extra[0], side1_extra[1])
         else:
+            # Mass-splitting slot lookup for both bodies. When mass
+            # splitting is disabled (highest_index_in_use[0] == 0) the
+            # helper returns (slot=-1, inv_factor=1), so the inv_mass /
+            # inv_inertia scaling below is identity and the warm-start
+            # scatter at the end routes back to ``bodies.velocity``.
+            slot1, inv_factor1 = get_state_index(copy_state, b1, parallel_id)
+            slot2, inv_factor2 = get_state_index(copy_state, b2, parallel_id)
+            inv_factor1_f = wp.float32(inv_factor1)
+            inv_factor2_f = wp.float32(inv_factor2)
             orientation1 = bodies.orientation[b1]
             orientation2 = bodies.orientation[b2]
             position1 = bodies.position[b1]
             position2 = bodies.position[b2]
             body_com1 = bodies.body_com[b1]
             body_com2 = bodies.body_com[b2]
-            inv_mass1 = bodies.inverse_mass[b1]
-            inv_mass2 = bodies.inverse_mass[b2]
-            inv_inertia1 = bodies.inverse_inertia_world[b1]
-            inv_inertia2 = bodies.inverse_inertia_world[b2]
-            # Batched warm-start accumulators (one body-velocity scatter at end).
+            inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
+            inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
+            inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_factor1_f
+            inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_factor2_f
+            # Batched warm-start accumulators (one velocity scatter at end).
             total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
             total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
             total_ang_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
@@ -243,36 +260,87 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
                 bary0 = cc_get_side0_bary(cc, k)
                 bary1 = cc_get_side1_bary(cc, k)
                 p0_world = _side_world_contact_point(
-                    side0_kind, side0_nodes, bary0, bodies, particles, num_bodies,
-                    cc, k, False, margin0, n,
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    cc,
+                    k,
+                    False,
+                    margin0,
+                    n,
                 )
                 p1_world = _side_world_contact_point(
-                    side1_kind, side1_nodes, bary1, bodies, particles, num_bodies,
-                    cc, k, True, margin1, n,
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    cc,
+                    k,
+                    True,
+                    margin1,
+                    n,
                 )
-                inv_n = (
-                    contact_endpoint_inv_mass_along(
-                        side0_kind, side0_nodes, bary0, bodies, particles, num_bodies, p0_world, n,
-                    )
-                    + contact_endpoint_inv_mass_along(
-                        side1_kind, side1_nodes, bary1, bodies, particles, num_bodies, p1_world, n,
-                    )
+                inv_n = contact_endpoint_inv_mass_along(
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p0_world,
+                    n,
+                ) + contact_endpoint_inv_mass_along(
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p1_world,
+                    n,
                 )
-                inv_t1 = (
-                    contact_endpoint_inv_mass_along(
-                        side0_kind, side0_nodes, bary0, bodies, particles, num_bodies, p0_world, t1_dir,
-                    )
-                    + contact_endpoint_inv_mass_along(
-                        side1_kind, side1_nodes, bary1, bodies, particles, num_bodies, p1_world, t1_dir,
-                    )
+                inv_t1 = contact_endpoint_inv_mass_along(
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p0_world,
+                    t1_dir,
+                ) + contact_endpoint_inv_mass_along(
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p1_world,
+                    t1_dir,
                 )
-                inv_t2 = (
-                    contact_endpoint_inv_mass_along(
-                        side0_kind, side0_nodes, bary0, bodies, particles, num_bodies, p0_world, t2_dir,
-                    )
-                    + contact_endpoint_inv_mass_along(
-                        side1_kind, side1_nodes, bary1, bodies, particles, num_bodies, p1_world, t2_dir,
-                    )
+                inv_t2 = contact_endpoint_inv_mass_along(
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p0_world,
+                    t2_dir,
+                ) + contact_endpoint_inv_mass_along(
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p1_world,
+                    t2_dir,
                 )
                 eff_n = wp.float32(0.0)
                 if inv_n > wp.float32(1.0e-12):
@@ -327,15 +395,10 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
                 fric_limit_prev = mu_s_col * lam_n_prev
                 cone_margin = wp.float32(0.98)
                 lam_t_mag_sq = lam_t1_prev * lam_t1_prev + lam_t2_prev * lam_t2_prev
-                coulomb_saturated = (
-                    lam_n_prev > wp.float32(0.0)
-                    and lam_t_mag_sq >= (cone_margin * fric_limit_prev) * (cone_margin * fric_limit_prev)
+                coulomb_saturated = lam_n_prev > wp.float32(0.0) and lam_t_mag_sq >= (cone_margin * fric_limit_prev) * (
+                    cone_margin * fric_limit_prev
                 )
-                if (
-                    drift_sq > slip_threshold * slip_threshold
-                    or normal_aligned < wp.float32(0.95)
-                    or coulomb_saturated
-                ):
+                if drift_sq > slip_threshold * slip_threshold or normal_aligned < wp.float32(0.95) or coulomb_saturated:
                     fresh_lp0 = contacts.rigid_contact_point0[k]
                     fresh_lp1 = contacts.rigid_contact_point1[k]
                     cc_set_local_p0(cc, k, fresh_lp0)
@@ -400,10 +463,24 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
             imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
             if wp.static(cloth_support):
                 contact_endpoint_apply_impulse(
-                    side0_kind, side0_nodes, bary0, bodies, particles, num_bodies, p0_world, -imp,
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p0_world,
+                    -imp,
                 )
                 contact_endpoint_apply_impulse(
-                    side1_kind, side1_nodes, bary1, bodies, particles, num_bodies, p1_world, imp,
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p1_world,
+                    imp,
                 )
             else:
                 total_lin_imp_on_b2 += imp
@@ -412,10 +489,20 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
 
         if wp.static(not cloth_support):
             # Contact impulse acts from body 1 onto body 2 along +normal.
-            bodies.velocity[b1] = bodies.velocity[b1] - inv_mass1 * total_lin_imp_on_b2
-            bodies.velocity[b2] = bodies.velocity[b2] + inv_mass2 * total_lin_imp_on_b2
-            bodies.angular_velocity[b1] = bodies.angular_velocity[b1] - inv_inertia1 @ total_ang_imp_on_b1
-            bodies.angular_velocity[b2] = bodies.angular_velocity[b2] + inv_inertia2 @ total_ang_imp_on_b2
+            # Route reads + writes through the slot helpers so warm-start
+            # lands in the copy-state slot when mass splitting is on.
+            v1_cur, _vfb1, _vsb1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
+            v2_cur, _vfb2, _vsb2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
+            w1_cur, _wfb1, _wsb1 = read_angular_velocity_unified(bodies, copy_state, b1, parallel_id, num_bodies)
+            w2_cur, _wfb2, _wsb2 = read_angular_velocity_unified(bodies, copy_state, b2, parallel_id, num_bodies)
+            v1_new = v1_cur - inv_mass1 * total_lin_imp_on_b2
+            v2_new = v2_cur + inv_mass2 * total_lin_imp_on_b2
+            w1_new = w1_cur - inv_inertia1 @ total_ang_imp_on_b1
+            w2_new = w2_cur + inv_inertia2 @ total_ang_imp_on_b2
+            write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1_new)
+            write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2_new)
+            write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1_new)
+            write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2_new)
 
     return impl
 
@@ -434,6 +521,8 @@ def _make_contact_iterate_at(cloth_support: bool):
         cc: ContactContainer,
         contacts: ContactViews,
         use_bias: wp.bool,
+        copy_state: CopyStateContainer,
+        parallel_id: wp.int32,
     ):
         """One PGS sweep over every contact of one shape pair.
 
@@ -468,18 +557,21 @@ def _make_contact_iterate_at(cloth_support: bool):
             side0_nodes = wp.vec3i(b1, side0_extra[0], side0_extra[1])
             side1_nodes = wp.vec3i(b2, side1_extra[0], side1_extra[1])
         else:
-            inv_mass1 = bodies.inverse_mass[b1]
-            inv_mass2 = bodies.inverse_mass[b2]
-            inv_inertia1 = bodies.inverse_inertia_world[b1]
-            inv_inertia2 = bodies.inverse_inertia_world[b2]
+            # Mass-splitting slot lookup. Identity when disabled.
+            v1, inv_factor1, slot1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
+            v2, inv_factor2, slot2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
+            w1, _wfb1, _wsb1 = read_angular_velocity_unified(bodies, copy_state, b1, parallel_id, num_bodies)
+            w2, _wfb2, _wsb2 = read_angular_velocity_unified(bodies, copy_state, b2, parallel_id, num_bodies)
+            inv_factor1_f = wp.float32(inv_factor1)
+            inv_factor2_f = wp.float32(inv_factor2)
+            inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
+            inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
+            inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_factor1_f
+            inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_factor2_f
             orientation1 = bodies.orientation[b1]
             orientation2 = bodies.orientation[b2]
             body_com1 = bodies.body_com[b1]
             body_com2 = bodies.body_com[b2]
-            v1 = bodies.velocity[b1]
-            v2 = bodies.velocity[b2]
-            w1 = bodies.angular_velocity[b1]
-            w2 = bodies.angular_velocity[b2]
 
         for i in range(contact_count):
             k = contact_first + i
@@ -494,18 +586,48 @@ def _make_contact_iterate_at(cloth_support: bool):
                 bary0 = cc_get_side0_bary(cc, k)
                 bary1 = cc_get_side1_bary(cc, k)
                 p0_world = _side_world_contact_point(
-                    side0_kind, side0_nodes, bary0, bodies, particles, num_bodies,
-                    cc, k, False, margin0, n,
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    cc,
+                    k,
+                    False,
+                    margin0,
+                    n,
                 )
                 p1_world = _side_world_contact_point(
-                    side1_kind, side1_nodes, bary1, bodies, particles, num_bodies,
-                    cc, k, True, margin1, n,
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    cc,
+                    k,
+                    True,
+                    margin1,
+                    n,
                 )
                 v0_at_p = contact_endpoint_velocity_at_point(
-                    side0_kind, side0_nodes, bary0, bodies, particles, num_bodies, p0_world,
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p0_world,
                 )
                 v1_at_p = contact_endpoint_velocity_at_point(
-                    side1_kind, side1_nodes, bary1, bodies, particles, num_bodies, p1_world,
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p1_world,
                 )
                 vel_rel = v1_at_p - v0_at_p
             else:
@@ -588,23 +710,45 @@ def _make_contact_iterate_at(cloth_support: bool):
             imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
             if wp.static(cloth_support):
                 contact_endpoint_apply_impulse(
-                    side0_kind, side0_nodes, bary0, bodies, particles, num_bodies, p0_world, -imp,
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p0_world,
+                    -imp,
                 )
                 contact_endpoint_apply_impulse(
-                    side1_kind, side1_nodes, bary1, bodies, particles, num_bodies, p1_world, imp,
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    p1_world,
+                    imp,
                 )
             else:
                 v1, v2, w1, w2 = apply_pair_velocity_impulse(
-                    v1, v2, w1, w2,
-                    inv_mass1, inv_mass2, inv_inertia1, inv_inertia2,
-                    r1, r2, imp,
+                    v1,
+                    v2,
+                    w1,
+                    w2,
+                    inv_mass1,
+                    inv_mass2,
+                    inv_inertia1,
+                    inv_inertia2,
+                    r1,
+                    r2,
+                    imp,
                 )
 
         if wp.static(not cloth_support):
-            bodies.velocity[b1] = v1
-            bodies.velocity[b2] = v2
-            bodies.angular_velocity[b1] = w1
-            bodies.angular_velocity[b2] = w2
+            write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
+            write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
+            write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
+            write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2)
 
     return impl
 
@@ -632,6 +776,8 @@ def contact_prepare_for_iteration(
     idt: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
@@ -640,7 +786,18 @@ def contact_prepare_for_iteration(
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     contact_prepare_for_iteration_at(
-        constraints, cid, 0, bodies, particles, num_bodies, body_pair, idt, cc, contacts,
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
     )
 
 
@@ -654,6 +811,8 @@ def contact_prepare_for_iteration_cloth_aware(
     idt: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
@@ -662,16 +821,37 @@ def contact_prepare_for_iteration_cloth_aware(
     side0_extra = contact_get_side0_nodes_extra(constraints, cid)
     side1_extra = contact_get_side1_nodes_extra(constraints, cid)
     contact_endpoint_set_access_mode(
-        side0_kind, wp.vec3i(b1, side0_extra[0], side0_extra[1]),
-        bodies, particles, num_bodies, ACCESS_MODE_VELOCITY_LEVEL, idt,
+        side0_kind,
+        wp.vec3i(b1, side0_extra[0], side0_extra[1]),
+        bodies,
+        particles,
+        num_bodies,
+        ACCESS_MODE_VELOCITY_LEVEL,
+        idt,
     )
     contact_endpoint_set_access_mode(
-        side1_kind, wp.vec3i(b2, side1_extra[0], side1_extra[1]),
-        bodies, particles, num_bodies, ACCESS_MODE_VELOCITY_LEVEL, idt,
+        side1_kind,
+        wp.vec3i(b2, side1_extra[0], side1_extra[1]),
+        bodies,
+        particles,
+        num_bodies,
+        ACCESS_MODE_VELOCITY_LEVEL,
+        idt,
     )
     body_pair = constraint_bodies_make(b1, b2)
     contact_prepare_for_iteration_at_cloth_aware(
-        constraints, cid, 0, bodies, particles, num_bodies, body_pair, idt, cc, contacts,
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
     )
 
 
@@ -686,6 +866,8 @@ def contact_iterate(
     cc: ContactContainer,
     contacts: ContactViews,
     use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
@@ -693,7 +875,19 @@ def contact_iterate(
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     contact_iterate_at(
-        constraints, cid, 0, bodies, particles, num_bodies, body_pair, idt, cc, contacts, use_bias,
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        use_bias,
+        copy_state,
+        parallel_id,
     )
 
 
@@ -708,6 +902,8 @@ def contact_iterate_cloth_aware(
     cc: ContactContainer,
     contacts: ContactViews,
     use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
@@ -716,16 +912,36 @@ def contact_iterate_cloth_aware(
     side0_extra = contact_get_side0_nodes_extra(constraints, cid)
     side1_extra = contact_get_side1_nodes_extra(constraints, cid)
     contact_endpoint_set_access_mode(
-        side0_kind, wp.vec3i(b1, side0_extra[0], side0_extra[1]),
-        bodies, particles, num_bodies, ACCESS_MODE_VELOCITY_LEVEL, idt,
+        side0_kind,
+        wp.vec3i(b1, side0_extra[0], side0_extra[1]),
+        bodies,
+        particles,
+        num_bodies,
+        ACCESS_MODE_VELOCITY_LEVEL,
+        idt,
     )
     contact_endpoint_set_access_mode(
-        side1_kind, wp.vec3i(b2, side1_extra[0], side1_extra[1]),
-        bodies, particles, num_bodies, ACCESS_MODE_VELOCITY_LEVEL, idt,
+        side1_kind,
+        wp.vec3i(b2, side1_extra[0], side1_extra[1]),
+        bodies,
+        particles,
+        num_bodies,
+        ACCESS_MODE_VELOCITY_LEVEL,
+        idt,
     )
     body_pair = constraint_bodies_make(b1, b2)
     contact_iterate_at_cloth_aware(
-        constraints, cid, 0, bodies, particles, num_bodies, body_pair, idt, cc, contacts, use_bias,
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        use_bias,
+        copy_state,
+        parallel_id,
     )
-
-

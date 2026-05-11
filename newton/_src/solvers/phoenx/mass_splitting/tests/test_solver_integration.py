@@ -213,5 +213,161 @@ class TestMassSplittingSolverWiring(unittest.TestCase):
         self.assertEqual(int(world._interaction_graph_scratch.num_pairs.numpy()[0]), 0)
 
 
+def _build_box_stack_scene(num_boxes: int, mass_splitting: bool, device):
+    """Build a small free-falling pile that produces real contact
+    columns and exercises the iterate path. Returns the
+    :class:`PhoenXWorld`, a Newton ``State``, ``Contacts``, and the
+    ``shape_body`` map.
+
+    The scene is rigid-only (no joints, no cloth) so it's compatible
+    with the current mass-splitting guards.
+    """
+    import newton  # noqa: PLC0415
+    from newton._src.solvers.phoenx.body import body_container_zeros  # noqa: PLC0415
+    from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING  # noqa: PLC0415
+
+    mb = newton.ModelBuilder()
+    mb.default_shape_cfg.gap = 0.05
+    # Ground plane (static).
+    mb.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
+    # Stacked boxes (slightly offset so contacts are non-degenerate).
+    half_ext = (0.5, 0.5, 0.5)
+    body_ids: list[int] = []
+    for i in range(num_boxes):
+        z = 0.55 + 1.05 * i
+        body = mb.add_body(xform=wp.transform(p=wp.vec3(0.01 * i, 0.0, z), q=wp.quat_identity()))
+        mb.add_shape_box(body, hx=half_ext[0], hy=half_ext[1], hz=half_ext[2])
+        body_ids.append(body)
+    model = mb.finalize(device=device)
+    state = model.state()
+    collision_pipeline = newton.CollisionPipeline(model, contact_matching=PHOENX_CONTACT_MATCHING)
+    contacts = collision_pipeline.contacts()
+
+    num_bodies_phx = model.body_count + 1  # +1 for static-world slot 0
+    bodies = body_container_zeros(num_bodies_phx, device=device)
+    constraints = PhoenXWorld.make_constraint_container(num_joints=0, device=device)
+    world = PhoenXWorld(
+        bodies=bodies,
+        constraints=constraints,
+        num_joints=0,
+        rigid_contact_max=int(contacts.rigid_contact_max),
+        gravity=(0.0, 0.0, -9.81),
+        substeps=4,
+        solver_iterations=4,
+        velocity_iterations=1,
+        mass_splitting=mass_splitting,
+        max_colored_partitions=12,
+        step_layout="single_world",
+        device=device,
+    )
+
+    shape_body_np = model.shape_body.numpy()
+    shape_body_phx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
+    shape_body = wp.array(shape_body_phx, dtype=wp.int32, device=device)
+    return world, state, contacts, model, collision_pipeline, shape_body, body_ids
+
+
+def _sync_newton_to_phoenx(model, state, bodies, device):
+    from newton._src.solvers.phoenx.examples.example_common import (  # noqa: PLC0415
+        newton_to_phoenx_kernel,
+    )
+
+    n = model.body_count
+    if n == 0:
+        return
+    wp.launch(
+        newton_to_phoenx_kernel,
+        dim=n,
+        inputs=[state.body_q, state.body_qd, model.body_com],
+        outputs=[
+            bodies.position[1 : 1 + n],
+            bodies.orientation[1 : 1 + n],
+            bodies.velocity[1 : 1 + n],
+            bodies.angular_velocity[1 : 1 + n],
+        ],
+        device=device,
+    )
+
+
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "PhoenX mass-splitting tests are CUDA-only.",
+)
+class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
+    """When the constraint graph fits in K=12 colours (no overflow), the
+    slot-aware path with ``mass_splitting=True`` must produce the SAME
+    physics as ``mass_splitting=False``.
+
+    Mass splitting only meaningfully changes the impulse algebra in the
+    overflow bucket (``inv_factor > 1``). For colour buckets ``0..K-1``,
+    ``parallel_id=0`` and every body has exactly one slot, so
+    ``inv_factor=1`` and the slot helpers fall through to identity
+    arithmetic. The round-trip through ``broadcast → iterate via slots
+    → writeback`` is mathematically identity (modulo float precision).
+
+    These tests use real Newton scenes (gravity-driven box stacks) so
+    they exercise the full contact ingest → coloring → build →
+    broadcast → solve → writeback pipeline.
+    """
+
+    def _run_n_frames(self, world, state, contacts, model, collision_pipeline, shape_body, n_frames, dt):
+        for _ in range(n_frames):
+            _sync_newton_to_phoenx(model, state, world.bodies, world.device)
+            model.collide(state, contacts=contacts, collision_pipeline=collision_pipeline)
+            world.step(dt=dt, contacts=contacts, shape_body=shape_body)
+        wp.synchronize_device(world.device)
+        return world.bodies.position.numpy().copy(), world.bodies.velocity.numpy().copy()
+
+    def test_single_box_on_plane_matches_disabled(self):
+        device = wp.get_preferred_device()
+        # mass_splitting=False reference.
+        w0, s0, c0, m0, cp0, sb0, _ = _build_box_stack_scene(1, mass_splitting=False, device=device)
+        pos0, vel0 = self._run_n_frames(w0, s0, c0, m0, cp0, sb0, 10, 1.0 / 60.0)
+        # mass_splitting=True with no overflow → same physics.
+        w1, s1, c1, m1, cp1, sb1, _ = _build_box_stack_scene(1, mass_splitting=True, device=device)
+        pos1, vel1 = self._run_n_frames(w1, s1, c1, m1, cp1, sb1, 10, 1.0 / 60.0)
+        # Slot 1 = the dynamic box.
+        np.testing.assert_allclose(pos1[1], pos0[1], rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(vel1[1], vel0[1], rtol=1e-4, atol=1e-4)
+
+    def test_two_box_stack_matches_disabled(self):
+        device = wp.get_preferred_device()
+        w0, s0, c0, m0, cp0, sb0, _ = _build_box_stack_scene(2, mass_splitting=False, device=device)
+        pos0, vel0 = self._run_n_frames(w0, s0, c0, m0, cp0, sb0, 30, 1.0 / 60.0)
+        w1, s1, c1, m1, cp1, sb1, _ = _build_box_stack_scene(2, mass_splitting=True, device=device)
+        pos1, vel1 = self._run_n_frames(w1, s1, c1, m1, cp1, sb1, 30, 1.0 / 60.0)
+        # Both bodies (slots 1, 2).
+        for b in (1, 2):
+            np.testing.assert_allclose(pos1[b], pos0[b], rtol=1e-3, atol=1e-3)
+            np.testing.assert_allclose(vel1[b], vel0[b], rtol=1e-3, atol=1e-3)
+
+    def test_box_stack_under_graph_capture_with_mass_splitting(self):
+        # Load-bearing capture-safety check: the full pipeline (ingest →
+        # color → mass-splitting build → broadcast → solve → writeback →
+        # integrate) must run inside a captured CUDA graph and re-launch
+        # deterministically across multiple frames.
+        device = wp.get_preferred_device()
+        world, state, contacts, model, cp, shape_body, _ = _build_box_stack_scene(2, mass_splitting=True, device=device)
+
+        def _frame():
+            _sync_newton_to_phoenx(model, state, world.bodies, world.device)
+            model.collide(state, contacts=contacts, collision_pipeline=cp)
+            world.step(dt=1.0 / 60.0, contacts=contacts, shape_body=shape_body)
+
+        # Warm-up.
+        _frame()
+        with wp.ScopedCapture(device=device) as capture:
+            _frame()
+        # Run several frames of the captured graph; assertion is just
+        # that no kernel crashes and bodies fall.
+        for _ in range(5):
+            wp.capture_launch(capture.graph)
+        wp.synchronize_device(device)
+        pos = world.bodies.position.numpy()
+        # Bodies should have moved downward from their initial z (>= 0.55).
+        self.assertLess(float(pos[1][2]), 1.0)
+        self.assertLess(float(pos[2][2]), 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()

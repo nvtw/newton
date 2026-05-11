@@ -23,7 +23,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintBodies,
     assert_constraint_header,
     constraint_bodies_make,
-    pd_coefficients,
     soft_constraint_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
@@ -44,18 +43,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
-    cc_set_bias,
-    cc_set_bias_t1,
-    cc_set_bias_t2,
-    cc_set_eff_n,
-    cc_set_eff_t1,
-    cc_set_eff_t2,
-    cc_set_local_p0,
-    cc_set_local_p1,
     cc_set_normal_lambda,
-    cc_set_pd_bias,
-    cc_set_pd_eff_soft,
-    cc_set_pd_gamma,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
@@ -67,11 +55,15 @@ from newton._src.solvers.phoenx.helpers.data_packing import (
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     apply_pair_velocity_impulse,
-    effective_mass_scalar,
 )
-from newton._src.solvers.phoenx.solver_config import (
-    PHOENX_BOOST_CONTACT_NORMAL,
+from newton._src.solvers.phoenx.mass_splitting.access import (
+    read_angular_velocity_unified,
+    read_velocity_unified,
+    write_angular_velocity_unified,
+    write_velocity_unified,
 )
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
+from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
     "CONTACT_DWORDS",
@@ -85,6 +77,10 @@ __all__ = [
     "contact_get_contact_first",
     "contact_get_friction",
     "contact_get_friction_dynamic",
+    "contact_get_side0_kind",
+    "contact_get_side0_nodes_extra",
+    "contact_get_side1_kind",
+    "contact_get_side1_nodes_extra",
     "contact_iterate_at_multi",
     "contact_iterate_multi",
     "contact_pair_wrench_kernel",
@@ -92,20 +88,16 @@ __all__ = [
     "contact_per_contact_wrench_kernel",
     "contact_per_k_error_at",
     "contact_per_k_wrench_at",
-    "contact_get_side0_kind",
-    "contact_get_side0_nodes_extra",
-    "contact_get_side1_kind",
-    "contact_get_side1_nodes_extra",
-    "contact_set_side0_kind",
-    "contact_set_side0_nodes_extra",
-    "contact_set_side1_kind",
-    "contact_set_side1_nodes_extra",
     "contact_set_body1",
     "contact_set_body2",
     "contact_set_contact_count",
     "contact_set_contact_first",
     "contact_set_friction",
     "contact_set_friction_dynamic",
+    "contact_set_side0_kind",
+    "contact_set_side0_nodes_extra",
+    "contact_set_side1_kind",
+    "contact_set_side1_nodes_extra",
     "contact_views_make",
     "contact_world_error",
     "contact_world_error_at",
@@ -436,12 +428,16 @@ def contact_iterate_at_multi(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
     use_bias: wp.bool,
     num_sweeps: wp.int32,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
 ):
     """``num_sweeps`` PGS sweeps on one column with hoisted body
     velocity/inertia registers. Same-colour cids share no bodies, so
@@ -464,21 +460,23 @@ def contact_iterate_at_multi(
         DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
     )
 
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    # Mass-splitting slot lookup. Identity when disabled.
+    v1, inv_factor1, slot1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
+    v2, inv_factor2, slot2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
+    w1, _wfb1, _wsb1 = read_angular_velocity_unified(bodies, copy_state, b1, parallel_id, num_bodies)
+    w2, _wfb2, _wsb2 = read_angular_velocity_unified(bodies, copy_state, b2, parallel_id, num_bodies)
+    inv_factor1_f = wp.float32(inv_factor1)
+    inv_factor2_f = wp.float32(inv_factor2)
+    inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
+    inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
+    inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_factor1_f
+    inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_factor2_f
 
     # Body pose for per-contact lever-arm recompute.
     orientation1 = bodies.orientation[b1]
     orientation2 = bodies.orientation[b2]
     body_com1 = bodies.body_com[b1]
     body_com2 = bodies.body_com[b2]
-
-    v1 = bodies.velocity[b1]
-    v2 = bodies.velocity[b2]
-    w1 = bodies.angular_velocity[b1]
-    w2 = bodies.angular_velocity[b2]
 
     it = wp.int32(0)
     while it < num_sweeps:
@@ -577,10 +575,10 @@ def contact_iterate_at_multi(
             )
         it += 1
 
-    bodies.velocity[b1] = v1
-    bodies.velocity[b2] = v2
-    bodies.angular_velocity[b1] = w1
-    bodies.angular_velocity[b2] = w2
+    write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
+    write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
+    write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
+    write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2)
 
 
 @wp.func
@@ -588,18 +586,37 @@ def contact_iterate_multi(
     constraints: ContactColumnContainer,
     cid: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
     idt: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
     use_bias: wp.bool,
     num_sweeps: wp.int32,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at_multi(constraints, cid, 0, bodies, body_pair, idt, cc, contacts, use_bias, num_sweeps)
+    contact_iterate_at_multi(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        use_bias,
+        num_sweeps,
+        copy_state,
+        parallel_id,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -85,6 +85,8 @@ from newton._src.solvers.phoenx.mass_splitting import (
     build_interaction_graph,
     copy_state_container_zeros,
     interaction_graph_scratch_zeros,
+    launch_broadcast_rigid_to_copy_states,
+    launch_copy_state_into_rigids,
     record_all_interactions_kernel,
 )
 from newton._src.solvers.phoenx.materials import MaterialData
@@ -1283,8 +1285,20 @@ class PhoenXWorld:
             if picking is not None:
                 picking.apply_force()
             self._integrate_forces_and_gravity()
+            # Mass-splitting broadcast: fan body / particle state into
+            # every owned copy-state slot once per substep. Constraint
+            # iterates read / write the slots; writeback at end syncs
+            # back into the body container. No-op when disabled
+            # (highest_index_in_use[0] == 0 -> kernel short-circuit).
+            if self.mass_splitting_enabled and self.step_layout == "single_world":
+                self._mass_splitting_broadcast()
             if self.step_layout == "single_world":
                 self._solve_main_singleworld()
+                # Writeback BEFORE integrate so positions advance with
+                # the post-PGS velocity (slot[0] → body.velocity for
+                # every body that had slots).
+                if self.mass_splitting_enabled:
+                    self._mass_splitting_writeback()
                 self._integrate_positions()
                 self._relax_velocities_singleworld()
             else:
@@ -1535,6 +1549,30 @@ class PhoenXWorld:
             device=self.device,
         )
 
+    def _mass_splitting_broadcast(self) -> None:
+        """Fan body / particle state into every copy-state slot at substep
+        start. Once-per-substep cost; no-op when ``highest_index_in_use[0]
+        == 0`` (the kernel short-circuits)."""
+        launch_broadcast_rigid_to_copy_states(
+            self._copy_state,
+            self.bodies,
+            self._particles_or_sentinel(),
+            num_bodies=self.num_bodies,
+            dt=self.substep_dt,
+        )
+
+    def _mass_splitting_writeback(self) -> None:
+        """Write each body / particle's slot-0 velocity back to the
+        body / particle container after the PGS sweeps complete. No-op
+        when disabled.
+        """
+        launch_copy_state_into_rigids(
+            self._copy_state,
+            self.bodies,
+            self._particles_or_sentinel(),
+            num_bodies=self.num_bodies,
+        )
+
     def _rebuild_mass_splitting_graph(self) -> None:
         """Per-step emit + build of the (body, partition_key) interaction
         graph used by the copy-state read/write helpers.
@@ -1763,6 +1801,7 @@ class PhoenXWorld:
                 wp.int32(self.num_joints),
                 wp.int32(self.num_bodies),
                 self._tpw_choice,
+                self._copy_state,
             ],
             device=self.device,
         )
@@ -1793,6 +1832,7 @@ class PhoenXWorld:
         clears within the same outer iter."""
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
+        ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
             wp.launch(
                 kernel,
@@ -1815,6 +1855,8 @@ class PhoenXWorld:
                     wp.int32(self._singleworld_total_threads),
                     wp.int32(self._fuse_threshold),
                     self._head_active,
+                    self._copy_state,
+                    ms_cap,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=self.device,
@@ -1825,6 +1867,7 @@ class PhoenXWorld:
         wp.launch_tiled. Hands back to the head path on a colour > fuse_threshold."""
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
+        ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
         wp.launch_tiled(
             kernel,
             dim=[1],
@@ -1844,6 +1887,8 @@ class PhoenXWorld:
                 wp.int32(self.num_cloth_triangles),
                 wp.int32(self.num_bodies),
                 wp.int32(self._fuse_threshold),
+                self._copy_state,
+                ms_cap,
             ],
             block_dim=self._fuse_tail_block_dim,
             device=self.device,
@@ -1996,6 +2041,8 @@ class PhoenXWorld:
                 self.constraints,
                 self._contact_cols,
                 self.bodies,
+                self._particles_or_sentinel(),
+                wp.int32(self.num_bodies),
                 idt,
                 self._world_element_ids_by_color,
                 self._world_color_starts,
@@ -2007,6 +2054,7 @@ class PhoenXWorld:
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
                 self._tpw_choice,
+                self._copy_state,
             ],
             device=self.device,
         )

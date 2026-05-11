@@ -26,6 +26,10 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     revolute_iterate_multi,
     revolute_prepare_for_iteration,
 )
+from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    cloth_triangle_iterate_at,
+    cloth_triangle_prepare_for_iteration_at,
+)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -38,10 +42,6 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_iterate_multi,
     contact_world_error,
     contact_world_wrench,
-)
-from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
-    cloth_triangle_iterate_at,
-    cloth_triangle_prepare_for_iteration_at,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_iterate,
@@ -66,13 +66,13 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     element_interaction_data_make,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 
 # Cloth-triangle body3 dword offset (3rd vertex of the triangle). Mirrors the
 # layout in :mod:`constraint_cloth_triangle` -- header (type/body1/body2) at
 # dwords 0/1/2, body3 immediately after at dword 3.
 _CLOTH_TRIANGLE_OFF_BODY3 = wp.constant(wp.int32(3))
-
 
 
 __all__ = [
@@ -630,6 +630,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
         num_joints: wp.int32,
         num_bodies: wp.int32,
         tpw_buf: wp.array[wp.int32],
+        copy_state: CopyStateContainer,
     ):
         tid = wp.tid()
         tpw = tpw_buf[0]
@@ -658,7 +659,16 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                         actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
                 else:
                     contact_prepare_for_iteration(
-                        contact_cols, cid - num_joints, bodies, particles, num_bodies, idt, cc, contacts,
+                        contact_cols,
+                        cid - num_joints,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        copy_state,
+                        wp.int32(0),
                     )
                 base += tpw
 
@@ -686,7 +696,20 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                         else:
                             actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
                     else:
-                        contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, True, inner_sweeps)
+                        contact_iterate_multi(
+                            contact_cols,
+                            cid - num_joints,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            True,
+                            inner_sweeps,
+                            copy_state,
+                            wp.int32(0),
+                        )
                     base += tpw
 
                 _sync_warp()
@@ -705,6 +728,8 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
         bodies: BodyContainer,
+        particles: ParticleContainer,
+        num_bodies: wp.int32,
         idt: wp.float32,
         world_element_ids_by_color: wp.array[wp.int32],
         world_color_starts: wp.array2d[wp.int32],
@@ -716,6 +741,7 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
         num_worlds: wp.int32,
         num_joints: wp.int32,
         tpw_buf: wp.array[wp.int32],
+        copy_state: CopyStateContainer,
     ):
         tid = wp.tid()
         tpw = tpw_buf[0]
@@ -744,7 +770,20 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                     else:
                         actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
                 else:
-                    contact_iterate_multi(contact_cols, cid - num_joints, bodies, idt, cc, contacts, False, num_iterations)
+                    contact_iterate_multi(
+                        contact_cols,
+                        cid - num_joints,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        False,
+                        num_iterations,
+                        copy_state,
+                        wp.int32(0),
+                    )
                 base += tpw
 
             _sync_warp()
@@ -753,11 +792,9 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
     return kernel
 
 
-_constraint_prepare_plus_iterate_fast_tail_kernel = _make_fast_tail_prepare_plus_iterate_kernel(
-    revolute_only=False
-)
-_constraint_prepare_plus_iterate_fast_tail_revolute_kernel = (
-    _make_fast_tail_prepare_plus_iterate_kernel(revolute_only=True)
+_constraint_prepare_plus_iterate_fast_tail_kernel = _make_fast_tail_prepare_plus_iterate_kernel(revolute_only=False)
+_constraint_prepare_plus_iterate_fast_tail_revolute_kernel = _make_fast_tail_prepare_plus_iterate_kernel(
+    revolute_only=True
 )
 _constraint_relax_fast_tail_kernel = _make_fast_tail_relax_kernel(revolute_only=False)
 _constraint_relax_fast_tail_revolute_kernel = _make_fast_tail_relax_kernel(revolute_only=True)
@@ -1307,6 +1344,8 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
         total_num_threads: wp.int32,
         fuse_threshold: wp.int32,
         head_active: wp.array[wp.int32],
+        copy_state: CopyStateContainer,
+        max_colored_partitions: wp.int32,
     ):
         tid = wp.tid()
         if color_cursor[0] <= 0:
@@ -1320,8 +1359,22 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                 head_active[0] = 0
             return
 
+        # Overflow detection: when ``cursor - 1 == max_colored_partitions``
+        # the colour being processed IS the overflow bucket. Each CSR slot
+        # in the overflow gets a unique ``parallel_id`` so the
+        # constraint reads/writes its own copy-state slot (Jacobi-style
+        # within the bucket). Regular colours use ``parallel_id=0`` so
+        # every constraint in the bucket shares slot 0 of each body
+        # (GS-style). ``max_colored_partitions = -1`` disables the
+        # overflow path so non-mass-splitting builds keep parallel_id=0
+        # everywhere.
+        is_overflow_color = max_colored_partitions >= wp.int32(0) and (cursor - wp.int32(1)) == max_colored_partitions
+
         for t in range(tid, count, total_num_threads):
             cid = element_ids_by_color[start + t]
+            parallel_id = wp.int32(0)
+            if is_overflow_color:
+                parallel_id = t  # CSR offset within the overflow bucket.
             # Two-stage dispatch.
             # 1) Contacts live in a separate ContactColumnContainer (NOT in
             #    the joint-side ConstraintContainer), so contact cids must
@@ -1335,24 +1388,58 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                 if wp.static(cloth_support):
                     if wp.static(is_prepare):
                         contact_prepare_for_iteration_cloth_aware(
-                            contact_cols, cid - num_joints - num_cloth_triangles,
-                            bodies, particles, num_bodies, idt, cc, contacts,
+                            contact_cols,
+                            cid - num_joints - num_cloth_triangles,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            copy_state,
+                            parallel_id,
                         )
                     else:
                         contact_iterate_cloth_aware(
-                            contact_cols, cid - num_joints - num_cloth_triangles,
-                            bodies, particles, num_bodies, idt, cc, contacts, use_bias,
+                            contact_cols,
+                            cid - num_joints - num_cloth_triangles,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            use_bias,
+                            copy_state,
+                            parallel_id,
                         )
                 else:
                     if wp.static(is_prepare):
                         contact_prepare_for_iteration(
-                            contact_cols, cid - num_joints - num_cloth_triangles,
-                            bodies, particles, num_bodies, idt, cc, contacts,
+                            contact_cols,
+                            cid - num_joints - num_cloth_triangles,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            copy_state,
+                            parallel_id,
                         )
                     else:
                         contact_iterate(
-                            contact_cols, cid - num_joints - num_cloth_triangles,
-                            bodies, particles, num_bodies, idt, cc, contacts, use_bias,
+                            contact_cols,
+                            cid - num_joints - num_cloth_triangles,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            use_bias,
+                            copy_state,
+                            parallel_id,
                         )
                 continue
             ctype = constraint_get_type(constraints, cid)
@@ -1405,6 +1492,8 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
         num_cloth_triangles: wp.int32,
         num_bodies: wp.int32,
         fuse_threshold: wp.int32,
+        copy_state: CopyStateContainer,
+        max_colored_partitions: wp.int32,
     ):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
@@ -1412,8 +1501,14 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
             start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor)
             if count > fuse_threshold:
                 break
+            is_overflow_color = (
+                max_colored_partitions >= wp.int32(0) and (cursor - wp.int32(1)) == max_colored_partitions
+            )
             if lane < count:
                 cid = element_ids_by_color[start + lane]
+                parallel_id = wp.int32(0)
+                if is_overflow_color:
+                    parallel_id = lane
                 # See `_make_singleworld_persistent_kernel` for the
                 # two-stage dispatch rationale: cid-range first to
                 # separate contact cids (which live in a different
@@ -1422,24 +1517,58 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                     if wp.static(cloth_support):
                         if wp.static(is_prepare):
                             contact_prepare_for_iteration_cloth_aware(
-                                contact_cols, cid - num_joints - num_cloth_triangles,
-                                bodies, particles, num_bodies, idt, cc, contacts,
+                                contact_cols,
+                                cid - num_joints - num_cloth_triangles,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                copy_state,
+                                parallel_id,
                             )
                         else:
                             contact_iterate_cloth_aware(
-                                contact_cols, cid - num_joints - num_cloth_triangles,
-                                bodies, particles, num_bodies, idt, cc, contacts, use_bias,
+                                contact_cols,
+                                cid - num_joints - num_cloth_triangles,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                use_bias,
+                                copy_state,
+                                parallel_id,
                             )
                     else:
                         if wp.static(is_prepare):
                             contact_prepare_for_iteration(
-                                contact_cols, cid - num_joints - num_cloth_triangles,
-                                bodies, particles, num_bodies, idt, cc, contacts,
+                                contact_cols,
+                                cid - num_joints - num_cloth_triangles,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                copy_state,
+                                parallel_id,
                             )
                         else:
                             contact_iterate(
-                                contact_cols, cid - num_joints - num_cloth_triangles,
-                                bodies, particles, num_bodies, idt, cc, contacts, use_bias,
+                                contact_cols,
+                                cid - num_joints - num_cloth_triangles,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                use_bias,
+                                copy_state,
+                                parallel_id,
                             )
                 else:
                     ctype = constraint_get_type(constraints, cid)
