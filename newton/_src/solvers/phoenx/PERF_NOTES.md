@@ -85,6 +85,13 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - The SoA layout already serves cache-line-shared loads across warp lanes touching different (but index-adjacent) bodies; the AoS struct kills that sharing because each thread's 68 B struct lives in a different cache line. The compiler also already keeps the SoA fields in registers across the inner loop, so the read-coalescing the AoS pack was supposed to provide didn't materialise.
 - Reverted in this session before commit. **Don't re-try the same shape unless you also redesign the access pattern** (e.g. groupings of cids that share bodies, or a thread-block-cooperative load).
 
+### Body-hot AoS pack v2 (``BodyIterateHot``, post-locality-sort)
+- 2026-05-11: tried again, now that the CSR body-locality sort puts cids sharing a body in adjacent positions within a colour. Hypothesis: locality sort makes warp lanes touch adjacent bodies, so AoS would win where SoA wider-gather no longer helps. 5-field struct (added ``position`` to the 4 the first attempt used); single ``_phoenx_pack_iterate_hot_kernel`` repopulates from SoA twice per substep (entry + after integrate_positions).
+- **Single-world kapla: +7-14% FPS** across all 4 ms/iter configs, drift flat or improved.
+- **Multi-world regressed again**: g1_flat 4096 **-12.0%** (1.85M → 1.62M env_fps), h1_flat 4096 **-5.5%** (2.49M → 2.35M env_fps). Same root cause as v1 — multi-world warp lanes serve *different worlds*, not adjacent bodies in one world, so the SoA cache-line sharing the AoS pack kills was load-bearing in a way the locality sort doesn't fix.
+- Reverted in commits ``1420a63b`` (the pack) and ``db589d9d`` (revert).
+- **If you re-try, gate the AoS read at compile time** so single-world kernels use ``iterate_hot`` while multi-world fast-tail kernels stay on SoA. Worth ~10% on dense-contact single-world if the gating doesn't bloat kernel binary size. The dispatch already splits the kernels (``_make_singleworld_persistent_kernel`` vs ``_make_fast_tail_*``), so threading a ``use_aos: bool`` ``wp.static`` parameter through ``_make_contact_iterate_at`` is mechanical.
+
 ### `__ffsll` for the greedy first-free-colour scan
 - Wrapped the CUDA ``__ffsll`` intrinsic in a ``wp.func_native`` (``_lowest_set_bit``) and used it in both single-world and per-world greedy kernels in place of the 64-iteration linear bit-scan.
 - Per-launch greedy kernel time was unchanged (~52us on kapla single-world, multi-world bench unchanged). The original scan had an early-out on first set bit, and most masks have a low-set bit, so it rarely paid the full 64 iterations. The intrinsic is cleaner code but doesn't move the perf needle.
