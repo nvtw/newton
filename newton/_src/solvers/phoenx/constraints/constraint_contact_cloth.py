@@ -232,16 +232,20 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
             slot2, inv_factor2 = get_state_index(copy_state, b2, parallel_id)
             inv_factor1_f = wp.float32(inv_factor1)
             inv_factor2_f = wp.float32(inv_factor2)
-            orientation1 = bodies.orientation[b1]
-            orientation2 = bodies.orientation[b2]
-            position1 = bodies.position[b1]
-            position2 = bodies.position[b2]
-            body_com1 = bodies.body_com[b1]
-            body_com2 = bodies.body_com[b2]
-            inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
-            inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
-            inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_factor1_f
-            inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_factor2_f
+            # Single hot-struct load per body collapses 5 SoA reads
+            # into one cache-friendly fetch. See :class:`BodyIterateHot`.
+            hot1 = bodies.iterate_hot[b1]
+            hot2 = bodies.iterate_hot[b2]
+            orientation1 = hot1.orientation
+            orientation2 = hot2.orientation
+            position1 = hot1.position
+            position2 = hot2.position
+            body_com1 = hot1.body_com
+            body_com2 = hot2.body_com
+            inv_mass1 = hot1.inverse_mass * inv_factor1_f
+            inv_mass2 = hot2.inverse_mass * inv_factor2_f
+            inv_inertia1 = hot1.inverse_inertia_world * inv_factor1_f
+            inv_inertia2 = hot2.inverse_inertia_world * inv_factor2_f
             # Batched warm-start accumulators (one velocity scatter at end).
             total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
             total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
@@ -564,14 +568,19 @@ def _make_contact_iterate_at(cloth_support: bool):
             w2, _wfb2, _wsb2 = read_angular_velocity_unified(bodies, copy_state, b2, parallel_id, num_bodies)
             inv_factor1_f = wp.float32(inv_factor1)
             inv_factor2_f = wp.float32(inv_factor2)
-            inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
-            inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
-            inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_factor1_f
-            inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_factor2_f
-            orientation1 = bodies.orientation[b1]
-            orientation2 = bodies.orientation[b2]
-            body_com1 = bodies.body_com[b1]
-            body_com2 = bodies.body_com[b2]
+            # Packed iterate-hot struct: one ~80B load each in place of
+            # 5 disjoint SoA reads (inverse_mass, inverse_inertia_world,
+            # orientation, body_com, position) per body.
+            hot1 = bodies.iterate_hot[b1]
+            hot2 = bodies.iterate_hot[b2]
+            inv_mass1 = hot1.inverse_mass * inv_factor1_f
+            inv_mass2 = hot2.inverse_mass * inv_factor2_f
+            inv_inertia1 = hot1.inverse_inertia_world * inv_factor1_f
+            inv_inertia2 = hot2.inverse_inertia_world * inv_factor2_f
+            orientation1 = hot1.orientation
+            orientation2 = hot2.orientation
+            body_com1 = hot1.body_com
+            body_com2 = hot2.body_com
 
         for i in range(contact_count):
             k = contact_first + i

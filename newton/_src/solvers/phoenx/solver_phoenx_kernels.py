@@ -115,6 +115,7 @@ __all__ = [
     "_per_world_greedy_coloring_kernel",
     "_per_world_jp_coloring_kernel",
     "_phoenx_apply_forces_and_gravity_kernel",
+    "_phoenx_pack_iterate_hot_kernel",
     "_phoenx_apply_global_damping_kernel",
     "_phoenx_refresh_world_inertia_kernel",
     "_phoenx_update_inertia_and_clear_forces_kernel",
@@ -1228,6 +1229,33 @@ def _phoenx_refresh_world_inertia_kernel(
     if bodies.motion_type[i] == MOTION_DYNAMIC:
         r = wp.quat_to_matrix(bodies.orientation[i])
         bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_pack_iterate_hot_kernel(
+    bodies: BodyContainer,
+):
+    """Repopulate ``bodies.iterate_hot`` from the canonical SoA arrays.
+
+    Called twice per substep: once at substep entry (so the main
+    iterate sees the post-gravity / pre-integrate state) and once
+    after integrate (so relax sees the post-integrate orientation /
+    position). Each body packs five scalars / vectors into one
+    ``BodyIterateHot`` record so the constraint kernels read 1-2
+    cache lines per body instead of 5.
+
+    Static body 0 (slot 0) is packed too; the iterate kernels gate
+    on ``inverse_mass == 0`` anyway, so the values just need to be
+    finite (zero rows here).
+    """
+    i = wp.tid()
+    hot = bodies.iterate_hot[i]
+    hot.inverse_inertia_world = bodies.inverse_inertia_world[i]
+    hot.orientation = bodies.orientation[i]
+    hot.position = bodies.position[i]
+    hot.body_com = bodies.body_com[i]
+    hot.inverse_mass = bodies.inverse_mass[i]
+    bodies.iterate_hot[i] = hot
 
 
 @wp.kernel(enable_backward=False)

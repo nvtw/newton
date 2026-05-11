@@ -144,6 +144,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
+    _phoenx_pack_iterate_hot_kernel,
     _phoenx_refresh_world_inertia_kernel,
     _phoenx_update_inertia_and_clear_forces_kernel,
     _pick_threads_per_world_kernel,
@@ -1312,6 +1313,12 @@ class PhoenXWorld:
             # (highest_index_in_use[0] == 0 -> kernel short-circuit).
             if self.mass_splitting_enabled and self.step_layout == "single_world":
                 self._mass_splitting_broadcast()
+            # Pack iterate-hot AoS for the main PGS sweeps: one
+            # ``BodyIterateHot`` record per body folds the five SoA
+            # reads (inverse_mass, inverse_inertia_world, orientation,
+            # position, body_com) into a single struct load in the
+            # iterate kernels.
+            self._pack_iterate_hot()
             # Substep order: TGS-soft (Box2D-v3) — main solve with
             # positional Baumgarte bias, integrate to apply that
             # bias to positions, then relax (bias=False) to remove
@@ -1336,6 +1343,12 @@ class PhoenXWorld:
                 if self.mass_splitting_enabled:
                     self._mass_splitting_writeback()
                 self._integrate_positions()
+                # Repack iterate-hot so relax reads the post-integrate
+                # orientation / position. ``inverse_inertia_world``
+                # still reflects the substep-start orientation (it's
+                # refreshed after relax), matching what an SoA read
+                # would see here.
+                self._pack_iterate_hot()
                 self._relax_velocities_singleworld()
                 # Second writeback after relax: relax also routes
                 # through slots, so without this the next substep
@@ -1348,6 +1361,7 @@ class PhoenXWorld:
             else:
                 self._solve_main()
                 self._integrate_positions()
+                self._pack_iterate_hot()
                 self._relax_velocities()
             # Particle substep exit: flip POSITION_LEVEL writes (cloth
             # iterate) into VELOCITY_LEVEL via the access-mode
@@ -1810,6 +1824,26 @@ class PhoenXWorld:
                 inputs=[self.particles, self.gravity, wp.float32(self.substep_dt)],
                 device=self.device,
             )
+
+    def _pack_iterate_hot(self) -> None:
+        """Repack ``bodies.iterate_hot`` from the SoA arrays.
+
+        Called twice per substep: once at substep entry (after forces /
+        gravity) so the main PGS iterate reads the post-gravity, pre-
+        integrate body state; and once after ``_integrate_positions``
+        so the relax sweep reads the post-integrate orientation /
+        position with the still-current ``inverse_inertia_world``
+        (``_refresh_world_inertia`` runs after relax). Cheap single
+        kernel launch over ``num_bodies``.
+        """
+        if self.num_bodies == 0:
+            return
+        wp.launch(
+            _phoenx_pack_iterate_hot_kernel,
+            dim=self.num_bodies,
+            inputs=[self.bodies],
+            device=self.device,
+        )
 
     def _recover_particle_velocities(self) -> None:
         """Substep exit: flip every particle to ``VELOCITY_LEVEL``,
