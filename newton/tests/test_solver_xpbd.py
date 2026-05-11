@@ -1033,6 +1033,178 @@ def test_xpbd_parent_force_zero_for_free_body(test, device):
     )
 
 
+def test_xpbd_parent_f_centripetal_zero_g(test, device):
+    """Two boxes on a hinge, zero gravity, both spinning at ω about Y.
+
+    Reproduces the contact-free configuration of
+    ``example_boxes_hinged_comparison.py`` when run with
+    ``DIAG_ZERO_GRAVITY_FREE_SPIN = True``.  Both bodies start with the
+    same angular velocity about the hinge axis (so the hinge is at steady
+    state — relative joint velocity is zero), and gravity is off.  The
+    only load the hinge must transmit is centripetal, with closed-form
+    answers per body:
+
+        |F_body| = m * ω² * r_perp,   direction toward the rotation axis
+        |tau_body| ≈ 0                (about the body COM)
+
+    where r_perp is the body COM offset projected onto the plane
+    perpendicular to ω.  The expected magnitude is independent of dt,
+    iteration count, substep count, and solver tuning — this isolates
+    the constraint reaction reporting from any contact / convergence
+    confound.
+    """
+    omega = 5.0  # rad/s about Y
+
+    # Geometry mirrors boxes_hinged.usda (sticks in X, hinge along Y).
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder.request_state_attributes("body_parent_f")
+
+    body_1 = builder.add_body(xform=wp.transform(wp.vec3(0.25, -0.05, 0.05), wp.quat_identity()))
+    builder.add_shape_box(body_1, hx=0.25, hy=0.05, hz=0.05)
+    body_2 = builder.add_body(xform=wp.transform(wp.vec3(0.75, 0.05, 0.05), wp.quat_identity()))
+    builder.add_shape_box(body_2, hx=0.25, hy=0.05, hz=0.05)
+
+    joint_free = builder.add_joint_free(child=body_1)
+    joint_rev = builder.add_joint_revolute(
+        body_1,
+        body_2,
+        parent_xform=wp.transform(wp.vec3(0.25, 0.05, 0.0), wp.quat_identity()),
+        child_xform=wp.transform(wp.vec3(-0.25, -0.05, 0.0), wp.quat_identity()),
+        axis=wp.vec3(0.0, 1.0, 0.0),
+    )
+    builder.add_articulation([joint_free, joint_rev])
+
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverXPBD(
+        model,
+        iterations=8,
+        joint_linear_relaxation=0.7,
+        joint_angular_relaxation=0.4,
+        joint_linear_compliance=0.0,
+        joint_angular_compliance=0.0,
+        angular_damping=0.0,
+        enable_restitution=False,
+    )
+
+    state_in = model.state()
+    state_out = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+
+    # Common ω about Y for both bodies → relative joint velocity is zero,
+    # hinge is at instantaneous steady state, only centripetal load.
+    # body_qd layout: [:3] = linear [m/s], [3:6] = angular [rad/s] (world frame).
+    qd = state_in.body_qd.numpy()
+    qd[:, :3] = 0.0
+    qd[:, 3:6] = (0.0, omega, 0.0)
+    state_in.body_qd.assign(qd)
+
+    # One step is enough to populate body_parent_f; we don't need to
+    # propagate the dynamics since the centripetal answer is t=0+
+    # instantaneous.  Use a small dt so the integration error doesn't
+    # smear the answer.
+    dt = 1e-4
+    solver.step(state_in, state_out, None, None, dt)
+
+    pf2 = state_out.body_parent_f.numpy()[body_2]
+    f_lin = pf2[:3]
+    f_tau = pf2[3:6]
+
+    m_body2 = float(model.body_mass.numpy()[body_2])
+    r_perp = 0.25  # body_2 COM offset from hinge axis projected onto X (Y-spin perpendicular plane)
+    expected_force = m_body2 * omega * omega * r_perp  # 1 * 25 * 0.25 = 6.25 N
+
+    # Centripetal force points from the COM toward the hinge axis.  In the
+    # initial configuration body_2 COM is at +X relative to the hinge, so
+    # F_body2 should be along -X.  Tolerate ~10% for first-step XPBD bias.
+    np.testing.assert_allclose(
+        f_lin[0],
+        -expected_force,
+        rtol=0.10,
+        atol=0.5,
+        err_msg=(f"body_2 centripetal F_x should be ~-{expected_force:.3f} N (m·ω²·r); got F={f_lin}"),
+    )
+    np.testing.assert_allclose(
+        f_lin[1:],
+        0.0,
+        atol=0.5,
+        err_msg=f"body_2 centripetal F should have no Y/Z component; got F={f_lin}",
+    )
+
+    # Torque about the body_2 COM should vanish: a pure centripetal force
+    # passes through the body's COM trajectory's rotation plane, so the
+    # constraint provides no torque about the COM.  Allow ~10% of |F|·r
+    # as slack for first-step bias.
+    np.testing.assert_allclose(
+        f_tau,
+        0.0,
+        atol=0.10 * expected_force * r_perp,
+        err_msg=(
+            f"body_2 hinge torque about COM should be ~0 in steady centripetal motion; "
+            f"got tau={f_tau} (much larger than this indicates joint_impulse contamination)"
+        ),
+    )
+
+
+def test_xpbd_parent_f_consistent_across_solvers(test, device):
+    """XPBD's ``body_parent_f`` must match MuJoCo / Featherstone for a static pendulum.
+
+    Identical scene, identical initial state, one step.  The three solvers
+    use different integration schemes but report wrenches in the same
+    documented frame (world frame, at child COM).  Disagreement larger
+    than a few percent on the dominant component indicates a convention
+    or accumulation bug rather than legitimate per-solver discretization
+    difference (which is bounded for a static configuration).
+    """
+
+    def _build():
+        builder = newton.ModelBuilder(gravity=-9.81, up_axis=newton.Axis.Z)
+        builder.request_state_attributes("body_parent_f")
+        link = builder.add_link()
+        builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+        joint = builder.add_joint_revolute(
+            -1,
+            link,
+            parent_xform=wp.transform_identity(),
+            child_xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()),
+            axis=wp.vec3(0.0, 1.0, 0.0),
+        )
+        builder.add_articulation([joint])
+        return builder.finalize(device=device)
+
+    dt = 5e-3
+    results = {}
+    for name, make_solver in [
+        ("xpbd", lambda m: newton.solvers.SolverXPBD(m, iterations=8)),
+        ("mujoco", lambda m: newton.solvers.SolverMuJoCo(m, use_mujoco_cpu=False)),
+        ("featherstone", newton.solvers.SolverFeatherstone),
+    ]:
+        model = _build()
+        solver = make_solver(model)
+        state_0, state_1 = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+        solver.step(state_0, state_1, None, None, dt)
+        results[name] = state_1.body_parent_f.numpy()[0]
+
+    mg = float(model.body_mass.numpy()[0]) * 9.81
+    for name, parent_f in results.items():
+        np.testing.assert_allclose(parent_f[2], mg, rtol=0.05, err_msg=f"{name}: |F_z| should be ~m*g")
+
+    # Cross-solver agreement: XPBD must be within 10% of MuJoCo on every
+    # spatial component (5% would be tight for the off-axis components
+    # given the different integration orders).
+    np.testing.assert_allclose(
+        results["xpbd"],
+        results["mujoco"],
+        atol=0.5,
+        rtol=0.10,
+        err_msg=(
+            "XPBD and MuJoCo disagree on body_parent_f for a static pendulum:\n"
+            f"  xpbd   = {results['xpbd']}\n"
+            f"  mujoco = {results['mujoco']}"
+        ),
+    )
+
+
 devices = get_test_devices(mode="basic")
 
 
@@ -1145,6 +1317,22 @@ add_function_test(
     TestSolverXPBD,
     "test_xpbd_parent_force_zero_for_free_body",
     test_xpbd_parent_force_zero_for_free_body,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_parent_f_centripetal_zero_g",
+    test_xpbd_parent_f_centripetal_zero_g,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_parent_f_consistent_across_solvers",
+    test_xpbd_parent_f_consistent_across_solvers,
     devices=devices,
     check_output=False,
 )
