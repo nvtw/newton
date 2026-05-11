@@ -17,41 +17,9 @@ __all__ = [
     "MOTION_KINEMATIC",
     "MOTION_STATIC",
     "BodyContainer",
-    "BodyIterateHot",
     "body_container_zeros",
     "body_set_access_mode",
 ]
-
-
-@wp.struct
-class BodyIterateHot:
-    """Packed cache of the body fields the prepare / iterate kernels
-    read on every constraint.
-
-    The canonical state stays in the SoA arrays
-    (:attr:`BodyContainer.position`, ``.orientation``, etc.); this
-    struct is repopulated once per substep entry (and again after
-    integrate, for relax) so the constraint kernels can hit one
-    array of structs instead of 5 separate SoA reads per body. For a
-    body touched at index ``b``, what used to be five non-coalesced
-    loads from disjoint arrays collapses into a single 80-byte
-    struct load — usually 1-2 cache lines per body where the SoA
-    layout took 5.
-
-    Field order is chosen so the largest field (``inv_inertia_world``,
-    36 bytes) lands first to avoid struct-padding gaps on alignment.
-
-    NB: ``inverse_mass`` and ``inverse_inertia_world`` carry the
-    UNSCALED body values; mass-splitting's ``inv_factor`` scaling
-    happens at the consumer site in the constraint kernel
-    (multiplying after the struct read is cheap).
-    """
-
-    inverse_inertia_world: wp.mat33f
-    orientation: wp.quatf
-    position: wp.vec3f
-    body_com: wp.vec3f
-    inverse_mass: wp.float32
 
 
 # Motion types (mirrors Jitter2 ``MotionType``).
@@ -115,13 +83,6 @@ class BodyContainer:
     #: ``body_set_access_mode`` to flip lazily.
     access_mode: wp.array[wp.int32]
 
-    #: Per-substep packed cache of iterate-hot fields. Repopulated
-    #: by :func:`pack_iterate_hot_kernel` once per substep entry
-    #: (and again after integrate for relax). The prepare / iterate
-    #: kernels consume this AoS layout instead of the five separate
-    #: SoA arrays above, cutting per-body cache-line traffic ~5x.
-    iterate_hot: wp.array[BodyIterateHot]
-
 
 def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyContainer:
     """Allocate a zero-initialized :class:`BodyContainer` on ``device``.
@@ -153,7 +114,6 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.position_prev_substep = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.orientation_prev_substep = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
     c.access_mode = wp.full(num_bodies, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
-    c.iterate_hot = wp.zeros(num_bodies, dtype=BodyIterateHot, device=device)
     return c
 
 

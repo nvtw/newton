@@ -24,7 +24,6 @@ from newton._src.solvers.phoenx.body import (
     MOTION_KINEMATIC,
     MOTION_STATIC,
     BodyContainer,
-    BodyIterateHot,
 )
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     DRIVE_MODE_OFF,
@@ -1057,9 +1056,6 @@ class WorldBuilder:
         c.position_prev_substep = wp.array(positions, dtype=wp.vec3f, device=device)
         c.orientation_prev_substep = wp.array(orientations, dtype=wp.quatf, device=device)
         c.access_mode = wp.full(n, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
-        # Per-substep packed cache; repopulated by
-        # :func:`_phoenx_pack_iterate_hot_kernel` at substep entry.
-        c.iterate_hot = wp.zeros(n, dtype=BodyIterateHot, device=device)
         return c
 
     def _pack_joint_arrays(self, device: wp.context.Device) -> dict:
