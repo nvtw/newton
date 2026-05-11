@@ -90,7 +90,13 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - **Single-world kapla: +7-14% FPS** across all 4 ms/iter configs, drift flat or improved.
 - **Multi-world regressed again**: g1_flat 4096 **-12.0%** (1.85M → 1.62M env_fps), h1_flat 4096 **-5.5%** (2.49M → 2.35M env_fps). Same root cause as v1 — multi-world warp lanes serve *different worlds*, not adjacent bodies in one world, so the SoA cache-line sharing the AoS pack kills was load-bearing in a way the locality sort doesn't fix.
 - Reverted in commits ``1420a63b`` (the pack) and ``db589d9d`` (revert).
-- **If you re-try, gate the AoS read at compile time** so single-world kernels use ``iterate_hot`` while multi-world fast-tail kernels stay on SoA. Worth ~10% on dense-contact single-world if the gating doesn't bloat kernel binary size. The dispatch already splits the kernels (``_make_singleworld_persistent_kernel`` vs ``_make_fast_tail_*``), so threading a ``use_aos: bool`` ``wp.static`` parameter through ``_make_contact_iterate_at`` is mechanical.
+- **Suspect the headline +7-14% is partly Step-1's contribution**: see v3 below; baselining matters.
+
+### Body-hot AoS pack v3 (single-world gated, post-locality-sort)
+- 2026-05-11 (same session as v2): retried with ``use_aos: bool`` threaded through the ``_make_contact_{prepare_for_iteration,iterate}_at`` factories via ``wp.static``, plus a parallel factory for the entry-point wrappers so no hand-written wp.func wrappers were duplicated. Single-world kernel factories called the ``*_aos`` variants; multi-world fast-tail kept SoA. Pack kernel guarded by ``step_layout == "single_world"``.
+- **Result: neutral.** Kapla single-world +0.3-1.0% over the pre-AoS baseline (53.12 → 53.58, 34.72 → 34.54, 55.91 → 56.22, 37.27 → 37.39). Multi-world unchanged within noise (g1_flat 1.82M, h1_flat 2.47M).
+- The v2 "+7-14% Kapla" headline was measured against the **pre-Step-1** baseline JSON; Step 1's CSR body-locality sort had already captured the bulk of the win. AoS alone contributes only ~+1% once locality sort is in place.
+- **Don't re-try without re-checking against a *current* baseline.** The pack kernel + 4 extra factory variants doubled the compiled binary size for these funcs while contributing under a percent. Reverted (not committed).
 
 ### `__ffsll` for the greedy first-free-colour scan
 - Wrapped the CUDA ``__ffsll`` intrinsic in a ``wp.func_native`` (``_lowest_set_bit``) and used it in both single-world and per-world greedy kernels in place of the 64-iteration linear bit-scan.
