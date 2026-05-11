@@ -1141,7 +1141,7 @@ class PhoenXWorld:
         # Rigid prefix mirrors model.shape_*; suffix lands in world 0
         # with default flags (= same flag value as a typical dynamic
         # rigid shape so the broad phase doesn't cull cloth tris).
-        unified_shape_world = wp.zeros(S + T, dtype=wp.int32, device=self.device)
+        unified_shape_world = wp.zeros(S + T + Tet, dtype=wp.int32, device=self.device)
         if S > 0 and getattr(model, "shape_world", None) is not None:
             wp.copy(unified_shape_world, model.shape_world, count=S)
         unified_shape_flags = None
