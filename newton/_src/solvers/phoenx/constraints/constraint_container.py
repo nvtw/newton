@@ -22,6 +22,7 @@ __all__ = [
     "CONSTRAINT_BODY1_OFFSET",
     "CONSTRAINT_BODY2_OFFSET",
     "CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET",
+    "CONSTRAINT_TYPE_CLOTH_BENDING",
     "CONSTRAINT_TYPE_CLOTH_TRIANGLE",
     "CONSTRAINT_TYPE_CONTACT",
     "CONSTRAINT_TYPE_INVALID",
@@ -82,6 +83,11 @@ CONSTRAINT_TYPE_CLOTH_TRIANGLE = wp.constant(wp.int32(10))
 #: XPBD soft-body tetrahedron (FemTetPBD corotational shear row). Endpoints
 #: body1..body4 are particle indices. See :mod:`constraint_soft_tetrahedron`.
 CONSTRAINT_TYPE_SOFT_TETRAHEDRON = wp.constant(wp.int32(11))
+#: XPBD cloth bending hinge (Bergou / Wardetzky 2007 quadratic curvature
+#: energy). Endpoints body1..body4 are particle indices. body1 / body2 are
+#: opposite vertices of the two triangles; body3 / body4 are the shared
+#: edge. See :mod:`constraint_cloth_bending`.
+CONSTRAINT_TYPE_CLOTH_BENDING = wp.constant(wp.int32(12))
 
 CONSTRAINT_TYPE_OFFSET = wp.constant(wp.int32(0))
 CONSTRAINT_BODY1_OFFSET = wp.constant(wp.int32(1))
