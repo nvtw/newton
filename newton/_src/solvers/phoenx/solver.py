@@ -125,6 +125,9 @@ class SolverPhoenX(SolverBase):
         threads_per_world: int | str = "auto",
         max_thread_blocks: int | None = None,
         velocity_readout: str = "substep_end",
+        mass_splitting: bool = False,
+        max_colored_partitions: int = 12,
+        mass_splitting_batch_size: int = 8,
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -268,6 +271,9 @@ class SolverPhoenX(SolverBase):
             threads_per_world=threads_per_world,
             max_thread_blocks=max_thread_blocks,
             enable_body_pair_grouping=has_compound_bodies,
+            mass_splitting=mass_splitting,
+            max_colored_partitions=max_colored_partitions,
+            mass_splitting_batch_size=mass_splitting_batch_size,
             device=self.device,
         )
 

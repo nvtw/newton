@@ -39,6 +39,8 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_mat22,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
+from newton._src.solvers.phoenx.mass_splitting.access import get_state_index
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_set_access_mode
 
 __all__ = [
@@ -286,7 +288,9 @@ def cloth_triangle_prepare_for_iteration_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
     particles: ParticleContainer,
+    copy_state: CopyStateContainer,
     num_bodies: wp.int32,
+    parallel_id: wp.int32,
 ):
     """Substep-entry prepare: cache inverse masses; reset XPBD warm starts.
 
@@ -294,6 +298,12 @@ def cloth_triangle_prepare_for_iteration_at(
     particle slot. The persisted ``rotation`` warm start is intentionally
     NOT reset -- the closest-rotation angle evolves continuously with
     the triangle's pose.
+
+    With mass splitting enabled, each particle's cached ``inv_mass`` is
+    scaled by ``inv_factor`` (its slot count) so the per-iteration XPBD
+    correction sees the Tonge effective mass ``m_per_slot = m / N``.
+    Mass splitting OFF (or particles outside the graph) returns
+    ``inv_factor=1`` and this scaling is identity.
     """
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
@@ -302,9 +312,13 @@ def cloth_triangle_prepare_for_iteration_at(
     p_b = body_b - num_bodies
     p_c = body_c - num_bodies
 
-    write_float(constraints, _OFF_INV_MASS_A, cid, particles.inverse_mass[p_a])
-    write_float(constraints, _OFF_INV_MASS_B, cid, particles.inverse_mass[p_b])
-    write_float(constraints, _OFF_INV_MASS_C, cid, particles.inverse_mass[p_c])
+    _slot_a, inv_factor_a = get_state_index(copy_state, body_a, parallel_id)
+    _slot_b, inv_factor_b = get_state_index(copy_state, body_b, parallel_id)
+    _slot_c, inv_factor_c = get_state_index(copy_state, body_c, parallel_id)
+
+    write_float(constraints, _OFF_INV_MASS_A, cid, particles.inverse_mass[p_a] * wp.float32(inv_factor_a))
+    write_float(constraints, _OFF_INV_MASS_B, cid, particles.inverse_mass[p_b] * wp.float32(inv_factor_b))
+    write_float(constraints, _OFF_INV_MASS_C, cid, particles.inverse_mass[p_c] * wp.float32(inv_factor_c))
 
     write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, wp.float32(0.0))
     write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, wp.float32(0.0))
@@ -315,7 +329,9 @@ def cloth_triangle_iterate_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
     particles: ParticleContainer,
+    copy_state: CopyStateContainer,
     num_bodies: wp.int32,
+    parallel_id: wp.int32,
     idt: wp.float32,
 ):
     """One XPBD sweep on a cloth triangle (area + shear rows).
@@ -323,6 +339,17 @@ def cloth_triangle_iterate_at(
     Direct port of ``FemTriPBD.Iterate`` (``FemTriPBD.cs:99-236``).
     Body fields are unified indices: ``i_p = body - num_bodies`` is the
     particle slot.
+
+    ``copy_state`` / ``parallel_id`` are threaded for signature
+    consistency with the other constraint kernels. Mass splitting's
+    effective-mass scaling is applied at prepare time (see
+    :func:`cloth_triangle_prepare_for_iteration_at`); the iterate
+    reads / writes particle positions directly. For typical cloth
+    meshes the graph partitioner places each cloth-triangle in a
+    regular colour bucket (``inv_factor = 1``), so the prepare scaling
+    is identity. Cloth-triangles in the overflow bucket share one
+    ``parallel_id`` across their three endpoints (constraint-aligned),
+    so the direct position writes don't conflict between slots.
     """
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
