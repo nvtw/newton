@@ -694,7 +694,36 @@ def _ms_load_body_pair(
 ):
     """Slot-aware load of ``(v1, v2, w1, w2, inv_mass1, inv_mass2,
     inv_inertia1, inv_inertia2, slot1, slot2)`` for one joint endpoint pair.
+
+    Mass-splitting-disabled fast path is checked ONCE at the top — when
+    ``highest_index_in_use[0] == 0`` (the common case for joint-heavy
+    scenes like g1_flat / h1_flat where mass splitting is off) we
+    bypass ``copy_state`` and the ``inv_factor`` multiply entirely.
+    Avoids 4 redundant int reads + 4 FP multiplies per joint per sweep
+    that the unified helpers' per-call fast-path would otherwise pay.
     """
+    if copy_state.highest_index_in_use[0] == wp.int32(0):
+        # Mass splitting disabled: direct SoA, no copy_state touch.
+        v1 = bodies.velocity[b1]
+        v2 = bodies.velocity[b2]
+        w1 = bodies.angular_velocity[b1]
+        w2 = bodies.angular_velocity[b2]
+        inv_mass1 = bodies.inverse_mass[b1]
+        inv_mass2 = bodies.inverse_mass[b2]
+        inv_inertia1 = bodies.inverse_inertia_world[b1]
+        inv_inertia2 = bodies.inverse_inertia_world[b2]
+        return (
+            v1,
+            v2,
+            w1,
+            w2,
+            inv_mass1,
+            inv_mass2,
+            inv_inertia1,
+            inv_inertia2,
+            wp.int32(-1),
+            wp.int32(-1),
+        )
     v1, inv_factor1, slot1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
     v2, inv_factor2, slot2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
     w1, _wfb1, _wsb1 = read_angular_velocity_unified(bodies, copy_state, b1, parallel_id, num_bodies)
@@ -723,7 +752,18 @@ def _ms_store_body_pair(
     v2: wp.vec3f,
     w2: wp.vec3f,
 ):
-    """Slot-aware writeback paired with :func:`_ms_load_body_pair`."""
+    """Slot-aware writeback paired with :func:`_ms_load_body_pair`.
+
+    Fast path: when both slots are ``-1`` (load returned the disabled
+    path) we know mass splitting is off for this pair — write directly
+    to ``bodies.*`` without the 4 ``write_*_unified`` calls.
+    """
+    if slot1 < wp.int32(0) and slot2 < wp.int32(0):
+        bodies.velocity[b1] = v1
+        bodies.velocity[b2] = v2
+        bodies.angular_velocity[b1] = w1
+        bodies.angular_velocity[b2] = w2
+        return
     write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
     write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
     write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
