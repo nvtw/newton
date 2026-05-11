@@ -137,7 +137,7 @@ class Example:
         self.sim_time = 0.0
         self.frame_index: int = 0
         self.sim_substeps = 4
-        self.solver_iterations = 5
+        self.solver_iterations = 10
         self.velocity_iterations = 1
 
         self._build_scene()
