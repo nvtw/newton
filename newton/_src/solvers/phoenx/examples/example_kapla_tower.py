@@ -84,6 +84,15 @@ GROUND_HEIGHT: float = 0.35 * GLOBAL_SCALING
 USE_BIG_WORLD_MODE: bool = True
 STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
 
+# Tonge mass splitting (C# PhoenX default). When ``True`` the
+# partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`
+# colours and any remainder goes to an overflow bucket solved with
+# per-(body, partition) copy states. Currently requires the single-
+# world layout (the multi-world fast-tail kernels haven't been
+# refactored yet) and no joints / cloth — both true for this scene.
+ENABLE_MASS_SPLITTING: bool = False
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
+
 # Tile the single ``KaplaTower2.usda`` instancer into a 2D grid centred
 # on the origin. ``(1, 1)`` reproduces the original scene; bigger
 # grids scale brick count, SAP candidates and contact pool linearly,
@@ -324,6 +333,8 @@ class Example:
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
             max_thread_blocks=256,
+            mass_splitting=ENABLE_MASS_SPLITTING,
+            max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             device=self.device,
         )
 
