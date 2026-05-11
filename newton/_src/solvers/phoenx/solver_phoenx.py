@@ -85,6 +85,7 @@ from newton._src.solvers.phoenx.mass_splitting import (
     build_interaction_graph,
     copy_state_container_zeros,
     interaction_graph_scratch_zeros,
+    launch_average_and_broadcast,
     launch_broadcast_rigid_to_copy_states,
     launch_copy_state_into_rigids,
     record_all_interactions_kernel,
@@ -1565,7 +1566,17 @@ class PhoenXWorld:
         """Write each body / particle's slot-0 velocity back to the
         body / particle container after the PGS sweeps complete. No-op
         when disabled.
+
+        Calls :func:`launch_average_and_broadcast` first to merge any
+        divergent slots (overflow-bucket bodies have multiple slots
+        that the iterate kernel touched Jacobi-style). After the
+        average, all of a body's slots hold the same averaged
+        velocity, so the subsequent writeback reading slot[0] picks
+        up all the per-slot impulse contributions. For bodies with a
+        single slot (regular colours, no overflow) the average is a
+        no-op.
         """
+        launch_average_and_broadcast(self._copy_state, num_bodies=self.num_bodies)
         launch_copy_state_into_rigids(
             self._copy_state,
             self.bodies,

@@ -341,6 +341,61 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
             np.testing.assert_allclose(pos1[b], pos0[b], rtol=1e-3, atol=1e-3)
             np.testing.assert_allclose(vel1[b], vel0[b], rtol=1e-3, atol=1e-3)
 
+    def test_single_box_with_overflow_still_settles(self):
+        # Force the overflow path by setting ``max_colored_partitions=1``:
+        # every contact-bucket past the first goes to the overflow
+        # bucket. With a single box on a plane there's only one contact
+        # column so coloring fits in 1 colour and nothing overflows --
+        # but every body has exactly 1 slot, exercising the slot-aware
+        # iterate path with ``inv_factor=1``.
+        device = wp.get_preferred_device()
+        w0, s0, c0, m0, cp0, sb0, _ = _build_box_stack_scene(1, mass_splitting=False, device=device)
+        pos0, _ = self._run_n_frames(w0, s0, c0, m0, cp0, sb0, 30, 1.0 / 60.0)
+        # mass_splitting=True with K=1 still routes through slots.
+        device = wp.get_preferred_device()
+        import newton  # noqa: PLC0415
+        from newton._src.solvers.phoenx.body import body_container_zeros  # noqa: PLC0415
+        from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING  # noqa: PLC0415
+
+        mb = newton.ModelBuilder()
+        mb.default_shape_cfg.gap = 0.05
+        mb.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
+        body = mb.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.55), q=wp.quat_identity()))
+        mb.add_shape_box(body, hx=0.5, hy=0.5, hz=0.5)
+        model = mb.finalize(device=device)
+        state = model.state()
+        collision_pipeline = newton.CollisionPipeline(model, contact_matching=PHOENX_CONTACT_MATCHING)
+        contacts = collision_pipeline.contacts()
+        bodies = body_container_zeros(model.body_count + 1, device=device)
+        constraints = PhoenXWorld.make_constraint_container(num_joints=0, device=device)
+        w1 = PhoenXWorld(
+            bodies=bodies,
+            constraints=constraints,
+            num_joints=0,
+            rigid_contact_max=int(contacts.rigid_contact_max),
+            gravity=(0.0, 0.0, -9.81),
+            substeps=4,
+            solver_iterations=4,
+            velocity_iterations=1,
+            mass_splitting=True,
+            max_colored_partitions=1,  # Force overflow more aggressively.
+            step_layout="single_world",
+            device=device,
+        )
+        shape_body_np = model.shape_body.numpy()
+        shape_body_phx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
+        sb1 = wp.array(shape_body_phx, dtype=wp.int32, device=device)
+        pos1, _ = self._run_n_frames(w1, state, contacts, model, collision_pipeline, sb1, 30, 1.0 / 60.0)
+        # Both should have the box resting on the plane (z ≈ 0.5).
+        # We don't require byte-equivalent positions (the iterate
+        # algebra inside the overflow bucket scales by inv_factor); we
+        # just require the box hasn't tunneled through the plane nor
+        # exploded upward.
+        self.assertGreater(float(pos1[1][2]), 0.45)  # not below the plane
+        self.assertLess(float(pos1[1][2]), 0.6)  # not floating
+        # Sanity vs disabled.
+        self.assertAlmostEqual(float(pos1[1][2]), float(pos0[1][2]), delta=0.05)
+
     def test_box_stack_under_graph_capture_with_mass_splitting(self):
         # Load-bearing capture-safety check: the full pipeline (ingest →
         # color → mass-splitting build → broadcast → solve → writeback →
