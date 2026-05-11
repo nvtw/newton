@@ -39,15 +39,25 @@ contact as their closest.  To keep the mapping injective without
 sorting or CAS retries, the matcher uses a single ``wp.atomic_min`` per
 new contact on a per-prev ``int64`` claim word:
 
-    claim = (float_flip(dist_sq) << 32) | tid
+    claim = (float_flip(dist_sq) << 32) | (sort_key & 0xFFFFFFFF)
 
 ``float_flip`` reinterprets the non-negative ``dist_sq`` as a
 sortable ``uint32``, so the high 32 bits order claims by ascending
-distance; the low 32 bits hold the new contact index, breaking ties
-deterministically (smallest ``tid`` wins).  After the match kernel
-runs, a small finalize kernel reads ``prev_claim[best_idx]`` and
-demotes any new contact whose ``tid`` does not appear in the low bits
-to :data:`MATCH_BROKEN`.  Losers are *not* re-matched against a
+distance; the low 32 bits hold the low 32 bits of the new contact's
+sort key (which uniquely identify it within its shape pair), breaking
+ties deterministically.  Using the sort key rather than the
+``wp.tid()`` of the new contact keeps the winner invariant under the
+non-deterministic unsorted slot assignment that the narrow phase gives
+us via ``wp.atomic_add`` -- two parallel runs of the same scene that
+emit the same set of new contacts in different orders will pick the
+same winner.  See :func:`_pack_claim` for the per-pair uniqueness
+caveat (multi-contact paths are unique by construction; the global
+reduction path is no worse than the upstream deterministic sort).
+
+After the match kernel runs, a small finalize kernel reads
+``prev_claim[best_idx]`` and demotes any new contact whose sort-key low
+32 bits do not appear in the low bits of the claim word to
+:data:`MATCH_BROKEN`.  Losers are *not* re-matched against a
 second-closest prev (kept for simplicity and speed).
 
 Cost: one ``int64[capacity]`` buffer, one ``wp.atomic_min`` per new
@@ -224,7 +234,10 @@ class _MatchData:
     body_q: wp.array[wp.transform]
     shape_body: wp.array[wp.int32]
 
-    # Per-prev claim word, packed (float_flip(dist_sq) << 32 | tid).
+    # Per-prev claim word, packed (float_flip(dist_sq) << 32 | key_low32),
+    # where key_low32 is the low 32 bits of the racing new contact's sort
+    # key (deterministic per contact, invariant under non-deterministic
+    # narrow-phase slot assignment -- see ``_pack_claim``).
     # Initialised to _CLAIM_SENTINEL each frame; race with atomic_min.
     prev_claim: wp.array[wp.int64]
 
@@ -632,7 +645,10 @@ class ContactMatcher:
             # Per-prev claim word for the atomic_min race that keeps the
             # new→prev mapping injective (see module docstring).  Reset
             # to _CLAIM_SENTINEL each frame; the low 32 bits of the
-            # surviving value identify the winning new contact ``tid``.
+            # surviving value identify the winning new contact by the low
+            # 32 bits of its sort key (deterministic, invariant under
+            # non-deterministic narrow-phase slot assignment -- see
+            # ``_pack_claim``).
             self._prev_claim = wp.empty(capacity, dtype=wp.int64)
 
             # Contact report (optional).
