@@ -1346,6 +1346,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
         head_active: wp.array[wp.int32],
         copy_state: CopyStateContainer,
         max_colored_partitions: wp.int32,
+        ms_batch_size: wp.int32,
     ):
         tid = wp.tid()
         if color_cursor[0] <= 0:
@@ -1359,108 +1360,133 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                 head_active[0] = 0
             return
 
-        # Overflow detection: when ``cursor - 1 == max_colored_partitions``
-        # the colour being processed IS the overflow bucket. Each CSR slot
-        # in the overflow gets a unique ``parallel_id`` so the
-        # constraint reads/writes its own copy-state slot (Jacobi-style
-        # within the bucket). Regular colours use ``parallel_id=0`` so
-        # every constraint in the bucket shares slot 0 of each body
-        # (GS-style). ``max_colored_partitions = -1`` disables the
-        # overflow path so non-mass-splitting builds keep parallel_id=0
-        # everywhere.
-        is_overflow_color = max_colored_partitions >= wp.int32(0) and (cursor - wp.int32(1)) == max_colored_partitions
+        # Overflow detection. ``_singleworld_color_range`` computes the
+        # *colour id* as ``c = n_colors - cursor`` (cursor decrements
+        # from n_colors down to 1). The overflow bucket is colour
+        # ``max_colored_partitions``, so it's the last one processed:
+        # ``c == max_colored_partitions`` iff
+        # ``num_colors[0] - cursor == max_colored_partitions``.
+        # Overflow constraints are grouped into batches of
+        # ``ms_batch_size`` consecutive CSR slots; one thread processes
+        # a whole batch sequentially (Gauss-Seidel within the batch on
+        # a shared slot) while across batches processing is parallel
+        # (Jacobi via distinct slots). Regular colours stay at
+        # ``parallel_id=0`` with one thread per constraint (independent
+        # set, no need for splitting).
+        is_overflow_color = max_colored_partitions >= wp.int32(0) and (num_colors[0] - cursor) == max_colored_partitions
 
-        for t in range(tid, count, total_num_threads):
-            cid = element_ids_by_color[start + t]
-            parallel_id = wp.int32(0)
+        # For overflow: each thread covers ``ms_batch_size`` consecutive
+        # CSR slots starting at ``tid * ms_batch_size``, grid-stride
+        # by ``total_num_threads * ms_batch_size``. For regular:
+        # one slot per thread, grid-stride by total_num_threads.
+        thread_start = tid
+        stride = total_num_threads
+        if is_overflow_color:
+            thread_start = tid * ms_batch_size
+            stride = total_num_threads * ms_batch_size
+
+        for t in range(thread_start, count, stride):
+            inner_end = wp.int32(1)
             if is_overflow_color:
-                parallel_id = t  # CSR offset within the overflow bucket.
-            # Two-stage dispatch.
-            # 1) Contacts live in a separate ContactColumnContainer (NOT in
-            #    the joint-side ConstraintContainer), so contact cids must
-            #    NOT do a `constraint_get_type` read -- the constraint
-            #    container has no slot at the contact cid range. Use a
-            #    cheap cid-range check.
-            # 2) Joints + cloth share the ConstraintContainer; within that
-            #    range we dispatch on the type tag (each schema stamps its
-            #    type into dword 0 at populate time).
-            if cid >= num_joints + num_cloth_triangles:
-                if wp.static(cloth_support):
-                    if wp.static(is_prepare):
-                        contact_prepare_for_iteration_cloth_aware(
-                            contact_cols,
-                            cid - num_joints - num_cloth_triangles,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            copy_state,
-                            parallel_id,
-                        )
+                inner_end = ms_batch_size
+            for inner in range(inner_end):
+                t_slot = t + inner
+                if t_slot >= count:
+                    break
+                cid = element_ids_by_color[start + t_slot]
+                parallel_id = wp.int32(0)
+                if is_overflow_color:
+                    # Batch index = partition_key stamped by emit.
+                    parallel_id = t_slot / ms_batch_size
+                # Two-stage dispatch.
+                # 1) Contacts live in a separate ContactColumnContainer (NOT in
+                #    the joint-side ConstraintContainer), so contact cids must
+                #    NOT do a `constraint_get_type` read -- the constraint
+                #    container has no slot at the contact cid range. Use a
+                #    cheap cid-range check.
+                # 2) Joints + cloth share the ConstraintContainer; within that
+                #    range we dispatch on the type tag (each schema stamps its
+                #    type into dword 0 at populate time).
+                dispatched = False
+                if cid >= num_joints + num_cloth_triangles:
+                    if wp.static(cloth_support):
+                        if wp.static(is_prepare):
+                            contact_prepare_for_iteration_cloth_aware(
+                                contact_cols,
+                                cid - num_joints - num_cloth_triangles,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                copy_state,
+                                parallel_id,
+                            )
+                        else:
+                            contact_iterate_cloth_aware(
+                                contact_cols,
+                                cid - num_joints - num_cloth_triangles,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                use_bias,
+                                copy_state,
+                                parallel_id,
+                            )
                     else:
-                        contact_iterate_cloth_aware(
-                            contact_cols,
-                            cid - num_joints - num_cloth_triangles,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                            copy_state,
-                            parallel_id,
-                        )
-                else:
+                        if wp.static(is_prepare):
+                            contact_prepare_for_iteration(
+                                contact_cols,
+                                cid - num_joints - num_cloth_triangles,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                copy_state,
+                                parallel_id,
+                            )
+                        else:
+                            contact_iterate(
+                                contact_cols,
+                                cid - num_joints - num_cloth_triangles,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                use_bias,
+                                copy_state,
+                                parallel_id,
+                            )
+                    dispatched = True
+                if not dispatched:
+                    ctype = constraint_get_type(constraints, cid)
+                    if wp.static(cloth_support):
+                        if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
+                            if wp.static(is_prepare):
+                                cloth_triangle_prepare_for_iteration_at(constraints, cid, particles, num_bodies)
+                            else:
+                                cloth_triangle_iterate_at(constraints, cid, particles, num_bodies, idt)
+                            dispatched = True
+                if not dispatched:
+                    # Joint (ADBS or revolute specialisation).
                     if wp.static(is_prepare):
-                        contact_prepare_for_iteration(
-                            contact_cols,
-                            cid - num_joints - num_cloth_triangles,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            copy_state,
-                            parallel_id,
-                        )
+                        if wp.static(revolute_only):
+                            revolute_prepare_for_iteration(constraints, cid, bodies, idt)
+                        else:
+                            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
                     else:
-                        contact_iterate(
-                            contact_cols,
-                            cid - num_joints - num_cloth_triangles,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                            copy_state,
-                            parallel_id,
-                        )
-                continue
-            ctype = constraint_get_type(constraints, cid)
-            if wp.static(cloth_support):
-                if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
-                    if wp.static(is_prepare):
-                        cloth_triangle_prepare_for_iteration_at(constraints, cid, particles, num_bodies)
-                    else:
-                        cloth_triangle_iterate_at(constraints, cid, particles, num_bodies, idt)
-                    continue
-            # Joint (ADBS or revolute specialisation).
-            if wp.static(is_prepare):
-                if wp.static(revolute_only):
-                    revolute_prepare_for_iteration(constraints, cid, bodies, idt)
-                else:
-                    actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
-            else:
-                if wp.static(revolute_only):
-                    revolute_iterate(constraints, cid, bodies, idt, use_bias)
-                else:
-                    actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
+                        if wp.static(revolute_only):
+                            revolute_iterate(constraints, cid, bodies, idt, use_bias)
+                        else:
+                            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
 
         if tid == 0:
             color_cursor[0] = cursor - 1
@@ -1494,6 +1520,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
         fuse_threshold: wp.int32,
         copy_state: CopyStateContainer,
         max_colored_partitions: wp.int32,
+        ms_batch_size: wp.int32,
     ):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
@@ -1502,8 +1529,15 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
             if count > fuse_threshold:
                 break
             is_overflow_color = (
-                max_colored_partitions >= wp.int32(0) and (cursor - wp.int32(1)) == max_colored_partitions
+                max_colored_partitions >= wp.int32(0) and (num_colors[0] - cursor) == max_colored_partitions
             )
+            # If the overflow bucket ended up small enough to fuse, hand
+            # it back to the persistent head kernel where the batched
+            # grid-stride dispatch lives. Avoids racing on shared slots
+            # in the single-block tail (lanes 0..ms_batch_size-1 all
+            # share one ``parallel_id`` for the same body).
+            if is_overflow_color and ms_batch_size > wp.int32(1):
+                break
             if lane < count:
                 cid = element_ids_by_color[start + lane]
                 parallel_id = wp.int32(0)

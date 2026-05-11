@@ -273,6 +273,7 @@ class PhoenXWorld:
         enable_body_pair_grouping: bool = False,
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
+        mass_splitting_batch_size: int = 8,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -314,6 +315,16 @@ class PhoenXWorld:
                 ``MassSplitting(maxPartitions=12)``). Constraints that
                 don't fit in ``[0, K)`` end up in colour K (overflow).
                 Ignored when ``mass_splitting=False``.
+            mass_splitting_batch_size: B — overflow constraints are
+                grouped into batches of ``B`` constraints sharing one
+                partition copy. Within a batch, constraints process
+                sequentially (Gauss-Seidel, one thread per batch); across
+                batches, processing is parallel (Jacobi). Larger B keeps
+                ``inv_factor`` bounded so impulses aren't over-damped on
+                hub bodies that touch many overflow contacts.
+                ``8`` (default) mirrors C# PhoenX's
+                ``MassSplitting.BatchingThreshold = 8``. Ignored when
+                ``mass_splitting=False``.
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -512,6 +523,9 @@ class PhoenXWorld:
                     "(multi-world fast-tail kernels haven't been refactored yet)."
                 )
         self.max_colored_partitions: int | None = int(max_colored_partitions) if self.mass_splitting_enabled else None
+        if self.mass_splitting_enabled and int(mass_splitting_batch_size) < 1:
+            raise ValueError(f"mass_splitting_batch_size must be >= 1 (got {mass_splitting_batch_size})")
+        self.mass_splitting_batch_size: int = int(mass_splitting_batch_size) if self.mass_splitting_enabled else 1
         # Unified body-or-particle node space for the partitioner:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
         # num_bodies + num_particles)`` are particles.
@@ -1617,6 +1631,7 @@ class PhoenXWorld:
                 self._num_active_constraints,
                 self._partitioner.interaction_id_to_partition,
                 wp.int32(int(self.max_colored_partitions)),
+                wp.int32(int(self.mass_splitting_batch_size)),
                 self._interaction_graph_scratch,
             ],
             device=self.device,
@@ -1852,6 +1867,7 @@ class PhoenXWorld:
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
         ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
+        ms_batch = wp.int32(int(self.mass_splitting_batch_size))
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
             wp.launch(
                 kernel,
@@ -1876,6 +1892,7 @@ class PhoenXWorld:
                     self._head_active,
                     self._copy_state,
                     ms_cap,
+                    ms_batch,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=self.device,
@@ -1887,6 +1904,7 @@ class PhoenXWorld:
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         idt = kw.get("idt", wp.float32(0.0))
         ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
+        ms_batch = wp.int32(int(self.mass_splitting_batch_size))
         wp.launch_tiled(
             kernel,
             dim=[1],
@@ -1908,6 +1926,7 @@ class PhoenXWorld:
                 wp.int32(self._fuse_threshold),
                 self._copy_state,
                 ms_cap,
+                ms_batch,
             ],
             block_dim=self._fuse_tail_block_dim,
             device=self.device,

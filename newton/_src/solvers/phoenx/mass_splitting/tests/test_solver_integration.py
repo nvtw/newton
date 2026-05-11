@@ -148,7 +148,8 @@ class TestMassSplittingSolverWiring(unittest.TestCase):
         # Force coloring into the overflow bucket by setting
         # ``max_colored_partitions=1``: every adjacent element after
         # the first one lands in colour 1 (overflow). A hub body
-        # touching three elements ends up with multiple slots.
+        # touching three elements ends up with multiple slots when
+        # ``mass_splitting_batch_size=1`` (strongest splitting).
         device = wp.get_preferred_device()
         bodies = body_container_zeros(5, device=device)
         bodies.inverse_mass.assign(np.array([0.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32))
@@ -160,6 +161,7 @@ class TestMassSplittingSolverWiring(unittest.TestCase):
             rigid_contact_max=8,
             mass_splitting=True,
             max_colored_partitions=1,  # 1 regular colour + 1 overflow
+            mass_splitting_batch_size=1,  # no batching -> 1 slot per overflow contact
             step_layout="single_world",
             device=device,
         )

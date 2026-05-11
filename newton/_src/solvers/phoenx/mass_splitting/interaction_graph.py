@@ -179,6 +179,7 @@ def record_all_interactions_kernel(
     num_active_constraints: wp.array[wp.int32],
     interaction_id_to_partition: wp.array[wp.int32],
     max_colored_partitions: wp.int32,
+    batch_size: wp.int32,
     scratch: InteractionGraphScratch,
 ):
     """Per-step emit: walk the active CSR slots and stamp
@@ -191,12 +192,15 @@ def record_all_interactions_kernel(
       ``interaction_id_to_partition[element_ids_by_color[t]]``.
     * If colour ``< K`` (a regular MIS bucket): ``partition_key = 0``
       so every body in any regular bucket shares one copy slot.
-    * If colour ``== K`` (overflow): ``partition_key = t -
-      color_starts[K]`` — the slot's position within the overflow
-      slice. ``batch_size = 1`` (every overflow slot is its own
-      partition copy). C# allowed ``batch_size > 1`` to group
-      consecutive slots; we ship 1 for now to keep the API surface
-      small.
+    * If colour ``== K`` (overflow): ``partition_key = (t -
+      color_starts[K]) // batch_size`` — overflow constraints group
+      into batches of ``batch_size`` consecutive CSR slots, all
+      sharing one partition copy. The iterate kernel processes each
+      batch sequentially in one thread (GS within the batch) so the
+      shared slot is race-free; across batches, processing is
+      parallel (Jacobi). ``batch_size = 1`` (one constraint per
+      partition) is the strongest splitting; ``batch_size = 8``
+      matches C# PhoenX's ``BatchingThreshold = 8``.
 
     One thread per CSR slot in ``[0, num_active_constraints)``. Each
     thread emits up to ``MAX_BODIES`` entries via :func:`emit_pair`
@@ -209,8 +213,10 @@ def record_all_interactions_kernel(
     color = interaction_id_to_partition[eid]
     partition_key = wp.int32(0)
     if color >= max_colored_partitions:
-        # Overflow slice. batch_size = 1: every slot is its own partition.
-        partition_key = tid - color_starts[max_colored_partitions]
+        # Overflow slice. Group every ``batch_size`` consecutive
+        # CSR slots into one partition copy.
+        overflow_offset = tid - color_starts[max_colored_partitions]
+        partition_key = overflow_offset / batch_size
     el = elements[eid]
     for j in range(MAX_BODIES):
         v = element_interaction_data_get(el, j)
