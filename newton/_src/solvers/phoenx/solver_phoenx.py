@@ -116,34 +116,6 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
-    _constraint_iterate_singleworld_cloth_kernel,
-    _constraint_iterate_singleworld_fused_cloth_kernel,
-    _constraint_iterate_singleworld_fused_kernel,
-    _constraint_iterate_singleworld_fused_revolute_cloth_kernel,
-    _constraint_iterate_singleworld_fused_revolute_kernel,
-    _constraint_iterate_singleworld_kernel,
-    _constraint_iterate_singleworld_revolute_cloth_kernel,
-    _constraint_iterate_singleworld_revolute_kernel,
-    _constraint_prepare_plus_iterate_fast_tail_kernel,
-    _constraint_prepare_plus_iterate_fast_tail_revolute_kernel,
-    _constraint_prepare_singleworld_cloth_kernel,
-    _constraint_prepare_singleworld_fused_cloth_kernel,
-    _constraint_prepare_singleworld_fused_kernel,
-    _constraint_prepare_singleworld_fused_revolute_cloth_kernel,
-    _constraint_prepare_singleworld_fused_revolute_kernel,
-    _constraint_prepare_singleworld_kernel,
-    _constraint_prepare_singleworld_revolute_cloth_kernel,
-    _constraint_prepare_singleworld_revolute_kernel,
-    _constraint_relax_fast_tail_kernel,
-    _constraint_relax_fast_tail_revolute_kernel,
-    _constraint_relax_singleworld_cloth_kernel,
-    _constraint_relax_singleworld_fused_cloth_kernel,
-    _constraint_relax_singleworld_fused_kernel,
-    _constraint_relax_singleworld_fused_revolute_cloth_kernel,
-    _constraint_relax_singleworld_fused_revolute_kernel,
-    _constraint_relax_singleworld_kernel,
-    _constraint_relax_singleworld_revolute_cloth_kernel,
-    _constraint_relax_singleworld_revolute_kernel,
     _constraints_to_elements_kernel,
     _count_elements_per_world_kernel,
     _integrate_velocities_kernel,
@@ -160,6 +132,8 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _reset_head_active_kernel,
     _set_kinematic_pose_batch_kernel,
     _sync_num_active_constraints_kernel,
+    get_fast_tail_kernel,
+    get_singleworld_kernel,
     pack_body_xforms_kernel,
 )
 
@@ -2046,10 +2020,8 @@ class PhoenXWorld:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
-        kernel = (
-            _constraint_prepare_plus_iterate_fast_tail_revolute_kernel
-            if self._use_revolute_specialization
-            else _constraint_prepare_plus_iterate_fast_tail_kernel
+        kernel = get_fast_tail_kernel(
+            kind="prepare_plus_iterate", revolute_only=bool(self._use_revolute_specialization)
         )
         wp.launch(
             kernel,
@@ -2083,10 +2055,8 @@ class PhoenXWorld:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
-        kernel = (
-            _constraint_relax_fast_tail_revolute_kernel
-            if self._use_revolute_specialization
-            else _constraint_relax_fast_tail_kernel
+        kernel = get_fast_tail_kernel(
+            kind="relax", revolute_only=bool(self._use_revolute_specialization)
         )
         self._launch_fast_iter(
             kernel,
@@ -2292,40 +2262,15 @@ class PhoenXWorld:
         cloth_on = (
             self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0 or self.num_cloth_bending > 0
         )
-        if self._use_revolute_specialization:
-            if cloth_on:
-                return (
-                    _constraint_prepare_singleworld_revolute_cloth_kernel,
-                    _constraint_prepare_singleworld_fused_revolute_cloth_kernel,
-                    _constraint_iterate_singleworld_revolute_cloth_kernel,
-                    _constraint_iterate_singleworld_fused_revolute_cloth_kernel,
-                    _constraint_relax_singleworld_revolute_cloth_kernel,
-                    _constraint_relax_singleworld_fused_revolute_cloth_kernel,
-                )
-            return (
-                _constraint_prepare_singleworld_revolute_kernel,
-                _constraint_prepare_singleworld_fused_revolute_kernel,
-                _constraint_iterate_singleworld_revolute_kernel,
-                _constraint_iterate_singleworld_fused_revolute_kernel,
-                _constraint_relax_singleworld_revolute_kernel,
-                _constraint_relax_singleworld_fused_revolute_kernel,
-            )
-        if cloth_on:
-            return (
-                _constraint_prepare_singleworld_cloth_kernel,
-                _constraint_prepare_singleworld_fused_cloth_kernel,
-                _constraint_iterate_singleworld_cloth_kernel,
-                _constraint_iterate_singleworld_fused_cloth_kernel,
-                _constraint_relax_singleworld_cloth_kernel,
-                _constraint_relax_singleworld_fused_cloth_kernel,
-            )
+        revolute_only = bool(self._use_revolute_specialization)
+        kw = {"revolute_only": revolute_only, "cloth_support": cloth_on}
         return (
-            _constraint_prepare_singleworld_kernel,
-            _constraint_prepare_singleworld_fused_kernel,
-            _constraint_iterate_singleworld_kernel,
-            _constraint_iterate_singleworld_fused_kernel,
-            _constraint_relax_singleworld_kernel,
-            _constraint_relax_singleworld_fused_kernel,
+            get_singleworld_kernel(phase="prepare", fused=False, **kw),
+            get_singleworld_kernel(phase="prepare", fused=True, **kw),
+            get_singleworld_kernel(phase="iterate", fused=False, **kw),
+            get_singleworld_kernel(phase="iterate", fused=True, **kw),
+            get_singleworld_kernel(phase="relax", fused=False, **kw),
+            get_singleworld_kernel(phase="relax", fused=True, **kw),
         )
 
     def _fast_tail_block_dim(self) -> int:

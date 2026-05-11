@@ -127,7 +127,7 @@ def _locality_writeback_kernel(
     element_ids_by_color[tid] = values[tid]
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _fill_cost_values_from_contacts_kernel(
     cost_values: wp.array[wp.int32],
     contact_cols: ContactColumnContainer,

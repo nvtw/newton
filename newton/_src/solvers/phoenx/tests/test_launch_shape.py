@@ -36,14 +36,15 @@ import warp as wp
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _STRAGGLER_BLOCK_DIM,
     _choose_fast_tail_worlds_per_block,
-    _constraint_prepare_plus_iterate_fast_tail_kernel,
-    _constraint_relax_fast_tail_kernel,
+    get_fast_tail_kernel,
 )
 from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums
 
+_prepare_plus_iterate_kernel = get_fast_tail_kernel(kind="prepare_plus_iterate", revolute_only=False)
+_relax_kernel = get_fast_tail_kernel(kind="relax", revolute_only=False)
 _MAIN_SOLVE_KERNELS = {
-    _constraint_prepare_plus_iterate_fast_tail_kernel.key,
-    _constraint_relax_fast_tail_kernel.key,
+    _prepare_plus_iterate_kernel.key,
+    _relax_kernel.key,
 }
 
 
@@ -150,12 +151,12 @@ class TestPhoenXOneBlockPerWorld(unittest.TestCase):
         # constraints. Relax runs when velocity_iterations > 0 (our
         # test harness uses velocity_iterations=1).
         self.assertIn(
-            _constraint_prepare_plus_iterate_fast_tail_kernel.key,
+            _prepare_plus_iterate_kernel.key,
             kernels_seen,
             msg="fused prepare+iterate kernel did not fire -- solver pipeline regressed",
         )
         self.assertIn(
-            _constraint_relax_fast_tail_kernel.key,
+            _relax_kernel.key,
             kernels_seen,
             msg=("relax kernel did not fire -- velocity_iterations=1 should always run one relax pass"),
         )

@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import functools
+
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import (
@@ -102,31 +104,6 @@ __all__ = [
     "_choose_fast_tail_worlds_per_block",
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
-    "_constraint_iterate_singleworld_cloth_kernel",
-    "_constraint_iterate_singleworld_fused_cloth_kernel",
-    "_constraint_iterate_singleworld_fused_revolute_cloth_kernel",
-    "_constraint_iterate_singleworld_fused_revolute_kernel",
-    "_constraint_iterate_singleworld_kernel",
-    "_constraint_iterate_singleworld_revolute_cloth_kernel",
-    "_constraint_iterate_singleworld_revolute_kernel",
-    "_constraint_prepare_plus_iterate_fast_tail_kernel",
-    "_constraint_prepare_plus_iterate_fast_tail_revolute_kernel",
-    "_constraint_prepare_singleworld_cloth_kernel",
-    "_constraint_prepare_singleworld_fused_cloth_kernel",
-    "_constraint_prepare_singleworld_fused_revolute_cloth_kernel",
-    "_constraint_prepare_singleworld_fused_revolute_kernel",
-    "_constraint_prepare_singleworld_kernel",
-    "_constraint_prepare_singleworld_revolute_cloth_kernel",
-    "_constraint_prepare_singleworld_revolute_kernel",
-    "_constraint_relax_fast_tail_kernel",
-    "_constraint_relax_fast_tail_revolute_kernel",
-    "_constraint_relax_singleworld_cloth_kernel",
-    "_constraint_relax_singleworld_fused_cloth_kernel",
-    "_constraint_relax_singleworld_fused_revolute_cloth_kernel",
-    "_constraint_relax_singleworld_fused_revolute_kernel",
-    "_constraint_relax_singleworld_kernel",
-    "_constraint_relax_singleworld_revolute_cloth_kernel",
-    "_constraint_relax_singleworld_revolute_kernel",
     "_constraints_to_elements_kernel",
     "_count_elements_per_world_kernel",
     "_integrate_velocities_kernel",
@@ -143,6 +120,8 @@ __all__ = [
     "_rotation_quaternion",
     "_set_kinematic_pose_batch_kernel",
     "_sync_num_active_constraints_kernel",
+    "get_fast_tail_kernel",
+    "get_singleworld_kernel",
     "pack_body_xforms_kernel",
 ]
 
@@ -461,7 +440,7 @@ def _per_world_jp_coloring_kernel(
 _PER_WORLD_FREE_COLOR_FLIP = wp.constant(wp.int64(-1))
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _per_world_greedy_coloring_kernel(
     # per-world bucketing (input from the two kernels above)
     world_element_offsets: wp.array[wp.int32],  # [nw+1] (exclusive prefix of counts)
@@ -629,10 +608,11 @@ def _per_world_greedy_coloring_kernel(
 # Multi-world fast-tail kernels: revolute_only skips the joint-mode branch.
 
 
+@functools.cache
 def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
     """Build the multi-world fused prepare + iterate fast-tail kernel."""
 
-    @wp.kernel(enable_backward=False)
+    @wp.kernel(enable_backward=False, module="unique")
     def kernel(
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
@@ -748,10 +728,11 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
     return kernel
 
 
+@functools.cache
 def _make_fast_tail_relax_kernel(*, revolute_only: bool):
     """Multi-world relax fast-tail kernel (use_bias=False, num_sweeps=num_iterations)."""
 
-    @wp.kernel(enable_backward=False)
+    @wp.kernel(enable_backward=False, module="unique")
     def kernel(
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
@@ -824,15 +805,24 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
     return kernel
 
 
-_constraint_prepare_plus_iterate_fast_tail_kernel = _make_fast_tail_prepare_plus_iterate_kernel(revolute_only=False)
-_constraint_prepare_plus_iterate_fast_tail_revolute_kernel = _make_fast_tail_prepare_plus_iterate_kernel(
-    revolute_only=True
-)
-_constraint_relax_fast_tail_kernel = _make_fast_tail_relax_kernel(revolute_only=False)
-_constraint_relax_fast_tail_revolute_kernel = _make_fast_tail_relax_kernel(revolute_only=True)
+# Fast-tail kernels are no longer eagerly built at module import. Callers
+# should use :func:`get_fast_tail_kernel` (or hit module ``__getattr__`` for
+# the legacy names) so only the revolute variant the scene actually needs
+# gets compiled.
 
 
-@wp.kernel(enable_backward=False)
+def get_fast_tail_kernel(*, kind: str, revolute_only: bool):
+    """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``
+    or ``"relax"``. Each (kind, revolute_only) pair is cached after first
+    build by the underlying factory's ``functools.cache``."""
+    if kind == "prepare_plus_iterate":
+        return _make_fast_tail_prepare_plus_iterate_kernel(revolute_only=revolute_only)
+    if kind == "relax":
+        return _make_fast_tail_relax_kernel(revolute_only=revolute_only)
+    raise ValueError(f"unknown fast-tail kernel kind: {kind!r}")
+
+
+@wp.kernel(enable_backward=False, module="unique")
 def _constraints_to_elements_kernel(
     constraints: ConstraintContainer,
     contact_cols: ContactColumnContainer,
@@ -1463,6 +1453,7 @@ def _singleworld_color_range_from_cursor(
 # are compile-time so Warp constant-folds + dead-code-eliminates the unused branch.
 
 
+@functools.cache
 def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, cloth_support: bool):
     """Persistent-grid PGS kernel for the requested phase + specialisation.
 
@@ -1475,7 +1466,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
     is_iterate = phase == "iterate"
     use_bias = is_iterate  # iterate ON, relax OFF (prepare ignores)
 
-    @wp.kernel(enable_backward=False)
+    @wp.kernel(enable_backward=False, module="unique")
     def kernel(
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
@@ -1678,6 +1669,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
     return kernel
 
 
+@functools.cache
 def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_support: bool):
     """Single-block tail-fused PGS kernel; same axes as
     :func:`_make_singleworld_persistent_kernel`."""
@@ -1685,7 +1677,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
     is_iterate = phase == "iterate"
     use_bias = is_iterate
 
-    @wp.kernel(enable_backward=False)
+    @wp.kernel(enable_backward=False, module="unique")
     def kernel(
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
@@ -1867,81 +1859,10 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
     return kernel
 
 
-_constraint_prepare_singleworld_kernel = _make_singleworld_persistent_kernel(
-    phase="prepare", revolute_only=False, cloth_support=False
-)
-_constraint_iterate_singleworld_kernel = _make_singleworld_persistent_kernel(
-    phase="iterate", revolute_only=False, cloth_support=False
-)
-_constraint_relax_singleworld_kernel = _make_singleworld_persistent_kernel(
-    phase="relax", revolute_only=False, cloth_support=False
-)
-_constraint_prepare_singleworld_fused_kernel = _make_singleworld_fused_kernel(
-    phase="prepare", revolute_only=False, cloth_support=False
-)
-_constraint_iterate_singleworld_fused_kernel = _make_singleworld_fused_kernel(
-    phase="iterate", revolute_only=False, cloth_support=False
-)
-_constraint_relax_singleworld_fused_kernel = _make_singleworld_fused_kernel(
-    phase="relax", revolute_only=False, cloth_support=False
-)
-_constraint_prepare_singleworld_revolute_kernel = _make_singleworld_persistent_kernel(
-    phase="prepare", revolute_only=True, cloth_support=False
-)
-_constraint_iterate_singleworld_revolute_kernel = _make_singleworld_persistent_kernel(
-    phase="iterate", revolute_only=True, cloth_support=False
-)
-_constraint_relax_singleworld_revolute_kernel = _make_singleworld_persistent_kernel(
-    phase="relax", revolute_only=True, cloth_support=False
-)
-_constraint_prepare_singleworld_fused_revolute_kernel = _make_singleworld_fused_kernel(
-    phase="prepare", revolute_only=True, cloth_support=False
-)
-_constraint_iterate_singleworld_fused_revolute_kernel = _make_singleworld_fused_kernel(
-    phase="iterate", revolute_only=True, cloth_support=False
-)
-_constraint_relax_singleworld_fused_revolute_kernel = _make_singleworld_fused_kernel(
-    phase="relax", revolute_only=True, cloth_support=False
-)
-
-# Cloth-supporting variants. These add the third (cloth) branch to the
-# type-tag dispatch. Same kernel signature as the cloth_support=False
-# variants -- the cloth branch is the only difference, gated by
-# ``wp.static(cloth_support)`` so the rigid-only binaries above are
-# byte-identical to the pre-cloth implementation.
-_constraint_prepare_singleworld_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="prepare", revolute_only=False, cloth_support=True
-)
-_constraint_iterate_singleworld_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="iterate", revolute_only=False, cloth_support=True
-)
-_constraint_relax_singleworld_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="relax", revolute_only=False, cloth_support=True
-)
-_constraint_prepare_singleworld_fused_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="prepare", revolute_only=False, cloth_support=True
-)
-_constraint_iterate_singleworld_fused_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="iterate", revolute_only=False, cloth_support=True
-)
-_constraint_relax_singleworld_fused_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="relax", revolute_only=False, cloth_support=True
-)
-_constraint_prepare_singleworld_revolute_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="prepare", revolute_only=True, cloth_support=True
-)
-_constraint_iterate_singleworld_revolute_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="iterate", revolute_only=True, cloth_support=True
-)
-_constraint_relax_singleworld_revolute_cloth_kernel = _make_singleworld_persistent_kernel(
-    phase="relax", revolute_only=True, cloth_support=True
-)
-_constraint_prepare_singleworld_fused_revolute_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="prepare", revolute_only=True, cloth_support=True
-)
-_constraint_iterate_singleworld_fused_revolute_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="iterate", revolute_only=True, cloth_support=True
-)
-_constraint_relax_singleworld_fused_revolute_cloth_kernel = _make_singleworld_fused_kernel(
-    phase="relax", revolute_only=True, cloth_support=True
-)
+def get_singleworld_kernel(
+    *, phase: str, fused: bool, revolute_only: bool, cloth_support: bool
+):
+    """Lazy singleworld kernel builder. Each axis combination is cached
+    after first build by the underlying factory's ``functools.cache``."""
+    factory = _make_singleworld_fused_kernel if fused else _make_singleworld_persistent_kernel
+    return factory(phase=phase, revolute_only=revolute_only, cloth_support=cloth_support)

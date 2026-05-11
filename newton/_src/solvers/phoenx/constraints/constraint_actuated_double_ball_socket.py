@@ -458,7 +458,7 @@ ADBS_DWORDS: int = num_dwords(ActuatedDoubleBallSocketData)
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def actuated_double_ball_socket_initialize_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
