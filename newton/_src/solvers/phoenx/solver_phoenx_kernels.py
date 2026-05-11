@@ -1717,132 +1717,148 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
             is_overflow_color = (
                 max_colored_partitions >= wp.int32(0) and (num_colors[0] - cursor) == max_colored_partitions
             )
-            # If the overflow bucket ended up small enough to fuse, hand
-            # it back to the persistent head kernel where the batched
-            # grid-stride dispatch lives. Avoids racing on shared slots
-            # in the single-block tail (lanes 0..ms_batch_size-1 all
-            # share one ``parallel_id`` for the same body).
-            if is_overflow_color and ms_batch_size > wp.int32(1):
-                break
-            if lane < count:
-                cid = element_ids_by_color[start + lane]
+            # Overflow handling mirrors the head kernel's batched
+            # dispatch (see ``_make_singleworld_persistent_kernel``):
+            # one lane covers ``ms_batch_size`` consecutive CSR slots
+            # sequentially (Gauss-Seidel within the batch on a shared
+            # ``parallel_id``), and different lanes own different
+            # batches in parallel (Jacobi). ``parallel_id == lane``
+            # matches the ``partition_key = overflow_offset /
+            # batch_size`` the emit stamped, so each lane reads /
+            # writes its own ``copy_state`` slot -- no intra-block
+            # race. The earlier shortcut bailed back to the head on
+            # overflow + ``batch_size > 1`` and deadlocked when the
+            # head also bailed to the tail on the same small overflow
+            # colour.
+            inner_steps = wp.int32(1)
+            num_units = count
+            if is_overflow_color:
+                inner_steps = ms_batch_size
+                num_units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
+            if lane < num_units:
                 parallel_id = wp.int32(0)
                 if is_overflow_color:
                     parallel_id = lane
-                # See `_make_singleworld_persistent_kernel` for the
-                # two-stage dispatch rationale: cid-range first to
-                # separate contact cids (which live in a different
-                # container), then type-tag for joint vs cloth.
-                if cid >= num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
-                    if wp.static(cloth_support):
-                        if wp.static(is_prepare):
-                            contact_prepare_for_iteration_cloth_aware(
-                                contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
-                                bodies,
-                                particles,
-                                num_bodies,
-                                idt,
-                                cc,
-                                contacts,
-                                copy_state,
-                                parallel_id,
-                            )
+                t_slot_base = lane * inner_steps
+                for inner in range(inner_steps):
+                    t_slot = t_slot_base + inner
+                    if t_slot >= count:
+                        break
+                    cid = element_ids_by_color[start + t_slot]
+                    # See `_make_singleworld_persistent_kernel` for the
+                    # two-stage dispatch rationale: cid-range first to
+                    # separate contact cids (which live in a different
+                    # container), then type-tag for joint vs cloth.
+                    if cid >= num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
+                        if wp.static(cloth_support):
+                            if wp.static(is_prepare):
+                                contact_prepare_for_iteration_cloth_aware(
+                                    contact_cols,
+                                    cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    copy_state,
+                                    parallel_id,
+                                )
+                            else:
+                                contact_iterate_cloth_aware(
+                                    contact_cols,
+                                    cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    use_bias,
+                                    copy_state,
+                                    parallel_id,
+                                )
                         else:
-                            contact_iterate_cloth_aware(
-                                contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
-                                bodies,
-                                particles,
-                                num_bodies,
-                                idt,
-                                cc,
-                                contacts,
-                                use_bias,
-                                copy_state,
-                                parallel_id,
-                            )
+                            if wp.static(is_prepare):
+                                contact_prepare_for_iteration(
+                                    contact_cols,
+                                    cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    copy_state,
+                                    parallel_id,
+                                )
+                            else:
+                                contact_iterate(
+                                    contact_cols,
+                                    cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    use_bias,
+                                    copy_state,
+                                    parallel_id,
+                                )
                     else:
-                        if wp.static(is_prepare):
-                            contact_prepare_for_iteration(
-                                contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
-                                bodies,
-                                particles,
-                                num_bodies,
-                                idt,
-                                cc,
-                                contacts,
-                                copy_state,
-                                parallel_id,
-                            )
-                        else:
-                            contact_iterate(
-                                contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
-                                bodies,
-                                particles,
-                                num_bodies,
-                                idt,
-                                cc,
-                                contacts,
-                                use_bias,
-                                copy_state,
-                                parallel_id,
-                            )
-                else:
-                    ctype = constraint_get_type(constraints, cid)
-                    dispatched = False
-                    if wp.static(cloth_support):
-                        if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
+                        ctype = constraint_get_type(constraints, cid)
+                        dispatched = False
+                        if wp.static(cloth_support):
+                            if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
+                                if wp.static(is_prepare):
+                                    cloth_triangle_prepare_for_iteration_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    cloth_triangle_iterate_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                dispatched = True
+                            elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
+                                if wp.static(is_prepare):
+                                    soft_tetrahedron_prepare_for_iteration_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    soft_tetrahedron_iterate_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                dispatched = True
+                            elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
+                                if wp.static(is_prepare):
+                                    cloth_bending_prepare_for_iteration_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    cloth_bending_iterate_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                dispatched = True
+                        if not dispatched:
                             if wp.static(is_prepare):
-                                cloth_triangle_prepare_for_iteration_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                )
+                                if wp.static(revolute_only):
+                                    revolute_prepare_for_iteration(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    actuated_double_ball_socket_prepare_for_iteration(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
                             else:
-                                cloth_triangle_iterate_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                )
-                            dispatched = True
-                        elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
-                            if wp.static(is_prepare):
-                                soft_tetrahedron_prepare_for_iteration_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                )
-                            else:
-                                soft_tetrahedron_iterate_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                )
-                            dispatched = True
-                        elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
-                            if wp.static(is_prepare):
-                                cloth_bending_prepare_for_iteration_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                )
-                            else:
-                                cloth_bending_iterate_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                )
-                            dispatched = True
-                    if not dispatched:
-                        if wp.static(is_prepare):
-                            if wp.static(revolute_only):
-                                revolute_prepare_for_iteration(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                )
-                            else:
-                                actuated_double_ball_socket_prepare_for_iteration(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                )
-                        else:
-                            if wp.static(revolute_only):
-                                revolute_iterate(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
-                                )
-                            else:
-                                actuated_double_ball_socket_iterate(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
-                                )
+                                if wp.static(revolute_only):
+                                    revolute_iterate(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
+                                    )
+                                else:
+                                    actuated_double_ball_socket_iterate(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
+                                    )
             _sync_threads()
             cursor = cursor - 1
         if lane == 0:

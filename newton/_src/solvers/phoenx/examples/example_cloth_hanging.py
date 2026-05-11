@@ -38,6 +38,17 @@ from newton._src.solvers.phoenx.examples.example_common import (
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
+# Tonge mass splitting (C# PhoenX default). When ``True`` the
+# partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`
+# colours and any remainder lands in an overflow bucket solved with
+# per-(body, partition) copy states. Requires the single-world step
+# layout (already used by this example); joint and cloth-triangle
+# constraints route through the slot-aware helpers and so coexist
+# fine with mass splitting.
+ENABLE_MASS_SPLITTING: bool = True
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
+
+
 class Example:
     """Hanging cloth + a falling rigid cube + a static ground plane."""
 
@@ -165,6 +176,8 @@ class Example:
             solver_iterations=self.solver_iterations,
             rigid_contact_max=8192,
             step_layout="single_world",
+            mass_splitting=ENABLE_MASS_SPLITTING,
+            max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             device=self.device,
         )
         self.world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))

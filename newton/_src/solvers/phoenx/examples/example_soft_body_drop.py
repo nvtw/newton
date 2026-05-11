@@ -54,7 +54,7 @@ class Example:
         cube_size: float = 0.4,
         cube1_drop_height: float = 2.0,
         cube2_drop_height: float = 3.5,
-        youngs_modulus: float = 5.0e7,
+        youngs_modulus: float = 5.0e8,
         poisson_ratio: float = 0.3,
         density: float = 500.0,
         soft_body_thickness: float = 0.005,
@@ -74,8 +74,8 @@ class Example:
         # (``Playground.NumberSubsteps = 1``, ``SolverIterations = 8``)
         # at frame dt 1/60 so the user's intuition for Young's modulus
         # transfers from the C# experimental sim.
-        self.sim_substeps = 1
-        self.solver_iterations = 16
+        self.sim_substeps = 4
+        self.solver_iterations = 8
 
         self.youngs_modulus = float(youngs_modulus)
         self.poisson_ratio = float(poisson_ratio)
@@ -282,7 +282,7 @@ if __name__ == "__main__":
     parser.add_argument("--cube-size", type=float, default=0.4)
     parser.add_argument("--cube1-drop-height", type=float, default=2.0)
     parser.add_argument("--cube2-drop-height", type=float, default=3.5)
-    parser.add_argument("--youngs-modulus", type=float, default=1.0e6)
+    parser.add_argument("--youngs-modulus", type=float, default=1.0e8)
     parser.add_argument("--poisson-ratio", type=float, default=0.3)
     parser.add_argument("--density", type=float, default=500.0)
     parser.add_argument("--soft-body-thickness", type=float, default=0.005)

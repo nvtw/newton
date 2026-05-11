@@ -43,55 +43,80 @@ from newton._src.solvers.phoenx.constraints.contact_endpoint import (
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import effective_mass_scalar
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer, copy_state_container_zeros
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_container_zeros
 
 
 @wp.kernel(enable_backward=False)
 def _eval_velocity_at_point(
     kind: wp.int32,
-    nodes: wp.vec3i,
+    nodes: wp.vec4i,
     bary: wp.vec3f,
     bodies: BodyContainer,
     particles: ParticleContainer,
+    copy_state: CopyStateContainer,
     num_bodies: wp.int32,
+    parallel_id: wp.int32,
     contact_point: wp.vec3f,
     out: wp.array[wp.vec3f],
 ):
     out[0] = contact_endpoint_velocity_at_point(
-        kind, nodes, bary, bodies, particles, num_bodies, contact_point
+        kind, nodes, bary, bodies, particles, copy_state, num_bodies, parallel_id, contact_point
     )
 
 
 @wp.kernel(enable_backward=False)
 def _eval_inv_mass_along(
     kind: wp.int32,
-    nodes: wp.vec3i,
+    nodes: wp.vec4i,
     bary: wp.vec3f,
     bodies: BodyContainer,
     particles: ParticleContainer,
+    copy_state: CopyStateContainer,
     num_bodies: wp.int32,
+    parallel_id: wp.int32,
     contact_point: wp.vec3f,
     direction: wp.vec3f,
     out: wp.array[wp.float32],
 ):
     out[0] = contact_endpoint_inv_mass_along(
-        kind, nodes, bary, bodies, particles, num_bodies, contact_point, direction
+        kind,
+        nodes,
+        bary,
+        bodies,
+        particles,
+        copy_state,
+        num_bodies,
+        parallel_id,
+        contact_point,
+        direction,
     )
 
 
 @wp.kernel(enable_backward=False)
 def _eval_apply_impulse(
     kind: wp.int32,
-    nodes: wp.vec3i,
+    nodes: wp.vec4i,
     bary: wp.vec3f,
     bodies: BodyContainer,
     particles: ParticleContainer,
+    copy_state: CopyStateContainer,
     num_bodies: wp.int32,
+    parallel_id: wp.int32,
     contact_point: wp.vec3f,
     impulse: wp.vec3f,
 ):
     contact_endpoint_apply_impulse(
-        kind, nodes, bary, bodies, particles, num_bodies, contact_point, impulse
+        kind,
+        nodes,
+        bary,
+        bodies,
+        particles,
+        copy_state,
+        num_bodies,
+        parallel_id,
+        contact_point,
+        impulse,
     )
 
 
@@ -157,6 +182,17 @@ class TestContactEndpointHelpers(unittest.TestCase):
         self.particles.velocity.assign(self.particle_vel)
         self.particles.inverse_mass.assign(self.particle_inv_mass)
 
+        # Sentinel ``CopyStateContainer`` -- mass splitting disabled, so
+        # every endpoint helper falls through to direct bodies / particles
+        # reads/writes (``inv_factor == 1``, ``slot == -1``).
+        self.copy_state = copy_state_container_zeros(capacity=1, num_nodes=1, device=self.device)
+
+    @staticmethod
+    def _nodes4(nodes):
+        """Pad a 1/2/3-element node tuple to a ``wp.vec4i`` with ``-1`` sentinels."""
+        padded = list(nodes) + [-1] * (4 - len(nodes))
+        return wp.vec4i(*padded[:4])
+
     def _eval_v_at_p(self, kind, nodes, bary, contact_point):
         out = wp.zeros(1, dtype=wp.vec3f, device=self.device)
         wp.launch(
@@ -164,11 +200,13 @@ class TestContactEndpointHelpers(unittest.TestCase):
             dim=1,
             inputs=[
                 wp.int32(kind),
-                wp.vec3i(*nodes),
+                self._nodes4(nodes),
                 wp.vec3f(*bary),
                 self.bodies,
                 self.particles,
+                self.copy_state,
                 wp.int32(self.num_bodies),
+                wp.int32(0),
                 wp.vec3f(*contact_point),
             ],
             outputs=[out],
@@ -183,11 +221,13 @@ class TestContactEndpointHelpers(unittest.TestCase):
             dim=1,
             inputs=[
                 wp.int32(kind),
-                wp.vec3i(*nodes),
+                self._nodes4(nodes),
                 wp.vec3f(*bary),
                 self.bodies,
                 self.particles,
+                self.copy_state,
                 wp.int32(self.num_bodies),
+                wp.int32(0),
                 wp.vec3f(*contact_point),
                 wp.vec3f(*direction),
             ],
@@ -305,11 +345,13 @@ class TestContactEndpointHelpers(unittest.TestCase):
             dim=1,
             inputs=[
                 wp.int32(SHAPE_ENDPOINT_KIND_RIGID),
-                wp.vec3i(b, -1, -1),
+                self._nodes4((b,)),
                 wp.vec3f(0.0, 0.0, 0.0),
                 self.bodies,
                 self.particles,
+                self.copy_state,
                 wp.int32(self.num_bodies),
+                wp.int32(0),
                 wp.vec3f(*p.tolist()),
                 wp.vec3f(*J.tolist()),
             ],
@@ -334,11 +376,13 @@ class TestContactEndpointHelpers(unittest.TestCase):
             dim=1,
             inputs=[
                 wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE),
-                wp.vec3i(*nodes),
+                self._nodes4(nodes),
                 wp.vec3f(*bary.tolist()),
                 self.bodies,
                 self.particles,
+                self.copy_state,
                 wp.int32(self.num_bodies),
+                wp.int32(0),
                 wp.vec3f(0.0, 0.0, 0.0),  # contact_point unused for cloth
                 wp.vec3f(*J.tolist()),
             ],

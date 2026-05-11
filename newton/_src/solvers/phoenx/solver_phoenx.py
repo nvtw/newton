@@ -2174,22 +2174,42 @@ class PhoenXWorld:
         )
 
     def _singleworld_head_plus_tail_sweep(self, head_kernel, tail_kernel, idt: wp.float32) -> None:
-        """Persistent-grid head + fused single-block tail. Head's capture_while
-        gated by :attr:`_head_active`; tail's by the colour cursor."""
-        wp.launch(_reset_head_active_kernel, dim=1, inputs=[self._head_active], device=self.device)
+        """Persistent-grid head + fused single-block tail.
 
-        wp.capture_while(
-            self._head_active,
-            self._capture_singleworld_sweep,
-            kernel=head_kernel,
-            idt=idt,
-        )
-        wp.capture_while(
-            self._partitioner.color_cursor,
-            self._capture_singleworld_tail_sweep,
-            kernel=tail_kernel,
-            idt=idt,
-        )
+        Outer ``wp.capture_while`` on ``color_cursor`` so head and tail
+        alternate until every colour is drained. Each round: re-arm
+        ``head_active``, run the head sweep (drains large colours;
+        bails when ``count <= fuse_threshold``), then run a single
+        tail launch (the tail kernel's internal ``while cursor > 0``
+        walks every remaining small colour). The tail bails back when
+        a colour grows past ``fuse_threshold`` (a sweep-time stack
+        change can flip the size of an upcoming colour), so the outer
+        loop re-arms ``head_active`` and lets head pick that colour
+        up; with the fused-tail overflow fix the tail decrements past
+        the mass-splitting overflow column the same way it decrements
+        any small column, so neither side can leave ``color_cursor``
+        stuck without progress.
+
+        The previous version used two sequential ``wp.capture_while``
+        (head on ``head_active``, then tail on ``color_cursor``) and
+        deadlocked whenever the tail bailed without decrementing the
+        cursor: capture re-launched the tail, tail bailed again,
+        ping-pong forever. Reproducer:
+        ``example_cloth_hanging`` with mass splitting enabled, on the
+        first frame where the cube contacts the cloth.
+        """
+
+        def _round() -> None:
+            wp.launch(_reset_head_active_kernel, dim=1, inputs=[self._head_active], device=self.device)
+            wp.capture_while(
+                self._head_active,
+                self._capture_singleworld_sweep,
+                kernel=head_kernel,
+                idt=idt,
+            )
+            self._capture_singleworld_tail_sweep(kernel=tail_kernel, idt=idt)
+
+        wp.capture_while(self._partitioner.color_cursor, _round)
 
     def _solve_main_singleworld(self) -> None:
         """Single-world prepare + main PGS iterate. Each sweep is head (large

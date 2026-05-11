@@ -134,6 +134,43 @@ def _flip_joint(stage: Usd.Stage, joint_path: str) -> None:
     _swap_attr_pair(joint, "physics:localRot0", "physics:localRot1")
 
 
+# ---------------------------------------------------------------------------
+# Graph-captured animation pipeline. The per-frame target update used to be
+# host-side (numpy fancy-index + ``assign``), which broke CUDA graph capture.
+# These two kernels move the update onto the GPU so the entire per-frame
+# pipeline can be captured into a single graph and replayed without any
+# Python-side bookkeeping.
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel(enable_backward=False)
+def _scatter_animation_targets(
+    sim_time: wp.array[wp.float32],
+    animation_speed: wp.float32,
+    animation_fps: wp.float32,
+    n_frames: wp.int32,
+    animation_data: wp.array2d[wp.float32],
+    animation_indices: wp.array2d[wp.int32],
+    joint_target_pos: wp.array[wp.float32],
+):
+    """Scatter the current animation frame's per-channel target into
+    ``joint_target_pos``. ``dim=(world_count, n_channels)``."""
+    world_idx, channel = wp.tid()
+    frame = wp.int32(sim_time[0] * animation_speed * animation_fps)
+    if frame >= n_frames:
+        frame = n_frames - 1
+    if frame < 0:
+        frame = 0
+    dof_idx = animation_indices[world_idx, channel]
+    joint_target_pos[dof_idx] = animation_data[frame, channel]
+
+
+@wp.kernel(enable_backward=False)
+def _advance_sim_time(sim_time: wp.array[wp.float32], dt: wp.float32):
+    """Increment the GPU-resident frame counter by ``dt``. ``dim=1``."""
+    sim_time[0] = sim_time[0] + dt
+
+
 class Example:
     def __init__(self, viewer, args):
         # ``--fps`` controls how often we enter the per-frame pipeline:

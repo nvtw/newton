@@ -308,7 +308,9 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
                     bary0,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p0_world,
                     n,
                 ) + contact_endpoint_inv_mass_along(
@@ -317,7 +319,9 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
                     bary1,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p1_world,
                     n,
                 )
@@ -327,7 +331,9 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
                     bary0,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p0_world,
                     t1_dir,
                 ) + contact_endpoint_inv_mass_along(
@@ -336,7 +342,9 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
                     bary1,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p1_world,
                     t1_dir,
                 )
@@ -346,7 +354,9 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
                     bary0,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p0_world,
                     t2_dir,
                 ) + contact_endpoint_inv_mass_along(
@@ -355,7 +365,9 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
                     bary1,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p1_world,
                     t2_dir,
                 )
@@ -485,7 +497,9 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
                     bary0,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p0_world,
                     -imp,
                 )
@@ -495,7 +509,9 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
                     bary1,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p1_world,
                     imp,
                 )
@@ -634,7 +650,9 @@ def _make_contact_iterate_at(cloth_support: bool):
                     bary0,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p0_world,
                 )
                 v1_at_p = contact_endpoint_velocity_at_point(
@@ -643,7 +661,9 @@ def _make_contact_iterate_at(cloth_support: bool):
                     bary1,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p1_world,
                 )
                 vel_rel = v1_at_p - v0_at_p
@@ -732,7 +752,9 @@ def _make_contact_iterate_at(cloth_support: bool):
                     bary0,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p0_world,
                     -imp,
                 )
@@ -742,7 +764,9 @@ def _make_contact_iterate_at(cloth_support: bool):
                     bary1,
                     bodies,
                     particles,
+                    copy_state,
                     num_bodies,
+                    parallel_id,
                     p1_world,
                     imp,
                 )
