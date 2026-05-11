@@ -39,3 +39,5 @@ newton.utils
    run_benchmark
    solidify_mesh
    string_to_warp
+   validate_tet_mesh
+   validate_triangle_mesh
