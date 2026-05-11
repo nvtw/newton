@@ -26,6 +26,7 @@ __all__ = [
     "CONSTRAINT_TYPE_CONTACT",
     "CONSTRAINT_TYPE_INVALID",
     "CONSTRAINT_TYPE_OFFSET",
+    "CONSTRAINT_TYPE_SOFT_TETRAHEDRON",
     "DEFAULT_DAMPING_RATIO",
     "DEFAULT_HERTZ_ANGULAR",
     "DEFAULT_HERTZ_CONTACT",
@@ -78,6 +79,9 @@ CONSTRAINT_TYPE_CONTACT = wp.constant(wp.int32(9))
 #: XPBD cloth triangle (FemTriPBD area + shear rows). Endpoints body1/body2/body3
 #: are particle indices. See :mod:`constraint_cloth_triangle`.
 CONSTRAINT_TYPE_CLOTH_TRIANGLE = wp.constant(wp.int32(10))
+#: XPBD soft-body tetrahedron (FemTetPBD corotational shear row). Endpoints
+#: body1..body4 are particle indices. See :mod:`constraint_soft_tetrahedron`.
+CONSTRAINT_TYPE_SOFT_TETRAHEDRON = wp.constant(wp.int32(11))
 
 CONSTRAINT_TYPE_OFFSET = wp.constant(wp.int32(0))
 CONSTRAINT_BODY1_OFFSET = wp.constant(wp.int32(1))

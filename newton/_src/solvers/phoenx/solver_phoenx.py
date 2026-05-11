@@ -42,6 +42,10 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     CLOTH_TRIANGLE_DWORDS,
 )
+from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
+    SOFT_TET_DWORDS,
+    soft_tet_init_rows_kernel,
+)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     CONTACT_DWORDS,
     ContactColumnContainer,
@@ -263,6 +267,7 @@ class PhoenXWorld:
         num_joints: int = 0,
         num_particles: int = 0,
         num_cloth_triangles: int = 0,
+        num_soft_tetrahedra: int = 0,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         num_worlds: int = 1,
@@ -360,6 +365,9 @@ class PhoenXWorld:
         self.num_cloth_triangles: int = int(num_cloth_triangles)
         if self.num_cloth_triangles < 0:
             raise ValueError(f"num_cloth_triangles must be >= 0 (got {self.num_cloth_triangles})")
+        self.num_soft_tetrahedra: int = int(num_soft_tetrahedra)
+        if self.num_soft_tetrahedra < 0:
+            raise ValueError(f"num_soft_tetrahedra must be >= 0 (got {self.num_soft_tetrahedra})")
         # Lazily allocate the particle store only when cloth is present;
         # rigid-only scenes pay zero memory for particles.
         self.particles: ParticleContainer | None = None
@@ -462,10 +470,15 @@ class PhoenXWorld:
         self.substep_dt: float = 0.0
 
         # cid layout in the shared :class:`ConstraintContainer`:
-        #   [0, num_joints):                                     joints
-        #   [num_joints, num_joints + num_cloth_triangles):      cloth tris
-        #   [num_joints + num_cloth_triangles, ...):             contacts
-        self._constraint_capacity: int = max(1, self.num_joints + self.num_cloth_triangles + self.max_contact_columns)
+        #   [0, num_joints):                                                    joints
+        #   [num_joints, num_joints + num_cloth_triangles):                     cloth tris
+        #   [num_joints + num_cloth_triangles,
+        #    num_joints + num_cloth_triangles + num_soft_tetrahedra):           soft tets
+        #   [num_joints + num_cloth_triangles + num_soft_tetrahedra, ...):      contacts
+        self._constraint_capacity: int = max(
+            1,
+            self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra + self.max_contact_columns,
+        )
 
         # Persistent grid fixed at construction (graph-capture stability).
         if max_thread_blocks is not None and int(max_thread_blocks) < 1:
@@ -487,11 +500,14 @@ class PhoenXWorld:
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
             self._constraint_capacity, dtype=ElementInteractionData, device=self.device
         )
-        # Joints + cloth tris are the only active cids until the first
-        # contact ingest (cloth tris are populated immediately by
-        # :meth:`populate_cloth_triangles_from_model`).
+        # Joints + cloth tris + soft tets are the only active cids until
+        # the first contact ingest (cloth tris are populated by
+        # :meth:`populate_cloth_triangles_from_model`; soft tets by
+        # :meth:`populate_soft_tetrahedra_from_model`).
         self._num_active_constraints: wp.array[int] = wp.array(
-            [self.num_joints + self.num_cloth_triangles], dtype=wp.int32, device=self.device
+            [self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra],
+            dtype=wp.int32,
+            device=self.device,
         )
         # Mass splitting config. When ``True``, the partitioner caps at
         # ``max_colored_partitions`` colours and the overflow bucket is
@@ -636,8 +652,12 @@ class PhoenXWorld:
 
     def _assert_invariants(self) -> None:
         """Validate per-step buffer shapes against the documented schema."""
-        expected_constraint_dwords = self.required_constraint_dwords(self.num_joints, self.num_cloth_triangles)
-        expected_constraint_cols = max(1, int(self.num_joints) + int(self.num_cloth_triangles))
+        expected_constraint_dwords = self.required_constraint_dwords(
+            self.num_joints, self.num_cloth_triangles, self.num_soft_tetrahedra
+        )
+        expected_constraint_cols = max(
+            1, int(self.num_joints) + int(self.num_cloth_triangles) + int(self.num_soft_tetrahedra)
+        )
         actual_constraint_shape = self.constraints.data.shape
         assert actual_constraint_shape == (expected_constraint_dwords, expected_constraint_cols), (
             f"ConstraintContainer.data has shape {actual_constraint_shape}, expected "
@@ -744,13 +764,19 @@ class PhoenXWorld:
     # Joint initialisation.
 
     @staticmethod
-    def required_constraint_dwords(num_joints: int, num_cloth_triangles: int = 0) -> int:
-        """Dword width = max(ADBS, CONTACT, CLOTH_TRIANGLE) over the active types."""
+    def required_constraint_dwords(
+        num_joints: int,
+        num_cloth_triangles: int = 0,
+        num_soft_tetrahedra: int = 0,
+    ) -> int:
+        """Dword width = max(ADBS, CONTACT, CLOTH_TRIANGLE, SOFT_TET) over the active types."""
         widths = [int(CONTACT_DWORDS)]
         if int(num_joints) > 0:
             widths.append(int(ADBS_DWORDS))
         if int(num_cloth_triangles) > 0:
             widths.append(int(CLOTH_TRIANGLE_DWORDS))
+        if int(num_soft_tetrahedra) > 0:
+            widths.append(int(SOFT_TET_DWORDS))
         return max(widths)
 
     @staticmethod
@@ -758,16 +784,21 @@ class PhoenXWorld:
         num_joints: int,
         device: wp.context.Devicelike = None,
         num_cloth_triangles: int = 0,
+        num_soft_tetrahedra: int = 0,
     ) -> ConstraintContainer:
         """Factory for a correctly-sized :class:`ConstraintContainer`.
 
-        Joint cids occupy ``[0, num_joints)``; cloth-triangle cids
-        occupy ``[num_joints, num_joints + num_cloth_triangles)``.
+        Joint cids occupy ``[0, num_joints)``; cloth-triangle cids occupy
+        ``[num_joints, num_joints + num_cloth_triangles)``; soft-tet cids
+        occupy ``[num_joints + num_cloth_triangles,
+        num_joints + num_cloth_triangles + num_soft_tetrahedra)``.
         """
-        cap = max(1, int(num_joints) + int(num_cloth_triangles))
+        cap = max(1, int(num_joints) + int(num_cloth_triangles) + int(num_soft_tetrahedra))
         return constraint_container_zeros(
             num_constraints=cap,
-            num_dwords=PhoenXWorld.required_constraint_dwords(num_joints, num_cloth_triangles),
+            num_dwords=PhoenXWorld.required_constraint_dwords(
+                num_joints, num_cloth_triangles, num_soft_tetrahedra
+            ),
             device=device,
         )
 
@@ -970,7 +1001,75 @@ class PhoenXWorld:
         )
         # Bump the active-constraint count so the partitioner sees the
         # cloth-triangle suffix from the very first step.
-        self._num_active_constraints.fill_(self.num_joints + self.num_cloth_triangles)
+        self._num_active_constraints.fill_(
+            self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra
+        )
+
+    def populate_soft_tetrahedra_from_model(
+        self,
+        model,
+        *,
+        beta_lambda: float = 0.1,
+        beta_mu: float = 0.1,
+    ) -> None:
+        """Stamp soft-tetrahedron constraint rows from a Newton :class:`Model`.
+
+        Reads ``model.particle_q`` / ``particle_qd`` / ``particle_inv_mass``
+        / ``tet_indices`` / ``tet_poses`` / ``tet_materials``. Soft-tet cids
+        occupy ``[num_joints + num_cloth_triangles, num_joints +
+        num_cloth_triangles + num_soft_tetrahedra)`` in the
+        :class:`ConstraintContainer`.
+
+        ``tet_poses[t]`` is the pre-inverted rest-pose 3x3 stamped by
+        :meth:`newton.ModelBuilder.add_tetrahedron`. ``tet_materials[t]``
+        is ``(k_mu, k_lambda, k_damp)`` in SI Pa / Pa / dimensionless.
+
+        Idempotent across multiple calls. May be combined with
+        :meth:`populate_cloth_triangles_from_model` in the same scene;
+        each populator stamps its own cid range and bumps
+        ``_num_active_constraints`` to the joint + cloth + soft-tet sum.
+        """
+        if self.num_soft_tetrahedra == 0:
+            return
+        if self.particles is None:
+            raise RuntimeError("populate_soft_tetrahedra_from_model requires num_particles > 0")
+        model_particle_count = int(model.particle_count)
+        model_tet_count = int(model.tet_count)
+        if model_particle_count != self.num_particles:
+            raise ValueError(
+                f"populate_soft_tetrahedra_from_model: model.particle_count "
+                f"({model_particle_count}) != world.num_particles ({self.num_particles})"
+            )
+        if model_tet_count != self.num_soft_tetrahedra:
+            raise ValueError(
+                f"populate_soft_tetrahedra_from_model: model.tet_count "
+                f"({model_tet_count}) != world.num_soft_tetrahedra ({self.num_soft_tetrahedra})"
+            )
+        # Only re-copy particle SoA if cloth populate hasn't already done so;
+        # both populators read the same model.particle_q so the result is
+        # identical. Keeping the copy idempotent simplifies the call order.
+        wp.copy(self.particles.position, model.particle_q)
+        wp.copy(self.particles.velocity, model.particle_qd)
+        wp.copy(self.particles.inverse_mass, model.particle_inv_mass)
+        wp.launch(
+            soft_tet_init_rows_kernel,
+            dim=self.num_soft_tetrahedra,
+            inputs=[
+                self.constraints,
+                wp.int32(self.num_joints + self.num_cloth_triangles),  # cid_offset
+                wp.int32(self.num_bodies),
+                model.tet_indices,
+                model.particle_q,
+                model.tet_poses,
+                model.tet_materials,
+                wp.float32(beta_lambda),
+                wp.float32(beta_mu),
+            ],
+            device=self.device,
+        )
+        self._num_active_constraints.fill_(
+            self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra
+        )
 
     def setup_cloth_collision_pipeline(
         self,
@@ -1255,10 +1354,10 @@ class PhoenXWorld:
 
         self._ingest_and_warmstart_contacts(contacts, shape_body)
         if self._ingest_scratch is not None:
-            # Contacts begin after the joint + cloth-tri blocks in the
-            # cid space.
+            # Contacts begin after the joint + cloth-tri + soft-tet
+            # blocks in the cid space.
             self._partitioner.set_costs_from_contacts(
-                self.num_joints + self.num_cloth_triangles,
+                self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra,
                 self._ingest_scratch.num_contact_columns,
                 self._contact_cols,
             )
@@ -1380,7 +1479,9 @@ class PhoenXWorld:
         """Translate Newton ``Contacts`` -> contact columns. Swap prev/current
         per-cid state, ingest -> warm-start -> forward-map stamp, fuse counts."""
         if contacts is None or self.max_contact_columns == 0 or self._ingest_scratch is None:
-            self._num_active_constraints.fill_(self.num_joints + self.num_cloth_triangles)
+            self._num_active_constraints.fill_(
+                self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra
+            )
             self._contact_views = None
             return
 
@@ -1541,7 +1642,7 @@ class PhoenXWorld:
 
         stamp_forward_contact_map(
             rigid_contact_max=self.rigid_contact_max,
-            cid_base=self.num_joints + self.num_cloth_triangles,
+            cid_base=self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra,
             scratch=self._ingest_scratch,
             cid_of_contact=self._cid_of_contact_cur,
             device=self.device,
@@ -1550,13 +1651,13 @@ class PhoenXWorld:
         self._sync_num_active_constraints()
 
     def _sync_num_active_constraints(self) -> None:
-        """Fuse joint+cloth+contact column count into _num_active_constraints on-device."""
+        """Fuse joint+cloth+soft-tet+contact column count into _num_active_constraints on-device."""
         wp.launch(
             _sync_num_active_constraints_kernel,
             dim=1,
             inputs=[
                 self._ingest_scratch.num_contact_columns,
-                wp.int32(self.num_joints + self.num_cloth_triangles),
+                wp.int32(self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra),
             ],
             outputs=[self._num_active_constraints],
             device=self.device,
@@ -1577,6 +1678,7 @@ class PhoenXWorld:
                 self._num_active_constraints,
                 wp.int32(self.num_joints),
                 wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_soft_tetrahedra),
                 wp.int32(self.num_bodies),
                 self._elements,
             ],
@@ -1897,6 +1999,7 @@ class PhoenXWorld:
                     contact_views,
                     wp.int32(self.num_joints),
                     wp.int32(self.num_cloth_triangles),
+                    wp.int32(self.num_soft_tetrahedra),
                     wp.int32(self.num_bodies),
                     wp.int32(self._singleworld_total_threads),
                     wp.int32(self._fuse_threshold),
@@ -1933,6 +2036,7 @@ class PhoenXWorld:
                 contact_views,
                 wp.int32(self.num_joints),
                 wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_soft_tetrahedra),
                 wp.int32(self.num_bodies),
                 wp.int32(self._fuse_threshold),
                 self._copy_state,
@@ -2014,12 +2118,14 @@ class PhoenXWorld:
 
         * ``revolute_only``: every joint is revolute -> skip the
           ``joint_mode`` branch in the iterate hot loop.
-        * ``cloth_support``: ``num_cloth_triangles > 0`` -> include the
-          cloth-triangle dispatch in the type-tag if/elif. The
+        * ``cloth_support``: ``num_cloth_triangles > 0`` or
+          ``num_soft_tetrahedra > 0`` -> include the cloth-triangle
+          *and* soft-tetrahedron dispatch in the type-tag if/elif. The
           rigid-only variant is byte-identical to the pre-cloth
-          implementation so rigid scenes pay zero cost.
+          implementation so rigid scenes pay zero cost; soft-tets reuse
+          the same compile-time gate.
         """
-        cloth_on = self.num_cloth_triangles > 0
+        cloth_on = self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0
         if self._use_revolute_specialization:
             if cloth_on:
                 return (
