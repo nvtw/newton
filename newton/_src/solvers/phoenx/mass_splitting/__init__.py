@@ -48,6 +48,7 @@ from newton._src.solvers.phoenx.mass_splitting.interaction_graph import (
     InteractionGraphScratch,
     build_interaction_graph,
     interaction_graph_scratch_zeros,
+    record_all_interactions_kernel,
 )
 from newton._src.solvers.phoenx.mass_splitting.kernels import (
     launch_average_and_broadcast,
@@ -69,6 +70,7 @@ __all__ = [
     "read_orientation_unified",
     "read_position_unified",
     "read_velocity_unified",
+    "record_all_interactions_kernel",
     "write_angular_velocity_unified",
     "write_orientation_unified",
     "write_position_unified",

@@ -51,6 +51,11 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
+    MAX_BODIES,
+    ElementInteractionData,
+    element_interaction_data_get,
+)
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 
 __all__ = [
@@ -58,6 +63,7 @@ __all__ = [
     "build_interaction_graph",
     "emit_pair",
     "interaction_graph_scratch_zeros",
+    "record_all_interactions_kernel",
 ]
 
 
@@ -163,6 +169,54 @@ def emit_pair(
     slot = wp.atomic_add(scratch.num_pairs, 0, wp.int32(1))
     if slot < cap:
         scratch.packed_keys[slot] = _pack_key(node_id, partition_key)
+
+
+@wp.kernel(enable_backward=False)
+def record_all_interactions_kernel(
+    elements: wp.array[ElementInteractionData],
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    interaction_id_to_partition: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
+    scratch: InteractionGraphScratch,
+):
+    """Per-step emit: walk the active CSR slots and stamp
+    ``(node_id, partition_key)`` pairs into ``scratch.packed_keys``.
+
+    Direct port of C# ``PartitioningKernels.RecordAllInteractionsKernel``
+    (``CudaKernels/MassSplitting/PartitioningKernels.cs:618``):
+
+    * Slot ``t`` lives in colour
+      ``interaction_id_to_partition[element_ids_by_color[t]]``.
+    * If colour ``< K`` (a regular MIS bucket): ``partition_key = 0``
+      so every body in any regular bucket shares one copy slot.
+    * If colour ``== K`` (overflow): ``partition_key = t -
+      color_starts[K]`` — the slot's position within the overflow
+      slice. ``batch_size = 1`` (every overflow slot is its own
+      partition copy). C# allowed ``batch_size > 1`` to group
+      consecutive slots; we ship 1 for now to keep the API surface
+      small.
+
+    One thread per CSR slot in ``[0, num_active_constraints)``. Each
+    thread emits up to ``MAX_BODIES`` entries via :func:`emit_pair`
+    (which atomic-adds the emit counter and drops past capacity).
+    """
+    tid = wp.tid()
+    if tid >= num_active_constraints[0]:
+        return
+    eid = element_ids_by_color[tid]
+    color = interaction_id_to_partition[eid]
+    partition_key = wp.int32(0)
+    if color >= max_colored_partitions:
+        # Overflow slice. batch_size = 1: every slot is its own partition.
+        partition_key = tid - color_starts[max_colored_partitions]
+    el = elements[eid]
+    for j in range(MAX_BODIES):
+        v = element_interaction_data_get(el, j)
+        if v < wp.int32(0):
+            break
+        emit_pair(scratch, v, partition_key)
 
 
 # -----------------------------------------------------------------------------

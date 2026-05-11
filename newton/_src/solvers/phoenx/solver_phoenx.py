@@ -82,8 +82,10 @@ from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_lengt
 from newton._src.solvers.phoenx.mass_splitting import (
     CopyStateContainer,
     InteractionGraphScratch,
+    build_interaction_graph,
     copy_state_container_zeros,
     interaction_graph_scratch_zeros,
+    record_all_interactions_kernel,
 )
 from newton._src.solvers.phoenx.materials import MaterialData
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_container_zeros
@@ -1242,6 +1244,14 @@ class PhoenXWorld:
             if self._tpw_auto and self.step_layout != "single_world":
                 self._pick_tpw()
 
+            # Mass-splitting interaction graph rebuild: maps every
+            # (body, partition_key) tuple touched by the active CSR
+            # into a copy-state slot. Single-world only for now —
+            # multi-world's per-world CSR layout differs and is the
+            # next sub-step.
+            if self.mass_splitting_enabled and self.step_layout == "single_world":
+                self._rebuild_mass_splitting_graph()
+
         self._kinematic_prepare_step()
 
         # Substep order: bias-on solve -> integrate -> bias-off relax. Reversing
@@ -1502,6 +1512,38 @@ class PhoenXWorld:
             ],
             device=self.device,
         )
+
+    def _rebuild_mass_splitting_graph(self) -> None:
+        """Per-step emit + build of the (body, partition_key) interaction
+        graph used by the copy-state read/write helpers.
+
+        Reads the partitioner's current CSR layout
+        (``element_ids_by_color`` / ``color_starts`` /
+        ``interaction_id_to_partition``) and writes
+        :attr:`_copy_state`'s ``section_end`` / ``partition_list`` /
+        ``highest_index_in_use`` arrays.
+
+        Single-world only. Graph-capture safe.
+        """
+        # The emit kernel atomically appends one entry per non-static
+        # endpoint; the previous step's build call has already left
+        # ``scratch.num_pairs`` at 0 so the launch picks up clean.
+        wp.launch(
+            record_all_interactions_kernel,
+            dim=self._constraint_capacity,
+            inputs=[
+                self._elements,
+                self._partitioner.element_ids_by_color,
+                self._partitioner.color_starts,
+                self._num_active_constraints,
+                self._partitioner.interaction_id_to_partition,
+                wp.int32(int(self.max_colored_partitions)),
+                self._interaction_graph_scratch,
+            ],
+            device=self.device,
+        )
+        # Sort + dedup + sections; writes back into self._copy_state.
+        build_interaction_graph(self._interaction_graph_scratch, self._copy_state)
 
     def _maybe_fallback_from_per_world_greedy_overflow(self, nw: int) -> None:
         """Multi-world analogue of
