@@ -654,9 +654,13 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                 cid = world_element_ids_by_color[start + base]
                 if cid < num_joints:
                     if wp.static(revolute_only):
-                        revolute_prepare_for_iteration(constraints, cid, bodies, idt)
+                        revolute_prepare_for_iteration(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
                     else:
-                        actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+                        actuated_double_ball_socket_prepare_for_iteration(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
                 else:
                     contact_prepare_for_iteration(
                         contact_cols,
@@ -692,9 +696,13 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                     cid = world_element_ids_by_color[start + base]
                     if cid < num_joints:
                         if wp.static(revolute_only):
-                            revolute_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
+                            revolute_iterate_multi(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt, True, inner_sweeps
+                            )
                         else:
-                            actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, True, inner_sweeps)
+                            actuated_double_ball_socket_iterate_multi(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt, True, inner_sweeps
+                            )
                     else:
                         contact_iterate_multi(
                             contact_cols,
@@ -766,9 +774,13 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                 cid = world_element_ids_by_color[start + base]
                 if cid < num_joints:
                     if wp.static(revolute_only):
-                        revolute_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
+                        revolute_iterate_multi(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt, False, num_iterations
+                        )
                     else:
-                        actuated_double_ball_socket_iterate_multi(constraints, cid, bodies, idt, False, num_iterations)
+                        actuated_double_ball_socket_iterate_multi(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt, False, num_iterations
+                        )
                 else:
                     contact_iterate_multi(
                         contact_cols,
@@ -1471,22 +1483,34 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                     if wp.static(cloth_support):
                         if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
                             if wp.static(is_prepare):
-                                cloth_triangle_prepare_for_iteration_at(constraints, cid, particles, num_bodies)
+                                cloth_triangle_prepare_for_iteration_at(
+                                    constraints, cid, particles, copy_state, num_bodies, parallel_id
+                                )
                             else:
-                                cloth_triangle_iterate_at(constraints, cid, particles, num_bodies, idt)
+                                cloth_triangle_iterate_at(
+                                    constraints, cid, particles, copy_state, num_bodies, parallel_id, idt
+                                )
                             dispatched = True
                 if not dispatched:
                     # Joint (ADBS or revolute specialisation).
                     if wp.static(is_prepare):
                         if wp.static(revolute_only):
-                            revolute_prepare_for_iteration(constraints, cid, bodies, idt)
+                            revolute_prepare_for_iteration(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                            )
                         else:
-                            actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+                            actuated_double_ball_socket_prepare_for_iteration(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                            )
                     else:
                         if wp.static(revolute_only):
-                            revolute_iterate(constraints, cid, bodies, idt, use_bias)
+                            revolute_iterate(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
+                            )
                         else:
-                            actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
+                            actuated_double_ball_socket_iterate(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
+                            )
 
         if tid == 0:
             color_cursor[0] = cursor - 1
@@ -1610,21 +1634,33 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                     if wp.static(cloth_support):
                         if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
                             if wp.static(is_prepare):
-                                cloth_triangle_prepare_for_iteration_at(constraints, cid, particles, num_bodies)
+                                cloth_triangle_prepare_for_iteration_at(
+                                    constraints, cid, particles, copy_state, num_bodies, parallel_id
+                                )
                             else:
-                                cloth_triangle_iterate_at(constraints, cid, particles, num_bodies, idt)
+                                cloth_triangle_iterate_at(
+                                    constraints, cid, particles, copy_state, num_bodies, parallel_id, idt
+                                )
                             dispatched = True
                     if not dispatched:
                         if wp.static(is_prepare):
                             if wp.static(revolute_only):
-                                revolute_prepare_for_iteration(constraints, cid, bodies, idt)
+                                revolute_prepare_for_iteration(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
                             else:
-                                actuated_double_ball_socket_prepare_for_iteration(constraints, cid, bodies, idt)
+                                actuated_double_ball_socket_prepare_for_iteration(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
                         else:
                             if wp.static(revolute_only):
-                                revolute_iterate(constraints, cid, bodies, idt, use_bias)
+                                revolute_iterate(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
+                                )
                             else:
-                                actuated_double_ball_socket_iterate(constraints, cid, bodies, idt, use_bias)
+                                actuated_double_ball_socket_iterate(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
+                                )
             _sync_threads()
             cursor = cursor - 1
         if lane == 0:

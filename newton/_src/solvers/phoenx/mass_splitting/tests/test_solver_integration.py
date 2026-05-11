@@ -398,6 +398,138 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         # Sanity vs disabled.
         self.assertAlmostEqual(float(pos1[1][2]), float(pos0[1][2]), delta=0.05)
 
+    def test_pendulum_joint_matches_disabled(self):
+        # Two-body pendulum: parent body welded to world via a fixed
+        # joint, child body hanging from a revolute joint. With
+        # mass_splitting=True (K=12, no overflow), the joint iterate
+        # routes through the slot helpers with ``inv_factor=1``, so the
+        # math is identity vs ``mass_splitting=False`` (modulo float
+        # ordering). Covers the joint refactor end-to-end.
+        device = wp.get_preferred_device()
+        import newton  # noqa: PLC0415
+
+        def _build(mass_splitting: bool):
+            mb = newton.ModelBuilder()
+            mb.add_ground_plane()
+            hx = hy = 0.1
+            hz = 0.4
+            parent = mb.add_link(xform=wp.transform(p=wp.vec3(0.0, 0.0, 2.0), q=wp.quat_identity()))
+            child = mb.add_link(
+                xform=wp.transform(p=wp.vec3(0.0, 0.0, 2.0 - 2.0 * hz), q=wp.quat_identity()),
+                label="pend_child",
+            )
+            mb.add_shape_box(parent, hx=hx, hy=hy, hz=hz)
+            mb.add_shape_box(child, hx=hx, hy=hy, hz=hz)
+            j_fix = mb.add_joint_fixed(
+                parent=-1,
+                child=parent,
+                parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, 2.0), q=wp.quat_identity()),
+                child_xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
+            )
+            j_rev = mb.add_joint_revolute(
+                parent=parent,
+                child=child,
+                axis=wp.vec3(1.0, 0.0, 0.0),
+                parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, -hz), q=wp.quat_identity()),
+                child_xform=wp.transform(p=wp.vec3(0.0, 0.0, hz), q=wp.quat_identity()),
+            )
+            mb.add_articulation([j_fix, j_rev])
+            mb.joint_q[-1] = 0.3
+            mb.color()
+            model = mb.finalize(device=device)
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                substeps=4,
+                solver_iterations=8,
+                velocity_iterations=1,
+                step_layout="single_world",
+                mass_splitting=mass_splitting,
+                max_colored_partitions=12,
+            )
+            return model, solver
+
+        model0, solver0 = _build(mass_splitting=False)
+        model1, solver1 = _build(mass_splitting=True)
+        state0 = model0.state()
+        state1 = model1.state()
+        contacts0 = newton.CollisionPipeline(model0).contacts() if False else None
+        contacts1 = newton.CollisionPipeline(model1).contacts() if False else None
+        for _ in range(30):
+            solver0.step(state0, state0, control=None, contacts=contacts0, dt=1.0 / 60.0)
+            solver1.step(state1, state1, control=None, contacts=contacts1, dt=1.0 / 60.0)
+        wp.synchronize_device(device)
+        q0 = state0.body_q.numpy()
+        q1 = state1.body_q.numpy()
+        np.testing.assert_allclose(q1, q0, rtol=1e-3, atol=1e-3)
+
+    def test_cloth_grid_matches_disabled(self):
+        # Small cloth grid falling onto a static box. With
+        # mass_splitting=True (K=12, no overflow) every cloth-triangle
+        # endpoint has exactly one slot so ``inv_factor=1`` and the
+        # prepare-time mass scaling is identity. End-state particle
+        # positions must match the ``mass_splitting=False`` reference.
+        device = wp.get_preferred_device()
+        import newton  # noqa: PLC0415
+        from newton._src.solvers.phoenx.body import body_container_zeros  # noqa: PLC0415
+        from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (  # noqa: PLC0415
+            cloth_lame_from_youngs_poisson_plane_stress,
+        )
+
+        def _build(mass_splitting: bool):
+            mb = newton.ModelBuilder()
+            mb.add_shape_box(
+                body=-1,
+                xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
+                hx=0.5, hy=0.5, hz=0.1,
+            )
+            tri_ka, tri_ke = cloth_lame_from_youngs_poisson_plane_stress(5.0e8, 0.3)
+            mb.add_cloth_grid(
+                pos=wp.vec3(-0.3, -0.3, 0.3),
+                rot=wp.quat_identity(),
+                vel=wp.vec3(0.0, 0.0, 0.0),
+                dim_x=4, dim_y=4, cell_x=0.15, cell_y=0.15,
+                mass=0.05, fix_left=False,
+                tri_ke=tri_ke, tri_ka=tri_ka, particle_radius=0.04,
+            )
+            model = mb.finalize(device=device)
+            bodies = body_container_zeros(max(1, int(model.body_count)), device=device)
+            constraints = PhoenXWorld.make_constraint_container(
+                num_joints=0, num_cloth_triangles=int(model.tri_count), device=device,
+            )
+            world = PhoenXWorld(
+                bodies=bodies, constraints=constraints, num_joints=0,
+                num_particles=int(model.particle_count),
+                num_cloth_triangles=int(model.tri_count),
+                rigid_contact_max=2048,
+                num_worlds=1, substeps=4, solver_iterations=8,
+                step_layout="single_world", device=device,
+                mass_splitting=mass_splitting,
+                max_colored_partitions=12,
+            )
+            world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
+            world.populate_cloth_triangles_from_model(model)
+            pipeline = world.setup_cloth_collision_pipeline(
+                model, cloth_thickness=0.005, cloth_gap=0.010, rigid_contact_max=2048,
+            )
+            state = model.state()
+            contacts = pipeline.contacts()
+            return world, state, contacts
+
+        w0, s0, c0 = _build(mass_splitting=False)
+        w1, s1, c1 = _build(mass_splitting=True)
+        for _ in range(30):
+            w0.collide(s0, c0)
+            w0.step(1.0 / 60.0, contacts=c0)
+            w1.collide(s1, c1)
+            w1.step(1.0 / 60.0, contacts=c1)
+        wp.synchronize_device(device)
+        p0 = w0.particles.position.numpy()
+        p1 = w1.particles.position.numpy()
+        # Cloth particles should land at the same height (within float
+        # ordering noise); the cloth-triangle iterate's inv_mass scaling
+        # is identity for inv_factor=1.
+        np.testing.assert_allclose(p1, p0, rtol=1e-3, atol=1e-3)
+
     def test_box_stack_under_graph_capture_with_mass_splitting(self):
         # Load-bearing capture-safety check: the full pipeline (ingest →
         # color → mass-splitting build → broadcast → solve → writeback →

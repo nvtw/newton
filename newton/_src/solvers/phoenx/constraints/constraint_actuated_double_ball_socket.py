@@ -26,6 +26,14 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
+from newton._src.solvers.phoenx.mass_splitting.access import (
+    read_angular_velocity_unified,
+    read_velocity_unified,
+    write_angular_velocity_unified,
+    write_velocity_unified,
+)
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
+from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     _PD_NYQUIST_HEADROOM_MAX,
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
@@ -657,6 +665,72 @@ def actuated_double_ball_socket_initialize_kernel(
 
 
 # ---------------------------------------------------------------------------
+# Mass-splitting body-pair load/store helpers
+#
+# All joint iterates/prepares share the same access pattern: load (v, w,
+# inv_mass, inv_inertia) for two bodies, do constraint math, write
+# (v, w) back. With mass splitting the loads / stores route through the
+# slot-aware unified helpers and inv_mass / inv_inertia are scaled by the
+# per-body slot count (Tonge effective mass). Disabled-fast-path returns
+# slot=-1 / inv_factor=1, so this collapses to the pre-mass-splitting
+# bodies.* path without a branch.
+#
+# Joints connect bodies (never particles), but the unified helpers take
+# a ParticleContainer parameter for the body/particle branch. We thread
+# it through unchanged; the particle branch is unreachable for
+# ``b < num_bodies`` and gets dead-code-eliminated by the runtime.
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _ms_load_body_pair(
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    b1: wp.int32,
+    b2: wp.int32,
+    parallel_id: wp.int32,
+    num_bodies: wp.int32,
+):
+    """Slot-aware load of ``(v1, v2, w1, w2, inv_mass1, inv_mass2,
+    inv_inertia1, inv_inertia2, slot1, slot2)`` for one joint endpoint pair.
+    """
+    v1, inv_factor1, slot1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
+    v2, inv_factor2, slot2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
+    w1, _wfb1, _wsb1 = read_angular_velocity_unified(bodies, copy_state, b1, parallel_id, num_bodies)
+    w2, _wfb2, _wsb2 = read_angular_velocity_unified(bodies, copy_state, b2, parallel_id, num_bodies)
+    inv_f1 = wp.float32(inv_factor1)
+    inv_f2 = wp.float32(inv_factor2)
+    inv_mass1 = bodies.inverse_mass[b1] * inv_f1
+    inv_mass2 = bodies.inverse_mass[b2] * inv_f2
+    inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_f1
+    inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_f2
+    return v1, v2, w1, w2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2
+
+
+@wp.func
+def _ms_store_body_pair(
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    b1: wp.int32,
+    b2: wp.int32,
+    slot1: wp.int32,
+    slot2: wp.int32,
+    num_bodies: wp.int32,
+    v1: wp.vec3f,
+    w1: wp.vec3f,
+    v2: wp.vec3f,
+    w2: wp.vec3f,
+):
+    """Slot-aware writeback paired with :func:`_ms_load_body_pair`."""
+    write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
+    write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
+    write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
+    write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2)
+
+
+# ---------------------------------------------------------------------------
 # Shared axial (drive + limit) iterate helper
 # ---------------------------------------------------------------------------
 
@@ -789,6 +863,10 @@ def _anchor1_positional_prepare_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
@@ -805,9 +883,9 @@ def _anchor1_positional_prepare_at(
     ``mass_coeff``, ``impulse_coeff``, ``bias1`` to the column.
 
     Returns ``(r1_b1, r1_b2, cr1_b1, cr1_b2, velocity1,
-    angular_velocity1, velocity2, angular_velocity2)`` so callers can
-    continue with additional positional / angular rows before
-    committing body velocities.
+    angular_velocity1, velocity2, angular_velocity2, slot1, slot2)`` so
+    callers can continue with additional positional / angular rows
+    before committing body velocities via :func:`_ms_store_body_pair`.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -816,10 +894,9 @@ def _anchor1_positional_prepare_at(
     orient2 = bodies.orientation[b2]
     position1 = bodies.position[b1]
     position2 = bodies.position[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
+        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
+    )
 
     la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
     la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
@@ -852,12 +929,12 @@ def _anchor1_positional_prepare_at(
 
     # 3-DoF positional warm-start (only the anchor-1 impulse).
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-    velocity1 = bodies.velocity[b1] - inv_mass1 * acc1
-    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (cr1_b1 @ acc1)
-    velocity2 = bodies.velocity[b2] + inv_mass2 * acc1
-    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (cr1_b2 @ acc1)
+    velocity1 = velocity1 - inv_mass1 * acc1
+    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc1)
+    velocity2 = velocity2 + inv_mass2 * acc1
+    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1)
 
-    return r1_b1, r1_b2, cr1_b1, cr1_b2, velocity1, angular_velocity1, velocity2, angular_velocity2
+    return r1_b1, r1_b2, cr1_b1, cr1_b2, velocity1, angular_velocity1, velocity2, angular_velocity2, slot1, slot2
 
 
 # ---------------------------------------------------------------------------
@@ -1016,6 +1093,10 @@ def _ball_socket_prepare_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
@@ -1039,12 +1120,16 @@ def _ball_socket_prepare_at(
         angular_velocity1,
         velocity2,
         angular_velocity2,
-    ) = _anchor1_positional_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
+        slot1,
+        slot2,
+    ) = _anchor1_positional_prepare_at(
+        constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+    )
 
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+    _ms_store_body_pair(
+        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
+        velocity1, angular_velocity1, velocity2, angular_velocity2,
+    )
 
 
 @wp.func
@@ -1053,6 +1138,10 @@ def _ball_socket_iterate_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
     use_bias: wp.bool,
@@ -1072,14 +1161,9 @@ def _ball_socket_iterate_at(
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    velocity1 = bodies.velocity[b1]
-    velocity2 = bodies.velocity[b2]
-    angular_velocity1 = bodies.angular_velocity[b1]
-    angular_velocity2 = bodies.angular_velocity[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
+        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
+    )
 
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
@@ -1108,10 +1192,10 @@ def _ball_socket_iterate_at(
     velocity2 = velocity2 + inv_mass2 * lam1
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1)
 
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+    _ms_store_body_pair(
+        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
+        velocity1, angular_velocity1, velocity2, angular_velocity2,
+    )
 
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
 
@@ -1127,6 +1211,10 @@ def _revolute_prepare_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
@@ -1144,10 +1232,9 @@ def _revolute_prepare_at(
     orientation2 = bodies.orientation[b2]
     position1 = bodies.position[b1]
     position2 = bodies.position[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
+        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
+    )
 
     la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
     la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
@@ -1265,10 +1352,10 @@ def _revolute_prepare_at(
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
     acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
 
-    velocity1 = bodies.velocity[b1] - inv_mass1 * (acc1 + acc2)
-    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (cr1_b1 @ acc1 + cr2_b1 @ acc2)
-    velocity2 = bodies.velocity[b2] + inv_mass2 * (acc1 + acc2)
-    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (cr1_b2 @ acc1 + cr2_b2 @ acc2)
+    velocity1 = velocity1 - inv_mass1 * (acc1 + acc2)
+    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc1 + cr2_b1 @ acc2)
+    velocity2 = velocity2 + inv_mass2 * (acc1 + acc2)
+    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1 + cr2_b2 @ acc2)
 
     # ---- Axial drive + limit block (angular) ------------------------
     # Angular effective mass: the axial impulse is a pure torque along
@@ -1315,10 +1402,10 @@ def _revolute_prepare_at(
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
 
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+    _ms_store_body_pair(
+        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
+        velocity1, angular_velocity1, velocity2, angular_velocity2,
+    )
 
 
 @wp.func
@@ -1327,6 +1414,10 @@ def _revolute_iterate_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
     use_bias: wp.bool,
@@ -1342,14 +1433,9 @@ def _revolute_iterate_at(
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    velocity1 = bodies.velocity[b1]
-    velocity2 = bodies.velocity[b2]
-    angular_velocity1 = bodies.angular_velocity[b1]
-    angular_velocity2 = bodies.angular_velocity[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
+        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
+    )
 
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
@@ -1435,10 +1521,10 @@ def _revolute_iterate_at(
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+    _ms_store_body_pair(
+        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
+        velocity1, angular_velocity1, velocity2, angular_velocity2,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1467,6 +1553,10 @@ def _prismatic_prepare_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
@@ -1485,10 +1575,9 @@ def _prismatic_prepare_at(
     orientation2 = bodies.orientation[b2]
     position1 = bodies.position[b1]
     position2 = bodies.position[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
+        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
+    )
 
     la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
     la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
@@ -1675,12 +1764,12 @@ def _prismatic_prepare_at(
     write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc_imp3_world)
 
     total_linear = acc_imp1_world + acc_imp2_world + acc_imp3_world
-    velocity1 = bodies.velocity[b1] - inv_mass1 * total_linear
-    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (
+    velocity1 = velocity1 - inv_mass1 * total_linear
+    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (
         cr1_b1 @ acc_imp1_world + cr2_b1 @ acc_imp2_world + cr3_b1 @ acc_imp3_world
     )
-    velocity2 = bodies.velocity[b2] + inv_mass2 * total_linear
-    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (
+    velocity2 = velocity2 + inv_mass2 * total_linear
+    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (
         cr1_b2 @ acc_imp1_world + cr2_b2 @ acc_imp2_world + cr3_b2 @ acc_imp3_world
     )
 
@@ -1720,10 +1809,10 @@ def _prismatic_prepare_at(
     velocity2 = velocity2 - inv_mass2 * (n_hat * axial_imp)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ wp.cross(r1_b2, n_hat * axial_imp)
 
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+    _ms_store_body_pair(
+        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
+        velocity1, angular_velocity1, velocity2, angular_velocity2,
+    )
 
 
 @wp.func
@@ -1732,6 +1821,10 @@ def _prismatic_iterate_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
     use_bias: wp.bool,
@@ -1748,14 +1841,9 @@ def _prismatic_iterate_at(
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    velocity1 = bodies.velocity[b1]
-    velocity2 = bodies.velocity[b2]
-    angular_velocity1 = bodies.angular_velocity[b1]
-    angular_velocity2 = bodies.angular_velocity[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
+        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
+    )
 
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
@@ -1865,10 +1953,10 @@ def _prismatic_iterate_at(
     velocity2 = velocity2 - inv_mass2 * axial_imp
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ wp.cross(r1_b2, axial_imp)
 
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+    _ms_store_body_pair(
+        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
+        velocity1, angular_velocity1, velocity2, angular_velocity2,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1901,6 +1989,10 @@ def _cable_prepare_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
@@ -1921,10 +2013,9 @@ def _cable_prepare_at(
     orientation2 = bodies.orientation[b2]
     position1 = bodies.position[b1]
     position2 = bodies.position[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
+        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
+    )
 
     la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
     la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
@@ -2112,19 +2203,19 @@ def _cable_prepare_at(
     write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc_imp3_world)
 
     total_linear = acc_imp1 + acc_imp2_world + acc_imp3_world
-    velocity1 = bodies.velocity[b1] - inv_mass1 * total_linear
-    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (
+    velocity1 = velocity1 - inv_mass1 * total_linear
+    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (
         cr1_b1 @ acc_imp1 + cr2_b1 @ acc_imp2_world + cr3_b1 @ acc_imp3_world
     )
-    velocity2 = bodies.velocity[b2] + inv_mass2 * total_linear
-    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (
+    velocity2 = velocity2 + inv_mass2 * total_linear
+    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (
         cr1_b2 @ acc_imp1 + cr2_b2 @ acc_imp2_world + cr3_b2 @ acc_imp3_world
     )
 
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+    _ms_store_body_pair(
+        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
+        velocity1, angular_velocity1, velocity2, angular_velocity2,
+    )
 
     # Zero unused axial drive / limit state so wrench helpers and any
     # cross-mode reads see a clean column.
@@ -2140,6 +2231,10 @@ def _cable_iterate_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
     use_bias: wp.bool,
@@ -2166,14 +2261,9 @@ def _cable_iterate_at(
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    velocity1 = bodies.velocity[b1]
-    velocity2 = bodies.velocity[b2]
-    angular_velocity1 = bodies.angular_velocity[b1]
-    angular_velocity2 = bodies.angular_velocity[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
+        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
+    )
 
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
@@ -2264,10 +2354,10 @@ def _cable_iterate_at(
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr3_b2 @ lam3_world)
     write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3_world + lam3_world)
 
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+    _ms_store_body_pair(
+        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
+        velocity1, angular_velocity1, velocity2, angular_velocity2,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2293,6 +2383,10 @@ def _fixed_prepare_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
@@ -2305,10 +2399,9 @@ def _fixed_prepare_at(
     orientation2 = bodies.orientation[b2]
     position1 = bodies.position[b1]
     position2 = bodies.position[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
+        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
+    )
 
     la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
     la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
@@ -2477,19 +2570,19 @@ def _fixed_prepare_at(
     write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc_imp3_world)
 
     total_linear = acc_imp1 + acc_imp2_world + acc_imp3_world
-    velocity1 = bodies.velocity[b1] - inv_mass1 * total_linear
-    angular_velocity1 = bodies.angular_velocity[b1] - inv_inertia1 @ (
+    velocity1 = velocity1 - inv_mass1 * total_linear
+    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (
         cr1_b1 @ acc_imp1 + cr2_b1 @ acc_imp2_world + cr3_b1 @ acc_imp3_world
     )
-    velocity2 = bodies.velocity[b2] + inv_mass2 * total_linear
-    angular_velocity2 = bodies.angular_velocity[b2] + inv_inertia2 @ (
+    velocity2 = velocity2 + inv_mass2 * total_linear
+    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (
         cr1_b2 @ acc_imp1 + cr2_b2 @ acc_imp2_world + cr3_b2 @ acc_imp3_world
     )
 
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+    _ms_store_body_pair(
+        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
+        velocity1, angular_velocity1, velocity2, angular_velocity2,
+    )
 
     # Zero the axial drive / limit state so world_wrench / iterate don't
     # pick up stale values from a previous mode assignment.
@@ -2505,6 +2598,10 @@ def _fixed_iterate_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
     use_bias: wp.bool,
@@ -2514,14 +2611,9 @@ def _fixed_iterate_at(
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    velocity1 = bodies.velocity[b1]
-    velocity2 = bodies.velocity[b2]
-    angular_velocity1 = bodies.angular_velocity[b1]
-    angular_velocity2 = bodies.angular_velocity[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
+        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
+    )
 
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
@@ -2620,10 +2712,10 @@ def _fixed_iterate_at(
 
     write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3_world + lam3_world)
 
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+    _ms_store_body_pair(
+        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
+        velocity1, angular_velocity1, velocity2, angular_velocity2,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2637,6 +2729,10 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
@@ -2649,15 +2745,15 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
     """
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
-        _revolute_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
+        _revolute_prepare_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
     elif joint_mode == JOINT_MODE_PRISMATIC:
-        _prismatic_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
+        _prismatic_prepare_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
     elif joint_mode == JOINT_MODE_FIXED:
-        _fixed_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
+        _fixed_prepare_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
     elif joint_mode == JOINT_MODE_CABLE:
-        _cable_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
+        _cable_prepare_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
     else:
-        _ball_socket_prepare_at(constraints, cid, base_offset, bodies, body_pair, idt)
+        _ball_socket_prepare_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
 
 
 @wp.func
@@ -2666,6 +2762,10 @@ def _revolute_iterate_at_multi(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
     use_bias: wp.bool,
@@ -2693,14 +2793,9 @@ def _revolute_iterate_at_multi(
     b2 = body_pair.b2
 
     # ---- Body state (hoisted out of the sweep loop) ------------------
-    velocity1 = bodies.velocity[b1]
-    velocity2 = bodies.velocity[b2]
-    angular_velocity1 = bodies.angular_velocity[b1]
-    angular_velocity2 = bodies.angular_velocity[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
+        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
+    )
 
     # ---- Constraint constants ----------------------------------------
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
@@ -2861,10 +2956,10 @@ def _revolute_iterate_at_multi(
         it += 1
 
     # ---- Writeback ---------------------------------------------------
-    bodies.velocity[b1] = velocity1
-    bodies.angular_velocity[b1] = angular_velocity1
-    bodies.velocity[b2] = velocity2
-    bodies.angular_velocity[b2] = angular_velocity2
+    _ms_store_body_pair(
+        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
+        velocity1, angular_velocity1, velocity2, angular_velocity2,
+    )
 
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1)
     write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world)
@@ -2879,6 +2974,10 @@ def actuated_double_ball_socket_iterate_multi(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     idt: wp.float32,
     use_bias: wp.bool,
     num_sweeps: wp.int32,
@@ -2899,11 +2998,15 @@ def actuated_double_ball_socket_iterate_multi(
     body_pair = constraint_bodies_make(b1, b2)
     joint_mode = read_int(constraints, _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
-        _revolute_iterate_at_multi(constraints, cid, 0, bodies, body_pair, idt, use_bias, num_sweeps)
+        _revolute_iterate_at_multi(
+            constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias, num_sweeps
+        )
     else:
         it = wp.int32(0)
         while it < num_sweeps:
-            actuated_double_ball_socket_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
+            actuated_double_ball_socket_iterate_at(
+                constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias
+            )
             it += 1
 
 
@@ -2913,6 +3016,10 @@ def actuated_double_ball_socket_iterate_at(
     cid: wp.int32,
     base_offset: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
     use_bias: wp.bool,
@@ -2928,15 +3035,15 @@ def actuated_double_ball_socket_iterate_at(
     """
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
-        _revolute_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
+        _revolute_iterate_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias)
     elif joint_mode == JOINT_MODE_PRISMATIC:
-        _prismatic_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
+        _prismatic_iterate_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias)
     elif joint_mode == JOINT_MODE_FIXED:
-        _fixed_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
+        _fixed_iterate_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias)
     elif joint_mode == JOINT_MODE_CABLE:
-        _cable_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
+        _cable_iterate_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias)
     else:
-        _ball_socket_iterate_at(constraints, cid, base_offset, bodies, body_pair, idt, use_bias)
+        _ball_socket_iterate_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias)
 
 
 @wp.func
@@ -2998,6 +3105,10 @@ def actuated_double_ball_socket_prepare_for_iteration(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     idt: wp.float32,
 ):
     """Direct prepare entry; see
@@ -3013,7 +3124,9 @@ def actuated_double_ball_socket_prepare_for_iteration(
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
-    actuated_double_ball_socket_prepare_for_iteration_at(constraints, cid, 0, bodies, body_pair, idt)
+    actuated_double_ball_socket_prepare_for_iteration_at(
+        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+    )
 
 
 @wp.func
@@ -3021,6 +3134,10 @@ def actuated_double_ball_socket_iterate(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     idt: wp.float32,
     use_bias: wp.bool,
 ):
@@ -3032,7 +3149,9 @@ def actuated_double_ball_socket_iterate(
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
-    actuated_double_ball_socket_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
+    actuated_double_ball_socket_iterate_at(
+        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias
+    )
 
 
 @wp.func
@@ -3040,6 +3159,10 @@ def revolute_iterate(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     idt: wp.float32,
     use_bias: wp.bool,
 ):
@@ -3058,7 +3181,9 @@ def revolute_iterate(
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
-    _revolute_iterate_at(constraints, cid, 0, bodies, body_pair, idt, use_bias)
+    _revolute_iterate_at(
+        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias
+    )
 
 
 @wp.func
@@ -3066,6 +3191,10 @@ def revolute_prepare_for_iteration(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     idt: wp.float32,
 ):
     """Revolute-only prepare entry, skipping the ``joint_mode``
@@ -3075,7 +3204,9 @@ def revolute_prepare_for_iteration(
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
-    _revolute_prepare_at(constraints, cid, 0, bodies, body_pair, idt)
+    _revolute_prepare_at(
+        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+    )
 
 
 @wp.func
@@ -3083,6 +3214,10 @@ def revolute_iterate_multi(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
     idt: wp.float32,
     use_bias: wp.bool,
     num_sweeps: wp.int32,
@@ -3099,7 +3234,9 @@ def revolute_iterate_multi(
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
-    _revolute_iterate_at_multi(constraints, cid, 0, bodies, body_pair, idt, use_bias, num_sweeps)
+    _revolute_iterate_at_multi(
+        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias, num_sweeps
+    )
 
 
 @wp.func
