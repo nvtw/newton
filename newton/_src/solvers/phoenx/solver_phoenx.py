@@ -20,10 +20,27 @@ from newton._src.solvers.phoenx.body import (
     MOTION_KINEMATIC,
     BodyContainer,
 )
+from newton._src.solvers.phoenx.cloth_collision import (
+    PhoenXClothShareVertexFilterData,
+    _phoenx_pack_cloth_contact_barycentric_kernel,
+    _phoenx_pack_cloth_contact_endpoints_kernel,
+    _phoenx_populate_shape_endpoints_kernel,
+    _phoenx_update_cloth_shape_geometry_kernel,
+    phoenx_cloth_share_vertex_filter,
+    shape_endpoints_zeros,
+)
+from newton._src.solvers.phoenx.cloth_step import (
+    cloth_init_triangle_rows_kernel,
+    cloth_predict_kernel,
+    cloth_recover_kernel,
+)
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     ADBS_DWORDS,
     JOINT_MODE_REVOLUTE,
     actuated_double_ball_socket_initialize_kernel,
+)
+from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    CLOTH_TRIANGLE_DWORDS,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     CONTACT_DWORDS,
@@ -34,9 +51,6 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_per_contact_error_kernel,
     contact_per_contact_wrench_kernel,
     contact_views_make,
-)
-from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
-    CLOTH_TRIANGLE_DWORDS,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
@@ -57,28 +71,20 @@ from newton._src.solvers.phoenx.constraints.contact_ingest import (
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     GREEDY_MAX_COLORS,
+    MAX_BODIES,
     ElementInteractionData,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import (
     MAX_COLORS,
     IncrementalContactPartitioner,
 )
-from newton._src.solvers.phoenx.cloth_collision import (
-    PhoenXClothShareVertexFilterData,
-    ShapeEndpoint,
-    _phoenx_pack_cloth_contact_barycentric_kernel,
-    _phoenx_pack_cloth_contact_endpoints_kernel,
-    _phoenx_populate_shape_endpoints_kernel,
-    _phoenx_update_cloth_shape_geometry_kernel,
-    phoenx_cloth_share_vertex_filter,
-    shape_endpoints_zeros,
-)
-from newton._src.solvers.phoenx.cloth_step import (
-    cloth_init_triangle_rows_kernel,
-    cloth_predict_kernel,
-    cloth_recover_kernel,
-)
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int
+from newton._src.solvers.phoenx.mass_splitting import (
+    CopyStateContainer,
+    InteractionGraphScratch,
+    copy_state_container_zeros,
+    interaction_graph_scratch_zeros,
+)
 from newton._src.solvers.phoenx.materials import MaterialData
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_container_zeros
 from newton._src.solvers.phoenx.solver_config import (
@@ -260,6 +266,8 @@ class PhoenXWorld:
         threads_per_world: int | str = "auto",
         max_thread_blocks: int | None = None,
         enable_body_pair_grouping: bool = False,
+        mass_splitting: bool = False,
+        max_colored_partitions: int = 12,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -285,6 +293,22 @@ class PhoenXWorld:
                 GPU with a co-resident workload or to measure
                 occupancy. No effect on
                 ``step_layout="multi_world"``.
+            mass_splitting: Enable Tonge mass splitting on the overflow
+                partition (C# PhoenX default behaviour). When ``True``,
+                graph coloring caps at ``max_colored_partitions`` colours
+                and any remainder lands in a dedicated overflow bucket
+                solved Jacobi-style with per-(body, partition) copy
+                states; the substep loop broadcasts body / particle
+                state into copies before PGS, averages between
+                iterations, and writes the result back. ``False``
+                (default) preserves the existing single-color-per-
+                element behaviour and zero per-substep mass-splitting
+                overhead.
+            max_colored_partitions: K — the number of "regular" colour
+                buckets when ``mass_splitting=True`` (matches C# PhoenX's
+                ``MassSplitting(maxPartitions=12)``). Constraints that
+                don't fit in ``[0, K)`` end up in colour K (overflow).
+                Ignored when ``mass_splitting=False``.
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -426,9 +450,7 @@ class PhoenXWorld:
         #   [0, num_joints):                                     joints
         #   [num_joints, num_joints + num_cloth_triangles):      cloth tris
         #   [num_joints + num_cloth_triangles, ...):             contacts
-        self._constraint_capacity: int = max(
-            1, self.num_joints + self.num_cloth_triangles + self.max_contact_columns
-        )
+        self._constraint_capacity: int = max(1, self.num_joints + self.num_cloth_triangles + self.max_contact_columns)
 
         # Persistent grid fixed at construction (graph-capture stability).
         if max_thread_blocks is not None and int(max_thread_blocks) < 1:
@@ -456,6 +478,13 @@ class PhoenXWorld:
         self._num_active_constraints: wp.array[int] = wp.array(
             [self.num_joints + self.num_cloth_triangles], dtype=wp.int32, device=self.device
         )
+        # Mass splitting config. When ``True``, the partitioner caps at
+        # ``max_colored_partitions`` colours and the overflow bucket is
+        # solved with copy states (C# PhoenX behaviour). The
+        # :class:`IncrementalContactPartitioner` ctor validates the cap
+        # against ``GREEDY_MAX_COLORS`` / ``MAX_COLORS``.
+        self.mass_splitting_enabled: bool = bool(mass_splitting)
+        self.max_colored_partitions: int | None = int(max_colored_partitions) if self.mass_splitting_enabled else None
         # Unified body-or-particle node space for the partitioner:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
         # num_bodies + num_particles)`` are particles.
@@ -464,6 +493,31 @@ class PhoenXWorld:
             max_num_nodes=max(1, self.num_bodies + self.num_particles),
             device=self.device,
             use_tile_scan=True,
+            max_colored_partitions=self.max_colored_partitions,
+        )
+
+        # Mass-splitting data plane. Always allocated (sentinel-sized
+        # when disabled) so the constraint kernels can take
+        # :class:`CopyStateContainer` as a parameter unconditionally.
+        # When ``mass_splitting_enabled`` is False the broadcast /
+        # average / writeback kernels short-circuit on
+        # ``highest_index_in_use[0] == 0``.
+        if self.mass_splitting_enabled:
+            # Worst-case entry count: every constraint contributes one
+            # entry per endpoint (one entry per body). MAX_BODIES bounds
+            # the per-element endpoint count.
+            ms_capacity = max(1, self._constraint_capacity * int(MAX_BODIES))
+            ms_nodes = max(1, self.num_bodies + self.num_particles)
+        else:
+            # Sentinel containers — kernels see highest_index_in_use==0
+            # and short-circuit. Memory cost is negligible.
+            ms_capacity = 1
+            ms_nodes = 1
+        self._copy_state: CopyStateContainer = copy_state_container_zeros(
+            capacity=ms_capacity, num_nodes=ms_nodes, device=self.device
+        )
+        self._interaction_graph_scratch: InteractionGraphScratch = interaction_graph_scratch_zeros(
+            capacity=ms_capacity, device=self.device
         )
         # Live single-world coloring choice. Flipped to False (round-based JP)
         # if a non-captured greedy build overflows the 64-color bitmask; never
@@ -546,9 +600,7 @@ class PhoenXWorld:
 
     def _assert_invariants(self) -> None:
         """Validate per-step buffer shapes against the documented schema."""
-        expected_constraint_dwords = self.required_constraint_dwords(
-            self.num_joints, self.num_cloth_triangles
-        )
+        expected_constraint_dwords = self.required_constraint_dwords(self.num_joints, self.num_cloth_triangles)
         expected_constraint_cols = max(1, int(self.num_joints) + int(self.num_cloth_triangles))
         actual_constraint_shape = self.constraints.data.shape
         assert actual_constraint_shape == (expected_constraint_dwords, expected_constraint_cols), (
@@ -1113,8 +1165,7 @@ class PhoenXWorld:
         """
         if self._collision_pipeline is None:
             raise RuntimeError(
-                "PhoenXWorld.collide requires setup_cloth_collision_pipeline() to "
-                "have been called first"
+                "PhoenXWorld.collide requires setup_cloth_collision_pipeline() to have been called first"
             )
         self.update_cloth_shape_geometry()
         self._collision_pipeline.collide_with_external_aabbs(state, contacts)
@@ -1254,9 +1305,7 @@ class PhoenXWorld:
             return
 
         if getattr(contacts, "contact_matching", False) is False:
-            raise ValueError(
-                'PhoenX requires Contacts with non-disabled contact_matching (use "sticky").'
-            )
+            raise ValueError('PhoenX requires Contacts with non-disabled contact_matching (use "sticky").')
         if shape_body is None:
             shape_body = self._shape_body_internal
         # When the cloth-aware pipeline is active, contact slots can
@@ -1264,9 +1313,10 @@ class PhoenXWorld:
         # shape_body (length S) doesn't cover the cloth suffix, so use
         # the pipeline's unified_shape_body (length S + T, with cloth
         # shapes mapped to -1) instead.
-        if self._collision_pipeline is not None and getattr(
-            self._collision_pipeline, "unified_shape_body", None
-        ) is not None:
+        if (
+            self._collision_pipeline is not None
+            and getattr(self._collision_pipeline, "unified_shape_body", None) is not None
+        ):
             shape_body = self._collision_pipeline.unified_shape_body
         if shape_body is None:
             raise ValueError(

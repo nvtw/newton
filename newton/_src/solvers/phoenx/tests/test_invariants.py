@@ -75,5 +75,50 @@ class TestInvariants(unittest.TestCase):
             PhoenXWorld(**kw)
 
 
+class TestMassSplittingConfig(unittest.TestCase):
+    """Mass-splitting config plumbs through to the partitioner and
+    allocates the copy-state / interaction-graph scratch."""
+
+    def test_disabled_by_default_uses_sentinel_containers(self) -> None:
+        w = PhoenXWorld(**_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=10))
+        self.assertFalse(w.mass_splitting_enabled)
+        self.assertIsNone(w.max_colored_partitions)
+        # Sentinel allocations: capacity-1, num_nodes-1. highest_index_in_use
+        # stays at zero so the broadcast / average / writeback kernels
+        # short-circuit when called.
+        self.assertEqual(w._copy_state.position.shape[0], 1)
+        self.assertEqual(w._copy_state.section_end.shape[0], 1)
+        self.assertEqual(int(w._copy_state.highest_index_in_use.numpy()[0]), 0)
+
+    def test_enabled_allocates_capacity_sized_buffers(self) -> None:
+        w = PhoenXWorld(
+            **_make_kwargs(num_bodies=4, num_joints=2, rigid_contact_max=128),
+            mass_splitting=True,
+            max_colored_partitions=12,
+        )
+        self.assertTrue(w.mass_splitting_enabled)
+        self.assertEqual(w.max_colored_partitions, 12)
+        # Capacity sized for constraint_capacity * MAX_BODIES (worst case
+        # entry count). num_nodes = num_bodies + num_particles.
+        from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (  # noqa: PLC0415
+            MAX_BODIES,
+        )
+
+        expected_capacity = w._constraint_capacity * int(MAX_BODIES)
+        self.assertEqual(w._copy_state.position.shape[0], expected_capacity)
+        self.assertEqual(w._copy_state.section_end.shape[0], w.num_bodies + w.num_particles)
+        self.assertEqual(int(w._copy_state.highest_index_in_use.numpy()[0]), 0)
+
+    def test_rejects_overflow_cap_above_greedy_limit(self) -> None:
+        # The partitioner raises if max_colored_partitions exceeds the
+        # int64 forbidden-mask budget.
+        with self.assertRaises(ValueError):
+            PhoenXWorld(
+                **_make_kwargs(num_bodies=1, num_joints=0, rigid_contact_max=1),
+                mass_splitting=True,
+                max_colored_partitions=64,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
