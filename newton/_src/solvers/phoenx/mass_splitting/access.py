@@ -123,6 +123,16 @@ def get_state_index(
         # constraint kernel can still read its velocity from direct storage,
         # though typically static bodies are filtered before getting here.
         return wp.int32(-1), wp.int32(1)
+    # Fast path for ``parallel_id == 0``: partition keys are emitted as
+    # sorted (ascending) ints, and ``0`` (regular colour) is always the
+    # smallest. If present, it lives at ``partition_list[start]``;
+    # otherwise the body is overflow-only. Skipping the binary search
+    # here saves the bulk of the lookup cost for regular-colour
+    # iterates (which are the majority of contacts in dense scenes).
+    if parallel_id == wp.int32(0):
+        if copy_state.partition_list[start] == wp.int32(0):
+            return start, count
+        return wp.int32(-1), wp.int32(1)
     local = _binary_search_partition_list(copy_state.partition_list, start, end, parallel_id)
     if local < wp.int32(0):
         # Slots exist but none match this parallel_id (this constraint isn't

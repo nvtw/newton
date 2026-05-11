@@ -56,6 +56,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
     element_interaction_data_get,
 )
+from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 
 __all__ = [
@@ -231,18 +232,6 @@ def record_all_interactions_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _mask_tail_kernel(keys: wp.array[wp.int64], num_pairs: wp.array[wp.int32]):
-    """Stamp ``INT64_MAX`` past ``num_pairs[0]`` so radix sort tails the slots.
-
-    Mirrors :func:`helpers.scan_and_sort.sort_variable_length_int64`'s
-    masking pass but here ``num_pairs`` is the build-time counter.
-    """
-    tid = wp.tid()
-    if tid >= num_pairs[0]:
-        keys[tid] = wp.int64(_INT64_MAX_LITERAL)
-
-
-@wp.kernel(enable_backward=False)
 def _zero_section_end_and_is_boundary_kernel(
     section_end: wp.array[wp.int32],
     is_boundary: wp.array[wp.int32],
@@ -371,7 +360,7 @@ def build_interaction_graph(
     capacity = scratch.packed_keys.shape[0] // 2
     num_nodes = copy_state.section_end.shape[0]
 
-    # Stage 1: prep — mask sort tail, zero accumulators.
+    # Stage 1: prep — zero per-node accumulators + per-slot boundary flags.
     prep_dim = max(num_nodes, capacity)
     wp.launch(
         _zero_section_end_and_is_boundary_kernel,
@@ -385,16 +374,10 @@ def build_interaction_graph(
         inputs=[copy_state.highest_index_in_use],
         device=device,
     )
-    wp.launch(
-        _mask_tail_kernel,
-        dim=capacity,
-        inputs=[scratch.packed_keys, scratch.num_pairs],
-        device=device,
-    )
 
-    # Stage 2: sort. radix_sort_pairs requires count == buffer_size / 2
-    # and uses the second half as ping-pong scratch.
-    wp.utils.radix_sort_pairs(scratch.packed_keys, scratch.packed_values, capacity)
+    # Stage 2: variable-length sort. Helper masks the tail past
+    # ``num_pairs[0]`` with ``INT64_MAX`` then runs radix_sort_pairs.
+    sort_variable_length_int64(scratch.packed_keys, scratch.packed_values, scratch.num_pairs)
 
     # Stage 3: boundary detect + per-node count.
     wp.launch(

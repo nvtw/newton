@@ -71,7 +71,6 @@ from newton._src.solvers.phoenx.constraints.contact_ingest import (
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     GREEDY_MAX_COLORS,
-    MAX_BODIES,
     ElementInteractionData,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import (
@@ -545,9 +544,15 @@ class PhoenXWorld:
         # ``highest_index_in_use[0] == 0``.
         if self.mass_splitting_enabled:
             # Worst-case entry count: every constraint contributes one
-            # entry per endpoint (one entry per body). MAX_BODIES bounds
-            # the per-element endpoint count.
-            ms_capacity = max(1, self._constraint_capacity * int(MAX_BODIES))
+            # entry per endpoint. The mass-splitting path is currently
+            # rigid-only (joints + cloth are guarded out at the top of
+            # __init__), so rigid-rigid contacts contribute at most 2
+            # endpoints. Tightening this from MAX_BODIES=8 to 2 shrinks
+            # the radix-sort buffer 4x; the sort runs over
+            # ``2 * ms_capacity`` int64 keys, so the saving is real
+            # GPU time on dense scenes like Kapla.
+            _MS_ENDPOINTS_PER_CONSTRAINT = 2
+            ms_capacity = max(1, self._constraint_capacity * _MS_ENDPOINTS_PER_CONSTRAINT)
             ms_nodes = max(1, self.num_bodies + self.num_particles)
         else:
             # Sentinel containers — kernels see highest_index_in_use==0

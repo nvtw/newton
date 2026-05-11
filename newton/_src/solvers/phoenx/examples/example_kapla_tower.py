@@ -90,7 +90,7 @@ STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
 # per-(body, partition) copy states. Currently requires the single-
 # world layout (the multi-world fast-tail kernels haven't been
 # refactored yet) and no joints / cloth — both true for this scene.
-ENABLE_MASS_SPLITTING: bool = False
+ENABLE_MASS_SPLITTING: bool = True
 MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
 
 # Tile the single ``KaplaTower2.usda`` instancer into a 2D grid centred
@@ -239,7 +239,13 @@ class Example:
         # disjoint so SAP drops cross-cell pairs.
         num_cells = nx * ny
         shape_pairs_max = 1_500_000 * num_cells
-        rigid_contact_max_pipeline = 900_000 * num_cells
+        # Hand-tuned upper bound on simultaneously-active contact
+        # columns. 500k easily covers the observed ~750k narrow-phase
+        # contacts collapsed into ~50-80k columns (one column per
+        # shape pair). The mass-splitting copy-state and the sort
+        # buffer for the interaction graph both scale with this, so
+        # over-budgeting wastes GPU memory and slows the radix sort.
+        rigid_contact_max_pipeline = 500_000 * num_cells
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
             contact_matching=PHOENX_CONTACT_MATCHING,
