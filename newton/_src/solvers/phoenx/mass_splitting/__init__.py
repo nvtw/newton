@@ -29,6 +29,17 @@ This first milestone exposes the data plane only; the solver loop in
 
 from __future__ import annotations
 
+from newton._src.solvers.phoenx.mass_splitting.access import (
+    get_state_index,
+    read_angular_velocity_unified,
+    read_orientation_unified,
+    read_position_unified,
+    read_velocity_unified,
+    write_angular_velocity_unified,
+    write_orientation_unified,
+    write_position_unified,
+    write_velocity_unified,
+)
 from newton._src.solvers.phoenx.mass_splitting.copy_state import (
     CopyStateContainer,
     copy_state_container_zeros,
@@ -49,8 +60,17 @@ __all__ = [
     "InteractionGraphScratch",
     "build_interaction_graph",
     "copy_state_container_zeros",
+    "get_state_index",
     "interaction_graph_scratch_zeros",
     "launch_average_and_broadcast",
     "launch_broadcast_rigid_to_copy_states",
     "launch_copy_state_into_rigids",
+    "read_angular_velocity_unified",
+    "read_orientation_unified",
+    "read_position_unified",
+    "read_velocity_unified",
+    "write_angular_velocity_unified",
+    "write_orientation_unified",
+    "write_position_unified",
+    "write_velocity_unified",
 ]
