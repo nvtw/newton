@@ -486,6 +486,28 @@ class PhoenXWorld:
         # :class:`IncrementalContactPartitioner` ctor validates the cap
         # against ``GREEDY_MAX_COLORS`` / ``MAX_COLORS``.
         self.mass_splitting_enabled: bool = bool(mass_splitting)
+        if self.mass_splitting_enabled:
+            # Rigid-only path for now: joint / cloth constraint kernels
+            # still read/write the body container directly, so they'd
+            # diverge from the copy-state slots that contact iterates
+            # write. Refactoring those kernels is the next sub-step.
+            if self.num_joints > 0:
+                raise NotImplementedError(
+                    "mass_splitting=True currently requires num_joints == 0 "
+                    "(joint constraint kernels haven't been refactored to use "
+                    "copy-state slots yet)."
+                )
+            if self.num_cloth_triangles > 0:
+                raise NotImplementedError(
+                    "mass_splitting=True currently requires num_cloth_triangles == 0 "
+                    "(cloth-triangle constraint kernels haven't been refactored "
+                    "to use copy-state slots yet)."
+                )
+            if step_layout != "single_world":
+                raise NotImplementedError(
+                    "mass_splitting=True currently requires step_layout='single_world' "
+                    "(multi-world fast-tail kernels haven't been refactored yet)."
+                )
         self.max_colored_partitions: int | None = int(max_colored_partitions) if self.mass_splitting_enabled else None
         # Unified body-or-particle node space for the partitioner:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,

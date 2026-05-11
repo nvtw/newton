@@ -91,10 +91,13 @@ class TestMassSplittingConfig(unittest.TestCase):
         self.assertEqual(int(w._copy_state.highest_index_in_use.numpy()[0]), 0)
 
     def test_enabled_allocates_capacity_sized_buffers(self) -> None:
+        # Mass splitting currently requires num_joints == 0 and
+        # num_cloth_triangles == 0 (rigid-only path).
         w = PhoenXWorld(
-            **_make_kwargs(num_bodies=4, num_joints=2, rigid_contact_max=128),
+            **_make_kwargs(num_bodies=4, num_joints=0, rigid_contact_max=128),
             mass_splitting=True,
             max_colored_partitions=12,
+            step_layout="single_world",
         )
         self.assertTrue(w.mass_splitting_enabled)
         self.assertEqual(w.max_colored_partitions, 12)
@@ -117,6 +120,23 @@ class TestMassSplittingConfig(unittest.TestCase):
                 **_make_kwargs(num_bodies=1, num_joints=0, rigid_contact_max=1),
                 mass_splitting=True,
                 max_colored_partitions=64,
+                step_layout="single_world",
+            )
+
+    def test_rejects_mass_splitting_with_joints(self) -> None:
+        with self.assertRaisesRegex(NotImplementedError, "num_joints == 0"):
+            PhoenXWorld(
+                **_make_kwargs(num_bodies=2, num_joints=1, rigid_contact_max=1),
+                mass_splitting=True,
+                step_layout="single_world",
+            )
+
+    def test_rejects_mass_splitting_with_multi_world_layout(self) -> None:
+        with self.assertRaisesRegex(NotImplementedError, "step_layout='single_world'"):
+            PhoenXWorld(
+                **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
+                mass_splitting=True,
+                step_layout="multi_world",
             )
 
 
