@@ -26,6 +26,10 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     revolute_iterate_multi,
     revolute_prepare_for_iteration,
 )
+from newton._src.solvers.phoenx.constraints.constraint_cloth_bending import (
+    cloth_bending_iterate_at,
+    cloth_bending_prepare_for_iteration_at,
+)
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_iterate_at,
     cloth_triangle_prepare_for_iteration_at,
@@ -54,6 +58,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_prepare_for_iteration_cloth_aware,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
+    CONSTRAINT_TYPE_CLOTH_BENDING,
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
     ConstraintContainer,
@@ -83,6 +88,11 @@ _CLOTH_TRIANGLE_OFF_BODY3 = wp.constant(wp.int32(3))
 # at dwords 0/1/2, body3 at dword 3, body4 at dword 4.
 _SOFT_TET_OFF_BODY3 = wp.constant(wp.int32(3))
 _SOFT_TET_OFF_BODY4 = wp.constant(wp.int32(4))
+# Cloth-bending body3 / body4 dword offsets. Mirrors
+# :mod:`constraint_cloth_bending` -- same header layout as soft-tet, two
+# extras at dwords 3 and 4.
+_CLOTH_BENDING_OFF_BODY3 = wp.constant(wp.int32(3))
+_CLOTH_BENDING_OFF_BODY4 = wp.constant(wp.int32(4))
 
 
 __all__ = [
@@ -831,6 +841,7 @@ def _constraints_to_elements_kernel(
     num_constraints: wp.array[wp.int32],
     num_joints: wp.int32,
     num_cloth_triangles: wp.int32,
+    num_cloth_bending: wp.int32,
     num_soft_tetrahedra: wp.int32,
     num_bodies: wp.int32,
     elements: wp.array[ElementInteractionData],
@@ -838,12 +849,13 @@ def _constraints_to_elements_kernel(
     """Project active constraints into ElementInteractionData. Static bodies
     collapse to -1; the dynamic body compacts to slot 0.
 
-    Cloth-triangle and soft-tetrahedron constraints emit 3- and 4-member
-    elements with unified body-or-particle indices: rigid bodies live at
-    ``[0, num_bodies)`` and particles at ``[num_bodies, num_bodies +
-    num_particles)``. The partitioner sees the unified-index nodes
-    uniformly so the same Jones-Plassmann / greedy coloring pass colours
-    joints, contacts, cloth-triangles, and soft-tetrahedra together.
+    Cloth-triangle, cloth-bending and soft-tetrahedron constraints
+    emit 3- or 4-member elements with unified body-or-particle
+    indices: rigid bodies live at ``[0, num_bodies)`` and particles at
+    ``[num_bodies, num_bodies + num_particles)``. The partitioner sees
+    the unified-index nodes uniformly so the same Jones-Plassmann /
+    greedy coloring pass colours joints, contacts, cloth-triangles,
+    cloth-bending, and soft-tetrahedra together.
     """
     tid = wp.tid()
     n = num_constraints[0]
@@ -896,7 +908,46 @@ def _constraints_to_elements_kernel(
                 slot2 = v
         elements[tid] = element_interaction_data_make(slot0, slot1, slot2, -1, -1, -1, -1, -1)
         return
-    if tid < num_joints + num_cloth_triangles + num_soft_tetrahedra:
+    if tid < num_joints + num_cloth_triangles + num_cloth_bending:
+        # Cloth-bending: 4 unified-index particle endpoints. body1 / body2
+        # are the opposite vertices; body3 / body4 are the shared edge.
+        b1 = constraint_get_body1(constraints, tid)
+        b2 = constraint_get_body2(constraints, tid)
+        b3 = read_int(constraints, _CLOTH_BENDING_OFF_BODY3, tid)
+        b4 = read_int(constraints, _CLOTH_BENDING_OFF_BODY4, tid)
+        if b1 >= num_bodies and particles.inverse_mass[b1 - num_bodies] == 0.0:
+            b1 = -1
+        if b2 >= num_bodies and particles.inverse_mass[b2 - num_bodies] == 0.0:
+            b2 = -1
+        if b3 >= num_bodies and particles.inverse_mass[b3 - num_bodies] == 0.0:
+            b3 = -1
+        if b4 >= num_bodies and particles.inverse_mass[b4 - num_bodies] == 0.0:
+            b4 = -1
+        slot0 = wp.int32(-1)
+        slot1 = wp.int32(-1)
+        slot2 = wp.int32(-1)
+        slot3 = wp.int32(-1)
+        if b1 >= 0:
+            slot0 = b1
+        for cand in range(3):
+            v = b2
+            if cand == 1:
+                v = b3
+            elif cand == 2:
+                v = b4
+            if v < 0:
+                continue
+            if slot0 < 0:
+                slot0 = v
+            elif slot1 < 0:
+                slot1 = v
+            elif slot2 < 0:
+                slot2 = v
+            else:
+                slot3 = v
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
+        return
+    if tid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
         # Soft-tetrahedron: four unified-index particle endpoints stored
         # in body1/body2/body3/body4 (populate kernel did the +num_bodies
         # shift). Pinned particles collapse to -1 so the partitioner
@@ -938,7 +989,7 @@ def _constraints_to_elements_kernel(
                 slot3 = v
         elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
         return
-    local_cid = tid - num_joints - num_cloth_triangles - num_soft_tetrahedra
+    local_cid = tid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra
     b1 = contact_get_body1(contact_cols, local_cid)
     b2 = contact_get_body2(contact_cols, local_cid)
     side0_kind = contact_get_side0_kind(contact_cols, local_cid)
@@ -1439,6 +1490,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
         contacts: ContactViews,
         num_joints: wp.int32,
         num_cloth_triangles: wp.int32,
+        num_cloth_bending: wp.int32,
         num_soft_tetrahedra: wp.int32,
         num_bodies: wp.int32,
         total_num_threads: wp.int32,
@@ -1508,12 +1560,12 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                 #    range we dispatch on the type tag (each schema stamps its
                 #    type into dword 0 at populate time).
                 dispatched = False
-                if cid >= num_joints + num_cloth_triangles + num_soft_tetrahedra:
+                if cid >= num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
                     if wp.static(cloth_support):
                         if wp.static(is_prepare):
                             contact_prepare_for_iteration_cloth_aware(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_soft_tetrahedra,
+                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1526,7 +1578,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                         else:
                             contact_iterate_cloth_aware(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_soft_tetrahedra,
+                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1541,7 +1593,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                         if wp.static(is_prepare):
                             contact_prepare_for_iteration(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_soft_tetrahedra,
+                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1554,7 +1606,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                         else:
                             contact_iterate(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_soft_tetrahedra,
+                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1586,6 +1638,16 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                                 )
                             else:
                                 soft_tetrahedron_iterate_at(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
+                            dispatched = True
+                        elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
+                            if wp.static(is_prepare):
+                                cloth_bending_prepare_for_iteration_at(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
+                            else:
+                                cloth_bending_iterate_at(
                                     constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             dispatched = True
@@ -1638,6 +1700,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
         contacts: ContactViews,
         num_joints: wp.int32,
         num_cloth_triangles: wp.int32,
+        num_cloth_bending: wp.int32,
         num_soft_tetrahedra: wp.int32,
         num_bodies: wp.int32,
         fuse_threshold: wp.int32,
@@ -1670,12 +1733,12 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                 # two-stage dispatch rationale: cid-range first to
                 # separate contact cids (which live in a different
                 # container), then type-tag for joint vs cloth.
-                if cid >= num_joints + num_cloth_triangles + num_soft_tetrahedra:
+                if cid >= num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
                     if wp.static(cloth_support):
                         if wp.static(is_prepare):
                             contact_prepare_for_iteration_cloth_aware(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_soft_tetrahedra,
+                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1688,7 +1751,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                         else:
                             contact_iterate_cloth_aware(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_soft_tetrahedra,
+                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1703,7 +1766,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                         if wp.static(is_prepare):
                             contact_prepare_for_iteration(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_soft_tetrahedra,
+                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1716,7 +1779,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                         else:
                             contact_iterate(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_soft_tetrahedra,
+                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1748,6 +1811,16 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                 )
                             else:
                                 soft_tetrahedron_iterate_at(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
+                            dispatched = True
+                        elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
+                            if wp.static(is_prepare):
+                                cloth_bending_prepare_for_iteration_at(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
+                            else:
+                                cloth_bending_iterate_at(
                                     constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             dispatched = True
