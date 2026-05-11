@@ -26,6 +26,7 @@ from newton._src.solvers.phoenx.cloth_collision import (
     _phoenx_pack_cloth_contact_endpoints_kernel,
     _phoenx_populate_shape_endpoints_kernel,
     _phoenx_update_cloth_shape_geometry_kernel,
+    _phoenx_update_soft_tet_shape_geometry_kernel,
     phoenx_cloth_share_vertex_filter,
     shape_endpoints_zeros,
 )
@@ -41,6 +42,10 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     CLOTH_TRIANGLE_DWORDS,
+)
+from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
+    SOFT_TET_DWORDS,
+    soft_tet_init_rows_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     CONTACT_DWORDS,
@@ -263,6 +268,7 @@ class PhoenXWorld:
         num_joints: int = 0,
         num_particles: int = 0,
         num_cloth_triangles: int = 0,
+        num_soft_tetrahedra: int = 0,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         num_worlds: int = 1,
@@ -360,6 +366,9 @@ class PhoenXWorld:
         self.num_cloth_triangles: int = int(num_cloth_triangles)
         if self.num_cloth_triangles < 0:
             raise ValueError(f"num_cloth_triangles must be >= 0 (got {self.num_cloth_triangles})")
+        self.num_soft_tetrahedra: int = int(num_soft_tetrahedra)
+        if self.num_soft_tetrahedra < 0:
+            raise ValueError(f"num_soft_tetrahedra must be >= 0 (got {self.num_soft_tetrahedra})")
         # Lazily allocate the particle store only when cloth is present;
         # rigid-only scenes pay zero memory for particles.
         self.particles: ParticleContainer | None = None
@@ -462,10 +471,15 @@ class PhoenXWorld:
         self.substep_dt: float = 0.0
 
         # cid layout in the shared :class:`ConstraintContainer`:
-        #   [0, num_joints):                                     joints
-        #   [num_joints, num_joints + num_cloth_triangles):      cloth tris
-        #   [num_joints + num_cloth_triangles, ...):             contacts
-        self._constraint_capacity: int = max(1, self.num_joints + self.num_cloth_triangles + self.max_contact_columns)
+        #   [0, num_joints):                                                    joints
+        #   [num_joints, num_joints + num_cloth_triangles):                     cloth tris
+        #   [num_joints + num_cloth_triangles,
+        #    num_joints + num_cloth_triangles + num_soft_tetrahedra):           soft tets
+        #   [num_joints + num_cloth_triangles + num_soft_tetrahedra, ...):      contacts
+        self._constraint_capacity: int = max(
+            1,
+            self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra + self.max_contact_columns,
+        )
 
         # Persistent grid fixed at construction (graph-capture stability).
         if max_thread_blocks is not None and int(max_thread_blocks) < 1:
@@ -487,11 +501,14 @@ class PhoenXWorld:
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
             self._constraint_capacity, dtype=ElementInteractionData, device=self.device
         )
-        # Joints + cloth tris are the only active cids until the first
-        # contact ingest (cloth tris are populated immediately by
-        # :meth:`populate_cloth_triangles_from_model`).
+        # Joints + cloth tris + soft tets are the only active cids until
+        # the first contact ingest (cloth tris are populated by
+        # :meth:`populate_cloth_triangles_from_model`; soft tets by
+        # :meth:`populate_soft_tetrahedra_from_model`).
         self._num_active_constraints: wp.array[int] = wp.array(
-            [self.num_joints + self.num_cloth_triangles], dtype=wp.int32, device=self.device
+            [self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra],
+            dtype=wp.int32,
+            device=self.device,
         )
         # Mass splitting config. When ``True``, the partitioner caps at
         # ``max_colored_partitions`` colours and the overflow bucket is
@@ -636,8 +653,12 @@ class PhoenXWorld:
 
     def _assert_invariants(self) -> None:
         """Validate per-step buffer shapes against the documented schema."""
-        expected_constraint_dwords = self.required_constraint_dwords(self.num_joints, self.num_cloth_triangles)
-        expected_constraint_cols = max(1, int(self.num_joints) + int(self.num_cloth_triangles))
+        expected_constraint_dwords = self.required_constraint_dwords(
+            self.num_joints, self.num_cloth_triangles, self.num_soft_tetrahedra
+        )
+        expected_constraint_cols = max(
+            1, int(self.num_joints) + int(self.num_cloth_triangles) + int(self.num_soft_tetrahedra)
+        )
         actual_constraint_shape = self.constraints.data.shape
         assert actual_constraint_shape == (expected_constraint_dwords, expected_constraint_cols), (
             f"ConstraintContainer.data has shape {actual_constraint_shape}, expected "
@@ -744,13 +765,19 @@ class PhoenXWorld:
     # Joint initialisation.
 
     @staticmethod
-    def required_constraint_dwords(num_joints: int, num_cloth_triangles: int = 0) -> int:
-        """Dword width = max(ADBS, CONTACT, CLOTH_TRIANGLE) over the active types."""
+    def required_constraint_dwords(
+        num_joints: int,
+        num_cloth_triangles: int = 0,
+        num_soft_tetrahedra: int = 0,
+    ) -> int:
+        """Dword width = max(ADBS, CONTACT, CLOTH_TRIANGLE, SOFT_TET) over the active types."""
         widths = [int(CONTACT_DWORDS)]
         if int(num_joints) > 0:
             widths.append(int(ADBS_DWORDS))
         if int(num_cloth_triangles) > 0:
             widths.append(int(CLOTH_TRIANGLE_DWORDS))
+        if int(num_soft_tetrahedra) > 0:
+            widths.append(int(SOFT_TET_DWORDS))
         return max(widths)
 
     @staticmethod
@@ -758,16 +785,21 @@ class PhoenXWorld:
         num_joints: int,
         device: wp.context.Devicelike = None,
         num_cloth_triangles: int = 0,
+        num_soft_tetrahedra: int = 0,
     ) -> ConstraintContainer:
         """Factory for a correctly-sized :class:`ConstraintContainer`.
 
-        Joint cids occupy ``[0, num_joints)``; cloth-triangle cids
-        occupy ``[num_joints, num_joints + num_cloth_triangles)``.
+        Joint cids occupy ``[0, num_joints)``; cloth-triangle cids occupy
+        ``[num_joints, num_joints + num_cloth_triangles)``; soft-tet cids
+        occupy ``[num_joints + num_cloth_triangles,
+        num_joints + num_cloth_triangles + num_soft_tetrahedra)``.
         """
-        cap = max(1, int(num_joints) + int(num_cloth_triangles))
+        cap = max(1, int(num_joints) + int(num_cloth_triangles) + int(num_soft_tetrahedra))
         return constraint_container_zeros(
             num_constraints=cap,
-            num_dwords=PhoenXWorld.required_constraint_dwords(num_joints, num_cloth_triangles),
+            num_dwords=PhoenXWorld.required_constraint_dwords(
+                num_joints, num_cloth_triangles, num_soft_tetrahedra
+            ),
             device=device,
         )
 
@@ -970,7 +1002,75 @@ class PhoenXWorld:
         )
         # Bump the active-constraint count so the partitioner sees the
         # cloth-triangle suffix from the very first step.
-        self._num_active_constraints.fill_(self.num_joints + self.num_cloth_triangles)
+        self._num_active_constraints.fill_(
+            self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra
+        )
+
+    def populate_soft_tetrahedra_from_model(
+        self,
+        model,
+        *,
+        beta_lambda: float = 0.1,
+        beta_mu: float = 0.1,
+    ) -> None:
+        """Stamp soft-tetrahedron constraint rows from a Newton :class:`Model`.
+
+        Reads ``model.particle_q`` / ``particle_qd`` / ``particle_inv_mass``
+        / ``tet_indices`` / ``tet_poses`` / ``tet_materials``. Soft-tet cids
+        occupy ``[num_joints + num_cloth_triangles, num_joints +
+        num_cloth_triangles + num_soft_tetrahedra)`` in the
+        :class:`ConstraintContainer`.
+
+        ``tet_poses[t]`` is the pre-inverted rest-pose 3x3 stamped by
+        :meth:`newton.ModelBuilder.add_tetrahedron`. ``tet_materials[t]``
+        is ``(k_mu, k_lambda, k_damp)`` in SI Pa / Pa / dimensionless.
+
+        Idempotent across multiple calls. May be combined with
+        :meth:`populate_cloth_triangles_from_model` in the same scene;
+        each populator stamps its own cid range and bumps
+        ``_num_active_constraints`` to the joint + cloth + soft-tet sum.
+        """
+        if self.num_soft_tetrahedra == 0:
+            return
+        if self.particles is None:
+            raise RuntimeError("populate_soft_tetrahedra_from_model requires num_particles > 0")
+        model_particle_count = int(model.particle_count)
+        model_tet_count = int(model.tet_count)
+        if model_particle_count != self.num_particles:
+            raise ValueError(
+                f"populate_soft_tetrahedra_from_model: model.particle_count "
+                f"({model_particle_count}) != world.num_particles ({self.num_particles})"
+            )
+        if model_tet_count != self.num_soft_tetrahedra:
+            raise ValueError(
+                f"populate_soft_tetrahedra_from_model: model.tet_count "
+                f"({model_tet_count}) != world.num_soft_tetrahedra ({self.num_soft_tetrahedra})"
+            )
+        # Only re-copy particle SoA if cloth populate hasn't already done so;
+        # both populators read the same model.particle_q so the result is
+        # identical. Keeping the copy idempotent simplifies the call order.
+        wp.copy(self.particles.position, model.particle_q)
+        wp.copy(self.particles.velocity, model.particle_qd)
+        wp.copy(self.particles.inverse_mass, model.particle_inv_mass)
+        wp.launch(
+            soft_tet_init_rows_kernel,
+            dim=self.num_soft_tetrahedra,
+            inputs=[
+                self.constraints,
+                wp.int32(self.num_joints + self.num_cloth_triangles),  # cid_offset
+                wp.int32(self.num_bodies),
+                model.tet_indices,
+                model.particle_q,
+                model.tet_poses,
+                model.tet_materials,
+                wp.float32(beta_lambda),
+                wp.float32(beta_mu),
+            ],
+            device=self.device,
+        )
+        self._num_active_constraints.fill_(
+            self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra
+        )
 
     def setup_cloth_collision_pipeline(
         self,
@@ -978,6 +1078,8 @@ class PhoenXWorld:
         *,
         cloth_thickness: float = 0.005,
         cloth_gap: float = 0.010,
+        soft_body_thickness: float = 0.005,
+        soft_body_gap: float = 0.010,
         broad_phase: str = "sap",
         contact_matching: str = "sticky",
         rigid_contact_max: int | None = None,
@@ -985,75 +1087,88 @@ class PhoenXWorld:
         phoenx_body_offset: int = 1,
     ):
         """Construct (and stash on ``model._collision_pipeline``) a
-        unified rigid + cloth-triangle :class:`CollisionPipeline`.
+        unified rigid + cloth-triangle + soft-tet :class:`CollisionPipeline`.
 
-        Allocates ``extra_shape_count = num_cloth_triangles`` virtual
-        shape slots in the pipeline, stamps the static metadata for the
-        cloth-triangle suffix ``[S, S + T)`` (``shape_type=TRIANGLE``,
-        ``shape_gap=cloth_gap``, ``shape_collision_group=1``,
-        ``shape_body=-1``, etc.), and stores the per-step thickness /
-        gap so :meth:`update_cloth_shape_geometry` can refresh
-        ``geom_transform`` / ``geom_data`` / ``shape_aabb_*`` from the
-        current particle positions.
+        Allocates ``extra_shape_count = num_cloth_triangles +
+        num_soft_tetrahedra`` virtual shape slots, stamps static metadata
+        for two suffixes:
 
-        The narrow-phase code path is unchanged -- cloth tris are
-        consumed as ordinary :data:`~newton.GeoType.TRIANGLE` shapes.
+        * Cloth-triangle suffix ``[S, S + T)`` -- ``shape_type=TRIANGLE``.
+        * Soft-tet suffix ``[S + T, S + T + Tet)`` -- ``shape_type=TETRAHEDRON``.
+
+        Per-step :meth:`update_cloth_shape_geometry` refreshes
+        ``geom_transform`` / ``geom_data`` / ``shape_aabb_*`` / (tet only)
+        ``shape_source`` from current particle positions.
+
+        Narrow-phase reuses Newton's existing GeoType.TRIANGLE / TETRAHEDRON
+        support-function dispatch unchanged.
 
         Args:
-            model: Finalised :class:`~newton.Model` with
-                ``model.shape_*`` populated. Must have
-                ``model.tri_count == self.num_cloth_triangles``.
+            model: Finalised :class:`~newton.Model` with ``model.shape_*``
+                populated. Must have ``model.tri_count ==
+                self.num_cloth_triangles`` and ``model.tet_count ==
+                self.num_soft_tetrahedra``.
             cloth_thickness: Geometric Minkowski-skin half-thickness
                 added to each cloth triangle [m]. Default 5 mm.
             cloth_gap: Speculative-contact enlargement on top of the
                 thickness [m]. Default 10 mm. Total contact-detection
                 radius is ``thickness + gap``.
+            soft_body_thickness: Per-tet skin half-thickness [m].
+            soft_body_gap: Per-tet speculative-contact gap [m].
             broad_phase: ``"sap"`` (default), ``"nxn"``, or ``"explicit"``.
             contact_matching: PhoenX requires ``"sticky"`` (default) or
                 ``"latest"`` so warm-starting works.
             rigid_contact_max: Override Newton's contact-buffer size.
-                Defaults to whatever the pipeline's auto-estimator picks.
             shape_pairs_max: Broad-phase candidate-pair budget override.
 
         Returns:
-            The constructed :class:`CollisionPipeline`. Also assigned to
-            ``model._collision_pipeline`` so :meth:`Model.collide` (and
-            its overload-with-external-aabbs path) routes through it.
+            The constructed :class:`CollisionPipeline`.
         """
         from newton._src.geometry.types import GeoType  # noqa: PLC0415
         from newton._src.sim.collide import CollisionPipeline  # noqa: PLC0415
 
-        if self.num_cloth_triangles == 0:
+        if self.num_cloth_triangles == 0 and self.num_soft_tetrahedra == 0:
             raise RuntimeError(
-                "setup_cloth_collision_pipeline requires num_cloth_triangles > 0; "
-                "rigid-only scenes use newton.CollisionPipeline directly"
+                "setup_cloth_collision_pipeline requires num_cloth_triangles > 0 "
+                "or num_soft_tetrahedra > 0; rigid-only scenes use "
+                "newton.CollisionPipeline directly"
             )
         S = int(model.shape_count)
         T = int(self.num_cloth_triangles)
+        Tet = int(self.num_soft_tetrahedra)
 
         # Unified shape_world / shape_flags arrays of length S+T.
         # Rigid prefix mirrors model.shape_*; suffix lands in world 0
         # with default flags (= same flag value as a typical dynamic
         # rigid shape so the broad phase doesn't cull cloth tris).
-        unified_shape_world = wp.zeros(S + T, dtype=wp.int32, device=self.device)
+        unified_shape_world = wp.zeros(S + T + Tet, dtype=wp.int32, device=self.device)
         if S > 0 and getattr(model, "shape_world", None) is not None:
             wp.copy(unified_shape_world, model.shape_world, count=S)
         unified_shape_flags = None
         if getattr(model, "shape_flags", None) is not None:
             shape_flags = model.shape_flags
             # Suffix flags = take the most permissive flag set we see
-            # in the prefix so cloth shapes participate in broad phase.
-            # Falls back to copying [0] (or 0) if the prefix is empty.
-            unified_shape_flags = wp.zeros(S + T, dtype=shape_flags.dtype, device=self.device)
+            # in the prefix so deformable shapes participate in broad phase.
+            unified_shape_flags = wp.zeros(S + T + Tet, dtype=shape_flags.dtype, device=self.device)
             if S > 0:
                 wp.copy(unified_shape_flags, shape_flags, count=S)
-                # Suffix gets the same flags as shape 0 -- avoids
-                # importing flag bit constants here.
                 seed_value = int(shape_flags.numpy()[0])
                 if seed_value != 0:
                     arr = unified_shape_flags.numpy()
                     arr[S:] = seed_value
                     unified_shape_flags.assign(arr)
+
+        # Length-1 sentinel for the unused mesh-indices argument in the
+        # share-vertex filter when the matching deformable category is
+        # absent (Warp arrays must be non-empty to be bound).
+        if T == 0:
+            tri_indices_for_filter = wp.zeros((1, 3), dtype=wp.int32, device=self.device)
+        else:
+            tri_indices_for_filter = model.tri_indices
+        if Tet == 0:
+            tet_indices_for_filter = wp.zeros((1, 4), dtype=wp.int32, device=self.device)
+        else:
+            tet_indices_for_filter = model.tet_indices
 
         pipeline = CollisionPipeline(
             model,
@@ -1061,7 +1176,7 @@ class PhoenXWorld:
             contact_matching=contact_matching,
             rigid_contact_max=rigid_contact_max,
             shape_pairs_max=shape_pairs_max,
-            extra_shape_count=T,
+            extra_shape_count=T + Tet,
             unified_shape_world=unified_shape_world,
             unified_shape_flags=unified_shape_flags,
             broad_phase_filter=(
@@ -1070,82 +1185,93 @@ class PhoenXWorld:
             ),
         )
 
-        # Bind the share-vertex filter's per-step data: triangle index
-        # array + cloth-shape offset. The filter callback reads this
-        # at every broad-phase pair test to drop pairs of cloth tris
-        # that share at least one particle (the elasticity rows
-        # already couple them; treating their geometric overlap as a
-        # contact would double-count). Rigid + cloth-vs-rigid pairs
-        # pass through unchanged.
+        # Bind the share-vertex filter's per-step data: tri/tet index
+        # arrays + offsets. The filter callback reads this at every
+        # broad-phase pair test to drop pairs of deformables (cloth or
+        # soft-tet) that share at least one particle.
         share_vertex_data = PhoenXClothShareVertexFilterData()
         share_vertex_data.num_rigid_shapes = wp.int32(S)
-        share_vertex_data.tri_indices = model.tri_indices
+        share_vertex_data.num_cloth_triangles = wp.int32(T)
+        share_vertex_data.tri_indices = tri_indices_for_filter
+        share_vertex_data.tet_indices = tet_indices_for_filter
         pipeline.set_broad_phase_filter_data(share_vertex_data)
 
-        # Stamp the static cloth-triangle suffix metadata. Per-step
-        # quantities (geom_xform, geom_data, AABB) are written by
-        # :meth:`update_cloth_shape_geometry`.
+        # Stamp the static deformable-shape suffix metadata. Per-step
+        # quantities (geom_xform, geom_data, AABB, shape_source for tets)
+        # are written by :meth:`update_cloth_shape_geometry`.
         triangle_type = int(GeoType.TRIANGLE)
+        tetrahedron_type = int(GeoType.TETRAHEDRON)
 
-        def _fill_suffix_int(arr: wp.array, value: int) -> None:
+        def _fill_range_int(arr: wp.array, lo: int, hi: int, value: int) -> None:
             host = arr.numpy()
-            host[S:] = value
+            host[lo:hi] = value
             arr.assign(host)
 
-        def _fill_suffix_float(arr: wp.array, value: float) -> None:
+        def _fill_range_float(arr: wp.array, lo: int, hi: int, value: float) -> None:
             host = arr.numpy()
-            host[S:] = value
+            host[lo:hi] = value
             arr.assign(host)
 
-        _fill_suffix_int(pipeline.unified_shape_type, triangle_type)
-        _fill_suffix_float(pipeline.unified_shape_gap, float(cloth_gap))
-        _fill_suffix_float(pipeline.unified_shape_collision_radius, 0.0)
-        _fill_suffix_int(pipeline.unified_shape_collision_group, 1)
-        # ``unified_shape_body`` was already filled to -1 in the suffix
-        # by :meth:`CollisionPipeline._build_unified_shape_arrays`; no
-        # action needed.
-        # ``unified_shape_source_ptr`` defaults to 0 -- TRIANGLE doesn't
-        # consume it (only TETRAHEDRON / CONVEX_MESH do).
+        if T > 0:
+            _fill_range_int(pipeline.unified_shape_type, S, S + T, triangle_type)
+            _fill_range_float(pipeline.unified_shape_gap, S, S + T, float(cloth_gap))
+            _fill_range_float(pipeline.unified_shape_collision_radius, S, S + T, 0.0)
+            _fill_range_int(pipeline.unified_shape_collision_group, S, S + T, 1)
+        if Tet > 0:
+            _fill_range_int(pipeline.unified_shape_type, S + T, S + T + Tet, tetrahedron_type)
+            _fill_range_float(pipeline.unified_shape_gap, S + T, S + T + Tet, float(soft_body_gap))
+            _fill_range_float(pipeline.unified_shape_collision_radius, S + T, S + T + Tet, 0.0)
+            _fill_range_int(pipeline.unified_shape_collision_group, S + T, S + T + Tet, 1)
+        # ``unified_shape_body`` was already filled to -1 in both
+        # suffixes by :meth:`CollisionPipeline._build_unified_shape_arrays`.
+        # ``unified_shape_source_ptr`` defaults to 0; the per-step tet
+        # geometry kernel writes the encoded 4th-vertex into it.
 
         # Stash for :meth:`update_cloth_shape_geometry` and downstream
         # collision dispatch.
         self._collision_pipeline = pipeline
         self._cloth_shape_offset: int = S
+        self._soft_tet_shape_offset: int = S + T
         self._cloth_thickness: float = float(cloth_thickness)
         self._cloth_gap: float = float(cloth_gap)
-        self._cloth_tri_indices = model.tri_indices
+        self._soft_body_thickness: float = float(soft_body_thickness)
+        self._soft_body_gap: float = float(soft_body_gap)
+        self._cloth_tri_indices = tri_indices_for_filter if T > 0 else None
+        self._soft_tet_indices = tet_indices_for_filter if Tet > 0 else None
 
-        # Per-shape filter id array. Length S + T. Rigid prefix
+        # Per-shape filter id array. Length S + T + Tet. Rigid prefix
         # mirrors model.shape_body so the existing same-body collision
-        # filter behaviour is preserved. Cloth-tri suffix gets unique
-        # negative ids ``-(2 + t)`` so distinct cloth tris (each
+        # filter behaviour is preserved. Deformable suffixes get unique
+        # negative ids ``-(2 + i)`` so distinct deformables (each
         # nominally anchored to the world via shape_body=-1) don't
-        # collapse into a single filter group -- that would lose
-        # cloth-vs-cloth and cloth-vs-static-rigid contacts. Negative
-        # ids stay distinct from any rigid body index (>= 0) and from
-        # the -1 world-anchor sentinel.
+        # collapse into a single filter group.
         S_int = int(S)
         T_int = int(T)
-        filter_host = np.zeros(S_int + T_int, dtype=np.int32)
+        Tet_int = int(Tet)
+        filter_host = np.zeros(S_int + T_int + Tet_int, dtype=np.int32)
         if S_int > 0 and getattr(model, "shape_body", None) is not None:
             filter_host[:S_int] = model.shape_body.numpy()
-        for t_i in range(T_int):
-            filter_host[S_int + t_i] = -(2 + t_i)
+        for i in range(T_int + Tet_int):
+            filter_host[S_int + i] = -(2 + i)
         self._shape_filter_id = wp.array(filter_host, dtype=wp.int32, device=self.device)
 
         # Per-shape endpoint table for cloth-aware contact ingest.
-        # Allocated for the full unified shape range and populated
-        # once: rigid prefix copies model.shape_body, cloth suffix
-        # decodes tri_indices into unified-index triplets.
-        self._shape_endpoints = shape_endpoints_zeros(S + T, device=self.device)
+        # Allocated for the full unified shape range and populated once:
+        # rigid prefix copies model.shape_body; cloth suffix decodes
+        # tri_indices into 3-particle nodes; soft-tet suffix decodes
+        # tet_indices into 4-particle nodes.
+        self._shape_endpoints = shape_endpoints_zeros(S + T + Tet, device=self.device)
         wp.launch(
             _phoenx_populate_shape_endpoints_kernel,
-            dim=S + T,
+            dim=S + T + Tet,
             inputs=[
                 model.shape_body,
-                model.tri_indices,
+                tri_indices_for_filter,
+                tet_indices_for_filter,
                 wp.int32(S),
                 wp.int32(T),
+                wp.int32(S + T),
+                wp.int32(Tet),
                 wp.int32(self.num_bodies),
                 wp.int32(phoenx_body_offset),
             ],
@@ -1160,35 +1286,57 @@ class PhoenXWorld:
         return pipeline
 
     def update_cloth_shape_geometry(self) -> None:
-        """Per-step refresh of the cloth-triangle shape suffix.
+        """Per-step refresh of the cloth-triangle + soft-tet shape suffixes.
 
-        Reads current particle positions, re-canonicalises each cloth
-        triangle, writes the suffix of ``geom_transform`` /
-        ``geom_data`` / ``shape_aabb_lower`` / ``shape_aabb_upper``.
+        Reads current particle positions and re-canonicalises each
+        deformable shape into its slot in the unified shape arrays.
+        Cloth triangles get :func:`_phoenx_update_cloth_shape_geometry_kernel`;
+        soft tets get :func:`_phoenx_update_soft_tet_shape_geometry_kernel`.
         Must be called once per step before
         :meth:`CollisionPipeline.collide_with_external_aabbs`.
         """
-        if self.num_cloth_triangles == 0 or self._collision_pipeline is None:
+        if self._collision_pipeline is None:
             return
         pipeline = self._collision_pipeline
-        wp.launch(
-            _phoenx_update_cloth_shape_geometry_kernel,
-            dim=self.num_cloth_triangles,
-            inputs=[
-                self.particles,
-                self._cloth_tri_indices,
-                wp.int32(self._cloth_shape_offset),
-                wp.float32(self._cloth_thickness),
-                wp.float32(self._cloth_gap),
-            ],
-            outputs=[
-                pipeline.geom_transform,
-                pipeline.geom_data,
-                pipeline.narrow_phase.shape_aabb_lower,
-                pipeline.narrow_phase.shape_aabb_upper,
-            ],
-            device=self.device,
-        )
+        if self.num_cloth_triangles > 0:
+            wp.launch(
+                _phoenx_update_cloth_shape_geometry_kernel,
+                dim=self.num_cloth_triangles,
+                inputs=[
+                    self.particles,
+                    self._cloth_tri_indices,
+                    wp.int32(self._cloth_shape_offset),
+                    wp.float32(self._cloth_thickness),
+                    wp.float32(self._cloth_gap),
+                ],
+                outputs=[
+                    pipeline.geom_transform,
+                    pipeline.geom_data,
+                    pipeline.narrow_phase.shape_aabb_lower,
+                    pipeline.narrow_phase.shape_aabb_upper,
+                ],
+                device=self.device,
+            )
+        if self.num_soft_tetrahedra > 0:
+            wp.launch(
+                _phoenx_update_soft_tet_shape_geometry_kernel,
+                dim=self.num_soft_tetrahedra,
+                inputs=[
+                    self.particles,
+                    self._soft_tet_indices,
+                    wp.int32(self._soft_tet_shape_offset),
+                    wp.float32(self._soft_body_thickness),
+                    wp.float32(self._soft_body_gap),
+                ],
+                outputs=[
+                    pipeline.geom_transform,
+                    pipeline.geom_data,
+                    pipeline.unified_shape_source_ptr,
+                    pipeline.narrow_phase.shape_aabb_lower,
+                    pipeline.narrow_phase.shape_aabb_upper,
+                ],
+                device=self.device,
+            )
 
     def collide(self, state, contacts) -> None:
         """Run the unified rigid + cloth-triangle collision pipeline.
@@ -1255,10 +1403,10 @@ class PhoenXWorld:
 
         self._ingest_and_warmstart_contacts(contacts, shape_body)
         if self._ingest_scratch is not None:
-            # Contacts begin after the joint + cloth-tri blocks in the
-            # cid space.
+            # Contacts begin after the joint + cloth-tri + soft-tet
+            # blocks in the cid space.
             self._partitioner.set_costs_from_contacts(
-                self.num_joints + self.num_cloth_triangles,
+                self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra,
                 self._ingest_scratch.num_contact_columns,
                 self._contact_cols,
             )
@@ -1380,7 +1528,9 @@ class PhoenXWorld:
         """Translate Newton ``Contacts`` -> contact columns. Swap prev/current
         per-cid state, ingest -> warm-start -> forward-map stamp, fuse counts."""
         if contacts is None or self.max_contact_columns == 0 or self._ingest_scratch is None:
-            self._num_active_constraints.fill_(self.num_joints + self.num_cloth_triangles)
+            self._num_active_constraints.fill_(
+                self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra
+            )
             self._contact_views = None
             return
 
@@ -1541,7 +1691,7 @@ class PhoenXWorld:
 
         stamp_forward_contact_map(
             rigid_contact_max=self.rigid_contact_max,
-            cid_base=self.num_joints + self.num_cloth_triangles,
+            cid_base=self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra,
             scratch=self._ingest_scratch,
             cid_of_contact=self._cid_of_contact_cur,
             device=self.device,
@@ -1550,13 +1700,13 @@ class PhoenXWorld:
         self._sync_num_active_constraints()
 
     def _sync_num_active_constraints(self) -> None:
-        """Fuse joint+cloth+contact column count into _num_active_constraints on-device."""
+        """Fuse joint+cloth+soft-tet+contact column count into _num_active_constraints on-device."""
         wp.launch(
             _sync_num_active_constraints_kernel,
             dim=1,
             inputs=[
                 self._ingest_scratch.num_contact_columns,
-                wp.int32(self.num_joints + self.num_cloth_triangles),
+                wp.int32(self.num_joints + self.num_cloth_triangles + self.num_soft_tetrahedra),
             ],
             outputs=[self._num_active_constraints],
             device=self.device,
@@ -1577,6 +1727,7 @@ class PhoenXWorld:
                 self._num_active_constraints,
                 wp.int32(self.num_joints),
                 wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_soft_tetrahedra),
                 wp.int32(self.num_bodies),
                 self._elements,
             ],
@@ -1897,6 +2048,7 @@ class PhoenXWorld:
                     contact_views,
                     wp.int32(self.num_joints),
                     wp.int32(self.num_cloth_triangles),
+                    wp.int32(self.num_soft_tetrahedra),
                     wp.int32(self.num_bodies),
                     wp.int32(self._singleworld_total_threads),
                     wp.int32(self._fuse_threshold),
@@ -1933,6 +2085,7 @@ class PhoenXWorld:
                 contact_views,
                 wp.int32(self.num_joints),
                 wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_soft_tetrahedra),
                 wp.int32(self.num_bodies),
                 wp.int32(self._fuse_threshold),
                 self._copy_state,
@@ -2014,12 +2167,14 @@ class PhoenXWorld:
 
         * ``revolute_only``: every joint is revolute -> skip the
           ``joint_mode`` branch in the iterate hot loop.
-        * ``cloth_support``: ``num_cloth_triangles > 0`` -> include the
-          cloth-triangle dispatch in the type-tag if/elif. The
+        * ``cloth_support``: ``num_cloth_triangles > 0`` or
+          ``num_soft_tetrahedra > 0`` -> include the cloth-triangle
+          *and* soft-tetrahedron dispatch in the type-tag if/elif. The
           rigid-only variant is byte-identical to the pre-cloth
-          implementation so rigid scenes pay zero cost.
+          implementation so rigid scenes pay zero cost; soft-tets reuse
+          the same compile-time gate.
         """
-        cloth_on = self.num_cloth_triangles > 0
+        cloth_on = self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0
         if self._use_revolute_specialization:
             if cloth_on:
                 return (

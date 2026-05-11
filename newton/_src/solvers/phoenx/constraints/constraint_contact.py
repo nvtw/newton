@@ -138,14 +138,16 @@ class ContactConstraintData:
     #: Number of contacts in this column.
     contact_count: wp.int32
 
-    #: Endpoint kind per side: ``0`` = rigid body, ``1`` = cloth triangle.
-    #: ``body1`` / ``body2`` store the first unified body-or-particle
-    #: index; ``*_nodes_extra`` holds the 2nd and 3rd cloth particles
-    #: (``(-1, -1)`` for rigid).
+    #: Endpoint kind per side: ``0`` = rigid body, ``1`` = cloth triangle,
+    #: ``2`` = soft tetrahedron. ``body1`` / ``body2`` store the first
+    #: unified body-or-particle index; ``*_nodes_extra`` holds the 2nd /
+    #: 3rd / 4th element particles (``(-1, -1, -1)`` for rigid; the cloth
+    #: path stores ``(extra0, extra1, -1)`` with the 4th slot as a sentinel;
+    #: soft-tet fills all three).
     side0_kind: wp.int32
     side1_kind: wp.int32
-    side0_nodes_extra: wp.vec2i
-    side1_nodes_extra: wp.vec2i
+    side0_nodes_extra: wp.vec3i
+    side1_nodes_extra: wp.vec3i
 
 
 assert_constraint_header(ContactConstraintData)
@@ -386,31 +388,35 @@ def contact_set_side1_kind(c: ContactColumnContainer, local_cid: wp.int32, v: wp
 
 
 @wp.func
-def contact_get_side0_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32) -> wp.vec2i:
-    return wp.vec2i(
+def contact_get_side0_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32) -> wp.vec3i:
+    return wp.vec3i(
         _col_read_int(c, _OFF_SIDE0_NODES_EXTRA + wp.int32(0), local_cid),
         _col_read_int(c, _OFF_SIDE0_NODES_EXTRA + wp.int32(1), local_cid),
+        _col_read_int(c, _OFF_SIDE0_NODES_EXTRA + wp.int32(2), local_cid),
     )
 
 
 @wp.func
-def contact_set_side0_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32, v: wp.vec2i):
+def contact_set_side0_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32, v: wp.vec3i):
     _col_write_int(c, _OFF_SIDE0_NODES_EXTRA + wp.int32(0), local_cid, v[0])
     _col_write_int(c, _OFF_SIDE0_NODES_EXTRA + wp.int32(1), local_cid, v[1])
+    _col_write_int(c, _OFF_SIDE0_NODES_EXTRA + wp.int32(2), local_cid, v[2])
 
 
 @wp.func
-def contact_get_side1_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32) -> wp.vec2i:
-    return wp.vec2i(
+def contact_get_side1_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32) -> wp.vec3i:
+    return wp.vec3i(
         _col_read_int(c, _OFF_SIDE1_NODES_EXTRA + wp.int32(0), local_cid),
         _col_read_int(c, _OFF_SIDE1_NODES_EXTRA + wp.int32(1), local_cid),
+        _col_read_int(c, _OFF_SIDE1_NODES_EXTRA + wp.int32(2), local_cid),
     )
 
 
 @wp.func
-def contact_set_side1_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32, v: wp.vec2i):
+def contact_set_side1_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32, v: wp.vec3i):
     _col_write_int(c, _OFF_SIDE1_NODES_EXTRA + wp.int32(0), local_cid, v[0])
     _col_write_int(c, _OFF_SIDE1_NODES_EXTRA + wp.int32(1), local_cid, v[1])
+    _col_write_int(c, _OFF_SIDE1_NODES_EXTRA + wp.int32(2), local_cid, v[2])
 
 
 # ---------------------------------------------------------------------------

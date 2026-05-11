@@ -27,7 +27,10 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
-from newton._src.solvers.phoenx.cloth_collision import SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE
+from newton._src.solvers.phoenx.cloth_collision import (
+    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
+    SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
+)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -121,7 +124,7 @@ __all__ = [
 @wp.func
 def _side_world_contact_point(
     kind: wp.int32,
-    nodes: wp.vec3i,
+    nodes: wp.vec4i,
     bary: wp.vec3f,
     bodies: BodyContainer,
     particles: ParticleContainer,
@@ -135,7 +138,8 @@ def _side_world_contact_point(
     """World-space contact point on this side incl. ``+/-margin*n`` shift.
 
     Rigid: ``pos + quat_rotate(orient, local_p - body_com) + sign*margin*n``.
-    Cloth: ``bary . particle_positions + sign*margin*n``.
+    Cloth: ``bary . particle_positions + sign*margin*n`` (3 nodes).
+    Soft-tet: 4-node barycentric anchor (4th weight derived).
     Side 0 uses ``+margin*n`` (push toward side 1); side 1 uses ``-margin*n``.
     """
     sign = wp.float32(-1.0) if is_side1 else wp.float32(1.0)
@@ -145,6 +149,19 @@ def _side_world_contact_point(
         p_c = nodes[2] - num_bodies
         anchor = (
             bary[0] * particles.position[p_a] + bary[1] * particles.position[p_b] + bary[2] * particles.position[p_c]
+        )
+        return anchor + (sign * margin) * n
+    if kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        p_a = nodes[0] - num_bodies
+        p_b = nodes[1] - num_bodies
+        p_c = nodes[2] - num_bodies
+        p_d = nodes[3] - num_bodies
+        bary_d = wp.float32(1.0) - bary[0] - bary[1] - bary[2]
+        anchor = (
+            bary[0] * particles.position[p_a]
+            + bary[1] * particles.position[p_b]
+            + bary[2] * particles.position[p_c]
+            + bary_d * particles.position[p_d]
         )
         return anchor + (sign * margin) * n
     b = nodes[0]
@@ -220,8 +237,8 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
             side1_kind = contact_get_side1_kind(constraints, cid)
             side0_extra = contact_get_side0_nodes_extra(constraints, cid)
             side1_extra = contact_get_side1_nodes_extra(constraints, cid)
-            side0_nodes = wp.vec3i(b1, side0_extra[0], side0_extra[1])
-            side1_nodes = wp.vec3i(b2, side1_extra[0], side1_extra[1])
+            side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
+            side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
         else:
             # Mass-splitting slot lookup for both bodies. When mass
             # splitting is disabled (highest_index_in_use[0] == 0) the
@@ -554,8 +571,8 @@ def _make_contact_iterate_at(cloth_support: bool):
             side1_kind = contact_get_side1_kind(constraints, cid)
             side0_extra = contact_get_side0_nodes_extra(constraints, cid)
             side1_extra = contact_get_side1_nodes_extra(constraints, cid)
-            side0_nodes = wp.vec3i(b1, side0_extra[0], side0_extra[1])
-            side1_nodes = wp.vec3i(b2, side1_extra[0], side1_extra[1])
+            side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
+            side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
         else:
             # Mass-splitting slot lookup. Identity when disabled.
             v1, inv_factor1, slot1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
@@ -822,7 +839,7 @@ def contact_prepare_for_iteration_cloth_aware(
     side1_extra = contact_get_side1_nodes_extra(constraints, cid)
     contact_endpoint_set_access_mode(
         side0_kind,
-        wp.vec3i(b1, side0_extra[0], side0_extra[1]),
+        wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2]),
         bodies,
         particles,
         num_bodies,
@@ -831,7 +848,7 @@ def contact_prepare_for_iteration_cloth_aware(
     )
     contact_endpoint_set_access_mode(
         side1_kind,
-        wp.vec3i(b2, side1_extra[0], side1_extra[1]),
+        wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2]),
         bodies,
         particles,
         num_bodies,
@@ -913,7 +930,7 @@ def contact_iterate_cloth_aware(
     side1_extra = contact_get_side1_nodes_extra(constraints, cid)
     contact_endpoint_set_access_mode(
         side0_kind,
-        wp.vec3i(b1, side0_extra[0], side0_extra[1]),
+        wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2]),
         bodies,
         particles,
         num_bodies,
@@ -922,7 +939,7 @@ def contact_iterate_cloth_aware(
     )
     contact_endpoint_set_access_mode(
         side1_kind,
-        wp.vec3i(b2, side1_extra[0], side1_extra[1]),
+        wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2]),
         bodies,
         particles,
         num_bodies,

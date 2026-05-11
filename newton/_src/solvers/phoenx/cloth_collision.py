@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.geometry.support_function import encode_vec3
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -53,11 +54,14 @@ __all__ = [
     "PhoenXClothShareVertexFilterData",
     "SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE",
     "SHAPE_ENDPOINT_KIND_RIGID",
+    "SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON",
     "ShapeEndpoint",
     "_phoenx_pack_cloth_contact_barycentric_kernel",
     "_phoenx_pack_cloth_contact_endpoints_kernel",
     "_phoenx_populate_shape_endpoints_kernel",
     "_phoenx_update_cloth_shape_geometry_kernel",
+    "_phoenx_update_soft_tet_shape_geometry_kernel",
+    "canonicalize_tetrahedron",
     "canonicalize_triangle",
     "phoenx_cloth_share_vertex_filter",
     "shape_endpoints_zeros",
@@ -83,13 +87,18 @@ __all__ = [
 # :meth:`PhoenXWorld.setup_cloth_collision_pipeline` and read by the
 # contact-ingest kernel as a single 16-byte load per shape.
 
-#: Shape is owned by a rigid body. ``nodes`` holds ``(body_unified, -1, -1)``.
+#: Shape is owned by a rigid body. ``nodes`` holds ``(body_unified, -1, -1, -1)``.
 SHAPE_ENDPOINT_KIND_RIGID: int = 0
 
 #: Shape is a cloth triangle. ``nodes`` holds three particle indices in
 #: unified body-or-particle space ``(num_bodies + p_a, num_bodies + p_b,
-#: num_bodies + p_c)``.
+#: num_bodies + p_c, -1)`` -- the 4th slot is unused for triangles.
 SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE: int = 1
+
+#: Shape is a soft-body tetrahedron. ``nodes`` holds four particle
+#: indices in unified body-or-particle space ``(num_bodies + p_a,
+#: num_bodies + p_b, num_bodies + p_c, num_bodies + p_d)``.
+SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON: int = 2
 
 
 @wp.struct
@@ -97,14 +106,18 @@ class ShapeEndpoint:
     """Per-shape mapping ``shape_index -> (kind, nodes)``.
 
     For rigid shapes, ``nodes[0]`` is the rigid body index in unified
-    body-or-particle space (``[0, num_bodies)``); ``nodes[1]`` and
-    ``nodes[2]`` are ``-1``.
+    body-or-particle space (``[0, num_bodies)``); ``nodes[1..3]`` are
+    ``-1``.
 
     For cloth-triangle shapes, ``nodes[0/1/2]`` are the three triangle
-    particle indices in unified space (``num_bodies + particle_id``).
+    particle indices in unified space (``num_bodies + particle_id``);
+    ``nodes[3]`` is ``-1``.
+
+    For soft-tet shapes, ``nodes[0..3]`` are the four tetrahedron vertex
+    indices in unified space.
     """
 
-    nodes: wp.vec3i
+    nodes: wp.vec4i
     kind: wp.int32
 
 
@@ -118,30 +131,34 @@ def shape_endpoints_zeros(num_shapes: int, device=None) -> wp.array[ShapeEndpoin
 def _phoenx_populate_shape_endpoints_kernel(
     shape_body: wp.array[wp.int32],
     tri_indices: wp.array2d[wp.int32],
+    tet_indices: wp.array2d[wp.int32],
     cloth_shape_offset: wp.int32,
     num_cloth_triangles: wp.int32,
+    soft_tet_shape_offset: wp.int32,
+    num_soft_tetrahedra: wp.int32,
     num_bodies: wp.int32,
     phoenx_body_offset: wp.int32,
     # out
     shape_endpoints: wp.array[ShapeEndpoint],
 ):
-    """One thread per shape ``s`` in ``[0, S + T)``: stamp its
-    :class:`ShapeEndpoint`.
+    """One thread per shape ``s``: stamp its :class:`ShapeEndpoint`.
+
+    Layout in the unified shape array:
 
     * ``s < cloth_shape_offset`` -> rigid: ``nodes = (newton_body +
-      phoenx_body_offset, -1, -1)``.
+      phoenx_body_offset, -1, -1, -1)``.
+    * ``cloth_shape_offset <= s < soft_tet_shape_offset`` -> cloth tri:
+      nodes = ``(num_bodies + p_a, num_bodies + p_b, num_bodies + p_c, -1)``.
+    * ``s >= soft_tet_shape_offset`` -> soft-tet: nodes are all four
+      unified-index particle indices.
 
-      Newton's :attr:`Model.shape_body` uses Newton's body indexing
-      (``[0, model.body_count)`` for dynamic bodies, ``-1`` for shapes
-      anchored to the world). PhoenX's :class:`BodyContainer` may use
-      a different layout: the "ported example" / cloth-aware convention
-      reserves slot 0 for a static world-anchor body and shifts every
-      Newton body by ``+1`` (so ``phoenx_body_offset = 1``); raw
-      ``WorldBuilder`` scenes pass ``phoenx_body_offset = 0``.
-      ``-1`` (no body) is preserved as-is so the iterate's static-anchor
-      branch fires.
-    * ``s >= cloth_shape_offset`` -> cloth tri: nodes = unified-index
-      triplet ``num_bodies + particle_id`` from ``tri_indices[s - S]``.
+    Newton's :attr:`Model.shape_body` uses Newton's body indexing
+    (``[0, model.body_count)`` for dynamic bodies, ``-1`` for shapes
+    anchored to the world). PhoenX's :class:`BodyContainer` may use
+    a different layout: the "ported example" / cloth-aware convention
+    reserves slot 0 for a static world-anchor body and shifts every
+    Newton body by ``+1`` (so ``phoenx_body_offset = 1``); raw
+    ``WorldBuilder`` scenes pass ``phoenx_body_offset = 0``.
     """
     s = wp.tid()
     if s < cloth_shape_offset:
@@ -149,19 +166,32 @@ def _phoenx_populate_shape_endpoints_kernel(
         if b >= 0:
             b = b + phoenx_body_offset
         ep = ShapeEndpoint()
-        ep.nodes = wp.vec3i(b, wp.int32(-1), wp.int32(-1))
+        ep.nodes = wp.vec4i(b, wp.int32(-1), wp.int32(-1), wp.int32(-1))
         ep.kind = wp.int32(SHAPE_ENDPOINT_KIND_RIGID)
         shape_endpoints[s] = ep
         return
-    t = s - cloth_shape_offset
-    if t >= num_cloth_triangles:
+    if s < soft_tet_shape_offset:
+        t = s - cloth_shape_offset
+        if t >= num_cloth_triangles:
+            return
+        pa = tri_indices[t, 0]
+        pb = tri_indices[t, 1]
+        pc = tri_indices[t, 2]
+        ep = ShapeEndpoint()
+        ep.nodes = wp.vec4i(num_bodies + pa, num_bodies + pb, num_bodies + pc, wp.int32(-1))
+        ep.kind = wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE)
+        shape_endpoints[s] = ep
         return
-    pa = tri_indices[t, 0]
-    pb = tri_indices[t, 1]
-    pc = tri_indices[t, 2]
+    t = s - soft_tet_shape_offset
+    if t >= num_soft_tetrahedra:
+        return
+    pa = tet_indices[t, 0]
+    pb = tet_indices[t, 1]
+    pc = tet_indices[t, 2]
+    pd = tet_indices[t, 3]
     ep = ShapeEndpoint()
-    ep.nodes = wp.vec3i(num_bodies + pa, num_bodies + pb, num_bodies + pc)
-    ep.kind = wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE)
+    ep.nodes = wp.vec4i(num_bodies + pa, num_bodies + pb, num_bodies + pc, num_bodies + pd)
+    ep.kind = wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON)
     shape_endpoints[s] = ep
 
 
@@ -277,6 +307,94 @@ def _phoenx_update_cloth_shape_geometry_kernel(
     aabb_upper[s] = hi + enlargement_vec
 
 
+@wp.func
+def canonicalize_tetrahedron(xa: wp.vec3f, xb: wp.vec3f, xc: wp.vec3f, xd: wp.vec3f):
+    """Map four world-space tet vertices to the canonical
+    ``(shape_transform, edge_ab, c_y, c_z, d_local)`` form Newton's
+    :data:`~newton.GeoType.TETRAHEDRON` consumes.
+
+    The first three vertices (A, B, C) follow the same convention as
+    :func:`canonicalize_triangle`. The 4th vertex ``D`` is transformed
+    into the local frame so it can be packed into ``shape_source``.
+
+    Returns ``(transform, edge_ab, c_y, c_z, d_local)``. Degenerate
+    tetrahedra (collinear A/B or coplanar A/B/C) return identity
+    transform + zero scale; the narrow phase sees a degenerate
+    primitive and skips it cleanly.
+    """
+    xform, edge_ab, c_y, c_z = canonicalize_triangle(xa, xb, xc)
+    if edge_ab < _DEGENERATE_EPS:
+        return xform, edge_ab, c_y, c_z, wp.vec3f(0.0, 0.0, 0.0)
+    # Local frame: A is the origin, +Z = (B-A)/|B-A|, +Y in-plane perp,
+    # +X = +Y x +Z (face normal). D in local space is the inverse
+    # transform applied to D's world position.
+    d_local = wp.transform_point(wp.transform_inverse(xform), xd)
+    return xform, edge_ab, c_y, c_z, d_local
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_update_soft_tet_shape_geometry_kernel(
+    particles: ParticleContainer,
+    tet_indices: wp.array2d[wp.int32],
+    soft_tet_shape_offset: wp.int32,
+    soft_body_thickness: wp.float32,
+    soft_body_gap: wp.float32,
+    # outputs
+    geom_xform: wp.array[wp.transform],
+    geom_data: wp.array[wp.vec4f],
+    shape_source: wp.array[wp.uint64],
+    aabb_lower: wp.array[wp.vec3f],
+    aabb_upper: wp.array[wp.vec3f],
+):
+    """Per-step update of the soft-tet shape suffix.
+
+    Mirrors :func:`_phoenx_update_cloth_shape_geometry_kernel` for the
+    4-vertex tet primitive. One thread per tet. Writes the five
+    per-step quantities Newton's collision pipeline reads for shape
+    ``soft_tet_shape_offset + t``:
+
+    * ``geom_xform`` -- canonical-frame world transform (A at origin,
+      AB along local +Z, ABC in local YZ plane).
+    * ``geom_data`` -- ``(edge_ab, c_y, c_z, thickness)``.
+    * ``shape_source`` -- encoded vertex D in local frame
+      (``encode_vec3``).
+    * ``shape_aabb_lower/upper`` -- world AABB over the 4 vertices,
+      enlarged by ``thickness + gap`` for speculative-contact detection.
+    """
+    t = wp.tid()
+    s = soft_tet_shape_offset + t
+
+    pa = tet_indices[t, 0]
+    pb = tet_indices[t, 1]
+    pc = tet_indices[t, 2]
+    pd = tet_indices[t, 3]
+
+    xa = particles.position[pa]
+    xb = particles.position[pb]
+    xc = particles.position[pc]
+    xd = particles.position[pd]
+
+    xform, edge_ab, c_y, c_z, d_local = canonicalize_tetrahedron(xa, xb, xc, xd)
+    geom_xform[s] = xform
+    geom_data[s] = wp.vec4f(edge_ab, c_y, c_z, soft_body_thickness)
+    shape_source[s] = encode_vec3(d_local)
+
+    enlargement = soft_body_thickness + soft_body_gap
+    enlargement_vec = wp.vec3f(enlargement, enlargement, enlargement)
+    lo = wp.vec3f(
+        wp.min(wp.min(xa[0], xb[0]), wp.min(xc[0], xd[0])),
+        wp.min(wp.min(xa[1], xb[1]), wp.min(xc[1], xd[1])),
+        wp.min(wp.min(xa[2], xb[2]), wp.min(xc[2], xd[2])),
+    )
+    hi = wp.vec3f(
+        wp.max(wp.max(xa[0], xb[0]), wp.max(xc[0], xd[0])),
+        wp.max(wp.max(xa[1], xb[1]), wp.max(xc[1], xd[1])),
+        wp.max(wp.max(xa[2], xb[2]), wp.max(xc[2], xd[2])),
+    )
+    aabb_lower[s] = lo - enlargement_vec
+    aabb_upper[s] = hi + enlargement_vec
+
+
 # ---------------------------------------------------------------------------
 # Cloth-aware contact ingest (post-process to the rigid pack kernel)
 # ---------------------------------------------------------------------------
@@ -330,13 +448,55 @@ def _phoenx_pack_cloth_contact_endpoints_kernel(
     ep_b = shape_endpoints[sb]
 
     # Primary node per side (= nodes[0]) lands in the existing
-    # ``body1`` / ``body2`` header dwords; extras land in side*_nodes_extra.
+    # ``body1`` / ``body2`` header dwords; extras (up to 3 for soft-tet,
+    # ``-1`` for unused slots on rigid / cloth-tri) land in side*_nodes_extra.
     contact_set_body1(contact_cols, tid, ep_a.nodes[0])
     contact_set_body2(contact_cols, tid, ep_b.nodes[0])
     contact_set_side0_kind(contact_cols, tid, ep_a.kind)
     contact_set_side1_kind(contact_cols, tid, ep_b.kind)
-    contact_set_side0_nodes_extra(contact_cols, tid, wp.vec2i(ep_a.nodes[1], ep_a.nodes[2]))
-    contact_set_side1_nodes_extra(contact_cols, tid, wp.vec2i(ep_b.nodes[1], ep_b.nodes[2]))
+    contact_set_side0_nodes_extra(
+        contact_cols, tid, wp.vec3i(ep_a.nodes[1], ep_a.nodes[2], ep_a.nodes[3])
+    )
+    contact_set_side1_nodes_extra(
+        contact_cols, tid, wp.vec3i(ep_b.nodes[1], ep_b.nodes[2], ep_b.nodes[3])
+    )
+
+
+@wp.func
+def _barycentric_in_tet(p: wp.vec3f, xa: wp.vec3f, xb: wp.vec3f, xc: wp.vec3f, xd: wp.vec3f) -> wp.vec3f:
+    """Tet barycentric of point ``p`` w.r.t. vertices ``(xa, xb, xc, xd)``.
+
+    Returns ``(bary_a, bary_b, bary_c)`` -- the weights for the first
+    three vertices. The 4th weight is implicit:
+    ``bary_d = 1 - bary_a - bary_b - bary_c`` (derived at iterate time
+    by the 4-node contact endpoint helper).
+
+    Mirrors :func:`_barycentric_in_plane` -- solve a 3x3 linear system
+    on the edge basis ``(xb-xa, xc-xa, xd-xa)``. Degenerate (coplanar
+    or collinear) tetrahedra collapse to ``(1, 0, 0)`` so the iterate
+    sees a well-defined contact point at vertex A.
+    """
+    e1 = xb - xa
+    e2 = xc - xa
+    e3 = xd - xa
+    d = p - xa
+    # 3x3 matrix ``T`` with columns (e1, e2, e3); barycentric
+    # (beta, gamma, delta) = T^-1 * d. ``alpha = 1 - beta - gamma - delta``.
+    T = wp.mat33f(
+        e1[0], e2[0], e3[0],
+        e1[1], e2[1], e3[1],
+        e1[2], e2[2], e3[2],
+    )
+    det_T = wp.determinant(T)
+    if det_T < _DEGENERATE_EPS and det_T > -_DEGENERATE_EPS:
+        return wp.vec3f(1.0, 0.0, 0.0)
+    inv_T = wp.inverse(T)
+    bcd = inv_T @ d
+    beta = bcd[0]
+    gamma = bcd[1]
+    delta = bcd[2]
+    alpha = wp.float32(1.0) - beta - gamma - delta
+    return wp.vec3f(alpha, beta, gamma)
 
 
 @wp.func
@@ -413,6 +573,19 @@ def _phoenx_pack_cloth_contact_barycentric_kernel(
             particles.position[p_c],
         )
         cc_set_side0_bary(cc, k, bary)
+    elif ep_a.kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        p_a = ep_a.nodes[0] - num_bodies
+        p_b = ep_a.nodes[1] - num_bodies
+        p_c = ep_a.nodes[2] - num_bodies
+        p_d = ep_a.nodes[3] - num_bodies
+        bary = _barycentric_in_tet(
+            contacts.rigid_contact_point0[k],
+            particles.position[p_a],
+            particles.position[p_b],
+            particles.position[p_c],
+            particles.position[p_d],
+        )
+        cc_set_side0_bary(cc, k, bary)
 
     if ep_b.kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
         p_a = ep_b.nodes[0] - num_bodies
@@ -423,6 +596,19 @@ def _phoenx_pack_cloth_contact_barycentric_kernel(
             particles.position[p_a],
             particles.position[p_b],
             particles.position[p_c],
+        )
+        cc_set_side1_bary(cc, k, bary)
+    elif ep_b.kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        p_a = ep_b.nodes[0] - num_bodies
+        p_b = ep_b.nodes[1] - num_bodies
+        p_c = ep_b.nodes[2] - num_bodies
+        p_d = ep_b.nodes[3] - num_bodies
+        bary = _barycentric_in_tet(
+            contacts.rigid_contact_point1[k],
+            particles.position[p_a],
+            particles.position[p_b],
+            particles.position[p_c],
+            particles.position[p_d],
         )
         cc_set_side1_bary(cc, k, bary)
 
@@ -453,16 +639,54 @@ class PhoenXClothShareVertexFilterData:
 
     Attributes:
         num_rigid_shapes: ``S`` in the unified shape index space.
-            Shape indices ``< num_rigid_shapes`` are rigid (filter
-            passes through); indices ``>= num_rigid_shapes`` are cloth
-            tris with index ``t = shape - S`` into ``tri_indices``.
+            Shape indices ``< S`` are rigid (filter passes through);
+            indices ``[S, S + num_cloth_triangles)`` are cloth tris
+            with index ``t = shape - S`` into ``tri_indices``;
+            indices ``[S + num_cloth_triangles, ...)`` are soft-tets
+            with index ``t = shape - S - num_cloth_triangles`` into
+            ``tet_indices``.
+        num_cloth_triangles: Length of the cloth-tri block (separates
+            cloth from soft-tet in the unified shape array).
         tri_indices: Per-triangle particle indices, shape
-            ``(num_cloth_triangles, 3)``. Read at broad-phase time to
-            test whether two cloth tris share a vertex.
+            ``(num_cloth_triangles, 3)``.
+        tet_indices: Per-tet particle indices, shape
+            ``(num_soft_tetrahedra, 4)``.
     """
 
     num_rigid_shapes: wp.int32
+    num_cloth_triangles: wp.int32
     tri_indices: wp.array2d[wp.int32]
+    tet_indices: wp.array2d[wp.int32]
+
+
+@wp.func
+def _share_vertex_get_particles(
+    shape: wp.int32,
+    data: PhoenXClothShareVertexFilterData,
+):
+    """Return the up-to-4 particle indices of a deformable shape, or
+    ``(-1, -1, -1, -1)`` if the shape is rigid. Used by
+    :func:`phoenx_cloth_share_vertex_filter` to keep the filter body
+    compact.
+    """
+    S = data.num_rigid_shapes
+    if shape < S:
+        return wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1)
+    t_cloth = shape - S
+    if t_cloth < data.num_cloth_triangles:
+        return (
+            data.tri_indices[t_cloth, 0],
+            data.tri_indices[t_cloth, 1],
+            data.tri_indices[t_cloth, 2],
+            wp.int32(-1),
+        )
+    t_tet = t_cloth - data.num_cloth_triangles
+    return (
+        data.tet_indices[t_tet, 0],
+        data.tet_indices[t_tet, 1],
+        data.tet_indices[t_tet, 2],
+        data.tet_indices[t_tet, 3],
+    )
 
 
 @wp.func
@@ -472,27 +696,30 @@ def phoenx_cloth_share_vertex_filter(
 ) -> wp.int32:
     """Broad-phase callback. Returns ``0`` to drop the pair, ``1`` to keep.
 
-    Drop iff both shapes are cloth tris AND they share at least one
-    vertex (any of the 3 particle indices match between the two
-    triangles). Otherwise pass through.
+    Drop iff both shapes are deformable (cloth-tri or soft-tet) AND
+    they share at least one particle vertex. Cloth-cloth, cloth-tet,
+    and tet-tet pairs all participate in the share-vertex test.
+    Rigid-anything pairs always pass through.
     """
     sa = pair[0]
     sb = pair[1]
-    S = data.num_rigid_shapes
-    if sa < S or sb < S:
-        return wp.int32(1)  # not both cloth: pass through
-    ta = sa - S
-    tb = sb - S
-    a0 = data.tri_indices[ta, 0]
-    a1 = data.tri_indices[ta, 1]
-    a2 = data.tri_indices[ta, 2]
-    b0 = data.tri_indices[tb, 0]
-    b1 = data.tri_indices[tb, 1]
-    b2 = data.tri_indices[tb, 2]
-    if a0 == b0 or a0 == b1 or a0 == b2:
-        return wp.int32(0)
-    if a1 == b0 or a1 == b1 or a1 == b2:
-        return wp.int32(0)
-    if a2 == b0 or a2 == b1 or a2 == b2:
-        return wp.int32(0)
+    a0, a1, a2, a3 = _share_vertex_get_particles(sa, data)
+    if a0 < wp.int32(0):
+        return wp.int32(1)  # sa rigid: pass through
+    b0, b1, b2, b3 = _share_vertex_get_particles(sb, data)
+    if b0 < wp.int32(0):
+        return wp.int32(1)  # sb rigid: pass through
+    # Both deformable. Compare every pair of (active) vertex indices.
+    for i in range(4):
+        ai = a0
+        if i == 1:
+            ai = a1
+        elif i == 2:
+            ai = a2
+        elif i == 3:
+            ai = a3
+        if ai < wp.int32(0):
+            continue
+        if ai == b0 or ai == b1 or ai == b2 or ai == b3:
+            return wp.int32(0)
     return wp.int32(1)
