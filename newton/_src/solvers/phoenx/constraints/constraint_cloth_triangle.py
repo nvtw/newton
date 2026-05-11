@@ -41,10 +41,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
+    add_position_correction_unified_all_slots,
     get_state_index,
     read_position_unified,
     set_access_mode_unified,
-    write_position_unified,
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
@@ -403,10 +403,16 @@ def cloth_triangle_iterate_at(
     lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
 
     # Slot-aware position reads. Without mass splitting the helpers
-    # fall through to ``particles.position[p_*]``.
-    x_a, _ifa, slot_a = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
-    x_b, _ifb, slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
-    x_c, _ifc, slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
+    # fall through to ``particles.position[p_*]``. Cache the read
+    # values so we can extract the per-iter delta at the end and
+    # broadcast it to every slot (preserves cloth-tri contribution
+    # across Tonge averaging).
+    x_a, _ifa, _slot_a = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
+    x_b, _ifb, _slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
+    x_c, _ifc, _slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
+    x_a_in = x_a
+    x_b_in = x_b
+    x_c_in = x_c
     dx_a = x_a - particles.position_prev_substep[p_a]
     dx_b = x_b - particles.position_prev_substep[p_b]
     dx_c = x_c - particles.position_prev_substep[p_c]
@@ -515,12 +521,24 @@ def cloth_triangle_iterate_at(
             x_c = x_c + _project_to_3d(x_axis, y_axis, delta_c)
             lambda_sum_mu = lambda_sum_mu + d_lam_mu
 
-    # Slot-aware position writes -- route through copy_state slot when
-    # mass splitting is engaged for this vertex; otherwise write
-    # straight to ``particles.position[p_*]``.
-    write_position_unified(bodies, particles, copy_state, body_a, slot_a, num_bodies, x_a)
-    write_position_unified(bodies, particles, copy_state, body_b, slot_b, num_bodies, x_b)
-    write_position_unified(bodies, particles, copy_state, body_c, slot_c, num_bodies, x_c)
+    # Broadcast the per-iter position-level *delta* to every slot of
+    # each vertex (or to particle storage when no slots exist). The
+    # helper picks the right encoding per slot: a slot already at
+    # POSITION_LEVEL gets ``slot.pos += dx``; a slot at
+    # VELOCITY_LEVEL (touched by a velocity-level contact impulse)
+    # gets ``slot.vel += dx * idt``. Either way, every slot receives
+    # the cloth-tri contribution, so :func:`launch_average_and_broadcast`
+    # preserves it instead of diluting by ``1/N``. Existing per-slot
+    # contact velocities are not overwritten.
+    add_position_correction_unified_all_slots(
+        bodies, particles, copy_state, body_a, num_bodies, idt, x_a - x_a_in
+    )
+    add_position_correction_unified_all_slots(
+        bodies, particles, copy_state, body_b, num_bodies, idt, x_b - x_b_in
+    )
+    add_position_correction_unified_all_slots(
+        bodies, particles, copy_state, body_c, num_bodies, idt, x_c - x_c_in
+    )
 
     write_float(constraints, _OFF_ROTATION, cid, rotation)
     write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, lambda_sum_lambda)

@@ -73,7 +73,7 @@ class Example:
         self.sim_time = 0.0
 
         self.sim_substeps = 4
-        self.solver_iterations = 8
+        self.solver_iterations = 16
 
         self.dim_x = width
         self.dim_y = height

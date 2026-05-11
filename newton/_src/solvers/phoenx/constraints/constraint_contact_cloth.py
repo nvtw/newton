@@ -866,7 +866,9 @@ def contact_prepare_for_iteration_cloth_aware(
         wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2]),
         bodies,
         particles,
+        copy_state,
         num_bodies,
+        parallel_id,
         ACCESS_MODE_VELOCITY_LEVEL,
         idt,
     )
@@ -875,7 +877,9 @@ def contact_prepare_for_iteration_cloth_aware(
         wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2]),
         bodies,
         particles,
+        copy_state,
         num_bodies,
+        parallel_id,
         ACCESS_MODE_VELOCITY_LEVEL,
         idt,
     )
@@ -957,7 +961,9 @@ def contact_iterate_cloth_aware(
         wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2]),
         bodies,
         particles,
+        copy_state,
         num_bodies,
+        parallel_id,
         ACCESS_MODE_VELOCITY_LEVEL,
         idt,
     )
@@ -966,7 +972,9 @@ def contact_iterate_cloth_aware(
         wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2]),
         bodies,
         particles,
+        copy_state,
         num_bodies,
+        parallel_id,
         ACCESS_MODE_VELOCITY_LEVEL,
         idt,
     )

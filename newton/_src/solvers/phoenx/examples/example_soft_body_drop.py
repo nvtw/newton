@@ -3,14 +3,19 @@
 
 """PhoenX soft-body tetrahedral drop demo.
 
-Two soft cubes (5 tetrahedra each, via Newton's standard hex-to-tet
-decomposition in :meth:`newton.ModelBuilder.add_soft_grid` with a 1x1x1
-grid) drop onto a static ground plane. The cubes have different
-positions and a slight horizontal offset so they bounce, deform, and
-roll on the ground.
+A configurable number of soft cubes drop onto a static ground plane.
+Each cube is voxelised at a configurable resolution
+(``cube_resolution`` voxels per side) and every voxel is decomposed
+into 5 tetrahedra by Newton's standard hex-to-tet split in
+:meth:`newton.ModelBuilder.add_soft_grid`, yielding
+``5 * cube_resolution**3`` tets per cube (5 at res=1, 40 at res=2,
+135 at res=3, 320 at res=4, ...). The cubes share an x/y centre and
+are stacked vertically with a configurable spacing, so the lower
+cubes get to partially settle before the upper ones impact --
+producing a deform-and-squash stack as the column collapses.
 
-The decomposition follows the Jitter2 reference (5 tets per hex cell,
-matching ``MeshBuilder.GenerateTetrahedronBlock`` in
+The 5-tets-per-hex decomposition follows the Jitter2 reference
+(matching ``MeshBuilder.GenerateTetrahedronBlock`` in
 ``jitterphysics2/.../MeshBuilder.cs:282``).
 
 Exercises:
@@ -45,25 +50,37 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
 class Example:
-    """Two soft cubes dropping onto a ground plane."""
+    """A configurable column of soft cubes dropping onto a ground plane."""
 
     def __init__(
         self,
         viewer,
         args=None,
+        num_cubes: int = 2,
         cube_size: float = 0.4,
-        cube1_drop_height: float = 2.0,
-        cube2_drop_height: float = 3.5,
+        cube_resolution: int = 1,
+        base_drop_height: float = 2.0,
+        cube_spacing: float = 1.5,
         youngs_modulus: float = 5.0e8,
         poisson_ratio: float = 0.3,
         density: float = 500.0,
         soft_body_thickness: float = 0.005,
         soft_body_gap: float = 0.010,
     ):
+        if int(num_cubes) < 1:
+            raise ValueError(f"num_cubes must be >= 1, got {num_cubes}")
+        if int(cube_resolution) < 1:
+            raise ValueError(f"cube_resolution must be >= 1, got {cube_resolution}")
+
         self.viewer = viewer
         self.device = wp.get_device()
+        self.num_cubes = int(num_cubes)
+        self.cube_size = float(cube_size)
+        self.cube_resolution = int(cube_resolution)
+        self.base_drop_height = float(base_drop_height)
+        self.cube_spacing = float(cube_spacing)
 
-        self.fps = 60
+        self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
 
@@ -74,8 +91,8 @@ class Example:
         # (``Playground.NumberSubsteps = 1``, ``SolverIterations = 8``)
         # at frame dt 1/60 so the user's intuition for Young's modulus
         # transfers from the C# experimental sim.
-        self.sim_substeps = 4
-        self.solver_iterations = 8
+        self.sim_substeps = 3
+        self.solver_iterations = 10
 
         self.youngs_modulus = float(youngs_modulus)
         self.poisson_ratio = float(poisson_ratio)
@@ -88,39 +105,38 @@ class Example:
         # Static ground plane at z = 0.
         builder.add_ground_plane(height=1.0)
 
-        # Soft cube 1: 5 tets via add_soft_grid with dim_x=dim_y=dim_z=1.
-        # Newton's hex-to-5-tet decomposition lands one tet per voxel
-        # slice (4 corner tets + 1 central tet); the same scheme
-        # Jitter2's ``MeshBuilder.GenerateTetrahedronBlock`` uses.
-        builder.add_soft_grid(
-            pos=wp.vec3(-0.6, 0.0, cube1_drop_height),
-            rot=wp.quat_identity(),
-            vel=wp.vec3(0.0, 0.0, 0.0),
-            dim_x=1, dim_y=1, dim_z=1,
-            cell_x=cube_size, cell_y=cube_size, cell_z=cube_size,
-            density=density,
-            k_mu=self.k_mu,
-            k_lambda=self.k_lambda,
-            k_damp=0.0,
-            add_surface_mesh_edges=False,
-        )
-
-        # Soft cube 2: same construction, offset horizontally so the
-        # two cubes don't sit directly atop the same plane patch.
-        # Drops from a higher altitude so it impacts after cube 1 has
-        # partially settled.
-        builder.add_soft_grid(
-            pos=wp.vec3(0.6, 0.2, cube2_drop_height),
-            rot=wp.quat_from_axis_angle(wp.vec3(1.0, 1.0, 0.0), 0.3),
-            vel=wp.vec3(0.0, 0.0, 0.0),
-            dim_x=1, dim_y=1, dim_z=1,
-            cell_x=cube_size, cell_y=cube_size, cell_z=cube_size,
-            density=density,
-            k_mu=self.k_mu,
-            k_lambda=self.k_lambda,
-            k_damp=0.0,
-            add_surface_mesh_edges=False,
-        )
+        # Each cube is voxelised at ``cube_resolution`` cells per
+        # side. ``add_soft_grid`` decomposes every hex cell into 5
+        # tets (4 corner tets + 1 central tet -- the same scheme as
+        # Jitter2's ``MeshBuilder.GenerateTetrahedronBlock``), so the
+        # tet count per cube is ``5 * cube_resolution**3`` (5 at
+        # res=1, 40 at res=2, 135 at res=3, 320 at res=4, ...). Cell
+        # size is ``cube_size / cube_resolution`` so the cube's outer
+        # dimensions stay at ``cube_size`` regardless of resolution.
+        # ``add_soft_grid`` spawns the grid in the +x/+y/+z octant
+        # from ``pos``, so we shift x/y by ``-0.5 * cube_size`` to
+        # centre the column on the world Z-axis. Cubes are stacked
+        # along +z at ``base_drop_height + i * cube_spacing`` so the
+        # lower cubes get to partially settle before the upper ones
+        # land.
+        cube_xy_centre = -0.5 * self.cube_size
+        cell_size = self.cube_size / self.cube_resolution
+        for i in range(self.num_cubes):
+            drop_height = self.base_drop_height + i * self.cube_spacing
+            builder.add_soft_grid(
+                pos=wp.vec3(cube_xy_centre, cube_xy_centre, drop_height),
+                rot=wp.quat_identity(),
+                vel=wp.vec3(0.0, 0.0, 0.0),
+                dim_x=self.cube_resolution,
+                dim_y=self.cube_resolution,
+                dim_z=self.cube_resolution,
+                cell_x=cell_size, cell_y=cell_size, cell_z=cell_size,
+                density=density,
+                k_mu=self.k_mu,
+                k_lambda=self.k_lambda,
+                k_damp=0.0,
+                add_surface_mesh_edges=False,
+            )
 
         self.model = builder.finalize(device=self.device)
 
@@ -196,7 +212,22 @@ class Example:
         self.state = self.model.state()
 
         self.viewer.set_model(self.model)
-        self.viewer.set_camera(pos=wp.vec3(4.0, -3.0, 2.0), pitch=-20.0, yaw=215.0)
+        # Frame the cube column from the side. The bottom cube sits
+        # at ~``base_drop_height`` and the top cube at
+        # ``base_drop_height + (num_cubes - 1) * cube_spacing`` (plus
+        # half a cube-size in either direction). Sit the camera back
+        # along +x at the column's mid-height and pitch down slightly
+        # so the ground plane and the full stack are in frame; yaw
+        # 180 deg points back at the origin (the same convention as
+        # the other PhoenX examples, e.g. ``example_kapla_arena``).
+        column_top = self.base_drop_height + (self.num_cubes - 1) * self.cube_spacing + 0.5 * self.cube_size
+        column_mid_z = 0.5 * (self.base_drop_height - 0.5 * self.cube_size + column_top)
+        cam_distance = max(4.0, 3.0 * column_top)
+        self.viewer.set_camera(
+            pos=wp.vec3(cam_distance, 0.0, column_mid_z),
+            pitch=-15.0,
+            yaw=180.0,
+        )
 
         self._capture()
 
@@ -279,21 +310,32 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
+    parser.add_argument("--num-cubes", type=int, default=2)
     parser.add_argument("--cube-size", type=float, default=0.4)
-    parser.add_argument("--cube1-drop-height", type=float, default=2.0)
-    parser.add_argument("--cube2-drop-height", type=float, default=3.5)
-    parser.add_argument("--youngs-modulus", type=float, default=1.0e8)
+    parser.add_argument(
+        "--cube-resolution",
+        type=int,
+        default=3,
+        help="Voxels per cube side; each voxel becomes 5 tets "
+        "(res=1 -> 5 tets/cube, res=3 -> 135 tets/cube).",
+    )
+    parser.add_argument("--base-drop-height", type=float, default=2.0)
+    parser.add_argument("--cube-spacing", type=float, default=1.5)
+    parser.add_argument("--youngs-modulus", type=float, default=1.0e9)
     parser.add_argument("--poisson-ratio", type=float, default=0.3)
     parser.add_argument("--density", type=float, default=500.0)
     parser.add_argument("--soft-body-thickness", type=float, default=0.005)
     parser.add_argument("--soft-body-gap", type=float, default=0.010)
     viewer, args = newton.examples.init(parser)
+    viewer._paused = True
     example = Example(
         viewer,
         args,
+        num_cubes=args.num_cubes,
         cube_size=args.cube_size,
-        cube1_drop_height=args.cube1_drop_height,
-        cube2_drop_height=args.cube2_drop_height,
+        cube_resolution=args.cube_resolution,
+        base_drop_height=args.base_drop_height,
+        cube_spacing=args.cube_spacing,
         youngs_modulus=args.youngs_modulus,
         poisson_ratio=args.poisson_ratio,
         density=args.density,

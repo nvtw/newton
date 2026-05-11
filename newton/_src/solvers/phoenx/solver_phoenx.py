@@ -80,6 +80,7 @@ from newton._src.solvers.phoenx.constraints.contact_ingest import (
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     GREEDY_MAX_COLORS,
+    MAX_BODIES,
     ElementInteractionData,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import (
@@ -532,14 +533,19 @@ class PhoenXWorld:
         # ``highest_index_in_use[0] == 0``.
         if self.mass_splitting_enabled:
             # Worst-case entry count: every constraint contributes one
-            # entry per endpoint. The mass-splitting path is currently
-            # rigid-only (joints + cloth are guarded out at the top of
-            # __init__), so rigid-rigid contacts contribute at most 2
-            # endpoints. Tightening this from MAX_BODIES=8 to 2 shrinks
-            # the radix-sort buffer 4x; the sort runs over
-            # ``2 * ms_capacity`` int64 keys, so the saving is real
-            # GPU time on dense scenes like Kapla.
-            _MS_ENDPOINTS_PER_CONSTRAINT = 2
+            # entry per endpoint. ``MAX_BODIES`` (8) is the safe upper
+            # bound across every constraint type the partitioner can
+            # see -- rigid-rigid contacts have 2, joints have 2, cloth
+            # triangles have 3 nodes, cloth-bending has 4, soft tets
+            # have 4, cloth-rigid contacts have up to 5 (1 rigid + 3
+            # / 4 cloth nodes), cloth-cloth contacts have 6, and
+            # soft-tet-vs-cloth-tri contacts have 7. Under-sizing this
+            # silently drops pairs at :func:`emit_pair`'s atomic-add
+            # boundary, which leaves participating particles without
+            # slot allocations and forces their constraints to fall
+            # through to direct body/particle storage -- bypassing the
+            # Tonge averaging that the contact iterates assume.
+            _MS_ENDPOINTS_PER_CONSTRAINT = int(MAX_BODIES)
             ms_capacity = max(1, self._constraint_capacity * _MS_ENDPOINTS_PER_CONSTRAINT)
             ms_nodes = max(1, self.num_bodies + self.num_particles)
         else:

@@ -203,6 +203,16 @@ def record_all_interactions_kernel(
       partition) is the strongest splitting; ``batch_size = 8``
       matches C# PhoenX's ``BatchingThreshold = 8``.
 
+    Nodes are emitted under the unified body-or-particle index space
+    (rigid bodies in ``[0, num_bodies)``, particles in
+    ``[num_bodies, num_bodies + num_particles)``). Particles
+    participate in mass splitting just like rigid bodies — they own
+    slots in the copy state and are averaged-and-broadcast back at
+    the end of each iteration. Cloth-triangle / soft-tet elasticity
+    must compensate for Tonge's ``1/N`` average dilution to preserve
+    XPBD position-level correctness (see
+    :mod:`newton._src.solvers.phoenx.constraints.constraint_cloth_triangle`).
+
     One thread per CSR slot in ``[0, num_active_constraints)``. Each
     thread emits up to ``MAX_BODIES`` entries via :func:`emit_pair`
     (which atomic-adds the emit counter and drops past capacity).
