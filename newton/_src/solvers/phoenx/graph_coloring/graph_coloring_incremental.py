@@ -22,6 +22,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     TILE_SCAN_BLOCK_DIM,
     ElementInteractionData,
+    element_interaction_data_get,
     greedy_clear_int_kernel,
     greedy_color_histogram_kernel,
     greedy_count_and_scan_color_starts_kernel,
@@ -65,6 +66,65 @@ def _greedy_coloring_grid_size(max_num_interactions: int, device: wp.DeviceLike)
     capacity_blocks = max(1, (max(1, int(max_num_interactions)) + block_dim - 1) // block_dim)
     num_blocks = max(8, min(capacity_blocks, max_blocks_limit))
     return num_blocks * block_dim
+
+
+# INT64_MAX past num_active so the radix sort pushes inactive slots to
+# the tail. Inactive entries (eid past num_active) never get touched by
+# the iterate kernel anyway -- the tail just has to be sortable.
+_LOCALITY_TAIL_KEY: int = 0x7FFFFFFFFFFFFFFF
+
+
+@wp.kernel(enable_backward=False)
+def _locality_compute_keys_kernel(
+    elements: wp.array[ElementInteractionData],
+    element_ids_by_color: wp.array[wp.int32],
+    interaction_id_to_partition: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    keys: wp.array[wp.int64],
+    values: wp.array[wp.int32],
+):
+    """For each slot ``i`` in ``[0, num_elements[0])``, compute a packed
+    ``(colour << 32) | body_min`` key and stash the element id in
+    ``values[i]``. ``body_min`` is the lowest non-negative endpoint of
+    the element (static endpoints are stamped ``-1`` by the element-
+    emission kernel).
+
+    Slots past ``num_elements[0]`` get ``INT64_MAX`` so the radix
+    sort lands them at the tail; their values are don't-care.
+    """
+    tid = wp.tid()
+    if tid >= keys.shape[0]:
+        return
+    if tid >= num_elements[0]:
+        keys[tid] = wp.int64(_LOCALITY_TAIL_KEY)
+        values[tid] = wp.int32(0)
+        return
+    eid = element_ids_by_color[tid]
+    color = interaction_id_to_partition[eid]
+    el = elements[eid]
+    body_min = wp.int32(0x7FFFFFFF)
+    for j in range(MAX_BODIES):
+        b = element_interaction_data_get(el, j)
+        if b < wp.int32(0):
+            break
+        if b < body_min:
+            body_min = b
+    key = (wp.int64(color) << wp.int64(32)) | (wp.int64(body_min) & wp.int64(0xFFFFFFFF))
+    keys[tid] = key
+    values[tid] = eid
+
+
+@wp.kernel(enable_backward=False)
+def _locality_writeback_kernel(
+    values: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    element_ids_by_color: wp.array[wp.int32],
+):
+    """Copy the sorted element-id stream back into the CSR slot array."""
+    tid = wp.tid()
+    if tid >= num_elements[0]:
+        return
+    element_ids_by_color[tid] = values[tid]
 
 
 @wp.kernel(enable_backward=False)
@@ -175,6 +235,18 @@ class IncrementalContactPartitioner:
 
         # In-place compacted remaining ids (survivors pack leftward).
         self._remaining_ids = wp.zeros(padded_len, dtype=wp.int32, device=device)
+
+        # Body-locality post-sort scratch. After the colour build
+        # writes :attr:`_element_ids_by_color`, this pair-sort
+        # reorders entries WITHIN each colour so consecutive slots
+        # access nearby body indices. Cuts the per-thread body-data
+        # scatter that dominates the iterate kernel. ``radix_sort_pairs``
+        # needs 2*N buffers (ping-pong); we sort the entire
+        # element-by-colour array in one call with a packed
+        # ``(colour | body_min)`` key. Colour is the high 32 bits so
+        # the CSR colour ordering is preserved.
+        self._locality_keys = wp.zeros(2 * max_num_interactions, dtype=wp.int64, device=device)
+        self._locality_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
 
         self._current_color = wp.zeros(1, dtype=wp.int32, device=device)
         self._num_remaining = wp.zeros(1, dtype=wp.int32, device=device)
@@ -426,6 +498,7 @@ class IncrementalContactPartitioner:
             self._num_remaining,
             self._capture_build_csr_step,
         )
+        self._sort_csr_by_body_locality()
 
     def _capture_build_csr_step(self) -> None:
         """build_csr capture_while body, unrolled NUM_INNER_WHILE_ITERATIONS times.
@@ -558,6 +631,49 @@ class IncrementalContactPartitioner:
                 self._greedy_color_offsets,
                 self._element_ids_by_color,
                 self._num_elements,
+            ],
+        )
+        self._sort_csr_by_body_locality()
+
+    def _sort_csr_by_body_locality(self) -> None:
+        """Reorder ``element_ids_by_color`` so consecutive entries within
+        each colour access nearby body indices.
+
+        The iterate kernel reads ``bodies.position[b]``,
+        ``bodies.orientation[b]``, ``bodies.inverse_inertia_world[b]``,
+        ``bodies.body_com[b]`` per constraint. Within a colour
+        independent-set guarantees that distinct constraints touch
+        DIFFERENT bodies, so consecutive entries land in unrelated
+        cache lines unless we explicitly group them. Sorting each
+        colour slice by ``min(b1, b2)`` lifts L1/L2 hit rate on dense
+        scenes (Kapla, kapla_arena) with no functional change — the
+        within-colour order is irrelevant to PGS correctness.
+
+        Single radix-sort on packed ``(colour << 32) | body_min`` keys
+        preserves the colour boundaries (colour is the high half)
+        while sorting by body within each colour.
+        """
+        n = self.max_num_interactions
+        wp.launch(
+            _locality_compute_keys_kernel,
+            dim=2 * n,
+            inputs=[
+                self._elements,
+                self._element_ids_by_color,
+                self._interaction_id_to_partition,
+                self._num_elements,
+                self._locality_keys,
+                self._locality_values,
+            ],
+        )
+        wp.utils.radix_sort_pairs(self._locality_keys, self._locality_values, n)
+        wp.launch(
+            _locality_writeback_kernel,
+            dim=n,
+            inputs=[
+                self._locality_values,
+                self._num_elements,
+                self._element_ids_by_color,
             ],
         )
 
