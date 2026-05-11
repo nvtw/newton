@@ -28,6 +28,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
+from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
     ConstraintContainer,
@@ -42,9 +43,14 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_quat,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
-from newton._src.solvers.phoenx.mass_splitting.access import get_state_index
+from newton._src.solvers.phoenx.mass_splitting.access import (
+    get_state_index,
+    read_position_unified,
+    set_access_mode_unified,
+    write_position_unified,
+)
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
-from newton._src.solvers.phoenx.particle import ParticleContainer, particle_set_access_mode
+from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
     "SOFT_TET_DWORDS",
@@ -357,23 +363,24 @@ def _quat_to_mat33(q: wp.quatf) -> wp.mat33f:
 def soft_tetrahedron_prepare_for_iteration_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
+    bodies: BodyContainer,
     particles: ParticleContainer,
     copy_state: CopyStateContainer,
     num_bodies: wp.int32,
     parallel_id: wp.int32,
+    idt: wp.float32,
 ):
-    """Substep-entry prepare: cache inverse masses; reset XPBD warm starts.
+    """Substep-entry prepare: flip each vertex's access mode to
+    POSITION_LEVEL, cache inverse masses, reset XPBD warm starts.
 
     Body fields are unified indices: ``i_p = body - num_bodies`` is the
     particle slot. The persisted ``rotation`` quaternion warm start is
     intentionally NOT reset -- the closest-rotation evolves continuously
     with the tet's pose.
 
-    With mass splitting enabled, each particle's cached ``inv_mass`` is
-    scaled by ``inv_factor`` (its slot count) so the per-iteration XPBD
-    correction sees the Tonge effective mass ``m_per_slot = m / N``.
-    Mass splitting OFF (or particles outside the graph) returns
-    ``inv_factor=1`` and this scaling is identity.
+    Direct port of Jitter2's ``FemTetPBD.PrepareForIteration``
+    (``FemTetPBD.cs:82-118``): every vertex's access mode is flipped
+    via the slot-aware unified helper before reads / writes.
     """
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
@@ -383,6 +390,20 @@ def soft_tetrahedron_prepare_for_iteration_at(
     p_b = body_b - num_bodies
     p_c = body_c - num_bodies
     p_d = body_d - num_bodies
+
+    # Flip access mode (slot-aware). Mirrors C# FemTetPBD prepare.
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_b, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_c, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_d, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
 
     _slot_a, inv_factor_a = get_state_index(copy_state, body_a, parallel_id)
     _slot_b, inv_factor_b = get_state_index(copy_state, body_b, parallel_id)
@@ -402,6 +423,7 @@ def soft_tetrahedron_prepare_for_iteration_at(
 def soft_tetrahedron_iterate_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
+    bodies: BodyContainer,
     particles: ParticleContainer,
     copy_state: CopyStateContainer,
     num_bodies: wp.int32,
@@ -416,10 +438,10 @@ def soft_tetrahedron_iterate_at(
     volumetric deviation through Hookean linearisation).
 
     Body fields are unified indices: ``i_p = body - num_bodies`` is the
-    particle slot. The ``copy_state`` / ``parallel_id`` parameters are
-    threaded for signature parity with :mod:`constraint_cloth_triangle`;
-    mass-splitting's effective-mass scaling lives in prepare. The
-    iterate reads / writes particle positions directly.
+    particle slot. Reads / writes route through the slot-aware unified
+    helpers so mass splitting routes position-level work into the slot
+    when one exists; without it the helpers fall through to particle
+    storage and behaviour matches the rigid-only path.
     """
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
@@ -430,14 +452,19 @@ def soft_tetrahedron_iterate_at(
     p_c = body_c - num_bodies
     p_d = body_d - num_bodies
 
-    # Flip the four vertices to POSITION_LEVEL so the position reads
-    # below reflect any prior velocity-level write (e.g. a contact
-    # relax sweep). No-op on subsequent sweeps in the same substep
-    # (mode already POSITION_LEVEL); no-op on STATIC pinned vertices.
-    particle_set_access_mode(particles, p_a, _ACCESS_MODE_POSITION_LEVEL, idt)
-    particle_set_access_mode(particles, p_b, _ACCESS_MODE_POSITION_LEVEL, idt)
-    particle_set_access_mode(particles, p_c, _ACCESS_MODE_POSITION_LEVEL, idt)
-    particle_set_access_mode(particles, p_d, _ACCESS_MODE_POSITION_LEVEL, idt)
+    # Slot-aware access-mode flip on each vertex (C# FemTetPBD pattern).
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_b, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_c, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_d, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
 
     inv_mass_a = read_float(constraints, _OFF_INV_MASS_A, cid)
     inv_mass_b = read_float(constraints, _OFF_INV_MASS_B, cid)
@@ -449,10 +476,11 @@ def soft_tetrahedron_iterate_at(
     rotation = read_quat(constraints, _OFF_ROTATION, cid)
     lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
 
-    x_a = particles.position[p_a]
-    x_b = particles.position[p_b]
-    x_c = particles.position[p_c]
-    x_d = particles.position[p_d]
+    # Slot-aware position reads.
+    x_a, _ifa, slot_a = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
+    x_b, _ifb, slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
+    x_c, _ifc, slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
+    x_d, _ifd, slot_d = read_position_unified(bodies, particles, copy_state, body_d, parallel_id, num_bodies)
 
     # Deformation gradient F = (xB-xA, xC-xA, xD-xA) * inv_rest.
     # Layout matches Jitter2 (row-major, F.M_ij is F[i-1, j-1]).
@@ -548,10 +576,10 @@ def soft_tetrahedron_iterate_at(
         x_d = x_d + wp.vec3f(g4_x * d_lam_mu * inv_mass_d, g4_y * d_lam_mu * inv_mass_d, g4_z * d_lam_mu * inv_mass_d)
         lambda_sum_mu = lambda_sum_mu + d_lam_mu
 
-    particles.position[p_a] = x_a
-    particles.position[p_b] = x_b
-    particles.position[p_c] = x_c
-    particles.position[p_d] = x_d
+    write_position_unified(bodies, particles, copy_state, body_a, slot_a, num_bodies, x_a)
+    write_position_unified(bodies, particles, copy_state, body_b, slot_b, num_bodies, x_b)
+    write_position_unified(bodies, particles, copy_state, body_c, slot_c, num_bodies, x_c)
+    write_position_unified(bodies, particles, copy_state, body_d, slot_d, num_bodies, x_d)
 
     write_quat(constraints, _OFF_ROTATION, cid, rotation)
     write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, lambda_sum_mu)

@@ -27,6 +27,7 @@ from newton._src.solvers.phoenx.access_mode import (
     ACCESS_MODE_POSITION_LEVEL,
     synchronize_position_velocity,
 )
+from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     ConstraintContainer,
@@ -39,9 +40,14 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_mat22,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
-from newton._src.solvers.phoenx.mass_splitting.access import get_state_index
+from newton._src.solvers.phoenx.mass_splitting.access import (
+    get_state_index,
+    read_position_unified,
+    set_access_mode_unified,
+    write_position_unified,
+)
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
-from newton._src.solvers.phoenx.particle import ParticleContainer, particle_set_access_mode
+from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
     "CLOTH_TRIANGLE_DWORDS",
@@ -287,10 +293,12 @@ def _extract_rotation_2d(
 def cloth_triangle_prepare_for_iteration_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
+    bodies: BodyContainer,
     particles: ParticleContainer,
     copy_state: CopyStateContainer,
     num_bodies: wp.int32,
     parallel_id: wp.int32,
+    idt: wp.float32,
 ):
     """Substep-entry prepare: cache inverse masses; reset XPBD warm starts.
 
@@ -299,11 +307,10 @@ def cloth_triangle_prepare_for_iteration_at(
     NOT reset -- the closest-rotation angle evolves continuously with
     the triangle's pose.
 
-    With mass splitting enabled, each particle's cached ``inv_mass`` is
-    scaled by ``inv_factor`` (its slot count) so the per-iteration XPBD
-    correction sees the Tonge effective mass ``m_per_slot = m / N``.
-    Mass splitting OFF (or particles outside the graph) returns
-    ``inv_factor=1`` and this scaling is identity.
+    Direct port of Jitter2's ``FemTriPBD.PrepareForIteration`` pattern:
+    every vertex's access mode is set to POSITION_LEVEL via the
+    slot-aware unified helper. Mass-splitting routes through the slot;
+    rigid-only path falls through to ``particle_set_access_mode``.
     """
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
@@ -311,6 +318,17 @@ def cloth_triangle_prepare_for_iteration_at(
     p_a = body_a - num_bodies
     p_b = body_b - num_bodies
     p_c = body_c - num_bodies
+
+    # Flip access mode for each vertex (matches C# FemTriPBD prepare).
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_b, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_c, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
 
     _slot_a, inv_factor_a = get_state_index(copy_state, body_a, parallel_id)
     _slot_b, inv_factor_b = get_state_index(copy_state, body_b, parallel_id)
@@ -328,6 +346,7 @@ def cloth_triangle_prepare_for_iteration_at(
 def cloth_triangle_iterate_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
+    bodies: BodyContainer,
     particles: ParticleContainer,
     copy_state: CopyStateContainer,
     num_bodies: wp.int32,
@@ -340,16 +359,15 @@ def cloth_triangle_iterate_at(
     Body fields are unified indices: ``i_p = body - num_bodies`` is the
     particle slot.
 
-    ``copy_state`` / ``parallel_id`` are threaded for signature
-    consistency with the other constraint kernels. Mass splitting's
-    effective-mass scaling is applied at prepare time (see
-    :func:`cloth_triangle_prepare_for_iteration_at`); the iterate
-    reads / writes particle positions directly. For typical cloth
-    meshes the graph partitioner places each cloth-triangle in a
-    regular colour bucket (``inv_factor = 1``), so the prepare scaling
-    is identity. Cloth-triangles in the overflow bucket share one
-    ``parallel_id`` across their three endpoints (constraint-aligned),
-    so the direct position writes don't conflict between slots.
+    Goes through the slot-aware unified helpers
+    (:func:`set_access_mode_unified`, :func:`read_position_unified`,
+    :func:`write_position_unified`) so mass splitting is transparent:
+    when slots exist they receive position-level work; when not
+    (rigid-only path) the helpers fall through to particle storage.
+    The post-iterate average kernel synchronises slot state back to
+    VELOCITY_LEVEL using the body / particle's substep-start snapshot,
+    which encodes the per-slot position deltas as velocity deltas and
+    averages them through the standard velocity average.
     """
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
@@ -358,14 +376,18 @@ def cloth_triangle_iterate_at(
     p_b = body_b - num_bodies
     p_c = body_c - num_bodies
 
-    # Flip the three vertices to POSITION_LEVEL so the position read
-    # below reflects any prior velocity-level write (e.g. a contact
-    # relax sweep) before we project. No-op on subsequent sweeps in
-    # the same substep (mode already POSITION_LEVEL); no-op on STATIC
-    # pinned vertices.
-    particle_set_access_mode(particles, p_a, _ACCESS_MODE_POSITION_LEVEL, idt)
-    particle_set_access_mode(particles, p_b, _ACCESS_MODE_POSITION_LEVEL, idt)
-    particle_set_access_mode(particles, p_c, _ACCESS_MODE_POSITION_LEVEL, idt)
+    # Flip each vertex's access mode (slot-aware). C# FemTriPBD calls
+    # SetAccessMode on every iterate too; safe to repeat -- a no-op
+    # when already POSITION_LEVEL or STATIC.
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_b, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_c, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
 
     inv_mass_a = read_float(constraints, _OFF_INV_MASS_A, cid)
     inv_mass_b = read_float(constraints, _OFF_INV_MASS_B, cid)
@@ -380,9 +402,11 @@ def cloth_triangle_iterate_at(
     lambda_sum_lambda = read_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid)
     lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
 
-    x_a = particles.position[p_a]
-    x_b = particles.position[p_b]
-    x_c = particles.position[p_c]
+    # Slot-aware position reads. Without mass splitting the helpers
+    # fall through to ``particles.position[p_*]``.
+    x_a, _ifa, slot_a = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
+    x_b, _ifb, slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
+    x_c, _ifc, slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
     dx_a = x_a - particles.position_prev_substep[p_a]
     dx_b = x_b - particles.position_prev_substep[p_b]
     dx_c = x_c - particles.position_prev_substep[p_c]
@@ -491,9 +515,12 @@ def cloth_triangle_iterate_at(
             x_c = x_c + _project_to_3d(x_axis, y_axis, delta_c)
             lambda_sum_mu = lambda_sum_mu + d_lam_mu
 
-    particles.position[p_a] = x_a
-    particles.position[p_b] = x_b
-    particles.position[p_c] = x_c
+    # Slot-aware position writes -- route through copy_state slot when
+    # mass splitting is engaged for this vertex; otherwise write
+    # straight to ``particles.position[p_*]``.
+    write_position_unified(bodies, particles, copy_state, body_a, slot_a, num_bodies, x_a)
+    write_position_unified(bodies, particles, copy_state, body_b, slot_b, num_bodies, x_b)
+    write_position_unified(bodies, particles, copy_state, body_c, slot_c, num_bodies, x_c)
 
     write_float(constraints, _OFF_ROTATION, cid, rotation)
     write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, lambda_sum_lambda)

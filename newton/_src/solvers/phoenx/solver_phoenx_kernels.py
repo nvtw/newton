@@ -966,38 +966,64 @@ def _constraints_to_elements_kernel(
             if particles.inverse_mass[b2 - num_bodies] == 0.0:
                 b2 = -1
 
-    # Resolve the four extra nodes (cloth side only). Rigid sides have
-    # extras at -1 and the static check is skipped.
+    # Resolve up to three extra nodes per side. Rigid sides have
+    # extras at -1; cloth-tri sides have two extras (third stays -1);
+    # soft-tet sides have all three extras populated.
     e0a = wp.int32(-1)
     e0b = wp.int32(-1)
-    if side0_kind == wp.int32(1):
+    e0c = wp.int32(-1)
+    if side0_kind == wp.int32(1):  # CLOTH_TRIANGLE
         e0a = side0_extra[0]
         e0b = side0_extra[1]
         if e0a >= 0 and particles.inverse_mass[e0a - num_bodies] == 0.0:
             e0a = -1
         if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
             e0b = -1
+    elif side0_kind == wp.int32(2):  # SOFT_TETRAHEDRON
+        e0a = side0_extra[0]
+        e0b = side0_extra[1]
+        e0c = side0_extra[2]
+        if e0a >= 0 and particles.inverse_mass[e0a - num_bodies] == 0.0:
+            e0a = -1
+        if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
+            e0b = -1
+        if e0c >= 0 and particles.inverse_mass[e0c - num_bodies] == 0.0:
+            e0c = -1
     e1a = wp.int32(-1)
     e1b = wp.int32(-1)
-    if side1_kind == wp.int32(1):
+    e1c = wp.int32(-1)
+    if side1_kind == wp.int32(1):  # CLOTH_TRIANGLE
         e1a = side1_extra[0]
         e1b = side1_extra[1]
         if e1a >= 0 and particles.inverse_mass[e1a - num_bodies] == 0.0:
             e1a = -1
         if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
             e1b = -1
+    elif side1_kind == wp.int32(2):  # SOFT_TETRAHEDRON
+        e1a = side1_extra[0]
+        e1b = side1_extra[1]
+        e1c = side1_extra[2]
+        if e1a >= 0 and particles.inverse_mass[e1a - num_bodies] == 0.0:
+            e1a = -1
+        if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
+            e1b = -1
+        if e1c >= 0 and particles.inverse_mass[e1c - num_bodies] == 0.0:
+            e1c = -1
 
     # Compact: drop -1s into a contiguous prefix (the partitioner's
-    # adjacency loop stops on the first -1). Up to 6 nodes for a
-    # cloth-cloth contact (3 + 3); cloth-rigid is 4; rigid-rigid is 2.
+    # adjacency loop stops on the first -1). Up to 8 nodes total:
+    # tet-tet = 4+4; tet-cloth = 4+3; tet-rigid = 4+1; cloth-cloth =
+    # 3+3; cloth-rigid = 3+1; rigid-rigid = 1+1.
     s0 = wp.int32(-1)
     s1 = wp.int32(-1)
     s2 = wp.int32(-1)
     s3 = wp.int32(-1)
     s4 = wp.int32(-1)
     s5 = wp.int32(-1)
+    s6 = wp.int32(-1)
+    s7 = wp.int32(-1)
     cnt = wp.int32(0)
-    for cand in range(6):
+    for cand in range(8):
         v = wp.int32(-1)
         if cand == 0:
             v = b1
@@ -1008,9 +1034,13 @@ def _constraints_to_elements_kernel(
         elif cand == 3:
             v = e0b
         elif cand == 4:
+            v = e0c
+        elif cand == 5:
             v = e1a
-        else:
+        elif cand == 6:
             v = e1b
+        else:
+            v = e1c
         if v < 0:
             continue
         if cnt == 0:
@@ -1023,10 +1053,14 @@ def _constraints_to_elements_kernel(
             s3 = v
         elif cnt == 4:
             s4 = v
-        else:
+        elif cnt == 5:
             s5 = v
+        elif cnt == 6:
+            s6 = v
+        else:
+            s7 = v
         cnt = cnt + 1
-    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5, -1, -1)
+    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5, s6, s7)
 
 
 @wp.kernel(enable_backward=False)
@@ -1538,21 +1572,21 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                         if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
                             if wp.static(is_prepare):
                                 cloth_triangle_prepare_for_iteration_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             else:
                                 cloth_triangle_iterate_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id, idt
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             dispatched = True
                         elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
                             if wp.static(is_prepare):
                                 soft_tetrahedron_prepare_for_iteration_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             else:
                                 soft_tetrahedron_iterate_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id, idt
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             dispatched = True
                 if not dispatched:
@@ -1700,21 +1734,21 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                         if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
                             if wp.static(is_prepare):
                                 cloth_triangle_prepare_for_iteration_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             else:
                                 cloth_triangle_iterate_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id, idt
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             dispatched = True
                         elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
                             if wp.static(is_prepare):
                                 soft_tetrahedron_prepare_for_iteration_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             else:
                                 soft_tetrahedron_iterate_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id, idt
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             dispatched = True
                     if not dispatched:

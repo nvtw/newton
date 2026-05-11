@@ -42,9 +42,13 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.access_mode import (
+    synchronize_pose_velocity,
+    synchronize_position_velocity,
+)
+from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
-from newton._src.solvers.phoenx.particle import ParticleContainer
+from newton._src.solvers.phoenx.particle import ParticleContainer, particle_set_access_mode
 
 __all__ = [
     "get_state_index",
@@ -52,6 +56,8 @@ __all__ = [
     "read_orientation_unified",
     "read_position_unified",
     "read_velocity_unified",
+    "set_access_mode_unified",
+    "slot_synchronize_to_velocity_level",
     "write_angular_velocity_unified",
     "write_orientation_unified",
     "write_position_unified",
@@ -305,3 +311,153 @@ def write_orientation_unified(
         bodies.orientation[node_id] = value
         return
     copy_state.orientation[slot] = value
+
+
+# -----------------------------------------------------------------------------
+# Slot-aware access-mode flip. Mirrors Jitter2
+# ``TinyRigidState.SetAccessMode`` (MassSplitting/TinyRigidState.cs:108) and
+# the synchronize-on-flip semantics from
+# ``SynchronizeVelAndPosStateUpdates``.
+#
+# Every constraint prepare / iterate must route the access-mode flip through
+# this helper. The unified pattern: read state via ``read_*_unified``,
+# compute, write via ``write_*_unified``, and synchronise via this helper
+# whenever switching dual representation. Mass splitting is then automatic
+# — the average / writeback kernels also call SetAccessMode(VelocityLevel)
+# on each slot, which encodes any POSITION_LEVEL work as velocity deltas
+# that the standard velocity average aggregates correctly.
+# -----------------------------------------------------------------------------
+
+
+@wp.func
+def slot_synchronize_to_velocity_level(
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    node_id: wp.int32,
+    slot: wp.int32,
+    num_bodies: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Synchronise one slot to VELOCITY_LEVEL in place.
+
+    Mirrors Jitter2's
+    ``TinyRigidState.SynchronizeVelAndPosStateUpdates(VelocityLevel, ...)``
+    used inside ``MassSplittingRigidBodyInteractionGraph.AverageAndBroadcast``
+    and ``WriteBack``. If the slot is already at VELOCITY_LEVEL (or
+    STATIC), no-op.
+
+    The snapshot anchor for the synchronize is the body's (or particle's)
+    ``position_prev_substep`` -- the substep-start state captured by the
+    predict kernel before the broadcast.
+    """
+    if slot < wp.int32(0):
+        return
+    current = copy_state.access_mode[slot]
+    if node_id < num_bodies:
+        pos_prev = bodies.position_prev_substep[node_id]
+        orient_prev = bodies.orientation_prev_substep[node_id]
+        pos_new, orient_new, vel_new, omega_new, mode_new = synchronize_pose_velocity(
+            copy_state.position[slot],
+            copy_state.orientation[slot],
+            copy_state.velocity[slot],
+            copy_state.angular_velocity[slot],
+            pos_prev,
+            orient_prev,
+            current,
+            wp.int32(1),  # ACCESS_MODE_VELOCITY_LEVEL
+            inv_dt,
+        )
+        copy_state.position[slot] = pos_new
+        copy_state.orientation[slot] = orient_new
+        copy_state.velocity[slot] = vel_new
+        copy_state.angular_velocity[slot] = omega_new
+        copy_state.access_mode[slot] = mode_new
+    else:
+        p = node_id - num_bodies
+        pos_prev = particles.position_prev_substep[p]
+        pos_new, vel_new, mode_new = synchronize_position_velocity(
+            copy_state.position[slot],
+            copy_state.velocity[slot],
+            pos_prev,
+            current,
+            wp.int32(1),  # ACCESS_MODE_VELOCITY_LEVEL
+            inv_dt,
+        )
+        copy_state.position[slot] = pos_new
+        copy_state.velocity[slot] = vel_new
+        copy_state.access_mode[slot] = mode_new
+
+
+@wp.func
+def set_access_mode_unified(
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    node_id: wp.int32,
+    parallel_id: wp.int32,
+    num_bodies: wp.int32,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Slot-aware access-mode flip used by constraint prepare / iterate.
+
+    Routes through the per-(node, parallel_id) slot when one exists --
+    synchronising the slot's dual state via the same arithmetic the
+    body / particle helpers use, anchored on the body / particle's
+    ``position_prev_substep`` (and ``orientation_prev_substep`` for
+    bodies). When no slot exists (mass splitting off, or the node has
+    no slot for this ``parallel_id``), falls through to
+    :func:`body_set_access_mode` / :func:`particle_set_access_mode` --
+    preserving the rigid-only path verbatim.
+
+    Direct port of Jitter2's pattern in
+    ``FemTetPBD.PrepareForIteration / Iterate``: every per-vertex
+    access call is ``state.SetAccessMode(...)`` whether ``state`` is
+    the body's VelState (no MS) or one of the slot's TinyRigidState
+    (MS engaged).
+    """
+    slot, _inv_factor = get_state_index(copy_state, node_id, parallel_id)
+    if slot < wp.int32(0):
+        if node_id < num_bodies:
+            body_set_access_mode(bodies, node_id, new_access_mode, inv_dt)
+        else:
+            particle_set_access_mode(particles, node_id - num_bodies, new_access_mode, inv_dt)
+        return
+
+    current = copy_state.access_mode[slot]
+    if current == new_access_mode:
+        return
+    if node_id < num_bodies:
+        pos_prev = bodies.position_prev_substep[node_id]
+        orient_prev = bodies.orientation_prev_substep[node_id]
+        pos_new, orient_new, vel_new, omega_new, mode_new = synchronize_pose_velocity(
+            copy_state.position[slot],
+            copy_state.orientation[slot],
+            copy_state.velocity[slot],
+            copy_state.angular_velocity[slot],
+            pos_prev,
+            orient_prev,
+            current,
+            new_access_mode,
+            inv_dt,
+        )
+        copy_state.position[slot] = pos_new
+        copy_state.orientation[slot] = orient_new
+        copy_state.velocity[slot] = vel_new
+        copy_state.angular_velocity[slot] = omega_new
+        copy_state.access_mode[slot] = mode_new
+    else:
+        p = node_id - num_bodies
+        pos_prev = particles.position_prev_substep[p]
+        pos_new, vel_new, mode_new = synchronize_position_velocity(
+            copy_state.position[slot],
+            copy_state.velocity[slot],
+            pos_prev,
+            current,
+            new_access_mode,
+            inv_dt,
+        )
+        copy_state.position[slot] = pos_new
+        copy_state.velocity[slot] = vel_new
+        copy_state.access_mode[slot] = mode_new

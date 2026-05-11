@@ -156,9 +156,9 @@ class TestBroadcastAverage(unittest.TestCase):
         cs.angular_velocity.assign(ang_h)
 
         # Warm-up + capture + launch average.
-        launch_average_and_broadcast(cs, num_bodies)
+        launch_average_and_broadcast(cs, bodies, particles, num_bodies, 1.0 / dt)
         with wp.ScopedCapture(device=device) as capture:
-            launch_average_and_broadcast(cs, num_bodies)
+            launch_average_and_broadcast(cs, bodies, particles, num_bodies, 1.0 / dt)
         wp.capture_launch(capture.graph)
         wp.synchronize_device(device)
 
@@ -200,7 +200,7 @@ class TestBroadcastAverage(unittest.TestCase):
         sum_b0_w_before = ang_h[0:2].sum(axis=0)
         sum_b1_w_before = ang_h[2:5].sum(axis=0)
 
-        launch_average_and_broadcast(cs, num_bodies)
+        launch_average_and_broadcast(cs, bodies, particles, num_bodies, 1.0 / dt)
         wp.synchronize_device(device)
 
         vel_after = cs.velocity.numpy()
@@ -227,7 +227,7 @@ class TestBroadcastAverage(unittest.TestCase):
         w_orig = bodies.angular_velocity.numpy().copy()
 
         launch_broadcast_rigid_to_copy_states(cs, bodies, particles, num_bodies, dt)
-        launch_copy_state_into_rigids(cs, bodies, particles, num_bodies)
+        launch_copy_state_into_rigids(cs, bodies, particles, num_bodies, 1.0 / dt)
         wp.synchronize_device(device)
 
         np.testing.assert_allclose(bodies.velocity.numpy(), v_orig)
@@ -249,9 +249,10 @@ class TestBroadcastAverage(unittest.TestCase):
         w_orig = bodies.angular_velocity.numpy().copy()
         slots_v_orig = cs.velocity.numpy().copy()
 
-        launch_broadcast_rigid_to_copy_states(cs, bodies, particles, num_bodies, 0.01)
-        launch_average_and_broadcast(cs, num_bodies)
-        launch_copy_state_into_rigids(cs, bodies, particles, num_bodies)
+        dt = 0.01
+        launch_broadcast_rigid_to_copy_states(cs, bodies, particles, num_bodies, dt)
+        launch_average_and_broadcast(cs, bodies, particles, num_bodies, 1.0 / dt)
+        launch_copy_state_into_rigids(cs, bodies, particles, num_bodies, 1.0 / dt)
         wp.synchronize_device(device)
 
         # Bodies untouched, slots untouched (broadcast skipped because
@@ -282,7 +283,7 @@ class TestBroadcastAverage(unittest.TestCase):
         vel_h[1] = np.array([99.0, 99.0, 99.0], dtype=np.float32)
         cs.velocity.assign(vel_h)
 
-        launch_copy_state_into_rigids(cs, bodies, particles, num_bodies)
+        launch_copy_state_into_rigids(cs, bodies, particles, num_bodies, 1.0 / dt)
         wp.synchronize_device(device)
 
         np.testing.assert_array_equal(bodies.velocity.numpy()[0], v_orig_b0)

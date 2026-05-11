@@ -54,7 +54,7 @@ class Example:
         cube_size: float = 0.4,
         cube1_drop_height: float = 2.0,
         cube2_drop_height: float = 3.5,
-        youngs_modulus: float = 1.0e6,
+        youngs_modulus: float = 5.0e7,
         poisson_ratio: float = 0.3,
         density: float = 500.0,
         soft_body_thickness: float = 0.005,
@@ -67,7 +67,14 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
 
-        self.sim_substeps = 8
+        # XPBD compliance scales as ``alpha_tilde = alpha / dt^2``. With
+        # more substeps (smaller dt), the per-substep ``bias_mu``
+        # ``= 1 / (k_mu * dt^2)`` grows quadratically and the constraint
+        # behaves softer per substep. Match the Jitter2 reference
+        # (``Playground.NumberSubsteps = 1``, ``SolverIterations = 8``)
+        # at frame dt 1/60 so the user's intuition for Young's modulus
+        # transfers from the C# experimental sim.
+        self.sim_substeps = 1
         self.solver_iterations = 16
 
         self.youngs_modulus = float(youngs_modulus)
