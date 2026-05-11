@@ -1302,6 +1302,14 @@ class PhoenXWorld:
                     self._mass_splitting_writeback()
                 self._integrate_positions()
                 self._relax_velocities_singleworld()
+                # Second writeback after relax: relax also routes
+                # through slots, so without this the next substep
+                # would see stale body.velocity for any body that
+                # had mass-splitting slots. No-op when relax is
+                # skipped (velocity_iterations == 0) or when mass
+                # splitting is off.
+                if self.mass_splitting_enabled and self.velocity_iterations > 0:
+                    self._mass_splitting_writeback()
             else:
                 self._solve_main()
                 self._integrate_positions()
@@ -1925,7 +1933,17 @@ class PhoenXWorld:
 
     def _solve_main_singleworld(self) -> None:
         """Single-world prepare + main PGS iterate. Each sweep is head (large
-        colours) then fused tail (small colours)."""
+        colours) then fused tail (small colours).
+
+        When mass splitting is enabled, an
+        :func:`launch_average_and_broadcast` runs after every full
+        color sweep (prepare and each iterate iteration). This is the
+        C# ``MassSplitting.RunMethodParallelIterate`` +
+        ``AverageAndBroadcast`` pattern: every iteration leaves
+        divergent slots merged back to their mean, so the next
+        iteration starts from a consistent state and Jacobi-block
+        convergence on the overflow bucket actually converges.
+        """
         if self._constraint_capacity == 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
@@ -1934,10 +1952,17 @@ class PhoenXWorld:
 
         self._partitioner.begin_sweep()
         self._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
+        if self.mass_splitting_enabled:
+            # Prepare applies the warm-start impulse to each body's
+            # slots. Average it so the iterate phase starts from
+            # converged slot values.
+            launch_average_and_broadcast(self._copy_state, num_bodies=self.num_bodies)
 
         for _ in range(self.solver_iterations):
             self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
+            if self.mass_splitting_enabled:
+                launch_average_and_broadcast(self._copy_state, num_bodies=self.num_bodies)
 
     def _relax_velocities_singleworld(self) -> None:
         """Single-world TGS-soft relax sweeps (bias OFF)."""
@@ -1948,6 +1973,8 @@ class PhoenXWorld:
         for _ in range(self.velocity_iterations):
             self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
+            if self.mass_splitting_enabled:
+                launch_average_and_broadcast(self._copy_state, num_bodies=self.num_bodies)
 
     def _singleworld_kernels(self):
         """Returns (prepare_head, prepare_fused, iterate_head, iterate_fused,
