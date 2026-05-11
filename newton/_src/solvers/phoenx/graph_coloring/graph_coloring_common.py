@@ -273,6 +273,7 @@ def partitioning_coloring_incremental_greedy_kernel(
     total_num_threads: wp.int32,
     num_remaining: wp.array[int],
     overflow_flag: wp.array[int],
+    max_colored_partitions: wp.int32,
 ):
     """JP-MIS with greedy colour selection. Vertex commits iff highest priority
     among uncoloured neighbours; gets the smallest colour not used by already-
@@ -282,6 +283,19 @@ def partitioning_coloring_incremental_greedy_kernel(
     ``num_remaining`` is decremented per commit, read by outer
     ``wp.capture_while``. Forbidden mask is int64 (cap GREEDY_MAX_COLORS=64);
     overflow sets ``overflow_flag[0]`` for host-side error reporting.
+
+    ``max_colored_partitions``:
+
+    * ``< 0`` -- disabled. Smallest-free search uses the full
+      [0, GREEDY_MAX_COLORS) range; saturation sets ``overflow_flag``.
+      Backward-compatible behaviour.
+    * ``>= 0`` -- soft cap. Smallest-free search caps at
+      ``[0, max_colored_partitions)``. If saturated, the vertex
+      commits at colour ``max_colored_partitions`` (the overflow
+      bucket) instead of flagging overflow. Mass splitting handles
+      the per-bucket within-colour conflicts via copy states. Must
+      be ``<= GREEDY_MAX_COLORS - 1`` so the bucket fits in the
+      int64 forbidden-mask range.
     """
     n = num_elements[0]
     for tid in range(wp.tid(), n, total_num_threads):
@@ -326,7 +340,21 @@ def partitioning_coloring_incremental_greedy_kernel(
             # Smallest free colour = lowest 0-bit in forbidden mask.
             free_mask = forbidden_mask ^ _FREE_COLOR_FLIP
             c = _lowest_set_bit(free_mask)
-            if c < wp.int32(0) or c >= GREEDY_MAX_COLORS:
+            # Soft-cap path: a search ceiling of max_colored_partitions
+            # routes any saturated bucket commit to the overflow colour.
+            # Disabled path (max_colored_partitions < 0): historical
+            # GREEDY_MAX_COLORS overflow-flag behaviour.
+            soft_cap = max_colored_partitions >= wp.int32(0)
+            if soft_cap and (c < wp.int32(0) or c >= max_colored_partitions):
+                # Saturated in [0, K). Commit at colour K (overflow bucket).
+                # No overflow flag: the bucket is a legitimate solver
+                # target consumed by mass splitting.
+                color_tags[tid] = max_colored_partitions + wp.int32(1)
+                partition_data_concat[tid] = (
+                    wp.int64(max_colored_partitions + wp.int32(1)) << _COLOR_SHIFT
+                ) | wp.int64(tid)
+                wp.atomic_sub(num_remaining, 0, 1)
+            elif (not soft_cap) and (c < wp.int32(0) or c >= GREEDY_MAX_COLORS):
                 # Mask saturated. Stamp poison colour and flag overflow;
                 # we still must commit + decrement to let capture_while exit.
                 overflow_flag[0] = 1
@@ -567,6 +595,7 @@ def incremental_tile_compact_csr_and_advance_kernel(
     interaction_id_to_partition: wp.array[int],
     max_colors: int,
     overflow_flag: wp.array[int],
+    max_colored_partitions: wp.int32,
 ):
     """CSR variant of :func:`incremental_tile_compact_remaining_and_advance_kernel`.
 
@@ -577,6 +606,18 @@ def incremental_tile_compact_csr_and_advance_kernel(
     ``num_colors`` sentinel slot -- starts at the right offset) and
     mirrors ``current_color`` into ``num_colors`` for the outer
     sweep-time ``capture_while``.
+
+    ``max_colored_partitions``:
+
+    * ``< 0`` -- disabled. Reaching ``cc == max_colors`` raises
+      ``overflow_flag``.
+    * ``>= 0`` -- soft cap. When ``cc == max_colored_partitions``,
+      every still-uncoloured element in ``remaining_ids[0..n)`` gets
+      stamped with colour ``max_colored_partitions`` (the overflow
+      bucket) in one tile-scan pass, bypassing the MIS-correctness
+      requirement that colours 0..K-1 obey. Mass splitting consumes
+      the bucket and resolves the within-colour conflicts via copy
+      states.
     """
     _block, lane = wp.tid()
 
@@ -592,6 +633,29 @@ def incremental_tile_compact_csr_and_advance_kernel(
     if n == 0:
         return
     cc = current_color[0]
+    # Soft cap: when we hit the overflow bucket colour, dump every
+    # uncoloured remaining element into it in one pass. This bypasses
+    # the MIS-correctness requirement (colours 0..K-1) — mass splitting
+    # resolves the within-bucket conflicts on copy states.
+    if max_colored_partitions >= wp.int32(0) and cc >= max_colored_partitions:
+        base = color_starts[max_colored_partitions]
+        offset = int(0)
+        while offset < n:
+            slot = offset + lane
+            if slot < n:
+                eid = remaining_ids[slot]
+                element_ids_by_color[base + slot] = eid
+                interaction_id_to_partition[eid] = max_colored_partitions
+                partition_data_concat[eid] = (
+                    wp.int64(max_colored_partitions + wp.int32(1)) << _COLOR_SHIFT
+                ) | wp.int64(eid)
+            offset = offset + TILE_SCAN_BLOCK_DIM
+        if lane == 0:
+            color_starts[max_colored_partitions + wp.int32(1)] = base + n
+            num_remaining[0] = 0
+            current_color[0] = max_colored_partitions + wp.int32(1)
+            num_colors[0] = max_colored_partitions + wp.int32(1)
+        return
     # Overflow guard. ``color_starts`` is sized ``max_colors + 1`` so
     # the largest writable end-offset slot is ``color_starts[max_colors]``
     # -- i.e. valid ``cc`` values are ``0 .. max_colors - 1``. If the

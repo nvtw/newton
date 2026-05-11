@@ -102,11 +102,42 @@ class IncrementalContactPartitioner:
         device: wp.DeviceLike = None,
         seed: int = 0,
         use_tile_scan: bool = True,
+        max_colored_partitions: int | None = None,
     ) -> None:
+        """``max_colored_partitions``: soft cap for the overflow bucket. When
+        set to ``K``, colours ``0..K-1`` are produced by normal MIS coloring
+        and any still-uncoloured remainder lands in colour ``K`` (the
+        overflow bucket). Mass splitting consumes the bucket and resolves
+        the within-colour conflicts via copy states. ``None`` (default)
+        disables the cap — overshooting :data:`MAX_COLORS` raises.
+        ``K`` must be ``<= GREEDY_MAX_COLORS - 1`` for the greedy path
+        (the int64 forbidden mask covers ``[0, GREEDY_MAX_COLORS)``) and
+        ``<= MAX_COLORS - 1`` for the JP path so ``color_starts[K + 1]``
+        stays in-bounds.
+        """
         self.max_num_interactions = max_num_interactions
         self.max_num_nodes = max_num_nodes
         # Tile-scan: single-block, graph-capture safe, no implicit allocations.
         self.use_tile_scan = use_tile_scan
+        # Validate the soft cap (None disables; int picks the overflow
+        # bucket colour). Pass-through to kernels uses -1 for "disabled".
+        if max_colored_partitions is not None:
+            if max_colored_partitions < 0:
+                raise ValueError(f"max_colored_partitions must be >= 0 or None (got {max_colored_partitions})")
+            if max_colored_partitions >= int(GREEDY_MAX_COLORS):
+                raise ValueError(
+                    f"max_colored_partitions must be < GREEDY_MAX_COLORS ({int(GREEDY_MAX_COLORS)}) "
+                    f"for the greedy path's int64 forbidden mask; got {max_colored_partitions}."
+                )
+            if max_colored_partitions >= MAX_COLORS:
+                raise ValueError(
+                    f"max_colored_partitions must be < MAX_COLORS ({MAX_COLORS}) so "
+                    f"color_starts[K + 1] stays in-bounds; got {max_colored_partitions}."
+                )
+        self.max_colored_partitions = max_colored_partitions
+        self._max_colored_partitions_kernel_arg: int = (
+            -1 if max_colored_partitions is None else int(max_colored_partitions)
+        )
 
         import numpy as np  # noqa: PLC0415
 
@@ -429,6 +460,7 @@ class IncrementalContactPartitioner:
                     self._interaction_id_to_partition,
                     int(MAX_COLORS),
                     self._overflow_flag,
+                    wp.int32(self._max_colored_partitions_kernel_arg),
                 ],
                 block_dim=int(TILE_SCAN_BLOCK_DIM),
             )
@@ -554,6 +586,7 @@ class IncrementalContactPartitioner:
                     wp.int32(self._greedy_grid_size),
                     self._num_remaining,
                     self._overflow_flag,
+                    wp.int32(self._max_colored_partitions_kernel_arg),
                 ],
                 block_dim=_GREEDY_BLOCK_DIM,
             )
