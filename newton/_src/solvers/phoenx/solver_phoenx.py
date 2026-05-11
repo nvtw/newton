@@ -1312,11 +1312,27 @@ class PhoenXWorld:
             # (highest_index_in_use[0] == 0 -> kernel short-circuit).
             if self.mass_splitting_enabled and self.step_layout == "single_world":
                 self._mass_splitting_broadcast()
+            # Substep order: TGS-soft (Box2D-v3) — main solve with
+            # positional Baumgarte bias, integrate to apply that
+            # bias to positions, then relax (bias=False) to remove
+            # the velocity drift the bias introduced. C# PhoenX uses
+            # classical PGS (integrate after both) which doesn't
+            # require this drift cleanup, but Newton's bias schedule
+            # is designed around it; swapping the order regresses
+            # multiple stacking and friction tests.
+            #
+            # The "slot.position becomes stale between main and
+            # relax" concern is a non-issue: relax sets
+            # ``use_bias=False`` so it doesn't read slot.position,
+            # and constraint lever arms come from ``bodies.orientation``
+            # / ``bodies.body_com`` (no position). The extra
+            # writeback per substep is cheap compared to the
+            # stability win.
             if self.step_layout == "single_world":
                 self._solve_main_singleworld()
                 # Writeback BEFORE integrate so positions advance with
                 # the post-PGS velocity (slot[0] → body.velocity for
-                # every body that had slots).
+                # every body that has slots). No-op when disabled.
                 if self.mass_splitting_enabled:
                     self._mass_splitting_writeback()
                 self._integrate_positions()
