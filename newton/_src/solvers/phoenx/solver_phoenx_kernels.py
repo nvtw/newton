@@ -1572,21 +1572,21 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                         if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
                             if wp.static(is_prepare):
                                 cloth_triangle_prepare_for_iteration_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             else:
                                 cloth_triangle_iterate_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id, idt
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             dispatched = True
                         elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
                             if wp.static(is_prepare):
                                 soft_tetrahedron_prepare_for_iteration_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             else:
                                 soft_tetrahedron_iterate_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id, idt
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             dispatched = True
                 if not dispatched:
@@ -1734,21 +1734,21 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                         if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
                             if wp.static(is_prepare):
                                 cloth_triangle_prepare_for_iteration_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             else:
                                 cloth_triangle_iterate_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id, idt
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             dispatched = True
                         elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
                             if wp.static(is_prepare):
                                 soft_tetrahedron_prepare_for_iteration_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             else:
                                 soft_tetrahedron_iterate_at(
-                                    constraints, cid, particles, copy_state, num_bodies, parallel_id, idt
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                                 )
                             dispatched = True
                     if not dispatched:

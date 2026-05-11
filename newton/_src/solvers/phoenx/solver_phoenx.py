@@ -1760,12 +1760,20 @@ class PhoenXWorld:
         single slot (regular colours, no overflow) the average is a
         no-op.
         """
-        launch_average_and_broadcast(self._copy_state, num_bodies=self.num_bodies)
+        inv_dt = 1.0 / self.substep_dt
+        launch_average_and_broadcast(
+            self._copy_state,
+            self.bodies,
+            self._particles_or_sentinel(),
+            num_bodies=self.num_bodies,
+            inv_dt=inv_dt,
+        )
         launch_copy_state_into_rigids(
             self._copy_state,
             self.bodies,
             self._particles_or_sentinel(),
             num_bodies=self.num_bodies,
+            inv_dt=inv_dt,
         )
 
     def _rebuild_mass_splitting_graph(self) -> None:
@@ -2139,13 +2147,25 @@ class PhoenXWorld:
             # Prepare applies the warm-start impulse to each body's
             # slots. Average it so the iterate phase starts from
             # converged slot values.
-            launch_average_and_broadcast(self._copy_state, num_bodies=self.num_bodies)
+            launch_average_and_broadcast(
+                self._copy_state,
+                self.bodies,
+                self._particles_or_sentinel(),
+                num_bodies=self.num_bodies,
+                inv_dt=1.0 / self.substep_dt,
+            )
 
         for _ in range(self.solver_iterations):
             self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
             if self.mass_splitting_enabled:
-                launch_average_and_broadcast(self._copy_state, num_bodies=self.num_bodies)
+                launch_average_and_broadcast(
+                self._copy_state,
+                self.bodies,
+                self._particles_or_sentinel(),
+                num_bodies=self.num_bodies,
+                inv_dt=1.0 / self.substep_dt,
+            )
 
     def _relax_velocities_singleworld(self) -> None:
         """Single-world TGS-soft relax sweeps (bias OFF)."""
@@ -2157,7 +2177,13 @@ class PhoenXWorld:
             self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
             if self.mass_splitting_enabled:
-                launch_average_and_broadcast(self._copy_state, num_bodies=self.num_bodies)
+                launch_average_and_broadcast(
+                self._copy_state,
+                self.bodies,
+                self._particles_or_sentinel(),
+                num_bodies=self.num_bodies,
+                inv_dt=1.0 / self.substep_dt,
+            )
 
     def _singleworld_kernels(self):
         """Returns (prepare_head, prepare_fused, iterate_head, iterate_fused,

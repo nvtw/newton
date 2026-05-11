@@ -48,6 +48,9 @@ from newton._src.solvers.phoenx.access_mode import (
     integrate_orientation,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.mass_splitting.access import (
+    slot_synchronize_to_velocity_level,
+)
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 
@@ -148,30 +151,45 @@ def _broadcast_rigid_to_copy_states_kernel(
 @wp.kernel(enable_backward=False)
 def _average_and_broadcast_kernel(
     copy_state: CopyStateContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
     num_bodies: wp.int32,
+    inv_dt: wp.float32,
 ):
-    """Average velocity / angular_velocity across a node's slots and
-    broadcast the result.
+    """Synchronise per-slot dual state to VELOCITY_LEVEL, then average
+    velocity / angular_velocity across a node's slots and broadcast the
+    result.
 
-    Mirrors the C# ``MassSplittingRigidBodyInteractionGraphGpu``
-    ``AverageAndBroadcast`` method (``MassSplittingTypes.cs:206``):
-    bodies with a single slot (or zero) are a no-op; bodies with N>1
-    slots average their per-slot velocity / angular_velocity, scale by
-    ``1/N``, and write the average to every slot. Position /
-    orientation stay at the broadcast-time forward-integrated value.
+    Mirrors the C# pattern in
+    ``MassSplittingRigidBodyInteractionGraph.AverageAndBroadcast``
+    (``MassSplitting/MassSplittingRigidBodyInteractionGraph.cs:324-378``):
+    each slot's ``SetAccessMode(VelocityLevel, ...)`` is called BEFORE
+    the velocity sum. Position-level work done by constraint iterates
+    is thus encoded as ``v = (slot.position - body.position_prev_substep)
+    / dt`` and folded into the velocity average for free -- no separate
+    position-averaging code needed. The synchronize anchor is the
+    body / particle's ``position_prev_substep`` (substep-start snapshot).
 
-    For particle nodes the angular_velocity sum is over zeros so the
-    write is a no-op for them on that field — harmless.
+    Bodies with a single slot (or zero) are a no-op for the average;
+    bodies with N>1 slots get their N velocities averaged and
+    broadcast. For particle nodes the angular_velocity sum is over
+    zeros so the write is harmless on that field.
     """
     node_id = wp.tid()
     if copy_state.highest_index_in_use[0] == wp.int32(0):
         return
     start, end = _section_range(copy_state, node_id)
     count = end - start
-    # No copies (count==0) or only one copy (count==1, averaging a
-    # singleton is a no-op): nothing to do.
     if count <= wp.int32(1):
         return
+
+    # Synchronize every slot to VELOCITY_LEVEL first (C# pattern).
+    # Position-level work gets encoded as velocity deltas relative to
+    # the body / particle's substep-start snapshot.
+    for slot in range(start, end):
+        slot_synchronize_to_velocity_level(
+            bodies, particles, copy_state, node_id, slot, num_bodies, inv_dt
+        )
 
     sum_v = wp.vec3f(0.0, 0.0, 0.0)
     sum_w = wp.vec3f(0.0, 0.0, 0.0)
@@ -186,10 +204,6 @@ def _average_and_broadcast_kernel(
     for slot in range(start, end):
         copy_state.velocity[slot] = avg_v
         copy_state.angular_velocity[slot] = avg_w
-        # Force the access mode back to VELOCITY_LEVEL: any constraint
-        # iterate that left a slot at POSITION_LEVEL gets unified back
-        # to the velocity dual after the average.
-        copy_state.access_mode[slot] = _ACCESS_MODE_VELOCITY_LEVEL
 
 
 @wp.kernel(enable_backward=False)
@@ -198,18 +212,21 @@ def _copy_state_into_rigids_kernel(
     bodies: BodyContainer,
     particles: ParticleContainer,
     num_bodies: wp.int32,
+    inv_dt: wp.float32,
 ):
-    """Write the first slot's velocity back to body / particle.
+    """Synchronise slot[0] to VELOCITY_LEVEL and write velocity back to
+    body / particle storage.
 
-    All slots carry the same averaged velocity after
-    :func:`launch_average_and_broadcast`, so the first slot is
-    canonical. Mirrors C# ``WriteBack`` (``MassSplittingTypes.cs:282``)
-    + ``TinyRigidState.WriteBack`` (``BodyTypes.cs:309``): only velocity
-    travels back; position / orientation are advanced separately by the
-    solver's integrate step.
+    Mirrors C# ``TinyRigidState.WriteBack`` (``TinyRigidState.cs:92``):
+    ``SynchronizeVelAndPosStateUpdates(VelocityLevel, ...)`` is invoked
+    first to fold any pending position-level state into velocity, then
+    velocity / angular_velocity are copied out. Position is not copied
+    back -- the standard solver integrate step advances it from
+    ``position_prev_substep + velocity * dt`` next, which automatically
+    yields the averaged position when mass splitting was engaged.
 
-    Static nodes are intentionally skipped (their slot would have been
-    stamped ``ACCESS_MODE_STATIC`` by broadcast).
+    Static nodes are skipped (slot's access_mode was stamped STATIC by
+    broadcast for those).
     """
     node_id = wp.tid()
     if copy_state.highest_index_in_use[0] == wp.int32(0):
@@ -219,6 +236,12 @@ def _copy_state_into_rigids_kernel(
         return
     if copy_state.access_mode[start] == _ACCESS_MODE_STATIC:
         return
+
+    # Synchronize slot[0] to VELOCITY_LEVEL before writeback. Sibling
+    # slots already match after the prior average + broadcast pass.
+    slot_synchronize_to_velocity_level(
+        bodies, particles, copy_state, node_id, start, num_bodies, inv_dt
+    )
 
     vel = copy_state.velocity[start]
     if node_id < num_bodies:
@@ -251,14 +274,23 @@ def launch_broadcast_rigid_to_copy_states(
 
 def launch_average_and_broadcast(
     copy_state: CopyStateContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
     num_bodies: int,
+    inv_dt: float,
 ) -> None:
-    """Launch :func:`_average_and_broadcast_kernel`."""
+    """Launch :func:`_average_and_broadcast_kernel`.
+
+    The kernel needs ``bodies`` + ``particles`` to read the substep-start
+    snapshots (``position_prev_substep`` / ``orientation_prev_substep``)
+    used as the synchronize anchor when flipping slot access mode to
+    VELOCITY_LEVEL. ``inv_dt`` is the substep inverse-dt.
+    """
     num_nodes = copy_state.section_end.shape[0]
     wp.launch(
         _average_and_broadcast_kernel,
         dim=num_nodes,
-        inputs=[copy_state, wp.int32(num_bodies)],
+        inputs=[copy_state, bodies, particles, wp.int32(num_bodies), wp.float32(inv_dt)],
         device=copy_state.section_end.device,
     )
 
@@ -268,12 +300,18 @@ def launch_copy_state_into_rigids(
     bodies: BodyContainer,
     particles: ParticleContainer,
     num_bodies: int,
+    inv_dt: float,
 ) -> None:
-    """Launch :func:`_copy_state_into_rigids_kernel`."""
+    """Launch :func:`_copy_state_into_rigids_kernel`.
+
+    ``inv_dt`` is the substep inverse-dt -- used by the slot
+    synchronize at writeback to encode any pending position-level state
+    as velocity.
+    """
     num_nodes = copy_state.section_end.shape[0]
     wp.launch(
         _copy_state_into_rigids_kernel,
         dim=num_nodes,
-        inputs=[copy_state, bodies, particles, wp.int32(num_bodies)],
+        inputs=[copy_state, bodies, particles, wp.int32(num_bodies), wp.float32(inv_dt)],
         device=copy_state.section_end.device,
     )
