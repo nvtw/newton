@@ -305,7 +305,7 @@ void main() {
         @self._window.event
         def on_mouse_drag(x, y, dx, dy, buttons, modifiers):
             if self.gui:
-                self.gui.handle_mouse_drag(x, y, dx, dy, buttons, self._to_framebuffer_coords)
+                self.gui.handle_mouse_drag(x, y, dx, dy, buttons, self._to_framebuffer_coords, modifiers)
 
         @self._window.event
         def on_mouse_press(x, y, button, modifiers):

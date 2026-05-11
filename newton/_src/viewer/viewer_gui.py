@@ -38,6 +38,9 @@ class ViewerGui:
         self._cam_vel = np.zeros(3, dtype=np.float32)
         self._cam_speed = 4.0
         self._cam_damp_tau = 0.083
+        self._camera_orbit_sensitivity = 0.1
+        self._camera_dolly_scroll_sensitivity = 0.15
+        self._camera_dolly_drag_sensitivity = 0.01
 
         # Gizmo active-frame tracking (handles snap_to on release)
         self._gizmo_active = {}
@@ -230,6 +233,7 @@ class ViewerGui:
             center[1] - front.y * distance,
             center[2] - front.z * distance,
         )
+        camera.set_pivot(center)
         if hasattr(viewer, "_camera_dirty"):
             viewer._camera_dirty = True
 
@@ -278,11 +282,19 @@ class ViewerGui:
         if picking is not None:
             picking.release()
 
-    def handle_mouse_scroll(self, scroll_y: float) -> None:
-        """Handle scroll wheel: adjust camera FOV unless UI is capturing."""
+    def handle_mouse_scroll(self, scroll_y: float, is_ctrl_down: bool = False) -> None:
+        """Handle scroll wheel: dolly camera; Ctrl+scroll adjusts FOV."""
         if self.should_ignore_mouse_input():
             return
-        self.adjust_camera_fov_from_scroll(scroll_y)
+        camera = getattr(self._viewer, "camera", None)
+        if camera is None:
+            return
+        if is_ctrl_down:
+            camera.fov = max(15.0, min(90.0, camera.fov - scroll_y * 2.0))
+        else:
+            camera.dolly(scroll_y * self._camera_dolly_scroll_sensitivity)
+        if hasattr(self._viewer, "_camera_dirty"):
+            self._viewer._camera_dirty = True
 
     def handle_mouse_press(self, x: float, y: float, button: int, to_framebuffer_coords) -> None:
         """Handle mouse button press: start picking on right-click."""
@@ -305,6 +317,22 @@ class ViewerGui:
         if button == pyglet.window.mouse.RIGHT and getattr(self._viewer, "picking", None) is not None:
             self.release_picking()
 
+    def _camera_pan_scale(self) -> float:
+        """World-space meters per window pixel for screen-plane camera panning."""
+        viewer = self._viewer
+        camera = getattr(viewer, "camera", None)
+        if camera is None:
+            return 0.01
+        height = max(float(getattr(camera, "height", 1.0)), 1.0)
+        renderer = getattr(viewer, "renderer", None)
+        if renderer is not None:
+            window = getattr(renderer, "window", None)
+            if window is not None and hasattr(window, "get_size"):
+                _, h = window.get_size()
+                height = max(float(h), 1.0)
+        distance = max(camera.pivot_distance, camera.MIN_PIVOT_DISTANCE)
+        return 2.0 * distance * np.tan(np.radians(camera.fov) * 0.5) / height
+
     def handle_mouse_drag(
         self,
         x: float,
@@ -313,8 +341,9 @@ class ViewerGui:
         dy: float,
         buttons: int,
         to_framebuffer_coords,
+        modifiers: int = 0,
     ) -> None:
-        """Handle mouse drag: rotate camera (left) or update picking (right)."""
+        """Handle mouse drag: middle-click orbit/pan/dolly, left-click look, right-click pick."""
         import pyglet
 
         allow_active_pick_drag = (
@@ -325,8 +354,27 @@ class ViewerGui:
         if self.should_ignore_mouse_input(allow_active_pick_drag=allow_active_pick_drag):
             return
         viewer = self._viewer
+        camera = getattr(viewer, "camera", None)
+
+        if buttons & pyglet.window.mouse.MIDDLE and camera is not None:
+            if modifiers & pyglet.window.key.MOD_CTRL:
+                camera.dolly(dy * self._camera_dolly_drag_sensitivity)
+            elif modifiers & pyglet.window.key.MOD_SHIFT:
+                scale = self._camera_pan_scale()
+                camera.pan(-dx * scale, -dy * scale)
+            else:
+                camera.orbit(
+                    delta_yaw=-dx * self._camera_orbit_sensitivity,
+                    delta_pitch=dy * self._camera_orbit_sensitivity,
+                )
+            if hasattr(viewer, "_camera_dirty"):
+                viewer._camera_dirty = True
+            return
+
         if buttons & pyglet.window.mouse.LEFT:
             self.rotate_camera_from_drag(dx, dy)
+            if camera is not None:
+                camera.sync_pivot_to_view()
         if (
             buttons & pyglet.window.mouse.RIGHT
             and getattr(viewer, "picking_enabled", False)
@@ -347,6 +395,8 @@ class ViewerGui:
 
         if symbol == pyglet.window.key.SPACE:
             self._viewer._paused = not self._viewer._paused
+        elif symbol == pyglet.window.key.PERIOD and getattr(self._viewer, "_paused", False):
+            self._viewer._step_requested = True
         elif symbol == pyglet.window.key.H:
             self.show_ui = not self.show_ui
         elif symbol == pyglet.window.key.F:
@@ -537,6 +587,21 @@ class ViewerGui:
             imgui.separator()
             header_flags = 0
 
+            # Run controls — shown once a model is loaded
+            if viewer.model is not None:
+                _changed, viewer._paused = imgui.checkbox("Pause", viewer._paused)
+                imgui.same_line()
+                imgui.begin_disabled(not viewer._paused)
+                if imgui.button("Step"):
+                    viewer._step_requested = True
+                imgui.end_disabled()
+                reset_cb = getattr(viewer, "_reset_callback", None)
+                if reset_cb is not None:
+                    imgui.same_line()
+                    if imgui.button("Reset"):
+                        reset_cb()
+                imgui.separator()
+
             # Top-level collapsing headers injected by the viewer (e.g. example browser)
             for callback in viewer._ui_callbacks.get("panel", []):
                 callback(self.ui.imgui)
@@ -549,7 +614,6 @@ class ViewerGui:
                     imgui.text(f"Up Axis: {axis_names[viewer.model.up_axis]}")
                     gravity = viewer.model.gravity.numpy()[0]
                     imgui.text(f"Gravity: ({gravity[0]:.2f}, {gravity[1]:.2f}, {gravity[2]:.2f})")
-                    _changed, viewer._paused = imgui.checkbox("Pause", viewer._paused)
 
                 imgui.set_next_item_open(True, imgui.Cond_.appearing)
                 if imgui.collapsing_header("Visualization", flags=header_flags):
@@ -626,8 +690,13 @@ class ViewerGui:
                 imgui.text("QE - Pan up/down")
                 imgui.text("Left Click - Look around")
                 imgui.text("Right Click - Pick objects")
-                imgui.text("Scroll - Zoom")
+                imgui.text("Middle Click - Orbit")
+                imgui.text("Shift + Middle Click - Pan")
+                imgui.text("Ctrl + Middle Click - Dolly")
+                imgui.text("Scroll - Dolly")
+                imgui.text("Ctrl + Scroll - FOV zoom")
                 imgui.text("Space - Pause/Resume")
+                imgui.text(". - Step one frame (when paused)")
                 imgui.text("H - Toggle UI")
                 imgui.text("F - Frame camera around model")
 
