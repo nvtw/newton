@@ -186,6 +186,12 @@ class PortedExample:
     #: splitting handles the overflow, so quality stays the same.
     #: Only safe with :attr:`mass_splitting` enabled.
     max_greedy_outer_iters: int | None = None
+    #: Hard cap on the single-world PGS persistent-grid block count
+    #: (each block is 256 threads). ``None`` uses the auto-size
+    #: heuristic (32 block floor, 4*SM ceiling). Lowering helps
+    #: small-partition scenes where the default 32-block floor
+    #: over-provisions threads; raising helps very large partitions.
+    max_thread_blocks: int | None = None
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -326,6 +332,7 @@ class PortedExample:
             max_colored_partitions=self.max_colored_partitions,
             mass_splitting_unrolled=self.mass_splitting_unrolled,
             max_greedy_outer_iters=self.max_greedy_outer_iters,
+            max_thread_blocks=self.max_thread_blocks,
             device=self.device,
         )
 
