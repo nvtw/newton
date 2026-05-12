@@ -41,7 +41,9 @@ def _make_elements_array(bodies_per_elem: list[list[int]], device) -> wp.array:
     """Pack a Python list of per-element body lists into the Warp struct array."""
     n = len(bodies_per_elem)
     max_bodies = int(MAX_BODIES)
-    struct_dtype = np.dtype({"names": ["bodies"], "formats": [(np.int32, max_bodies)], "offsets": [0], "itemsize": 32})
+    struct_dtype = np.dtype(
+        {"names": ["bodies"], "formats": [(np.int32, max_bodies)], "offsets": [0], "itemsize": 4 * max_bodies}
+    )
     arr = np.zeros(n, dtype=struct_dtype)
     arr["bodies"][:] = -1
     for i, blist in enumerate(bodies_per_elem):

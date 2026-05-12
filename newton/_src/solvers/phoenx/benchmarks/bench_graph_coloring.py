@@ -100,7 +100,12 @@ class Snapshot:
         """
         n = self.num_elements
         struct_dtype = np.dtype(
-            {"names": ["bodies"], "formats": [(np.int32, int(MAX_BODIES))], "offsets": [0], "itemsize": 32}
+            {
+                "names": ["bodies"],
+                "formats": [(np.int32, int(MAX_BODIES))],
+                "offsets": [0],
+                "itemsize": 4 * int(MAX_BODIES),
+            }
         )
         # IncrementalContactPartitioner sizes itself from
         # max_num_interactions; pad the struct array to that capacity.

@@ -897,7 +897,7 @@ def _constraints_to_elements_kernel(
         if b1 < 0 and b2 >= 0:
             b1 = b2
             b2 = -1
-        elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
+        elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles:
         # Cloth-triangle: three unified-index particle endpoints already
@@ -931,7 +931,7 @@ def _constraints_to_elements_kernel(
                 slot1 = v
             else:
                 slot2 = v
-        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, -1, -1, -1, -1, -1)
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending:
         # Cloth-bending: 4 unified-index particle endpoints. body1 / body2
@@ -970,7 +970,7 @@ def _constraints_to_elements_kernel(
                 slot2 = v
             else:
                 slot3 = v
-        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
         # Soft-tetrahedron: four unified-index particle endpoints stored
@@ -1012,7 +1012,7 @@ def _constraints_to_elements_kernel(
                 slot2 = v
             else:
                 slot3 = v
-        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1)
         return
     local_cid = tid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra
     b1 = contact_get_body1(contact_cols, local_cid)
@@ -1089,8 +1089,9 @@ def _constraints_to_elements_kernel(
             e1b = -1
 
     # Compact: drop -1s into a contiguous prefix (the partitioner's
-    # adjacency loop stops on the first -1). Up to 8 nodes total:
-    # tet-tet = 4+4; tet-cloth = 4+3; tet-rigid = 4+1; cloth-cloth =
+    # adjacency loop stops on the first -1). Up to 6 nodes per contact
+    # after the soft-tet 4th-vertex drop (see soft-tet branches above):
+    # tet-tet = 3+3; tet-cloth = 3+3; tet-rigid = 3+1; cloth-cloth =
     # 3+3; cloth-rigid = 3+1; rigid-rigid = 1+1.
     s0 = wp.int32(-1)
     s1 = wp.int32(-1)
@@ -1098,10 +1099,8 @@ def _constraints_to_elements_kernel(
     s3 = wp.int32(-1)
     s4 = wp.int32(-1)
     s5 = wp.int32(-1)
-    s6 = wp.int32(-1)
-    s7 = wp.int32(-1)
     cnt = wp.int32(0)
-    for cand in range(8):
+    for cand in range(6):
         v = wp.int32(-1)
         if cand == 0:
             v = b1
@@ -1112,13 +1111,9 @@ def _constraints_to_elements_kernel(
         elif cand == 3:
             v = e0b
         elif cand == 4:
-            v = e0c
-        elif cand == 5:
             v = e1a
-        elif cand == 6:
-            v = e1b
         else:
-            v = e1c
+            v = e1b
         if v < 0:
             continue
         if cnt == 0:
@@ -1131,14 +1126,10 @@ def _constraints_to_elements_kernel(
             s3 = v
         elif cnt == 4:
             s4 = v
-        elif cnt == 5:
-            s5 = v
-        elif cnt == 6:
-            s6 = v
         else:
-            s7 = v
+            s5 = v
         cnt = cnt + 1
-    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5, s6, s7)
+    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5)
 
 
 @wp.kernel(enable_backward=False)

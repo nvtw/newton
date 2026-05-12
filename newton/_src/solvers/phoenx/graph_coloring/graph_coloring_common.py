@@ -17,30 +17,34 @@ _UNPARTITIONED = wp.constant(wp.int64(1 << 62))
 # 64-bit bitwise NOT on int64 constants.
 _TAG_MASK = wp.constant(wp.int64((1 << 62) - 1))
 
-MAX_BODIES = wp.constant(8)
+MAX_BODIES = wp.constant(6)
 
-vec8i = wp.types.vector(length=8, dtype=wp.int32)
+vec6i = wp.types.vector(length=6, dtype=wp.int32)
 
 
 @wp.struct
 class ElementInteractionData:
-    # Body slots; -1 = inactive. Slots 0..1 = primary pair; 2..7 optional.
-    bodies: vec8i
+    # Body slots; -1 = inactive. Slots 0..1 = primary pair; 2..5 optional.
+    # Width 6 fits every constraint type: joint (2), cloth-tri (3),
+    # cloth-bending (4), soft-tet shear (4), and the densest contact --
+    # soft-tet-vs-soft-tet (3 + 3 = 6, after adjacency-only emission
+    # in ``_constraints_to_elements_kernel``).
+    bodies: vec6i
 
 
 @wp.func
 def element_interaction_data_empty() -> ElementInteractionData:
     d = ElementInteractionData()
-    d.bodies = vec8i(-1, -1, -1, -1, -1, -1, -1, -1)
+    d.bodies = vec6i(-1, -1, -1, -1, -1, -1)
     return d
 
 
 @wp.func
 def element_interaction_data_make(
-    body1: int, body2: int, body3: int, body4: int, body5: int, body6: int, body7: int, body8: int
+    body1: int, body2: int, body3: int, body4: int, body5: int, body6: int
 ) -> ElementInteractionData:
     d = ElementInteractionData()
-    d.bodies = vec8i(body1, body2, body3, body4, body5, body6, body7, body8)
+    d.bodies = vec6i(body1, body2, body3, body4, body5, body6)
     return d
 
 

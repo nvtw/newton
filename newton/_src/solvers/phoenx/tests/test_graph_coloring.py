@@ -38,7 +38,9 @@ def _build_elements_array(elements_bodies: list[list[int]], capacity: int) -> wp
     max_bodies = int(MAX_BODIES)
     # Warp expects a structured numpy dtype matching the @wp.struct layout:
     # a single field ``bodies`` of type int32[8].
-    struct_dtype = np.dtype({"names": ["bodies"], "formats": [(np.int32, max_bodies)], "offsets": [0], "itemsize": 32})
+    struct_dtype = np.dtype(
+        {"names": ["bodies"], "formats": [(np.int32, max_bodies)], "offsets": [0], "itemsize": 4 * max_bodies}
+    )
     data = np.zeros(capacity, dtype=struct_dtype)
     data["bodies"][:] = -1
     for i, bodies in enumerate(elements_bodies):
@@ -379,8 +381,9 @@ def _generate_stress_workload(
 
 def _make_stress_elements_array(bodies_np: np.ndarray, device) -> wp.array:
     num_elements = bodies_np.shape[0]
+    max_bodies = int(MAX_BODIES)
     struct_dtype = np.dtype(
-        {"names": ["bodies"], "formats": [(np.int32, int(MAX_BODIES))], "offsets": [0], "itemsize": 32}
+        {"names": ["bodies"], "formats": [(np.int32, max_bodies)], "offsets": [0], "itemsize": 4 * max_bodies}
     )
     arr = np.zeros(num_elements, dtype=struct_dtype)
     arr["bodies"] = bodies_np
@@ -613,15 +616,11 @@ class TestIncrementalGraphColoring(unittest.TestCase):
 
     def test_small_disjoint_graph(self):
         # Four non-conflicting elements all fit into partition 0.
-        bodies_np = np.array(
-            [
-                [0, 1, -1, -1, -1, -1, -1, -1],
-                [2, 3, -1, -1, -1, -1, -1, -1],
-                [4, 5, -1, -1, -1, -1, -1, -1],
-                [6, 7, -1, -1, -1, -1, -1, -1],
-            ],
-            dtype=np.int32,
-        )
+        bodies_np = np.full((4, int(MAX_BODIES)), -1, dtype=np.int32)
+        bodies_np[0, :2] = [0, 1]
+        bodies_np[1, :2] = [2, 3]
+        bodies_np[2, :2] = [4, 5]
+        bodies_np[3, :2] = [6, 7]
         device = wp.get_preferred_device()
         result = _run_incremental_to_completion(bodies_np, num_bodies=8, device=device)
         self.assertEqual(result["num_remaining"], 0)
@@ -631,7 +630,7 @@ class TestIncrementalGraphColoring(unittest.TestCase):
 
     def test_small_clique_graph(self):
         # Clique: every element touches body 0. Each needs its own colour.
-        bodies_np = np.full((4, 8), -1, dtype=np.int32)
+        bodies_np = np.full((4, int(MAX_BODIES)), -1, dtype=np.int32)
         for i in range(4):
             bodies_np[i, 0] = 0
             bodies_np[i, 1] = i + 1

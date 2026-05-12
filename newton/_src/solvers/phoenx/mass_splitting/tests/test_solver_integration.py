@@ -108,7 +108,7 @@ class TestMassSplittingSolverWiring(unittest.TestCase):
         # put them in different buckets.
         max_bodies = int(MAX_BODIES)
         struct_dtype = np.dtype(
-            {"names": ["bodies"], "formats": [(np.int32, max_bodies)], "offsets": [0], "itemsize": 32}
+            {"names": ["bodies"], "formats": [(np.int32, max_bodies)], "offsets": [0], "itemsize": 4 * max_bodies}
         )
         elems_np = np.zeros(world._constraint_capacity, dtype=struct_dtype)
         elems_np["bodies"][:] = -1
@@ -168,7 +168,7 @@ class TestMassSplittingSolverWiring(unittest.TestCase):
 
         max_bodies = int(MAX_BODIES)
         struct_dtype = np.dtype(
-            {"names": ["bodies"], "formats": [(np.int32, max_bodies)], "offsets": [0], "itemsize": 32}
+            {"names": ["bodies"], "formats": [(np.int32, max_bodies)], "offsets": [0], "itemsize": 4 * max_bodies}
         )
         elems_np = np.zeros(world._constraint_capacity, dtype=struct_dtype)
         elems_np["bodies"][:] = -1

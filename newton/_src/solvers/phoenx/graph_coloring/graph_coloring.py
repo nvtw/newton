@@ -17,7 +17,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     partitioning_coloring_kernel,
     partitioning_prepare_kernel,
     set_int_array_kernel,
-    vec8i,
+    vec6i,
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import scan_variable_length, sort_variable_length_int64
 
@@ -32,7 +32,7 @@ __all__ = [
     "element_interaction_data_get",
     "element_interaction_data_make",
     "maximal_independent_set_partitioning",
-    "vec8i",
+    "vec6i",
 ]
 
 

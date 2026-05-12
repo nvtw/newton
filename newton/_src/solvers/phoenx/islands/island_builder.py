@@ -23,8 +23,8 @@ __all__ = [
 ]
 
 
-#: Max bodies per interaction row. Matches vec8i ElementInteractionData layout.
-MAX_BODIES_PER_INTERACTION = 8
+#: Max bodies per interaction row. Matches the vec6i ElementInteractionData layout.
+MAX_BODIES_PER_INTERACTION = 6
 
 
 #: Parent sentinel = "slot never touched". Matches PhoenX's 0xFFFFFFFFu.
