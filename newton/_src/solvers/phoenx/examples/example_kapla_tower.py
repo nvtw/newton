@@ -245,7 +245,7 @@ class Example:
         # shape pair). The mass-splitting copy-state and the sort
         # buffer for the interaction graph both scale with this, so
         # over-budgeting wastes GPU memory and slows the radix sort.
-        rigid_contact_max_pipeline = 500_000 * num_cells
+        rigid_contact_max_pipeline = 125_000 * num_cells
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
             contact_matching=PHOENX_CONTACT_MATCHING,
@@ -341,6 +341,16 @@ class Example:
             max_thread_blocks=256,
             mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
+            # Empirical kapla tuning. ``mass_splitting_unrolled`` drops
+            # the ``wp.capture_while`` on the MS PGS hot path for a
+            # fixed K+1 host-side unroll (+9% on kapla_tower vs
+            # captured-while). ``mass_splitting_batch_size=4`` is the
+            # sweep optimum (+12% over the C# PhoenX default of 8);
+            # smaller batches expose more Jacobi parallelism on
+            # kapla's hub-heavy overflow partition, where the default
+            # 8 over-serialises inside each batch.
+            mass_splitting_unrolled=True,
+            mass_splitting_batch_size=4,
             device=self.device,
         )
 
