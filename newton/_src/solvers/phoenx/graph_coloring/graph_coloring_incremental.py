@@ -20,12 +20,15 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     GREEDY_MAX_COLORS,
     MAX_BODIES,
+    MAX_GREEDY_OUTER_ITERS,
     TILE_SCAN_BLOCK_DIM,
     ElementInteractionData,
     element_interaction_data_get,
     greedy_clear_int_kernel,
     greedy_color_histogram_kernel,
     greedy_count_and_scan_color_starts_kernel,
+    greedy_increment_and_check_iter_kernel,
+    greedy_overflow_spill_kernel,
     greedy_reset_init_kernel,
     greedy_scatter_elements_by_color_kernel,
     incremental_begin_sweep_kernel,
@@ -305,6 +308,11 @@ class IncrementalContactPartitioner:
         self._greedy_grid_size: int = _greedy_coloring_grid_size(max_num_interactions, device)
         # In-graph greedy-overflow fallback predicate.
         self._fallback_flag: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
+        # Greedy outer-iteration counter (capped at MAX_GREEDY_OUTER_ITERS so
+        # dense graphs don't pay the long-tail per-round MIS cost; remaining
+        # uncoloured elements get spilled to the overflow colour after the
+        # capture_while exits).
+        self._greedy_iter_count: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Sweep-time colour cursor (decremented by PGS kernels).
         self._color_cursor = wp.zeros(1, dtype=wp.int32, device=device)
@@ -637,9 +645,27 @@ class IncrementalContactPartitioner:
                 self._num_elements,
             ],
         )
+        # Reset the outer-iteration counter that the inner-loop watcher
+        # bumps each round; capped at ``MAX_GREEDY_OUTER_ITERS`` so dense
+        # graphs don't pay the long MIS tail.
+        self._greedy_iter_count.zero_()
         wp.capture_while(
             self._num_remaining,
             self._capture_build_csr_greedy_step,
+        )
+        # Force-spill anything still uncoloured into the overflow colour.
+        # No-op when capture_while drained num_remaining naturally; only
+        # fires when the iter-cap watcher triggered the early exit. Mass
+        # splitting handles the overflow bucket via copy states.
+        wp.launch(
+            greedy_overflow_spill_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._color_tags,
+                self._partition_data_concat,
+                self._num_elements,
+                wp.int32(self._max_colored_partitions_kernel_arg),
+            ],
         )
         wp.launch(
             greedy_color_histogram_kernel,
@@ -755,7 +781,11 @@ class IncrementalContactPartitioner:
 
     def _capture_build_csr_greedy_step(self) -> None:
         """build_csr_greedy capture_while body. Unrolled NUM_INNER_WHILE_ITERATIONS
-        times to amortise the outer overhead."""
+        times to amortise the outer overhead. After the unrolled launches a
+        single-thread watcher kernel bumps the outer-iteration counter and
+        force-exits the capture_while when ``MAX_GREEDY_OUTER_ITERS`` is hit
+        (only when an overflow bucket is configured -- otherwise the loop
+        runs to natural convergence)."""
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
             wp.launch(
                 partitioning_coloring_incremental_greedy_kernel,
@@ -775,6 +805,16 @@ class IncrementalContactPartitioner:
                     wp.int32(self._max_colored_partitions_kernel_arg),
                 ],
                 block_dim=_GREEDY_BLOCK_DIM,
+            )
+        if self._max_colored_partitions_kernel_arg >= 0:
+            wp.launch(
+                greedy_increment_and_check_iter_kernel,
+                dim=1,
+                inputs=[
+                    self._greedy_iter_count,
+                    self._num_remaining,
+                    wp.int32(MAX_GREEDY_OUTER_ITERS),
+                ],
             )
 
     def begin_sweep(self) -> None:

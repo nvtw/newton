@@ -243,6 +243,17 @@ def partitioning_coloring_kernel(
 
 # Greedy variant: int64 forbidden-colour mask. Overflow past 64 sets a flag.
 GREEDY_MAX_COLORS = wp.constant(64)
+
+#: Outer-iteration cap for the greedy ``capture_while`` build. Each outer
+#: iteration runs ``NUM_INNER_WHILE_ITERATIONS`` (8) inner greedy launches,
+#: so 16 outer = 128 inner launches max. Past this cap the remaining
+#: uncoloured elements are force-spilled to the overflow colour (consumed
+#: by mass-splitting copy states). Picked to cover the soft_body_drop
+#: steady-contact scene (~64 inner launches naturally needed) and leave
+#: headroom for moderately denser graphs without paying for the long
+#: tail of stragglers that drives the per-step coloring cost up to
+#: 52 % of GPU time on res=3 scenes.
+MAX_GREEDY_OUTER_ITERS = wp.constant(16)
 # All-ones; used in place of int64 unary NOT (see _TAG_MASK comment).
 _FREE_COLOR_FLIP = wp.constant(wp.int64(-1))
 
@@ -369,6 +380,55 @@ def partitioning_coloring_incremental_greedy_kernel(
                 color_tags[tid] = c + wp.int32(1)
                 partition_data_concat[tid] = (wp.int64(c + 1) << _COLOR_SHIFT) | wp.int64(tid)
                 wp.atomic_sub(num_remaining, 0, 1)
+
+
+@wp.kernel(enable_backward=False)
+def greedy_increment_and_check_iter_kernel(
+    iter_count: wp.array[wp.int32],
+    num_remaining: wp.array[wp.int32],
+    max_outer_iters: wp.int32,
+):
+    """Single-thread iteration-cap watcher run at the end of each
+    ``_capture_build_csr_greedy_step``. Increments the iter counter; when
+    the cap is hit (and some elements remain uncoloured), zeroes
+    ``num_remaining`` so the outer ``wp.capture_while`` exits and the
+    follow-up spill kernel can dump the remaining elements into the
+    overflow colour."""
+    if wp.tid() != 0:
+        return
+    iter_count[0] = iter_count[0] + wp.int32(1)
+    if iter_count[0] >= max_outer_iters and num_remaining[0] > wp.int32(0):
+        num_remaining[0] = wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def greedy_overflow_spill_kernel(
+    color_tags: wp.array[wp.int32],
+    partition_data_concat: wp.array[wp.int64],
+    num_elements: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
+):
+    """Assign every still-uncoloured element to the overflow colour
+    ``max_colored_partitions``. Run AFTER the greedy ``capture_while``
+    exits; no-op when capture_while drained num_remaining naturally
+    (everything already coloured).
+
+    The overflow colour is consumed by mass splitting's copy-state
+    machinery, so spilling here gives correct physics with potentially
+    more colours than the optimal MIS would have found -- the tradeoff
+    that lets us cap the outer iteration loop on dense graphs."""
+    tid = wp.tid()
+    if tid >= num_elements[0]:
+        return
+    if color_tags[tid] != wp.int32(0):
+        return
+    # Uncoloured: stamp the overflow colour. Skip ``num_remaining`` here
+    # because the iter-cap watcher already zeroed it; downstream
+    # histogram / scatter only reads ``partition_data_concat``.
+    color_tags[tid] = max_colored_partitions + wp.int32(1)
+    partition_data_concat[tid] = (
+        wp.int64(max_colored_partitions + wp.int32(1)) << _COLOR_SHIFT
+    ) | wp.int64(tid)
 
 
 @wp.kernel(enable_backward=False)
