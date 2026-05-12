@@ -221,6 +221,7 @@ class IncrementalContactPartitioner:
         use_tile_scan: bool = True,
         max_colored_partitions: int | None = None,
         max_greedy_outer_iters: int | None = None,
+        enable_warm_start: bool = False,
     ) -> None:
         """``max_colored_partitions``: soft cap for the overflow bucket. When
         set to ``K``, colours ``0..K-1`` are produced by normal MIS coloring
@@ -265,6 +266,20 @@ class IncrementalContactPartitioner:
         self._max_colored_partitions_kernel_arg: int = (
             -1 if max_colored_partitions is None else int(max_colored_partitions)
         )
+        # Warm-start cache for cross-frame colour reuse. When enabled,
+        # ``build_csr`` seeds ``color_tags`` from the cache and runs a
+        # validation pass before the greedy MIS loop -- constraints
+        # whose previous-frame colour is still legal skip the MIS
+        # entirely. See :mod:`warm_start` for the design.
+        self.enable_warm_start: bool = bool(enable_warm_start)
+        if self.enable_warm_start:
+            from newton._src.solvers.phoenx.graph_coloring.warm_start import (
+                warm_start_cache_zeros,
+            )
+
+            self._warm_start_cache = warm_start_cache_zeros(max_num_interactions, device=device)
+        else:
+            self._warm_start_cache = None
 
         import numpy as np  # noqa: PLC0415
 

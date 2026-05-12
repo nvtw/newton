@@ -192,6 +192,14 @@ class PortedExample:
     #: small-partition scenes where the default 32-block floor
     #: over-provisions threads; raising helps very large partitions.
     max_thread_blocks: int | None = None
+    #: Enable cross-frame warm-start of the greedy MIS colouring.
+    #: When ``True`` the partitioner persists each step's coloring
+    #: into a body-pair-indexed cache, then on the next step seeds
+    #: ``color_tags`` from the cache and validates against the
+    #: current adjacency -- constraints whose previous colour is
+    #: still legal skip the MIS loop. See
+    #: :mod:`graph_coloring.warm_start` for the design.
+    enable_warm_start_coloring: bool = False
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -333,6 +341,7 @@ class PortedExample:
             mass_splitting_unrolled=self.mass_splitting_unrolled,
             max_greedy_outer_iters=self.max_greedy_outer_iters,
             max_thread_blocks=self.max_thread_blocks,
+            enable_warm_start_coloring=self.enable_warm_start_coloring,
             device=self.device,
         )
 

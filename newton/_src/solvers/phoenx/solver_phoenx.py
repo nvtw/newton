@@ -273,6 +273,7 @@ class PhoenXWorld:
         mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
+        enable_warm_start_coloring: bool = False,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -554,6 +555,7 @@ class PhoenXWorld:
                 use_tile_scan=True,
                 max_colored_partitions=self.max_colored_partitions,
                 max_greedy_outer_iters=max_greedy_outer_iters,
+                enable_warm_start=enable_warm_start_coloring,
             )
         elif self.partitioner_algorithm == "luby_fixed":
             if step_layout != "single_world":
