@@ -87,7 +87,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
     MAX_COLORS,
     IncrementalContactPartitioner,
 )
-from newton._src.solvers.phoenx.dispatch.legacy import LegacyDispatcher
+from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldFastTailDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import (
     SingleWorldMassSplittingDispatcher,
@@ -681,16 +681,15 @@ class PhoenXWorld:
         # Step-time dispatcher. Each (step_layout, mass_splitting)
         # combination has a dedicated class under :mod:`phoenx.dispatch`
         # so the hot path is straight-line with no capability checks.
-        # Combinations not yet extracted (mass-splitting, multi-world)
-        # currently route through :class:`LegacyDispatcher` which
-        # forwards to the inline in-class helpers.
         if self.step_layout == "single_world":
             if self.mass_splitting_enabled:
                 self._dispatcher = SingleWorldMassSplittingDispatcher(self)
             else:
                 self._dispatcher = SingleWorldDispatcher(self)
         else:
-            self._dispatcher = LegacyDispatcher(self)
+            # mass_splitting + multi_world is rejected by the earlier
+            # validation in this ctor.
+            self._dispatcher = MultiWorldFastTailDispatcher(self)
 
         self._assert_invariants()
 
