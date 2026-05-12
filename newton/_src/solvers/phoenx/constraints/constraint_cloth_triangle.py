@@ -25,7 +25,6 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import (
     ACCESS_MODE_POSITION_LEVEL,
-    synchronize_position_velocity,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -41,10 +40,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
-    add_position_correction_unified_all_slots,
     get_state_index,
     read_position_unified,
     set_access_mode_unified,
+    write_position_unified,
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
@@ -403,16 +402,15 @@ def cloth_triangle_iterate_at(
     lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
 
     # Slot-aware position reads. Without mass splitting the helpers
-    # fall through to ``particles.position[p_*]``. Cache the read
-    # values so we can extract the per-iter delta at the end and
-    # broadcast it to every slot (preserves cloth-tri contribution
-    # across Tonge averaging).
-    x_a, _ifa, _slot_a = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
-    x_b, _ifb, _slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
-    x_c, _ifc, _slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
-    x_a_in = x_a
-    x_b_in = x_b
-    x_c_in = x_c
+    # fall through to ``particles.position[p_*]``; with mass splitting,
+    # they read from the slot matching ``parallel_id`` and the final
+    # write goes back to that same slot. Per-iter dilution by ``1/N``
+    # at average time is intentional (Tonge mass splitting: each iter
+    # contributes ``1/N`` progress, accumulating across solver iters).
+    # Matches Jitter2's ``FemTriPBD.Iterate`` single-slot pattern.
+    x_a, _ifa, slot_a = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
+    x_b, _ifb, slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
+    x_c, _ifc, slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
     dx_a = x_a - particles.position_prev_substep[p_a]
     dx_b = x_b - particles.position_prev_substep[p_b]
     dx_c = x_c - particles.position_prev_substep[p_c]
@@ -450,9 +448,12 @@ def cloth_triangle_iterate_at(
     dx_b_2d_lam = _project_to_2d(x_axis, y_axis, dx_b)
     dx_c_2d_lam = _project_to_2d(x_axis, y_axis, dx_c)
     grad_dot_dx_lambda = (
-        g1_a_x * dx_a_2d_lam[0] + g1_a_y * dx_a_2d_lam[1]
-        + g1_b_x * dx_b_2d_lam[0] + g1_b_y * dx_b_2d_lam[1]
-        + g1_c_x * dx_c_2d_lam[0] + g1_c_y * dx_c_2d_lam[1]
+        g1_a_x * dx_a_2d_lam[0]
+        + g1_a_y * dx_a_2d_lam[1]
+        + g1_b_x * dx_b_2d_lam[0]
+        + g1_b_y * dx_b_2d_lam[1]
+        + g1_c_x * dx_c_2d_lam[0]
+        + g1_c_y * dx_c_2d_lam[1]
     )
     grad_dot_grad_inv_m_lambda = (
         inv_mass_a * (g1_a_x * g1_a_x + g1_a_y * g1_a_y)
@@ -501,9 +502,12 @@ def cloth_triangle_iterate_at(
         dx_b_2d_mu = _project_to_2d(x_axis, y_axis, dx_b)
         dx_c_2d_mu = _project_to_2d(x_axis, y_axis, dx_c)
         grad_dot_dx_mu = (
-            g2_a_x * dx_a_2d_mu[0] + g2_a_y * dx_a_2d_mu[1]
-            + g2_b_x * dx_b_2d_mu[0] + g2_b_y * dx_b_2d_mu[1]
-            + g2_c_x * dx_c_2d_mu[0] + g2_c_y * dx_c_2d_mu[1]
+            g2_a_x * dx_a_2d_mu[0]
+            + g2_a_y * dx_a_2d_mu[1]
+            + g2_b_x * dx_b_2d_mu[0]
+            + g2_b_y * dx_b_2d_mu[1]
+            + g2_c_x * dx_c_2d_mu[0]
+            + g2_c_y * dx_c_2d_mu[1]
         )
         grad_dot_grad_inv_m_mu = (
             inv_mass_a * (g2_a_x * g2_a_x + g2_a_y * g2_a_y)
@@ -521,24 +525,9 @@ def cloth_triangle_iterate_at(
             x_c = x_c + _project_to_3d(x_axis, y_axis, delta_c)
             lambda_sum_mu = lambda_sum_mu + d_lam_mu
 
-    # Broadcast the per-iter position-level *delta* to every slot of
-    # each vertex (or to particle storage when no slots exist). The
-    # helper picks the right encoding per slot: a slot already at
-    # POSITION_LEVEL gets ``slot.pos += dx``; a slot at
-    # VELOCITY_LEVEL (touched by a velocity-level contact impulse)
-    # gets ``slot.vel += dx * idt``. Either way, every slot receives
-    # the cloth-tri contribution, so :func:`launch_average_and_broadcast`
-    # preserves it instead of diluting by ``1/N``. Existing per-slot
-    # contact velocities are not overwritten.
-    add_position_correction_unified_all_slots(
-        bodies, particles, copy_state, body_a, num_bodies, idt, x_a - x_a_in
-    )
-    add_position_correction_unified_all_slots(
-        bodies, particles, copy_state, body_b, num_bodies, idt, x_b - x_b_in
-    )
-    add_position_correction_unified_all_slots(
-        bodies, particles, copy_state, body_c, num_bodies, idt, x_c - x_c_in
-    )
+    write_position_unified(bodies, particles, copy_state, body_a, slot_a, num_bodies, x_a)
+    write_position_unified(bodies, particles, copy_state, body_b, slot_b, num_bodies, x_b)
+    write_position_unified(bodies, particles, copy_state, body_c, slot_c, num_bodies, x_c)
 
     write_float(constraints, _OFF_ROTATION, cid, rotation)
     write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, lambda_sum_lambda)

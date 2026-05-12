@@ -51,7 +51,6 @@ from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContai
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_set_access_mode
 
 __all__ = [
-    "add_position_correction_unified_all_slots",
     "get_state_index",
     "read_angular_velocity_unified",
     "read_orientation_unified",
@@ -312,86 +311,6 @@ def write_orientation_unified(
         bodies.orientation[node_id] = value
         return
     copy_state.orientation[slot] = value
-
-
-@wp.func
-def add_position_correction_unified_all_slots(
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    copy_state: CopyStateContainer,
-    node_id: wp.int32,
-    num_bodies: wp.int32,
-    idt: wp.float32,
-    dx: wp.vec3f,
-):
-    """Apply an XPBD position-level *delta* ``dx`` to every slot of
-    ``node_id`` so :func:`launch_average_and_broadcast` preserves it
-    (instead of diluting by ``1/N``).
-
-    Velocity-level Tonge constraints (contacts) rely on the per-slot
-    impulse being scaled by ``inv_factor`` so the post-average
-    velocity matches the unsplit single-iter result. XPBD
-    position-level constraints (cloth-triangle / cloth-bending /
-    soft-tet elasticity) fall through that math because the ``1/N``
-    mass scaling cancels out of the per-slot ``dx`` (XPBD lambda is
-    ``N x`` bigger with ``inv_mass * N``; ``dx = lambda * grad *
-    inv_mass * N`` gives ``dx_per_slot = dx_unsplit``). Without
-    compensation, after averaging the particle would only see
-    ``dx_unsplit / N``.
-
-    Per-slot encoding follows that slot's current access mode so
-    *both* the cloth contribution and any concurrent velocity-level
-    contact contribution survive:
-
-    * ``ACCESS_MODE_VELOCITY_LEVEL`` slot: encode ``dx`` as a velocity
-      delta ``+= dx * idt``. The slot's existing ``vel`` (contact
-      impulses) is preserved.
-    * ``ACCESS_MODE_POSITION_LEVEL`` slot: add ``dx`` to ``position``
-      directly. The slot's existing position-level state is preserved.
-    * ``ACCESS_MODE_STATIC``: skip (pinned / world anchor).
-    * ``ACCESS_MODE_NONE``: stamp ``VELOCITY_LEVEL`` and encode as
-      velocity, mirroring how :func:`particle_set_access_mode` treats
-      the uninitialised state.
-
-    No-slot fallback (``highest_index_in_use[0] == 0`` or no slots for
-    this node) writes the delta directly to body / particle storage.
-    """
-    if copy_state.highest_index_in_use[0] == wp.int32(0):
-        if node_id < num_bodies:
-            bodies.position[node_id] = bodies.position[node_id] + dx
-        else:
-            p = node_id - num_bodies
-            particles.position[p] = particles.position[p] + dx
-        return
-    if node_id < wp.int32(0) or node_id >= copy_state.section_end.shape[0]:
-        return
-    start = wp.int32(0)
-    if node_id > wp.int32(0):
-        start = copy_state.section_end[node_id - wp.int32(1)]
-    end = copy_state.section_end[node_id]
-    if start >= end:
-        if node_id < num_bodies:
-            bodies.position[node_id] = bodies.position[node_id] + dx
-        else:
-            p = node_id - num_bodies
-            particles.position[p] = particles.position[p] + dx
-        return
-    dvel = dx * idt
-    _NONE = wp.int32(0)
-    _VEL = wp.int32(1)
-    _POS = wp.int32(2)
-    _STATIC = wp.int32(3)
-    for s in range(start, end):
-        mode = copy_state.access_mode[s]
-        if mode == _STATIC:
-            continue
-        if mode == _POS:
-            copy_state.position[s] = copy_state.position[s] + dx
-        else:
-            # VELOCITY_LEVEL (or NONE → stamp as VELOCITY_LEVEL).
-            copy_state.velocity[s] = copy_state.velocity[s] + dvel
-            if mode == _NONE:
-                copy_state.access_mode[s] = _VEL
 
 
 # -----------------------------------------------------------------------------

@@ -48,6 +48,16 @@ from newton._src.solvers.phoenx.examples.example_common import (
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
+# Tonge mass splitting (C# PhoenX default). When ``True`` the
+# partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`
+# colours and any remainder lands in an overflow bucket solved with
+# per-(body, partition) copy states. Requires the single-world step
+# layout (already used by this example); soft-tetrahedron constraints
+# route through the slot-aware helpers and so coexist fine with mass
+# splitting.
+ENABLE_MASS_SPLITTING: bool = True
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
+
 
 class Example:
     """A configurable column of soft cubes dropping onto a ground plane."""
@@ -91,14 +101,12 @@ class Example:
         # (``Playground.NumberSubsteps = 1``, ``SolverIterations = 8``)
         # at frame dt 1/60 so the user's intuition for Young's modulus
         # transfers from the C# experimental sim.
-        self.sim_substeps = 3
-        self.solver_iterations = 10
+        self.sim_substeps = 5
+        self.solver_iterations = 5
 
         self.youngs_modulus = float(youngs_modulus)
         self.poisson_ratio = float(poisson_ratio)
-        self.k_lambda, self.k_mu = soft_tet_lame_from_youngs_poisson(
-            self.youngs_modulus, self.poisson_ratio
-        )
+        self.k_lambda, self.k_mu = soft_tet_lame_from_youngs_poisson(self.youngs_modulus, self.poisson_ratio)
 
         builder = newton.ModelBuilder()
 
@@ -130,7 +138,9 @@ class Example:
                 dim_x=self.cube_resolution,
                 dim_y=self.cube_resolution,
                 dim_z=self.cube_resolution,
-                cell_x=cell_size, cell_y=cell_size, cell_z=cell_size,
+                cell_x=cell_size,
+                cell_y=cell_size,
+                cell_z=cell_size,
                 density=density,
                 k_mu=self.k_mu,
                 k_lambda=self.k_lambda,
@@ -197,6 +207,8 @@ class Example:
             solver_iterations=self.solver_iterations,
             rigid_contact_max=4096,
             step_layout="single_world",
+            mass_splitting=ENABLE_MASS_SPLITTING,
+            max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             device=self.device,
         )
         self.world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
@@ -298,9 +310,7 @@ class Example:
         # the plane). Use a generous bound -- the soft-body collision
         # stack still tunes for tight equilibrium.
         if positions[:, 2].min() < -5.0:
-            raise RuntimeError(
-                f"a soft-cube particle escaped downward (min z = {positions[:, 2].min():.4f})"
-            )
+            raise RuntimeError(f"a soft-cube particle escaped downward (min z = {positions[:, 2].min():.4f})")
 
     def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)
@@ -316,8 +326,7 @@ if __name__ == "__main__":
         "--cube-resolution",
         type=int,
         default=3,
-        help="Voxels per cube side; each voxel becomes 5 tets "
-        "(res=1 -> 5 tets/cube, res=3 -> 135 tets/cube).",
+        help="Voxels per cube side; each voxel becomes 5 tets (res=1 -> 5 tets/cube, res=3 -> 135 tets/cube).",
     )
     parser.add_argument("--base-drop-height", type=float, default=2.0)
     parser.add_argument("--cube-spacing", type=float, default=1.5)

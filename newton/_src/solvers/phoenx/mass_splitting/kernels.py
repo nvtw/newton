@@ -130,13 +130,22 @@ def _broadcast_rigid_to_copy_states_kernel(
         orient = integrate_orientation(body_orient, ang, dt)
     else:
         # Particle source. No orientation / angular velocity.
+        # NOTE: unlike rigid bodies, ``cloth_predict_kernel`` already
+        # advances ``particles.position`` to the predicted end-of-substep
+        # value (``pos_prev_substep + dt * vel``) before this kernel
+        # runs. The rigid branch above adds ``dt * vel`` itself because
+        # ``_phoenx_apply_forces_and_gravity_kernel`` only updates
+        # velocity. Adding ``dt * vel`` again here would double-integrate
+        # the particle and inject a spurious position delta into every
+        # slot -- which then makes cloth-tri / bending compute huge
+        # corrections and oscillate. Use the already-predicted position
+        # directly.
         p = node_id - num_bodies
         p_mode = particles.access_mode[p]
         if p_mode == _ACCESS_MODE_STATIC:
             mode = _ACCESS_MODE_STATIC
-        p_pos = particles.position[p]
+        pos = particles.position[p]
         vel = particles.velocity[p]
-        pos = p_pos + dt * vel
         # Orientation slot is unused for particles; leave the broadcast
         # default of identity. Same for angular velocity (vec3f(0)).
 
@@ -187,9 +196,7 @@ def _average_and_broadcast_kernel(
     # Position-level work gets encoded as velocity deltas relative to
     # the body / particle's substep-start snapshot.
     for slot in range(start, end):
-        slot_synchronize_to_velocity_level(
-            bodies, particles, copy_state, node_id, slot, num_bodies, inv_dt
-        )
+        slot_synchronize_to_velocity_level(bodies, particles, copy_state, node_id, slot, num_bodies, inv_dt)
 
     sum_v = wp.vec3f(0.0, 0.0, 0.0)
     sum_w = wp.vec3f(0.0, 0.0, 0.0)
@@ -214,16 +221,32 @@ def _copy_state_into_rigids_kernel(
     num_bodies: wp.int32,
     inv_dt: wp.float32,
 ):
-    """Synchronise slot[0] to VELOCITY_LEVEL and write velocity back to
-    body / particle storage.
+    """Synchronise slot[0] to VELOCITY_LEVEL and write back to body /
+    particle storage.
 
     Mirrors C# ``TinyRigidState.WriteBack`` (``TinyRigidState.cs:92``):
     ``SynchronizeVelAndPosStateUpdates(VelocityLevel, ...)`` is invoked
     first to fold any pending position-level state into velocity, then
-    velocity / angular_velocity are copied out. Position is not copied
-    back -- the standard solver integrate step advances it from
-    ``position_prev_substep + velocity * dt`` next, which automatically
-    yields the averaged position when mass splitting was engaged.
+    velocity / angular_velocity are copied out.
+
+    Rigid bodies: position is **not** copied back -- the
+    :func:`_integrate_velocities_kernel` step that runs next advances
+    ``bodies.position += bodies.velocity * dt`` starting from
+    ``bodies.position_prev_substep``, which yields exactly the right
+    final position (C# template: ``body.Position +=
+    body.Velocity * dt`` after WriteBack).
+
+    Particles: there is no equivalent rigid-style integrate step that
+    runs after writeback for particles, so we fold the integrate into
+    the writeback for the particle range: ``particles.position =
+    particles.position_prev_substep + dt * particles.velocity``. This
+    is the exact analogue of the rigid pattern (substep-start anchor +
+    dt * post-writeback velocity = final position) and works for both
+    single-slot (writeback's slot-sync extracted velocity from the
+    iterate's POSITION_LEVEL output) and multi-slot (average-and-
+    broadcast already averaged the velocity) cases. Without this the
+    particle would be stuck at the ``cloth_predict`` predicted
+    position (cube falls through pinned cloth under mass splitting).
 
     Static nodes are skipped (slot's access_mode was stamped STATIC by
     broadcast for those).
@@ -239,16 +262,23 @@ def _copy_state_into_rigids_kernel(
 
     # Synchronize slot[0] to VELOCITY_LEVEL before writeback. Sibling
     # slots already match after the prior average + broadcast pass.
-    slot_synchronize_to_velocity_level(
-        bodies, particles, copy_state, node_id, start, num_bodies, inv_dt
-    )
+    slot_synchronize_to_velocity_level(bodies, particles, copy_state, node_id, start, num_bodies, inv_dt)
 
     vel = copy_state.velocity[start]
     if node_id < num_bodies:
         bodies.velocity[node_id] = vel
         bodies.angular_velocity[node_id] = copy_state.angular_velocity[start]
     else:
-        particles.velocity[node_id - num_bodies] = vel
+        p = node_id - num_bodies
+        particles.velocity[p] = vel
+        # Fold the rigid-style integrate into the writeback for particles:
+        # particle has no later ``pos += vel * dt`` step. Use the
+        # substep-start anchor + the just-written velocity to recover the
+        # final position. Identical to ``body.Position += body.Velocity *
+        # dt`` (where body.Position at this point is the substep-start
+        # value) in C# ``Integrate`` running after ``CopyStateIntoRigids``.
+        dt = wp.float32(1.0) / inv_dt
+        particles.position[p] = particles.position_prev_substep[p] + dt * vel
 
 
 def launch_broadcast_rigid_to_copy_states(
