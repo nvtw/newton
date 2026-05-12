@@ -142,7 +142,7 @@ class Example(PortedExample):
     # number >> max_colored_partitions). Lowering to 8 halves coloring
     # launches; extra uncoloured elements just spill to the overflow
     # bucket and mass splitting solves them Jacobi-style.
-    max_greedy_outer_iters = 8
+    max_greedy_outer_iters = 1
 
     def step(self) -> None:
         super().step()
