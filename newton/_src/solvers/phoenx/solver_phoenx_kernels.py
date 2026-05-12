@@ -619,6 +619,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
         bodies: BodyContainer,
         particles: ParticleContainer,
         idt: wp.float32,
+        sor_boost: wp.float32,
         world_element_ids_by_color: wp.array[wp.int32],
         world_color_starts: wp.array2d[wp.int32],
         world_csr_offsets: wp.array[wp.int32],
@@ -705,6 +706,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                                 num_bodies,
                                 wp.int32(0),
                                 idt,
+                                sor_boost,
                                 True,
                                 inner_sweeps,
                             )
@@ -718,6 +720,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                                 num_bodies,
                                 wp.int32(0),
                                 idt,
+                                sor_boost,
                                 True,
                                 inner_sweeps,
                             )
@@ -735,6 +738,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                             inner_sweeps,
                             copy_state,
                             wp.int32(0),
+                            sor_boost,
                         )
                     base += tpw
 
@@ -758,6 +762,7 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
         particles: ParticleContainer,
         num_bodies: wp.int32,
         idt: wp.float32,
+        sor_boost: wp.float32,
         world_element_ids_by_color: wp.array[wp.int32],
         world_color_starts: wp.array2d[wp.int32],
         world_csr_offsets: wp.array[wp.int32],
@@ -802,6 +807,7 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                             num_bodies,
                             wp.int32(0),
                             idt,
+                            sor_boost,
                             False,
                             num_iterations,
                         )
@@ -815,6 +821,7 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                             num_bodies,
                             wp.int32(0),
                             idt,
+                            sor_boost,
                             False,
                             num_iterations,
                         )
@@ -832,6 +839,7 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                         num_iterations,
                         copy_state,
                         wp.int32(0),
+                        sor_boost,
                     )
                 base += tpw
 
@@ -1502,6 +1510,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
         bodies: BodyContainer,
         particles: ParticleContainer,
         idt: wp.float32,
+        sor_boost: wp.float32,
         element_ids_by_color: wp.array[wp.int32],
         color_starts: wp.array[wp.int32],
         num_colors: wp.array[wp.int32],
@@ -1608,6 +1617,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                                 use_bias,
                                 copy_state,
                                 parallel_id,
+                                sor_boost,
                             )
                     else:
                         if wp.static(is_prepare):
@@ -1636,6 +1646,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                                 use_bias,
                                 copy_state,
                                 parallel_id,
+                                sor_boost,
                             )
                     dispatched = True
                 if not dispatched:
@@ -1648,7 +1659,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                                 )
                             else:
                                 cloth_triangle_iterate_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                 )
                             dispatched = True
                         elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
@@ -1658,7 +1669,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                                 )
                             else:
                                 soft_tetrahedron_iterate_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                 )
                             dispatched = True
                         elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
@@ -1668,7 +1679,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                                 )
                             else:
                                 cloth_bending_iterate_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                 )
                             dispatched = True
                 if not dispatched:
@@ -1685,11 +1696,29 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                     else:
                         if wp.static(revolute_only):
                             revolute_iterate(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                parallel_id,
+                                idt,
+                                sor_boost,
+                                use_bias,
                             )
                         else:
                             actuated_double_ball_socket_iterate(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                parallel_id,
+                                idt,
+                                sor_boost,
+                                use_bias,
                             )
 
         if tid == 0:
@@ -1713,6 +1742,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
         bodies: BodyContainer,
         particles: ParticleContainer,
         idt: wp.float32,
+        sor_boost: wp.float32,
         element_ids_by_color: wp.array[wp.int32],
         color_starts: wp.array[wp.int32],
         num_colors: wp.array[wp.int32],
@@ -1798,6 +1828,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                     use_bias,
                                     copy_state,
                                     parallel_id,
+                                    sor_boost,
                                 )
                         else:
                             if wp.static(is_prepare):
@@ -1826,6 +1857,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                     use_bias,
                                     copy_state,
                                     parallel_id,
+                                    sor_boost,
                                 )
                     else:
                         ctype = constraint_get_type(constraints, cid)
@@ -1838,7 +1870,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                     )
                                 else:
                                     cloth_triangle_iterate_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                     )
                                 dispatched = True
                             elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
@@ -1848,7 +1880,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                     )
                                 else:
                                     soft_tetrahedron_iterate_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                     )
                                 dispatched = True
                             elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
@@ -1858,7 +1890,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                     )
                                 else:
                                     cloth_bending_iterate_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                     )
                                 dispatched = True
                         if not dispatched:
@@ -1882,6 +1914,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                         num_bodies,
                                         parallel_id,
                                         idt,
+                                        sor_boost,
                                         use_bias,
                                     )
                                 else:
@@ -1894,6 +1927,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                         num_bodies,
                                         parallel_id,
                                         idt,
+                                        sor_boost,
                                         use_bias,
                                     )
             _sync_threads()

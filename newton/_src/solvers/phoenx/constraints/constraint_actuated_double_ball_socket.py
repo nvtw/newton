@@ -756,6 +756,7 @@ def _axial_drive_limit_iterate(
     jv_axial: wp.float32,
     clamp: wp.int32,
     idt: wp.float32,
+    sor_boost: wp.float32,
 ) -> wp.float32:
     """Scalar drive+limit PGS step for revolute/prismatic mode.
 
@@ -813,6 +814,7 @@ def _axial_drive_limit_iterate(
         # Jitter2 ``jv = n . (v2 - v1)`` convention):
         #   lam = -M_eff_soft * (jv - bias + gamma * acc)
         lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
+        lam_drive = lam_drive * sor_boost
         old_acc = acc_drive
         acc_drive = acc_drive + lam_drive
         if max_force_drive > 0.0:
@@ -849,6 +851,7 @@ def _axial_drive_limit_iterate(
                 eff_axial = 1.0 / eff_inv
                 lam_unsoft = -eff_axial * (jv_axial + bias_box)
                 lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
+        lam_limit = lam_limit * sor_boost
         old_acc = acc_limit
         acc_limit = acc_limit + lam_limit
         # Unilateral clamp: the limit only pushes back toward the
@@ -1176,6 +1179,7 @@ def _ball_socket_iterate_at(
     parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
     """Ball-socket PGS iterate.
@@ -1227,6 +1231,7 @@ def _ball_socket_iterate_at(
 
     lam1_us = -(a1_inv @ rhs1)
     lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+    lam1 = lam1 * sor_boost
 
     velocity1 = velocity1 - inv_mass1 * lam1
     angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1)
@@ -1485,6 +1490,7 @@ def _revolute_iterate_at(
     parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
     """Revolute-mode PGS iterate.
@@ -1562,6 +1568,7 @@ def _revolute_iterate_at(
     )
     lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
     lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
+    lam2 = lam2 * sor_boost
 
     lam2_world = lam2[0] * t1 + lam2[1] * t2
     lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
@@ -1572,6 +1579,7 @@ def _revolute_iterate_at(
 
     lam1_us = -(a1_inv @ (rhs1 + u_lam2_us))
     lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+    lam1 = lam1 * sor_boost
 
     total_lin = lam1 + lam2_world
 
@@ -1591,7 +1599,7 @@ def _revolute_iterate_at(
     # the warm-start below: ``+n_hat`` for body 1, ``-n_hat`` for body
     # 2, so positive lambda spins body 1 *forward* and body 2 *back*.
     jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt)
+    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost)
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
@@ -1930,6 +1938,7 @@ def _prismatic_iterate_at(
     parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
     """Prismatic-mode PGS iterate.
@@ -2020,9 +2029,11 @@ def _prismatic_iterate_at(
     a4_inv_rhs4 = a4_inv @ rhs4
     lam3_us = -s_scalar_inv * (rhs3 - wp.dot(c_pris, a4_inv_rhs4))
     lam3 = mass_coeff * lam3_us - impulse_coeff * acc3_scalar
+    lam3 = lam3 * sor_boost
 
     lam4_us = -(a4_inv @ (rhs4 + c_pris * lam3_us))
     lam4 = mass_coeff * lam4_us - impulse_coeff * acc4
+    lam4 = lam4 * sor_boost
 
     # World-frame tangent impulses per anchor.
     lam1_world = lam4[0] * t1 + lam4[1] * t2
@@ -2054,7 +2065,7 @@ def _prismatic_iterate_at(
     v1_anchor = velocity1 + wp.cross(angular_velocity1, r1_b1)
     v2_anchor = velocity2 + wp.cross(angular_velocity2, r1_b2)
     jv_axial = wp.dot(n_hat, v1_anchor - v2_anchor)
-    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt)
+    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost)
 
     # Apply the combined linear impulse: lam along n_hat, with body 1
     # getting +n_hat and body 2 getting -n_hat (mirror of revolute's
@@ -2371,6 +2382,7 @@ def _cable_iterate_at(
     parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
     """Cable-mode PGS iterate.
@@ -2439,6 +2451,7 @@ def _cable_iterate_at(
     rhs1 = jv1 + bias1
     lam1_us = -(a1_inv @ rhs1)
     lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+    lam1 = lam1 * sor_boost
     velocity1 = velocity1 - inv_mass1 * lam1
     angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1)
     velocity2 = velocity2 + inv_mass2 * lam1
@@ -2468,6 +2481,8 @@ def _cable_iterate_at(
 
     lam2_t1 = -(k22_inv_00 * rhs2_t1 + k22_inv_01 * rhs2_t2)
     lam2_t2 = -(k22_inv_10 * rhs2_t1 + k22_inv_11 * rhs2_t2)
+    lam2_t1 = lam2_t1 * sor_boost
+    lam2_t2 = lam2_t2 * sor_boost
     lam2_world = lam2_t1 * t1 + lam2_t2 * t2
 
     velocity1 = velocity1 - inv_mass1 * lam2_world
@@ -2489,6 +2504,7 @@ def _cable_iterate_at(
     jv3_t2 = wp.dot(t2, jv3_world)
 
     lam3 = -m_twist_soft * (jv3_t2 + bias3 + gamma_twist * acc3_t2)
+    lam3 = lam3 * sor_boost
     lam3_world = lam3 * t2
 
     velocity1 = velocity1 - inv_mass1 * lam3_world
@@ -2776,6 +2792,7 @@ def _fixed_iterate_at(
     parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
     """Fixed-mode PGS iterate: REVOLUTE anchor-1+2 3+2 Schur, then
@@ -2853,6 +2870,7 @@ def _fixed_iterate_at(
     )
     lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
     lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
+    lam2 = lam2 * sor_boost
 
     lam2_world = lam2[0] * t1 + lam2[1] * t2
     lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
@@ -2863,6 +2881,7 @@ def _fixed_iterate_at(
 
     lam1_us = -(a1_inv @ (rhs1 + u_lam2_us))
     lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+    lam1 = lam1 * sor_boost
 
     total_lin = lam1 + lam2_world
 
@@ -2883,6 +2902,7 @@ def _fixed_iterate_at(
 
     lam3_us = -(s_scalar_inv * (jv3 + bias3))
     lam3 = mass_coeff * lam3_us - impulse_coeff * acc3_scalar
+    lam3 = lam3 * sor_boost
 
     lam3_world = lam3 * t2
 
@@ -2969,6 +2989,7 @@ def _revolute_iterate_at_multi(
     parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    sor_boost: wp.float32,
     use_bias: wp.bool,
     num_sweeps: wp.int32,
 ):
@@ -3109,6 +3130,7 @@ def _revolute_iterate_at_multi(
 
         lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
         lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
+        lam2 = lam2 * sor_boost
 
         lam2_world = lam2[0] * t1 + lam2[1] * t2
         lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
@@ -3119,6 +3141,7 @@ def _revolute_iterate_at_multi(
 
         lam1_us = -(a1_inv @ (rhs1 + u_lam2_us))
         lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+        lam1 = lam1 * sor_boost
 
         total_lin = lam1 + lam2_world
 
@@ -3136,6 +3159,7 @@ def _revolute_iterate_at_multi(
         lam_drive = wp.float32(0.0)
         if drive_active:
             lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
+            lam_drive = lam_drive * sor_boost
             old_acc = acc_drive
             acc_drive = acc_drive + lam_drive
             if max_force_drive > wp.float32(0.0):
@@ -3151,6 +3175,7 @@ def _revolute_iterate_at_multi(
                 if eff_axial > wp.float32(0.0):
                     lam_unsoft = -eff_axial * (jv_axial + bias_box)
                     lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
+            lam_limit = lam_limit * sor_boost
             old_acc_l = acc_limit
             acc_limit = acc_limit + lam_limit
             if clamp == _CLAMP_MAX:
@@ -3199,6 +3224,7 @@ def actuated_double_ball_socket_iterate_multi(
     num_bodies: wp.int32,
     parallel_id: wp.int32,
     idt: wp.float32,
+    sor_boost: wp.float32,
     use_bias: wp.bool,
     num_sweeps: wp.int32,
 ):
@@ -3229,6 +3255,7 @@ def actuated_double_ball_socket_iterate_multi(
             parallel_id,
             body_pair,
             idt,
+            sor_boost,
             use_bias,
             num_sweeps,
         )
@@ -3236,7 +3263,18 @@ def actuated_double_ball_socket_iterate_multi(
         it = wp.int32(0)
         while it < num_sweeps:
             actuated_double_ball_socket_iterate_at(
-                constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias
+                constraints,
+                cid,
+                0,
+                bodies,
+                particles,
+                copy_state,
+                num_bodies,
+                parallel_id,
+                body_pair,
+                idt,
+                sor_boost,
+                use_bias,
             )
             it += 1
 
@@ -3253,6 +3291,7 @@ def actuated_double_ball_socket_iterate_at(
     parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
     """Composable PGS iteration step that dispatches on ``joint_mode``.
@@ -3277,6 +3316,7 @@ def actuated_double_ball_socket_iterate_at(
             parallel_id,
             body_pair,
             idt,
+            sor_boost,
             use_bias,
         )
     elif joint_mode == JOINT_MODE_PRISMATIC:
@@ -3291,6 +3331,7 @@ def actuated_double_ball_socket_iterate_at(
             parallel_id,
             body_pair,
             idt,
+            sor_boost,
             use_bias,
         )
     elif joint_mode == JOINT_MODE_FIXED:
@@ -3305,6 +3346,7 @@ def actuated_double_ball_socket_iterate_at(
             parallel_id,
             body_pair,
             idt,
+            sor_boost,
             use_bias,
         )
     elif joint_mode == JOINT_MODE_CABLE:
@@ -3319,6 +3361,7 @@ def actuated_double_ball_socket_iterate_at(
             parallel_id,
             body_pair,
             idt,
+            sor_boost,
             use_bias,
         )
     else:
@@ -3333,6 +3376,7 @@ def actuated_double_ball_socket_iterate_at(
             parallel_id,
             body_pair,
             idt,
+            sor_boost,
             use_bias,
         )
 
@@ -3430,6 +3474,7 @@ def actuated_double_ball_socket_iterate(
     num_bodies: wp.int32,
     parallel_id: wp.int32,
     idt: wp.float32,
+    sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
     """Direct iterate entry; see
@@ -3441,7 +3486,7 @@ def actuated_double_ball_socket_iterate(
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     actuated_double_ball_socket_iterate_at(
-        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias
+        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, sor_boost, use_bias
     )
 
 
@@ -3455,6 +3500,7 @@ def revolute_iterate(
     num_bodies: wp.int32,
     parallel_id: wp.int32,
     idt: wp.float32,
+    sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
     """Revolute-only iterate entry, skipping the ``joint_mode``
@@ -3473,7 +3519,7 @@ def revolute_iterate(
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     _revolute_iterate_at(
-        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias
+        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, sor_boost, use_bias
     )
 
 
@@ -3508,6 +3554,7 @@ def revolute_iterate_multi(
     num_bodies: wp.int32,
     parallel_id: wp.int32,
     idt: wp.float32,
+    sor_boost: wp.float32,
     use_bias: wp.bool,
     num_sweeps: wp.int32,
 ):
@@ -3534,6 +3581,7 @@ def revolute_iterate_multi(
         parallel_id,
         body_pair,
         idt,
+        sor_boost,
         use_bias,
         num_sweeps,
     )

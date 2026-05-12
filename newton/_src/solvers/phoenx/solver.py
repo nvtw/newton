@@ -130,6 +130,7 @@ class SolverPhoenX(SolverBase):
         mass_splitting_batch_size: int = 8,
         partitioner_algorithm: str = "greedy",
         enable_warm_start_coloring: bool = True,
+        sor_boost: float = 1.0,
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -159,6 +160,11 @@ class SolverPhoenX(SolverBase):
                 No-op for ``step_layout="multi_world"`` (per-world
                 coloring kernel doesn't read the cache; the cache
                 itself isn't allocated).
+            sor_boost: Successive over-relaxation factor applied to
+                every PGS delta lambda (joints, contacts, cloth, soft
+                tet). ``1.0`` (default) = vanilla PGS. ``1.1..1.5``
+                typically accelerates convergence on smooth modes;
+                values >= 2.0 diverge.
         """
         super().__init__(model)
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -264,6 +270,7 @@ class SolverPhoenX(SolverBase):
             mass_splitting_batch_size=mass_splitting_batch_size,
             partitioner_algorithm=partitioner_algorithm,
             enable_warm_start_coloring=enable_warm_start_coloring,
+            sor_boost=sor_boost,
             device=self.device,
         )
 

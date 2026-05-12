@@ -274,6 +274,7 @@ class PhoenXWorld:
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
+        sor_boost: float = 1.0,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -415,6 +416,18 @@ class PhoenXWorld:
         self.velocity_iterations = int(velocity_iterations)
         if self.velocity_iterations < 0:
             raise ValueError(f"velocity_iterations must be >= 0 (got {self.velocity_iterations})")
+
+        # SOR boost (successive over-relaxation): every iterate
+        # multiplies its computed delta lambda by this factor before
+        # clamp/apply. 1.0 = vanilla PGS. Values in (1.0, 2.0) trade
+        # per-iteration aggression for fewer iters to converge on
+        # smooth modes; >= 2.0 diverges on most rigid-body PGS
+        # problems. Applies to every constraint type (joints,
+        # contacts, cloth, soft tet) via the kernel-level sor_boost
+        # arg threaded into each iterate.
+        self.sor_boost: float = float(sor_boost)
+        if not (0.1 <= self.sor_boost <= 2.0):
+            raise ValueError(f"sor_boost must be in [0.1, 2.0] (got {self.sor_boost})")
 
         # Joint-type specialisation flag for the single-world kernels.
         # ``True`` means every joint is revolute (or there are none),
@@ -2084,6 +2097,7 @@ class PhoenXWorld:
                 self.bodies,
                 self._particles_or_sentinel(),
                 idt,
+                wp.float32(self.sor_boost),
                 self._world_element_ids_by_color,
                 self._world_color_starts,
                 self._world_csr_offsets,
@@ -2134,6 +2148,7 @@ class PhoenXWorld:
                     self.bodies,
                     self._particles_or_sentinel(),
                     idt,
+                    wp.float32(self.sor_boost),
                     self._partitioner.element_ids_by_color,
                     self._partitioner.color_starts,
                     self._partitioner.num_colors,
@@ -2172,6 +2187,7 @@ class PhoenXWorld:
                 self.bodies,
                 self._particles_or_sentinel(),
                 idt,
+                wp.float32(self.sor_boost),
                 self._partitioner.element_ids_by_color,
                 self._partitioner.color_starts,
                 self._partitioner.num_colors,
@@ -2376,6 +2392,7 @@ class PhoenXWorld:
                 self._particles_or_sentinel(),
                 wp.int32(self.num_bodies),
                 idt,
+                wp.float32(self.sor_boost),
                 self._world_element_ids_by_color,
                 self._world_color_starts,
                 self._world_csr_offsets,

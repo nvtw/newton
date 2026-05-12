@@ -444,6 +444,7 @@ def contact_iterate_at_multi(
     num_sweeps: wp.int32,
     copy_state: CopyStateContainer,
     parallel_id: wp.int32,
+    sor_boost: wp.float32,
 ):
     """``num_sweeps`` PGS sweeps on one column with hoisted body
     velocity/inertia registers. Same-colour cids share no bodies, so
@@ -522,6 +523,7 @@ def contact_iterate_at_multi(
                 pd_gamma_n = cc_get_pd_gamma(cc, k)
                 pd_bias_n = cc_get_pd_bias(cc, k)
                 d_lam_n_us = -pd_eff_soft_n * (jv_n - pd_bias_n + pd_gamma_n * lam_n_old)
+                d_lam_n_us = d_lam_n_us * sor_boost
                 lam_n_new = wp.max(lam_n_old + d_lam_n_us, wp.float32(0.0))
                 d_lam_n = lam_n_new - lam_n_old
             else:
@@ -536,14 +538,15 @@ def contact_iterate_at_multi(
                     impulse_coeff_n = wp.float32(0.0)
                 d_lam_n_us = -eff_n * (jv_n + bias_val)
                 d_lam_n = mass_coeff_n * d_lam_n_us - impulse_coeff_n * lam_n_old
+                d_lam_n = d_lam_n * sor_boost
                 lam_n_new = wp.max(lam_n_old + d_lam_n, wp.float32(0.0))
                 d_lam_n = lam_n_new - lam_n_old
 
             fric_limit_static = mu_s * lam_n_new
             fric_limit_kinetic = mu_k * lam_n_new
 
-            d_lam_t1 = -eff_t1 * (jv_t1 + bias_t1_val)
-            d_lam_t2 = -eff_t2 * (jv_t2 + bias_t2_val)
+            d_lam_t1 = -eff_t1 * (jv_t1 + bias_t1_val) * sor_boost
+            d_lam_t2 = -eff_t2 * (jv_t2 + bias_t2_val) * sor_boost
             lam_t1_old = cc_get_tangent1_lambda(cc, k)
             lam_t2_old = cc_get_tangent2_lambda(cc, k)
             lam_t1_raw = lam_t1_old + d_lam_t1
@@ -601,6 +604,7 @@ def contact_iterate_multi(
     num_sweeps: wp.int32,
     copy_state: CopyStateContainer,
     parallel_id: wp.int32,
+    sor_boost: wp.float32,
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
@@ -622,6 +626,7 @@ def contact_iterate_multi(
         num_sweeps,
         copy_state,
         parallel_id,
+        sor_boost,
     )
 
 

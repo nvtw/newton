@@ -258,6 +258,7 @@ def cloth_bending_iterate_at(
     num_bodies: wp.int32,
     parallel_id: wp.int32,
     idt: wp.float32,
+    sor_boost: wp.float32,
 ):
     """One XPBD sweep on a cloth bending edge.
 
@@ -316,8 +317,10 @@ def cloth_bending_iterate_at(
         return
 
     # Per-dim XPBD lambda update. The 3 dimensions are decoupled, so we
-    # compute them in one go via vector math.
+    # compute them in one go via vector math. SOR boost scales the
+    # delta lambda before commit; sor_boost=1.0 reproduces vanilla PGS.
     d_lam = -(c_vec + bias * lambda_sum) / denom
+    d_lam = d_lam * sor_boost
 
     # Position updates: per vertex per dim, delta = K_i * m_inv_i * d_lam_d.
     xA = xA + (k_0 * inv_mass_a) * d_lam

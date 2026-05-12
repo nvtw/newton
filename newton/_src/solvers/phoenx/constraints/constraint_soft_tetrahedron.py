@@ -414,6 +414,7 @@ def soft_tetrahedron_iterate_at(
     num_bodies: wp.int32,
     parallel_id: wp.int32,
     idt: wp.float32,
+    sor_boost: wp.float32,
 ):
     """One XPBD sweep on a soft-body tetrahedron (corotational shear row).
 
@@ -573,6 +574,7 @@ def soft_tetrahedron_iterate_at(
     if denom > wp.float32(0.0):
         c_mu = rest_volume * mv
         d_lam_mu = -(c_mu + bias_mu * lambda_sum_mu + gamma_mu * grad_dot_dx_mu) / denom
+        d_lam_mu = d_lam_mu * sor_boost
         x_a = x_a + wp.vec3f(g1_x * d_lam_mu * inv_mass_a, g1_y * d_lam_mu * inv_mass_a, g1_z * d_lam_mu * inv_mass_a)
         x_b = x_b + wp.vec3f(g2_x * d_lam_mu * inv_mass_b, g2_y * d_lam_mu * inv_mass_b, g2_z * d_lam_mu * inv_mass_b)
         x_c = x_c + wp.vec3f(g3_x * d_lam_mu * inv_mass_c, g3_y * d_lam_mu * inv_mass_c, g3_z * d_lam_mu * inv_mass_c)

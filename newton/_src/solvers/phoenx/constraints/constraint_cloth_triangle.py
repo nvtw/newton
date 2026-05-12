@@ -351,6 +351,7 @@ def cloth_triangle_iterate_at(
     num_bodies: wp.int32,
     parallel_id: wp.int32,
     idt: wp.float32,
+    sor_boost: wp.float32,
 ):
     """One XPBD sweep on a cloth triangle (area + shear rows).
 
@@ -475,6 +476,7 @@ def cloth_triangle_iterate_at(
 
     if denom_lambda > wp.float32(0.0):
         d_lam_lambda = -(c_lambda + bias_lambda * lambda_sum_lambda + gamma_lambda * grad_dot_dx_lambda) / denom_lambda
+        d_lam_lambda = d_lam_lambda * sor_boost
         delta_a = wp.vec2f(inv_mass_a * g1_a_x * d_lam_lambda, inv_mass_a * g1_a_y * d_lam_lambda)
         delta_b = wp.vec2f(inv_mass_b * g1_b_x * d_lam_lambda, inv_mass_b * g1_b_y * d_lam_lambda)
         delta_c = wp.vec2f(inv_mass_c * g1_c_x * d_lam_lambda, inv_mass_c * g1_c_y * d_lam_lambda)
@@ -528,6 +530,7 @@ def cloth_triangle_iterate_at(
         denom_mu = (wp.float32(1.0) + gamma_mu) * grad_dot_grad_inv_m_mu + bias_mu
         if denom_mu > wp.float32(0.0):
             d_lam_mu = -(c_mu + bias_mu * lambda_sum_mu + gamma_mu * grad_dot_dx_mu) / denom_mu
+            d_lam_mu = d_lam_mu * sor_boost
             delta_a = wp.vec2f(inv_mass_a * g2_a_x * d_lam_mu, inv_mass_a * g2_a_y * d_lam_mu)
             delta_b = wp.vec2f(inv_mass_b * g2_b_x * d_lam_mu, inv_mass_b * g2_b_y * d_lam_mu)
             delta_c = wp.vec2f(inv_mass_c * g2_c_x * d_lam_mu, inv_mass_c * g2_c_y * d_lam_mu)

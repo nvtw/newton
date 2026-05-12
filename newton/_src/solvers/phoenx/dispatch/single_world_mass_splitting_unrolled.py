@@ -101,6 +101,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                     w.bodies,
                     w._particles_or_sentinel(),
                     idt,
+                    wp.float32(w.sor_boost),
                     w._partitioner.element_ids_by_color,
                     w._partitioner.color_starts,
                     w._partitioner.num_colors,
