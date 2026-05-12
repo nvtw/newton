@@ -419,25 +419,6 @@ def partitioning_coloring_incremental_greedy_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def greedy_increment_and_check_iter_kernel(
-    iter_count: wp.array[wp.int32],
-    num_remaining: wp.array[wp.int32],
-    max_outer_iters: wp.int32,
-):
-    """Single-thread iteration-cap watcher run at the end of each
-    ``_capture_build_csr_greedy_step``. Increments the iter counter; when
-    the cap is hit (and some elements remain uncoloured), zeroes
-    ``num_remaining`` so the outer ``wp.capture_while`` exits and the
-    follow-up spill kernel can dump the remaining elements into the
-    overflow colour."""
-    if wp.tid() != 0:
-        return
-    iter_count[0] = iter_count[0] + wp.int32(1)
-    if iter_count[0] >= max_outer_iters and num_remaining[0] > wp.int32(0):
-        num_remaining[0] = wp.int32(0)
-
-
-@wp.kernel(enable_backward=False)
 def greedy_overflow_spill_kernel(
     color_tags: wp.array[wp.int32],
     partition_data_concat: wp.array[wp.int64],
