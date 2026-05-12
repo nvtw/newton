@@ -99,10 +99,16 @@ class TestMassSplittingConfig(unittest.TestCase):
         )
         self.assertTrue(w.mass_splitting_enabled)
         self.assertEqual(w.max_colored_partitions, 12)
-        # Capacity sized for constraint_capacity * 2 (rigid-only path:
-        # contacts contribute at most 2 endpoints).
-        # num_nodes = num_bodies + num_particles.
-        expected_capacity = w._constraint_capacity * 2
+        # Capacity sized for ``constraint_capacity * MAX_BODIES`` -- a
+        # soft-tet-vs-soft-tet contact emits up to 8 endpoint pairs
+        # (4 + 4 vertices). Cloth-cloth contacts emit 6, cloth-rigid 4,
+        # tet-rigid 5, etc. The constant ``_MS_ENDPOINTS_PER_CONSTRAINT
+        # = int(MAX_BODIES)`` in ``solver_phoenx.py`` carries this
+        # upper bound. The earlier ``* 2`` figure (rigid-only path)
+        # is stale -- under-sizing silently drops emit_pair entries
+        # and leaves bodies without their mass-splitting slot.
+        from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_BODIES
+        expected_capacity = w._constraint_capacity * int(MAX_BODIES)
         self.assertEqual(w._copy_state.position.shape[0], expected_capacity)
         self.assertEqual(w._copy_state.section_end.shape[0], w.num_bodies + w.num_particles)
         self.assertEqual(int(w._copy_state.highest_index_in_use.numpy()[0]), 0)
