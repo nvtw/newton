@@ -200,3 +200,98 @@ def seed_warm_start_kernel(
     # partition_data_concat encoding: high bits = color+1 (which is
     # exactly what color_tags stores), low bits = tid.
     partition_data_concat[tid] = (wp.int64(cached_color) << _COLOR_SHIFT) | wp.int64(tid)
+
+
+@wp.kernel(enable_backward=False)
+def warm_start_invalidate_mark_kernel(
+    color_tags: wp.array[wp.int32],
+    elements: wp.array[ElementInteractionData],
+    adjacency_section_end_indices: wp.array[wp.int32],
+    vertex_to_adjacent_elements: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
+    invalid_mark: wp.array[wp.int32],
+):
+    """Pass 1 of warm-start validation: detect colour conflicts.
+
+    For each ``tid`` with a non-zero seeded colour, scan its
+    neighbours. If any neighbour with ``tid' > tid`` shares the same
+    ``color_tags`` value, this element loses and gets marked
+    invalid. Tie-break by ``tid`` is deterministic and prevents both
+    sides of a conflict from being marked (we'd waste a recolor).
+
+    Race-free: each thread reads from ``color_tags`` (no writes
+    inside this pass) and writes only ``invalid_mark[tid]`` (its own
+    slot). Pass 2 (:func:`warm_start_invalidate_apply_kernel`)
+    consumes ``invalid_mark`` and resets the losers.
+
+    Overflow elements (``color_tags[tid] == max_colored_partitions + 1``)
+    are EXEMPT: by design they conflict with their neighbours and
+    mass splitting solves them Jacobi-style. Leave them coloured.
+    """
+    tid = wp.tid()
+    if tid >= num_elements[0]:
+        return
+    my_color = color_tags[tid]
+    if my_color == wp.int32(0):
+        return  # not seeded, MIS handles
+    # Overflow bucket: same-colour neighbours are expected; not a conflict.
+    if max_colored_partitions >= wp.int32(0) and my_color == max_colored_partitions + wp.int32(1):
+        return
+
+    el = elements[tid]
+    for j in range(MAX_BODIES):
+        v = element_interaction_data_get(el, j)
+        if v < wp.int32(0):
+            break
+        start = wp.int32(0)
+        if v > wp.int32(0):
+            start = adjacency_section_end_indices[v - wp.int32(1)]
+        end = adjacency_section_end_indices[v]
+        for k in range(start, end):
+            neighbor = vertex_to_adjacent_elements[k]
+            # Self isn't a conflict, and we tie-break by tid so each
+            # conflict pair (lower, higher) marks only the higher.
+            if neighbor <= tid:
+                continue
+            if color_tags[neighbor] == my_color:
+                invalid_mark[tid] = wp.int32(1)
+                return
+
+
+@wp.kernel(enable_backward=False)
+def warm_start_invalidate_apply_kernel(
+    invalid_mark: wp.array[wp.int32],
+    color_tags: wp.array[wp.int32],
+    partition_data_concat: wp.array[wp.int64],
+    num_elements: wp.array[wp.int32],
+    num_remaining: wp.array[wp.int32],
+):
+    """Pass 2 of warm-start validation: reset invalidated constraints
+    and decrement ``num_remaining`` for the ones that survived.
+
+    Three outcomes per element:
+
+    * ``invalid_mark == 1``: previous colour was illegal under the
+      new adjacency. Reset to 0 so the MIS loop picks it up.
+    * ``invalid_mark == 0`` and ``color_tags != 0``: warm-start hit,
+      colour kept. Decrement ``num_remaining`` (greedy uses this as
+      its "elements still to colour" counter; for warm-started slots
+      we're effectively pre-colouring, so they shouldn't be counted
+      as remaining work).
+    * ``color_tags == 0``: no warm-start, MIS will colour this one.
+      ``num_remaining`` already counts it (initialised to
+      ``num_elements``); no change.
+
+    Also clears ``invalid_mark[tid]`` for next frame.
+    """
+    tid = wp.tid()
+    if tid >= num_elements[0]:
+        return
+    if invalid_mark[tid] != wp.int32(0):
+        invalid_mark[tid] = wp.int32(0)  # clear for next frame
+        color_tags[tid] = wp.int32(0)
+        partition_data_concat[tid] = wp.int64(tid)
+        return
+    if color_tags[tid] != wp.int32(0):
+        wp.atomic_sub(num_remaining, 0, 1)

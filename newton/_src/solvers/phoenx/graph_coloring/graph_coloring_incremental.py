@@ -278,8 +278,13 @@ class IncrementalContactPartitioner:
             )
 
             self._warm_start_cache = warm_start_cache_zeros(max_num_interactions, device=device)
+            # Per-frame scratch for the validation pass. ``mark`` is
+            # written by mark_kernel, consumed + cleared by
+            # apply_kernel each step.
+            self._warm_start_invalid_mark = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
         else:
             self._warm_start_cache = None
+            self._warm_start_invalid_mark = None
 
         import numpy as np  # noqa: PLC0415
 
@@ -700,6 +705,8 @@ class IncrementalContactPartitioner:
         if self.enable_warm_start:
             from newton._src.solvers.phoenx.graph_coloring.warm_start import (
                 seed_warm_start_kernel,
+                warm_start_invalidate_apply_kernel,
+                warm_start_invalidate_mark_kernel,
             )
 
             wp.launch(
@@ -713,6 +720,33 @@ class IncrementalContactPartitioner:
                     self._warm_start_cache.num_entries,
                     self._color_tags,
                     self._partition_data_concat,
+                ],
+            )
+            # Validation pass: detect colour conflicts under the
+            # current adjacency. Two phases (mark + apply) so the
+            # tie-break read-side stays race-free.
+            wp.launch(
+                warm_start_invalidate_mark_kernel,
+                dim=self.max_num_interactions,
+                inputs=[
+                    self._color_tags,
+                    self._elements,
+                    self._adjacency_section_end_indices,
+                    self._vertex_to_adjacent_elements,
+                    self._num_elements,
+                    wp.int32(self._max_colored_partitions_kernel_arg),
+                    self._warm_start_invalid_mark,
+                ],
+            )
+            wp.launch(
+                warm_start_invalidate_apply_kernel,
+                dim=self.max_num_interactions,
+                inputs=[
+                    self._warm_start_invalid_mark,
+                    self._color_tags,
+                    self._partition_data_concat,
+                    self._num_elements,
+                    self._num_remaining,
                 ],
             )
         # Host-side fixed unroll of the greedy MIS loop. Trip count is
