@@ -165,6 +165,25 @@ def read_angular_velocity_unified(
 
 
 @wp.func
+def read_angular_velocity_with_slot(
+    bodies: BodyContainer,
+    copy_state: CopyStateContainer,
+    node_id: wp.int32,
+    slot: wp.int32,
+) -> wp.vec3f:
+    """Read angular velocity using a precomputed slot index.
+
+    Companion to :func:`read_velocity_unified`: callers that just paid
+    for ``get_state_index`` can pass the resulting ``slot`` here to
+    skip the second lookup. ``slot < 0`` means "no slot, use direct
+    body storage".
+    """
+    if slot < wp.int32(0):
+        return bodies.angular_velocity[node_id]
+    return copy_state.angular_velocity[slot]
+
+
+@wp.func
 def read_position_unified(
     bodies: BodyContainer,
     particles: ParticleContainer,

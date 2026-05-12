@@ -101,6 +101,7 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
 from newton._src.solvers.phoenx.mass_splitting.access import (
     get_state_index,
     read_angular_velocity_unified,
+    read_angular_velocity_with_slot,
     read_velocity_unified,
     write_angular_velocity_unified,
     write_velocity_unified,
@@ -526,8 +527,12 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
             # lands in the copy-state slot when mass splitting is on.
             v1_cur, _vfb1, _vsb1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
             v2_cur, _vfb2, _vsb2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
-            w1_cur, _wfb1, _wsb1 = read_angular_velocity_unified(bodies, copy_state, b1, parallel_id, num_bodies)
-            w2_cur, _wfb2, _wsb2 = read_angular_velocity_unified(bodies, copy_state, b2, parallel_id, num_bodies)
+            # ``slot1`` / ``slot2`` were captured in the prepare scope above
+            # (see the get_state_index pair at the top of the cloth_support
+            # else-branch). Reuse them so the angular reads skip the second
+            # slot lookup -- saves 2 get_state_index calls per contact iter.
+            w1_cur = read_angular_velocity_with_slot(bodies, copy_state, b1, slot1)
+            w2_cur = read_angular_velocity_with_slot(bodies, copy_state, b2, slot2)
             v1_new = v1_cur - inv_mass1 * total_lin_imp_on_b2
             v2_new = v2_cur + inv_mass2 * total_lin_imp_on_b2
             w1_new = w1_cur - inv_inertia1 @ total_ang_imp_on_b1
@@ -593,8 +598,10 @@ def _make_contact_iterate_at(cloth_support: bool):
             # Mass-splitting slot lookup. Identity when disabled.
             v1, inv_factor1, slot1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
             v2, inv_factor2, slot2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
-            w1, _wfb1, _wsb1 = read_angular_velocity_unified(bodies, copy_state, b1, parallel_id, num_bodies)
-            w2, _wfb2, _wsb2 = read_angular_velocity_unified(bodies, copy_state, b2, parallel_id, num_bodies)
+            # Reuse the slot from read_velocity_unified instead of a second
+            # get_state_index call.
+            w1 = read_angular_velocity_with_slot(bodies, copy_state, b1, slot1)
+            w2 = read_angular_velocity_with_slot(bodies, copy_state, b2, slot2)
             inv_factor1_f = wp.float32(inv_factor1)
             inv_factor2_f = wp.float32(inv_factor2)
             inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
