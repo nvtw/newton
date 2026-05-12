@@ -127,7 +127,8 @@ class PortedExample:
     * Override :attr:`fps`, :attr:`sim_substeps`, :attr:`solver_iterations`,
       :attr:`velocity_iterations`, :attr:`gravity`, :attr:`step_layout`,
       :attr:`broad_phase`, :attr:`shape_pairs_max`, :attr:`default_friction`,
-      :attr:`default_restitution`, :attr:`show_contacts` as needed.
+      :attr:`default_restitution`, :attr:`show_contacts`,
+      :attr:`mass_splitting`, :attr:`max_colored_partitions` as needed.
     """
 
     fps: int = 60
@@ -163,6 +164,16 @@ class PortedExample:
     print_step_reports: bool = False
     #: Human-readable scene name used in step report log prefixes.
     step_report_label: str | None = None
+    #: Enable Tonge mass splitting (C# PhoenX default). When ``True``
+    #: the partitioner caps at :attr:`max_colored_partitions` colours
+    #: and any remainder lands in an overflow bucket solved with
+    #: per-(body, partition) copy states. Requires
+    #: ``step_layout = "single_world"``.
+    mass_splitting: bool = False
+    #: K — the number of "regular" colour partitions the graph
+    #: coloring is capped at when :attr:`mass_splitting` is enabled.
+    #: Any constraint that wouldn't fit lands in the overflow bucket.
+    max_colored_partitions: int = 12
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -299,6 +310,8 @@ class PortedExample:
             num_joints=num_joints,
             default_friction=self.default_friction,
             step_layout=self.step_layout,
+            mass_splitting=self.mass_splitting,
+            max_colored_partitions=self.max_colored_partitions,
             device=self.device,
         )
 

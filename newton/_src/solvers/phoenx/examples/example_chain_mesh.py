@@ -56,6 +56,14 @@ RING_SPACING = 2.0 * (RING_RADIUS + TUBE_RADIUS) + 0.005 - 0.05
 #: flat ring clears the ground plane.
 DROP_HEIGHT = TUBE_RADIUS + 0.01
 
+# Tonge mass splitting (C# PhoenX default). When ``True`` the
+# partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`
+# colours and any remainder lands in an overflow bucket solved with
+# per-(body, partition) copy states. Requires the single-world step
+# layout (already used by this example).
+ENABLE_MASS_SPLITTING: bool = True
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
+
 
 def _add_chain_ring(builder: newton.ModelBuilder, body: int, *, static: bool = False) -> None:
     """Attach 6 capsules to ``body`` arranged around a ring of radius
@@ -123,6 +131,8 @@ class Example(PortedExample):
     # Flip to ``True`` to print PhoenX contact/constraint coloring stats
     # after each physics step.
     print_step_reports = True
+    mass_splitting = ENABLE_MASS_SPLITTING
+    max_colored_partitions = MASS_SPLITTING_MAX_COLORED_PARTITIONS
 
     def step(self) -> None:
         super().step()
