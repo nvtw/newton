@@ -1,34 +1,39 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bench: PhoenX locality sort timing across mixed / rigid / multi-world scenes.
+"""Bench: type-aware locality sort for the PGS iterate kernel.
 
-PhoenX's per-color locality sort uses the packed key::
+Hypothesis: PhoenX's per-color sort currently orders constraints
+within a colour by ``body_min`` (cache locality) but mixes constraint
+types arbitrarily within a warp. The iterate kernel's runtime
+dispatch ladder (contacts -> cloth-tri -> soft-tet -> cloth-bending
+-> joint) is then divergent on mixed-type warps: every branch is
+masked through, every read taken.
 
-    (colour << 56) | (ctype << 48) | (body_min << 24) | eid_low
+Promoting the constraint type to the high bits of the locality sort
+key clusters same-type cids within each colour, so each warp should
+mostly execute a single branch's code. Body-min sub-order is
+preserved (24 bits) so cache locality within a type is intact, and
+``eid`` in the lowest 24 bits is the deterministic tie-break that
+folds the existing pass-1 sort into the same single radix pass.
 
-producing per-colour ordering that first clusters same-type cids
-(warp coherence in the iterate dispatch ladder), then sorts by
-``body_min`` for cache locality within a type, with ``eid`` in the
-low bits as a deterministic tie-break. The ctype field is stamped
-into :class:`ElementInteractionData` at emission time
-(:func:`_constraints_to_elements_kernel`), so the sort kernel reads
-it from the same struct load it already does for ``body_min``.
+The sort runs **once per coloring rebuild** (per step, not per
+substep iteration), so any added cost is amortized over ~30-100
+iterate launches per step. The win is concentrated in mixed
+cloth + soft + rigid + contact scenes -- pure rigid or pure cloth
+scenes see no change (one type dominates the whole CSR).
 
-This bench builds representative scenes and times the captured step
-(prepare + iterate + relax kernels, plus collision and integrate)
-to surface regressions in any of the involved kernels:
+This bench builds a representative mixed scene and times the inner
+solve (prepare + iterate + relax kernels only, no coloring /
+integrate / contact ingest) under graph capture. Runs in two modes:
 
-* ``mixed`` -- cloth + soft-tet + rigid + contact, single-world
-* ``tower`` -- 32-cube rigid stack, single-world
-* ``g1_flat_64`` / ``g1_flat_512`` -- the multi-world humanoid
-  scenes used for MjWarp comparisons. Multi-world doesn't go
-  through this sort path (it uses ``_build_per_world_coloring``
-  instead), so these scenes are a regression sentinel.
+* ``--mode baseline``: current 2-pass (eid then ``color, body_min``)
+* ``--mode type-aware``: single-pass packed key ``(color << 57) |
+  (type << 53) | (body_min << 29) | eid_low``
 
-To A/B against an earlier sort variant, run this bench against an
-older commit (``git stash`` the change first) and compare the
-printed numbers.
+Pick the mode via the ``PHOENX_TYPE_AWARE_LOCALITY_SORT`` env var so
+the same script captures both numbers in one run for direct
+comparison.
 
 Usage::
 
@@ -39,6 +44,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import os
 import statistics
 import time
 
@@ -338,46 +344,35 @@ def _measure(world: PhoenXWorld, model, state, contacts, *, frames: int, warmup:
     }
 
 
-def _run_one_scene(*, frames: int, warmup: int, scene: str) -> dict[str, float]:
-    """Build the scene and time the captured step.
+_ORIGINAL_SET_TYPE_SOURCE = None
 
-    The type-aware locality sort is always on in :class:`PhoenXWorld`
-    (no toggle). To re-measure a baseline, run this bench against an
-    older commit (e.g. ``git stash`` the
-    ``_locality_compute_keys_kernel`` change first); the script is
-    kept as a reproducible probe rather than an in-process A/B
-    harness.
+
+def _run_one_mode(*, type_aware: bool, frames: int, warmup: int, scene: str) -> dict[str, float]:
+    """Build the scene and time it under one sort configuration.
+
+    When ``type_aware=False``, monkey-patches
+    :meth:`IncrementalContactPartitioner.set_type_source` to a no-op
+    so :class:`PhoenXWorld` builds without wiring the type-aware
+    sort. The world otherwise always calls ``set_type_source`` in
+    ``__init__``; this hook is the cleanest way to compare the two
+    paths inside one Python process without mutating module state.
     """
+    from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import IncrementalContactPartitioner
+
+    global _ORIGINAL_SET_TYPE_SOURCE
+    if _ORIGINAL_SET_TYPE_SOURCE is None:
+        _ORIGINAL_SET_TYPE_SOURCE = IncrementalContactPartitioner.set_type_source
+    if type_aware:
+        IncrementalContactPartitioner.set_type_source = _ORIGINAL_SET_TYPE_SOURCE
+    else:
+        IncrementalContactPartitioner.set_type_source = lambda self, *a, **k: None
+
     device = wp.get_device()
     collision_pipeline = None
-    handle = None
     if scene == "mixed":
         world, model, state, contacts = _build_mixed_scene(device)
     elif scene == "tower":
         world, model, state, contacts, collision_pipeline = _build_tower_scene(device)
-    elif scene.startswith("g1_flat_"):
-        # Multi-world scenario via the existing g1_flat factory.
-        # Single-world path doesn't see this -- multi-world goes through
-        # _build_per_world_coloring instead, so a 0 % delta here is the
-        # expected outcome and confirms no regression on the
-        # MjWarp-comparison scenes.
-        from newton._src.solvers.phoenx.benchmarks.scenarios import g1_flat
-        num_worlds = int(scene.removeprefix("g1_flat_"))
-        handle = g1_flat.build(
-            num_worlds=num_worlds, solver_name="phoenx",
-            substeps=4, solver_iterations=4, velocity_iterations=1,
-        )
-        print(f"  scene: g1_flat num_worlds={num_worlds}")
-        results = []
-        for trial in range(3):
-            r = _measure_handle(handle, frames=frames, warmup=warmup if trial == 0 else 1)
-            results.append(r)
-            print(f"  trial {trial}: ms/step={r['ms_per_step']:.3f}")
-        return {
-            "median_ms": statistics.median(r["ms_per_step"] for r in results),
-            "n_active": -1,
-            "same_type_pair_frac": -1.0,
-        }
     else:
         raise ValueError(f"unknown scene {scene!r}")
     print(
@@ -405,24 +400,6 @@ def _run_one_scene(*, frames: int, warmup: int, scene: str) -> dict[str, float]:
     }
 
 
-def _measure_handle(handle, *, frames: int, warmup: int) -> dict[str, float]:
-    device = wp.get_device()
-    for _ in range(warmup):
-        handle.simulate_one_frame()
-    wp.synchronize_device(device)
-
-    with wp.ScopedCapture(device=device) as cap:
-        handle.simulate_one_frame()
-    graph = cap.graph
-    wp.synchronize_device(device)
-    t0 = time.perf_counter()
-    for _ in range(frames):
-        wp.capture_launch(graph)
-    wp.synchronize_device(device)
-    t1 = time.perf_counter()
-    return {"ms_per_step": 1000.0 * (t1 - t0) / max(frames, 1)}
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--frames", type=int, default=500, help="captured-step replays for timing")
@@ -433,13 +410,21 @@ def main() -> None:
     if not device.is_cuda:
         raise SystemExit("This bench requires CUDA (graph capture).")
 
-    scenes = ("mixed", "tower", "g1_flat_64", "g1_flat_512")
-    for scene in scenes:
+    for scene in ("mixed", "tower"):
         print(f"\n###### scene = {scene!r} ######")
-        r = _run_one_scene(frames=args.frames, warmup=args.warmup, scene=scene)
-        print(f"[{scene}] median ms/step: {r['median_ms']:.3f}")
-        if r["same_type_pair_frac"] >= 0:
-            print(f"[{scene}] same-contact-pair-fraction: {r['same_type_pair_frac']:.3f}")
+        print("=== baseline (type-aware locality sort OFF) ===")
+        baseline = _run_one_mode(type_aware=False, frames=args.frames, warmup=args.warmup, scene=scene)
+        print(f"baseline median ms/step: {baseline['median_ms']:.3f}\n")
+
+        print("=== type-aware locality sort ON ===")
+        type_aware = _run_one_mode(type_aware=True, frames=args.frames, warmup=args.warmup, scene=scene)
+        print(f"type-aware median ms/step: {type_aware['median_ms']:.3f}\n")
+
+        speedup = baseline["median_ms"] / max(type_aware["median_ms"], 1.0e-6)
+        delta_pct = (type_aware["median_ms"] - baseline["median_ms"]) / baseline["median_ms"] * 100.0
+        print(f"[{scene}] speedup: {speedup:.3f}x  ({delta_pct:+.1f}% change in ms/step)")
+        print(f"[{scene}] same-contact-pair-fraction: baseline={baseline['same_type_pair_frac']:.3f} "
+              f"type-aware={type_aware['same_type_pair_frac']:.3f}")
 
 
 if __name__ == "__main__":

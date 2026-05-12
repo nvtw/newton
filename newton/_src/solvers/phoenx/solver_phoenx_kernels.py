@@ -56,10 +56,8 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_prepare_for_iteration_cloth_aware,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
-    CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
     CONSTRAINT_TYPE_CLOTH_BENDING,
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
-    CONSTRAINT_TYPE_CONTACT,
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
     ConstraintContainer,
     constraint_get_body1,
@@ -78,7 +76,6 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
     _lowest_set_bit,
     element_interaction_data_make,
-    element_interaction_data_make_typed,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
@@ -901,9 +898,7 @@ def _constraints_to_elements_kernel(
         if b1 < 0 and b2 >= 0:
             b1 = b2
             b2 = -1
-        elements[tid] = element_interaction_data_make_typed(
-            b1, b2, -1, -1, -1, -1, -1, -1, CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET
-        )
+        elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles:
         # Cloth-triangle: three unified-index particle endpoints already
@@ -937,9 +932,7 @@ def _constraints_to_elements_kernel(
                 slot1 = v
             else:
                 slot2 = v
-        elements[tid] = element_interaction_data_make_typed(
-            slot0, slot1, slot2, -1, -1, -1, -1, -1, CONSTRAINT_TYPE_CLOTH_TRIANGLE
-        )
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, -1, -1, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending:
         # Cloth-bending: 4 unified-index particle endpoints. body1 / body2
@@ -978,9 +971,7 @@ def _constraints_to_elements_kernel(
                 slot2 = v
             else:
                 slot3 = v
-        elements[tid] = element_interaction_data_make_typed(
-            slot0, slot1, slot2, slot3, -1, -1, -1, -1, CONSTRAINT_TYPE_CLOTH_BENDING
-        )
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
         # Soft-tetrahedron: four unified-index particle endpoints stored
@@ -1022,9 +1013,7 @@ def _constraints_to_elements_kernel(
                 slot2 = v
             else:
                 slot3 = v
-        elements[tid] = element_interaction_data_make_typed(
-            slot0, slot1, slot2, slot3, -1, -1, -1, -1, CONSTRAINT_TYPE_SOFT_TETRAHEDRON
-        )
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
         return
     local_cid = tid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra
     b1 = contact_get_body1(contact_cols, local_cid)
@@ -1148,9 +1137,7 @@ def _constraints_to_elements_kernel(
         else:
             s7 = v
         cnt = cnt + 1
-    elements[tid] = element_interaction_data_make_typed(
-        s0, s1, s2, s3, s4, s5, s6, s7, CONSTRAINT_TYPE_CONTACT
-    )
+    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5, s6, s7)
 
 
 @wp.kernel(enable_backward=False)
