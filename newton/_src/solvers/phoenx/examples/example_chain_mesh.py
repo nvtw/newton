@@ -149,6 +149,11 @@ class Example(PortedExample):
     # batches, and the smaller launches reduce per-call dispatch
     # overhead.
     max_thread_blocks = 16
+    # Cross-frame warm-start of the greedy MIS coloring. Body pairs
+    # (ring-vs-ring contacts) are stable across frames, so most cids'
+    # previous colour is still legal. Validation pass catches the few
+    # cases where adjacency changed.
+    enable_warm_start_coloring = True
 
     def step(self) -> None:
         super().step()
