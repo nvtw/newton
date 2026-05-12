@@ -1909,8 +1909,7 @@ class PhoenXWorld:
                 self._elements,
                 self._partitioner._adjacency_section_end_indices,
                 self._partitioner._vertex_to_adjacent_elements,
-                self._partitioner._random_values,
-                self._partitioner._cost_values,
+                self._partitioner._packed_priorities,
                 int(MAX_COLORS),
             ],
             outputs=[
@@ -1970,8 +1969,7 @@ class PhoenXWorld:
                     self._elements,
                     self._partitioner._adjacency_section_end_indices,
                     self._partitioner._vertex_to_adjacent_elements,
-                    self._partitioner._random_values,
-                    self._partitioner._cost_values,
+                    self._partitioner._packed_priorities,
                     int(GREEDY_MAX_COLORS),
                 ],
                 outputs=[
@@ -2000,8 +1998,7 @@ class PhoenXWorld:
                     self._elements,
                     self._partitioner._adjacency_section_end_indices,
                     self._partitioner._vertex_to_adjacent_elements,
-                    self._partitioner._random_values,
-                    self._partitioner._cost_values,
+                    self._partitioner._packed_priorities,
                     int(MAX_COLORS),
                 ],
                 outputs=[

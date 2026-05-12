@@ -61,7 +61,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import (
     MAX_COLORS,
     _GREEDY_BLOCK_DIM,
-    _fill_cost_values_from_contacts_kernel,
+    _fill_packed_priorities_from_contacts_kernel,
     _locality_compute_keys_kernel,
     _locality_eid_keys_kernel,
     _locality_writeback_kernel,
@@ -136,8 +136,7 @@ def _luby_is_removed(
 def luby_coloring_kernel(
     partition_data_concat: wp.array[wp.int64],
     removed_marker: wp.array[wp.int32],
-    random_values: wp.array[wp.int32],
-    cost_values: wp.array[wp.int32],
+    packed_priorities: wp.array[wp.int32],
     adjacency_section_end_indices: wp.array[wp.int32],
     vertex_to_adjacent_elements: wp.array[wp.int32],
     elements: wp.array[ElementInteractionData],
@@ -157,7 +156,7 @@ def luby_coloring_kernel(
     if _luby_is_removed(partition_data_concat, removed_marker, tid, color, luby_base, luby_marker):
         return
 
-    self_prio = (wp.int64(cost_values[tid]) << wp.int64(32)) | (wp.int64(random_values[tid]) & wp.int64(0xFFFFFFFF))
+    self_prio = packed_priorities[tid]
 
     el = elements[tid]
     is_local_max = bool(True)
@@ -179,10 +178,7 @@ def luby_coloring_kernel(
                 partition_data_concat, removed_marker, neighbor, color, luby_base, luby_marker
             ):
                 continue
-            neigh_prio = (wp.int64(cost_values[neighbor]) << wp.int64(32)) | (
-                wp.int64(random_values[neighbor]) & wp.int64(0xFFFFFFFF)
-            )
-            if neigh_prio > self_prio:
+            if packed_priorities[neighbor] > self_prio:
                 is_local_max = False
                 break
 
@@ -274,11 +270,19 @@ class FixedIterationLubyPartitioner:
         self.max_luby_colors = int(max_luby_colors)
 
         # JP priorities -- same construction as IncrementalContactPartitioner
-        # (fixed seed makes the build deterministic).
+        # (fixed seed makes the build deterministic). Stored prepacked as
+        # ``(cost << 24) | (random & 0xFFFFFF)`` so the coloring kernel
+        # reads a single int32 per neighbour instead of two int32s + shift.
         rng = np.random.default_rng(seed)
         priorities = rng.permutation(max_num_interactions).astype(np.int32) + 1
+        if priorities.max() >= (1 << 24):
+            raise ValueError(
+                f"max_num_interactions ({max_num_interactions}) exceeds the 2^24 "
+                "packed-priority limit."
+            )
         self._random_values = wp.from_numpy(priorities, dtype=wp.int32, device=device)
-        self._cost_values = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+        packed_init = (priorities & 0x00FFFFFF).astype(np.int32)
+        self._packed_priorities = wp.from_numpy(packed_init, dtype=wp.int32, device=device)
 
         # Per-element Luby state.
         self._removed_marker = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
@@ -358,9 +362,15 @@ class FixedIterationLubyPartitioner:
         contact_cols: ContactColumnContainer,
     ) -> None:
         wp.launch(
-            _fill_cost_values_from_contacts_kernel,
+            _fill_packed_priorities_from_contacts_kernel,
             dim=num_cids,
-            inputs=[self._cost_values, contact_cols, num_contact_columns, wp.int32(0)],
+            inputs=[
+                self._packed_priorities,
+                self._random_values,
+                contact_cols,
+                num_contact_columns,
+                wp.int32(0),
+            ],
             device=self._device,
         )
 
@@ -446,8 +456,7 @@ class FixedIterationLubyPartitioner:
                     inputs=[
                         self._partition_data_concat,
                         self._removed_marker,
-                        self._random_values,
-                        self._cost_values,
+                        self._packed_priorities,
                         self._adjacency_section_end_indices,
                         self._vertex_to_adjacent_elements,
                         self._elements,

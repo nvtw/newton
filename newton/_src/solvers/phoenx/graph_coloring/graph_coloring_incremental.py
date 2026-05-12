@@ -170,18 +170,34 @@ def _locality_writeback_kernel(
 
 
 @wp.kernel(enable_backward=False, module="unique")
-def _fill_cost_values_from_contacts_kernel(
-    cost_values: wp.array[wp.int32],
+def _fill_packed_priorities_from_contacts_kernel(
+    packed_priorities: wp.array[wp.int32],
+    random_values: wp.array[wp.int32],
     contact_cols: ContactColumnContainer,
     num_contact_columns: wp.array[wp.int32],
     num_joints: wp.int32,
 ):
+    """Refresh per-cid packed JP priority from contact column counts.
+
+    Layout: ``packed[i] = (cost << 24) | (random[i] & 0xFFFFFF)``.
+
+    ``cost`` is the contact-count bias (joints get 0, contacts get the
+    column's contact count clamped to 0..255); the random tiebreaker
+    is read straight from the per-build permutation. This replaces the
+    older two-array layout that needed a re-shift/OR per kernel access.
+    """
     tid = wp.tid()
     local_cid = tid - num_joints
     if local_cid >= wp.int32(0) and local_cid < num_contact_columns[0]:
-        cost_values[tid] = contact_get_contact_count(contact_cols, local_cid)
+        cost = contact_get_contact_count(contact_cols, local_cid)
     else:
-        cost_values[tid] = wp.int32(0)
+        cost = wp.int32(0)
+    # Clamp cost to fit in the 8-bit high byte (255+ contacts on a single
+    # column is unrealistic but cap defensively).
+    if cost > wp.int32(255):
+        cost = wp.int32(255)
+    rand = random_values[tid] & wp.int32(0x00FFFFFF)
+    packed_priorities[tid] = (cost << wp.int32(24)) | rand
 
 
 class IncrementalContactPartitioner:
@@ -245,9 +261,21 @@ class IncrementalContactPartitioner:
 
         rng = np.random.default_rng(seed)
         priorities = rng.permutation(max_num_interactions).astype(np.int32) + 1
+        # The packed priority (cost << 24) | (random & 0xFFFFFF) caps the
+        # random tiebreaker at 2^24 = 16M; ensure the permutation fits.
+        if priorities.max() >= (1 << 24):
+            raise ValueError(
+                f"max_num_interactions ({max_num_interactions}) exceeds the 2^24 "
+                "packed-priority limit. Lower the partitioner capacity or widen the "
+                "PACKED_PRIO_RANDOM_MASK / cost shift in graph_coloring_common.py."
+            )
         self._random_values = wp.from_numpy(priorities, dtype=wp.int32, device=device)
-        # Per-cid JP cost; refreshed each step from contact counts (or zero).
-        self._cost_values = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+        # Per-cid packed (cost, random) priority. Initialised with cost=0
+        # so non-contact rows already have a usable value; refreshed
+        # each step from contact column counts via
+        # :func:`_fill_packed_priorities_from_contacts_kernel`.
+        packed_init = (priorities & 0x00FFFFFF).astype(np.int32)
+        self._packed_priorities = wp.from_numpy(packed_init, dtype=wp.int32, device=device)
 
         self._adjacency_section_end_indices = wp.zeros(max_num_nodes, dtype=wp.int32, device=device)
         self._vertex_to_adjacent_elements = wp.zeros(
@@ -335,18 +363,20 @@ class IncrementalContactPartitioner:
         num_contact_columns: wp.array[wp.int32],
         contact_cols: ContactColumnContainer,
     ) -> None:
-        """Refresh per-cid JP costs from contact-column contact counts.
-        Joints and inactive tail cids get 0."""
+        """Refresh per-cid packed JP priorities from contact-column counts.
+        Joints and inactive tail cids get cost=0; contacts get the column's
+        contact count clamped to 0..255."""
         wp.launch(
-            _fill_cost_values_from_contacts_kernel,
+            _fill_packed_priorities_from_contacts_kernel,
             dim=self.max_num_interactions,
             inputs=[
-                self._cost_values,
+                self._packed_priorities,
+                self._random_values,
                 contact_cols,
                 num_contact_columns,
                 wp.int32(num_joints),
             ],
-            device=self._cost_values.device,
+            device=self._packed_priorities.device,
         )
 
     def reset(
@@ -458,8 +488,7 @@ class IncrementalContactPartitioner:
             dim=self.max_num_interactions,
             inputs=[
                 self._partition_data_concat,
-                self._random_values,
-                self._cost_values,
+                self._packed_priorities,
                 self._adjacency_section_end_indices,
                 self._vertex_to_adjacent_elements,
                 self._elements,
@@ -556,8 +585,7 @@ class IncrementalContactPartitioner:
                 dim=self.max_num_interactions,
                 inputs=[
                     self._partition_data_concat,
-                    self._random_values,
-                    self._cost_values,
+                    self._packed_priorities,
                     self._adjacency_section_end_indices,
                     self._vertex_to_adjacent_elements,
                     self._elements,
@@ -793,8 +821,7 @@ class IncrementalContactPartitioner:
                 inputs=[
                     self._partition_data_concat,
                     self._color_tags,
-                    self._random_values,
-                    self._cost_values,
+                    self._packed_priorities,
                     self._adjacency_section_end_indices,
                     self._vertex_to_adjacent_elements,
                     self._elements,

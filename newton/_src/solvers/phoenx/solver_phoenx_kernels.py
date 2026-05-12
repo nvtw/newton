@@ -293,14 +293,17 @@ def _build_scatter_keys_kernel(
 
 @wp.func
 def _cost_biased_priority(
-    random_values: wp.array[wp.int32],
-    cost_values: wp.array[wp.int32],
+    packed_priorities: wp.array[wp.int32],
     cid: wp.int32,
-) -> wp.int64:
-    """Return lexicographic JP priority: high 32 bits cost, low 32 bits jitter."""
-    cost = wp.int64(cost_values[cid])
-    jitter = wp.int64(random_values[cid]) & _PRIORITY_JITTER_MASK
-    return (cost << _PRIORITY_COST_SHIFT) | jitter
+) -> wp.int32:
+    """Read prepacked (cost << 24) | (random & 0xFFFFFF) priority.
+
+    The pack happens once per step in the partitioner; coloring just
+    reads. See :func:`pack_priorities_kernel` in :mod:`graph_coloring_common`.
+    Bit layout makes plain int32 lexicographic comparison equivalent
+    to ``(cost, random)`` lex order.
+    """
+    return packed_priorities[cid]
 
 
 @wp.kernel(enable_backward=False)
@@ -313,8 +316,7 @@ def _per_world_jp_coloring_kernel(
     elements: wp.array[ElementInteractionData],
     adjacency_end: wp.array[wp.int32],  # [num_bodies]
     vertex_to_elements: wp.array[wp.int32],  # [cap * MAX_BODIES]
-    random_values: wp.array[wp.int32],  # [capacity] JP priorities
-    cost_values: wp.array[wp.int32],  # [capacity] JP costs (contacts use contact_count)
+    packed_priorities: wp.array[wp.int32],  # [capacity] (cost << 24) | (random & 0xFFFFFF)
     max_colors: wp.int32,
     # scratch (caller zeros each step)
     assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
@@ -372,7 +374,7 @@ def _per_world_jp_coloring_kernel(
             if slot < count:
                 eid = world_elements[base + slot]
                 if assigned[eid] == wp.int32(0):
-                    self_prio = _cost_biased_priority(random_values, cost_values, eid)
+                    self_prio = _cost_biased_priority(packed_priorities, eid)
                     is_local_max = bool(True)
                     for j in range(MAX_BODIES):
                         if not is_local_max:
@@ -395,7 +397,7 @@ def _per_world_jp_coloring_kernel(
                             # (graph edge can't conflict).
                             if a != wp.int32(0) and a != current_color + wp.int32(1):
                                 continue
-                            if _cost_biased_priority(random_values, cost_values, neighbor) > self_prio:
+                            if _cost_biased_priority(packed_priorities, neighbor) > self_prio:
                                 is_local_max = bool(False)
 
                     if is_local_max:
@@ -449,8 +451,7 @@ def _per_world_greedy_coloring_kernel(
     elements: wp.array[ElementInteractionData],
     adjacency_end: wp.array[wp.int32],  # [num_bodies]
     vertex_to_elements: wp.array[wp.int32],  # [cap * MAX_BODIES]
-    random_values: wp.array[wp.int32],  # [capacity] JP priorities
-    cost_values: wp.array[wp.int32],  # [capacity] JP costs (unused in greedy mode)
+    packed_priorities: wp.array[wp.int32],  # [capacity] (cost << 24) | (random & 0xFFFFFF)
     max_colors: wp.int32,  # = GREEDY_MAX_COLORS, kept for parity with JP variant
     # scratch (caller zeros each step)
     assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
@@ -513,7 +514,7 @@ def _per_world_greedy_coloring_kernel(
             if slot < count:
                 eid = world_elements[base + slot]
                 if assigned[eid] == wp.int32(0):
-                    self_prio = _cost_biased_priority(random_values, cost_values, eid)
+                    self_prio = _cost_biased_priority(packed_priorities, eid)
                     is_local_max = bool(True)
                     forbidden_mask = wp.int64(0)
                     for j in range(MAX_BODIES):
@@ -535,7 +536,7 @@ def _per_world_greedy_coloring_kernel(
                             a = assigned[neighbor]
                             if a == wp.int32(0):
                                 # Uncoloured: MIS tiebreak.
-                                if _cost_biased_priority(random_values, cost_values, neighbor) > self_prio:
+                                if _cost_biased_priority(packed_priorities, neighbor) > self_prio:
                                     is_local_max = bool(False)
                             else:
                                 # Coloured: forbid that colour.

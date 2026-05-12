@@ -102,8 +102,7 @@ def maximal_independent_set_partitioning(
     color_tags: wp.array[wp.int32],
     partition_data_elements: wp.array[int],
     interaction_id_to_partition: wp.array[int],
-    random_values: wp.array[int],
-    cost_values: wp.array[int],
+    packed_priorities: wp.array[wp.int32],
     adjacency_section_end_indices: wp.array[int],
     vertex_to_adjacent_elements: wp.array[int],
     # Radix-sort scratch (size 2*N).
@@ -151,8 +150,7 @@ def maximal_independent_set_partitioning(
                 partition_data_concat,
                 partition_ends,
                 max_used_color,
-                random_values,
-                cost_values,
+                packed_priorities,
                 adjacency_section_end_indices,
                 vertex_to_adjacent_elements,
                 elements,
@@ -201,13 +199,22 @@ class ContactPartitioner:
         self.max_num_nodes = max_num_nodes
         self.max_num_partitions = max_num_partitions
 
-        # JP priorities: permutation of [1, N] for guaranteed uniqueness.
+        # JP priorities: permutation of [1, N] (uniqueness for tiebreak),
+        # stored prepacked as (cost << 24) | (random & 0xFFFFFF). Cost is
+        # refreshed each step from contact counts via the partitioner's
+        # set_costs_from_contacts hook; this batch-mode helper leaves it
+        # at 0 so cost-biasing is opt-in only.
         import numpy as np  # noqa: PLC0415
 
         rng = np.random.default_rng(seed)
         priorities = rng.permutation(max_num_interactions).astype(np.int32) + 1
-        self._random_values = wp.from_numpy(priorities, dtype=wp.int32, device=device)
-        self._cost_values = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+        if priorities.max() >= (1 << 24):
+            raise ValueError(
+                f"max_num_interactions ({max_num_interactions}) exceeds the 2^24 "
+                "packed-priority limit."
+            )
+        packed_init = (priorities & 0x00FFFFFF).astype(np.int32)
+        self._packed_priorities = wp.from_numpy(packed_init, dtype=wp.int32, device=device)
 
         self._partition_ends = wp.zeros(max_num_partitions + 1, dtype=wp.int32, device=device)
         self._num_partitions = wp.zeros(1, dtype=wp.int32, device=device)
@@ -233,11 +240,17 @@ class ContactPartitioner:
         self,
         elements: wp.array[ElementInteractionData],
         num_elements: wp.array[int],
-        cost_values=None,
+        packed_priorities=None,
     ) -> None:
-        """Run the colouring pipeline on ``elements[:num_elements[0]]``."""
-        if cost_values is None:
-            cost_values = self._cost_values
+        """Run the colouring pipeline on ``elements[:num_elements[0]]``.
+
+        ``packed_priorities`` overrides the partitioner's seeded
+        priorities (used by tests to inject deterministic
+        ``(cost, random)`` packed values). When ``None`` uses the
+        internal permutation-only buffer (cost-biasing off).
+        """
+        if packed_priorities is None:
+            packed_priorities = self._packed_priorities
 
         maximal_independent_set_partitioning(
             elements=elements,
@@ -252,8 +265,7 @@ class ContactPartitioner:
             color_tags=self._color_tags,
             partition_data_elements=self._partition_data_elements,
             interaction_id_to_partition=self._interaction_id_to_partition,
-            random_values=self._random_values,
-            cost_values=cost_values,
+            packed_priorities=packed_priorities,
             adjacency_section_end_indices=self._adjacency_section_end_indices,
             vertex_to_adjacent_elements=self._vertex_to_adjacent_elements,
             partition_data_concat_sort_values=self._partition_data_concat_sort_values,

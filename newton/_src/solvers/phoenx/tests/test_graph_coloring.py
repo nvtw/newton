@@ -89,14 +89,20 @@ def _run_partitioner(
     else:
         random_values = np.asarray(random_values, dtype=np.int32)
         assert random_values.shape == (max_num_interactions,)
-    random_values_arr = wp.from_numpy(random_values, dtype=wp.int32)
 
     if cost_values is None:
         cost_values = np.zeros(max_num_interactions, dtype=np.int32)
     else:
         cost_values = np.asarray(cost_values, dtype=np.int32)
         assert cost_values.shape == (max_num_interactions,)
-    cost_values_arr = wp.from_numpy(cost_values, dtype=wp.int32)
+
+    # Pack into the int32 layout the kernels now consume:
+    # (cost << 24) | (random & 0xFFFFFF). Tests use small values so the
+    # 8-bit cost cap is never hit.
+    cost_clamped = np.clip(cost_values, 0, 255).astype(np.int32)
+    rand_clamped = (random_values & 0x00FFFFFF).astype(np.int32)
+    packed = (cost_clamped << 24) | rand_clamped
+    packed_priorities_arr = wp.from_numpy(packed, dtype=wp.int32)
 
     # Adjacency buffers. Upper bound on adjacency entries: every element
     # contributes at most MAX_BODIES vertex references.
@@ -125,8 +131,7 @@ def _run_partitioner(
         color_tags=color_tags,
         partition_data_elements=partition_data_elements,
         interaction_id_to_partition=interaction_id_to_partition,
-        random_values=random_values_arr,
-        cost_values=cost_values_arr,
+        packed_priorities=packed_priorities_arr,
         adjacency_section_end_indices=adjacency_section_end_indices,
         vertex_to_adjacent_elements=vertex_to_adjacent_elements,
         partition_data_concat_sort_values=partition_data_concat_sort_values,
