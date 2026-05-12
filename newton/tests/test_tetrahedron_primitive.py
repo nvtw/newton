@@ -150,7 +150,7 @@ class TestTetrahedronBuilder(unittest.TestCase):
         from newton._src.geometry.support_function import decode_vec3
 
         @wp.kernel
-        def decode_kernel(p: wp.array(dtype=wp.uint64), out: wp.array(dtype=wp.vec3)):
+        def decode_kernel(p: wp.array[wp.uint64], out: wp.array[wp.vec3]):
             out[0] = decode_vec3(p[0])
 
         device = "cuda:0"
@@ -366,9 +366,7 @@ class TestTetrahedronNarrowPhase(unittest.TestCase):
         # Translate every vertex by a fixed offset; sphere placed at the
         # translated centroid should still collide.
         offset = (10.0, 20.0, 30.0)
-        translated = tuple(
-            (v[0] + offset[0], v[1] + offset[1], v[2] + offset[2]) for v in DEFAULT_TET_VERTICES
-        )
+        translated = tuple((v[0] + offset[0], v[1] + offset[1], v[2] + offset[2]) for v in DEFAULT_TET_VERTICES)
         a, b, c, d = translated
         centroid = (
             (a[0] + b[0] + c[0] + d[0]) * 0.25,

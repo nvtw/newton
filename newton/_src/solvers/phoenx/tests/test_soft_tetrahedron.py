@@ -31,7 +31,9 @@ from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
-def _build_soft_cube(*, dim: int = 2, cell: float = 0.1, density: float = 100.0, k_mu: float = 1.0e4, k_lambda: float = 1.0e4):
+def _build_soft_cube(
+    *, dim: int = 2, cell: float = 0.1, density: float = 100.0, k_mu: float = 1.0e4, k_lambda: float = 1.0e4
+):
     """Build a Newton model containing a dim x dim x dim soft cube.
 
     Returns the finalised :class:`newton.Model`.
@@ -56,7 +58,9 @@ def _build_soft_cube(*, dim: int = 2, cell: float = 0.1, density: float = 100.0,
     return builder.finalize()
 
 
-def _build_phoenx_world_for_soft_cube(model, device, gravity: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> PhoenXWorld:
+def _build_phoenx_world_for_soft_cube(
+    model, device, gravity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+) -> PhoenXWorld:
     """Build a PhoenXWorld matched to the given soft-cube model. No
     external collision; pure internal-constraint exercise."""
     bodies = body_container_zeros(max(1, int(model.body_count)), device=device)

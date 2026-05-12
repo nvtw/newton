@@ -978,11 +978,7 @@ def raycast_kernel(
     # ``shape_source_ptr`` carries the Warp mesh handle for MESH/CONVEX_MESH
     # and the encoded fourth vertex D for TETRAHEDRON; ``ray_intersect_geom``
     # picks the right interpretation based on ``geomtype``.
-    if (
-        geomtype == GeoType.MESH
-        or geomtype == GeoType.CONVEX_MESH
-        or geomtype == GeoType.TETRAHEDRON
-    ):
+    if geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_MESH or geomtype == GeoType.TETRAHEDRON:
         mesh_id = shape_source_ptr[shape_idx]
     else:
         mesh_id = wp.uint64(0)
@@ -1128,11 +1124,7 @@ def sensor_raycast_kernel(
     # ``shape_source_ptr`` carries the Warp mesh handle for MESH/CONVEX_MESH
     # and the encoded fourth vertex D for TETRAHEDRON; ``ray_intersect_geom``
     # picks the right interpretation based on ``geomtype``.
-    if (
-        geomtype == GeoType.MESH
-        or geomtype == GeoType.CONVEX_MESH
-        or geomtype == GeoType.TETRAHEDRON
-    ):
+    if geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_MESH or geomtype == GeoType.TETRAHEDRON:
         mesh_id = shape_source_ptr[shape_idx]
     else:
         mesh_id = wp.uint64(0)

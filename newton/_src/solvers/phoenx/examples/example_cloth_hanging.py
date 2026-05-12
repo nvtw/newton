@@ -37,7 +37,6 @@ from newton._src.solvers.phoenx.examples.example_common import (
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
-
 # Tonge mass splitting (C# PhoenX default). When ``True`` the
 # partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`
 # colours and any remainder lands in an overflow bucket solved with
@@ -82,9 +81,7 @@ class Example:
 
         self.youngs_modulus = float(youngs_modulus)
         self.poisson_ratio = float(poisson_ratio)
-        self.tri_ka, self.tri_ke = cloth_lame_from_youngs_poisson_plane_stress(
-            self.youngs_modulus, self.poisson_ratio
-        )
+        self.tri_ka, self.tri_ke = cloth_lame_from_youngs_poisson_plane_stress(self.youngs_modulus, self.poisson_ratio)
         self._cube_drop_height = float(cube_drop_height)
 
         builder = newton.ModelBuilder()
@@ -271,9 +268,7 @@ class Example:
             raise RuntimeError("non-finite particle position in final state")
 
         # Pinned particles haven't drifted (small numerical floor).
-        pinned_drift = np.linalg.norm(
-            positions[pinned_indices] - self.model.particle_q.numpy()[pinned_indices], axis=1
-        )
+        pinned_drift = np.linalg.norm(positions[pinned_indices] - self.model.particle_q.numpy()[pinned_indices], axis=1)
         if pinned_drift.max() > 1.0e-3:
             raise RuntimeError(f"pinned particle drifted: max={pinned_drift.max():.4f} m")
 
@@ -282,9 +277,7 @@ class Example:
         cube_q = self.state.body_q.numpy()
         cube_z = float(cube_q[self._cube_body, 2])
         if cube_z > self._cube_drop_height - 0.05:
-            raise RuntimeError(
-                f"cube didn't fall (z={cube_z:.4f}, started at {self._cube_drop_height:.4f})"
-            )
+            raise RuntimeError(f"cube didn't fall (z={cube_z:.4f}, started at {self._cube_drop_height:.4f})")
         if not np.isfinite(cube_z):
             raise RuntimeError(f"cube z went non-finite: {cube_z}")
 

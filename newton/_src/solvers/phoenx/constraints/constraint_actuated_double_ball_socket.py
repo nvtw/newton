@@ -26,14 +26,6 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
-from newton._src.solvers.phoenx.mass_splitting.access import (
-    read_angular_velocity_unified,
-    read_velocity_unified,
-    write_angular_velocity_unified,
-    write_velocity_unified,
-)
-from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
-from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     _PD_NYQUIST_HEADROOM_MAX,
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
@@ -66,6 +58,14 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
     revolution_tracker_angle,
     revolution_tracker_update,
 )
+from newton._src.solvers.phoenx.mass_splitting.access import (
+    read_angular_velocity_unified,
+    read_velocity_unified,
+    write_angular_velocity_unified,
+    write_velocity_unified,
+)
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
+from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_config import (
     PHOENX_BOOST_CABLE_BEND,
     PHOENX_BOOST_CABLE_TWIST,
@@ -934,9 +934,18 @@ def _anchor1_positional_prepare_at(
     orient2 = bodies.orientation[b2]
     position1 = bodies.position[b1]
     position2 = bodies.position[b2]
-    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
-        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
-    )
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
     la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
@@ -1167,8 +1176,18 @@ def _ball_socket_prepare_at(
     )
 
     _ms_store_body_pair(
-        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
-        velocity1, angular_velocity1, velocity2, angular_velocity2,
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
 
@@ -1201,9 +1220,18 @@ def _ball_socket_iterate_at(
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
-        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
-    )
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
@@ -1233,8 +1261,18 @@ def _ball_socket_iterate_at(
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1)
 
     _ms_store_body_pair(
-        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
-        velocity1, angular_velocity1, velocity2, angular_velocity2,
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
@@ -1272,9 +1310,18 @@ def _revolute_prepare_at(
     orientation2 = bodies.orientation[b2]
     position1 = bodies.position[b1]
     position2 = bodies.position[b2]
-    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
-        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
-    )
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
     la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
@@ -1443,8 +1490,18 @@ def _revolute_prepare_at(
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
 
     _ms_store_body_pair(
-        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
-        velocity1, angular_velocity1, velocity2, angular_velocity2,
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
 
@@ -1473,9 +1530,18 @@ def _revolute_iterate_at(
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
-        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
-    )
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
@@ -1562,8 +1628,18 @@ def _revolute_iterate_at(
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
     _ms_store_body_pair(
-        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
-        velocity1, angular_velocity1, velocity2, angular_velocity2,
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
 
@@ -1615,9 +1691,18 @@ def _prismatic_prepare_at(
     orientation2 = bodies.orientation[b2]
     position1 = bodies.position[b1]
     position2 = bodies.position[b2]
-    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
-        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
-    )
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
     la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
@@ -1850,8 +1935,18 @@ def _prismatic_prepare_at(
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ wp.cross(r1_b2, n_hat * axial_imp)
 
     _ms_store_body_pair(
-        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
-        velocity1, angular_velocity1, velocity2, angular_velocity2,
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
 
@@ -1881,9 +1976,18 @@ def _prismatic_iterate_at(
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
-        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
-    )
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
@@ -1994,8 +2098,18 @@ def _prismatic_iterate_at(
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ wp.cross(r1_b2, axial_imp)
 
     _ms_store_body_pair(
-        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
-        velocity1, angular_velocity1, velocity2, angular_velocity2,
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
 
@@ -2053,9 +2167,18 @@ def _cable_prepare_at(
     orientation2 = bodies.orientation[b2]
     position1 = bodies.position[b1]
     position2 = bodies.position[b2]
-    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
-        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
-    )
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
     la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
@@ -2253,8 +2376,18 @@ def _cable_prepare_at(
     )
 
     _ms_store_body_pair(
-        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
-        velocity1, angular_velocity1, velocity2, angular_velocity2,
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
     # Zero unused axial drive / limit state so wrench helpers and any
@@ -2301,9 +2434,18 @@ def _cable_iterate_at(
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
-        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
-    )
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
@@ -2395,8 +2537,18 @@ def _cable_iterate_at(
     write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3_world + lam3_world)
 
     _ms_store_body_pair(
-        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
-        velocity1, angular_velocity1, velocity2, angular_velocity2,
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
 
@@ -2439,9 +2591,18 @@ def _fixed_prepare_at(
     orientation2 = bodies.orientation[b2]
     position1 = bodies.position[b1]
     position2 = bodies.position[b2]
-    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
-        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
-    )
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
     la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
@@ -2620,8 +2781,18 @@ def _fixed_prepare_at(
     )
 
     _ms_store_body_pair(
-        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
-        velocity1, angular_velocity1, velocity2, angular_velocity2,
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
     # Zero the axial drive / limit state so world_wrench / iterate don't
@@ -2651,9 +2822,18 @@ def _fixed_iterate_at(
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
-        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
-    )
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
@@ -2753,8 +2933,18 @@ def _fixed_iterate_at(
     write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3_world + lam3_world)
 
     _ms_store_body_pair(
-        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
-        velocity1, angular_velocity1, velocity2, angular_velocity2,
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
 
@@ -2785,15 +2975,25 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
     """
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
-        _revolute_prepare_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
+        _revolute_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        )
     elif joint_mode == JOINT_MODE_PRISMATIC:
-        _prismatic_prepare_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
+        _prismatic_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        )
     elif joint_mode == JOINT_MODE_FIXED:
-        _fixed_prepare_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
+        _fixed_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        )
     elif joint_mode == JOINT_MODE_CABLE:
-        _cable_prepare_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
+        _cable_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        )
     else:
-        _ball_socket_prepare_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
+        _ball_socket_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        )
 
 
 @wp.func
@@ -2833,9 +3033,18 @@ def _revolute_iterate_at_multi(
     b2 = body_pair.b2
 
     # ---- Body state (hoisted out of the sweep loop) ------------------
-    velocity1, velocity2, angular_velocity1, angular_velocity2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2 = _ms_load_body_pair(
-        bodies, particles, copy_state, b1, b2, parallel_id, num_bodies
-    )
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     # ---- Constraint constants ----------------------------------------
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
@@ -2997,8 +3206,18 @@ def _revolute_iterate_at_multi(
 
     # ---- Writeback ---------------------------------------------------
     _ms_store_body_pair(
-        bodies, particles, copy_state, b1, b2, slot1, slot2, num_bodies,
-        velocity1, angular_velocity1, velocity2, angular_velocity2,
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1)
@@ -3039,7 +3258,18 @@ def actuated_double_ball_socket_iterate_multi(
     joint_mode = read_int(constraints, _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
         _revolute_iterate_at_multi(
-            constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias, num_sweeps
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            body_pair,
+            idt,
+            use_bias,
+            num_sweeps,
         )
     else:
         it = wp.int32(0)
@@ -3075,15 +3305,75 @@ def actuated_double_ball_socket_iterate_at(
     """
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
-        _revolute_iterate_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias)
+        _revolute_iterate_at(
+            constraints,
+            cid,
+            base_offset,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            body_pair,
+            idt,
+            use_bias,
+        )
     elif joint_mode == JOINT_MODE_PRISMATIC:
-        _prismatic_iterate_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias)
+        _prismatic_iterate_at(
+            constraints,
+            cid,
+            base_offset,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            body_pair,
+            idt,
+            use_bias,
+        )
     elif joint_mode == JOINT_MODE_FIXED:
-        _fixed_iterate_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias)
+        _fixed_iterate_at(
+            constraints,
+            cid,
+            base_offset,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            body_pair,
+            idt,
+            use_bias,
+        )
     elif joint_mode == JOINT_MODE_CABLE:
-        _cable_iterate_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias)
+        _cable_iterate_at(
+            constraints,
+            cid,
+            base_offset,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            body_pair,
+            idt,
+            use_bias,
+        )
     else:
-        _ball_socket_iterate_at(constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias)
+        _ball_socket_iterate_at(
+            constraints,
+            cid,
+            base_offset,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            body_pair,
+            idt,
+            use_bias,
+        )
 
 
 @wp.func
@@ -3244,9 +3534,7 @@ def revolute_prepare_for_iteration(
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
-    _revolute_prepare_at(
-        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
-    )
+    _revolute_prepare_at(constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
 
 
 @wp.func
@@ -3275,7 +3563,18 @@ def revolute_iterate_multi(
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     _revolute_iterate_at_multi(
-        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, use_bias, num_sweeps
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        copy_state,
+        num_bodies,
+        parallel_id,
+        body_pair,
+        idt,
+        use_bias,
+        num_sweeps,
     )
 
 

@@ -379,9 +379,7 @@ class Example:
             f"sim_ticks/frame={self.sim_ticks_per_frame} substeps/tick={self.sim_substeps} "
             f"substep_dt={substep_dt * 1000.0:.3f}ms"
         )
-        for s, (k_bend, d_bend, color) in enumerate(
-            zip(bend_stiffnesses, bend_dampings, palette, strict=False)
-        ):
+        for s, (k_bend, d_bend, color) in enumerate(zip(bend_stiffnesses, bend_dampings, palette, strict=False)):
             print(
                 f"  strand[{s}] bend_stiffness={k_bend:.4g} N*m/rad "
                 f"bend_damping={d_bend:.4g} N*m*s/rad "

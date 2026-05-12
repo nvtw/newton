@@ -42,7 +42,9 @@ class TestSoftBodyOnBox(unittest.TestCase):
         builder.add_shape_box(
             body=-1,
             xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
-            hx=0.5, hy=0.5, hz=box_h,
+            hx=0.5,
+            hy=0.5,
+            hz=box_h,
         )
         # Drop a 2x2x2 soft cube (40 tets after 5-tet-per-cell decomposition)
         # from ~30 cm above the box.
@@ -50,8 +52,12 @@ class TestSoftBodyOnBox(unittest.TestCase):
             pos=wp.vec3(-0.1, -0.1, 0.4),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
-            dim_x=2, dim_y=2, dim_z=2,
-            cell_x=0.1, cell_y=0.1, cell_z=0.1,
+            dim_x=2,
+            dim_y=2,
+            dim_z=2,
+            cell_x=0.1,
+            cell_y=0.1,
+            cell_z=0.1,
             density=200.0,
             k_mu=1.0e5,
             k_lambda=1.0e5,
@@ -119,13 +125,15 @@ class TestSoftBodyOnBox(unittest.TestCase):
         # Cube must slow down vs free fall (contacts firing). Threshold:
         # less than 70% of analytical free-fall drop.
         self.assertLess(
-            actual_drop, 0.7 * free_fall_distance,
+            actual_drop,
+            0.7 * free_fall_distance,
             f"soft cube didn't decelerate (dropped {actual_drop:.3f}m vs free-fall {free_fall_distance:.3f}m); "
             f"box collisions not firing",
         )
         # Cube must not escape downward (rough sanity bound).
         self.assertGreater(
-            float(p_final[:, 2].min()), -5.0,
+            float(p_final[:, 2].min()),
+            -5.0,
             f"soft cube escaped downward (min z = {float(p_final[:, 2].min()):.4f}); contacts failed",
         )
 

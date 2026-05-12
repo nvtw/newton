@@ -47,10 +47,6 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_bending import (
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     CLOTH_TRIANGLE_DWORDS,
 )
-from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
-    SOFT_TET_DWORDS,
-    soft_tet_init_rows_kernel,
-)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     CONTACT_DWORDS,
     ContactColumnContainer,
@@ -64,6 +60,10 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     constraint_container_zeros,
+)
+from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
+    SOFT_TET_DWORDS,
+    soft_tet_init_rows_kernel,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_DERIVED_DWORDS_PER_CONTACT,
@@ -2061,9 +2061,7 @@ class PhoenXWorld:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
-        kernel = get_fast_tail_kernel(
-            kind="relax", revolute_only=bool(self._use_revolute_specialization)
-        )
+        kernel = get_fast_tail_kernel(kind="relax", revolute_only=bool(self._use_revolute_specialization))
         self._launch_fast_iter(
             kernel,
             self.velocity_iterations,
@@ -2225,12 +2223,12 @@ class PhoenXWorld:
             self._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
             if self.mass_splitting_enabled:
                 launch_average_and_broadcast(
-                self._copy_state,
-                self.bodies,
-                self._particles_or_sentinel(),
-                num_bodies=self.num_bodies,
-                inv_dt=1.0 / self.substep_dt,
-            )
+                    self._copy_state,
+                    self.bodies,
+                    self._particles_or_sentinel(),
+                    num_bodies=self.num_bodies,
+                    inv_dt=1.0 / self.substep_dt,
+                )
 
     def _relax_velocities_singleworld(self) -> None:
         """Single-world TGS-soft relax sweeps (bias OFF)."""
@@ -2243,12 +2241,12 @@ class PhoenXWorld:
             self._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
             if self.mass_splitting_enabled:
                 launch_average_and_broadcast(
-                self._copy_state,
-                self.bodies,
-                self._particles_or_sentinel(),
-                num_bodies=self.num_bodies,
-                inv_dt=1.0 / self.substep_dt,
-            )
+                    self._copy_state,
+                    self.bodies,
+                    self._particles_or_sentinel(),
+                    num_bodies=self.num_bodies,
+                    inv_dt=1.0 / self.substep_dt,
+                )
 
     def _singleworld_kernels(self):
         """Returns (prepare_head, prepare_fused, iterate_head, iterate_fused,
@@ -2265,9 +2263,7 @@ class PhoenXWorld:
           implementation so rigid scenes pay zero cost; soft-tets reuse
           the same compile-time gate.
         """
-        cloth_on = (
-            self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0 or self.num_cloth_bending > 0
-        )
+        cloth_on = self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0 or self.num_cloth_bending > 0
         revolute_only = bool(self._use_revolute_specialization)
         kw = {"revolute_only": revolute_only, "cloth_support": cloth_on}
         return (

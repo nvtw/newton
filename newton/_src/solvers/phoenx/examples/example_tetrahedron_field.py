@@ -231,9 +231,7 @@ class Example(PortedExample):
         assert np.isfinite(dyn_pos).all(), "non-finite tetrahedron position"
         assert np.isfinite(dyn_vel).all(), "non-finite tetrahedron velocity"
 
-        spawn_half_extent_xy = (
-            0.5 * (max(TET_GRID_X, TET_GRID_Y) - 1) * TET_SPACING_XY + TET_PLANAR_JITTER
-        )
+        spawn_half_extent_xy = 0.5 * (max(TET_GRID_X, TET_GRID_Y) - 1) * TET_SPACING_XY + TET_PLANAR_JITTER
         xy_tol = spawn_half_extent_xy + 4.0  # tets can slide a few metres on bounce
         max_xy = float(np.max(np.linalg.norm(dyn_pos[:, :2], axis=1)))
         assert max_xy < xy_tol, f"tetrahedra spread too far ({max_xy:.2f} > {xy_tol:.2f})"

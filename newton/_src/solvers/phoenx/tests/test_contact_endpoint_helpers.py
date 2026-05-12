@@ -31,7 +31,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros
 from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_RIGID,
@@ -42,7 +42,6 @@ from newton._src.solvers.phoenx.constraints.contact_endpoint import (
     contact_endpoint_velocity_at_point,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import effective_mass_scalar
-from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer, copy_state_container_zeros
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_container_zeros
 
@@ -171,12 +170,8 @@ class TestContactEndpointHelpers(unittest.TestCase):
 
         # Cloth particles 0/1/2: triangle nodes with distinct masses
         # and velocities; these are the cloth side of a contact.
-        self.particle_pos = np.array(
-            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32
-        )
-        self.particle_vel = np.array(
-            [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]], dtype=np.float32
-        )
+        self.particle_pos = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+        self.particle_vel = np.array([[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]], dtype=np.float32)
         self.particle_inv_mass = np.array([1.0 / 0.1, 1.0 / 0.2, 1.0 / 0.3], dtype=np.float32)
         self.particles.position.assign(self.particle_pos)
         self.particles.velocity.assign(self.particle_vel)
@@ -274,7 +269,9 @@ class TestContactEndpointHelpers(unittest.TestCase):
         self.assertAlmostEqual(got, expected, places=5)
 
     def test_rigid_static_inv_mass_zero(self):
-        got = self._eval_inv_mass(SHAPE_ENDPOINT_KIND_RIGID, (-1, -1, -1), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+        got = self._eval_inv_mass(
+            SHAPE_ENDPOINT_KIND_RIGID, (-1, -1, -1), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0)
+        )
         self.assertAlmostEqual(got, 0.0, places=6)
 
     def test_cloth_inv_mass_along(self):
@@ -286,9 +283,7 @@ class TestContactEndpointHelpers(unittest.TestCase):
             + bary[1] ** 2 * self.particle_inv_mass[1]
             + bary[2] ** 2 * self.particle_inv_mass[2]
         )
-        got = self._eval_inv_mass(
-            SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE, nodes, bary, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0)
-        )
+        got = self._eval_inv_mass(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE, nodes, bary, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
         self.assertAlmostEqual(got, expected, places=5)
 
     def test_rigid_rigid_pair_matches_effective_mass_scalar(self):
@@ -330,8 +325,9 @@ class TestContactEndpointHelpers(unittest.TestCase):
             device=self.device,
         )
         denom = float(out.numpy()[0])
-        self.assertAlmostEqual(sum_helper, denom, places=5,
-            msg=f"sum_helper={sum_helper} effective_mass_scalar denom={denom}")
+        self.assertAlmostEqual(
+            sum_helper, denom, places=5, msg=f"sum_helper={sum_helper} effective_mass_scalar denom={denom}"
+        )
 
     def test_rigid_apply_impulse(self):
         """v_after - v_before == J / m ; w_after - w_before == invI . (r x J)."""
@@ -391,8 +387,7 @@ class TestContactEndpointHelpers(unittest.TestCase):
         v_after = self.particles.velocity.numpy()
         for i in range(3):
             expected_dv = bary[i] * J * self.particle_inv_mass[i]
-            np.testing.assert_allclose(v_after[i] - v_before[i], expected_dv, atol=1e-6,
-                err_msg=f"node {i}")
+            np.testing.assert_allclose(v_after[i] - v_before[i], expected_dv, atol=1e-6, err_msg=f"node {i}")
 
 
 if __name__ == "__main__":

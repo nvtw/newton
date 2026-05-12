@@ -212,14 +212,12 @@ class TestPhoenXBasicJointsPrismaticLimit(unittest.TestCase):
             self.assertGreaterEqual(
                 slide,
                 -0.3 - slack,
-                f"prismatic slider undershot lower limit: slide={slide:+.4f} m "
-                f"(window [-0.3, +0.3], slack {slack} m)",
+                f"prismatic slider undershot lower limit: slide={slide:+.4f} m (window [-0.3, +0.3], slack {slack} m)",
             )
             self.assertLessEqual(
                 slide,
                 0.3 + slack,
-                f"prismatic slider overshot upper limit: slide={slide:+.4f} m "
-                f"(window [-0.3, +0.3], slack {slack} m)",
+                f"prismatic slider overshot upper limit: slide={slide:+.4f} m (window [-0.3, +0.3], slack {slack} m)",
             )
 
         # Sanity: the slider must actually reach the lower stop --

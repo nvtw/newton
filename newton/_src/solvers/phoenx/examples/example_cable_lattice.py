@@ -31,8 +31,8 @@ from newton._src.solvers.phoenx.solver_phoenx import pack_body_xforms_kernel
 from newton._src.solvers.phoenx.world_builder import JointMode, WorldBuilder
 
 # Reference-scene counts.
-LAYERS = 1 #16
-STRANDS_PER_LAYER = 5 # 75
+LAYERS = 1  # 16
+STRANDS_PER_LAYER = 5  # 75
 SEGMENTS_PER_STRAND = 256
 
 # Segment geometry. The capsule is aligned with body-local +z and rotated
@@ -217,7 +217,10 @@ class Example:
                         first_body = body
                     if previous_body is not None:
                         anchor = _vec_add(
-                            _vec_add(_vec_scale(direction, -0.5 * span + segment * pitch), _vec_scale(transverse, transverse_offset)),
+                            _vec_add(
+                                _vec_scale(direction, -0.5 * span + segment * pitch),
+                                _vec_scale(transverse, transverse_offset),
+                            ),
                             (0.0, 0.0, z),
                         )
                         builder.add_joint(
@@ -351,14 +354,18 @@ class Example:
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
     parser.add_argument("--layers", type=int, default=LAYERS, help="Number of stacked cable layers.")
-    parser.add_argument("--strands-per-layer", type=int, default=STRANDS_PER_LAYER, help="Parallel strands in each layer.")
+    parser.add_argument(
+        "--strands-per-layer", type=int, default=STRANDS_PER_LAYER, help="Parallel strands in each layer."
+    )
     parser.add_argument(
         "--segments-per-strand",
         type=int,
         default=SEGMENTS_PER_STRAND,
         help="Capsule segments per strand.",
     )
-    parser.add_argument("--segment-pitch", type=float, default=SEGMENT_PITCH, help="Center-to-center segment spacing [m].")
+    parser.add_argument(
+        "--segment-pitch", type=float, default=SEGMENT_PITCH, help="Center-to-center segment spacing [m]."
+    )
     parser.add_argument("--segment-radius", type=float, default=SEGMENT_RADIUS, help="Capsule radius [m].")
     parser.add_argument(
         "--segment-overlap",
@@ -380,14 +387,18 @@ if __name__ == "__main__":
         help="Vertical spacing between layers [m]. Defaults to 2.4 * segment radius.",
     )
     parser.add_argument("--bend-stiffness", type=float, default=BEND_STIFFNESS, help="Cable bend stiffness [N*m/rad].")
-    parser.add_argument("--twist-stiffness", type=float, default=TWIST_STIFFNESS, help="Cable twist stiffness [N*m/rad].")
+    parser.add_argument(
+        "--twist-stiffness", type=float, default=TWIST_STIFFNESS, help="Cable twist stiffness [N*m/rad]."
+    )
     parser.add_argument("--bend-damping", type=float, default=BEND_DAMPING, help="Cable bend damping [N*m*s/rad].")
     parser.add_argument("--twist-damping", type=float, default=TWIST_DAMPING, help="Cable twist damping [N*m*s/rad].")
     parser.add_argument("--gravity", type=float, default=0.0, help="Downward gravity magnitude [m/s^2].")
     parser.add_argument("--fps", type=int, default=FPS, help="Render frames per second.")
     parser.add_argument("--substeps", type=int, default=SUBSTEPS, help="PhoenX solver substeps per frame.")
     parser.add_argument("--solver-iterations", type=int, default=SOLVER_ITERATIONS, help="PhoenX PGS iterations.")
-    parser.add_argument("--velocity-iterations", type=int, default=VELOCITY_ITERATIONS, help="PhoenX velocity iterations.")
+    parser.add_argument(
+        "--velocity-iterations", type=int, default=VELOCITY_ITERATIONS, help="PhoenX velocity iterations."
+    )
     parser.add_argument("--no-pin-ends", action="store_true", help="Do not pin strand endpoints to the static world.")
     parser.add_argument("--no-cuda-graph", action="store_true", help="Disable CUDA graph capture for the frame step.")
     viewer, args = newton.examples.init(parser)

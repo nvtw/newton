@@ -51,10 +51,10 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
-    "PhoenXClothShareVertexFilterData",
     "SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE",
     "SHAPE_ENDPOINT_KIND_RIGID",
     "SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON",
+    "PhoenXClothShareVertexFilterData",
     "ShapeEndpoint",
     "_phoenx_pack_cloth_contact_barycentric_kernel",
     "_phoenx_pack_cloth_contact_endpoints_kernel",
@@ -237,9 +237,15 @@ def canonicalize_triangle(xa: wp.vec3f, xb: wp.vec3f, xc: wp.vec3f):
     local_y = perp * (wp.float32(1.0) / c_y)
     local_x = wp.cross(local_y, local_z)
     rot = wp.mat33f(
-        local_x[0], local_y[0], local_z[0],
-        local_x[1], local_y[1], local_z[1],
-        local_x[2], local_y[2], local_z[2],
+        local_x[0],
+        local_y[0],
+        local_z[0],
+        local_x[1],
+        local_y[1],
+        local_z[1],
+        local_x[2],
+        local_y[2],
+        local_z[2],
     )
     q = wp.quat_from_matrix(rot)
     return wp.transform(xa, q), edge_ab, c_y, c_z
@@ -454,12 +460,8 @@ def _phoenx_pack_cloth_contact_endpoints_kernel(
     contact_set_body2(contact_cols, tid, ep_b.nodes[0])
     contact_set_side0_kind(contact_cols, tid, ep_a.kind)
     contact_set_side1_kind(contact_cols, tid, ep_b.kind)
-    contact_set_side0_nodes_extra(
-        contact_cols, tid, wp.vec3i(ep_a.nodes[1], ep_a.nodes[2], ep_a.nodes[3])
-    )
-    contact_set_side1_nodes_extra(
-        contact_cols, tid, wp.vec3i(ep_b.nodes[1], ep_b.nodes[2], ep_b.nodes[3])
-    )
+    contact_set_side0_nodes_extra(contact_cols, tid, wp.vec3i(ep_a.nodes[1], ep_a.nodes[2], ep_a.nodes[3]))
+    contact_set_side1_nodes_extra(contact_cols, tid, wp.vec3i(ep_b.nodes[1], ep_b.nodes[2], ep_b.nodes[3]))
 
 
 @wp.func
@@ -483,9 +485,15 @@ def _barycentric_in_tet(p: wp.vec3f, xa: wp.vec3f, xb: wp.vec3f, xc: wp.vec3f, x
     # 3x3 matrix ``T`` with columns (e1, e2, e3); barycentric
     # (beta, gamma, delta) = T^-1 * d. ``alpha = 1 - beta - gamma - delta``.
     T = wp.mat33f(
-        e1[0], e2[0], e3[0],
-        e1[1], e2[1], e3[1],
-        e1[2], e2[2], e3[2],
+        e1[0],
+        e2[0],
+        e3[0],
+        e1[1],
+        e2[1],
+        e3[1],
+        e1[2],
+        e2[2],
+        e3[2],
     )
     det_T = wp.determinant(T)
     if det_T < _DEGENERATE_EPS and det_T > -_DEGENERATE_EPS:

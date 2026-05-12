@@ -46,7 +46,9 @@ class TestClothOnBox(unittest.TestCase):
         builder.add_shape_box(
             body=-1,
             xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
-            hx=0.5, hy=0.5, hz=box_h,
+            hx=0.5,
+            hy=0.5,
+            hz=box_h,
         )
         tri_ka, tri_ke = cloth_lame_from_youngs_poisson_plane_stress(5.0e8, 0.3)
         # Drop a small cloth (8x8 = 64 triangles, 81 particles) from
@@ -55,28 +57,44 @@ class TestClothOnBox(unittest.TestCase):
             pos=wp.vec3(-0.4, -0.4, 0.3),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
-            dim_x=8, dim_y=8, cell_x=0.1, cell_y=0.1,
-            mass=0.05, fix_left=False,
-            tri_ke=tri_ke, tri_ka=tri_ka, particle_radius=0.04,
+            dim_x=8,
+            dim_y=8,
+            cell_x=0.1,
+            cell_y=0.1,
+            mass=0.05,
+            fix_left=False,
+            tri_ke=tri_ke,
+            tri_ka=tri_ka,
+            particle_radius=0.04,
         )
         model = builder.finalize(device=device)
 
         bodies = body_container_zeros(max(1, int(model.body_count)), device=device)
         constraints = PhoenXWorld.make_constraint_container(
-            num_joints=0, num_cloth_triangles=int(model.tri_count), device=device,
+            num_joints=0,
+            num_cloth_triangles=int(model.tri_count),
+            device=device,
         )
         world = PhoenXWorld(
-            bodies=bodies, constraints=constraints, num_joints=0,
+            bodies=bodies,
+            constraints=constraints,
+            num_joints=0,
             num_particles=int(model.particle_count),
             num_cloth_triangles=int(model.tri_count),
             rigid_contact_max=4096,
-            num_worlds=1, substeps=4, solver_iterations=8,
-            step_layout="single_world", device=device,
+            num_worlds=1,
+            substeps=4,
+            solver_iterations=8,
+            step_layout="single_world",
+            device=device,
         )
         world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
         world.populate_cloth_triangles_from_model(model)
         pipeline = world.setup_cloth_collision_pipeline(
-            model, cloth_thickness=cloth_thickness, cloth_gap=0.010, rigid_contact_max=4096,
+            model,
+            cloth_thickness=cloth_thickness,
+            cloth_gap=0.010,
+            rigid_contact_max=4096,
         )
 
         state = model.state()
@@ -99,13 +117,19 @@ class TestClothOnBox(unittest.TestCase):
         min_z = float(p_final[:, 2].min())
         max_z = float(p_final[:, 2].max())
 
-        self.assertGreater(min_z, box_top_z - 0.005,
-            f"cloth particles penetrated the box (min z = {min_z:.4f}, box top = {box_top_z:.4f})")
-        self.assertLess(mean_z, 0.15,
-            f"cloth didn't settle (mean z = {mean_z:.4f}, expected near {expected_z:.4f})")
-        self.assertAlmostEqual(mean_z, expected_z, delta=0.02,
+        self.assertGreater(
+            min_z,
+            box_top_z - 0.005,
+            f"cloth particles penetrated the box (min z = {min_z:.4f}, box top = {box_top_z:.4f})",
+        )
+        self.assertLess(mean_z, 0.15, f"cloth didn't settle (mean z = {mean_z:.4f}, expected near {expected_z:.4f})")
+        self.assertAlmostEqual(
+            mean_z,
+            expected_z,
+            delta=0.02,
             msg=f"cloth settled at z = {mean_z:.4f}, expected near {expected_z:.4f} "
-                f"(box_top + thickness); range [{min_z:.4f}, {max_z:.4f}]")
+            f"(box_top + thickness); range [{min_z:.4f}, {max_z:.4f}]",
+        )
 
 
 if __name__ == "__main__":

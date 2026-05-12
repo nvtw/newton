@@ -181,8 +181,10 @@ def cloth_init_triangle_rows_kernel(
             else:
                 inv_det = wp.float32(1.0) / det
                 inv_rest_m = wp.mat22f(
-                    ac_y * inv_det, -ac_x * inv_det,
-                    -ab_y * inv_det, ab_x * inv_det,
+                    ac_y * inv_det,
+                    -ac_x * inv_det,
+                    -ab_y * inv_det,
+                    ab_x * inv_det,
                 )
                 cloth_triangle_set_inv_rest(constraints, cid, inv_rest_m)
                 rest_area = wp.float32(0.5) * wp.sqrt(wp.dot(normal, normal))

@@ -280,7 +280,7 @@ class Example:
             elif bool(self.args.pin_top_edge):
                 pin_corners = [(i, ny - 1) for i in range(nx)]
 
-            for (i, j) in pin_corners:
+            for i, j in pin_corners:
                 anchor = (x_of(i), y_of(j), height_z)
                 # Any incident capsule works as the body to pin; the
                 # ball-socket lock at the corner anchors the whole star.
@@ -303,12 +303,7 @@ class Example:
         per_net_chain_joints = 0
         for j in range(ny):
             for i in range(nx):
-                deg = (
-                    (1 if i > 0 else 0)
-                    + (1 if i < nx - 1 else 0)
-                    + (1 if j > 0 else 0)
-                    + (1 if j < ny - 1 else 0)
-                )
+                deg = (1 if i > 0 else 0) + (1 if i < nx - 1 else 0) + (1 if j > 0 else 0) + (1 if j < ny - 1 else 0)
                 per_net_chain_joints += max(deg - 1, 0)
         expected_chain_joints = num_nets * per_net_chain_joints
         expected_total = expected_chain_joints + total_pin_joints
@@ -474,7 +469,9 @@ if __name__ == "__main__":
     parser.add_argument("--fps", type=int, default=FPS, help="Render frames per second.")
     parser.add_argument("--substeps", type=int, default=SUBSTEPS, help="PhoenX solver substeps per frame.")
     parser.add_argument("--solver-iterations", type=int, default=SOLVER_ITERATIONS, help="PhoenX PGS iterations.")
-    parser.add_argument("--velocity-iterations", type=int, default=VELOCITY_ITERATIONS, help="PhoenX velocity iterations.")
+    parser.add_argument(
+        "--velocity-iterations", type=int, default=VELOCITY_ITERATIONS, help="PhoenX velocity iterations."
+    )
     parser.add_argument("--no-cuda-graph", action="store_true", help="Disable CUDA graph capture for the frame step.")
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)

@@ -53,7 +53,6 @@ from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
-
 # ---------------------------------------------------------------------
 # Triangle construction helpers
 # ---------------------------------------------------------------------
@@ -68,9 +67,7 @@ def _world_to_local(
     return float(p_local[0]), float(p_local[1]), float(p_local[2])
 
 
-def _filter_collision_between_bodies(
-    builder: newton.ModelBuilder, body_a: int, body_b: int
-) -> None:
+def _filter_collision_between_bodies(builder: newton.ModelBuilder, body_a: int, body_b: int) -> None:
     """Mark every shape on ``body_a`` as not-colliding with every shape on ``body_b``."""
     shapes_a = builder.body_shapes[body_a]
     shapes_b = builder.body_shapes[body_b]
@@ -254,9 +251,7 @@ class Example:
         # seeded (the ADBS init kernel reads PhoenX body positions to
         # snapshot the body-local anchor offsets).
         if num_joints > 0:
-            self.world.initialize_actuated_double_ball_socket_joints(
-                **self._adbs.to_initialize_kwargs()
-            )
+            self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
 
         # ---- Newton state for the renderer ---------------------------
         # We mirror PhoenX body state -> ``state.body_q`` / ``body_qd``
@@ -546,21 +541,16 @@ class Example:
             drift = float(np.linalg.norm(now_p - init_p))
             if drift > allowed:
                 raise RuntimeError(
-                    f"pinned cloth corner triangle drifted: body={pinned} "
-                    f"drift={drift:.4f} m allowed={allowed:.4f} m"
+                    f"pinned cloth corner triangle drifted: body={pinned} drift={drift:.4f} m allowed={allowed:.4f} m"
                 )
 
         cube_z = float(body_q[self.cube_body, 2])
         if cube_z >= self.cube_spawn_z - 1.0e-3:
-            raise RuntimeError(
-                f"cube did not fall (z={cube_z:.4f} m, spawn={self.cube_spawn_z:.4f} m)"
-            )
+            raise RuntimeError(f"cube did not fall (z={cube_z:.4f} m, spawn={self.cube_spawn_z:.4f} m)")
 
         floor = self.cloth_z - 4.0 * self.cube_he
         if cube_z < floor:
-            raise RuntimeError(
-                f"cube fell through cloth (z={cube_z:.4f} m, floor={floor:.4f} m)"
-            )
+            raise RuntimeError(f"cube fell through cloth (z={cube_z:.4f} m, floor={floor:.4f} m)")
 
     def render(self) -> None:
         self._final_state()

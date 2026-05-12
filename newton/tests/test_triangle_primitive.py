@@ -186,9 +186,7 @@ class TestTriangleInertia(unittest.TestCase):
         # triangle centroid so external mass / inertia overrides resolve
         # at the geometric center, not at vertex A.
         scale = wp.vec3(1.0, 1.0, 0.0)
-        m, com, inertia = compute_inertia_shape(
-            GeoType.TRIANGLE, scale, None, density=1000.0, thickness=0.0
-        )
+        m, com, inertia = compute_inertia_shape(GeoType.TRIANGLE, scale, None, density=1000.0, thickness=0.0)
         self.assertEqual(m, 0.0)
         # Centroid of A=(0,0,0), B=(0,0,1), C=(0,1,0) is (0, 1/3, 1/3).
         np.testing.assert_allclose(np.array(com), (0.0, 1.0 / 3.0, 1.0 / 3.0), atol=1e-6)
@@ -204,9 +202,7 @@ class TestTriangleInertia(unittest.TestCase):
         margin = 0.05
         density = 1000.0
         scale = wp.vec3(L, c_y, 0.0)
-        m, _com, _I = compute_inertia_shape(
-            GeoType.TRIANGLE, scale, None, density=density, thickness=margin
-        )
+        m, _com, _I = compute_inertia_shape(GeoType.TRIANGLE, scale, None, density=density, thickness=margin)
         expected_mass = density * (0.5 * L * c_y) * (2.0 * margin)
         self.assertAlmostEqual(m, expected_mass, places=4)
 
@@ -221,9 +217,7 @@ class TestTriangleInertia(unittest.TestCase):
         margin = 1e-4  # very thin
         density = 1000.0
         scale = wp.vec3(L, c_y, 0.0)
-        m, _com, inertia = compute_inertia_shape(
-            GeoType.TRIANGLE, scale, None, density=density, thickness=margin
-        )
+        m, _com, inertia = compute_inertia_shape(GeoType.TRIANGLE, scale, None, density=density, thickness=margin)
         I = np.array(inertia).reshape(3, 3)
         # Symmetry: tensor must be symmetric.
         np.testing.assert_allclose(I, I.T, atol=1e-12)

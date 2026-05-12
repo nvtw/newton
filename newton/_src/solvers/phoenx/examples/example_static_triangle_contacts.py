@@ -135,9 +135,7 @@ class Example(PortedExample):
         # phase is free to report the overlap.
         pair = (min(tri_a, tri_b), max(tri_a, tri_b))
         if hasattr(builder, "shape_collision_filter_pairs"):
-            builder.shape_collision_filter_pairs = [
-                p for p in builder.shape_collision_filter_pairs if tuple(p) != pair
-            ]
+            builder.shape_collision_filter_pairs = [p for p in builder.shape_collision_filter_pairs if tuple(p) != pair]
 
         # ---- Falling sphere (sanity check for contact arrows) --------
         sphere_body = builder.add_body(

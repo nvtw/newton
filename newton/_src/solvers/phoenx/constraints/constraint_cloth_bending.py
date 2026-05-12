@@ -337,12 +337,7 @@ def cloth_bending_iterate_at(
     # Shared denominator: independent of dimension because the gradient
     # is K_i along the d-th axis only. ||grad||^2 = K_i^2.
     bias = idt * idt * alpha
-    grad_sq = (
-        inv_mass_a * k_0 * k_0
-        + inv_mass_b * k_1 * k_1
-        + inv_mass_c * k_2 * k_2
-        + inv_mass_d * k_3 * k_3
-    )
+    grad_sq = inv_mass_a * k_0 * k_0 + inv_mass_b * k_1 * k_1 + inv_mass_c * k_2 * k_2 + inv_mass_d * k_3 * k_3
     denom = grad_sq + bias
     if denom <= wp.float32(0.0):
         return

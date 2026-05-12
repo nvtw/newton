@@ -36,10 +36,6 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_triangle_iterate_at,
     cloth_triangle_prepare_for_iteration_at,
 )
-from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
-    soft_tetrahedron_iterate_at,
-    soft_tetrahedron_prepare_for_iteration_at,
-)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -68,6 +64,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_get_body2,
     constraint_get_type,
     read_int,
+)
+from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
+    soft_tetrahedron_iterate_at,
+    soft_tetrahedron_prepare_for_iteration_at,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
@@ -697,11 +697,29 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                     if cid < num_joints:
                         if wp.static(revolute_only):
                             revolute_iterate_multi(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt, True, inner_sweeps
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                True,
+                                inner_sweeps,
                             )
                         else:
                             actuated_double_ball_socket_iterate_multi(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt, True, inner_sweeps
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                True,
+                                inner_sweeps,
                             )
                     else:
                         contact_iterate_multi(
@@ -776,11 +794,29 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                 if cid < num_joints:
                     if wp.static(revolute_only):
                         revolute_iterate_multi(
-                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt, False, num_iterations
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            False,
+                            num_iterations,
                         )
                     else:
                         actuated_double_ball_socket_iterate_multi(
-                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt, False, num_iterations
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            False,
+                            num_iterations,
                         )
                 else:
                     contact_iterate_multi(
@@ -1845,11 +1881,27 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                             else:
                                 if wp.static(revolute_only):
                                     revolute_iterate(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        use_bias,
                                     )
                                 else:
                                     actuated_double_ball_socket_iterate(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, use_bias
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        use_bias,
                                     )
             _sync_threads()
             cursor = cursor - 1
@@ -1859,9 +1911,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
     return kernel
 
 
-def get_singleworld_kernel(
-    *, phase: str, fused: bool, revolute_only: bool, cloth_support: bool
-):
+def get_singleworld_kernel(*, phase: str, fused: bool, revolute_only: bool, cloth_support: bool):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
     factory = _make_singleworld_fused_kernel if fused else _make_singleworld_persistent_kernel

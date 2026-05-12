@@ -61,17 +61,29 @@ class TestClothContactPartitioner(unittest.TestCase):
             pos=wp.vec3(-0.5, -0.5, 0.11),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
-            dim_x=4, dim_y=4, cell_x=0.25, cell_y=0.25,
-            mass=0.05, fix_left=False,
-            tri_ke=tri_ke, tri_ka=tri_ka, particle_radius=0.04,
+            dim_x=4,
+            dim_y=4,
+            cell_x=0.25,
+            cell_y=0.25,
+            mass=0.05,
+            fix_left=False,
+            tri_ke=tri_ke,
+            tri_ka=tri_ka,
+            particle_radius=0.04,
         )
         builder.add_cloth_grid(
             pos=wp.vec3(-0.5, -0.5, 0.13),  # 2 cm above the first grid
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
-            dim_x=4, dim_y=4, cell_x=0.25, cell_y=0.25,
-            mass=0.05, fix_left=False,
-            tri_ke=tri_ke, tri_ka=tri_ka, particle_radius=0.04,
+            dim_x=4,
+            dim_y=4,
+            cell_x=0.25,
+            cell_y=0.25,
+            mass=0.05,
+            fix_left=False,
+            tri_ke=tri_ke,
+            tri_ka=tri_ka,
+            particle_radius=0.04,
         )
         model = builder.finalize(device=device)
 
@@ -133,9 +145,15 @@ class TestClothContactPartitioner(unittest.TestCase):
 
         n_active = int(world._num_active_constraints.numpy()[0])
         n_colors = int(world._partitioner.num_colors.numpy()[0])
-        self.assertGreater(n_active, world.num_cloth_triangles, "expected > num_cloth_triangles active cids (contacts present)")
+        self.assertGreater(
+            n_active, world.num_cloth_triangles, "expected > num_cloth_triangles active cids (contacts present)"
+        )
         self.assertGreater(n_colors, 0)
-        self.assertLess(n_colors, n_active, "more colours than elements would mean every element is its own colour -- partitioner failed to merge")
+        self.assertLess(
+            n_colors,
+            n_active,
+            "more colours than elements would mean every element is its own colour -- partitioner failed to merge",
+        )
 
         color_starts = world._partitioner.color_starts.numpy()
         ids_by_color = world._partitioner.element_ids_by_color.numpy()

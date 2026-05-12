@@ -118,7 +118,8 @@ class TestClothBending(unittest.TestCase):
         z_range_soft = float(p_soft[:, 2].max() - p_soft[:, 2].min())
         z_range_stiff = float(p_stiff[:, 2].max() - p_stiff[:, 2].min())
         self.assertLess(
-            z_range_stiff, z_range_soft,
+            z_range_stiff,
+            z_range_soft,
             f"stiff cloth z-range ({z_range_stiff:.3f}) should be < soft ({z_range_soft:.3f})",
         )
 

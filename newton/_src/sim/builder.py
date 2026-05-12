@@ -119,7 +119,7 @@ def _encode_vec3_uint64(x: float, y: float, z: float) -> int:
 
     Returns:
         A Python ``int`` in ``[0, 2^64)`` -- safe to push into a
-        ``wp.array(dtype=wp.uint64)``.
+        ``wp.array[wp.uint64]``.
     """
     ax = abs(float(x))
     ay = abs(float(y))
@@ -193,10 +193,7 @@ def _canonicalize_triangle(
     perp = ac - c_z * local_z
     perp_norm = float(np.linalg.norm(perp))
     if perp_norm <= 1.0e-12 * edge_ab:
-        raise ValueError(
-            f"Degenerate triangle: A={tuple(a)}, B={tuple(b)}, C={tuple(c)} "
-            "are colinear (zero area)."
-        )
+        raise ValueError(f"Degenerate triangle: A={tuple(a)}, B={tuple(b)}, C={tuple(c)} are colinear (zero area).")
     local_y = perp / perp_norm
     c_y = perp_norm
     local_x = np.cross(local_y, local_z)
@@ -6274,8 +6271,7 @@ class ModelBuilder:
         # ``d_x == 0`` (D in the canonical YZ plane).
         if abs(d_x) < 1.0e-12:
             raise ValueError(
-                f"Degenerate tetrahedron: vertex D={tuple(point_d)} is "
-                "coplanar with A, B, C (zero volume)."
+                f"Degenerate tetrahedron: vertex D={tuple(point_d)} is coplanar with A, B, C (zero volume)."
             )
 
         scale = wp.vec3(edge_ab, c_y, c_z)
