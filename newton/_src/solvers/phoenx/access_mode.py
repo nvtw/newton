@@ -3,35 +3,19 @@
 
 """Per-entity access-mode synchronization helpers.
 
-Direct port of Jitter2's ``TinyRigidState.SynchronizeVelAndPosStateUpdates``
-(``MassSplitting/TinyRigidState.cs``). PhoenX stores rigid bodies and
-particles in struct-of-arrays containers; this module exposes
-container-agnostic ``@wp.func`` helpers that constraint kernels call to
-*lazily* convert one entity (body or particle) between velocity-level
-and position-level integration regimes inside a single substep.
+Port of Jitter2's ``TinyRigidState.SynchronizeVelAndPosStateUpdates``
+(``MassSplitting/TinyRigidState.cs``). Container-agnostic ``@wp.func``
+helpers that lazily convert one entity between
+:data:`ACCESS_MODE_VELOCITY_LEVEL` (velocity is authoritative; flip to
+position integrates the substep-start snapshot forward by ``velocity *
+dt``) and :data:`ACCESS_MODE_POSITION_LEVEL` (position is authoritative;
+flip to velocity recovers ``velocity`` from the position delta vs
+``position_prev_substep`` -- Macklin XPBD).
+:data:`ACCESS_MODE_STATIC` skips sync (pinned / kinematic).
+:data:`ACCESS_MODE_NONE` silently promotes to the requested mode.
 
-## Mental model
-
-Each entity carries an ``access_mode`` int that tracks which dual is
-"live":
-
-* :data:`ACCESS_MODE_VELOCITY_LEVEL` -- ``velocity`` /
-  ``angular_velocity`` are authoritative; flipping to position-level
-  integrates the substep-start snapshot forward by ``velocity * dt``.
-* :data:`ACCESS_MODE_POSITION_LEVEL` -- ``position`` / ``orientation``
-  are authoritative; flipping back to velocity-level recovers
-  ``velocity`` from the position delta against
-  ``position_prev_substep`` (Macklin XPBD).
-* :data:`ACCESS_MODE_STATIC` -- pinned / static / kinematic; sync is a
-  no-op so the substep-start snapshot is never modified.
-* :data:`ACCESS_MODE_NONE` -- uninitialised; sync silently promotes to
-  the requested mode.
-
-The pattern is independent of mass splitting -- the synchronize helpers
-are pure value-based functions over ``(position, orientation, velocity,
-angular_velocity, prev-substep snapshot, access_mode, inv_dt)``.
-Containers (body SoA / particle SoA) read out the dual fields, call
-the helper, and scatter the result back.
+Pure value-based functions: read the dual fields from the container,
+call the helper, scatter the result back.
 """
 
 from __future__ import annotations

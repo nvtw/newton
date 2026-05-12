@@ -1512,58 +1512,37 @@ class PhoenXWorld:
             # (highest_index_in_use[0] == 0 -> kernel short-circuit).
             if self.mass_splitting_enabled and self.step_layout == "single_world":
                 self._mass_splitting_broadcast()
-            # Substep order: TGS-soft (Box2D-v3) — main solve with
-            # positional Baumgarte bias, integrate to apply that
-            # bias to positions, then relax (bias=False) to remove
-            # the velocity drift the bias introduced. C# PhoenX uses
-            # classical PGS (integrate after both) which doesn't
-            # require this drift cleanup, but Newton's bias schedule
-            # is designed around it; swapping the order regresses
-            # multiple stacking and friction tests.
-            #
-            # The "slot.position becomes stale between main and
-            # relax" concern is a non-issue: relax sets
-            # ``use_bias=False`` so it doesn't read slot.position,
-            # and constraint lever arms come from ``bodies.orientation``
-            # / ``bodies.body_com`` (no position). The extra
-            # writeback per substep is cheap compared to the
-            # stability win.
+            # TGS-soft (Box2D-v3) substep order: solve-with-bias ->
+            # integrate -> relax (bias=False). Reversing regresses
+            # stacking / friction tests. Relax doesn't read
+            # slot.position (use_bias=False), so the post-integrate
+            # slot.position staleness is harmless.
             if self.step_layout == "single_world":
                 self._solve_main_singleworld()
                 # Writeback BEFORE integrate so positions advance with
-                # the post-PGS velocity (slot[0] → body.velocity for
-                # every body that has slots). No-op when disabled.
+                # the post-PGS velocity from slot[0].
                 if self.mass_splitting_enabled:
                     self._mass_splitting_writeback()
                 self._integrate_positions()
                 self._relax_velocities_singleworld()
                 # Second writeback after relax: relax also routes
-                # through slots, so without this the next substep
-                # would see stale body.velocity for any body that
-                # had mass-splitting slots. No-op when relax is
-                # skipped (velocity_iterations == 0) or when mass
-                # splitting is off.
+                # through slots, so the next substep would see stale
+                # body.velocity otherwise.
                 if self.mass_splitting_enabled and self.velocity_iterations > 0:
                     self._mass_splitting_writeback()
             else:
                 self._solve_main()
                 self._integrate_positions()
                 self._relax_velocities()
-            # Particle substep exit: flip POSITION_LEVEL writes (cloth
-            # iterate) into VELOCITY_LEVEL via the access-mode
-            # synchronize. No-op for STATIC pinned particles and for
-            # rigid-only scenes (num_particles == 0).
+            # Flip cloth particles' POSITION_LEVEL writes back to
+            # VELOCITY_LEVEL. No-op for STATIC particles and rigid-only
+            # scenes (num_particles == 0).
             self._recover_particle_velocities()
-            # Inertia refresh: ``_integrate_positions`` rotated every
-            # dynamic body via ``q_new = dq(omega * substep_dt) * q``;
-            # the world-frame inverse inertia tensor stored in
-            # ``bodies.inverse_inertia_world`` was rebuilt for the
-            # PRIOR orientation, so any subsequent constraint solve in
-            # this step (relax + the next substep) would project
-            # impulses through a stale ``R * I^-1 * R^T``. For
-            # anisotropic robot links this biases the angular impulse
-            # direction over the substep loop. Refreshing here keeps
-            # every solve consistent with the current pose.
+            # Refresh ``bodies.inverse_inertia_world`` after
+            # _integrate_positions rotated every body -- any subsequent
+            # solve (relax + next substep) would project impulses
+            # through a stale ``R * I^-1 * R^T``, biasing anisotropic
+            # robot links.
             self._refresh_world_inertia()
             alpha = float(k + 1) * inv_n
             self._kinematic_interpolate_substep(alpha)

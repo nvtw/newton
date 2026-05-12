@@ -5,46 +5,26 @@
 
 Mirrors C# ``MassSplittingRigidBodyInteractionGraph.BuildInteractionGraph``
 (``MassSplitting/MassSplittingRigidBodyInteractionGraph.cs:129``) plus
-``MassSplittingKernels.BuildInteractionGraph{Prepare,Build,Finalize}Kernel``
-(``CudaKernels/MassSplitting/MassSplittingKernels.cs``).
+``MassSplittingKernels.BuildInteractionGraph{Prepare,Build,Finalize}Kernel``.
 
-## Pipeline (all stages CUDA-graph-capturable)
+Pipeline (graph-capturable): callers deposit ``(node_id, partition_key)``
+pairs into ``InteractionGraphScratch.packed_keys`` via :func:`emit_pair`,
+then :func:`build_interaction_graph`:
 
-The caller deposits ``(unified_node_id, partition_key)`` pairs into
-``InteractionGraphScratch.packed_keys`` via :func:`emit_pair` from a
-per-constraint kernel (or hand-build the array in tests). Then
-:func:`build_interaction_graph` runs the canonical chain:
+1. Mask tail past ``num_pairs[0]`` with ``INT64_MAX`` so the sort tails it.
+2. ``radix_sort_pairs`` on ``packed_keys`` (high 32 = node, low 32 =
+   partition_key) -- groups by node, sorts partitions within node.
+3. ``_mark_boundaries_and_count_kernel`` flags first occurrence of each
+   unique ``(node, partition)`` and atomic-adds the node bucket count.
+4. Exclusive scan on ``is_boundary`` -> ``dest_idx``;
+   ``_compact_partition_list_kernel`` writes deduplicated partition
+   keys into ``CopyStateContainer.partition_list``.
+5. Inclusive scan on ``section_end`` -- per-node counts -> cumulative
+   end offsets; this auto-fills empty-node holes with the predecessor.
 
-1. ``_mask_tail_int64`` — slots past ``num_pairs[0]`` are stamped with
-   ``INT64_MAX`` so radix sort pushes them to the tail.
-2. ``wp.utils.radix_sort_pairs`` on ``packed_keys`` (high 32 bits =
-   node id, low 32 = partition key) — drives both the node-id grouping
-   and the per-node partition-key ordering.
-3. ``_mark_boundaries_and_count_kernel`` — per slot ``k``: flag the
-   first occurrence of each unique ``(node, partition)`` pair; for each
-   flagged slot atomic-add the node's bucket in ``section_end``.
-4. ``wp.utils.array_scan`` on ``is_boundary`` (exclusive) →
-   ``dest_idx``, then ``_compact_partition_list_kernel`` writes the
-   deduplicated partition keys into ``CopyStateContainer.partition_list``
-   and stamps ``highest_index_in_use[0]``.
-5. ``wp.utils.array_scan`` on ``section_end`` (inclusive) — converts
-   per-node counts to cumulative-end offsets, filling empty-node holes
-   with their predecessor's value. Mirrors the C#
-   ``maxScan.inclusiveScan(StateSectionEndIndices, ...)`` step except
-   we use sum-scan over counts which is equivalent and lets us reuse
-   ``array_scan``.
-
-The C# build uses an inclusive *max* scan over an array that's already
-written with the run-end at each boundary; we use an inclusive *sum*
-scan over per-node counts, which collapses to the same result without
-needing a custom max-scan kernel.
-
-## Disabled fast path
-
-Constructions where the caller leaves ``num_pairs[0] == 0`` (mass
-splitting off) produce ``highest_index_in_use[0] == 0`` after build,
-which is the short-circuit gate that :func:`get_state_index` (Step 4)
-checks before touching any of the slot arrays.
+Disabled fast path: ``num_pairs[0] == 0`` => ``highest_index_in_use[0]
+== 0`` after build, the short-circuit gate :func:`get_state_index`
+checks.
 """
 
 from __future__ import annotations

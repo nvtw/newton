@@ -3,39 +3,22 @@
 
 """Slot-aware read/write helpers for constraint kernels.
 
-Direct port of the C# ``ConstraintHelper.ReadState`` /
-``ConstraintHelper.WriteState`` pattern
-(``CudaKernels/Constraints/ConstraintHelper.cs:153-232``).
+Port of C# ``ConstraintHelper.ReadState`` / ``WriteState``
+(``CudaKernels/Constraints/ConstraintHelper.cs:153-232``). One kernel
+serves both mass-splitting-off and -on: the helpers dispatch to direct
+body/particle storage when the node has no copy-state slot for the
+given ``parallel_id``, else to the matching :class:`CopyStateContainer`
+slot.
 
-Purpose: keep ONE set of constraint kernels that work both with mass
-splitting OFF and ON. The constraint kernel reads / writes through
-these helpers, which dispatch to either:
+Read helpers return ``(value, inv_factor, slot)``:
 
-* The direct body / particle storage (``BodyContainer`` /
-  ``ParticleContainer``) when the node has no copy state slot for
-  this ``parallel_id``. This is the disabled-fast-path AND the
-  static-body / not-in-graph fallback.
-* A specific slot in :class:`CopyStateContainer` when the body
-  participates in mass splitting and the ``parallel_id`` hits one of
-  its allocated slots.
-
-The helpers return ``(value, inv_factor, slot)``:
-
-* ``inv_factor = count`` — the number of partition copies this node
-  has. ``1`` when the helper fell through to direct storage. The
-  constraint kernel scales ``inv_mass`` and ``inv_inertia`` by
-  ``inv_factor`` so a body in N slots sees ``1/N`` of its inertia
-  per slot — the Tonge mass-split effective-mass relation. Static
-  bodies (``inv_mass == 0``) zero out the scaled inv mass / inertia
-  regardless of ``inv_factor``, so the no-slot fallback's
-  ``inv_factor=1`` is safe even if the body is static.
-* ``slot`` — the copy-state slot index for the matching
-  :func:`write_*_unified` call. ``-1`` means "fell through to
-  direct"; the writer then routes back to the body / particle.
-
-This file does NOT yet refactor any constraint kernel — it lands the
-helpers + unit tests so the routing contract is locked in before the
-larger kernel refactor (Step 4b / Step 6 of the plan).
+* ``inv_factor`` -- partition-copy count; the constraint kernel scales
+  ``inv_mass`` / ``inv_inertia`` by this so a body in N slots sees
+  ``1/N`` of its inertia per slot (Tonge effective-mass). ``1`` on the
+  no-slot fallback. Static bodies' ``inv_mass == 0`` self-zero so the
+  fallback is safe.
+* ``slot`` -- index into the SoA arrays for the matching
+  ``write_*_unified``. ``-1`` => fell through to direct storage.
 """
 
 from __future__ import annotations
@@ -101,20 +84,14 @@ def get_state_index(
 ):
     """Locate the slot for ``(node_id, parallel_id)``.
 
-    Returns ``(slot, inv_factor)``:
-
-    * ``slot == -1`` — no slot. Caller falls back to direct
-      body / particle storage. ``inv_factor == 1`` (no mass scaling).
-      Hit when: mass splitting disabled (``highest_index_in_use[0] ==
-      0``), ``node_id`` out of range, the node has zero slots, or the
-      requested ``parallel_id`` isn't among the node's allocated
-      partition keys.
-    * ``slot >= 0`` — slot index into the SoA arrays. ``inv_factor ==
-      count`` — total slot count of this node. The constraint kernel
-      scales ``inv_mass`` / ``inv_inertia`` by ``inv_factor`` so each
-      slot sees ``mass / count`` — the Tonge mass-split effective-mass.
+    Returns ``(slot, inv_factor)``. ``slot == -1`` (with ``inv_factor
+    == 1``) means no slot: caller falls back to direct body / particle
+    storage. Hit when mass splitting is disabled, the node is out of
+    range, or ``parallel_id`` isn't among the node's allocated keys.
+    ``slot >= 0`` => index into the SoA arrays with ``inv_factor =
+    count`` (total slots for this node, used for Tonge ``1/N`` mass
+    scaling).
     """
-    # Disabled fast path: zero slots populated. Single int load + compare.
     if copy_state.highest_index_in_use[0] == wp.int32(0):
         return wp.int32(-1), wp.int32(1)
     if node_id < wp.int32(0) or node_id >= copy_state.section_end.shape[0]:
@@ -125,27 +102,16 @@ def get_state_index(
     end = copy_state.section_end[node_id]
     count = end - start
     if count == wp.int32(0):
-        # Node in range but has no slots (static body / not in graph). The
-        # constraint kernel can still read its velocity from direct storage,
-        # though typically static bodies are filtered before getting here.
         return wp.int32(-1), wp.int32(1)
-    # Fast path for ``parallel_id == 0``: partition keys are emitted as
-    # sorted (ascending) ints, and ``0`` (regular colour) is always the
-    # smallest. If present, it lives at ``partition_list[start]``;
-    # otherwise the body is overflow-only. Skipping the binary search
-    # here saves the bulk of the lookup cost for regular-colour
-    # iterates (which are the majority of contacts in dense scenes).
+    # parallel_id == 0 (regular colour) is always the smallest key, so
+    # if present it lives at partition_list[start] -- skip the binary
+    # search for the regular-colour iterate hot path.
     if parallel_id == wp.int32(0):
         if copy_state.partition_list[start] == wp.int32(0):
             return start, count
         return wp.int32(-1), wp.int32(1)
     local = _binary_search_partition_list(copy_state.partition_list, start, end, parallel_id)
     if local < wp.int32(0):
-        # Slots exist but none match this parallel_id (this constraint isn't
-        # in the partition this body belongs to). Fall through to direct
-        # storage so the read still returns the body's velocity. Mass
-        # splitting only affects bodies/parallel_ids that actually appear
-        # together in the interaction graph.
         return wp.int32(-1), wp.int32(1)
     return local, count
 

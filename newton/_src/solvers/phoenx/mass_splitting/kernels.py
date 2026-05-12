@@ -3,39 +3,23 @@
 
 """Broadcast / average / writeback substep-loop kernels for mass splitting.
 
-Direct port of C# ``MassSplitting`` substep helpers
-(``CudaKernels/Solver/SolverKernels.cs`` lines 44-110):
+Port of C# ``MassSplitting`` substep helpers
+(``CudaKernels/Solver/SolverKernels.cs:44-110``):
 
-* :func:`launch_broadcast_rigid_to_copy_states` ↔
-  ``BroadcastRigidToCopyStatesKernel`` (called once per substep, before
-  the PGS prepare phase). Fan body / particle state into every
-  ``(node, partition_copy)`` slot. Mirrors the C# ``TinyRigidState``
-  copy constructor which forward-integrates ``position += dt *
-  velocity`` and ``orientation = integrate(orientation, omega, dt)``,
-  matching TGS-soft's "predicted position at substep end" semantics.
+* :func:`launch_broadcast_rigid_to_copy_states` -- once per substep,
+  pre-PGS. Fans body / particle state into every ``(node,
+  partition_copy)`` slot. Forward-integrates position by ``dt *
+  velocity`` (TGS-soft predicted-end-of-substep semantics).
+* :func:`launch_average_and_broadcast` -- between PGS iterations.
+  Averages linear / angular velocity across a node's slots; position /
+  orientation stay at broadcast-time values.
+* :func:`launch_copy_state_into_rigids` -- once post-PGS. Writes
+  slot[0]'s averaged velocity back to body / particle storage.
 
-* :func:`launch_average_and_broadcast` ↔ ``AverageAndBroadcastKernel``
-  (called between PGS iterations inside the overflow partition's
-  iterate loop). Average linear and angular velocity across all of a
-  node's slots, broadcast the average back. Position / orientation
-  stay at the broadcast-time forward-integrated value — only velocity
-  travels through the Jacobi reduction.
-
-* :func:`launch_copy_state_into_rigids` ↔ ``CopyStateIntoRigidsKernel``
-  (called once after the PGS phase, before the integrate kernel).
-  Write the first slot's averaged velocity back into
-  ``BodyContainer.velocity`` / ``ParticleContainer.velocity``.
-
-All three kernels launch one thread per unified-node-id and gate on
-``copy_state.highest_index_in_use[0] == 0`` for the mass-splitting-off
-no-op path. Inside a captured CUDA graph, the disabled launch is one
-zero-cost kernel-boundary plus per-thread integer compare.
-
-Access-mode synchronization is intentionally NOT folded in here —
-Step 4 of the plan will thread the access-mode flip through the slot
-helpers once the constraint kernels are refactored to read/write copy
-slots directly. Until then the broadcast assumes the body is at
-``VELOCITY_LEVEL`` (true by default per ``body_container_zeros``).
+All three launch one thread per unified-node-id and short-circuit on
+``copy_state.highest_index_in_use[0] == 0`` (mass splitting off).
+Inside a captured graph the disabled launch is one zero-cost
+kernel-boundary + per-thread int compare.
 """
 
 from __future__ import annotations

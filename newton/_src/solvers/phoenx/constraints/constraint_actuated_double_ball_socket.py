@@ -1296,13 +1296,8 @@ def _revolute_prepare_at(
     body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
-    """Revolute-mode prepare pass.
-
-    Identical to the old :mod:`constraint_actuated_double_ball_socket`
-    math: a 3+2 Schur complement on the (anchor1 3-row lock, anchor2
-    tangent 2-row lock) stack, followed by a scalar drive / limit row
-    on the axial twist. See the module docstring for the formulation.
-    """
+    """Revolute prepare: 3+2 Schur on (anchor1 lock, anchor2 tangent
+    lock) + scalar drive/limit row on the axial twist."""
     b1 = body_pair.b1
     b2 = body_pair.b2
 
