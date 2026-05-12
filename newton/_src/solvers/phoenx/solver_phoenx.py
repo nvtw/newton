@@ -92,6 +92,9 @@ from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatch
 from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import (
     SingleWorldMassSplittingDispatcher,
 )
+from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting_unrolled import (
+    SingleWorldMassSplittingUnrolledDispatcher,
+)
 from newton._src.solvers.phoenx.graph_coloring.luby_fixed import (
     FixedIterationLubyPartitioner,
 )
@@ -267,6 +270,7 @@ class PhoenXWorld:
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
+        mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
         device: wp.context.Devicelike = None,
     ):
@@ -532,6 +536,11 @@ class PhoenXWorld:
         if self.mass_splitting_enabled and int(mass_splitting_batch_size) < 1:
             raise ValueError(f"mass_splitting_batch_size must be >= 1 (got {mass_splitting_batch_size})")
         self.mass_splitting_batch_size: int = int(mass_splitting_batch_size) if self.mass_splitting_enabled else 1
+        # Opt-in: drop both ``wp.capture_while`` loops on the mass-
+        # splitting PGS hot path in favour of a host-side fixed
+        # ``max_colored_partitions + 1`` unroll. Trade-off discussion in
+        # :mod:`dispatch.single_world_mass_splitting_unrolled`.
+        self.mass_splitting_unrolled: bool = bool(mass_splitting_unrolled) and self.mass_splitting_enabled
         # Unified body-or-particle node space for the partitioner:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
         # num_bodies + num_particles)`` are particles.
@@ -683,7 +692,10 @@ class PhoenXWorld:
         # so the hot path is straight-line with no capability checks.
         if self.step_layout == "single_world":
             if self.mass_splitting_enabled:
-                self._dispatcher = SingleWorldMassSplittingDispatcher(self)
+                if self.mass_splitting_unrolled:
+                    self._dispatcher = SingleWorldMassSplittingUnrolledDispatcher(self)
+                else:
+                    self._dispatcher = SingleWorldMassSplittingDispatcher(self)
             else:
                 self._dispatcher = SingleWorldDispatcher(self)
         else:
