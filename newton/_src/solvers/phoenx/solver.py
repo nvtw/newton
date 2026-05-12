@@ -129,6 +129,7 @@ class SolverPhoenX(SolverBase):
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
         partitioner_algorithm: str = "greedy",
+        enable_warm_start_coloring: bool = True,
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -152,6 +153,12 @@ class SolverPhoenX(SolverBase):
                 ``"luby_fixed"`` runs a fixed ``2 * max_colored_partitions``
                 Luby launches and spills overshoots to overflow (single-world
                 step layout only).
+            enable_warm_start_coloring: Reuse previous-frame colour
+                assignments to skip MIS work on constraints whose
+                body-pair adjacency is unchanged. Default ``True``.
+                No-op for ``step_layout="multi_world"`` (per-world
+                coloring kernel doesn't read the cache; the cache
+                itself isn't allocated).
         """
         super().__init__(model)
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -256,6 +263,7 @@ class SolverPhoenX(SolverBase):
             max_colored_partitions=max_colored_partitions,
             mass_splitting_batch_size=mass_splitting_batch_size,
             partitioner_algorithm=partitioner_algorithm,
+            enable_warm_start_coloring=enable_warm_start_coloring,
             device=self.device,
         )
 

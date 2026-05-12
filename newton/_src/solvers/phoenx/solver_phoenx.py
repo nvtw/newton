@@ -273,7 +273,7 @@ class PhoenXWorld:
         mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
-        enable_warm_start_coloring: bool = False,
+        enable_warm_start_coloring: bool = True,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -547,6 +547,10 @@ class PhoenXWorld:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
         # num_bodies + num_particles)`` are particles.
         self.partitioner_algorithm: str = str(partitioner_algorithm)
+        # Warm-start coloring only feeds the single-world greedy build;
+        # the per-world multi-world path uses a different kernel that
+        # never reads the cache. Skip the allocation in that case.
+        _warm_start_active: bool = bool(enable_warm_start_coloring) and step_layout == "single_world"
         if self.partitioner_algorithm == "greedy":
             self._partitioner = IncrementalContactPartitioner(
                 max_num_interactions=self._constraint_capacity,
@@ -555,7 +559,7 @@ class PhoenXWorld:
                 use_tile_scan=True,
                 max_colored_partitions=self.max_colored_partitions,
                 max_greedy_outer_iters=max_greedy_outer_iters,
-                enable_warm_start=enable_warm_start_coloring,
+                enable_warm_start=_warm_start_active,
             )
         elif self.partitioner_algorithm == "luby_fixed":
             if step_layout != "single_world":
