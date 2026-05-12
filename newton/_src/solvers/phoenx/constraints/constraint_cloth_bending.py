@@ -1,67 +1,40 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Position-level XPBD cloth bending constraint -- isometric bending
-(quadratic curvature) model.
+"""Position-level XPBD cloth bending: Bergou/Wardetzky quadratic
+curvature.
 
-Replaces the auto-generated dihedral-angle hinge from Gingold 2004
-"A discrete model for inelastic deformation of thin shells" (which is
-what Jitter2's ``FemTriBendingPBD`` ports). The Gingold/Grinspun
-dihedral formulation has singularities at ``theta=0`` (flat) and
-``theta=pi`` (degenerate fold) -- the ``atan2`` gradient blows up
-there, and XPBD can't converge in one iteration at high stiffness.
+Chosen over the dihedral-angle hinge (Gingold 2004 / Jitter2's
+``FemTriBendingPBD``) because dihedral has singularities at
+``theta=0`` and ``theta=pi`` where the ``atan2`` gradient blows up,
+preventing one-step XPBD convergence at high stiffness.
 
-Instead we use the **Bergou / Wardetzky quadratic bending model**:
+Refs:
 
-* Bergou, Wardetzky, Robinson, Audoly, Grinspun 2008 -- "Discrete
-  Elastic Rods" (introduced the quadratic curvature concept).
-* Wardetzky, Bergou, Harmon, Zorin, Grinspun 2007 -- "Discrete
-  Quadratic Curvature Energies" -- the canonical reference for this
-  exact formulation.
-* Bender, Mueller, Macklin 2017 -- "A Survey on Position-Based
-  Simulation Methods in Computer Graphics", section 5.4 -- describes
-  the XPBD integration we use here.
+* Wardetzky/Bergou/Harmon/Zorin/Grinspun 2007 -- "Discrete Quadratic
+  Curvature Energies" (canonical formulation).
+* Bergou et al. 2008 -- "Discrete Elastic Rods".
+* Bender/Mueller/Macklin 2017 survey, section 5.4 (XPBD integration).
 
-This is what production cloth solvers (PhysX 5 / Omniverse, Houdini,
-Marvelous Designer) use for the dihedral mode. Key property: the
-constraint is **linear** in vertex positions; the gradient is a
-precomputed 4-vector ``K`` of cotangent weights. There are no
-singularities, and at high stiffness the XPBD iterate converges in
-one step.
-
-The energy:
+Energy is linear in vertex positions::
 
     E_bend = (3 / (A_1 + A_2)) * | sum_i K_i * p_i |^2
 
-where ``K_i`` are cotangent weights (4 of them, one per vertex) and
-``sum_i K_i = 0`` (translation-invariant). The discrete mean
-curvature vector ``h(x) = sum_i K_i * p_i`` is linear in positions,
-so we express the bending constraint as three scalar XPBD
-constraints, one per spatial dimension::
+``K_i`` = cotangent weights (4 per hinge), ``sum_i K_i = 0``. We
+split into three scalar XPBD constraints, one per spatial dim::
 
-    C_d(x) = h(x)[d] - h_rest[d]   for d in {x, y, z}
+    C_d(x) = (sum_i K_i * p_i)[d] - h_rest[d]   for d in {x, y, z}
 
-Cotangent weights (Wardetzky 2007 Eq. 12 with our convention of
-``p_0`` = opposite vertex of triangle 1, ``p_1`` = opposite vertex
-of triangle 2, ``p_2`` / ``p_3`` = shared edge)::
+Cotangent weights (Wardetzky 2007 Eq. 12; ``p_0/p_1`` opposite
+vertices of the two triangles, ``p_2/p_3`` shared edge)::
 
-    cot_a = cotangent at p_2 in triangle T1 = (p_2, p_3, p_0)
-    cot_b = cotangent at p_3 in triangle T1
-    cot_c = cotangent at p_2 in triangle T2 = (p_2, p_3, p_1)
-    cot_d = cotangent at p_3 in triangle T2
+    cot_a, cot_b: cotangents at p_2, p_3 in T1 = (p_2, p_3, p_0)
+    cot_c, cot_d: cotangents at p_2, p_3 in T2 = (p_2, p_3, p_1)
+    K_0 = cot_a + cot_b,  K_1 = cot_c + cot_d
+    K_2 = -cot_a - cot_c, K_3 = -cot_b - cot_d
 
-    K_0 =  cot_a + cot_b    (opposite vertex of T1)
-    K_1 =  cot_c + cot_d    (opposite vertex of T2)
-    K_2 = -cot_a - cot_c    (shared edge vertex)
-    K_3 = -cot_b - cot_d    (shared edge vertex)
-
-We bake the area factor ``sqrt(3 / (A_1 + A_2))`` directly into the
-``K_i`` so the per-iter math reduces to the bare linear constraint.
-
-Mass-splitting + access-mode integration: identical to the cloth
-triangle and soft tet -- prepare flips access mode via
-``set_access_mode_unified``, position reads / writes go through
-``read_position_unified`` / ``write_position_unified``.
+The area factor ``sqrt(3 / (A_1 + A_2))`` is baked into ``K_i`` so
+the per-iter math is the bare linear constraint.
 """
 
 from __future__ import annotations

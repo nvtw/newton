@@ -1,38 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fixed-iteration Luby MIS coloring (C# PhoenX port).
+"""Fixed-iteration Luby MIS coloring (C# PhoenX
+``MaximalIndependentSetPartitioning2`` port).
 
-Port of ``ContactPartitions.MaximalIndependentSetPartitioning2`` in
-``experimentalsim/PhoenX/src/PhoenX/MassSplitting/ContactPartitions.cs``.
-Runs **exactly** ``2 * MAX_LUBY_COLORS`` coloring kernel launches and
-nothing else -- no ``capture_while``, no convergence check, no
-``num_remaining`` atomic. Any element still uncoloured at the end is
-written to the overflow colour, which mass splitting consumes via
-copy-state slots.
+Runs exactly ``2 * MAX_LUBY_COLORS`` coloring kernel launches with
+no ``capture_while``. Each launch commits all local-max uncoloured
+elements and marks their uncoloured neighbours "removed for this
+iteration" so the next iteration in the same colour can commit
+the residue. Any element still uncoloured after all launches lands
+in the overflow colour (resolved by mass splitting copy states).
 
-Within each coloring launch, every uncoloured element checks neighbour
-priorities for local-max status; on commit it marks not only itself
-but also every uncoloured neighbour as "removed for this Luby
-iteration" so the *next* iteration within the same colour can commit
-those neighbours' non-conflicting ones. Two Luby iterations per
-colour drains most conflicts; the remainder rolls to the next colour.
+Use this instead of :class:`IncrementalContactPartitioner`'s greedy
+MIS when the greedy outer-iter cap dominates (dense soft-tet
+contact graphs hit ~30+ greedy outers vs. fixed 16 here).
 
-Compared to the greedy MIS in
-:class:`IncrementalContactPartitioner`:
-
-* Newton greedy MIS: per-launch one round of local-max commits, kept
-  in a ``capture_while`` until ``num_remaining == 0``. Dense soft-tet
-  contact graphs take 30+ outer rounds even with the safety cap.
-* Luby-fixed: per-launch propagates commits via the per-iter
-  removed-marker, so each launch makes more progress. Total launches
-  ``= 2 * MAX_LUBY_COLORS`` (e.g. 16 for ``MAX_LUBY_COLORS = 8``),
-  versus ~128 for greedy under the worst-case cap.
-
-This implementation reuses the adjacency-build, histogram, scatter,
-and locality-sort kernels from :mod:`graph_coloring_common` /
-:mod:`graph_coloring_incremental`; only the coloring kernel itself is
-new.
+Reuses adjacency / histogram / scatter / locality-sort from
+:mod:`graph_coloring_common`; only the coloring kernel is new.
 """
 
 from __future__ import annotations

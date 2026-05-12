@@ -3,24 +3,18 @@
 
 """Position-level XPBD soft-body tetrahedron, Jitter2 ``FemTetPBD`` port.
 
-Direct 3D analogue of :mod:`constraint_cloth_triangle`. Four-vertex
-volumetric element with one corotational XPBD row:
+3D analogue of :mod:`constraint_cloth_triangle`. Single corotational
+XPBD shear row::
 
-* **Shear (mu) row** -- ``C = ||F - R||_F * rest_volume`` where ``F`` is
-  the 3x3 deformation gradient and ``R`` is the corotational rotation
-  extracted from ``F`` via Mueller polar decomposition (quaternion-axis
-  iteration). ``F = (xB-xA, xC-xA, xD-xA) * inv_rest``.
+    C = ||F - R||_F * rest_volume
+    F = (xB-xA, xC-xA, xD-xA) * inv_rest
 
-The volume preservation row (``det(F)-1``) is intentionally NOT
-applied -- the Jitter2 reference port (``FemTetPBD.cs:215-228``) computes
-its gradients but leaves the lambda update commented out. ``||F-R||_F``
-already captures pure-volumetric deviation (when ``F = c*R``, the row
-fires), so a single corotational row is sufficient for the Hookean
-energy. Adding the explicit ``det`` row is a follow-up.
+``R`` from Mueller polar decomposition (quaternion-axis iteration).
 
-The math is line-for-line identical to
-``jitterphysics2/.../FemTetPBD.cs:151-298``. Only the shear row's
-analytic gradients (``grad2_1..grad2_12``) are evaluated.
+The volume-preservation row (``det(F) - 1``) is intentionally omitted
+-- ``||F - R||_F`` already captures pure-volumetric deviation
+(``F = c*R`` fires the shear row), matching the Jitter2 reference
+which computes the volume gradient but never applies the lambda.
 """
 
 from __future__ import annotations
@@ -243,16 +237,10 @@ _DET_F_EPS = wp.constant(wp.float32(1.0e-8))
 
 @wp.func
 def _extract_rotation_3d(F: wp.mat33f, q_init: wp.quatf) -> wp.quatf:
-    """3D closest-rotation extraction (Mueller polar decomposition by
-    quaternion-axis iteration). Warm-starts from ``q_init``.
-
-    Per-iteration: build the rotation matrix's columns implicitly from
-    the quaternion components, compute ``omega = sum_i (R_col_i x
-    F_col_i) / |sum_i R_col_i . F_col_i|``, rotate the quaternion by
-    ``angle = |omega|`` about ``omega/|omega|``, and re-normalise.
-    Convergence after 4-15 iterations is typical.
-
-    Direct port of ``ConstraintHelper.ExtractRotation`` (3D variant).
+    """Closest-rotation quaternion from deformation gradient via
+    Mueller polar decomposition (quaternion-axis iteration), warm-
+    started from ``q_init``. Converges in 4-15 iters. Port of
+    ``ConstraintHelper.ExtractRotation`` (Jitter2 3D).
     """
     q = q_init
     for _ in range(_EXTRACT_ROT_MAX_ITERS):
@@ -479,17 +467,11 @@ def soft_tetrahedron_iterate_at(
     x_b, _ifb, slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
     x_c, _ifc, slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
     x_d, _ifd, slot_d = read_position_unified(bodies, particles, copy_state, body_d, parallel_id, num_bodies)
-    # ``dx = x - position_prev_substep`` is the XPBD damping term
-    # anchor (Macklin et al. 2020 "Detailed Rigid Body Simulation
-    # with XPBD"): the ``gamma * grad . dx`` term in the lambda
-    # numerator is velocity-projected damping (does not damp at
-    # rest, unlike ether damping). ``x`` is the *current* (gauss-
-    # seidel-mutable) slot position; ``position_prev_substep`` is the
-    # substep-start snapshot captured by ``cloth_predict_kernel`` and
-    # never modified during PGS. Mirrors the cloth-triangle iterate's
-    # use of the same anchor. Jitter2 ``FemTetPBD.Iterate`` omits the
-    # damping term (bare XPBD); this is a Newton extension that
-    # collapses to bare XPBD when ``beta_mu == 0``.
+    # XPBD damping anchor (Macklin et al. 2020): velocity-projected
+    # damping via ``gamma * grad . (x - position_prev_substep)``,
+    # zero at rest. ``position_prev_substep`` is the substep-start
+    # snapshot from ``cloth_predict_kernel``. Newton extension over
+    # bare Jitter2 XPBD; ``beta_mu == 0`` recovers Jitter2.
     dx_a = x_a - particles.position_prev_substep[p_a]
     dx_b = x_b - particles.position_prev_substep[p_b]
     dx_c = x_c - particles.position_prev_substep[p_c]

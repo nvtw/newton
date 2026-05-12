@@ -121,33 +121,26 @@ JOINT_MODE_BALL_SOCKET = wp.constant(wp.int32(2))
 #: Gauss-Seidel. No drive, no limit. All three anchors are snapshotted
 #: in the column at init regardless of mode, so no extra state.
 JOINT_MODE_FIXED = wp.constant(wp.int32(3))
-#: Cable (soft fixed): rigid 3-row anchor-1 ball-socket + 2-row tangent
-#: anchor-2 PD spring-damper (k_bend, d_bend) + 1-row scalar anchor-3
-#: PD spring-damper (k_twist, d_twist). Solved as block Gauss-Seidel
-#: between the three blocks (same row layout as :data:`JOINT_MODE_FIXED`),
-#: but with independent per-block soft coefficients. Converges to
-#: REVOLUTE-quality behaviour as ``k_bend -> infinity`` (the anchor-2
-#: tangent rows lock both bend axes) and to FIXED as ``k_twist -> infinity``
-#: as well. User gains are in **rotational SI units**:
+#: Cable (soft fixed): rigid anchor-1 ball-socket + PD spring-damper
+#: on anchor-2 tangent rows (``k_bend, d_bend``) + PD spring-damper on
+#: anchor-3 scalar row (``k_twist, d_twist``). Block Gauss-Seidel
+#: across the three blocks, independent per-block soft coefficients.
+#: Converges to REVOLUTE as ``k_bend -> inf`` and to FIXED as
+#: ``k_twist -> inf``.
 #:
-#:   * ``k_bend`` [N*m/rad], ``d_bend`` [N*m*s/rad] -- maps to a positional
-#:     spring at anchor 2 with ``k_pos = k_bend / rest_length^2`` (lever
-#:     arm ``rest_length`` between anchor 1 and anchor 2 along ``n_hat``).
-#:   * ``k_twist`` [N*m/rad], ``d_twist`` [N*m*s/rad] -- maps to a
-#:     positional spring along ``t2`` at anchor 3 with the same
-#:     ``1 / rest_length^2`` rescale (lever arm ``rest_length`` between
-#:     anchor 1 and anchor 3 perpendicular to ``n_hat``).
+#: User gains in rotational SI units, rescaled to positional springs
+#: via the lever arm ``rest_length``:
 #:
-#: Column slot reuse (no schema growth):
-#:   * ``stiffness_drive`` / ``damping_drive`` -> ``k_bend`` / ``d_bend``.
-#:   * ``stiffness_limit`` / ``damping_limit`` -> ``k_twist`` / ``d_twist``.
-#:   * Anchor-3 snapshot uses the PRISMATIC / FIXED ``mode_extras`` layout
-#:     (la3_b1, la3_b2, ...). No revolute twist tracker.
-#:   * ``s_inv`` (mat33, 9 dwords) packs the per-substep PD soft cache:
-#:     dwords 0..3 = K22 soft inverse (2x2), 4 = gamma_bend,
-#:     5 = M_twist_soft, 6 = gamma_twist; 7..8 unused.
-#:   * ``bias2`` (vec3) holds (bias_bend_t1, bias_bend_t2, 0).
-#:   * ``bias3`` (1 dword) holds bias_twist along t2.
+#:   * ``k_bend`` [N*m/rad], ``d_bend`` [N*m*s/rad] -- anchor-2
+#:     positional spring with ``k_pos = k_bend / rest_length^2``.
+#:   * ``k_twist`` [N*m/rad], ``d_twist`` [N*m*s/rad] -- anchor-3
+#:     scalar spring along ``t2`` with the same ``1/rest_length^2``
+#:     rescale.
+#:
+#: Slot reuse (no schema growth): drive_* aliases bend_*, limit_*
+#: aliases twist_*, ``s_inv`` mat33 packs the PD soft cache
+#: (dwords 0..3 = K22_inv, 4 = gamma_bend, 5 = M_twist_soft,
+#: 6 = gamma_twist), ``bias3`` carries the twist bias.
 JOINT_MODE_CABLE = wp.constant(wp.int32(4))
 
 
@@ -189,27 +182,10 @@ _CLAMP_MIN = wp.constant(wp.int32(2))
 class ActuatedDoubleBallSocketData:
     """Per-constraint dword-layout schema for the unified joint.
 
-    Union over the two joint modes: revolute and prismatic use
-    mode-specific Schur caches but share every other slot (anchors,
-    lever arms, warm-start impulses, drive / limit scalars), so the
-    dispatcher treats them as one constraint type.
-
-    Layout groups:
-
-    * **Header** -- ``constraint_type / body1 / body2``.
-    * **Shared positional block** -- two user anchors on the joint
-      axis, their body-local snapshots, runtime lever arms, cached
-      tangent basis, revolute rest-pose quat.
-    * **Revolute Schur cache** -- ``a1_inv, ut_ai, s_inv``.
-    * **Prismatic Schur cache** -- ``a4_inv`` (mat44f), ``c_pris``
-      (vec4f), ``s_scalar_inv``, plus anchor-3 snapshots / lever arms.
-    * **Warm-start** -- three ``vec3f`` accumulated impulses covering
-      both modes (revolute: ``acc_imp1`` full vec3 + ``acc_imp2``
-      tangent-only; prismatic: all three tangent-only).
-    * **Actuator block** -- drive / limit setpoints, cached soft-
-      constraint coefficients, scalar accumulated impulses.
-
-    Storage: ~80 dwords (~320 B per joint).
+    Union over revolute / prismatic / ball-socket / fixed / cable.
+    Mode-specific Schur caches live in dedicated slots; the rest is
+    shared. ~80 dwords (~320 B per joint). See field-level ``#:``
+    comments for individual slot semantics.
     """
 
     # ---- Header -------------------------------------------------------
@@ -692,15 +668,12 @@ def _ms_load_body_pair(
     parallel_id: wp.int32,
     num_bodies: wp.int32,
 ):
-    """Slot-aware load of ``(v1, v2, w1, w2, inv_mass1, inv_mass2,
-    inv_inertia1, inv_inertia2, slot1, slot2)`` for one joint endpoint pair.
-
-    Mass-splitting-disabled fast path is checked ONCE at the top — when
-    ``highest_index_in_use[0] == 0`` (the common case for joint-heavy
-    scenes like g1_flat / h1_flat where mass splitting is off) we
-    bypass ``copy_state`` and the ``inv_factor`` multiply entirely.
-    Avoids 4 redundant int reads + 4 FP multiplies per joint per sweep
-    that the unified helpers' per-call fast-path would otherwise pay.
+    """Slot-aware load of body-pair kinematic state. Returns
+    ``(v1, v2, w1, w2, inv_mass1, inv_mass2, inv_inertia1,
+    inv_inertia2, slot1, slot2)``. Mass-splitting fast path
+    (``highest_index_in_use[0] == 0``) bypasses copy_state + the
+    Tonge ``inv_factor`` multiply (4 int reads + 4 FP muls saved
+    per sweep).
     """
     if copy_state.highest_index_in_use[0] == wp.int32(0):
         # Mass splitting disabled: direct SoA, no copy_state touch.
@@ -2112,24 +2085,17 @@ def _prismatic_iterate_at(
 # Cable (soft fixed) mode
 # ---------------------------------------------------------------------------
 #
-# CABLE = anchor-1 3-row Box2D-soft point lock (``hertz``,
-# ``damping_ratio``) + anchor-2 tangent 2-row PD spring-damper (bend
-# rows, ``k_bend``, ``d_bend``) + anchor-3 scalar 1-row PD
-# spring-damper (twist row, ``k_twist``, ``d_twist``). Block GS
-# between the three blocks: each block is solved with its own
-# pre-computed soft inverse, the outer PGS loop closes the cross-
-# coupling.
+# Three block-GS sub-blocks, each with its own pre-computed soft
+# inverse; the outer PGS loop closes the cross-coupling.
+#   1. Anchor-1: rigid 3-row Box2D-soft point lock.
+#   2. Anchor-2 tangent: 2-row PD (k_bend, d_bend).
+#   3. Anchor-3 scalar: 1-row PD (k_twist, d_twist).
 #
-# As ``k_bend -> infinity`` the anchor-2 PD rows lock with revolute
-# convergence quality (Nyquist-clamped soft -> rigid). As
-# ``k_twist -> infinity`` on top of that the anchor-3 row locks too,
-# yielding a fixed weld. User-facing gains are in rotational SI units
-# (N*m/rad, N*m*s/rad); the implementation rescales by
-# ``1 / rest_length^2`` to obtain the equivalent positional spring at
-# the lever-armed anchors. Lever-arm amplification gives the correct
-# rotational stiffness without needing an angular Jacobian / log-map,
-# and the well-conditioned positional rows match REVOLUTE / PRISMATIC
-# convergence behaviour.
+# User gains are in rotational SI units; rescaled by 1/rest_length^2
+# to positional springs at the lever-armed anchors. Avoids an
+# angular Jacobian / log-map and matches REVOLUTE/PRISMATIC
+# convergence. k_bend -> inf yields REVOLUTE; k_twist -> inf on top
+# yields FIXED.
 
 
 @wp.func

@@ -827,20 +827,14 @@ class IncrementalContactPartitioner:
             self._persist_warm_start_cache()
 
     def _persist_warm_start_cache(self) -> None:
-        """Compact the current build's ``(body_pair_key, colour)``
-        pairs into :attr:`_warm_start_cache` for the next frame.
+        """Compact ``(body_pair_key, colour)`` pairs into
+        :attr:`_warm_start_cache` for the next frame.
 
-        Pipeline:
-
-        1. Emit ``(key, cid)`` per active coloured element; pad tail
-           with ``INT64_MAX`` so radix sort lands it at the end.
-        2. Radix sort by key (puts duplicate keys adjacent and inactive
-           tails at the end).
-        3. Mark boundary slots (first occurrence of each unique key).
-        4. Exclusive prefix scan over the boundary flags -> dest_idx.
-        5. Compact: each boundary slot writes ``(key, color_tags[cid])``
-           to ``cache[dest_idx]``. Last write atomic-max's
-           ``cache.num_entries``.
+        Pipeline: emit per coloured element (inactive tails get
+        ``INT64_MAX`` keys) -> radix sort by key -> mark first
+        occurrence of each unique key -> exclusive scan -> compact
+        boundary entries into the cache (atomic-max sets
+        ``num_entries``).
         """
         from newton._src.solvers.phoenx.graph_coloring.warm_start import (
             warm_start_dedup_pairs_kernel,
@@ -900,22 +894,13 @@ class IncrementalContactPartitioner:
         )
 
     def _sort_csr_by_body_locality(self) -> None:
-        """Reorder ``element_ids_by_color`` so consecutive entries within
-        each colour access nearby body indices.
-
-        The iterate kernel reads ``bodies.position[b]``,
-        ``bodies.orientation[b]``, ``bodies.inverse_inertia_world[b]``,
-        ``bodies.body_com[b]`` per constraint. Within a colour
-        independent-set guarantees that distinct constraints touch
-        DIFFERENT bodies, so consecutive entries land in unrelated
-        cache lines unless we explicitly group them. Sorting each
-        colour slice by ``min(b1, b2)`` lifts L1/L2 hit rate on dense
-        scenes (Kapla, kapla_arena) with no functional change — the
-        within-colour order is irrelevant to PGS correctness.
-
-        Single radix-sort on packed ``(colour << 32) | body_min`` keys
-        preserves the colour boundaries (colour is the high half)
-        while sorting by body within each colour.
+        """Sort each colour slice of ``element_ids_by_color`` by
+        ``min(b1, b2)`` so consecutive entries hit nearby body cache
+        lines (Kapla / kapla_arena L1/L2 hit rate). PGS correctness is
+        order-independent within a colour. Two-pass radix sort: first
+        by eid (deterministic tie-break), then by packed
+        ``(colour << 32) | body_min`` (colour high half preserves
+        boundaries).
         """
         n = self.max_num_interactions
         # Pass 1: sort by eid. Makes the within-(colour, body_min) tie
