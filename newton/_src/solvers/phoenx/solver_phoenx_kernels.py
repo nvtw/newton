@@ -117,7 +117,6 @@ __all__ = [
     "_phoenx_update_inertia_and_clear_forces_kernel",
     "_pick_threads_per_world_kernel",
     "_reduce_total_colours_kernel",
-    "_rotation_quaternion",
     "_set_kinematic_pose_batch_kernel",
     "_sync_num_active_constraints_kernel",
     "get_fast_tail_kernel",

@@ -52,13 +52,7 @@ _ACCESS_MODE_VELOCITY_LEVEL = wp.constant(wp.int32(ACCESS_MODE_VELOCITY_LEVEL))
 @wp.func
 def _section_range(copy_state: CopyStateContainer, node_id: wp.int32):
     """Return ``(start, end)`` slot indices for a node, or ``(0, 0)``
-    when ``node_id`` has no slots.
-
-    Centralised here so the start-index branch (``section_end[node-1]``
-    vs ``0``) lives in one place. Adds one int load and one branch on
-    the hot path — within the "small overhead acceptable when disabled"
-    budget the user signed off on.
-    """
+    when ``node_id`` has no slots."""
     if node_id < 0 or node_id >= copy_state.section_end.shape[0]:
         return wp.int32(0), wp.int32(0)
     start = wp.int32(0)

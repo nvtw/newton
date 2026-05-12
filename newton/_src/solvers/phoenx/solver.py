@@ -168,30 +168,7 @@ class SolverPhoenX(SolverBase):
         self.bodies.orientation.assign(np.tile([0.0, 0.0, 0.0, 1.0], (num_bodies_phoenx, 1)).astype(np.float32))
 
         if model.body_count:
-            wp.launch(
-                _init_phoenx_body_container_kernel,
-                dim=num_bodies_phoenx,
-                inputs=[
-                    model.body_inv_mass,
-                    model.body_inv_inertia,
-                    model.body_com,
-                    model.body_flags,
-                    model.body_world,
-                    wp.int32(int(BodyFlags.KINEMATIC)),
-                ],
-                outputs=[
-                    self.bodies.inverse_mass,
-                    self.bodies.inverse_inertia,
-                    self.bodies.inverse_inertia_world,
-                    self.bodies.body_com,
-                    self.bodies.affected_by_gravity,
-                    self.bodies.motion_type,
-                    self.bodies.world_id,
-                    self.bodies.linear_damping,
-                    self.bodies.angular_damping,
-                ],
-                device=self.device,
-            )
+            self._launch_init_phoenx_bodies(model)
             # PhoenX is maximal-coordinate; bake reduced-coord armature into both
             # bodies' inertia along the joint axis so eff_inv = J M^-1 J^T sees
             # the augmented mass. Skinny links (<0.1 kg) need this for stable PD.
@@ -231,9 +208,7 @@ class SolverPhoenX(SolverBase):
                 model._collision_pipeline.contacts()  # forces buffer sizing
         rigid_contact_max = int(model.rigid_contact_max)
 
-        gravity_np = (
-            model.gravity.numpy() if model.gravity is not None else np.asarray([[0.0, 0.0, -9.81]], dtype=np.float32)
-        )
+        gravity_np = self._read_model_gravity_np(model)
         num_worlds = max(1, int(gravity_np.shape[0]))
         gravity_tuples = [tuple(float(x) for x in row) for row in gravity_np]
         if len(gravity_tuples) == 1:
@@ -712,6 +687,45 @@ class SolverPhoenX(SolverBase):
         if state_out.joint_q is not None and state_out.joint_qd is not None and int(self.model.joint_count) > 0:
             newton.eval_ik(self.model, state_out, state_out.joint_q, state_out.joint_qd)
 
+    @staticmethod
+    def _read_model_gravity_np(model) -> np.ndarray:
+        """Host-side ``model.gravity`` array, defaulting to single-world
+        ``[0, 0, -9.81]``. Shared by ``__init__`` (consumed as tuples for
+        the PhoenXWorld ctor) and :meth:`notify_model_changed` (consumed
+        as a ``wp.array``)."""
+        if model.gravity is not None:
+            return model.gravity.numpy()
+        return np.asarray([[0.0, 0.0, -9.81]], dtype=np.float32)
+
+    def _launch_init_phoenx_bodies(self, model) -> None:
+        """Refresh the PhoenX :class:`BodyContainer` from a Newton
+        :class:`Model`. Same kernel + inputs/outputs at ``__init__`` and
+        :meth:`notify_model_changed`'s body-property refresh path."""
+        wp.launch(
+            _init_phoenx_body_container_kernel,
+            dim=int(model.body_count) + 1,
+            inputs=[
+                model.body_inv_mass,
+                model.body_inv_inertia,
+                model.body_com,
+                model.body_flags,
+                model.body_world,
+                wp.int32(int(BodyFlags.KINEMATIC)),
+            ],
+            outputs=[
+                self.bodies.inverse_mass,
+                self.bodies.inverse_inertia,
+                self.bodies.inverse_inertia_world,
+                self.bodies.body_com,
+                self.bodies.affected_by_gravity,
+                self.bodies.motion_type,
+                self.bodies.world_id,
+                self.bodies.linear_damping,
+                self.bodies.angular_damping,
+            ],
+            device=self.device,
+        )
+
     def notify_model_changed(self, flags: int) -> None:
         """Refresh state on Model edits. Joint-property changes rebuild the ADBS
         init arrays from scratch; gravity is reread from ``model.gravity``."""
@@ -720,42 +734,15 @@ class SolverPhoenX(SolverBase):
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
         if flags & int(SolverNotifyFlags.MODEL_PROPERTIES):
-            gravity_np = (
-                self.model.gravity.numpy()
-                if self.model.gravity is not None
-                else np.asarray([[0.0, 0.0, -9.81]], dtype=np.float32)
+            self.world.gravity = wp.array(
+                self._read_model_gravity_np(self.model), dtype=wp.vec3f, device=self.device
             )
-            self.world.gravity = wp.array(gravity_np, dtype=wp.vec3f, device=self.device)
         # Single body refresh kernel covers both BODY_PROPERTIES and BODY_INERTIAL_PROPERTIES.
         body_refresh_mask = int(SolverNotifyFlags.BODY_INERTIAL_PROPERTIES | SolverNotifyFlags.BODY_PROPERTIES)
         if flags & body_refresh_mask:
             if self.model.body_count > 0:
-                wp.launch(
-                    _init_phoenx_body_container_kernel,
-                    dim=self.model.body_count + 1,
-                    inputs=[
-                        self.model.body_inv_mass,
-                        self.model.body_inv_inertia,
-                        self.model.body_com,
-                        self.model.body_flags,
-                        self.model.body_world,
-                        wp.int32(int(BodyFlags.KINEMATIC)),
-                    ],
-                    outputs=[
-                        self.bodies.inverse_mass,
-                        self.bodies.inverse_inertia,
-                        self.bodies.inverse_inertia_world,
-                        self.bodies.body_com,
-                        self.bodies.affected_by_gravity,
-                        self.bodies.motion_type,
-                        self.bodies.world_id,
-                        self.bodies.linear_damping,
-                        self.bodies.angular_damping,
-                    ],
-                    device=self.device,
-                )
-                # _init_phoenx_body_container_kernel just overwrote inertia,
-                # so re-bake armature.
+                self._launch_init_phoenx_bodies(self.model)
+                # Re-bake armature: the kernel just overwrote inertia.
                 self._bake_joint_armature_into_body_inertia(self.model)
         if flags & int(SolverNotifyFlags.SHAPE_PROPERTIES):
             if self.model.shape_material_mu is not None and self.model.shape_count > 0:

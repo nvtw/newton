@@ -102,7 +102,6 @@ def partitioning_prepare_kernel(
         adjacency_section_end_indices[tid] = 0
 
 
-# TODO: Is a bit heavy on atomics
 @wp.kernel(enable_backward=False)
 def partitioning_adjacency_count_kernel(
     adjacency_section_end_indices: wp.array[int],
