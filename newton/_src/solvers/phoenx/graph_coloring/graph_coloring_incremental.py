@@ -282,9 +282,20 @@ class IncrementalContactPartitioner:
             # written by mark_kernel, consumed + cleared by
             # apply_kernel each step.
             self._warm_start_invalid_mark = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+            # Persist-pipeline scratch (radix sort + boundary scan +
+            # compact). Radix sort needs 2*N ping-pong; the boundary
+            # / dest_idx arrays are 1*N.
+            self._ws_pair_keys = wp.zeros(2 * max_num_interactions, dtype=wp.int64, device=device)
+            self._ws_pair_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
+            self._ws_is_boundary = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+            self._ws_dest_idx = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
         else:
             self._warm_start_cache = None
             self._warm_start_invalid_mark = None
+            self._ws_pair_keys = None
+            self._ws_pair_values = None
+            self._ws_is_boundary = None
+            self._ws_dest_idx = None
 
         import numpy as np  # noqa: PLC0415
 
@@ -809,6 +820,84 @@ class IncrementalContactPartitioner:
             ],
         )
         self._sort_csr_by_body_locality()
+        # Persist this build's coloring into the warm-start cache for
+        # the next frame. Reuses radix-sort + boundary-scan pipeline
+        # similar to mass_splitting's build_interaction_graph.
+        if self.enable_warm_start:
+            self._persist_warm_start_cache()
+
+    def _persist_warm_start_cache(self) -> None:
+        """Compact the current build's ``(body_pair_key, colour)``
+        pairs into :attr:`_warm_start_cache` for the next frame.
+
+        Pipeline:
+
+        1. Emit ``(key, cid)`` per active coloured element; pad tail
+           with ``INT64_MAX`` so radix sort lands it at the end.
+        2. Radix sort by key (puts duplicate keys adjacent and inactive
+           tails at the end).
+        3. Mark boundary slots (first occurrence of each unique key).
+        4. Exclusive prefix scan over the boundary flags -> dest_idx.
+        5. Compact: each boundary slot writes ``(key, color_tags[cid])``
+           to ``cache[dest_idx]``. Last write atomic-max's
+           ``cache.num_entries``.
+        """
+        from newton._src.solvers.phoenx.graph_coloring.warm_start import (
+            warm_start_dedup_pairs_kernel,
+            warm_start_emit_pairs_kernel,
+            warm_start_mark_boundaries_kernel,
+            warm_start_reset_count_kernel,
+        )
+
+        # Step 1: emit pairs.
+        wp.launch(
+            warm_start_emit_pairs_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._elements,
+                self._color_tags,
+                self._num_elements,
+                self._ws_pair_keys,
+                self._ws_pair_values,
+            ],
+        )
+        # Step 2: radix sort. ``radix_sort_pairs`` needs 2*N buffers
+        # (ping-pong); the emit kernel only writes the first N slots
+        # but the buffer is sized 2*N already.
+        wp.utils.radix_sort_pairs(self._ws_pair_keys, self._ws_pair_values, self.max_num_interactions)
+        # Step 3: mark boundaries.
+        wp.launch(
+            warm_start_mark_boundaries_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._ws_pair_keys,
+                self._num_elements,
+                self._ws_is_boundary,
+            ],
+        )
+        # Step 4: exclusive prefix scan.
+        wp.utils.array_scan(self._ws_is_boundary, self._ws_dest_idx, inclusive=False)
+        # Step 5: reset cache counter, then compact.
+        wp.launch(
+            warm_start_reset_count_kernel,
+            dim=1,
+            inputs=[self._warm_start_cache.num_entries],
+        )
+        wp.launch(
+            warm_start_dedup_pairs_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._ws_pair_keys,
+                self._ws_pair_values,
+                self._ws_is_boundary,
+                self._ws_dest_idx,
+                self._color_tags,
+                self._num_elements,
+                self._warm_start_cache.keys,
+                self._warm_start_cache.colors,
+                self._warm_start_cache.num_entries,
+            ],
+        )
 
     def _sort_csr_by_body_locality(self) -> None:
         """Reorder ``element_ids_by_color`` so consecutive entries within

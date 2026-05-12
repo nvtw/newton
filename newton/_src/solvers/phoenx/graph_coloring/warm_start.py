@@ -259,6 +259,122 @@ def warm_start_invalidate_mark_kernel(
                 return
 
 
+_PERSIST_TAIL_KEY: int = 0x7FFFFFFFFFFFFFFF
+
+
+@wp.kernel(enable_backward=False)
+def warm_start_emit_pairs_kernel(
+    elements: wp.array[ElementInteractionData],
+    color_tags: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    keys_out: wp.array[wp.int64],
+    values_out: wp.array[wp.int32],
+):
+    """Emit one ``(body_pair_key, cid)`` pair per active coloured
+    constraint. Inactive / uncoloured slots get ``INT64_MAX`` keys so
+    the subsequent radix sort pushes them to the tail.
+
+    ``values_out[i] = cid`` so the dedup kernel can recover
+    ``color_tags[cid]`` after the sort permutes positions.
+    """
+    tid = wp.tid()
+    if tid >= keys_out.shape[0]:
+        return
+    n = num_elements[0]
+    if tid >= n:
+        keys_out[tid] = wp.int64(_PERSIST_TAIL_KEY)
+        values_out[tid] = wp.int32(0)
+        return
+    color = color_tags[tid]
+    if color == wp.int32(0):
+        # Shouldn't happen after a clean build (overflow spill makes
+        # sure every active element is coloured), but be defensive.
+        keys_out[tid] = wp.int64(_PERSIST_TAIL_KEY)
+        values_out[tid] = wp.int32(0)
+        return
+    keys_out[tid] = warm_start_key_func(elements[tid])
+    values_out[tid] = tid
+
+
+@wp.kernel(enable_backward=False)
+def warm_start_mark_boundaries_kernel(
+    sorted_keys: wp.array[wp.int64],
+    num_elements: wp.array[wp.int32],
+    is_boundary: wp.array[wp.int32],
+):
+    """Mark ``is_boundary[i] = 1`` iff ``sorted_keys[i]`` is the FIRST
+    occurrence of its key value (and the slot is within the active
+    region). Drives the subsequent prefix-scan that assigns destination
+    slots in the cache.
+    """
+    tid = wp.tid()
+    if tid >= is_boundary.shape[0]:
+        return
+    n = num_elements[0]
+    if tid >= n:
+        is_boundary[tid] = wp.int32(0)
+        return
+    key = sorted_keys[tid]
+    if key == wp.int64(_PERSIST_TAIL_KEY):
+        is_boundary[tid] = wp.int32(0)
+        return
+    if tid == wp.int32(0):
+        is_boundary[tid] = wp.int32(1)
+        return
+    if sorted_keys[tid - wp.int32(1)] != key:
+        is_boundary[tid] = wp.int32(1)
+    else:
+        is_boundary[tid] = wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def warm_start_dedup_pairs_kernel(
+    sorted_keys: wp.array[wp.int64],
+    sorted_values: wp.array[wp.int32],
+    is_boundary: wp.array[wp.int32],
+    dest_idx: wp.array[wp.int32],
+    color_tags: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    out_keys: wp.array[wp.int64],
+    out_colors: wp.array[wp.int32],
+    out_num_entries: wp.array[wp.int32],
+):
+    """Compact: each thread at a boundary writes ``(key, color)`` to
+    its scan-assigned destination slot. The last-thread writes
+    ``out_num_entries[0] = total_unique`` so the next frame's seed
+    kernel knows the cache size.
+
+    For duplicate-key slots (multi-contact body pairs), we keep
+    whichever entry the sort landed first -- one of the conflicting
+    constraints gets cached; the others will hit the validation pass
+    next frame.
+    """
+    tid = wp.tid()
+    if tid >= sorted_keys.shape[0]:
+        return
+    n = num_elements[0]
+    if tid >= n:
+        return
+    if is_boundary[tid] == wp.int32(0):
+        return
+    cid = sorted_values[tid]
+    dest = dest_idx[tid]
+    out_keys[dest] = sorted_keys[tid]
+    out_colors[dest] = color_tags[cid]
+    # Single-thread write to num_entries: the LAST boundary slot's
+    # dest+1 is the total unique count. Use atomic_max so any
+    # straggler write is harmless.
+    wp.atomic_max(out_num_entries, 0, dest + wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def warm_start_reset_count_kernel(out_num_entries: wp.array[wp.int32]):
+    """Zero ``out_num_entries[0]`` before the dedup kernel's
+    ``atomic_max`` updates."""
+    if wp.tid() == wp.int32(0):
+        out_num_entries[0] = wp.int32(0)
+
+
 @wp.kernel(enable_backward=False)
 def warm_start_invalidate_apply_kernel(
     invalid_mark: wp.array[wp.int32],
