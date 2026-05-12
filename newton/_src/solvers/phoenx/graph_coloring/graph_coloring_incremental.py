@@ -691,6 +691,30 @@ class IncrementalContactPartitioner:
                 self._num_elements,
             ],
         )
+        # Warm-start: seed ``color_tags`` from the cross-frame cache
+        # before the MIS loop. Constraints whose previous-frame
+        # colour is still legal under the current adjacency keep
+        # their colour (validation pass below catches the rest);
+        # constraints not in the cache stay at 0 and get coloured
+        # normally by MIS.
+        if self.enable_warm_start:
+            from newton._src.solvers.phoenx.graph_coloring.warm_start import (
+                seed_warm_start_kernel,
+            )
+
+            wp.launch(
+                seed_warm_start_kernel,
+                dim=self.max_num_interactions,
+                inputs=[
+                    self._elements,
+                    self._num_elements,
+                    self._warm_start_cache.keys,
+                    self._warm_start_cache.colors,
+                    self._warm_start_cache.num_entries,
+                    self._color_tags,
+                    self._partition_data_concat,
+                ],
+            )
         # Host-side fixed unroll of the greedy MIS loop. Trip count is
         # bounded by ``MAX_GREEDY_OUTER_ITERS`` -- on dense scenes we
         # always hit it anyway, and on sparse scenes the kernel's

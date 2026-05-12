@@ -35,8 +35,10 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
+    GREEDY_MAX_COLORS,
     MAX_BODIES,
     ElementInteractionData,
+    _COLOR_SHIFT,
     element_interaction_data_get,
 )
 
@@ -45,6 +47,12 @@ __all__ = [
     "warm_start_cache_zeros",
     "warm_start_key_func",
     "binary_search_warm_start_func",
+    "seed_warm_start_kernel",
+    "warm_start_invalidate_mark_kernel",
+    "warm_start_invalidate_apply_kernel",
+    "warm_start_emit_pairs_kernel",
+    "warm_start_dedup_pairs_kernel",
+    "warm_start_reset_count_kernel",
 ]
 
 
@@ -149,3 +157,46 @@ def binary_search_warm_start_func(
         else:
             return mid
     return wp.int32(-1)
+
+
+@wp.kernel(enable_backward=False)
+def seed_warm_start_kernel(
+    elements: wp.array[ElementInteractionData],
+    num_elements: wp.array[wp.int32],
+    cache_keys: wp.array[wp.int64],
+    cache_colors: wp.array[wp.int32],
+    cache_num_entries: wp.array[wp.int32],
+    color_tags: wp.array[wp.int32],
+    partition_data_concat: wp.array[wp.int64],
+):
+    """For each active constraint, look up its body-pair key in the
+    cache and seed ``color_tags[tid]`` with the cached colour. Empty
+    cache (``cache_num_entries[0] == 0``) leaves ``color_tags`` at 0
+    -- equivalent to cold-start MIS.
+
+    Also stamps ``partition_data_concat[tid]``: the greedy kernel
+    reads this on commit, so we keep it in sync with ``color_tags``
+    here (uncoloured slots get the unpartitioned-marker flag stamped
+    by the adjacency-store kernel earlier; we overwrite for coloured
+    slots).
+    """
+    tid = wp.tid()
+    if tid >= num_elements[0]:
+        return
+    n = cache_num_entries[0]
+    if n == wp.int32(0):
+        # Empty cache: leave color_tags / partition_data_concat as-is
+        # (adjacency_store_kernel already wrote them for the cold path).
+        return
+    el = elements[tid]
+    key = warm_start_key_func(el)
+    idx = binary_search_warm_start_func(cache_keys, n, key)
+    if idx < wp.int32(0):
+        return  # not in cache -> cold path (color_tags[tid] stays 0)
+    cached_color = cache_colors[idx]
+    if cached_color <= wp.int32(0):
+        return  # corrupt entry (shouldn't happen); fall through
+    color_tags[tid] = cached_color
+    # partition_data_concat encoding: high bits = color+1 (which is
+    # exactly what color_tags stores), low bits = tid.
+    partition_data_concat[tid] = (wp.int64(cached_color) << _COLOR_SHIFT) | wp.int64(tid)
