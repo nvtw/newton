@@ -130,7 +130,7 @@ class Example(PortedExample):
     step_report_label = "ChainMesh"
     # Flip to ``True`` to print PhoenX contact/constraint coloring stats
     # after each physics step.
-    print_step_reports = True
+    print_step_reports = False
     mass_splitting = ENABLE_MASS_SPLITTING
     max_colored_partitions = MASS_SPLITTING_MAX_COLORED_PARTITIONS
     # capture_while-free mass-splitting dispatcher. With cap=4 and high

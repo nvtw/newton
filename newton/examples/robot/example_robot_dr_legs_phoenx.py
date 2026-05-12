@@ -578,7 +578,7 @@ class Example:
 if __name__ == "__main__":
     parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
-    viewer._paused = True
+    # viewer._paused = True
     viewer.show_visual = False
     viewer.show_inertia_boxes = True
 
