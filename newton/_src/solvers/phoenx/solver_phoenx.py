@@ -87,6 +87,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
     MAX_COLORS,
     IncrementalContactPartitioner,
 )
+from newton._src.solvers.phoenx.dispatch.legacy import LegacyDispatcher
 from newton._src.solvers.phoenx.graph_coloring.luby_fixed import (
     FixedIterationLubyPartitioner,
 )
@@ -672,6 +673,13 @@ class PhoenXWorld:
         self._shape_body_internal: wp.array[wp.int32] | None = None
         # Lazy sentinel for optional per-contact stiffness/damping/friction.
         self._soft_contact_sentinel: wp.array[wp.float32] | None = None
+
+        # Step-time dispatcher. Currently a single transitional dispatcher
+        # that forwards to the in-line legacy methods so :meth:`step` can
+        # route through a uniform surface; future commits move each path
+        # (single-world / multi-world / mass-splitting) into its own
+        # dedicated dispatcher class under :mod:`phoenx.dispatch`.
+        self._dispatcher = LegacyDispatcher(self)
 
         self._assert_invariants()
 
@@ -1525,13 +1533,10 @@ class PhoenXWorld:
             if self._tpw_auto and self.step_layout != "single_world":
                 self._pick_tpw()
 
-            # Mass-splitting interaction graph rebuild: maps every
-            # (body, partition_key) tuple touched by the active CSR
-            # into a copy-state slot. Single-world only for now —
-            # multi-world's per-world CSR layout differs and is the
-            # next sub-step.
-            if self.mass_splitting_enabled and self.step_layout == "single_world":
-                self._rebuild_mass_splitting_graph()
+            # Per-step setup that depends on the just-built CSR. The
+            # dispatcher rebuilds the mass-splitting interaction graph
+            # here (no-op when mass splitting is disabled).
+            self._dispatcher.begin_step()
 
         self._kinematic_prepare_step()
 
@@ -1542,35 +1547,18 @@ class PhoenXWorld:
             if picking is not None:
                 picking.apply_force()
             self._integrate_forces_and_gravity()
-            # Mass-splitting broadcast: fan body / particle state into
-            # every owned copy-state slot once per substep. Constraint
-            # iterates read / write the slots; writeback at end syncs
-            # back into the body container. No-op when disabled
-            # (highest_index_in_use[0] == 0 -> kernel short-circuit).
-            if self.mass_splitting_enabled and self.step_layout == "single_world":
-                self._mass_splitting_broadcast()
             # TGS-soft (Box2D-v3) substep order: solve-with-bias ->
             # integrate -> relax (bias=False). Reversing regresses
-            # stacking / friction tests. Relax doesn't read
-            # slot.position (use_bias=False), so the post-integrate
-            # slot.position staleness is harmless.
-            if self.step_layout == "single_world":
-                self._solve_main_singleworld()
-                # Writeback BEFORE integrate so positions advance with
-                # the post-PGS velocity from slot[0].
-                if self.mass_splitting_enabled:
-                    self._mass_splitting_writeback()
-                self._integrate_positions()
-                self._relax_velocities_singleworld()
-                # Second writeback after relax: relax also routes
-                # through slots, so the next substep would see stale
-                # body.velocity otherwise.
-                if self.mass_splitting_enabled and self.velocity_iterations > 0:
-                    self._mass_splitting_writeback()
-            else:
-                self._solve_main()
-                self._integrate_positions()
-                self._relax_velocities()
+            # stacking / friction tests. Dispatcher owns:
+            #   - solve(): pre-substep mass-splitting broadcast +
+            #     prepare/iterate sweeps + post-solve writeback.
+            #   - relax(): bias-off relax sweeps + post-relax writeback.
+            # integrate_positions stays in step() -- identical for every
+            # dispatcher.
+            idt = wp.float32(1.0 / self.substep_dt)
+            self._dispatcher.solve(idt)
+            self._integrate_positions()
+            self._dispatcher.relax(idt)
             # Flip cloth particles' POSITION_LEVEL writes back to
             # VELOCITY_LEVEL. No-op for STATIC particles and rigid-only
             # scenes (num_particles == 0).
