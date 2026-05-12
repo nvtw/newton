@@ -89,6 +89,9 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
 )
 from newton._src.solvers.phoenx.dispatch.legacy import LegacyDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatcher
+from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import (
+    SingleWorldMassSplittingDispatcher,
+)
 from newton._src.solvers.phoenx.graph_coloring.luby_fixed import (
     FixedIterationLubyPartitioner,
 )
@@ -681,8 +684,11 @@ class PhoenXWorld:
         # Combinations not yet extracted (mass-splitting, multi-world)
         # currently route through :class:`LegacyDispatcher` which
         # forwards to the inline in-class helpers.
-        if self.step_layout == "single_world" and not self.mass_splitting_enabled:
-            self._dispatcher = SingleWorldDispatcher(self)
+        if self.step_layout == "single_world":
+            if self.mass_splitting_enabled:
+                self._dispatcher = SingleWorldMassSplittingDispatcher(self)
+            else:
+                self._dispatcher = SingleWorldDispatcher(self)
         else:
             self._dispatcher = LegacyDispatcher(self)
 

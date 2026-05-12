@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Dispatcher for ``step_layout='single_world'`` with Tonge mass splitting.
+
+Pattern: per-substep PGS = persistent-grid head + single-block fused
+tail, ``wp.capture_while`` over ``color_cursor``. **Plus** the
+mass-splitting plumbing:
+
+* :meth:`begin_step` rebuilds the ``(body, partition_key)`` interaction
+  graph from the just-built CSR.
+* :meth:`solve` broadcasts body / particle state into copy-state slots
+  before the prepare sweep, averages slots between iterations (Jacobi
+  convergence on the overflow bucket needs this), and writes back
+  slot[0] -> body before integrate_positions.
+* :meth:`relax` runs the bias-off relax loop, averages between iters,
+  and writes back at the end.
+
+A future commit will swap this for an unrolled variant
+(:mod:`single_world_mass_splitting_unrolled`) that drops the
+``wp.capture_while`` and uses a fixed
+``max_colored_partitions + 1`` host loop -- which is only possible
+because the partitioner's colour count is bounded under mass
+splitting.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import warp as wp
+
+from newton._src.solvers.phoenx.mass_splitting import (
+    launch_average_and_broadcast,
+)
+
+if TYPE_CHECKING:
+    from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+
+
+class SingleWorldMassSplittingDispatcher:
+    """Single-world PGS dispatcher with Tonge mass splitting."""
+
+    __slots__ = ("_world",)
+
+    def __init__(self, world: PhoenXWorld) -> None:
+        self._world = world
+
+    def begin_step(self) -> None:
+        self._world._rebuild_mass_splitting_graph()
+
+    def solve(self, idt: wp.float32) -> None:
+        w = self._world
+        # Fan body / particle state into every owned copy-state slot
+        # before the constraint kernels read them.
+        w._mass_splitting_broadcast()
+        if w._constraint_capacity == 0:
+            # Still need to writeback to keep slot[0] -> body in sync
+            # for the next substep.
+            w._mass_splitting_writeback()
+            return
+
+        inv_dt = 1.0 / w.substep_dt
+        prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
+        particles_or_sentinel = w._particles_or_sentinel()
+        num_bodies = w.num_bodies
+        copy_state = w._copy_state
+        bodies = w.bodies
+
+        # Prepare applies the warm-start impulse to each body's slots;
+        # average so the iterate phase starts from converged slot values.
+        w._partitioner.begin_sweep()
+        w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
+        launch_average_and_broadcast(
+            copy_state, bodies, particles_or_sentinel,
+            num_bodies=num_bodies, inv_dt=inv_dt,
+        )
+
+        for _ in range(w.solver_iterations):
+            w._partitioner.begin_sweep()
+            w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
+            launch_average_and_broadcast(
+                copy_state, bodies, particles_or_sentinel,
+                num_bodies=num_bodies, inv_dt=inv_dt,
+            )
+
+        # Writeback slot[0].velocity -> body.velocity. step()'s
+        # integrate_positions then advances bodies with the post-PGS
+        # velocity.
+        w._mass_splitting_writeback()
+
+    def relax(self, idt: wp.float32) -> None:
+        w = self._world
+        if w._constraint_capacity == 0 or w.velocity_iterations <= 0:
+            return
+
+        inv_dt = 1.0 / w.substep_dt
+        _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
+        particles_or_sentinel = w._particles_or_sentinel()
+        num_bodies = w.num_bodies
+        copy_state = w._copy_state
+        bodies = w.bodies
+
+        for _ in range(w.velocity_iterations):
+            w._partitioner.begin_sweep()
+            w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
+            launch_average_and_broadcast(
+                copy_state, bodies, particles_or_sentinel,
+                num_bodies=num_bodies, inv_dt=inv_dt,
+            )
+
+        # Second writeback after relax: relax also routes through slots,
+        # so the next substep would see stale body.velocity otherwise.
+        w._mass_splitting_writeback()
+
+
+__all__ = ["SingleWorldMassSplittingDispatcher"]
