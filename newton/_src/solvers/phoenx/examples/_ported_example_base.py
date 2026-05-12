@@ -174,6 +174,11 @@ class PortedExample:
     #: coloring is capped at when :attr:`mass_splitting` is enabled.
     #: Any constraint that wouldn't fit lands in the overflow bucket.
     max_colored_partitions: int = 12
+    #: Use the capture_while-free mass-splitting dispatcher. Only
+    #: applies when :attr:`mass_splitting` is True. Default off because
+    #: the trade-off (no conditional graph nodes vs slightly higher
+    #: launch count) is workload-dependent.
+    mass_splitting_unrolled: bool = False
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -312,6 +317,7 @@ class PortedExample:
             step_layout=self.step_layout,
             mass_splitting=self.mass_splitting,
             max_colored_partitions=self.max_colored_partitions,
+            mass_splitting_unrolled=self.mass_splitting_unrolled,
             device=self.device,
         )
 

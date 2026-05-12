@@ -62,7 +62,7 @@ DROP_HEIGHT = TUBE_RADIUS + 0.01
 # per-(body, partition) copy states. Requires the single-world step
 # layout (already used by this example).
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 4
 
 
 def _add_chain_ring(builder: newton.ModelBuilder, body: int, *, static: bool = False) -> None:
@@ -133,6 +133,11 @@ class Example(PortedExample):
     print_step_reports = True
     mass_splitting = ENABLE_MASS_SPLITTING
     max_colored_partitions = MASS_SPLITTING_MAX_COLORED_PARTITIONS
+    # capture_while-free mass-splitting dispatcher. With cap=4 and high
+    # contact density this scene's tail kernel was 78% serialized in a
+    # single block; the head-only path runs the same work in parallel
+    # across many SMs.
+    mass_splitting_unrolled = True
 
     def step(self) -> None:
         super().step()
