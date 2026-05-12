@@ -129,14 +129,15 @@ class SoftTetrahedronData:
     alpha_lambda: wp.float32  # 1 / Lame lambda (volume compliance, reserved)
     alpha_mu: wp.float32  # 1 / Lame mu (shear compliance)
 
-    # Macklin XPBD damping coefficients (gamma = beta * dt enters the
-    # lambda numerator as ``gamma * grad . (x - position_prev_substep)``).
-    # Reserved -- the soft-tet iterate currently runs bare XPBD without
-    # the damping term (no ``position_prev_substep`` read). Cloth-tri
-    # uses the equivalent formulation; mirror that pattern when
-    # implementing soft-tet damping.
-    beta_lambda: wp.float32  # PD damping on volume row (reserved)
-    beta_mu: wp.float32  # PD damping on shear row (reserved)
+    # Macklin XPBD damping coefficients. ``gamma = beta * dt`` enters
+    # the lambda numerator as ``gamma * grad . (x - position_prev_substep)``
+    # -- velocity-projected damping that does NOT damp at rest, unlike
+    # ether damping. Mirrors the cloth-triangle iterate's same-shape
+    # damping term (Macklin et al. 2020 "Detailed Rigid Body
+    # Simulation with XPBD"). Jitter2 ``FemTetPBD`` omits this term;
+    # Newton's variant collapses to bare XPBD when ``beta == 0``.
+    beta_lambda: wp.float32  # PD damping on volume row (reserved -- volume row not yet implemented)
+    beta_mu: wp.float32  # PD damping on shear row
 
     inv_mass_a: wp.float32
     inv_mass_b: wp.float32
@@ -469,6 +470,7 @@ def soft_tetrahedron_iterate_at(
     rest_volume = read_float(constraints, _OFF_REST_VOLUME, cid)
     inv_rest = read_mat33(constraints, _OFF_INV_REST, cid)
     alpha_mu = read_float(constraints, _OFF_ALPHA_MU, cid)
+    beta_mu = read_float(constraints, _OFF_BETA_MU, cid)
     rotation = read_quat(constraints, _OFF_ROTATION, cid)
     lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
 
@@ -477,6 +479,21 @@ def soft_tetrahedron_iterate_at(
     x_b, _ifb, slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
     x_c, _ifc, slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
     x_d, _ifd, slot_d = read_position_unified(bodies, particles, copy_state, body_d, parallel_id, num_bodies)
+    # ``dx = x - position_prev_substep`` is the XPBD damping term
+    # anchor (Macklin et al. 2020 "Detailed Rigid Body Simulation
+    # with XPBD"): the ``gamma * grad . dx`` term in the lambda
+    # numerator is velocity-projected damping (does not damp at
+    # rest, unlike ether damping). ``x`` is the *current* (gauss-
+    # seidel-mutable) slot position; ``position_prev_substep`` is the
+    # substep-start snapshot captured by ``cloth_predict_kernel`` and
+    # never modified during PGS. Mirrors the cloth-triangle iterate's
+    # use of the same anchor. Jitter2 ``FemTetPBD.Iterate`` omits the
+    # damping term (bare XPBD); this is a Newton extension that
+    # collapses to bare XPBD when ``beta_mu == 0``.
+    dx_a = x_a - particles.position_prev_substep[p_a]
+    dx_b = x_b - particles.position_prev_substep[p_b]
+    dx_c = x_c - particles.position_prev_substep[p_c]
+    dx_d = x_d - particles.position_prev_substep[p_d]
 
     # Deformation gradient F = (xB-xA, xC-xA, xD-xA) * inv_rest.
     # Layout matches Jitter2 (row-major, F.M_ij is F[i-1, j-1]).
@@ -554,18 +571,26 @@ def soft_tetrahedron_iterate_at(
 
     idt_sq = idt * idt
     bias_mu = idt_sq * alpha_mu
+    dt = wp.float32(1.0) / idt
+    gamma_mu = beta_mu * dt
 
-    denom = (
+    grad_dot_grad_inv_m_mu = (
         inv_mass_a * (g1_x * g1_x + g1_y * g1_y + g1_z * g1_z)
         + inv_mass_b * (g2_x * g2_x + g2_y * g2_y + g2_z * g2_z)
         + inv_mass_c * (g3_x * g3_x + g3_y * g3_y + g3_z * g3_z)
         + inv_mass_d * (g4_x * g4_x + g4_y * g4_y + g4_z * g4_z)
-        + bias_mu
     )
+    grad_dot_dx_mu = (
+        g1_x * dx_a[0] + g1_y * dx_a[1] + g1_z * dx_a[2]
+        + g2_x * dx_b[0] + g2_y * dx_b[1] + g2_z * dx_b[2]
+        + g3_x * dx_c[0] + g3_y * dx_c[1] + g3_z * dx_c[2]
+        + g4_x * dx_d[0] + g4_y * dx_d[1] + g4_z * dx_d[2]
+    )
+    denom = (wp.float32(1.0) + gamma_mu) * grad_dot_grad_inv_m_mu + bias_mu
 
     if denom > wp.float32(0.0):
         c_mu = rest_volume * mv
-        d_lam_mu = -(c_mu + bias_mu * lambda_sum_mu) / denom
+        d_lam_mu = -(c_mu + bias_mu * lambda_sum_mu + gamma_mu * grad_dot_dx_mu) / denom
         x_a = x_a + wp.vec3f(g1_x * d_lam_mu * inv_mass_a, g1_y * d_lam_mu * inv_mass_a, g1_z * d_lam_mu * inv_mass_a)
         x_b = x_b + wp.vec3f(g2_x * d_lam_mu * inv_mass_b, g2_y * d_lam_mu * inv_mass_b, g2_z * d_lam_mu * inv_mass_b)
         x_c = x_c + wp.vec3f(g3_x * d_lam_mu * inv_mass_c, g3_y * d_lam_mu * inv_mass_c, g3_z * d_lam_mu * inv_mass_c)

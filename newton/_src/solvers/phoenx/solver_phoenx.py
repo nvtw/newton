@@ -1079,6 +1079,20 @@ class PhoenXWorld:
         :meth:`populate_cloth_triangles_from_model` in the same scene;
         each populator stamps its own cid range and bumps
         ``_num_active_constraints`` to the joint + cloth + soft-tet sum.
+
+        Args:
+            beta_mu: Macklin XPBD damping on the shear row [1/s]. Enters
+                the lambda numerator as ``gamma_mu * grad . (x -
+                position_prev_substep)`` with ``gamma_mu = beta_mu *
+                substep_dt`` -- velocity-projected damping that does
+                NOT damp at rest. ``0.0`` => bare XPBD (matches Jitter2
+                ``FemTetPBD``); ``~0.1`` is a reasonable default that
+                lets a free-falling soft cube settle within ~30 substeps
+                on impact rather than ringing indefinitely.
+            beta_lambda: Reserved -- the volume row is not yet
+                implemented in :func:`soft_tetrahedron_iterate_at`; the
+                value is stamped into the row data so a future port can
+                pick it up without an API change.
         """
         if self.num_soft_tetrahedra == 0:
             return
