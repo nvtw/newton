@@ -411,6 +411,17 @@ def cloth_triangle_iterate_at(
     x_a, _ifa, slot_a = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
     x_b, _ifb, slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
     x_c, _ifc, slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
+    # ``dx = x - position_prev_substep`` is the XPBD damping term anchor
+    # (Macklin et al. 2020 "Detailed Rigid Body Simulation with XPBD"):
+    # the ``gamma * grad . dx`` term in the lambda numerator is real
+    # velocity-projected damping (does not damp at rest, unlike ether
+    # damping). ``x`` is the *current* (gauss-seidel-mutable) slot
+    # position; ``position_prev_substep`` is the substep-start snapshot
+    # captured by ``cloth_predict_kernel`` and never modified during PGS.
+    # Reading prev_substep here does NOT break Gauss-Seidel: the
+    # iterate state ``x`` is the mutable one; prev_substep is constant
+    # within a substep. Jitter2 ``FemTriPBD.Iterate`` omits this term
+    # (bare XPBD); the damping is a Newton extension.
     dx_a = x_a - particles.position_prev_substep[p_a]
     dx_b = x_b - particles.position_prev_substep[p_b]
     dx_c = x_c - particles.position_prev_substep[p_c]

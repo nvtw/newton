@@ -129,8 +129,14 @@ class SoftTetrahedronData:
     alpha_lambda: wp.float32  # 1 / Lame lambda (volume compliance, reserved)
     alpha_mu: wp.float32  # 1 / Lame mu (shear compliance)
 
+    # Macklin XPBD damping coefficients (gamma = beta * dt enters the
+    # lambda numerator as ``gamma * grad . (x - position_prev_substep)``).
+    # Reserved -- the soft-tet iterate currently runs bare XPBD without
+    # the damping term (no ``position_prev_substep`` read). Cloth-tri
+    # uses the equivalent formulation; mirror that pattern when
+    # implementing soft-tet damping.
     beta_lambda: wp.float32  # PD damping on volume row (reserved)
-    beta_mu: wp.float32  # PD damping on shear row
+    beta_mu: wp.float32  # PD damping on shear row (reserved)
 
     inv_mass_a: wp.float32
     inv_mass_b: wp.float32
@@ -284,30 +290,20 @@ def _extract_rotation_3d(F: wp.mat33f, q_init: wp.quatf) -> wp.quatf:
                 j_ * F33
                 + p_ * F22
                 + bl * F11
-                + wp.float32(2.0)
-                * (bn * F12 + w_ * F31 + s_ * F23 + F13 * bs + F21 * bb + F32 * d_)
+                + wp.float32(2.0) * (bn * F12 + w_ * F31 + s_ * F23 + F13 * bs + F21 * bb + F32 * d_)
             )
             + _EXTRACT_ROT_EPS
         )
         cf = wp.float32(1.0) / denom
 
         omega_x = (
-            -wp.float32(2.0) * F22 * d_
-            - j_ * F23
-            + p_ * F32
-            + wp.float32(2.0) * (s_ * F33 - w_ * F21 + F31 * bb)
+            -wp.float32(2.0) * F22 * d_ - j_ * F23 + p_ * F32 + wp.float32(2.0) * (s_ * F33 - w_ * F21 + F31 * bb)
         ) * cf
         omega_y = (
-            -wp.float32(2.0) * F33 * bs
-            - bl * F31
-            + j_ * F13
-            + wp.float32(2.0) * (w_ * F11 - bn * F32 + F12 * d_)
+            -wp.float32(2.0) * F33 * bs - bl * F31 + j_ * F13 + wp.float32(2.0) * (w_ * F11 - bn * F32 + F12 * d_)
         ) * cf
         omega_z = (
-            -wp.float32(2.0) * F11 * bb
-            - p_ * F12
-            + bl * F21
-            + wp.float32(2.0) * (bn * F22 - s_ * F13 + F23 * bs)
+            -wp.float32(2.0) * F11 * bb - p_ * F12 + bl * F21 + wp.float32(2.0) * (bn * F22 - s_ * F13 + F23 * bs)
         ) * cf
 
         omega = wp.vec3f(omega_x, omega_y, omega_z)
