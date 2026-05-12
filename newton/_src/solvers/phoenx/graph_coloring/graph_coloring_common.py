@@ -351,6 +351,9 @@ def partitioning_coloring_incremental_greedy_kernel(
       int64 forbidden-mask range.
     """
     n = num_elements[0]
+    soft_cap = max_colored_partitions >= wp.int32(0)
+    saturation_limit = max_colored_partitions if soft_cap else wp.int32(GREEDY_MAX_COLORS)
+
     for tid in range(wp.tid(), n, total_num_threads):
         # 4-byte tag read (0 = uncoloured) — halves bandwidth vs int64.
         if color_tags[tid] != wp.int32(0):
@@ -378,13 +381,20 @@ def partitioning_coloring_incremental_greedy_kernel(
                 neighbor = vertex_to_adjacent_elements[k]
                 if neighbor == tid:
                     continue
-                # tag == 0: uncoloured -> MIS tiebreak. tag != 0: forbid colour.
+                # Read both color tag AND priority unconditionally so the
+                # compiler can issue both loads up-front (hides global-
+                # memory latency for the conditional path below). Cost is
+                # one extra read for already-coloured neighbours; the
+                # array is small enough to live in cache.
                 ntag = color_tags[neighbor]
+                neigh_prio = contact_partitions_get_random_value(packed_priorities, neighbor)
                 if ntag == wp.int32(0):
-                    if contact_partitions_get_random_value(packed_priorities, neighbor) > self_prio:
+                    # Uncoloured neighbour -> MIS priority tiebreak.
+                    if neigh_prio > self_prio:
                         is_local_max = False
                         break
                 else:
+                    # Coloured neighbour -> forbid its colour.
                     ncolor = ntag - wp.int32(1)
                     if ncolor < GREEDY_MAX_COLORS:
                         forbidden_mask = forbidden_mask | (wp.int64(1) << wp.int64(ncolor))
@@ -393,32 +403,19 @@ def partitioning_coloring_incremental_greedy_kernel(
             # Smallest free colour = lowest 0-bit in forbidden mask.
             free_mask = forbidden_mask ^ _FREE_COLOR_FLIP
             c = _lowest_set_bit(free_mask)
-            # Soft-cap path: a search ceiling of max_colored_partitions
-            # routes any saturated bucket commit to the overflow colour.
-            # Disabled path (max_colored_partitions < 0): historical
-            # GREEDY_MAX_COLORS overflow-flag behaviour.
-            soft_cap = max_colored_partitions >= wp.int32(0)
-            if soft_cap and (c < wp.int32(0) or c >= max_colored_partitions):
-                # Saturated in [0, K). Commit at colour K (overflow bucket).
-                # No overflow flag: the bucket is a legitimate solver
-                # target consumed by mass splitting.
-                color_tags[tid] = max_colored_partitions + wp.int32(1)
-                partition_data_concat[tid] = (
-                    wp.int64(max_colored_partitions + wp.int32(1)) << _COLOR_SHIFT
-                ) | wp.int64(tid)
-                wp.atomic_sub(num_remaining, 0, 1)
-            elif (not soft_cap) and (c < wp.int32(0) or c >= GREEDY_MAX_COLORS):
-                # Mask saturated. Stamp poison colour and flag overflow;
-                # we still must commit + decrement to let capture_while exit.
-                overflow_flag[0] = 1
-                fallback_c = wp.int32(GREEDY_MAX_COLORS - wp.int32(1))
-                color_tags[tid] = fallback_c + wp.int32(1)
-                partition_data_concat[tid] = (wp.int64(fallback_c + wp.int32(1)) << _COLOR_SHIFT) | wp.int64(tid)
-                wp.atomic_sub(num_remaining, 0, 1)
-            else:
-                color_tags[tid] = c + wp.int32(1)
-                partition_data_concat[tid] = (wp.int64(c + 1) << _COLOR_SHIFT) | wp.int64(tid)
-                wp.atomic_sub(num_remaining, 0, 1)
+            # Saturation routing:
+            #   soft_cap on  -> route to overflow colour ``max_colored_partitions``
+            #   soft_cap off -> route to ``GREEDY_MAX_COLORS - 1`` and flag overflow
+            # Both paths still commit + decrement so capture_while exits.
+            if c < wp.int32(0) or c >= saturation_limit:
+                if soft_cap:
+                    c = max_colored_partitions
+                else:
+                    overflow_flag[0] = 1
+                    c = wp.int32(GREEDY_MAX_COLORS - wp.int32(1))
+            color_tags[tid] = c + wp.int32(1)
+            partition_data_concat[tid] = (wp.int64(c + wp.int32(1)) << _COLOR_SHIFT) | wp.int64(tid)
+            wp.atomic_sub(num_remaining, 0, 1)
 
 
 @wp.kernel(enable_backward=False)
