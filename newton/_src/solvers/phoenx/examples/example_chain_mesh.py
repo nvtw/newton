@@ -62,7 +62,7 @@ DROP_HEIGHT = TUBE_RADIUS + 0.01
 # per-(body, partition) copy states. Requires the single-world step
 # layout (already used by this example).
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 4
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
 
 
 def _add_chain_ring(builder: newton.ModelBuilder, body: int, *, static: bool = False) -> None:
@@ -138,6 +138,11 @@ class Example(PortedExample):
     # single block; the head-only path runs the same work in parallel
     # across many SMs.
     mass_splitting_unrolled = True
+    # Greedy MIS always hits the iter cap on this scene (chromatic
+    # number >> max_colored_partitions). Lowering to 8 halves coloring
+    # launches; extra uncoloured elements just spill to the overflow
+    # bucket and mass splitting solves them Jacobi-style.
+    max_greedy_outer_iters = 8
 
     def step(self) -> None:
         super().step()

@@ -272,6 +272,7 @@ class PhoenXWorld:
         mass_splitting_batch_size: int = 8,
         mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
+        max_greedy_outer_iters: int | None = None,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -552,6 +553,7 @@ class PhoenXWorld:
                 device=self.device,
                 use_tile_scan=True,
                 max_colored_partitions=self.max_colored_partitions,
+                max_greedy_outer_iters=max_greedy_outer_iters,
             )
         elif self.partitioner_algorithm == "luby_fixed":
             if step_layout != "single_world":

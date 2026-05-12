@@ -220,6 +220,7 @@ class IncrementalContactPartitioner:
         seed: int = 0,
         use_tile_scan: bool = True,
         max_colored_partitions: int | None = None,
+        max_greedy_outer_iters: int | None = None,
     ) -> None:
         """``max_colored_partitions``: soft cap for the overflow bucket. When
         set to ``K``, colours ``0..K-1`` are produced by normal MIS coloring
@@ -252,6 +253,15 @@ class IncrementalContactPartitioner:
                     f"color_starts[K + 1] stays in-bounds; got {max_colored_partitions}."
                 )
         self.max_colored_partitions = max_colored_partitions
+        # Per-instance override for the host-side greedy loop bound. ``None``
+        # uses the module-level :data:`MAX_GREEDY_OUTER_ITERS` (default 16).
+        # Mass-splitting scenes can safely lower this -- excess uncoloured
+        # elements just spill to the overflow bucket. Non-MS scenes
+        # (``max_colored_partitions is None``) need the full 16 to find a
+        # valid coloring with no fallback.
+        self._max_greedy_outer_iters_override: int | None = (
+            int(max_greedy_outer_iters) if max_greedy_outer_iters is not None else None
+        )
         self._max_colored_partitions_kernel_arg: int = (
             -1 if max_colored_partitions is None else int(max_colored_partitions)
         )
@@ -673,7 +683,12 @@ class IncrementalContactPartitioner:
         # extra post-convergence iters cheap. Replaces a
         # wp.capture_while + watcher kernel pair (one conditional
         # graph node + one watcher launch per outer iter).
-        for _ in range(int(MAX_GREEDY_OUTER_ITERS)):
+        outer_iters = (
+            self._max_greedy_outer_iters_override
+            if self._max_greedy_outer_iters_override is not None
+            else int(MAX_GREEDY_OUTER_ITERS)
+        )
+        for _ in range(outer_iters):
             self._capture_build_csr_greedy_step()
         # Force-spill anything still uncoloured into the overflow colour.
         # No-op when capture_while drained num_remaining naturally; only

@@ -179,6 +179,13 @@ class PortedExample:
     #: the trade-off (no conditional graph nodes vs slightly higher
     #: launch count) is workload-dependent.
     mass_splitting_unrolled: bool = False
+    #: Override the greedy MIS outer-iteration cap (default 16). On
+    #: dense scenes with low :attr:`max_colored_partitions` greedy
+    #: hits the cap every step; lowering saves coloring time at the
+    #: cost of pushing more elements into the overflow bucket. Mass
+    #: splitting handles the overflow, so quality stays the same.
+    #: Only safe with :attr:`mass_splitting` enabled.
+    max_greedy_outer_iters: int | None = None
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -318,6 +325,7 @@ class PortedExample:
             mass_splitting=self.mass_splitting,
             max_colored_partitions=self.max_colored_partitions,
             mass_splitting_unrolled=self.mass_splitting_unrolled,
+            max_greedy_outer_iters=self.max_greedy_outer_iters,
             device=self.device,
         )
 
