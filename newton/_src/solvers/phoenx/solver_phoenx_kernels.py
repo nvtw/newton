@@ -1056,15 +1056,19 @@ def _constraints_to_elements_kernel(
         if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
             e0b = -1
     elif side0_kind == wp.int32(2):  # SOFT_TETRAHEDRON
+        # Opt-E experiment: emit only 2 extras (3 nodes total per soft-tet
+        # side: b1 + e0a + e0b) into the coloring adjacency. The 4th tet
+        # vertex (e0c) is opposite the contact face -- its barycentric
+        # weight is zero on a true face contact, so dropping it from the
+        # adjacency graph sparsifies coloring without changing the
+        # iterate's impulse on the 4th vertex (which is zero anyway for
+        # face contacts, small for edge/vertex contacts).
         e0a = side0_extra[0]
         e0b = side0_extra[1]
-        e0c = side0_extra[2]
         if e0a >= 0 and particles.inverse_mass[e0a - num_bodies] == 0.0:
             e0a = -1
         if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
             e0b = -1
-        if e0c >= 0 and particles.inverse_mass[e0c - num_bodies] == 0.0:
-            e0c = -1
     e1a = wp.int32(-1)
     e1b = wp.int32(-1)
     e1c = wp.int32(-1)
@@ -1076,15 +1080,13 @@ def _constraints_to_elements_kernel(
         if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
             e1b = -1
     elif side1_kind == wp.int32(2):  # SOFT_TETRAHEDRON
+        # Opt-E experiment: see side0 comment.
         e1a = side1_extra[0]
         e1b = side1_extra[1]
-        e1c = side1_extra[2]
         if e1a >= 0 and particles.inverse_mass[e1a - num_bodies] == 0.0:
             e1a = -1
         if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
             e1b = -1
-        if e1c >= 0 and particles.inverse_mass[e1c - num_bodies] == 0.0:
-            e1c = -1
 
     # Compact: drop -1s into a contiguous prefix (the partitioner's
     # adjacency loop stops on the first -1). Up to 8 nodes total:

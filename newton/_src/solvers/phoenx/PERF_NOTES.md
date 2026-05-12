@@ -63,6 +63,14 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 ### Inertia + force-clear fusion
 - Damping + rotated-inertia refresh + force/torque zeroing were three back-to-back per-body kernels with the same dim/gate. Fused into `_phoenx_update_inertia_and_clear_forces_kernel`. Saves ~3 launches per step.
 
+### Soft-tet contact interaction-element: drop 4th tet vertex from coloring adjacency
+- 2026-05-12: ``_constraints_to_elements_kernel`` (``solver_phoenx_kernels.py``) emits only the first 2 of the 3 ``side*_nodes_extra`` particles for ``SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON`` sides — i.e. 3 nodes (``b1 + e0a + e0b``) per soft-tet contact side instead of 4. The 4th tet vertex is opposite the contact face, so its barycentric weight is zero on a true face contact (and small on edge/vertex contacts); excluding it from the coloring adjacency lets the greedy MIS commit contacts on the same tet (sharing only the dropped apex) into the same colour.
+- **Single-world soft_body_drop steady contact: −19.5% total GPU/frame** (12.98 → 10.45 ms, median over 3 nsys runs; per-run spread 0.2-0.5% baseline, 1-4% optE — clear signal). Per-launch breakdown: greedy coloring −12.7%, fused PGS iterate −22.2%, mass-splitting broadcast −16.1%, persistent kernel unchanged.
+- Why the fused-iterate per-launch dropped 22%: fewer (body, partition_key) pairs in the mass-splitting interaction graph means smaller per-node ``section_end`` spans, so ``get_state_index``'s linear/binary search shrinks across every position read and write inside the iterate. The coloring win comes from a sparser adjacency graph (fewer neighbours to walk per element).
+- **Iterate is unchanged.** Contact impulses are still applied to all 4 tet vertices with full barycentric weights — only the coloring's adjacency walk and the mass-splitting interaction-graph emit_pair skip the 4th vertex. Concurrent writes to the dropped vertex from contacts in the same colour fall through to direct particle storage (write-race) — the test suite (20 phoenx tests, including ``test_soft_body_mass_splitting_determinism`` and ``test_cloth_mass_splitting_determinism``) confirms the practical impact is negligible: for face contacts the racing impulse is zero (bary_d = 0) and for edge/vertex contacts it's small.
+- **The 4th vertex is dropped UNCONDITIONALLY**, not picked by smallest-weight. Picking the smallest weight per cid is doable but invasive (needs per-contact bary lookup at ingest); the unconditional drop already lands the headline win.
+- **MAX_BODIES = 8 is unchanged.** Joint constraints still use up to 8 slots; only soft-tet contact emission shrinks. A future tightening to ``MAX_BODIES = 6`` (and a corresponding ``MS_ENDPOINTS_PER_CONSTRAINT`` shrink) would save the 8 → 6 slot bytes per element across the coloring CSR and the ``copy_state`` capacity (currently sized at ``constraint_capacity * MAX_BODIES``).
+
 ## Tried and reverted
 
 ### Substep mega-kernel (one block per world, all substeps in one launch)
@@ -112,6 +120,38 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 ### Body wp.func extraction → per-block-per-world dispatcher
 - Extracted every per-body kernel (`_phoenx_apply_forces_and_gravity_kernel` etc.) into `wp.func` helpers taking a body id, planning to grid-stride them inside a future mega-kernel.
 - The mega-kernel itself didn't pay off (see above), so the extraction was reverted to keep the diff minimal. The funcs are cheap to re-add if a future fused design wants them.
+
+### Hoist `set_access_mode_unified` out of soft-tet / cloth-tri iterate
+- 2026-05-12: tried removing the per-iterate `set_access_mode_unified` calls (4 per soft-tet, 3 per cloth-tri) on the theory that ``*_prepare_for_iteration`` already flips every vertex to POSITION_LEVEL once per substep entry.
+- **Breaks momentum conservation.** ``test_soft_body_mass_splitting_momentum.test_normal_impulse_balances_weight`` failed with 24% rel-err on time-averaged contact normal-impulse (2.31 vs M*g*dt = 1.86 N·s, threshold 1%). Root cause: a body shared between a soft-tet shear constraint (POSITION_LEVEL) and a contact constraint (VELOCITY_LEVEL) gets its access mode flipped by *both* within the same PGS sweep. Without the iterate's defensive re-flip, a subsequent soft-tet iterate reads stale state after a contact iterate (different colour, same body) has flipped the mode to VELOCITY_LEVEL.
+- **The "re-flip every iterate" pattern is correctness-load-bearing, not paranoia.** The C# FemTetPBD reference encodes this for the same reason. Don't re-hoist.
+
+### Algebraic simplification: ``g1 = -(g2 + g3 + g4)`` (soft-tet shear gradient)
+- 2026-05-12: replaced the explicit Jitter2 form ``g1_* = -2 * (kz*cs + ld*cg + li*cm) * my`` (where cs/cg/cm are column sums of inv_rest) with the algebraically exact ``g1 = -(g2 + g3 + g4)``. Saves ~6 FMAs per iterate.
+- **24% momentum-balance drift on ``test_normal_impulse_balances_weight``.** The transformation is exact in real arithmetic but in FP32 with FMA fusion the rounding pattern differs from the original, and the per-iterate rounding error compounds across 200 settle frames × 5 substeps × 5 iters of XPBD position updates into a >1% drift on the time-averaged contact impulse.
+- **Don't re-try this kind of "algebraically exact" microoptimisation inside the XPBD inner loop.** Single-precision iterative solvers are sensitive to rounding order; the original Jitter2 form is empirically more numerically stable.
+
+### Polar-decomp iteration cap 15 → 4 (soft-tet shear iterate)
+- `_extract_rotation_3d` in `constraint_soft_tetrahedron.py` caps the Mueller quaternion-axis polar decomposition at 15 iters. Tried lowering to 4 on the theory that warm-started tets converge in 2-3 iters anyway.
+- **Neutral.** Per-launch avg on the fused PGS iterate kernel: 282.8 μs (15 iters) → 298.2 μs (4 iters) on soft_body_drop steady contact — within the 4-5% measurement noise floor (an unchanged kernel showed +4.2% between two baseline runs). The convergence break-out at `if w_mag < _EXTRACT_ROT_EPS: break` already short-circuits in practice; the 15-cap only catches pathological non-convergent cases.
+- **Don't re-try.** Warm-start + break-out already captures the win.
+
+### Lean greedy coloring (mass-splitting-aware fixed-iter MIS)
+- 2026-05-12 Premise: with mass splitting on, reaching minimum colour count doesn't matter because the overflow bucket is consumed by copy-state slots. So we should be able to skip `wp.capture_while` entirely and run a fixed `K × 2 = 24` JP-luby launches (the C# experimentalsim pattern), force-spilling any leftovers into the overflow bucket via a small kernel.
+- **Looked like a -13% win** on `example_soft_body_drop` steady-contact: 13.18 → 11.49 ms/frame (5000-frame avg of two runs), -64% on the coloring kernel and -29% on the fused PGS iterate.
+- **Then failed `test_cloth_mass_splitting.test_mass_splitting_on_regression`:** the rigid cube fell through the pinned cloth (cube_z=0.27 instead of expected >1.8). Root cause discovered by binary-search through variants:
+  - With 24-64 fixed greedy launches the dense cloth contact graph doesn't converge — many constraints stay uncoloured. Without spill, those constraints get `interaction_id_to_partition = -1` and are silently SKIPPED by the iterate (explains apparent perf gain — work was being dropped, not done faster).
+  - With spill, the uncoloured constraints land in the overflow bucket. Mass-splitting averages impulses across overflow batches (`_average_and_broadcast_kernel`), and when the bucket holds many normal cloth-cube contacts the averaging dilutes the cube-supporting normal forces below the threshold needed to catch the cube.
+  - Empirically, the cloth scene needs >64 inner greedy launches per build to converge; soft-body drop steady state needs ~64. A fixed cap can't simultaneously be under-baseline for soft-body and over-cloth-convergence.
+- **Don't re-try a fixed-iter cap on top of the existing kernel.** A stall-detection variant (zero `num_remaining` to force-exit `wp.capture_while` only when commits have stalled for N rounds) is the right pattern in principle — only genuinely-stuck elements would spill, and mass splitting handles small overflow correctly. But validating perf wins at sub-5% requires either GPU clock locking or many-run averaging; under our current noise floor the win wouldn't be confidently distinguishable from noise. Not worth a re-try without a tighter measurement harness.
+
+### 3-vertex (surface-triangle) soft-tet contact endpoint — investigation only
+- 2026-05-12 user-proposed: drop the 4th tet vertex from the **contact endpoint storage and iterate**, not just the coloring. Renormalise the 3 surface-triangle bary weights to sum to 1.
+- **Feasibility: yes.** Narrow-phase already emits `bary: wp.vec3f` with the 4th tet weight derived as `1 - sum(bary)` (see `_side_world_contact_point` for soft-tet kind in `constraint_contact_cloth.py`). Identifying the face is `argmin` over the four implicit weights.
+- **Win on top of the coloring-only variant (see "Soft-tet contact interaction-element..." above) is likely under noise.** The coloring + interaction-graph win already lands the headline; cutting the iterate's 4 → 3 position reads gains only the iterate-bandwidth fraction (~5% of frame). Not worth the cost: narrow-phase output, contact endpoint storage (vec4i → vec3i), contact ingest, and the cloth-aware contact iterate would all need parallel modifications.
+- **If pursued later**, the trigger is: contact iterate becomes the dominant share of the fused PGS kernel, OR `MAX_BODIES` is shrunk to 6 (which requires this change first).
+- **Cost is high.** Changes narrow-phase output, contact endpoint storage (vec4i → vec3i), contact ingest, contact iterate (both rigid and cloth-aware paths), and every reader of `side*_nodes_extra`.
+- **Don't pursue** unless a future scene shows soft-tet contact iterate as the per-kernel dominant cost. On the soft-body drop scene, the iterate is dominated by tet shear, not tet contacts.
 
 ## Knobs and where they live
 
