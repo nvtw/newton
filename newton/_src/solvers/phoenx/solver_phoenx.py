@@ -88,6 +88,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
     IncrementalContactPartitioner,
 )
 from newton._src.solvers.phoenx.dispatch.legacy import LegacyDispatcher
+from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatcher
 from newton._src.solvers.phoenx.graph_coloring.luby_fixed import (
     FixedIterationLubyPartitioner,
 )
@@ -674,12 +675,16 @@ class PhoenXWorld:
         # Lazy sentinel for optional per-contact stiffness/damping/friction.
         self._soft_contact_sentinel: wp.array[wp.float32] | None = None
 
-        # Step-time dispatcher. Currently a single transitional dispatcher
-        # that forwards to the in-line legacy methods so :meth:`step` can
-        # route through a uniform surface; future commits move each path
-        # (single-world / multi-world / mass-splitting) into its own
-        # dedicated dispatcher class under :mod:`phoenx.dispatch`.
-        self._dispatcher = LegacyDispatcher(self)
+        # Step-time dispatcher. Each (step_layout, mass_splitting)
+        # combination has a dedicated class under :mod:`phoenx.dispatch`
+        # so the hot path is straight-line with no capability checks.
+        # Combinations not yet extracted (mass-splitting, multi-world)
+        # currently route through :class:`LegacyDispatcher` which
+        # forwards to the inline in-class helpers.
+        if self.step_layout == "single_world" and not self.mass_splitting_enabled:
+            self._dispatcher = SingleWorldDispatcher(self)
+        else:
+            self._dispatcher = LegacyDispatcher(self)
 
         self._assert_invariants()
 
