@@ -58,29 +58,18 @@ class SingleWorldMassSplittingUnrolledDispatcher:
 
     def __init__(self, world: PhoenXWorld) -> None:
         self._world = world
-        # Static upper bound on the number of distinct partitions the
-        # partitioner can produce under mass splitting. Used to size
-        # the head-kernel launch loop. The bound is the SMALLER of:
-        #
-        #   - max_colored_partitions + 1  (K coloured + 1 overflow,
-        #     the partitioner's design cap)
-        #   - max_greedy_outer_iters * NUM_INNER_WHILE_ITERATIONS + 1
-        #     (a tighter bound when the user lowered the greedy iter
-        #     cap; greedy can fill at most M = outer * inner distinct
-        #     colours in M inner launches, plus the overflow bucket)
-        #
-        # On chain (cap_iters=1): bound = min(13, 9) = 9 -- saves 4
-        # no-op head launches per sweep × 105 sweeps/step = 420 saved
-        # launches per step at ~5 us each = 2 ms/step.
-        from newton._src.solvers.phoenx.solver_config import NUM_INNER_WHILE_ITERATIONS
-
-        k_plus_one = int(world.max_colored_partitions) + 1
-        outer_override = getattr(world._partitioner, "_max_greedy_outer_iters_override", None)
-        if outer_override is not None:
-            iters_bound = int(outer_override) * int(NUM_INNER_WHILE_ITERATIONS) + 1
-            self._launch_bound = min(k_plus_one, iters_bound)
-        else:
-            self._launch_bound = k_plus_one
+        # Launch the head kernel ``max_colored_partitions + 1`` times
+        # per sweep -- one for each colour slot (K colored + 1
+        # overflow). The empty colored slots (when greedy doesn't
+        # fill all K) are no-op launches that bail cheaply on
+        # count==0; the overflow slot at index K is the heavy
+        # workload that MUST run. Tried bounding by
+        # ``M * NUM_INNER_WHILE_ITERATIONS + 1`` (M = greedy outer
+        # cap) -- the kernel's cursor model means a smaller bound
+        # processes partitions 0..bound-1 IN ORDER and skips the
+        # overflow at index K. Physics drifted (chain max_abs
+        # 2.27 -> 3.06 in 150 frames). Reverted.
+        self._launch_bound = int(world.max_colored_partitions) + 1
 
     def begin_step(self) -> None:
         self._world._rebuild_mass_splitting_graph()
@@ -88,17 +77,13 @@ class SingleWorldMassSplittingUnrolledDispatcher:
     def _unrolled_sweep(self, head_kernel, idt: wp.float32) -> None:
         """Host-side fixed-count colour-drain, head-only.
 
-        Loop iterates ``num_partitions_upper_bound`` times -- typically
-        ``max_colored_partitions + 1`` (the partitioner's static upper
-        bound under mass splitting), but additionally clamped by
-        ``max_greedy_outer_iters * NUM_INNER_WHILE_ITERATIONS + 1`` for
-        scenes that lower the greedy iter cap (chain at cap_iters=1
-        gives at most ``1 * 8 + 1 = 9`` partitions, vs the cap=12
-        nominal 13). Each iteration launches the head kernel ONCE
-        with ``fuse_threshold = -1`` (so head doesn't bail on small
+        Loop iterates exactly ``max_colored_partitions + 1`` times --
+        the partitioner's upper bound on colour count under mass
+        splitting. Each iteration launches the head kernel ONCE with
+        ``fuse_threshold = -1`` (so head doesn't bail on small
         partitions -- it processes every size itself via persistent
-        grid). After cursor hits 0, remaining launches early-exit
-        cheaply.
+        grid). Empty colored partitions are cheap no-op launches; the
+        overflow partition at index K is the heavy work.
 
         No tail kernel, no capture_while.
         """
