@@ -13,14 +13,8 @@ Usage::
 
 import warp as wp
 
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    CONSTRAINT_TYPE_OFFSET,
-    ConstraintContainer,
-    constraint_get_type,
-)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
-    _col_read_int,
     contact_get_contact_count,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
@@ -172,84 +166,6 @@ def _locality_writeback_kernel(
     element_ids_by_color[tid] = values[tid]
 
 
-@wp.kernel(enable_backward=False)
-def _locality_type_aware_keys_kernel(
-    elements: wp.array[ElementInteractionData],
-    element_ids_by_color: wp.array[wp.int32],
-    interaction_id_to_partition: wp.array[wp.int32],
-    num_elements: wp.array[wp.int32],
-    keys: wp.array[wp.int64],
-    values: wp.array[wp.int32],
-    constraints: ConstraintContainer,
-    contact_cols: ContactColumnContainer,
-    contact_offset: wp.int32,
-):
-    """Single-pass type-aware locality key.
-
-    Packs the 64-bit sort key as::
-
-        bits [63..56]: colour     (8 bits, max 256 -- GREEDY_MAX_COLORS=64)
-        bits [55..48]: type       (8 bits, max 256 -- currently 5 types)
-        bits [47..24]: body_min   (24 bits, max 16M -- lowest body endpoint)
-        bits [23.. 0]: eid        (24 bits, max 16M -- deterministic tie-break)
-
-    Primary sort is by ``colour`` (preserves the CSR partition layout),
-    then ``type`` (clusters same-type cids within each colour for warp
-    coherence in the iterate kernel's runtime dispatch ladder), then
-    ``body_min`` (cache locality on per-body container loads within a
-    type), then ``eid`` (deterministic tie-break -- replaces the
-    pre-existing pass-1 eid sort so the locality sort runs in a single
-    radix pass).
-
-    Type lookup: contacts live in :class:`ContactColumnContainer` (cid
-    range ``[contact_offset, ...)``) with their type tag stamped at
-    dword 0 by ``contact_ingest._col_write_int(..., CONSTRAINT_TYPE,
-    CONTACT)``. Joint / cloth / soft-tet rows live in
-    :class:`ConstraintContainer` and store their type at the same
-    dword 0 via :func:`constraint_get_type`. The cid-range check
-    selects the right container at the cost of one int load (cheap
-    compared with the radix sort that follows).
-
-    Slots past ``num_elements[0]`` get ``INT64_MAX`` so the radix
-    sort lands them at the tail; their values are don't-care.
-    """
-    tid = wp.tid()
-    if tid >= keys.shape[0]:
-        return
-    if tid >= num_elements[0]:
-        keys[tid] = wp.int64(_LOCALITY_TAIL_KEY)
-        values[tid] = wp.int32(0)
-        return
-    eid = element_ids_by_color[tid]
-    color = interaction_id_to_partition[eid]
-
-    # Resolve type per container.
-    ctype = wp.int32(0)
-    if eid >= contact_offset:
-        ctype = _col_read_int(contact_cols, CONSTRAINT_TYPE_OFFSET, eid - contact_offset)
-    else:
-        ctype = constraint_get_type(constraints, eid)
-
-    # body_min for cache locality within (colour, type).
-    el = elements[eid]
-    body_min = wp.int32(0x7FFFFFFF)
-    for j in range(MAX_BODIES):
-        b = element_interaction_data_get(el, j)
-        if b < wp.int32(0):
-            break
-        if b < body_min:
-            body_min = b
-
-    key = (
-        (wp.int64(color) << wp.int64(56))
-        | (wp.int64(ctype) << wp.int64(48))
-        | ((wp.int64(body_min) & wp.int64(0xFFFFFF)) << wp.int64(24))
-        | (wp.int64(eid) & wp.int64(0xFFFFFF))
-    )
-    keys[tid] = key
-    values[tid] = eid
-
-
 @wp.kernel(enable_backward=False, module="unique")
 def _fill_cost_values_from_contacts_kernel(
     cost_values: wp.array[wp.int32],
@@ -370,15 +286,6 @@ class IncrementalContactPartitioner:
         # the CSR colour ordering is preserved.
         self._locality_keys = wp.zeros(2 * max_num_interactions, dtype=wp.int64, device=device)
         self._locality_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
-
-        # Type-aware locality sort plumbing. Off until
-        # :meth:`set_type_source` is called by PhoenXWorld with the
-        # constraint / contact-column containers; the existing 2-pass
-        # eid + ``(colour, body_min)`` sort stays in effect when off.
-        self._type_source_set: bool = False
-        self._type_source_constraints: ConstraintContainer | None = None
-        self._type_source_contact_cols: ContactColumnContainer | None = None
-        self._type_source_contact_offset: int = -1
 
         self._current_color = wp.zeros(1, dtype=wp.int32, device=device)
         self._num_remaining = wp.zeros(1, dtype=wp.int32, device=device)
@@ -767,35 +674,6 @@ class IncrementalContactPartitioner:
         )
         self._sort_csr_by_body_locality()
 
-    def set_type_source(
-        self,
-        constraints: ConstraintContainer,
-        contact_cols: ContactColumnContainer,
-        contact_offset: int,
-    ) -> None:
-        """Wire the type-aware locality sort.
-
-        After this is called, :meth:`_sort_csr_by_body_locality`
-        collapses its existing 2-pass eid + body_min sort into a single
-        packed-key sort that also clusters same-type cids within each
-        colour. See :func:`_locality_type_aware_keys_kernel` for the
-        key layout. ``contact_offset`` is
-        ``num_joints + num_cloth_triangles + num_cloth_bending +
-        num_soft_tetrahedra`` -- cids at or above this index live in
-        ``contact_cols`` and are stamped with
-        ``CONSTRAINT_TYPE_CONTACT``; below it they live in
-        ``constraints``.
-
-        Pass ``contact_offset = -1`` (or any value larger than every
-        active eid) to force every read down the ``constraints``
-        branch; that's the path the rigid-only benches use, where
-        ``contact_cols`` may be a sentinel zero-length buffer.
-        """
-        self._type_source_constraints = constraints
-        self._type_source_contact_cols = contact_cols
-        self._type_source_contact_offset = int(contact_offset)
-        self._type_source_set = True
-
     def _sort_csr_by_body_locality(self) -> None:
         """Reorder ``element_ids_by_color`` so consecutive entries within
         each colour access nearby body indices.
@@ -813,44 +691,8 @@ class IncrementalContactPartitioner:
         Single radix-sort on packed ``(colour << 32) | body_min`` keys
         preserves the colour boundaries (colour is the high half)
         while sorting by body within each colour.
-
-        When :meth:`set_type_source` has been called by PhoenXWorld,
-        the existing 2-pass eid + ``(colour, body_min)`` sort
-        collapses into a single packed-key sort that also clusters
-        same-type cids within each colour for warp coherence in the
-        iterate dispatch ladder.
         """
         n = self.max_num_interactions
-        if self._type_source_set:
-            # Single-pass packed-key sort:
-            # (colour << 56) | (type << 48) | (body_min << 24) | eid_low.
-            # Replaces the eid pass + the (colour, body_min) pass.
-            wp.launch(
-                _locality_type_aware_keys_kernel,
-                dim=2 * n,
-                inputs=[
-                    self._elements,
-                    self._element_ids_by_color,
-                    self._interaction_id_to_partition,
-                    self._num_elements,
-                    self._locality_keys,
-                    self._locality_values,
-                    self._type_source_constraints,
-                    self._type_source_contact_cols,
-                    wp.int32(self._type_source_contact_offset),
-                ],
-            )
-            wp.utils.radix_sort_pairs(self._locality_keys, self._locality_values, n)
-            wp.launch(
-                _locality_writeback_kernel,
-                dim=n,
-                inputs=[
-                    self._locality_values,
-                    self._num_elements,
-                    self._element_ids_by_color,
-                ],
-            )
-            return
         # Pass 1: sort by eid. Makes the within-(colour, body_min) tie
         # ordering of the pass-2 stable sort deterministic. Cheap
         # (single radix sort over a buffer already allocated for the
