@@ -545,9 +545,10 @@ Porting PhysX SDF Assets to Newton
 USD assets authored for PhysX commonly configure SDF-based mesh collision through
 ``PhysxSDFMeshCollisionAPI`` and configure collision margins through
 ``PhysxCollisionAPI``. Newton defines its own codeless API schemas
-(``NewtonSDFCollisionAPI``, ``NewtonHydroelasticCollisionAPI``, and
-``NewtonCollisionAPI``) for the same concepts, with naming and unit conventions
-chosen to match Newton's internal representation.
+(``NewtonSDFCollisionAPI`` and ``NewtonCollisionAPI``) for the same concepts,
+with naming and unit conventions chosen to match Newton's internal
+representation. Hydroelastic configuration is folded into
+``NewtonSDFCollisionAPI`` and opted into via ``newton:hydroelasticEnabled``.
 
 Newton's USD importer reads only the ``newton:*`` attributes for SDF and
 hydroelastic configuration. ``physxSDFMeshCollision:*`` attributes are collected
@@ -628,11 +629,9 @@ attributes, along with any unit or semantic differences.
 **Hydroelastic contacts (per mesh shape, opt-in):**
 
 PhysX does not expose a hydroelastic configuration schema for rigid-body contacts.
-Hydroelastic contacts in Newton are enabled by applying
-``NewtonHydroelasticCollisionAPI`` (which inherits ``NewtonSDFCollisionAPI``); the
-schema default ``newton:hydroelasticEnabled=true`` turns the feature on. Author
-``newton:kh`` [N/m^3] only when you need to override the default contact
-stiffness coefficient.
+Hydroelastic contacts in Newton are configured on ``NewtonSDFCollisionAPI`` and
+opted into by authoring ``newton:hydroelasticEnabled=true``. Author
+``newton:kh`` [N/m^3] to override the default contact stiffness coefficient.
 
 Before and After
 ~~~~~~~~~~~~~~~~
@@ -703,8 +702,8 @@ Two details are worth highlighting:
 * The single PhysX narrow-band thickness ``0.01`` becomes an inner/outer pair
   ``(-0.01, 0.01)`` as fractions of the mesh AABB diagonal.
 
-To also opt into hydroelastic contacts, apply ``NewtonHydroelasticCollisionAPI``
-and author ``newton:kh``:
+To also opt into hydroelastic contacts, set ``newton:hydroelasticEnabled=true``
+on the same ``NewtonSDFCollisionAPI`` and author ``newton:kh``:
 
 .. code-block:: usda
 
@@ -714,11 +713,11 @@ and author ``newton:kh``:
            "PhysicsCollisionAPI",
            "NewtonCollisionAPI",
            "NewtonSDFCollisionAPI",
-           "NewtonHydroelasticCollisionAPI",
        ]
    )
    {
        uniform int newton:sdfMaxResolution = 256
+       bool newton:hydroelasticEnabled = true
        float newton:kh = 1e7
    }
 
@@ -863,14 +862,12 @@ verifying the Newton import.
    the importer treats that as opting in to SDF generation via the schema
    default ``sdfEnabled=true`` and fills in schema defaults for any attributes
    that are not authored (e.g. ``sdfMaxResolution=64``, ``sdfMargin=0.05``).
-   Applying ``NewtonHydroelasticCollisionAPI`` additionally enables
-   hydroelastic contacts via the schema default ``hydroelasticEnabled=true``,
-   with ``kh=1e10``. ``newton:kh`` authored on its own is a material
-   parameter and does **not** flip hydroelastic contacts on — the user must
-   either apply the API or author ``newton:hydroelasticEnabled=true`` to
-   explicitly opt in. ``newton:sdfEnabled=false`` and
-   ``newton:hydroelasticEnabled=false`` always win as explicit disables and
-   preserve the other authored values.
+   Hydroelastic contacts are folded into the same API and are **opt-in**:
+   ``newton:hydroelasticEnabled`` defaults to ``false``. Set it to ``true``
+   to enable hydroelastic contacts on a shape (``kh`` defaults to ``1e10``).
+   ``newton:kh`` authored on its own is a material parameter and does **not**
+   flip hydroelastic contacts on. ``newton:sdfEnabled=false`` always wins
+   as an explicit disable and preserves the other authored values.
 
 
 Limitations

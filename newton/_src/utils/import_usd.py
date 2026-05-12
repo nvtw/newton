@@ -2693,18 +2693,13 @@ def parse_usd(
 
                 # SDF parameters.
                 # Feature activation is explicit. Applying NewtonSDFCollisionAPI
-                # (or the hydro API that inherits from it) implies the schema
-                # default newton:sdfEnabled=true, mirroring the OpenUSD convention
-                # for physics:rigidBodyEnabled. Authored newton:sdfEnabled always
-                # wins — in particular newton:sdfEnabled=false is the explicit
-                # disable that preserves the other authored values. Presence of
-                # newton:sdfMaxResolution or newton:sdfTargetVoxelSize alone is
-                # also treated as intent to enable, for compatibility with assets
-                # that predate the dedicated API schema.
+                # implies the schema default newton:sdfEnabled=true, mirroring
+                # the OpenUSD convention for physics:rigidBodyEnabled. Authored
+                # newton:sdfEnabled always wins — in particular
+                # newton:sdfEnabled=false is the explicit disable that preserves
+                # the other authored values.
                 sdf_enabled = R.get_value(prim, prim_type=PrimType.SHAPE, key="sdf_enabled", verbose=verbose)
-                has_hydro_api = _prim_has_applied_schema(prim, "NewtonHydroelasticCollisionAPI")
-                # Hydro inherits from SDF in the schema; treat hydro-applied as SDF-applied too.
-                has_sdf_api = has_hydro_api or _prim_has_applied_schema(prim, "NewtonSDFCollisionAPI")
+                has_sdf_api = _prim_has_applied_schema(prim, "NewtonSDFCollisionAPI")
                 if sdf_enabled is None and has_sdf_api:
                     sdf_enabled = True
                 if sdf_enabled is False:
@@ -2782,21 +2777,18 @@ def parse_usd(
                         # Applied API, no authored margin: fall back to schema default.
                         sdf_margin = 0.05
 
-                    # Hydroelastic activation is driven by newton:hydroelasticEnabled
-                    # only. Applying NewtonHydroelasticCollisionAPI implies the
-                    # schema default (true). newton:kh alone is a material parameter
+                    # Hydroelastic is opt-in via newton:hydroelasticEnabled on the
+                    # NewtonSDFCollisionAPI. newton:kh alone is a material parameter
                     # and does NOT flip the feature on — users must explicitly
-                    # signal intent via the enable bool or the applied API.
+                    # set the enable bool to true.
                     hydroelastic_enabled = R.get_value(
                         prim, prim_type=PrimType.SHAPE, key="hydroelastic_enabled", verbose=verbose
                     )
-                    if hydroelastic_enabled is None and has_hydro_api:
-                        hydroelastic_enabled = True
                     kh = R.get_value(prim, prim_type=PrimType.SHAPE, key="kh", verbose=verbose)
-                    if hydroelastic_enabled is False:
-                        is_hydroelastic = False
-                    elif hydroelastic_enabled is True:
+                    if hydroelastic_enabled is True:
                         is_hydroelastic = True
+                    elif hydroelastic_enabled is False:
+                        is_hydroelastic = False
                     else:
                         is_hydroelastic = builder.default_shape_cfg.is_hydroelastic
                     if kh is None:

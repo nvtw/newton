@@ -98,7 +98,7 @@ class SchemaResolverNewton(SchemaResolver):
             "sdf_texture_format": SchemaAttribute("newton:sdfTextureFormat", None),
             "sdf_margin": SchemaAttribute("newton:sdfMargin", None),
             "sdf_margin_fraction": SchemaAttribute("newton:sdfMarginFraction", None),
-            # Hydroelastic contacts — from NewtonHydroelasticCollisionAPI
+            # Hydroelastic contacts — folded into NewtonSDFCollisionAPI
             "hydroelastic_enabled": SchemaAttribute("newton:hydroelasticEnabled", None),
             "kh": SchemaAttribute("newton:kh", None),
         },
