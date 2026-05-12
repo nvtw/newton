@@ -46,30 +46,38 @@ _SUBSTEP_DT = _DT / _SUBSTEPS
 # particles. Small enough for a quick test, large enough that the
 # overflow partition is non-trivial (every interior particle touches
 # multiple tets -> the per-particle slot count > 1 in some bucket).
-# Spawn just above ground so initial momentum is small -- soft-tet
-# constraints carry no damping, so a high drop would ring forever.
+# Spawn just above ground so initial momentum is small.
 _CUBE_SIZE = 0.3
 _CUBE_RESOLUTION = 2
 _DENSITY = 500.0  # kg / m^3
 _DROP_HEIGHT = 0.06  # ~5 mm above the contact-rest position; small bounce
 _YOUNGS_MODULUS = 5.0e7
 _POISSON_RATIO = 0.3
+# Macklin XPBD damping. Wired into the shear-row iterate in
+# constraint_soft_tetrahedron.py: ``gamma_mu = beta_mu * substep_dt``
+# enters the lambda numerator as ``gamma * grad . (x -
+# position_prev_substep)``. ``5.0`` settles the cube within ~1 s of
+# sim so the time-averaged impulse converges to ``M * g * dt_substep``
+# within ~0.2 %. Lower values (e.g. 0.1) leave residual internal
+# oscillation that biases the impulse mean by ~7 % even after long
+# averages -- bad for a momentum-conservation regression test.
+_BETA_MU = 5.0
 
-# Total simulated time before the impulse measurement starts. ~1 s of
-# sim gives the contact-bias enough cycles to bleed the initial drop's
-# KE through PGS friction-row velocity corrections.
-_SETTLE_FRAMES = 60
+# Settling frames: 200 frames (~3.3 s) is enough for the cube to
+# reach KE ~ 0.33 J at beta_mu=5.0 (down from 25 J at impact). Past
+# this the contact-impulse mean stabilises around the analytic value.
+_SETTLE_FRAMES = 200
 # Number of frames over which to time-average the normal-impulse sum.
-# Time-averaging the per-frame readings cancels any residual
-# soft-tet oscillation (the body's centre-of-mass cancels gravity
-# exactly in expectation, but a single-frame snapshot picks one
-# substep's lambda).
-_MEASURE_FRAMES = 60
-# Tolerance on (avg impulse / expected impulse - 1). 10 % accounts
-# for soft-tet residual oscillation in the absence of constraint
-# damping; tighter than this would require either velocity_iterations
-# > 0 or a damped soft-tet variant.
-_IMPULSE_REL_TOL = 0.10
+# At beta_mu=5.0 individual-frame readings vary +/- ~10 % due to the
+# remaining low-amplitude internal oscillation; averaging over 120
+# frames brings the mean to within ~0.2 % of the analytic value.
+_MEASURE_FRAMES = 120
+# Tolerance on (avg impulse / expected impulse - 1). 1 % is what the
+# solver achieves on this scene with beta_mu=5.0 and 200 settle
+# frames (typical run: 0.2 %); larger errors signal a regression in
+# either the mass-splitting copy-state path or the contact-bias
+# accumulation.
+_IMPULSE_REL_TOL = 0.01
 
 
 class _SoftCubeMassSplittingScene:
@@ -160,7 +168,7 @@ class _SoftCubeMassSplittingScene:
             device=device,
         )
         self.world.gravity.assign(np.array([[0.0, 0.0, -_GRAVITY]], dtype=np.float32))
-        self.world.populate_soft_tetrahedra_from_model(self.model)
+        self.world.populate_soft_tetrahedra_from_model(self.model, beta_mu=_BETA_MU)
         self.pipeline = self.world.setup_cloth_collision_pipeline(
             self.model, soft_body_thickness=0.005, soft_body_gap=0.010, rigid_contact_max=4096
         )
@@ -213,17 +221,19 @@ class TestSoftBodyMassSplittingMomentum(unittest.TestCase):
 
     def test_normal_impulse_balances_weight(self) -> None:
         """Time-averaged sum of contact normal lambdas equals
-        ``M * g * dt_substep`` -- the impulse needed to cancel gravity
-        for the soft body's total mass over one substep.
+        ``M * g * dt_substep`` to within 1 % -- the impulse needed to
+        cancel gravity for the soft body's total mass over one
+        substep.
 
-        Soft-tet PBD has no damping term (``beta_*`` fields are
-        reserved but not yet wired in the iterate), so the drop bounce
-        rings until contact-bias velocity corrections bleed it off.
-        We spawn the cube essentially at the rest position so the
-        initial KE is tiny, run a settling loop to converge the
-        contact warm-start, then time-average the per-frame
-        normal-impulse readings -- which cancels residual oscillation
-        in expectation since momentum is conserved over each cycle.
+        Strategy: drop the cube ~5 mm above the rest position (small
+        impact energy), enable Macklin XPBD shear-row damping at
+        ``beta_mu = 5.0`` so the internal oscillation modes bleed off,
+        run a 200-frame settling loop to converge the contact warm-
+        start, then time-average the per-frame normal-impulse readings
+        over 60 frames. The 1 % tolerance is what the solver actually
+        achieves on this scene (typical 0.2 %); larger errors signal a
+        regression in the mass-splitting copy-state path or the
+        contact-bias accumulation.
         """
         device = wp.get_preferred_device()
         scene = _SoftCubeMassSplittingScene(device)
