@@ -26,12 +26,20 @@ vec8i = wp.types.vector(length=8, dtype=wp.int32)
 class ElementInteractionData:
     # Body slots; -1 = inactive. Slots 0..1 = primary pair; 2..7 optional.
     bodies: vec8i
+    # Constraint type tag. Read by the locality-sort kernel to cluster
+    # same-type cids within each colour (warp coherence in the iterate
+    # dispatch ladder). ``0`` (CONSTRAINT_TYPE_INVALID) is the default
+    # for empty / uninitialised elements -- the sort just lands them at
+    # the head of the colour, which is fine because they have no
+    # active body endpoints anyway.
+    ctype: int
 
 
 @wp.func
 def element_interaction_data_empty() -> ElementInteractionData:
     d = ElementInteractionData()
     d.bodies = vec8i(-1, -1, -1, -1, -1, -1, -1, -1)
+    d.ctype = wp.int32(0)
     return d
 
 
@@ -41,6 +49,24 @@ def element_interaction_data_make(
 ) -> ElementInteractionData:
     d = ElementInteractionData()
     d.bodies = vec8i(body1, body2, body3, body4, body5, body6, body7, body8)
+    d.ctype = wp.int32(0)
+    return d
+
+
+@wp.func
+def element_interaction_data_make_typed(
+    body1: int, body2: int, body3: int, body4: int, body5: int, body6: int, body7: int, body8: int,
+    ctype: int,
+) -> ElementInteractionData:
+    """Variant of :func:`element_interaction_data_make` that also stamps
+    the constraint type. ``ctype`` should be one of
+    :data:`CONSTRAINT_TYPE_*` from :mod:`constraint_container` --
+    contacts use :data:`CONSTRAINT_TYPE_CONTACT` (already stamped by
+    contact ingest into the column container's dword 0, so callers
+    keep a single source of truth)."""
+    d = ElementInteractionData()
+    d.bodies = vec8i(body1, body2, body3, body4, body5, body6, body7, body8)
+    d.ctype = ctype
     return d
 
 

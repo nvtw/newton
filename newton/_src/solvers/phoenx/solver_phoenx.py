@@ -623,21 +623,6 @@ class PhoenXWorld:
         self._contact_views: ContactViews | None = None
         self._contact_views_placeholder: ContactViews = self._make_placeholder_contact_views()
 
-        # Wire the type-aware locality sort -- promotes constraint type
-        # into the high bits of the per-color sort key so warps in the
-        # iterate dispatch ladder see same-type cids contiguously, and
-        # collapses the existing 2-pass eid + (color, body_min) sort
-        # into a single packed-key radix pass. Always on for production
-        # use; the standalone bench / coloring tests in
-        # :mod:`benchmarks.bench_graph_coloring` use the partitioner
-        # without a type source and fall back to the 2-pass sort
-        # automatically.
-        self._partitioner.set_type_source(
-            self.constraints,
-            self._contact_cols,
-            self._contact_offset,
-        )
-
         # ----- Pairwise contact filter (packed int64 keys) -----
         self._collision_filter_keys: wp.array[wp.int64]
         self._set_collision_filter_pairs_impl(collision_filter_pairs or ())
