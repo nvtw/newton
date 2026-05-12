@@ -75,6 +75,31 @@ _LOCALITY_TAIL_KEY: int = 0x7FFFFFFFFFFFFFFF
 
 
 @wp.kernel(enable_backward=False)
+def _locality_eid_keys_kernel(
+    element_ids_by_color: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    keys: wp.array[wp.int64],
+    values: wp.array[wp.int32],
+):
+    """Pass 1: sort element_ids_by_color by ``eid`` to break ties in
+    the subsequent ``(colour, body_min)`` stable sort deterministically.
+
+    Pads slots past ``num_elements[0]`` with ``INT64_MAX`` so the radix
+    sort lands them at the tail; values are don't-care.
+    """
+    tid = wp.tid()
+    if tid >= keys.shape[0]:
+        return
+    if tid >= num_elements[0]:
+        keys[tid] = wp.int64(_LOCALITY_TAIL_KEY)
+        values[tid] = wp.int32(0)
+        return
+    eid = element_ids_by_color[tid]
+    keys[tid] = wp.int64(eid)
+    values[tid] = eid
+
+
+@wp.kernel(enable_backward=False)
 def _locality_compute_keys_kernel(
     elements: wp.array[ElementInteractionData],
     element_ids_by_color: wp.array[wp.int32],
@@ -83,14 +108,28 @@ def _locality_compute_keys_kernel(
     keys: wp.array[wp.int64],
     values: wp.array[wp.int32],
 ):
-    """For each slot ``i`` in ``[0, num_elements[0])``, compute a packed
-    ``(colour << 32) | body_min`` key and stash the element id in
-    ``values[i]``. ``body_min`` is the lowest non-negative endpoint of
-    the element (static endpoints are stamped ``-1`` by the element-
-    emission kernel).
+    """Pass 2: for each slot ``i`` in ``[0, num_elements[0])``, compute
+    a packed ``(colour << 32) | body_min`` key. ``body_min`` is the
+    lowest non-negative endpoint of the element (static endpoints
+    stamped ``-1`` by emission).
+
+    Together with the prior pass-1 eid sort (writeback'd into
+    ``element_ids_by_color``), the stable radix sort produces fully
+    deterministic ``(colour, body_min, eid)`` ordering:
+
+    * Regular colours: ``body_min`` is unique within a colour (MIS
+      independent-set guarantee), so the eid tie-breaker is never
+      needed but doesn't hurt.
+    * Overflow colour: ``body_min`` may repeat (constraints share
+      endpoints, which is why they're overflow). The eid order from
+      pass 1 survives ties in body_min, making the overflow batch
+      assignment (``partition_key = (overflow_offset / batch_size)``)
+      a deterministic function of the active CSR -- otherwise the
+      greedy scatter's atomic-add completion order would leak into
+      partition keys and break cross-run determinism.
 
     Slots past ``num_elements[0]`` get ``INT64_MAX`` so the radix
-    sort lands them at the tail; their values are don't-care.
+    sort lands them at the tail.
     """
     tid = wp.tid()
     if tid >= keys.shape[0]:
@@ -654,6 +693,37 @@ class IncrementalContactPartitioner:
         while sorting by body within each colour.
         """
         n = self.max_num_interactions
+        # Pass 1: sort by eid. Makes the within-(colour, body_min) tie
+        # ordering of the pass-2 stable sort deterministic. Cheap
+        # (single radix sort over a buffer already allocated for the
+        # locality sort, runs once per coloring rebuild).
+        wp.launch(
+            _locality_eid_keys_kernel,
+            dim=2 * n,
+            inputs=[
+                self._element_ids_by_color,
+                self._num_elements,
+                self._locality_keys,
+                self._locality_values,
+            ],
+        )
+        wp.utils.radix_sort_pairs(self._locality_keys, self._locality_values, n)
+        wp.launch(
+            _locality_writeback_kernel,
+            dim=n,
+            inputs=[
+                self._locality_values,
+                self._num_elements,
+                self._element_ids_by_color,
+            ],
+        )
+        # Pass 2: stable sort by (colour, body_min). Within colours
+        # ``body_min`` is unique by MIS independent-set so this groups
+        # for cache locality and is deterministic. For the overflow
+        # bucket (mass splitting only) ``body_min`` may tie -- ties
+        # inherit the pass-1 eid order, so the bucket's element
+        # ordering is deterministic across runs and the per-batch
+        # partition_key assignment is reproducible.
         wp.launch(
             _locality_compute_keys_kernel,
             dim=2 * n,
