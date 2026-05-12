@@ -205,10 +205,16 @@ class Example:
             num_worlds=1,
             substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,
-            rigid_contact_max=4096,
+            rigid_contact_max=2*4096,
             step_layout="single_world",
             mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
+            # On dense soft-body stacks greedy MIS produces a pyramidal
+            # colour-size distribution that the head/fused tail solver
+            # exploits; Luby-fixed produces more uniform sizes which keeps
+            # the expensive head kernel busy longer. Greedy wins by ~50%
+            # on the 7-cube/res=3 stack.
+            partitioner_algorithm="greedy",
             device=self.device,
         )
         self.world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
@@ -320,7 +326,7 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
-    parser.add_argument("--num-cubes", type=int, default=2)
+    parser.add_argument("--num-cubes", type=int, default=7)
     parser.add_argument("--cube-size", type=float, default=0.4)
     parser.add_argument(
         "--cube-resolution",
@@ -328,8 +334,8 @@ if __name__ == "__main__":
         default=3,
         help="Voxels per cube side; each voxel becomes 5 tets (res=1 -> 5 tets/cube, res=3 -> 135 tets/cube).",
     )
-    parser.add_argument("--base-drop-height", type=float, default=2.0)
-    parser.add_argument("--cube-spacing", type=float, default=1.5)
+    parser.add_argument("--base-drop-height", type=float, default=1.0)
+    parser.add_argument("--cube-spacing", type=float, default=0.5)
     parser.add_argument("--youngs-modulus", type=float, default=1.0e9)
     parser.add_argument("--poisson-ratio", type=float, default=0.3)
     parser.add_argument("--density", type=float, default=500.0)

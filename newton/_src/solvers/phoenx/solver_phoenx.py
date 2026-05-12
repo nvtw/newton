@@ -87,6 +87,9 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
     MAX_COLORS,
     IncrementalContactPartitioner,
 )
+from newton._src.solvers.phoenx.graph_coloring.luby_fixed import (
+    FixedIterationLubyPartitioner,
+)
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int
 from newton._src.solvers.phoenx.mass_splitting import (
     CopyStateContainer,
@@ -259,6 +262,7 @@ class PhoenXWorld:
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
+        partitioner_algorithm: str = "greedy",
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -310,6 +314,15 @@ class PhoenXWorld:
                 ``8`` (default) mirrors C# PhoenX's
                 ``MassSplitting.BatchingThreshold = 8``. Ignored when
                 ``mass_splitting=False``.
+            partitioner_algorithm: Which graph-colouring backend to use.
+                ``"greedy"`` (default) is :class:`IncrementalContactPartitioner`
+                — JP with capture_while convergence loop, configurable
+                colour cap. ``"luby_fixed"`` is :class:`FixedIterationLubyPartitioner`
+                — fixed ``2 * max_colored_partitions`` kernel launches with
+                Luby-marker propagation per launch, spilling any remainder
+                to the overflow colour. Use ``"luby_fixed"`` when the
+                greedy convergence loop becomes the bottleneck (dense
+                soft-tet/cloth contact graphs).
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -517,13 +530,37 @@ class PhoenXWorld:
         # Unified body-or-particle node space for the partitioner:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
         # num_bodies + num_particles)`` are particles.
-        self._partitioner = IncrementalContactPartitioner(
-            max_num_interactions=self._constraint_capacity,
-            max_num_nodes=max(1, self.num_bodies + self.num_particles),
-            device=self.device,
-            use_tile_scan=True,
-            max_colored_partitions=self.max_colored_partitions,
-        )
+        self.partitioner_algorithm: str = str(partitioner_algorithm)
+        if self.partitioner_algorithm == "greedy":
+            self._partitioner = IncrementalContactPartitioner(
+                max_num_interactions=self._constraint_capacity,
+                max_num_nodes=max(1, self.num_bodies + self.num_particles),
+                device=self.device,
+                use_tile_scan=True,
+                max_colored_partitions=self.max_colored_partitions,
+            )
+        elif self.partitioner_algorithm == "luby_fixed":
+            if step_layout != "single_world":
+                # Multi-world path reads ``_adjacency_section_end_indices``
+                # etc. straight from the partitioner because
+                # :class:`IncrementalContactPartitioner.reset` populates
+                # them eagerly. The Luby variant builds adjacency lazily
+                # in :meth:`build_csr` and doesn't expose a per-world
+                # coloring kernel yet.
+                raise NotImplementedError(
+                    "partitioner_algorithm='luby_fixed' currently requires step_layout='single_world'."
+                )
+            self._partitioner = FixedIterationLubyPartitioner(
+                max_num_interactions=self._constraint_capacity,
+                max_num_nodes=max(1, self.num_bodies + self.num_particles),
+                device=self.device,
+                max_colored_partitions=self.max_colored_partitions,
+            )
+        else:
+            raise ValueError(
+                f"Unknown partitioner_algorithm '{self.partitioner_algorithm}'. "
+                "Expected one of: 'greedy', 'luby_fixed'."
+            )
 
         # Mass-splitting data plane. Always allocated (sentinel-sized
         # when disabled) so the constraint kernels can take
@@ -1477,7 +1514,7 @@ class PhoenXWorld:
         if self._constraint_capacity > 0:
             self._partitioner.reset(self._elements, self._num_active_constraints)
             if self.step_layout == "single_world":
-                if self._use_greedy_coloring:
+                if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
                     # In-graph JP fallback if greedy's 64-colour bitmask overflows.
                     self._partitioner.build_csr_greedy_with_jp_fallback()
                 else:

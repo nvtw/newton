@@ -128,6 +128,7 @@ class SolverPhoenX(SolverBase):
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
+        partitioner_algorithm: str = "greedy",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -146,6 +147,11 @@ class SolverPhoenX(SolverBase):
                 ``"finite_difference"`` (pose-delta over the outer step), or
                 ``"substep_average"`` (∫ velocity dt / dt_outer; matches MuJoCo
                 Warp's post-integration qvel).
+            partitioner_algorithm: Graph-colouring backend. ``"greedy"`` (default)
+                runs the JP + capture_while convergence loop;
+                ``"luby_fixed"`` runs a fixed ``2 * max_colored_partitions``
+                Luby launches and spills overshoots to overflow (single-world
+                step layout only).
         """
         super().__init__(model)
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -249,6 +255,7 @@ class SolverPhoenX(SolverBase):
             mass_splitting=mass_splitting,
             max_colored_partitions=max_colored_partitions,
             mass_splitting_batch_size=mass_splitting_batch_size,
+            partitioner_algorithm=partitioner_algorithm,
             device=self.device,
         )
 
