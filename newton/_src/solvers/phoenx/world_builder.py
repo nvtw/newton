@@ -816,6 +816,11 @@ class WorldBuilder:
         rigid_contact_max: int = 0,
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
+        mass_splitting: bool = False,
+        max_colored_partitions: int = 12,
+        mass_splitting_batch_size: int = 8,
+        mass_splitting_unrolled: bool = False,
+        enable_column_timers: bool = False,
         device: wp.context.Devicelike = None,
     ) -> PhoenXWorld:
         """Allocate GPU storage and build a ready-to-step :class:`PhoenXWorld`.
@@ -823,6 +828,13 @@ class WorldBuilder:
         Descriptor lists are consumed (cleared on success). Shapes attached via
         :meth:`add_shape_*` fold density/mass into per-body compound inertia
         (parallel-axis); shape_body / shape_material are stored on the world.
+
+        ``mass_splitting`` (and the related ``max_colored_partitions`` /
+        ``mass_splitting_batch_size`` / ``mass_splitting_unrolled`` knobs)
+        are forwarded straight to :class:`PhoenXWorld`; see its docstring
+        for the full description. Requires ``step_layout="single_world"``.
+        ``enable_column_timers`` is the opt-in
+        ``%globaltimer``-based per-column wall-clock profiler.
         """
         device = wp.get_device(device)
 
@@ -859,6 +871,11 @@ class WorldBuilder:
             num_worlds=self._num_worlds,
             step_layout=step_layout,
             enable_body_pair_grouping=has_compound_bodies,
+            mass_splitting=mass_splitting,
+            max_colored_partitions=max_colored_partitions,
+            mass_splitting_batch_size=mass_splitting_batch_size,
+            mass_splitting_unrolled=mass_splitting_unrolled,
+            enable_column_timers=enable_column_timers,
             device=device,
         )
 

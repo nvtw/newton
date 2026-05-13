@@ -164,6 +164,11 @@ class PortedExample:
     print_step_reports: bool = False
     #: Human-readable scene name used in step report log prefixes.
     step_report_label: str | None = None
+    #: Forwarded to :class:`PhoenXWorld`. When ``True``, every PGS
+    #: dispatch atomic-adds its elapsed microseconds into the column's
+    #: ``time_us`` slot; the totals surface in
+    #: :attr:`PhoenXWorld.StepReport.time_us_total_*`. Off by default.
+    enable_column_timers: bool = False
     #: Enable Tonge mass splitting (C# PhoenX default). When ``True``
     #: the partitioner caps at :attr:`max_colored_partitions` colours
     #: and any remainder lands in an overflow bucket solved with
@@ -342,6 +347,7 @@ class PortedExample:
             max_greedy_outer_iters=self.max_greedy_outer_iters,
             max_thread_blocks=self.max_thread_blocks,
             enable_warm_start_coloring=self.enable_warm_start_coloring,
+            enable_column_timers=self.enable_column_timers,
             device=self.device,
         )
 
@@ -457,6 +463,15 @@ class PortedExample:
         if report.per_world_num_colors is not None:
             fields.append(f"per_world_num_colors={report.per_world_num_colors}")
             fields.append(f"per_world_color_sizes={report.per_world_color_sizes}")
+        if report.time_us_total_joints is not None:
+            fields.append(
+                "time_us=("
+                f"joints={report.time_us_total_joints:.1f}, "
+                f"cloth_tri={report.time_us_total_cloth_triangles:.1f}, "
+                f"cloth_bend={report.time_us_total_cloth_bending:.1f}, "
+                f"soft_tet={report.time_us_total_soft_tetrahedra:.1f}, "
+                f"contacts={report.time_us_total_contacts:.1f})"
+            )
         label = self.step_report_label or self.__class__.__name__
         print(f"[PhoenX {label}] " + " ".join(fields))
 

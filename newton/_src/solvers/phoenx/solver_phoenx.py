@@ -37,18 +37,22 @@ from newton._src.solvers.phoenx.cloth_step import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     ADBS_DWORDS,
+    ADBS_TIME_US_OFFSET,
     JOINT_MODE_REVOLUTE,
     actuated_double_ball_socket_initialize_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_bending import (
     CLOTH_BENDING_DWORDS,
+    CLOTH_BENDING_TIME_US_OFFSET,
     cloth_bending_init_rows_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     CLOTH_TRIANGLE_DWORDS,
+    CLOTH_TRIANGLE_TIME_US_OFFSET,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     CONTACT_DWORDS,
+    CONTACT_TIME_US_OFFSET,
     ContactColumnContainer,
     ContactViews,
     contact_column_container_zeros,
@@ -63,6 +67,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
     SOFT_TET_DWORDS,
+    SOFT_TET_TIME_US_OFFSET,
     soft_tet_init_rows_kernel,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
@@ -78,6 +83,14 @@ from newton._src.solvers.phoenx.constraints.contact_ingest import (
     ingest_contacts,
     stamp_forward_contact_map,
 )
+from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldFastTailDispatcher
+from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatcher
+from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import (
+    SingleWorldMassSplittingDispatcher,
+)
+from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting_unrolled import (
+    SingleWorldMassSplittingUnrolledDispatcher,
+)
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     GREEDY_MAX_COLORS,
     MAX_BODIES,
@@ -86,14 +99,6 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import (
     MAX_COLORS,
     IncrementalContactPartitioner,
-)
-from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldFastTailDispatcher
-from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatcher
-from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import (
-    SingleWorldMassSplittingDispatcher,
-)
-from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting_unrolled import (
-    SingleWorldMassSplittingUnrolledDispatcher,
 )
 from newton._src.solvers.phoenx.graph_coloring.luby_fixed import (
     FixedIterationLubyPartitioner,
@@ -140,10 +145,14 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _phoenx_refresh_world_inertia_kernel,
     _phoenx_update_inertia_and_clear_forces_kernel,
     _pick_threads_per_world_kernel,
+    _reduce_constraint_time_us_kernel,
+    _reduce_contact_time_us_kernel,
     _reduce_total_colours_kernel,
     _reset_head_active_kernel,
     _set_kinematic_pose_batch_kernel,
     _sync_num_active_constraints_kernel,
+    _zero_constraint_time_us_kernel,
+    _zero_contact_time_us_kernel,
     get_fast_tail_kernel,
     get_singleworld_kernel,
     pack_body_xforms_kernel,
@@ -246,6 +255,27 @@ class PhoenXWorld:
         """Max constraints incident to any single body. Hard lower bound on the
         colour count any valid colouring can achieve. 0 if no step yet."""
 
+        time_us_total_joints: float | None = None
+        """Total wall-clock microseconds spent in joint dispatches (sum of
+        every constraint column's ``time_us`` slot). ``None`` unless
+        :attr:`PhoenXWorld.enable_column_timers` is set."""
+
+        time_us_total_cloth_triangles: float | None = None
+        """Total wall-clock microseconds spent in cloth-triangle dispatches.
+        ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
+
+        time_us_total_cloth_bending: float | None = None
+        """Total wall-clock microseconds spent in cloth-bending dispatches.
+        ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
+
+        time_us_total_soft_tetrahedra: float | None = None
+        """Total wall-clock microseconds spent in soft-tet dispatches.
+        ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
+
+        time_us_total_contacts: float | None = None
+        """Total wall-clock microseconds spent in contact dispatches.
+        ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
+
     def __init__(
         self,
         bodies: BodyContainer,
@@ -275,6 +305,7 @@ class PhoenXWorld:
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
         sor_boost: float = 1.0,
+        enable_column_timers: bool = False,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -341,6 +372,18 @@ class PhoenXWorld:
             self.device = bodies.position.device
         else:
             self.device = wp.get_device(device)
+
+        #: Opt-in CUDA ``%globaltimer``-based per-column wall-clock
+        #: profiler. When ``True``, every PGS dispatch atomic-adds its
+        #: elapsed microseconds into the column's ``time_us`` slot;
+        #: cleared at the start of every :meth:`step`. Off by default
+        #: to keep the kernel-cache key stable.
+        self.enable_column_timers: bool = bool(enable_column_timers)
+        # Persistent 5-element device scratch for the per-type
+        # ``time_us`` reduction
+        # (joints / cloth_tri / cloth_bend / soft_tet / contacts).
+        # Allocated lazily on the first :meth:`step_report` call.
+        self._column_timer_totals: wp.array[wp.float32] | None = None
 
         self.bodies: BodyContainer = bodies
         self.constraints: ConstraintContainer = constraints
@@ -1551,6 +1594,9 @@ class PhoenXWorld:
         self.inv_step_dt = 1.0 / dt
         self.substep_dt = dt / self.substeps
 
+        if self.enable_column_timers:
+            self._zero_column_timers()
+
         self._ingest_and_warmstart_contacts(contacts, shape_body)
         if self._ingest_scratch is not None:
             # Contacts begin after the joint + cloth-tri + cloth-bending
@@ -2085,7 +2131,9 @@ class PhoenXWorld:
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
         kernel = get_fast_tail_kernel(
-            kind="prepare_plus_iterate", revolute_only=bool(self._use_revolute_specialization)
+            kind="prepare_plus_iterate",
+            revolute_only=bool(self._use_revolute_specialization),
+            enable_column_timers=self.enable_column_timers,
         )
         wp.launch(
             kernel,
@@ -2120,7 +2168,11 @@ class PhoenXWorld:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
-        kernel = get_fast_tail_kernel(kind="relax", revolute_only=bool(self._use_revolute_specialization))
+        kernel = get_fast_tail_kernel(
+            kind="relax",
+            revolute_only=bool(self._use_revolute_specialization),
+            enable_column_timers=self.enable_column_timers,
+        )
         self._launch_fast_iter(
             kernel,
             self.velocity_iterations,
@@ -2326,7 +2378,11 @@ class PhoenXWorld:
         """
         cloth_on = self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0 or self.num_cloth_bending > 0
         revolute_only = bool(self._use_revolute_specialization)
-        kw = {"revolute_only": revolute_only, "cloth_support": cloth_on}
+        kw = {
+            "revolute_only": revolute_only,
+            "cloth_support": cloth_on,
+            "enable_column_timers": self.enable_column_timers,
+        }
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),
             get_singleworld_kernel(phase="prepare", fused=True, **kw),
@@ -2454,6 +2510,88 @@ class PhoenXWorld:
             inputs=[self.bodies],
             device=self.device,
         )
+
+    def _gather_column_timers(self, num_contact_columns: int) -> dict[str, float]:
+        """Sum every per-column ``time_us`` slot into per-type totals.
+
+        Reduces on-device into a 5-element scratch buffer
+        (joints / cloth_tri / cloth_bend / soft_tet / contacts) and
+        copies only that 20-byte payload back to host. The previous
+        full-row ``.numpy()`` copy was ``rigid_contact_max * 16 * 4``
+        bytes per call -- megabytes on dense scenes -- which serialised
+        the eager-mode viewer loop.
+        """
+        if self._column_timer_totals is None:
+            self._column_timer_totals = wp.zeros(5, dtype=wp.float32, device=self.device)
+        else:
+            self._column_timer_totals.zero_()
+        if self._contact_offset > 0:
+            wp.launch(
+                _reduce_constraint_time_us_kernel,
+                dim=self._contact_offset,
+                inputs=[
+                    self.constraints,
+                    wp.int32(ADBS_TIME_US_OFFSET),
+                    wp.int32(CLOTH_TRIANGLE_TIME_US_OFFSET),
+                    wp.int32(CLOTH_BENDING_TIME_US_OFFSET),
+                    wp.int32(SOFT_TET_TIME_US_OFFSET),
+                    wp.int32(self.num_joints),
+                    wp.int32(self.num_cloth_triangles),
+                    wp.int32(self.num_cloth_bending),
+                    wp.int32(self.num_soft_tetrahedra),
+                    self._column_timer_totals,
+                ],
+                device=self.device,
+            )
+        if num_contact_columns > 0 and self.max_contact_columns > 0:
+            wp.launch(
+                _reduce_contact_time_us_kernel,
+                dim=num_contact_columns,
+                inputs=[
+                    self._contact_cols,
+                    wp.int32(num_contact_columns),
+                    wp.int32(CONTACT_TIME_US_OFFSET),
+                    self._column_timer_totals,
+                ],
+                device=self.device,
+            )
+        totals = self._column_timer_totals.numpy()
+        return {
+            "time_us_total_joints": float(totals[0]),
+            "time_us_total_cloth_triangles": float(totals[1]),
+            "time_us_total_cloth_bending": float(totals[2]),
+            "time_us_total_soft_tetrahedra": float(totals[3]),
+            "time_us_total_contacts": float(totals[4]),
+        }
+
+    def _zero_column_timers(self) -> None:
+        """Zero every per-column ``time_us`` slot. Called at step start
+        when :attr:`enable_column_timers` is set."""
+        if self._contact_offset > 0:
+            wp.launch(
+                _zero_constraint_time_us_kernel,
+                dim=self._contact_offset,
+                inputs=[
+                    self.constraints,
+                    self._num_active_constraints,
+                    wp.int32(ADBS_TIME_US_OFFSET),
+                    wp.int32(CLOTH_TRIANGLE_TIME_US_OFFSET),
+                    wp.int32(CLOTH_BENDING_TIME_US_OFFSET),
+                    wp.int32(SOFT_TET_TIME_US_OFFSET),
+                    wp.int32(self.num_joints),
+                    wp.int32(self.num_cloth_triangles),
+                    wp.int32(self.num_cloth_bending),
+                    wp.int32(self.num_soft_tetrahedra),
+                ],
+                device=self.device,
+            )
+        if self.max_contact_columns > 0:
+            wp.launch(
+                _zero_contact_time_us_kernel,
+                dim=self.max_contact_columns,
+                inputs=[self._contact_cols, wp.int32(self.max_contact_columns), wp.int32(CONTACT_TIME_US_OFFSET)],
+                device=self.device,
+            )
 
     def _update_inertia_and_clear_forces(self) -> None:
         """End-of-step: damping + inertia rebuild + force/torque zeroing (fused)."""
@@ -2584,6 +2722,11 @@ class PhoenXWorld:
         )
         num_active = self.num_joints + num_contact_columns
 
+        if self.enable_column_timers:
+            timer_kwargs = self._gather_column_timers(num_contact_columns)
+        else:
+            timer_kwargs = {}
+
         # Per-body degree from the partitioner's adjacency CSR end array.
         # max_body_degree is the lower bound on any valid graph colouring.
         if num_active > 0 and self.num_bodies > 0:
@@ -2614,6 +2757,7 @@ class PhoenXWorld:
                 num_joints=self.num_joints,
                 num_active_constraints=num_active,
                 max_body_degree=max_body_degree,
+                **timer_kwargs,
             )
 
         nc_per_world = self._world_num_colors.numpy().astype(np.int32, copy=False)
@@ -2640,6 +2784,7 @@ class PhoenXWorld:
             num_joints=self.num_joints,
             num_active_constraints=num_active,
             max_body_degree=max_body_degree,
+            **timer_kwargs,
         )
 
     def gather_contact_wrenches(self, out: wp.array) -> None:

@@ -150,6 +150,10 @@ class ClothTriangleData:
     lambda_sum_lambda: wp.float32
     lambda_sum_mu: wp.float32
 
+    #: Opt-in per-column wall-clock accumulator (microseconds). See
+    #: :func:`constraint_accumulate_time_us`.
+    time_us: wp.float32
+
 
 assert_constraint_header(ClothTriangleData)
 
@@ -169,6 +173,7 @@ _OFF_INV_MASS_C = wp.constant(dword_offset_of(ClothTriangleData, "inv_mass_c"))
 _OFF_ROTATION = wp.constant(dword_offset_of(ClothTriangleData, "rotation"))
 _OFF_LAMBDA_SUM_LAMBDA = wp.constant(dword_offset_of(ClothTriangleData, "lambda_sum_lambda"))
 _OFF_LAMBDA_SUM_MU = wp.constant(dword_offset_of(ClothTriangleData, "lambda_sum_mu"))
+CLOTH_TRIANGLE_TIME_US_OFFSET = wp.constant(dword_offset_of(ClothTriangleData, "time_us"))
 
 CLOTH_TRIANGLE_DWORDS: int = num_dwords(ClothTriangleData)
 

@@ -56,6 +56,16 @@ SOLVER_ITERATIONS = 5
 VELOCITY_ITERATIONS = 1
 STEP_LAYOUT = "single_world"
 
+# Tonge mass splitting (C# PhoenX default). When ``True`` the
+# partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`
+# colours and any remainder lands in an overflow bucket solved with
+# per-(body, partition) copy states. Requires the single-world step
+# layout (already used by this example); the unified joint kernels
+# route through the slot-aware helpers and so coexist fine with
+# mass splitting.
+ENABLE_MASS_SPLITTING: bool = True
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
+
 # Per-net hue palette (HSV ramp); we tint each cloth so neighbouring cloths
 # read as visually distinct without retuning the per-axis colour scheme.
 _NET_HUE_OFFSETS = (0.0, 0.18, 0.36, 0.54, 0.72, 0.10, 0.28, 0.46, 0.64, 0.82)
@@ -322,6 +332,10 @@ class Example:
             gravity=(0.0, 0.0, -gravity_g),
             rigid_contact_max=0,
             step_layout=STEP_LAYOUT,
+            mass_splitting=ENABLE_MASS_SPLITTING,
+            max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
+            mass_splitting_unrolled=True,
+            mass_splitting_batch_size=8,
             device=self.device,
         )
 

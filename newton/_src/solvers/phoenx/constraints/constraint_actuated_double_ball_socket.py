@@ -322,6 +322,10 @@ class ActuatedDoubleBallSocketData:
     accumulated_impulse_drive: wp.float32
     accumulated_impulse_limit: wp.float32
 
+    #: Opt-in per-column wall-clock accumulator (microseconds). See
+    #: :func:`constraint_accumulate_time_us`.
+    time_us: wp.float32
+
 
 assert_constraint_header(ActuatedDoubleBallSocketData)
 
@@ -424,6 +428,7 @@ _OFF_CLAMP = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "clamp"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_world"))
 _OFF_ACC_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_drive"))
 _OFF_ACC_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_limit"))
+ADBS_TIME_US_OFFSET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "time_us"))
 
 #: Total dword count of one unified joint constraint.
 ADBS_DWORDS: int = num_dwords(ActuatedDoubleBallSocketData)

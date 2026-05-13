@@ -51,6 +51,7 @@ from newton._src.solvers.phoenx.examples.example_common import (
     phoenx_to_newton_kernel,
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.timer import print_column_timings
 
 # Tonge mass splitting (C# PhoenX default). When ``True`` the
 # partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`
@@ -61,6 +62,16 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 # splitting.
 ENABLE_MASS_SPLITTING: bool = True
 MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
+
+#: Opt-in per-column wall-clock profiling. When ``True`` the solver
+#: brackets every PGS dispatch with CUDA ``%globaltimer`` reads and
+#: atomic-adds the elapsed microseconds into the column's ``time_us``
+#: slot; :func:`~newton._src.solvers.phoenx.timer.print_column_timings`
+#: then dumps the per-type totals once per full step. Adds two
+#: ``%globaltimer`` reads + one atomic_add per dispatch and breaks
+#: CUDA-graph capture (the print path performs a D2H read), so leave
+#: off for benchmarks / shipped runs.
+ENABLE_COLUMN_TIMERS: bool = True
 
 
 class Example:
@@ -242,8 +253,10 @@ class Example:
             # the expensive head kernel busy longer. Greedy wins by ~50%
             # on the 7-cube/res=3 stack.
             partitioner_algorithm="greedy",
+            enable_column_timers=ENABLE_COLUMN_TIMERS,
             device=self.device,
         )
+        self._frame_index = 0
         self.world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
         self.world.populate_soft_tetrahedra_from_model(self.model)
         self.collision_pipeline = self.world.setup_cloth_collision_pipeline(
@@ -317,6 +330,12 @@ class Example:
         wp.copy(self.state.particle_qd, self.world.particles.velocity)
 
     def _capture(self) -> None:
+        # The captured graph covers the substep + collision work only.
+        # The D2H readback in ``print_column_timings`` happens outside
+        # the capture in :meth:`step`, so graph capture stays enabled
+        # even with ``ENABLE_COLUMN_TIMERS=True`` -- without the graph
+        # the eager Python launch overhead per substep is ~1000x what
+        # the GPU work itself costs on this scene and the demo crawls.
         if self.device.is_cuda:
             self._simulate_one_frame()  # warm-up
             with wp.ScopedCapture(device=self.device) as capture:
@@ -337,6 +356,8 @@ class Example:
         else:
             self._simulate_one_frame()
         self.sim_time += self.frame_dt
+        self._frame_index += 1
+        print_column_timings(self.world, self._frame_index, label="soft_body_drop")
 
     def test_final(self) -> None:
         positions = self.state.particle_q.numpy()

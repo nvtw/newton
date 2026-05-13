@@ -38,6 +38,7 @@ __all__ = [
     "ConstraintBodies",
     "ConstraintContainer",
     "assert_constraint_header",
+    "constraint_accumulate_time_us",
     "constraint_bodies_make",
     "constraint_container_zeros",
     "constraint_get_body1",
@@ -341,6 +342,15 @@ def constraint_get_body2(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
 @wp.func
 def constraint_set_body2(c: ConstraintContainer, cid: wp.int32, b: wp.int32):
     write_int(c, CONSTRAINT_BODY2_OFFSET, cid, b)
+
+
+@wp.func
+def constraint_accumulate_time_us(c: ConstraintContainer, time_us_off: wp.int32, cid: wp.int32, t_us: wp.float32):
+    """Atomic-add ``t_us`` microseconds into the column's ``time_us`` slot.
+
+    ``time_us_off`` is the per-schema dword offset (e.g. ``ADBS_TIME_US_OFFSET``).
+    """
+    wp.atomic_add(c.data, time_us_off, cid, t_us)
 
 
 # Body-pair carrier for composable sub-constraint calls (header is per-column,

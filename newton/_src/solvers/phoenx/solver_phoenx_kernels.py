@@ -19,6 +19,7 @@ from newton._src.solvers.phoenx.body import (
     BodyContainer,
 )
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
+    ADBS_TIME_US_OFFSET,
     actuated_double_ball_socket_iterate,
     actuated_double_ball_socket_iterate_multi,
     actuated_double_ball_socket_prepare_for_iteration,
@@ -29,16 +30,19 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     revolute_prepare_for_iteration,
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_bending import (
+    CLOTH_BENDING_TIME_US_OFFSET,
     cloth_bending_iterate_at,
     cloth_bending_prepare_for_iteration_at,
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    CLOTH_TRIANGLE_TIME_US_OFFSET,
     cloth_triangle_iterate_at,
     cloth_triangle_prepare_for_iteration_at,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
+    contact_accumulate_time_us,
     contact_get_body1,
     contact_get_body2,
     contact_get_side0_kind,
@@ -60,12 +64,14 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
     ConstraintContainer,
+    constraint_accumulate_time_us,
     constraint_get_body1,
     constraint_get_body2,
     constraint_get_type,
     read_int,
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
+    SOFT_TET_TIME_US_OFFSET,
     soft_tetrahedron_iterate_at,
     soft_tetrahedron_prepare_for_iteration_at,
 )
@@ -80,6 +86,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
+from newton._src.solvers.phoenx.timer import elapsed_us, read_global_timer_ns
 
 # Cloth-triangle body3 dword offset (3rd vertex of the triangle). Mirrors the
 # layout in :mod:`constraint_cloth_triangle` -- header (type/body1/body2) at
@@ -118,7 +125,11 @@ __all__ = [
     "_pick_threads_per_world_kernel",
     "_reduce_total_colours_kernel",
     "_set_kinematic_pose_batch_kernel",
+    "_reduce_constraint_time_us_kernel",
+    "_reduce_contact_time_us_kernel",
     "_sync_num_active_constraints_kernel",
+    "_zero_constraint_time_us_kernel",
+    "_zero_contact_time_us_kernel",
     "get_fast_tail_kernel",
     "get_singleworld_kernel",
     "pack_body_xforms_kernel",
@@ -609,7 +620,7 @@ def _per_world_greedy_coloring_kernel(
 
 
 @functools.cache
-def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
+def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool, enable_column_timers: bool = False):
     """Build the multi-world fused prepare + iterate fast-tail kernel."""
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -653,6 +664,9 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
             base = local_tid
             while base < count:
                 cid = world_element_ids_by_color[start + base]
+                _t0 = wp.uint64(0)
+                if wp.static(enable_column_timers):
+                    _t0 = read_global_timer_ns()
                 if cid < num_joints:
                     if wp.static(revolute_only):
                         revolute_prepare_for_iteration(
@@ -662,10 +676,15 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                         actuated_double_ball_socket_prepare_for_iteration(
                             constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
                         )
+                    if wp.static(enable_column_timers):
+                        constraint_accumulate_time_us(
+                            constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                        )
                 else:
+                    local_cid = cid - num_joints
                     contact_prepare_for_iteration(
                         contact_cols,
-                        cid - num_joints,
+                        local_cid,
                         bodies,
                         particles,
                         num_bodies,
@@ -675,6 +694,8 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                         copy_state,
                         wp.int32(0),
                     )
+                    if wp.static(enable_column_timers):
+                        contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                 base += tpw
 
             _sync_warp()
@@ -695,6 +716,9 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                 base = local_tid
                 while base < count:
                     cid = world_element_ids_by_color[start + base]
+                    _t0 = wp.uint64(0)
+                    if wp.static(enable_column_timers):
+                        _t0 = read_global_timer_ns()
                     if cid < num_joints:
                         if wp.static(revolute_only):
                             revolute_iterate_multi(
@@ -724,10 +748,15 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                                 True,
                                 inner_sweeps,
                             )
+                        if wp.static(enable_column_timers):
+                            constraint_accumulate_time_us(
+                                constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                            )
                     else:
+                        local_cid = cid - num_joints
                         contact_iterate_multi(
                             contact_cols,
-                            cid - num_joints,
+                            local_cid,
                             bodies,
                             particles,
                             num_bodies,
@@ -740,6 +769,8 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
                             wp.int32(0),
                             sor_boost,
                         )
+                        if wp.static(enable_column_timers):
+                            contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                     base += tpw
 
                 _sync_warp()
@@ -751,7 +782,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool):
 
 
 @functools.cache
-def _make_fast_tail_relax_kernel(*, revolute_only: bool):
+def _make_fast_tail_relax_kernel(*, revolute_only: bool, enable_column_timers: bool = False):
     """Multi-world relax fast-tail kernel (use_bias=False, num_sweeps=num_iterations)."""
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -796,6 +827,9 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
             base = local_tid
             while base < count:
                 cid = world_element_ids_by_color[start + base]
+                _t0 = wp.uint64(0)
+                if wp.static(enable_column_timers):
+                    _t0 = read_global_timer_ns()
                 if cid < num_joints:
                     if wp.static(revolute_only):
                         revolute_iterate_multi(
@@ -825,10 +859,15 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                             False,
                             num_iterations,
                         )
+                    if wp.static(enable_column_timers):
+                        constraint_accumulate_time_us(
+                            constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                        )
                 else:
+                    local_cid = cid - num_joints
                     contact_iterate_multi(
                         contact_cols,
-                        cid - num_joints,
+                        local_cid,
                         bodies,
                         particles,
                         num_bodies,
@@ -841,6 +880,8 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
                         wp.int32(0),
                         sor_boost,
                     )
+                    if wp.static(enable_column_timers):
+                        contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                 base += tpw
 
             _sync_warp()
@@ -855,14 +896,105 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool):
 # gets compiled.
 
 
-def get_fast_tail_kernel(*, kind: str, revolute_only: bool):
+@wp.kernel(enable_backward=False, module="unique")
+def _zero_constraint_time_us_kernel(
+    constraints: ConstraintContainer,
+    num_active: wp.array[wp.int32],
+    adbs_off: wp.int32,
+    cloth_tri_off: wp.int32,
+    cloth_bend_off: wp.int32,
+    soft_tet_off: wp.int32,
+    num_joints: wp.int32,
+    num_cloth_triangles: wp.int32,
+    num_cloth_bending: wp.int32,
+    num_soft_tetrahedra: wp.int32,
+):
+    """Zero every constraint column's ``time_us`` slot at step start.
+
+    Walks ``[0, num_active)`` once and selects the correct per-schema
+    dword offset from the constraint-type tag (dword 0)."""
+    cid = wp.tid()
+    total = num_active[0]
+    if cid >= total:
+        return
+    if cid < num_joints:
+        off = adbs_off
+    elif cid < num_joints + num_cloth_triangles:
+        off = cloth_tri_off
+    elif cid < num_joints + num_cloth_triangles + num_cloth_bending:
+        off = cloth_bend_off
+    elif cid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
+        off = soft_tet_off
+    else:
+        return
+    constraints.data[off, cid] = wp.float32(0.0)
+
+
+@wp.kernel(enable_backward=False, module="unique")
+def _zero_contact_time_us_kernel(
+    contact_cols: ContactColumnContainer,
+    num_columns: wp.int32,
+    off: wp.int32,
+):
+    """Zero every contact column's ``time_us`` slot at step start."""
+    local_cid = wp.tid()
+    if local_cid >= num_columns:
+        return
+    contact_cols.data[off, local_cid] = wp.float32(0.0)
+
+
+@wp.kernel(enable_backward=False, module="unique")
+def _reduce_constraint_time_us_kernel(
+    constraints: ConstraintContainer,
+    adbs_off: wp.int32,
+    cloth_tri_off: wp.int32,
+    cloth_bend_off: wp.int32,
+    soft_tet_off: wp.int32,
+    num_joints: wp.int32,
+    num_cloth_triangles: wp.int32,
+    num_cloth_bending: wp.int32,
+    num_soft_tetrahedra: wp.int32,
+    totals: wp.array[wp.float32],
+):
+    """Atomic-sum every constraint column's ``time_us`` slot into
+    ``totals[0..3]`` = (joints, cloth_tri, cloth_bend, soft_tet)."""
+    cid = wp.tid()
+    if cid < num_joints:
+        wp.atomic_add(totals, 0, constraints.data[adbs_off, cid])
+    elif cid < num_joints + num_cloth_triangles:
+        wp.atomic_add(totals, 1, constraints.data[cloth_tri_off, cid])
+    elif cid < num_joints + num_cloth_triangles + num_cloth_bending:
+        wp.atomic_add(totals, 2, constraints.data[cloth_bend_off, cid])
+    elif cid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
+        wp.atomic_add(totals, 3, constraints.data[soft_tet_off, cid])
+
+
+@wp.kernel(enable_backward=False, module="unique")
+def _reduce_contact_time_us_kernel(
+    contact_cols: ContactColumnContainer,
+    num_columns: wp.int32,
+    off: wp.int32,
+    totals: wp.array[wp.float32],
+):
+    """Atomic-sum every contact column's ``time_us`` slot into
+    ``totals[4]``."""
+    local_cid = wp.tid()
+    if local_cid >= num_columns:
+        return
+    wp.atomic_add(totals, 4, contact_cols.data[off, local_cid])
+
+
+def get_fast_tail_kernel(*, kind: str, revolute_only: bool, enable_column_timers: bool = False):
     """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``
-    or ``"relax"``. Each (kind, revolute_only) pair is cached after first
-    build by the underlying factory's ``functools.cache``."""
+    or ``"relax"``. Each (kind, revolute_only, enable_column_timers)
+    tuple is cached after first build by the underlying factory's
+    ``functools.cache``."""
     if kind == "prepare_plus_iterate":
-        return _make_fast_tail_prepare_plus_iterate_kernel(revolute_only=revolute_only)
+        return _make_fast_tail_prepare_plus_iterate_kernel(
+            revolute_only=revolute_only, enable_column_timers=enable_column_timers
+        )
     if kind == "relax":
-        return _make_fast_tail_relax_kernel(revolute_only=revolute_only)
+        return _make_fast_tail_relax_kernel(revolute_only=revolute_only, enable_column_timers=enable_column_timers)
     raise ValueError(f"unknown fast-tail kernel kind: {kind!r}")
 
 
@@ -1491,13 +1623,19 @@ def _singleworld_color_range_from_cursor(
 
 
 @functools.cache
-def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, cloth_support: bool):
+def _make_singleworld_persistent_kernel(
+    *, phase: str, revolute_only: bool, cloth_support: bool, enable_column_timers: bool = False
+):
     """Persistent-grid PGS kernel for the requested phase + specialisation.
 
     Per-cid dispatch reads the constraint type tag (dword 0) and routes
     to the matching ``@wp.func`` -- joint, cloth-triangle, or contact.
     The cloth branch is gated by the compile-time ``cloth_support``
     flag so rigid-only scenes get a binary with no cloth code at all.
+
+    ``enable_column_timers`` is a static axis: when True, each per-cid
+    dispatch is bracketed with ``%globaltimer`` reads and the elapsed
+    microseconds are atomic-added to the column's ``time_us`` slot.
     """
     is_prepare = phase == "prepare"
     is_iterate = phase == "iterate"
@@ -1579,6 +1717,12 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                 if is_overflow_color:
                     # Batch index = partition_key stamped by emit.
                     parallel_id = t_slot / ms_batch_size
+                # Opt-in per-column wall-clock bracket. The %globaltimer
+                # reads and atomic_add are dead-code-eliminated when
+                # ``enable_column_timers=False`` thanks to ``wp.static``.
+                _t0 = wp.uint64(0)
+                if wp.static(enable_column_timers):
+                    _t0 = read_global_timer_ns()
                 # Two-stage dispatch.
                 # 1) Contacts live in a separate ContactColumnContainer (NOT in
                 #    the joint-side ConstraintContainer), so contact cids must
@@ -1590,11 +1734,12 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                 #    type into dword 0 at populate time).
                 dispatched = False
                 if cid >= num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
+                    local_cid = cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra
                     if wp.static(cloth_support):
                         if wp.static(is_prepare):
                             contact_prepare_for_iteration_cloth_aware(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                local_cid,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1607,7 +1752,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                         else:
                             contact_iterate_cloth_aware(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                local_cid,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1623,7 +1768,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                         if wp.static(is_prepare):
                             contact_prepare_for_iteration(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                local_cid,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1636,7 +1781,7 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                         else:
                             contact_iterate(
                                 contact_cols,
-                                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                local_cid,
                                 bodies,
                                 particles,
                                 num_bodies,
@@ -1649,6 +1794,8 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                                 sor_boost,
                             )
                     dispatched = True
+                    if wp.static(enable_column_timers):
+                        contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                 if not dispatched:
                     ctype = constraint_get_type(constraints, cid)
                     if wp.static(cloth_support):
@@ -1662,6 +1809,10 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                                     constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                 )
                             dispatched = True
+                            if wp.static(enable_column_timers):
+                                constraint_accumulate_time_us(
+                                    constraints, CLOTH_TRIANGLE_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                )
                         elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
                             if wp.static(is_prepare):
                                 soft_tetrahedron_prepare_for_iteration_at(
@@ -1672,6 +1823,10 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                                     constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                 )
                             dispatched = True
+                            if wp.static(enable_column_timers):
+                                constraint_accumulate_time_us(
+                                    constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                )
                         elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
                             if wp.static(is_prepare):
                                 cloth_bending_prepare_for_iteration_at(
@@ -1682,6 +1837,10 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                                     constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                 )
                             dispatched = True
+                            if wp.static(enable_column_timers):
+                                constraint_accumulate_time_us(
+                                    constraints, CLOTH_BENDING_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                )
                 if not dispatched:
                     # Joint (ADBS or revolute specialisation).
                     if wp.static(is_prepare):
@@ -1720,6 +1879,10 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
                                 sor_boost,
                                 use_bias,
                             )
+                    if wp.static(enable_column_timers):
+                        constraint_accumulate_time_us(
+                            constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                        )
 
         if tid == 0:
             color_cursor[0] = cursor - 1
@@ -1728,7 +1891,9 @@ def _make_singleworld_persistent_kernel(*, phase: str, revolute_only: bool, clot
 
 
 @functools.cache
-def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_support: bool):
+def _make_singleworld_fused_kernel(
+    *, phase: str, revolute_only: bool, cloth_support: bool, enable_column_timers: bool = False
+):
     """Single-block tail-fused PGS kernel; same axes as
     :func:`_make_singleworld_persistent_kernel`."""
     is_prepare = phase == "prepare"
@@ -1796,16 +1961,20 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                     if t_slot >= count:
                         break
                     cid = element_ids_by_color[start + t_slot]
+                    _t0 = wp.uint64(0)
+                    if wp.static(enable_column_timers):
+                        _t0 = read_global_timer_ns()
                     # See `_make_singleworld_persistent_kernel` for the
                     # two-stage dispatch rationale: cid-range first to
                     # separate contact cids (which live in a different
                     # container), then type-tag for joint vs cloth.
                     if cid >= num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
+                        local_cid = cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra
                         if wp.static(cloth_support):
                             if wp.static(is_prepare):
                                 contact_prepare_for_iteration_cloth_aware(
                                     contact_cols,
-                                    cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                    local_cid,
                                     bodies,
                                     particles,
                                     num_bodies,
@@ -1818,7 +1987,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                             else:
                                 contact_iterate_cloth_aware(
                                     contact_cols,
-                                    cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                    local_cid,
                                     bodies,
                                     particles,
                                     num_bodies,
@@ -1834,7 +2003,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                             if wp.static(is_prepare):
                                 contact_prepare_for_iteration(
                                     contact_cols,
-                                    cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                    local_cid,
                                     bodies,
                                     particles,
                                     num_bodies,
@@ -1847,7 +2016,7 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                             else:
                                 contact_iterate(
                                     contact_cols,
-                                    cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra,
+                                    local_cid,
                                     bodies,
                                     particles,
                                     num_bodies,
@@ -1859,6 +2028,8 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                     parallel_id,
                                     sor_boost,
                                 )
+                        if wp.static(enable_column_timers):
+                            contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                     else:
                         ctype = constraint_get_type(constraints, cid)
                         dispatched = False
@@ -1873,6 +2044,10 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                         constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                     )
                                 dispatched = True
+                                if wp.static(enable_column_timers):
+                                    constraint_accumulate_time_us(
+                                        constraints, CLOTH_TRIANGLE_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                    )
                             elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
                                 if wp.static(is_prepare):
                                     soft_tetrahedron_prepare_for_iteration_at(
@@ -1883,6 +2058,10 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                         constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                     )
                                 dispatched = True
+                                if wp.static(enable_column_timers):
+                                    constraint_accumulate_time_us(
+                                        constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                    )
                             elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
                                 if wp.static(is_prepare):
                                     cloth_bending_prepare_for_iteration_at(
@@ -1893,6 +2072,10 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                         constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
                                     )
                                 dispatched = True
+                                if wp.static(enable_column_timers):
+                                    constraint_accumulate_time_us(
+                                        constraints, CLOTH_BENDING_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                    )
                         if not dispatched:
                             if wp.static(is_prepare):
                                 if wp.static(revolute_only):
@@ -1930,6 +2113,10 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
                                         sor_boost,
                                         use_bias,
                                     )
+                            if wp.static(enable_column_timers):
+                                constraint_accumulate_time_us(
+                                    constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                )
             _sync_threads()
             cursor = cursor - 1
         if lane == 0:
@@ -1938,8 +2125,15 @@ def _make_singleworld_fused_kernel(*, phase: str, revolute_only: bool, cloth_sup
     return kernel
 
 
-def get_singleworld_kernel(*, phase: str, fused: bool, revolute_only: bool, cloth_support: bool):
+def get_singleworld_kernel(
+    *, phase: str, fused: bool, revolute_only: bool, cloth_support: bool, enable_column_timers: bool = False
+):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
     factory = _make_singleworld_fused_kernel if fused else _make_singleworld_persistent_kernel
-    return factory(phase=phase, revolute_only=revolute_only, cloth_support=cloth_support)
+    return factory(
+        phase=phase,
+        revolute_only=revolute_only,
+        cloth_support=cloth_support,
+        enable_column_timers=enable_column_timers,
+    )

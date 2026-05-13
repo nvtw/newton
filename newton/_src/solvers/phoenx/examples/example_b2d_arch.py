@@ -188,7 +188,7 @@ class Example(PortedExample):
     solver_iterations = 20
     default_friction = 0.6  # b2ShapeDef.material.friction in the sample
     start_paused = True
-    pause_after_step = True  # SPACE advances one frame at a time
+    pause_after_step = False  # SPACE advances one frame at a time
 
     def build_scene(self, builder: newton.ModelBuilder):
         builder.add_ground_plane()

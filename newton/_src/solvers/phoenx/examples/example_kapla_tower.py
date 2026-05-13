@@ -97,7 +97,7 @@ MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
 # on the origin. ``(1, 1)`` reproduces the original scene; bigger
 # grids scale brick count, SAP candidates and contact pool linearly,
 # which the collision-pipeline budgets below absorb via ``Nx * Ny``.
-TOWER_GRID_DIMS: tuple[int, int] = (2, 2)
+TOWER_GRID_DIMS: tuple[int, int] = (1, 1)
 # Centre-to-centre spacing [m]. Tower footprint ~7.1 x 5.0 m at
 # scale 0.1; 9 m leaves ~2 m clearance so neighbours don't leak into
 # each other's SAP lists during settling.

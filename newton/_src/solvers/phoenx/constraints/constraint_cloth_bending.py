@@ -124,6 +124,10 @@ class ClothBendingData:
     inv_mass_c: wp.float32
     inv_mass_d: wp.float32
 
+    #: Opt-in per-column wall-clock accumulator (microseconds). See
+    #: :func:`constraint_accumulate_time_us`.
+    time_us: wp.float32
+
 
 assert_constraint_header(ClothBendingData)
 
@@ -143,6 +147,7 @@ _OFF_INV_MASS_A = wp.constant(dword_offset_of(ClothBendingData, "inv_mass_a"))
 _OFF_INV_MASS_B = wp.constant(dword_offset_of(ClothBendingData, "inv_mass_b"))
 _OFF_INV_MASS_C = wp.constant(dword_offset_of(ClothBendingData, "inv_mass_c"))
 _OFF_INV_MASS_D = wp.constant(dword_offset_of(ClothBendingData, "inv_mass_d"))
+CLOTH_BENDING_TIME_US_OFFSET = wp.constant(dword_offset_of(ClothBendingData, "time_us"))
 
 CLOTH_BENDING_DWORDS: int = num_dwords(ClothBendingData)
 

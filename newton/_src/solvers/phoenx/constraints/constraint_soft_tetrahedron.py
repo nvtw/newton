@@ -142,6 +142,10 @@ class SoftTetrahedronData:
     lambda_sum_lambda: wp.float32  # volume row accumulator (reserved)
     lambda_sum_mu: wp.float32  # shear row accumulator
 
+    #: Opt-in per-column wall-clock accumulator (microseconds). See
+    #: :func:`constraint_accumulate_time_us`.
+    time_us: wp.float32
+
 
 assert_constraint_header(SoftTetrahedronData)
 
@@ -163,6 +167,7 @@ _OFF_INV_MASS_D = wp.constant(dword_offset_of(SoftTetrahedronData, "inv_mass_d")
 _OFF_ROTATION = wp.constant(dword_offset_of(SoftTetrahedronData, "rotation"))
 _OFF_LAMBDA_SUM_LAMBDA = wp.constant(dword_offset_of(SoftTetrahedronData, "lambda_sum_lambda"))
 _OFF_LAMBDA_SUM_MU = wp.constant(dword_offset_of(SoftTetrahedronData, "lambda_sum_mu"))
+SOFT_TET_TIME_US_OFFSET = wp.constant(dword_offset_of(SoftTetrahedronData, "time_us"))
 
 SOFT_TET_DWORDS: int = num_dwords(SoftTetrahedronData)
 

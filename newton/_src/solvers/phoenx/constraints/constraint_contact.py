@@ -68,9 +68,11 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
     "CONTACT_DWORDS",
+    "CONTACT_TIME_US_OFFSET",
     "ContactColumnContainer",
     "ContactConstraintData",
     "ContactViews",
+    "contact_accumulate_time_us",
     "contact_column_container_zeros",
     "contact_get_body1",
     "contact_get_body2",
@@ -150,6 +152,12 @@ class ContactConstraintData:
     side0_nodes_extra: wp.vec3i
     side1_nodes_extra: wp.vec3i
 
+    #: Opt-in per-column wall-clock accumulator (microseconds). Written
+    #: atomically by the head/tail dispatch when
+    #: :attr:`PhoenXWorld.enable_column_timers` is set; cleared at the
+    #: start of every :meth:`PhoenXWorld.step`.
+    time_us: wp.float32
+
 
 assert_constraint_header(ContactConstraintData)
 
@@ -164,6 +172,7 @@ _OFF_SIDE0_KIND = wp.constant(dword_offset_of(ContactConstraintData, "side0_kind
 _OFF_SIDE1_KIND = wp.constant(dword_offset_of(ContactConstraintData, "side1_kind"))
 _OFF_SIDE0_NODES_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "side0_nodes_extra"))
 _OFF_SIDE1_NODES_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "side1_nodes_extra"))
+CONTACT_TIME_US_OFFSET = wp.constant(dword_offset_of(ContactConstraintData, "time_us"))
 
 
 #: Dwords per contact column. The per-pair layout drops every per-slot
@@ -218,6 +227,12 @@ def _col_read_float(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int3
 @wp.func
 def _col_write_float(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32, v: wp.float32):
     write2d_f32(c.data, off, local_cid, v)
+
+
+@wp.func
+def contact_accumulate_time_us(c: ContactColumnContainer, local_cid: wp.int32, t_us: wp.float32):
+    """Atomic-add ``t_us`` microseconds into the column's ``time_us`` slot."""
+    wp.atomic_add(c.data, CONTACT_TIME_US_OFFSET, local_cid, t_us)
 
 
 # ---------------------------------------------------------------------------
