@@ -562,7 +562,16 @@ def _phoenx_pack_cloth_contact_barycentric_kernel(
     body-frame transform on the narrow-phase output).
     """
     k = wp.tid()
-    if k >= contacts.rigid_contact_count[0]:
+    # Clamp the count against the buffer capacity -- on narrow-phase
+    # overflow ``rigid_contact_count[0]`` keeps climbing past the
+    # actual buffer size while only the first ``rigid_contact_max``
+    # slots got written. Without the clamp the early-return below
+    # never fires for k in [0, buffer_size) and we'd read garbage
+    # (or, downstream, OOB) from the tail.
+    n_active = contacts.rigid_contact_count[0]
+    if n_active > contacts.rigid_contact_shape0.shape[0]:
+        n_active = contacts.rigid_contact_shape0.shape[0]
+    if k >= n_active:
         return
 
     sa = contacts.rigid_contact_shape0[k]

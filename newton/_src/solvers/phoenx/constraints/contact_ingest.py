@@ -197,6 +197,26 @@ def allocate_ingest_scratch(
 # (contacts already arrive sorted by (shape_a, shape_b)).
 
 
+@wp.func
+def _clamp_contact_count(rigid_contact_count: wp.array[wp.int32], buffer_size: wp.int32) -> wp.int32:
+    """Return ``min(rigid_contact_count[0], buffer_size)``.
+
+    The narrow phase appends contacts via ``atomic_add`` into a fixed-size
+    buffer; on overflow the counter keeps climbing past ``buffer_size`` while
+    only the first ``buffer_size`` slots are actually written. Downstream
+    kernels must clamp before using the count as a loop bound or index --
+    otherwise inflated counts trigger OOB reads on the pair-grouping arrays
+    (``pair_id[count - 1]``, ``pair_count[p]`` -> per-contact loops) and
+    manifest as a CUDA illegal-memory-access crash. The narrow phase's
+    ``wp.printf`` overflow warning still surfaces the underlying capacity
+    problem so the user can bump ``rigid_contact_max``.
+    """
+    n = rigid_contact_count[0]
+    if n > buffer_size:
+        n = buffer_size
+    return n
+
+
 @wp.kernel(enable_backward=False)
 def _contact_pair_boundary_kernel(
     rigid_contact_count: wp.array[wp.int32],
@@ -208,7 +228,7 @@ def _contact_pair_boundary_kernel(
     """pair_boundary[i] = 1 iff contact i starts a new (shape_a, shape_b) run.
     Tail past rigid_contact_count[0] is zeroed."""
     tid = wp.tid()
-    count = rigid_contact_count[0]
+    count = _clamp_contact_count(rigid_contact_count, rigid_contact_shape0.shape[0])
     if tid >= count:
         pair_boundary[tid] = wp.int32(0)
         return
@@ -253,7 +273,7 @@ def _build_body_pair_keys_kernel(
     so the sort doesn't see undefined values.
     """
     tid = wp.tid()
-    n = rigid_contact_count[0]
+    n = _clamp_contact_count(rigid_contact_count, rigid_contact_shape0.shape[0])
     if tid >= n:
         body_pair_keys[tid] = wp.int64(9223372036854775807)  # INT64_MAX
         sort_perm[tid] = tid
@@ -286,7 +306,7 @@ def _build_inv_sort_perm_kernel(
     ``prev_cid_of_contact``).
     """
     tid = wp.tid()
-    n = rigid_contact_count[0]
+    n = _clamp_contact_count(rigid_contact_count, sort_perm.shape[0])
     if tid >= n:
         return
     newton_k = sort_perm[tid]
@@ -339,7 +359,7 @@ def _gather_sorted_contacts_kernel(
     the gather respects that by branching on shape.
     """
     tid = wp.tid()
-    n = rigid_contact_count[0]
+    n = _clamp_contact_count(rigid_contact_count, sort_perm.shape[0])
     if tid >= n:
         return
     newton_k = sort_perm[tid]
@@ -390,7 +410,7 @@ def _body_pair_boundary_kernel(
     contact column per body pair.
     """
     tid = wp.tid()
-    n = rigid_contact_count[0]
+    n = _clamp_contact_count(rigid_contact_count, body_pair_keys.shape[0])
     if tid >= n:
         pair_boundary[tid] = wp.int32(0)
         return
@@ -461,7 +481,7 @@ def _scatter_pair_starts_kernel(
     ``pair_columns = 0`` so the downstream scan is stable.
     """
     tid = wp.tid()
-    count = rigid_contact_count[0]
+    count = _clamp_contact_count(rigid_contact_count, pair_id.shape[0])
 
     # Publish num_pairs via thread 0 before any reads/writes that depend
     # on it. The inclusive scan's last active value is the run count.
@@ -490,6 +510,7 @@ def _scatter_pair_starts_kernel(
 @wp.kernel(enable_backward=False)
 def _pair_counts_and_columns_kernel(
     rigid_contact_count: wp.array[wp.int32],
+    rigid_contact_max: wp.int32,
     num_pairs: wp.array[wp.int32],
     pair_first: wp.array[wp.int32],
     pair_shape_a: wp.array[wp.int32],
@@ -513,18 +534,26 @@ def _pair_counts_and_columns_kernel(
     ids so distinct cloth tris (each individually anchored to the
     world) don't collapse into a single "world body" group and lose
     cloth-vs-cloth + cloth-vs-static-rigid contacts.
+
+    ``rigid_contact_max`` is the narrow-phase contact buffer capacity --
+    used to clamp the inflated ``rigid_contact_count[0]`` on overflow so
+    ``pair_count`` (which drives downstream per-contact loops) never
+    exceeds the buffer size.
     """
     tid = wp.tid()
     n = num_pairs[0]
     if tid >= n:
         return
 
-    # pair_count from adjacent pair_first values.
+    # pair_count from adjacent pair_first values. Clamp the last pair's
+    # upper bound against the narrow-phase buffer capacity so an
+    # overflowed count doesn't inflate pair_count past the actual
+    # written range.
     cur = pair_first[tid]
     if tid + wp.int32(1) < n:
         nxt = pair_first[tid + wp.int32(1)]
     else:
-        nxt = rigid_contact_count[0]
+        nxt = _clamp_contact_count(rigid_contact_count, rigid_contact_max)
     pair_count[tid] = nxt - cur
 
     # pair_columns: 1 iff distinct filter groups + not body-pair-filtered.
@@ -1112,6 +1141,7 @@ def ingest_contacts(
         dim=rigid_contact_max,
         inputs=[
             contacts.rigid_contact_count,
+            wp.int32(rigid_contact_max),
             scratch.num_pairs,
             scratch.pair_first,
             scratch.pair_shape_a,

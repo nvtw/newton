@@ -118,6 +118,7 @@ def _run_pair_detection(
         dim=capacity,
         inputs=[
             count_arr,
+            wp.int32(capacity),
             num_pairs,
             pair_first,
             pair_shape_a,
@@ -246,6 +247,7 @@ class TestContactIngestLargeShapeCount(unittest.TestCase):
             dim=capacity,
             inputs=[
                 count_arr,
+                wp.int32(capacity),
                 num_pairs,
                 pair_first,
                 pair_shape_a,

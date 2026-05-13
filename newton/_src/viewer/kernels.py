@@ -270,7 +270,15 @@ def compute_contact_lines(
     """Create line segments along contact normals for visualization."""
     tid = wp.tid()
     nan_line = wp.vec3(wp.nan, wp.nan, wp.nan)
+    # Clamp against the line-buffer capacity. On narrow-phase overflow
+    # ``contact_count[0]`` climbs past the actual buffer size; without
+    # the clamp the early-return below never fires for tid in [0, cap)
+    # and we'd draw bogus arrows from stale tail data instead of the
+    # documented NaN sentinel.
     count = contact_count[0]
+    cap = line_start.shape[0]
+    if count > cap:
+        count = cap
     if tid >= count:
         line_start[tid] = nan_line
         line_end[tid] = nan_line

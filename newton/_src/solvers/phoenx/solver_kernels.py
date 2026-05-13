@@ -382,7 +382,16 @@ def _contact_impulse_to_force_wrapper_kernel(
     Newton stores force on shape0, so we negate before writing.
     """
     k = wp.tid()
+    # Clamp the count against the output buffer capacity. On narrow-phase
+    # overflow the raw counter keeps climbing past the actual contact
+    # buffer; without clamping the early-return below never fires for
+    # valid k and we'd index ``force_out[sort_perm[k]]`` past the live
+    # range. ``sort_perm`` may be a size-1 placeholder when
+    # ``has_perm == 0``, so we size against ``force_out`` (which is
+    # always ``rigid_contact_max`` long).
     n_active = rigid_contact_count[0]
+    if n_active > force_out.shape[0]:
+        n_active = force_out.shape[0]
     if k >= n_active:
         return
     n = cc_get_normal(cc, k)

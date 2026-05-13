@@ -54,7 +54,15 @@ def differentiable_contact_augment_kernel(
     * ``out_point1_world`` — contact point on shape B in world space [m].
     """
     tid = wp.tid()
+    # Clamp the count against the contact-shape buffer capacity. On
+    # narrow-phase overflow ``contact_count[0]`` exceeds the buffer
+    # size; without the clamp threads in [capacity, count) would
+    # fail to hit the early-return and emit bogus outputs from
+    # stale tail data.
     count = contact_count[0]
+    cap = contact_shape0.shape[0]
+    if count > cap:
+        count = cap
     if tid >= count:
         return
 

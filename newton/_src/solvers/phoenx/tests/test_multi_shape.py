@@ -188,6 +188,7 @@ class TestSelfContactFilter(unittest.TestCase):
             dim=2,
             inputs=[
                 rigid_contact_count,
+                wp.int32(8),  # rigid_contact_max (no overflow in this test)
                 num_pairs,
                 pair_first,
                 pair_shape_a,
@@ -230,6 +231,7 @@ class TestSelfContactFilter(unittest.TestCase):
             dim=1,
             inputs=[
                 rigid_contact_count,
+                wp.int32(2),  # rigid_contact_max (no overflow in this test)
                 num_pairs,
                 pair_first,
                 pair_shape_a,

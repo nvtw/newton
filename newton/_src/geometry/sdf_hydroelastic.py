@@ -928,7 +928,16 @@ def broadphase_collision_pairs_count(
     thread_num_blocks: wp.array[wp.int32],
 ):
     tid = wp.tid()
-    if tid >= shape_pairs_sdf_sdf_count[0]:
+    # Clamp the count against the pair buffer capacity. The broad-phase
+    # write path gates with ``if idx < shape_pairs_sdf_sdf.shape[0]``
+    # but the counter still climbs past capacity on overflow; without
+    # the clamp threads in [capacity, count) would treat stale tail
+    # data as live pairs and emit bogus blocks.
+    n_pairs = shape_pairs_sdf_sdf_count[0]
+    cap_pairs = shape_pairs_sdf_sdf.shape[0]
+    if n_pairs > cap_pairs:
+        n_pairs = cap_pairs
+    if tid >= n_pairs:
         return
 
     pair = shape_pairs_sdf_sdf[tid]

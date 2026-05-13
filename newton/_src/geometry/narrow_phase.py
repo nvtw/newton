@@ -807,7 +807,15 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
     """
     tid, j = wp.tid()
 
+    # Clamp against the pair buffer capacity. The broad-phase write
+    # path gates writes with ``if idx < shape_pairs_mesh.shape[0]`` but
+    # the counter still climbs past capacity on overflow; without the
+    # clamp here the strided loop would index ``shape_pairs_mesh[i]``
+    # past the end of the buffer.
     num_mesh_pairs = shape_pairs_mesh_count[0]
+    cap_mesh_pairs = shape_pairs_mesh.shape[0]
+    if num_mesh_pairs > cap_mesh_pairs:
+        num_mesh_pairs = cap_mesh_pairs
 
     # Strided loop over mesh pairs
     for i in range(tid, num_mesh_pairs, total_num_threads):
@@ -1107,7 +1115,14 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         """
         tid = wp.tid()
 
+        # Clamp the count against the pair buffer capacity. On
+        # broad-phase mesh-plane overflow the counter exceeds the
+        # buffer size; without the clamp the loop below would
+        # OOB-read ``shape_pairs_mesh_plane[pair_idx]`` past the end.
         pair_count = shape_pairs_mesh_plane_count[0]
+        cap_pairs = shape_pairs_mesh_plane.shape[0]
+        if pair_count > cap_pairs:
+            pair_count = cap_pairs
 
         # Iterate over all mesh-plane pairs
         for pair_idx in range(pair_count):
