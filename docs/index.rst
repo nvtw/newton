@@ -44,6 +44,7 @@ Newton Physics
    :caption: API Reference
    
    api/newton
+   api/newton_actuators
    api/newton_geometry
    api/newton_ik
    api/newton_math

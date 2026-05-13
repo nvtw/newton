@@ -16,6 +16,7 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton.geometry import HydroelasticSDF
 
 # Assembly type for the nut and bolt
 ASSEMBLY_STR = "m20_loose"
@@ -23,7 +24,7 @@ ASSEMBLY_STR = "m20_loose"
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 
-SDF_MAX_RESOLUTION = 256
+SDF_MAX_RESOLUTION = 128
 SDF_NARROW_BAND_RANGE = (-0.005, 0.005)
 
 SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
@@ -115,7 +116,8 @@ class Example:
         self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 5
+        self.sim_substeps = 4
+        self.collide_every = 2 if args.solver == "mujoco" else 1  # re-collide every K substeps
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.world_count = args.world_count
@@ -139,7 +141,7 @@ class Example:
 
         # Maximum number of rigid contacts to allocate (limits memory usage)
         # None = auto-calculate (can be very large), or set explicit limit (e.g., 1_000_000)
-        self.rigid_contact_max = 100000
+        self.rigid_contact_max = 40_000
 
         # Broad phase mode: NXN (O(N²)), SAP (O(N log N)), EXPLICIT (precomputed pairs)
         self.broad_phase_mode = "sap"
@@ -161,6 +163,13 @@ class Example:
 
         self.model = main_scene.finalize()
 
+        # Disable the marching-cubes edge clamp — threading dynamics on the
+        # M20 helix are sensitive to the contact-surface vertex bias the clamp
+        # introduces.
+        sdf_hydroelastic_config = HydroelasticSDF.Config(
+            mc_edge_clamp_min=0.0,
+        )
+
         # PhoenX needs contact matching for its per-pair warm-start.
         # XPBD and MuJoCo are happy with the default latest-only matching.
         from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
@@ -171,6 +180,7 @@ class Example:
             "reduce_contacts": True,
             "rigid_contact_max": self.rigid_contact_max,
             "broad_phase": self.broad_phase_mode,
+            "sdf_hydroelastic_config": sdf_hydroelastic_config,
         }
         if self.solver_type == "phoenx":
             cp_kwargs["contact_matching"] = PHOENX_CONTACT_MATCHING
@@ -220,7 +230,8 @@ class Example:
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.collision_pipeline.contacts()
+        self.collision_pipeline.collide(self.state_0, self.contacts)
 
         self.viewer.set_model(self.model)
 
@@ -305,8 +316,11 @@ class Example:
             self.graph = None
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-        for _ in range(self.sim_substeps):
+        for sub in range(self.sim_substeps):
+            # Refresh contacts every K substeps so contact normals stay
+            # aligned with the threading rotation.
+            if sub % self.collide_every == 0:
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             self.state_0.clear_forces()
 
             self.viewer.apply_forces(self.state_0)
@@ -447,6 +461,4 @@ if __name__ == "__main__":
     parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
 
-    example = Example(viewer, args)
-
-    newton.examples.run(example, args)
+    newton.examples.run(Example(viewer, args), args)
