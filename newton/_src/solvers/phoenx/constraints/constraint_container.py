@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
 from newton._src.solvers.phoenx.helpers.data_packing import (
     dword_offset_of,
     reinterpret_float_as_int,
@@ -141,163 +142,167 @@ def constraint_container_zeros(
 
 @wp.func
 def read_float(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.float32:
-    return c.data[off, cid]
+    return read2d_f32(c.data, off, cid)
 
 
 @wp.func
 def write_float(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.float32):
-    c.data[off, cid] = v
+    write2d_f32(c.data, off, cid, v)
 
 
 @wp.func
 def read_int(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.int32:
     """Bit-cast read of an int field stored in the float buffer."""
-    return reinterpret_float_as_int(c.data[off, cid])
+    return reinterpret_float_as_int(read2d_f32(c.data, off, cid))
 
 
 @wp.func
 def write_int(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.int32):
     """Bit-cast write of an int field into the float buffer."""
-    c.data[off, cid] = reinterpret_int_as_float(v)
+    write2d_f32(c.data, off, cid, reinterpret_int_as_float(v))
 
 
 @wp.func
 def read_vec3(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.vec3f:
-    return wp.vec3f(c.data[off + 0, cid], c.data[off + 1, cid], c.data[off + 2, cid])
+    return wp.vec3f(
+        read2d_f32(c.data, off + 0, cid),
+        read2d_f32(c.data, off + 1, cid),
+        read2d_f32(c.data, off + 2, cid),
+    )
 
 
 @wp.func
 def write_vec3(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.vec3f):
-    c.data[off + 0, cid] = v[0]
-    c.data[off + 1, cid] = v[1]
-    c.data[off + 2, cid] = v[2]
+    write2d_f32(c.data, off + 0, cid, v[0])
+    write2d_f32(c.data, off + 1, cid, v[1])
+    write2d_f32(c.data, off + 2, cid, v[2])
 
 
 @wp.func
 def read_quat(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.quatf:
     return wp.quatf(
-        c.data[off + 0, cid],
-        c.data[off + 1, cid],
-        c.data[off + 2, cid],
-        c.data[off + 3, cid],
+        read2d_f32(c.data, off + 0, cid),
+        read2d_f32(c.data, off + 1, cid),
+        read2d_f32(c.data, off + 2, cid),
+        read2d_f32(c.data, off + 3, cid),
     )
 
 
 @wp.func
 def write_quat(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.quatf):
-    c.data[off + 0, cid] = v[0]
-    c.data[off + 1, cid] = v[1]
-    c.data[off + 2, cid] = v[2]
-    c.data[off + 3, cid] = v[3]
+    write2d_f32(c.data, off + 0, cid, v[0])
+    write2d_f32(c.data, off + 1, cid, v[1])
+    write2d_f32(c.data, off + 2, cid, v[2])
+    write2d_f32(c.data, off + 3, cid, v[3])
 
 
 @wp.func
 def read_mat22(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.mat22f:
     """Row-major 2x2 from 4 consecutive dwords."""
     return wp.mat22f(
-        c.data[off + 0, cid],
-        c.data[off + 1, cid],
-        c.data[off + 2, cid],
-        c.data[off + 3, cid],
+        read2d_f32(c.data, off + 0, cid),
+        read2d_f32(c.data, off + 1, cid),
+        read2d_f32(c.data, off + 2, cid),
+        read2d_f32(c.data, off + 3, cid),
     )
 
 
 @wp.func
 def write_mat22(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.mat22f):
-    c.data[off + 0, cid] = v[0, 0]
-    c.data[off + 1, cid] = v[0, 1]
-    c.data[off + 2, cid] = v[1, 0]
-    c.data[off + 3, cid] = v[1, 1]
+    write2d_f32(c.data, off + 0, cid, v[0, 0])
+    write2d_f32(c.data, off + 1, cid, v[0, 1])
+    write2d_f32(c.data, off + 2, cid, v[1, 0])
+    write2d_f32(c.data, off + 3, cid, v[1, 1])
 
 
 @wp.func
 def read_mat33(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.mat33f:
     """Row-major 3x3 from 9 consecutive dwords."""
     return wp.mat33f(
-        c.data[off + 0, cid],
-        c.data[off + 1, cid],
-        c.data[off + 2, cid],
-        c.data[off + 3, cid],
-        c.data[off + 4, cid],
-        c.data[off + 5, cid],
-        c.data[off + 6, cid],
-        c.data[off + 7, cid],
-        c.data[off + 8, cid],
+        read2d_f32(c.data, off + 0, cid),
+        read2d_f32(c.data, off + 1, cid),
+        read2d_f32(c.data, off + 2, cid),
+        read2d_f32(c.data, off + 3, cid),
+        read2d_f32(c.data, off + 4, cid),
+        read2d_f32(c.data, off + 5, cid),
+        read2d_f32(c.data, off + 6, cid),
+        read2d_f32(c.data, off + 7, cid),
+        read2d_f32(c.data, off + 8, cid),
     )
 
 
 @wp.func
 def write_mat33(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.mat33f):
-    c.data[off + 0, cid] = v[0, 0]
-    c.data[off + 1, cid] = v[0, 1]
-    c.data[off + 2, cid] = v[0, 2]
-    c.data[off + 3, cid] = v[1, 0]
-    c.data[off + 4, cid] = v[1, 1]
-    c.data[off + 5, cid] = v[1, 2]
-    c.data[off + 6, cid] = v[2, 0]
-    c.data[off + 7, cid] = v[2, 1]
-    c.data[off + 8, cid] = v[2, 2]
+    write2d_f32(c.data, off + 0, cid, v[0, 0])
+    write2d_f32(c.data, off + 1, cid, v[0, 1])
+    write2d_f32(c.data, off + 2, cid, v[0, 2])
+    write2d_f32(c.data, off + 3, cid, v[1, 0])
+    write2d_f32(c.data, off + 4, cid, v[1, 1])
+    write2d_f32(c.data, off + 5, cid, v[1, 2])
+    write2d_f32(c.data, off + 6, cid, v[2, 0])
+    write2d_f32(c.data, off + 7, cid, v[2, 1])
+    write2d_f32(c.data, off + 8, cid, v[2, 2])
 
 
 @wp.func
 def read_vec4(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.vec4f:
     return wp.vec4f(
-        c.data[off + 0, cid],
-        c.data[off + 1, cid],
-        c.data[off + 2, cid],
-        c.data[off + 3, cid],
+        read2d_f32(c.data, off + 0, cid),
+        read2d_f32(c.data, off + 1, cid),
+        read2d_f32(c.data, off + 2, cid),
+        read2d_f32(c.data, off + 3, cid),
     )
 
 
 @wp.func
 def write_vec4(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.vec4f):
-    c.data[off + 0, cid] = v[0]
-    c.data[off + 1, cid] = v[1]
-    c.data[off + 2, cid] = v[2]
-    c.data[off + 3, cid] = v[3]
+    write2d_f32(c.data, off + 0, cid, v[0])
+    write2d_f32(c.data, off + 1, cid, v[1])
+    write2d_f32(c.data, off + 2, cid, v[2])
+    write2d_f32(c.data, off + 3, cid, v[3])
 
 
 @wp.func
 def read_mat44(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.mat44f:
     """Row-major 4x4 from 16 consecutive dwords."""
     return wp.mat44f(
-        c.data[off + 0, cid],
-        c.data[off + 1, cid],
-        c.data[off + 2, cid],
-        c.data[off + 3, cid],
-        c.data[off + 4, cid],
-        c.data[off + 5, cid],
-        c.data[off + 6, cid],
-        c.data[off + 7, cid],
-        c.data[off + 8, cid],
-        c.data[off + 9, cid],
-        c.data[off + 10, cid],
-        c.data[off + 11, cid],
-        c.data[off + 12, cid],
-        c.data[off + 13, cid],
-        c.data[off + 14, cid],
-        c.data[off + 15, cid],
+        read2d_f32(c.data, off + 0, cid),
+        read2d_f32(c.data, off + 1, cid),
+        read2d_f32(c.data, off + 2, cid),
+        read2d_f32(c.data, off + 3, cid),
+        read2d_f32(c.data, off + 4, cid),
+        read2d_f32(c.data, off + 5, cid),
+        read2d_f32(c.data, off + 6, cid),
+        read2d_f32(c.data, off + 7, cid),
+        read2d_f32(c.data, off + 8, cid),
+        read2d_f32(c.data, off + 9, cid),
+        read2d_f32(c.data, off + 10, cid),
+        read2d_f32(c.data, off + 11, cid),
+        read2d_f32(c.data, off + 12, cid),
+        read2d_f32(c.data, off + 13, cid),
+        read2d_f32(c.data, off + 14, cid),
+        read2d_f32(c.data, off + 15, cid),
     )
 
 
 @wp.func
 def write_mat44(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.mat44f):
-    c.data[off + 0, cid] = v[0, 0]
-    c.data[off + 1, cid] = v[0, 1]
-    c.data[off + 2, cid] = v[0, 2]
-    c.data[off + 3, cid] = v[0, 3]
-    c.data[off + 4, cid] = v[1, 0]
-    c.data[off + 5, cid] = v[1, 1]
-    c.data[off + 6, cid] = v[1, 2]
-    c.data[off + 7, cid] = v[1, 3]
-    c.data[off + 8, cid] = v[2, 0]
-    c.data[off + 9, cid] = v[2, 1]
-    c.data[off + 10, cid] = v[2, 2]
-    c.data[off + 11, cid] = v[2, 3]
-    c.data[off + 12, cid] = v[3, 0]
-    c.data[off + 13, cid] = v[3, 1]
-    c.data[off + 14, cid] = v[3, 2]
-    c.data[off + 15, cid] = v[3, 3]
+    write2d_f32(c.data, off + 0, cid, v[0, 0])
+    write2d_f32(c.data, off + 1, cid, v[0, 1])
+    write2d_f32(c.data, off + 2, cid, v[0, 2])
+    write2d_f32(c.data, off + 3, cid, v[0, 3])
+    write2d_f32(c.data, off + 4, cid, v[1, 0])
+    write2d_f32(c.data, off + 5, cid, v[1, 1])
+    write2d_f32(c.data, off + 6, cid, v[1, 2])
+    write2d_f32(c.data, off + 7, cid, v[1, 3])
+    write2d_f32(c.data, off + 8, cid, v[2, 0])
+    write2d_f32(c.data, off + 9, cid, v[2, 1])
+    write2d_f32(c.data, off + 10, cid, v[2, 2])
+    write2d_f32(c.data, off + 11, cid, v[2, 3])
+    write2d_f32(c.data, off + 12, cid, v[3, 0])
+    write2d_f32(c.data, off + 13, cid, v[3, 1])
+    write2d_f32(c.data, off + 14, cid, v[3, 2])
+    write2d_f32(c.data, off + 15, cid, v[3, 3])
 
 
 # Type-agnostic header accessors (work on any column thanks to the dword

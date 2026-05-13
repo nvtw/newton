@@ -16,6 +16,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
+from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
 from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -201,22 +202,22 @@ def contact_column_container_zeros(
 # Column-local int/float read+write helpers, keyed by ``local_cid``.
 @wp.func
 def _col_read_int(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32) -> wp.int32:
-    return reinterpret_float_as_int(c.data[off, local_cid])
+    return reinterpret_float_as_int(read2d_f32(c.data, off, local_cid))
 
 
 @wp.func
 def _col_write_int(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32, v: wp.int32):
-    c.data[off, local_cid] = reinterpret_int_as_float(v)
+    write2d_f32(c.data, off, local_cid, reinterpret_int_as_float(v))
 
 
 @wp.func
 def _col_read_float(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32) -> wp.float32:
-    return c.data[off, local_cid]
+    return read2d_f32(c.data, off, local_cid)
 
 
 @wp.func
 def _col_write_float(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32, v: wp.float32):
-    c.data[off, local_cid] = v
+    write2d_f32(c.data, off, local_cid, v)
 
 
 # ---------------------------------------------------------------------------

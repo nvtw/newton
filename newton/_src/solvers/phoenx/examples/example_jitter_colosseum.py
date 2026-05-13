@@ -39,9 +39,10 @@ def _quat_z(angle_rad: float):
 
 
 class Example(PortedExample):
-    sim_substeps = 16
-    solver_iterations = 16
+    sim_substeps = 8
+    solver_iterations = 4
     default_friction = 0.6
+    step_layout = "single_world"
 
     def build_scene(self, builder: newton.ModelBuilder):
         builder.add_ground_plane()

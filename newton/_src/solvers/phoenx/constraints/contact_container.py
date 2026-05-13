@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
+
 __all__ = [
     "CC_DERIVED_DWORDS_PER_CONTACT",
     "CC_DWORDS_PER_CONTACT",
@@ -134,96 +136,96 @@ class ContactContainer:
 
 @wp.func
 def cc_get_normal_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.lambdas[_CC_OFF_NORMAL_LAMBDA, k]
+    return read2d_f32(cc.lambdas, _CC_OFF_NORMAL_LAMBDA, k)
 
 
 @wp.func
 def cc_set_normal_lambda(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.lambdas[_CC_OFF_NORMAL_LAMBDA, k] = v
+    write2d_f32(cc.lambdas, _CC_OFF_NORMAL_LAMBDA, k, v)
 
 
 @wp.func
 def cc_get_tangent1_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.lambdas[_CC_OFF_TANGENT1_LAMBDA, k]
+    return read2d_f32(cc.lambdas, _CC_OFF_TANGENT1_LAMBDA, k)
 
 
 @wp.func
 def cc_set_tangent1_lambda(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.lambdas[_CC_OFF_TANGENT1_LAMBDA, k] = v
+    write2d_f32(cc.lambdas, _CC_OFF_TANGENT1_LAMBDA, k, v)
 
 
 @wp.func
 def cc_get_tangent2_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.lambdas[_CC_OFF_TANGENT2_LAMBDA, k]
+    return read2d_f32(cc.lambdas, _CC_OFF_TANGENT2_LAMBDA, k)
 
 
 @wp.func
 def cc_set_tangent2_lambda(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.lambdas[_CC_OFF_TANGENT2_LAMBDA, k] = v
+    write2d_f32(cc.lambdas, _CC_OFF_TANGENT2_LAMBDA, k, v)
 
 
 @wp.func
 def cc_get_normal(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.lambdas[_CC_OFF_NORMAL_X, k],
-        cc.lambdas[_CC_OFF_NORMAL_Y, k],
-        cc.lambdas[_CC_OFF_NORMAL_Z, k],
+        read2d_f32(cc.lambdas, _CC_OFF_NORMAL_X, k),
+        read2d_f32(cc.lambdas, _CC_OFF_NORMAL_Y, k),
+        read2d_f32(cc.lambdas, _CC_OFF_NORMAL_Z, k),
     )
 
 
 @wp.func
 def cc_set_normal(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    cc.lambdas[_CC_OFF_NORMAL_X, k] = v[0]
-    cc.lambdas[_CC_OFF_NORMAL_Y, k] = v[1]
-    cc.lambdas[_CC_OFF_NORMAL_Z, k] = v[2]
+    write2d_f32(cc.lambdas, _CC_OFF_NORMAL_X, k, v[0])
+    write2d_f32(cc.lambdas, _CC_OFF_NORMAL_Y, k, v[1])
+    write2d_f32(cc.lambdas, _CC_OFF_NORMAL_Z, k, v[2])
 
 
 @wp.func
 def cc_get_tangent1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.lambdas[_CC_OFF_TANGENT1_X, k],
-        cc.lambdas[_CC_OFF_TANGENT1_Y, k],
-        cc.lambdas[_CC_OFF_TANGENT1_Z, k],
+        read2d_f32(cc.lambdas, _CC_OFF_TANGENT1_X, k),
+        read2d_f32(cc.lambdas, _CC_OFF_TANGENT1_Y, k),
+        read2d_f32(cc.lambdas, _CC_OFF_TANGENT1_Z, k),
     )
 
 
 @wp.func
 def cc_set_tangent1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    cc.lambdas[_CC_OFF_TANGENT1_X, k] = v[0]
-    cc.lambdas[_CC_OFF_TANGENT1_Y, k] = v[1]
-    cc.lambdas[_CC_OFF_TANGENT1_Z, k] = v[2]
+    write2d_f32(cc.lambdas, _CC_OFF_TANGENT1_X, k, v[0])
+    write2d_f32(cc.lambdas, _CC_OFF_TANGENT1_Y, k, v[1])
+    write2d_f32(cc.lambdas, _CC_OFF_TANGENT1_Z, k, v[2])
 
 
 @wp.func
 def cc_get_local_p0(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.lambdas[_CC_OFF_LOCAL_P0_X, k],
-        cc.lambdas[_CC_OFF_LOCAL_P0_Y, k],
-        cc.lambdas[_CC_OFF_LOCAL_P0_Z, k],
+        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_X, k),
+        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_Y, k),
+        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_Z, k),
     )
 
 
 @wp.func
 def cc_set_local_p0(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    cc.lambdas[_CC_OFF_LOCAL_P0_X, k] = v[0]
-    cc.lambdas[_CC_OFF_LOCAL_P0_Y, k] = v[1]
-    cc.lambdas[_CC_OFF_LOCAL_P0_Z, k] = v[2]
+    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_X, k, v[0])
+    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_Y, k, v[1])
+    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_Z, k, v[2])
 
 
 @wp.func
 def cc_get_local_p1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.lambdas[_CC_OFF_LOCAL_P1_X, k],
-        cc.lambdas[_CC_OFF_LOCAL_P1_Y, k],
-        cc.lambdas[_CC_OFF_LOCAL_P1_Z, k],
+        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_X, k),
+        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_Y, k),
+        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_Z, k),
     )
 
 
 @wp.func
 def cc_set_local_p1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    cc.lambdas[_CC_OFF_LOCAL_P1_X, k] = v[0]
-    cc.lambdas[_CC_OFF_LOCAL_P1_Y, k] = v[1]
-    cc.lambdas[_CC_OFF_LOCAL_P1_Z, k] = v[2]
+    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_X, k, v[0])
+    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_Y, k, v[1])
+    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_Z, k, v[2])
 
 
 # Per-side barycentric weights for cloth-aware endpoints. Populated by
@@ -235,33 +237,33 @@ def cc_set_local_p1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
 @wp.func
 def cc_get_side0_bary(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.lambdas[_CC_OFF_SIDE0_BARY_X, k],
-        cc.lambdas[_CC_OFF_SIDE0_BARY_Y, k],
-        cc.lambdas[_CC_OFF_SIDE0_BARY_Z, k],
+        read2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_X, k),
+        read2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_Y, k),
+        read2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_Z, k),
     )
 
 
 @wp.func
 def cc_set_side0_bary(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    cc.lambdas[_CC_OFF_SIDE0_BARY_X, k] = v[0]
-    cc.lambdas[_CC_OFF_SIDE0_BARY_Y, k] = v[1]
-    cc.lambdas[_CC_OFF_SIDE0_BARY_Z, k] = v[2]
+    write2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_X, k, v[0])
+    write2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_Y, k, v[1])
+    write2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_Z, k, v[2])
 
 
 @wp.func
 def cc_get_side1_bary(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.lambdas[_CC_OFF_SIDE1_BARY_X, k],
-        cc.lambdas[_CC_OFF_SIDE1_BARY_Y, k],
-        cc.lambdas[_CC_OFF_SIDE1_BARY_Z, k],
+        read2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_X, k),
+        read2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_Y, k),
+        read2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_Z, k),
     )
 
 
 @wp.func
 def cc_set_side1_bary(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    cc.lambdas[_CC_OFF_SIDE1_BARY_X, k] = v[0]
-    cc.lambdas[_CC_OFF_SIDE1_BARY_Y, k] = v[1]
-    cc.lambdas[_CC_OFF_SIDE1_BARY_Z, k] = v[2]
+    write2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_X, k, v[0])
+    write2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_Y, k, v[1])
+    write2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_Z, k, v[2])
 
 
 # ---- prev-step views ------------------------------------------------
@@ -269,52 +271,52 @@ def cc_set_side1_bary(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
 
 @wp.func
 def cc_get_prev_normal_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.prev_lambdas[_CC_OFF_NORMAL_LAMBDA, k]
+    return read2d_f32(cc.prev_lambdas, _CC_OFF_NORMAL_LAMBDA, k)
 
 
 @wp.func
 def cc_get_prev_tangent1_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.prev_lambdas[_CC_OFF_TANGENT1_LAMBDA, k]
+    return read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_LAMBDA, k)
 
 
 @wp.func
 def cc_get_prev_tangent2_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.prev_lambdas[_CC_OFF_TANGENT2_LAMBDA, k]
+    return read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT2_LAMBDA, k)
 
 
 @wp.func
 def cc_get_prev_normal(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.prev_lambdas[_CC_OFF_NORMAL_X, k],
-        cc.prev_lambdas[_CC_OFF_NORMAL_Y, k],
-        cc.prev_lambdas[_CC_OFF_NORMAL_Z, k],
+        read2d_f32(cc.prev_lambdas, _CC_OFF_NORMAL_X, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_NORMAL_Y, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_NORMAL_Z, k),
     )
 
 
 @wp.func
 def cc_get_prev_tangent1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.prev_lambdas[_CC_OFF_TANGENT1_X, k],
-        cc.prev_lambdas[_CC_OFF_TANGENT1_Y, k],
-        cc.prev_lambdas[_CC_OFF_TANGENT1_Z, k],
+        read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_X, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_Y, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_Z, k),
     )
 
 
 @wp.func
 def cc_get_prev_local_p0(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.prev_lambdas[_CC_OFF_LOCAL_P0_X, k],
-        cc.prev_lambdas[_CC_OFF_LOCAL_P0_Y, k],
-        cc.prev_lambdas[_CC_OFF_LOCAL_P0_Z, k],
+        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P0_X, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P0_Y, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P0_Z, k),
     )
 
 
 @wp.func
 def cc_get_prev_local_p1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        cc.prev_lambdas[_CC_OFF_LOCAL_P1_X, k],
-        cc.prev_lambdas[_CC_OFF_LOCAL_P1_Y, k],
-        cc.prev_lambdas[_CC_OFF_LOCAL_P1_Z, k],
+        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P1_X, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P1_Y, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P1_Z, k),
     )
 
 
@@ -325,92 +327,92 @@ def cc_get_prev_local_p1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
 
 @wp.func
 def cc_get_eff_n(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.derived[_CC_OFF_EFF_N, k]
+    return read2d_f32(cc.derived, _CC_OFF_EFF_N, k)
 
 
 @wp.func
 def cc_set_eff_n(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.derived[_CC_OFF_EFF_N, k] = v
+    write2d_f32(cc.derived, _CC_OFF_EFF_N, k, v)
 
 
 @wp.func
 def cc_get_eff_t1(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.derived[_CC_OFF_EFF_T1, k]
+    return read2d_f32(cc.derived, _CC_OFF_EFF_T1, k)
 
 
 @wp.func
 def cc_set_eff_t1(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.derived[_CC_OFF_EFF_T1, k] = v
+    write2d_f32(cc.derived, _CC_OFF_EFF_T1, k, v)
 
 
 @wp.func
 def cc_get_eff_t2(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.derived[_CC_OFF_EFF_T2, k]
+    return read2d_f32(cc.derived, _CC_OFF_EFF_T2, k)
 
 
 @wp.func
 def cc_set_eff_t2(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.derived[_CC_OFF_EFF_T2, k] = v
+    write2d_f32(cc.derived, _CC_OFF_EFF_T2, k, v)
 
 
 @wp.func
 def cc_get_bias(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.derived[_CC_OFF_BIAS, k]
+    return read2d_f32(cc.derived, _CC_OFF_BIAS, k)
 
 
 @wp.func
 def cc_set_bias(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.derived[_CC_OFF_BIAS, k] = v
+    write2d_f32(cc.derived, _CC_OFF_BIAS, k, v)
 
 
 @wp.func
 def cc_get_bias_t1(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.derived[_CC_OFF_BIAS_T1, k]
+    return read2d_f32(cc.derived, _CC_OFF_BIAS_T1, k)
 
 
 @wp.func
 def cc_set_bias_t1(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.derived[_CC_OFF_BIAS_T1, k] = v
+    write2d_f32(cc.derived, _CC_OFF_BIAS_T1, k, v)
 
 
 @wp.func
 def cc_get_bias_t2(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.derived[_CC_OFF_BIAS_T2, k]
+    return read2d_f32(cc.derived, _CC_OFF_BIAS_T2, k)
 
 
 @wp.func
 def cc_set_bias_t2(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.derived[_CC_OFF_BIAS_T2, k] = v
+    write2d_f32(cc.derived, _CC_OFF_BIAS_T2, k, v)
 
 
 @wp.func
 def cc_get_pd_gamma(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.derived[_CC_OFF_PD_GAMMA, k]
+    return read2d_f32(cc.derived, _CC_OFF_PD_GAMMA, k)
 
 
 @wp.func
 def cc_set_pd_gamma(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.derived[_CC_OFF_PD_GAMMA, k] = v
+    write2d_f32(cc.derived, _CC_OFF_PD_GAMMA, k, v)
 
 
 @wp.func
 def cc_get_pd_bias(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.derived[_CC_OFF_PD_BIAS, k]
+    return read2d_f32(cc.derived, _CC_OFF_PD_BIAS, k)
 
 
 @wp.func
 def cc_set_pd_bias(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.derived[_CC_OFF_PD_BIAS, k] = v
+    write2d_f32(cc.derived, _CC_OFF_PD_BIAS, k, v)
 
 
 @wp.func
 def cc_get_pd_eff_soft(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return cc.derived[_CC_OFF_PD_EFF_SOFT, k]
+    return read2d_f32(cc.derived, _CC_OFF_PD_EFF_SOFT, k)
 
 
 @wp.func
 def cc_set_pd_eff_soft(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    cc.derived[_CC_OFF_PD_EFF_SOFT, k] = v
+    write2d_f32(cc.derived, _CC_OFF_PD_EFF_SOFT, k, v)
 
 
 # ---------------------------------------------------------------------------

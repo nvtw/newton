@@ -26,8 +26,8 @@ _QUAT_ZTOX = wp.quat(0.0, _S, 0.0, _S)
 
 
 class Example(PortedExample):
-    sim_substeps = 12
-    solver_iterations = 16
+    sim_substeps = 10
+    solver_iterations = 5
 
     def build_scene(self, builder: newton.ModelBuilder):
         builder.add_ground_plane()
