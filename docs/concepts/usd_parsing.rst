@@ -566,7 +566,7 @@ attributes, along with any unit or semantic differences.
 
 .. list-table::
    :header-rows: 1
-   :widths: 35 35 30
+   :widths: 30 30 40
 
    * - **PhysX**
      - **Newton**
@@ -576,55 +576,58 @@ attributes, along with any unit or semantic differences.
      - Direct mapping [m].
    * - ``physxCollision:contactOffset``
      - ``newton:contactGap``
-     - **Semantic difference.** Newton's ``contactGap`` is additive on top of
-       ``contactMargin``; PhysX's ``contactOffset`` is measured from the original
-       shape surface. Convert as
-       ``newton:contactGap = physxCollision:contactOffset - physxCollision:restOffset``.
+     - Semantic shift — see note below.
+
+.. note::
+
+   Newton's ``contactGap`` is additive on top of ``contactMargin``; PhysX's
+   ``contactOffset`` is measured from the original shape surface. Convert as
+   ``newton:contactGap = physxCollision:contactOffset - physxCollision:restOffset``.
 
 **SDF collision configuration (per mesh shape):**
 
 .. list-table::
    :header-rows: 1
-   :widths: 38 38 24
+   :widths: 30 30 40
 
    * - **PhysX**
      - **Newton**
      - **Notes**
    * - ``physxSDFMeshCollision:sdfResolution``
      - ``newton:sdfMaxResolution``
-     - Direct mapping (must be divisible by 8).
+     - Direct mapping; must be divisible by 8.
    * - ``physxSDFMeshCollision:sdfNarrowBandThickness``
-     - ``newton:sdfNarrowBandOuterFraction``
-     - PhysX authors a single fraction of the mesh AABB diagonal. Newton splits
-       the narrow band into inner/outer halves: set the inner fraction to the
-       negated value (e.g. ``-0.01``) and the outer fraction to the positive
-       value (e.g. ``0.01``).
-   * - *(derived as above)*
-     - ``newton:sdfNarrowBandInnerFraction``
-     - Typically ``-physxSDFMeshCollision:sdfNarrowBandThickness``.
+     - ``newton:sdfNarrowBandInnerFraction``,
+       ``newton:sdfNarrowBandOuterFraction``
+     - Split into inner / outer halves — see *Narrow band split* below.
    * - ``physxSDFMeshCollision:sdfMargin``
      - ``newton:sdfMarginFraction``
-     - Both are fractions of the mesh AABB diagonal. Direct mapping.
+     - Both are fractions of the mesh AABB diagonal.
    * - ``physxSDFMeshCollision:sdfBitsPerSubgridPixel``
      - ``newton:sdfTextureFormat``
-     - Token translation: ``BitsPerPixel8`` → ``uint8``, ``BitsPerPixel16`` →
-       ``uint16``, ``BitsPerPixel32`` → ``float32``.
-   * - *(no PhysX equivalent)*
+     - ``BitsPerPixel8/16/32`` → ``uint8`` / ``uint16`` / ``float32``.
+   * - *(no equivalent)*
      - ``newton:sdfEnabled``
-     - Optional toggle. When ``NewtonSDFCollisionAPI`` is applied, SDF is
-       enabled by default.
-   * - *(no PhysX equivalent)*
+     - Defaults to ``true`` when ``NewtonSDFCollisionAPI`` is applied.
+   * - *(no equivalent)*
      - ``newton:sdfTargetVoxelSize``
-     - Optional absolute target voxel size [m]; when authored (> 0) it takes
-       precedence over ``sdfMaxResolution``.
+     - Absolute voxel size [m]; when ``> 0``, overrides ``sdfMaxResolution``.
 
 .. note::
 
-   Newton also exposes absolute-distance variants (``newton:sdfNarrowBandInner``,
-   ``newton:sdfNarrowBandOuter``, ``newton:sdfMargin``) in meters. When both an
-   absolute and a fractional value are authored, the fractional form overrides the
-   absolute form at parse time. PhysX-ported assets naturally use the fractional
-   form.
+   **Narrow band split.** PhysX authors a single fraction of the mesh AABB
+   diagonal. Newton splits it into inner / outer halves: set
+   ``newton:sdfNarrowBandInnerFraction`` to the negated value and
+   ``newton:sdfNarrowBandOuterFraction`` to the positive value
+   (e.g. ``-0.01`` and ``0.01``).
+
+.. note::
+
+   **Absolute vs. fractional.** Newton also exposes absolute-distance variants
+   (``newton:sdfNarrowBandInner``, ``newton:sdfNarrowBandOuter``,
+   ``newton:sdfMargin``) in meters. When both forms are authored, the
+   fractional one wins at parse time. PhysX-ported assets naturally use the
+   fractional form.
 
 **Hydroelastic contacts (per mesh shape, opt-in):**
 
