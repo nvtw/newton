@@ -25,7 +25,7 @@ from .gl.gui import UI
 from .gl.image_logger import ImageLogger
 from .gl.opengl import LinesGL, MeshGL, MeshInstancerGL, RendererGL
 from .picking import Picking
-from .viewer import ViewerBase
+from .viewer import _DEFAULT_LAYER_ID, ViewerBase
 from .wind import Wind
 
 
@@ -318,6 +318,27 @@ class ViewerGL(ViewerBase):
         self._pbo = None
         self._wp_pbo = None
 
+    @override
+    def _extra_layer_state_attrs(self) -> tuple[str, ...]:
+        """Per-layer attributes specific to the OpenGL backend.
+
+        These are caches that are tied to a single model: the packed VBO
+        transform arrays, the capsule key set, and the picking/wind
+        helpers. Including them in the snapshot lets each layer keep its
+        own model + packed buffers without overwriting other layers'
+        state when the active layer is switched.
+        """
+        return (
+            "_packed_groups",
+            "_capsule_keys",
+            "_packed_write_indices",
+            "_packed_world_xforms",
+            "_packed_vbo_xforms",
+            "_packed_vbo_xforms_host",
+            "picking",
+            "wind",
+        )
+
     def _hash_geometry(self, geo_type: int, geo_scale, thickness: float, is_solid: bool, geo_src=None) -> int:
         # For capsules, ignore (radius, half_height) in the geometry hash so varying-length capsules batch together.
         # Capsule dimensions are stored per-shape in model.shape_scale as (radius, half_height, _unused) and
@@ -450,22 +471,43 @@ class ViewerGL(ViewerBase):
         """Reset GL-specific model-dependent state to defaults.
 
         Called from ``__init__`` (via ``super().__init__`` → ``clear_model``)
-        and whenever the current model is discarded.
+        and whenever the current model is discarded. Only resources owned by
+        the currently active layer are destroyed so other layers' models
+        keep rendering.
         """
-        # Render object and line caches (path -> GL object)
-        for obj in getattr(self, "objects", {}).values():
-            if hasattr(obj, "destroy"):
-                obj.destroy()
-        self.objects = {}
-        for obj in getattr(self, "lines", {}).values():
-            obj.destroy()
-        self.lines = {}
-        for obj in getattr(self, "arrows", {}).values():
-            obj.destroy()
-        self.arrows = {}
-        self._destroy_all_wireframes()
-        self.wireframe_shapes = {}
-        self._wireframe_vbo_owners: dict[int, WireframeShapeGL] = {}
+        # Only destroy backend objects owned by the active layer so other
+        # live layers retain their meshes / instancers / lines / wireframes.
+        owns = self._is_layer_owned_path
+
+        def _filter_destroy(d: dict) -> dict:
+            kept: dict = {}
+            for k, v in d.items():
+                if owns(k):
+                    if hasattr(v, "destroy"):
+                        v.destroy()
+                else:
+                    kept[k] = v
+            return kept
+
+        self.objects = _filter_destroy(getattr(self, "objects", {}))
+        self.lines = _filter_destroy(getattr(self, "lines", {}))
+        self.arrows = _filter_destroy(getattr(self, "arrows", {}))
+
+        # Wireframe shapes are keyed on layer-qualified names; filter by ownership.
+        # VBO owners are shared by id(vertex_data) and self-managed by
+        # ``log_wireframe_shape``; leave them alone here so other layers'
+        # wireframes that share an owner keep functioning. If no layers
+        # remain, the owners' GL resources are freed at viewer close().
+        wireframe_shapes = getattr(self, "wireframe_shapes", {})
+        kept_wf: dict = {}
+        for k, v in wireframe_shapes.items():
+            if owns(k):
+                v.destroy()
+            else:
+                kept_wf[k] = v
+        self.wireframe_shapes = kept_wf
+        if not hasattr(self, "_wireframe_vbo_owners"):
+            self._wireframe_vbo_owners = {}
 
         # Interactive picking and wind force helpers
         self.picking = None
@@ -650,7 +692,10 @@ class ViewerGL(ViewerBase):
         from .gl.opengl import MeshInstancerGL  # noqa: PLC0415
 
         current_names = {s.name for s in self._shape_instances.values()}
-        stale = [k for k, v in self.objects.items() if isinstance(v, MeshInstancerGL) and k not in current_names]
+        owns = self._is_layer_owned_path
+        stale = [
+            k for k, v in self.objects.items() if isinstance(v, MeshInstancerGL) and owns(k) and k not in current_names
+        ]
         for k in stale:
             obj = self.objects.pop(k)
             del obj
@@ -1432,8 +1477,9 @@ class ViewerGL(ViewerBase):
             # ---- Upload pinned host slices to GL per instancer ----
             host_np = self._packed_vbo_xforms_host.numpy()
 
+            layer_hidden = self._layer_force_hidden()
             for key, shapes, offset, count in self._packed_groups:
-                visible = self._should_show_shape(shapes.flags, shapes.static)
+                visible = self._should_show_shape(shapes.flags, shapes.static) and not layer_hidden
                 colors = shapes.colors if self.model_changed or shapes.colors_changed else None
                 materials = shapes.materials if self.model_changed else None
 
@@ -2535,6 +2581,19 @@ class ViewerGL(ViewerBase):
                     # Inertia boxes toggle
                     show_inertia_boxes = self.show_inertia_boxes
                     changed, self.show_inertia_boxes = imgui.checkbox("Show Inertia Boxes", show_inertia_boxes)
+
+            # Layers section — toggle visibility of overlaid solvers/models.
+            # Only shown when more than just the default layer has been
+            # registered (i.e., the user opted in via viewer.activate()).
+            user_layers = [lyr for lid, lyr in self._layers.items() if lid != _DEFAULT_LAYER_ID]
+            if user_layers:
+                imgui.set_next_item_open(True, imgui.Cond_.appearing)
+                if imgui.collapsing_header("Layers", flags=header_flags):
+                    imgui.separator()
+                    for lyr in user_layers:
+                        changed, new_visible = imgui.checkbox(f"Show '{lyr.layer_id}'", lyr.visible)
+                        if changed:
+                            self.set_layer_visible(lyr.layer_id, new_visible)
 
             imgui.set_next_item_open(True, imgui.Cond_.appearing)
             if imgui.collapsing_header("Example Options"):
