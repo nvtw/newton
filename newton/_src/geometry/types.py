@@ -25,14 +25,14 @@ def _resolve_relative_or_absolute(
     *,
     default_rel: float,
     name: str,
-    mesh: "Mesh",
+    diagonal: float,
 ) -> float:
-    """Resolve a per-mesh extent given mutually exclusive absolute and relative options.
+    """Resolve a half-extent given mutually exclusive absolute and relative options.
 
     ``abs_value`` is interpreted in metres; ``rel_value`` as a fraction of
-    the mesh AABB diagonal. Exactly one of the two may be supplied. When
-    both are ``None`` the default relative fraction is used. Negative
-    inputs raise :class:`ValueError`.
+    the supplied ``diagonal``. Exactly one of the two may be supplied. When
+    both are ``None`` the default relative fraction is used. Negative inputs
+    raise :class:`ValueError`.
     """
     if abs_value is not None and rel_value is not None:
         raise ValueError(
@@ -45,11 +45,6 @@ def _resolve_relative_or_absolute(
     rel = float(rel_value) if rel_value is not None else float(default_rel)
     if rel < 0.0:
         raise ValueError(f"{name}_rel must be non-negative, got {rel}.")
-    if mesh._vertices.size == 0:
-        return 0.0
-    aabb_min = mesh._vertices.min(axis=0)
-    aabb_max = mesh._vertices.max(axis=0)
-    diagonal = float(np.linalg.norm(aabb_max - aabb_min))
     return rel * diagonal
 
 
@@ -893,33 +888,56 @@ class Mesh:
     ) -> None:
         """Compute and cache the precomputed-edge set used by SDF-mesh contacts.
 
-        Resolves the absolute/relative box half-extents (mutually exclusive
-        per axis), runs :func:`find_redundant_edges` followed by
-        :func:`resolve_edge_removals`, and stores the kept edge pairs on
-        ``self._collision_edges``.
+        The baseline is the full dihedral-filtered edge set from
+        :meth:`_filter_edges_by_dihedral_angle` — boundary edges and
+        non-manifold edges are preserved so the SDF path matches the
+        builder's threshold fallback. When ``enable_box_absorption`` is
+        ``True`` the manifold-only absorption pass runs on top and removes
+        the manifold edges that ``resolve_edge_removals`` flags.
         """
+        if self._vertices.size > 0:
+            aabb_min = self._vertices.min(axis=0)
+            aabb_max = self._vertices.max(axis=0)
+            diagonal = float(np.linalg.norm(aabb_max - aabb_min))
+        else:
+            diagonal = 0.0
+
         half_height = _resolve_relative_or_absolute(
-            half_height_abs, half_height_rel, default_rel=1.0e-3, name="edge_box_half_height", mesh=self
+            half_height_abs, half_height_rel, default_rel=1.0e-3, name="edge_box_half_height", diagonal=diagonal
         )
         half_width = _resolve_relative_or_absolute(
-            half_width_abs, half_width_rel, default_rel=5.0e-3, name="edge_box_half_width", mesh=self
+            half_width_abs, half_width_rel, default_rel=5.0e-3, name="edge_box_half_width", diagonal=diagonal
         )
+
+        full_edges = self._filter_edges_by_dihedral_angle(lower_angle_threshold_rad)
+
+        if not enable_box_absorption or len(full_edges) == 0:
+            self._collision_edges = np.ascontiguousarray(full_edges, dtype=np.int32)
+            return
 
         from .edge_redundancy import find_redundant_edges, resolve_edge_removals  # noqa: PLC0415
 
         result = find_redundant_edges(
             self,
-            enable_box_absorption=enable_box_absorption,
+            enable_box_absorption=True,
             half_height=half_height,
             half_width=half_width,
             lower_angle_threshold_rad=lower_angle_threshold_rad,
             upper_angle_threshold_rad=upper_angle_threshold_rad,
         )
-        if enable_box_absorption:
-            resolution = resolve_edge_removals(result)
-            self._collision_edges = np.ascontiguousarray(result.edge_indices[~resolution.to_remove], dtype=np.int32)
-        else:
-            self._collision_edges = np.ascontiguousarray(result.edge_indices, dtype=np.int32)
+        resolution = resolve_edge_removals(result)
+        if not np.any(resolution.to_remove):
+            self._collision_edges = np.ascontiguousarray(full_edges, dtype=np.int32)
+            return
+
+        # Project absorption removals back into the full edge set. Both arrays
+        # encode the same raw (a, b) vertex pairs in identical orientation,
+        # so packing each row into a single int64 key gives a cheap np.isin.
+        to_remove_pairs = result.edge_indices[resolution.to_remove]
+        full_keys = (full_edges[:, 0].astype(np.int64) << 32) | full_edges[:, 1].astype(np.int64)
+        remove_keys = (to_remove_pairs[:, 0].astype(np.int64) << 32) | to_remove_pairs[:, 1].astype(np.int64)
+        keep_mask = ~np.isin(full_keys, remove_keys)
+        self._collision_edges = np.ascontiguousarray(full_edges[keep_mask], dtype=np.int32)
 
     def clear_sdf(self) -> None:
         """Detach and release the currently attached SDF.

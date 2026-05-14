@@ -215,5 +215,117 @@ class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
         self.assertEqual(int(model.mesh_edge_indices.shape[0]), mesh_ranges[0][1])
 
 
+def _open_top_box_mesh() -> newton.Mesh:
+    """Cube with the top face removed -> 4 boundary edges along the open rim."""
+    verts = np.array(
+        [
+            [0, 0, 0],
+            [1, 0, 0],
+            [1, 1, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+            [1, 0, 1],
+            [1, 1, 1],
+            [0, 1, 1],
+        ],
+        dtype=np.float32,
+    )
+    tris = np.array(
+        [
+            0, 2, 1, 0, 3, 2,
+            0, 1, 5, 0, 5, 4,
+            1, 2, 6, 1, 6, 5,
+            2, 3, 7, 2, 7, 6,
+            3, 0, 4, 3, 4, 7,
+        ],
+        dtype=np.int32,
+    )  # fmt: skip
+    return newton.Mesh(verts, tris, compute_inertia=False)
+
+
+class TestBuildCollisionEdges(unittest.TestCase):
+    """Tests for Mesh._build_collision_edges (the edge-simplification half of
+    Mesh.build_sdf), exercised directly so we don't pay for the SDF cook."""
+
+    def _build(self, mesh: newton.Mesh, **kwargs) -> np.ndarray:
+        defaults = {
+            "lower_angle_threshold_rad": math.radians(0.1),
+            "upper_angle_threshold_rad": math.radians(10.0),
+            "enable_box_absorption": False,
+            "half_height_abs": None,
+            "half_height_rel": None,
+            "half_width_abs": None,
+            "half_width_rel": None,
+        }
+        defaults.update(kwargs)
+        mesh._build_collision_edges(**defaults)
+        return mesh._collision_edges
+
+    def test_abs_and_rel_together_raises(self):
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        with self.assertRaisesRegex(ValueError, "edge_box_half_height"):
+            self._build(mesh, half_height_abs=1.0, half_height_rel=1e-3)
+        with self.assertRaisesRegex(ValueError, "edge_box_half_width"):
+            self._build(mesh, half_width_abs=1.0, half_width_rel=5e-3)
+
+    def test_negative_value_raises(self):
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            self._build(mesh, half_height_abs=-1.0)
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            self._build(mesh, half_width_rel=-1.0)
+
+    def test_boundary_edges_preserved_without_absorption(self):
+        # Open-top box has 4 boundary edges that must survive the build_sdf
+        # path; the fallback (no _collision_edges) keeps them too.
+        mesh = _open_top_box_mesh()
+        kept = self._build(mesh, lower_angle_threshold_rad=math.radians(0.1))
+        fallback = mesh._filter_edges_by_dihedral_angle(math.radians(0.1))
+        # The two paths must agree row-for-row when absorption is off.
+        np.testing.assert_array_equal(kept, fallback)
+        # Concretely: 12 edges (4 boundary along the open rim + 8 manifold
+        # silhouette/diagonals; coplanar face diagonals get dropped).
+        self.assertEqual(len(kept), 12)
+
+    def test_absorption_removes_only_absorbed_manifold_edges(self):
+        # Cube has 0-deg face diagonals (manifold, absorbable) and 90-deg
+        # silhouette edges. Big extents -> diagonals absorbed; silhouettes
+        # protected by the 10 deg upper threshold.
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        kept = self._build(
+            mesh,
+            lower_angle_threshold_rad=0.0,
+            enable_box_absorption=True,
+            half_height_abs=2.0,
+            half_width_abs=2.0,
+        )
+        # At most the 18 unique edges, strictly fewer than 18 (some diagonals removed).
+        self.assertLess(len(kept), 18)
+        self.assertGreaterEqual(len(kept), 12)
+
+    def test_collision_edges_consumed_by_builder(self):
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        # Seed _collision_edges with a hand-picked subset (e.g. 6 edges).
+        seeded = mesh.edges[:6].astype(np.int32)
+        mesh._collision_edges = np.ascontiguousarray(seeded)
+
+        builder = newton.ModelBuilder()
+        # Builder threshold differs from what's cached -> must still use the
+        # cached set rather than recompute.
+        builder.mesh_edge_lower_angle_threshold_rad = math.radians(45.0)
+        body = builder.add_body()
+        builder.add_shape_mesh(body=body, mesh=mesh)
+        model = builder.finalize()
+
+        ranges = model.shape_edge_range.numpy()
+        self.assertEqual(int(ranges[0][1]), len(seeded))
+        np.testing.assert_array_equal(model.mesh_edge_indices.numpy(), seeded)
+
+    def test_empty_mesh_produces_empty_collision_edges(self):
+        mesh = newton.Mesh(np.zeros((0, 3), dtype=np.float32), np.zeros(0, dtype=np.int32), compute_inertia=False)
+        kept = self._build(mesh, enable_box_absorption=True)
+        self.assertEqual(kept.shape, (0, 2))
+
+
 if __name__ == "__main__":
     unittest.main()

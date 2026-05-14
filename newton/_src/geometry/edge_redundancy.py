@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU-first detection of redundant manifold edges via box-line absorption.
+"""Detection of redundant manifold edges via a dihedral-angle pre-filter and
+an opt-in box-line absorption pass.
 
-For every manifold edge we build an oriented box in the edge frame
+The dihedral-angle pre-filter always runs and gates which manifold edges
+participate (and reports them on :class:`EdgeRedundancyResult`). The
+box-absorption pass only runs when ``enable_box_absorption=True``: for
+every surviving manifold edge we build an oriented box in the edge frame
 (``dir``, ``tang``, ``normal``), run the SAP broad phase, and exactly test
 whether edge ``a``'s box fully absorbs edge ``b``'s segment. Mutual
 absorption marks both edges; :func:`resolve_edge_removals` then picks
