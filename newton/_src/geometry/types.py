@@ -827,6 +827,16 @@ class Mesh:
         self._edges = None
         self._is_watertight = None
 
+    def _canonical_vertex_ids(self) -> np.ndarray:
+        """Per-vertex canonical IDs that fold geometrically coincident vertices
+        together. Vertex positions are quantized to the nearest 1e-7 m bucket
+        before hashing, so vertices closer than 100 nm collapse to one id."""
+        q = np.round(self._vertices * 1e7).astype(np.int64)
+        q_contig = np.ascontiguousarray(q)
+        void_verts = q_contig.view(np.dtype((np.void, q_contig.dtype.itemsize * q_contig.shape[1])))
+        _, canonical = np.unique(void_verts, return_inverse=True)
+        return canonical.ravel()
+
     @property
     def edges(self) -> np.ndarray:
         """Unique edge vertex pairs, shape (N, 2), with geometric deduplication.
@@ -840,12 +850,7 @@ class Mesh:
                 return self._edges
             tris = self._indices.reshape(-1, 3)
             n = len(tris)
-            # Canonical vertex ids via quantized coordinates (overflow-safe)
-            q = np.round(self._vertices * 1e7).astype(np.int64)
-            q_contig = np.ascontiguousarray(q)
-            void_verts = q_contig.view(np.dtype((np.void, q_contig.dtype.itemsize * q_contig.shape[1])))
-            _, canonical = np.unique(void_verts, return_inverse=True)
-            canonical = canonical.ravel()
+            canonical = self._canonical_vertex_ids()
             # Build edges with (min, max) canonical ordering, keep original indices
             c = canonical[tris]
             canon_edges = np.empty((n * 3, 2), dtype=np.int64)
@@ -911,23 +916,17 @@ class Mesh:
 
         tris = self._indices.reshape(-1, 3)
         n = len(tris)
-        q = np.round(self._vertices * 1e7).astype(np.int64)
-        q_contig = np.ascontiguousarray(q)
-        void_verts = q_contig.view(np.dtype((np.void, q_contig.dtype.itemsize * q_contig.shape[1])))
-        _, canonical = np.unique(void_verts, return_inverse=True)
-        canonical = canonical.ravel()
+        canonical = self._canonical_vertex_ids()
 
         c = canonical[tris]
         canon_edges = np.empty((n * 3, 2), dtype=np.int64)
         orig_edges = np.empty((n * 3, 2), dtype=np.int32)
-        tri_id = np.empty(n * 3, dtype=np.int64)
         for k, (a, b) in enumerate(((0, 1), (1, 2), (0, 2))):
             ca, cb = c[:, a], c[:, b]
             canon_edges[k::3, 0] = np.minimum(ca, cb)
             canon_edges[k::3, 1] = np.maximum(ca, cb)
             orig_edges[k::3, 0] = tris[:, a]
             orig_edges[k::3, 1] = tris[:, b]
-            tri_id[k::3] = np.arange(n, dtype=np.int64)
 
         # Pack each canonical edge pair into a single int64 key for fast sorting.
         # canonical ids fit in int32 range comfortably (vertex count), so shift by 32.
@@ -936,8 +935,6 @@ class Mesh:
         keys_sorted = keys[order]
 
         # Group boundaries via change points in the sorted keys.
-        if keys_sorted.size == 0:
-            return _full_with_optional_diagnostics()
         change = np.empty(keys_sorted.size, dtype=bool)
         change[0] = True
         change[1:] = keys_sorted[1:] != keys_sorted[:-1]
@@ -977,8 +974,9 @@ class Mesh:
             pair_starts = group_starts[pair_mask]
             slots_a = order[pair_starts]
             slots_b = order[pair_starts + 1]
-            tri_a = tri_id[slots_a]
-            tri_b = tri_id[slots_b]
+            # Slot index encodes the source triangle as slot // 3 (slot = 3*tri + k).
+            tri_a = slots_a // 3
+            tri_b = slots_b // 3
             n_a = face_normals[tri_a]
             n_b = face_normals[tri_b]
             norm_a = face_norms[tri_a]
@@ -1048,22 +1046,14 @@ class Mesh:
 
         tris = self._indices.reshape(-1, 3)
         n = len(tris)
-
-        # Canonical vertex ids (same machinery as edges/_filter).
-        q = np.round(self._vertices * 1e7).astype(np.int64)
-        q_contig = np.ascontiguousarray(q)
-        void_verts = q_contig.view(np.dtype((np.void, q_contig.dtype.itemsize * q_contig.shape[1])))
-        _, canonical = np.unique(void_verts, return_inverse=True)
-        canonical = canonical.ravel()
+        canonical = self._canonical_vertex_ids()
 
         c = canonical[tris]
         slot_canon = np.empty((n * 3, 2), dtype=np.int64)
-        slot_tri = np.empty(n * 3, dtype=np.int64)
         for k, (a, b) in enumerate(((0, 1), (1, 2), (0, 2))):
             ca, cb = c[:, a], c[:, b]
             slot_canon[k::3, 0] = np.minimum(ca, cb)
             slot_canon[k::3, 1] = np.maximum(ca, cb)
-            slot_tri[k::3] = np.arange(n, dtype=np.int64)
         slot_keys = (slot_canon[:, 0] << 32) | slot_canon[:, 1]
 
         # Map each input edge to its canonical key, then count occurrences across all slots.
@@ -1089,8 +1079,9 @@ class Mesh:
         pair_mask = counts == 2
         if np.any(pair_mask):
             pair_left = left[pair_mask]
-            tri_a = slot_tri[order[pair_left]]
-            tri_b = slot_tri[order[pair_left + 1]]
+            # Slot index encodes the source triangle as slot // 3 (slot = 3*tri + k).
+            tri_a = order[pair_left] // 3
+            tri_b = order[pair_left + 1] // 3
             n_a = face_normals[tri_a]
             n_b = face_normals[tri_b]
             norm_a = face_norms[tri_a]
@@ -1142,11 +1133,7 @@ class Mesh:
                 self._is_watertight = False
                 return self._is_watertight
             tris = self._indices.reshape(-1, 3)
-            q = np.round(self._vertices * 1e7).astype(np.int64)
-            q_contig = np.ascontiguousarray(q)
-            void_verts = q_contig.view(np.dtype((np.void, q_contig.dtype.itemsize * q_contig.shape[1])))
-            _, canonical = np.unique(void_verts, return_inverse=True)
-            c = canonical.ravel()[tris]
+            c = self._canonical_vertex_ids()[tris]
             pairs = np.empty((len(tris) * 3, 2), dtype=np.int64)
             for k, (a, b) in enumerate(((0, 1), (1, 2), (0, 2))):
                 pairs[k::3, 0] = np.minimum(c[:, a], c[:, b])
