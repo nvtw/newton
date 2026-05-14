@@ -5,6 +5,7 @@
 ### Added
 
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
+- Add `ModelBuilder.mesh_edge_angle_threshold` (default 0.1 degree) to drop near-coplanar internal edges when packing precomputed mesh edges for SDF-mesh contact generation. Boundary and non-manifold edges are always kept; set to `0` to disable filtering
 - Add `ViewerGL.show_loading_splash()` / `ViewerGL.hide_loading_splash()` displaying a stylized Newton's-cradle overlay while the GL viewer waits on Warp kernel compilation; raised automatically by `newton.examples.init()` for visible GL viewers
 
 ## [1.2.0] - 2026-05-12

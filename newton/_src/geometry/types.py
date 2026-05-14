@@ -864,6 +864,257 @@ class Mesh:
             self._edges = orig_edges[first_idx]
         return self._edges
 
+    def _filter_edges_by_dihedral_angle(
+        self,
+        angle_threshold_rad: float,
+        *,
+        return_diagnostics: bool = False,
+    ) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return unique edge vertex pairs, dropping near-coplanar internal edges.
+
+        For each geometric edge shared by exactly two triangles, the edge is
+        kept only when the angle between the two adjacent face normals is at
+        least ``angle_threshold_rad``. Boundary edges (1 adjacent triangle) and
+        non-manifold edges (>2 adjacent triangles) are always kept. Degenerate
+        triangles (zero-area) are treated conservatively (the edge is kept).
+
+        When ``angle_threshold_rad <= 0`` the full unfiltered :attr:`edges` array
+        is returned without recomputation. The returned rows are a subset of
+        :attr:`edges` in the same first-occurrence order.
+
+        Args:
+            angle_threshold_rad: Dihedral-angle threshold [rad].
+            return_diagnostics: If ``True``, also return per-kept-edge diagnostics
+                (dihedral angles and averaged adjacent-face normals). Edges that
+                are not shared by exactly two triangles use NaN sentinels.
+
+        Returns:
+            By default, unique edge vertex pairs ``(N, 2)`` with dtype ``int32``.
+            When ``return_diagnostics`` is ``True``, a tuple
+            ``(edges, angles, average_normals)`` where ``angles`` has shape
+            ``(N,)`` dtype ``float32`` (radians, NaN for non-pair edges) and
+            ``average_normals`` has shape ``(N, 3)`` dtype ``float32`` (unit
+            vector averaging the two adjacent face normals; NaN-filled for
+            non-pair edges).
+        """
+
+        def _full_with_optional_diagnostics() -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
+            edges = self.edges
+            if not return_diagnostics:
+                return edges
+            return self._compute_edge_dihedral_diagnostics(edges)
+
+        if angle_threshold_rad <= 0.0:
+            return _full_with_optional_diagnostics()
+        if self._indices.size == 0 or self._vertices.size == 0:
+            return _full_with_optional_diagnostics()
+
+        tris = self._indices.reshape(-1, 3)
+        n = len(tris)
+        q = np.round(self._vertices * 1e7).astype(np.int64)
+        q_contig = np.ascontiguousarray(q)
+        void_verts = q_contig.view(np.dtype((np.void, q_contig.dtype.itemsize * q_contig.shape[1])))
+        _, canonical = np.unique(void_verts, return_inverse=True)
+        canonical = canonical.ravel()
+
+        c = canonical[tris]
+        canon_edges = np.empty((n * 3, 2), dtype=np.int64)
+        orig_edges = np.empty((n * 3, 2), dtype=np.int32)
+        tri_id = np.empty(n * 3, dtype=np.int64)
+        for k, (a, b) in enumerate(((0, 1), (1, 2), (0, 2))):
+            ca, cb = c[:, a], c[:, b]
+            canon_edges[k::3, 0] = np.minimum(ca, cb)
+            canon_edges[k::3, 1] = np.maximum(ca, cb)
+            orig_edges[k::3, 0] = tris[:, a]
+            orig_edges[k::3, 1] = tris[:, b]
+            tri_id[k::3] = np.arange(n, dtype=np.int64)
+
+        # Pack each canonical edge pair into a single int64 key for fast sorting.
+        # canonical ids fit in int32 range comfortably (vertex count), so shift by 32.
+        keys = (canon_edges[:, 0] << 32) | canon_edges[:, 1]
+        order = np.argsort(keys, kind="stable")
+        keys_sorted = keys[order]
+
+        # Group boundaries via change points in the sorted keys.
+        if keys_sorted.size == 0:
+            return _full_with_optional_diagnostics()
+        change = np.empty(keys_sorted.size, dtype=bool)
+        change[0] = True
+        change[1:] = keys_sorted[1:] != keys_sorted[:-1]
+        group_starts = np.flatnonzero(change)
+        group_ends = np.empty_like(group_starts)
+        group_ends[:-1] = group_starts[1:]
+        group_ends[-1] = keys_sorted.size
+        group_counts = group_ends - group_starts
+
+        verts = self._vertices.astype(np.float64, copy=False)
+        # Per-triangle face normals (unnormalized cross products).
+        v0 = verts[tris[:, 0]]
+        v1 = verts[tris[:, 1]]
+        v2 = verts[tris[:, 2]]
+        face_normals = np.cross(v1 - v0, v2 - v0)
+        face_norms = np.linalg.norm(face_normals, axis=1)
+
+        cos_threshold = float(np.cos(angle_threshold_rad))
+
+        # Build a boolean mask over the original 3*n edge slots; True = keep this slot.
+        keep_slot = np.zeros(n * 3, dtype=bool)
+
+        # Per-slot diagnostics, initialized to NaN sentinels for non-pair edges.
+        if return_diagnostics:
+            slot_angle = np.full(n * 3, np.nan, dtype=np.float64)
+            slot_avg_normal = np.full((n * 3, 3), np.nan, dtype=np.float64)
+
+        # Single-triangle (boundary) and >2-triangle (non-manifold) groups: keep
+        # the first slot in each such group.
+        non_pair_mask = group_counts != 2
+        first_slots_non_pair = order[group_starts[non_pair_mask]]
+        keep_slot[first_slots_non_pair] = True
+
+        # Exactly-2 groups: evaluate dihedral angle, keep first slot if above threshold.
+        pair_mask = group_counts == 2
+        if np.any(pair_mask):
+            pair_starts = group_starts[pair_mask]
+            slots_a = order[pair_starts]
+            slots_b = order[pair_starts + 1]
+            tri_a = tri_id[slots_a]
+            tri_b = tri_id[slots_b]
+            n_a = face_normals[tri_a]
+            n_b = face_normals[tri_b]
+            norm_a = face_norms[tri_a]
+            norm_b = face_norms[tri_b]
+            # Conservative for degenerate triangles: keep the edge.
+            valid = (norm_a > 0.0) & (norm_b > 0.0)
+            denom = np.where(valid, norm_a * norm_b, 1.0)
+            cos_ab = np.einsum("ij,ij->i", n_a, n_b) / denom
+            cos_ab = np.clip(cos_ab, -1.0, 1.0)
+            # Keep when angle >= threshold, i.e. cos(angle) <= cos(threshold).
+            # Always keep when either triangle is degenerate.
+            keep_pair = (~valid) | (cos_ab <= cos_threshold)
+            keep_slot[slots_a[keep_pair]] = True
+
+            if return_diagnostics:
+                # Per-pair angle (radians) and unit average normal, written into the
+                # slot table at the kept ("first") slot of each pair group. Slots
+                # belonging to non-pair groups remain NaN.
+                angles_pair = np.where(valid, np.arccos(cos_ab), np.nan)
+                # Unit face normals; safe-divide using ones where invalid (NaNs handle that).
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    unit_a = n_a / np.where(norm_a[:, None] > 0.0, norm_a[:, None], 1.0)
+                    unit_b = n_b / np.where(norm_b[:, None] > 0.0, norm_b[:, None], 1.0)
+                avg = unit_a + unit_b
+                avg_norm = np.linalg.norm(avg, axis=1)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    unit_avg = avg / np.where(avg_norm[:, None] > 0.0, avg_norm[:, None], 1.0)
+                # Where the two normals point opposite directions (avg ~= 0), or any
+                # adjacent triangle was degenerate, fall back to NaN.
+                bad = (~valid) | (avg_norm == 0.0)
+                unit_avg[bad] = np.nan
+                slot_angle[slots_a] = angles_pair
+                slot_avg_normal[slots_a] = unit_avg
+
+        # Restore original first-occurrence order across slots (matches the
+        # ordering used by the unfiltered ``edges`` property).
+        kept_indices = np.flatnonzero(keep_slot)
+        kept_indices.sort()
+        kept_edges = orig_edges[kept_indices]
+        if not return_diagnostics:
+            return kept_edges
+
+        kept_angles = slot_angle[kept_indices].astype(np.float32)
+        kept_avg_normals = slot_avg_normal[kept_indices].astype(np.float32)
+        return kept_edges, kept_angles, kept_avg_normals
+
+    def _compute_edge_dihedral_diagnostics(self, edges: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute dihedral angle and averaged adjacent-face normal for each edge.
+
+        Used by :meth:`_filter_edges_by_dihedral_angle` when diagnostics are
+        requested but no filtering happens. Edges that are not shared by exactly
+        two triangles use NaN sentinels.
+
+        Args:
+            edges: Unique edge vertex pairs ``(N, 2)`` (e.g. :attr:`edges`).
+
+        Returns:
+            ``(edges, angles, average_normals)`` matching the diagnostic output
+            of :meth:`_filter_edges_by_dihedral_angle`.
+        """
+        n_edges = len(edges)
+        angles = np.full(n_edges, np.nan, dtype=np.float32)
+        avg_normals = np.full((n_edges, 3), np.nan, dtype=np.float32)
+
+        if n_edges == 0 or self._indices.size == 0 or self._vertices.size == 0:
+            return edges, angles, avg_normals
+
+        tris = self._indices.reshape(-1, 3)
+        n = len(tris)
+
+        # Canonical vertex ids (same machinery as edges/_filter).
+        q = np.round(self._vertices * 1e7).astype(np.int64)
+        q_contig = np.ascontiguousarray(q)
+        void_verts = q_contig.view(np.dtype((np.void, q_contig.dtype.itemsize * q_contig.shape[1])))
+        _, canonical = np.unique(void_verts, return_inverse=True)
+        canonical = canonical.ravel()
+
+        c = canonical[tris]
+        slot_canon = np.empty((n * 3, 2), dtype=np.int64)
+        slot_tri = np.empty(n * 3, dtype=np.int64)
+        for k, (a, b) in enumerate(((0, 1), (1, 2), (0, 2))):
+            ca, cb = c[:, a], c[:, b]
+            slot_canon[k::3, 0] = np.minimum(ca, cb)
+            slot_canon[k::3, 1] = np.maximum(ca, cb)
+            slot_tri[k::3] = np.arange(n, dtype=np.int64)
+        slot_keys = (slot_canon[:, 0] << 32) | slot_canon[:, 1]
+
+        # Map each input edge to its canonical key, then count occurrences across all slots.
+        edge_canon0 = np.minimum(canonical[edges[:, 0]], canonical[edges[:, 1]])
+        edge_canon1 = np.maximum(canonical[edges[:, 0]], canonical[edges[:, 1]])
+        edge_keys = (edge_canon0.astype(np.int64) << 32) | edge_canon1.astype(np.int64)
+
+        order = np.argsort(slot_keys, kind="stable")
+        keys_sorted = slot_keys[order]
+
+        # For each query edge, find the run of slots with its key.
+        left = np.searchsorted(keys_sorted, edge_keys, side="left")
+        right = np.searchsorted(keys_sorted, edge_keys, side="right")
+        counts = right - left
+
+        verts = self._vertices.astype(np.float64, copy=False)
+        v0 = verts[tris[:, 0]]
+        v1 = verts[tris[:, 1]]
+        v2 = verts[tris[:, 2]]
+        face_normals = np.cross(v1 - v0, v2 - v0)
+        face_norms = np.linalg.norm(face_normals, axis=1)
+
+        pair_mask = counts == 2
+        if np.any(pair_mask):
+            pair_left = left[pair_mask]
+            tri_a = slot_tri[order[pair_left]]
+            tri_b = slot_tri[order[pair_left + 1]]
+            n_a = face_normals[tri_a]
+            n_b = face_normals[tri_b]
+            norm_a = face_norms[tri_a]
+            norm_b = face_norms[tri_b]
+            valid = (norm_a > 0.0) & (norm_b > 0.0)
+            denom = np.where(valid, norm_a * norm_b, 1.0)
+            cos_ab = np.clip(np.einsum("ij,ij->i", n_a, n_b) / denom, -1.0, 1.0)
+            angles_pair = np.where(valid, np.arccos(cos_ab), np.nan)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                unit_a = n_a / np.where(norm_a[:, None] > 0.0, norm_a[:, None], 1.0)
+                unit_b = n_b / np.where(norm_b[:, None] > 0.0, norm_b[:, None], 1.0)
+            avg = unit_a + unit_b
+            avg_norm = np.linalg.norm(avg, axis=1)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                unit_avg = avg / np.where(avg_norm[:, None] > 0.0, avg_norm[:, None], 1.0)
+            bad = (~valid) | (avg_norm == 0.0)
+            unit_avg[bad] = np.nan
+
+            pair_indices = np.flatnonzero(pair_mask)
+            angles[pair_indices] = angles_pair.astype(np.float32)
+            avg_normals[pair_indices] = unit_avg.astype(np.float32)
+
+        return edges, angles, avg_normals
+
     @property
     def is_watertight(self) -> bool:
         """``True`` if every geometric edge is shared by exactly two triangles.
