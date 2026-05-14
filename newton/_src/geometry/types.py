@@ -1018,7 +1018,7 @@ class Mesh:
         lower_angle_threshold_rad: float,
         *,
         return_diagnostics: bool = False,
-    ) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Return unique edge vertex pairs, dropping near-coplanar internal edges.
 
         Internal edges (shared by exactly 2 triangles) are dropped when the
@@ -1030,15 +1030,17 @@ class Mesh:
         Args:
             lower_angle_threshold_rad: Lower dihedral-angle threshold [rad].
             return_diagnostics: If ``True``, also return per-kept-edge
-                ``(angles, average_normals)`` with NaN sentinels for edges
-                not shared by exactly two triangles.
+                ``(angles, average_normals, adjacent_face_area_sum)`` with NaN
+                sentinels for edges not shared by exactly two non-degenerate
+                triangles.
 
         Returns:
             ``edges`` ``(N, 2)`` int32, or
-            ``(edges, angles, average_normals)`` if ``return_diagnostics``.
+            ``(edges, angles, average_normals, adjacent_face_area_sum)`` if
+            ``return_diagnostics``.
         """
 
-        def _full_with_optional_diagnostics() -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
+        def _full_with_optional_diagnostics() -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
             edges = self.edges
             if not return_diagnostics:
                 return edges
@@ -1093,6 +1095,7 @@ class Mesh:
         if return_diagnostics:
             slot_angle = np.full(n * 3, np.nan, dtype=np.float64)
             slot_avg_normal = np.full((n * 3, 3), np.nan, dtype=np.float64)
+            slot_area_sum = np.full(n * 3, np.nan, dtype=np.float64)
 
         # Boundary and non-manifold groups: always keep the first slot.
         non_pair_mask = group_counts != 2
@@ -1130,8 +1133,13 @@ class Mesh:
                     unit_avg = avg / np.where(avg_norm[:, None] > 0.0, avg_norm[:, None], 1.0)
                 # Opposing normals (avg ~= 0) or degenerate triangle -> NaN.
                 unit_avg[(~valid) | (avg_norm == 0.0)] = np.nan
+                # Cross-product magnitude = 2 * triangle area, so the sum of the
+                # two adjacent triangle areas is 0.5 * (||n_a|| + ||n_b||). NaN
+                # when either adjacent triangle is degenerate.
+                area_sum_pair = np.where(valid, 0.5 * (norm_a + norm_b), np.nan)
                 slot_angle[slots_a] = angles_pair
                 slot_avg_normal[slots_a] = unit_avg
+                slot_area_sum[slots_a] = area_sum_pair
 
         # Sort to preserve the first-occurrence order used by ``edges``.
         kept_indices = np.flatnonzero(keep_slot)
@@ -1142,10 +1150,13 @@ class Mesh:
 
         kept_angles = slot_angle[kept_indices].astype(np.float32)
         kept_avg_normals = slot_avg_normal[kept_indices].astype(np.float32)
-        return kept_edges, kept_angles, kept_avg_normals
+        kept_area_sums = slot_area_sum[kept_indices].astype(np.float32)
+        return kept_edges, kept_angles, kept_avg_normals, kept_area_sums
 
-    def _compute_edge_dihedral_diagnostics(self, edges: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Per-edge dihedral angle and averaged adjacent-face normal.
+    def _compute_edge_dihedral_diagnostics(
+        self, edges: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Per-edge dihedral angle, averaged adjacent-face normal, and area sum.
 
         Used by :meth:`_filter_edges_by_dihedral_angle` when diagnostics are
         requested without filtering. Non-pair edges use NaN sentinels.
@@ -1154,9 +1165,10 @@ class Mesh:
         n_edges = len(edges)
         angles = np.full(n_edges, np.nan, dtype=np.float32)
         avg_normals = np.full((n_edges, 3), np.nan, dtype=np.float32)
+        area_sums = np.full(n_edges, np.nan, dtype=np.float32)
 
         if n_edges == 0 or self._indices.size == 0 or self._vertices.size == 0:
-            return edges, angles, avg_normals
+            return edges, angles, avg_normals, area_sums
 
         tris = self._indices.reshape(-1, 3)
         n = len(tris)
@@ -1216,8 +1228,10 @@ class Mesh:
             pair_indices = np.flatnonzero(pair_mask)
             angles[pair_indices] = angles_pair.astype(np.float32)
             avg_normals[pair_indices] = unit_avg.astype(np.float32)
+            # Cross-product magnitude = 2 * triangle area.
+            area_sums[pair_indices] = np.where(valid, 0.5 * (norm_a + norm_b), np.nan).astype(np.float32)
 
-        return edges, angles, avg_normals
+        return edges, angles, avg_normals, area_sums
 
     @property
     def is_watertight(self) -> bool:

@@ -186,6 +186,7 @@ def _make_synthetic_result(
     edge_indices: np.ndarray,
     dihedral_angles: np.ndarray,
     absorb_lists: list[list[int]],
+    adjacent_face_area_sum: np.ndarray | None = None,
 ) -> EdgeRedundancyResult:
     """Build an EdgeRedundancyResult by hand, bypassing the GPU path."""
     n = len(edge_indices)
@@ -202,9 +203,13 @@ def _make_synthetic_result(
         for e in absorbed:
             num_absorbers[e] += 1
     candidate = num_absorbers > 0
+    if adjacent_face_area_sum is None:
+        # Uniform area -> resolve_edge_removals falls back to stable index order.
+        adjacent_face_area_sum = np.ones(n, dtype=np.float32)
     return EdgeRedundancyResult(
         edge_indices=np.asarray(edge_indices, dtype=np.int32).reshape(-1, 2),
         dihedral_angles=np.asarray(dihedral_angles, dtype=np.float32),
+        adjacent_face_area_sum=np.asarray(adjacent_face_area_sum, dtype=np.float32),
         candidate_for_removal=candidate,
         num_absorbers_per_edge=num_absorbers,
         absorb_count_per_box=absorb_count,
@@ -310,6 +315,49 @@ class TestEdgeRemovalResolution(unittest.TestCase):
         self.assertTrue(bool(resolution.kept[1]))
         self.assertFalse(bool(resolution.to_remove[0]))
         self.assertTrue(bool(resolution.to_remove[4]))
+
+    def test_area_sum_breaks_absorb_count_ties(self):
+        # Two boxes tie on absorb count. The one adjacent to larger triangles
+        # should be processed first under the lexsort tiebreaker, regardless of
+        # which edge has the lower index.
+        #
+        #   edge 0: absorbs [2, 3], adjacent area sum = 1.0  (small triangles)
+        #   edge 1: absorbs [2, 4], adjacent area sum = 5.0  (large triangles)
+        #   edges 2, 3, 4: absorb nothing
+        #
+        # Both boxes have count 2 -> the larger-area edge 1 must win the
+        # primary slot. It promotes edge 1 to kept and removes 2 and 4.
+        # Edge 0 follows: its container is still unremoved, so it promotes
+        # itself to kept and removes edge 3. Edge 2 is already removed.
+        result = _make_synthetic_result(
+            edge_indices=np.array([[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]], dtype=np.int32),
+            dihedral_angles=np.zeros(5, dtype=np.float32),
+            absorb_lists=[[2, 3], [2, 4], [], [], []],
+            adjacent_face_area_sum=np.array([1.0, 5.0, 1.0, 1.0, 1.0], dtype=np.float32),
+        )
+        resolution = resolve_edge_removals(result, upper_angle_threshold_rad=math.radians(10.0))
+        order = [int(x) for x in resolution.order]
+        # Larger-area edge 1 must come before edge 0 even though both have count 2.
+        self.assertLess(order.index(1), order.index(0))
+        self.assertTrue(bool(resolution.kept[1]))
+        self.assertTrue(bool(resolution.kept[0]))
+        self.assertTrue(bool(resolution.to_remove[2]))
+        self.assertTrue(bool(resolution.to_remove[3]))
+        self.assertTrue(bool(resolution.to_remove[4]))
+
+    def test_area_tiebreaker_does_not_change_unique_count_order(self):
+        # When counts are unique, area sums must not reorder boxes.
+        result = _make_synthetic_result(
+            edge_indices=np.array([[0, 1], [2, 3], [4, 5]], dtype=np.int32),
+            dihedral_angles=np.zeros(3, dtype=np.float32),
+            # Box 0 absorbs 1 edge, box 1 absorbs 2 edges. Box 0 has a much
+            # larger area but a strictly smaller count -> box 1 still comes first.
+            absorb_lists=[[2], [0, 2], []],
+            adjacent_face_area_sum=np.array([100.0, 1.0, 1.0], dtype=np.float32),
+        )
+        resolution = resolve_edge_removals(result, upper_angle_threshold_rad=math.radians(10.0))
+        order = [int(x) for x in resolution.order]
+        self.assertEqual(order[0], 1)
 
 
 class TestRemoveRedundantEdges(unittest.TestCase):

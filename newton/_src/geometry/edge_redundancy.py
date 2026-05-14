@@ -40,6 +40,9 @@ class EdgeRedundancyResult:
     Attributes:
         edge_indices [-]: Manifold edge vertex pairs ``(M, 2)``.
         dihedral_angles [rad]: Per-edge dihedral angles.
+        adjacent_face_area_sum [m^2]: Sum of the two adjacent triangle areas
+            per manifold edge. Used by :func:`resolve_edge_removals` as a
+            tiebreaker (larger area wins) when sorting by absorb count.
         candidate_for_removal [-]: Edges absorbed by at least one other box.
         num_absorbers_per_edge [-]: Per-edge count of absorbing boxes.
         absorb_count_per_box [-]: Per-box count of absorbed edges.
@@ -63,6 +66,7 @@ class EdgeRedundancyResult:
 
     edge_indices: np.ndarray
     dihedral_angles: np.ndarray
+    adjacent_face_area_sum: np.ndarray
     candidate_for_removal: np.ndarray
     num_absorbers_per_edge: np.ndarray
     absorb_count_per_box: np.ndarray
@@ -413,7 +417,7 @@ def find_redundant_edges(
         max_retries: Max grow-on-overflow attempts for the SAP pair buffer.
         device: Optional Warp device.
     """
-    edges_np, angles_np, normals_np = mesh._filter_edges_by_dihedral_angle(
+    edges_np, angles_np, normals_np, area_sums_np = mesh._filter_edges_by_dihedral_angle(
         lower_angle_threshold_rad, return_diagnostics=True
     )
 
@@ -422,6 +426,7 @@ def find_redundant_edges(
     edge_indices_np = edges_np[manifold_mask].astype(np.int32, copy=False)
     edge_angles_np = angles_np[manifold_mask].astype(np.float32, copy=False)
     edge_normals_np = normals_np[manifold_mask].astype(np.float32, copy=False)
+    edge_area_sums_np = area_sums_np[manifold_mask].astype(np.float32, copy=False)
     n_edges = int(len(edge_indices_np))
 
     vertices_np = np.asarray(mesh.vertices, dtype=np.float32)
@@ -439,6 +444,7 @@ def find_redundant_edges(
         return EdgeRedundancyResult(
             edge_indices=edge_indices_np.reshape(-1, 2),
             dihedral_angles=edge_angles_np,
+            adjacent_face_area_sum=edge_area_sums_np,
             candidate_for_removal=np.zeros(n_edges, dtype=bool),
             num_absorbers_per_edge=np.zeros(n_edges, dtype=np.int32),
             absorb_count_per_box=np.zeros(n_edges, dtype=np.int32),
@@ -617,6 +623,7 @@ def find_redundant_edges(
     return EdgeRedundancyResult(
         edge_indices=edge_indices_np.reshape(-1, 2),
         dihedral_angles=edge_angles_np,
+        adjacent_face_area_sum=edge_area_sums_np,
         candidate_for_removal=candidate_host,
         num_absorbers_per_edge=num_absorbers_host,
         absorb_count_per_box=absorb_count_host,
@@ -694,8 +701,13 @@ def resolve_edge_removals(
         )
 
     absorb_count = result.absorb_count_per_box.astype(np.int64, copy=False)
-    # Stable descending sort -> safe to break on first 0 below.
-    order = np.argsort(-absorb_count, kind="stable").astype(np.int32, copy=False)
+    # Stable descending sort by (absorb_count, adjacent_face_area_sum). The
+    # area sum breaks ties on absorb count: when two boxes absorb the same
+    # number of others, prefer the one adjacent to larger triangles (heuristic
+    # that favours the load-bearing geometry). np.lexsort treats the *last*
+    # key as primary, so we put -absorb_count last.
+    area_sum = result.adjacent_face_area_sum.astype(np.float64, copy=False)
+    order = np.lexsort((-area_sum, -absorb_count)).astype(np.int32, copy=False)
 
     offsets = result.absorbed_offsets
     indices = result.absorbed_indices

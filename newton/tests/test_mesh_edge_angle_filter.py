@@ -118,33 +118,40 @@ class TestMeshEdgeAngleFilter(unittest.TestCase):
 
     def test_diagnostics_shapes_and_subset(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
-        edges, angles, normals = mesh._filter_edges_by_dihedral_angle(math.radians(1.0), return_diagnostics=True)
+        edges, angles, normals, area_sums = mesh._filter_edges_by_dihedral_angle(
+            math.radians(1.0), return_diagnostics=True
+        )
         self.assertEqual(angles.shape, (len(edges),))
         self.assertEqual(normals.shape, (len(edges), 3))
+        self.assertEqual(area_sums.shape, (len(edges),))
         # Cube silhouette edges are 90 degree dihedrals between two valid triangles.
         np.testing.assert_allclose(angles, math.radians(90.0), atol=1e-5)
         finite = np.isfinite(normals).all(axis=1)
         self.assertTrue(bool(finite.all()))
+        # Each silhouette edge is adjacent to two right-isoceles tris of area 0.5 -> sum 1.0.
+        np.testing.assert_allclose(area_sums, 1.0, atol=1e-5)
 
     def test_diagnostics_nan_for_boundary_edges(self):
         mesh = _single_triangle_mesh()
-        edges, angles, normals = mesh._filter_edges_by_dihedral_angle(-1.0, return_diagnostics=True)
+        edges, angles, normals, area_sums = mesh._filter_edges_by_dihedral_angle(-1.0, return_diagnostics=True)
         self.assertEqual(len(edges), 3)
         self.assertTrue(bool(np.all(np.isnan(angles))))
         self.assertTrue(bool(np.all(np.isnan(normals))))
+        self.assertTrue(bool(np.all(np.isnan(area_sums))))
 
     def test_diagnostics_nan_for_non_manifold_edges(self):
         mesh = _non_manifold_mesh()
-        edges, angles, normals = mesh._filter_edges_by_dihedral_angle(-1.0, return_diagnostics=True)
+        edges, angles, normals, area_sums = mesh._filter_edges_by_dihedral_angle(-1.0, return_diagnostics=True)
         # Locate the non-manifold (0, 1) edge in the returned set.
         rows = [tuple(sorted((int(a), int(b)))) for a, b in edges]
         nm = rows.index((0, 1))
         self.assertTrue(math.isnan(float(angles[nm])))
         self.assertTrue(bool(np.all(np.isnan(normals[nm]))))
+        self.assertTrue(math.isnan(float(area_sums[nm])))
 
     def test_diagnostics_flat_quad_zero_angle(self):
         mesh = _flat_quad_mesh()
-        edges, angles, normals = mesh._filter_edges_by_dihedral_angle(-1.0, return_diagnostics=True)
+        edges, angles, normals, area_sums = mesh._filter_edges_by_dihedral_angle(-1.0, return_diagnostics=True)
         # The internal diagonal (0, 2) is shared by exactly two coplanar triangles
         # whose normals are both +Z, so the dihedral angle is 0 and the average
         # normal is +Z. Boundary edges remain NaN.
@@ -152,8 +159,11 @@ class TestMeshEdgeAngleFilter(unittest.TestCase):
         diag = rows.index((0, 2))
         self.assertAlmostEqual(float(angles[diag]), 0.0, places=5)
         np.testing.assert_allclose(normals[diag], [0.0, 0.0, 1.0], atol=1e-5)
+        # Two right tris of area 0.5 -> sum 1.0.
+        self.assertAlmostEqual(float(area_sums[diag]), 1.0, places=5)
         boundary_mask = np.array([row != (0, 2) for row in rows])
         self.assertTrue(bool(np.all(np.isnan(angles[boundary_mask]))))
+        self.assertTrue(bool(np.all(np.isnan(area_sums[boundary_mask]))))
 
     def test_filter_preserves_edges_subset_and_order(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
