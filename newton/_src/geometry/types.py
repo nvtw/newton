@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
+import math
 import os
 import warnings
 from collections.abc import Sequence
@@ -16,6 +17,40 @@ from ..utils.texture import compute_texture_hash
 if TYPE_CHECKING:
     from ..sim.model import Model
     from .sdf_utils import SDF
+
+
+def _resolve_relative_or_absolute(
+    abs_value: float | None,
+    rel_value: float | None,
+    *,
+    default_rel: float,
+    name: str,
+    mesh: "Mesh",
+) -> float:
+    """Resolve a per-mesh extent given mutually exclusive absolute and relative options.
+
+    ``abs_value`` is interpreted in metres; ``rel_value`` as a fraction of
+    the mesh AABB diagonal. Exactly one of the two may be supplied. When
+    both are ``None`` the default relative fraction is used. Negative
+    inputs raise :class:`ValueError`.
+    """
+    if abs_value is not None and rel_value is not None:
+        raise ValueError(
+            f"{name}: pass either {name} (absolute, m) or {name}_rel (fraction of AABB diagonal), not both."
+        )
+    if abs_value is not None:
+        if abs_value < 0.0:
+            raise ValueError(f"{name} must be non-negative, got {abs_value}.")
+        return float(abs_value)
+    rel = float(rel_value) if rel_value is not None else float(default_rel)
+    if rel < 0.0:
+        raise ValueError(f"{name}_rel must be non-negative, got {rel}.")
+    if mesh._vertices.size == 0:
+        return 0.0
+    aabb_min = mesh._vertices.min(axis=0)
+    aabb_max = mesh._vertices.max(axis=0)
+    diagonal = float(np.linalg.norm(aabb_max - aabb_min))
+    return rel * diagonal
 
 
 def _normalize_texture_input(texture: str | os.PathLike[str] | np.ndarray | None) -> str | np.ndarray | None:
@@ -193,6 +228,7 @@ class Mesh:
         self._cached_hash = None
         self._texture_hash = None
         self._edges = None
+        self._collision_edges: np.ndarray | None = None
         self._is_watertight: bool | None = None
         self.sdf = sdf
 
@@ -728,8 +764,19 @@ class Mesh:
         scale: tuple[float, float, float] | None = None,
         texture_format: str = "uint16",
         cache_dir: str | os.PathLike[str] | None = None,
+        edge_lower_angle_threshold_rad: float = math.radians(0.1),
+        edge_upper_angle_threshold_rad: float = math.radians(10.0),
+        edge_box_absorption: bool = False,
+        edge_box_half_height: float | None = None,
+        edge_box_half_height_rel: float | None = None,
+        edge_box_half_width: float | None = None,
+        edge_box_half_width_rel: float | None = None,
     ) -> "SDF":
         """Build and attach an SDF for this mesh.
+
+        Also simplifies the precomputed mesh edges that the SDF-mesh contact
+        pipeline iterates over and caches the kept set on the mesh, so the
+        resulting :class:`Model` ships with the simplified edge set.
 
         Args:
             device: CUDA device for SDF allocation. When ``None``, uses the
@@ -767,12 +814,37 @@ class Mesh:
                 mesh-SDF cook. ``shape_margin`` is applied at sample
                 time and is *not* part of the cache key. Defaults to
                 ``None`` (cache disabled).
+            edge_lower_angle_threshold_rad: Drop near-coplanar internal edges
+                whose dihedral angle is below this value [rad]. Default
+                0.1 deg; set to 0 to keep every manifold edge.
+            edge_upper_angle_threshold_rad: Maximum dihedral angle [rad] for
+                an absorbed edge to be eligible for definitive removal.
+                Only consulted when ``edge_box_absorption`` is ``True``.
+                Default 10 deg.
+            edge_box_absorption: Run the box-absorption pass after the
+                dihedral-angle pre-filter to drop manifold edges fully
+                covered by another edge's oriented box. Default ``False``.
+            edge_box_half_height: Absolute box half-extent [m] along the
+                edge normal. Mutually exclusive with
+                ``edge_box_half_height_rel``.
+            edge_box_half_height_rel: Box half-extent along the edge normal
+                as a fraction of the mesh AABB diagonal. Defaults to
+                ``1e-3`` when no absolute value is supplied.
+            edge_box_half_width: Absolute box half-extent [m] along the
+                in-plane tangent and the per-end overhang along the edge.
+                Mutually exclusive with ``edge_box_half_width_rel``.
+            edge_box_half_width_rel: Box half-extent in-plane as a fraction
+                of the mesh AABB diagonal. Defaults to ``5e-3`` when no
+                absolute value is supplied.
 
         Returns:
             The attached :class:`SDF` instance.
 
         Raises:
             RuntimeError: If this mesh already has an SDF attached.
+            ValueError: If both an absolute and relative half-extent are
+                supplied for the same axis, or if any absolute or relative
+                half-extent is negative.
         """
         if self.sdf is not None:
             raise RuntimeError("Mesh already has an SDF. Call clear_sdf() before rebuilding.")
@@ -795,7 +867,59 @@ class Mesh:
             texture_format=texture_format,
             cache_dir=cache_dir,
         )
+
+        self._build_collision_edges(
+            lower_angle_threshold_rad=edge_lower_angle_threshold_rad,
+            upper_angle_threshold_rad=edge_upper_angle_threshold_rad,
+            enable_box_absorption=edge_box_absorption,
+            half_height_abs=edge_box_half_height,
+            half_height_rel=edge_box_half_height_rel,
+            half_width_abs=edge_box_half_width,
+            half_width_rel=edge_box_half_width_rel,
+        )
+
         return self.sdf
+
+    def _build_collision_edges(
+        self,
+        *,
+        lower_angle_threshold_rad: float,
+        upper_angle_threshold_rad: float,
+        enable_box_absorption: bool,
+        half_height_abs: float | None,
+        half_height_rel: float | None,
+        half_width_abs: float | None,
+        half_width_rel: float | None,
+    ) -> None:
+        """Compute and cache the precomputed-edge set used by SDF-mesh contacts.
+
+        Resolves the absolute/relative box half-extents (mutually exclusive
+        per axis), runs :func:`find_redundant_edges` followed by
+        :func:`resolve_edge_removals`, and stores the kept edge pairs on
+        ``self._collision_edges``.
+        """
+        half_height = _resolve_relative_or_absolute(
+            half_height_abs, half_height_rel, default_rel=1.0e-3, name="edge_box_half_height", mesh=self
+        )
+        half_width = _resolve_relative_or_absolute(
+            half_width_abs, half_width_rel, default_rel=5.0e-3, name="edge_box_half_width", mesh=self
+        )
+
+        from .edge_redundancy import find_redundant_edges, resolve_edge_removals  # noqa: PLC0415
+
+        result = find_redundant_edges(
+            self,
+            enable_box_absorption=enable_box_absorption,
+            half_height=half_height,
+            half_width=half_width,
+            lower_angle_threshold_rad=lower_angle_threshold_rad,
+            upper_angle_threshold_rad=upper_angle_threshold_rad,
+        )
+        if enable_box_absorption:
+            resolution = resolve_edge_removals(result)
+            self._collision_edges = np.ascontiguousarray(result.edge_indices[~resolution.to_remove], dtype=np.int32)
+        else:
+            self._collision_edges = np.ascontiguousarray(result.edge_indices, dtype=np.int32)
 
     def clear_sdf(self) -> None:
         """Detach and release the currently attached SDF.
@@ -814,6 +938,7 @@ class Mesh:
         self._vertices = np.array(value, dtype=np.float32).reshape(-1, 3)
         self._cached_hash = None
         self._edges = None
+        self._collision_edges = None
         self._is_watertight = None
 
     @property
@@ -825,6 +950,7 @@ class Mesh:
         self._indices = np.array(value, dtype=np.int32).flatten()
         self._cached_hash = None
         self._edges = None
+        self._collision_edges = None
         self._is_watertight = None
 
     def _canonical_vertex_ids(self) -> np.ndarray:
@@ -871,36 +997,27 @@ class Mesh:
 
     def _filter_edges_by_dihedral_angle(
         self,
-        angle_threshold_rad: float,
+        lower_angle_threshold_rad: float,
         *,
         return_diagnostics: bool = False,
     ) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return unique edge vertex pairs, dropping near-coplanar internal edges.
 
-        For each geometric edge shared by exactly two triangles, the edge is
-        kept only when the angle between the two adjacent face normals is at
-        least ``angle_threshold_rad``. Boundary edges (1 adjacent triangle) and
-        non-manifold edges (>2 adjacent triangles) are always kept. Degenerate
-        triangles (zero-area) are treated conservatively (the edge is kept).
-
-        When ``angle_threshold_rad <= 0`` the full unfiltered :attr:`edges` array
-        is returned without recomputation. The returned rows are a subset of
-        :attr:`edges` in the same first-occurrence order.
+        Internal edges (shared by exactly 2 triangles) are dropped when the
+        dihedral angle between the two adjacent face normals is strictly
+        below ``lower_angle_threshold_rad``. Boundary, non-manifold, and
+        degenerate-adjacent edges are always kept. ``<= 0`` returns the
+        unfiltered :attr:`edges`.
 
         Args:
-            angle_threshold_rad: Dihedral-angle threshold [rad].
-            return_diagnostics: If ``True``, also return per-kept-edge diagnostics
-                (dihedral angles and averaged adjacent-face normals). Edges that
-                are not shared by exactly two triangles use NaN sentinels.
+            lower_angle_threshold_rad: Lower dihedral-angle threshold [rad].
+            return_diagnostics: If ``True``, also return per-kept-edge
+                ``(angles, average_normals)`` with NaN sentinels for edges
+                not shared by exactly two triangles.
 
         Returns:
-            By default, unique edge vertex pairs ``(N, 2)`` with dtype ``int32``.
-            When ``return_diagnostics`` is ``True``, a tuple
-            ``(edges, angles, average_normals)`` where ``angles`` has shape
-            ``(N,)`` dtype ``float32`` (radians, NaN for non-pair edges) and
-            ``average_normals`` has shape ``(N, 3)`` dtype ``float32`` (unit
-            vector averaging the two adjacent face normals; NaN-filled for
-            non-pair edges).
+            ``edges`` ``(N, 2)`` int32, or
+            ``(edges, angles, average_normals)`` if ``return_diagnostics``.
         """
 
         def _full_with_optional_diagnostics() -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -909,7 +1026,7 @@ class Mesh:
                 return edges
             return self._compute_edge_dihedral_diagnostics(edges)
 
-        if angle_threshold_rad <= 0.0:
+        if lower_angle_threshold_rad <= 0.0:
             return _full_with_optional_diagnostics()
         if self._indices.size == 0 or self._vertices.size == 0:
             return _full_with_optional_diagnostics()
@@ -928,8 +1045,7 @@ class Mesh:
             orig_edges[k::3, 0] = tris[:, a]
             orig_edges[k::3, 1] = tris[:, b]
 
-        # Pack each canonical edge pair into a single int64 key for fast sorting.
-        # canonical ids fit in int32 range comfortably (vertex count), so shift by 32.
+        # Pack each canonical edge pair into a single int64 key (vertex ids fit in 32 bits).
         keys = (canon_edges[:, 0] << 32) | canon_edges[:, 1]
         order = np.argsort(keys, kind="stable")
         keys_sorted = keys[order]
@@ -945,58 +1061,48 @@ class Mesh:
         group_counts = group_ends - group_starts
 
         verts = self._vertices.astype(np.float64, copy=False)
-        # Per-triangle face normals (unnormalized cross products).
         v0 = verts[tris[:, 0]]
         v1 = verts[tris[:, 1]]
         v2 = verts[tris[:, 2]]
         face_normals = np.cross(v1 - v0, v2 - v0)
         face_norms = np.linalg.norm(face_normals, axis=1)
 
-        cos_threshold = float(np.cos(angle_threshold_rad))
+        cos_threshold = float(np.cos(lower_angle_threshold_rad))
 
-        # Build a boolean mask over the original 3*n edge slots; True = keep this slot.
+        # Per-slot keep mask over the n*3 edge slots; one slot wins per group.
         keep_slot = np.zeros(n * 3, dtype=bool)
 
-        # Per-slot diagnostics, initialized to NaN sentinels for non-pair edges.
         if return_diagnostics:
             slot_angle = np.full(n * 3, np.nan, dtype=np.float64)
             slot_avg_normal = np.full((n * 3, 3), np.nan, dtype=np.float64)
 
-        # Single-triangle (boundary) and >2-triangle (non-manifold) groups: keep
-        # the first slot in each such group.
+        # Boundary and non-manifold groups: always keep the first slot.
         non_pair_mask = group_counts != 2
-        first_slots_non_pair = order[group_starts[non_pair_mask]]
-        keep_slot[first_slots_non_pair] = True
+        keep_slot[order[group_starts[non_pair_mask]]] = True
 
-        # Exactly-2 groups: evaluate dihedral angle, keep first slot if above threshold.
+        # Pair groups: keep the first slot iff the dihedral angle clears the threshold.
         pair_mask = group_counts == 2
         if np.any(pair_mask):
             pair_starts = group_starts[pair_mask]
             slots_a = order[pair_starts]
             slots_b = order[pair_starts + 1]
-            # Slot index encodes the source triangle as slot // 3 (slot = 3*tri + k).
+            # Slot encodes the source triangle as slot // 3 (slot = 3*tri + k).
             tri_a = slots_a // 3
             tri_b = slots_b // 3
             n_a = face_normals[tri_a]
             n_b = face_normals[tri_b]
             norm_a = face_norms[tri_a]
             norm_b = face_norms[tri_b]
-            # Conservative for degenerate triangles: keep the edge.
+            # Degenerate adjacent triangles -> conservatively keep the edge.
             valid = (norm_a > 0.0) & (norm_b > 0.0)
             denom = np.where(valid, norm_a * norm_b, 1.0)
-            cos_ab = np.einsum("ij,ij->i", n_a, n_b) / denom
-            cos_ab = np.clip(cos_ab, -1.0, 1.0)
-            # Keep when angle >= threshold, i.e. cos(angle) <= cos(threshold).
-            # Always keep when either triangle is degenerate.
+            cos_ab = np.clip(np.einsum("ij,ij->i", n_a, n_b) / denom, -1.0, 1.0)
+            # angle >= threshold  <=>  cos(angle) <= cos(threshold).
             keep_pair = (~valid) | (cos_ab <= cos_threshold)
             keep_slot[slots_a[keep_pair]] = True
 
             if return_diagnostics:
-                # Per-pair angle (radians) and unit average normal, written into the
-                # slot table at the kept ("first") slot of each pair group. Slots
-                # belonging to non-pair groups remain NaN.
                 angles_pair = np.where(valid, np.arccos(cos_ab), np.nan)
-                # Unit face normals; safe-divide using ones where invalid (NaNs handle that).
                 with np.errstate(invalid="ignore", divide="ignore"):
                     unit_a = n_a / np.where(norm_a[:, None] > 0.0, norm_a[:, None], 1.0)
                     unit_b = n_b / np.where(norm_b[:, None] > 0.0, norm_b[:, None], 1.0)
@@ -1004,15 +1110,12 @@ class Mesh:
                 avg_norm = np.linalg.norm(avg, axis=1)
                 with np.errstate(invalid="ignore", divide="ignore"):
                     unit_avg = avg / np.where(avg_norm[:, None] > 0.0, avg_norm[:, None], 1.0)
-                # Where the two normals point opposite directions (avg ~= 0), or any
-                # adjacent triangle was degenerate, fall back to NaN.
-                bad = (~valid) | (avg_norm == 0.0)
-                unit_avg[bad] = np.nan
+                # Opposing normals (avg ~= 0) or degenerate triangle -> NaN.
+                unit_avg[(~valid) | (avg_norm == 0.0)] = np.nan
                 slot_angle[slots_a] = angles_pair
                 slot_avg_normal[slots_a] = unit_avg
 
-        # Restore original first-occurrence order across slots (matches the
-        # ordering used by the unfiltered ``edges`` property).
+        # Sort to preserve the first-occurrence order used by ``edges``.
         kept_indices = np.flatnonzero(keep_slot)
         kept_indices.sort()
         kept_edges = orig_edges[kept_indices]
@@ -1024,18 +1127,11 @@ class Mesh:
         return kept_edges, kept_angles, kept_avg_normals
 
     def _compute_edge_dihedral_diagnostics(self, edges: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Compute dihedral angle and averaged adjacent-face normal for each edge.
+        """Per-edge dihedral angle and averaged adjacent-face normal.
 
         Used by :meth:`_filter_edges_by_dihedral_angle` when diagnostics are
-        requested but no filtering happens. Edges that are not shared by exactly
-        two triangles use NaN sentinels.
-
-        Args:
-            edges: Unique edge vertex pairs ``(N, 2)`` (e.g. :attr:`edges`).
-
-        Returns:
-            ``(edges, angles, average_normals)`` matching the diagnostic output
-            of :meth:`_filter_edges_by_dihedral_angle`.
+        requested without filtering. Non-pair edges use NaN sentinels.
+        ``edges`` must be the deduplicated pairs from :attr:`edges`.
         """
         n_edges = len(edges)
         angles = np.full(n_edges, np.nan, dtype=np.float32)
@@ -1056,7 +1152,6 @@ class Mesh:
             slot_canon[k::3, 1] = np.maximum(ca, cb)
         slot_keys = (slot_canon[:, 0] << 32) | slot_canon[:, 1]
 
-        # Map each input edge to its canonical key, then count occurrences across all slots.
         edge_canon0 = np.minimum(canonical[edges[:, 0]], canonical[edges[:, 1]])
         edge_canon1 = np.maximum(canonical[edges[:, 0]], canonical[edges[:, 1]])
         edge_keys = (edge_canon0.astype(np.int64) << 32) | edge_canon1.astype(np.int64)
@@ -1064,7 +1159,7 @@ class Mesh:
         order = np.argsort(slot_keys, kind="stable")
         keys_sorted = slot_keys[order]
 
-        # For each query edge, find the run of slots with its key.
+        # Run length per query edge gives its triangle-share count.
         left = np.searchsorted(keys_sorted, edge_keys, side="left")
         right = np.searchsorted(keys_sorted, edge_keys, side="right")
         counts = right - left
@@ -1079,7 +1174,7 @@ class Mesh:
         pair_mask = counts == 2
         if np.any(pair_mask):
             pair_left = left[pair_mask]
-            # Slot index encodes the source triangle as slot // 3 (slot = 3*tri + k).
+            # Slot encodes the source triangle as slot // 3.
             tri_a = order[pair_left] // 3
             tri_b = order[pair_left + 1] // 3
             n_a = face_normals[tri_a]

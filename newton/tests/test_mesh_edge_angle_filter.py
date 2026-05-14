@@ -6,7 +6,7 @@
 `Mesh._filter_edges_by_dihedral_angle` drops internal edges whose two adjacent
 triangle face normals are within an angle threshold (near-coplanar). Boundary
 edges and non-manifold edges are always kept. The filter is applied at
-`ModelBuilder.finalize()` time via `ModelBuilder.mesh_edge_angle_threshold`.
+`ModelBuilder.finalize()` time via `ModelBuilder.mesh_edge_lower_angle_threshold_rad`.
 """
 
 import math
@@ -172,14 +172,14 @@ class TestMeshEdgeAngleFilter(unittest.TestCase):
 class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
     def test_default_is_point_one_degree(self):
         builder = newton.ModelBuilder()
-        self.assertAlmostEqual(builder.mesh_edge_angle_threshold, math.radians(0.1))
+        self.assertAlmostEqual(builder.mesh_edge_lower_angle_threshold_rad, math.radians(0.1))
 
     def test_finalize_packs_filtered_edges_per_threshold(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
 
         # Threshold 0 -> 18 unique edges packed.
         builder0 = newton.ModelBuilder()
-        builder0.mesh_edge_angle_threshold = 0.0
+        builder0.mesh_edge_lower_angle_threshold_rad = 0.0
         body0 = builder0.add_body()
         builder0.add_shape_mesh(body=body0, mesh=mesh)
         model0 = builder0.finalize()
