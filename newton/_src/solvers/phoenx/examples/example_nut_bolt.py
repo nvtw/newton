@@ -31,6 +31,11 @@ from newton._src.solvers.phoenx.examples.example_common import (
     newton_to_phoenx_kernel,
     phoenx_to_newton_kernel,
 )
+from newton._src.solvers.phoenx.materials import (
+    COMBINE_MIN,
+    Material,
+    material_table_from_list,
+)
 from newton._src.solvers.phoenx.picking import (
     Picking,
     register_with_viewer_gl,
@@ -40,30 +45,22 @@ from newton._src.solvers.phoenx.solver_phoenx import (
     pack_body_xforms_kernel,
 )
 
-# Contact matching mode. The shared jitter/phoenx default is
-# ``"sticky"`` -- it pins each matched contact's body-frame anchors
-# and world-frame normal to their first-frame values, which kills
-# stack jitter but also freezes the contact normal. On the nut-bolt
-# scene, the first frame's contacts land on the bolt head's flat
-# top (vertical normal), so sticky mode keeps that vertical normal
-# even once the nut should be threading -- the normal-row impulse
-# ends up pure-vertical and produces no torque about +Z.
-# ``"latest"`` keeps matching (so warm-start still works) but uses
-# each frame's fresh narrow-phase normal, which tilts along the
-# helical SDF surface and naturally rotates the nut. XPBD and
-# MuJoCo's solver don't go through this matching layer at all, so
-# this is a PhoenX-specific sticky-vs-fresh tradeoff.
+# Contact matching mode. ``"latest"`` uses fresh narrow-phase
+# normals each frame so the helical-thread torque drives nut
+# rotation; ``"sticky"`` pins frame-1 normals and produces no
+# rotation about +Z but is more numerically stable under low
+# friction.
 _CONTACT_MATCHING = "latest"
 
-# When ``True``, pin the bolt to the world (zero inv mass + inertia,
-# so :func:`init_phoenx_bodies_kernel` flags it as
-# :data:`MOTION_STATIC`). When ``False``, leave the bolt as a regular
-# rigid body driven by its mesh-derived mass and inertia -- useful for
-# stress-testing the nut-bolt contact pair when neither side is
-# anchored. The nut still drops onto the bolt either way; with a free
-# bolt the pair drifts together along the contact normal until the
-# threads catch.
-BOLT_IS_STATIC = False
+# Default for ``--bolt-static``. ``False`` exercises the dynamic-bolt
+# case (xpbd handles this; phoenx must too).
+BOLT_IS_STATIC_DEFAULT = False
+
+# Per-shape Coulomb friction. ``COMBINE_MIN`` makes bolt-ground
+# ``min(1.0, 1.0) = 1.0`` (bolt clamps) and bolt-nut
+# ``min(1.0, 0.01) = 0.01`` (threads engage).
+BOLT_GROUND_FRICTION: float = 1.0
+NUT_FRICTION: float = 0.01
 
 # Assembly + asset source -- identical to the jitter / XPBD / MuJoCo
 # nut-bolt examples so the same mesh pair is compared across solvers.
@@ -71,26 +68,18 @@ ASSEMBLY_STR = "m20_loose"
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 
-# Shape config. Matches the XPBD / MuJoCo nut-bolt knobs verbatim
-# so the three solvers can be compared side-by-side on the same
-# scene. The ``ke`` / ``kd`` stiffness terms are no-ops for jitter
-# / PhoenX (they're a MuJoCo/SemiImplicit penalty-solver knob).
-#
-# ``mu = 0.01`` is *deliberate*: for a rigid nut on a rigid helical
-# bolt SDF, the contact normals are purely radial + axial (they
-# have no component in the tangent-around-axis direction), so the
-# *normal impulse alone* produces zero torque about +Z. The nut
-# rotates because Coulomb friction opposes the axial slip along
-# the helix surface -- and the helix's tangent direction has a
-# rotational component, so the friction force has one too. Set
-# ``mu = 0`` and the nut sinks straight down the bolt without
-# threading; this is physically correct.
+# ``mu = 0.01`` is deliberate: only Coulomb friction (not the
+# axially-symmetric normal impulse) can produce torque about the
+# bolt axis, so it drives the threading rotation. ``gap`` / SDF
+# narrow band are tight (0.5 mm / 1 mm); wider speculative ranges
+# create off-axis nut-bolt SDF contacts that PhoenX's PGS turns
+# into a horizontal impulse the threading dynamics can't damp out.
 SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
     margin=0.0,
     mu=0.01,
     ke=1e7,
     kd=1e4,
-    gap=0.005,
+    gap=0.0005,
     density=8000.0,
     mu_torsional=0.0,
     mu_rolling=0.0,
@@ -98,7 +87,7 @@ SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
 )
 
 MESH_SDF_MAX_RESOLUTION = 512
-MESH_SDF_NARROW_BAND_RANGE = (-0.005, 0.005)
+MESH_SDF_NARROW_BAND_RANGE = (-0.001, 0.001)
 
 
 def _load_mesh_with_sdf(mesh_file: str, gap: float) -> tuple[newton.Mesh, wp.vec3]:
@@ -171,6 +160,9 @@ class Example:
         # Matches the ``scene_scale`` knob in
         # :mod:`newton.examples.contacts.example_nut_bolt_sdf`.
         self.scene_scale = float(getattr(args, "scene_scale", 1.0))
+
+        # CLI-controlled scene flags.
+        self.bolt_is_static: bool = bool(getattr(args, "bolt_static", BOLT_IS_STATIC_DEFAULT))
 
         self.viewer = viewer
         self.device = wp.get_device()
@@ -249,14 +241,14 @@ class Example:
 
         self.model = mb.finalize()
 
-        # Pin the bolt (default): zero its inverse mass + inertia so
-        # :func:`init_phoenx_bodies_kernel` marks it
+        # Pin the bolt (default off): zero its inverse mass + inertia
+        # so :func:`init_phoenx_bodies_kernel` marks it
         # :data:`MOTION_STATIC`. The nut's density-derived mass is
         # unaffected because the mesh inertia computation already ran
-        # during ``finalize``. When :data:`BOLT_IS_STATIC` is
+        # during ``finalize``. When :data:`bolt_is_static` is
         # ``False``, skip this step and let the bolt fall under gravity
         # like the nut.
-        if BOLT_IS_STATIC:
+        if self.bolt_is_static:
             body_inv_mass_np = self.model.body_inv_mass.numpy()
             body_inv_inertia_np = self.model.body_inv_inertia.numpy()
             body_inv_mass_np[bolt_body] = 0.0
@@ -332,6 +324,36 @@ class Example:
             default_friction=SHAPE_CFG.mu,
             device=self.device,
         )
+
+        # ---- Per-shape materials (COMBINE_MIN, see BOLT_GROUND_FRICTION) ----
+        materials = material_table_from_list(
+            [
+                Material(),  # index 0: reserved default
+                Material(  # index 1: bolt
+                    static_friction=BOLT_GROUND_FRICTION,
+                    dynamic_friction=BOLT_GROUND_FRICTION,
+                    friction_combine_mode=COMBINE_MIN,
+                ),
+                Material(  # index 2: nut
+                    static_friction=NUT_FRICTION,
+                    dynamic_friction=NUT_FRICTION,
+                    friction_combine_mode=COMBINE_MIN,
+                ),
+                Material(  # index 3: ground
+                    static_friction=BOLT_GROUND_FRICTION,
+                    dynamic_friction=BOLT_GROUND_FRICTION,
+                    friction_combine_mode=COMBINE_MIN,
+                ),
+            ],
+            device=self.device,
+        )
+        # Newton shape ordering: 0 = ground, 1 = bolt mesh, 2 = nut mesh.
+        shape_material_idx = wp.array(
+            np.array([3, 1, 2], dtype=np.int32),
+            dtype=wp.int32,
+            device=self.device,
+        )
+        self.world.set_materials(materials, shape_material_idx)
 
         # ---- Viewer ---------------------------------------------------
         self._xforms = wp.zeros(num_phoenx_bodies, dtype=wp.transform, device=self.device)
@@ -450,32 +472,48 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self) -> None:
-        """After the settle run the nut must still be near the bolt
-        axis (no off-axis fly-off) and both bodies must have finite
-        state. The nut may have rotated significantly (threading) so
-        we don't assert on orientation.
+        """After the settle run both the nut and (when free) the bolt
+        must still be near the bolt's initial XY axis (no off-axis
+        fly-off) and have finite state. The nut may have rotated
+        significantly (threading) so we don't assert on orientation.
+        With ``--no-bolt-static`` the bolt is also checked -- if it had
+        slid out from under the nut we'd see a large XY drift here.
         """
         positions = self.bodies.position.numpy()
         velocities = self.bodies.velocity.numpy()
         nut_slot = self._nut_body + 1
+        bolt_slot = self._bolt_body + 1
         nut_pos = positions[nut_slot]
         nut_vel = velocities[nut_slot]
+        bolt_pos = positions[bolt_slot]
+        bolt_vel = velocities[bolt_slot]
         assert np.isfinite(nut_pos).all(), f"nut position non-finite ({nut_pos})"
         assert np.isfinite(nut_vel).all(), f"nut velocity non-finite ({nut_vel})"
+        assert np.isfinite(bolt_pos).all(), f"bolt position non-finite ({bolt_pos})"
+        assert np.isfinite(bolt_vel).all(), f"bolt velocity non-finite ({bolt_vel})"
+        max_drift = 0.1 * self.scene_scale
         nut_xy_dist = float(
             np.linalg.norm(
                 np.asarray(nut_pos[:2], dtype=np.float32) - np.asarray(self._nut_initial_xy, dtype=np.float32)
             )
         )
-        max_drift = 0.1 * self.scene_scale
         assert nut_xy_dist < max_drift, (
             f"nut flew off-axis: xy_dist={nut_xy_dist:.4f} m "
             f"(max={max_drift:.4f} m at scene_scale={self.scene_scale}; "
             f"pos={tuple(float(x) for x in nut_pos)})"
         )
+        if not self.bolt_is_static:
+            bolt_xy_dist = float(np.linalg.norm(np.asarray(bolt_pos[:2], dtype=np.float32)))
+            assert bolt_xy_dist < max_drift, (
+                f"bolt slid off the ground: xy_dist={bolt_xy_dist:.4f} m "
+                f"(max={max_drift:.4f} m at scene_scale={self.scene_scale}; "
+                f"pos={tuple(float(x) for x in bolt_pos)})"
+            )
 
     @staticmethod
     def create_parser():
+        import argparse  # noqa: PLC0415
+
         parser = newton.examples.create_parser()
         parser.add_argument(
             "--scene-scale",
@@ -489,6 +527,17 @@ class Example:
                 "geometrically similar scene at a different length scale."
             ),
         )
+        parser.add_argument(
+            "--bolt-static",
+            action=argparse.BooleanOptionalAction,
+            default=BOLT_IS_STATIC_DEFAULT,
+            help=(
+                "Pin the bolt to the world (zero inv mass + inertia). "
+                "When ``--no-bolt-static`` the bolt is left dynamic and "
+                "drops onto the ground plane before the nut threads on; "
+                "exercises the contact path with neither side anchored."
+            ),
+        )
         return parser
 
 
@@ -496,5 +545,10 @@ if __name__ == "__main__":
     parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)
-    viewer._paused = True
+    # Start paused for interactive viewers so the user can see the
+    # initial pose before stepping. ``--test`` (and the headless null
+    # viewer) override is_paused() to always step, so this is a no-op
+    # in CI.
+    if hasattr(viewer, "_paused") and not getattr(args, "test", False):
+        viewer._paused = True
     newton.examples.run(example, args)
