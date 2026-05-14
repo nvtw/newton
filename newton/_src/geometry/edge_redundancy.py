@@ -395,9 +395,14 @@ def find_redundant_edges(
     Args:
         mesh: A :class:`newton.Mesh` instance.
         half_height [m]: Box half-extent along the edge normal. Defaults to
-            ``1e-3 * D`` where ``D`` is the mesh AABB diagonal.
+            ``1e-3 * D`` where ``D`` is the mesh AABB diagonal. A non-positive
+            value (or a default-resolved value of zero on a degenerate mesh)
+            disables the broad phase entirely; the returned result lists every
+            manifold edge with no containment candidates.
         half_width [m]: Box half-extent along the in-plane tangent (and the
             per-end overhang along the edge direction). Defaults to ``5e-3 * D``.
+            Non-positive values trigger the same disabled fast path as
+            ``half_height``.
         angle_threshold_rad [rad]: Only edges with dihedral angle greater than
             or equal to this threshold are considered. ``0`` (default) keeps
             every manifold edge.
@@ -427,20 +432,19 @@ def find_redundant_edges(
     resolved_half_height = float(half_height) if half_height is not None else 1.0e-3 * diagonal
     resolved_half_width = float(half_width) if half_width is not None else 5.0e-3 * diagonal
 
-    # Empty / degenerate fast paths.
-    if n_edges == 0:
-        empty_offsets = np.zeros(1, dtype=np.int32)
-        empty_indices = np.zeros(0, dtype=np.int32)
-        empty_int = np.zeros(0, dtype=np.int32)
-        empty_bool = np.zeros(0, dtype=bool)
+    # Fast paths: no manifold edges, or boxes that would degenerate to zero/
+    # negative half-extents (the kernels would still run but no edge could
+    # ever be swallowed, so skip the GPU work entirely).
+    boxes_disabled = resolved_half_height <= 0.0 or resolved_half_width <= 0.0
+    if n_edges == 0 or boxes_disabled:
         return EdgeRedundancyResult(
-            edge_indices=edge_indices_np.reshape(0, 2),
+            edge_indices=edge_indices_np.reshape(-1, 2),
             dihedral_angles=edge_angles_np,
-            candidate_for_removal=empty_bool,
-            num_containers_per_edge=empty_int,
-            swallow_count_per_box=empty_int,
-            swallowed_offsets=empty_offsets,
-            swallowed_indices=empty_indices,
+            candidate_for_removal=np.zeros(n_edges, dtype=bool),
+            num_containers_per_edge=np.zeros(n_edges, dtype=np.int32),
+            swallow_count_per_box=np.zeros(n_edges, dtype=np.int32),
+            swallowed_offsets=np.zeros(n_edges + 1, dtype=np.int32),
+            swallowed_indices=np.zeros(0, dtype=np.int32),
             broad_phase_pair_count=0,
             aabb_diagonal=diagonal,
             half_height=resolved_half_height,
@@ -738,9 +742,59 @@ def resolve_edge_removals(
     )
 
 
+def remove_redundant_edges(
+    mesh,
+    *,
+    half_height: float | None = None,
+    half_width: float | None = None,
+    angle_threshold_rad: float = math.radians(10.0),
+    initial_pair_capacity_factor: int = 8,
+    max_retries: int = 3,
+    device=None,
+) -> np.ndarray:
+    """Find and drop redundant manifold edges in one call, returning the kept set.
+
+    Chains :func:`find_redundant_edges` and :func:`resolve_edge_removals` and
+    returns just the kept manifold-edge vertex pairs. Use this when you don't
+    need the intermediate diagnostics (CSR adjacency, dihedral angles, etc.) —
+    fall back to the two-step API when you do.
+
+    Args:
+        mesh: A :class:`newton.Mesh` instance.
+        half_height [m]: Forwarded to :func:`find_redundant_edges`. A
+            non-positive value disables the broad phase, in which case every
+            manifold edge is kept.
+        half_width [m]: Forwarded to :func:`find_redundant_edges`. Same
+            disabled-fast-path behavior as ``half_height``.
+        angle_threshold_rad [rad]: Maximum dihedral angle for a swallowed edge
+            to be removed. Forwarded to :func:`resolve_edge_removals`; defaults
+            to 10 degrees.
+        initial_pair_capacity_factor: Forwarded to :func:`find_redundant_edges`.
+        max_retries: Forwarded to :func:`find_redundant_edges`.
+        device: Forwarded to :func:`find_redundant_edges`.
+
+    Returns:
+        Kept manifold-edge vertex pairs ``(M, 2)`` with dtype ``int32``. Rows
+        are a subset of the manifold-edge subset returned by
+        :func:`find_redundant_edges` in the same order.
+    """
+    result = find_redundant_edges(
+        mesh,
+        half_height=half_height,
+        half_width=half_width,
+        angle_threshold_rad=0.0,
+        initial_pair_capacity_factor=initial_pair_capacity_factor,
+        max_retries=max_retries,
+        device=device,
+    )
+    resolution = resolve_edge_removals(result, angle_threshold_rad=angle_threshold_rad)
+    return result.edge_indices[~resolution.to_remove]
+
+
 __all__ = [
     "EdgeRedundancyResult",
     "EdgeResolutionResult",
     "find_redundant_edges",
+    "remove_redundant_edges",
     "resolve_edge_removals",
 ]

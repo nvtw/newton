@@ -18,6 +18,7 @@ from newton._src.geometry.edge_redundancy import (
     EdgeRedundancyResult,
     EdgeResolutionResult,
     find_redundant_edges,
+    remove_redundant_edges,
     resolve_edge_removals,
 )
 
@@ -115,6 +116,29 @@ class TestEdgeRedundancyCube(unittest.TestCase):
         self.assertGreater(int(result.candidate_for_removal.sum()), 0)
         # CSR consistency: total swallowed entries equals sum over box counts.
         self.assertEqual(int(result.swallow_count_per_box.sum()), int(result.swallowed_offsets[-1]))
+
+    def test_non_positive_extents_skip_broad_phase(self):
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        # Each non-positive value individually disables the broad phase. The
+        # manifold-edge set is still reported (18 unique edges on a cube), but
+        # no edge is ever flagged as a candidate and no SAP pair is generated.
+        for kwargs in (
+            {"half_height": 0.0, "half_width": 1.0},
+            {"half_height": 1.0, "half_width": 0.0},
+            {"half_height": -1.0, "half_width": 1.0},
+            {"half_height": 1.0, "half_width": -1.0},
+        ):
+            with self.subTest(**kwargs):
+                result = find_redundant_edges(mesh, **kwargs)
+                self.assertEqual(len(result.edge_indices), 18)
+                self.assertEqual(int(result.candidate_for_removal.sum()), 0)
+                self.assertEqual(int(result.num_containers_per_edge.sum()), 0)
+                self.assertEqual(int(result.swallow_count_per_box.sum()), 0)
+                self.assertEqual(int(result.swallowed_offsets[-1]), 0)
+                self.assertEqual(result.broad_phase_pair_count, 0)
+                # CSR offsets must remain consistent: length n_edges + 1, all zeros.
+                self.assertEqual(result.swallowed_offsets.shape, (18 + 1,))
+                self.assertTrue(bool(np.all(result.swallowed_offsets == 0)))
 
 
 class TestEdgeRedundancySwallowing(unittest.TestCase):
@@ -272,6 +296,30 @@ class TestEdgeRemovalResolution(unittest.TestCase):
         self.assertTrue(bool(resolution.kept[1]))
         self.assertFalse(bool(resolution.to_remove[0]))
         self.assertTrue(bool(resolution.to_remove[4]))
+
+
+class TestRemoveRedundantEdges(unittest.TestCase):
+    def test_swallowing_mesh_drops_short_edge(self):
+        mesh = _swallowing_mesh()
+        # Match the two-step pipeline at the same thresholds and assert the
+        # one-shot helper returns the same kept set.
+        full = find_redundant_edges(mesh, half_height=0.5, half_width=0.5)
+        resolution = resolve_edge_removals(full, angle_threshold_rad=math.radians(10.0))
+        expected = full.edge_indices[~resolution.to_remove]
+
+        kept = remove_redundant_edges(mesh, half_height=0.5, half_width=0.5)
+        np.testing.assert_array_equal(kept, expected)
+
+        rows = [tuple(sorted((int(a), int(b)))) for a, b in kept]
+        self.assertIn((2, 3), rows)  # long edge kept
+        self.assertNotIn((8, 9), rows)  # short edge removed
+
+    def test_disabled_boxes_keep_every_manifold_edge(self):
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        kept = remove_redundant_edges(mesh, half_height=0.0, half_width=1.0)
+        # The fast path in find_redundant_edges flags no candidates, so every
+        # manifold edge survives.
+        self.assertEqual(len(kept), 18)
 
 
 if __name__ == "__main__":
