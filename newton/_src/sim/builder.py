@@ -307,9 +307,10 @@ class ModelBuilder:
         generated from a primitive (box, sphere, capsule, cylinder, cone) during
         :meth:`ModelBuilder.finalize`, this value is used as the expansion distance
         around the surface. Independent of :attr:`gap` and :attr:`margin`, which
-        control collision-pipeline inflation. When ``None``, falls back to
-        :attr:`gap`. Not accepted on mesh shapes — for user meshes, pass ``margin``
-        to :meth:`~newton.geometry.Mesh.build_sdf` before calling
+        control collision-pipeline inflation. When ``None``, ``finalize`` uses
+        ``0.05`` (the same default the ``NewtonSDFCollisionAPI`` USD schema applies
+        for ``newton:sdfMargin``). Not accepted on mesh shapes — for user meshes,
+        pass ``margin`` to :meth:`~newton.geometry.Mesh.build_sdf` before calling
         :meth:`ModelBuilder.add_shape_mesh`."""
 
         def configure_sdf(
@@ -10168,15 +10169,17 @@ class ModelBuilder:
                 shape_src = self.shape_source[i]
                 shape_flags = self.shape_flags[i]
                 shape_scale = self.shape_scale[i]
-                shape_gap = self.shape_gap[i]
                 sdf_narrow_band_range = self.shape_sdf_narrow_band_range[i]
                 sdf_target_voxel_size = self.shape_sdf_target_voxel_size[i]
                 sdf_max_resolution = self.shape_sdf_max_resolution[i]
                 sdf_tex_fmt = self.shape_sdf_texture_format[i]
                 sdf_margin = self.shape_sdf_margin[i]
                 # SDF generation margin: use the per-shape sdf_margin when set;
-                # otherwise use shape_gap as the expansion distance.
-                sdf_gen_margin = sdf_margin if sdf_margin is not None else shape_gap
+                # otherwise fall back to 0.05 m, which matches the schema default
+                # for newton:sdfMargin on NewtonSDFCollisionAPI. Keeping this in
+                # sync with the schema avoids "USD-authored vs. programmatic-API"
+                # behavioural drift (D11, REQ-10).
+                sdf_gen_margin = sdf_margin if sdf_margin is not None else 0.05
                 is_hydroelastic = bool(shape_flags & ShapeFlags.HYDROELASTIC)
                 has_shape_collision = bool(shape_flags & ShapeFlags.COLLIDE_SHAPES)
 
