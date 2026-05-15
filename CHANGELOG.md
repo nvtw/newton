@@ -7,6 +7,12 @@
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
 - Add `ViewerGL.show_loading_splash()` / `ViewerGL.hide_loading_splash()` displaying a stylized Newton's-cradle overlay while the GL viewer waits on Warp kernel compilation; raised automatically by `newton.examples.init()` for visible GL viewers
 
+### Changed
+
+- `ModelBuilder.ShapeConfig.sdf_margin` falls back to `0.05` m (matching the `newton:sdfMargin` schema default on `NewtonSDFCollisionAPI`) when unset, instead of inheriting from `ShapeConfig.gap`. The docstring already documented the two as independent; the runtime now matches.
+- `ModelBuilder.finalize()` no longer writes the deferred mesh SDF back to `Mesh.sdf` on shared `Mesh` instances. The SDF data is retained on the finalized `Model` (`model.shape_sdf_index`, `model.texture_sdf_data`). Call `Mesh.build_sdf()` directly when you want the SDF stored on a `Mesh`.
+- `ModelBuilder.add_shape_convex_hull()` (and any path producing `GeoType.CONVEX_MESH`) now raises `ValueError` if `ShapeConfig.sdf_*` or `ShapeConfig.is_hydroelastic` are set, matching `add_shape_mesh()`. Build and attach the SDF on the underlying `Mesh` via `Mesh.build_sdf()` instead.
+
 ### Fixed
 
 - Fix `SolverMuJoCo` returning `State.joint_qd` in world frame for root `FREE` joints with non-identity `parent_xform`, violating the documented parent-frame contract and corrupting derived `body_qd`.
