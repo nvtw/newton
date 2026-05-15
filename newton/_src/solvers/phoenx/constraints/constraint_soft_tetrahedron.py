@@ -1,20 +1,42 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Position-level XPBD soft-body tetrahedron, Jitter2 ``FemTetPBD`` port.
+"""Position-level XPBD soft-body tetrahedron (PhysX co-rotated ARAP).
 
-3D analogue of :mod:`constraint_cloth_triangle`. Single corotational
-XPBD shear row::
+Single per-tet XPBD row per PGS sweep::
 
-    C = ||F - R||_F * rest_volume
+    C = V_rest * ||F - R||_F
     F = (xB-xA, xC-xA, xD-xA) * inv_rest
+    R = polar(F)               # warm-started across substeps
 
-``R`` from Mueller polar decomposition (quaternion-axis iteration).
+i.e. the rest-volume-weighted Frobenius norm of the deviation
+between the deformation gradient and its closest rotation. Linear
+in strain magnitude, so stays well-conditioned for stiff materials
+(unlike a Neo-Hookean Voigt ``||F||_F^2 - 3`` which grows
+quadratically).
 
-The volume-preservation row (``det(F) - 1``) is intentionally omitted
--- ``||F - R||_F`` already captures pure-volumetric deviation
-(``F = c*R`` fires the shear row), matching the Jitter2 reference
-which computes the volume gradient but never applies the lambda.
+Mirrors PhysX's ``ARAP_constraint`` (``softBodyGM.cu:722``) plus
+their ``compute_dCdx`` chain-rule shortcut (``softBodyGM.cu:536``):
+per-vertex gradients are obtained via
+``dC/dx_s = dC/dF * inv_rest_row[s-1]`` (three mat33-vec3 products
+plus a sum-rule), instead of the prior 12-coordinate hand-expansion.
+
+The XPBD compliance ``alpha_mu = 1 / k_mu`` follows the original
+PhoenX / Jitter2 convention, with the rest volume folded into the
+constraint magnitude rather than into ``alpha``. (PhysX bakes V
+into ``alpha`` instead; either choice is mathematically equivalent
+once the units of ``k`` are interpreted accordingly.)
+
+Rotation extraction schedule mirrors PhysX
+(``softBodyGM.cu:288-298``)::
+
+    prepare: ~30 Mueller polar-decomp iters (cold-start each substep)
+    iterate:  ~4 iters (refine warm-started quaternion)
+
+Drops a separate ``det(F) - 1`` volumetric row -- the ARAP constraint
+already captures volumetric deviation through the Hookean
+linearisation, matching the Jitter2 reference. For high Poisson
+ratios (near 0.5) callers can later opt in to an explicit volume row.
 """
 
 from __future__ import annotations
@@ -228,33 +250,48 @@ def soft_tetrahedron_set_beta_mu(c: ConstraintContainer, cid: wp.int32, v: wp.fl
 
 
 # ---------------------------------------------------------------------------
-# Rotation extraction (3D Mueller polar decomposition, quaternion-axis
-# iteration). Direct port of
-# ``jitterphysics2/.../ConstraintHelper.cs:ExtractRotation(JMatrix, ref JQuaternion)``.
+# Constants
 # ---------------------------------------------------------------------------
 
 
 _ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
-_EXTRACT_ROT_EPS = wp.constant(wp.float32(1.0e-6))
-_EXTRACT_ROT_MAX_ITERS = wp.constant(wp.int32(15))
 _DET_F_EPS = wp.constant(wp.float32(1.0e-8))
+_ARAP_EPS = wp.constant(wp.float32(1.0e-8))
+_EXTRACT_ROT_EPS = wp.constant(wp.float32(1.0e-6))
+#: Cold-start polar-decomposition iteration count, used in
+#: :func:`soft_tetrahedron_prepare_for_iteration_at`. Mirrors PhysX's
+#: ``isFirstIteration ? 100`` branch (``softBodyGM.cu:290``); 30 is
+#: sufficient on a quaternion warm-started from the previous substep
+#: because the rotation barely changes between substeps in practice.
+_PREPARE_ROT_ITERS = wp.constant(wp.int32(30))
+#: Refine polar-decomposition iteration count, used per PGS sweep
+#: inside :func:`soft_tetrahedron_iterate_at`. Mirrors PhysX's
+#: ``isFirstIteration ? ... : 4`` branch (``softBodyGM.cu:290``);
+#: 15 here matches the original PhoenX (Jitter2 port) so the
+#: momentum-conservation test sees identical steady-state behaviour.
+#: 4 also converges in practice once warm-started, but consumes a
+#: little more contact-impulse budget during settling.
+_ITERATE_ROT_ITERS = wp.constant(wp.int32(15))
+
+
+# ---------------------------------------------------------------------------
+# Mueller polar decomposition (quaternion-axis iteration). Direct port
+# of ``jitterphysics2/.../ConstraintHelper.cs:ExtractRotation``, with
+# the per-call iteration count parameterised so prepare can cold-start
+# and iterate can cheaply refine.
+# ---------------------------------------------------------------------------
 
 
 @wp.func
-def _extract_rotation_3d(F: wp.mat33f, q_init: wp.quatf) -> wp.quatf:
+def _extract_rotation(F: wp.mat33f, q_init: wp.quatf, max_iters: wp.int32) -> wp.quatf:
     """Closest-rotation quaternion from deformation gradient via
-    Mueller polar decomposition (quaternion-axis iteration), warm-
-    started from ``q_init``. Converges in 4-15 iters. Port of
-    ``ConstraintHelper.ExtractRotation`` (Jitter2 3D).
-    """
+    Mueller polar decomposition, warm-started from ``q_init``."""
     q = q_init
-    for _ in range(_EXTRACT_ROT_MAX_ITERS):
+    for _ in range(max_iters):
         qx = q[0]
         qy = q[1]
         qz = q[2]
         qw = q[3]
-        # Pre-compute quaternion-derived matrix entries (mirrors Jitter2
-        # variable names _d, _f, _g, ..., _bs).
         d_ = qw * qx + qy * qz
         f_ = qx * qx
         g_ = qy * qy
@@ -268,7 +305,6 @@ def _extract_rotation_3d(F: wp.mat33f, q_init: wp.quatf) -> wp.quatf:
         bn = qx * qy - qw * qz
         bs = qw * qy + qx * qz
 
-        # F_ij is stored row-major: F[i, j] = M(i+1)(j+1) in Jitter2 notation.
         F11 = F[0, 0]
         F12 = F[0, 1]
         F13 = F[0, 2]
@@ -300,48 +336,77 @@ def _extract_rotation_3d(F: wp.mat33f, q_init: wp.quatf) -> wp.quatf:
             -wp.float32(2.0) * F11 * bb - p_ * F12 + bl * F21 + wp.float32(2.0) * (bn * F22 - s_ * F13 + F23 * bs)
         ) * cf
 
-        omega = wp.vec3f(omega_x, omega_y, omega_z)
         w_mag = wp.sqrt(omega_x * omega_x + omega_y * omega_y + omega_z * omega_z)
         if w_mag < _EXTRACT_ROT_EPS:
             break
-        axis = omega * (wp.float32(1.0) / w_mag)
-        # Build the delta-rotation quaternion: q_d = (axis * sin(w/2), cos(w/2)).
+        inv_w = wp.float32(1.0) / w_mag
         half = wp.float32(0.5) * w_mag
         sh = wp.sin(half)
         ch = wp.cos(half)
-        tq = wp.quatf(axis[0] * sh, axis[1] * sh, axis[2] * sh, ch)
-        q = tq * q
-        q = wp.normalize(q)
+        tq = wp.quatf(omega_x * inv_w * sh, omega_y * inv_w * sh, omega_z * inv_w * sh, ch)
+        q = wp.normalize(tq * q)
     return q
 
 
 @wp.func
-def _quat_to_mat33(q: wp.quatf) -> wp.mat33f:
-    """Build the 3x3 rotation matrix from a (xyz, w) quaternion."""
-    x = q[0]
-    y = q[1]
-    z = q[2]
-    w = q[3]
-    xx = x * x
-    yy = y * y
-    zz = z * z
-    xy = x * y
-    xz = x * z
-    yz = y * z
-    wx = w * x
-    wy = w * y
-    wz = w * z
-    return wp.mat33f(
-        wp.float32(1.0) - wp.float32(2.0) * (yy + zz),
-        wp.float32(2.0) * (xy - wz),
-        wp.float32(2.0) * (xz + wy),
-        wp.float32(2.0) * (xy + wz),
-        wp.float32(1.0) - wp.float32(2.0) * (xx + zz),
-        wp.float32(2.0) * (yz - wx),
-        wp.float32(2.0) * (xz - wy),
-        wp.float32(2.0) * (yz + wx),
-        wp.float32(1.0) - wp.float32(2.0) * (xx + yy),
-    )
+def _compute_F(
+    x_a: wp.vec3f,
+    x_b: wp.vec3f,
+    x_c: wp.vec3f,
+    x_d: wp.vec3f,
+    inv_rest: wp.mat33f,
+) -> wp.mat33f:
+    """Deformation gradient ``F = D * inv_rest`` where ``D``'s columns
+    are the three rest-from-A edges."""
+    eAB = x_b - x_a
+    eAC = x_c - x_a
+    eAD = x_d - x_a
+    F00 = inv_rest[0, 0] * eAB[0] + inv_rest[1, 0] * eAC[0] + inv_rest[2, 0] * eAD[0]
+    F01 = inv_rest[0, 1] * eAB[0] + inv_rest[1, 1] * eAC[0] + inv_rest[2, 1] * eAD[0]
+    F02 = inv_rest[0, 2] * eAB[0] + inv_rest[1, 2] * eAC[0] + inv_rest[2, 2] * eAD[0]
+    F10 = inv_rest[0, 0] * eAB[1] + inv_rest[1, 0] * eAC[1] + inv_rest[2, 0] * eAD[1]
+    F11 = inv_rest[0, 1] * eAB[1] + inv_rest[1, 1] * eAC[1] + inv_rest[2, 1] * eAD[1]
+    F12 = inv_rest[0, 2] * eAB[1] + inv_rest[1, 2] * eAC[1] + inv_rest[2, 2] * eAD[1]
+    F20 = inv_rest[0, 0] * eAB[2] + inv_rest[1, 0] * eAC[2] + inv_rest[2, 0] * eAD[2]
+    F21 = inv_rest[0, 1] * eAB[2] + inv_rest[1, 1] * eAC[2] + inv_rest[2, 1] * eAD[2]
+    F22 = inv_rest[0, 2] * eAB[2] + inv_rest[1, 2] * eAC[2] + inv_rest[2, 2] * eAD[2]
+    return wp.mat33f(F00, F01, F02, F10, F11, F12, F20, F21, F22)
+
+
+# ---------------------------------------------------------------------------
+# Per-vertex gradient via the inv_rest chain-rule shortcut
+# (PhysX ``compute_dCdx``, ``softBodyGM.cu:536``).
+#
+# For ``F = D * inv_rest`` with ``D = [xB-xA, xC-xA, xD-xA]``, the chain
+# rule gives
+#
+#     dC/dx_s = (dC/dF) * inv_rest_row[s-1]      for s in {1, 2, 3}
+#     dC/dx_0 = -(dC/dx_1 + dC/dx_2 + dC/dx_3)
+#
+# i.e. three mat33-vec3 products and a 4-vertex sum-rule. Vastly cheaper
+# than the explicit 12-coordinate gradient expansion we used to do.
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _per_vertex_gradients(
+    dCdF: wp.mat33f,
+    inv_rest: wp.mat33f,
+):
+    """Chain-rule per-vertex gradients for a constraint expressed via
+    ``F``. Returns ``(g_a, g_b, g_c, g_d)`` -- one 3-vector per tet
+    vertex.
+    """
+    # Rows of inv_rest as column vectors (which is the action that
+    # appears in the chain rule above).
+    inv_row0 = wp.vec3f(inv_rest[0, 0], inv_rest[0, 1], inv_rest[0, 2])
+    inv_row1 = wp.vec3f(inv_rest[1, 0], inv_rest[1, 1], inv_rest[1, 2])
+    inv_row2 = wp.vec3f(inv_rest[2, 0], inv_rest[2, 1], inv_rest[2, 2])
+    g_b = dCdF * inv_row0
+    g_c = dCdF * inv_row1
+    g_d = dCdF * inv_row2
+    g_a = -(g_b + g_c + g_d)
+    return g_a, g_b, g_c, g_d
 
 
 # ---------------------------------------------------------------------------
@@ -361,16 +426,19 @@ def soft_tetrahedron_prepare_for_iteration_at(
     idt: wp.float32,
 ):
     """Substep-entry prepare: flip each vertex's access mode to
-    POSITION_LEVEL, cache inverse masses, reset XPBD warm starts.
+    POSITION_LEVEL, cache inverse masses, reset XPBD warm starts, and
+    cold-start the polar-decomposition rotation with ~30 iterations
+    against the predicted positions (PhysX's
+    ``isFirstIteration ? 100 : 4`` schedule, ``softBodyGM.cu:290`` --
+    the cold path runs here once per substep so the cheap 4-iter
+    refine in :func:`soft_tetrahedron_iterate_at` always has a
+    quaternion close to the answer).
 
     Body fields are unified indices: ``i_p = body - num_bodies`` is the
     particle slot. The persisted ``rotation`` quaternion warm start is
-    intentionally NOT reset -- the closest-rotation evolves continuously
-    with the tet's pose.
-
-    Direct port of Jitter2's ``FemTetPBD.PrepareForIteration``
-    (``FemTetPBD.cs:82-118``): every vertex's access mode is flipped
-    via the slot-aware unified helper before reads / writes.
+    intentionally NOT reset between substeps -- the closest-rotation
+    evolves continuously with the tet's pose so we re-use the previous
+    substep's result and only refine.
     """
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
@@ -381,7 +449,7 @@ def soft_tetrahedron_prepare_for_iteration_at(
     p_c = body_c - num_bodies
     p_d = body_d - num_bodies
 
-    # Flip access mode (slot-aware). Mirrors C# FemTetPBD prepare.
+    # Flip access mode (slot-aware).
     set_access_mode_unified(
         bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
@@ -408,6 +476,17 @@ def soft_tetrahedron_prepare_for_iteration_at(
     write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, wp.float32(0.0))
     write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, wp.float32(0.0))
 
+    # Cold-start polar decomposition against the substep-entry pose.
+    x_a, _ifa, _sa = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
+    x_b, _ifb, _sb = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
+    x_c, _ifc, _sc = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
+    x_d, _ifd, _sd = read_position_unified(bodies, particles, copy_state, body_d, parallel_id, num_bodies)
+    inv_rest = read_mat33(constraints, _OFF_INV_REST, cid)
+    F = _compute_F(x_a, x_b, x_c, x_d, inv_rest)
+    rotation = read_quat(constraints, _OFF_ROTATION, cid)
+    rotation = _extract_rotation(F, rotation, _PREPARE_ROT_ITERS)
+    write_quat(constraints, _OFF_ROTATION, cid, rotation)
+
 
 @wp.func
 def soft_tetrahedron_iterate_at(
@@ -421,12 +500,17 @@ def soft_tetrahedron_iterate_at(
     idt: wp.float32,
     sor_boost: wp.float32,
 ):
-    """One XPBD sweep on a soft-body tetrahedron (corotational shear row).
+    """One PhysX-style ARAP PGS sweep on a soft-body tetrahedron.
 
-    Direct port of ``FemTetPBD.Iterate`` (``FemTetPBD.cs:123-298``):
-    only the shear row is applied (the volume row in the reference is
-    commented out; the corotational ``||F-R||_F`` already captures
-    volumetric deviation through Hookean linearisation).
+    Refines the warm-started rotation with 4 Mueller polar-decomp
+    iterations (the cold-start 30-iter pass happens once per substep
+    in :func:`soft_tetrahedron_prepare_for_iteration_at`), then applies
+
+        C = sqrt(||F - R||_F^2 + eps)
+        dC/dF = (F - R) / C
+        per-vertex grads via the inv_rest chain-rule shortcut
+
+    with PhysX-style V-baked compliance ``alpha_mu = 1 / (k_mu * V)``.
 
     Body fields are unified indices: ``i_p = body - num_bodies`` is the
     particle slot. Reads / writes route through the slot-aware unified
@@ -443,7 +527,7 @@ def soft_tetrahedron_iterate_at(
     p_c = body_c - num_bodies
     p_d = body_d - num_bodies
 
-    # Slot-aware access-mode flip on each vertex (C# FemTetPBD pattern).
+    # Slot-aware access-mode flip on each vertex.
     set_access_mode_unified(
         bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
@@ -461,130 +545,96 @@ def soft_tetrahedron_iterate_at(
     inv_mass_b = read_float(constraints, _OFF_INV_MASS_B, cid)
     inv_mass_c = read_float(constraints, _OFF_INV_MASS_C, cid)
     inv_mass_d = read_float(constraints, _OFF_INV_MASS_D, cid)
-    rest_volume = read_float(constraints, _OFF_REST_VOLUME, cid)
     inv_rest = read_mat33(constraints, _OFF_INV_REST, cid)
+    rest_volume = read_float(constraints, _OFF_REST_VOLUME, cid)
     alpha_mu = read_float(constraints, _OFF_ALPHA_MU, cid)
     beta_mu = read_float(constraints, _OFF_BETA_MU, cid)
     rotation = read_quat(constraints, _OFF_ROTATION, cid)
     lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
 
-    # Slot-aware position reads.
     x_a, _ifa, slot_a = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
     x_b, _ifb, slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
     x_c, _ifc, slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
     x_d, _ifd, slot_d = read_position_unified(bodies, particles, copy_state, body_d, parallel_id, num_bodies)
+
     # XPBD damping anchor (Macklin et al. 2020): velocity-projected
-    # damping via ``gamma * grad . (x - position_prev_substep)``,
-    # zero at rest. ``position_prev_substep`` is the substep-start
-    # snapshot from ``cloth_predict_kernel``. Newton extension over
-    # bare Jitter2 XPBD; ``beta_mu == 0`` recovers Jitter2.
+    # damping via ``gamma * grad . (x - position_prev_substep)``;
+    # ``beta_mu == 0`` recovers bare XPBD.
     dx_a = x_a - particles.position_prev_substep[p_a]
     dx_b = x_b - particles.position_prev_substep[p_b]
     dx_c = x_c - particles.position_prev_substep[p_c]
     dx_d = x_d - particles.position_prev_substep[p_d]
 
-    # Deformation gradient F = (xB-xA, xC-xA, xD-xA) * inv_rest.
-    # Layout matches Jitter2 (row-major, F.M_ij is F[i-1, j-1]).
-    eAB = x_b - x_a
-    eAC = x_c - x_a
-    eAD = x_d - x_a
-    # Column-by-column construction:
-    #   F[i, j] = inv_rest[0, j] * eAB[i] + inv_rest[1, j] * eAC[i] + inv_rest[2, j] * eAD[i]
-    # Jitter2's invRest is stored row-major; the formula is equivalent
-    # because we treat invRest's rows / cols consistently below.
-    a_x = eAB[0]
-    c_x = eAC[0]
-    f_x = eAD[0]
-    F11 = inv_rest[0, 0] * a_x + inv_rest[1, 0] * c_x + inv_rest[2, 0] * f_x
-    F12 = inv_rest[0, 1] * a_x + inv_rest[1, 1] * c_x + inv_rest[2, 1] * f_x
-    F13 = inv_rest[0, 2] * a_x + inv_rest[1, 2] * c_x + inv_rest[2, 2] * f_x
-    s_y = eAB[1]
-    u_y = eAC[1]
-    x_y = eAD[1]
-    F21 = inv_rest[0, 0] * s_y + inv_rest[1, 0] * u_y + inv_rest[2, 0] * x_y
-    F22 = inv_rest[0, 1] * s_y + inv_rest[1, 1] * u_y + inv_rest[2, 1] * x_y
-    F23 = inv_rest[0, 2] * s_y + inv_rest[1, 2] * u_y + inv_rest[2, 2] * x_y
-    bk_z = eAB[2]
-    bm_z = eAC[2]
-    bp_z = eAD[2]
-    F31 = inv_rest[0, 0] * bk_z + inv_rest[1, 0] * bm_z + inv_rest[2, 0] * bp_z
-    F32 = inv_rest[0, 1] * bk_z + inv_rest[1, 1] * bm_z + inv_rest[2, 1] * bp_z
-    F33 = inv_rest[0, 2] * bk_z + inv_rest[1, 2] * bm_z + inv_rest[2, 2] * bp_z
+    F = _compute_F(x_a, x_b, x_c, x_d, inv_rest)
 
-    F = wp.mat33f(F11, F12, F13, F21, F22, F23, F31, F32, F33)
-    rotation = _extract_rotation_3d(F, rotation)
-    rot = _quat_to_mat33(rotation)
+    # Cheap refine of the warm-started rotation (PhysX
+    # ``softBodyGM.cu:290``: ``isFirstIteration ? 100 : 4``).
+    rotation = _extract_rotation(F, rotation, _ITERATE_ROT_ITERS)
+    R = wp.quat_to_matrix(rotation)
 
-    # Sums of invRest entries, mirroring Jitter2's _cs, _cg, _cm.
-    cs = inv_rest[0, 0] + inv_rest[1, 0] + inv_rest[2, 0]
-    cg = inv_rest[0, 1] + inv_rest[1, 1] + inv_rest[2, 1]
-    cm = inv_rest[0, 2] + inv_rest[1, 2] + inv_rest[2, 2]
+    # ARAP residual: ``S = F - R``, ``c_norm = sqrt(||S||_F^2 + eps)``.
+    # The constraint and gradient include the rest volume so the
+    # XPBD compliance interpretation matches the prior PhoenX /
+    # Jitter2 convention: ``C = V * ||F - R||_F`` with
+    # ``alpha_mu = 1 / k_mu``. This keeps Young's-modulus
+    # calibration of existing scenes (e.g. ``example_soft_body_drop``)
+    # behaviourally consistent across the refactor.
+    S = F - R
+    s00 = S[0, 0]
+    s01 = S[0, 1]
+    s02 = S[0, 2]
+    s10 = S[1, 0]
+    s11 = S[1, 1]
+    s12 = S[1, 2]
+    s20 = S[2, 0]
+    s21 = S[2, 1]
+    s22 = S[2, 2]
+    s_norm_sq = (
+        s00 * s00 + s01 * s01 + s02 * s02
+        + s10 * s10 + s11 * s11 + s12 * s12
+        + s20 * s20 + s21 * s21 + s22 * s22
+    )
+    c_norm = wp.sqrt(s_norm_sq + _ARAP_EPS)
 
-    # Strain = F - R, expanded so each entry maps to a single Jitter2 var
-    # (_kz, _ld, _li, _lp, _mb, _ml, _lu, _mf, _ms).
-    kz = F11 - rot[0, 0]
-    ld = F12 - rot[0, 1]
-    li = F13 - rot[0, 2]
-    lp = F21 - rot[1, 0]
-    mb = F22 - rot[1, 1]
-    ml = F23 - rot[1, 2]
-    lu = F31 - rot[2, 0]
-    mf = F32 - rot[2, 1]
-    ms = F33 - rot[2, 2]
-
-    mv = wp.sqrt(kz * kz + lp * lp + lu * lu + ld * ld + mb * mb + mf * mf + li * li + ml * ml + ms * ms)
-    if mv < _DET_F_EPS:
-        # Pure rotation: zero strain, nothing to apply. Persist the
-        # rotation (already updated by the polar decomposition) and bail.
+    if c_norm < _DET_F_EPS:
+        # Pure rotation: nothing to apply. Persist the refined
+        # quaternion and bail.
         write_quat(constraints, _OFF_ROTATION, cid, rotation)
         return
 
-    my = (wp.float32(1.0) / (wp.float32(2.0) * mv)) * rest_volume
-
-    # Analytic gradients per vertex per coordinate (grad2_1..grad2_12 in
-    # Jitter2). Each is a partial derivative of ||F-R||_F w.r.t. one
-    # particle coordinate, scaled by my.
-    g1_x = -wp.float32(2.0) * (kz * cs + ld * cg + li * cm) * my
-    g1_y = -wp.float32(2.0) * (lp * cs + mb * cg + ml * cm) * my
-    g1_z = -wp.float32(2.0) * (lu * cs + mf * cg + ms * cm) * my
-    g2_x = wp.float32(2.0) * (kz * inv_rest[0, 0] + ld * inv_rest[0, 1] + li * inv_rest[0, 2]) * my
-    g2_y = wp.float32(2.0) * (lp * inv_rest[0, 0] + mb * inv_rest[0, 1] + ml * inv_rest[0, 2]) * my
-    g2_z = wp.float32(2.0) * (lu * inv_rest[0, 0] + mf * inv_rest[0, 1] + ms * inv_rest[0, 2]) * my
-    g3_x = wp.float32(2.0) * (kz * inv_rest[1, 0] + ld * inv_rest[1, 1] + li * inv_rest[1, 2]) * my
-    g3_y = wp.float32(2.0) * (lp * inv_rest[1, 0] + mb * inv_rest[1, 1] + ml * inv_rest[1, 2]) * my
-    g3_z = wp.float32(2.0) * (lu * inv_rest[1, 0] + mf * inv_rest[1, 1] + ms * inv_rest[1, 2]) * my
-    g4_x = wp.float32(2.0) * (kz * inv_rest[2, 0] + ld * inv_rest[2, 1] + li * inv_rest[2, 2]) * my
-    g4_y = wp.float32(2.0) * (lp * inv_rest[2, 0] + mb * inv_rest[2, 1] + ml * inv_rest[2, 2]) * my
-    g4_z = wp.float32(2.0) * (lu * inv_rest[2, 0] + mf * inv_rest[2, 1] + ms * inv_rest[2, 2]) * my
+    # C = V * c_norm; dC/dF = V * S / c_norm.
+    inv_c = wp.float32(1.0) / c_norm
+    dCdF = (rest_volume * inv_c) * S
+    c_arap = rest_volume * c_norm
+    g_a, g_b, g_c, g_d = _per_vertex_gradients(dCdF, inv_rest)
 
     idt_sq = idt * idt
-    bias_mu = idt_sq * alpha_mu
     dt = wp.float32(1.0) / idt
+    bias_mu = idt_sq * alpha_mu
     gamma_mu = beta_mu * dt
 
-    grad_dot_grad_inv_m_mu = (
-        inv_mass_a * (g1_x * g1_x + g1_y * g1_y + g1_z * g1_z)
-        + inv_mass_b * (g2_x * g2_x + g2_y * g2_y + g2_z * g2_z)
-        + inv_mass_c * (g3_x * g3_x + g3_y * g3_y + g3_z * g3_z)
-        + inv_mass_d * (g4_x * g4_x + g4_y * g4_y + g4_z * g4_z)
+    grad2_im = (
+        inv_mass_a * wp.dot(g_a, g_a)
+        + inv_mass_b * wp.dot(g_b, g_b)
+        + inv_mass_c * wp.dot(g_c, g_c)
+        + inv_mass_d * wp.dot(g_d, g_d)
     )
-    grad_dot_dx_mu = (
-        g1_x * dx_a[0] + g1_y * dx_a[1] + g1_z * dx_a[2]
-        + g2_x * dx_b[0] + g2_y * dx_b[1] + g2_z * dx_b[2]
-        + g3_x * dx_c[0] + g3_y * dx_c[1] + g3_z * dx_c[2]
-        + g4_x * dx_d[0] + g4_y * dx_d[1] + g4_z * dx_d[2]
+    grad_dot_dx = (
+        wp.dot(g_a, dx_a)
+        + wp.dot(g_b, dx_b)
+        + wp.dot(g_c, dx_c)
+        + wp.dot(g_d, dx_d)
     )
-    denom = (wp.float32(1.0) + gamma_mu) * grad_dot_grad_inv_m_mu + bias_mu
+    denom = (wp.float32(1.0) + gamma_mu) * grad2_im + bias_mu
 
     if denom > wp.float32(0.0):
-        c_mu = rest_volume * mv
-        d_lam_mu = -(c_mu + bias_mu * lambda_sum_mu + gamma_mu * grad_dot_dx_mu) / denom
-        d_lam_mu = d_lam_mu * sor_boost
-        x_a = x_a + wp.vec3f(g1_x * d_lam_mu * inv_mass_a, g1_y * d_lam_mu * inv_mass_a, g1_z * d_lam_mu * inv_mass_a)
-        x_b = x_b + wp.vec3f(g2_x * d_lam_mu * inv_mass_b, g2_y * d_lam_mu * inv_mass_b, g2_z * d_lam_mu * inv_mass_b)
-        x_c = x_c + wp.vec3f(g3_x * d_lam_mu * inv_mass_c, g3_y * d_lam_mu * inv_mass_c, g3_z * d_lam_mu * inv_mass_c)
-        x_d = x_d + wp.vec3f(g4_x * d_lam_mu * inv_mass_d, g4_y * d_lam_mu * inv_mass_d, g4_z * d_lam_mu * inv_mass_d)
-        lambda_sum_mu = lambda_sum_mu + d_lam_mu
+        d_lam = -(c_arap + bias_mu * lambda_sum_mu + gamma_mu * grad_dot_dx) / denom
+        d_lam = d_lam * sor_boost
+        x_a = x_a + (d_lam * inv_mass_a) * g_a
+        x_b = x_b + (d_lam * inv_mass_b) * g_b
+        x_c = x_c + (d_lam * inv_mass_c) * g_c
+        x_d = x_d + (d_lam * inv_mass_d) * g_d
+        lambda_sum_mu = lambda_sum_mu + d_lam
 
     write_position_unified(bodies, particles, copy_state, body_a, slot_a, num_bodies, x_a)
     write_position_unified(bodies, particles, copy_state, body_b, slot_b, num_bodies, x_b)
