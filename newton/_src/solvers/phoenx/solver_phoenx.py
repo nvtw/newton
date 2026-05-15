@@ -192,7 +192,14 @@ def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]
     return wp.array(arr_np, dtype=wp.vec3f, device=device)
 
 
-_SINGLEWORLD_BLOCK_DIM: int = 256
+#: Persistent-grid block dim for the single-world iterate / prepare /
+#: relax kernels. One warp per block (32 threads) gives the most blocks
+#: in flight per SM and decouples the per-block ``__syncthreads()`` to
+#: a warp-sync. Kapla single-world FPS scales monotonically as block
+#: dim decreases from 256 (baseline 63 FPS) -> 32 (124 FPS, +97 %),
+#: with dragon flat-to-mildly-positive (+6 %). Bit-exact determinism +
+#: tower/stacking tests preserved.
+_SINGLEWORLD_BLOCK_DIM: int = 32
 
 
 def _singleworld_total_threads(

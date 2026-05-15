@@ -44,8 +44,8 @@ from newton._src.solvers.phoenx.mass_splitting import (
 
 # Mirror of :data:`solver_phoenx._SINGLEWORLD_BLOCK_DIM`. Re-declared
 # here to avoid a circular import from the dispatch module back into
-# the solver module.
-_SINGLEWORLD_BLOCK_DIM: int = 256
+# the solver module. Keep in sync with the canonical value.
+_SINGLEWORLD_BLOCK_DIM: int = 32
 
 if TYPE_CHECKING:
     from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
