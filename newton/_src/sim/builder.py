@@ -10183,10 +10183,9 @@ class ModelBuilder:
                 sdf_tex_fmt = self.shape_sdf_texture_format[i]
                 sdf_margin = self.shape_sdf_margin[i]
                 # SDF generation margin: use the per-shape sdf_margin when set;
-                # otherwise fall back to 0.05 m, which matches the schema default
-                # for newton:sdfMargin on NewtonSDFCollisionAPI. Keeping this in
-                # sync with the schema avoids "USD-authored vs. programmatic-API"
-                # behavioural drift (D11, REQ-10).
+                # otherwise fall back to 0.05 m, which matches the schema
+                # default for newton:sdfMargin on NewtonSDFCollisionAPI so the
+                # USD-authored and programmatic-API entry points stay in sync.
                 sdf_gen_margin = sdf_margin if sdf_margin is not None else 0.05
                 is_hydroelastic = bool(shape_flags & ShapeFlags.HYDROELASTIC)
                 has_shape_collision = bool(shape_flags & ShapeFlags.COLLIDE_SHAPES)
