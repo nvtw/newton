@@ -126,10 +126,14 @@ class TestSDFUSDParsing(unittest.TestCase):
             self.assertEqual(builder.shape_sdf_max_resolution[s1], 128)
             self.assertIsNone(builder.shape_sdf_max_resolution[s2])
 
-            # After finalize, SDF is built on the mesh
-            builder.finalize(device=device)
-            mesh1 = builder.shape_source[s1]
-            self.assertIsNotNone(mesh1.sdf, "Expected mesh.sdf built during finalize")
+            # After finalize, the deferred SDF lands in the model (not on the
+            # shared Mesh — finalize() must not mutate user-owned geometry).
+            model = builder.finalize(device=device)
+            self.assertGreaterEqual(
+                int(model.shape_sdf_index.numpy()[s1]),
+                0,
+                "Expected an SDF entry for shape s1 in the finalized model.",
+            )
 
     def test_usd_sdf_defaults(self, device=None):
         """Shapes without SDF attributes should use builder defaults (None)."""
@@ -184,9 +188,12 @@ class TestSDFUSDParsing(unittest.TestCase):
             # SDF params stored, deferred to finalize
             self.assertEqual(builder.shape_sdf_max_resolution[s1], 64)
 
-            builder.finalize(device=device)
-            mesh1 = builder.shape_source[s1]
-            self.assertIsNotNone(mesh1.sdf, "Expected SDF built from default_shape_cfg during finalize")
+            model = builder.finalize(device=device)
+            self.assertGreaterEqual(
+                int(model.shape_sdf_index.numpy()[s1]),
+                0,
+                "Expected SDF built from default_shape_cfg during finalize.",
+            )
 
     def test_usd_hydroelastic_attributes(self, device=None):
         """Authoring newton:hydroelasticEnabled=true with kh on NewtonSDFCollisionAPI opts into hydroelastic."""
@@ -253,10 +260,14 @@ class TestSDFUSDParsing(unittest.TestCase):
             result = parse_usd(builder, str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
 
-            # SDF deferred to finalize
-            builder.finalize(device=device)
-            mesh1 = builder.shape_source[s1]
-            self.assertIsNotNone(mesh1.sdf, "Expected SDF built with sdfMargin during finalize")
+            # SDF deferred to finalize; result lands in the model, not on the
+            # shared Mesh.
+            model = builder.finalize(device=device)
+            self.assertGreaterEqual(
+                int(model.shape_sdf_index.numpy()[s1]),
+                0,
+                "Expected SDF built with sdfMargin during finalize.",
+            )
 
     def test_usd_sdf_enabled_false(self, device=None):
         """newton:sdfEnabled=false suppresses SDF building even with params authored."""
@@ -502,9 +513,12 @@ class TestSDFUSDParsing(unittest.TestCase):
 
             self.assertEqual(builder.shape_sdf_max_resolution[s1], 64)
 
-            builder.finalize(device=device)
-            mesh1 = builder.shape_source[s1]
-            self.assertIsNotNone(mesh1.sdf, "Applied SDF API should enable SDF building")
+            model = builder.finalize(device=device)
+            self.assertGreaterEqual(
+                int(model.shape_sdf_index.numpy()[s1]),
+                0,
+                "Applied SDF API should land an SDF entry on the finalized model.",
+            )
 
     def test_usd_sdf_api_applied_no_hydroelastic_by_default(self, device=None):
         """Applying NewtonSDFCollisionAPI without authoring hydroelasticEnabled leaves hydro OFF."""
