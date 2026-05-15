@@ -306,11 +306,14 @@ class ModelBuilder:
         """SDF generation margin [m] for primitive shapes. When a texture SDF is
         generated from a primitive (box, sphere, capsule, cylinder, cone) during
         :meth:`ModelBuilder.finalize`, this value is used as the expansion distance
-        around the surface. Independent of :attr:`gap` and :attr:`margin`, which
-        control collision-pipeline inflation. When ``None``, ``finalize`` uses
-        ``0.05`` (the same default the ``NewtonSDFCollisionAPI`` USD schema applies
-        for ``newton:sdfMargin``). Not accepted on mesh shapes — for user meshes,
-        pass ``margin`` to :meth:`~newton.geometry.Mesh.build_sdf` before calling
+        around the surface. Conceptually distinct from :attr:`gap` (collision-pipeline
+        broad-phase inflation) and :attr:`margin` (contact surface inflation), but
+        when left at the sentinel ``None`` value, ``finalize`` reuses :attr:`gap`
+        as the SDF generation margin for backward compatibility — a tight ``gap``
+        therefore implies a tight SDF, which gives accurate near-surface contact
+        resolution. Set :attr:`sdf_margin` explicitly to decouple the two values.
+        Not accepted on mesh shapes — for user meshes, pass ``margin`` to
+        :meth:`~newton.geometry.Mesh.build_sdf` before calling
         :meth:`ModelBuilder.add_shape_mesh`."""
 
         def configure_sdf(
@@ -10177,16 +10180,18 @@ class ModelBuilder:
                 shape_src = self.shape_source[i]
                 shape_flags = self.shape_flags[i]
                 shape_scale = self.shape_scale[i]
+                shape_gap = self.shape_gap[i]
                 sdf_narrow_band_range = self.shape_sdf_narrow_band_range[i]
                 sdf_target_voxel_size = self.shape_sdf_target_voxel_size[i]
                 sdf_max_resolution = self.shape_sdf_max_resolution[i]
                 sdf_tex_fmt = self.shape_sdf_texture_format[i]
                 sdf_margin = self.shape_sdf_margin[i]
-                # SDF generation margin: use the per-shape sdf_margin when set;
-                # otherwise fall back to 0.05 m, which matches the schema
-                # default for newton:sdfMargin on NewtonSDFCollisionAPI so the
-                # USD-authored and programmatic-API entry points stay in sync.
-                sdf_gen_margin = sdf_margin if sdf_margin is not None else 0.05
+                # SDF generation margin: use the per-shape sdf_margin when the
+                # caller has set it explicitly; otherwise fall back to shape_gap
+                # so the SDF tracks the broad-phase tolerance. A tight gap then
+                # produces a tight SDF, which is what hydroelastic tests rely on
+                # for accurate near-surface penetration depths.
+                sdf_gen_margin = sdf_margin if sdf_margin is not None else shape_gap
                 is_hydroelastic = bool(shape_flags & ShapeFlags.HYDROELASTIC)
                 has_shape_collision = bool(shape_flags & ShapeFlags.COLLIDE_SHAPES)
 

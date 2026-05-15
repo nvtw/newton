@@ -9,7 +9,6 @@
 
 ### Changed
 
-- `ModelBuilder.ShapeConfig.sdf_margin` falls back to `0.05` m (matching the `newton:sdfMargin` schema default on `NewtonSDFCollisionAPI`) when unset, instead of inheriting from `ShapeConfig.gap`. The docstring already documented the two as independent; the runtime now matches.
 - `ModelBuilder.finalize()` no longer writes the deferred mesh SDF back to `Mesh.sdf` on shared `Mesh` instances. The SDF data is retained on the finalized `Model` (`model.shape_sdf_index`, `model.texture_sdf_data`). Call `Mesh.build_sdf()` directly when you want the SDF stored on a `Mesh`.
 - `ModelBuilder.add_shape_convex_hull()` (and any path producing `GeoType.CONVEX_MESH`) now raises `ValueError` if `ShapeConfig.sdf_*` or `ShapeConfig.is_hydroelastic` are set, matching `add_shape_mesh()`. Build and attach the SDF on the underlying `Mesh` via `Mesh.build_sdf()` instead.
 
