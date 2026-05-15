@@ -681,11 +681,7 @@ The same asset using Newton schemas:
    {
        def Mesh "CollisionMesh"
        (
-           prepend apiSchemas = [
-               "PhysicsCollisionAPI",
-               "NewtonCollisionAPI",
-               "NewtonSDFCollisionAPI",
-           ]
+           prepend apiSchemas = ["NewtonSDFCollisionAPI"]
        )
        {
            float newton:contactMargin = 0.002
@@ -712,11 +708,7 @@ on the same ``NewtonSDFCollisionAPI`` and author ``newton:kh``:
 
    def Mesh "CollisionMesh"
    (
-       prepend apiSchemas = [
-           "PhysicsCollisionAPI",
-           "NewtonCollisionAPI",
-           "NewtonSDFCollisionAPI",
-       ]
+       prepend apiSchemas = ["NewtonSDFCollisionAPI"]
    )
    {
        uniform int newton:sdfMaxResolution = 256
@@ -805,9 +797,10 @@ suite, so it doubles as an end-to-end regression against Newton's importer.
                if fmt is not None:
                    _set(prim, "newton:sdfTextureFormat", Sdf.ValueTypeNames.Token, fmt)
 
-           # Apply the Newton API schemas so the importer honors schema defaults
-           # for any attributes left unauthored.
-           prim.AddAppliedSchema("NewtonCollisionAPI")
+           # Apply the Newton SDF API so the importer honors schema defaults
+           # for any attributes left unauthored. NewtonSDFCollisionAPI inherits
+           # NewtonCollisionAPI and PhysicsCollisionAPI; listing them explicitly
+           # would be redundant.
            prim.AddAppliedSchema("NewtonSDFCollisionAPI")
            modified += 1
        return modified
