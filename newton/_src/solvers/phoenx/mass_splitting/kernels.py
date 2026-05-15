@@ -259,6 +259,14 @@ def _copy_state_into_rigids_kernel(
         particles.position[p] = particles.position_prev_substep[p] + dt * vel
 
 
+# Per-node mass-splitting kernels iterate sequentially over a small
+# slot range and have no cross-thread sync, so they follow the same
+# rule as :data:`solver_phoenx._SINGLEWORLD_BLOCK_DIM`: one warp per
+# block maximises blocks-in-flight per SM and hides the global memory
+# latency on the slot reads / writes.
+_MASS_SPLITTING_PER_NODE_BLOCK_DIM: int = 32
+
+
 def launch_broadcast_rigid_to_copy_states(
     copy_state: CopyStateContainer,
     bodies: BodyContainer,
@@ -276,6 +284,7 @@ def launch_broadcast_rigid_to_copy_states(
         _broadcast_rigid_to_copy_states_kernel,
         dim=num_nodes,
         inputs=[copy_state, bodies, particles, wp.int32(num_bodies), wp.float32(dt)],
+        block_dim=_MASS_SPLITTING_PER_NODE_BLOCK_DIM,
         device=copy_state.section_end.device,
     )
 
@@ -299,6 +308,7 @@ def launch_average_and_broadcast(
         _average_and_broadcast_kernel,
         dim=num_nodes,
         inputs=[copy_state, bodies, particles, wp.int32(num_bodies), wp.float32(inv_dt)],
+        block_dim=_MASS_SPLITTING_PER_NODE_BLOCK_DIM,
         device=copy_state.section_end.device,
     )
 
@@ -321,5 +331,6 @@ def launch_copy_state_into_rigids(
         _copy_state_into_rigids_kernel,
         dim=num_nodes,
         inputs=[copy_state, bodies, particles, wp.int32(num_bodies), wp.float32(inv_dt)],
+        block_dim=_MASS_SPLITTING_PER_NODE_BLOCK_DIM,
         device=copy_state.section_end.device,
     )
