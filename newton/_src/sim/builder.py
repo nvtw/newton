@@ -10113,11 +10113,28 @@ class ModelBuilder:
                 and getattr(ssrc, "sdf", None) is not None
                 for stype, ssrc, sflags in zip(self.shape_type, self.shape_source, self.shape_flags, strict=True)
             )
+            # Catch meshes whose SDF is still deferred (built during finalize) so
+            # the CPU-runs-into-build_sdf path also raises here, not deeper down.
+            has_deferred_mesh_sdf = any(
+                stype == GeoType.MESH
+                and ssrc is not None
+                and sflags & ShapeFlags.COLLIDE_SHAPES
+                and getattr(ssrc, "sdf", None) is None
+                and (smax is not None or svox is not None)
+                for stype, ssrc, sflags, smax, svox in zip(
+                    self.shape_type,
+                    self.shape_source,
+                    self.shape_flags,
+                    self.shape_sdf_max_resolution,
+                    self.shape_sdf_target_voxel_size,
+                    strict=True,
+                )
+            )
             has_hydroelastic_shapes = any(
                 (sflags & ShapeFlags.HYDROELASTIC) and (sflags & ShapeFlags.COLLIDE_SHAPES)
                 for sflags in self.shape_flags
             )
-            if (has_mesh_sdf or has_hydroelastic_shapes) and not is_gpu:
+            if (has_mesh_sdf or has_deferred_mesh_sdf or has_hydroelastic_shapes) and not is_gpu:
                 raise ValueError(
                     "SDF collision paths require a CUDA-capable GPU device. "
                     "Texture SDFs (used for SDF collision) only support CUDA."

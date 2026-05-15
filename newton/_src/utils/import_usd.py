@@ -8,6 +8,7 @@ import copy
 import datetime
 import inspect
 import itertools
+import math
 import os
 import posixpath
 import re
@@ -44,12 +45,21 @@ AttributeFrequency = Model.AttributeFrequency
 _NEWTON_SRC_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir)) + os.sep
 
 
-def _usd_bbox_diagonal(prim) -> float | None:
+def _usd_bbox_diagonal(prim, scale=None) -> float | None:
     """Length of the local-space AABB diagonal for a USD prim [m].
 
     Uses UsdGeom.BBoxCache so it works uniformly for meshes (from points)
     and primitives (from their size/radius attributes). Returns None if
     the bbox is empty or degenerate.
+
+    Args:
+        prim: The USD prim to measure.
+        scale: Optional per-axis scale (3-tuple, vec3, or sequence). When
+            provided, the bbox extents are multiplied component-wise before
+            taking the diagonal. This is needed for ``UsdGeomMesh`` shapes
+            consumed with ``physics:meshScale``, because the bbox cache
+            returns unscaled geometry bounds but fractional SDF distances
+            must be computed against the *scaled* mesh.
     """
     from pxr import Usd, UsdGeom
 
@@ -58,7 +68,12 @@ def _usd_bbox_diagonal(prim) -> float | None:
     rng = bbox.ComputeAlignedRange()
     if rng.IsEmpty():
         return None
-    diag = rng.GetSize().GetLength()
+    size = rng.GetSize()
+    if scale is not None:
+        sx, sy, sz = (abs(float(c)) for c in scale)
+        diag = math.sqrt((size[0] * sx) ** 2 + (size[1] * sy) ** 2 + (size[2] * sz) ** 2)
+    else:
+        diag = size.GetLength()
     return float(diag) if diag > 0 else None
 
 
@@ -301,7 +316,9 @@ def parse_usd(
     if mesh_maxhullvert is None:
         mesh_maxhullvert = Mesh.MAX_HULL_VERTICES
 
-    if schema_resolvers is None:
+    if not schema_resolvers:
+        # Treat both None and [] as "use the default" so newton:* SDF/hydro
+        # attributes aren't silently dropped when callers pass an empty list.
         schema_resolvers = [SchemaResolverNewton()]
     collect_schema_attrs = len(schema_resolvers) > 0
 
@@ -2747,7 +2764,11 @@ def parse_usd(
                         prim, prim_type=PrimType.SHAPE, key="sdf_margin_fraction", verbose=verbose
                     )
                     has_fractional = any(f is not None and f != 0 for f in (nb_inner_frac, nb_outer_frac, margin_frac))
-                    bbox_diag = _usd_bbox_diagonal(prim) if has_fractional else None
+                    # Mesh shapes use `physics:meshScale` to scale the geometry at
+                    # build time. Fractional SDF distances must be computed against
+                    # the *scaled* bbox, so pass meshScale through when available.
+                    bbox_scale = shape_spec.meshScale if key == UsdPhysics.ObjectType.MeshShape else None
+                    bbox_diag = _usd_bbox_diagonal(prim, scale=bbox_scale) if has_fractional else None
                     if has_fractional and bbox_diag is None:
                         warnings.warn(
                             f"{prim.GetPath()}: fractional SDF attributes authored but bbox is empty; "
