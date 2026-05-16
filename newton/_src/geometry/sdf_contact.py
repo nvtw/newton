@@ -6,7 +6,11 @@ from typing import Any
 import warp as wp
 
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, SHAPE_PAIR_INDEX_MASK, ContactData
-from ..geometry.sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_grad
+from ..geometry.sdf_texture import (
+    TextureSDFData,
+    texture_sample_sdf_grad_hw as texture_sample_sdf_grad,
+    texture_sample_sdf_hw as texture_sample_sdf,
+)
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sample_sdf_heightfield
 from .contact_reduction_global import GlobalContactReducerData, export_and_reduce_contact_centered
