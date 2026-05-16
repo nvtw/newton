@@ -1134,6 +1134,59 @@ def texture_sample_sdf_grad_hw(
     return sdf_val, grad
 
 
+@wp.func
+def texture_sample_sdf_grad_only_hw(
+    sdf: TextureSDFData,
+    local_pos: wp.vec3,
+) -> wp.vec3:
+    """Hardware FD gradient at ``local_pos``, no value sample.
+
+    Companion to :func:`texture_sample_sdf_grad_hw` for callers that
+    already know the SDF value at ``local_pos`` (e.g. the SDF
+    narrow-phase reuses Brent's converged value). Six HW samples
+    instead of seven; the centre value is computed by the caller
+    from prior context.
+
+    When ``local_pos`` is outside the SDF box, the gradient is the
+    unit vector from the clamped boundary point to ``local_pos`` --
+    same extrapolation convention as :func:`texture_sample_sdf_grad`.
+
+    Args:
+        sdf: texture SDF data
+        local_pos: query position in local SDF space [m]
+
+    Returns:
+        Gradient [unitless].
+    """
+    clamped = wp.vec3(
+        wp.clamp(local_pos[0], sdf.sdf_box_lower[0], sdf.sdf_box_upper[0]),
+        wp.clamp(local_pos[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1]),
+        wp.clamp(local_pos[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2]),
+    )
+    diff = local_pos - clamped
+    diff_mag = wp.length(diff)
+
+    h_x = 0.5 / sdf.inv_sdf_dx[0]
+    h_y = 0.5 / sdf.inv_sdf_dx[1]
+    h_z = 0.5 / sdf.inv_sdf_dx[2]
+    gx = (
+        texture_sample_sdf_hw(sdf, local_pos + wp.vec3(h_x, 0.0, 0.0))
+        - texture_sample_sdf_hw(sdf, local_pos - wp.vec3(h_x, 0.0, 0.0))
+    ) / (2.0 * h_x)
+    gy = (
+        texture_sample_sdf_hw(sdf, local_pos + wp.vec3(0.0, h_y, 0.0))
+        - texture_sample_sdf_hw(sdf, local_pos - wp.vec3(0.0, h_y, 0.0))
+    ) / (2.0 * h_y)
+    gz = (
+        texture_sample_sdf_hw(sdf, local_pos + wp.vec3(0.0, 0.0, h_z))
+        - texture_sample_sdf_hw(sdf, local_pos - wp.vec3(0.0, 0.0, h_z))
+    ) / (2.0 * h_z)
+    grad = wp.vec3(gx, gy, gz)
+    if diff_mag > 0.0:
+        grad = diff / diff_mag
+    return grad
+
+
 # ============================================================================
 # Host-side Construction Functions
 # ============================================================================
