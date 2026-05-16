@@ -255,20 +255,29 @@ def make_contact_key(shape_a: int, shape_b: int, bin_id: int) -> wp.uint64:
 # **Fast** — ``(float_flip(score) << 32) | contact_id``.
 #   Full 32-bit score precision, no fingerprint. Contact_id in low 32 bits.
 #
-# **Deterministic** — ``(float_flip(score)>>10 << 42) | (fp << 20) | (id & 0xFFFFF)``.
-#   22-bit score, 22-bit fingerprint tiebreaker, 20-bit contact_id.
+# **Deterministic** — ``(float_flip(score)>>11 << 43) | (fp << 22) | (id & 0x3FFFFF)``.
+#   21-bit score, 21-bit fingerprint tiebreaker, 22-bit contact_id (~4M).
 # ---------------------------------------------------------------------------
 
-# 22-bit fingerprint is wide enough to distinguish any two contacts that share
-# the same truncated score within a single reduction slot.  The remaining 20
-# bits for contact_id support up to 1,048,575 buffered contacts.
-FINGERPRINT_BITS = wp.constant(wp.uint64(22))
-CONTACT_ID_BITS = wp.constant(wp.uint64(20))
-CONTACT_ID_MASK = wp.constant(wp.uint64((1 << 20) - 1))
-FINGERPRINT_MASK = wp.constant(wp.uint64((1 << 22) - 1))
+# 21-bit fingerprint is still wide enough to distinguish any two contacts
+# that share the same truncated score within a single reduction slot (the
+# narrow phase's fingerprint encoding uses ~15 bits in practice -- e.g. SDF
+# contacts pack ``(edge_idx << 2) | (mode << 1)`` and meshes with > 524K
+# edges are rare). 22 bits for contact_id raises the per-step buffered-
+# contact ceiling from ~1M to ~4M; the previous 1M cap was reached on
+# scenes that push ~6K edge-tests per mesh-mesh pair across hundreds of
+# pairs (e.g. the 20x20 nut/bolt scene generates ~2.2M edge-test attempts
+# at frame 0, and silent atomic_add overflow past the 1M cap caused
+# non-deterministic contact dropping that exploded the simulation).
+# 21-bit score keeps ~2.4e-4 relative precision (~0.24 mm at 1 m scale) --
+# still finer than the 0.5 mm contact gap this scene uses.
+FINGERPRINT_BITS = wp.constant(wp.uint64(21))
+CONTACT_ID_BITS = wp.constant(wp.uint64(22))
+CONTACT_ID_MASK = wp.constant(wp.uint64((1 << 22) - 1))
+FINGERPRINT_MASK = wp.constant(wp.uint64((1 << 21) - 1))
 # Plain Python int (not wp.constant) because it is used inside wp.static()
 # which requires a Python-level value for compile-time evaluation.
-SCORE_SHIFT = 10
+SCORE_SHIFT = 11
 
 
 # -- Fast (non-deterministic) variants -------------------------------------
@@ -333,40 +342,41 @@ def _make_contact_value_det(score: float, fingerprint: int, contact_id: int) -> 
 
     ::
 
-        63        42 41        20 19          0
+        63        43 42        22 21          0
         ┌──────────┬────────────┬──────────────┐
         │  score   │ fingerprint│  contact_id  │
-        │ (22 bit) │  (22 bit)  │   (20 bit)   │
+        │ (21 bit) │  (21 bit)  │   (22 bit)   │
         └──────────┴────────────┴──────────────┘
 
-    **Score (bits 63-42, 22 bits)** — ``float_flip(score) >> 10``.
+    **Score (bits 63-43, 21 bits)** — ``float_flip(score) >> 11``.
     ``float_flip`` reinterprets the IEEE-754 float as an order-preserving
     uint32 (see http://stereopsis.com/radix.html).  The right-shift by
-    ``SCORE_SHIFT`` (10) discards the 10 least-significant bits of the
-    mantissa, keeping 1 sign-equivalent + 8 exponent + 13 mantissa = 22
-    bits.  This gives ~2^-13 ≈ 1.2e-4 relative precision — sufficient to
-    distinguish contacts whose spatial projection scores or negated depths
-    differ by more than ~0.1 mm at 1 m scale.
+    ``SCORE_SHIFT`` (11) discards the 11 least-significant bits of the
+    mantissa, keeping 1 sign-equivalent + 8 exponent + 12 mantissa = 21
+    bits.  This gives ~2^-12 ≈ 2.4e-4 relative precision — still finer
+    than the 0.5 mm contact gap typical in mesh contacts at 1 m scale.
 
-    **Fingerprint (bits 41-20, 22 bits)** — deterministic tiebreaker
+    **Fingerprint (bits 42-22, 21 bits)** — deterministic tiebreaker
     derived from geometry (edge index | mode/source tag bits).  When two
     contacts have the same truncated score, the fingerprint breaks the tie
     so that ``atomic_max`` always picks the same winner regardless of
     thread scheduling.  Effective limits depend on upstream bit consumption:
 
-    - Mesh-triangle contacts: ``(tri_idx << 1) | 1`` — 21 effective bits
-      for ``tri_idx`` (~2M triangles).
-    - SDF contacts: ``(edge_idx << 2) | (mode << 1)`` — 20 effective bits
-      for ``edge_idx`` (~1M edges).
+    - Mesh-triangle contacts: ``(tri_idx << 1) | 1`` — 20 effective bits
+      for ``tri_idx`` (~1M triangles).
+    - SDF contacts: ``(edge_idx << 2) | (mode << 1)`` — 19 effective bits
+      for ``edge_idx`` (~524K edges).
 
     Meshes exceeding these limits will overflow the fingerprint field,
     causing non-deterministic tiebreaking for those contacts.
 
-    **Contact ID (bits 19-0, 20 bits)** — buffer slot assigned by
-    ``atomic_add``.  20 bits supports up to 1,048,575 buffered contacts.
-    Non-deterministic, but only matters when both score and fingerprint
-    are identical, which requires two geometrically identical contacts —
-    an impossible case.
+    **Contact ID (bits 21-0, 22 bits)** — buffer slot assigned by
+    ``atomic_add``.  22 bits supports up to 4,194,303 buffered contacts
+    (raised from 20 bits / ~1M to fix silent atomic_add overflow on
+    scenes that generate millions of edge-test attempts, e.g. dense
+    nut/bolt grids).  Non-deterministic, but only matters when both
+    score and fingerprint are identical, which requires two
+    geometrically identical contacts — an impossible case.
 
     The cascade ``score > fingerprint > contact_id`` means ``atomic_max``
     on this uint64 selects the contact with the best score, breaking ties
@@ -378,7 +388,7 @@ def _make_contact_value_det(score: float, fingerprint: int, contact_id: int) -> 
         contact_id: Index into the contact buffer (from ``atomic_add``).
     """
     return (
-        (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(42))
+        (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(43))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
         | (wp.uint64(contact_id) & CONTACT_ID_MASK)
     )
@@ -398,17 +408,17 @@ def _make_preprune_probe_det(score: float, fingerprint: int) -> wp.uint64:
     (score and fingerprint), never on the non-deterministic contact_id.
     """
     return (
-        (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(42))
+        (wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT))) << wp.uint64(43))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
         | CONTACT_ID_MASK
     )
 
 
 @wp.func_native("""
-return static_cast<int32_t>(packed & 0xFFFFFull);
+return static_cast<int32_t>(packed & 0x3FFFFFull);
 """)
 def _unpack_contact_id_det(packed: wp.uint64) -> int:
-    """Extract contact_id (low 20 bits) — deterministic variant."""
+    """Extract contact_id (low 22 bits) — deterministic variant."""
     ...
 
 
