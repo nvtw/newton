@@ -77,7 +77,7 @@ ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 # uses :meth:`ModelBuilder.replicate` so each pair sits in its own
 # world, matching the parallel-environment layout used by other
 # Newton examples).
-GRID_DIMS_DEFAULT: tuple[int, int] = (50, 50)
+GRID_DIMS_DEFAULT: tuple[int, int] = (80, 80)
 
 # Hard frame cap (see :meth:`Example.step`). The GL viewer's
 # ``is_running()`` doesn't honour ``--num-frames`` in interactive
@@ -146,10 +146,13 @@ def _load_mesh_with_sdf(mesh_file: str, gap: float) -> tuple[newton.Mesh, wp.vec
         margin=gap,
         # Drop edges whose oriented box is fully covered by another
         # edge's box -- mesh-SDF narrow phase iterates one edge less
-        # without losing contact coverage. Halves the bolt-edge count
-        # against the bolt's smooth shaft (the contact information for
-        # a flat region is already carried by its boundary edge).
+        # without losing contact coverage. Bump the in-plane box width
+        # to ~2 % of the AABB diagonal (4x the default) to absorb more
+        # of the bolt's smooth-shaft edges; per-mesh edge counts drop
+        # bolt 22 560 -> 15 359 (-32 %), nut 12 773 -> 6 483 (-49 %),
+        # total 35 333 -> 21 842 (-38 %).
         edge_box_absorption=True,
+        edge_box_half_width_rel=2e-2,
     )
     return mesh, center_vec
 
@@ -175,8 +178,8 @@ class Example:
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 10
-        self.solver_iterations = 5
+        self.sim_substeps = 1
+        self.solver_iterations = 10
         self._frame: int = 0
 
         # Scene-wide geometric scale. ``1.0`` matches the M20 bolt
