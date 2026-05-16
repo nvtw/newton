@@ -950,19 +950,20 @@ def texture_sample_sdf_grad(
     sdf: TextureSDFData,
     local_pos: wp.vec3,
 ) -> tuple[float, wp.vec3]:
-    """Sample SDF value and gradient using analytical trilinear from 8 corner texels.
+    """Sample SDF value and gradient.
 
-    Uses :func:`_read_cell_corners` for point-sampled texel reads at exact
-    texel centres (``integer + 0.5``) and performs both trilinear
-    interpolation and analytical gradient computation in float32. Works
-    correctly regardless of :data:`SDF_TEXTURE_FILTERING`: under the HW
-    path the underlying texture is ``LINEAR``-filtered, but sampling at
-    a texel centre evaluates to that texel's exact value (the trilinear
-    weights are ``(1, 0, ...)``), so the 8-corner blend stays bit-exact.
-    Only :func:`texture_sample_sdf` (the value-only cull path) opts into
-    the HW single-fetch variant -- the gradient path keeps its analytical
-    derivative because that's both faster (no FD samples) and more
-    accurate than central differencing on uint16-quantised SDFs.
+    Two implementations selected at compile time by
+    :data:`SDF_TEXTURE_FILTERING`:
+
+    * ``"software"`` (default) -- 8 point-sampled texel reads via
+      :func:`_read_cell_corners` followed by a float32 trilinear blend
+      and analytical partial derivatives. Most accurate.
+    * ``"hardware"`` -- 1 hardware-filtered fetch for the value plus 6
+      hardware-filtered fetches for a centred-difference gradient
+      (``±0.5`` fine-cell baseline along each axis). All seven fetches
+      go through the texture unit's trilinear filter (8-bit
+      fixed-point weights) -- keeps the entire SDF read path on the
+      same code path as the value-only cull.
 
     Args:
         sdf: texture SDF data
@@ -978,6 +979,28 @@ def texture_sample_sdf_grad(
     )
     diff = local_pos - clamped
     diff_mag = wp.length(diff)
+
+    if wp.static(SDF_TEXTURE_FILTERING == "hardware"):
+        h_x = 0.5 / sdf.inv_sdf_dx[0]
+        h_y = 0.5 / sdf.inv_sdf_dx[1]
+        h_z = 0.5 / sdf.inv_sdf_dx[2]
+        sdf_val = texture_sample_sdf(sdf, local_pos)
+        gx = (
+            texture_sample_sdf(sdf, local_pos + wp.vec3(h_x, 0.0, 0.0))
+            - texture_sample_sdf(sdf, local_pos - wp.vec3(h_x, 0.0, 0.0))
+        ) / (2.0 * h_x)
+        gy = (
+            texture_sample_sdf(sdf, local_pos + wp.vec3(0.0, h_y, 0.0))
+            - texture_sample_sdf(sdf, local_pos - wp.vec3(0.0, h_y, 0.0))
+        ) / (2.0 * h_y)
+        gz = (
+            texture_sample_sdf(sdf, local_pos + wp.vec3(0.0, 0.0, h_z))
+            - texture_sample_sdf(sdf, local_pos - wp.vec3(0.0, 0.0, h_z))
+        ) / (2.0 * h_z)
+        grad = wp.vec3(gx, gy, gz)
+        if diff_mag > 0.0:
+            grad = diff / diff_mag
+        return sdf_val, grad
 
     f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
     corners, tx, ty, tz = _read_cell_corners(sdf, f)
@@ -1382,19 +1405,19 @@ def create_sparse_sdf_textures(
         Tuple of ``(texture_sdf, coarse_texture, subgrid_texture)``.
         Caller must keep texture references alive to prevent GC.
     """
-    # ``CLOSEST`` for the software path so ``wp.texture_sample`` at
-    # ``texel + 0.5`` returns the exact texel value (no 8-bit weight
-    # rounding); ``LINEAR`` for the hardware path so a single fetch at
-    # a fractional coordinate yields the trilinearly filtered value via
-    # the texture unit.
-    _tex_filter = (
-        wp.TextureFilterMode.LINEAR
-        if SDF_TEXTURE_FILTERING == "hardware"
-        else wp.TextureFilterMode.CLOSEST
-    )
+    # Always create the texture with ``LINEAR`` filter mode regardless of
+    # :data:`SDF_TEXTURE_FILTERING`. Under LINEAR, sampling at an exact
+    # texel centre (``integer + 0.5``) still resolves to that texel's
+    # value -- the trilinear weights collapse to ``(1, 0, ...)`` -- so
+    # the software path's 8-corner reads remain effectively bit-exact
+    # (modulo a ~1/256 weight-quantisation error that is far below any
+    # physically meaningful contact precision). Decoupling the texture
+    # mode from the kernel path lets users toggle
+    # :data:`SDF_TEXTURE_FILTERING` at any time without rebuilding the
+    # SDF.
     coarse_tex = wp.Texture3D(
         sparse_data["coarse_sdf"],
-        filter_mode=_tex_filter,
+        filter_mode=wp.TextureFilterMode.LINEAR,
         address_mode=wp.TextureAddressMode.CLAMP,
         normalized_coords=False,
         device=device,
@@ -1402,7 +1425,7 @@ def create_sparse_sdf_textures(
 
     subgrid_tex = wp.Texture3D(
         sparse_data["subgrid_data"],
-        filter_mode=_tex_filter,
+        filter_mode=wp.TextureFilterMode.LINEAR,
         address_mode=wp.TextureAddressMode.CLAMP,
         normalized_coords=False,
         device=device,
