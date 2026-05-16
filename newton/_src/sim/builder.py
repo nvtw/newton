@@ -1291,6 +1291,12 @@ class ModelBuilder:
         ``ModelBuilder.ShapeConfig.gap`` is ``None``. The resolved per-shape values are later
         propagated to :attr:`Model.shape_gap`."""
 
+        self.mesh_edge_lower_angle_threshold_rad: float = math.radians(0.1)
+        """Lower dihedral-angle threshold [rad] for filtering precomputed mesh edges
+        used by SDF-mesh contact generation. Internal edges with dihedral angle
+        below this value are dropped; boundary and non-manifold edges are always
+        kept. Set to 0 to disable filtering. Default: 0.1 degree."""
+
         self.num_rigid_contacts_per_world: int | None = None
         """Optional per-world rigid-contact allocation budget used to set :attr:`Model.rigid_contact_max`."""
 
@@ -10660,7 +10666,10 @@ class ModelBuilder:
             shape_edge_ranges = []
             edge_chunks = []
             edge_offset = 0
-            edge_cache = {}  # mesh python id → (start, count)
+            edge_cache = {}  # (id(mesh), threshold) → (start, count). For
+            # meshes whose precomputed collision edges were already prepared
+            # by mesh.build_sdf(), the threshold component is None.
+            mesh_edge_lower_angle_threshold_rad = float(self.mesh_edge_lower_angle_threshold_rad)
 
             for i in range(len(self.shape_type)):
                 if (
@@ -10669,11 +10678,17 @@ class ModelBuilder:
                     and (self.shape_flags[i] & ShapeFlags.COLLIDE_SHAPES)
                 ):
                     mesh = self.shape_source[i]
-                    mesh_key = id(mesh)
+                    if mesh._collision_edges is not None:
+                        mesh_key = (id(mesh), None)
+                    else:
+                        mesh_key = (id(mesh), mesh_edge_lower_angle_threshold_rad)
                     if mesh_key in edge_cache:
                         shape_edge_ranges.append(edge_cache[mesh_key])
                     else:
-                        edges = mesh.edges  # lazily computed and cached on the Mesh
+                        if mesh._collision_edges is not None:
+                            edges = mesh._collision_edges
+                        else:
+                            edges = mesh._filter_edges_by_dihedral_angle(mesh_edge_lower_angle_threshold_rad)
                         start = edge_offset
                         count = len(edges)
                         edge_chunks.append(edges)
