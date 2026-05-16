@@ -144,6 +144,12 @@ def _load_mesh_with_sdf(mesh_file: str, gap: float) -> tuple[newton.Mesh, wp.vec
         max_resolution=MESH_SDF_MAX_RESOLUTION,
         narrow_band_range=MESH_SDF_NARROW_BAND_RANGE,
         margin=gap,
+        # Drop edges whose oriented box is fully covered by another
+        # edge's box -- mesh-SDF narrow phase iterates one edge less
+        # without losing contact coverage. Halves the bolt-edge count
+        # against the bolt's smooth shaft (the contact information for
+        # a flat region is already carried by its boundary edge).
+        edge_box_absorption=True,
     )
     return mesh, center_vec
 
