@@ -1364,6 +1364,8 @@ def verify_narrow_phase_buffers(
     max_sdf_sdf: int,
     contact_count: wp.array[int],
     max_contacts: int,
+    reducer_count: wp.array[int],
+    max_reducer: int,
 ):
     """Check for buffer overflows in the collision pipeline."""
     if broad_phase_count[0] > max_broad_phase:
@@ -1419,6 +1421,18 @@ def verify_narrow_phase_buffers(
             contact_count[0],
             max_contacts,
         )
+    if max_reducer > 0:
+        if reducer_count[0] > max_reducer:
+            # GlobalContactReducer's pre-reduction edge-test buffer
+            # (sized by ``max_triangle_pairs``). Edge tests past the
+            # capacity are silently dropped by ``atomic_add``; which
+            # ones get kept depends on thread scheduling, so dense
+            # mesh-mesh scenes can diverge non-deterministically.
+            wp.printf(
+                "Warning: SDF reducer buffer overflowed %d > %d (raise max_triangle_pairs).\n",
+                reducer_count[0],
+                max_reducer,
+            )
 
 
 class NarrowPhase:
@@ -2148,6 +2162,16 @@ class NarrowPhase:
 
         # Verify no collision pipeline buffers overflowed
         if self.verify_buffers:
+            # Reducer is optional (heightfield-only / non-reduce scenes
+            # leave ``global_contact_reducer = None``); pass a sentinel
+            # in that case so the kernel's ``max_reducer > 0`` guard
+            # skips the check cleanly.
+            if self.global_contact_reducer is not None:
+                reducer_count_arr = self.global_contact_reducer.contact_count
+                reducer_capacity = int(self.global_contact_reducer.capacity)
+            else:
+                reducer_count_arr = candidate_pair_count  # any int32 array, value gated by max_reducer=0
+                reducer_capacity = 0
             wp.launch(
                 kernel=verify_narrow_phase_buffers,
                 dim=[1],
@@ -2168,6 +2192,8 @@ class NarrowPhase:
                     self.shape_pairs_sdf_sdf.shape[0] if self.shape_pairs_sdf_sdf is not None else 0,
                     writer_data.contact_count,
                     writer_data.contact_max,
+                    reducer_count_arr,
+                    reducer_capacity,
                 ],
                 device=device,
                 record_tape=False,

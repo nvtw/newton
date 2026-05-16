@@ -77,7 +77,7 @@ ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 # uses :meth:`ModelBuilder.replicate` so each pair sits in its own
 # world, matching the parallel-environment layout used by other
 # Newton examples).
-GRID_DIMS_DEFAULT: tuple[int, int] = (20, 20)
+GRID_DIMS_DEFAULT: tuple[int, int] = (50, 50)
 
 # Hard frame cap (see :meth:`Example.step`). The GL viewer's
 # ``is_running()`` doesn't honour ``--num-frames`` in interactive
@@ -176,7 +176,7 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.sim_substeps = 10
-        self.solver_iterations = 10
+        self.solver_iterations = 5
         self._frame: int = 0
 
         # Scene-wide geometric scale. ``1.0`` matches the M20 bolt
@@ -394,22 +394,23 @@ class Example:
         # global minima.
         # 96/cell turned out to overflow on settle frames (~97
         # contacts/pair observed at 20x20, "Contact buffer overflowed
-        # 38689 > 38464"); dropped contacts let the nut fall through
-        # the bolt. 128/cell gives ~25% headroom over the measured peak.
-        rigid_contact_max_estimate = 128 * num_pairs_total + 64
+        # 38689 > 38464"); 128/cell still tripped the warning on the
+        # 50x50 scene's settle (peaks of 129-130 contacts/pair). 160/cell
+        # gives ~25% headroom over the measured peak across all the
+        # tested grids without bloating downstream PhoenX scratch.
+        rigid_contact_max_estimate = 160 * num_pairs_total + 64
         shape_pairs_max_estimate = 16 * num_pairs_total + 8
         # ``max_triangle_pairs`` sizes the SDF narrow phase's GLOBAL
         # contact-reducer buffer (``GlobalContactReducer.capacity``).
         # The SDF kernel pushes ~6K edge-test attempts per mesh-mesh
         # pair into this buffer via ``atomic_add``; at 20x20 = 400
-        # pairs that totals ~2.4M attempts per frame. The default
-        # ``max_triangle_pairs=1M`` silently overflowed past the cap,
-        # and the dropped contacts (atomic_add ordering is non-
-        # deterministic) made the simulation diverge at >=380 pairs.
-        # 8K/cell gives ~25% headroom over the measured peak; cap at
-        # the deterministic-packing ceiling (~4M, see
-        # ``CONTACT_ID_BITS``) so deterministic mode stays available.
-        max_triangle_pairs_estimate = min(8 * 1024 * num_pairs_total + 64 * 1024, 4 * 1024 * 1024 - 1)
+        # pairs that totals ~2.4M attempts per frame and at 50x50 it
+        # passes 8M. ``GlobalContactReducer`` auto-falls back from
+        # deterministic to fast packing if this exceeds the
+        # deterministic-packing ceiling (~4M, see ``CONTACT_ID_BITS``);
+        # we size unconditionally to the measured workload so contacts
+        # never get silently dropped on overflow.
+        max_triangle_pairs_estimate = 8 * 1024 * num_pairs_total + 64 * 1024
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
             contact_matching=_CONTACT_MATCHING,

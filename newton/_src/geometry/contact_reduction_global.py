@@ -748,12 +748,29 @@ class GlobalContactReducer:
         """
         max_det_contacts = 1 << int(CONTACT_ID_BITS)
         if deterministic and capacity > max_det_contacts:
-            raise ValueError(
-                f"Deterministic contact packing supports at most {max_det_contacts} "
-                f"buffered contacts ({int(CONTACT_ID_BITS)}-bit contact_id), "
-                f"but capacity={capacity}. Reduce max_triangle_pairs or disable "
-                f"deterministic mode."
+            # Auto-fallback: dense mesh-mesh scenes (e.g. a 50x50 grid of
+            # SDF nut/bolt pairs) push more edge-test attempts than the
+            # deterministic packing's contact_id field can index. Silently
+            # capping the buffer at ``max_det_contacts`` would drop
+            # ~50 % of the edge tests in a non-deterministic atomic_add
+            # order -- worse than just switching to fast packing, which
+            # has a full 32-bit contact_id and so caps at ~4 G entries.
+            # Fingerprint-based tiebreaking is lost in fast mode, but
+            # geometry-level determinism survives whenever contacts in
+            # the same reduction slot have distinct scores (the common
+            # case for SDF narrow-phase mesh-mesh).
+            import warnings  # noqa: PLC0415
+
+            warnings.warn(
+                f"GlobalContactReducer: requested capacity={capacity} exceeds the "
+                f"deterministic packing's contact_id range ({max_det_contacts}); "
+                f"falling back to fast (non-deterministic) packing so the buffer "
+                f"holds every edge-test attempt instead of dropping ~"
+                f"{100 * (capacity - max_det_contacts) // capacity}% silently.",
+                RuntimeWarning,
+                stacklevel=2,
             )
+            deterministic = False
         self.capacity = capacity
         self.device = device
         self.store_hydroelastic_data = store_hydroelastic_data
