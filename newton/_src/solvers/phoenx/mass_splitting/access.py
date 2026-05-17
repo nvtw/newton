@@ -421,6 +421,12 @@ def slot_synchronize_to_velocity_level(
     if slot < wp.int32(0):
         return
     current = copy_state.access_mode[slot]
+    # Fast path: VELOCITY_LEVEL / STATIC slots are no-ops on the
+    # ``->VELOCITY_LEVEL`` flip. The original helper still read +
+    # wrote all 5 fields with their unchanged values; skip those
+    # writes so the average pass that follows doesn't pay for them.
+    if current == wp.int32(1):  # ACCESS_MODE_VELOCITY_LEVEL
+        return
     if node_id < num_bodies:
         pos_prev = bodies.position_prev_substep[node_id]
         orient_prev = bodies.orientation_prev_substep[node_id]
