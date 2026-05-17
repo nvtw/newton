@@ -261,19 +261,16 @@ _DET_F_EPS = wp.constant(wp.float32(1.0e-8))
 _ARAP_EPS = wp.constant(wp.float32(1.0e-8))
 _EXTRACT_ROT_EPS = wp.constant(wp.float32(1.0e-6))
 #: Cold-start polar-decomposition iteration count, used in
-#: :func:`soft_tetrahedron_prepare_for_iteration_at`. Mirrors PhysX's
-#: ``isFirstIteration ? 100`` branch (``softBodyGM.cu:290``); 30 is
-#: sufficient on a quaternion warm-started from the previous substep
-#: because the rotation barely changes between substeps in practice.
-_PREPARE_ROT_ITERS = wp.constant(wp.int32(30))
-#: Refine polar-decomposition iteration count, used per PGS sweep
-#: inside :func:`soft_tetrahedron_iterate_at`. Mirrors PhysX's
-#: ``isFirstIteration ? ... : 4`` branch (``softBodyGM.cu:290``);
-#: 15 here matches the original PhoenX (Jitter2 port) so the
-#: momentum-conservation test sees identical steady-state behaviour.
-#: 4 also converges in practice once warm-started, but consumes a
-#: little more contact-impulse budget during settling.
-_ITERATE_ROT_ITERS = wp.constant(wp.int32(15))
+#: :func:`soft_tetrahedron_prepare_for_iteration_at`. Kugelstadt APD
+#: with full 3x3 Hessian converges quadratically; 6 iters covers a
+#: cold (identity) start with a generous margin.
+_PREPARE_ROT_ITERS = wp.constant(wp.int32(6))
+#: Refine polar-decomposition iteration count per PGS sweep inside
+#: :func:`soft_tetrahedron_iterate_at`. APD's quadratic convergence
+#: + the substep-entry warm start lands at machine precision in
+#: 2-3 refines; the inner break-out on ``|omega|^2`` catches the
+#: already-converged case.
+_ITERATE_ROT_ITERS = wp.constant(wp.int32(3))
 
 
 # ---------------------------------------------------------------------------
@@ -284,69 +281,118 @@ _ITERATE_ROT_ITERS = wp.constant(wp.int32(15))
 # ---------------------------------------------------------------------------
 
 
+_APD_DETH_EPS = wp.constant(wp.float32(1.0e-9))
+
+
 @wp.func
 def _extract_rotation(F: wp.mat33f, q_init: wp.quatf, max_iters: wp.int32) -> wp.quatf:
-    """Closest-rotation quaternion from deformation gradient via
-    Mueller polar decomposition, warm-started from ``q_init``."""
+    """Closest-rotation quaternion via the Kugelstadt et al. 2018
+    analytical polar decomposition (Newton iteration with the full 3x3
+    Hessian + Cayley-map quaternion update), warm-started from
+    ``q_init``.
+
+    Reference: Kugelstadt, Bender & Müller-Fischer 2018 SCA
+    "Fast Corotated FEM Using Operator Splitting"; CPU reference at
+    https://github.com/InteractiveComputerGraphics/FastCorotatedFEM
+    (``FastCorotFEM.cpp::APD_Newton_AVX``).
+
+    Each step:
+
+        B = R^T F                              (R from quaternion)
+        gradient g = axial(B - B^T)
+        Hessian H = trace(B) I - 0.5 (B + B^T) (3x3 symmetric)
+        omega = -0.25 H^{-1} g                  (Newton step)
+        q <- q * cayley(omega)                  (no sqrt / sin / cos)
+
+    The Cayley map preserves unit length without an explicit
+    normalisation, and the full 3x3 inverse gives quadratic local
+    convergence -- typically 1-2 iterations from a warm start vs.
+    Mueller's >=15 with the scalar-denom approximation. If ``detH``
+    drops below ``_APD_DETH_EPS`` the step degenerates to gradient
+    descent (the reference's fallback).
+    """
     q = q_init
     for _ in range(max_iters):
-        qx = q[0]
-        qy = q[1]
-        qz = q[2]
-        qw = q[3]
-        d_ = qw * qx + qy * qz
-        f_ = qx * qx
-        g_ = qy * qy
-        j_ = wp.float32(1.0) - wp.float32(2.0) * (f_ + g_)
-        m_ = qz * qz
-        p_ = wp.float32(1.0) - wp.float32(2.0) * (f_ + m_)
-        s_ = qy * qz - qw * qx
-        w_ = qx * qz - qw * qy
-        bb = qw * qz + qx * qy
-        bl = wp.float32(1.0) - wp.float32(2.0) * (g_ + m_)
-        bn = qx * qy - qw * qz
-        bs = qw * qy + qx * qz
+        R = wp.quat_to_matrix(q)
+        # B = R^T F. Each component is a dot of an R column with an
+        # F column.
+        Rc0 = wp.vec3f(R[0, 0], R[1, 0], R[2, 0])
+        Rc1 = wp.vec3f(R[0, 1], R[1, 1], R[2, 1])
+        Rc2 = wp.vec3f(R[0, 2], R[1, 2], R[2, 2])
+        Fc0 = wp.vec3f(F[0, 0], F[1, 0], F[2, 0])
+        Fc1 = wp.vec3f(F[0, 1], F[1, 1], F[2, 1])
+        Fc2 = wp.vec3f(F[0, 2], F[1, 2], F[2, 2])
+        b00 = wp.dot(Rc0, Fc0)
+        b01 = wp.dot(Rc0, Fc1)
+        b02 = wp.dot(Rc0, Fc2)
+        b10 = wp.dot(Rc1, Fc0)
+        b11 = wp.dot(Rc1, Fc1)
+        b12 = wp.dot(Rc1, Fc2)
+        b20 = wp.dot(Rc2, Fc0)
+        b21 = wp.dot(Rc2, Fc1)
+        b22 = wp.dot(Rc2, Fc2)
 
-        F11 = F[0, 0]
-        F12 = F[0, 1]
-        F13 = F[0, 2]
-        F21 = F[1, 0]
-        F22 = F[1, 1]
-        F23 = F[1, 2]
-        F31 = F[2, 0]
-        F32 = F[2, 1]
-        F33 = F[2, 2]
+        # Axial part of B - B^T: g = (B[1,2]-B[2,1], B[2,0]-B[0,2], B[0,1]-B[1,0]).
+        # Sign convention matches the FastCorotatedFEM reference
+        # (``APD_Newton_AVX``); paired with the ``-0.25/detH`` factor
+        # below it gives the correct ascent direction on
+        # trace(R^T F).
+        g_x = b12 - b21
+        g_y = b20 - b02
+        g_z = b01 - b10
 
-        denom = (
-            wp.abs(
-                j_ * F33
-                + p_ * F22
-                + bl * F11
-                + wp.float32(2.0) * (bn * F12 + w_ * F31 + s_ * F23 + F13 * bs + F21 * bb + F32 * d_)
-            )
-            + _EXTRACT_ROT_EPS
+        # Symmetric 3x3 Hessian (Kugelstadt eq. 7).
+        h00 = b11 + b22
+        h11 = b00 + b22
+        h22 = b00 + b11
+        h01 = wp.float32(-0.5) * (b10 + b01)
+        h02 = wp.float32(-0.5) * (b20 + b02)
+        h12 = wp.float32(-0.5) * (b21 + b12)
+
+        det_h = (
+            -h02 * h02 * h11
+            + wp.float32(2.0) * h01 * h02 * h12
+            - h00 * h12 * h12
+            - h01 * h01 * h22
+            + h00 * h11 * h22
         )
-        cf = wp.float32(1.0) / denom
 
-        omega_x = (
-            -wp.float32(2.0) * F22 * d_ - j_ * F23 + p_ * F32 + wp.float32(2.0) * (s_ * F33 - w_ * F21 + F31 * bb)
-        ) * cf
-        omega_y = (
-            -wp.float32(2.0) * F33 * bs - bl * F31 + j_ * F13 + wp.float32(2.0) * (w_ * F11 - bn * F32 + F12 * d_)
-        ) * cf
-        omega_z = (
-            -wp.float32(2.0) * F11 * bb - p_ * F12 + bl * F21 + wp.float32(2.0) * (bn * F22 - s_ * F13 + F23 * bs)
-        ) * cf
+        if wp.abs(det_h) < _APD_DETH_EPS:
+            # Degenerate Hessian -- fall back to gradient descent.
+            omega_x = -g_x
+            omega_y = -g_y
+            omega_z = -g_z
+        else:
+            factor = wp.float32(-0.25) / det_h
+            # H^{-1} via cofactors. The 0.25 in factor folds the
+            # combined sign / scale from Kugelstadt's derivation.
+            omega_x = factor * (
+                (h11 * h22 - h12 * h12) * g_x
+                + (h02 * h12 - h01 * h22) * g_y
+                + (h01 * h12 - h02 * h11) * g_z
+            )
+            omega_y = factor * (
+                (h02 * h12 - h01 * h22) * g_x
+                + (h00 * h22 - h02 * h02) * g_y
+                + (h01 * h02 - h00 * h12) * g_z
+            )
+            omega_z = factor * (
+                (h01 * h12 - h02 * h11) * g_x
+                + (h01 * h02 - h00 * h12) * g_y
+                + (h00 * h11 - h01 * h01) * g_z
+            )
 
-        w_mag = wp.sqrt(omega_x * omega_x + omega_y * omega_y + omega_z * omega_z)
-        if w_mag < _EXTRACT_ROT_EPS:
+        l2 = omega_x * omega_x + omega_y * omega_y + omega_z * omega_z
+        if l2 < _EXTRACT_ROT_EPS * _EXTRACT_ROT_EPS:
             break
-        inv_w = wp.float32(1.0) / w_mag
-        half = wp.float32(0.5) * w_mag
-        sh = wp.sin(half)
-        ch = wp.cos(half)
-        tq = wp.quatf(omega_x * inv_w * sh, omega_y * inv_w * sh, omega_z * inv_w * sh, ch)
-        q = wp.normalize(tq * q)
+        # Cayley map: q_new = q * (omega.x * s, omega.y * s, omega.z * s, w)
+        # with w = (1 - l2)/(1 + l2), s = 2/(1 + l2). Produces a unit
+        # quaternion exactly (no normalise needed).
+        inv = wp.float32(1.0) / (wp.float32(1.0) + l2)
+        w_dq = (wp.float32(1.0) - l2) * inv
+        s_dq = wp.float32(2.0) * inv
+        dq = wp.quatf(omega_x * s_dq, omega_y * s_dq, omega_z * s_dq, w_dq)
+        q = q * dq
     return q
 
 
