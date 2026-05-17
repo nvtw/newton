@@ -60,8 +60,22 @@ from newton._src.solvers.phoenx.timer import print_column_timings
 # layout (already used by this example); soft-tetrahedron constraints
 # route through the slot-aware helpers and so coexist fine with mass
 # splitting.
+# Mass-splitting setup. With dense soft-tet meshes (15k tets sharing
+# ~7k particles via the voxel hex-to-tet decomposition) the contact
+# graph has high vertex-degree, and the greedy coloring with a moderate
+# colour cap spills ~50% of constraints into the sequential-batch
+# overflow bucket. Dropping the cap to ``0`` puts ALL soft-tet rows
+# into the overflow bucket -- which is mass-splitting's Jacobi-block
+# path, batched ``ms_batch_size`` cids per thread with
+# ``_average_and_broadcast`` between PGS iterations. On this scene
+# the pure-Jacobi path is *faster* than the Gauss-Seidel coloured
+# path because the GPU runs one big parallel block instead of
+# ``N_colors`` sequential dispatches, and the in-batch sequential
+# Gauss-Seidel of ``ms_batch_size=8`` (the default) still provides
+# enough intra-thread feedback for convergence. Tests pass with
+# ``=0``; raising it doesn't help (more launches, worse FPS).
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 0
 
 #: Opt-in per-column wall-clock profiling. When ``True`` the solver
 #: brackets every PGS dispatch with CUDA ``%globaltimer`` reads and
