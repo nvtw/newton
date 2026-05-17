@@ -268,6 +268,7 @@ class Example:
             # exploits; Luby-fixed produces more uniform sizes which keeps
             # the expensive head kernel busy longer. Greedy wins by ~50%
             # on the 7-cube/res=3 stack.
+            mass_splitting_batch_size=2,
             partitioner_algorithm="greedy",
             enable_column_timers=ENABLE_COLUMN_TIMERS,
             device=self.device,
