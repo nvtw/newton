@@ -259,7 +259,9 @@ class Example:
             substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,
             velocity_iterations=self.velocity_iterations,
-            rigid_contact_max=2 * 4096 * max(1, self.grid_x * self.grid_y),
+            # Scale contact buffer with cube_resolution^2 since soft-tet
+            # contacts roughly track the surface-triangle count per cube.
+            rigid_contact_max=2 * 1024 * self.cube_resolution * self.cube_resolution * max(1, self.grid_x * self.grid_y),
             step_layout="single_world",
             mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
@@ -280,7 +282,7 @@ class Example:
             self.model,
             soft_body_thickness=soft_body_thickness,
             soft_body_gap=soft_body_gap,
-            rigid_contact_max=4096 * max(1, self.grid_x * self.grid_y),
+            rigid_contact_max=1024 * self.cube_resolution * self.cube_resolution * max(1, self.grid_x * self.grid_y),
         )
         self.contacts = self.collision_pipeline.contacts()
 
@@ -399,7 +401,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cube-resolution",
         type=int,
-        default=3,
+        default=4,
         help="Voxels per cube side; each voxel becomes 5 tets (res=1 -> 5 tets/cube, res=3 -> 135 tets/cube).",
     )
     parser.add_argument("--base-drop-height", type=float, default=1.0)
