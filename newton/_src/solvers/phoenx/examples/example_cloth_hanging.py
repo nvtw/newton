@@ -35,6 +35,7 @@ from newton._src.solvers.phoenx.examples.example_common import (
     newton_to_phoenx_kernel,
     phoenx_to_newton_kernel,
 )
+from newton._src.solvers.phoenx.picking import Picking, register_with_viewer_gl
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 # Tonge mass splitting (C# PhoenX default). When ``True`` the
@@ -192,6 +193,23 @@ class Example:
         self.viewer.set_model(self.model)
         self.viewer.set_camera(pos=wp.vec3(6.0, 0.0, 4.0), pitch=-15.0, yaw=180.0)
 
+        # Picking. PhoenX bodies layout: slot 0 is the static world
+        # anchor (skip via zero half-extents), slot 1 is the cube.
+        # ``Picking.pick()`` raycasts every body with positive
+        # half-extents; the cube + (optionally) the cloth triangles are
+        # the only pickable targets in this scene.
+        half_extents_np = np.zeros((num_phoenx_bodies, 3), dtype=np.float32)
+        # Slot index = newton body index + 1 (slot 0 is the world anchor).
+        half_extents_np[self._cube_body + 1] = (cube_size, cube_size, cube_size)
+        self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
+        self.picking = Picking(
+            self.world,
+            self._half_extents,
+            model=self.model,
+            particles=self.world.particles,
+        )
+        register_with_viewer_gl(self.viewer, self.picking)
+
         self._capture()
 
     def _sync_newton_to_phoenx(self) -> None:
@@ -247,6 +265,12 @@ class Example:
         # Newton -> PhoenX (cube state may have been touched by the
         # outer host between frames).
         self._sync_newton_to_phoenx()
+        # Picking PD force/impulse: rigid path writes ``bodies.force``
+        # (consumed by the solver each substep), cloth path writes a
+        # velocity impulse directly to the 3 picked particles. Both
+        # kernels gate internally on ``pick_*[0] < 0`` so calling
+        # unconditionally keeps the graph-capture invariant.
+        self.picking.apply_force(dt=self.frame_dt)
         # Run the cloth-aware collision pipeline + solver step.
         self.world.collide(self.state, self.contacts)
         self.world.step(self.frame_dt, contacts=self.contacts)
