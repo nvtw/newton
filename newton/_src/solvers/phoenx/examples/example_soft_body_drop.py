@@ -130,6 +130,7 @@ class Example:
         # transfers from the C# experimental sim.
         self.sim_substeps = 5
         self.solver_iterations = 4
+        self.velocity_iterations = 0
 
         self.youngs_modulus = float(youngs_modulus)
         self.poisson_ratio = float(poisson_ratio)
@@ -243,6 +244,7 @@ class Example:
             num_worlds=1,
             substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,
+            velocity_iterations=self.velocity_iterations,
             rigid_contact_max=2 * 4096 * max(1, self.grid_x * self.grid_y),
             step_layout="single_world",
             mass_splitting=ENABLE_MASS_SPLITTING,

@@ -62,7 +62,9 @@ from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num
 from newton._src.solvers.phoenx.mass_splitting.access import (
     get_state_index,
     read_position_unified,
+    read_position_with_slot,
     set_access_mode_unified,
+    set_access_mode_with_slot,
     write_position_unified,
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
@@ -449,24 +451,25 @@ def soft_tetrahedron_prepare_for_iteration_at(
     p_c = body_c - num_bodies
     p_d = body_d - num_bodies
 
-    # Flip access mode (slot-aware).
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_b, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_c, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_d, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
+    # One slot lookup per vertex, reused for access-mode flip + position
+    # read + inverse-mass scaling below.
+    slot_a, inv_factor_a = get_state_index(copy_state, body_a, parallel_id)
+    slot_b, inv_factor_b = get_state_index(copy_state, body_b, parallel_id)
+    slot_c, inv_factor_c = get_state_index(copy_state, body_c, parallel_id)
+    slot_d, inv_factor_d = get_state_index(copy_state, body_d, parallel_id)
 
-    _slot_a, inv_factor_a = get_state_index(copy_state, body_a, parallel_id)
-    _slot_b, inv_factor_b = get_state_index(copy_state, body_b, parallel_id)
-    _slot_c, inv_factor_c = get_state_index(copy_state, body_c, parallel_id)
-    _slot_d, inv_factor_d = get_state_index(copy_state, body_d, parallel_id)
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_b, slot_b, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_c, slot_c, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_d, slot_d, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
 
     write_float(constraints, _OFF_INV_MASS_A, cid, particles.inverse_mass[p_a] * wp.float32(inv_factor_a))
     write_float(constraints, _OFF_INV_MASS_B, cid, particles.inverse_mass[p_b] * wp.float32(inv_factor_b))
@@ -477,10 +480,14 @@ def soft_tetrahedron_prepare_for_iteration_at(
     write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, wp.float32(0.0))
 
     # Cold-start polar decomposition against the substep-entry pose.
-    x_a, _ifa, _sa = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
-    x_b, _ifb, _sb = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
-    x_c, _ifc, _sc = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
-    x_d, _ifd, _sd = read_position_unified(bodies, particles, copy_state, body_d, parallel_id, num_bodies)
+    # The substep-entry refresh is correctness-load-bearing: skipping
+    # it (and relying on iterate's break-out) drifts the FP momentum
+    # accumulation by ~12% on the soft-body-mass-splitting momentum
+    # test even though break-out exits in 1-2 iters in practice.
+    x_a = read_position_with_slot(bodies, particles, copy_state, body_a, slot_a, num_bodies)
+    x_b = read_position_with_slot(bodies, particles, copy_state, body_b, slot_b, num_bodies)
+    x_c = read_position_with_slot(bodies, particles, copy_state, body_c, slot_c, num_bodies)
+    x_d = read_position_with_slot(bodies, particles, copy_state, body_d, slot_d, num_bodies)
     inv_rest = read_mat33(constraints, _OFF_INV_REST, cid)
     F = _compute_F(x_a, x_b, x_c, x_d, inv_rest)
     rotation = read_quat(constraints, _OFF_ROTATION, cid)
@@ -527,18 +534,26 @@ def soft_tetrahedron_iterate_at(
     p_c = body_c - num_bodies
     p_d = body_d - num_bodies
 
-    # Slot-aware access-mode flip on each vertex.
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    # One slot lookup per vertex, reused below for access-mode flip,
+    # position read, and position write. Saves ``set_access_mode_unified``
+    # + ``read_position_unified``'s redundant :func:`get_state_index` walk
+    # (~4 array loads each) on the iterate hot path.
+    slot_a, _ifa = get_state_index(copy_state, body_a, parallel_id)
+    slot_b, _ifb = get_state_index(copy_state, body_b, parallel_id)
+    slot_c, _ifc = get_state_index(copy_state, body_c, parallel_id)
+    slot_d, _ifd = get_state_index(copy_state, body_d, parallel_id)
+
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_b, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_b, slot_b, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_c, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_c, slot_c, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_d, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_d, slot_d, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
 
     inv_mass_a = read_float(constraints, _OFF_INV_MASS_A, cid)
@@ -552,10 +567,10 @@ def soft_tetrahedron_iterate_at(
     rotation = read_quat(constraints, _OFF_ROTATION, cid)
     lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
 
-    x_a, _ifa, slot_a = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
-    x_b, _ifb, slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
-    x_c, _ifc, slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
-    x_d, _ifd, slot_d = read_position_unified(bodies, particles, copy_state, body_d, parallel_id, num_bodies)
+    x_a = read_position_with_slot(bodies, particles, copy_state, body_a, slot_a, num_bodies)
+    x_b = read_position_with_slot(bodies, particles, copy_state, body_b, slot_b, num_bodies)
+    x_c = read_position_with_slot(bodies, particles, copy_state, body_c, slot_c, num_bodies)
+    x_d = read_position_with_slot(bodies, particles, copy_state, body_d, slot_d, num_bodies)
 
     # XPBD damping anchor (Macklin et al. 2020): velocity-projected
     # damping via ``gamma * grad . (x - position_prev_substep)``;

@@ -1624,7 +1624,12 @@ def _singleworld_color_range_from_cursor(
 
 @functools.cache
 def _make_singleworld_persistent_kernel(
-    *, phase: str, revolute_only: bool, cloth_support: bool, enable_column_timers: bool = False
+    *,
+    phase: str,
+    revolute_only: bool,
+    cloth_support: bool,
+    enable_column_timers: bool = False,
+    soft_tet_only: bool = False,
 ):
     """Persistent-grid PGS kernel for the requested phase + specialisation.
 
@@ -1632,6 +1637,13 @@ def _make_singleworld_persistent_kernel(
     to the matching ``@wp.func`` -- joint, cloth-triangle, or contact.
     The cloth branch is gated by the compile-time ``cloth_support``
     flag so rigid-only scenes get a binary with no cloth code at all.
+
+    ``soft_tet_only=True`` skips the ctype dispatch tree: when the
+    ConstraintContainer only ever holds soft-tetrahedron rows (no
+    joints, no cloth triangles, no cloth bending), every non-contact
+    cid is by construction a soft-tet. Eliminates one dword load
+    (constraint type) and the cloth_tri / cloth_bend / joint
+    fallback branches from the iterate / prepare / relax hot path.
 
     ``enable_column_timers`` is a static axis: when True, each per-cid
     dispatch is bracketed with ``%globaltimer`` reads and the elapsed
@@ -1797,92 +1809,110 @@ def _make_singleworld_persistent_kernel(
                     if wp.static(enable_column_timers):
                         contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                 if not dispatched:
-                    ctype = constraint_get_type(constraints, cid)
-                    if wp.static(cloth_support):
-                        if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
-                            if wp.static(is_prepare):
-                                cloth_triangle_prepare_for_iteration_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                )
-                            else:
-                                cloth_triangle_iterate_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
-                                )
-                            dispatched = True
-                            if wp.static(enable_column_timers):
-                                constraint_accumulate_time_us(
-                                    constraints, CLOTH_TRIANGLE_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
-                                )
-                        elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
-                            if wp.static(is_prepare):
-                                soft_tetrahedron_prepare_for_iteration_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                )
-                            else:
-                                soft_tetrahedron_iterate_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
-                                )
-                            dispatched = True
-                            if wp.static(enable_column_timers):
-                                constraint_accumulate_time_us(
-                                    constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
-                                )
-                        elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
-                            if wp.static(is_prepare):
-                                cloth_bending_prepare_for_iteration_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                )
-                            else:
-                                cloth_bending_iterate_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
-                                )
-                            dispatched = True
-                            if wp.static(enable_column_timers):
-                                constraint_accumulate_time_us(
-                                    constraints, CLOTH_BENDING_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
-                                )
-                if not dispatched:
-                    # Joint (ADBS or revolute specialisation).
-                    if wp.static(is_prepare):
-                        if wp.static(revolute_only):
-                            revolute_prepare_for_iteration(
+                    if wp.static(soft_tet_only):
+                        # Specialised path: ConstraintContainer only holds soft-tets
+                        # (no joints / cloth-tri / cloth-bend rows), so the ctype
+                        # read + 3-way compare is dead code. cid here is by
+                        # construction a soft-tet.
+                        if wp.static(is_prepare):
+                            soft_tetrahedron_prepare_for_iteration_at(
                                 constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
                             )
                         else:
-                            actuated_double_ball_socket_prepare_for_iteration(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                            soft_tetrahedron_iterate_at(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                            )
+                        if wp.static(enable_column_timers):
+                            constraint_accumulate_time_us(
+                                constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
                             )
                     else:
-                        if wp.static(revolute_only):
-                            revolute_iterate(
-                                constraints,
-                                cid,
-                                bodies,
-                                particles,
-                                copy_state,
-                                num_bodies,
-                                parallel_id,
-                                idt,
-                                sor_boost,
-                                use_bias,
-                            )
-                        else:
-                            actuated_double_ball_socket_iterate(
-                                constraints,
-                                cid,
-                                bodies,
-                                particles,
-                                copy_state,
-                                num_bodies,
-                                parallel_id,
-                                idt,
-                                sor_boost,
-                                use_bias,
-                            )
-                    if wp.static(enable_column_timers):
-                        constraint_accumulate_time_us(
-                            constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
-                        )
+                        ctype = constraint_get_type(constraints, cid)
+                        if wp.static(cloth_support):
+                            if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
+                                if wp.static(is_prepare):
+                                    cloth_triangle_prepare_for_iteration_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    cloth_triangle_iterate_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                    )
+                                dispatched = True
+                                if wp.static(enable_column_timers):
+                                    constraint_accumulate_time_us(
+                                        constraints, CLOTH_TRIANGLE_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                    )
+                            elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
+                                if wp.static(is_prepare):
+                                    soft_tetrahedron_prepare_for_iteration_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    soft_tetrahedron_iterate_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                    )
+                                dispatched = True
+                                if wp.static(enable_column_timers):
+                                    constraint_accumulate_time_us(
+                                        constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                    )
+                            elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
+                                if wp.static(is_prepare):
+                                    cloth_bending_prepare_for_iteration_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    cloth_bending_iterate_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                    )
+                                dispatched = True
+                                if wp.static(enable_column_timers):
+                                    constraint_accumulate_time_us(
+                                        constraints, CLOTH_BENDING_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                    )
+                        if not dispatched:
+                            # Joint (ADBS or revolute specialisation).
+                            if wp.static(is_prepare):
+                                if wp.static(revolute_only):
+                                    revolute_prepare_for_iteration(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    actuated_double_ball_socket_prepare_for_iteration(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                            else:
+                                if wp.static(revolute_only):
+                                    revolute_iterate(
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        sor_boost,
+                                        use_bias,
+                                    )
+                                else:
+                                    actuated_double_ball_socket_iterate(
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        sor_boost,
+                                        use_bias,
+                                    )
+                            if wp.static(enable_column_timers):
+                                constraint_accumulate_time_us(
+                                    constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                )
 
         if tid == 0:
             color_cursor[0] = cursor - 1
@@ -1892,7 +1922,12 @@ def _make_singleworld_persistent_kernel(
 
 @functools.cache
 def _make_singleworld_fused_kernel(
-    *, phase: str, revolute_only: bool, cloth_support: bool, enable_column_timers: bool = False
+    *,
+    phase: str,
+    revolute_only: bool,
+    cloth_support: bool,
+    enable_column_timers: bool = False,
+    soft_tet_only: bool = False,
 ):
     """Single-block tail-fused PGS kernel; same axes as
     :func:`_make_singleworld_persistent_kernel`."""
@@ -2031,92 +2066,106 @@ def _make_singleworld_fused_kernel(
                         if wp.static(enable_column_timers):
                             contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                     else:
-                        ctype = constraint_get_type(constraints, cid)
-                        dispatched = False
-                        if wp.static(cloth_support):
-                            if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
-                                if wp.static(is_prepare):
-                                    cloth_triangle_prepare_for_iteration_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                    )
-                                else:
-                                    cloth_triangle_iterate_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
-                                    )
-                                dispatched = True
-                                if wp.static(enable_column_timers):
-                                    constraint_accumulate_time_us(
-                                        constraints, CLOTH_TRIANGLE_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
-                                    )
-                            elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
-                                if wp.static(is_prepare):
-                                    soft_tetrahedron_prepare_for_iteration_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                    )
-                                else:
-                                    soft_tetrahedron_iterate_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
-                                    )
-                                dispatched = True
-                                if wp.static(enable_column_timers):
-                                    constraint_accumulate_time_us(
-                                        constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
-                                    )
-                            elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
-                                if wp.static(is_prepare):
-                                    cloth_bending_prepare_for_iteration_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                    )
-                                else:
-                                    cloth_bending_iterate_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
-                                    )
-                                dispatched = True
-                                if wp.static(enable_column_timers):
-                                    constraint_accumulate_time_us(
-                                        constraints, CLOTH_BENDING_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
-                                    )
-                        if not dispatched:
+                        if wp.static(soft_tet_only):
                             if wp.static(is_prepare):
-                                if wp.static(revolute_only):
-                                    revolute_prepare_for_iteration(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                    )
-                                else:
-                                    actuated_double_ball_socket_prepare_for_iteration(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                                    )
+                                soft_tetrahedron_prepare_for_iteration_at(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
                             else:
-                                if wp.static(revolute_only):
-                                    revolute_iterate(
-                                        constraints,
-                                        cid,
-                                        bodies,
-                                        particles,
-                                        copy_state,
-                                        num_bodies,
-                                        parallel_id,
-                                        idt,
-                                        sor_boost,
-                                        use_bias,
-                                    )
-                                else:
-                                    actuated_double_ball_socket_iterate(
-                                        constraints,
-                                        cid,
-                                        bodies,
-                                        particles,
-                                        copy_state,
-                                        num_bodies,
-                                        parallel_id,
-                                        idt,
-                                        sor_boost,
-                                        use_bias,
-                                    )
+                                soft_tetrahedron_iterate_at(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                )
                             if wp.static(enable_column_timers):
                                 constraint_accumulate_time_us(
-                                    constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                    constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
                                 )
+                        else:
+                            ctype = constraint_get_type(constraints, cid)
+                            dispatched = False
+                            if wp.static(cloth_support):
+                                if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
+                                    if wp.static(is_prepare):
+                                        cloth_triangle_prepare_for_iteration_at(
+                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                        )
+                                    else:
+                                        cloth_triangle_iterate_at(
+                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                        )
+                                    dispatched = True
+                                    if wp.static(enable_column_timers):
+                                        constraint_accumulate_time_us(
+                                            constraints, CLOTH_TRIANGLE_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                        )
+                                elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
+                                    if wp.static(is_prepare):
+                                        soft_tetrahedron_prepare_for_iteration_at(
+                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                        )
+                                    else:
+                                        soft_tetrahedron_iterate_at(
+                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                        )
+                                    dispatched = True
+                                    if wp.static(enable_column_timers):
+                                        constraint_accumulate_time_us(
+                                            constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                        )
+                                elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
+                                    if wp.static(is_prepare):
+                                        cloth_bending_prepare_for_iteration_at(
+                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                        )
+                                    else:
+                                        cloth_bending_iterate_at(
+                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                        )
+                                    dispatched = True
+                                    if wp.static(enable_column_timers):
+                                        constraint_accumulate_time_us(
+                                            constraints, CLOTH_BENDING_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                        )
+                            if not dispatched:
+                                if wp.static(is_prepare):
+                                    if wp.static(revolute_only):
+                                        revolute_prepare_for_iteration(
+                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                        )
+                                    else:
+                                        actuated_double_ball_socket_prepare_for_iteration(
+                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                        )
+                                else:
+                                    if wp.static(revolute_only):
+                                        revolute_iterate(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                            sor_boost,
+                                            use_bias,
+                                        )
+                                    else:
+                                        actuated_double_ball_socket_iterate(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                            sor_boost,
+                                            use_bias,
+                                        )
+                                if wp.static(enable_column_timers):
+                                    constraint_accumulate_time_us(
+                                        constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                    )
             _sync_threads()
             cursor = cursor - 1
         if lane == 0:
@@ -2126,7 +2175,13 @@ def _make_singleworld_fused_kernel(
 
 
 def get_singleworld_kernel(
-    *, phase: str, fused: bool, revolute_only: bool, cloth_support: bool, enable_column_timers: bool = False
+    *,
+    phase: str,
+    fused: bool,
+    revolute_only: bool,
+    cloth_support: bool,
+    enable_column_timers: bool = False,
+    soft_tet_only: bool = False,
 ):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
@@ -2136,4 +2191,5 @@ def get_singleworld_kernel(
         revolute_only=revolute_only,
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
+        soft_tet_only=soft_tet_only,
     )

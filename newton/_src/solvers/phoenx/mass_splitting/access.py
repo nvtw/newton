@@ -38,8 +38,10 @@ __all__ = [
     "read_angular_velocity_unified",
     "read_orientation_unified",
     "read_position_unified",
+    "read_position_with_slot",
     "read_velocity_unified",
     "set_access_mode_unified",
+    "set_access_mode_with_slot",
     "slot_synchronize_to_velocity_level",
     "write_angular_velocity_unified",
     "write_orientation_unified",
@@ -181,6 +183,86 @@ def read_angular_velocity_with_slot(
     if slot < wp.int32(0):
         return bodies.angular_velocity[node_id]
     return copy_state.angular_velocity[slot]
+
+
+@wp.func
+def read_position_with_slot(
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    node_id: wp.int32,
+    slot: wp.int32,
+    num_bodies: wp.int32,
+) -> wp.vec3f:
+    """Read position using a precomputed slot. Companion to
+    :func:`get_state_index` so callers can do one slot lookup per
+    node and reuse it for the access-mode flip + read + write."""
+    if slot < wp.int32(0):
+        if node_id < num_bodies:
+            return bodies.position[node_id]
+        return particles.position[node_id - num_bodies]
+    return copy_state.position[slot]
+
+
+@wp.func
+def set_access_mode_with_slot(
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    node_id: wp.int32,
+    slot: wp.int32,
+    num_bodies: wp.int32,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Slot-aware access-mode flip given a precomputed slot. Identical
+    semantics to :func:`set_access_mode_unified` minus the redundant
+    :func:`get_state_index` call. ``slot < 0`` falls through to the
+    direct body / particle helper.
+    """
+    if slot < wp.int32(0):
+        if node_id < num_bodies:
+            body_set_access_mode(bodies, node_id, new_access_mode, inv_dt)
+        else:
+            particle_set_access_mode(particles, node_id - num_bodies, new_access_mode, inv_dt)
+        return
+
+    current = copy_state.access_mode[slot]
+    if current == new_access_mode:
+        return
+    if node_id < num_bodies:
+        pos_prev = bodies.position_prev_substep[node_id]
+        orient_prev = bodies.orientation_prev_substep[node_id]
+        pos_new, orient_new, vel_new, omega_new, mode_new = synchronize_pose_velocity(
+            copy_state.position[slot],
+            copy_state.orientation[slot],
+            copy_state.velocity[slot],
+            copy_state.angular_velocity[slot],
+            pos_prev,
+            orient_prev,
+            current,
+            new_access_mode,
+            inv_dt,
+        )
+        copy_state.position[slot] = pos_new
+        copy_state.orientation[slot] = orient_new
+        copy_state.velocity[slot] = vel_new
+        copy_state.angular_velocity[slot] = omega_new
+        copy_state.access_mode[slot] = mode_new
+    else:
+        p = node_id - num_bodies
+        pos_prev = particles.position_prev_substep[p]
+        pos_new, vel_new, mode_new = synchronize_position_velocity(
+            copy_state.position[slot],
+            copy_state.velocity[slot],
+            pos_prev,
+            current,
+            new_access_mode,
+            inv_dt,
+        )
+        copy_state.position[slot] = pos_new
+        copy_state.velocity[slot] = vel_new
+        copy_state.access_mode[slot] = mode_new
 
 
 @wp.func

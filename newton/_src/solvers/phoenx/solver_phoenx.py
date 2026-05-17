@@ -2385,10 +2385,21 @@ class PhoenXWorld:
         """
         cloth_on = self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0 or self.num_cloth_bending > 0
         revolute_only = bool(self._use_revolute_specialization)
+        # Soft-tet-only: the ConstraintContainer only holds soft-tetrahedron
+        # rows (no joints, no cloth triangles, no cloth bending). Lets the
+        # persistent kernel skip the per-cid type-tag read + 3-way ctype
+        # compare in the iterate / prepare / relax hot path.
+        soft_tet_only = (
+            self.num_soft_tetrahedra > 0
+            and self.num_joints == 0
+            and self.num_cloth_triangles == 0
+            and self.num_cloth_bending == 0
+        )
         kw = {
             "revolute_only": revolute_only,
             "cloth_support": cloth_on,
             "enable_column_timers": self.enable_column_timers,
+            "soft_tet_only": soft_tet_only,
         }
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),
