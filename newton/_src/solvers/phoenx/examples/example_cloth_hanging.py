@@ -100,7 +100,10 @@ class Example:
         )
         builder.add_shape_box(self._cube_body, hx=cube_size, hy=cube_size, hz=cube_size)
 
-        # Hanging cloth pinned along the left edge.
+        # Hanging cloth pinned along the left edge. ``edge_ke`` sets
+        # the per-hinge bending stiffness (in N·m/rad) consumed by the
+        # PhoenX dihedral-angle bending constraint below; ``edge_kd``
+        # is reserved for damping (currently unused by the iterate).
         builder.add_cloth_grid(
             pos=wp.vec3(0.0, 0.0, 4.0),
             rot=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), wp.pi * 0.5),
@@ -113,6 +116,7 @@ class Example:
             fix_left=True,
             tri_ke=self.tri_ke,
             tri_ka=self.tri_ka,
+            edge_ke=1.0e-2,
             particle_radius=0.04,
         )
 
@@ -161,6 +165,7 @@ class Example:
         constraints = PhoenXWorld.make_constraint_container(
             num_joints=0,
             num_cloth_triangles=int(self.model.tri_count),
+            num_cloth_bending=int(self.model.edge_count),
             device=self.device,
         )
         self.world = PhoenXWorld(
@@ -169,6 +174,7 @@ class Example:
             num_joints=0,
             num_particles=int(self.model.particle_count),
             num_cloth_triangles=int(self.model.tri_count),
+            num_cloth_bending=int(self.model.edge_count),
             num_worlds=1,
             substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,
@@ -180,6 +186,11 @@ class Example:
         )
         self.world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
         self.world.populate_cloth_triangles_from_model(self.model)
+        # Bending hinges: one PhysX-style dihedral-angle constraint per
+        # interior edge of the cloth grid. Without these the strip
+        # crumples freely; with the small ``edge_ke`` set above the
+        # cloth keeps a soft natural curvature as it hangs.
+        self.world.populate_cloth_bending_from_model(self.model)
         self.collision_pipeline = self.world.setup_cloth_collision_pipeline(
             self.model,
             cloth_thickness=cloth_thickness,

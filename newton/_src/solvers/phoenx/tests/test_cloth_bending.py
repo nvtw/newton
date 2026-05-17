@@ -1,17 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Smoke tests for the Bergou/Wardetzky cloth bending constraint.
+"""Smoke tests for the PhysX-style dihedral-angle cloth bending
+constraint.
 
 Build a small cloth grid that produces interior bending edges, run a
-few frames with HIGH bending stiffness, and verify:
+few frames, and verify:
 
 * The constraint kernel compiles + runs under captured graph.
-* High stiffness keeps the cloth nearly flat over many frames
-  (within ~10% deviation), demonstrating one-iteration convergence
-  with no singularities.
-* Cotangent weights at rest satisfy ``sum(K_i) = 0`` (translation
-  invariance).
+* High stiffness keeps the cloth nearer its rest plane than a soft
+  stiffness does (the dihedral hinge resists fold-out from flat).
+
+The constraint is the PhysX
+``bendingEnergySolvePerTrianglePair`` formulation (see
+:mod:`newton._src.solvers.phoenx.constraints.constraint_cloth_bending`):
+``C = clamp(atan2(sinθ, cosθ) - θ_rest, -π/2, π/2)`` with the
+standard dihedral per-vertex gradients. Rest angles come from
+``model.edge_rest_angle`` (0 for the flat cloth grid built here),
+stiffness from ``model.edge_bending_properties[t, 0]`` (= ``edge_ke``).
 
 CUDA-only.
 """
@@ -96,9 +102,9 @@ class TestClothBending(unittest.TestCase):
 
     def test_high_stiffness_resists_deformation(self):
         # With very high bending stiffness, the cloth should stay
-        # near-flat (no folding) even under gravity. The linear Bergou
-        # constraint converges at infinite stiffness in one XPBD
-        # iteration.
+        # near-flat (no folding) even under gravity. The dihedral-angle
+        # constraint pulls every hinge back toward its rest angle (0
+        # for the flat cloth grid here).
         device = wp.get_preferred_device()
         world_soft, model_soft, _ = self._build_cloth(bending_stiffness=0.01)
         world_stiff, model_stiff, _ = self._build_cloth(bending_stiffness=1.0e6)

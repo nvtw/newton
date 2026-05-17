@@ -1186,7 +1186,7 @@ class PhoenXWorld:
                 wp.int32(self._cloth_bending_offset),
                 wp.int32(self.num_bodies),
                 model.edge_indices,
-                model.particle_q,
+                model.edge_rest_angle,
                 model.edge_bending_properties,
                 wp.float32(1.0e-6),  # alpha floor
             ],
