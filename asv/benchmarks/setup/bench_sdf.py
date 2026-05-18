@@ -174,25 +174,29 @@ class FastBuildSdf:
             # Matches the ``skip_benchmark_if`` guard on ``time_build_sdf``.
             return
 
-        self._vertices, self._indices = _create_icosphere(radius=0.5, subdivisions=_SPHERE_SUBDIVISIONS)
+        vertices, indices = _create_icosphere(radius=0.5, subdivisions=_SPHERE_SUBDIVISIONS)
+
+        # Build the Newton mesh (and its BVH) once in setup so the timed
+        # call measures only the SDF cook -- not mesh construction or BVH
+        # rebuilds.
+        self._mesh = newton.Mesh(vertices, indices, compute_inertia=False)
 
         # Extended warmup: multiple builds push the GPU into a sustained
         # boost-clock state, not just compile kernels.
         for _ in range(_WARMUP_BUILDS):
-            warm_mesh = newton.Mesh(self._vertices, self._indices, compute_inertia=False)
-            warm_sdf = _build_sdf(warm_mesh, max_resolution=max_resolution)
-            del warm_sdf
-            del warm_mesh
+            self._mesh.clear_sdf()
+            _build_sdf(self._mesh, max_resolution=max_resolution)
+        self._mesh.clear_sdf()
         wp.synchronize_device()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_build_sdf(self, max_resolution):
         for _ in range(_BUILDS_PER_SAMPLE[max_resolution]):
-            mesh = newton.Mesh(self._vertices, self._indices, compute_inertia=False)
-            sdf = _build_sdf(mesh, max_resolution=max_resolution)
-            # Release immediately so peak GPU memory stays bounded.
-            del sdf
-            del mesh
+            _build_sdf(self._mesh, max_resolution=max_resolution)
+            # Release the SDF before the next iteration: ``build_sdf``
+            # raises if the mesh already has one attached, and we want
+            # each timed call to start from the same state.
+            self._mesh.clear_sdf()
         wp.synchronize_device()
 
 

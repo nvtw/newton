@@ -6,12 +6,12 @@
 
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
 - Add `ViewerGL.show_loading_splash()` / `ViewerGL.hide_loading_splash()` displaying a stylized Newton's-cradle overlay while the GL viewer waits on Warp kernel compilation; raised automatically by `newton.examples.init()` for visible GL viewers
-- Add edge-simplification options to `Mesh.build_sdf()` (`edge_lower_angle_threshold_rad` defaulting to 0.1 deg, `edge_upper_angle_threshold_rad`, opt-in `edge_box_absorption`, and mutually exclusive absolute / relative box half-extents `edge_box_half_{normal,lateral}` and `edge_box_half_{normal,lateral}_rel`) that drop near-coplanar internal edges (and optionally manifold edges absorbed by another edge's oriented box) from the precomputed mesh-edge set used by SDF-mesh contact generation; boundary and non-manifold edges are always kept, the simplified edge set is cached on the `Mesh` and consumed by `ModelBuilder.finalize()`
+- Add edge-simplification options to `Mesh.build_sdf()` that drop near-coplanar internal edges from the mesh-edge set used by SDF-mesh contact generation: `edge_lower_angle_threshold_rad` (default 0.1°), `edge_upper_angle_threshold_rad`, opt-in `edge_box_absorption`, and box half-extent controls `edge_box_half_{normal,lateral}` / `edge_box_half_{normal,lateral}_rel`
 
 ### Changed
 
 - Remove the `cbor2` `<6` dependency ceiling after updating recorder deserialization to accept mapping-like decoded containers
-- Switch the SDF-mesh narrow phase to hardware-filtered SDF texture sampling with centred-difference gradients and an adaptive Brent edge search that exits once parametric tolerance reaches half the configured contact gap. Hydroelastic SDF sampling is unchanged. Resulting contact distances and normals shift well below typical `contact_threshold` and `shape_margin` settings
+- Switch the SDF-mesh narrow phase to hardware-filtered SDF texture sampling with centred-difference gradients and an adaptive Brent edge search that exits once parametric tolerance reaches half the configured contact gap. Hydroelastic SDF sampling is unchanged. Resulting contact distances and normals shift well below typical `contact_threshold` and `shape_margin` settings, so no user action is required; pass `edge_lower_angle_threshold_rad=-1.0` to `Mesh.build_sdf()` to also skip the new edge-simplification pass and recover the previous full edge set
 
 ### Fixed
 
