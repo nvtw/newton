@@ -63,6 +63,26 @@ def _make_two_separated_boxes(*, gap: float = 5.0, box_z: float = 0.5) -> newton
     return mb.finalize()
 
 
+def _make_box_stack(*, n_layers: int = 4, box_half: float = 0.1) -> newton.Model:
+    """Vertical stack of ``n_layers`` cubes on a ground plane."""
+    mb = newton.ModelBuilder()
+    mb.add_ground_plane()
+    for i in range(n_layers):
+        z = box_half + i * (2.0 * box_half + 1e-3)
+        body = mb.add_body(
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, z), q=wp.quat_identity()),
+        )
+        mb.add_shape_box(
+            body,
+            hx=box_half,
+            hy=box_half,
+            hz=box_half,
+            cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.6),
+        )
+    mb.gravity = -GRAVITY
+    return mb.finalize()
+
+
 def _run_frames(solver, state_0, state_1, control, contacts, model, n: int, dt: float):
     for _ in range(n):
         state_0.clear_forces()
@@ -279,6 +299,89 @@ class TestSleepingPipeline(unittest.TestCase):
             0,
             msg="external force via state.body_f must wake the sleeping island",
         )
+
+    def test_external_force_wakes_full_stack_via_pre_collide_pass(self) -> None:
+        """A force on a *single* body in a sleeping stack must wake every
+        body in that stack on the wake frame, with the stack's contacts
+        still in place so the substep solve has something to lean on.
+
+        Without :meth:`PhoenXWorld.wake_on_external_input` running before
+        ``model.collide()``, the broad-phase sleeping filter drops every
+        plank-vs-plank and plank-vs-ground pair on the wake frame --
+        the picked body free-accelerates against an empty stack and
+        the column collapses. With the pre-collide wake pass driven by
+        a last-awake ``set_nr`` snapshot, the whole island wakes
+        synchronously and the broad phase keeps every contact.
+        """
+        threshold = 0.05
+        model = _make_box_stack(n_layers=4)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=8,
+            solver_iterations=16,
+            sleeping_velocity_threshold=threshold,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        dt = 1.0 / 60.0
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=180, dt=dt)
+        is_sleeping_before = solver.world.bodies.is_sleeping.numpy()
+        # Slot 0 = anchor, slots 1..N = stack from bottom up.
+        self.assertTrue(
+            all(int(is_sleeping_before[s]) == 1 for s in range(1, 5)),
+            msg=f"stack did not fully sleep before pick; flags={is_sleeping_before.tolist()}",
+        )
+
+        z_before = state_0.body_q.numpy()[:, 2].copy()
+
+        # Apply a sideways pull to the BOTTOM stack body via the
+        # public Newton wrench path. body_f layout is (force_xyz,
+        # torque_xyz); index 0 is force_x. The 30 N pull on a 0.008
+        # m^3 cube (mass ~8 kg) gives dv = 30/8/60 ~= 0.063 m/s,
+        # comfortably above threshold 0.05.
+        body_f = np.zeros((4, 6), dtype=np.float32)
+        body_f[0, 0] = 30.0
+        state_0.body_f.assign(body_f)
+
+        # Drive the pre-collide wake pass: import body_f into PhoenX's
+        # force accumulators, then propagate the wake through the
+        # last-awake island snapshot. After this call ``is_sleeping``
+        # is cleared for every body that shared a stack island with
+        # the bottom box, so the broad phase below keeps every
+        # contact pair instead of filtering them out.
+        solver.wake_on_external_input(state_0)
+
+        # Run one frame manually (skip the default ``clear_forces``
+        # so ``state.body_f`` survives into the substep solve).
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, dt)
+
+        is_sleeping_after = solver.world.bodies.is_sleeping.numpy()
+        for s in range(1, 5):
+            self.assertEqual(
+                int(is_sleeping_after[s]),
+                0,
+                msg=(f"body slot {s} should have woken with the rest of the stack; flags={is_sleeping_after.tolist()}"),
+            )
+
+        # Stack must not collapse: every body's z must stay within a
+        # few millimetres of where it was. Without the wake pass the
+        # top boxes would drop visibly through their neighbours since
+        # the broad-phase filter had dropped every supporting contact.
+        z_after = state_1.body_q.numpy()[:, 2]
+        for i in range(4):
+            self.assertLess(
+                abs(float(z_after[i] - z_before[i])),
+                0.01,
+                msg=(
+                    f"stack body {i} drifted from z={z_before[i]:.4f} to "
+                    f"z={z_after[i]:.4f} on the wake frame -- contacts must "
+                    "have been missing"
+                ),
+            )
 
     def test_hysteresis_counter_ticks_then_sleeps(self) -> None:
         """A body settling on the floor must not flip ``is_sleeping`` until

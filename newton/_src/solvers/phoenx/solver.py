@@ -736,6 +736,34 @@ class SolverPhoenX(SolverBase):
                 device=self.device,
             )
 
+    def wake_on_external_input(self, state_in: State) -> None:
+        """Wake every sleeping island whose bodies carry an external
+        force or torque set in ``state_in.body_f``, *before* the host
+        calls ``model.collide(...)``.
+
+        The per-step sleeping pass inside :meth:`step` cannot drive
+        broad-phase decisions on the wake frame: by the time it lifts
+        ``is_sleeping`` for a body that picking just pushed, the
+        sleep-aware broad-phase filter has already dropped that body's
+        contact pairs and the substep solve sees an empty stack. Call
+        sequence on the host side::
+
+            state.body_f.assign(...)  # picking / wrenches
+            solver.wake_on_external_input(state)  # propagate wake
+            model.collide(state, contacts)  # broad-phase keeps pairs
+            solver.step(state, state_out, ...)
+
+        Imports ``state_in.body_f`` into PhoenX's force accumulators
+        first so the wake pass reads the user-applied wrench rather
+        than the post-clear zeroes that :meth:`step` would otherwise
+        re-load it from. A no-op when the sleeping pipeline is
+        disabled.
+        """
+        if not self._sleeping_enabled:
+            return
+        self._import_body_state(state_in)
+        self.world.wake_on_external_input()
+
     def step(
         self,
         state_in: State,

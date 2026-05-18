@@ -120,10 +120,13 @@ __all__ = [
     "_per_world_jp_coloring_kernel",
     "_phoenx_apply_forces_and_gravity_kernel",
     "_phoenx_apply_global_damping_kernel",
+    "_phoenx_apply_island_wake_kernel",
+    "_phoenx_capture_last_awake_island_kernel",
     "_phoenx_collapse_sleeping_elements_kernel",
     "_phoenx_copy_elements_to_int2d_kernel",
     "_phoenx_finalize_body_aabb_diagonal_kernel",
     "_phoenx_init_body_aabb_kernel",
+    "_phoenx_island_fanin_external_input_kernel",
     "_phoenx_island_max_velocity_kernel",
     "_phoenx_mark_sleeping_islands_kernel",
     "_phoenx_propagate_sleep_to_bodies_kernel",
@@ -1817,6 +1820,93 @@ def _phoenx_propagate_sleep_to_bodies_kernel(
     if c >= sleeping_frames_required:
         bodies.is_sleeping[b] = wp.int32(1)
     else:
+        bodies.is_sleeping[b] = wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_capture_last_awake_island_kernel(
+    bodies: BodyContainer,
+    set_nr: wp.array[wp.int32],
+    # out: per-body snapshot of ``set_nr`` taken while the body was
+    # still awake. Sleeping bodies skip the write so the value frozen
+    # at the moment they last had real contacts (typically the full
+    # stack island) survives across frames where the broad-phase
+    # filter collapses every interaction.
+    last_awake_set_nr: wp.array[wp.int32],
+):
+    """Persist the last-awake island id per body so
+    :meth:`PhoenXWorld.wake_on_external_input` can propagate a wake
+    through the original stack even after many frames of sleeping
+    have decayed ``set_nr`` to per-body singletons.
+    """
+    b = wp.tid()
+    if bodies.motion_type[b] != MOTION_DYNAMIC:
+        return
+    if bodies.is_sleeping[b] != wp.int32(0):
+        return
+    nr = set_nr[b]
+    if nr < 0:
+        return
+    last_awake_set_nr[b] = nr
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_island_fanin_external_input_kernel(
+    bodies: BodyContainer,
+    island_of_body: wp.array[wp.int32],
+    # inout: per-island flag (atomic-OR via atomic_max with value 1)
+    island_has_external: wp.array[wp.int32],
+):
+    """Per body: if the body carries any user-applied force or torque,
+    raise the flag for its island so the propagate kernel can wake
+    every sleeping body in the same island.
+
+    ``island_of_body`` is the *previous* step's ``set_nr`` -- this
+    kernel runs before ``model.collide()`` and the per-step island
+    builder, so we re-use the most recent persistent assignment. For
+    a freshly-built scene where the builder has not run yet,
+    ``set_nr`` is initialized to -1 and the fan-in skips every body
+    (which is correct: nothing was sleeping yet).
+
+    Gravity is *not* counted -- it lives on a separate per-world array
+    consumed by ``apply_forces_and_gravity`` and never touches
+    ``bodies.force`` -- so awake stacks under gravity stay sleepable,
+    while a real picking pull (or any host-set wrench) wakes the
+    island synchronously before broad-phase decides which pairs to
+    drop.
+    """
+    b = wp.tid()
+    if bodies.motion_type[b] != MOTION_DYNAMIC:
+        return
+    if bodies.is_sleeping[b] == wp.int32(0):
+        return
+    island = island_of_body[b]
+    if island < 0:
+        return
+    if wp.length_sq(bodies.force[b]) > wp.float32(0.0) or wp.length_sq(bodies.torque[b]) > wp.float32(0.0):
+        wp.atomic_max(island_has_external, island, wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_apply_island_wake_kernel(
+    bodies: BodyContainer,
+    island_of_body: wp.array[wp.int32],
+    island_has_external: wp.array[wp.int32],
+):
+    """Per body: if the body's island has been flagged by the fan-in
+    kernel, clear ``is_sleeping``. The follow-up ``model.collide()``
+    then sees an awake body and the broad-phase filter keeps the
+    pair, so the substep solve has its plank-vs-plank and plank-vs-
+    ground contacts on the wake frame -- the precondition for the
+    stack to stay upright while the picked body is dragged.
+    """
+    b = wp.tid()
+    if bodies.motion_type[b] != MOTION_DYNAMIC:
+        return
+    island = island_of_body[b]
+    if island < 0:
+        return
+    if island_has_external[island] != wp.int32(0):
         bodies.is_sleeping[b] = wp.int32(0)
 
 

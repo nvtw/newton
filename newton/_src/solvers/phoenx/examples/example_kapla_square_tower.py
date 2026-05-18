@@ -92,7 +92,7 @@ SLEEP_COLOR_GAIN: float = 0.30
 # settled tower sleep within a few seconds without freezing planks that
 # are still drifting visibly.
 SLEEPING_VELOCITY_THRESHOLD: float = 0.15
-SLEEPING_FRAMES_REQUIRED: int = 60
+SLEEPING_FRAMES_REQUIRED: int = 10
 
 
 @wp.kernel
@@ -384,12 +384,20 @@ class Example:
 
     def simulate(self) -> None:
         self._sync_newton_to_phoenx()
+        # Apply picking force *before* collide() so the wake-on-input
+        # pass below sees the user wrench and lifts ``is_sleeping`` on
+        # the picked plank's whole island. Without this ordering the
+        # broad-phase sleeping filter (which runs in collide) drops
+        # plank-vs-plank and plank-vs-ground pairs on the wake frame
+        # and the tower has no contacts to lean on while the picked
+        # plank is being dragged.
+        self.picking.apply_force()
+        self.world.wake_on_external_input()
         self.model.collide(
             self.state,
             contacts=self.contacts,
             collision_pipeline=self.collision_pipeline,
         )
-        self.picking.apply_force()
         narrow_phase = self.collision_pipeline.narrow_phase
         self.world.step(
             dt=self.frame_dt,

@@ -147,10 +147,13 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
+    _phoenx_apply_island_wake_kernel,
+    _phoenx_capture_last_awake_island_kernel,
     _phoenx_collapse_sleeping_elements_kernel,
     _phoenx_copy_elements_to_int2d_kernel,
     _phoenx_finalize_body_aabb_diagonal_kernel,
     _phoenx_init_body_aabb_kernel,
+    _phoenx_island_fanin_external_input_kernel,
     _phoenx_island_max_velocity_kernel,
     _phoenx_mark_sleeping_islands_kernel,
     _phoenx_propagate_sleep_to_bodies_kernel,
@@ -793,6 +796,15 @@ class PhoenXWorld:
         self._island_interaction_bodies: wp.array2d[wp.int32] | None = None
         self._island_max_velocity: wp.array[wp.float32] | None = None
         self._island_is_sleeping: wp.array[wp.int32] | None = None
+        self._island_has_external_input: wp.array[wp.int32] | None = None
+        # Per-body snapshot of ``set_nr`` taken on every step where the
+        # body was awake; sleeping bodies retain their last awake-frame
+        # value. ``wake_on_external_input`` consumes this so a force on
+        # any sleeping body lifts the whole original stack, even though
+        # the broad-phase filter has decayed the current frame's
+        # ``set_nr`` to per-body singletons by dropping every
+        # sleeping-vs-sleeping pair.
+        self._last_awake_set_nr: wp.array[wp.int32] | None = None
         # Per-rigid-body bounding box, unioned across every attached
         # shape's world-frame AABB. Used by the sleeping pipeline to
         # estimate a body's swept volume so the spin term in the
@@ -817,6 +829,17 @@ class PhoenXWorld:
             )
             self._island_max_velocity = wp.zeros(self.num_bodies, dtype=wp.float32, device=self.device)
             self._island_is_sleeping = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
+            # Per-island "wake on external input" flag, consumed by
+            # :meth:`wake_on_external_input` to lift ``is_sleeping`` for
+            # every body in an island whose user-applied force / torque
+            # arrived between two ``step()`` calls. Sized num_bodies so
+            # any compact island id fits.
+            self._island_has_external_input = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
+            # Initialize to -1 so the first wake-on-input call before
+            # any sleep transition is a no-op (no body has a valid
+            # snapshot yet -- they are still in their initial awake
+            # singletons and nothing was sleeping anyway).
+            self._last_awake_set_nr = wp.full(self.num_bodies, value=-1, dtype=wp.int32, device=self.device)
             self._body_aabb_lower = wp.zeros((self.num_bodies, 3), dtype=wp.float32, device=self.device)
             self._body_aabb_upper = wp.zeros((self.num_bodies, 3), dtype=wp.float32, device=self.device)
             self._body_aabb_diagonal = wp.zeros(self.num_bodies, dtype=wp.float32, device=self.device)
@@ -1978,6 +2001,50 @@ class PhoenXWorld:
             device=self.device,
         )
 
+    def wake_on_external_input(self) -> None:
+        """Wake every island whose bodies carry a user-applied force or
+        torque, *before* ``model.collide()`` runs the broad phase.
+
+        The per-step sleeping pass inside :meth:`step` cannot drive
+        broad-phase decisions on the wake frame: by the time it lifts
+        ``is_sleeping`` for a body that picking just pushed, the
+        sleep-aware broad-phase filter has already dropped that body's
+        contact pairs and the substep solve sees an empty stack. Call
+        this between ``picking.apply_force()`` and ``model.collide()``
+        in the host loop so the wake decision arrives in time.
+
+        Uses the *previous* step's ``set_nr`` -- the latest persistent
+        island assignment -- to propagate the wake through the full
+        island, so picking a single plank wakes every plank that
+        shared a contact island with it. A no-op when the sleeping
+        pipeline is disabled (no allocation, no kernel launches).
+        """
+        if not self._sleeping_enabled or self.num_bodies == 0 or self._island_builder is None:
+            return
+        if self._island_has_external_input is None or self._last_awake_set_nr is None:
+            return
+        self._island_has_external_input.zero_()
+        wp.launch(
+            _phoenx_island_fanin_external_input_kernel,
+            dim=self.num_bodies,
+            inputs=[
+                self.bodies,
+                self._last_awake_set_nr,
+            ],
+            outputs=[self._island_has_external_input],
+            device=self.device,
+        )
+        wp.launch(
+            _phoenx_apply_island_wake_kernel,
+            dim=self.num_bodies,
+            inputs=[
+                self.bodies,
+                self._last_awake_set_nr,
+                self._island_has_external_input,
+            ],
+            device=self.device,
+        )
+
     def _run_sleeping_pass(
         self,
         shape_body: wp.array[wp.int32] | None,
@@ -2115,6 +2182,26 @@ class PhoenXWorld:
             outputs=[self._elements],
             device=self.device,
         )
+
+        # Snapshot ``set_nr`` for bodies that are still awake after the
+        # per-step sleep decision. Bodies that just transitioned to
+        # sleeping skip the write, so their entry retains the
+        # *previous* frame's awake-state island id -- the one built
+        # while the stack still had its full contact graph. The
+        # pre-collide wake-on-input pass reads this snapshot, not the
+        # live ``set_nr``, so a force on a long-sleeping plank wakes
+        # the whole original stack rather than just the picked plank.
+        if self._last_awake_set_nr is not None:
+            wp.launch(
+                _phoenx_capture_last_awake_island_kernel,
+                dim=self.num_bodies,
+                inputs=[
+                    self.bodies,
+                    self._island_builder.set_nr,
+                ],
+                outputs=[self._last_awake_set_nr],
+                device=self.device,
+            )
 
     def _mass_splitting_broadcast(self) -> None:
         """Fan body / particle state into every copy-state slot at substep
