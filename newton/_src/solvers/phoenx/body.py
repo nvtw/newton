@@ -91,6 +91,17 @@ class BodyContainer:
     #: have something to bind to; stays 0 when sleeping is disabled.
     is_sleeping: wp.array[wp.int32]
 
+    #: Per-body counter: number of consecutive frames the body's island
+    #: has had its max-velocity score below
+    #: :attr:`PhoenXWorld.sleeping_velocity_threshold`. Reset to 0 the
+    #: moment any body in the island exceeds the threshold (the
+    #: island-level max governs every body in the island). Saturates
+    #: at :attr:`PhoenXWorld.sleeping_frames_required` so it never
+    #: overflows. ``is_sleeping`` is set to 1 once this counter reaches
+    #: the required frame count; with ``sleeping_frames_required == 0``
+    #: the body sleeps on the first below-threshold frame.
+    frames_below_threshold: wp.array[wp.int32]
+
 
 def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyContainer:
     """Allocate a zero-initialized :class:`BodyContainer` on ``device``.
@@ -123,6 +134,7 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.orientation_prev_substep = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
     c.access_mode = wp.full(num_bodies, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
     c.is_sleeping = wp.zeros(num_bodies, dtype=wp.int32, device=device)
+    c.frames_below_threshold = wp.zeros(num_bodies, dtype=wp.int32, device=device)
     return c
 
 

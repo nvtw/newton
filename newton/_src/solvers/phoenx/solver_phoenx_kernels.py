@@ -1741,24 +1741,49 @@ def _phoenx_propagate_sleep_to_bodies_kernel(
     bodies: BodyContainer,
     island_of_body: wp.array[wp.int32],
     island_is_sleeping: wp.array[wp.int32],
+    sleeping_frames_required: wp.int32,
 ):
-    """Per-body: ``bodies.is_sleeping = island_is_sleeping[island_of_body]``,
-    with static / anchor bodies forced to 0 so the gravity gate never
-    masks them (they're handled by the existing motion_type / inv_mass
-    branches).
+    """Per-body hysteresis: increment the body's ``frames_below_threshold``
+    counter while its island is below the velocity threshold; reset to
+    0 the moment the island wakes (any body in the island lifting the
+    max-score above threshold). ``is_sleeping`` flips to 1 once the
+    counter reaches ``sleeping_frames_required``.
+
+    Static / anchor / no-island bodies stay at counter 0, sleep 0 so
+    the gravity gate never masks them (those branches are handled by
+    the existing motion_type / inv_mass paths).
     """
     b = wp.tid()
     if bodies.motion_type[b] != MOTION_DYNAMIC:
+        bodies.frames_below_threshold[b] = wp.int32(0)
         bodies.is_sleeping[b] = wp.int32(0)
         return
     if bodies.inverse_mass[b] == 0.0:
+        bodies.frames_below_threshold[b] = wp.int32(0)
         bodies.is_sleeping[b] = wp.int32(0)
         return
     island = island_of_body[b]
     if island < 0:
+        bodies.frames_below_threshold[b] = wp.int32(0)
         bodies.is_sleeping[b] = wp.int32(0)
         return
-    bodies.is_sleeping[b] = island_is_sleeping[island]
+    if island_is_sleeping[island] == wp.int32(0):
+        # Island has max-score >= threshold -- some body in the island
+        # is moving. Reset every body's counter in lockstep so the
+        # whole island can't sleep until it's been below threshold
+        # for ``sleeping_frames_required`` consecutive frames.
+        bodies.frames_below_threshold[b] = wp.int32(0)
+        bodies.is_sleeping[b] = wp.int32(0)
+        return
+    # Island is below threshold this frame. Saturating increment.
+    c = bodies.frames_below_threshold[b] + wp.int32(1)
+    if c > sleeping_frames_required:
+        c = sleeping_frames_required
+    bodies.frames_below_threshold[b] = c
+    if c >= sleeping_frames_required:
+        bodies.is_sleeping[b] = wp.int32(1)
+    else:
+        bodies.is_sleeping[b] = wp.int32(0)
 
 
 @wp.kernel(enable_backward=False)

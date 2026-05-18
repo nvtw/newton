@@ -327,6 +327,7 @@ class PhoenXWorld:
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
+        sleeping_frames_required: int = 30,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -784,7 +785,13 @@ class PhoenXWorld:
             raise ValueError(
                 f"sleeping_velocity_threshold must be >= 0 (got {sleeping_threshold})"
             )
+        sleeping_frames = int(sleeping_frames_required)
+        if sleeping_frames < 0:
+            raise ValueError(
+                f"sleeping_frames_required must be >= 0 (got {sleeping_frames})"
+            )
         self._sleeping_velocity_threshold: float = sleeping_threshold
+        self._sleeping_frames_required: int = sleeping_frames
         self._sleeping_enabled: bool = sleeping_threshold > 0.0
         self._island_builder: UnionFindIslandBuilder | None = None
         self._island_interaction_bodies: wp.array2d[wp.int32] | None = None
@@ -2097,6 +2104,7 @@ class PhoenXWorld:
                 self.bodies,
                 self._island_builder.set_nr,
                 self._island_is_sleeping,
+                wp.int32(self._sleeping_frames_required),
             ],
             device=self.device,
         )

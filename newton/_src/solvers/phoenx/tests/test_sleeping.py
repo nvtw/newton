@@ -240,6 +240,167 @@ class TestSleepingPipeline(unittest.TestCase):
         )
 
 
+    def test_hysteresis_counter_ticks_then_sleeps(self) -> None:
+        """A body settling on the floor must not flip ``is_sleeping`` until
+        its ``frames_below_threshold`` counter reaches the configured
+        threshold. With a small ``sleeping_frames_required=10`` we can
+        catch the counter mid-climb and confirm the sleep flag stays at 0
+        until the count is reached.
+        """
+        model = _make_box_on_plane(box_z=0.5)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=8,
+            solver_iterations=16,
+            sleeping_velocity_threshold=0.05,
+            sleeping_frames_required=10,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        dt = 1.0 / 60.0
+        # Step until the body's velocity is comfortably below threshold.
+        # 90 frames is plenty for a 50cm drop on Mu=0.5.
+        state_0, state_1 = _run_frames(
+            solver, state_0, state_1, control, contacts, model, n=90, dt=dt
+        )
+
+        # By now the counter should be saturated at 10 and is_sleeping=1.
+        counter = int(solver.world.bodies.frames_below_threshold.numpy()[1])
+        sleeping = int(solver.world.bodies.is_sleeping.numpy()[1])
+        self.assertEqual(
+            counter,
+            10,
+            msg=f"counter should saturate at 10, got {counter}",
+        )
+        self.assertEqual(sleeping, 1)
+
+    def test_hysteresis_counter_resets_on_wake(self) -> None:
+        """A body whose island climbs above threshold has its counter
+        reset to 0 in the very same step. Verifies the wake side of
+        the per-body hysteresis -- the counter must not retain stale
+        history across a wake event.
+        """
+        model = _make_box_on_plane(box_z=0.5)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=8,
+            solver_iterations=16,
+            sleeping_velocity_threshold=0.05,
+            sleeping_frames_required=10,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        dt = 1.0 / 60.0
+        # Settle the box; counter saturates at 10, is_sleeping = 1.
+        state_0, state_1 = _run_frames(
+            solver, state_0, state_1, control, contacts, model, n=90, dt=dt
+        )
+        self.assertEqual(int(solver.world.bodies.frames_below_threshold.numpy()[1]), 10)
+        self.assertEqual(int(solver.world.bodies.is_sleeping.numpy()[1]), 1)
+
+        # Inject a high upward velocity via state.body_qd. The import
+        # kernel will copy this into bodies.velocity before the next
+        # step's island-max-velocity scan, lifting island_max above
+        # threshold -> reset path fires.
+        qd = state_0.body_qd.numpy()
+        qd[0, 5] = 5.0  # +5 m/s linear-z
+        state_0.body_qd.assign(qd)
+
+        state_0, state_1 = _run_frames(
+            solver, state_0, state_1, control, contacts, model, n=1, dt=dt
+        )
+
+        counter = int(solver.world.bodies.frames_below_threshold.numpy()[1])
+        sleeping = int(solver.world.bodies.is_sleeping.numpy()[1])
+        self.assertEqual(
+            counter,
+            0,
+            msg=f"counter did not reset on wake; got {counter}",
+        )
+        self.assertEqual(
+            sleeping,
+            0,
+            msg="body still flagged sleeping after wake reset",
+        )
+
+    def test_zero_required_frames_sleeps_immediately(self) -> None:
+        """``sleeping_frames_required=0`` recovers the legacy single-frame
+        sleep behavior: a body whose island is below threshold this
+        frame sleeps this frame.
+        """
+        model = _make_box_on_plane(box_z=0.5)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=8,
+            solver_iterations=16,
+            sleeping_velocity_threshold=0.05,
+            sleeping_frames_required=0,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        dt = 1.0 / 60.0
+        # 60 frames is enough to settle but well short of any default
+        # hysteresis -- a non-zero default would leave is_sleeping = 0
+        # here. The N=0 path must trip immediately on the first
+        # below-threshold frame, so 60 frames is more than enough.
+        state_0, state_1 = _run_frames(
+            solver, state_0, state_1, control, contacts, model, n=60, dt=dt
+        )
+        self.assertEqual(
+            int(solver.world.bodies.is_sleeping.numpy()[1]),
+            1,
+            msg="N=0 hysteresis must collapse to single-frame sleep",
+        )
+
+    def test_hysteresis_blocks_premature_sleep(self) -> None:
+        """With a high ``sleeping_frames_required``, a body that physically
+        settled may still report ``is_sleeping == 0`` while the counter
+        is climbing. Verifies hysteresis actually delays the flip.
+        """
+        # 200 frames is just shy of full settle + saturate-at-200 hysteresis;
+        # the counter should be < 200 and the sleep flag still 0.
+        model = _make_box_on_plane(box_z=0.5)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=8,
+            solver_iterations=16,
+            sleeping_velocity_threshold=0.05,
+            sleeping_frames_required=200,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        dt = 1.0 / 60.0
+        state_0, state_1 = _run_frames(
+            solver, state_0, state_1, control, contacts, model, n=120, dt=dt
+        )
+
+        counter = int(solver.world.bodies.frames_below_threshold.numpy()[1])
+        sleeping = int(solver.world.bodies.is_sleeping.numpy()[1])
+        self.assertGreater(counter, 0, msg="counter never advanced past 0")
+        self.assertLess(
+            counter,
+            200,
+            msg=f"counter unexpectedly saturated ({counter}); did the body sleep prematurely?",
+        )
+        self.assertEqual(
+            sleeping,
+            0,
+            msg="is_sleeping flipped to 1 before counter reached required frames",
+        )
+
+
 if __name__ == "__main__":
     wp.init()
     unittest.main()

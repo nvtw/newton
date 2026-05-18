@@ -132,6 +132,7 @@ class SolverPhoenX(SolverBase):
         enable_warm_start_coloring: bool = True,
         sor_boost: float = 1.0,
         sleeping_velocity_threshold: float = 0.0,
+        sleeping_frames_required: int = 30,
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -178,6 +179,17 @@ class SolverPhoenX(SolverBase):
                 external force application. Auto-installs a
                 sleeping-aware broad-phase filter on the rigid contact
                 pipeline so sleeping-vs-sleeping shape pairs early-out.
+            sleeping_frames_required: Number of consecutive frames an
+                island's max-velocity score must stay below
+                :attr:`sleeping_velocity_threshold` before its bodies
+                are flagged sleeping. Default ``30`` (~0.5 s at 60 Hz)
+                matches PhysX / Bullet conventions and avoids
+                threshold-flicker on barely-settled stacks. Wake-up
+                is always single-frame: the instant any body in the
+                island lifts the max-score above threshold every body
+                in the island resets its counter to 0 in lockstep.
+                ``0`` recovers the old single-frame sleep behavior.
+                Ignored when ``sleeping_velocity_threshold == 0``.
         """
         super().__init__(model)
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -302,6 +314,7 @@ class SolverPhoenX(SolverBase):
             enable_warm_start_coloring=enable_warm_start_coloring,
             sor_boost=sor_boost,
             sleeping_velocity_threshold=float(sleeping_velocity_threshold),
+            sleeping_frames_required=int(sleeping_frames_required),
             device=self.device,
         )
 
