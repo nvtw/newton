@@ -61,7 +61,12 @@ from .sdf_mc import (
     get_mc_tables,
     get_triangle_fraction,
 )
-from .sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_at_voxel
+from .sdf_texture import (
+    TextureSDFData,
+    texture_sample_sdf,
+    texture_sample_sdf_at_voxel,
+    texture_sample_sdf_no_extrap,
+)
 from .utils import scan_with_total
 
 vec8f = wp.types.vector(length=8, dtype=wp.float32)
@@ -754,7 +759,7 @@ class HydroelasticSDF:
         # Find voxels which contain the isosurface between the shapes using octree-like pruning.
         # We do this by computing the difference between sdfs at the voxel/subblock center and comparing it to the voxel/subblock radius.
         # The check is first performed for subblocks of size (8 x 8 x 8), then (4 x 4 x 4), then (2 x 2 x 2), and finally for each voxel.
-        for i, (subblock_size, _n_blocks) in enumerate(((8, 1), (4, 2), (2, 2), (1, 2))):
+        for i in range(4):
             wp.launch(
                 kernel=self._count_iso_voxels_kernels[i],
                 dim=[self.grid_size],
@@ -1314,7 +1319,11 @@ def mc_iterate_voxel_vertices(
         local_pos_a = sdf_data.sdf_box_lower + wp.cw_mul(wp.vec3(float(x), float(y), float(z)), sdf_data.voxel_size)
         point_b = wp.transform_point(X_a_to_b, local_pos_a)
         valA = texture_sample_sdf_at_voxel(sdf_data, x, y, z)
-        valB = texture_sample_sdf(sdf_other_data, point_b)
+        # Iso-voxels reach this kernel only after octree confirmed both SDFs
+        # straddle the surface inside the voxel, so the transformed sample
+        # point is by construction inside the other SDF's box.  Skip the
+        # out-of-box extrapolation (clamp + sqrt) on the hot per-corner path.
+        valB = texture_sample_sdf_no_extrap(sdf_other_data, point_b)
 
         is_valid = not (wp.isnan(valA) or wp.isnan(valB))
         if not is_valid:
