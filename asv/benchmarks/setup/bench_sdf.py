@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
+
 import numpy as np
 import warp as wp
 
@@ -10,6 +12,33 @@ wp.config.quiet = True
 from asv_runner.benchmarks.mark import skip_benchmark_if
 
 import newton
+
+# ``edge_lower_angle_threshold_rad`` was added to ``Mesh.build_sdf`` alongside
+# the edge-simplification pass that runs as part of the SDF build.  When asv
+# runs this benchmark against an older base commit (where the kwarg does not
+# exist yet), forwarding it unconditionally raises ``TypeError`` from
+# ``setup`` and the entire benchmark is marked ``failed`` on the base side,
+# which in turn makes ``asv continuous`` exit non-zero on this PR.  Detect
+# the kwarg once at import time and only forward it where supported; on
+# older commits this just measures the SDF cook + the (then-absent) edge
+# pass, matching pre-change behaviour.
+_BUILD_SDF_SUPPORTS_EDGE_THRESHOLD = (
+    "edge_lower_angle_threshold_rad" in inspect.signature(newton.Mesh.build_sdf).parameters
+)
+
+
+def _build_sdf(mesh: "newton.Mesh", *, max_resolution: int) -> "newton.SDF":
+    """Build an SDF for ``mesh`` and skip the edge-simplification pass when supported.
+
+    The edge-simplification pass is unrelated to what this benchmark
+    measures and would otherwise contribute (variable) wall time, so we
+    short-circuit it via ``edge_lower_angle_threshold_rad=-1.0`` when the
+    kwarg is available.
+    """
+    if _BUILD_SDF_SUPPORTS_EDGE_THRESHOLD:
+        return mesh.build_sdf(max_resolution=max_resolution, edge_lower_angle_threshold_rad=-1.0)
+    return mesh.build_sdf(max_resolution=max_resolution)
+
 
 # Subdivision 4 yields 20 * 4**4 = 5120 triangles, which is representative of
 # typical collision meshes used with SDF-based contact (YCB, nut-bolt, gears).
@@ -151,19 +180,16 @@ class FastBuildSdf:
         # boost-clock state, not just compile kernels.
         for _ in range(_WARMUP_BUILDS):
             warm_mesh = newton.Mesh(self._vertices, self._indices, compute_inertia=False)
-            warm_sdf = warm_mesh.build_sdf(max_resolution=max_resolution, edge_lower_angle_threshold_rad=-1.0)
+            warm_sdf = _build_sdf(warm_mesh, max_resolution=max_resolution)
             del warm_sdf
             del warm_mesh
         wp.synchronize_device()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_build_sdf(self, max_resolution):
-        # ``edge_lower_angle_threshold_rad < 0`` short-circuits the edge
-        # simplification pass inside ``build_sdf`` so this benchmark measures
-        # the SDF cook in isolation.
         for _ in range(_BUILDS_PER_SAMPLE[max_resolution]):
             mesh = newton.Mesh(self._vertices, self._indices, compute_inertia=False)
-            sdf = mesh.build_sdf(max_resolution=max_resolution, edge_lower_angle_threshold_rad=-1.0)
+            sdf = _build_sdf(mesh, max_resolution=max_resolution)
             # Release immediately so peak GPU memory stays bounded.
             del sdf
             del mesh
