@@ -422,6 +422,21 @@ class ViewerGL(ViewerBase):
         self._point_mesh.update(points, indices, normals, uvs)
 
     @override
+    def _arrow_scale(self) -> float:
+        """Contact-arrow length multiplier, sourced from the GL renderer."""
+        return self.renderer.arrow_length_scale
+
+    @override
+    def _joint_scale(self) -> float:
+        """Joint-axis length multiplier, sourced from the GL renderer."""
+        return self.renderer.joint_scale
+
+    @override
+    def _com_scale(self) -> float:
+        """COM sphere radius multiplier, sourced from the GL renderer."""
+        return self.renderer.com_scale
+
+    @override
     def log_gizmo(
         self,
         name: str,
@@ -805,6 +820,9 @@ class ViewerGL(ViewerBase):
         assert normals is None or isinstance(normals, wp.array)
         assert uvs is None or isinstance(uvs, wp.array)
 
+        # Route user-supplied names through the active layer (idempotent).
+        name = self._qualify(name)
+
         if name not in self.objects:
             self.objects[name] = MeshGL(
                 len(points), len(indices), self.device, hidden=hidden, backface_culling=backface_culling
@@ -848,6 +866,13 @@ class ViewerGL(ViewerBase):
             materials: Array of materials.
             hidden: Whether the instances are hidden.
         """
+        # Route user-supplied names through the active layer (idempotent).
+        # ``mesh`` is the path of a previously registered mesh; qualify it
+        # the same way so a caller using the bare path produced by
+        # ``log_mesh`` finds the prototype the active layer registered.
+        name = self._qualify(name)
+        mesh = self._qualify(mesh)
+
         if mesh not in self.objects:
             raise RuntimeError(f"Path {mesh} not found")
 
@@ -904,9 +929,17 @@ class ViewerGL(ViewerBase):
             materials: Capsule instance materials (wp.vec4), length N or None (no update).
             hidden: Whether the instances are hidden.
         """
+        # Route the user-supplied capsule batch name through the active
+        # layer so two layers calling ``log_capsules`` with the same path
+        # don't overwrite each other (idempotent on already-qualified names).
+        name = self._qualify(name)
+
         # Render capsules via instanced cylinder body + instanced sphere caps.
-        sphere_mesh = "/geometry/_capsule_instancer/sphere"
-        cylinder_mesh = "/geometry/_capsule_instancer/cylinder"
+        # Prototype mesh keys are qualified with the active layer so a
+        # ``clear_model()`` on one layer does not destroy prototypes shared
+        # by capsule instancers in other live layers.
+        sphere_mesh = self._qualify("/geometry/_capsule_instancer/sphere")
+        cylinder_mesh = self._qualify("/geometry/_capsule_instancer/cylinder")
 
         if sphere_mesh not in self.objects:
             self.log_geo(sphere_mesh, nt.GeoType.SPHERE, (1.0,), 0.0, True, hidden=True)
@@ -996,6 +1029,9 @@ class ViewerGL(ViewerBase):
                 ``RendererGL.line_width``.
             hidden: Whether the lines are initially hidden.
         """
+        # Route user-supplied names through the active layer (idempotent).
+        name = self._qualify(name)
+
         # Handle empty logs by resetting the LinesGL object
         if starts is None or ends is None or colors is None:
             if name in self.lines:
@@ -1061,6 +1097,8 @@ class ViewerGL(ViewerBase):
                 ``RendererGL.arrow_scale``.
             hidden: Whether the arrows are initially hidden.
         """
+        # Route user-supplied names through the active layer (idempotent).
+        name = self._qualify(name)
         if starts is None or ends is None or colors is None:
             if name in self.arrows:
                 self.arrows[name].update(None, None, None)
@@ -1112,6 +1150,8 @@ class ViewerGL(ViewerBase):
             world_matrix: 4x4 float32 world matrix, or ``None`` to keep current.
             hidden: Whether the shape is hidden.
         """
+        # Route user-supplied names through the active layer (idempotent).
+        name = self._qualify(name)
         existing = self.wireframe_shapes.get(name)
 
         if vertex_data is not None:
@@ -1169,6 +1209,9 @@ class ViewerGL(ViewerBase):
             colors: Array of point colors.
             hidden: Whether the points are hidden.
         """
+        # Route user-supplied names through the active layer (idempotent).
+        name = self._qualify(name)
+
         if points is None:
             if name in self.objects:
                 self.objects[name].hidden = True
@@ -1193,6 +1236,8 @@ class ViewerGL(ViewerBase):
 
         if radii is None:
             radii = wp.full(num_points, 0.1, dtype=wp.float32, device=self.device)
+        elif isinstance(radii, (int, float, np.integer, np.floating)):
+            radii = wp.full(num_points, float(radii), dtype=wp.float32, device=self.device)
 
         # If a point object is first created/recreated and no colors are provided,
         # initialize to white to avoid uninitialized instance color buffers.
@@ -1230,6 +1275,9 @@ class ViewerGL(ViewerBase):
             xform: Optional world-space transform applied to all splat centers.
             hidden: Whether the point cloud should be hidden.
         """
+        # Route user-supplied names through the active layer (idempotent).
+        name = self._qualify(name)
+
         if hidden:
             if name in self.objects:
                 self.objects[name].hidden = True
@@ -2535,13 +2583,21 @@ class ViewerGL(ViewerBase):
                     show_joints = self.show_joints
                     changed, self.show_joints = imgui.checkbox("Show Joints", show_joints)
 
+                    if self.show_joints:
+                        _, self.renderer.joint_scale = imgui.slider_float(
+                            "Joint Scale", self.renderer.joint_scale, 0.25, 5.0
+                        )
+
                     # Contact visualization
                     show_contacts = self.show_contacts
                     changed, self.show_contacts = imgui.checkbox("Show Contacts", show_contacts)
 
                     if self.show_contacts:
+                        _, self.renderer.arrow_length_scale = imgui.slider_float(
+                            "Contact Length", self.renderer.arrow_length_scale, 0.25, 5.0
+                        )
                         _, self.renderer.arrow_scale = imgui.slider_float(
-                            "Arrow Scale", self.renderer.arrow_scale, 0.25, 5.0
+                            "Contact Width", self.renderer.arrow_scale, 0.25, 5.0
                         )
 
                     # Particle visualization
@@ -2555,6 +2611,9 @@ class ViewerGL(ViewerBase):
                     # Center of mass visualization
                     show_com = self.show_com
                     changed, self.show_com = imgui.checkbox("Show Center of Mass", show_com)
+
+                    if self.show_com:
+                        _, self.renderer.com_scale = imgui.slider_float("COM Scale", self.renderer.com_scale, 0.25, 5.0)
 
                     # Triangle mesh visualization
                     show_triangles = self.show_triangles

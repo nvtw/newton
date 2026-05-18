@@ -150,6 +150,36 @@ class TestViewerLayers(unittest.TestCase):
         # Active layer falls back to default sentinel.
         self.assertEqual(viewer.layer.name_prefix, "")
 
+    def test_remove_inactive_layer_preserves_active(self):
+        """Removing a non-active layer keeps the previously active layer active."""
+        viewer = _RecordingViewer()
+        viewer.activate("X")
+        viewer.activate("Y")
+        viewer.remove_layer("X")
+        self.assertNotIn("X", viewer.layers)
+        self.assertEqual(viewer._active_layer_id, "Y")
+
+    def test_remove_layer_clears_backend_state(self):
+        """remove_layer() should run clear_model() so the layer's resources
+        are released by the backend, not just dropped from the registry."""
+
+        clear_calls: list[str] = []
+
+        class _ClearTrackingViewer(_RecordingViewer):
+            def clear_model(self):
+                # Record which layer owned the call when clear_model fires.
+                clear_calls.append(self._active_layer_id)
+                super().clear_model()
+
+        viewer = _ClearTrackingViewer()
+        viewer.activate("X")
+        viewer.set_model(_build_box_model())
+        clear_calls.clear()
+
+        viewer.remove_layer("X")
+
+        self.assertIn("X", clear_calls, "remove_layer must run clear_model under the removed layer")
+
     def test_cannot_remove_default_layer(self):
         viewer = _RecordingViewer()
         with self.assertRaises(ValueError):
@@ -159,6 +189,25 @@ class TestViewerLayers(unittest.TestCase):
         viewer = _RecordingViewer()
         with self.assertRaises(ValueError):
             viewer.activate("")
+
+    def test_log_shapes_user_name_is_layer_qualified(self):
+        """Two layers calling log_shapes with the same user-supplied name
+        must end up under their respective ``/layers/<id>/`` namespace so
+        they do not overwrite each other in the backend."""
+
+        viewer = _RecordingViewer()
+        viewer.set_model(_build_box_model())  # required to estimate scene scale, etc.
+
+        xforms = wp.array([wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())], dtype=wp.transform)
+
+        viewer.activate("A")
+        viewer.log_shapes("/user/probe", int(newton.GeoType.SPHERE), 1.0, xforms)
+        viewer.activate("B")
+        viewer.log_shapes("/user/probe", int(newton.GeoType.SPHERE), 1.0, xforms)
+
+        names = [n for n, _ in viewer.instance_calls]
+        self.assertIn("/layers/A/user/probe", names)
+        self.assertIn("/layers/B/user/probe", names)
 
 
 if __name__ == "__main__":

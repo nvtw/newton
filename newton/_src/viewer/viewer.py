@@ -240,8 +240,11 @@ class ViewerBase(ABC):
     def remove_layer(self, layer_id: str) -> None:
         """Remove a layer and all its associated render state.
 
-        If the removed layer is currently active, the default layer is
-        re-activated. The internal default layer cannot be removed.
+        Destroys every backend object (meshes, instancers, lines, arrows,
+        wireframes, …) that the removed layer owns so the layer stops
+        rendering immediately and no GPU resources leak. If the removed
+        layer is currently active, the default layer is re-activated. The
+        internal default layer cannot be removed.
 
         Args:
             layer_id: Identifier of the layer to remove.
@@ -250,8 +253,30 @@ class ViewerBase(ABC):
             raise ValueError("Cannot remove the default layer")
         if layer_id not in self._layers:
             return
-        if self._active_layer_id == layer_id:
-            self.activate(_DEFAULT_LAYER_ID)
+
+        # Snapshot the active layer so we can restore it after destroying
+        # the target layer's backend state. When the active layer is the
+        # one being removed, fall back to the default layer.
+        prev_active = self._active_layer_id
+        if prev_active == layer_id:
+            prev_active = _DEFAULT_LAYER_ID
+
+        # Activate the to-be-removed layer so ``_is_layer_owned_path``
+        # matches its objects, then drop its model — backend ``clear_model``
+        # overrides destroy only resources owned by the active layer.
+        if self._active_layer_id != layer_id:
+            self.activate(layer_id)
+        # ``clear_model`` is the canonical "free everything this layer
+        # owns" entry point and is overridden by backends (e.g. ViewerGL)
+        # to destroy GL handles for meshes/instancers/lines/wireframes.
+        self.clear_model()
+
+        # Re-snapshot the now-empty layer state into the registry entry so
+        # the upcoming activate() doesn't try to read a stale snapshot.
+        self._snapshot_layer(self._layers[layer_id])
+
+        # Move off the removed layer before deleting its registry entry.
+        self.activate(prev_active)
         del self._layers[layer_id]
 
     def set_layer_visible(self, layer_id: str, visible: bool) -> None:
@@ -308,6 +333,13 @@ class ViewerBase(ABC):
     def _qualify(self, name: str | None) -> str | None:
         """Prefix a backend object name with the active layer's namespace.
 
+        Idempotent: when the name is already qualified with the active
+        layer's prefix (e.g. because an internal caller already qualified
+        it before forwarding through a public ``log_*`` method), the name
+        is returned unchanged. Names targeting a *different* layer's
+        namespace (``/layers/<other>/...``) are also returned unchanged,
+        which lets layer-aware backends address other layers explicitly.
+
         Returns ``name`` unchanged when no user-defined layer is active so
         legacy code paths (and existing snapshot files / USD layers / Rerun
         entity paths) remain identical.
@@ -322,6 +354,10 @@ class ViewerBase(ABC):
             return None
         prefix = self.layer.name_prefix
         if not prefix:
+            return name
+        # Already qualified (with the active layer's prefix or any other
+        # layer's prefix) — do not double-qualify.
+        if name == prefix or name.startswith(prefix + "/") or name.startswith("/layers/"):
             return name
         return f"{prefix}{name}" if name.startswith("/") else f"{prefix}/{name}"
 
@@ -430,13 +466,18 @@ class ViewerBase(ABC):
         # Center-of-mass visualization
         self._com_positions = None
         self._com_colors = None
-        self._com_radii = None
 
         # World offset support
         self.world_offsets = None
         self._user_spacing: tuple[float, float, float] | None = None
         self._visible_worlds: set[int] | None = None
         self._visible_worlds_mask: wp.array | None = None
+
+        # Characteristic body size in world units, used to auto-scale
+        # visualization helpers (contact arrows, joint axes, COM markers).
+        # Set in :meth:`set_model` from :meth:`_estimate_scene_scale`; falls
+        # back to 1.0 when no dynamic shapes are present.
+        self.scene_scale: float = 1.0
 
         # Picking
         self.picking_enabled = True
@@ -523,6 +564,8 @@ class ViewerBase(ABC):
             self._shape_sdf_index_host = model.shape_sdf_index.numpy() if model.shape_sdf_index is not None else None
             self._build_visible_worlds_mask()
             self._populate_shapes()
+
+            self.scene_scale = self._estimate_scene_scale() or 1.0
 
             # Auto-compute world offsets if not already set
             if self.world_offsets is None:
@@ -694,6 +737,40 @@ class ViewerBase(ABC):
 
         # Convert to warp array
         self.world_offsets = wp.array(full_offsets, dtype=wp.vec3, device=self.device)
+
+    def _estimate_scene_scale(self) -> float:
+        """Estimate a characteristic body size in world units.
+
+        Returns ``median(collision_radius)`` over shapes attached to a body
+        (``shape_body >= 0``). Static, world-attached shapes (heightfields,
+        ground planes, fixtures) carry ``shape_body == -1`` and are excluded,
+        so the scale tracks the bodies that actually move in the scene, not
+        the world they move in.
+
+        Returns:
+            float: Characteristic body size, or 0.0 if no body-attached shapes.
+        """
+        if self.model is None or self.model.shape_count == 0:
+            return 0.0
+
+        radii = self.model.shape_collision_radius.numpy()
+        shape_body = self.model.shape_body.numpy()
+        keep = (shape_body >= 0) & (radii > 0.0) & (radii < 1.0e5)
+        if not keep.any():
+            return 0.0
+        return float(np.median(radii[keep]))
+
+    def _arrow_scale(self) -> float:
+        """User multiplier on contact-arrow length and pixel width. Default 1.0."""
+        return 1.0
+
+    def _joint_scale(self) -> float:
+        """User multiplier on joint-axis line length. Default 1.0."""
+        return 1.0
+
+    def _com_scale(self) -> float:
+        """User multiplier on COM sphere radius. Default 1.0."""
+        return 1.0
 
     def _get_world_extents(self) -> tuple[float, float, float] | None:
         """Get the maximum extents of all worlds in the model."""
@@ -969,7 +1046,7 @@ class ViewerBase(ABC):
                     contacts.rigid_contact_point0,
                     contacts.rigid_contact_offset0,
                     contacts.rigid_contact_normal,
-                    0.1,  # line length scale factor
+                    self.scene_scale * self._arrow_scale(),
                 ],
                 outputs=[
                     self._contact_points0,  # line start points
@@ -1108,6 +1185,10 @@ class ViewerBase(ABC):
 
         geo_scale = _as_float_list(geo_scale)
 
+        # Route user-supplied object names through the active layer so two
+        # layers can call ``log_shapes`` with the same path without colliding.
+        name = self._qualify(name)
+
         # ensure mesh exists (shared with populate path)
         mesh_path = self._populate_geometry(
             int(geo_type),
@@ -1182,6 +1263,8 @@ class ViewerBase(ABC):
                 by ``geo_type``.
             hidden: Whether the created mesh should be hidden.
         """
+        # Route user-supplied object names through the active layer.
+        name = self._qualify(name)
 
         if geo_type == newton.GeoType.GAUSSIAN:
             if geo_src is None:
@@ -1344,6 +1427,11 @@ class ViewerBase(ABC):
         """
         Register or update a mesh prototype in the viewer backend.
 
+        Backends that support :meth:`activate` must route ``name`` through
+        :meth:`_qualify` so that two layers logging the same path receive
+        distinct backend objects. ``_qualify`` is idempotent and a no-op
+        on the default layer.
+
         Args:
             name: Unique path/name for the mesh asset.
             points: Vertex positions as a Warp vec3 array.
@@ -1375,6 +1463,10 @@ class ViewerBase(ABC):
     ):
         """
         Log a batch of mesh instances.
+
+        Backends that support :meth:`activate` must route ``name`` and
+        ``mesh`` through :meth:`_qualify` so that two layers logging the
+        same path receive distinct backend objects.
 
         Args:
             name: Unique path/name for the instance batch.
@@ -1412,7 +1504,7 @@ class ViewerBase(ABC):
             materials: Optional per-capsule material parameters as a Warp vec4 array.
             hidden: Whether the capsule batch should be hidden.
         """
-        self.log_instances(name, mesh, xforms, scales, colors, materials, hidden=hidden)
+        self.log_instances(self._qualify(name), mesh, xforms, scales, colors, materials, hidden=hidden)
 
     @abstractmethod
     def log_lines(
@@ -1468,7 +1560,7 @@ class ViewerBase(ABC):
                 via the renderer (e.g. ``RendererGL.arrow_scale``).
             hidden: Whether the arrow batch should be hidden.
         """
-        self.log_lines(name, starts, ends, colors, width=width, hidden=hidden)
+        self.log_lines(self._qualify(name), starts, ends, colors, width=width, hidden=hidden)
 
     def log_wireframe_shape(  # noqa: B027
         self,
@@ -2438,7 +2530,7 @@ class ViewerBase(ABC):
                 self._visible_worlds_mask,
                 self.model.shape_collision_radius,
                 self.model.shape_body,
-                0.1,  # line scale factor
+                self.scene_scale * self._joint_scale(),
             ],
             outputs=[
                 self._joint_points0,
@@ -2459,7 +2551,8 @@ class ViewerBase(ABC):
         if self._com_positions is None or len(self._com_positions) < num_bodies:
             self._com_positions = wp.zeros(num_bodies, dtype=wp.vec3, device=self.device)
             self._com_colors = wp.full(num_bodies, wp.vec3(1.0, 0.8, 0.0), device=self.device)
-            self._com_radii = wp.full(num_bodies, 0.05, dtype=float, device=self.device)
+
+        com_radius = 0.5 * self.scene_scale * self._com_scale()
 
         from .kernels import compute_com_positions  # noqa: PLC0415
 
@@ -2480,7 +2573,7 @@ class ViewerBase(ABC):
         self.log_points(
             self._qualify("/model/com"),
             self._com_positions,
-            self._com_radii,
+            com_radius,
             self._com_colors,
             hidden=not self.show_com or self._layer_force_hidden(),
         )
