@@ -509,10 +509,10 @@ class ViewerGL(ViewerBase):
         self.arrows = _filter_destroy(getattr(self, "arrows", {}))
 
         # Wireframe shapes are keyed on layer-qualified names; filter by ownership.
-        # VBO owners are shared by id(vertex_data) and self-managed by
-        # ``log_wireframe_shape``; leave them alone here so other layers'
-        # wireframes that share an owner keep functioning. If no layers
-        # remain, the owners' GL resources are freed at viewer close().
+        # VBO owners are shared across layers by ``id(vertex_data)``; after
+        # destroying this layer's shared shapes, drop any owners with no
+        # surviving references so their GL buffers are freed immediately
+        # instead of leaking until viewer close().
         wireframe_shapes = getattr(self, "wireframe_shapes", {})
         kept_wf: dict = {}
         for k, v in wireframe_shapes.items():
@@ -523,6 +523,19 @@ class ViewerGL(ViewerBase):
         self.wireframe_shapes = kept_wf
         if not hasattr(self, "_wireframe_vbo_owners"):
             self._wireframe_vbo_owners = {}
+        else:
+            # An owner is still live iff at least one remaining wireframe
+            # shape shares its VAO handle (``create_shared`` aliases the
+            # GLuint object, so identity is sufficient).
+            live_vao_ids = {id(s.vao) for s in kept_wf.values() if hasattr(s, "vao")}
+            orphan_keys = [
+                key
+                for key, owner in self._wireframe_vbo_owners.items()
+                if hasattr(owner, "vao") and id(owner.vao) not in live_vao_ids
+            ]
+            for key in orphan_keys:
+                owner = self._wireframe_vbo_owners.pop(key)
+                owner.destroy()
 
         # Interactive picking and wind force helpers
         self.picking = None
@@ -1407,6 +1420,9 @@ class ViewerGL(ViewerBase):
             array: Array data to visualize, or ``None`` to remove a previously
                 logged array.
         """
+        # Route user-supplied names through the active layer (idempotent).
+        name = self._qualify(name)
+
         if array is None:
             self._array_buffers.pop(name, None)
             self._array_dirty.discard(name)
@@ -1429,6 +1445,9 @@ class ViewerGL(ViewerBase):
     @override
     def log_image(self, name: str, image: wp.array[Any] | np.ndarray) -> None:
         """See :meth:`~newton.viewer.ViewerBase.log_image`."""
+        # Route user-supplied names through the active layer (idempotent)
+        # so two layers logging the same image name don't stomp each other.
+        name = self._qualify(name)
         self._image_logger.log(name, image)
 
     @override
@@ -1457,6 +1476,8 @@ class ViewerGL(ViewerBase):
         """
         if smoothing < 1:
             raise ValueError("smoothing must be >= 1")
+        # Route user-supplied names through the active layer (idempotent).
+        name = self._qualify(name)
         val = float(value.item() if hasattr(value, "item") else value)
         buf = self._scalar_buffers.get(name)
         if buf is None:
