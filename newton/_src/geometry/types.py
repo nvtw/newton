@@ -884,13 +884,15 @@ class Mesh:
 
         A negative ``lower_angle_threshold_rad`` (with
         ``enable_box_absorption=False``) opts out of edge simplification
-        entirely: the cache is populated with the full :attr:`edges` set,
-        identical to the pre-simplification behaviour. Use this when the
-        simplification cost is undesirable (e.g. benchmarks that isolate
-        the SDF cook). Combining a negative threshold with
-        ``enable_box_absorption=True`` is rejected because the absorption
-        pass relies on a non-negative dihedral gate to identify manifold
-        edges and would otherwise silently no-op.
+        entirely: ``_collision_edges`` is left ``None`` so the builder
+        falls back to the lazily-computed :attr:`edges` set, matching the
+        pre-simplification behaviour without paying for an eager edge
+        computation here. Use this when the simplification cost is
+        undesirable (e.g. benchmarks that isolate the SDF cook).
+        Combining a negative threshold with ``enable_box_absorption=True``
+        is rejected because the absorption pass relies on a non-negative
+        dihedral gate to identify manifold edges and would otherwise
+        silently no-op.
         """
         if lower_angle_threshold_rad < 0.0:
             if enable_box_absorption:
@@ -898,7 +900,7 @@ class Mesh:
                     "edge_lower_angle_threshold_rad < 0 disables edge simplification, "
                     "which is incompatible with edge_box_absorption=True."
                 )
-            self._collision_edges = np.ascontiguousarray(self.edges, dtype=np.int32)
+            self._collision_edges = None
             return
 
         if self._vertices.size > 0:
