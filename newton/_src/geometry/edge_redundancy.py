@@ -55,8 +55,8 @@ class EdgeRedundancyResult:
             bit-deterministic.
         broad_phase_pair_count [-]: AABB pairs returned by SAP.
         aabb_diagonal [m]: Mesh world-space AABB diagonal.
-        half_height [m]: Box half-extent along the edge normal.
-        half_width [m]: Box half-extent along the in-plane tangent and the
+        half_normal [m]: Box half-extent along the edge normal.
+        half_lateral [m]: Box half-extent along the in-plane tangent and the
             per-end overhang along the edge direction.
         lower_angle_threshold_rad [rad]: Input gate that was applied. Edges
             below this dihedral angle were dropped before the broad phase.
@@ -74,8 +74,8 @@ class EdgeRedundancyResult:
     absorbed_indices: np.ndarray
     broad_phase_pair_count: int
     aabb_diagonal: float
-    half_height: float
-    half_width: float
+    half_normal: float
+    half_lateral: float
     lower_angle_threshold_rad: float
     upper_angle_threshold_rad: float
 
@@ -90,8 +90,8 @@ def _build_edge_box_kernel(
     vertices: wp.array[wp.vec3],
     edge_indices: wp.array[wp.vec2i],
     avg_normals: wp.array[wp.vec3],
-    half_height: float,
-    half_width: float,
+    half_normal: float,
+    half_lateral: float,
     # Outputs
     box_center: wp.array[wp.vec3],
     box_axis_dir: wp.array[wp.vec3],
@@ -144,7 +144,7 @@ def _build_edge_box_kernel(
     box_axis_dir[i] = dir_e
     box_axis_tang[i] = tang
     box_axis_normal[i] = normal
-    box_half_extents[i] = wp.vec3(0.5 * edge_len + half_width, half_width, half_height)
+    box_half_extents[i] = wp.vec3(0.5 * edge_len + half_lateral, half_lateral, half_normal)
     box_valid[i] = 1
 
 
@@ -379,8 +379,8 @@ def find_redundant_edges(
     mesh,
     *,
     enable_box_absorption: bool = False,
-    half_height: float | None = None,
-    half_width: float | None = None,
+    half_normal: float | None = None,
+    half_lateral: float | None = None,
     lower_angle_threshold_rad: float = math.radians(0.1),
     upper_angle_threshold_rad: float = math.radians(10.0),
     initial_pair_capacity_factor: int = 8,
@@ -399,10 +399,10 @@ def find_redundant_edges(
         enable_box_absorption: When ``True``, build oriented edge boxes and
             populate ``candidate_for_removal`` / CSR adjacency. When
             ``False`` (default), only the dihedral-angle pre-filter runs.
-        half_height [m]: Box half-extent along the edge normal. Defaults to
+        half_normal [m]: Box half-extent along the edge normal. Defaults to
             ``1e-3 * D`` (``D`` = mesh AABB diagonal). Ignored when
             ``enable_box_absorption`` is ``False``.
-        half_width [m]: Box half-extent along the in-plane tangent and the
+        half_lateral [m]: Box half-extent along the in-plane tangent and the
             per-end overhang along the edge. Defaults to ``5e-3 * D``.
             Ignored when ``enable_box_absorption`` is ``False``.
         lower_angle_threshold_rad [rad]: Input gate. Manifold edges with
@@ -435,11 +435,11 @@ def find_redundant_edges(
     aabb_max = vertices_np.max(axis=0) if len(vertices_np) > 0 else np.zeros(3, dtype=np.float32)
     diagonal = float(np.linalg.norm(aabb_max - aabb_min))
 
-    resolved_half_height = float(half_height) if half_height is not None else 1.0e-3 * diagonal
-    resolved_half_width = float(half_width) if half_width is not None else 5.0e-3 * diagonal
+    resolved_half_normal = float(half_normal) if half_normal is not None else 1.0e-3 * diagonal
+    resolved_half_lateral = float(half_lateral) if half_lateral is not None else 5.0e-3 * diagonal
 
     # Fast path: absorption disabled by caller, no edges, or non-positive extents.
-    boxes_disabled = resolved_half_height <= 0.0 or resolved_half_width <= 0.0
+    boxes_disabled = resolved_half_normal <= 0.0 or resolved_half_lateral <= 0.0
     if not enable_box_absorption or n_edges == 0 or boxes_disabled:
         return EdgeRedundancyResult(
             edge_indices=edge_indices_np.reshape(-1, 2),
@@ -452,8 +452,8 @@ def find_redundant_edges(
             absorbed_indices=np.zeros(0, dtype=np.int32),
             broad_phase_pair_count=0,
             aabb_diagonal=diagonal,
-            half_height=resolved_half_height,
-            half_width=resolved_half_width,
+            half_normal=resolved_half_normal,
+            half_lateral=resolved_half_lateral,
             lower_angle_threshold_rad=float(lower_angle_threshold_rad),
             upper_angle_threshold_rad=float(upper_angle_threshold_rad),
         )
@@ -480,8 +480,8 @@ def find_redundant_edges(
                 vertices_wp,
                 edge_indices_wp,
                 avg_normals_wp,
-                resolved_half_height,
-                resolved_half_width,
+                resolved_half_normal,
+                resolved_half_lateral,
             ],
             outputs=[
                 box_center,
@@ -631,8 +631,8 @@ def find_redundant_edges(
         absorbed_indices=absorbed_indices_host,
         broad_phase_pair_count=actual_pair_count,
         aabb_diagonal=diagonal,
-        half_height=resolved_half_height,
-        half_width=resolved_half_width,
+        half_normal=resolved_half_normal,
+        half_lateral=resolved_half_lateral,
         lower_angle_threshold_rad=float(lower_angle_threshold_rad),
         upper_angle_threshold_rad=float(upper_angle_threshold_rad),
     )
@@ -744,8 +744,8 @@ def remove_redundant_edges(
     mesh,
     *,
     enable_box_absorption: bool = False,
-    half_height: float | None = None,
-    half_width: float | None = None,
+    half_normal: float | None = None,
+    half_lateral: float | None = None,
     lower_angle_threshold_rad: float = math.radians(0.1),
     upper_angle_threshold_rad: float = math.radians(10.0),
     initial_pair_capacity_factor: int = 8,
@@ -766,8 +766,8 @@ def remove_redundant_edges(
     result = find_redundant_edges(
         mesh,
         enable_box_absorption=enable_box_absorption,
-        half_height=half_height,
-        half_width=half_width,
+        half_normal=half_normal,
+        half_lateral=half_lateral,
         lower_angle_threshold_rad=lower_angle_threshold_rad,
         upper_angle_threshold_rad=upper_angle_threshold_rad,
         initial_pair_capacity_factor=initial_pair_capacity_factor,

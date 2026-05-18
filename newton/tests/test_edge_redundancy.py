@@ -113,7 +113,7 @@ class TestEdgeRedundancyCube(unittest.TestCase):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
         # Half-extents larger than the cube edge length -> sister edges get absorbed.
         result = find_redundant_edges(
-            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_height=2.0, half_width=2.0
+            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_normal=2.0, half_lateral=2.0
         )
         self.assertGreater(int(result.candidate_for_removal.sum()), 0)
         # CSR consistency: total absorbed entries equals sum over box counts.
@@ -125,10 +125,10 @@ class TestEdgeRedundancyCube(unittest.TestCase):
         # manifold-edge set is still reported (18 unique edges on a cube), but
         # no edge is ever flagged as a candidate and no SAP pair is generated.
         for kwargs in (
-            {"half_height": 0.0, "half_width": 1.0},
-            {"half_height": 1.0, "half_width": 0.0},
-            {"half_height": -1.0, "half_width": 1.0},
-            {"half_height": 1.0, "half_width": -1.0},
+            {"half_normal": 0.0, "half_lateral": 1.0},
+            {"half_normal": 1.0, "half_lateral": 0.0},
+            {"half_normal": -1.0, "half_lateral": 1.0},
+            {"half_normal": 1.0, "half_lateral": -1.0},
         ):
             with self.subTest(**kwargs):
                 result = find_redundant_edges(mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, **kwargs)
@@ -148,7 +148,7 @@ class TestEdgeRedundancyAbsorption(unittest.TestCase):
         mesh = _absorbing_mesh()
         # Generous box so the long edge's oriented box covers the short edge.
         result = find_redundant_edges(
-            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_height=0.5, half_width=0.5
+            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_normal=0.5, half_lateral=0.5
         )
 
         # Locate the long and short edges in the manifold-edge subset.
@@ -173,7 +173,7 @@ class TestEdgeRedundancyAbsorption(unittest.TestCase):
     def test_csr_offsets_are_monotonic(self):
         mesh = _absorbing_mesh()
         result = find_redundant_edges(
-            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_height=0.5, half_width=0.5
+            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_normal=0.5, half_lateral=0.5
         )
         offsets = result.absorbed_offsets
         # Strictly non-decreasing and ends with the total entry count.
@@ -217,8 +217,8 @@ def _make_synthetic_result(
         absorbed_indices=indices,
         broad_phase_pair_count=int(absorb_count.sum()),
         aabb_diagonal=1.0,
-        half_height=1.0,
-        half_width=1.0,
+        half_normal=1.0,
+        half_lateral=1.0,
         lower_angle_threshold_rad=0.0,
         upper_angle_threshold_rad=math.radians(10.0),
     )
@@ -228,7 +228,7 @@ class TestEdgeRemovalResolution(unittest.TestCase):
     def test_absorbing_mesh_default_threshold_removes_short_edge(self):
         mesh = _absorbing_mesh()
         result = find_redundant_edges(
-            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_height=0.5, half_width=0.5
+            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_normal=0.5, half_lateral=0.5
         )
         resolution = resolve_edge_removals(result)
         self.assertIsInstance(resolution, EdgeResolutionResult)
@@ -245,7 +245,7 @@ class TestEdgeRemovalResolution(unittest.TestCase):
     def test_threshold_zero_removes_nothing(self):
         mesh = _absorbing_mesh()
         result = find_redundant_edges(
-            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_height=0.5, half_width=0.5
+            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_normal=0.5, half_lateral=0.5
         )
         # threshold == 0 means no absorbed edge qualifies (angle < 0 is False everywhere).
         resolution = resolve_edge_removals(result, upper_angle_threshold_rad=0.0)
@@ -254,7 +254,7 @@ class TestEdgeRemovalResolution(unittest.TestCase):
     def test_cube_oversized_extents_kept_and_removed_are_disjoint(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
         result = find_redundant_edges(
-            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_height=2.0, half_width=2.0
+            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_normal=2.0, half_lateral=2.0
         )
         # Cube silhouette edges have a 90 deg dihedral and must never be
         # removed at the default 10 deg threshold; only the 6 face diagonals
@@ -366,13 +366,13 @@ class TestRemoveRedundantEdges(unittest.TestCase):
         # Match the two-step pipeline at the same thresholds and assert the
         # one-shot helper returns the same kept set.
         full = find_redundant_edges(
-            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_height=0.5, half_width=0.5
+            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_normal=0.5, half_lateral=0.5
         )
         resolution = resolve_edge_removals(full, upper_angle_threshold_rad=math.radians(10.0))
         expected = full.edge_indices[~resolution.to_remove]
 
         kept = remove_redundant_edges(
-            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_height=0.5, half_width=0.5
+            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_normal=0.5, half_lateral=0.5
         )
         np.testing.assert_array_equal(kept, expected)
 
@@ -383,7 +383,7 @@ class TestRemoveRedundantEdges(unittest.TestCase):
     def test_disabled_boxes_keep_every_manifold_edge(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
         kept = remove_redundant_edges(
-            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_height=0.0, half_width=1.0
+            mesh, enable_box_absorption=True, lower_angle_threshold_rad=0.0, half_normal=0.0, half_lateral=1.0
         )
         # The fast path in find_redundant_edges flags no candidates, so every
         # manifold edge survives.

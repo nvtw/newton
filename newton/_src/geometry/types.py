@@ -762,75 +762,58 @@ class Mesh:
         edge_lower_angle_threshold_rad: float = math.radians(0.1),
         edge_upper_angle_threshold_rad: float = math.radians(10.0),
         edge_box_absorption: bool = False,
-        edge_box_half_height: float | None = None,
-        edge_box_half_height_rel: float | None = None,
-        edge_box_half_width: float | None = None,
-        edge_box_half_width_rel: float | None = None,
+        edge_box_half_normal: float | None = None,
+        edge_box_half_normal_rel: float | None = None,
+        edge_box_half_lateral: float | None = None,
+        edge_box_half_lateral_rel: float | None = None,
     ) -> "SDF":
         """Build and attach an SDF for this mesh.
 
-        Also simplifies the precomputed mesh edges that the SDF-mesh contact
-        pipeline iterates over and caches the kept set on the mesh, so the
+        Also simplifies the precomputed mesh edges used by the SDF-mesh
+        contact pipeline and caches the kept set on the mesh, so the
         resulting :class:`Model` ships with the simplified edge set.
 
         Args:
-            device: CUDA device for SDF allocation. When ``None``, uses the
-                current :class:`wp.ScopedDevice` or the Warp default device.
+            device: CUDA device for SDF allocation. Defaults to the current
+                :class:`wp.ScopedDevice` or the Warp default device.
             narrow_band_range: Signed narrow-band distance range [m] as
-                ``(inner, outer)``. Uses ``(-0.1, 0.1)`` when not provided.
-            target_voxel_size: Target sparse-grid voxel size [m]. If provided,
-                takes precedence over ``max_resolution``.
-            max_resolution: Maximum sparse-grid dimension [voxel] along the longest
-                AABB axis, used when ``target_voxel_size`` is not provided. Must be
-                divisible by 8.
-            margin: Extra AABB padding [m] added before discretization. Uses
-                ``0.05`` when not provided.
-            shape_margin: Shape margin offset [m] to subtract from SDF values.
-                When non-zero, the SDF surface is effectively shrunk inward by
-                this amount. Useful for modeling compliant layers in hydroelastic
-                collision. Defaults to ``0.0``.
-            scale: Scale factors ``(sx, sy, sz)`` to bake into the SDF. When
-                provided, the mesh vertices are scaled before SDF generation
-                and ``scale_baked`` is set to ``True`` in the resulting SDF.
-                Required for hydroelastic collision with non-unit shape scale.
-                Defaults to ``None`` (no scale baking, scale applied at runtime).
-            texture_format: Subgrid texture storage format for the SDF.
-                ``"uint16"`` (default) stores subgrid voxels in 16-bit
-                normalized textures (half the memory of float32).
-                ``"float32"`` stores full-precision values. ``"uint8"`` uses
-                8-bit textures for minimum memory at lower precision.
-            cache_dir: Optional directory used to cache cooked SDF data on
-                disk. When provided, the cooked sparse SDF (the data that
-                backs the GPU 3D textures) is keyed by mesh content +
-                build parameters and persisted as a single
-                ``{hash}.sdf.npz`` file (an uncompressed ``np.savez``
-                bundle of typed numpy arrays). Subsequent calls with
-                identical inputs reload from disk and skip the expensive
-                mesh-SDF cook. ``shape_margin`` is applied at sample
-                time and is *not* part of the cache key. Defaults to
-                ``None`` (cache disabled).
-            edge_lower_angle_threshold_rad: Drop near-coplanar internal edges
-                whose dihedral angle is below this value [rad]. Default
-                0.1 deg; set to 0 to keep every manifold edge.
+                ``(inner, outer)``. Defaults to ``(-0.1, 0.1)``.
+            target_voxel_size: Target sparse-grid voxel size [m]. Takes
+                precedence over ``max_resolution`` when provided.
+            max_resolution: Maximum sparse-grid dimension [voxel] along the
+                longest AABB axis. Must be divisible by 8.
+            margin: Extra AABB padding [m] added before discretization.
+                Defaults to ``0.05``.
+            shape_margin: SDF surface offset [m]. Non-zero values shrink the
+                SDF surface inward; used for compliant hydroelastic layers.
+            scale: Scale factors ``(sx, sy, sz)`` baked into the SDF.
+                Required for hydroelastic collision with non-unit shape
+                scale. Defaults to runtime scaling.
+            texture_format: Subgrid texture storage: ``"uint16"`` (default,
+                half the memory of float32), ``"float32"`` (full precision),
+                or ``"uint8"`` (minimum memory, lower precision).
+            cache_dir: Optional directory for on-disk caching of the cooked
+                sparse SDF. Keyed by mesh content and build parameters
+                (``shape_margin`` is applied at sample time and is *not*
+                part of the cache key). Defaults to no caching.
+            edge_lower_angle_threshold_rad: Drop internal edges whose
+                dihedral angle is below this value [rad]. Set to 0 to keep
+                every manifold edge.
             edge_upper_angle_threshold_rad: Maximum dihedral angle [rad] for
-                an absorbed edge to be eligible for definitive removal.
-                Only consulted when ``edge_box_absorption`` is ``True``.
-                Default 10 deg.
-            edge_box_absorption: Run the box-absorption pass after the
-                dihedral-angle pre-filter to drop manifold edges fully
-                covered by another edge's oriented box. Default ``False``.
-            edge_box_half_height: Absolute box half-extent [m] along the
+                an absorbed edge to be removed. Only consulted when
+                ``edge_box_absorption`` is ``True``.
+            edge_box_absorption: Drop manifold edges fully covered by
+                another edge's oriented box.
+            edge_box_half_normal: Absolute box half-extent [m] along the
                 edge normal. Mutually exclusive with
-                ``edge_box_half_height_rel``.
-            edge_box_half_height_rel: Box half-extent along the edge normal
-                as a fraction of the mesh AABB diagonal. Defaults to
-                ``1e-3`` when no absolute value is supplied.
-            edge_box_half_width: Absolute box half-extent [m] along the
-                in-plane tangent and the per-end overhang along the edge.
-                Mutually exclusive with ``edge_box_half_width_rel``.
-            edge_box_half_width_rel: Box half-extent in-plane as a fraction
-                of the mesh AABB diagonal. Defaults to ``5e-3`` when no
-                absolute value is supplied.
+                ``edge_box_half_normal_rel``.
+            edge_box_half_normal_rel: Box half-extent along the edge normal
+                as a fraction of the AABB diagonal. Defaults to ``1e-3``.
+            edge_box_half_lateral: Absolute box half-extent [m] in-plane
+                (across the edge and as per-end overhang along it).
+                Mutually exclusive with ``edge_box_half_lateral_rel``.
+            edge_box_half_lateral_rel: Box half-extent in-plane as a fraction
+                of the AABB diagonal. Defaults to ``5e-3``.
 
         Returns:
             The attached :class:`SDF` instance.
@@ -838,8 +821,8 @@ class Mesh:
         Raises:
             RuntimeError: If this mesh already has an SDF attached.
             ValueError: If both an absolute and relative half-extent are
-                supplied for the same axis, or if any absolute or relative
-                half-extent is negative.
+                supplied for the same axis, or if any half-extent is
+                negative.
         """
         if self.sdf is not None:
             raise RuntimeError("Mesh already has an SDF. Call clear_sdf() before rebuilding.")
@@ -867,10 +850,10 @@ class Mesh:
             lower_angle_threshold_rad=edge_lower_angle_threshold_rad,
             upper_angle_threshold_rad=edge_upper_angle_threshold_rad,
             enable_box_absorption=edge_box_absorption,
-            half_height_abs=edge_box_half_height,
-            half_height_rel=edge_box_half_height_rel,
-            half_width_abs=edge_box_half_width,
-            half_width_rel=edge_box_half_width_rel,
+            half_normal_abs=edge_box_half_normal,
+            half_normal_rel=edge_box_half_normal_rel,
+            half_lateral_abs=edge_box_half_lateral,
+            half_lateral_rel=edge_box_half_lateral_rel,
         )
 
         return self.sdf
@@ -881,19 +864,19 @@ class Mesh:
         lower_angle_threshold_rad: float,
         upper_angle_threshold_rad: float,
         enable_box_absorption: bool,
-        half_height_abs: float | None,
-        half_height_rel: float | None,
-        half_width_abs: float | None,
-        half_width_rel: float | None,
+        half_normal_abs: float | None,
+        half_normal_rel: float | None,
+        half_lateral_abs: float | None,
+        half_lateral_rel: float | None,
     ) -> None:
         """Compute and cache the precomputed-edge set used by SDF-mesh contacts.
 
         The baseline is the full dihedral-filtered edge set from
         :meth:`_filter_edges_by_dihedral_angle` — boundary edges and
-        non-manifold edges are preserved so the SDF path matches the
-        builder's threshold fallback. When ``enable_box_absorption`` is
-        ``True`` the manifold-only absorption pass runs on top and removes
-        the manifold edges that ``resolve_edge_removals`` flags.
+        non-manifold edges are always preserved. When
+        ``enable_box_absorption`` is ``True`` the manifold-only absorption
+        pass runs on top and removes the manifold edges that
+        ``resolve_edge_removals`` flags.
         """
         if self._vertices.size > 0:
             aabb_min = self._vertices.min(axis=0)
@@ -902,11 +885,11 @@ class Mesh:
         else:
             diagonal = 0.0
 
-        half_height = _resolve_relative_or_absolute(
-            half_height_abs, half_height_rel, default_rel=1.0e-3, name="edge_box_half_height", diagonal=diagonal
+        half_normal = _resolve_relative_or_absolute(
+            half_normal_abs, half_normal_rel, default_rel=1.0e-3, name="edge_box_half_normal", diagonal=diagonal
         )
-        half_width = _resolve_relative_or_absolute(
-            half_width_abs, half_width_rel, default_rel=5.0e-3, name="edge_box_half_width", diagonal=diagonal
+        half_lateral = _resolve_relative_or_absolute(
+            half_lateral_abs, half_lateral_rel, default_rel=5.0e-3, name="edge_box_half_lateral", diagonal=diagonal
         )
 
         full_edges = self._filter_edges_by_dihedral_angle(lower_angle_threshold_rad)
@@ -920,8 +903,8 @@ class Mesh:
         result = find_redundant_edges(
             self,
             enable_box_absorption=True,
-            half_height=half_height,
-            half_width=half_width,
+            half_normal=half_normal,
+            half_lateral=half_lateral,
             lower_angle_threshold_rad=lower_angle_threshold_rad,
             upper_angle_threshold_rad=upper_angle_threshold_rad,
         )

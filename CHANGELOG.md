@@ -6,8 +6,7 @@
 
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
 - Add `ViewerGL.show_loading_splash()` / `ViewerGL.hide_loading_splash()` displaying a stylized Newton's-cradle overlay while the GL viewer waits on Warp kernel compilation; raised automatically by `newton.examples.init()` for visible GL viewers
-- Add `ModelBuilder.mesh_edge_lower_angle_threshold_rad` (default 0.1 degree) to drop near-coplanar internal edges when packing precomputed mesh edges for SDF-mesh contact generation. Boundary and non-manifold edges are always kept; set to `0` to disable filtering
-- Add edge-simplification options to `Mesh.build_sdf()`: `edge_lower_angle_threshold_rad`, `edge_upper_angle_threshold_rad`, opt-in `edge_box_absorption`, plus mutually exclusive absolute (`edge_box_half_height` / `edge_box_half_width`) and relative (`edge_box_half_height_rel` / `edge_box_half_width_rel`) box half-extents. The simplified edge set is cached on the `Mesh` and consumed by `ModelBuilder.finalize()` for SDF-mesh contact generation
+- Add edge-simplification options to `Mesh.build_sdf()` (`edge_lower_angle_threshold_rad` defaulting to 0.1 deg, `edge_upper_angle_threshold_rad`, opt-in `edge_box_absorption`, and mutually exclusive absolute / relative box half-extents `edge_box_half_{normal,lateral}` and `edge_box_half_{normal,lateral}_rel`) that drop near-coplanar internal edges (and optionally manifold edges absorbed by another edge's oriented box) from the precomputed mesh-edge set used by SDF-mesh contact generation; boundary and non-manifold edges are always kept, the simplified edge set is cached on the `Mesh` and consumed by `ModelBuilder.finalize()`
 
 ## [1.2.0] - 2026-05-12
 

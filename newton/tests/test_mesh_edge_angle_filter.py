@@ -5,8 +5,9 @@
 
 `Mesh._filter_edges_by_dihedral_angle` drops internal edges whose two adjacent
 triangle face normals are within an angle threshold (near-coplanar). Boundary
-edges and non-manifold edges are always kept. The filter is applied at
-`ModelBuilder.finalize()` time via `ModelBuilder.mesh_edge_lower_angle_threshold_rad`.
+edges and non-manifold edges are always kept. The filter is applied from
+`Mesh.build_sdf()` and the resulting simplified set is cached on the mesh for
+`ModelBuilder.finalize()` to consume.
 """
 
 import math
@@ -180,32 +181,17 @@ class TestMeshEdgeAngleFilter(unittest.TestCase):
 
 
 class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
-    def test_default_is_point_one_degree(self):
-        builder = newton.ModelBuilder()
-        self.assertAlmostEqual(builder.mesh_edge_lower_angle_threshold_rad, math.radians(0.1))
-
-    def test_finalize_packs_filtered_edges_per_threshold(self):
+    def test_finalize_uses_full_edges_without_build_sdf(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
 
-        # Threshold 0 -> 18 unique edges packed.
-        builder0 = newton.ModelBuilder()
-        builder0.mesh_edge_lower_angle_threshold_rad = 0.0
-        body0 = builder0.add_body()
-        builder0.add_shape_mesh(body=body0, mesh=mesh)
-        model0 = builder0.finalize()
-        ranges0 = model0.shape_edge_range.numpy()
-        # First (and only) mesh shape should have count == 18.
-        self.assertEqual(int(ranges0[0][1]), 18)
-        self.assertEqual(int(model0.mesh_edge_indices.shape[0]), 18)
-
-        # Default threshold (1 degree) -> 12 silhouette edges packed.
-        builder1 = newton.ModelBuilder()
-        body1 = builder1.add_body()
-        builder1.add_shape_mesh(body=body1, mesh=mesh)
-        model1 = builder1.finalize()
-        ranges1 = model1.shape_edge_range.numpy()
-        self.assertEqual(int(ranges1[0][1]), 12)
-        self.assertEqual(int(model1.mesh_edge_indices.shape[0]), 12)
+        builder = newton.ModelBuilder()
+        body = builder.add_body()
+        builder.add_shape_mesh(body=body, mesh=mesh)
+        model = builder.finalize()
+        ranges = model.shape_edge_range.numpy()
+        # No build_sdf() -> builder packs all 18 unique cube edges.
+        self.assertEqual(int(ranges[0][1]), 18)
+        self.assertEqual(int(model.mesh_edge_indices.shape[0]), 18)
 
     def test_finalize_shares_edges_across_shapes_referencing_same_mesh(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
@@ -262,10 +248,10 @@ class TestBuildCollisionEdges(unittest.TestCase):
             "lower_angle_threshold_rad": math.radians(0.1),
             "upper_angle_threshold_rad": math.radians(10.0),
             "enable_box_absorption": False,
-            "half_height_abs": None,
-            "half_height_rel": None,
-            "half_width_abs": None,
-            "half_width_rel": None,
+            "half_normal_abs": None,
+            "half_normal_rel": None,
+            "half_lateral_abs": None,
+            "half_lateral_rel": None,
         }
         defaults.update(kwargs)
         mesh._build_collision_edges(**defaults)
@@ -273,17 +259,17 @@ class TestBuildCollisionEdges(unittest.TestCase):
 
     def test_abs_and_rel_together_raises(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
-        with self.assertRaisesRegex(ValueError, "edge_box_half_height"):
-            self._build(mesh, half_height_abs=1.0, half_height_rel=1e-3)
-        with self.assertRaisesRegex(ValueError, "edge_box_half_width"):
-            self._build(mesh, half_width_abs=1.0, half_width_rel=5e-3)
+        with self.assertRaisesRegex(ValueError, "edge_box_half_normal"):
+            self._build(mesh, half_normal_abs=1.0, half_normal_rel=1e-3)
+        with self.assertRaisesRegex(ValueError, "edge_box_half_lateral"):
+            self._build(mesh, half_lateral_abs=1.0, half_lateral_rel=5e-3)
 
     def test_negative_value_raises(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
         with self.assertRaisesRegex(ValueError, "non-negative"):
-            self._build(mesh, half_height_abs=-1.0)
+            self._build(mesh, half_normal_abs=-1.0)
         with self.assertRaisesRegex(ValueError, "non-negative"):
-            self._build(mesh, half_width_rel=-1.0)
+            self._build(mesh, half_lateral_rel=-1.0)
 
     def test_boundary_edges_preserved_without_absorption(self):
         # Open-top box has 4 boundary edges that must survive the build_sdf
@@ -306,8 +292,8 @@ class TestBuildCollisionEdges(unittest.TestCase):
             mesh,
             lower_angle_threshold_rad=0.0,
             enable_box_absorption=True,
-            half_height_abs=2.0,
-            half_width_abs=2.0,
+            half_normal_abs=2.0,
+            half_lateral_abs=2.0,
         )
         # At most the 18 unique edges, strictly fewer than 18 (some diagonals removed).
         self.assertLess(len(kept), 18)
@@ -315,14 +301,12 @@ class TestBuildCollisionEdges(unittest.TestCase):
 
     def test_collision_edges_consumed_by_builder(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
-        # Seed _collision_edges with a hand-picked subset (e.g. 6 edges).
+        # Seed _collision_edges with a hand-picked subset (e.g. 6 edges) to
+        # simulate ``Mesh.build_sdf()`` having populated it.
         seeded = mesh.edges[:6].astype(np.int32)
         mesh._collision_edges = np.ascontiguousarray(seeded)
 
         builder = newton.ModelBuilder()
-        # Builder threshold differs from what's cached -> must still use the
-        # cached set rather than recompute.
-        builder.mesh_edge_lower_angle_threshold_rad = math.radians(45.0)
         body = builder.add_body()
         builder.add_shape_mesh(body=body, mesh=mesh)
         model = builder.finalize()
