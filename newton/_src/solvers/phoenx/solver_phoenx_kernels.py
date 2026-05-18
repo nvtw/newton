@@ -108,14 +108,6 @@ __all__ = [
     "_PER_WORLD_COLORING_BLOCK_DIM",
     "_STRAGGLER_BLOCK_DIM",
     "_build_scatter_keys_kernel",
-    "_phoenx_collapse_sleeping_elements_kernel",
-    "_phoenx_copy_elements_to_int2d_kernel",
-    "_phoenx_finalize_body_aabb_diagonal_kernel",
-    "_phoenx_init_body_aabb_kernel",
-    "_phoenx_island_max_velocity_kernel",
-    "_phoenx_mark_sleeping_islands_kernel",
-    "_phoenx_propagate_sleep_to_bodies_kernel",
-    "_phoenx_shape_aabb_fanin_kernel",
     "_choose_fast_tail_worlds_per_block",
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
@@ -128,13 +120,21 @@ __all__ = [
     "_per_world_jp_coloring_kernel",
     "_phoenx_apply_forces_and_gravity_kernel",
     "_phoenx_apply_global_damping_kernel",
+    "_phoenx_collapse_sleeping_elements_kernel",
+    "_phoenx_copy_elements_to_int2d_kernel",
+    "_phoenx_finalize_body_aabb_diagonal_kernel",
+    "_phoenx_init_body_aabb_kernel",
+    "_phoenx_island_max_velocity_kernel",
+    "_phoenx_mark_sleeping_islands_kernel",
+    "_phoenx_propagate_sleep_to_bodies_kernel",
     "_phoenx_refresh_world_inertia_kernel",
+    "_phoenx_shape_aabb_fanin_kernel",
     "_phoenx_update_inertia_and_clear_forces_kernel",
     "_pick_threads_per_world_kernel",
-    "_reduce_total_colours_kernel",
-    "_set_kinematic_pose_batch_kernel",
     "_reduce_constraint_time_us_kernel",
     "_reduce_contact_time_us_kernel",
+    "_reduce_total_colours_kernel",
+    "_set_kinematic_pose_batch_kernel",
     "_sync_num_active_constraints_kernel",
     "_zero_constraint_time_us_kernel",
     "_zero_contact_time_us_kernel",
@@ -1353,6 +1353,12 @@ def _integrate_velocities_kernel(
     mt = bodies.motion_type[i]
     if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
         return
+    # Sleeping bodies must not drift. They may carry a small residual
+    # velocity (anywhere below the per-island sleep threshold) at the
+    # moment ``is_sleeping`` flips; integrating that for many substeps
+    # would slide the whole sleeping island visibly.
+    if bodies.is_sleeping[i] != wp.int32(0):
+        return
 
     bodies.position[i] = bodies.position[i] + bodies.velocity[i] * dt
     q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
@@ -1582,15 +1588,22 @@ def _phoenx_copy_elements_to_int2d_kernel(
     elements: wp.array[ElementInteractionData],
     num_active_constraints: wp.array[wp.int32],
     num_bodies: wp.int32,
+    bodies: BodyContainer,
     # out: 2D int32 array, shape (capacity, MAX_BODIES), in the layout the
     # UnionFindIslandBuilder consumes. Particle endpoints (b >= num_bodies)
     # are dropped to -1 because the island scratch is sized for rigid bodies
-    # only -- particles never sleep in this iteration.
+    # only -- particles never sleep in this iteration. Non-dynamic endpoints
+    # (the world anchor at slot 0 plus any other static / kinematic body)
+    # are also dropped: they must never bridge two dynamic islands through
+    # a shared ground / platform contact.
     interaction_bodies: wp.array2d[wp.int32],
 ):
     """Copy ``elements[].bodies`` into the int2d view consumed by
     :class:`UnionFindIslandBuilder`. Inactive cids (>= num_active_constraints)
-    are zeroed to -1 so the builder's chain-union sees a clean tail.
+    are zeroed to -1 so the builder's chain-union sees a clean tail. Dynamic
+    endpoints are packed to the front of the row, with -1 padding after, so
+    the chain-union (which terminates on the first -1) sees every dynamic
+    body in the element regardless of where the dropped slots sat.
     """
     tid = wp.tid()
     if tid >= num_active_constraints[0]:
@@ -1598,11 +1611,17 @@ def _phoenx_copy_elements_to_int2d_kernel(
             interaction_bodies[tid, j] = wp.int32(-1)
         return
     el = elements[tid]
+    write_idx = wp.int32(0)
     for j in range(MAX_BODIES):
         b = el.bodies[j]
-        if b >= num_bodies:
-            b = wp.int32(-1)
-        interaction_bodies[tid, j] = b
+        if b < 0 or b >= num_bodies:
+            continue
+        if bodies.motion_type[b] != MOTION_DYNAMIC:
+            continue
+        interaction_bodies[tid, write_idx] = b
+        write_idx = write_idx + wp.int32(1)
+    for j in range(write_idx, MAX_BODIES):
+        interaction_bodies[tid, j] = wp.int32(-1)
 
 
 _AABB_INIT_LARGE = wp.constant(wp.float32(1.0e30))
@@ -1687,28 +1706,43 @@ def _phoenx_island_max_velocity_kernel(
     bodies: BodyContainer,
     body_aabb_diagonal: wp.array[wp.float32],
     island_of_body: wp.array[wp.int32],
+    step_dt: wp.float32,
     # inout
     island_max_velocity: wp.array[wp.float32],
 ):
-    """Score = length(v) + 0.5 * diag * length(omega). Per body, atomic-max
-    into ``island_max_velocity[island_of_body[b]]`` with an if-then-atomic
+    """Score = length(v_pred) + 0.5 * diag * length(w_pred), where
+    ``v_pred`` and ``w_pred`` fold one step's worth of external force /
+    torque into the body's current velocity:
+
+        v_pred = v + (F * inv_mass) * step_dt
+        w_pred = w + (inv_I_world * tau) * step_dt
+
+    Folding external input into the score means any picking pull or
+    user-applied wrench big enough to actually shift the body this
+    step lifts the island's score above the sleep threshold, waking
+    the whole island. Bodies.force / bodies.torque are the user-input
+    accumulators (gravity is applied separately and is *not* counted,
+    so awake stacks stay awake but stationary stacks under gravity
+    alone can still sleep). Per body, atomic-max into
+    ``island_max_velocity[island_of_body[b]]`` with an if-then-atomic
     early-out to cut atomic pressure: the atomic only fires when the
     body's score actually exceeds the current island maximum.
 
-    Static / anchor bodies are skipped (they wouldn't change a max anyway
-    -- their score is 0).
+    Static / anchor bodies are skipped (they wouldn't change a max
+    anyway -- their score is 0).
     """
     b = wp.tid()
     if bodies.motion_type[b] != MOTION_DYNAMIC:
         return
-    if bodies.inverse_mass[b] == 0.0:
+    inv_mass = bodies.inverse_mass[b]
+    if inv_mass == 0.0:
         return
     island = island_of_body[b]
     if island < 0:
         return
-    v = bodies.velocity[b]
-    w = bodies.angular_velocity[b]
-    score = wp.length(v) + 0.5 * body_aabb_diagonal[b] * wp.length(w)
+    v_pred = bodies.velocity[b] + bodies.force[b] * (inv_mass * step_dt)
+    w_pred = bodies.angular_velocity[b] + (bodies.inverse_inertia_world[b] * bodies.torque[b]) * step_dt
+    score = wp.length(v_pred) + 0.5 * body_aabb_diagonal[b] * wp.length(w_pred)
     # Plain read of the per-island slot. atomic_max on float is
     # deterministic, so racing readers may underestimate (someone else's
     # newer write might be in flight), but only at the cost of an extra
@@ -2094,12 +2128,23 @@ def _make_singleworld_persistent_kernel(
                                     )
                                 else:
                                     cloth_triangle_iterate_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        sor_boost,
                                     )
                                 dispatched = True
                                 if wp.static(enable_column_timers):
                                     constraint_accumulate_time_us(
-                                        constraints, CLOTH_TRIANGLE_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                        constraints,
+                                        CLOTH_TRIANGLE_TIME_US_OFFSET,
+                                        cid,
+                                        elapsed_us(_t0, read_global_timer_ns()),
                                     )
                             elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
                                 if wp.static(is_prepare):
@@ -2108,12 +2153,23 @@ def _make_singleworld_persistent_kernel(
                                     )
                                 else:
                                     soft_tetrahedron_iterate_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        sor_boost,
                                     )
                                 dispatched = True
                                 if wp.static(enable_column_timers):
                                     constraint_accumulate_time_us(
-                                        constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                        constraints,
+                                        SOFT_TET_TIME_US_OFFSET,
+                                        cid,
+                                        elapsed_us(_t0, read_global_timer_ns()),
                                     )
                             elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
                                 if wp.static(is_prepare):
@@ -2122,12 +2178,23 @@ def _make_singleworld_persistent_kernel(
                                     )
                                 else:
                                     cloth_bending_iterate_at(
-                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        sor_boost,
                                     )
                                 dispatched = True
                                 if wp.static(enable_column_timers):
                                     constraint_accumulate_time_us(
-                                        constraints, CLOTH_BENDING_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                        constraints,
+                                        CLOTH_BENDING_TIME_US_OFFSET,
+                                        cid,
+                                        elapsed_us(_t0, read_global_timer_ns()),
                                     )
                         if not dispatched:
                             # Joint (ADBS or revolute specialisation).
@@ -2331,7 +2398,15 @@ def _make_singleworld_fused_kernel(
                                 )
                             else:
                                 soft_tetrahedron_iterate_at(
-                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                    constraints,
+                                    cid,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    parallel_id,
+                                    idt,
+                                    sor_boost,
                                 )
                             if wp.static(enable_column_timers):
                                 constraint_accumulate_time_us(
@@ -2344,54 +2419,122 @@ def _make_singleworld_fused_kernel(
                                 if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
                                     if wp.static(is_prepare):
                                         cloth_triangle_prepare_for_iteration_at(
-                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
                                         )
                                     else:
                                         cloth_triangle_iterate_at(
-                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                            sor_boost,
                                         )
                                     dispatched = True
                                     if wp.static(enable_column_timers):
                                         constraint_accumulate_time_us(
-                                            constraints, CLOTH_TRIANGLE_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                            constraints,
+                                            CLOTH_TRIANGLE_TIME_US_OFFSET,
+                                            cid,
+                                            elapsed_us(_t0, read_global_timer_ns()),
                                         )
                                 elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
                                     if wp.static(is_prepare):
                                         soft_tetrahedron_prepare_for_iteration_at(
-                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
                                         )
                                     else:
                                         soft_tetrahedron_iterate_at(
-                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                            sor_boost,
                                         )
                                     dispatched = True
                                     if wp.static(enable_column_timers):
                                         constraint_accumulate_time_us(
-                                            constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                            constraints,
+                                            SOFT_TET_TIME_US_OFFSET,
+                                            cid,
+                                            elapsed_us(_t0, read_global_timer_ns()),
                                         )
                                 elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
                                     if wp.static(is_prepare):
                                         cloth_bending_prepare_for_iteration_at(
-                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
                                         )
                                     else:
                                         cloth_bending_iterate_at(
-                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                            sor_boost,
                                         )
                                     dispatched = True
                                     if wp.static(enable_column_timers):
                                         constraint_accumulate_time_us(
-                                            constraints, CLOTH_BENDING_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                            constraints,
+                                            CLOTH_BENDING_TIME_US_OFFSET,
+                                            cid,
+                                            elapsed_us(_t0, read_global_timer_ns()),
                                         )
                             if not dispatched:
                                 if wp.static(is_prepare):
                                     if wp.static(revolute_only):
                                         revolute_prepare_for_iteration(
-                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
                                         )
                                     else:
                                         actuated_double_ball_socket_prepare_for_iteration(
-                                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
                                         )
                                 else:
                                     if wp.static(revolute_only):

@@ -17,7 +17,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
-from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
+from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer, body_set_access_mode
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
@@ -624,6 +624,19 @@ def contact_iterate_multi(
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
+    # Backup safety for the sleep-transition frame. The broad-phase
+    # filter drops frozen-vs-frozen pairs, but contacts the broad
+    # phase already produced *before* the per-step sleeping pass
+    # flipped a body's ``is_sleeping`` survive into the substep
+    # solve. Without this guard the positional-bias term re-injects
+    # energy into the freshly-sleeping bodies and the whole island
+    # explodes. Frozen = sleeping or non-dynamic (STATIC / KINEMATIC,
+    # which also catches the world anchor at slot 0).
+    if b1 >= 0 and b1 < num_bodies and b2 >= 0 and b2 < num_bodies:
+        frozen1 = (bodies.motion_type[b1] != MOTION_DYNAMIC) or (bodies.is_sleeping[b1] != wp.int32(0))
+        frozen2 = (bodies.motion_type[b2] != MOTION_DYNAMIC) or (bodies.is_sleeping[b2] != wp.int32(0))
+        if frozen1 and frozen2:
+            return
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)

@@ -33,6 +33,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.geometry.support_function import encode_vec3
+from newton._src.solvers.phoenx.body import MOTION_DYNAMIC
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -671,15 +672,19 @@ class PhoenXClothShareVertexFilterData:
             ``(num_soft_tetrahedra, 4)``.
         sleeping_enabled: ``1`` when the sleeping pipeline is active --
             the filter drops rigid-rigid pairs where both shapes' bodies
-            have ``body_is_sleeping == 1``. ``0`` skips the sleep check.
+            are "frozen" (sleeping, static, kinematic, or the world
+            anchor). ``0`` skips the sleep check.
         phoenx_body_offset: Shift to apply to ``shape_body[s]`` before
-            indexing ``body_is_sleeping`` (PhoenX slot 0 is the world
-            anchor, so the offset is 1 in practice).
+            indexing ``body_is_sleeping`` / ``body_motion_type`` (PhoenX
+            slot 0 is the world anchor, so the offset is 1 in practice).
         shape_body: Per-shape Newton body index (``-1`` for world);
             length matches the unified shape array. Required when
             ``sleeping_enabled == 1``.
         body_is_sleeping: PhoenX ``BodyContainer.is_sleeping``. Required
             when ``sleeping_enabled == 1``.
+        body_motion_type: PhoenX ``BodyContainer.motion_type``. Required
+            when ``sleeping_enabled == 1`` so the filter can treat
+            STATIC / KINEMATIC bodies as permanently frozen.
     """
 
     num_rigid_shapes: wp.int32
@@ -690,6 +695,7 @@ class PhoenXClothShareVertexFilterData:
     phoenx_body_offset: wp.int32
     shape_body: wp.array[wp.int32]
     body_is_sleeping: wp.array[wp.int32]
+    body_motion_type: wp.array[wp.int32]
 
 
 @wp.func
@@ -732,9 +738,12 @@ def phoenx_cloth_share_vertex_filter(
     Two independent filters compose here:
 
     1. (Sleeping) When the sleeping pipeline is active, drop any
-       rigid-rigid pair where *both* shapes' bodies are flagged
-       ``is_sleeping``. Sleeping-vs-awake pairs pass through so the
-       awake body's contact can wake the sleeping island next step.
+       rigid-rigid pair where *both* shapes' bodies are "frozen": each
+       is sleeping, attached to the world anchor (``shape_body == -1``),
+       or has ``motion_type != DYNAMIC`` (STATIC / KINEMATIC). Pairs
+       where at least one side is an awake dynamic body pass through
+       so the awake body's contact can wake the sleeping island next
+       step.
     2. (Share-vertex) Drop a pair iff both shapes are deformable
        (cloth-tri or soft-tet) AND they share at least one particle
        vertex.
@@ -742,15 +751,27 @@ def phoenx_cloth_share_vertex_filter(
     sa = pair[0]
     sb = pair[1]
     if data.sleeping_enabled != wp.int32(0):
-        # Rigid prefix only -- deformable suffixes use shape_body=-1.
+        # Rigid prefix only -- deformable suffixes use shape_body=-1
+        # via the cloth path, not the sleeping path.
         if sa < data.num_rigid_shapes and sb < data.num_rigid_shapes:
             nba = data.shape_body[sa]
             nbb = data.shape_body[sb]
-            if nba >= 0 and nbb >= 0:
+            # Map shape_body == -1 (world anchor) to PhoenX slot 0; that
+            # slot's motion_type is STATIC so the frozen test catches it.
+            slot_a = wp.int32(0)
+            slot_b = wp.int32(0)
+            if nba >= 0:
                 slot_a = nba + data.phoenx_body_offset
+            if nbb >= 0:
                 slot_b = nbb + data.phoenx_body_offset
-                if data.body_is_sleeping[slot_a] != 0 and data.body_is_sleeping[slot_b] != 0:
-                    return wp.int32(0)
+            frozen_a = (data.body_is_sleeping[slot_a] != wp.int32(0)) or (
+                data.body_motion_type[slot_a] != MOTION_DYNAMIC
+            )
+            frozen_b = (data.body_is_sleeping[slot_b] != wp.int32(0)) or (
+                data.body_motion_type[slot_b] != MOTION_DYNAMIC
+            )
+            if frozen_a and frozen_b:
+                return wp.int32(0)
     a0, a1, a2, a3 = _share_vertex_get_particles(sa, data)
     if a0 < wp.int32(0):
         return wp.int32(1)  # sa rigid: pass through
@@ -783,14 +804,15 @@ def build_phoenx_share_vertex_filter_data(
     phoenx_body_offset: int,
     shape_body: wp.array[wp.int32] | None,
     body_is_sleeping: wp.array[wp.int32] | None,
+    body_motion_type: wp.array[wp.int32] | None,
     device: wp.context.Devicelike,
 ) -> PhoenXClothShareVertexFilterData:
     """Construct the broad-phase filter data struct used by
     :func:`phoenx_cloth_share_vertex_filter`.
 
     Length-1 sentinel arrays are substituted for ``shape_body`` /
-    ``body_is_sleeping`` when ``sleeping_enabled`` is ``False`` so the
-    Warp ABI stays bound regardless of feature use.
+    ``body_is_sleeping`` / ``body_motion_type`` when ``sleeping_enabled``
+    is ``False`` so the Warp ABI stays bound regardless of feature use.
     """
     data = PhoenXClothShareVertexFilterData()
     data.num_rigid_shapes = wp.int32(int(num_rigid_shapes))
@@ -803,6 +825,9 @@ def build_phoenx_share_vertex_filter_data(
         shape_body = wp.zeros(1, dtype=wp.int32, device=device)
     if body_is_sleeping is None:
         body_is_sleeping = wp.zeros(1, dtype=wp.int32, device=device)
+    if body_motion_type is None:
+        body_motion_type = wp.zeros(1, dtype=wp.int32, device=device)
     data.shape_body = shape_body
     data.body_is_sleeping = body_is_sleeping
+    data.body_motion_type = body_motion_type
     return data

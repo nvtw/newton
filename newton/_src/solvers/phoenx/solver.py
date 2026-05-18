@@ -248,12 +248,12 @@ class SolverPhoenX(SolverBase):
                 tight_rcm = _estimate_rigid_contact_max_phoenx(model)
                 if tight_rcm is not None:
                     model.rigid_contact_max = 0  # bypass "already sized" short-circuit
-                from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
-                    PHOENX_CONTACT_MATCHING,
-                )
                 from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
                     PhoenXClothShareVertexFilterData,
                     phoenx_cloth_share_vertex_filter,
+                )
+                from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
+                    PHOENX_CONTACT_MATCHING,
                 )
 
                 cp_kwargs = {
@@ -340,6 +340,7 @@ class SolverPhoenX(SolverBase):
                 phoenx_body_offset=1,
                 shape_body=model.shape_body,
                 body_is_sleeping=self.bodies.is_sleeping,
+                body_motion_type=self.bodies.motion_type,
                 device=self.device,
             )
             model._collision_pipeline.set_broad_phase_filter_data(filter_data)
@@ -843,9 +844,7 @@ class SolverPhoenX(SolverBase):
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
         if flags & int(SolverNotifyFlags.MODEL_PROPERTIES):
-            self.world.gravity = wp.array(
-                self._read_model_gravity_np(self.model), dtype=wp.vec3f, device=self.device
-            )
+            self.world.gravity = wp.array(self._read_model_gravity_np(self.model), dtype=wp.vec3f, device=self.device)
         # Single body refresh kernel covers both BODY_PROPERTIES and BODY_INERTIAL_PROPERTIES.
         body_refresh_mask = int(SolverNotifyFlags.BODY_INERTIAL_PROPERTIES | SolverNotifyFlags.BODY_PROPERTIES)
         if flags & body_refresh_mask:

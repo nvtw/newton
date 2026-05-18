@@ -123,9 +123,7 @@ class TestSleepingPipeline(unittest.TestCase):
         contacts = model.contacts()
 
         dt = 1.0 / 60.0
-        state_0, state_1 = _run_frames(
-            solver, state_0, state_1, control, contacts, model, n=120, dt=dt
-        )
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
 
         is_sleeping = solver.world.bodies.is_sleeping.numpy()
         # Slot 0 = world anchor, slot 1 = the box.
@@ -138,9 +136,7 @@ class TestSleepingPipeline(unittest.TestCase):
 
         # Run another second; the body must stay sleeping (gravity gated).
         com_z_before = float(state_0.body_q.numpy()[0, 2])
-        state_0, state_1 = _run_frames(
-            solver, state_0, state_1, control, contacts, model, n=60, dt=dt
-        )
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=60, dt=dt)
         com_z_after = float(state_0.body_q.numpy()[0, 2])
         self.assertAlmostEqual(
             com_z_after,
@@ -168,9 +164,7 @@ class TestSleepingPipeline(unittest.TestCase):
         contacts = model.contacts()
 
         dt = 1.0 / 60.0
-        state_0, state_1 = _run_frames(
-            solver, state_0, state_1, control, contacts, model, n=120, dt=dt
-        )
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
 
         is_sleeping = solver.world.bodies.is_sleeping.numpy()
         # Both boxes (slots 1 and 2) must sleep.
@@ -200,9 +194,7 @@ class TestSleepingPipeline(unittest.TestCase):
         contacts = model.contacts()
 
         dt = 1.0 / 60.0
-        state_0, state_1 = _run_frames(
-            solver, state_0, state_1, control, contacts, model, n=120, dt=dt
-        )
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
         self.assertEqual(int(solver.world.bodies.is_sleeping.numpy()[1]), 1)
 
         # Inject a hard +z impulse via body_f, mimicking an external kick.
@@ -228,9 +220,7 @@ class TestSleepingPipeline(unittest.TestCase):
 
         # One frame with high velocity -- the island max-vel must exceed
         # threshold and the body must remain awake at frame end.
-        state_0, state_1 = _run_frames(
-            solver, state_0, state_1, control, contacts, model, n=1, dt=dt
-        )
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=1, dt=dt)
         # After one frame at +5 m/s the body has lifted; it should still
         # be flagged awake.
         self.assertEqual(
@@ -239,6 +229,56 @@ class TestSleepingPipeline(unittest.TestCase):
             msg="body should remain awake immediately after a high-velocity kick",
         )
 
+    def test_external_force_wakes_sleeping_island(self) -> None:
+        """An external force applied via ``state.body_f`` -- e.g. picking,
+        a user-side wrench callback -- must wake the body's island on the
+        very next step. The per-island sleep score folds in
+        ``force * inv_mass * step_dt`` (and the torque analogue) so any
+        wrench big enough to actually shift the body lifts the score above
+        threshold without the caller having to clear ``is_sleeping``
+        manually.
+        """
+        threshold = 0.05
+        model = _make_box_on_plane(box_z=0.3)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=8,
+            solver_iterations=16,
+            sleeping_velocity_threshold=threshold,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        dt = 1.0 / 60.0
+        # Let the box settle and fall asleep.
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
+        self.assertEqual(
+            int(solver.world.bodies.is_sleeping.numpy()[1]),
+            1,
+            msg="box must be sleeping before the wake test",
+        )
+
+        # Apply a +z force big enough that the predicted dv (F * invm * dt)
+        # clears the sleep threshold. For a 0.2 m cube at density 1000 the
+        # mass is 8 kg; force = 50 N gives dv = 50/8/60 ≈ 0.104 m/s > 0.05.
+        # body_f spatial-vector layout (matching the PhoenX import kernel)
+        # is (force_xyz, torque_xyz); index 2 is force_z.
+        body_f = np.zeros((1, 6), dtype=np.float32)
+        body_f[0, 2] = 50.0
+        state_0.body_f.assign(body_f)
+
+        # Step manually to skip the ``clear_forces`` at the top of
+        # ``_run_frames`` -- that zeroes ``state.body_f`` before
+        # solver.step gets to import it, which would defeat the test.
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, dt)
+        self.assertEqual(
+            int(solver.world.bodies.is_sleeping.numpy()[1]),
+            0,
+            msg="external force via state.body_f must wake the sleeping island",
+        )
 
     def test_hysteresis_counter_ticks_then_sleeps(self) -> None:
         """A body settling on the floor must not flip ``is_sleeping`` until
@@ -263,9 +303,7 @@ class TestSleepingPipeline(unittest.TestCase):
         dt = 1.0 / 60.0
         # Step until the body's velocity is comfortably below threshold.
         # 90 frames is plenty for a 50cm drop on Mu=0.5.
-        state_0, state_1 = _run_frames(
-            solver, state_0, state_1, control, contacts, model, n=90, dt=dt
-        )
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=90, dt=dt)
 
         # By now the counter should be saturated at 10 and is_sleeping=1.
         counter = int(solver.world.bodies.frames_below_threshold.numpy()[1])
@@ -298,9 +336,7 @@ class TestSleepingPipeline(unittest.TestCase):
 
         dt = 1.0 / 60.0
         # Settle the box; counter saturates at 10, is_sleeping = 1.
-        state_0, state_1 = _run_frames(
-            solver, state_0, state_1, control, contacts, model, n=90, dt=dt
-        )
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=90, dt=dt)
         self.assertEqual(int(solver.world.bodies.frames_below_threshold.numpy()[1]), 10)
         self.assertEqual(int(solver.world.bodies.is_sleeping.numpy()[1]), 1)
 
@@ -312,9 +348,7 @@ class TestSleepingPipeline(unittest.TestCase):
         qd[0, 5] = 5.0  # +5 m/s linear-z
         state_0.body_qd.assign(qd)
 
-        state_0, state_1 = _run_frames(
-            solver, state_0, state_1, control, contacts, model, n=1, dt=dt
-        )
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=1, dt=dt)
 
         counter = int(solver.world.bodies.frames_below_threshold.numpy()[1])
         sleeping = int(solver.world.bodies.is_sleeping.numpy()[1])
@@ -352,9 +386,7 @@ class TestSleepingPipeline(unittest.TestCase):
         # hysteresis -- a non-zero default would leave is_sleeping = 0
         # here. The N=0 path must trip immediately on the first
         # below-threshold frame, so 60 frames is more than enough.
-        state_0, state_1 = _run_frames(
-            solver, state_0, state_1, control, contacts, model, n=60, dt=dt
-        )
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=60, dt=dt)
         self.assertEqual(
             int(solver.world.bodies.is_sleeping.numpy()[1]),
             1,
@@ -382,9 +414,7 @@ class TestSleepingPipeline(unittest.TestCase):
         contacts = model.contacts()
 
         dt = 1.0 / 60.0
-        state_0, state_1 = _run_frames(
-            solver, state_0, state_1, control, contacts, model, n=120, dt=dt
-        )
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
 
         counter = int(solver.world.bodies.frames_below_threshold.numpy()[1])
         sleeping = int(solver.world.bodies.is_sleeping.numpy()[1])

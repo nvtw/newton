@@ -105,6 +105,10 @@ from newton._src.solvers.phoenx.graph_coloring.luby_fixed import (
     FixedIterationLubyPartitioner,
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int
+from newton._src.solvers.phoenx.islands.island_builder import (
+    MAX_BODIES_PER_INTERACTION,
+    UnionFindIslandBuilder,
+)
 from newton._src.solvers.phoenx.mass_splitting import (
     CopyStateContainer,
     InteractionGraphScratch,
@@ -126,10 +130,6 @@ from newton._src.solvers.phoenx.solver_config import (
 )
 from newton._src.solvers.phoenx.solver_kernels import (
     _accumulate_substep_velocity_kernel,
-)
-from newton._src.solvers.phoenx.islands.island_builder import (
-    MAX_BODIES_PER_INTERACTION,
-    UnionFindIslandBuilder,
 )
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
@@ -782,14 +782,10 @@ class PhoenXWorld:
         # the entire block (no kernel launches, no scratch resets).
         sleeping_threshold = float(sleeping_velocity_threshold)
         if sleeping_threshold < 0.0:
-            raise ValueError(
-                f"sleeping_velocity_threshold must be >= 0 (got {sleeping_threshold})"
-            )
+            raise ValueError(f"sleeping_velocity_threshold must be >= 0 (got {sleeping_threshold})")
         sleeping_frames = int(sleeping_frames_required)
         if sleeping_frames < 0:
-            raise ValueError(
-                f"sleeping_frames_required must be >= 0 (got {sleeping_frames})"
-            )
+            raise ValueError(f"sleeping_frames_required must be >= 0 (got {sleeping_frames})")
         self._sleeping_velocity_threshold: float = sleeping_threshold
         self._sleeping_frames_required: int = sleeping_frames
         self._sleeping_enabled: bool = sleeping_threshold > 0.0
@@ -808,9 +804,7 @@ class PhoenXWorld:
         self._sleeping_num_bodies_device: wp.array[wp.int32] | None = None
         if self._sleeping_enabled:
             if self.num_bodies <= 0:
-                raise ValueError(
-                    "sleeping_velocity_threshold > 0 requires num_bodies > 0"
-                )
+                raise ValueError("sleeping_velocity_threshold > 0 requires num_bodies > 0")
             self._island_builder = UnionFindIslandBuilder(
                 num_bodies_capacity=self.num_bodies,
                 device=self.device,
@@ -826,9 +820,7 @@ class PhoenXWorld:
             self._body_aabb_lower = wp.zeros((self.num_bodies, 3), dtype=wp.float32, device=self.device)
             self._body_aabb_upper = wp.zeros((self.num_bodies, 3), dtype=wp.float32, device=self.device)
             self._body_aabb_diagonal = wp.zeros(self.num_bodies, dtype=wp.float32, device=self.device)
-            self._sleeping_num_bodies_device = wp.array(
-                [self.num_bodies], dtype=wp.int32, device=self.device
-            )
+            self._sleeping_num_bodies_device = wp.array([self.num_bodies], dtype=wp.int32, device=self.device)
 
         # Step-time dispatcher. Each (step_layout, mass_splitting)
         # combination has a dedicated class under :mod:`phoenx.dispatch`
@@ -1472,6 +1464,7 @@ class PhoenXWorld:
             phoenx_body_offset=int(phoenx_body_offset),
             shape_body=model.shape_body if self._sleeping_enabled else None,
             body_is_sleeping=self.bodies.is_sleeping if self._sleeping_enabled else None,
+            body_motion_type=self.bodies.motion_type if self._sleeping_enabled else None,
             device=self.device,
         )
         pipeline.set_broad_phase_filter_data(share_vertex_data)
@@ -2062,6 +2055,7 @@ class PhoenXWorld:
                 self._elements,
                 self._num_active_constraints,
                 wp.int32(self.num_bodies),
+                self.bodies,
             ],
             outputs=[self._island_interaction_bodies],
             device=self.device,
@@ -2080,6 +2074,7 @@ class PhoenXWorld:
                 self.bodies,
                 self._body_aabb_diagonal,
                 self._island_builder.set_nr,
+                wp.float32(self.step_dt),
             ],
             outputs=[self._island_max_velocity],
             device=self.device,

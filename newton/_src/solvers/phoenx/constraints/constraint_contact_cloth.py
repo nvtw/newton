@@ -26,7 +26,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
-from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
+from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer, body_set_access_mode
 from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
@@ -100,7 +100,6 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
 )
 from newton._src.solvers.phoenx.mass_splitting.access import (
     get_state_index,
-    read_angular_velocity_unified,
     read_angular_velocity_with_slot,
     read_velocity_unified,
     write_angular_velocity_unified,
@@ -927,6 +926,17 @@ def contact_iterate(
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
+    # Backup safety for the sleep-transition frame. See the matching
+    # guard in :func:`contact_iterate_multi` for the full reasoning --
+    # contacts the broad phase already produced before the per-step
+    # sleeping pass flipped ``is_sleeping`` survive into the substep
+    # solve, and without this guard the positional-bias term explodes
+    # the freshly-sleeping island.
+    if b1 >= 0 and b1 < num_bodies and b2 >= 0 and b2 < num_bodies:
+        frozen1 = (bodies.motion_type[b1] != MOTION_DYNAMIC) or (bodies.is_sleeping[b1] != wp.int32(0))
+        frozen2 = (bodies.motion_type[b2] != MOTION_DYNAMIC) or (bodies.is_sleeping[b2] != wp.int32(0))
+        if frozen1 and frozen2:
+            return
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
