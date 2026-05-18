@@ -246,6 +246,148 @@ class TestIslandBuilderDeterminism(unittest.TestCase):
             np.testing.assert_array_equal(snaps[0]["set_sizes"], s["set_sizes"])
             np.testing.assert_array_equal(snaps[0]["set_sizes_compact"], s["set_sizes_compact"])
 
+    def _clustered_mixed_arity_workload(
+        self,
+        seed: int,
+        cluster_sizes: list[int],
+        pair_edges_per_cluster: int,
+        triplet_edges_per_cluster: int,
+        quad_edges_per_cluster: int,
+        six_edges_per_cluster: int,
+        hubs_per_cluster: int,
+        hub_degree: int,
+    ) -> tuple[list[list[int]], int]:
+        """Synthetic workload with multiple disjoint clusters. Each
+        cluster owns a contiguous body-id range and emits its own
+        mixed-arity interactions + a few high-degree hubs that union
+        within the cluster only. Returns ``(elements, num_bodies)``.
+
+        Multiple clusters guarantee multiple islands so the
+        deterministic post-sort path (min-index sort + label rewrite)
+        is exercised under load -- a single-cluster workload collapses
+        into one island after the first few unions and never touches
+        the multi-island branch.
+        """
+        rng = np.random.default_rng(seed)
+        elements: list[list[int]] = []
+        offset = 0
+        cluster_ranges: list[tuple[int, int]] = []
+        for size in cluster_sizes:
+            cluster_ranges.append((offset, offset + size))
+            offset += size
+        num_bodies = offset
+
+        def _distinct_in(lo: int, hi: int, n: int) -> list[int]:
+            return [int(x) for x in rng.choice(hi - lo, size=n, replace=False) + lo]
+
+        for lo, hi in cluster_ranges:
+            for _ in range(pair_edges_per_cluster):
+                elements.append(_distinct_in(lo, hi, 2))
+            for _ in range(triplet_edges_per_cluster):
+                elements.append(_distinct_in(lo, hi, 3))
+            for _ in range(quad_edges_per_cluster):
+                elements.append(_distinct_in(lo, hi, 4))
+            for _ in range(six_edges_per_cluster):
+                elements.append(_distinct_in(lo, hi, MAX_BODIES_PER_INTERACTION))
+            # High-degree hubs: contention path that stresses the
+            # atomic union retries on the cluster's representative.
+            for h in _distinct_in(lo, hi, hubs_per_cluster):
+                for p in _distinct_in(lo, hi, hub_degree):
+                    if int(p) == int(h):
+                        continue
+                    elements.append([int(h), int(p)])
+
+        rng.shuffle(elements)
+        return elements, num_bodies
+
+    def test_determinism_large_2k_plus(self):
+        """2000+ interactions across multiple disjoint clusters; the
+        builder must produce byte-identical outputs across repeated
+        runs and the multi-island post-sort path must be exercised.
+
+        Six clusters of 64 bodies (384 total) with ~470 mixed-arity
+        interactions per cluster + small hubs put the total well over
+        2000 elements while guaranteeing six distinct islands. Both
+        the union-find races (within-cluster contention) and the
+        deterministic post-sort path (min-index sort, label rewrite
+        across six islands) run under load.
+        """
+        elements, num_bodies = self._clustered_mixed_arity_workload(
+            seed=2026,
+            cluster_sizes=[64, 64, 64, 64, 64, 64],
+            pair_edges_per_cluster=200,
+            triplet_edges_per_cluster=100,
+            quad_edges_per_cluster=80,
+            six_edges_per_cluster=40,
+            hubs_per_cluster=2,
+            hub_degree=24,
+        )
+        self.assertGreaterEqual(
+            len(elements),
+            2000,
+            msg=f"workload below 2k elements ({len(elements)}); raise the band sizes",
+        )
+
+        # Run six times; every snapshot must byte-match snapshot 0.
+        # Six is enough to flush the kernel module cache once and run
+        # several rounds with hot module state -- catches subtle race
+        # paths the first run might mask.
+        snaps = []
+        for _ in range(6):
+            _, snap = _run_builder(elements, num_bodies=num_bodies)
+            snaps.append(snap)
+
+        ref = snaps[0]
+        # Sanity: every cluster collapsed into exactly one island,
+        # producing six islands total. Anything else means the
+        # within-cluster unions didn't converge (which determinism
+        # asserts below would still catch, but this is a louder failure).
+        self.assertEqual(
+            ref["num_islands"],
+            6,
+            msg=f"expected 6 islands (one per cluster), got {ref['num_islands']}",
+        )
+
+        for idx, s in enumerate(snaps[1:], start=1):
+            self.assertEqual(
+                s["num_islands"],
+                ref["num_islands"],
+                msg=f"run {idx}: num_islands {s['num_islands']} != ref {ref['num_islands']}",
+            )
+            np.testing.assert_array_equal(
+                ref["set_nr"],
+                s["set_nr"],
+                err_msg=f"run {idx}: set_nr drifted from reference",
+            )
+            np.testing.assert_array_equal(
+                ref["set_sizes"],
+                s["set_sizes"],
+                err_msg=f"run {idx}: set_sizes drifted from reference",
+            )
+            np.testing.assert_array_equal(
+                ref["set_sizes_compact"],
+                s["set_sizes_compact"],
+                err_msg=f"run {idx}: set_sizes_compact drifted from reference",
+            )
+
+        # Cross-check the island id <-> min-body invariant on the
+        # large workload: island k's smallest body id must be strictly
+        # less than island (k+1)'s. This is the property the post-sort
+        # step exists to enforce.
+        bodies_by_island: dict[int, int] = {}
+        for body in range(num_bodies):
+            nr = int(ref["set_nr"][body])
+            if nr < 0:
+                continue
+            prev = bodies_by_island.get(nr, body)
+            bodies_by_island[nr] = min(prev, body)
+        min_ids = [bodies_by_island[k] for k in sorted(bodies_by_island.keys())]
+        self.assertEqual(
+            min_ids,
+            sorted(min_ids),
+            msg="island ids are not ordered by min-body-id; post-sort regressed",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
