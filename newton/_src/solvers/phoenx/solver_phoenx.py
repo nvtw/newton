@@ -27,6 +27,7 @@ from newton._src.solvers.phoenx.cloth_collision import (
     _phoenx_populate_shape_endpoints_kernel,
     _phoenx_update_cloth_shape_geometry_kernel,
     _phoenx_update_soft_tet_shape_geometry_kernel,
+    build_phoenx_share_vertex_filter_data,
     phoenx_cloth_share_vertex_filter,
     shape_endpoints_zeros,
 )
@@ -126,6 +127,10 @@ from newton._src.solvers.phoenx.solver_config import (
 from newton._src.solvers.phoenx.solver_kernels import (
     _accumulate_substep_velocity_kernel,
 )
+from newton._src.solvers.phoenx.islands.island_builder import (
+    MAX_BODIES_PER_INTERACTION,
+    UnionFindIslandBuilder,
+)
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
     _STRAGGLER_BLOCK_DIM,
@@ -142,7 +147,15 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
+    _phoenx_collapse_sleeping_elements_kernel,
+    _phoenx_copy_elements_to_int2d_kernel,
+    _phoenx_finalize_body_aabb_diagonal_kernel,
+    _phoenx_init_body_aabb_kernel,
+    _phoenx_island_max_velocity_kernel,
+    _phoenx_mark_sleeping_islands_kernel,
+    _phoenx_propagate_sleep_to_bodies_kernel,
     _phoenx_refresh_world_inertia_kernel,
+    _phoenx_shape_aabb_fanin_kernel,
     _phoenx_update_inertia_and_clear_forces_kernel,
     _pick_threads_per_world_kernel,
     _reduce_constraint_time_us_kernel,
@@ -313,6 +326,7 @@ class PhoenXWorld:
         enable_warm_start_coloring: bool = True,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
+        sleeping_velocity_threshold: float = 0.0,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -757,6 +771,57 @@ class PhoenXWorld:
         self._shape_body_internal: wp.array[wp.int32] | None = None
         # Lazy sentinel for optional per-contact stiffness/damping/friction.
         self._soft_contact_sentinel: wp.array[wp.float32] | None = None
+
+        # Reference to the share-vertex / sleeping filter data, kept alive
+        # so the Warp ABI sees a stable wp.struct binding across steps.
+        self._share_vertex_filter_data: PhoenXClothShareVertexFilterData | None = None
+
+        # Sleeping pipeline. Activated by ``sleeping_velocity_threshold > 0``;
+        # zero leaves every helper at ``None`` so the per-step hot path skips
+        # the entire block (no kernel launches, no scratch resets).
+        sleeping_threshold = float(sleeping_velocity_threshold)
+        if sleeping_threshold < 0.0:
+            raise ValueError(
+                f"sleeping_velocity_threshold must be >= 0 (got {sleeping_threshold})"
+            )
+        self._sleeping_velocity_threshold: float = sleeping_threshold
+        self._sleeping_enabled: bool = sleeping_threshold > 0.0
+        self._island_builder: UnionFindIslandBuilder | None = None
+        self._island_interaction_bodies: wp.array2d[wp.int32] | None = None
+        self._island_max_velocity: wp.array[wp.float32] | None = None
+        self._island_is_sleeping: wp.array[wp.int32] | None = None
+        # Per-rigid-body bounding box, unioned across every attached
+        # shape's world-frame AABB. Used by the sleeping pipeline to
+        # estimate a body's swept volume so the spin term in the
+        # velocity score (0.5 * diagonal * |omega|) accounts for
+        # off-COM shapes.
+        self._body_aabb_lower: wp.array2d[wp.float32] | None = None
+        self._body_aabb_upper: wp.array2d[wp.float32] | None = None
+        self._body_aabb_diagonal: wp.array[wp.float32] | None = None
+        self._sleeping_num_bodies_device: wp.array[wp.int32] | None = None
+        if self._sleeping_enabled:
+            if self.num_bodies <= 0:
+                raise ValueError(
+                    "sleeping_velocity_threshold > 0 requires num_bodies > 0"
+                )
+            self._island_builder = UnionFindIslandBuilder(
+                num_bodies_capacity=self.num_bodies,
+                device=self.device,
+            )
+            self._island_interaction_bodies = wp.full(
+                shape=(self._constraint_capacity, int(MAX_BODIES_PER_INTERACTION)),
+                value=-1,
+                dtype=wp.int32,
+                device=self.device,
+            )
+            self._island_max_velocity = wp.zeros(self.num_bodies, dtype=wp.float32, device=self.device)
+            self._island_is_sleeping = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
+            self._body_aabb_lower = wp.zeros((self.num_bodies, 3), dtype=wp.float32, device=self.device)
+            self._body_aabb_upper = wp.zeros((self.num_bodies, 3), dtype=wp.float32, device=self.device)
+            self._body_aabb_diagonal = wp.zeros(self.num_bodies, dtype=wp.float32, device=self.device)
+            self._sleeping_num_bodies_device = wp.array(
+                [self.num_bodies], dtype=wp.int32, device=self.device
+            )
 
         # Step-time dispatcher. Each (step_layout, mass_splitting)
         # combination has a dedicated class under :mod:`phoenx.dispatch`
@@ -1386,15 +1451,24 @@ class PhoenXWorld:
         )
 
         # Bind the share-vertex filter's per-step data: tri/tet index
-        # arrays + offsets. The filter callback reads this at every
-        # broad-phase pair test to drop pairs of deformables (cloth or
-        # soft-tet) that share at least one particle.
-        share_vertex_data = PhoenXClothShareVertexFilterData()
-        share_vertex_data.num_rigid_shapes = wp.int32(S)
-        share_vertex_data.num_cloth_triangles = wp.int32(T)
-        share_vertex_data.tri_indices = tri_indices_for_filter
-        share_vertex_data.tet_indices = tet_indices_for_filter
+        # arrays + offsets, plus optional sleeping-aware fields. The
+        # filter callback reads this at every broad-phase pair test to
+        # drop pairs of deformables (cloth or soft-tet) that share at
+        # least one particle, and (when sleeping is on) rigid-rigid
+        # pairs where both bodies are flagged sleeping.
+        share_vertex_data = build_phoenx_share_vertex_filter_data(
+            num_rigid_shapes=S,
+            num_cloth_triangles=T,
+            tri_indices=tri_indices_for_filter,
+            tet_indices=tet_indices_for_filter,
+            sleeping_enabled=self._sleeping_enabled,
+            phoenx_body_offset=int(phoenx_body_offset),
+            shape_body=model.shape_body if self._sleeping_enabled else None,
+            body_is_sleeping=self.bodies.is_sleeping if self._sleeping_enabled else None,
+            device=self.device,
+        )
         pipeline.set_broad_phase_filter_data(share_vertex_data)
+        self._share_vertex_filter_data = share_vertex_data
 
         # Stamp the static deformable-shape suffix metadata. Per-step
         # quantities (geom_xform, geom_data, AABB, shape_source for tets)
@@ -1585,12 +1659,19 @@ class PhoenXWorld:
         picking=None,
         vel_accum: wp.array[wp.vec3f] | None = None,
         omega_accum: wp.array[wp.vec3f] | None = None,
+        shape_aabb_lower: wp.array[wp.vec3f] | None = None,
+        shape_aabb_upper: wp.array[wp.vec3f] | None = None,
     ) -> None:
         """Advance the world by ``dt`` seconds.
 
         Phases: ingest contacts -> JP colouring -> substep loop (forces+gravity,
         main solve, integrate, relax) -> damping + inertia refresh -> clear forces.
         ``contacts`` requires non-disabled contact_matching ("sticky" recommended).
+
+        ``shape_aabb_lower`` / ``shape_aabb_upper`` are read only when
+        :attr:`sleeping_velocity_threshold` > 0; pass the broad phase's
+        per-shape AABB arrays in that case (typically
+        ``model._collision_pipeline.narrow_phase.shape_aabb_*``).
         """
         if dt < 0.0:
             raise ValueError("Time step cannot be negative.")
@@ -1615,6 +1696,8 @@ class PhoenXWorld:
             )
 
         self._rebuild_elements()
+        if self._sleeping_enabled:
+            self._run_sleeping_pass(shape_body, shape_aabb_lower, shape_aabb_upper)
         if self._constraint_capacity > 0:
             self._partitioner.reset(self._elements, self._num_active_constraints)
             if self.step_layout == "single_world":
@@ -1892,6 +1975,141 @@ class PhoenXWorld:
                 wp.int32(self.num_bodies),
                 self._elements,
             ],
+            device=self.device,
+        )
+
+    def _run_sleeping_pass(
+        self,
+        shape_body: wp.array[wp.int32] | None,
+        shape_aabb_lower: wp.array[wp.vec3f] | None,
+        shape_aabb_upper: wp.array[wp.vec3f] | None,
+    ) -> None:
+        """Detect sleeping islands and collapse their constraints out of the
+        partitioner's element view.
+
+        Sequence (graph-capture safe; all bounds are device arrays):
+
+        1. zero ``_body_aabb_diagonal`` / ``_island_max_velocity``.
+        2. fan per-shape AABB diagonals into the owning body via atomic_max.
+        3. copy ``_elements`` into the int2d interaction buffer the
+           island builder consumes (particles dropped to -1).
+        4. build islands (atomic union-find + deterministic post-sort).
+        5. per-body, atomic_max body score into the body's island slot.
+        6. mark islands sleeping (max score < threshold).
+        7. propagate the per-island flag to ``bodies.is_sleeping``.
+        8. rewrite ``_elements`` so any slot pointing to a sleeping body
+           becomes ``-1`` -- the partitioner then sees an empty
+           interaction and the constraint contributes nothing to
+           coloring / overflow.
+        """
+        if self._constraint_capacity == 0 or self.num_bodies == 0:
+            return
+        if self._island_builder is None:
+            return
+        if shape_body is None or shape_aabb_lower is None or shape_aabb_upper is None:
+            # No broad-phase AABBs available -- can't compute spin score.
+            # Leave the per-body flag at its prior value (rare path; e.g.
+            # caller stepped without contacts).
+            return
+
+        self._island_max_velocity.zero_()
+
+        # Per-body union AABB: reset to ±large, fan in each attached
+        # shape's world-frame AABB via per-axis atomic min/max, then
+        # finalize the diagonal length.
+        wp.launch(
+            _phoenx_init_body_aabb_kernel,
+            dim=self.num_bodies,
+            outputs=[self._body_aabb_lower, self._body_aabb_upper],
+            device=self.device,
+        )
+        # Cap the launch to ``shape_body``'s length -- cloth setups pad
+        # the broad-phase AABB array with cloth-tri / soft-tet suffix
+        # shapes that aren't covered by the rigid-only ``shape_body``.
+        # Those suffix shapes don't sleep, so skipping them is correct.
+        num_shapes = min(int(shape_aabb_lower.shape[0]), int(shape_body.shape[0]))
+        if num_shapes > 0:
+            wp.launch(
+                _phoenx_shape_aabb_fanin_kernel,
+                dim=num_shapes,
+                inputs=[
+                    shape_aabb_lower,
+                    shape_aabb_upper,
+                    shape_body,  # PhoenX-shifted: slot 0 = anchor, real bodies at >= 1
+                ],
+                outputs=[self._body_aabb_lower, self._body_aabb_upper],
+                device=self.device,
+            )
+        wp.launch(
+            _phoenx_finalize_body_aabb_diagonal_kernel,
+            dim=self.num_bodies,
+            inputs=[self._body_aabb_lower, self._body_aabb_upper],
+            outputs=[self._body_aabb_diagonal],
+            device=self.device,
+        )
+
+        wp.launch(
+            _phoenx_copy_elements_to_int2d_kernel,
+            dim=self._constraint_capacity,
+            inputs=[
+                self._elements,
+                self._num_active_constraints,
+                wp.int32(self.num_bodies),
+            ],
+            outputs=[self._island_interaction_bodies],
+            device=self.device,
+        )
+
+        self._island_builder.build_islands(
+            self._island_interaction_bodies,
+            self._num_active_constraints,
+            self._sleeping_num_bodies_device,
+        )
+
+        wp.launch(
+            _phoenx_island_max_velocity_kernel,
+            dim=self.num_bodies,
+            inputs=[
+                self.bodies,
+                self._body_aabb_diagonal,
+                self._island_builder.set_nr,
+            ],
+            outputs=[self._island_max_velocity],
+            device=self.device,
+        )
+
+        wp.launch(
+            _phoenx_mark_sleeping_islands_kernel,
+            dim=self.num_bodies,
+            inputs=[
+                self._island_max_velocity,
+                self._island_builder.num_sets,
+                wp.float32(self._sleeping_velocity_threshold),
+            ],
+            outputs=[self._island_is_sleeping],
+            device=self.device,
+        )
+
+        wp.launch(
+            _phoenx_propagate_sleep_to_bodies_kernel,
+            dim=self.num_bodies,
+            inputs=[
+                self.bodies,
+                self._island_builder.set_nr,
+                self._island_is_sleeping,
+            ],
+            device=self.device,
+        )
+
+        wp.launch(
+            _phoenx_collapse_sleeping_elements_kernel,
+            dim=self._constraint_capacity,
+            inputs=[
+                self.bodies,
+                self._num_active_constraints,
+                wp.int32(self.num_bodies),
+            ],
+            outputs=[self._elements],
             device=self.device,
         )
 

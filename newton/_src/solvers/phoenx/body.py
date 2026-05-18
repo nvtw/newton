@@ -83,6 +83,14 @@ class BodyContainer:
     #: ``body_set_access_mode`` to flip lazily.
     access_mode: wp.array[wp.int32]
 
+    #: Per-body sleep flag (1 = sleeping, 0 = awake). Only written when
+    #: :attr:`PhoenXWorld.sleeping_velocity_threshold` > 0. A sleeping
+    #: body skips gravity / force application and is collapsed to -1 in
+    #: the partitioner's element view so its constraints drop out of
+    #: the coloring. Always allocated so kernels that read the field
+    #: have something to bind to; stays 0 when sleeping is disabled.
+    is_sleeping: wp.array[wp.int32]
+
 
 def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyContainer:
     """Allocate a zero-initialized :class:`BodyContainer` on ``device``.
@@ -114,6 +122,7 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.position_prev_substep = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.orientation_prev_substep = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
     c.access_mode = wp.full(num_bodies, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
+    c.is_sleeping = wp.zeros(num_bodies, dtype=wp.int32, device=device)
     return c
 
 

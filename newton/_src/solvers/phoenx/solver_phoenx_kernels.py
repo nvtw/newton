@@ -108,6 +108,14 @@ __all__ = [
     "_PER_WORLD_COLORING_BLOCK_DIM",
     "_STRAGGLER_BLOCK_DIM",
     "_build_scatter_keys_kernel",
+    "_phoenx_collapse_sleeping_elements_kernel",
+    "_phoenx_copy_elements_to_int2d_kernel",
+    "_phoenx_finalize_body_aabb_diagonal_kernel",
+    "_phoenx_init_body_aabb_kernel",
+    "_phoenx_island_max_velocity_kernel",
+    "_phoenx_mark_sleeping_islands_kernel",
+    "_phoenx_propagate_sleep_to_bodies_kernel",
+    "_phoenx_shape_aabb_fanin_kernel",
     "_choose_fast_tail_worlds_per_block",
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
@@ -1495,6 +1503,14 @@ def _phoenx_apply_forces_and_gravity_kernel(
     if bodies.inverse_mass[i] == 0.0:
         bodies.access_mode[i] = ACCESS_MODE_STATIC
         return
+    # Sleeping bodies: skip gravity + force application and present as
+    # STATIC to the constraint solve so body_set_access_mode early-outs
+    # on every constraint touch. Velocity stays at whatever value it
+    # held when the island fell below the threshold (~ 0). is_sleeping
+    # is always 0 when the sleeping pipeline is disabled.
+    if bodies.is_sleeping[i] != 0:
+        bodies.access_mode[i] = ACCESS_MODE_STATIC
+        return
     bodies.access_mode[i] = ACCESS_MODE_VELOCITY_LEVEL
     v = bodies.velocity[i]
     w = bodies.angular_velocity[i]
@@ -1553,6 +1569,223 @@ def _phoenx_apply_global_damping_kernel(
         ang = 1.0 - global_damping[1]
         bodies.velocity[i] = bodies.velocity[i] * lin
         bodies.angular_velocity[i] = bodies.angular_velocity[i] * ang
+
+
+# Island-sleeping kernels. Activated only when
+# :attr:`PhoenXWorld.sleeping_velocity_threshold` > 0; otherwise the
+# scratch arrays they read/write stay zero and the wp.launch calls are
+# never issued.
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_copy_elements_to_int2d_kernel(
+    elements: wp.array[ElementInteractionData],
+    num_active_constraints: wp.array[wp.int32],
+    num_bodies: wp.int32,
+    # out: 2D int32 array, shape (capacity, MAX_BODIES), in the layout the
+    # UnionFindIslandBuilder consumes. Particle endpoints (b >= num_bodies)
+    # are dropped to -1 because the island scratch is sized for rigid bodies
+    # only -- particles never sleep in this iteration.
+    interaction_bodies: wp.array2d[wp.int32],
+):
+    """Copy ``elements[].bodies`` into the int2d view consumed by
+    :class:`UnionFindIslandBuilder`. Inactive cids (>= num_active_constraints)
+    are zeroed to -1 so the builder's chain-union sees a clean tail.
+    """
+    tid = wp.tid()
+    if tid >= num_active_constraints[0]:
+        for j in range(MAX_BODIES):
+            interaction_bodies[tid, j] = wp.int32(-1)
+        return
+    el = elements[tid]
+    for j in range(MAX_BODIES):
+        b = el.bodies[j]
+        if b >= num_bodies:
+            b = wp.int32(-1)
+        interaction_bodies[tid, j] = b
+
+
+_AABB_INIT_LARGE = wp.constant(wp.float32(1.0e30))
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_init_body_aabb_kernel(
+    # out
+    body_aabb_lower: wp.array2d[wp.float32],
+    body_aabb_upper: wp.array2d[wp.float32],
+):
+    """Per-body, per-axis reset: lower = +inf-ish, upper = -inf-ish so
+    the subsequent fanin's componentwise atomic_min / atomic_max
+    converge to the union AABB of every attached shape.
+    """
+    b = wp.tid()
+    body_aabb_lower[b, 0] = _AABB_INIT_LARGE
+    body_aabb_lower[b, 1] = _AABB_INIT_LARGE
+    body_aabb_lower[b, 2] = _AABB_INIT_LARGE
+    body_aabb_upper[b, 0] = -_AABB_INIT_LARGE
+    body_aabb_upper[b, 1] = -_AABB_INIT_LARGE
+    body_aabb_upper[b, 2] = -_AABB_INIT_LARGE
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_shape_aabb_fanin_kernel(
+    shape_aabb_lower: wp.array[wp.vec3f],
+    shape_aabb_upper: wp.array[wp.vec3f],
+    shape_body_phoenx: wp.array[wp.int32],
+    # out: per-axis atomic_min / atomic_max into the owning body's slot.
+    body_aabb_lower: wp.array2d[wp.float32],
+    body_aabb_upper: wp.array2d[wp.float32],
+):
+    """Union every attached shape's world-frame AABB into the body's
+    AABB. ``shape_body_phoenx`` is PhoenX-shifted; slot 0 (anchor) is
+    skipped because static shapes don't sleep.
+    """
+    s = wp.tid()
+    nb = shape_body_phoenx[s]
+    if nb <= 0:
+        return
+    lo = shape_aabb_lower[s]
+    hi = shape_aabb_upper[s]
+    wp.atomic_min(body_aabb_lower, nb, 0, lo[0])
+    wp.atomic_min(body_aabb_lower, nb, 1, lo[1])
+    wp.atomic_min(body_aabb_lower, nb, 2, lo[2])
+    wp.atomic_max(body_aabb_upper, nb, 0, hi[0])
+    wp.atomic_max(body_aabb_upper, nb, 1, hi[1])
+    wp.atomic_max(body_aabb_upper, nb, 2, hi[2])
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_finalize_body_aabb_diagonal_kernel(
+    body_aabb_lower: wp.array2d[wp.float32],
+    body_aabb_upper: wp.array2d[wp.float32],
+    # out
+    body_aabb_diagonal: wp.array[wp.float32],
+):
+    """Per-body: diagonal = length(upper - lower). Bodies with no
+    shapes (upper still at -inf) get diagonal = 0 -- their spin term
+    in the velocity score collapses to zero, which is what we want
+    (no shapes => no swept volume).
+    """
+    b = wp.tid()
+    ux = body_aabb_upper[b, 0]
+    uy = body_aabb_upper[b, 1]
+    uz = body_aabb_upper[b, 2]
+    lx = body_aabb_lower[b, 0]
+    ly = body_aabb_lower[b, 1]
+    lz = body_aabb_lower[b, 2]
+    if ux < lx:
+        body_aabb_diagonal[b] = wp.float32(0.0)
+        return
+    dx = ux - lx
+    dy = uy - ly
+    dz = uz - lz
+    body_aabb_diagonal[b] = wp.sqrt(dx * dx + dy * dy + dz * dz)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_island_max_velocity_kernel(
+    bodies: BodyContainer,
+    body_aabb_diagonal: wp.array[wp.float32],
+    island_of_body: wp.array[wp.int32],
+    # inout
+    island_max_velocity: wp.array[wp.float32],
+):
+    """Score = length(v) + 0.5 * diag * length(omega). Per body, atomic-max
+    into ``island_max_velocity[island_of_body[b]]`` with an if-then-atomic
+    early-out to cut atomic pressure: the atomic only fires when the
+    body's score actually exceeds the current island maximum.
+
+    Static / anchor bodies are skipped (they wouldn't change a max anyway
+    -- their score is 0).
+    """
+    b = wp.tid()
+    if bodies.motion_type[b] != MOTION_DYNAMIC:
+        return
+    if bodies.inverse_mass[b] == 0.0:
+        return
+    island = island_of_body[b]
+    if island < 0:
+        return
+    v = bodies.velocity[b]
+    w = bodies.angular_velocity[b]
+    score = wp.length(v) + 0.5 * body_aabb_diagonal[b] * wp.length(w)
+    # Plain read of the per-island slot. atomic_max on float is
+    # deterministic, so racing readers may underestimate (someone else's
+    # newer write might be in flight), but only at the cost of an extra
+    # atomic -- correctness holds.
+    if score > island_max_velocity[island]:
+        wp.atomic_max(island_max_velocity, island, score)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_mark_sleeping_islands_kernel(
+    island_max_velocity: wp.array[wp.float32],
+    num_islands: wp.array[wp.int32],
+    threshold: wp.float32,
+    # out
+    island_is_sleeping: wp.array[wp.int32],
+):
+    """``island_is_sleeping[i] = 1 if island_max_velocity[i] < threshold else 0``."""
+    i = wp.tid()
+    if i >= num_islands[0]:
+        island_is_sleeping[i] = wp.int32(0)
+        return
+    if island_max_velocity[i] < threshold:
+        island_is_sleeping[i] = wp.int32(1)
+    else:
+        island_is_sleeping[i] = wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_propagate_sleep_to_bodies_kernel(
+    bodies: BodyContainer,
+    island_of_body: wp.array[wp.int32],
+    island_is_sleeping: wp.array[wp.int32],
+):
+    """Per-body: ``bodies.is_sleeping = island_is_sleeping[island_of_body]``,
+    with static / anchor bodies forced to 0 so the gravity gate never
+    masks them (they're handled by the existing motion_type / inv_mass
+    branches).
+    """
+    b = wp.tid()
+    if bodies.motion_type[b] != MOTION_DYNAMIC:
+        bodies.is_sleeping[b] = wp.int32(0)
+        return
+    if bodies.inverse_mass[b] == 0.0:
+        bodies.is_sleeping[b] = wp.int32(0)
+        return
+    island = island_of_body[b]
+    if island < 0:
+        bodies.is_sleeping[b] = wp.int32(0)
+        return
+    bodies.is_sleeping[b] = island_is_sleeping[island]
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_collapse_sleeping_elements_kernel(
+    bodies: BodyContainer,
+    num_active_constraints: wp.array[wp.int32],
+    num_bodies: wp.int32,
+    # inout
+    elements: wp.array[ElementInteractionData],
+):
+    """Rewrite every per-element body slot whose body is sleeping to -1.
+    Particle slots (>= num_bodies) and slots already -1 pass through.
+    After this kernel, constraints involving only sleeping bodies become
+    empty interactions (all -1), so the partitioner adjacency count adds
+    nothing for them and they drop out of every colour bucket.
+    """
+    tid = wp.tid()
+    if tid >= num_active_constraints[0]:
+        return
+    el = elements[tid]
+    for j in range(MAX_BODIES):
+        b = el.bodies[j]
+        if b < 0:
+            break
+        if b < num_bodies and bodies.is_sleeping[b] != 0:
+            el.bodies[j] = wp.int32(-1)
+    elements[tid] = el
 
 
 # Single-world step path: per-colour grid launches via wp.capture_while on

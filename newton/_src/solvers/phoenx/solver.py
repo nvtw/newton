@@ -131,6 +131,7 @@ class SolverPhoenX(SolverBase):
         partitioner_algorithm: str = "greedy",
         enable_warm_start_coloring: bool = True,
         sor_boost: float = 1.0,
+        sleeping_velocity_threshold: float = 0.0,
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -165,6 +166,18 @@ class SolverPhoenX(SolverBase):
                 tet). ``1.0`` (default) = vanilla PGS. ``1.1..1.5``
                 typically accelerates convergence on smooth modes;
                 values >= 2.0 diverge.
+            sleeping_velocity_threshold: Per-island sleep cutoff
+                ``[m/s + rad/s * 0.5 * aabb_diagonal]``. ``0.0``
+                (default) disables sleeping entirely -- no island
+                build, no extra kernels, no extra allocations. When
+                ``> 0``, each step computes connected components over
+                the active interaction set; islands whose max body
+                score falls below the threshold are flagged sleeping
+                and their constraints are dropped from the coloring /
+                overflow partition. Sleeping bodies skip gravity and
+                external force application. Auto-installs a
+                sleeping-aware broad-phase filter on the rigid contact
+                pipeline so sleeping-vs-sleeping shape pairs early-out.
         """
         super().__init__(model)
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -203,9 +216,17 @@ class SolverPhoenX(SolverBase):
 
         # PhoenX's warm-start path needs contact_matching != "disabled".
         # Auto-attach a sticky pipeline so users don't have to size Contacts.
+        self._sleeping_enabled: bool = float(sleeping_velocity_threshold) > 0.0
         if int(model.shape_count) > 0:
             existing_cp = getattr(model, "_collision_pipeline", None)
             needs_new_cp = existing_cp is None or not getattr(existing_cp, "contact_matching", False)
+            # When sleeping is on we need a broad-phase filter func wired
+            # into the pipeline at construction time; force rebuild if
+            # the existing pipeline doesn't carry one.
+            if self._sleeping_enabled and not needs_new_cp:
+                existing_filter = getattr(existing_cp, "_broad_phase_filter_func", None)
+                if existing_filter is None:
+                    needs_new_cp = True
             if needs_new_cp:
                 import newton as _newton  # noqa: PLC0415  -- local to keep the import cycle tight
 
@@ -218,12 +239,21 @@ class SolverPhoenX(SolverBase):
                 from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
                     PHOENX_CONTACT_MATCHING,
                 )
-
-                model._collision_pipeline = _newton.CollisionPipeline(
-                    model,
-                    contact_matching=PHOENX_CONTACT_MATCHING,
-                    rigid_contact_max=tight_rcm,
+                from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
+                    PhoenXClothShareVertexFilterData,
+                    phoenx_cloth_share_vertex_filter,
                 )
+
+                cp_kwargs = {
+                    "contact_matching": PHOENX_CONTACT_MATCHING,
+                    "rigid_contact_max": tight_rcm,
+                }
+                if self._sleeping_enabled:
+                    cp_kwargs["broad_phase_filter"] = (
+                        phoenx_cloth_share_vertex_filter,
+                        PhoenXClothShareVertexFilterData,
+                    )
+                model._collision_pipeline = _newton.CollisionPipeline(model, **cp_kwargs)
                 model._collision_pipeline.contacts()  # forces buffer sizing
         rigid_contact_max = int(model.rigid_contact_max)
 
@@ -271,8 +301,37 @@ class SolverPhoenX(SolverBase):
             partitioner_algorithm=partitioner_algorithm,
             enable_warm_start_coloring=enable_warm_start_coloring,
             sor_boost=sor_boost,
+            sleeping_velocity_threshold=float(sleeping_velocity_threshold),
             device=self.device,
         )
+
+        # When sleeping is on (and not already wired by a downstream
+        # ``setup_cloth_collision_pipeline``), bind the share-vertex
+        # filter data with sleeping fields populated. The pipeline's
+        # filter func is shared with cloth setups; cloth setup paths
+        # call ``build_phoenx_share_vertex_filter_data`` themselves and
+        # overwrite this binding without losing the sleeping fields.
+        if self._sleeping_enabled and int(model.shape_count) > 0:
+            from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
+                build_phoenx_share_vertex_filter_data,
+            )
+
+            tri_sentinel = wp.zeros((1, 3), dtype=wp.int32, device=self.device)
+            tet_sentinel = wp.zeros((1, 4), dtype=wp.int32, device=self.device)
+            filter_data = build_phoenx_share_vertex_filter_data(
+                num_rigid_shapes=int(model.shape_count),
+                num_cloth_triangles=0,
+                tri_indices=tri_sentinel,
+                tet_indices=tet_sentinel,
+                sleeping_enabled=True,
+                phoenx_body_offset=1,
+                shape_body=model.shape_body,
+                body_is_sleeping=self.bodies.is_sleeping,
+                device=self.device,
+            )
+            model._collision_pipeline.set_broad_phase_filter_data(filter_data)
+            self._share_vertex_filter_data = filter_data
+            self.world._share_vertex_filter_data = filter_data
 
         # Seed body pose BEFORE joint init — ADBS init reads body positions to
         # snapshot body-local anchors. Without this, welds pull child to origin.
@@ -695,12 +754,27 @@ class SolverPhoenX(SolverBase):
             world_vel_accum = None
             world_omega_accum = None
 
+        # When sleeping is enabled, hand the broad-phase per-shape AABB
+        # arrays to the world so it can compute body diagonals for the
+        # spin-velocity term of the sleep score. ``narrow_phase`` is
+        # populated by ``model.collide(...)`` -- which the caller runs
+        # before ``solver.step(...)``.
+        shape_aabb_lower = None
+        shape_aabb_upper = None
+        if self._sleeping_enabled:
+            cp = getattr(self.model, "_collision_pipeline", None)
+            np_ = getattr(cp, "narrow_phase", None) if cp is not None else None
+            shape_aabb_lower = getattr(np_, "shape_aabb_lower", None)
+            shape_aabb_upper = getattr(np_, "shape_aabb_upper", None)
+
         self.world.step(
             dt=float(dt),
             contacts=contacts,
             shape_body=self._shape_body,
             vel_accum=world_vel_accum,
             omega_accum=world_omega_accum,
+            shape_aabb_lower=shape_aabb_lower,
+            shape_aabb_upper=shape_aabb_upper,
         )
         self._last_dt = float(dt) / max(1, self.world.substeps)
 

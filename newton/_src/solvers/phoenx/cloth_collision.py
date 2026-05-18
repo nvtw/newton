@@ -61,6 +61,7 @@ __all__ = [
     "_phoenx_populate_shape_endpoints_kernel",
     "_phoenx_update_cloth_shape_geometry_kernel",
     "_phoenx_update_soft_tet_shape_geometry_kernel",
+    "build_phoenx_share_vertex_filter_data",
     "canonicalize_tetrahedron",
     "canonicalize_triangle",
     "phoenx_cloth_share_vertex_filter",
@@ -668,12 +669,27 @@ class PhoenXClothShareVertexFilterData:
             ``(num_cloth_triangles, 3)``.
         tet_indices: Per-tet particle indices, shape
             ``(num_soft_tetrahedra, 4)``.
+        sleeping_enabled: ``1`` when the sleeping pipeline is active --
+            the filter drops rigid-rigid pairs where both shapes' bodies
+            have ``body_is_sleeping == 1``. ``0`` skips the sleep check.
+        phoenx_body_offset: Shift to apply to ``shape_body[s]`` before
+            indexing ``body_is_sleeping`` (PhoenX slot 0 is the world
+            anchor, so the offset is 1 in practice).
+        shape_body: Per-shape Newton body index (``-1`` for world);
+            length matches the unified shape array. Required when
+            ``sleeping_enabled == 1``.
+        body_is_sleeping: PhoenX ``BodyContainer.is_sleeping``. Required
+            when ``sleeping_enabled == 1``.
     """
 
     num_rigid_shapes: wp.int32
     num_cloth_triangles: wp.int32
     tri_indices: wp.array2d[wp.int32]
     tet_indices: wp.array2d[wp.int32]
+    sleeping_enabled: wp.int32
+    phoenx_body_offset: wp.int32
+    shape_body: wp.array[wp.int32]
+    body_is_sleeping: wp.array[wp.int32]
 
 
 @wp.func
@@ -713,13 +729,28 @@ def phoenx_cloth_share_vertex_filter(
 ) -> wp.int32:
     """Broad-phase callback. Returns ``0`` to drop the pair, ``1`` to keep.
 
-    Drop iff both shapes are deformable (cloth-tri or soft-tet) AND
-    they share at least one particle vertex. Cloth-cloth, cloth-tet,
-    and tet-tet pairs all participate in the share-vertex test.
-    Rigid-anything pairs always pass through.
+    Two independent filters compose here:
+
+    1. (Sleeping) When the sleeping pipeline is active, drop any
+       rigid-rigid pair where *both* shapes' bodies are flagged
+       ``is_sleeping``. Sleeping-vs-awake pairs pass through so the
+       awake body's contact can wake the sleeping island next step.
+    2. (Share-vertex) Drop a pair iff both shapes are deformable
+       (cloth-tri or soft-tet) AND they share at least one particle
+       vertex.
     """
     sa = pair[0]
     sb = pair[1]
+    if data.sleeping_enabled != wp.int32(0):
+        # Rigid prefix only -- deformable suffixes use shape_body=-1.
+        if sa < data.num_rigid_shapes and sb < data.num_rigid_shapes:
+            nba = data.shape_body[sa]
+            nbb = data.shape_body[sb]
+            if nba >= 0 and nbb >= 0:
+                slot_a = nba + data.phoenx_body_offset
+                slot_b = nbb + data.phoenx_body_offset
+                if data.body_is_sleeping[slot_a] != 0 and data.body_is_sleeping[slot_b] != 0:
+                    return wp.int32(0)
     a0, a1, a2, a3 = _share_vertex_get_particles(sa, data)
     if a0 < wp.int32(0):
         return wp.int32(1)  # sa rigid: pass through
@@ -740,3 +771,38 @@ def phoenx_cloth_share_vertex_filter(
         if ai == b0 or ai == b1 or ai == b2 or ai == b3:
             return wp.int32(0)
     return wp.int32(1)
+
+
+def build_phoenx_share_vertex_filter_data(
+    *,
+    num_rigid_shapes: int,
+    num_cloth_triangles: int,
+    tri_indices: wp.array2d[wp.int32],
+    tet_indices: wp.array2d[wp.int32],
+    sleeping_enabled: bool,
+    phoenx_body_offset: int,
+    shape_body: wp.array[wp.int32] | None,
+    body_is_sleeping: wp.array[wp.int32] | None,
+    device: wp.context.Devicelike,
+) -> PhoenXClothShareVertexFilterData:
+    """Construct the broad-phase filter data struct used by
+    :func:`phoenx_cloth_share_vertex_filter`.
+
+    Length-1 sentinel arrays are substituted for ``shape_body`` /
+    ``body_is_sleeping`` when ``sleeping_enabled`` is ``False`` so the
+    Warp ABI stays bound regardless of feature use.
+    """
+    data = PhoenXClothShareVertexFilterData()
+    data.num_rigid_shapes = wp.int32(int(num_rigid_shapes))
+    data.num_cloth_triangles = wp.int32(int(num_cloth_triangles))
+    data.tri_indices = tri_indices
+    data.tet_indices = tet_indices
+    data.sleeping_enabled = wp.int32(1 if sleeping_enabled else 0)
+    data.phoenx_body_offset = wp.int32(int(phoenx_body_offset))
+    if shape_body is None:
+        shape_body = wp.zeros(1, dtype=wp.int32, device=device)
+    if body_is_sleeping is None:
+        body_is_sleeping = wp.zeros(1, dtype=wp.int32, device=device)
+    data.shape_body = shape_body
+    data.body_is_sleeping = body_is_sleeping
+    return data
