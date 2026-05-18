@@ -8,8 +8,9 @@ import warp as wp
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, SHAPE_PAIR_INDEX_MASK, ContactData
 from ..geometry.sdf_texture import (
     TextureSDFData,
-    texture_sample_sdf_grad_hw as texture_sample_sdf_grad,
     texture_sample_sdf_grad_only_hw,
+)
+from ..geometry.sdf_texture import (
     texture_sample_sdf_hw as texture_sample_sdf,
 )
 from ..geometry.types import GeoType
