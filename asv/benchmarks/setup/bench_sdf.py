@@ -121,6 +121,13 @@ class FastBuildSdf:
 
     Uses an icosphere with ~5120 triangles (subdivision 4), representative of
     typical collision meshes used with Newton's SDF contact path.
+
+    Each timed call builds :data:`_BUILDS_PER_SAMPLE` SDFs in a loop and
+    releases each immediately, reporting the total wall time.  The batch size
+    is scaled down at higher resolutions so every sample takes roughly the
+    same wall time.  This amortizes GPU boost-clock/thermal transients on AWS
+    CI runners that previously made single-build measurements bimodal across
+    runs (see #2534).
     """
 
     params = ([32, 64, 128, 256],)
@@ -144,16 +151,19 @@ class FastBuildSdf:
         # boost-clock state, not just compile kernels.
         for _ in range(_WARMUP_BUILDS):
             warm_mesh = newton.Mesh(self._vertices, self._indices, compute_inertia=False)
-            warm_sdf = warm_mesh.build_sdf(max_resolution=max_resolution)
+            warm_sdf = warm_mesh.build_sdf(max_resolution=max_resolution, edge_lower_angle_threshold_rad=-1.0)
             del warm_sdf
             del warm_mesh
         wp.synchronize_device()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_build_sdf(self, max_resolution):
+        # ``edge_lower_angle_threshold_rad < 0`` short-circuits the edge
+        # simplification pass inside ``build_sdf`` so this benchmark measures
+        # the SDF cook in isolation.
         for _ in range(_BUILDS_PER_SAMPLE[max_resolution]):
             mesh = newton.Mesh(self._vertices, self._indices, compute_inertia=False)
-            sdf = mesh.build_sdf(max_resolution=max_resolution)
+            sdf = mesh.build_sdf(max_resolution=max_resolution, edge_lower_angle_threshold_rad=-1.0)
             # Release immediately so peak GPU memory stays bounded.
             del sdf
             del mesh

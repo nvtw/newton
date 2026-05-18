@@ -798,7 +798,10 @@ class Mesh:
                 part of the cache key). Defaults to no caching.
             edge_lower_angle_threshold_rad: Drop internal edges whose
                 dihedral angle is below this value [rad]. Set to 0 to keep
-                every manifold edge.
+                every manifold edge. A negative value opts out of edge
+                simplification entirely and caches the full :attr:`edges`
+                set as-is (matching the pre-simplification behaviour); it
+                is rejected when ``edge_box_absorption=True``.
             edge_upper_angle_threshold_rad: Maximum dihedral angle [rad] for
                 an absorbed edge to be removed. Only consulted when
                 ``edge_box_absorption`` is ``True``.
@@ -821,8 +824,9 @@ class Mesh:
         Raises:
             RuntimeError: If this mesh already has an SDF attached.
             ValueError: If both an absolute and relative half-extent are
-                supplied for the same axis, or if any half-extent is
-                negative.
+                supplied for the same axis, if any half-extent is
+                negative, or if ``edge_lower_angle_threshold_rad`` is
+                negative while ``edge_box_absorption=True``.
         """
         if self.sdf is not None:
             raise RuntimeError("Mesh already has an SDF. Call clear_sdf() before rebuilding.")
@@ -877,7 +881,26 @@ class Mesh:
         ``enable_box_absorption`` is ``True`` the manifold-only absorption
         pass runs on top and removes the manifold edges that
         ``resolve_edge_removals`` flags.
+
+        A negative ``lower_angle_threshold_rad`` (with
+        ``enable_box_absorption=False``) opts out of edge simplification
+        entirely: the cache is populated with the full :attr:`edges` set,
+        identical to the pre-simplification behaviour. Use this when the
+        simplification cost is undesirable (e.g. benchmarks that isolate
+        the SDF cook). Combining a negative threshold with
+        ``enable_box_absorption=True`` is rejected because the absorption
+        pass relies on a non-negative dihedral gate to identify manifold
+        edges and would otherwise silently no-op.
         """
+        if lower_angle_threshold_rad < 0.0:
+            if enable_box_absorption:
+                raise ValueError(
+                    "edge_lower_angle_threshold_rad < 0 disables edge simplification, "
+                    "which is incompatible with edge_box_absorption=True."
+                )
+            self._collision_edges = np.ascontiguousarray(self.edges, dtype=np.int32)
+            return
+
         if self._vertices.size > 0:
             aabb_min = self._vertices.min(axis=0)
             aabb_max = self._vertices.max(axis=0)
