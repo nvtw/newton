@@ -1698,8 +1698,12 @@ class ViewerGL(ViewerBase):
         if self.wind is not None:
             self.wind.update(dt)
 
-        # If the window was closed during event processing, skip rendering
+        # If the window was closed during event processing, skip rendering.
+        # Also finalize any active recording so ffmpeg flushes a valid MP4
+        # even when the user closes the window instead of calling close().
         if self.renderer.has_exit():
+            if self._recorder.is_recording:
+                self._stop_recording()
             return
 
         # Render the scene and present it
@@ -1737,17 +1741,21 @@ class ViewerGL(ViewerBase):
         Returns:
             ``True`` if recording started successfully.
         """
-        fb_w, fb_h = self.renderer.window.get_framebuffer_size()
+        # Use the renderer's cached screen size — this is what get_frame()
+        # validates against, so the preallocated capture buffer is
+        # guaranteed to match on HiDPI/scaled displays.
+        w = self.renderer._screen_width
+        h = self.renderer._screen_height
         started = self._recorder.start(
-            width=fb_w,
-            height=fb_h,
+            width=w,
+            height=h,
             fps=float(self._record_fps),
             output_path=output_path,
             flip_vertical=False,
         )
         if started:
             self._record_frame_gpu = wp.empty(
-                shape=(fb_h, fb_w, 3),
+                shape=(h, w, 3),
                 dtype=wp.uint8,  # pyright: ignore[reportArgumentType]
                 device=self.device,
             )
@@ -1780,8 +1788,9 @@ class ViewerGL(ViewerBase):
         if self.time + 0.5 * record_dt < self._record_next_sim_t:
             return
 
-        fb_w, fb_h = self.renderer.window.get_framebuffer_size()
-        if self._record_frame_gpu is None or self._record_frame_gpu.shape != (fb_h, fb_w, 3):
+        w = self.renderer._screen_width
+        h = self.renderer._screen_height
+        if self._record_frame_gpu is None or self._record_frame_gpu.shape != (h, w, 3):
             # Framebuffer changed underneath us (e.g. resize during recording);
             # cleanest behavior is to stop and let the user start a new recording.
             self._stop_recording()
@@ -1799,7 +1808,7 @@ class ViewerGL(ViewerBase):
         max_emit = max(1, 4 * self._record_fps)  # at most ~4 s worth of catch-up
         emitted = 0
         while self.time + 0.5 * record_dt >= self._record_next_sim_t and emitted < max_emit:
-            self._recorder.write_frame_bytes(self._record_last_frame_bytes, fb_w, fb_h)
+            self._recorder.write_frame_bytes(self._record_last_frame_bytes, w, h)
             self._record_next_sim_t += record_dt
             emitted += 1
 

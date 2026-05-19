@@ -130,6 +130,7 @@ class LiveMp4Recorder:
         assert self._proc is not None
         assert self._proc.stdin is not None
         assert self._queue is not None
+        unexpected_exit = False
         try:
             while True:
                 item = self._queue.get()
@@ -138,12 +139,22 @@ class LiveMp4Recorder:
                 try:
                     self._proc.stdin.write(item)
                 except BrokenPipeError:
+                    unexpected_exit = True
                     break
         finally:
             try:
                 self._proc.stdin.close()
             except Exception:
                 pass
+            if unexpected_exit:
+                # ffmpeg closed its stdin before we asked it to stop. This
+                # usually means the encoder couldn't initialize (e.g. a
+                # hardware encoder on a machine without the driver).
+                # Surface it instead of silently producing an empty file.
+                logger.warning(
+                    "ffmpeg exited unexpectedly during recording to %s; the output file may be empty or truncated.",
+                    self._output_path,
+                )
 
     def start(
         self,
@@ -176,6 +187,9 @@ class LiveMp4Recorder:
 
         self._width = int(width)
         self._height = int(height)
+        if self._width <= 0 or self._height <= 0:
+            logger.warning("Recording requires positive frame dimensions, got %dx%d.", self._width, self._height)
+            return False
         fps = max(1.0, float(fps))
 
         if output_path is None:
@@ -368,6 +382,10 @@ class LiveMp4Recorder:
             self._proc.wait(timeout=10.0)
         except Exception:
             self._proc.kill()
+            try:
+                self._proc.wait(timeout=5.0)
+            except Exception:
+                pass
 
         stopped_path = self._output_path
         logger.info("Stopped recording: %s", stopped_path)
