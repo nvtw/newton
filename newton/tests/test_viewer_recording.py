@@ -11,14 +11,16 @@ directly without instantiating any viewer. Tests that require an actual
 
 from __future__ import annotations
 
+import logging
+import queue as _queue
 import shutil
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
 import numpy as np
 
+import newton._src.viewer.recording as recording_mod
 from newton._src.viewer.recording import LiveMp4Recorder, _resolve_ffmpeg_executable
 
 
@@ -121,7 +123,6 @@ class TestQueueDropping(unittest.TestCase):
         # Simulate an active recording with a real queue but no live ffmpeg
         # subprocess: we manipulate internals directly to avoid spawning ffmpeg.
         # ``write_frame`` only cares about ``is_recording`` and ``self._queue``.
-        import queue as _queue
 
         class _DummyProc:
             pass
@@ -171,8 +172,6 @@ class TestFfmpegFallback(unittest.TestCase):
         rec = LiveMp4Recorder()
 
         # Force both resolution paths to fail.
-        import newton._src.viewer.recording as recording_mod
-
         original_which = shutil.which
         original_resolve = recording_mod._resolve_ffmpeg_executable
 
@@ -196,8 +195,5 @@ class TestFfmpegFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     # Surface log output during local debugging runs.
-    import logging
-
     logging.basicConfig(level=logging.INFO)
-    _ = time  # keep import for parity with manual debugging
     unittest.main()
