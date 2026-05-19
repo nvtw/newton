@@ -858,6 +858,14 @@ class PhoenXWorld:
             self._body_aabb_diagonal = wp.zeros(self.num_bodies, dtype=wp.float32, device=self.device)
             self._sleeping_num_bodies_device = wp.array([self.num_bodies], dtype=wp.int32, device=self.device)
 
+        # Cached references installed by :meth:`attach_collision_pipeline`.
+        # When non-None, :meth:`step` falls back to them for the optional
+        # ``shape_aabb_lower`` / ``shape_aabb_upper`` arguments (read only
+        # when sleeping is enabled) so user code doesn't have to thread
+        # the pipeline's narrow-phase AABBs through every step call.
+        self._sleeping_shape_aabb_lower: wp.array[wp.vec3f] | None = None
+        self._sleeping_shape_aabb_upper: wp.array[wp.vec3f] | None = None
+
         # Step-time dispatcher. Each (step_layout, mass_splitting)
         # combination has a dedicated class under :mod:`phoenx.dispatch`
         # so the hot path is straight-line with no capability checks.
@@ -932,6 +940,103 @@ class PhoenXWorld:
     def set_shape_body(self, shape_body: wp.array | None) -> None:
         """Install the shape->body map used by contact ingest. ``None`` clears."""
         self._shape_body_internal = shape_body
+
+    @staticmethod
+    def broad_phase_filter() -> tuple:
+        """Return the ``(filter_func, filter_data_type)`` tuple to pass
+        as ``broad_phase_filter`` when constructing the Newton
+        :class:`~newton.CollisionPipeline` that feeds this world.
+
+        Required only when sleeping is enabled or the scene contains
+        cloth / soft-body deformables (the same filter handles both
+        rigid-frozen-pair culling and deformable share-vertex skip)::
+
+            cp = newton.CollisionPipeline(
+                model,
+                contact_matching="sticky",
+                broad_phase_filter=PhoenXWorld.broad_phase_filter(),
+            )
+
+        Pair with :meth:`attach_collision_pipeline` after constructing
+        the world; that method installs the per-step filter data and
+        caches the pipeline's narrow-phase AABB arrays so
+        :meth:`step` doesn't need them as args.
+        """
+        return (phoenx_cloth_share_vertex_filter, PhoenXClothShareVertexFilterData)
+
+    def attach_collision_pipeline(
+        self,
+        collision_pipeline,
+        *,
+        num_rigid_shapes: int,
+        shape_body: wp.array[wp.int32],
+        phoenx_body_offset: int = 1,
+    ) -> None:
+        """Wire a rigid-only Newton :class:`~newton.CollisionPipeline`
+        into PhoenX's sleeping pipeline.
+
+        Builds the share-vertex filter data with sleeping fields
+        populated, installs it on the pipeline, and caches the
+        pipeline's per-shape AABB arrays + a PhoenX-offset shape_body
+        map. After this call, the per-frame loop is the same regardless
+        of whether sleeping is enabled::
+
+            world.wake_on_external_input()  # no-op when disabled
+            model.collide(state, contacts=contacts,
+                          collision_pipeline=cp)
+            world.step(dt=dt, contacts=contacts)   # no shape_aabb args
+
+        Pre-requisites:
+          * ``collision_pipeline`` was constructed with
+            ``broad_phase_filter=PhoenXWorld.broad_phase_filter()``.
+          * Scene is rigid-only -- cloth / soft-tet scenes use
+            :meth:`setup_cloth_collision_pipeline` which performs the
+            equivalent wiring and adds the deformable suffix.
+
+        Args:
+            collision_pipeline: The Newton CollisionPipeline.
+            num_rigid_shapes: Total rigid shape count (= ``model.shape_count``).
+            shape_body: Raw ``model.shape_body`` (Newton-index per shape;
+                ``-1`` for world-anchored). PhoenX shifts each entry by
+                ``+phoenx_body_offset`` internally for the contact ingest
+                path; the filter sees the raw Newton array.
+            phoenx_body_offset: Newton-id -> PhoenX-slot offset (1 for
+                the typical "slot 0 = world anchor" convention).
+        """
+        if self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0:
+            raise RuntimeError(
+                "attach_collision_pipeline is rigid-only; cloth / soft-tet "
+                "scenes use setup_cloth_collision_pipeline()"
+            )
+
+        import numpy as _np  # noqa: PLC0415
+
+        shape_body_np = shape_body.numpy() if isinstance(shape_body, wp.array) else _np.asarray(shape_body)
+        shape_body_phx = _np.where(shape_body_np < 0, 0, shape_body_np + int(phoenx_body_offset))
+        shape_body_phx_arr = wp.array(shape_body_phx.astype(_np.int32), dtype=wp.int32, device=self.device)
+        self.set_shape_body(shape_body_phx_arr)
+
+        tri_sentinel = wp.zeros((1, 3), dtype=wp.int32, device=self.device)
+        tet_sentinel = wp.zeros((1, 4), dtype=wp.int32, device=self.device)
+        filter_data = build_phoenx_share_vertex_filter_data(
+            num_rigid_shapes=int(num_rigid_shapes),
+            num_cloth_triangles=0,
+            tri_indices=tri_sentinel,
+            tet_indices=tet_sentinel,
+            sleeping_enabled=self._sleeping_enabled,
+            phoenx_body_offset=int(phoenx_body_offset),
+            shape_body=shape_body if self._sleeping_enabled else None,
+            body_island_root=self.bodies.island_root if self._sleeping_enabled else None,
+            body_motion_type=self.bodies.motion_type if self._sleeping_enabled else None,
+            device=self.device,
+        )
+        collision_pipeline.set_broad_phase_filter_data(filter_data)
+        self._share_vertex_filter_data = filter_data
+
+        if self._sleeping_enabled:
+            nphase = collision_pipeline.narrow_phase
+            self._sleeping_shape_aabb_lower = nphase.shape_aabb_lower
+            self._sleeping_shape_aabb_upper = nphase.shape_aabb_upper
 
     # Kinematic pose scripting.
 
@@ -1505,6 +1610,9 @@ class PhoenXWorld:
         )
         pipeline.set_broad_phase_filter_data(share_vertex_data)
         self._share_vertex_filter_data = share_vertex_data
+        if self._sleeping_enabled:
+            self._sleeping_shape_aabb_lower = pipeline.narrow_phase.shape_aabb_lower
+            self._sleeping_shape_aabb_upper = pipeline.narrow_phase.shape_aabb_upper
 
         # Stamp the static deformable-shape suffix metadata. Per-step
         # quantities (geom_xform, geom_data, AABB, shape_source for tets)
@@ -1705,14 +1813,20 @@ class PhoenXWorld:
         ``contacts`` requires non-disabled contact_matching ("sticky" recommended).
 
         ``shape_aabb_lower`` / ``shape_aabb_upper`` are read only when
-        :attr:`sleeping_velocity_threshold` > 0; pass the broad phase's
-        per-shape AABB arrays in that case (typically
-        ``model._collision_pipeline.narrow_phase.shape_aabb_*``).
+        :attr:`sleeping_velocity_threshold` > 0. When ``None``, falls
+        back to the arrays cached by :meth:`attach_collision_pipeline`
+        (or :meth:`setup_cloth_collision_pipeline`); pass explicit
+        arrays only if you need to point at a different pipeline.
         """
         if dt < 0.0:
             raise ValueError("Time step cannot be negative.")
         if dt < 1e-7:
             return
+        if self._sleeping_enabled:
+            if shape_aabb_lower is None:
+                shape_aabb_lower = self._sleeping_shape_aabb_lower
+            if shape_aabb_upper is None:
+                shape_aabb_upper = self._sleeping_shape_aabb_upper
 
         self.step_dt = dt
         self.inv_step_dt = 1.0 / dt

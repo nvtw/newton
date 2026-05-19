@@ -38,11 +38,6 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, body_container_zeros
-from newton._src.solvers.phoenx.cloth_collision import (
-    PhoenXClothShareVertexFilterData,
-    build_phoenx_share_vertex_filter_data,
-    phoenx_cloth_share_vertex_filter,
-)
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
 )
@@ -360,10 +355,9 @@ class Example:
         # over-budgeting wastes GPU memory and slows the radix sort.
         rigid_contact_max_pipeline = 500_000 * num_cells
         # Sleeping requires the PhoenX-aware broad-phase filter so the
-        # SAP pass drops rigid-rigid pairs where both sides are frozen
-        # (sleeping or static / kinematic). Without this, sleeping
-        # bricks would still generate ground / neighbour contacts whose
-        # bias terms re-inject energy and the tower explodes on settle.
+        # SAP pass drops rigid-rigid pairs where both sides are frozen.
+        # ``PhoenXWorld.attach_collision_pipeline`` (below) binds the
+        # per-step filter data; here we just expose the slot.
         cp_kwargs = {
             "contact_matching": PHOENX_CONTACT_MATCHING,
             "broad_phase": "sap",
@@ -371,10 +365,7 @@ class Example:
             "rigid_contact_max": rigid_contact_max_pipeline,
         }
         if ENABLE_SLEEPING:
-            cp_kwargs["broad_phase_filter"] = (
-                phoenx_cloth_share_vertex_filter,
-                PhoenXClothShareVertexFilterData,
-            )
+            cp_kwargs["broad_phase_filter"] = PhoenXWorld.broad_phase_filter()
         self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
@@ -526,33 +517,19 @@ class Example:
             device=self.device,
         )
 
-        # Sleeping plumbing (only when ENABLE_SLEEPING is on):
-        # * Bind the share-vertex filter's per-step data so the broad
-        #   phase can read live ``island_root`` / ``motion_type``.
-        # * Build two parallel per-shape colour buffers (active +
-        #   dimmed-for-sleep); :meth:`_refresh_sleep_colors` picks
-        #   between them each frame and writes the result into
-        #   ``model.shape_color`` (which the viewer's instance-colour
-        #   sync reads).
-        self._share_vertex_filter_data = None
+        # Sleeping plumbing: a single call binds the share-vertex
+        # filter data, caches the pipeline's per-shape AABB arrays for
+        # the per-step sleep score, and installs the PhoenX-offset
+        # shape_body map. Renderer-side dimming buffers stay here
+        # (visualisation, not solver state).
         self._shape_color_active = None
         self._shape_color_sleeping = None
         if ENABLE_SLEEPING:
-            _tri_sentinel = wp.zeros((1, 3), dtype=wp.int32, device=self.device)
-            _tet_sentinel = wp.zeros((1, 4), dtype=wp.int32, device=self.device)
-            self._share_vertex_filter_data = build_phoenx_share_vertex_filter_data(
+            self.world.attach_collision_pipeline(
+                self.collision_pipeline,
                 num_rigid_shapes=int(self.model.shape_count),
-                num_cloth_triangles=0,
-                tri_indices=_tri_sentinel,
-                tet_indices=_tet_sentinel,
-                sleeping_enabled=True,
-                phoenx_body_offset=1,
                 shape_body=self.model.shape_body,
-                body_island_root=self.bodies.island_root,
-                body_motion_type=self.bodies.motion_type,
-                device=self.device,
             )
-            self.collision_pipeline.set_broad_phase_filter_data(self._share_vertex_filter_data)
             self._shape_color_active = wp.clone(self.model.shape_color)
             self._shape_color_sleeping = wp.empty_like(self.model.shape_color)
             wp.launch(
@@ -653,31 +630,21 @@ class Example:
                 device=self.device,
             )
         self._sync_newton_to_phoenx()
-        # When sleeping is on, apply picking BEFORE collide() and call
-        # wake_on_external_input() so the sleeping broad-phase filter
-        # sees the user wrench and re-includes the picked plank's
-        # whole island. Otherwise the filter drops sleeping pairs and
-        # the picked plank has no contacts to lean on.
-        if ENABLE_SLEEPING:
-            self.picking.apply_force()
-            self.world.wake_on_external_input()
+        # Picking before collide so the wake propagates through the
+        # broad-phase filter on the same frame. ``wake_on_external_input``
+        # is a no-op when sleeping is disabled, so the order is uniform
+        # regardless of ``ENABLE_SLEEPING``.
+        self.picking.apply_force()
+        self.world.wake_on_external_input()
         self.model.collide(
             self.state,
             contacts=self.contacts,
             collision_pipeline=self.collision_pipeline,
         )
-        if not ENABLE_SLEEPING:
-            self.picking.apply_force()
-        step_kwargs = {
-            "dt": self.frame_dt,
-            "contacts": self.contacts,
-            "shape_body": self._shape_body,
-        }
-        if ENABLE_SLEEPING:
-            narrow_phase = self.collision_pipeline.narrow_phase
-            step_kwargs["shape_aabb_lower"] = narrow_phase.shape_aabb_lower
-            step_kwargs["shape_aabb_upper"] = narrow_phase.shape_aabb_upper
-        self.world.step(**step_kwargs)
+        # When sleeping is on, ``attach_collision_pipeline`` cached
+        # the per-shape AABB arrays + installed the shape_body map, so
+        # no extra step() args are needed.
+        self.world.step(dt=self.frame_dt, contacts=self.contacts, shape_body=self._shape_body)
         self._sync_phoenx_to_newton()
 
     def _sync_newton_to_phoenx(self) -> None:
