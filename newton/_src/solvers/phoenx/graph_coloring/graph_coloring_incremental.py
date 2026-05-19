@@ -46,6 +46,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     speculative_commit_kernel,
     speculative_overflow_exit_kernel,
     speculative_pick_kernel,
+    speculative_validate_commit_kernel,
     speculative_validate_kernel,
     warm_start_periodic_invalidate_kernel,
 )
@@ -1107,17 +1108,21 @@ class IncrementalContactPartitioner:
         # convergence iters cheap no-ops.
 
     def _capture_speculative_step(self) -> None:
-        """Speculative coloring outer-loop body (one round = 3 phases).
+        """Speculative coloring outer-loop body (one round = 2 phases).
 
-        Pick -> Validate -> Commit. The 3-phase pipeline is race-free
-        (kernel 2 only reads ``color_tags``; kernel 3 commits in a
-        separate launch with no concurrent reads). Each round
-        typically commits a few colours' worth of constraints, so
-        Kapla drains in ~6-10 rounds vs ~80 for strict JP-MIS.
+        Pick -> ValidateCommit. The fused validate+commit kernel is
+        race-safe under the priority-tiebreak rule: when two
+        constraints sharing a body both pick colour ``c``, the
+        lower-priority one always aborts regardless of whether it
+        reads the higher-priority one as "uncoloured but higher
+        priority" (pre-commit) or "coloured at same colour"
+        (post-commit). Cuts one launch per round vs the 3-phase
+        pipeline.
 
-        Unrolled by ``NUM_INNER_WHILE_ITERATIONS`` to amortise
-        ``capture_while`` predicate-check overhead, same shape as the
-        legacy greedy step.
+        Each round commits a spread of colours, so Kapla drains in
+        ~6-10 rounds vs ~80 for strict JP-MIS. Unrolled by
+        ``NUM_INNER_WHILE_ITERATIONS`` to amortise the outer
+        ``capture_while`` predicate-check overhead.
         """
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
             wp.launch(
@@ -1139,9 +1144,10 @@ class IncrementalContactPartitioner:
                 block_dim=_GREEDY_BLOCK_DIM,
             )
             wp.launch(
-                speculative_validate_kernel,
+                speculative_validate_commit_kernel,
                 dim=self._greedy_grid_size,
                 inputs=[
+                    self._partition_data_concat,
                     self._color_tags,
                     self._spec_tentative_color,
                     self._packed_priorities,
@@ -1151,21 +1157,8 @@ class IncrementalContactPartitioner:
                     self._num_elements,
                     wp.int32(self._greedy_grid_size),
                     self._num_remaining,
-                    self._spec_commit_decision,
                 ],
                 block_dim=_GREEDY_BLOCK_DIM,
-            )
-            wp.launch(
-                speculative_commit_kernel,
-                dim=self.max_num_interactions,
-                inputs=[
-                    self._partition_data_concat,
-                    self._color_tags,
-                    self._spec_tentative_color,
-                    self._spec_commit_decision,
-                    self._num_elements,
-                    self._num_remaining,
-                ],
             )
             # Force exit when the forbidden mask saturated -- without
             # this the capture_while spins forever on dense graphs

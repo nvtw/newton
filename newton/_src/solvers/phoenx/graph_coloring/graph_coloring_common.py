@@ -600,6 +600,79 @@ def speculative_validate_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def speculative_validate_commit_kernel(
+    partition_data_concat: wp.array[wp.int64],
+    color_tags: wp.array[wp.int32],
+    tentative_color: wp.array[wp.int32],
+    packed_priorities: wp.array[wp.int32],
+    adjacency_section_end_indices: wp.array[int],
+    vertex_to_adjacent_elements: wp.array[int],
+    elements: wp.array[ElementInteractionData],
+    num_elements: wp.array[int],
+    total_num_threads: wp.int32,
+    num_remaining: wp.array[int],
+):
+    """Fused speculative phase 2+3: validate AND commit in one kernel.
+
+    The 3-phase version splits validate (reads) from commit (writes)
+    to avoid a race where thread B reads ``color_tags[A]`` and sees
+    A's just-written commit. With the priority-tiebreak rule though
+    that race is actually benign: if A and B share a body and both
+    picked colour ``c``, exactly one of them has the higher priority
+    (priorities are a permutation, no ties). The lower-priority side
+    always aborts -- whether it sees the higher-priority side as
+    "not yet coloured but higher priority" (pre-commit read) or as
+    "already coloured at my tentative" (post-commit read) -- the
+    abort outcome is identical.
+
+    Saves one kernel launch per speculative round (~1.7us per
+    launch). With ~14 rounds per build in warm-start mode and ~32
+    in cold-start, that's ~30-50 fewer launches per frame.
+    """
+    if num_remaining[0] <= wp.int32(0):
+        return
+    n = num_elements[0]
+    for tid in range(wp.tid(), n, total_num_threads):
+        if color_tags[tid] != wp.int32(0):
+            continue
+        my_tent = tentative_color[tid]
+        my_prio = contact_partitions_get_random_value(packed_priorities, tid)
+        commit = bool(True)
+        el = elements[tid]
+        for j in range(MAX_BODIES):
+            if not commit:
+                break
+            v = element_interaction_data_get(el, j)
+            if v < 0:
+                break
+            if v > 0:
+                start = adjacency_section_end_indices[v - 1]
+            else:
+                start = 0
+            end = adjacency_section_end_indices[v]
+            for k in range(start, end):
+                neighbor = vertex_to_adjacent_elements[k]
+                if neighbor == tid:
+                    continue
+                ntag = color_tags[neighbor]
+                if ntag != wp.int32(0):
+                    if ntag == my_tent:
+                        commit = False
+                        break
+                    continue
+                if tentative_color[neighbor] != my_tent:
+                    continue
+                neigh_prio = contact_partitions_get_random_value(packed_priorities, neighbor)
+                if neigh_prio > my_prio:
+                    commit = False
+                    break
+        if commit:
+            color_tags[tid] = my_tent
+            partition_data_concat[tid] = (wp.int64(my_tent) << _COLOR_SHIFT) | wp.int64(tid)
+            wp.atomic_sub(num_remaining, 0, 1)
+
+
+@wp.kernel(enable_backward=False)
 def speculative_overflow_exit_kernel(
     overflow_flag: wp.array[int],
     num_remaining: wp.array[int],
