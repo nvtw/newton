@@ -337,6 +337,7 @@ class PhoenXWorld:
         symmetric_color_sweep: bool = False,
         warm_start_invalidate_period: int = 0,
         warm_start_rotate_skip_color: bool = False,
+        capture_while_greedy_coloring: bool = False,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
@@ -674,6 +675,12 @@ class PhoenXWorld:
             # breaks the lock-in without paying the full cold-start
             # tax.
             self._partitioner.set_warm_start_rotate_skip(bool(warm_start_rotate_skip_color))
+            # Use ``wp.capture_while(num_remaining, ...)`` instead of
+            # the fixed ``MAX_GREEDY_OUTER_ITERS`` host loop on the
+            # greedy MIS path. Skips post-convergence kernel launches
+            # entirely (Kapla converges in ~6 outer iters but the host
+            # loop unrolls to 16 -- 80 wasted launches per build).
+            self._partitioner.set_capture_while_greedy(bool(capture_while_greedy_coloring))
         elif self.partitioner_algorithm == "luby_fixed":
             if step_layout != "single_world":
                 # Multi-world path reads ``_adjacency_section_end_indices``
