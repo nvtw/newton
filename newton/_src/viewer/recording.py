@@ -186,6 +186,11 @@ class LiveMp4Recorder:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         codec = self._pick_encoder(ffmpeg_exe)
         quality = float(np.clip(self._quality, 0.0, 100.0))
+        # Keyframe interval of ~1 s. Forcing IDR at frame 0 and a short GOP
+        # makes lightweight players (Windows Media Player) and inline
+        # previews (Slack, GitHub) start decoding immediately instead of
+        # showing a placeholder until the first scene-cut keyframe lands.
+        keyint = max(1, int(round(fps)))
         cmd = [
             ffmpeg_exe,
             "-y",
@@ -201,14 +206,41 @@ class LiveMp4Recorder:
             f"{fps:.3f}",
             "-i",
             "-",
-            "-an",
+            # Silent AAC audio track — many platforms (most notably Slack)
+            # only inline-preview MP4s that carry an audio stream.
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-shortest",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "16k",
             "-c:v",
             codec,
         ]
         if codec == "h264_nvenc":
             # Lower CQ means higher quality; map quality in [0,100] -> CQ in [34,14].
             cq = int(round(34.0 - (quality / 100.0) * 20.0))
-            cmd += ["-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", str(max(14, min(34, cq))), "-b:v", "0"]
+            cmd += [
+                "-preset",
+                "p7",
+                "-tune",
+                "hq",
+                "-rc",
+                "vbr",
+                "-cq",
+                str(max(14, min(34, cq))),
+                "-b:v",
+                "0",
+                "-forced-idr",
+                "1",
+                "-g",
+                str(keyint),
+                "-keyint_min",
+                str(keyint),
+            ]
         elif codec in {"h264_qsv", "h264_amf"}:
             # Map quality in [0,100] to a practical bitrate range.
             bitrate_mbps = 4.0 + (quality / 100.0) * 76.0
@@ -221,14 +253,36 @@ class LiveMp4Recorder:
                 f"{maxrate_mbps:.0f}M",
                 "-bufsize",
                 f"{bufsize_mbps:.0f}M",
+                "-g",
+                str(keyint),
             ]
         elif codec == "libx264":
             # Lower CRF means higher quality; map quality in [0,100] -> CRF in [35,14].
             crf = int(round(35.0 - (quality / 100.0) * 21.0))
-            cmd += ["-preset", "slow", "-crf", str(max(14, min(35, crf)))]
+            cmd += [
+                "-preset",
+                "slow",
+                "-crf",
+                str(max(14, min(35, crf))),
+                "-x264-params",
+                f"keyint={keyint}:min-keyint={keyint}:scenecut=0",
+                "-force_key_frames",
+                "expr:eq(n,0)",
+            ]
         if flip_vertical:
             cmd += ["-vf", "vflip"]
-        cmd += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output_path)]
+        # Slack-compatible: H.264 High profile, level 4.2, yuv420p, faststart.
+        cmd += [
+            "-profile:v",
+            "high",
+            "-level",
+            "4.2",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
 
         try:
             self._proc = subprocess.Popen(
@@ -248,6 +302,26 @@ class LiveMp4Recorder:
         self._output_path = output_path
         logger.info("Started recording to %s using encoder %s.", output_path, codec)
         return True
+
+    def write_frame_bytes(self, frame_bytes: bytes, width: int, height: int):
+        """Queue an already-encoded raw ``rgb24`` byte buffer.
+
+        Use this when emitting duplicate frames so the caller doesn't pay
+        the cost of re-serializing the same numpy array on every duplicate.
+        Dimensions must match the values passed to :meth:`start`.
+        """
+        if not self.is_recording or self._queue is None:
+            return
+        if int(width) != self._width or int(height) != self._height:
+            return
+        expected = self._width * self._height * 3
+        if len(frame_bytes) != expected:
+            return
+        try:
+            self._queue.put_nowait(frame_bytes)
+        except queue.Full:
+            # Keep renderer real-time by dropping frames under sustained pressure.
+            pass
 
     def write_frame(self, frame_rgb: np.ndarray):
         """Queue a frame for encoding. Frame must be HxWx3 uint8."""

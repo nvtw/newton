@@ -324,6 +324,15 @@ class ViewerGL(ViewerBase):
         self._recorder = LiveMp4Recorder()
         self._recorder.set_filename_prefix("gl_recording")
         self._record_frame_gpu: wp.array | None = None
+        # Capture is driven by simulation time so the MP4's wall-clock
+        # duration matches sim time regardless of how fast the renderer
+        # produces frames. ``_record_next_sim_t`` is the next sim time at
+        # which we must emit a video frame; ``_record_last_frame_bytes``
+        # caches the most recent encoded frame so repeating it (when the
+        # sim is slower than the recording FPS) is cheap.
+        self._record_fps: int = 60
+        self._record_next_sim_t: float | None = None
+        self._record_last_frame_bytes: bytes | None = None
 
     @override
     def _extra_layer_state_attrs(self) -> tuple[str, ...]:
@@ -1717,6 +1726,10 @@ class ViewerGL(ViewerBase):
     def _start_recording(self, output_path: str | Path | None = None) -> bool:
         """Start live MP4 recording at the current framebuffer size.
 
+        The MP4 is encoded at a fixed ``self._record_fps`` and is paced by
+        the simulator's clock (``ViewerBase.time``), so the on-disk video
+        plays back in sync with sim time regardless of render speed.
+
         Args:
             output_path: Optional output file path. ``None`` selects a
                 timestamped default under the recorder's output directory.
@@ -1725,11 +1738,10 @@ class ViewerGL(ViewerBase):
             ``True`` if recording started successfully.
         """
         fb_w, fb_h = self.renderer.window.get_framebuffer_size()
-        fps_hint = self._current_fps if self._current_fps > 1.0 else 60.0
         started = self._recorder.start(
             width=fb_w,
             height=fb_h,
-            fps=float(fps_hint),
+            fps=float(self._record_fps),
             output_path=output_path,
             flip_vertical=False,
         )
@@ -1739,26 +1751,57 @@ class ViewerGL(ViewerBase):
                 dtype=wp.uint8,  # pyright: ignore[reportArgumentType]
                 device=self.device,
             )
+            self._record_next_sim_t = float(self.time)
+            self._record_last_frame_bytes = None
         return started
 
     def _stop_recording(self) -> Path | None:
         """Stop live MP4 recording and return the output path (if any)."""
         path = self._recorder.stop()
         self._record_frame_gpu = None
+        self._record_next_sim_t = None
+        self._record_last_frame_bytes = None
         return path
 
     def _record_frame_if_needed(self):
-        """Copy the just-presented frame to the recorder, if recording."""
-        if not self._recorder.is_recording:
+        """Emit MP4 frames driven by simulation time.
+
+        Writes zero or more frames per render call so the video's
+        wall-clock duration matches ``self.time``. When the sim is slower
+        than the recording FPS the most recent frame is repeated; when
+        faster, intermediate render frames are simply dropped from the
+        recording (the live preview still shows them).
+        """
+        if not self._recorder.is_recording or self._record_next_sim_t is None:
             return
+
+        record_dt = 1.0 / float(self._record_fps)
+        # Nothing to emit yet: sim has not advanced past the next slot.
+        if self.time + 0.5 * record_dt < self._record_next_sim_t:
+            return
+
         fb_w, fb_h = self.renderer.window.get_framebuffer_size()
         if self._record_frame_gpu is None or self._record_frame_gpu.shape != (fb_h, fb_w, 3):
             # Framebuffer changed underneath us (e.g. resize during recording);
             # cleanest behavior is to stop and let the user start a new recording.
             self._stop_recording()
             return
+
+        # Read the current framebuffer once, then emit it as many times as
+        # needed to catch up to sim time. Reuse the previous frame's bytes
+        # if the sim didn't advance enough to warrant a fresh readback.
         frame_gpu = self.get_frame(target_image=self._record_frame_gpu, render_ui=False)
-        self._recorder.write_frame(frame_gpu.numpy())
+        self._record_last_frame_bytes = frame_gpu.numpy().tobytes()
+
+        # Emit at least one frame; if the sim leapt forward, emit duplicates
+        # to keep playback wall-clock-accurate. Cap to avoid runaway loops
+        # if the sim time jumps unexpectedly (e.g. after a long pause).
+        max_emit = max(1, 4 * self._record_fps)  # at most ~4 s worth of catch-up
+        emitted = 0
+        while self.time + 0.5 * record_dt >= self._record_next_sim_t and emitted < max_emit:
+            self._recorder.write_frame_bytes(self._record_last_frame_bytes, fb_w, fb_h)
+            self._record_next_sim_t += record_dt
+            emitted += 1
 
     def get_frame(self, target_image: wp.array | None = None, render_ui: bool = False) -> wp.array:
         """
@@ -2799,11 +2842,21 @@ class ViewerGL(ViewerBase):
                     output_path = self._recorder.output_path
                     imgui.text("Status: recording")
                     imgui.text(f"Quality: {self._recorder.quality:.0f}/100")
+                    imgui.text(f"FPS: {self._record_fps}")
                     if output_path is not None:
                         imgui.text_wrapped(str(output_path))
                     if imgui.button("Stop Recording"):
                         self._stop_recording()
                 else:
+                    # Recording FPS chooser (sim-time-paced, so playback
+                    # speed is independent of render speed).
+                    imgui.text("Recording FPS:")
+                    for choice in (30, 60, 120):
+                        if imgui.radio_button(f"{choice}##rec_fps", self._record_fps == choice):
+                            self._record_fps = choice
+                        imgui.same_line()
+                    imgui.new_line()
+
                     imgui.text("Status: idle")
                     imgui.text_wrapped(str(self._recorder.suggested_output_path()))
                     if imgui.button("Start Recording"):
