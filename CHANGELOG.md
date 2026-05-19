@@ -97,19 +97,19 @@
 - Treat `stretch_stiffness` and `bend_stiffness` in `add_rod()` and `add_rod_graph()` as direct per-joint stiffness values, matching `add_joint_cable()` and other joint stiffness APIs
 - VBD solver uses augmented-Lagrangian hard constraints for body-body contacts by default (`rigid_contact_hard=True`)
 - Reduce collision-pipeline overhead in `SolverMuJoCo` via incremental contact conversion when the contact set is unchanged (~6× speedup on `example_robot_anymal_d` with 4096 worlds)
-- Streamline hydroelastic broadphase to derive block coordinates arithmetically from per-shape SDF coarse-texture dimensions; on-disk SDF caches written by earlier versions are transparently re-cooked on first load (`_sdf_cache.CACHE_FORMAT_VERSION` bumped to `2`)
 
 ### Deprecated
 
 - Deprecate `SensorRaycast` in favor of `SensorTiledCamera`; migrate to `SensorTiledCamera.utils.compute_pinhole_camera_rays()` and `create_depth_image_output()` for single-camera depth rendering — see the `SensorRaycast` class docstring for a complete migration example
 - Deprecate and ignore `rigid_enable_dahl_friction` in `SolverVBD`; Dahl friction is now auto-detected from model attributes (`model.vbd.dahl_eps_max` / `model.vbd.dahl_tau`)
 - Deprecate `newton-actuators` package dependency; all actuator functionality is now built into `newton.actuators`. The dependency is kept for backward compatibility and will be removed in a future release; migrate imports from `newton_actuators` to `newton.actuators`
+- Deprecate `SDF.texture_block_coords`; the attribute now always returns `None` and will be removed in Newton 1.4. The hydroelastic broadphase now derives block coordinates arithmetically from each SDF's coarse-texture dimensions, so callers no longer need to read them off the `SDF` object
 - Deprecate loading `.pt` / `.pth` (TorchScript) checkpoints via `ControllerNeuralMLP`; the legacy TorchScript / dict-checkpoint path still works (with a `DeprecationWarning`) when PyTorch is installed but will be removed in a future release. `ControllerNeuralLSTM` requires re-exporting to ONNX with the metadata properties documented in its class docstring; pointing it at a `.pt` checkpoint now raises `NotImplementedError` with migration guidance. Convert the MLP checkpoint to ONNX once with `torch.onnx.export(model, dummy_input, "policy.onnx", opset_version=17)` and load the resulting `.onnx` file.
 - Adjusted the grouping of `reset`, `step`, and `pause` so that they are all grouped together
 
 ### Fixed
 
-- Fix hydroelastic SDF contact surfaces dropping the central region under deep interpenetration. The broadphase used to skip subgrids whose centers were deeper than the SDF narrow band, leaving a hole in the contact patch when overlap exceeded the narrow-band thickness. Broadphase now visits every subgrid in the SDF coarse grid; sampling at far-inside locations is correct because the coarse SDF is dense and accurate everywhere
+- Fix hydroelastic SDF contact surfaces dropping the central region under deep interpenetration. The broadphase used to skip subgrids whose centers were deeper than the SDF narrow band, leaving a hole in the contact patch when overlap exceeded the narrow-band thickness. Broadphase now visits every subgrid in the SDF coarse grid (block coordinates are derived arithmetically from per-shape SDF coarse-texture dimensions); sampling at far-inside locations is correct because the coarse SDF is dense and accurate everywhere. On-disk SDF caches written by earlier versions are transparently re-cooked on first load (`_sdf_cache.CACHE_FORMAT_VERSION` bumped to `2`)
 - Fix `remesh_convex_hull` raising `QhullError` on degenerate (coincident, collinear, or coplanar) point clouds; it now returns a zero-volume fallback mesh with a `UserWarning`, raises `ValueError` on empty input, and retries Qhull with `QJ` joggle as a last resort on the 3D path
 - Fix narrow-phase CPU launches using GPU-sized block dimensions with kernels that observe `wp.block_dim() == 1`, avoiding out-of-bounds tile and strided-loop indexing until Warp GH-1413 is fixed
 - Fix `ViewerGL` Step button remaining clickable while the simulation is running; the button is now greyed out when not paused
