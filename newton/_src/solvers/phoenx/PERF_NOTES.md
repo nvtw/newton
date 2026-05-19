@@ -77,6 +77,34 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - **Memory: real 25% saving on ``copy_state`` capacity** (sized as ``constraint_capacity * MAX_BODIES``). On contact-heavy scenes (kapla, large cloth) this is the difference between fitting comfortably and pressuring GPU memory.
 - Kept for code hygiene: the constant now matches actual usage, the compact loop is shorter, and the ``vec6i`` is one cache-line word smaller. Tests updated: ``test_graph_coloring{,_overflow}`` had hardcoded ``itemsize=32`` (the old ``vec8i`` byte width); now derived from ``MAX_BODIES``.
 
+### Warm-start coloring cache stir (drift fix on tall stacks)
+- 2026-05-19: graph-coloring warm-start was reusing the same per-(body-pair) colour across frames, which made the PGS solve converge to a biased fixed point under the locked coloring. On the Kapla tower (10620 bricks, ~67k contact columns, single-world) the bias compounded over a few hundred frames into a full tower collapse: max brick drift 3.33 m at 1000 frames, mean 0.09 m.
+- Cold-start coloring (fixed seed + per-step ``contact_count``-shifted priorities) varies the colouring slightly each frame because the high bits of the JP priority shift as bodies settle. The variation averages the bias out (max drift 0.15 m, same scene) at a ~10 % step-time cost from the extra MIS work.
+- Fix: two complementary mechanisms, both capture-safe and graph-replay safe:
+  - ``warm_start_invalidate_period=N`` (default 4): every Nth ``build_csr`` zeroes ``cache_num_entries`` so the seed kernel finds an empty cache and greedy MIS rebuilds from scratch.
+  - ``warm_start_rotate_skip_color=True`` (default True): each step picks one cached colour round-robin (via a step counter) and the seed kernel skips entries with that colour; MIS re-derives ~1/num_colors of the assignments per step.
+- Combined cost (Kapla): ~3 % step time. Combined drift (Kapla 1000 frames): max 0.175 m vs 3.33 m unmitigated. Tested in the ``example_kapla_tower2`` drift probe.
+- What doesn't work:
+  - **Symmetric Gauss-Seidel** (alternate forward/reverse colour sweep). Marginal -- only edge colours swap position; middle colours stay put. Drift 3.33 -> 3.00 m.
+  - **Cyclic shift of colour sweep order**. Made things worse (4.18 m). PGS doesn't converge when iteration order changes each round.
+  - **Reducing ``MAX_GREEDY_OUTER_ITERS`` globally**. K=7 enough for Kapla cold-start but cloth needs more. Not safe as a default.
+  - **Per-thread ``num_remaining`` early-exit in the MIS kernel**. ~20 % slowdown -- 38k threads broadcast-reading the same atomic-hot cache line invalidates ``atomic_sub`` writes elsewhere.
+
+### ``wp.capture_while`` on the greedy MIS outer loop (default 2026-05-19)
+- The legacy fixed-loop did 16 outer × 8 inner = 128 MIS launches per build, relying on per-thread ``color_tags[tid] != 0`` to make post-convergence iters cheap no-ops. The post-convergence no-ops still cost ~1.67 us each (driver / kernel-launch overhead), totalling ~213 us/frame.
+- Switching to ``wp.capture_while(num_remaining, body)`` exits as soon as ``num_remaining`` hits 0:
+  - **Warm-start fast path: 12 800 -> 880 partitioner launches per 100 frames** (18x fewer); coloring kernel time 0.21 ms -> 0.04 ms/frame.
+  - Cold-start: 128 -> ~80 launches (~36 % reduction); time savings smaller (~76 us/frame) because the dropped launches were no-ops to begin with.
+- The capture_while watcher adds ~210 ``set_conditional_if_handle_kernel`` launches per 100 frames -- noise-level.
+- Enabled by default via ``PhoenXWorld(capture_while_greedy_coloring=True)``. The legacy fixed-loop path is preserved on the flag.
+
+### Speculative coloring (Çatalyürek-style, opt-in)
+- Implemented at ``speculative_pick_kernel`` / ``speculative_validate_kernel`` / ``speculative_commit_kernel`` (``graph_coloring_common.py``); deterministic via the same fixed priority permutation as JP-MIS.
+- 3-phase per round: pick smallest free colour, validate vs uncoloured-neighbour-with-higher-priority-same-tentative, commit. Race-free because the commit lives in a separate launch so phase 2 has a stable ``color_tags`` snapshot.
+- **Halves the round count** vs JP-MIS on dense graphs because MIS only commits "local maxima" while speculative commits at multiple colours per round. Kapla: ~32 rounds (96 launches) vs ~80 (80 launches).
+- **Wall-clock comparable, not faster.** Per-round work is roughly 3x JP-MIS (3 kernels with neighbour scans on both ``color_tags`` and ``tentative_color``), so the fewer-rounds win cancels out. Cold-start Kapla 100-frame nsys: 1.37 ms speculative vs 1.65 ms MIS+capture_while -- 17 % faster on raw kernel time but within noise on end-to-end FPS.
+- Default OFF. Useful as a building block for: dense graphs that exceed ``MAX_GREEDY_OUTER_ITERS`` on MIS, or future tuning (shared-mem ``tentative_color`` caching, warp-level forbidden-mask reductions) that closes the per-round cost gap.
+
 ## Tried and reverted
 
 ### Substep mega-kernel (one block per world, all substeps in one launch)
