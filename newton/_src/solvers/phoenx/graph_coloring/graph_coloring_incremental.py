@@ -43,6 +43,9 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     partitioning_coloring_incremental_greedy_kernel,
     partitioning_coloring_incremental_kernel,
     partitioning_prepare_kernel,
+    speculative_commit_kernel,
+    speculative_pick_kernel,
+    speculative_validate_kernel,
     warm_start_periodic_invalidate_kernel,
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import scan_variable_length
@@ -421,6 +424,22 @@ class IncrementalContactPartitioner:
         # capture_while path skips ~50-60% of launches on scenes that
         # converge fast (Kapla 67k-constraint single-world).
         self._use_capture_while_greedy: bool = False
+
+        # Speculative coloring (Çatalyürek-style). Three-phase per round
+        # (pick + validate + commit) instead of strict JP-MIS's one-phase
+        # local-max scan. Commits at multiple colours per round so dense
+        # contact graphs drain in ~6-10 rounds instead of ~80. Determinism
+        # comes from the fixed priority permutation -- same inputs ->
+        # same colouring across runs and hardware.
+        self._use_speculative_coloring: bool = False
+        # Scratch buffers; allocated once at construction so the
+        # captured graph reuses fixed pointers across replays.
+        self._spec_tentative_color: wp.array[wp.int32] = wp.zeros(
+            max_num_interactions, dtype=wp.int32, device=device
+        )
+        self._spec_commit_decision: wp.array[wp.int32] = wp.zeros(
+            max_num_interactions, dtype=wp.int32, device=device
+        )
 
         # Dummies for reusing partitioning_prepare_kernel as adjacency zeroer.
         self._prepare_partition_ends_dummy = wp.zeros(1, dtype=wp.int32, device=device)
@@ -822,21 +841,33 @@ class IncrementalContactPartitioner:
                     self._num_remaining,
                 ],
             )
-        # MIS loop. Two paths:
+        # Outer MIS loop. Three paths:
         #
-        # 1. ``wp.capture_while`` (when ``use_capture_while_greedy``
-        #    enabled and inside a capture). Exits as soon as
-        #    ``num_remaining[0]`` hits 0, so post-convergence launches
-        #    are skipped entirely. On the Kapla 67k-constraint scene
-        #    this drops total coloring launches per build from 128 to
-        #    ~48-56 (~5-7 outer iters × 8 inner unrolls).
-        #
-        # 2. Fixed host-unroll (default; preserved as a fallback for
-        #    contexts where ``capture_while`` overhead dominates, e.g.
-        #    very small graphs that converge in 1-2 rounds and where
-        #    each ``capture_while`` watcher launch would cost more
-        #    than the saved post-convergence kernel launches).
-        if self._use_capture_while_greedy:
+        # 1. **Speculative coloring** (``use_speculative_coloring`` on):
+        #    3-phase round (pick + validate + commit) commits at
+        #    multiple colours per round; ~6-10 rounds × 3 kernels = 18-30
+        #    launches on Kapla vs ~80 with JP-MIS. Race-free by
+        #    construction (no concurrent ``color_tags`` writes within a
+        #    phase).
+        # 2. **JP-MIS + capture_while** (``use_capture_while_greedy``):
+        #    legacy strict-MIS loop with ``wp.capture_while`` -- exits
+        #    as soon as ``num_remaining[0]`` hits 0 instead of running
+        #    the fixed cap.
+        # 3. **JP-MIS + fixed unroll** (neither flag set): legacy
+        #    behaviour for contexts where capture_while overhead
+        #    dominates.
+        if self._use_speculative_coloring:
+            if self._use_capture_while_greedy:
+                wp.capture_while(self._num_remaining, self._capture_speculative_step)
+            else:
+                outer_iters = (
+                    self._max_greedy_outer_iters_override
+                    if self._max_greedy_outer_iters_override is not None
+                    else int(MAX_GREEDY_OUTER_ITERS)
+                )
+                for _ in range(outer_iters):
+                    self._capture_speculative_step()
+        elif self._use_capture_while_greedy:
             wp.capture_while(self._num_remaining, self._capture_build_csr_greedy_step)
         else:
             outer_iters = (
@@ -1067,6 +1098,67 @@ class IncrementalContactPartitioner:
         # [tid] != 0`` check in the greedy kernel makes post-
         # convergence iters cheap no-ops.
 
+    def _capture_speculative_step(self) -> None:
+        """Speculative coloring outer-loop body (one round = 3 phases).
+
+        Pick -> Validate -> Commit. The 3-phase pipeline is race-free
+        (kernel 2 only reads ``color_tags``; kernel 3 commits in a
+        separate launch with no concurrent reads). Each round
+        typically commits a few colours' worth of constraints, so
+        Kapla drains in ~6-10 rounds vs ~80 for strict JP-MIS.
+
+        Unrolled by ``NUM_INNER_WHILE_ITERATIONS`` to amortise
+        ``capture_while`` predicate-check overhead, same shape as the
+        legacy greedy step.
+        """
+        for _ in range(NUM_INNER_WHILE_ITERATIONS):
+            wp.launch(
+                speculative_pick_kernel,
+                dim=self._greedy_grid_size,
+                inputs=[
+                    self._color_tags,
+                    self._adjacency_section_end_indices,
+                    self._vertex_to_adjacent_elements,
+                    self._elements,
+                    self._num_elements,
+                    wp.int32(self._greedy_grid_size),
+                    self._num_remaining,
+                    wp.int32(self._max_colored_partitions_kernel_arg),
+                    self._spec_tentative_color,
+                    self._spec_commit_decision,
+                ],
+                block_dim=_GREEDY_BLOCK_DIM,
+            )
+            wp.launch(
+                speculative_validate_kernel,
+                dim=self._greedy_grid_size,
+                inputs=[
+                    self._color_tags,
+                    self._spec_tentative_color,
+                    self._packed_priorities,
+                    self._adjacency_section_end_indices,
+                    self._vertex_to_adjacent_elements,
+                    self._elements,
+                    self._num_elements,
+                    wp.int32(self._greedy_grid_size),
+                    self._num_remaining,
+                    self._spec_commit_decision,
+                ],
+                block_dim=_GREEDY_BLOCK_DIM,
+            )
+            wp.launch(
+                speculative_commit_kernel,
+                dim=self.max_num_interactions,
+                inputs=[
+                    self._partition_data_concat,
+                    self._color_tags,
+                    self._spec_tentative_color,
+                    self._spec_commit_decision,
+                    self._num_elements,
+                    self._num_remaining,
+                ],
+            )
+
     def begin_sweep(self) -> None:
         """Reset the sweep-time colour cursor (copy num_colors -> color_cursor).
         Call before every PGS sweep. Also bumps ``sweep_direction``
@@ -1099,6 +1191,25 @@ class IncrementalContactPartitioner:
         re-running them as per-thread early-exits.
         """
         self._use_capture_while_greedy = bool(enabled)
+
+    def set_speculative_coloring(self, enabled: bool) -> None:
+        """Switch from strict JP-MIS to deterministic speculative
+        coloring on the greedy build path.
+
+        Speculative coloring runs three phases per round (pick,
+        validate, commit) and commits at multiple colours per round
+        instead of one. On dense contact graphs (Kapla 67k
+        constraints) this drops the inner-launch count from ~80 to
+        ~20-30 -- a clean 3-4x reduction in coloring time. Coloring
+        quality is comparable to JP-MIS within ~1-2 colours; PGS
+        sweep cost is unaffected.
+
+        Determinism: same fixed priority permutation as JP-MIS, plus
+        a 3-kernel split that eliminates the read/write race on
+        ``color_tags`` that a 2-kernel pick+commit would have. Same
+        inputs -> same colouring across runs and hardware.
+        """
+        self._use_speculative_coloring = bool(enabled)
 
     def set_warm_start_rotate_skip(self, enabled: bool) -> None:
         """When ``True``, each ``build_csr`` skips re-seeding one

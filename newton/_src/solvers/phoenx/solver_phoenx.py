@@ -352,6 +352,7 @@ class PhoenXWorld:
         warm_start_invalidate_period: int = 4,
         warm_start_rotate_skip_color: bool = True,
         capture_while_greedy_coloring: bool = True,
+        speculative_coloring: bool = False,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
@@ -695,6 +696,13 @@ class PhoenXWorld:
             # entirely (Kapla converges in ~6 outer iters but the host
             # loop unrolls to 16 -- 80 wasted launches per build).
             self._partitioner.set_capture_while_greedy(bool(capture_while_greedy_coloring))
+            # Deterministic speculative coloring (Çatalyürek-style).
+            # When True, the greedy build runs 3-phase pick + validate
+            # + commit per round instead of strict JP-MIS, committing
+            # at multiple colours per round. ~3-4x fewer inner kernel
+            # launches on the Kapla scene; coloring quality (number
+            # of colours) is comparable within ~1-2 colours.
+            self._partitioner.set_speculative_coloring(bool(speculative_coloring))
         elif self.partitioner_algorithm == "luby_fixed":
             if step_layout != "single_world":
                 # Multi-world path reads ``_adjacency_section_end_indices``

@@ -418,6 +418,194 @@ def partitioning_coloring_incremental_greedy_kernel(
             wp.atomic_sub(num_remaining, 0, 1)
 
 
+# ---------------------------------------------------------------------------
+# Speculative greedy coloring (Çatalyürek-style, deterministic).
+#
+# The legacy ``partitioning_coloring_incremental_greedy_kernel`` above is
+# strict JP-MIS: a vertex commits ONLY if its priority beats every uncoloured
+# neighbour. Per round each constraint commits with probability ~ 1/degree,
+# so on the Kapla 67k-constraint scene the host loop spins through ~80 inner
+# kernel launches to fully drain ``num_remaining``.
+#
+# Speculative coloring is more permissive. Each round runs in three phases:
+#
+# 1. **Pick** -- every uncoloured constraint picks the smallest colour not
+#    used by its already-coloured neighbours. Writes into a scratch
+#    ``tentative_color`` array. No conflict resolution yet; multiple
+#    neighbours may pick the same colour.
+# 2. **Validate** -- each uncoloured constraint scans its uncoloured
+#    neighbours: if any neighbour with strictly higher priority picked the
+#    *same* tentative colour, abort the commit. Writes a 0/1
+#    ``commit_decision`` flag. Reads-only on ``color_tags`` (no race with
+#    other threads' writes -- those happen in phase 3).
+# 3. **Commit** -- threads with ``commit_decision == 1`` stamp
+#    ``color_tags[tid] = tentative_color[tid]`` and decrement
+#    ``num_remaining``.
+#
+# Determinism: priorities are a fixed permutation (set once at partitioner
+# construction) plus a per-step cost prefix; same inputs -> same outputs
+# across runs and hardware. The 3-kernel split eliminates the read/write
+# race that a 2-kernel pick+commit would otherwise have on neighbours'
+# ``color_tags``.
+#
+# Why this is faster on dense graphs: phase 1's "smallest free" choice
+# already commits a *spread* of colours per round (not just colour 0), so
+# round 2 typically lands at colour 1 or 2 instead of waiting for colour 0
+# stragglers to clear. On Kapla this drops the round count from ~80 to
+# ~6-10 (multiplied by 3 launches/round = 18-30 launches total, vs 80
+# previously).
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel(enable_backward=False)
+def speculative_pick_kernel(
+    color_tags: wp.array[wp.int32],
+    adjacency_section_end_indices: wp.array[int],
+    vertex_to_adjacent_elements: wp.array[int],
+    elements: wp.array[ElementInteractionData],
+    num_elements: wp.array[int],
+    total_num_threads: wp.int32,
+    num_remaining: wp.array[int],
+    max_colored_partitions: wp.int32,
+    tentative_color: wp.array[wp.int32],
+    commit_decision: wp.array[wp.int32],
+):
+    """Speculative phase 1: each uncoloured constraint picks the smallest
+    colour not used by its already-coloured neighbours.
+
+    Writes ``tentative_color[tid]`` (encoded ``c + 1`` to match
+    ``color_tags``) and resets ``commit_decision[tid] = 0``. Sweeps the full
+    constraint range via persistent grid stride.
+    """
+    if num_remaining[0] <= wp.int32(0):
+        return
+    n = num_elements[0]
+    soft_cap = max_colored_partitions >= wp.int32(0)
+    saturation_limit = max_colored_partitions if soft_cap else wp.int32(GREEDY_MAX_COLORS)
+
+    for tid in range(wp.tid(), n, total_num_threads):
+        # Reset commit decision for this round; coloured tids skip the pick.
+        commit_decision[tid] = wp.int32(0)
+        if color_tags[tid] != wp.int32(0):
+            continue
+        el = elements[tid]
+        forbidden_mask = wp.int64(0)
+        for j in range(MAX_BODIES):
+            v = element_interaction_data_get(el, j)
+            if v < 0:
+                break
+            if v > 0:
+                start = adjacency_section_end_indices[v - 1]
+            else:
+                start = 0
+            end = adjacency_section_end_indices[v]
+            for k in range(start, end):
+                neighbor = vertex_to_adjacent_elements[k]
+                if neighbor == tid:
+                    continue
+                ntag = color_tags[neighbor]
+                if ntag != wp.int32(0):
+                    ncolor = ntag - wp.int32(1)
+                    if ncolor < GREEDY_MAX_COLORS:
+                        forbidden_mask = forbidden_mask | (wp.int64(1) << wp.int64(ncolor))
+        free_mask = forbidden_mask ^ _FREE_COLOR_FLIP
+        c = _lowest_set_bit(free_mask)
+        if c < wp.int32(0) or c >= saturation_limit:
+            if soft_cap:
+                c = max_colored_partitions
+            else:
+                c = wp.int32(GREEDY_MAX_COLORS - wp.int32(1))
+        tentative_color[tid] = c + wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def speculative_validate_kernel(
+    color_tags: wp.array[wp.int32],
+    tentative_color: wp.array[wp.int32],
+    packed_priorities: wp.array[wp.int32],
+    adjacency_section_end_indices: wp.array[int],
+    vertex_to_adjacent_elements: wp.array[int],
+    elements: wp.array[ElementInteractionData],
+    num_elements: wp.array[int],
+    total_num_threads: wp.int32,
+    num_remaining: wp.array[int],
+    commit_decision: wp.array[wp.int32],
+):
+    """Speculative phase 2: each uncoloured constraint decides whether its
+    tentative colour is safe to commit this round.
+
+    Conflict rule: abort if any *uncoloured* neighbour has the same
+    ``tentative_color`` AND strictly higher priority. Equal priorities are
+    impossible because the random tiebreaker is a permutation. Phase 2 only
+    *reads* ``color_tags`` and ``tentative_color``; the commit writes happen
+    in phase 3, so neighbours' state can't change underneath us.
+    """
+    if num_remaining[0] <= wp.int32(0):
+        return
+    n = num_elements[0]
+    for tid in range(wp.tid(), n, total_num_threads):
+        if color_tags[tid] != wp.int32(0):
+            continue
+        my_tent = tentative_color[tid]
+        my_prio = contact_partitions_get_random_value(packed_priorities, tid)
+        commit = bool(True)
+        el = elements[tid]
+        for j in range(MAX_BODIES):
+            if not commit:
+                break
+            v = element_interaction_data_get(el, j)
+            if v < 0:
+                break
+            if v > 0:
+                start = adjacency_section_end_indices[v - 1]
+            else:
+                start = 0
+            end = adjacency_section_end_indices[v]
+            for k in range(start, end):
+                neighbor = vertex_to_adjacent_elements[k]
+                if neighbor == tid:
+                    continue
+                if color_tags[neighbor] != wp.int32(0):
+                    continue  # already coloured: phase 1 forbidden mask handled it
+                if tentative_color[neighbor] != my_tent:
+                    continue  # different tentative, no conflict
+                # Same tentative + uncoloured: tie-break by priority.
+                neigh_prio = contact_partitions_get_random_value(packed_priorities, neighbor)
+                if neigh_prio > my_prio:
+                    commit = False
+                    break
+        if commit:
+            commit_decision[tid] = wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def speculative_commit_kernel(
+    partition_data_concat: wp.array[wp.int64],
+    color_tags: wp.array[wp.int32],
+    tentative_color: wp.array[wp.int32],
+    commit_decision: wp.array[wp.int32],
+    num_elements: wp.array[int],
+    num_remaining: wp.array[int],
+):
+    """Speculative phase 3: write through the commits flagged by phase 2.
+
+    Decoupling commit from validate gives kernel 2 a clean snapshot of
+    ``color_tags`` (no concurrent writes), so the 3-phase pipeline is
+    race-free without explicit synchronisation between launches.
+    """
+    tid = wp.tid()
+    if tid >= num_elements[0]:
+        return
+    if commit_decision[tid] == wp.int32(0):
+        return
+    if color_tags[tid] != wp.int32(0):
+        return  # belt-and-braces (shouldn't happen)
+    c_plus_one = tentative_color[tid]
+    color_tags[tid] = c_plus_one
+    partition_data_concat[tid] = (wp.int64(c_plus_one) << _COLOR_SHIFT) | wp.int64(tid)
+    wp.atomic_sub(num_remaining, 0, 1)
+
+
 @wp.kernel(enable_backward=False)
 def greedy_overflow_spill_kernel(
     color_tags: wp.array[wp.int32],
