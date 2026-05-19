@@ -542,6 +542,12 @@ Attributes with the same name in different namespaces are completely independent
 Porting PhysX SDF Assets to Newton
 ----------------------------------
 
+.. note::
+
+   ``NewtonSDFCollisionAPI`` is **experimental**. Attribute names, defaults,
+   and the folding of hydroelastic configuration into this schema may change
+   without notice in subsequent releases.
+
 USD assets authored for PhysX commonly configure SDF-based mesh collision through
 ``PhysxSDFMeshCollisionAPI`` and configure collision margins through
 ``PhysxCollisionAPI``. Newton defines its own codeless API schemas
