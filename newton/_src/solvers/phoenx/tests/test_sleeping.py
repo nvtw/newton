@@ -9,9 +9,12 @@ overhead. The cases here exercise the small invariants the wiring must
 preserve:
 
 * zero-threshold disables every allocation and per-step kernel;
-* a box that comes to rest on the ground gets flagged ``is_sleeping``
-  and stays put while sleeping;
+* a box that comes to rest on the ground gets a non-negative
+  ``island_root`` (the sleep label) and stays put while sleeping;
 * a moving body that lands on a sleeping island wakes both that step.
+
+A body is sleeping iff ``bodies.island_root[b] >= 0``; the value is the
+lowest body id in its island at the moment of sleep transition.
 """
 
 from __future__ import annotations
@@ -24,6 +27,16 @@ import warp as wp
 import newton
 
 GRAVITY = 9.81
+
+
+def _sleep_flags(solver) -> np.ndarray:
+    """Return a 0/1 array: 1 where the body is sleeping (``island_root >= 0``)."""
+    return (solver.world.bodies.island_root.numpy() >= 0).astype(np.int32)
+
+
+def _is_sleeping(solver, slot: int) -> int:
+    """1 if PhoenX slot ``slot`` is sleeping, 0 otherwise."""
+    return int(int(solver.world.bodies.island_root.numpy()[slot]) >= 0)
 
 
 def _make_box_on_plane(*, box_z: float = 0.5, mu: float = 0.5) -> newton.Model:
@@ -59,6 +72,30 @@ def _make_two_separated_boxes(*, gap: float = 5.0, box_z: float = 0.5) -> newton
             hz=0.1,
             cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.5),
         )
+    mb.gravity = -GRAVITY
+    return mb.finalize()
+
+
+def _make_two_stacks(*, n_layers: int = 3, box_half: float = 0.1, gap: float = 3.0) -> newton.Model:
+    """Two vertical stacks of ``n_layers`` cubes each, on a ground plane,
+    separated horizontally by ``gap`` so the two stacks never share an
+    island.
+    """
+    mb = newton.ModelBuilder()
+    mb.add_ground_plane()
+    for stack_x in (-gap, gap):
+        for i in range(n_layers):
+            z = box_half + i * (2.0 * box_half + 1e-3)
+            body = mb.add_body(
+                xform=wp.transform(p=wp.vec3(stack_x, 0.0, z), q=wp.quat_identity()),
+            )
+            mb.add_shape_box(
+                body,
+                hx=box_half,
+                hy=box_half,
+                hz=box_half,
+                cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.6),
+            )
     mb.gravity = -GRAVITY
     return mb.finalize()
 
@@ -123,7 +160,7 @@ class TestSleepingPipeline(unittest.TestCase):
         self.assertIsNotNone(solver.world._island_is_sleeping)
         self.assertIsNotNone(solver.world._body_aabb_diagonal)
         # Body 0 (newton index) = slot 1 in PhoenX.
-        self.assertEqual(int(solver.world.bodies.is_sleeping.numpy()[1]), 0)
+        self.assertEqual(_is_sleeping(solver, 1), 0)
 
     def test_box_settles_and_sleeps(self) -> None:
         """A box dropped on a plane is flagged sleeping after settling."""
@@ -145,13 +182,13 @@ class TestSleepingPipeline(unittest.TestCase):
         dt = 1.0 / 60.0
         state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
 
-        is_sleeping = solver.world.bodies.is_sleeping.numpy()
+        flags = _sleep_flags(solver)
         # Slot 0 = world anchor, slot 1 = the box.
-        self.assertEqual(int(is_sleeping[0]), 0, msg="anchor must never sleep")
+        self.assertEqual(int(flags[0]), 0, msg="anchor must never sleep")
         self.assertEqual(
-            int(is_sleeping[1]),
+            int(flags[1]),
             1,
-            msg=f"box did not sleep after 2s; is_sleeping={is_sleeping.tolist()}",
+            msg=f"box did not sleep after 2s; sleep flags={flags.tolist()}",
         )
 
         # Run another second; the body must stay sleeping (gravity gated).
@@ -164,7 +201,7 @@ class TestSleepingPipeline(unittest.TestCase):
             delta=1e-4,
             msg=f"sleeping box drifted: z {com_z_before:.6f} -> {com_z_after:.6f}",
         )
-        self.assertEqual(int(solver.world.bodies.is_sleeping.numpy()[1]), 1)
+        self.assertEqual(_is_sleeping(solver, 1), 1)
 
     def test_independent_stacks_sleep_independently(self) -> None:
         """Two separated boxes form two islands; both end up sleeping but
@@ -186,15 +223,16 @@ class TestSleepingPipeline(unittest.TestCase):
         dt = 1.0 / 60.0
         state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
 
-        is_sleeping = solver.world.bodies.is_sleeping.numpy()
+        flags = _sleep_flags(solver)
         # Both boxes (slots 1 and 2) must sleep.
-        self.assertEqual(int(is_sleeping[1]), 1, msg="left box did not sleep")
-        self.assertEqual(int(is_sleeping[2]), 1, msg="right box did not sleep")
+        self.assertEqual(int(flags[1]), 1, msg="left box did not sleep")
+        self.assertEqual(int(flags[2]), 1, msg="right box did not sleep")
 
-        # Confirm the island builder produced 2 distinct island ids for them.
-        set_nr = solver.world._island_builder.set_nr.numpy()
-        # set_nr is indexed by PhoenX slot.
-        self.assertNotEqual(int(set_nr[1]), int(set_nr[2]))
+        # Confirm the persistent island_root labels are distinct -- each
+        # box's root is its own body id, so slot 1's root is 1 and
+        # slot 2's root is 2.
+        island_root = solver.world.bodies.island_root.numpy()
+        self.assertNotEqual(int(island_root[1]), int(island_root[2]))
 
     def test_moving_body_wakes_sleeping_island(self) -> None:
         """A second body dropped onto a settled (sleeping) box wakes both."""
@@ -215,7 +253,7 @@ class TestSleepingPipeline(unittest.TestCase):
 
         dt = 1.0 / 60.0
         state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
-        self.assertEqual(int(solver.world.bodies.is_sleeping.numpy()[1]), 1)
+        self.assertEqual(_is_sleeping(solver, 1), 1)
 
         # Inject a hard +z impulse via body_f, mimicking an external kick.
         # Magnitude has to overcome the inv_mass-gated freeze AND clear the
@@ -226,14 +264,12 @@ class TestSleepingPipeline(unittest.TestCase):
 
         # NOTE: we don't expect a single sleeping body to wake from its own
         # force alone -- the gravity/force gate is the whole point. Instead,
-        # we forcibly clear is_sleeping and assert that re-running the
-        # sleeping pass picks the body back up immediately based on the
-        # high velocity it now carries.
-        # First clear the is_sleeping flag manually and seed a high velocity
-        # so the next step's island-max-velocity sees it.
-        is_sleeping = solver.world.bodies.is_sleeping.numpy()
-        is_sleeping[:] = 0
-        solver.world.bodies.is_sleeping.assign(is_sleeping)
+        # we forcibly clear ``island_root`` (mark every body awake) and
+        # assert that re-running the sleeping pass picks the body back up
+        # immediately based on the high velocity it now carries.
+        island_root = solver.world.bodies.island_root.numpy()
+        island_root[:] = -1
+        solver.world.bodies.island_root.assign(island_root)
         qd = state_0.body_qd.numpy()
         qd[0, 5] = 5.0  # 5 m/s upward
         state_0.body_qd.assign(qd)
@@ -244,7 +280,7 @@ class TestSleepingPipeline(unittest.TestCase):
         # After one frame at +5 m/s the body has lifted; it should still
         # be flagged awake.
         self.assertEqual(
-            int(solver.world.bodies.is_sleeping.numpy()[1]),
+            _is_sleeping(solver, 1),
             0,
             msg="body should remain awake immediately after a high-velocity kick",
         )
@@ -255,7 +291,7 @@ class TestSleepingPipeline(unittest.TestCase):
         very next step. The per-island sleep score folds in
         ``force * inv_mass * step_dt`` (and the torque analogue) so any
         wrench big enough to actually shift the body lifts the score above
-        threshold without the caller having to clear ``is_sleeping``
+        threshold without the caller having to clear ``island_root``
         manually.
         """
         threshold = 0.05
@@ -275,7 +311,7 @@ class TestSleepingPipeline(unittest.TestCase):
         # Let the box settle and fall asleep.
         state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
         self.assertEqual(
-            int(solver.world.bodies.is_sleeping.numpy()[1]),
+            _is_sleeping(solver, 1),
             1,
             msg="box must be sleeping before the wake test",
         )
@@ -295,7 +331,7 @@ class TestSleepingPipeline(unittest.TestCase):
         model.collide(state_0, contacts)
         solver.step(state_0, state_1, control, contacts, dt)
         self.assertEqual(
-            int(solver.world.bodies.is_sleeping.numpy()[1]),
+            _is_sleeping(solver, 1),
             0,
             msg="external force via state.body_f must wake the sleeping island",
         )
@@ -310,8 +346,9 @@ class TestSleepingPipeline(unittest.TestCase):
         plank-vs-plank and plank-vs-ground pair on the wake frame --
         the picked body free-accelerates against an empty stack and
         the column collapses. With the pre-collide wake pass driven by
-        a last-awake ``set_nr`` snapshot, the whole island wakes
-        synchronously and the broad phase keeps every contact.
+        ``bodies.island_root`` (the persistent body-id label captured
+        at sleep time), the whole island wakes synchronously and the
+        broad phase keeps every contact.
         """
         threshold = 0.05
         model = _make_box_stack(n_layers=4)
@@ -328,11 +365,11 @@ class TestSleepingPipeline(unittest.TestCase):
 
         dt = 1.0 / 60.0
         state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=180, dt=dt)
-        is_sleeping_before = solver.world.bodies.is_sleeping.numpy()
+        flags_before = _sleep_flags(solver)
         # Slot 0 = anchor, slots 1..N = stack from bottom up.
         self.assertTrue(
-            all(int(is_sleeping_before[s]) == 1 for s in range(1, 5)),
-            msg=f"stack did not fully sleep before pick; flags={is_sleeping_before.tolist()}",
+            all(int(flags_before[s]) == 1 for s in range(1, 5)),
+            msg=f"stack did not fully sleep before pick; sleep flags={flags_before.tolist()}",
         )
 
         z_before = state_0.body_q.numpy()[:, 2].copy()
@@ -347,11 +384,11 @@ class TestSleepingPipeline(unittest.TestCase):
         state_0.body_f.assign(body_f)
 
         # Drive the pre-collide wake pass: import body_f into PhoenX's
-        # force accumulators, then propagate the wake through the
-        # last-awake island snapshot. After this call ``is_sleeping``
-        # is cleared for every body that shared a stack island with
-        # the bottom box, so the broad phase below keeps every
-        # contact pair instead of filtering them out.
+        # force accumulators, then propagate the wake through every
+        # body sharing the picked body's ``island_root``. After this
+        # call ``island_root`` is -1 for every body that shared a stack
+        # island with the bottom box, so the broad phase below keeps
+        # every contact pair instead of filtering them out.
         solver.wake_on_external_input(state_0)
 
         # Run one frame manually (skip the default ``clear_forces``
@@ -359,12 +396,12 @@ class TestSleepingPipeline(unittest.TestCase):
         model.collide(state_0, contacts)
         solver.step(state_0, state_1, control, contacts, dt)
 
-        is_sleeping_after = solver.world.bodies.is_sleeping.numpy()
+        flags_after = _sleep_flags(solver)
         for s in range(1, 5):
             self.assertEqual(
-                int(is_sleeping_after[s]),
+                int(flags_after[s]),
                 0,
-                msg=(f"body slot {s} should have woken with the rest of the stack; flags={is_sleeping_after.tolist()}"),
+                msg=(f"body slot {s} should have woken with the rest of the stack; sleep flags={flags_after.tolist()}"),
             )
 
         # Stack must not collapse: every body's z must stay within a
@@ -384,7 +421,7 @@ class TestSleepingPipeline(unittest.TestCase):
             )
 
     def test_hysteresis_counter_ticks_then_sleeps(self) -> None:
-        """A body settling on the floor must not flip ``is_sleeping`` until
+        """A body settling on the floor must not stamp ``island_root`` until
         its ``frames_below_threshold`` counter reaches the configured
         threshold. With a small ``sleeping_frames_required=10`` we can
         catch the counter mid-climb and confirm the sleep flag stays at 0
@@ -408,9 +445,9 @@ class TestSleepingPipeline(unittest.TestCase):
         # 90 frames is plenty for a 50cm drop on Mu=0.5.
         state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=90, dt=dt)
 
-        # By now the counter should be saturated at 10 and is_sleeping=1.
+        # By now the counter should be saturated at 10 and island_root>=0.
         counter = int(solver.world.bodies.frames_below_threshold.numpy()[1])
-        sleeping = int(solver.world.bodies.is_sleeping.numpy()[1])
+        sleeping = _is_sleeping(solver, 1)
         self.assertEqual(
             counter,
             10,
@@ -438,10 +475,10 @@ class TestSleepingPipeline(unittest.TestCase):
         contacts = model.contacts()
 
         dt = 1.0 / 60.0
-        # Settle the box; counter saturates at 10, is_sleeping = 1.
+        # Settle the box; counter saturates at 10, island_root >= 0.
         state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=90, dt=dt)
         self.assertEqual(int(solver.world.bodies.frames_below_threshold.numpy()[1]), 10)
-        self.assertEqual(int(solver.world.bodies.is_sleeping.numpy()[1]), 1)
+        self.assertEqual(_is_sleeping(solver, 1), 1)
 
         # Inject a high upward velocity via state.body_qd. The import
         # kernel will copy this into bodies.velocity before the next
@@ -454,7 +491,7 @@ class TestSleepingPipeline(unittest.TestCase):
         state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=1, dt=dt)
 
         counter = int(solver.world.bodies.frames_below_threshold.numpy()[1])
-        sleeping = int(solver.world.bodies.is_sleeping.numpy()[1])
+        sleeping = _is_sleeping(solver, 1)
         self.assertEqual(
             counter,
             0,
@@ -486,20 +523,20 @@ class TestSleepingPipeline(unittest.TestCase):
 
         dt = 1.0 / 60.0
         # 60 frames is enough to settle but well short of any default
-        # hysteresis -- a non-zero default would leave is_sleeping = 0
-        # here. The N=0 path must trip immediately on the first
+        # hysteresis -- a non-zero default would leave the sleep flag
+        # at 0 here. The N=0 path must trip immediately on the first
         # below-threshold frame, so 60 frames is more than enough.
         state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=60, dt=dt)
         self.assertEqual(
-            int(solver.world.bodies.is_sleeping.numpy()[1]),
+            _is_sleeping(solver, 1),
             1,
             msg="N=0 hysteresis must collapse to single-frame sleep",
         )
 
     def test_hysteresis_blocks_premature_sleep(self) -> None:
         """With a high ``sleeping_frames_required``, a body that physically
-        settled may still report ``is_sleeping == 0`` while the counter
-        is climbing. Verifies hysteresis actually delays the flip.
+        settled may still report awake (``island_root == -1``) while the
+        counter is climbing. Verifies hysteresis actually delays the flip.
         """
         # 200 frames is just shy of full settle + saturate-at-200 hysteresis;
         # the counter should be < 200 and the sleep flag still 0.
@@ -520,7 +557,7 @@ class TestSleepingPipeline(unittest.TestCase):
         state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
 
         counter = int(solver.world.bodies.frames_below_threshold.numpy()[1])
-        sleeping = int(solver.world.bodies.is_sleeping.numpy()[1])
+        sleeping = _is_sleeping(solver, 1)
         self.assertGreater(counter, 0, msg="counter never advanced past 0")
         self.assertLess(
             counter,
@@ -530,8 +567,242 @@ class TestSleepingPipeline(unittest.TestCase):
         self.assertEqual(
             sleeping,
             0,
-            msg="is_sleeping flipped to 1 before counter reached required frames",
+            msg="island_root stamped before counter reached required frames",
         )
+
+    def test_island_root_is_lowest_body_id(self) -> None:
+        """The persistent ``island_root`` stamped at sleep time must equal
+        the lowest dynamic-body id in the island. With one box on the
+        ground (slot 0 = world anchor, slot 1 = the box), the box's
+        ``island_root`` must be 1 (its own body id, the smallest in the
+        singleton island).
+        """
+        model = _make_box_on_plane()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=8,
+            solver_iterations=16,
+            sleeping_velocity_threshold=0.05,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        dt = 1.0 / 60.0
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
+        island_root = solver.world.bodies.island_root.numpy()
+        self.assertEqual(
+            int(island_root[1]),
+            1,
+            msg=f"island_root for a single-box island must equal the box's body id; got {int(island_root[1])}",
+        )
+        # Anchor must stay at -1: it's static, never sleeps.
+        self.assertEqual(int(island_root[0]), -1, msg="anchor must never sleep")
+
+    def test_stack_planks_share_root_after_sequential_sleep(self) -> None:
+        """A 4-plank stack settles under gravity. Planks may transition
+        to sleeping at different frames (the top plank typically
+        jitters longer than the bottom), so the per-step union-find
+        sees a different "remaining awake group" each time another
+        plank goes to sleep. Without the cross-island unification
+        kernel, each plank would be stamped with a different
+        ``island_root`` -- the lowest body id of whatever happened to
+        still be awake at that moment.
+
+        After unification, every plank's ``island_root`` must converge
+        on the lowest body id in the entire physically-connected stack
+        (slot 1 here, the bottom plank). This is the precondition for
+        atomic wake: picking any one plank can then wake every plank
+        in the same root group in a single step instead of triggering
+        a multi-frame flood-fill through fresh contacts.
+        """
+        model = _make_box_stack(n_layers=4)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=8,
+            solver_iterations=16,
+            sleeping_velocity_threshold=0.05,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+        dt = 1.0 / 60.0
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=240, dt=dt)
+        flags = _sleep_flags(solver)
+        for s in range(1, 5):
+            self.assertEqual(
+                int(flags[s]),
+                1,
+                msg=f"slot {s} not sleeping after settle; sleep flags={flags.tolist()}",
+            )
+        island_root = solver.world.bodies.island_root.numpy()
+        # Slot 1 is the bottom plank = lowest dynamic body id, so the
+        # entire stack's unified root must equal 1.
+        for s in range(1, 5):
+            self.assertEqual(
+                int(island_root[s]),
+                1,
+                msg=(
+                    f"slot {s} root {int(island_root[s])} differs from the "
+                    f"expected unified root 1; full island_root = {island_root.tolist()}"
+                ),
+            )
+
+    def test_pick_top_of_stack_wakes_whole_stack_in_one_step(self) -> None:
+        """Picking the *top* plank of a sleeping stack must wake every
+        plank in a single step. Without unification + atomic
+        fan/apply wake, the top plank would wake alone in step 1,
+        then propagate downward over multiple frames as new contacts
+        are regenerated and the wake-on-contact pass fires plank by
+        plank -- the "flood-fill" behaviour the unification fixes.
+        """
+        threshold = 0.05
+        model = _make_box_stack(n_layers=4)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=8,
+            solver_iterations=16,
+            sleeping_velocity_threshold=threshold,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+        dt = 1.0 / 60.0
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=240, dt=dt)
+        for s in range(1, 5):
+            self.assertEqual(
+                _is_sleeping(solver, s),
+                1,
+                msg=f"slot {s} not sleeping before pick",
+            )
+
+        # Apply a sideways pull to the TOP plank (newton index n-1 =
+        # 3, PhoenX slot 4). 30 N is comfortably above threshold for
+        # an ~8 kg cube (dv ~= 0.063 m/s vs threshold 0.05).
+        body_f = np.zeros((4, 6), dtype=np.float32)
+        body_f[3, 0] = 30.0
+        state_0.body_f.assign(body_f)
+        solver.wake_on_external_input(state_0)
+
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, dt)
+
+        flags_after = _sleep_flags(solver)
+        for s in range(1, 5):
+            self.assertEqual(
+                int(flags_after[s]),
+                0,
+                msg=(
+                    f"slot {s} should have woken with the rest of the stack on "
+                    f"the same step; sleep flags={flags_after.tolist()}"
+                ),
+            )
+
+    def test_multi_stack_picks_wake_only_their_own_stack(self) -> None:
+        """Two separated stacks each fall asleep on their own island.
+        After many frames asleep (enough that the volatile compact id
+        in the live ``set_nr`` would have walked if sleeping bodies
+        still participated in the union-find), picking any body in
+        one stack must wake the *entire* original stack while leaving
+        the other stack still sleeping.
+
+        Regression for the bug where the per-step sleeping pass still
+        ran union-find over sleeping bodies: the broad-phase filter
+        dropped every sleeping-vs-sleeping pair, leaving the builder
+        with a sparse graph that fragmented each settled stack into
+        per-body singletons. With ``bodies.island_root`` holding a
+        stable body-id label captured at sleep time, the wake
+        propagates correctly regardless of how the live compact ids
+        drift across frames.
+        """
+        n_layers = 3
+        model = _make_two_stacks(n_layers=n_layers, gap=3.0)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=8,
+            solver_iterations=16,
+            sleeping_velocity_threshold=0.05,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        dt = 1.0 / 60.0
+        # Settle long enough that both stacks fall asleep and a few
+        # more sleeping-only frames pass (so the per-step union-find
+        # would have decayed any volatile compact ids the old design
+        # relied on).
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=180, dt=dt)
+
+        # PhoenX layout: slot 0 = anchor; slots 1..n_layers = stack A
+        # (the first stack added); slots n_layers+1..2*n_layers = stack B.
+        stack_a = list(range(1, n_layers + 1))
+        stack_b = list(range(n_layers + 1, 2 * n_layers + 1))
+
+        flags_before = _sleep_flags(solver)
+        for s in stack_a + stack_b:
+            self.assertEqual(
+                int(flags_before[s]),
+                1,
+                msg=f"slot {s} not sleeping before pick; sleep flags={flags_before.tolist()}",
+            )
+
+        # Each stack's island_root must equal the smallest body id in
+        # that stack (stable, body-id-shaped label).
+        island_root = solver.world.bodies.island_root.numpy()
+        for s in stack_a:
+            self.assertEqual(
+                int(island_root[s]),
+                stack_a[0],
+                msg=f"stack A slot {s} root {int(island_root[s])} != expected {stack_a[0]}",
+            )
+        for s in stack_b:
+            self.assertEqual(
+                int(island_root[s]),
+                stack_b[0],
+                msg=f"stack B slot {s} root {int(island_root[s])} != expected {stack_b[0]}",
+            )
+        self.assertNotEqual(
+            int(island_root[stack_a[0]]),
+            int(island_root[stack_b[0]]),
+            msg="two physically separate stacks must have distinct island roots",
+        )
+
+        # Pick the bottom of stack B with a sideways force, using the
+        # public Newton wrench path. body_f layout is (force_xyz,
+        # torque_xyz); index 0 is force_x. 30 N pull on a ~8 kg cube
+        # gives dv = 30/8/60 ~= 0.063 m/s, comfortably above the 0.05
+        # threshold.
+        body_f = np.zeros((2 * n_layers, 6), dtype=np.float32)
+        body_f[n_layers, 0] = 30.0  # bottom of stack B (newton index = n_layers)
+        state_0.body_f.assign(body_f)
+
+        solver.wake_on_external_input(state_0)
+
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, dt)
+
+        flags_after = _sleep_flags(solver)
+        # Stack B must be entirely awake.
+        for s in stack_b:
+            self.assertEqual(
+                int(flags_after[s]),
+                0,
+                msg=f"stack B slot {s} should have woken with the rest of the stack; sleep flags={flags_after.tolist()}",
+            )
+        # Stack A must remain entirely asleep (the wake must not have
+        # leaked across the gap between the two physically separate
+        # stacks).
+        for s in stack_a:
+            self.assertEqual(
+                int(flags_after[s]),
+                1,
+                msg=f"stack A slot {s} should have stayed asleep; sleep flags={flags_after.tolist()}",
+            )
 
 
 if __name__ == "__main__":

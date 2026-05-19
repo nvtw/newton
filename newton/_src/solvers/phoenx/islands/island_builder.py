@@ -358,11 +358,20 @@ class UnionFindIslandBuilder:
         interaction_bodies: wp.array2d[wp.int32],
         num_interactions: wp.array[wp.int32],
         num_bodies: wp.array[wp.int32],
+        extra_edges: wp.array2d[wp.int32] | None = None,
+        num_extra_edges: wp.array[wp.int32] | None = None,
     ) -> None:
         """Full pipeline: init -> atomic union-find -> compact -> sort by min-index
         -> invert map -> rewrite per-body ids -> scan -> group bodies per island.
 
         ``interaction_bodies`` is ``(>= num_interactions[0], 8)`` with -1 padding.
+
+        ``extra_edges`` is an optional second interaction array unioned
+        in alongside the regular elements (same row layout, ``-1``-padded).
+        Used by the sleeping pipeline to inject artificial chain edges
+        ``(body, island_root)`` that pull active sleeping islands back
+        into the live union-find. Caller must also pass
+        ``num_extra_edges``.
         """
         cap = self._capacity
 
@@ -389,6 +398,15 @@ class UnionFindIslandBuilder:
             outputs=[self.entries],
             device=self._device,
         )
+
+        if extra_edges is not None and num_extra_edges is not None:
+            wp.launch(
+                _island_unite_kernel,
+                dim=extra_edges.shape[0],
+                inputs=[extra_edges, num_extra_edges],
+                outputs=[self.entries],
+                device=self._device,
+            )
 
         wp.launch(
             _island_compute_set_nrs_kernel,

@@ -675,13 +675,14 @@ class PhoenXClothShareVertexFilterData:
             are "frozen" (sleeping, static, kinematic, or the world
             anchor). ``0`` skips the sleep check.
         phoenx_body_offset: Shift to apply to ``shape_body[s]`` before
-            indexing ``body_is_sleeping`` / ``body_motion_type`` (PhoenX
+            indexing ``body_island_root`` / ``body_motion_type`` (PhoenX
             slot 0 is the world anchor, so the offset is 1 in practice).
         shape_body: Per-shape Newton body index (``-1`` for world);
             length matches the unified shape array. Required when
             ``sleeping_enabled == 1``.
-        body_is_sleeping: PhoenX ``BodyContainer.is_sleeping``. Required
-            when ``sleeping_enabled == 1``.
+        body_island_root: PhoenX ``BodyContainer.island_root``. A body
+            is sleeping iff its ``island_root >= 0``. Required when
+            ``sleeping_enabled == 1``.
         body_motion_type: PhoenX ``BodyContainer.motion_type``. Required
             when ``sleeping_enabled == 1`` so the filter can treat
             STATIC / KINEMATIC bodies as permanently frozen.
@@ -694,7 +695,7 @@ class PhoenXClothShareVertexFilterData:
     sleeping_enabled: wp.int32
     phoenx_body_offset: wp.int32
     shape_body: wp.array[wp.int32]
-    body_is_sleeping: wp.array[wp.int32]
+    body_island_root: wp.array[wp.int32]
     body_motion_type: wp.array[wp.int32]
 
 
@@ -764,10 +765,10 @@ def phoenx_cloth_share_vertex_filter(
                 slot_a = nba + data.phoenx_body_offset
             if nbb >= 0:
                 slot_b = nbb + data.phoenx_body_offset
-            frozen_a = (data.body_is_sleeping[slot_a] != wp.int32(0)) or (
+            frozen_a = (data.body_island_root[slot_a] >= wp.int32(0)) or (
                 data.body_motion_type[slot_a] != MOTION_DYNAMIC
             )
-            frozen_b = (data.body_is_sleeping[slot_b] != wp.int32(0)) or (
+            frozen_b = (data.body_island_root[slot_b] >= wp.int32(0)) or (
                 data.body_motion_type[slot_b] != MOTION_DYNAMIC
             )
             if frozen_a and frozen_b:
@@ -803,7 +804,7 @@ def build_phoenx_share_vertex_filter_data(
     sleeping_enabled: bool,
     phoenx_body_offset: int,
     shape_body: wp.array[wp.int32] | None,
-    body_is_sleeping: wp.array[wp.int32] | None,
+    body_island_root: wp.array[wp.int32] | None,
     body_motion_type: wp.array[wp.int32] | None,
     device: wp.context.Devicelike,
 ) -> PhoenXClothShareVertexFilterData:
@@ -811,8 +812,10 @@ def build_phoenx_share_vertex_filter_data(
     :func:`phoenx_cloth_share_vertex_filter`.
 
     Length-1 sentinel arrays are substituted for ``shape_body`` /
-    ``body_is_sleeping`` / ``body_motion_type`` when ``sleeping_enabled``
+    ``body_island_root`` / ``body_motion_type`` when ``sleeping_enabled``
     is ``False`` so the Warp ABI stays bound regardless of feature use.
+    The sentinel ``body_island_root`` is initialized to ``-1`` (awake)
+    so the frozen test never trips when the field is unused.
     """
     data = PhoenXClothShareVertexFilterData()
     data.num_rigid_shapes = wp.int32(int(num_rigid_shapes))
@@ -823,11 +826,11 @@ def build_phoenx_share_vertex_filter_data(
     data.phoenx_body_offset = wp.int32(int(phoenx_body_offset))
     if shape_body is None:
         shape_body = wp.zeros(1, dtype=wp.int32, device=device)
-    if body_is_sleeping is None:
-        body_is_sleeping = wp.zeros(1, dtype=wp.int32, device=device)
+    if body_island_root is None:
+        body_island_root = wp.full(1, value=-1, dtype=wp.int32, device=device)
     if body_motion_type is None:
         body_motion_type = wp.zeros(1, dtype=wp.int32, device=device)
     data.shape_body = shape_body
-    data.body_is_sleeping = body_is_sleeping
+    data.body_island_root = body_island_root
     data.body_motion_type = body_motion_type
     return data

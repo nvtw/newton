@@ -110,14 +110,17 @@ def _select_shape_color_by_sleep_kernel(
     active_colors: wp.array[wp.vec3],
     sleeping_colors: wp.array[wp.vec3],
     shape_body: wp.array[wp.int32],
-    body_is_sleeping: wp.array[wp.int32],
+    body_island_root: wp.array[wp.int32],
     shape_color_out: wp.array[wp.vec3],
 ):
     sid = wp.tid()
     body = shape_body[sid]
     sleeping = int(0)
     if body >= 0:
-        sleeping = body_is_sleeping[body + 1]
+        # ``island_root >= 0`` marks a sleeping body (the value is the
+        # lowest body id in its island at sleep time).
+        if body_island_root[body + 1] >= 0:
+            sleeping = 1
     if sleeping != 0:
         shape_color_out[sid] = sleeping_colors[sid]
     else:
@@ -139,7 +142,7 @@ class Example:
         self.sim_time = 0.0
         self.frame_index: int = 0
         self.sim_substeps = 8
-        self.solver_iterations = 10 if ENABLE_MASS_SPLITTING else 6
+        self.solver_iterations = 10
         self.velocity_iterations = 1
 
         self._build_scene()
@@ -315,7 +318,7 @@ class Example:
         )
 
         # Bind the broad-phase filter data now that bodies exist. The
-        # filter holds device refs to ``shape_body``, ``is_sleeping``,
+        # filter holds device refs to ``shape_body``, ``island_root``,
         # and ``motion_type`` -- each broad-phase pair test reads them
         # to decide whether to forward the pair to the narrow phase.
         # Cloth tri / soft-tet index arrays are sentinels since this
@@ -330,7 +333,7 @@ class Example:
             sleeping_enabled=True,
             phoenx_body_offset=1,
             shape_body=self.model.shape_body,
-            body_is_sleeping=self.bodies.is_sleeping,
+            body_island_root=self.bodies.island_root,
             body_motion_type=self.bodies.motion_type,
             device=self.device,
         )
@@ -338,7 +341,7 @@ class Example:
 
         # Two parallel per-shape color buffers (active + dim-for-sleep), plus
         # a kernel that picks between them based on each body's
-        # ``is_sleeping`` flag and writes the result into ``model.shape_color``.
+        # ``island_root`` flag and writes the result into ``model.shape_color``.
         # The viewer's existing ``_sync_shape_colors_from_model`` repacks that
         # array into the OpenGL instance-color VBO every frame, so this is
         # the cheapest way to drive sleep-aware colors without modifying the
@@ -385,7 +388,7 @@ class Example:
     def simulate(self) -> None:
         self._sync_newton_to_phoenx()
         # Apply picking force *before* collide() so the wake-on-input
-        # pass below sees the user wrench and lifts ``is_sleeping`` on
+        # pass below sees the user wrench and clears ``island_root`` on
         # the picked plank's whole island. Without this ordering the
         # broad-phase sleeping filter (which runs in collide) drops
         # plank-vs-plank and plank-vs-ground pairs on the wake frame
@@ -467,7 +470,7 @@ class Example:
                 self._shape_color_active,
                 self._shape_color_sleeping,
                 self.model.shape_body,
-                self.bodies.is_sleeping,
+                self.bodies.island_root,
             ],
             outputs=[self.model.shape_color],
             device=self.device,

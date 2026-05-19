@@ -339,7 +339,7 @@ class SolverPhoenX(SolverBase):
                 sleeping_enabled=True,
                 phoenx_body_offset=1,
                 shape_body=model.shape_body,
-                body_is_sleeping=self.bodies.is_sleeping,
+                body_island_root=self.bodies.island_root,
                 body_motion_type=self.bodies.motion_type,
                 device=self.device,
             )
@@ -742,8 +742,8 @@ class SolverPhoenX(SolverBase):
         calls ``model.collide(...)``.
 
         The per-step sleeping pass inside :meth:`step` cannot drive
-        broad-phase decisions on the wake frame: by the time it lifts
-        ``is_sleeping`` for a body that picking just pushed, the
+        broad-phase decisions on the wake frame: by the time it clears
+        ``island_root`` for a body that picking just pushed, the
         sleep-aware broad-phase filter has already dropped that body's
         contact pairs and the substep solve sees an empty stack. Call
         sequence on the host side::

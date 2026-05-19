@@ -929,12 +929,12 @@ def contact_iterate(
     # Backup safety for the sleep-transition frame. See the matching
     # guard in :func:`contact_iterate_multi` for the full reasoning --
     # contacts the broad phase already produced before the per-step
-    # sleeping pass flipped ``is_sleeping`` survive into the substep
+    # sleeping pass stamped ``island_root`` survive into the substep
     # solve, and without this guard the positional-bias term explodes
     # the freshly-sleeping island.
     if b1 >= 0 and b1 < num_bodies and b2 >= 0 and b2 < num_bodies:
-        frozen1 = (bodies.motion_type[b1] != MOTION_DYNAMIC) or (bodies.is_sleeping[b1] != wp.int32(0))
-        frozen2 = (bodies.motion_type[b2] != MOTION_DYNAMIC) or (bodies.is_sleeping[b2] != wp.int32(0))
+        frozen1 = (bodies.motion_type[b1] != MOTION_DYNAMIC) or (bodies.island_root[b1] >= wp.int32(0))
+        frozen2 = (bodies.motion_type[b2] != MOTION_DYNAMIC) or (bodies.island_root[b2] >= wp.int32(0))
         if frozen1 and frozen2:
             return
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)

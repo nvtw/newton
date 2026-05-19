@@ -122,6 +122,24 @@ from newton._src.solvers.phoenx.mass_splitting import (
 )
 from newton._src.solvers.phoenx.materials import MaterialData
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_container_zeros
+from newton._src.solvers.phoenx.sleeping_kernels import (
+    _phoenx_apply_island_wake_kernel,
+    _phoenx_apply_wake_flag_kernel,
+    _phoenx_collapse_sleeping_elements_kernel,
+    _phoenx_compute_island_root_per_compact_kernel,
+    _phoenx_copy_elements_to_int2d_kernel,
+    _phoenx_detect_active_islands_kernel,
+    _phoenx_finalize_body_aabb_diagonal_kernel,
+    _phoenx_init_body_aabb_kernel,
+    _phoenx_inject_chain_edges_kernel,
+    _phoenx_island_fanin_external_input_kernel,
+    _phoenx_island_max_velocity_kernel,
+    _phoenx_mark_sleeping_islands_kernel,
+    _phoenx_propagate_sleep_to_bodies_kernel,
+    _phoenx_seed_uf_num_interactions_kernel,
+    _phoenx_self_wake_fanin_kernel,
+    _phoenx_shape_aabb_fanin_kernel,
+)
 from newton._src.solvers.phoenx.solver_config import (
     FUSE_TAIL_BLOCK_DIM,
     FUSE_TAIL_MAX_COLOR_SIZE,
@@ -147,18 +165,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
-    _phoenx_apply_island_wake_kernel,
-    _phoenx_capture_last_awake_island_kernel,
-    _phoenx_collapse_sleeping_elements_kernel,
-    _phoenx_copy_elements_to_int2d_kernel,
-    _phoenx_finalize_body_aabb_diagonal_kernel,
-    _phoenx_init_body_aabb_kernel,
-    _phoenx_island_fanin_external_input_kernel,
-    _phoenx_island_max_velocity_kernel,
-    _phoenx_mark_sleeping_islands_kernel,
-    _phoenx_propagate_sleep_to_bodies_kernel,
     _phoenx_refresh_world_inertia_kernel,
-    _phoenx_shape_aabb_fanin_kernel,
     _phoenx_update_inertia_and_clear_forces_kernel,
     _pick_threads_per_world_kernel,
     _reduce_constraint_time_us_kernel,
@@ -796,15 +803,37 @@ class PhoenXWorld:
         self._island_interaction_bodies: wp.array2d[wp.int32] | None = None
         self._island_max_velocity: wp.array[wp.float32] | None = None
         self._island_is_sleeping: wp.array[wp.int32] | None = None
+        # Per-root flag arrays, indexed by body id (the persistent
+        # ``island_root`` label). Both are zeroed at the start of each
+        # pass and raised by per-body atomic_max.
+        #   * _island_has_external_input -- raised by sleeping bodies
+        #     carrying a user wrench, consumed pre-collide by
+        #     :meth:`wake_on_external_input`.
+        #   * _wake_flag -- raised in-step by the self-wake kernel for
+        #     sleeping bodies whose own predicted score exceeds the
+        #     sleep threshold (host-side velocity / force injection).
         self._island_has_external_input: wp.array[wp.int32] | None = None
-        # Per-body snapshot of ``set_nr`` taken on every step where the
-        # body was awake; sleeping bodies retain their last awake-frame
-        # value. ``wake_on_external_input`` consumes this so a force on
-        # any sleeping body lifts the whole original stack, even though
-        # the broad-phase filter has decayed the current frame's
-        # ``set_nr`` to per-body singletons by dropping every
-        # sleeping-vs-sleeping pair.
-        self._last_awake_set_nr: wp.array[wp.int32] | None = None
+        self._wake_flag: wp.array[wp.int32] | None = None
+        # Per-compact-island scratch populated by
+        # ``_phoenx_compute_island_root_per_compact_kernel`` (atomic_min
+        # of awake body ids per compact id). The propagate kernel reads
+        # this slot when a body's hysteresis counter saturates so the
+        # body can stamp ``island_root`` with a stable body-id label.
+        self._island_root_per_compact: wp.array[wp.int32] | None = None
+        # Per-root active flag, indexed by body id. A sleeping island
+        # is "active" this step iff at least one member shares a
+        # constraint with an awake dynamic body. Active islands get
+        # chain edges injected into the union-find input so the awake
+        # body bridging them pulls the entire sleeping group into one
+        # compact island -- propagate then wakes everyone atomically.
+        # Inactive sleeping islands stay filtered for free.
+        self._island_active: wp.array[wp.int32] | None = None
+        # Separate union-find interaction counter so chain-edge
+        # injection can ``atomic_add`` past ``_num_active_constraints``
+        # without affecting other consumers (collapse kernel, partitioner,
+        # narrow phase). Seeded from ``_num_active_constraints[0]`` at
+        # the top of each sleeping pass.
+        self._uf_num_interactions: wp.array[wp.int32] | None = None
         # Per-rigid-body bounding box, unioned across every attached
         # shape's world-frame AABB. Used by the sleeping pipeline to
         # estimate a body's swept volume so the spin term in the
@@ -821,25 +850,27 @@ class PhoenXWorld:
                 num_bodies_capacity=self.num_bodies,
                 device=self.device,
             )
+            # Hold space for the regular per-element rows PLUS up to
+            # ``num_bodies`` chain edges injected by the sleeping pass.
             self._island_interaction_bodies = wp.full(
-                shape=(self._constraint_capacity, int(MAX_BODIES_PER_INTERACTION)),
+                shape=(self._constraint_capacity + self.num_bodies, int(MAX_BODIES_PER_INTERACTION)),
                 value=-1,
                 dtype=wp.int32,
                 device=self.device,
             )
             self._island_max_velocity = wp.zeros(self.num_bodies, dtype=wp.float32, device=self.device)
             self._island_is_sleeping = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
-            # Per-island "wake on external input" flag, consumed by
-            # :meth:`wake_on_external_input` to lift ``is_sleeping`` for
-            # every body in an island whose user-applied force / torque
-            # arrived between two ``step()`` calls. Sized num_bodies so
-            # any compact island id fits.
             self._island_has_external_input = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
-            # Initialize to -1 so the first wake-on-input call before
-            # any sleep transition is a no-op (no body has a valid
-            # snapshot yet -- they are still in their initial awake
-            # singletons and nothing was sleeping anyway).
-            self._last_awake_set_nr = wp.full(self.num_bodies, value=-1, dtype=wp.int32, device=self.device)
+            self._wake_flag = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
+            self._island_active = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
+            self._uf_num_interactions = wp.zeros(1, dtype=wp.int32, device=self.device)
+            # Per-compact-island scratch: lowest awake body id per
+            # compact id. Reset to num_bodies (a value past any real
+            # body id) at the start of the sleeping pass so atomic_min
+            # converges to the true minimum.
+            self._island_root_per_compact = wp.full(
+                self.num_bodies, value=self.num_bodies, dtype=wp.int32, device=self.device
+            )
             self._body_aabb_lower = wp.zeros((self.num_bodies, 3), dtype=wp.float32, device=self.device)
             self._body_aabb_upper = wp.zeros((self.num_bodies, 3), dtype=wp.float32, device=self.device)
             self._body_aabb_diagonal = wp.zeros(self.num_bodies, dtype=wp.float32, device=self.device)
@@ -1486,7 +1517,7 @@ class PhoenXWorld:
             sleeping_enabled=self._sleeping_enabled,
             phoenx_body_offset=int(phoenx_body_offset),
             shape_body=model.shape_body if self._sleeping_enabled else None,
-            body_is_sleeping=self.bodies.is_sleeping if self._sleeping_enabled else None,
+            body_island_root=self.bodies.island_root if self._sleeping_enabled else None,
             body_motion_type=self.bodies.motion_type if self._sleeping_enabled else None,
             device=self.device,
         )
@@ -2006,31 +2037,29 @@ class PhoenXWorld:
         torque, *before* ``model.collide()`` runs the broad phase.
 
         The per-step sleeping pass inside :meth:`step` cannot drive
-        broad-phase decisions on the wake frame: by the time it lifts
-        ``is_sleeping`` for a body that picking just pushed, the
+        broad-phase decisions on the wake frame: by the time it clears
+        ``island_root`` for a body that picking just pushed, the
         sleep-aware broad-phase filter has already dropped that body's
         contact pairs and the substep solve sees an empty stack. Call
         this between ``picking.apply_force()`` and ``model.collide()``
         in the host loop so the wake decision arrives in time.
 
-        Uses the *previous* step's ``set_nr`` -- the latest persistent
-        island assignment -- to propagate the wake through the full
-        island, so picking a single plank wakes every plank that
-        shared a contact island with it. A no-op when the sleeping
+        Uses ``bodies.island_root`` -- a stable body-id label (the
+        lowest body id in the island at the moment of sleep transition)
+        -- to propagate the wake through the full original island, so
+        picking a single plank wakes every plank that shared a contact
+        island with it at sleep time. A no-op when the sleeping
         pipeline is disabled (no allocation, no kernel launches).
         """
         if not self._sleeping_enabled or self.num_bodies == 0 or self._island_builder is None:
             return
-        if self._island_has_external_input is None or self._last_awake_set_nr is None:
+        if self._island_has_external_input is None:
             return
         self._island_has_external_input.zero_()
         wp.launch(
             _phoenx_island_fanin_external_input_kernel,
             dim=self.num_bodies,
-            inputs=[
-                self.bodies,
-                self._last_awake_set_nr,
-            ],
+            inputs=[self.bodies],
             outputs=[self._island_has_external_input],
             device=self.device,
         )
@@ -2039,7 +2068,6 @@ class PhoenXWorld:
             dim=self.num_bodies,
             inputs=[
                 self.bodies,
-                self._last_awake_set_nr,
                 self._island_has_external_input,
             ],
             device=self.device,
@@ -2051,23 +2079,29 @@ class PhoenXWorld:
         shape_aabb_lower: wp.array[wp.vec3f] | None,
         shape_aabb_upper: wp.array[wp.vec3f] | None,
     ) -> None:
-        """Detect sleeping islands and collapse their constraints out of the
-        partitioner's element view.
+        """Detect, mark, and wake sleeping islands. Sequence:
 
-        Sequence (graph-capture safe; all bounds are device arrays):
-
-        1. zero ``_body_aabb_diagonal`` / ``_island_max_velocity``.
-        2. fan per-shape AABB diagonals into the owning body via atomic_max.
-        3. copy ``_elements`` into the int2d interaction buffer the
-           island builder consumes (particles dropped to -1).
-        4. build islands (atomic union-find + deterministic post-sort).
-        5. per-body, atomic_max body score into the body's island slot.
-        6. mark islands sleeping (max score < threshold).
-        7. propagate the per-island flag to ``bodies.is_sleeping``.
-        8. rewrite ``_elements`` so any slot pointing to a sleeping body
-           becomes ``-1`` -- the partitioner then sees an empty
-           interaction and the constraint contributes nothing to
-           coloring / overflow.
+        1. AABB fanin (per-body union of attached shape AABBs).
+        2. Self-wake: sleeping bodies whose own predicted score is high
+           (host-side velocity / force injection) flag their root, and
+           the apply kernel clears ``island_root`` for the whole group.
+        3. Detect *active* sleeping islands -- any sleeping body sharing
+           a constraint with an awake dynamic body marks its island as
+           active for this frame.
+        4. Inject chain edges ``(body, island_root)`` for every body
+           in an active island so the awake bridging body pulls the
+           entire sleeping island back into the live union-find.
+        5. Copy ``_elements`` -> 2D union-find buffer (inactive
+           sleeping bodies filtered to -1; active sleeping bodies
+           kept).
+        6. Build islands (regular elements + chain edges).
+        7. Per-compact-island lowest awake body id, for the stamp.
+        8. Per-island max velocity, mark sleeping.
+        9. Propagate: sleeping body in awake compact island -> wake
+           (clear root); awake body whose island stayed below threshold
+           long enough -> stamp ``island_root``.
+        10. Collapse sleeping body slots to -1 in ``_elements`` so the
+            partitioner drops them from coloring / overflow.
         """
         if self._constraint_capacity == 0 or self.num_bodies == 0:
             return
@@ -2075,35 +2109,31 @@ class PhoenXWorld:
             return
         if shape_body is None or shape_aabb_lower is None or shape_aabb_upper is None:
             # No broad-phase AABBs available -- can't compute spin score.
-            # Leave the per-body flag at its prior value (rare path; e.g.
-            # caller stepped without contacts).
             return
 
         self._island_max_velocity.zero_()
+        if self._wake_flag is not None:
+            self._wake_flag.zero_()
+        if self._island_active is not None:
+            self._island_active.zero_()
+        if self._island_root_per_compact is not None:
+            self._island_root_per_compact.fill_(self.num_bodies)
 
-        # Per-body union AABB: reset to ±large, fan in each attached
-        # shape's world-frame AABB via per-axis atomic min/max, then
-        # finalize the diagonal length.
+        # --- Per-body union AABB (for the spin term of the score). ---
         wp.launch(
             _phoenx_init_body_aabb_kernel,
             dim=self.num_bodies,
             outputs=[self._body_aabb_lower, self._body_aabb_upper],
             device=self.device,
         )
-        # Cap the launch to ``shape_body``'s length -- cloth setups pad
-        # the broad-phase AABB array with cloth-tri / soft-tet suffix
-        # shapes that aren't covered by the rigid-only ``shape_body``.
-        # Those suffix shapes don't sleep, so skipping them is correct.
+        # Cap to shape_body length: cloth setups pad with cloth-tri /
+        # soft-tet suffix shapes not covered by the rigid-only array.
         num_shapes = min(int(shape_aabb_lower.shape[0]), int(shape_body.shape[0]))
         if num_shapes > 0:
             wp.launch(
                 _phoenx_shape_aabb_fanin_kernel,
                 dim=num_shapes,
-                inputs=[
-                    shape_aabb_lower,
-                    shape_aabb_upper,
-                    shape_body,  # PhoenX-shifted: slot 0 = anchor, real bodies at >= 1
-                ],
+                inputs=[shape_aabb_lower, shape_aabb_upper, shape_body],
                 outputs=[self._body_aabb_lower, self._body_aabb_upper],
                 device=self.device,
             )
@@ -2115,6 +2145,55 @@ class PhoenXWorld:
             device=self.device,
         )
 
+        # --- Self-wake: velocity / force injection. ---
+        if self._wake_flag is not None:
+            wp.launch(
+                _phoenx_self_wake_fanin_kernel,
+                dim=self.num_bodies,
+                inputs=[
+                    self.bodies,
+                    self._body_aabb_diagonal,
+                    wp.float32(self._sleeping_velocity_threshold),
+                    wp.float32(self.step_dt),
+                ],
+                outputs=[self._wake_flag],
+                device=self.device,
+            )
+            wp.launch(
+                _phoenx_apply_wake_flag_kernel,
+                dim=self.num_bodies,
+                inputs=[self.bodies, self._wake_flag],
+                device=self.device,
+            )
+
+        # --- Detect active sleeping islands + inject chain edges. ---
+        wp.launch(
+            _phoenx_detect_active_islands_kernel,
+            dim=self._constraint_capacity,
+            inputs=[
+                self.bodies,
+                self._elements,
+                self._num_active_constraints,
+                wp.int32(self.num_bodies),
+            ],
+            outputs=[self._island_active],
+            device=self.device,
+        )
+
+        # Seed the UF counter from the regular-element count so chain
+        # edges atomically claim slots past it.
+        wp.launch(
+            _phoenx_seed_uf_num_interactions_kernel,
+            dim=1,
+            inputs=[self._num_active_constraints],
+            outputs=[self._uf_num_interactions],
+            device=self.device,
+        )
+
+        # --- Copy elements into the 2D UF input. ---
+        # Note: the kernel writes -1 to slots past num_active_constraints.
+        # Chain-edge injection runs *after* this, atomically claiming
+        # slots past num_active_constraints and overwriting the -1s.
         wp.launch(
             _phoenx_copy_elements_to_int2d_kernel,
             dim=self._constraint_capacity,
@@ -2123,17 +2202,41 @@ class PhoenXWorld:
                 self._num_active_constraints,
                 wp.int32(self.num_bodies),
                 self.bodies,
+                self._island_active,
             ],
             outputs=[self._island_interaction_bodies],
             device=self.device,
         )
 
+        wp.launch(
+            _phoenx_inject_chain_edges_kernel,
+            dim=self.num_bodies,
+            inputs=[
+                self.bodies,
+                self._island_active,
+                wp.int32(self._island_interaction_bodies.shape[0]),
+            ],
+            outputs=[self._island_interaction_bodies, self._uf_num_interactions],
+            device=self.device,
+        )
+
+        # --- Build islands. Single UF pass over (elements + chain edges). ---
         self._island_builder.build_islands(
             self._island_interaction_bodies,
-            self._num_active_constraints,
+            self._uf_num_interactions,
             self._sleeping_num_bodies_device,
         )
 
+        # --- Per-compact lowest awake body id (for the stamp). ---
+        wp.launch(
+            _phoenx_compute_island_root_per_compact_kernel,
+            dim=self.num_bodies,
+            inputs=[self.bodies, self._island_builder.set_nr],
+            outputs=[self._island_root_per_compact],
+            device=self.device,
+        )
+
+        # --- Max velocity + sleeping mark + propagate. ---
         wp.launch(
             _phoenx_island_max_velocity_kernel,
             dim=self.num_bodies,
@@ -2146,7 +2249,6 @@ class PhoenXWorld:
             outputs=[self._island_max_velocity],
             device=self.device,
         )
-
         wp.launch(
             _phoenx_mark_sleeping_islands_kernel,
             dim=self.num_bodies,
@@ -2158,7 +2260,6 @@ class PhoenXWorld:
             outputs=[self._island_is_sleeping],
             device=self.device,
         )
-
         wp.launch(
             _phoenx_propagate_sleep_to_bodies_kernel,
             dim=self.num_bodies,
@@ -2166,11 +2267,13 @@ class PhoenXWorld:
                 self.bodies,
                 self._island_builder.set_nr,
                 self._island_is_sleeping,
+                self._island_root_per_compact,
                 wp.int32(self._sleeping_frames_required),
             ],
             device=self.device,
         )
 
+        # --- Collapse sleeping body slots in _elements for the partitioner. ---
         wp.launch(
             _phoenx_collapse_sleeping_elements_kernel,
             dim=self._constraint_capacity,
@@ -2182,26 +2285,6 @@ class PhoenXWorld:
             outputs=[self._elements],
             device=self.device,
         )
-
-        # Snapshot ``set_nr`` for bodies that are still awake after the
-        # per-step sleep decision. Bodies that just transitioned to
-        # sleeping skip the write, so their entry retains the
-        # *previous* frame's awake-state island id -- the one built
-        # while the stack still had its full contact graph. The
-        # pre-collide wake-on-input pass reads this snapshot, not the
-        # live ``set_nr``, so a force on a long-sleeping plank wakes
-        # the whole original stack rather than just the picked plank.
-        if self._last_awake_set_nr is not None:
-            wp.launch(
-                _phoenx_capture_last_awake_island_kernel,
-                dim=self.num_bodies,
-                inputs=[
-                    self.bodies,
-                    self._island_builder.set_nr,
-                ],
-                outputs=[self._last_awake_set_nr],
-                device=self.device,
-            )
 
     def _mass_splitting_broadcast(self) -> None:
         """Fan body / particle state into every copy-state slot at substep

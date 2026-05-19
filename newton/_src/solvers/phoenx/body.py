@@ -83,13 +83,19 @@ class BodyContainer:
     #: ``body_set_access_mode`` to flip lazily.
     access_mode: wp.array[wp.int32]
 
-    #: Per-body sleep flag (1 = sleeping, 0 = awake). Only written when
-    #: :attr:`PhoenXWorld.sleeping_velocity_threshold` > 0. A sleeping
-    #: body skips gravity / force application and is collapsed to -1 in
-    #: the partitioner's element view so its constraints drop out of
-    #: the coloring. Always allocated so kernels that read the field
-    #: have something to bind to; stays 0 when sleeping is disabled.
-    is_sleeping: wp.array[wp.int32]
+    #: Per-body sleep label. ``-1`` = awake; any non-negative value is
+    #: the *root body id* (the lowest body id in the island this body
+    #: was in at the moment it fell asleep). Acts as both the sleeping
+    #: flag and the persistent island identifier consumed by
+    #: :meth:`PhoenXWorld.wake_on_external_input` -- a force on any
+    #: sleeping body lifts every body sharing the same ``island_root``.
+    #: Only written when :attr:`PhoenXWorld.sleeping_velocity_threshold`
+    #: > 0; stays at ``-1`` (awake) when sleeping is disabled. Sleeping
+    #: bodies skip gravity / force application, are collapsed to -1 in
+    #: the partitioner's element view (so their constraints drop out
+    #: of the coloring), and are excluded from the per-step union-find
+    #: island build (so the live ``set_nr`` covers awake bodies only).
+    island_root: wp.array[wp.int32]
 
     #: Per-body counter: number of consecutive frames the body's island
     #: has had its max-velocity score below
@@ -97,9 +103,10 @@ class BodyContainer:
     #: moment any body in the island exceeds the threshold (the
     #: island-level max governs every body in the island). Saturates
     #: at :attr:`PhoenXWorld.sleeping_frames_required` so it never
-    #: overflows. ``is_sleeping`` is set to 1 once this counter reaches
-    #: the required frame count; with ``sleeping_frames_required == 0``
-    #: the body sleeps on the first below-threshold frame.
+    #: overflows. :attr:`island_root` is stamped with the island's
+    #: lowest body id once this counter reaches the required frame
+    #: count; with ``sleeping_frames_required == 0`` the body sleeps
+    #: on the first below-threshold frame.
     frames_below_threshold: wp.array[wp.int32]
 
 
@@ -133,7 +140,7 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.position_prev_substep = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.orientation_prev_substep = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
     c.access_mode = wp.full(num_bodies, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
-    c.is_sleeping = wp.zeros(num_bodies, dtype=wp.int32, device=device)
+    c.island_root = wp.full(num_bodies, value=-1, dtype=wp.int32, device=device)
     c.frames_below_threshold = wp.zeros(num_bodies, dtype=wp.int32, device=device)
     return c
 
