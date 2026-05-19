@@ -27,11 +27,6 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.phoenx.body import body_container_zeros
-from newton._src.solvers.phoenx.cloth_collision import (
-    PhoenXClothShareVertexFilterData,
-    build_phoenx_share_vertex_filter_data,
-    phoenx_cloth_share_vertex_filter,
-)
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
 )
@@ -240,10 +235,7 @@ class Example:
             broad_phase="sap",
             shape_pairs_max=20_000 * grid_side * grid_side,
             rigid_contact_max=20_000 * grid_side * grid_side,
-            broad_phase_filter=(
-                phoenx_cloth_share_vertex_filter,
-                PhoenXClothShareVertexFilterData,
-            ),
+            broad_phase_filter=PhoenXWorld.broad_phase_filter(),
         )
         self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
@@ -317,27 +309,14 @@ class Example:
             device=self.device,
         )
 
-        # Bind the broad-phase filter data now that bodies exist. The
-        # filter holds device refs to ``shape_body``, ``island_root``,
-        # and ``motion_type`` -- each broad-phase pair test reads them
-        # to decide whether to forward the pair to the narrow phase.
-        # Cloth tri / soft-tet index arrays are sentinels since this
-        # scene is rigid-only.
-        _tri_sentinel = wp.zeros((1, 3), dtype=wp.int32, device=self.device)
-        _tet_sentinel = wp.zeros((1, 4), dtype=wp.int32, device=self.device)
-        self._share_vertex_filter_data = build_phoenx_share_vertex_filter_data(
+        # Bind the broad-phase filter data + cache per-shape AABB
+        # arrays. After this call the per-frame loop doesn't need to
+        # pass ``shape_aabb_*`` to ``world.step()``.
+        self.world.attach_collision_pipeline(
+            self.collision_pipeline,
             num_rigid_shapes=int(self.model.shape_count),
-            num_cloth_triangles=0,
-            tri_indices=_tri_sentinel,
-            tet_indices=_tet_sentinel,
-            sleeping_enabled=True,
-            phoenx_body_offset=1,
             shape_body=self.model.shape_body,
-            body_island_root=self.bodies.island_root,
-            body_motion_type=self.bodies.motion_type,
-            device=self.device,
         )
-        self.collision_pipeline.set_broad_phase_filter_data(self._share_vertex_filter_data)
 
         # Two parallel per-shape color buffers (active + dim-for-sleep), plus
         # a kernel that picks between them based on each body's
@@ -401,13 +380,13 @@ class Example:
             contacts=self.contacts,
             collision_pipeline=self.collision_pipeline,
         )
-        narrow_phase = self.collision_pipeline.narrow_phase
+        # ``attach_collision_pipeline`` cached the per-shape AABB
+        # arrays + installed the shape_body map, so no extra args
+        # are needed here.
         self.world.step(
             dt=self.frame_dt,
             contacts=self.contacts,
             shape_body=self._shape_body,
-            shape_aabb_lower=narrow_phase.shape_aabb_lower,
-            shape_aabb_upper=narrow_phase.shape_aabb_upper,
         )
         self._sync_phoenx_to_newton()
 
