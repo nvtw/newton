@@ -1,27 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dispatcher for ``step_layout='single_world'`` with Tonge mass splitting.
+"""Single-world dispatcher with Tonge mass splitting.
 
-Pattern: per-substep PGS = persistent-grid head + single-block fused
-tail, ``wp.capture_while`` over ``color_cursor``. **Plus** the
-mass-splitting plumbing:
+Same PGS shape as :mod:`single_world` (head + fused tail under
+``capture_while``) but with:
 
-* :meth:`begin_step` rebuilds the ``(body, partition_key)`` interaction
-  graph from the just-built CSR.
-* :meth:`solve` broadcasts body / particle state into copy-state slots
-  before the prepare sweep, averages slots between iterations (Jacobi
-  convergence on the overflow bucket needs this), and writes back
-  slot[0] -> body before integrate_positions.
-* :meth:`relax` runs the bias-off relax loop, averages between iters,
-  and writes back at the end.
+* ``begin_step`` rebuilds the ``(body, partition_key)`` interaction graph.
+* ``solve`` broadcasts body/particle state into copy slots, averages
+  slots between iterations (required for Jacobi convergence on the
+  overflow bucket), and writes ``slot[0] -> body`` before integrate.
+* ``relax`` runs the bias-off pass, averages between iters, writes back.
 
-A future commit will swap this for an unrolled variant
-(:mod:`single_world_mass_splitting_unrolled`) that drops the
-``wp.capture_while`` and uses a fixed
-``max_colored_partitions + 1`` host loop -- which is only possible
-because the partitioner's colour count is bounded under mass
-splitting.
+Unrolled variant: :mod:`single_world_mass_splitting_unrolled` (drops
+``capture_while`` since mass-splitting bounds the colour count).
 """
 
 from __future__ import annotations

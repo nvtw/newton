@@ -1,15 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dispatcher for ``step_layout='single_world'`` without mass splitting.
-
-Pattern: per-substep PGS = persistent-grid head + single-block fused
-tail, with ``wp.capture_while`` draining all colours. The chromatic
-number is unbounded here (no overflow bucket), so the capture_while is
-warranted -- num_colors is device-side state.
-
-For the mass-splitting variant see :mod:`single_world_mass_splitting`.
-"""
+"""Single-world dispatcher (mass splitting OFF): per-substep PGS via
+persistent-grid head + single-block fused tail, with ``wp.capture_while``
+draining all colours. Mass-splitting variant in
+:mod:`single_world_mass_splitting`."""
 
 from __future__ import annotations
 
@@ -30,8 +25,7 @@ class SingleWorldDispatcher:
         self._world = world
 
     def begin_step(self) -> None:
-        # Nothing to do: no mass-splitting interaction graph to rebuild
-        # on this path.
+        # No-op: only mass splitting rebuilds an interaction graph.
         pass
 
     def solve(self, idt: wp.float32) -> None:

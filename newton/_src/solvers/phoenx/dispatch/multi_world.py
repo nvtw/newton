@@ -1,19 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dispatcher for ``step_layout='multi_world'`` without mass splitting.
-
-Pattern: one block per world, "fast-tail" PGS kernel that runs
-prepare + ``solver_iterations`` iterate sweeps in a single launch
-(the world-local colour streams are short and fit in shared memory).
-Per-world bucketing + per-world coloring (JP or greedy MIS) happens
-upstream in :meth:`PhoenXWorld._build_per_world_coloring`.
-
-Mass splitting is not supported in multi-world today (the per-world
-CSR layout differs from the global one the interaction-graph emit
-kernel expects) -- :class:`PhoenXWorld` raises ``NotImplementedError``
-at construction in that case.
-"""
+"""Multi-world dispatcher (mass splitting OFF). One block per world;
+the fast-tail kernel runs prepare + every iterate sweep in a single
+launch. Per-world coloring is built upstream in
+:meth:`PhoenXWorld._build_per_world_coloring`. Mass splitting is not
+supported on this path (per-world CSR layout)."""
 
 from __future__ import annotations
 
@@ -34,14 +26,11 @@ class MultiWorldFastTailDispatcher:
         self._world = world
 
     def begin_step(self) -> None:
-        # No per-step setup beyond what PhoenXWorld.step() already does
-        # (per-world coloring is built via _build_per_world_coloring).
+        # No-op; per-world coloring is built upstream.
         pass
 
     def solve(self, idt: wp.float32) -> None:
-        # _solve_main bundles prepare + every iterate into a single fast-tail
-        # launch; ``idt`` is recomputed inside from substep_dt for byte-
-        # identical behaviour with the pre-refactor path.
+        # Bundles prepare + every iterate into one fast-tail launch.
         self._world._solve_main()
 
     def relax(self, idt: wp.float32) -> None:

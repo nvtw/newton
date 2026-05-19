@@ -141,55 +141,28 @@ class SolverPhoenX(SolverBase):
             solver_iterations: PGS iterations per substep.
             velocity_iterations: TGS-soft relax sweeps per substep.
             default_friction: Fallback when Contacts/shapes carry no material.
-            step_layout: ``"multi_world"`` (default, per-world fast-tail; scales
-                to many small worlds) or ``"single_world"`` (per-colour grid
-                launches; wins for a few big worlds).
-            threads_per_world: ``"auto"`` (default), 32, 16, or 8. Multi-world only.
-            max_thread_blocks: Optional cap on the single-world PGS persistent grid.
-                ``None`` keeps the auto-size (clamp(ceil(cap/256), 32, 4*sm_count)).
-            velocity_readout: ``"substep_end"`` (default; bit-faithful),
-                ``"finite_difference"`` (pose-delta over the outer step), or
-                ``"substep_average"`` (∫ velocity dt / dt_outer; matches MuJoCo
-                Warp's post-integration qvel).
-            partitioner_algorithm: Graph-colouring backend. ``"greedy"`` (default)
-                runs the JP + capture_while convergence loop;
-                ``"luby_fixed"`` runs a fixed ``2 * max_colored_partitions``
-                Luby launches and spills overshoots to overflow (single-world
-                step layout only).
+            step_layout: ``"multi_world"`` (many small worlds) or
+                ``"single_world"`` (a few big worlds).
+            threads_per_world: ``"auto"`` / 32 / 16 / 8 (multi-world).
+            max_thread_blocks: Optional cap on the single-world PGS grid.
+            velocity_readout: ``"substep_end"`` (default, bit-faithful),
+                ``"finite_difference"``, or ``"substep_average"``.
+            partitioner_algorithm: ``"greedy"`` (default) or
+                ``"luby_fixed"`` (single-world only).
             enable_warm_start_coloring: Reuse previous-frame colour
-                assignments to skip MIS work on constraints whose
-                body-pair adjacency is unchanged. Default ``True``.
-                No-op for ``step_layout="multi_world"`` (per-world
-                coloring kernel doesn't read the cache; the cache
-                itself isn't allocated).
-            sor_boost: Successive over-relaxation factor applied to
-                every PGS delta lambda (joints, contacts, cloth, soft
-                tet). ``1.0`` (default) = vanilla PGS. ``1.1..1.5``
-                typically accelerates convergence on smooth modes;
-                values >= 2.0 diverge.
+                assignments. No-op on multi-world.
+            sor_boost: Per-impulse SOR factor. 1.0 = vanilla PGS;
+                1.1-1.5 typical; ``>= 2.0`` diverges.
             sleeping_velocity_threshold: Per-island sleep cutoff
-                ``[m/s + rad/s * 0.5 * aabb_diagonal]``. ``0.0``
-                (default) disables sleeping entirely -- no island
-                build, no extra kernels, no extra allocations. When
-                ``> 0``, each step computes connected components over
-                the active interaction set; islands whose max body
-                score falls below the threshold are flagged sleeping
-                and their constraints are dropped from the coloring /
-                overflow partition. Sleeping bodies skip gravity and
-                external force application. Auto-installs a
-                sleeping-aware broad-phase filter on the rigid contact
-                pipeline so sleeping-vs-sleeping shape pairs early-out.
-            sleeping_frames_required: Number of consecutive frames an
-                island's max-velocity score must stay below
-                :attr:`sleeping_velocity_threshold` before its bodies
-                are flagged sleeping. Default ``30`` (~0.5 s at 60 Hz)
-                matches PhysX / Bullet conventions and avoids
-                threshold-flicker on barely-settled stacks. Wake-up
-                is always single-frame: the instant any body in the
-                island lifts the max-score above threshold every body
-                in the island resets its counter to 0 in lockstep.
-                ``0`` recovers the old single-frame sleep behavior.
-                Ignored when ``sleeping_velocity_threshold == 0``.
+                ``[m/s + rad/s * 0.5 * aabb_diag]``. ``0.0`` disables
+                sleeping (no island build, no extra allocations).
+                Sleeping bodies are dropped from coloring + the
+                overflow partition and skip gravity / forces; a
+                sleeping-aware broad-phase filter is auto-installed.
+            sleeping_frames_required: Frames an island must stay below
+                threshold before being flagged sleeping. Default 30
+                (~0.5 s @ 60 Hz). Wake-up is always single-frame.
+                ``0`` recovers single-frame sleep.
         """
         super().__init__(model)
         valid_readouts = ("substep_end", "finite_difference", "substep_average")

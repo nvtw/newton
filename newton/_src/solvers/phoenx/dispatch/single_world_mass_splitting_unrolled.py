@@ -3,33 +3,13 @@
 
 """Capture_while-free mass-splitting dispatcher.
 
-Two structural changes vs :class:`SingleWorldMassSplittingDispatcher`:
+Differences from :class:`SingleWorldMassSplittingDispatcher`:
 
-1. **No ``wp.capture_while``.** The partitioner caps colour count at
-   ``max_colored_partitions + 1`` (K coloured + 1 overflow) under mass
-   splitting, so the colour-drain loop has a host-known upper bound
-   and becomes a fixed ``for`` range. Mirrors the C# PhoenX
-   ``RunMethodParallelIterate`` pattern.
-2. **No fused tail kernel.** The single-block tail was designed to
-   amortise launch overhead across many trailing small colours, but on
-   the MS path the head kernel can handle every partition size (small
-   and overflow alike -- it already does ``ms_batch_size`` batching
-   internally) using the persistent grid (multiple SMs in parallel).
-   The tail's single-block serial pass is a *pessimisation* on dense
-   contact scenes (cloth-vs-rigid impacts have ~70-element partitions
-   that the tail processes serially when they could run parallel
-   across 16+ blocks).
-
-Per sweep: exactly ``K + 1`` head launches, no tail, no capture_while.
-Rounds past ``cursor == 0`` early-exit cheaply in the head kernel.
-``fuse_threshold = -1`` disables the head's "bail to tail" check so
-head processes every partition itself.
-
-Profile motivation: on example_cloth_hanging at the cube-settled phase,
-the fused tail was 78% of GPU time (0.31 ms/launch × 360
-launches/5steps). Switching to head-only routes the same work through
-parallel persistent-grid launches at a small fraction of the per-call
-cost.
+* No ``wp.capture_while``: mass splitting bounds colours at K+1, so the
+  colour drain becomes a fixed ``for _ in range(K+1)`` host loop.
+* No fused tail: the head kernel processes every partition size via the
+  persistent grid (the fused tail's single-block serial pass is a
+  pessimisation on dense contact partitions).
 """
 
 from __future__ import annotations
@@ -42,9 +22,8 @@ from newton._src.solvers.phoenx.mass_splitting import (
     launch_average_and_broadcast,
 )
 
-# Mirror of :data:`solver_phoenx._SINGLEWORLD_BLOCK_DIM`. Re-declared
-# here to avoid a circular import from the dispatch module back into
-# the solver module. Keep in sync with the canonical value.
+# Mirror of ``solver_phoenx._SINGLEWORLD_BLOCK_DIM``; redeclared to
+# avoid circular import. Keep in sync.
 _SINGLEWORLD_BLOCK_DIM: int = 32
 
 if TYPE_CHECKING:
@@ -58,35 +37,19 @@ class SingleWorldMassSplittingUnrolledDispatcher:
 
     def __init__(self, world: PhoenXWorld) -> None:
         self._world = world
-        # Launch the head kernel ``max_colored_partitions + 1`` times
-        # per sweep -- one for each colour slot (K colored + 1
-        # overflow). The empty colored slots (when greedy doesn't
-        # fill all K) are no-op launches that bail cheaply on
-        # count==0; the overflow slot at index K is the heavy
-        # workload that MUST run. Tried bounding by
-        # ``M * NUM_INNER_WHILE_ITERATIONS + 1`` (M = greedy outer
-        # cap) -- the kernel's cursor model means a smaller bound
-        # processes partitions 0..bound-1 IN ORDER and skips the
-        # overflow at index K. Physics drifted (chain max_abs
-        # 2.27 -> 3.06 in 150 frames). Reverted.
+        # Exactly K+1 head launches per sweep (K coloured + 1 overflow).
+        # A smaller bound would skip the overflow at index K (cursor
+        # model processes partitions in order) and cause physics drift.
         self._launch_bound = int(world.max_colored_partitions) + 1
 
     def begin_step(self) -> None:
         self._world._rebuild_mass_splitting_graph()
 
     def _unrolled_sweep(self, head_kernel, idt: wp.float32) -> None:
-        """Host-side fixed-count colour-drain, head-only.
-
-        Loop iterates exactly ``max_colored_partitions + 1`` times --
-        the partitioner's upper bound on colour count under mass
-        splitting. Each iteration launches the head kernel ONCE with
-        ``fuse_threshold = -1`` (so head doesn't bail on small
-        partitions -- it processes every size itself via persistent
-        grid). Empty colored partitions are cheap no-op launches; the
-        overflow partition at index K is the heavy work.
-
-        No tail kernel, no capture_while.
-        """
+        """Head-only fixed-count colour drain. ``fuse_threshold=-1``
+        keeps head from bailing on small partitions. Empty colour
+        slots are cheap no-op launches; overflow at index K is the
+        heavy work."""
         w = self._world
         contact_views = w._contact_views if w._contact_views is not None else w._contact_views_placeholder
         ms_cap = wp.int32(int(w.max_colored_partitions))

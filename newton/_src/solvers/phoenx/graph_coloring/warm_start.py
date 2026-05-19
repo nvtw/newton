@@ -34,6 +34,7 @@ __all__ = [
     "warm_start_invalidate_mark_kernel",
     "warm_start_invalidate_apply_kernel",
     "warm_start_emit_pairs_kernel",
+    "warm_start_mark_boundaries_kernel",
     "warm_start_dedup_pairs_kernel",
     "warm_start_reset_count_kernel",
 ]
