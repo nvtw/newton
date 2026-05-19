@@ -10,6 +10,7 @@ import re
 import time
 from collections.abc import Callable, Sequence
 from importlib import metadata
+from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
@@ -25,6 +26,7 @@ from .gl.gui import UI
 from .gl.image_logger import ImageLogger
 from .gl.opengl import LinesGL, MeshGL, MeshInstancerGL, RendererGL
 from .picking import Picking
+from .recording import LiveMp4Recorder
 from .viewer import _DEFAULT_LAYER_ID, ViewerBase
 from .wind import Wind
 
@@ -317,6 +319,11 @@ class ViewerGL(ViewerBase):
         # Initialize PBO (Pixel Buffer Object) resources used in the `get_frame` method.
         self._pbo = None
         self._wp_pbo = None
+
+        # Optional live MP4 recording (driven from the sidebar "Recording" panel).
+        self._recorder = LiveMp4Recorder()
+        self._recorder.set_filename_prefix("gl_recording")
+        self._record_frame_gpu: wp.array | None = None
 
     @override
     def _extra_layer_state_attrs(self) -> tuple[str, ...]:
@@ -1704,6 +1711,55 @@ class ViewerGL(ViewerBase):
 
         self.renderer.present()
 
+        # Capture this frame for live MP4 recording, if active.
+        self._record_frame_if_needed()
+
+    def _start_recording(self, output_path: str | Path | None = None) -> bool:
+        """Start live MP4 recording at the current framebuffer size.
+
+        Args:
+            output_path: Optional output file path. ``None`` selects a
+                timestamped default under the recorder's output directory.
+
+        Returns:
+            ``True`` if recording started successfully.
+        """
+        fb_w, fb_h = self.renderer.window.get_framebuffer_size()
+        fps_hint = self._current_fps if self._current_fps > 1.0 else 60.0
+        started = self._recorder.start(
+            width=fb_w,
+            height=fb_h,
+            fps=float(fps_hint),
+            output_path=output_path,
+            flip_vertical=False,
+        )
+        if started:
+            self._record_frame_gpu = wp.empty(
+                shape=(fb_h, fb_w, 3),
+                dtype=wp.uint8,  # pyright: ignore[reportArgumentType]
+                device=self.device,
+            )
+        return started
+
+    def _stop_recording(self) -> Path | None:
+        """Stop live MP4 recording and return the output path (if any)."""
+        path = self._recorder.stop()
+        self._record_frame_gpu = None
+        return path
+
+    def _record_frame_if_needed(self):
+        """Copy the just-presented frame to the recorder, if recording."""
+        if not self._recorder.is_recording:
+            return
+        fb_w, fb_h = self.renderer.window.get_framebuffer_size()
+        if self._record_frame_gpu is None or self._record_frame_gpu.shape != (fb_h, fb_w, 3):
+            # Framebuffer changed underneath us (e.g. resize during recording);
+            # cleanest behavior is to stop and let the user start a new recording.
+            self._stop_recording()
+            return
+        frame_gpu = self.get_frame(target_image=self._record_frame_gpu, render_ui=False)
+        self._recorder.write_frame(frame_gpu.numpy())
+
     def get_frame(self, target_image: wp.array | None = None, render_ui: bool = False) -> wp.array:
         """
         Retrieve the last rendered frame.
@@ -1859,6 +1915,8 @@ class ViewerGL(ViewerBase):
         """
         Close the viewer and clean up resources.
         """
+        if self._recorder.is_recording:
+            self._stop_recording()
         self._clear_array_textures()
         self._invalidate_pbo()
         if self._image_logger is not None:
@@ -2283,6 +2341,10 @@ class ViewerGL(ViewerBase):
         fb_w, fb_h = self.renderer.window.get_framebuffer_size()
         self.camera.update_screen_size(fb_w, fb_h)
         self._invalidate_pbo()
+
+        if self._recorder.is_recording:
+            # ffmpeg was started with a fixed resolution; stop cleanly on resize.
+            self._stop_recording()
 
         if self.ui:
             self.ui.resize(width, height)
@@ -2717,6 +2779,35 @@ class ViewerGL(ViewerBase):
                 changed, self.renderer.sky_upper = _edit_color3("Sky Color", self.renderer.sky_upper)
                 # Ground color
                 changed, self.renderer.sky_lower = _edit_color3("Ground Color", self.renderer.sky_lower)
+
+            # Recording section
+            imgui.set_next_item_open(False, imgui.Cond_.once)
+            if imgui.collapsing_header("Recording"):
+                imgui.separator()
+
+                changed, quality = imgui.slider_float(
+                    "Video Quality",
+                    float(self._recorder.quality),
+                    0.0,
+                    100.0,
+                    "%.0f",
+                )
+                if changed:
+                    self._recorder.set_quality(float(quality))
+
+                if self._recorder.is_recording:
+                    output_path = self._recorder.output_path
+                    imgui.text("Status: recording")
+                    imgui.text(f"Quality: {self._recorder.quality:.0f}/100")
+                    if output_path is not None:
+                        imgui.text_wrapped(str(output_path))
+                    if imgui.button("Stop Recording"):
+                        self._stop_recording()
+                else:
+                    imgui.text("Status: idle")
+                    imgui.text_wrapped(str(self._recorder.suggested_output_path()))
+                    if imgui.button("Start Recording"):
+                        self._start_recording()
 
             self._image_logger.draw_controls()
 
