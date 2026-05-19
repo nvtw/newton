@@ -770,9 +770,10 @@ def warm_start_periodic_invalidate_kernel(
     invalidate_counter: wp.array[int],
     cache_num_entries: wp.array[int],
     num_colors: wp.array[int],
-    skip_color_plus_one: wp.array[int],
+    skip_color_start_plus_one: wp.array[int],
+    skip_color_end_plus_one: wp.array[int],
     invalidate_period: wp.int32,
-    rotate_skip_enabled: wp.int32,
+    rotate_skip_width: wp.int32,
 ):
     """Single-thread coloring-step pre-pass.
 
@@ -786,13 +787,15 @@ def warm_start_periodic_invalidate_kernel(
       Expensive (~10% step overhead in cold mode) but recovers full
       cold-start stability.
 
-    * **Rotating skip-colour** (``rotate_skip_enabled != 0``): bump
-      the counter and pick one colour per step (``counter % num_colors``)
-      whose seeded entries the seed kernel should SKIP. That colour
-      gets re-MIS'd this step while everything else stays warm-started.
-      Over ``num_colors`` steps each colour is re-MIS'd exactly once,
-      breaking the fixed-point lock-in at ~1/num_colors of the
-      cold-start cost.
+    * **Rotating skip-colour range** (``rotate_skip_width > 0``): bump
+      the counter and pick ``rotate_skip_width`` consecutive cached
+      colours per step (start = ``(counter * width) % num_colors``)
+      whose seeded entries the seed kernel should SKIP. Those colours
+      get re-MIS'd this step while the rest stay warm-started. Over
+      ``num_colors / width`` steps every colour is re-MIS'd exactly
+      once. Cost scales linearly with ``width``: ``width=1`` is the
+      cheapest stir, ``width=num_colors`` is equivalent to a full
+      invalidate.
 
     Both can be enabled together; periodic invalidate wins (full
     rebuild that step).
@@ -800,19 +803,29 @@ def warm_start_periodic_invalidate_kernel(
     c = invalidate_counter[0] + wp.int32(1)
     invalidate_counter[0] = c
 
-    # Default: no skip.
-    skip_color_plus_one[0] = wp.int32(0)
+    # Default: no skip (start > end disables the range check in seed).
+    skip_color_start_plus_one[0] = wp.int32(1)
+    skip_color_end_plus_one[0] = wp.int32(0)
 
     if invalidate_period > wp.int32(0) and c % invalidate_period == wp.int32(0):
         cache_num_entries[0] = wp.int32(0)
         return
 
-    if rotate_skip_enabled != wp.int32(0):
+    if rotate_skip_width > wp.int32(0):
         nc = num_colors[0]
         if nc > wp.int32(0):
-            # Skip cached colour ``c % nc`` this step (encoded as +1
-            # to match ``color_tags`` convention).
-            skip_color_plus_one[0] = (c % nc) + wp.int32(1)
+            # Skip cached colours ``[start, start+width)`` mod nc this
+            # step. Encoded as +1 to match ``color_tags`` convention;
+            # start_plus_one == end_plus_one means a single colour (the
+            # common ``width=1`` rotate-skip case).
+            start = (c * rotate_skip_width) % nc
+            width = rotate_skip_width
+            if width > nc:
+                width = nc
+            # Inclusive end. Wrap handled by seed kernel via the
+            # modular comparison.
+            skip_color_start_plus_one[0] = start + wp.int32(1)
+            skip_color_end_plus_one[0] = start + width  # exclusive in 1-indexed = inclusive in 0-indexed
 
 
 @wp.kernel(enable_backward=False)

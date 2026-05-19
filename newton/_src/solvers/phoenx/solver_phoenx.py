@@ -351,6 +351,7 @@ class PhoenXWorld:
         #   warm-start fast path it cuts MIS launches 18x.
         warm_start_invalidate_period: int = 4,
         warm_start_rotate_skip_color: bool = True,
+        warm_start_rotate_skip_width: int = 1,
         capture_while_greedy_coloring: bool = True,
         # Speculative coloring (3-phase pick + validate + commit) is
         # ~17 % faster than JP-MIS on cold-start MIS work (1.37 vs
@@ -696,7 +697,10 @@ class PhoenXWorld:
             # steps every colour cycles through a re-MIS, which
             # breaks the lock-in without paying the full cold-start
             # tax.
-            self._partitioner.set_warm_start_rotate_skip(bool(warm_start_rotate_skip_color))
+            self._partitioner.set_warm_start_rotate_skip(
+                bool(warm_start_rotate_skip_color),
+                width=int(warm_start_rotate_skip_width),
+            )
             # Use ``wp.capture_while(num_remaining, ...)`` instead of
             # the fixed ``MAX_GREEDY_OUTER_ITERS`` host loop on the
             # greedy MIS path. Skips post-convergence kernel launches

@@ -415,8 +415,13 @@ class IncrementalContactPartitioner:
         # match ``color_tags``; ``0`` means "no skip". Used to break
         # the warm-start coloring lock-in cheaply (~1/num_colors of
         # the cold-start cost per step).
-        self._warm_start_skip_color_plus_one: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
-        self._warm_start_rotate_skip: bool = False
+        self._warm_start_skip_color_start_plus_one: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
+        self._warm_start_skip_color_end_plus_one: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
+        # Rotate-skip range width in colours per step. ``0`` disables
+        # the stir; ``1`` matches the original single-colour skip;
+        # larger values cycle through colours faster (cost scales
+        # linearly).
+        self._warm_start_rotate_skip_width: int = 0
 
         # Greedy MIS outer-loop strategy. ``True`` uses
         # ``wp.capture_while`` to exit as soon as ``num_remaining``
@@ -795,9 +800,10 @@ class IncrementalContactPartitioner:
                     self._warm_start_invalidate_counter,
                     self._warm_start_cache.num_entries,
                     self._num_colors,
-                    self._warm_start_skip_color_plus_one,
+                    self._warm_start_skip_color_start_plus_one,
+                    self._warm_start_skip_color_end_plus_one,
                     wp.int32(self._warm_start_invalidate_period),
-                    wp.int32(1 if self._warm_start_rotate_skip else 0),
+                    wp.int32(self._warm_start_rotate_skip_width),
                 ],
             )
 
@@ -812,7 +818,8 @@ class IncrementalContactPartitioner:
                     self._warm_start_cache.num_entries,
                     self._color_tags,
                     self._partition_data_concat,
-                    self._warm_start_skip_color_plus_one,
+                    self._warm_start_skip_color_start_plus_one,
+                    self._warm_start_skip_color_end_plus_one,
                 ],
             )
             # Validation pass: detect colour conflicts under the
@@ -1222,17 +1229,21 @@ class IncrementalContactPartitioner:
         """
         self._use_speculative_coloring = bool(enabled)
 
-    def set_warm_start_rotate_skip(self, enabled: bool) -> None:
-        """When ``True``, each ``build_csr`` skips re-seeding one
-        cached colour (rotated round-robin via the step counter), so
-        that colour's constraints get re-MIS'd while the rest stay
-        warm-started. Over ``num_colors`` steps every colour cycles
-        through a re-MIS pass. Cost: ~1/num_colors of the cold-start
-        coloring overhead per step. Use this to break the warm-start
-        fixed-point coloring that biases tall-stack PGS solves
-        without paying the full cold-start cost.
+    def set_warm_start_rotate_skip(self, enabled: bool, width: int = 1) -> None:
+        """When ``enabled``, each ``build_csr`` skips re-seeding
+        ``width`` consecutive cached colours (rotated round-robin via
+        the step counter), so those colours' constraints get re-MIS'd
+        while the rest stay warm-started. Over ``num_colors / width``
+        steps every colour cycles through a re-MIS pass.
+
+        Cost: roughly ``width / num_colors`` of the cold-start
+        coloring overhead per step. ``width=1`` is the cheapest stir
+        (default), ``width=num_colors`` is equivalent to a full
+        invalidate. ``enabled=False`` disables (no skip).
         """
-        self._warm_start_rotate_skip = bool(enabled)
+        if width < 0:
+            raise ValueError(f"width must be >= 0 (got {width})")
+        self._warm_start_rotate_skip_width = int(width) if enabled else 0
 
     def set_symmetric_sweep(self, enabled: bool) -> None:
         """Enable / disable cyclic-shift Gauss-Seidel: rotate the

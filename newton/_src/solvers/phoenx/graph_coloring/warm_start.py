@@ -168,20 +168,23 @@ def seed_warm_start_kernel(
     cache_num_entries: wp.array[wp.int32],
     color_tags: wp.array[wp.int32],
     partition_data_concat: wp.array[wp.int64],
-    skip_color_plus_one: wp.array[wp.int32],
+    skip_color_start_plus_one: wp.array[wp.int32],
+    skip_color_end_plus_one: wp.array[wp.int32],
 ):
     """For each active constraint, look up its body-pair key in the
     cache and seed ``color_tags[tid]`` with the cached colour. Empty
     cache (``cache_num_entries[0] == 0``) leaves ``color_tags`` at 0
     -- equivalent to cold-start MIS.
 
-    ``skip_color_plus_one[0]`` is the **encoded** colour id to skip
-    this frame (i.e. ``color + 1`` matching the ``color_tags``
-    encoding). Cache entries with that exact colour are NOT seeded,
-    forcing greedy MIS to re-derive them this frame. ``0`` disables
-    skipping (full seed). Used to rotate which colour gets fresh-
-    coloured each frame so the warm-start fast path doesn't lock the
-    full coloring into a fixed point that biases the PGS solve.
+    ``skip_color_start_plus_one[0]`` .. ``skip_color_end_plus_one[0]``
+    is the inclusive **encoded** colour range to skip this frame
+    (``color + 1`` matching the ``color_tags`` encoding). Cache
+    entries whose colour falls in the range are NOT seeded, forcing
+    greedy MIS to re-derive them this frame. An empty range
+    (``start > end``) disables skipping (full seed). Used to rotate
+    which colour gets fresh-coloured each frame so the warm-start
+    fast path doesn't lock the full coloring into a fixed point that
+    biases the PGS solve.
 
     Also stamps ``partition_data_concat[tid]``: the greedy kernel
     reads this on commit, so we keep it in sync with ``color_tags``
@@ -205,7 +208,9 @@ def seed_warm_start_kernel(
     cached_color = cache_colors[idx]
     if cached_color <= wp.int32(0):
         return  # corrupt entry (shouldn't happen); fall through
-    if cached_color == skip_color_plus_one[0]:
+    s = skip_color_start_plus_one[0]
+    e = skip_color_end_plus_one[0]
+    if s <= e and cached_color >= s and cached_color <= e:
         return  # rotate-skip: re-MIS this colour this frame
     color_tags[tid] = cached_color
     # partition_data_concat encoding: high bits = color+1 (which is
