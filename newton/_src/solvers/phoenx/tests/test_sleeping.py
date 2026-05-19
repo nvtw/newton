@@ -805,6 +805,339 @@ class TestSleepingPipeline(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "SolverPhoenX sleeping tests run on CUDA only.",
+)
+class TestSleepingKinematicWake(unittest.TestCase):
+    """Regression for the kapla_tower2 camera-collider bug: a kinematic
+    mover (e.g. a camera collider) that moves into a sleeping island
+    must wake every body in that island on the same step the contact
+    appears -- otherwise the kinematic body just sweeps through the
+    sleeping geometry as if it weren't there.
+
+    Failure modes this guards against:
+      1. ``_constraints_to_elements_kernel`` collapsing the kinematic
+         body to -1 because ``inverse_mass == 0`` -- then the
+         sleeping detect kernel never sees it in any element.
+      2. Broad-phase sleeping filter dropping the kinematic-vs-sleeping
+         contact pair (would happen if the filter treated kinematic
+         as "frozen").
+      3. ``_phoenx_copy_elements_to_int2d_kernel`` dropping the
+         kinematic body from the union-find input (non-DYNAMIC
+         filter) -- the compact island then has no node carrying the
+         kinematic velocity and the score stays at 0.
+      4. ``_phoenx_island_max_velocity_kernel`` skipping the kinematic
+         body when scoring the compact island.
+      5. The order in ``world.step`` running the sleeping pass BEFORE
+         ``_kinematic_prepare_step`` -- the score kernel then reads a
+         stale ``bodies.velocity`` (= 0 for fresh kinematic targets)
+         and the island is re-marked as sleeping.
+
+    Mirrors the kapla example's setup pattern: builds a Newton model
+    with the camera-collider body, then creates PhoenXWorld directly
+    so we can promote that slot to MOTION_KINEMATIC + zero inv_mass
+    BEFORE PhoenXWorld counts kinematic bodies. The Newton-Model
+    wrapper (``SolverPhoenX``) doesn't expose a "this body is
+    kinematic" knob -- the lower-level path is the right surface.
+    """
+
+    def _build_scene(
+        self, *, n_layers: int = 3, box_half: float = 0.1, pusher_radius: float = 0.15
+    ):
+        """Build a brick-stack + sphere pusher scene exactly like the
+        kapla example wires up its camera collider: Newton model,
+        sleeping-aware ``CollisionPipeline``, manual PhoenX body
+        container, kinematic-promotion BEFORE ``PhoenXWorld``, the
+        share-vertex filter data with sleeping fields populated.
+
+        Returns a dict bundling everything the per-frame loop needs.
+        """
+        from newton._src.solvers.phoenx.body import (
+            MOTION_KINEMATIC,
+            body_container_zeros,
+        )
+        from newton._src.solvers.phoenx.cloth_collision import (
+            PhoenXClothShareVertexFilterData,
+            build_phoenx_share_vertex_filter_data,
+            phoenx_cloth_share_vertex_filter,
+        )
+        from newton._src.solvers.phoenx.examples.example_common import (
+            init_phoenx_bodies_kernel,
+            newton_to_phoenx_kernel,
+            phoenx_to_newton_kernel,
+        )
+        from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+
+        device = wp.get_device("cuda:0")
+
+        mb = newton.ModelBuilder()
+        mb.add_ground_plane()
+        for i in range(n_layers):
+            z = box_half + i * (2.0 * box_half + 1e-3)
+            b = mb.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, z), q=wp.quat_identity()))
+            mb.add_shape_box(
+                b, hx=box_half, hy=box_half, hz=box_half,
+                cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.6),
+            )
+        # Pusher: starts 2 m away (no broad-phase contact with the
+        # stack during the settle).
+        pusher_id = mb.add_body(
+            xform=wp.transform(p=wp.vec3(2.0, 0.0, box_half), q=wp.quat_identity()),
+        )
+        mb.add_shape_sphere(
+            pusher_id, radius=pusher_radius,
+            cfg=newton.ModelBuilder.ShapeConfig(density=1000.0),
+        )
+        mb.gravity = -GRAVITY
+        model = mb.finalize()
+
+        # Sleeping-aware collision pipeline (share-vertex filter
+        # carries the per-shape body / sleeping / motion-type lookup
+        # used to filter rigid-rigid pairs where both sides are
+        # frozen).
+        collision_pipeline = newton.CollisionPipeline(
+            model,
+            contact_matching="sticky",
+            broad_phase_filter=(
+                phoenx_cloth_share_vertex_filter,
+                PhoenXClothShareVertexFilterData,
+            ),
+        )
+        contacts = collision_pipeline.contacts()
+        rigid_contact_max = int(contacts.rigid_contact_point0.shape[0])
+
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        model.body_q.assign(state.body_q)
+
+        # PhoenX body container: slot 0 = world anchor; slot i+1 =
+        # newton body i. ``_init_phoenx_bodies_kernel`` reads inv_mass
+        # / inv_inertia from the model.
+        num_phx_bodies = int(model.body_count) + 1
+        bodies = body_container_zeros(num_phx_bodies, device=device)
+        wp.copy(
+            bodies.orientation,
+            wp.array(
+                np.tile([0.0, 0.0, 0.0, 1.0], (num_phx_bodies, 1)).astype(np.float32),
+                dtype=wp.quatf, device=device,
+            ),
+        )
+        wp.launch(
+            init_phoenx_bodies_kernel,
+            dim=model.body_count,
+            inputs=[
+                model.body_q, state.body_qd, model.body_com,
+                model.body_inv_mass, model.body_inv_inertia,
+            ],
+            outputs=[
+                bodies.position, bodies.orientation, bodies.velocity,
+                bodies.angular_velocity, bodies.inverse_mass,
+                bodies.inverse_inertia, bodies.inverse_inertia_world,
+                bodies.motion_type, bodies.body_com,
+            ],
+            device=device,
+        )
+
+        # Promote pusher to KINEMATIC + zero its inverse mass / inertia
+        # BEFORE ``PhoenXWorld.__init__`` (which caches kinematic count).
+        pusher_slot = pusher_id + 1
+        mt = bodies.motion_type.numpy()
+        mt[pusher_slot] = int(MOTION_KINEMATIC)
+        bodies.motion_type.assign(mt)
+        for arr_name in ("inverse_mass",):
+            arr = getattr(bodies, arr_name).numpy()
+            arr[pusher_slot] = 0.0
+            getattr(bodies, arr_name).assign(arr)
+        for arr_name in ("inverse_inertia", "inverse_inertia_world"):
+            arr = getattr(bodies, arr_name).numpy()
+            arr[pusher_slot] = np.zeros((3, 3), dtype=np.float32)
+            getattr(bodies, arr_name).assign(arr)
+
+        constraints = PhoenXWorld.make_constraint_container(num_joints=0, device=device)
+        shape_body_np = model.shape_body.numpy()
+        shape_body_phx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
+        shape_body = wp.array(shape_body_phx, dtype=wp.int32, device=device)
+
+        world = PhoenXWorld(
+            bodies=bodies,
+            constraints=constraints,
+            substeps=4,
+            solver_iterations=8,
+            gravity=(0.0, 0.0, -GRAVITY),
+            rigid_contact_max=rigid_contact_max,
+            step_layout="single_world",
+            sleeping_velocity_threshold=0.05,
+            sleeping_frames_required=10,
+            device=device,
+        )
+
+        # Sleeping-aware filter data, post-PhoenXWorld so it can read
+        # ``bodies.island_root``.
+        tri_sentinel = wp.zeros((1, 3), dtype=wp.int32, device=device)
+        tet_sentinel = wp.zeros((1, 4), dtype=wp.int32, device=device)
+        filter_data = build_phoenx_share_vertex_filter_data(
+            num_rigid_shapes=int(model.shape_count),
+            num_cloth_triangles=0,
+            tri_indices=tri_sentinel,
+            tet_indices=tet_sentinel,
+            sleeping_enabled=True,
+            phoenx_body_offset=1,
+            shape_body=model.shape_body,
+            body_island_root=bodies.island_root,
+            body_motion_type=bodies.motion_type,
+            device=device,
+        )
+        collision_pipeline.set_broad_phase_filter_data(filter_data)
+
+        return {
+            "model": model,
+            "state": state,
+            "contacts": contacts,
+            "collision_pipeline": collision_pipeline,
+            "world": world,
+            "bodies": bodies,
+            "shape_body": shape_body,
+            "pusher_id": pusher_id,
+            "pusher_slot": pusher_slot,
+            "n_layers": n_layers,
+            "box_half": box_half,
+            "newton_to_phoenx": newton_to_phoenx_kernel,
+            "phoenx_to_newton": phoenx_to_newton_kernel,
+            "device": device,
+        }
+
+    def _step_frame(
+        self, scene, pusher_xyz: tuple[float, float, float], dt: float
+    ) -> None:
+        """One outer step: stage pusher target, sync dynamic state,
+        collide, step. Mirrors the kapla example's per-frame pipeline."""
+        world = scene["world"]
+        device = scene["device"]
+        n = scene["model"].body_count
+        bodies = scene["bodies"]
+        state = scene["state"]
+
+        # Tell PhoenX the new kinematic target via the batch API
+        # (matches the kapla example's per-frame camera-collider
+        # update path).
+        body_id_arr = wp.array([int(scene["pusher_slot"])], dtype=wp.int32, device=device)
+        pos_arr = wp.array([pusher_xyz], dtype=wp.vec3f, device=device)
+        orient_arr = wp.array([(0.0, 0.0, 0.0, 1.0)], dtype=wp.quatf, device=device)
+        world.set_kinematic_poses_batch(
+            body_ids=body_id_arr, positions=pos_arr, orientations=orient_arr,
+        )
+        # Also patch state.body_q[pusher] so Newton's CollisionPipeline
+        # broad-phase sees the live kinematic position (the kapla
+        # example does this with a one-line write kernel).
+        bq = state.body_q.numpy()
+        bq[scene["pusher_id"]] = (
+            pusher_xyz[0], pusher_xyz[1], pusher_xyz[2], 0.0, 0.0, 0.0, 1.0,
+        )
+        state.body_q.assign(bq)
+
+        # Sync dynamic-only Newton -> PhoenX slice (skip the kinematic
+        # body's slot -- it's owned by ``set_kinematic_poses_batch``).
+        if n > 1:
+            wp.launch(
+                scene["newton_to_phoenx"],
+                dim=n - 1,
+                inputs=[state.body_q, state.body_qd, scene["model"].body_com],
+                outputs=[
+                    bodies.position[1 : n],
+                    bodies.orientation[1 : n],
+                    bodies.velocity[1 : n],
+                    bodies.angular_velocity[1 : n],
+                ],
+                device=device,
+            )
+
+        scene["model"].collide(state, contacts=scene["contacts"], collision_pipeline=scene["collision_pipeline"])
+        nphase = scene["collision_pipeline"].narrow_phase
+        world.step(
+            dt=dt,
+            contacts=scene["contacts"],
+            shape_body=scene["shape_body"],
+            shape_aabb_lower=nphase.shape_aabb_lower,
+            shape_aabb_upper=nphase.shape_aabb_upper,
+        )
+        # Bridge PhoenX -> Newton state for dynamic bodies (so the
+        # next frame's collide() reads the post-step poses).
+        if n > 1:
+            wp.launch(
+                scene["phoenx_to_newton"],
+                dim=n - 1,
+                inputs=[
+                    bodies.position[1 : n],
+                    bodies.orientation[1 : n],
+                    bodies.velocity[1 : n],
+                    bodies.angular_velocity[1 : n],
+                    scene["model"].body_com,
+                ],
+                outputs=[state.body_q, state.body_qd],
+                device=device,
+            )
+
+    def test_moving_kinematic_wakes_sleeping_stack(self) -> None:
+        """A kinematic body teleported into a sleeping stack must wake
+        every body in the stack on the same step."""
+        scene = self._build_scene(n_layers=3, box_half=0.1, pusher_radius=0.15)
+        bodies = scene["bodies"]
+        pusher_slot = scene["pusher_slot"]
+        stack_slots = list(range(1, scene["n_layers"] + 1))
+        dt = 1.0 / 60.0
+        far_xyz = (2.0, 0.0, scene["box_half"])
+        # Settle: pusher pinned far away, stack falls and sleeps.
+        for _ in range(180):
+            self._step_frame(scene, far_xyz, dt)
+
+        flags_before = (bodies.island_root.numpy() >= 0).astype(np.int32)
+        for s in stack_slots:
+            self.assertEqual(
+                int(flags_before[s]), 1,
+                msg=(
+                    "stack must be fully sleeping before pusher arrives; "
+                    f"got sleep flags={flags_before.tolist()}"
+                ),
+            )
+        self.assertEqual(
+            int(flags_before[pusher_slot]), 0,
+            msg="kinematic pusher must never carry a sleep flag",
+        )
+        positions_before = bodies.position.numpy().copy()
+
+        # Wake step: pusher teleports onto the stack center
+        # (inferred kinematic velocity = 2 m / (1/60 s) = 120 m/s --
+        # well above the 0.05 m/s threshold).
+        at_stack = (0.0, 0.0, scene["box_half"])
+        self._step_frame(scene, at_stack, dt)
+
+        flags_after = (bodies.island_root.numpy() >= 0).astype(np.int32)
+        still_sleeping = [s for s in stack_slots if int(flags_after[s]) == 1]
+        self.assertEqual(
+            still_sleeping, [],
+            msg=(
+                "Every stack body should have woken after the kinematic "
+                "pusher moved into the stack. "
+                f"sleep flags before={flags_before.tolist()} "
+                f"sleep flags after={flags_after.tolist()}"
+            ),
+        )
+        positions_after = bodies.position.numpy()
+        max_disp = float(
+            np.linalg.norm(positions_after[stack_slots] - positions_before[stack_slots], axis=1).max()
+        )
+        self.assertGreater(
+            max_disp, 1e-3,
+            msg=(
+                "Stack bodies did not visibly move after the kinematic "
+                f"pusher entered the column (max displacement = {max_disp:.6f} m). "
+                "Either contacts were dropped or the wake failed to lift "
+                "the substep solve."
+            ),
+        )
+
+
 if __name__ == "__main__":
     wp.init()
     unittest.main()

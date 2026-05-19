@@ -1163,16 +1163,23 @@ def _constraints_to_elements_kernel(
     # kind: rigid -> bodies; cloth -> particles (subtract num_bodies
     # to land in the particle SoA). ``b < 0`` is the "no node" case
     # (rigid sides without a body, e.g. world-attached shapes).
+    #
+    # KINEMATIC rigid bodies have ``inverse_mass == 0`` (the solver
+    # treats them as immovable rails) but we keep them as graph nodes
+    # so the per-step sleeping pass can spot sleeping-vs-kinematic
+    # contacts and wake the impacted island (e.g. a camera collider
+    # moving into a sleeping stack). Pure STATIC bodies still
+    # collapse to -1.
     if b1 >= 0:
         if side0_kind == wp.int32(0):
-            if bodies.inverse_mass[b1] == 0.0:
+            if bodies.inverse_mass[b1] == 0.0 and bodies.motion_type[b1] != MOTION_KINEMATIC:
                 b1 = -1
         else:
             if particles.inverse_mass[b1 - num_bodies] == 0.0:
                 b1 = -1
     if b2 >= 0:
         if side1_kind == wp.int32(0):
-            if bodies.inverse_mass[b2] == 0.0:
+            if bodies.inverse_mass[b2] == 0.0 and bodies.motion_type[b2] != MOTION_KINEMATIC:
                 b2 = -1
         else:
             if particles.inverse_mass[b2 - num_bodies] == 0.0:

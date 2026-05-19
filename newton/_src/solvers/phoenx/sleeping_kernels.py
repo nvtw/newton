@@ -44,7 +44,7 @@ all sleep-aware orchestration lives here.
 
 import warp as wp
 
-from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer
+from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, MOTION_KINEMATIC, MOTION_STATIC, BodyContainer
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     ElementInteractionData,
@@ -159,9 +159,12 @@ def _phoenx_detect_active_islands_kernel(
     island_active: wp.array[wp.int32],
 ):
     """A sleeping island is *active* this step iff at least one of its
-    members shares a constraint with an awake dynamic body. Bodies in
-    active islands get pulled back into the live union-find via chain
-    edges; bodies in inactive islands stay filtered out for free.
+    members shares a constraint with an awake source -- either an
+    awake DYNAMIC body or a KINEMATIC body (user-driven mover, e.g. a
+    camera collider). STATIC bodies (ground anchor) do NOT count as an
+    awake source: they're always in contact with everything that
+    settled on them, so treating them as awake would prevent any
+    island from ever sleeping.
     """
     tid = wp.tid()
     if tid >= num_active_constraints[0]:
@@ -175,7 +178,13 @@ def _phoenx_detect_active_islands_kernel(
             break
         if b >= num_bodies:
             continue
-        if bodies.motion_type[b] != MOTION_DYNAMIC:
+        mt = bodies.motion_type[b]
+        if mt == MOTION_STATIC:
+            continue
+        if mt != MOTION_DYNAMIC:
+            # KINEMATIC body (or any non-static, non-dynamic motion
+            # type): always treated as an awake source.
+            has_awake = wp.int32(1)
             continue
         if bodies.island_root[b] >= wp.int32(0):
             has_sleeping = wp.int32(1)
@@ -263,14 +272,18 @@ def _phoenx_copy_elements_to_int2d_kernel(
     island_active: wp.array[wp.int32],
     interaction_bodies: wp.array2d[wp.int32],
 ):
-    """Pack each element's dynamic body slots to the front of its row in
-    ``interaction_bodies``. Inactive cids and slots whose body is
-    non-dynamic or a particle are dropped to ``-1``.
+    """Pack each element's dynamic + kinematic body slots to the front
+    of its row in ``interaction_bodies``. Inactive cids, STATIC bodies,
+    and particles are dropped to ``-1``.
 
-    Sleeping bodies whose root is **not** active stay filtered (cost
-    nothing in the live UF). Sleeping bodies in **active** islands are
-    kept -- their chain edges to ``root`` (injected separately) then
-    merge them with the awake body bridging the island.
+    Sleeping (dynamic) bodies whose root is **not** active stay filtered
+    (cost nothing in the live UF). Sleeping bodies in **active** islands
+    are kept -- their chain edges to ``root`` (injected separately) then
+    merge them with the bridging body. KINEMATIC bodies are kept so a
+    kinematic mover (e.g. a camera collider) sharing an element with a
+    sleeping brick lands in the same compact island; the per-island
+    score kernel reads kinematic velocity and lifts the score above
+    threshold, waking the island.
     """
     tid = wp.tid()
     if tid >= num_active_constraints[0]:
@@ -283,12 +296,14 @@ def _phoenx_copy_elements_to_int2d_kernel(
         b = el.bodies[j]
         if b < 0 or b >= num_bodies:
             continue
-        if bodies.motion_type[b] != MOTION_DYNAMIC:
+        mt = bodies.motion_type[b]
+        if mt != MOTION_DYNAMIC and mt != MOTION_KINEMATIC:
             continue
-        root = bodies.island_root[b]
-        if root >= wp.int32(0) and island_active[root] == wp.int32(0):
-            # Sleeping body whose island is inactive: skip.
-            continue
+        if mt == MOTION_DYNAMIC:
+            root = bodies.island_root[b]
+            if root >= wp.int32(0) and island_active[root] == wp.int32(0):
+                # Sleeping dynamic body whose island is inactive: skip.
+                continue
         interaction_bodies[tid, write_idx] = b
         write_idx = write_idx + wp.int32(1)
     for j in range(write_idx, MAX_BODIES):
@@ -312,26 +327,38 @@ def _phoenx_island_max_velocity_kernel(
     ``v_pred`` folds one step of pending external wrench into velocity.
     Atomic-max into the body's compact island slot.
 
-    Only **awake** dynamic bodies contribute -- sleeping bodies always
-    score 0 by construction (integration is skipped), so feeding them in
-    would only pull a fresh ``v_pred = force * invm * dt`` into the
-    score, which is exactly what the self-wake path handles separately.
-    Skipping them keeps the per-frame score driven by the bodies that
-    actually shape the next-step solve.
+    Awake dynamic bodies contribute their own predicted velocity (force
+    is folded in via ``v_pred = v + force * invm * dt``). Sleeping
+    dynamic bodies are skipped -- their integration is paused so they
+    always score 0; self-wake handles fresh force injection on them.
+
+    KINEMATIC bodies contribute their inferred velocity (set by
+    :func:`_kinematic_prepare_step_kernel` from pose-target delta or
+    user-set body_qd). They have inv_mass==0 so force/torque can't
+    accelerate them, but a moving kinematic mover (camera collider,
+    scripted prop) must lift the island score so the compact island
+    containing it wakes the sleeping bodies it's pressing against.
     """
     b = wp.tid()
-    if bodies.motion_type[b] != MOTION_DYNAMIC:
-        return
-    inv_mass = bodies.inverse_mass[b]
-    if inv_mass == 0.0:
+    mt = bodies.motion_type[b]
+    if mt != MOTION_DYNAMIC and mt != MOTION_KINEMATIC:
         return
     if bodies.island_root[b] >= wp.int32(0):
         return
     island = island_of_body[b]
     if island < 0:
         return
-    v_pred = bodies.velocity[b] + bodies.force[b] * (inv_mass * step_dt)
-    w_pred = bodies.angular_velocity[b] + (bodies.inverse_inertia_world[b] * bodies.torque[b]) * step_dt
+    if mt == MOTION_DYNAMIC:
+        inv_mass = bodies.inverse_mass[b]
+        if inv_mass == 0.0:
+            return
+        v_pred = bodies.velocity[b] + bodies.force[b] * (inv_mass * step_dt)
+        w_pred = bodies.angular_velocity[b] + (bodies.inverse_inertia_world[b] * bodies.torque[b]) * step_dt
+    else:
+        # KINEMATIC: inv_mass / inv_inertia are zero so external wrench
+        # can't change velocity; use the inferred pose-derivative directly.
+        v_pred = bodies.velocity[b]
+        w_pred = bodies.angular_velocity[b]
     score = wp.length(v_pred) + 0.5 * body_aabb_diagonal[b] * wp.length(w_pred)
     if score > island_max_velocity[island]:
         wp.atomic_max(island_max_velocity, island, score)

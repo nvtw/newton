@@ -33,7 +33,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.geometry.support_function import encode_vec3
-from newton._src.solvers.phoenx.body import MOTION_DYNAMIC
+from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, MOTION_STATIC
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -741,10 +741,10 @@ def phoenx_cloth_share_vertex_filter(
     1. (Sleeping) When the sleeping pipeline is active, drop any
        rigid-rigid pair where *both* shapes' bodies are "frozen": each
        is sleeping, attached to the world anchor (``shape_body == -1``),
-       or has ``motion_type != DYNAMIC`` (STATIC / KINEMATIC). Pairs
-       where at least one side is an awake dynamic body pass through
-       so the awake body's contact can wake the sleeping island next
-       step.
+       or has ``motion_type == STATIC``. KINEMATIC bodies do NOT count
+       as frozen so a kinematic mover (e.g. a camera collider) still
+       generates contacts against sleeping bricks and the sleeping
+       pass wakes the impacted island next step.
     2. (Share-vertex) Drop a pair iff both shapes are deformable
        (cloth-tri or soft-tet) AND they share at least one particle
        vertex.
@@ -766,10 +766,10 @@ def phoenx_cloth_share_vertex_filter(
             if nbb >= 0:
                 slot_b = nbb + data.phoenx_body_offset
             frozen_a = (data.body_island_root[slot_a] >= wp.int32(0)) or (
-                data.body_motion_type[slot_a] != MOTION_DYNAMIC
+                data.body_motion_type[slot_a] == MOTION_STATIC
             )
             frozen_b = (data.body_island_root[slot_b] >= wp.int32(0)) or (
-                data.body_motion_type[slot_b] != MOTION_DYNAMIC
+                data.body_motion_type[slot_b] == MOTION_STATIC
             )
             if frozen_a and frozen_b:
                 return wp.int32(0)

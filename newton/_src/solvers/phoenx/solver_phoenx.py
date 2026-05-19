@@ -1732,6 +1732,12 @@ class PhoenXWorld:
             )
 
         self._rebuild_elements()
+        # Kinematic prepare BEFORE the sleeping pass: the per-island
+        # score kernel reads ``bodies.velocity`` and must see the
+        # pose-target-derived velocity for kinematic movers, otherwise a
+        # kinematic body moving into a sleeping island can't lift the
+        # score above threshold and the island never wakes.
+        self._kinematic_prepare_step()
         if self._sleeping_enabled:
             self._run_sleeping_pass(shape_body, shape_aabb_lower, shape_aabb_upper)
         if self._constraint_capacity > 0:
@@ -1752,8 +1758,6 @@ class PhoenXWorld:
             # dispatcher rebuilds the mass-splitting interaction graph
             # here (no-op when mass splitting is disabled).
             self._dispatcher.begin_step()
-
-        self._kinematic_prepare_step()
 
         # Substep order: bias-on solve -> integrate -> bias-off relax. Reversing
         # would discard the positional bias's penetration recovery.
