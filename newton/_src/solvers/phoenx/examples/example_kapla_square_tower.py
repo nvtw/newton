@@ -141,8 +141,8 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.frame_index: int = 0
-        self.sim_substeps = 8
-        self.solver_iterations = 10
+        self.sim_substeps = 6
+        self.solver_iterations = 8
         self.velocity_iterations = 1
 
         self._build_scene()
@@ -510,7 +510,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--grid-side",
         type=int,
-        default=5,
+        default=20,
         help="Tile the tower into a grid-side x grid-side grid in one shared world.",
     )
     parser.add_argument(
