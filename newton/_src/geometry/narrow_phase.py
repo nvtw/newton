@@ -807,7 +807,15 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
     """
     tid, j = wp.tid()
 
+    # Clamp against the pair buffer capacity. The broad-phase write
+    # path gates writes with ``if idx < shape_pairs_mesh.shape[0]`` but
+    # the counter still climbs past capacity on overflow; without the
+    # clamp here the strided loop would index ``shape_pairs_mesh[i]``
+    # past the end of the buffer.
     num_mesh_pairs = shape_pairs_mesh_count[0]
+    cap_mesh_pairs = shape_pairs_mesh.shape[0]
+    if num_mesh_pairs > cap_mesh_pairs:
+        num_mesh_pairs = cap_mesh_pairs
 
     # Strided loop over mesh pairs
     for i in range(tid, num_mesh_pairs, total_num_threads):
@@ -1107,7 +1115,14 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
         """
         tid = wp.tid()
 
+        # Clamp the count against the pair buffer capacity. On
+        # broad-phase mesh-plane overflow the counter exceeds the
+        # buffer size; without the clamp the loop below would
+        # OOB-read ``shape_pairs_mesh_plane[pair_idx]`` past the end.
         pair_count = shape_pairs_mesh_plane_count[0]
+        cap_pairs = shape_pairs_mesh_plane.shape[0]
+        if pair_count > cap_pairs:
+            pair_count = cap_pairs
 
         # Iterate over all mesh-plane pairs
         for pair_idx in range(pair_count):
@@ -1349,6 +1364,8 @@ def verify_narrow_phase_buffers(
     max_sdf_sdf: int,
     contact_count: wp.array[int],
     max_contacts: int,
+    reducer_count: wp.array[int],
+    max_reducer: int,
 ):
     """Check for buffer overflows in the collision pipeline."""
     if broad_phase_count[0] > max_broad_phase:
@@ -1404,6 +1421,18 @@ def verify_narrow_phase_buffers(
             contact_count[0],
             max_contacts,
         )
+    if max_reducer > 0:
+        if reducer_count[0] > max_reducer:
+            # GlobalContactReducer's pre-reduction edge-test buffer
+            # (sized by ``max_triangle_pairs``). Edge tests past the
+            # capacity are silently dropped by ``atomic_add``; which
+            # ones get kept depends on thread scheduling, so dense
+            # mesh-mesh scenes can diverge non-deterministically.
+            wp.printf(
+                "Warning: SDF reducer buffer overflowed %d > %d (raise max_triangle_pairs).\n",
+                reducer_count[0],
+                max_reducer,
+            )
 
 
 class NarrowPhase:
@@ -2133,6 +2162,16 @@ class NarrowPhase:
 
         # Verify no collision pipeline buffers overflowed
         if self.verify_buffers:
+            # Reducer is optional (heightfield-only / non-reduce scenes
+            # leave ``global_contact_reducer = None``); pass a sentinel
+            # in that case so the kernel's ``max_reducer > 0`` guard
+            # skips the check cleanly.
+            if self.global_contact_reducer is not None:
+                reducer_count_arr = self.global_contact_reducer.contact_count
+                reducer_capacity = int(self.global_contact_reducer.capacity)
+            else:
+                reducer_count_arr = candidate_pair_count  # any int32 array, value gated by max_reducer=0
+                reducer_capacity = 0
             wp.launch(
                 kernel=verify_narrow_phase_buffers,
                 dim=[1],
@@ -2153,6 +2192,8 @@ class NarrowPhase:
                     self.shape_pairs_sdf_sdf.shape[0] if self.shape_pairs_sdf_sdf is not None else 0,
                     writer_data.contact_count,
                     writer_data.contact_max,
+                    reducer_count_arr,
+                    reducer_capacity,
                 ],
                 device=device,
                 record_tape=False,

@@ -106,8 +106,12 @@ class Example:
         self.viewer = viewer
         self.device = wp.get_device()
 
+        # Pick the solver backend; default stays MuJoCo for reproducibility.
+        solver_name = getattr(args, "solver", "mujoco")
+
         builder = newton.ModelBuilder()
-        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        if solver_name == "mujoco":
+            newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
             armature=0.06,
             limit_ke=1.0e3,
@@ -169,15 +173,30 @@ class Example:
         self.model = builder.finalize()
         use_mujoco_contacts = getattr(args, "use_mujoco_contacts", False)
 
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            use_mujoco_contacts=use_mujoco_contacts,
-            solver="newton",
-            ls_parallel=False,
-            ls_iterations=50,
-            njmax=50,
-            nconmax=100,
-        )
+        if solver_name == "phoenx":
+            # PhoenX runs its own contacts (collision pipeline auto-
+            # created with sticky matching by the solver). Substeps=4
+            # matches the outer example cadence; per the MuJoCo-parity
+            # sweep in test_mujoco_parity, 4 internal substeps at 8 PGS
+            # iterations track MuJoCo's PD response to within ~0.01 rad
+            # RMS on a 1 m pendulum at dt=5 ms, which is what we need
+            # for a PhysX-trained policy transfer.
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model,
+                substeps=4,
+                solver_iterations=8,
+                velocity_iterations=1,
+            )
+        else:
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                use_mujoco_contacts=use_mujoco_contacts,
+                solver="newton",
+                ls_parallel=False,
+                ls_iterations=50,
+                njmax=50,
+                nconmax=100,
+            )
 
         self.viewer.set_model(self.model)
 
@@ -198,7 +217,12 @@ class Example:
 
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
-        if use_mujoco_contacts:
+        # Initialize contacts. PhoenX always needs a Contacts buffer
+        # (even though the solver auto-attaches a sticky CollisionPipeline,
+        # the example still drives ``model.collide`` in the simulate
+        # loop below). MuJoCo skips the buffer when collision detection
+        # lives inside its internal backend.
+        if solver_name == "mujoco" and use_mujoco_contacts:
             self.contacts = None
         else:
             self.contacts = self.model.contacts()
@@ -389,6 +413,12 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_mujoco_contacts_arg(parser)
+        parser.add_argument(
+            "--solver",
+            choices=["mujoco", "phoenx"],
+            default="mujoco",
+            help="Rigid-body solver backend. 'mujoco' (default) uses the MuJoCo/Warp solver; 'phoenx' uses SolverPhoenX.",
+        )
         return parser
 
 

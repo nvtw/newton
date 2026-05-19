@@ -1,0 +1,2370 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+"""Warp kernels for :class:`PhoenXWorld`. Dispatches only ADBS and CONTACT."""
+
+from __future__ import annotations
+
+import functools
+
+import warp as wp
+
+from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_STATIC,
+    ACCESS_MODE_VELOCITY_LEVEL,
+)
+from newton._src.solvers.phoenx.body import (
+    MOTION_DYNAMIC,
+    MOTION_KINEMATIC,
+    MOTION_STATIC,
+    BodyContainer,
+)
+from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
+    ADBS_TIME_US_OFFSET,
+    actuated_double_ball_socket_iterate,
+    actuated_double_ball_socket_iterate_multi,
+    actuated_double_ball_socket_prepare_for_iteration,
+    actuated_double_ball_socket_world_error,
+    actuated_double_ball_socket_world_wrench,
+    revolute_iterate,
+    revolute_iterate_multi,
+    revolute_prepare_for_iteration,
+)
+from newton._src.solvers.phoenx.constraints.constraint_cloth_bending import (
+    CLOTH_BENDING_TIME_US_OFFSET,
+    cloth_bending_iterate_at,
+    cloth_bending_prepare_for_iteration_at,
+)
+from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    CLOTH_TRIANGLE_TIME_US_OFFSET,
+    cloth_triangle_iterate_at,
+    cloth_triangle_prepare_for_iteration_at,
+)
+from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    ContactColumnContainer,
+    ContactViews,
+    contact_accumulate_time_us,
+    contact_get_body1,
+    contact_get_body2,
+    contact_get_side0_kind,
+    contact_get_side0_nodes_extra,
+    contact_get_side1_kind,
+    contact_get_side1_nodes_extra,
+    contact_iterate_multi,
+    contact_world_error,
+    contact_world_wrench,
+)
+from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
+    contact_iterate,
+    contact_iterate_cloth_aware,
+    contact_prepare_for_iteration,
+    contact_prepare_for_iteration_cloth_aware,
+)
+from newton._src.solvers.phoenx.constraints.constraint_container import (
+    CONSTRAINT_TYPE_CLOTH_BENDING,
+    CONSTRAINT_TYPE_CLOTH_TRIANGLE,
+    CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
+    ConstraintContainer,
+    constraint_accumulate_time_us,
+    constraint_get_body1,
+    constraint_get_body2,
+    constraint_get_type,
+    read_int,
+)
+from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
+    SOFT_TET_TIME_US_OFFSET,
+    soft_tetrahedron_iterate_at,
+    soft_tetrahedron_prepare_for_iteration_at,
+)
+from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
+    GREEDY_MAX_COLORS,
+    MAX_BODIES,
+    ElementInteractionData,
+    _lowest_set_bit,
+    element_interaction_data_make,
+)
+from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
+from newton._src.solvers.phoenx.particle import ParticleContainer
+from newton._src.solvers.phoenx.timer import elapsed_us, read_global_timer_ns
+
+# Body-N dword offsets in the per-constraint header. Each constraint
+# type stores (type, body1, body2) at dwords 0/1/2 then extra bodies
+# at dwords 3/4 (cloth-tri uses body3 only; soft-tet and cloth-bend
+# use body3 + body4).
+_CLOTH_TRIANGLE_OFF_BODY3 = wp.constant(wp.int32(3))
+_SOFT_TET_OFF_BODY3 = wp.constant(wp.int32(3))
+_SOFT_TET_OFF_BODY4 = wp.constant(wp.int32(4))
+_CLOTH_BENDING_OFF_BODY3 = wp.constant(wp.int32(3))
+_CLOTH_BENDING_OFF_BODY4 = wp.constant(wp.int32(4))
+
+
+__all__ = [
+    "_PER_WORLD_COLORING_BLOCK_DIM",
+    "_STRAGGLER_BLOCK_DIM",
+    "_build_scatter_keys_kernel",
+    "_choose_fast_tail_worlds_per_block",
+    "_constraint_gather_errors_kernel",
+    "_constraint_gather_wrenches_kernel",
+    "_constraints_to_elements_kernel",
+    "_count_elements_per_world_kernel",
+    "_integrate_velocities_kernel",
+    "_kinematic_interpolate_substep_kernel",
+    "_kinematic_prepare_step_kernel",
+    "_per_world_greedy_coloring_kernel",
+    "_per_world_jp_coloring_kernel",
+    "_phoenx_apply_forces_and_gravity_kernel",
+    "_phoenx_apply_global_damping_kernel",
+    "_phoenx_refresh_world_inertia_kernel",
+    "_phoenx_update_inertia_and_clear_forces_kernel",
+    "_pick_threads_per_world_kernel",
+    "_reduce_constraint_time_us_kernel",
+    "_reduce_contact_time_us_kernel",
+    "_reduce_total_colours_kernel",
+    "_set_kinematic_pose_batch_kernel",
+    "_sync_num_active_constraints_kernel",
+    "_zero_constraint_time_us_kernel",
+    "_zero_contact_time_us_kernel",
+    "get_fast_tail_kernel",
+    "get_singleworld_kernel",
+    "pack_body_xforms_kernel",
+]
+
+
+#: Max threads-per-world for fast-tail kernels (= warp size). The grid is
+#: always num_worlds * _STRAGGLER_BLOCK_DIM; surplus threads early-exit.
+_STRAGGLER_BLOCK_DIM: int = 32
+
+# PGS sweeps per *_iterate_multi call. Must evenly divide solver_iterations.
+# 2 amortises body/constraint reloads at +17-21% on g1_flat/h1_flat without
+# breaking stacking/articulation tests; 4 halves outer rounds further but
+# breaks test_slam_ball_into_stack.
+_FUSED_INNER_SWEEPS: int = 2
+
+_PRIORITY_COST_SHIFT = wp.constant(wp.int64(32))
+_PRIORITY_JITTER_MASK = wp.constant(wp.int64((1 << 32) - 1))
+
+
+def _choose_fast_tail_worlds_per_block(num_worlds: int) -> int:
+    """Worlds per physical block in the fast-tail kernels.
+
+    Each world owns one warp (32 threads); block size is ``32 * wpb``
+    so ``__syncwarp()`` stays valid. Three-tier by world count,
+    empirically tuned on RTX PRO 6000 (sm_120, 188 SMs):
+    ``wpb = 2`` below 512 worlds, ``wpb = 4`` up to 2048, ``wpb = 8``
+    above.
+    """
+    if num_worlds < 512:
+        return 2
+    if num_worlds < 2048:
+        return 4
+    return 8
+
+
+#: Upper bound on fast-tail block size. Lets callers bound padded launch dim
+#: without calling :func:`_choose_fast_tail_worlds_per_block` per-launch.
+_FAST_TAIL_MAX_BLOCK_DIM: int = _STRAGGLER_BLOCK_DIM * 8
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncthreads();
+#endif
+""")
+def _sync_threads(): ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncwarp();
+#endif
+""")
+def _sync_warp(): ...
+
+
+# Adaptive threads-per-world picker. Fast-tail grid is fixed; effective tpw
+# read from a 1-elem buffer per step. Smaller tpw early-exits surplus lanes.
+
+
+@wp.kernel(enable_backward=False)
+def _reduce_total_colours_kernel(
+    world_num_colors: wp.array[wp.int32],
+    num_worlds: wp.int32,
+    # out
+    total_colours: wp.array[wp.int32],
+):
+    """Atomic-sum world_num_colors into a 1-elem scalar. Caller must zero ``total_colours``."""
+    tid = wp.tid()
+    if tid >= num_worlds:
+        return
+    nc = world_num_colors[tid]
+    if nc > 0:
+        wp.atomic_add(total_colours, 0, nc)
+
+
+@wp.kernel(enable_backward=False)
+def _pick_threads_per_world_kernel(
+    world_csr_offsets: wp.array[wp.int32],
+    total_colours: wp.array[wp.int32],
+    num_worlds: wp.int32,
+    sm_count: wp.int32,
+    # out
+    tpw_choice: wp.array[wp.int32],
+):
+    """One-thread pick of tpw in {16, 32}. tpw=16 wins when warps/SM >= 8 AND
+    mean cids/colour <= 6 (sparse colours, saturated SMs); else tpw=32.
+    Auto picker never emits tpw=8 (the static arg can)."""
+    if wp.tid() != 0:
+        return
+
+    total_cids = world_csr_offsets[num_worlds]
+    nc = total_colours[0]
+
+    if nc <= 0 or num_worlds <= 0:
+        tpw_choice[0] = 32
+        return
+
+    # Fixed-point x16 so thresholds stay int32.
+    mean_x16 = (total_cids * wp.int32(16)) / nc
+    warps_at_tpw32 = num_worlds  # 1 warp/world at tpw=32
+    saturation_x16 = (warps_at_tpw32 * wp.int32(16)) / wp.max(sm_count, wp.int32(1))
+
+    pick = wp.int32(32)
+    if mean_x16 <= wp.int32(6 * 16) and saturation_x16 >= wp.int32(8 * 16):
+        pick = wp.int32(16)
+
+    tpw_choice[0] = pick
+
+
+# Per-world JP MIS coloring: worlds are independent (static-body nullification),
+# one block per world, output goes straight to per-world CSR.
+
+
+_PER_WORLD_COLORING_BLOCK_DIM: int = 64
+
+
+@wp.kernel(enable_backward=False)
+def _count_elements_per_world_kernel(
+    elements: wp.array[ElementInteractionData],
+    num_elements: wp.array[wp.int32],
+    bodies: BodyContainer,
+    # out
+    world_element_count: wp.array[wp.int32],  # [nw]
+    world_element_offsets_shifted: wp.array[wp.int32],  # [nw+1], will be inclusive-scanned
+):
+    """Atomic per-world element count. Writes raw count + shifted form so a
+    single inclusive scan produces (exclusive prefix, total)."""
+    tid = wp.tid()
+    n = num_elements[0]
+    if tid == wp.int32(0):
+        world_element_offsets_shifted[0] = wp.int32(0)
+    if tid >= n:
+        return
+    b = elements[tid].bodies[0]
+    if b < 0:
+        return
+    w = bodies.world_id[b]
+    wp.atomic_add(world_element_count, w, wp.int32(1))
+    wp.atomic_add(world_element_offsets_shifted, w + wp.int32(1), wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def _build_scatter_keys_kernel(
+    elements: wp.array[ElementInteractionData],
+    num_elements: wp.array[wp.int32],
+    bodies: BodyContainer,
+    cap: wp.int32,
+    # out (size ``2 * cap`` -- ping-pong buffer for ``radix_sort_pairs``)
+    keys: wp.array[wp.int32],
+    values: wp.array[wp.int32],
+):
+    """(key=world_id, value=cid) pairs for the per-world scatter sort.
+    Inactive/tail entries get key=INT32_MAX so they sort to the end."""
+    tid = wp.tid()
+    if tid >= cap:
+        return
+    n = num_elements[0]
+    if tid >= n:
+        keys[tid] = wp.int32(2147483647)
+        values[tid] = wp.int32(-1)
+        return
+    b = elements[tid].bodies[0]
+    if b < 0:
+        keys[tid] = wp.int32(2147483647)
+        values[tid] = wp.int32(-1)
+        return
+    keys[tid] = bodies.world_id[b]
+    values[tid] = tid
+
+
+@wp.func
+def _cost_biased_priority(
+    packed_priorities: wp.array[wp.int32],
+    cid: wp.int32,
+) -> wp.int32:
+    """Read prepacked (cost << 24) | (random & 0xFFFFFF) priority.
+
+    The pack happens once per step in the partitioner; coloring just
+    reads. See :func:`pack_priorities_kernel` in :mod:`graph_coloring_common`.
+    Bit layout makes plain int32 lexicographic comparison equivalent
+    to ``(cost, random)`` lex order.
+    """
+    return packed_priorities[cid]
+
+
+@wp.kernel(enable_backward=False)
+def _per_world_jp_coloring_kernel(
+    # per-world bucketing (input from the two kernels above)
+    world_element_offsets: wp.array[wp.int32],  # [nw+1] (exclusive prefix of counts)
+    world_element_count: wp.array[wp.int32],  # [nw] (raw per-world count)
+    world_elements: wp.array[wp.int32],  # [total] flat cid stream, sorted by world
+    # graph data
+    elements: wp.array[ElementInteractionData],
+    adjacency_end: wp.array[wp.int32],  # [num_bodies]
+    vertex_to_elements: wp.array[wp.int32],  # [cap * MAX_BODIES]
+    packed_priorities: wp.array[wp.int32],  # [capacity] (cost << 24) | (random & 0xFFFFFF)
+    max_colors: wp.int32,
+    # scratch (caller zeros each step)
+    assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
+    # outputs
+    world_element_ids_by_color: wp.array[wp.int32],  # [total] sorted-by-colour per world
+    world_color_starts: wp.array2d[wp.int32],  # [nw, MAX_COLORS+1] per-world prefix
+    world_num_colors: wp.array[wp.int32],  # [nw]
+):
+    """JP MIS coloring per world (one block per world). Each round picks
+    local-priority maxima and commits them as the next colour, writing into
+    world_element_ids_by_color via a tile-scan exclusive prefix."""
+    block, lane = wp.tid()
+    w = block
+    base = world_element_offsets[w]
+    count = world_element_count[w]
+
+    if count == 0:
+        if lane == wp.int32(0):
+            world_num_colors[w] = wp.int32(0)
+            world_color_starts[w, 0] = wp.int32(0)
+        return
+
+    # Phase 1: zero per-element assigned flags for this world's elements.
+    stride = _PER_WORLD_COLORING_BLOCK_DIM
+    offset = wp.int32(0)
+    while offset < count:
+        slot = offset + lane
+        if slot < count:
+            eid = world_elements[base + slot]
+            assigned[eid] = wp.int32(0)
+        offset = offset + stride
+
+    if lane == wp.int32(0):
+        world_color_starts[w, 0] = wp.int32(0)
+
+    _sync_threads()
+
+    current_color = wp.int32(0)
+    num_remaining = count
+    color_base = wp.int32(0)
+
+    while num_remaining > wp.int32(0) and current_color < max_colors:
+        # Phase 2: find local maxima and commit them. All lanes run
+        # the stride loop the same number of times so the
+        # block-collective tile reduction/scan sees every lane at the
+        # same point. Slot assignment uses ``tile_scan_exclusive``
+        # (deterministic, depends only on ``committed_here``) rather
+        # than an atomic cursor, at the same per-step cost.
+        committed_this_round = wp.int32(0)
+        offset = wp.int32(0)
+        while offset < count:
+            slot = offset + lane
+            committed_here = wp.int32(0)
+            committed_eid = wp.int32(0)
+            if slot < count:
+                eid = world_elements[base + slot]
+                if assigned[eid] == wp.int32(0):
+                    self_prio = _cost_biased_priority(packed_priorities, eid)
+                    is_local_max = bool(True)
+                    for j in range(MAX_BODIES):
+                        if not is_local_max:
+                            break
+                        b = elements[eid].bodies[j]
+                        if b < 0:
+                            break
+                        adj_start = wp.int32(0)
+                        if b > 0:
+                            adj_start = adjacency_end[b - 1]
+                        adj_end_b = adjacency_end[b]
+                        for k in range(adj_start, adj_end_b):
+                            if not is_local_max:
+                                break
+                            neighbor = vertex_to_elements[k]
+                            if neighbor == eid:
+                                continue
+                            a = assigned[neighbor]
+                            # Settled in a prior colour -> skip
+                            # (graph edge can't conflict).
+                            if a != wp.int32(0) and a != current_color + wp.int32(1):
+                                continue
+                            if _cost_biased_priority(packed_priorities, neighbor) > self_prio:
+                                is_local_max = bool(False)
+
+                    if is_local_max:
+                        assigned[eid] = current_color + wp.int32(1)
+                        committed_here = wp.int32(1)
+                        committed_eid = eid
+
+            # Block-wide deterministic slot assignment for the lanes
+            # that committed this iteration. ``tile_scan_exclusive``
+            # turns the per-lane 0/1 ``committed_here`` flags into
+            # per-lane prefix offsets; ``tile_sum`` gives the
+            # iteration's total so we can advance the colour-base
+            # offset for the next iteration.
+            committed_tile = wp.tile(committed_here)
+            iter_prefix = wp.tile_scan_exclusive(committed_tile)
+            iter_total_tile = wp.tile_sum(committed_tile)
+            iter_total = iter_total_tile[0]
+            if committed_here == wp.int32(1):
+                world_element_ids_by_color[base + color_base + committed_this_round + iter_prefix[lane]] = committed_eid
+            committed_this_round = committed_this_round + iter_total
+            offset = offset + stride
+
+        _sync_threads()
+
+        color_base = color_base + committed_this_round
+        num_remaining = num_remaining - committed_this_round
+        current_color = current_color + wp.int32(1)
+
+        if lane == wp.int32(0):
+            world_color_starts[w, current_color] = color_base
+
+        if committed_this_round == wp.int32(0):
+            break
+
+    if lane == wp.int32(0):
+        world_num_colors[w] = current_color
+
+
+# All-ones int64; flips a forbidden-color mask without unary NOT (Warp's int64
+# codegen is unreliable). Mirrors _FREE_COLOR_FLIP in graph_coloring_common.py.
+_PER_WORLD_FREE_COLOR_FLIP = wp.constant(wp.int64(-1))
+
+
+@wp.kernel(enable_backward=False, module="unique")
+def _per_world_greedy_coloring_kernel(
+    # per-world bucketing (input from the two kernels above)
+    world_element_offsets: wp.array[wp.int32],  # [nw+1] (exclusive prefix of counts)
+    world_element_count: wp.array[wp.int32],  # [nw] (raw per-world count)
+    world_elements: wp.array[wp.int32],  # [total] flat cid stream, sorted by world
+    # graph data
+    elements: wp.array[ElementInteractionData],
+    adjacency_end: wp.array[wp.int32],  # [num_bodies]
+    vertex_to_elements: wp.array[wp.int32],  # [cap * MAX_BODIES]
+    packed_priorities: wp.array[wp.int32],  # [capacity] (cost << 24) | (random & 0xFFFFFF)
+    max_colors: wp.int32,  # = GREEDY_MAX_COLORS, kept for parity with JP variant
+    # scratch (caller zeros each step)
+    assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
+    color_count: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS] histogram bucket
+    color_offsets: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS] live cursor for scatter
+    # outputs
+    world_element_ids_by_color: wp.array[wp.int32],  # [total] sorted-by-colour per world
+    world_color_starts: wp.array2d[wp.int32],  # [nw, MAX_COLORS+1] per-world prefix
+    world_num_colors: wp.array[wp.int32],  # [nw]
+    overflow_flag: wp.array[wp.int32],  # [1] set if any world exceeds GREEDY_MAX_COLORS
+):
+    """JP-MIS + smallest-free-color (greedy) per world. One block/world.
+    Replaces the JP round-equals-colour scatter with histogram + prefix scan +
+    atomic scatter (intra-block, no cross-block sync). Within-colour element
+    order is non-deterministic but irrelevant (PGS treats colours as sets)."""
+    block, lane = wp.tid()
+    w = block
+    base = world_element_offsets[w]
+    count = world_element_count[w]
+
+    if count == 0:
+        if lane == wp.int32(0):
+            world_num_colors[w] = wp.int32(0)
+            world_color_starts[w, 0] = wp.int32(0)
+        return
+
+    # Reset per-element assigned + per-world histogram/cursor buckets.
+    stride = _PER_WORLD_COLORING_BLOCK_DIM
+    offset = wp.int32(0)
+    while offset < count:
+        slot = offset + lane
+        if slot < count:
+            eid = world_elements[base + slot]
+            assigned[eid] = wp.int32(0)
+        offset = offset + stride
+
+    offset = wp.int32(0)
+    while offset < GREEDY_MAX_COLORS:
+        slot = offset + lane
+        if slot < GREEDY_MAX_COLORS:
+            color_count[w, slot] = wp.int32(0)
+            color_offsets[w, slot] = wp.int32(0)
+        offset = offset + stride
+
+    if lane == wp.int32(0):
+        world_color_starts[w, 0] = wp.int32(0)
+
+    _sync_threads()
+
+    # Greedy MIS+colour rounds. Outer loop hard-capped at ``count`` for safety.
+    num_remaining = count
+    overflow_local = wp.int32(0)
+    round_idx = wp.int32(0)
+    while num_remaining > wp.int32(0) and round_idx < count:
+        committed_this_round = wp.int32(0)
+        offset = wp.int32(0)
+        while offset < count:
+            slot = offset + lane
+            committed_here = wp.int32(0)
+            if slot < count:
+                eid = world_elements[base + slot]
+                if assigned[eid] == wp.int32(0):
+                    self_prio = _cost_biased_priority(packed_priorities, eid)
+                    is_local_max = bool(True)
+                    forbidden_mask = wp.int64(0)
+                    for j in range(MAX_BODIES):
+                        if not is_local_max:
+                            break
+                        b = elements[eid].bodies[j]
+                        if b < 0:
+                            break
+                        adj_start = wp.int32(0)
+                        if b > 0:
+                            adj_start = adjacency_end[b - 1]
+                        adj_end_b = adjacency_end[b]
+                        for k in range(adj_start, adj_end_b):
+                            if not is_local_max:
+                                break
+                            neighbor = vertex_to_elements[k]
+                            if neighbor == eid:
+                                continue
+                            a = assigned[neighbor]
+                            if a == wp.int32(0):
+                                # Uncoloured: MIS tiebreak.
+                                if _cost_biased_priority(packed_priorities, neighbor) > self_prio:
+                                    is_local_max = bool(False)
+                            else:
+                                # Coloured: forbid that colour.
+                                ncolor = a - wp.int32(1)
+                                if ncolor < GREEDY_MAX_COLORS:
+                                    forbidden_mask = forbidden_mask | (wp.int64(1) << wp.int64(ncolor))
+
+                    if is_local_max:
+                        # Saturated mask -> c < 0; treat as overflow (don't write
+                        # assigned[eid]=0 or fire an OOB atomic_add).
+                        free_mask = forbidden_mask ^ _PER_WORLD_FREE_COLOR_FLIP
+                        c = _lowest_set_bit(free_mask)
+                        if c < wp.int32(0) or c >= GREEDY_MAX_COLORS:
+                            overflow_local = wp.int32(1)
+                        else:
+                            assigned[eid] = c + wp.int32(1)
+                            wp.atomic_add(color_count, w, c, wp.int32(1))
+                            committed_here = wp.int32(1)
+
+            committed_tile = wp.tile(committed_here)
+            iter_total_tile = wp.tile_sum(committed_tile)
+            iter_total = iter_total_tile[0]
+            committed_this_round = committed_this_round + iter_total
+            offset = offset + stride
+
+        _sync_threads()
+        num_remaining = num_remaining - committed_this_round
+        if committed_this_round == wp.int32(0):
+            # Converged or saturated; overflow flag catches the latter.
+            break
+        round_idx = round_idx + wp.int32(1)
+
+    if overflow_local != wp.int32(0) and lane == wp.int32(0):
+        overflow_flag[0] = wp.int32(1)
+
+    # CSR build: exclusive prefix on color_count[w, :] (lane 0; 64 entries).
+    if lane == wp.int32(0):
+        running = wp.int32(0)
+        last_used = wp.int32(-1)
+        for c in range(GREEDY_MAX_COLORS):
+            world_color_starts[w, c] = running
+            cnt = color_count[w, c]
+            if cnt > wp.int32(0):
+                last_used = c
+            running = running + cnt
+        world_color_starts[w, GREEDY_MAX_COLORS] = running
+        world_num_colors[w] = last_used + wp.int32(1)
+    _sync_threads()
+
+    # Scatter ids into per-world CSR slices via atomic_add(color_offsets[w, c]).
+    offset = wp.int32(0)
+    while offset < count:
+        slot = offset + lane
+        if slot < count:
+            eid = world_elements[base + slot]
+            a = assigned[eid]
+            if a > wp.int32(0):
+                c = a - wp.int32(1)
+                local_slot = wp.atomic_add(color_offsets, w, c, wp.int32(1))
+                start = world_color_starts[w, c]
+                world_element_ids_by_color[base + start + local_slot] = eid
+        offset = offset + stride
+
+
+# Fast-path single-block-per-world dispatchers. Each block walks its world's
+# full CSR with __syncthreads between colours; same-colour cids never share a
+# body so per-lane RMW is race-free.
+#
+# Multi-world fast-tail kernels: revolute_only skips the joint-mode branch.
+
+
+@functools.cache
+def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool, enable_column_timers: bool = False):
+    """Build the multi-world fused prepare + iterate fast-tail kernel."""
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        world_element_ids_by_color: wp.array[wp.int32],
+        world_color_starts: wp.array2d[wp.int32],
+        world_csr_offsets: wp.array[wp.int32],
+        world_num_colors: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_iterations: wp.int32,
+        num_worlds: wp.int32,
+        num_joints: wp.int32,
+        num_bodies: wp.int32,
+        tpw_buf: wp.array[wp.int32],
+        copy_state: CopyStateContainer,
+    ):
+        tid = wp.tid()
+        tpw = tpw_buf[0]
+        local_tid = tid % tpw
+        world_id = tid / tpw
+        if world_id >= num_worlds:
+            return
+
+        n_colors = world_num_colors[world_id]
+        world_base = world_csr_offsets[world_id]
+
+        # ---- Prepare phase ----------------------------------------
+        c = wp.int32(0)
+        while c < n_colors:
+            start = world_base + world_color_starts[world_id, c]
+            end = world_base + world_color_starts[world_id, c + 1]
+            count = end - start
+
+            base = local_tid
+            while base < count:
+                cid = world_element_ids_by_color[start + base]
+                _t0 = wp.uint64(0)
+                if wp.static(enable_column_timers):
+                    _t0 = read_global_timer_ns()
+                if cid < num_joints:
+                    if wp.static(revolute_only):
+                        revolute_prepare_for_iteration(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
+                    else:
+                        actuated_double_ball_socket_prepare_for_iteration(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
+                    if wp.static(enable_column_timers):
+                        constraint_accumulate_time_us(
+                            constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                        )
+                else:
+                    local_cid = cid - num_joints
+                    contact_prepare_for_iteration(
+                        contact_cols,
+                        local_cid,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        copy_state,
+                        wp.int32(0),
+                    )
+                    if wp.static(enable_column_timers):
+                        contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
+                base += tpw
+
+            _sync_warp()
+            c += 1
+
+        # Iterate phase: outer = num_iterations / _FUSED_INNER_SWEEPS, each
+        # outer round runs *_iterate_multi to hold state in registers.
+        inner_sweeps = wp.int32(_FUSED_INNER_SWEEPS)
+        outer_iters = num_iterations / inner_sweeps
+        it_outer = wp.int32(0)
+        while it_outer < outer_iters:
+            c = wp.int32(0)
+            while c < n_colors:
+                start = world_base + world_color_starts[world_id, c]
+                end = world_base + world_color_starts[world_id, c + 1]
+                count = end - start
+
+                base = local_tid
+                while base < count:
+                    cid = world_element_ids_by_color[start + base]
+                    _t0 = wp.uint64(0)
+                    if wp.static(enable_column_timers):
+                        _t0 = read_global_timer_ns()
+                    if cid < num_joints:
+                        if wp.static(revolute_only):
+                            revolute_iterate_multi(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                sor_boost,
+                                True,
+                                inner_sweeps,
+                            )
+                        else:
+                            actuated_double_ball_socket_iterate_multi(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                sor_boost,
+                                True,
+                                inner_sweeps,
+                            )
+                        if wp.static(enable_column_timers):
+                            constraint_accumulate_time_us(
+                                constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                            )
+                    else:
+                        local_cid = cid - num_joints
+                        contact_iterate_multi(
+                            contact_cols,
+                            local_cid,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            True,
+                            inner_sweeps,
+                            copy_state,
+                            wp.int32(0),
+                            sor_boost,
+                        )
+                        if wp.static(enable_column_timers):
+                            contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
+                    base += tpw
+
+                _sync_warp()
+                c += 1
+
+            it_outer += 1
+
+    return kernel
+
+
+@functools.cache
+def _make_fast_tail_relax_kernel(*, revolute_only: bool, enable_column_timers: bool = False):
+    """Multi-world relax fast-tail kernel (use_bias=False, num_sweeps=num_iterations)."""
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        num_bodies: wp.int32,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        world_element_ids_by_color: wp.array[wp.int32],
+        world_color_starts: wp.array2d[wp.int32],
+        world_csr_offsets: wp.array[wp.int32],
+        world_num_colors: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_iterations: wp.int32,
+        num_worlds: wp.int32,
+        num_joints: wp.int32,
+        tpw_buf: wp.array[wp.int32],
+        copy_state: CopyStateContainer,
+    ):
+        tid = wp.tid()
+        tpw = tpw_buf[0]
+        local_tid = tid % tpw
+        world_id = tid / tpw
+        if world_id >= num_worlds:
+            return
+
+        n_colors = world_num_colors[world_id]
+        world_base = world_csr_offsets[world_id]
+
+        # *_iterate_multi with num_sweeps=num_iterations folds the whole relax
+        # into one register-cached call (velocity_iterations is typically 1).
+        c = wp.int32(0)
+        while c < n_colors:
+            start = world_base + world_color_starts[world_id, c]
+            end = world_base + world_color_starts[world_id, c + 1]
+            count = end - start
+
+            base = local_tid
+            while base < count:
+                cid = world_element_ids_by_color[start + base]
+                _t0 = wp.uint64(0)
+                if wp.static(enable_column_timers):
+                    _t0 = read_global_timer_ns()
+                if cid < num_joints:
+                    if wp.static(revolute_only):
+                        revolute_iterate_multi(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            sor_boost,
+                            False,
+                            num_iterations,
+                        )
+                    else:
+                        actuated_double_ball_socket_iterate_multi(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            sor_boost,
+                            False,
+                            num_iterations,
+                        )
+                    if wp.static(enable_column_timers):
+                        constraint_accumulate_time_us(
+                            constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                        )
+                else:
+                    local_cid = cid - num_joints
+                    contact_iterate_multi(
+                        contact_cols,
+                        local_cid,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        False,
+                        num_iterations,
+                        copy_state,
+                        wp.int32(0),
+                        sor_boost,
+                    )
+                    if wp.static(enable_column_timers):
+                        contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
+                base += tpw
+
+            _sync_warp()
+            c += 1
+
+    return kernel
+
+
+# Fast-tail kernels are no longer eagerly built at module import. Callers
+# should use :func:`get_fast_tail_kernel` (or hit module ``__getattr__`` for
+# the legacy names) so only the revolute variant the scene actually needs
+# gets compiled.
+
+
+@wp.kernel(enable_backward=False, module="unique")
+def _zero_constraint_time_us_kernel(
+    constraints: ConstraintContainer,
+    num_active: wp.array[wp.int32],
+    adbs_off: wp.int32,
+    cloth_tri_off: wp.int32,
+    cloth_bend_off: wp.int32,
+    soft_tet_off: wp.int32,
+    num_joints: wp.int32,
+    num_cloth_triangles: wp.int32,
+    num_cloth_bending: wp.int32,
+    num_soft_tetrahedra: wp.int32,
+):
+    """Zero every constraint column's ``time_us`` slot at step start.
+
+    Walks ``[0, num_active)`` once and selects the correct per-schema
+    dword offset from the constraint-type tag (dword 0)."""
+    cid = wp.tid()
+    total = num_active[0]
+    if cid >= total:
+        return
+    if cid < num_joints:
+        off = adbs_off
+    elif cid < num_joints + num_cloth_triangles:
+        off = cloth_tri_off
+    elif cid < num_joints + num_cloth_triangles + num_cloth_bending:
+        off = cloth_bend_off
+    elif cid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
+        off = soft_tet_off
+    else:
+        return
+    constraints.data[off, cid] = wp.float32(0.0)
+
+
+@wp.kernel(enable_backward=False, module="unique")
+def _zero_contact_time_us_kernel(
+    contact_cols: ContactColumnContainer,
+    num_columns: wp.int32,
+    off: wp.int32,
+):
+    """Zero every contact column's ``time_us`` slot at step start."""
+    local_cid = wp.tid()
+    if local_cid >= num_columns:
+        return
+    contact_cols.data[off, local_cid] = wp.float32(0.0)
+
+
+@wp.kernel(enable_backward=False, module="unique")
+def _reduce_constraint_time_us_kernel(
+    constraints: ConstraintContainer,
+    adbs_off: wp.int32,
+    cloth_tri_off: wp.int32,
+    cloth_bend_off: wp.int32,
+    soft_tet_off: wp.int32,
+    num_joints: wp.int32,
+    num_cloth_triangles: wp.int32,
+    num_cloth_bending: wp.int32,
+    num_soft_tetrahedra: wp.int32,
+    totals: wp.array[wp.float32],
+):
+    """Atomic-sum every constraint column's ``time_us`` slot into
+    ``totals[0..3]`` = (joints, cloth_tri, cloth_bend, soft_tet)."""
+    cid = wp.tid()
+    if cid < num_joints:
+        wp.atomic_add(totals, 0, constraints.data[adbs_off, cid])
+    elif cid < num_joints + num_cloth_triangles:
+        wp.atomic_add(totals, 1, constraints.data[cloth_tri_off, cid])
+    elif cid < num_joints + num_cloth_triangles + num_cloth_bending:
+        wp.atomic_add(totals, 2, constraints.data[cloth_bend_off, cid])
+    elif cid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
+        wp.atomic_add(totals, 3, constraints.data[soft_tet_off, cid])
+
+
+@wp.kernel(enable_backward=False, module="unique")
+def _reduce_contact_time_us_kernel(
+    contact_cols: ContactColumnContainer,
+    num_columns: wp.int32,
+    off: wp.int32,
+    totals: wp.array[wp.float32],
+):
+    """Atomic-sum every contact column's ``time_us`` slot into
+    ``totals[4]``."""
+    local_cid = wp.tid()
+    if local_cid >= num_columns:
+        return
+    wp.atomic_add(totals, 4, contact_cols.data[off, local_cid])
+
+
+def get_fast_tail_kernel(*, kind: str, revolute_only: bool, enable_column_timers: bool = False):
+    """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``
+    or ``"relax"``. Each (kind, revolute_only, enable_column_timers)
+    tuple is cached after first build by the underlying factory's
+    ``functools.cache``."""
+    if kind == "prepare_plus_iterate":
+        return _make_fast_tail_prepare_plus_iterate_kernel(
+            revolute_only=revolute_only, enable_column_timers=enable_column_timers
+        )
+    if kind == "relax":
+        return _make_fast_tail_relax_kernel(revolute_only=revolute_only, enable_column_timers=enable_column_timers)
+    raise ValueError(f"unknown fast-tail kernel kind: {kind!r}")
+
+
+@wp.kernel(enable_backward=False, module="unique")
+def _constraints_to_elements_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_constraints: wp.array[wp.int32],
+    num_joints: wp.int32,
+    num_cloth_triangles: wp.int32,
+    num_cloth_bending: wp.int32,
+    num_soft_tetrahedra: wp.int32,
+    num_bodies: wp.int32,
+    elements: wp.array[ElementInteractionData],
+):
+    """Project active constraints into ElementInteractionData. Static bodies
+    collapse to -1; the dynamic body compacts to slot 0.
+
+    Cloth-triangle, cloth-bending and soft-tetrahedron constraints
+    emit 3- or 4-member elements with unified body-or-particle
+    indices: rigid bodies live at ``[0, num_bodies)`` and particles at
+    ``[num_bodies, num_bodies + num_particles)``. The partitioner sees
+    the unified-index nodes uniformly so the same Jones-Plassmann /
+    greedy coloring pass colours joints, contacts, cloth-triangles,
+    cloth-bending, and soft-tetrahedra together.
+    """
+    tid = wp.tid()
+    n = num_constraints[0]
+    if tid >= n:
+        return
+    if tid < num_joints:
+        b1 = constraint_get_body1(constraints, tid)
+        b2 = constraint_get_body2(constraints, tid)
+        if b1 >= 0 and bodies.inverse_mass[b1] == 0.0:
+            b1 = -1
+        if b2 >= 0 and bodies.inverse_mass[b2] == 0.0:
+            b2 = -1
+        # Adjacency loop stops on the first -1, so compact non-negative ids first.
+        if b1 < 0 and b2 >= 0:
+            b1 = b2
+            b2 = -1
+        elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1)
+        return
+    if tid < num_joints + num_cloth_triangles:
+        # Cloth-triangle: three unified-index particle endpoints already
+        # stored in body1/body2/body3 (populate kernel did the +num_bodies
+        # shift). Pinned particles (inverse_mass == 0) collapse to -1 so
+        # the partitioner doesn't inflate adjacency for static anchors.
+        b1 = constraint_get_body1(constraints, tid)
+        b2 = constraint_get_body2(constraints, tid)
+        b3 = read_int(constraints, _CLOTH_TRIANGLE_OFF_BODY3, tid)
+        if b1 >= num_bodies and particles.inverse_mass[b1 - num_bodies] == 0.0:
+            b1 = -1
+        if b2 >= num_bodies and particles.inverse_mass[b2 - num_bodies] == 0.0:
+            b2 = -1
+        if b3 >= num_bodies and particles.inverse_mass[b3 - num_bodies] == 0.0:
+            b3 = -1
+        # Compact: drop -1s so the adjacency loop sees a contiguous prefix.
+        slot0 = wp.int32(-1)
+        slot1 = wp.int32(-1)
+        slot2 = wp.int32(-1)
+        if b1 >= 0:
+            slot0 = b1
+        for cand in range(2):
+            v = b2
+            if cand == 1:
+                v = b3
+            if v < 0:
+                continue
+            if slot0 < 0:
+                slot0 = v
+            elif slot1 < 0:
+                slot1 = v
+            else:
+                slot2 = v
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, -1, -1, -1)
+        return
+    if tid < num_joints + num_cloth_triangles + num_cloth_bending:
+        # Cloth-bending: 4 unified-index particle endpoints. body1 / body2
+        # are the opposite vertices; body3 / body4 are the shared edge.
+        b1 = constraint_get_body1(constraints, tid)
+        b2 = constraint_get_body2(constraints, tid)
+        b3 = read_int(constraints, _CLOTH_BENDING_OFF_BODY3, tid)
+        b4 = read_int(constraints, _CLOTH_BENDING_OFF_BODY4, tid)
+        if b1 >= num_bodies and particles.inverse_mass[b1 - num_bodies] == 0.0:
+            b1 = -1
+        if b2 >= num_bodies and particles.inverse_mass[b2 - num_bodies] == 0.0:
+            b2 = -1
+        if b3 >= num_bodies and particles.inverse_mass[b3 - num_bodies] == 0.0:
+            b3 = -1
+        if b4 >= num_bodies and particles.inverse_mass[b4 - num_bodies] == 0.0:
+            b4 = -1
+        slot0 = wp.int32(-1)
+        slot1 = wp.int32(-1)
+        slot2 = wp.int32(-1)
+        slot3 = wp.int32(-1)
+        if b1 >= 0:
+            slot0 = b1
+        for cand in range(3):
+            v = b2
+            if cand == 1:
+                v = b3
+            elif cand == 2:
+                v = b4
+            if v < 0:
+                continue
+            if slot0 < 0:
+                slot0 = v
+            elif slot1 < 0:
+                slot1 = v
+            elif slot2 < 0:
+                slot2 = v
+            else:
+                slot3 = v
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1)
+        return
+    if tid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
+        # Soft-tetrahedron: four unified-index particle endpoints stored
+        # in body1/body2/body3/body4 (populate kernel did the +num_bodies
+        # shift). Pinned particles collapse to -1 so the partitioner
+        # doesn't inflate adjacency for static anchors.
+        b1 = constraint_get_body1(constraints, tid)
+        b2 = constraint_get_body2(constraints, tid)
+        b3 = read_int(constraints, _SOFT_TET_OFF_BODY3, tid)
+        b4 = read_int(constraints, _SOFT_TET_OFF_BODY4, tid)
+        if b1 >= num_bodies and particles.inverse_mass[b1 - num_bodies] == 0.0:
+            b1 = -1
+        if b2 >= num_bodies and particles.inverse_mass[b2 - num_bodies] == 0.0:
+            b2 = -1
+        if b3 >= num_bodies and particles.inverse_mass[b3 - num_bodies] == 0.0:
+            b3 = -1
+        if b4 >= num_bodies and particles.inverse_mass[b4 - num_bodies] == 0.0:
+            b4 = -1
+        # Compact: drop -1s so the adjacency loop sees a contiguous prefix.
+        slot0 = wp.int32(-1)
+        slot1 = wp.int32(-1)
+        slot2 = wp.int32(-1)
+        slot3 = wp.int32(-1)
+        if b1 >= 0:
+            slot0 = b1
+        for cand in range(3):
+            v = b2
+            if cand == 1:
+                v = b3
+            elif cand == 2:
+                v = b4
+            if v < 0:
+                continue
+            if slot0 < 0:
+                slot0 = v
+            elif slot1 < 0:
+                slot1 = v
+            elif slot2 < 0:
+                slot2 = v
+            else:
+                slot3 = v
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1)
+        return
+    local_cid = tid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra
+    b1 = contact_get_body1(contact_cols, local_cid)
+    b2 = contact_get_body2(contact_cols, local_cid)
+    side0_kind = contact_get_side0_kind(contact_cols, local_cid)
+    side1_kind = contact_get_side1_kind(contact_cols, local_cid)
+    side0_extra = contact_get_side0_nodes_extra(contact_cols, local_cid)
+    side1_extra = contact_get_side1_nodes_extra(contact_cols, local_cid)
+
+    # Resolve a unified-index node to ``-1`` when its inverse mass is
+    # zero (anchored). The lookup container depends on the side's
+    # kind: rigid -> bodies; cloth -> particles (subtract num_bodies
+    # to land in the particle SoA). ``b < 0`` is the "no node" case
+    # (rigid sides without a body, e.g. world-attached shapes).
+    #
+    # KINEMATIC rigid bodies have ``inverse_mass == 0`` (the solver
+    # treats them as immovable rails) but we keep them as graph nodes
+    # so the per-step sleeping pass can spot sleeping-vs-kinematic
+    # contacts and wake the impacted island (e.g. a camera collider
+    # moving into a sleeping stack). Pure STATIC bodies still
+    # collapse to -1.
+    if b1 >= 0:
+        if side0_kind == wp.int32(0):
+            if bodies.inverse_mass[b1] == 0.0 and bodies.motion_type[b1] != MOTION_KINEMATIC:
+                b1 = -1
+        else:
+            if particles.inverse_mass[b1 - num_bodies] == 0.0:
+                b1 = -1
+    if b2 >= 0:
+        if side1_kind == wp.int32(0):
+            if bodies.inverse_mass[b2] == 0.0 and bodies.motion_type[b2] != MOTION_KINEMATIC:
+                b2 = -1
+        else:
+            if particles.inverse_mass[b2 - num_bodies] == 0.0:
+                b2 = -1
+
+    # Resolve up to three extra nodes per side. Rigid sides have
+    # extras at -1; cloth-tri sides have two extras (third stays -1);
+    # soft-tet sides have all three extras populated.
+    e0a = wp.int32(-1)
+    e0b = wp.int32(-1)
+    e0c = wp.int32(-1)
+    if side0_kind == wp.int32(1):  # CLOTH_TRIANGLE
+        e0a = side0_extra[0]
+        e0b = side0_extra[1]
+        if e0a >= 0 and particles.inverse_mass[e0a - num_bodies] == 0.0:
+            e0a = -1
+        if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
+            e0b = -1
+    elif side0_kind == wp.int32(2):  # SOFT_TETRAHEDRON
+        # Opt-E experiment: emit only 2 extras (3 nodes total per soft-tet
+        # side: b1 + e0a + e0b) into the coloring adjacency. The 4th tet
+        # vertex (e0c) is opposite the contact face -- its barycentric
+        # weight is zero on a true face contact, so dropping it from the
+        # adjacency graph sparsifies coloring without changing the
+        # iterate's impulse on the 4th vertex (which is zero anyway for
+        # face contacts, small for edge/vertex contacts).
+        e0a = side0_extra[0]
+        e0b = side0_extra[1]
+        if e0a >= 0 and particles.inverse_mass[e0a - num_bodies] == 0.0:
+            e0a = -1
+        if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
+            e0b = -1
+    e1a = wp.int32(-1)
+    e1b = wp.int32(-1)
+    e1c = wp.int32(-1)
+    if side1_kind == wp.int32(1):  # CLOTH_TRIANGLE
+        e1a = side1_extra[0]
+        e1b = side1_extra[1]
+        if e1a >= 0 and particles.inverse_mass[e1a - num_bodies] == 0.0:
+            e1a = -1
+        if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
+            e1b = -1
+    elif side1_kind == wp.int32(2):  # SOFT_TETRAHEDRON
+        # Opt-E experiment: see side0 comment.
+        e1a = side1_extra[0]
+        e1b = side1_extra[1]
+        if e1a >= 0 and particles.inverse_mass[e1a - num_bodies] == 0.0:
+            e1a = -1
+        if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
+            e1b = -1
+
+    # Compact: drop -1s into a contiguous prefix (the partitioner's
+    # adjacency loop stops on the first -1). Up to 6 nodes per contact
+    # after the soft-tet 4th-vertex drop (see soft-tet branches above):
+    # tet-tet = 3+3; tet-cloth = 3+3; tet-rigid = 3+1; cloth-cloth =
+    # 3+3; cloth-rigid = 3+1; rigid-rigid = 1+1.
+    s0 = wp.int32(-1)
+    s1 = wp.int32(-1)
+    s2 = wp.int32(-1)
+    s3 = wp.int32(-1)
+    s4 = wp.int32(-1)
+    s5 = wp.int32(-1)
+    cnt = wp.int32(0)
+    for cand in range(6):
+        v = wp.int32(-1)
+        if cand == 0:
+            v = b1
+        elif cand == 1:
+            v = b2
+        elif cand == 2:
+            v = e0a
+        elif cand == 3:
+            v = e0b
+        elif cand == 4:
+            v = e1a
+        else:
+            v = e1b
+        if v < 0:
+            continue
+        if cnt == 0:
+            s0 = v
+        elif cnt == 1:
+            s1 = v
+        elif cnt == 2:
+            s2 = v
+        elif cnt == 3:
+            s3 = v
+        elif cnt == 4:
+            s4 = v
+        else:
+            s5 = v
+        cnt = cnt + 1
+    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5)
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_gather_wrenches_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    num_constraints: wp.int32,
+    num_joints: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    out: wp.array[wp.spatial_vector],
+):
+    """Per-cid world-frame wrench on ``body2``: ``top = force [N]``,
+    ``bottom = torque [N·m]``. ``idt = 1 / substep_dt``."""
+    cid = wp.tid()
+    if cid >= num_constraints:
+        return
+    force = wp.vec3f(0.0, 0.0, 0.0)
+    torque = wp.vec3f(0.0, 0.0, 0.0)
+    if cid < num_joints:
+        force, torque = actuated_double_ball_socket_world_wrench(constraints, cid, idt)
+    else:
+        force, torque = contact_world_wrench(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
+    out[cid] = wp.spatial_vector(force, torque)
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_gather_errors_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    num_constraints: wp.int32,
+    num_joints: wp.int32,
+    # out
+    out: wp.array[wp.spatial_vector],
+):
+    """Per-cid position-level residual: top=linear [m], bottom=angular [rad]."""
+    cid = wp.tid()
+    if cid >= num_constraints:
+        return
+    zero = wp.spatial_vector(wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0))
+    err = zero
+    if cid < num_joints:
+        err = actuated_double_ball_socket_world_error(constraints, cid, bodies)
+    else:
+        err = contact_world_error(contact_cols, cid - num_joints)
+    out[cid] = err
+
+
+@wp.func
+def _rotation_quaternion(omega: wp.vec3f, dt: wp.float32) -> wp.quatf:
+    """Axis-angle rotation quaternion for ``omega * dt``. Unit norm by construction."""
+    omega_len = wp.length(omega)
+    theta = omega_len * dt
+    if theta < 1.0e-9:
+        return wp.quatf(0.0, 0.0, 0.0, 1.0)
+    half = theta * 0.5
+    s = wp.sin(half) / omega_len
+    return wp.quatf(omega[0] * s, omega[1] * s, omega[2] * s, wp.cos(half))
+
+
+@wp.kernel(enable_backward=False)
+def _integrate_velocities_kernel(
+    bodies: BodyContainer,
+    dt: wp.float32,
+):
+    """Advance pose for dynamic bodies only. Kinematic bodies advance via
+    lerp/slerp in :func:`_kinematic_interpolate_substep_kernel`."""
+    i = wp.tid()
+    mt = bodies.motion_type[i]
+    if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
+        return
+    # Sleeping bodies must not drift. They may carry a small residual
+    # velocity (anywhere below the per-island sleep threshold) at the
+    # moment ``island_root`` is stamped; integrating that for many
+    # substeps would slide the whole sleeping island visibly.
+    if bodies.island_root[i] >= wp.int32(0):
+        return
+
+    bodies.position[i] = bodies.position[i] + bodies.velocity[i] * dt
+    q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
+    bodies.orientation[i] = wp.normalize(q_rot * bodies.orientation[i])
+
+
+@wp.kernel(enable_backward=False)
+def _kinematic_prepare_step_kernel(
+    bodies: BodyContainer,
+    dt: wp.float32,
+):
+    """Per-step kinematic prepare. Resolves target (scripted vs constant-vel),
+    snapshots prev pose for substep lerp/slerp, infers velocity via quaternion
+    log-map (exact for large rotations)."""
+    i = wp.tid()
+    if bodies.motion_type[i] != MOTION_KINEMATIC:
+        return
+
+    pos_prev = bodies.position[i]
+    orient_prev = bodies.orientation[i]
+    bodies.position_prev[i] = pos_prev
+    bodies.orientation_prev[i] = orient_prev
+
+    if bodies.kinematic_target_valid[i] == 1:
+        pos_target = bodies.kinematic_target_pos[i]
+        orient_target = bodies.kinematic_target_orient[i]
+        # One-shot: user must re-assert the target each step.
+        bodies.kinematic_target_valid[i] = 0
+    else:
+        # Constant-velocity fallthrough: advance pose by velocity*dt.
+        pos_target = pos_prev + bodies.velocity[i] * dt
+        q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
+        orient_target = wp.normalize(q_rot * orient_prev)
+        bodies.kinematic_target_pos[i] = pos_target
+        bodies.kinematic_target_orient[i] = orient_target
+
+    # Infer velocity from pose delta. Round-trips exactly on the constant-
+    # velocity path; exposes pose derivative for the scripted path.
+    inv_dt = wp.float32(1.0) / dt
+    v = (pos_target - pos_prev) * inv_dt
+
+    # Canonicalise to shortest-path hemisphere before the atan2.
+    q_rel = orient_target * wp.quat_inverse(orient_prev)
+    if q_rel[3] < 0.0:
+        q_rel = -q_rel
+    xyz = wp.vec3f(q_rel[0], q_rel[1], q_rel[2])
+    xyz_len = wp.length(xyz)
+    if xyz_len > 1.0e-9:
+        angle = 2.0 * wp.atan2(xyz_len, q_rel[3])
+        omega = xyz * (angle * inv_dt / xyz_len)
+    else:
+        omega = wp.vec3f(0.0, 0.0, 0.0)
+
+    bodies.velocity[i] = v
+    bodies.angular_velocity[i] = omega
+
+
+@wp.kernel(enable_backward=False)
+def _set_kinematic_pose_batch_kernel(
+    bodies: BodyContainer,
+    body_ids: wp.array[wp.int32],
+    target_positions: wp.array[wp.vec3f],
+    target_orientations: wp.array[wp.quatf],
+):
+    """Batched writeback for :meth:`PhoenXWorld.set_kinematic_pose`. Silently
+    no-ops on non-kinematic bodies (host should validate and raise)."""
+    k = wp.tid()
+    b = body_ids[k]
+    if bodies.motion_type[b] != MOTION_KINEMATIC:
+        return
+    bodies.kinematic_target_pos[b] = target_positions[k]
+    bodies.kinematic_target_orient[b] = target_orientations[k]
+    bodies.kinematic_target_valid[b] = 1
+
+
+@wp.kernel(enable_backward=False)
+def _kinematic_interpolate_substep_kernel(
+    bodies: BodyContainer,
+    alpha: wp.float32,
+):
+    """Per-substep kinematic pose: position = lerp(prev, target, alpha),
+    orientation = slerp(prev, target, alpha). alpha = (substep+1)/num_substeps;
+    at alpha=1 the body lands exactly on its target."""
+    i = wp.tid()
+    if bodies.motion_type[i] != MOTION_KINEMATIC:
+        return
+    prev_pos = bodies.position_prev[i]
+    target_pos = bodies.kinematic_target_pos[i]
+    prev_orient = bodies.orientation_prev[i]
+    target_orient = bodies.kinematic_target_orient[i]
+    bodies.position[i] = (1.0 - alpha) * prev_pos + alpha * target_pos
+    bodies.orientation[i] = wp.quat_slerp(prev_orient, target_orient, alpha)
+
+
+@wp.kernel(enable_backward=False)
+def pack_body_xforms_kernel(
+    bodies: BodyContainer,
+    xforms: wp.array[wp.transform],
+):
+    """Pack ``(position, orientation)`` into a flat ``wp.transform``
+    array for ``viewer.log_shapes``."""
+    i = wp.tid()
+    xforms[i] = wp.transform(bodies.position[i], bodies.orientation[i])
+
+
+# Per-step body kernels (forces + gravity, inertia refresh, force clear) plus
+# the on-device active-constraint count fuse. Driven from PhoenXWorld.step.
+
+
+@wp.kernel(enable_backward=False)
+def _sync_num_active_constraints_kernel(
+    num_contact_columns: wp.array[wp.int32],
+    joint_constraint_count: wp.int32,
+    # out
+    num_active_constraints: wp.array[wp.int32],
+):
+    """``num_active_constraints = num_joints + num_contact_columns``,
+    on-device. Single-thread; safe inside graph capture."""
+    tid = wp.tid()
+    if tid != 0:
+        return
+    num_active_constraints[0] = joint_constraint_count + num_contact_columns[0]
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_apply_forces_and_gravity_kernel(
+    bodies: BodyContainer,
+    gravity: wp.array[wp.vec3f],
+    substep_dt: wp.float32,
+):
+    """Per-body substep entry: snapshot pose into ``*_prev_substep``,
+    set :attr:`access_mode`, then apply external forces + gravity to
+    velocity (dynamic only). Force accumulators are zeroed in
+    :func:`_phoenx_update_inertia_and_clear_forces_kernel` at end-of-step.
+
+    The substep-start pose snapshot is the finite-diff anchor used by
+    :mod:`newton._src.solvers.phoenx.access_mode` when a constraint
+    flips a body between velocity- and position-level. It must run
+    once per substep regardless of motion type so non-dynamic bodies
+    also have a valid anchor.
+    """
+    i = wp.tid()
+    bodies.position_prev_substep[i] = bodies.position[i]
+    bodies.orientation_prev_substep[i] = bodies.orientation[i]
+    if bodies.motion_type[i] != MOTION_DYNAMIC:
+        bodies.access_mode[i] = ACCESS_MODE_STATIC
+        return
+    if bodies.inverse_mass[i] == 0.0:
+        bodies.access_mode[i] = ACCESS_MODE_STATIC
+        return
+    # Sleeping bodies: skip gravity + force application and present as
+    # STATIC to the constraint solve so body_set_access_mode early-outs
+    # on every constraint touch. Velocity stays at whatever value it
+    # held when the island fell below the threshold (~ 0). ``island_root``
+    # is always -1 (awake) when the sleeping pipeline is disabled.
+    if bodies.island_root[i] >= 0:
+        bodies.access_mode[i] = ACCESS_MODE_STATIC
+        return
+    bodies.access_mode[i] = ACCESS_MODE_VELOCITY_LEVEL
+    v = bodies.velocity[i]
+    w = bodies.angular_velocity[i]
+    inv_mass = bodies.inverse_mass[i]
+    inv_inertia_world = bodies.inverse_inertia_world[i]
+    v = v + bodies.force[i] * (inv_mass * substep_dt)
+    w = w + (inv_inertia_world * bodies.torque[i]) * substep_dt
+    if bodies.affected_by_gravity[i] != 0:
+        v = v + gravity[bodies.world_id[i]] * substep_dt
+    bodies.velocity[i] = v
+    bodies.angular_velocity[i] = w
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_update_inertia_and_clear_forces_kernel(
+    bodies: BodyContainer,
+):
+    """End-of-step: per-body damping + world-inertia rebuild (R * I^-1 * R^T)
+    + force/torque accumulator zeroing. Runs once per step."""
+    i = wp.tid()
+    # Damping + rotated inertia: dynamic-only.
+    if bodies.motion_type[i] == MOTION_DYNAMIC:
+        bodies.velocity[i] = bodies.velocity[i] * bodies.linear_damping[i]
+        bodies.angular_velocity[i] = bodies.angular_velocity[i] * bodies.angular_damping[i]
+        r = wp.quat_to_matrix(bodies.orientation[i])
+        bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
+    # Force / torque clear: every body slot, including kinematic / static.
+    bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
+    bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_refresh_world_inertia_kernel(
+    bodies: BodyContainer,
+):
+    """Per-substep refresh of inverse_inertia_world (R * I^-1 * R^T) so the
+    next substep's solve sees the rotated inertia. Anisotropic bodies drift in
+    angular momentum without this when running multiple substeps."""
+    i = wp.tid()
+    if bodies.motion_type[i] == MOTION_DYNAMIC:
+        r = wp.quat_to_matrix(bodies.orientation[i])
+        bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_apply_global_damping_kernel(
+    bodies: BodyContainer,
+    global_damping: wp.array[wp.float32],
+):
+    """Per-substep global damping for dynamic bodies. ``global_damping`` is
+    [linear, angular]; v *= 1 - linear, w *= 1 - angular. Device-stored so the
+    host can rewrite without re-capture."""
+    i = wp.tid()
+    if bodies.motion_type[i] == MOTION_DYNAMIC:
+        lin = 1.0 - global_damping[0]
+        ang = 1.0 - global_damping[1]
+        bodies.velocity[i] = bodies.velocity[i] * lin
+        bodies.angular_velocity[i] = bodies.angular_velocity[i] * ang
+
+
+# Single-world step path: per-colour grid launches via wp.capture_while on
+# head_active. Persistent grid sized once at construction.
+# few big worlds; the multi-world fast-tail path leaves SMs idle there.
+#
+# Head capture-while termination -- ``head_active[0]`` starts at 1 and
+# the kernel clears it in two cases:
+#
+#   (a) ``color_cursor[0] <= 0``  -- sweep drained every colour.
+#   (b) ``count <= fuse_threshold`` -- hand off to the fused tail
+#       kernel, which resumes at the same cursor.
+#
+# Neither case touches ``color_cursor``; the dedicated ``head_active``
+# flag is what lets the tail kernel pick up where (b) stopped. During
+# normal work thread 0 decrements ``color_cursor`` at end-of-kernel.
+# ``fuse_threshold = 0`` disables (b) and preserves the original
+# one-kernel-per-colour behaviour.
+# Tail launches after head_active clears stay cheap (early-exit no-ops) until
+# the outer capture_while observes head_active[0] == 0.
+
+
+@wp.func
+def _color_for_step(
+    step_idx: wp.int32,
+    n_colors: wp.int32,
+    direction: wp.int32,
+    max_colored_partitions: wp.int32,
+) -> wp.int32:
+    """Map a 0-based forward step index into the actual color index
+    for this sweep. ``direction == 0`` => ascending order
+    (``c = step_idx``); ``!= 0`` => reverse for non-overflow colours
+    (symmetric Gauss-Seidel). When mass splitting is on
+    (``max_colored_partitions >= 0``) the overflow bucket at index
+    ``max_colored_partitions`` always runs last regardless of
+    direction.
+
+    Symmetric sweep alone is not enough to fix Kapla-tower drift
+    under warm-start (it only swaps edge colours; middle colours
+    stay near the middle of the sweep). It's kept as a building
+    block for future experimentation; the actual drift fix lives on
+    the warm-start cache side (see
+    ``warm_start_periodic_invalidate_kernel`` and ``set_warm_start
+    _rotate_skip``).
+    """
+    if direction == wp.int32(0):
+        return step_idx
+    # Reverse path.
+    if max_colored_partitions >= wp.int32(0) and step_idx == max_colored_partitions:
+        return max_colored_partitions  # overflow stays last
+    n_regular = n_colors
+    if max_colored_partitions >= wp.int32(0) and n_colors > max_colored_partitions:
+        n_regular = max_colored_partitions
+    if n_regular <= wp.int32(1):
+        return step_idx
+    return n_regular - wp.int32(1) - step_idx
+
+
+@wp.func
+def _singleworld_color_range(
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    color_cursor: wp.array[wp.int32],
+    sweep_direction: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
+):
+    """Decode current colour's cid range from cursor. Returns
+    ``(start, count, cursor, c)`` where ``c`` is the *actual* colour
+    index (post-direction remap). When ``sweep_direction[0] != 0``
+    the regular colours are visited in reverse order; the overflow
+    bucket (if any) stays last."""
+    cursor = color_cursor[0]
+    n_colors = num_colors[0]
+    step_idx = n_colors - cursor
+    c = _color_for_step(step_idx, n_colors, sweep_direction[0], max_colored_partitions)
+    start = color_starts[c]
+    end = color_starts[c + 1]
+    count = end - start
+    return start, count, cursor, c
+
+
+# Single-world fused-tail kernels: one 1D block walks trailing small colours,
+# __syncthreads between colours. Hands off to the persistent kernel on the
+# first colour > FUSE_TAIL_MAX_COLOR_SIZE without decrementing the cursor.
+
+
+@wp.kernel(enable_backward=False)
+def _reset_head_active_kernel(head_active: wp.array[wp.int32]):
+    """Reset head_active[0] = 1 so the next capture_while gets at least one launch."""
+    head_active[0] = 1
+
+
+@wp.func
+def _singleworld_color_range_from_cursor(
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    cursor: wp.int32,
+    sweep_direction: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
+):
+    """:func:`_singleworld_color_range` taking the cursor as a register
+    value. Returns ``(start, count, c)`` -- ``c`` is the direction-
+    remapped colour index (see :func:`_color_for_step`)."""
+    n_colors = num_colors[0]
+    step_idx = n_colors - cursor
+    c = _color_for_step(step_idx, n_colors, sweep_direction[0], max_colored_partitions)
+    start = color_starts[c]
+    end = color_starts[c + 1]
+    count = end - start
+    return start, count, c
+
+
+# Single-world kernel factories: persistent (head) + single-block (fused tail)
+# for prepare/iterate/relax x revolute_only/generic. ``phase`` and ``revolute_only``
+# are compile-time so Warp constant-folds + dead-code-eliminates the unused branch.
+
+
+@functools.cache
+def _make_singleworld_persistent_kernel(
+    *,
+    phase: str,
+    revolute_only: bool,
+    cloth_support: bool,
+    enable_column_timers: bool = False,
+    soft_tet_only: bool = False,
+):
+    """Persistent-grid PGS kernel for the requested phase + specialisation.
+
+    Per-cid dispatch reads the constraint type tag (dword 0) and routes
+    to the matching ``@wp.func`` -- joint, cloth-triangle, or contact.
+    The cloth branch is gated by the compile-time ``cloth_support``
+    flag so rigid-only scenes get a binary with no cloth code at all.
+
+    ``soft_tet_only=True`` skips the ctype dispatch tree: when the
+    ConstraintContainer only ever holds soft-tetrahedron rows (no
+    joints, no cloth triangles, no cloth bending), every non-contact
+    cid is by construction a soft-tet. Eliminates one dword load
+    (constraint type) and the cloth_tri / cloth_bend / joint
+    fallback branches from the iterate / prepare / relax hot path.
+
+    ``enable_column_timers`` is a static axis: when True, each per-cid
+    dispatch is bracketed with ``%globaltimer`` reads and the elapsed
+    microseconds are atomic-added to the column's ``time_us`` slot.
+    """
+    is_prepare = phase == "prepare"
+    is_iterate = phase == "iterate"
+    use_bias = is_iterate  # iterate ON, relax OFF (prepare ignores)
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        element_ids_by_color: wp.array[wp.int32],
+        color_starts: wp.array[wp.int32],
+        num_colors: wp.array[wp.int32],
+        color_cursor: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_joints: wp.int32,
+        num_cloth_triangles: wp.int32,
+        num_cloth_bending: wp.int32,
+        num_soft_tetrahedra: wp.int32,
+        num_bodies: wp.int32,
+        total_num_threads: wp.int32,
+        fuse_threshold: wp.int32,
+        head_active: wp.array[wp.int32],
+        copy_state: CopyStateContainer,
+        max_colored_partitions: wp.int32,
+        ms_batch_size: wp.int32,
+        sweep_direction: wp.array[wp.int32],
+    ):
+        tid = wp.tid()
+        if color_cursor[0] <= 0:
+            if tid == 0:
+                head_active[0] = 0
+            return
+        start, count, cursor, c = _singleworld_color_range(
+            color_starts, num_colors, color_cursor, sweep_direction, max_colored_partitions
+        )
+
+        if count <= fuse_threshold:
+            if tid == 0:
+                head_active[0] = 0
+            return
+
+        # Overflow detection. ``c`` is the direction-remapped colour
+        # index returned by ``_singleworld_color_range``; the overflow
+        # bucket lives at ``max_colored_partitions`` and stays there
+        # regardless of sweep direction (see ``_color_for_step``).
+        # Overflow constraints are grouped into batches of
+        # ``ms_batch_size`` consecutive CSR slots; one thread processes
+        # a whole batch sequentially (Gauss-Seidel within the batch on
+        # a shared slot) while across batches processing is parallel
+        # (Jacobi via distinct slots). Regular colours stay at
+        # ``parallel_id=0`` with one thread per constraint (independent
+        # set, no need for splitting).
+        is_overflow_color = max_colored_partitions >= wp.int32(0) and c == max_colored_partitions
+
+        # For overflow: each thread covers ``ms_batch_size`` consecutive
+        # CSR slots starting at ``tid * ms_batch_size``, grid-stride
+        # by ``total_num_threads * ms_batch_size``. For regular:
+        # one slot per thread, grid-stride by total_num_threads.
+        thread_start = tid
+        stride = total_num_threads
+        if is_overflow_color:
+            thread_start = tid * ms_batch_size
+            stride = total_num_threads * ms_batch_size
+
+        for t in range(thread_start, count, stride):
+            inner_end = wp.int32(1)
+            if is_overflow_color:
+                inner_end = ms_batch_size
+            for inner in range(inner_end):
+                t_slot = t + inner
+                if t_slot >= count:
+                    break
+                cid = element_ids_by_color[start + t_slot]
+                parallel_id = wp.int32(0)
+                if is_overflow_color:
+                    # Batch index = partition_key stamped by emit.
+                    parallel_id = t_slot / ms_batch_size
+                # Opt-in per-column wall-clock bracket. The %globaltimer
+                # reads and atomic_add are dead-code-eliminated when
+                # ``enable_column_timers=False`` thanks to ``wp.static``.
+                _t0 = wp.uint64(0)
+                if wp.static(enable_column_timers):
+                    _t0 = read_global_timer_ns()
+                # Two-stage dispatch.
+                # 1) Contacts live in a separate ContactColumnContainer (NOT in
+                #    the joint-side ConstraintContainer), so contact cids must
+                #    NOT do a `constraint_get_type` read -- the constraint
+                #    container has no slot at the contact cid range. Use a
+                #    cheap cid-range check.
+                # 2) Joints + cloth share the ConstraintContainer; within that
+                #    range we dispatch on the type tag (each schema stamps its
+                #    type into dword 0 at populate time).
+                dispatched = False
+                if cid >= num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
+                    local_cid = cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra
+                    if wp.static(cloth_support):
+                        if wp.static(is_prepare):
+                            contact_prepare_for_iteration_cloth_aware(
+                                contact_cols,
+                                local_cid,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                copy_state,
+                                parallel_id,
+                            )
+                        else:
+                            contact_iterate_cloth_aware(
+                                contact_cols,
+                                local_cid,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                use_bias,
+                                copy_state,
+                                parallel_id,
+                                sor_boost,
+                            )
+                    else:
+                        if wp.static(is_prepare):
+                            contact_prepare_for_iteration(
+                                contact_cols,
+                                local_cid,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                copy_state,
+                                parallel_id,
+                            )
+                        else:
+                            contact_iterate(
+                                contact_cols,
+                                local_cid,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                use_bias,
+                                copy_state,
+                                parallel_id,
+                                sor_boost,
+                            )
+                    dispatched = True
+                    if wp.static(enable_column_timers):
+                        contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
+                if not dispatched:
+                    if wp.static(soft_tet_only):
+                        # Specialised path: ConstraintContainer only holds soft-tets
+                        # (no joints / cloth-tri / cloth-bend rows), so the ctype
+                        # read + 3-way compare is dead code. cid here is by
+                        # construction a soft-tet.
+                        if wp.static(is_prepare):
+                            soft_tetrahedron_prepare_for_iteration_at(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                            )
+                        else:
+                            soft_tetrahedron_iterate_at(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost
+                            )
+                        if wp.static(enable_column_timers):
+                            constraint_accumulate_time_us(
+                                constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                            )
+                    else:
+                        ctype = constraint_get_type(constraints, cid)
+                        if wp.static(cloth_support):
+                            if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
+                                if wp.static(is_prepare):
+                                    cloth_triangle_prepare_for_iteration_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    cloth_triangle_iterate_at(
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        sor_boost,
+                                    )
+                                dispatched = True
+                                if wp.static(enable_column_timers):
+                                    constraint_accumulate_time_us(
+                                        constraints,
+                                        CLOTH_TRIANGLE_TIME_US_OFFSET,
+                                        cid,
+                                        elapsed_us(_t0, read_global_timer_ns()),
+                                    )
+                            elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
+                                if wp.static(is_prepare):
+                                    soft_tetrahedron_prepare_for_iteration_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    soft_tetrahedron_iterate_at(
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        sor_boost,
+                                    )
+                                dispatched = True
+                                if wp.static(enable_column_timers):
+                                    constraint_accumulate_time_us(
+                                        constraints,
+                                        SOFT_TET_TIME_US_OFFSET,
+                                        cid,
+                                        elapsed_us(_t0, read_global_timer_ns()),
+                                    )
+                            elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
+                                if wp.static(is_prepare):
+                                    cloth_bending_prepare_for_iteration_at(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    cloth_bending_iterate_at(
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        sor_boost,
+                                    )
+                                dispatched = True
+                                if wp.static(enable_column_timers):
+                                    constraint_accumulate_time_us(
+                                        constraints,
+                                        CLOTH_BENDING_TIME_US_OFFSET,
+                                        cid,
+                                        elapsed_us(_t0, read_global_timer_ns()),
+                                    )
+                        if not dispatched:
+                            # Joint (ADBS or revolute specialisation).
+                            if wp.static(is_prepare):
+                                if wp.static(revolute_only):
+                                    revolute_prepare_for_iteration(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                                else:
+                                    actuated_double_ball_socket_prepare_for_iteration(
+                                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                    )
+                            else:
+                                if wp.static(revolute_only):
+                                    revolute_iterate(
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        sor_boost,
+                                        use_bias,
+                                    )
+                                else:
+                                    actuated_double_ball_socket_iterate(
+                                        constraints,
+                                        cid,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        parallel_id,
+                                        idt,
+                                        sor_boost,
+                                        use_bias,
+                                    )
+                            if wp.static(enable_column_timers):
+                                constraint_accumulate_time_us(
+                                    constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                )
+
+        if tid == 0:
+            color_cursor[0] = cursor - 1
+
+    return kernel
+
+
+@functools.cache
+def _make_singleworld_fused_kernel(
+    *,
+    phase: str,
+    revolute_only: bool,
+    cloth_support: bool,
+    enable_column_timers: bool = False,
+    soft_tet_only: bool = False,
+):
+    """Single-block tail-fused PGS kernel; same axes as
+    :func:`_make_singleworld_persistent_kernel`."""
+    is_prepare = phase == "prepare"
+    is_iterate = phase == "iterate"
+    use_bias = is_iterate
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        element_ids_by_color: wp.array[wp.int32],
+        color_starts: wp.array[wp.int32],
+        num_colors: wp.array[wp.int32],
+        color_cursor: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_joints: wp.int32,
+        num_cloth_triangles: wp.int32,
+        num_cloth_bending: wp.int32,
+        num_soft_tetrahedra: wp.int32,
+        num_bodies: wp.int32,
+        fuse_threshold: wp.int32,
+        copy_state: CopyStateContainer,
+        max_colored_partitions: wp.int32,
+        ms_batch_size: wp.int32,
+        sweep_direction: wp.array[wp.int32],
+    ):
+        _block, lane = wp.tid()
+        cursor = color_cursor[0]
+        while cursor > 0:
+            start, count, c = _singleworld_color_range_from_cursor(
+                color_starts, num_colors, cursor, sweep_direction, max_colored_partitions
+            )
+            if count > fuse_threshold:
+                break
+            is_overflow_color = max_colored_partitions >= wp.int32(0) and c == max_colored_partitions
+            # Overflow handling mirrors the head kernel's batched
+            # dispatch (see ``_make_singleworld_persistent_kernel``):
+            # one lane covers ``ms_batch_size`` consecutive CSR slots
+            # sequentially (Gauss-Seidel within the batch on a shared
+            # ``parallel_id``), and different lanes own different
+            # batches in parallel (Jacobi). ``parallel_id == lane``
+            # matches the ``partition_key = overflow_offset /
+            # batch_size`` the emit stamped, so each lane reads /
+            # writes its own ``copy_state`` slot -- no intra-block
+            # race. The earlier shortcut bailed back to the head on
+            # overflow + ``batch_size > 1`` and deadlocked when the
+            # head also bailed to the tail on the same small overflow
+            # colour.
+            inner_steps = wp.int32(1)
+            num_units = count
+            if is_overflow_color:
+                inner_steps = ms_batch_size
+                num_units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
+            if lane < num_units:
+                parallel_id = wp.int32(0)
+                if is_overflow_color:
+                    parallel_id = lane
+                t_slot_base = lane * inner_steps
+                for inner in range(inner_steps):
+                    t_slot = t_slot_base + inner
+                    if t_slot >= count:
+                        break
+                    cid = element_ids_by_color[start + t_slot]
+                    _t0 = wp.uint64(0)
+                    if wp.static(enable_column_timers):
+                        _t0 = read_global_timer_ns()
+                    # See `_make_singleworld_persistent_kernel` for the
+                    # two-stage dispatch rationale: cid-range first to
+                    # separate contact cids (which live in a different
+                    # container), then type-tag for joint vs cloth.
+                    if cid >= num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
+                        local_cid = cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra
+                        if wp.static(cloth_support):
+                            if wp.static(is_prepare):
+                                contact_prepare_for_iteration_cloth_aware(
+                                    contact_cols,
+                                    local_cid,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    copy_state,
+                                    parallel_id,
+                                )
+                            else:
+                                contact_iterate_cloth_aware(
+                                    contact_cols,
+                                    local_cid,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    use_bias,
+                                    copy_state,
+                                    parallel_id,
+                                    sor_boost,
+                                )
+                        else:
+                            if wp.static(is_prepare):
+                                contact_prepare_for_iteration(
+                                    contact_cols,
+                                    local_cid,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    copy_state,
+                                    parallel_id,
+                                )
+                            else:
+                                contact_iterate(
+                                    contact_cols,
+                                    local_cid,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    use_bias,
+                                    copy_state,
+                                    parallel_id,
+                                    sor_boost,
+                                )
+                        if wp.static(enable_column_timers):
+                            contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
+                    else:
+                        if wp.static(soft_tet_only):
+                            if wp.static(is_prepare):
+                                soft_tetrahedron_prepare_for_iteration_at(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
+                            else:
+                                soft_tetrahedron_iterate_at(
+                                    constraints,
+                                    cid,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    parallel_id,
+                                    idt,
+                                    sor_boost,
+                                )
+                            if wp.static(enable_column_timers):
+                                constraint_accumulate_time_us(
+                                    constraints, SOFT_TET_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                )
+                        else:
+                            ctype = constraint_get_type(constraints, cid)
+                            dispatched = False
+                            if wp.static(cloth_support):
+                                if ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
+                                    if wp.static(is_prepare):
+                                        cloth_triangle_prepare_for_iteration_at(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                        )
+                                    else:
+                                        cloth_triangle_iterate_at(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                            sor_boost,
+                                        )
+                                    dispatched = True
+                                    if wp.static(enable_column_timers):
+                                        constraint_accumulate_time_us(
+                                            constraints,
+                                            CLOTH_TRIANGLE_TIME_US_OFFSET,
+                                            cid,
+                                            elapsed_us(_t0, read_global_timer_ns()),
+                                        )
+                                elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON:
+                                    if wp.static(is_prepare):
+                                        soft_tetrahedron_prepare_for_iteration_at(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                        )
+                                    else:
+                                        soft_tetrahedron_iterate_at(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                            sor_boost,
+                                        )
+                                    dispatched = True
+                                    if wp.static(enable_column_timers):
+                                        constraint_accumulate_time_us(
+                                            constraints,
+                                            SOFT_TET_TIME_US_OFFSET,
+                                            cid,
+                                            elapsed_us(_t0, read_global_timer_ns()),
+                                        )
+                                elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
+                                    if wp.static(is_prepare):
+                                        cloth_bending_prepare_for_iteration_at(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                        )
+                                    else:
+                                        cloth_bending_iterate_at(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                            sor_boost,
+                                        )
+                                    dispatched = True
+                                    if wp.static(enable_column_timers):
+                                        constraint_accumulate_time_us(
+                                            constraints,
+                                            CLOTH_BENDING_TIME_US_OFFSET,
+                                            cid,
+                                            elapsed_us(_t0, read_global_timer_ns()),
+                                        )
+                            if not dispatched:
+                                if wp.static(is_prepare):
+                                    if wp.static(revolute_only):
+                                        revolute_prepare_for_iteration(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                        )
+                                    else:
+                                        actuated_double_ball_socket_prepare_for_iteration(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                        )
+                                else:
+                                    if wp.static(revolute_only):
+                                        revolute_iterate(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                            sor_boost,
+                                            use_bias,
+                                        )
+                                    else:
+                                        actuated_double_ball_socket_iterate(
+                                            constraints,
+                                            cid,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            parallel_id,
+                                            idt,
+                                            sor_boost,
+                                            use_bias,
+                                        )
+                                if wp.static(enable_column_timers):
+                                    constraint_accumulate_time_us(
+                                        constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                    )
+            _sync_threads()
+            cursor = cursor - 1
+        if lane == 0:
+            color_cursor[0] = cursor
+
+    return kernel
+
+
+def get_singleworld_kernel(
+    *,
+    phase: str,
+    fused: bool,
+    revolute_only: bool,
+    cloth_support: bool,
+    enable_column_timers: bool = False,
+    soft_tet_only: bool = False,
+):
+    """Lazy singleworld kernel builder. Each axis combination is cached
+    after first build by the underlying factory's ``functools.cache``."""
+    factory = _make_singleworld_fused_kernel if fused else _make_singleworld_persistent_kernel
+    return factory(
+        phase=phase,
+        revolute_only=revolute_only,
+        cloth_support=cloth_support,
+        enable_column_timers=enable_column_timers,
+        soft_tet_only=soft_tet_only,
+    )
