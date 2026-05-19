@@ -11,6 +11,8 @@
 
 - `ModelBuilder.finalize()` no longer writes the deferred mesh SDF back to `Mesh.sdf` on shared `Mesh` instances. The SDF data is retained on the finalized `Model` (`model.shape_sdf_index`, `model.texture_sdf_data`). Call `Mesh.build_sdf()` directly when you want the SDF stored on a `Mesh`.
 - `ModelBuilder.add_shape_convex_hull()` (and any path producing `GeoType.CONVEX_MESH`) now raises `ValueError` if `ShapeConfig.sdf_*` or `ShapeConfig.is_hydroelastic` are set, matching `add_shape_mesh()`. Build and attach the SDF on the underlying `Mesh` via `Mesh.build_sdf()` instead.
+- Remove the `cbor2` `<6` dependency ceiling after updating recorder deserialization to accept mapping-like decoded containers
+- Require Warp 1.14 and configure Warp logging through `warp.config.log_level`; use Newton's `--quiet` flag or `--warp-config log_level=...` instead of legacy `verbose` or `quiet` config keys
 
 ### Fixed
 
@@ -30,6 +32,7 @@
 - Add `body_parent_f` extended state attribute support to `SolverFeatherstone` populated directly from the RNEA backward pass (per-body net spatial wrench translated to the body's COM, matching the `SolverMuJoCo` convention)
 - Add public `newton.geometry.build_bvh_shape()`, `build_bvh_particle()`, `refit_bvh_shape()`, and `refit_bvh_particle()` helpers for managing model BVHs
 - Raise process priority automatically in `--benchmark` mode for more stable measurements; add `--realtime` for maximum priority.
+- Add robotics tutorial notebook covering ModelBuilder, solvers, CUDA graphs, IK, and pick-and-place
 - Import per-shape authored color from USD stages into `ModelBuilder.shape_color`
 - Add `TRIANGLE_PRISM` support-function type for heightfield triangles, extruding 1 m along the heightfield's local -Z so GJK/MPR naturally resolves shapes on the back side
 - Add `ViewerGL.log_scalar()` for live scalar time-series plots in the viewer
