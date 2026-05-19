@@ -335,9 +335,23 @@ class PhoenXWorld:
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
         symmetric_color_sweep: bool = False,
-        warm_start_invalidate_period: int = 0,
-        warm_start_rotate_skip_color: bool = False,
-        capture_while_greedy_coloring: bool = False,
+        # Defaults chosen for the majority of scenes (Kapla, stacks,
+        # contact-heavy rigid). PhoenX is experimental; we don't keep
+        # legacy defaults around. Override per-scene if a regression
+        # ever shows up:
+        # * ``warm_start_invalidate_period=4`` + ``warm_start_rotate
+        #   _skip_color=True`` break the warm-start coloring lock-in
+        #   that drifts tall stacks; combined cost is ~3-5% of cold-
+        #   start coloring time (amortised across periodic full
+        #   rebuilds + a single rotated skipped colour per other
+        #   step).
+        # * ``capture_while_greedy_coloring=True`` exits the greedy
+        #   MIS loop the moment ``num_remaining`` hits 0 instead of
+        #   running the host loop to its fixed cap. On the common
+        #   warm-start fast path it cuts MIS launches 18x.
+        warm_start_invalidate_period: int = 4,
+        warm_start_rotate_skip_color: bool = True,
+        capture_while_greedy_coloring: bool = True,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
