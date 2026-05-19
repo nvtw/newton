@@ -17,6 +17,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -65,11 +66,20 @@ class TestWriteFrameWithoutStart(unittest.TestCase):
 
 @unittest.skipUnless(_ffmpeg_available(), "ffmpeg not available (install imageio-ffmpeg or system ffmpeg)")
 class TestLiveMp4Recording(unittest.TestCase):
-    """End-to-end recording into a temporary directory."""
+    """End-to-end recording into a temporary directory.
+
+    Pinned to ``libx264`` so the tests do not depend on the host having a
+    working NVENC/QSV/AMF driver (e.g. CPU-only CI runners).
+    """
+
+    def setUp(self):
+        self._encoder_patch = patch.object(LiveMp4Recorder, "_pick_encoder", return_value="libx264")
+        self._encoder_patch.start()
+
+    def tearDown(self):
+        self._encoder_patch.stop()
 
     def test_record_synthetic_frames(self):
-        # Use a resolution above NVENC's minimum frame dimension (~145x49) so the
-        # auto-picked encoder accepts the stream on machines with NVIDIA GPUs.
         width, height, n_frames = 256, 256, 24
         with tempfile.TemporaryDirectory() as tmpdir:
             out = Path(tmpdir) / "test.mp4"
@@ -93,7 +103,6 @@ class TestLiveMp4Recording(unittest.TestCase):
             self.assertGreater(out.stat().st_size, 0, "MP4 output should be non-empty")
 
     def test_rejects_wrong_shape_and_dtype(self):
-        # 256x256 stays above NVENC's minimum frame dimension.
         size = 256
         with tempfile.TemporaryDirectory() as tmpdir:
             out = Path(tmpdir) / "shape.mp4"
@@ -145,8 +154,14 @@ class TestQueueDropping(unittest.TestCase):
 class TestDoubleStartIsIdempotent(unittest.TestCase):
     """Calling ``start`` twice is a no-op while already recording."""
 
+    def setUp(self):
+        self._encoder_patch = patch.object(LiveMp4Recorder, "_pick_encoder", return_value="libx264")
+        self._encoder_patch.start()
+
+    def tearDown(self):
+        self._encoder_patch.stop()
+
     def test_double_start(self):
-        # 256x256 stays above NVENC's minimum frame dimension.
         size = 256
         with tempfile.TemporaryDirectory() as tmpdir:
             out = Path(tmpdir) / "double.mp4"

@@ -187,9 +187,9 @@ class LiveMp4Recorder:
         codec = self._pick_encoder(ffmpeg_exe)
         quality = float(np.clip(self._quality, 0.0, 100.0))
         # Keyframe interval of ~1 s. Forcing IDR at frame 0 and a short GOP
-        # makes lightweight players (Windows Media Player) and inline
-        # previews (Slack, GitHub) start decoding immediately instead of
-        # showing a placeholder until the first scene-cut keyframe lands.
+        # makes lightweight players and inline previews start decoding
+        # immediately instead of showing a placeholder until the first
+        # scene-cut keyframe lands.
         keyint = max(1, int(round(fps)))
         cmd = [
             ffmpeg_exe,
@@ -206,8 +206,8 @@ class LiveMp4Recorder:
             f"{fps:.3f}",
             "-i",
             "-",
-            # Silent AAC audio track — many platforms (most notably Slack)
-            # only inline-preview MP4s that carry an audio stream.
+            # Silent AAC audio track — some platforms only inline-preview
+            # MP4s that carry an audio stream.
             "-f",
             "lavfi",
             "-i",
@@ -271,7 +271,8 @@ class LiveMp4Recorder:
             ]
         if flip_vertical:
             cmd += ["-vf", "vflip"]
-        # Slack-compatible: H.264 High profile, level 4.2, yuv420p, faststart.
+        # Broad-compatibility output: H.264 High profile, level 4.2,
+        # yuv420p, faststart so the moov atom is at the front of the file.
         cmd += [
             "-profile:v",
             "high",
