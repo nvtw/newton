@@ -466,6 +466,7 @@ def speculative_pick_kernel(
     num_elements: wp.array[int],
     total_num_threads: wp.int32,
     num_remaining: wp.array[int],
+    overflow_flag: wp.array[int],
     max_colored_partitions: wp.int32,
     tentative_color: wp.array[wp.int32],
     commit_decision: wp.array[wp.int32],
@@ -476,6 +477,15 @@ def speculative_pick_kernel(
     Writes ``tentative_color[tid]`` (encoded ``c + 1`` to match
     ``color_tags``) and resets ``commit_decision[tid] = 0``. Sweeps the full
     constraint range via persistent grid stride.
+
+    If the int64 forbidden mask saturates (>= ``GREEDY_MAX_COLORS``
+    distinct neighbour colours), sets ``overflow_flag[0] = 1``. The
+    host-side build wrapper triggers a JP fallback when this fires,
+    same contract as ``partitioning_coloring_incremental_greedy
+    _kernel``. Without the flag, two saturated constraints sharing a
+    body would tentatively pick the same fallback colour and the
+    commit phase would let them both through (validation only checks
+    higher-priority uncoloured neighbours; both colour-63 picks pass).
     """
     if num_remaining[0] <= wp.int32(0):
         return
@@ -514,6 +524,7 @@ def speculative_pick_kernel(
             if soft_cap:
                 c = max_colored_partitions
             else:
+                overflow_flag[0] = wp.int32(1)
                 c = wp.int32(GREEDY_MAX_COLORS - wp.int32(1))
         tentative_color[tid] = c + wp.int32(1)
 
@@ -565,8 +576,18 @@ def speculative_validate_kernel(
                 neighbor = vertex_to_adjacent_elements[k]
                 if neighbor == tid:
                     continue
-                if color_tags[neighbor] != wp.int32(0):
-                    continue  # already coloured: phase 1 forbidden mask handled it
+                ntag = color_tags[neighbor]
+                if ntag != wp.int32(0):
+                    # Already coloured: phase 1 should have folded the
+                    # neighbour's colour into ``forbidden_mask``, but the
+                    # saturation fallback (``c = GREEDY_MAX_COLORS - 1``
+                    # when no soft cap and the int64 mask is full) can
+                    # still pick a colour that conflicts with an
+                    # already-coloured neighbour. Catch that here.
+                    if ntag == my_tent:
+                        commit = False
+                        break
+                    continue
                 if tentative_color[neighbor] != my_tent:
                     continue  # different tentative, no conflict
                 # Same tentative + uncoloured: tie-break by priority.
@@ -576,6 +597,27 @@ def speculative_validate_kernel(
                     break
         if commit:
             commit_decision[tid] = wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def speculative_overflow_exit_kernel(
+    overflow_flag: wp.array[int],
+    num_remaining: wp.array[int],
+):
+    """Force the speculative ``capture_while`` to exit when the
+    forbidden mask saturated (>= ``GREEDY_MAX_COLORS`` distinct
+    neighbour colours). Without this, a saturated constraint whose
+    *only* valid colour is already taken by a coloured neighbour
+    would loop forever -- pick keeps returning the fallback colour,
+    validate keeps aborting on the coloured-neighbour conflict, no
+    one commits, ``num_remaining`` never decreases.
+
+    Zeroing ``num_remaining`` here surfaces the saturation to the
+    host wrapper, which immediately runs the JP fallback on the
+    still-uncoloured constraints.
+    """
+    if overflow_flag[0] != wp.int32(0):
+        num_remaining[0] = wp.int32(0)
 
 
 @wp.kernel(enable_backward=False)

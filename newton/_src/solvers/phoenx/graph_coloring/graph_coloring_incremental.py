@@ -44,6 +44,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     partitioning_coloring_incremental_kernel,
     partitioning_prepare_kernel,
     speculative_commit_kernel,
+    speculative_overflow_exit_kernel,
     speculative_pick_kernel,
     speculative_validate_kernel,
     warm_start_periodic_invalidate_kernel,
@@ -1123,6 +1124,7 @@ class IncrementalContactPartitioner:
                     self._num_elements,
                     wp.int32(self._greedy_grid_size),
                     self._num_remaining,
+                    self._overflow_flag,
                     wp.int32(self._max_colored_partitions_kernel_arg),
                     self._spec_tentative_color,
                     self._spec_commit_decision,
@@ -1157,6 +1159,15 @@ class IncrementalContactPartitioner:
                     self._num_elements,
                     self._num_remaining,
                 ],
+            )
+            # Force exit when the forbidden mask saturated -- without
+            # this the capture_while spins forever on dense graphs
+            # whose chromatic number exceeds GREEDY_MAX_COLORS (64).
+            # JP fallback picks up the still-uncoloured stragglers.
+            wp.launch(
+                speculative_overflow_exit_kernel,
+                dim=1,
+                inputs=[self._overflow_flag, self._num_remaining],
             )
 
     def begin_sweep(self) -> None:
