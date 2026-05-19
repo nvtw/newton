@@ -119,6 +119,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                     w._copy_state,
                     ms_cap,
                     ms_batch,
+                    w._partitioner.sweep_direction,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=w.device,

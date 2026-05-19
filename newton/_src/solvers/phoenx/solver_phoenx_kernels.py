@@ -1590,19 +1590,62 @@ def _phoenx_apply_global_damping_kernel(
 
 
 @wp.func
+def _color_for_step(
+    step_idx: wp.int32,
+    n_colors: wp.int32,
+    direction: wp.int32,
+    max_colored_partitions: wp.int32,
+) -> wp.int32:
+    """Map a 0-based forward step index into the actual color index
+    for this sweep. ``direction == 0`` => ascending order
+    (``c = step_idx``); ``!= 0`` => reverse for non-overflow colours
+    (symmetric Gauss-Seidel). When mass splitting is on
+    (``max_colored_partitions >= 0``) the overflow bucket at index
+    ``max_colored_partitions`` always runs last regardless of
+    direction.
+
+    Symmetric sweep alone is not enough to fix Kapla-tower drift
+    under warm-start (it only swaps edge colours; middle colours
+    stay near the middle of the sweep). It's kept as a building
+    block for future experimentation; the actual drift fix lives on
+    the warm-start cache side (see
+    ``warm_start_periodic_invalidate_kernel`` and ``set_warm_start
+    _rotate_skip``).
+    """
+    if direction == wp.int32(0):
+        return step_idx
+    # Reverse path.
+    if max_colored_partitions >= wp.int32(0) and step_idx == max_colored_partitions:
+        return max_colored_partitions  # overflow stays last
+    n_regular = n_colors
+    if max_colored_partitions >= wp.int32(0) and n_colors > max_colored_partitions:
+        n_regular = max_colored_partitions
+    if n_regular <= wp.int32(1):
+        return step_idx
+    return n_regular - wp.int32(1) - step_idx
+
+
+@wp.func
 def _singleworld_color_range(
     color_starts: wp.array[wp.int32],
     num_colors: wp.array[wp.int32],
     color_cursor: wp.array[wp.int32],
+    sweep_direction: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
 ):
-    """Decode current colour's cid range from cursor. Returns (start, count, cursor)."""
+    """Decode current colour's cid range from cursor. Returns
+    ``(start, count, cursor, c)`` where ``c`` is the *actual* colour
+    index (post-direction remap). When ``sweep_direction[0] != 0``
+    the regular colours are visited in reverse order; the overflow
+    bucket (if any) stays last."""
     cursor = color_cursor[0]
     n_colors = num_colors[0]
-    c = n_colors - cursor
+    step_idx = n_colors - cursor
+    c = _color_for_step(step_idx, n_colors, sweep_direction[0], max_colored_partitions)
     start = color_starts[c]
     end = color_starts[c + 1]
     count = end - start
-    return start, count, cursor
+    return start, count, cursor, c
 
 
 # Single-world fused-tail kernels: one 1D block walks trailing small colours,
@@ -1621,14 +1664,19 @@ def _singleworld_color_range_from_cursor(
     color_starts: wp.array[wp.int32],
     num_colors: wp.array[wp.int32],
     cursor: wp.int32,
+    sweep_direction: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
 ):
-    """:func:`_singleworld_color_range` taking the cursor as a register value."""
+    """:func:`_singleworld_color_range` taking the cursor as a register
+    value. Returns ``(start, count, c)`` -- ``c`` is the direction-
+    remapped colour index (see :func:`_color_for_step`)."""
     n_colors = num_colors[0]
-    c = n_colors - cursor
+    step_idx = n_colors - cursor
+    c = _color_for_step(step_idx, n_colors, sweep_direction[0], max_colored_partitions)
     start = color_starts[c]
     end = color_starts[c + 1]
     count = end - start
-    return start, count
+    return start, count, c
 
 
 # Single-world kernel factories: persistent (head) + single-block (fused tail)
@@ -1692,25 +1740,26 @@ def _make_singleworld_persistent_kernel(
         copy_state: CopyStateContainer,
         max_colored_partitions: wp.int32,
         ms_batch_size: wp.int32,
+        sweep_direction: wp.array[wp.int32],
     ):
         tid = wp.tid()
         if color_cursor[0] <= 0:
             if tid == 0:
                 head_active[0] = 0
             return
-        start, count, cursor = _singleworld_color_range(color_starts, num_colors, color_cursor)
+        start, count, cursor, c = _singleworld_color_range(
+            color_starts, num_colors, color_cursor, sweep_direction, max_colored_partitions
+        )
 
         if count <= fuse_threshold:
             if tid == 0:
                 head_active[0] = 0
             return
 
-        # Overflow detection. ``_singleworld_color_range`` computes the
-        # *colour id* as ``c = n_colors - cursor`` (cursor decrements
-        # from n_colors down to 1). The overflow bucket is colour
-        # ``max_colored_partitions``, so it's the last one processed:
-        # ``c == max_colored_partitions`` iff
-        # ``num_colors[0] - cursor == max_colored_partitions``.
+        # Overflow detection. ``c`` is the direction-remapped colour
+        # index returned by ``_singleworld_color_range``; the overflow
+        # bucket lives at ``max_colored_partitions`` and stays there
+        # regardless of sweep direction (see ``_color_for_step``).
         # Overflow constraints are grouped into batches of
         # ``ms_batch_size`` consecutive CSR slots; one thread processes
         # a whole batch sequentially (Gauss-Seidel within the batch on
@@ -1718,7 +1767,7 @@ def _make_singleworld_persistent_kernel(
         # (Jacobi via distinct slots). Regular colours stay at
         # ``parallel_id=0`` with one thread per constraint (independent
         # set, no need for splitting).
-        is_overflow_color = max_colored_partitions >= wp.int32(0) and (num_colors[0] - cursor) == max_colored_partitions
+        is_overflow_color = max_colored_partitions >= wp.int32(0) and c == max_colored_partitions
 
         # For overflow: each thread covers ``ms_batch_size`` consecutive
         # CSR slots starting at ``tid * ms_batch_size``, grid-stride
@@ -2005,16 +2054,17 @@ def _make_singleworld_fused_kernel(
         copy_state: CopyStateContainer,
         max_colored_partitions: wp.int32,
         ms_batch_size: wp.int32,
+        sweep_direction: wp.array[wp.int32],
     ):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
         while cursor > 0:
-            start, count = _singleworld_color_range_from_cursor(color_starts, num_colors, cursor)
+            start, count, c = _singleworld_color_range_from_cursor(
+                color_starts, num_colors, cursor, sweep_direction, max_colored_partitions
+            )
             if count > fuse_threshold:
                 break
-            is_overflow_color = (
-                max_colored_partitions >= wp.int32(0) and (num_colors[0] - cursor) == max_colored_partitions
-            )
+            is_overflow_color = max_colored_partitions >= wp.int32(0) and c == max_colored_partitions
             # Overflow handling mirrors the head kernel's batched
             # dispatch (see ``_make_singleworld_persistent_kernel``):
             # one lane covers ``ms_batch_size`` consecutive CSR slots

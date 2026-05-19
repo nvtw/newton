@@ -334,6 +334,9 @@ class PhoenXWorld:
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
+        symmetric_color_sweep: bool = False,
+        warm_start_invalidate_period: int = 0,
+        warm_start_rotate_skip_color: bool = False,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
@@ -649,6 +652,28 @@ class PhoenXWorld:
                 max_greedy_outer_iters=max_greedy_outer_iters,
                 enable_warm_start=_warm_start_active,
             )
+            # Symmetric Gauss-Seidel: alternate forward/reverse colour
+            # iteration each sweep. Reduces iteration-order bias but
+            # is insufficient on its own to fix tall-stack drift
+            # under warm-start (the iteration-order bias is only a
+            # small fraction of the warm-start drift signature).
+            self._partitioner.set_symmetric_sweep(bool(symmetric_color_sweep))
+            # Periodic full-rebuild of the warm-start coloring. ``0``
+            # disables (cache reused every frame). A small positive
+            # value (e.g. ``5`` or ``10``) re-derives the coloring
+            # from scratch every Nth frame, which on stable tall
+            # stacks (Kapla tower) breaks the deterministic frame-to-
+            # frame coloring lock-in and the multi-frame solve-bias
+            # accumulation it produces.
+            self._partitioner.set_warm_start_invalidate_period(int(warm_start_invalidate_period))
+            # Rotating skip-colour: cheap (~1/num_colors of cold-start
+            # cost) alternative to periodic full-invalidate. Each step
+            # one cached colour is round-robined to a fresh re-MIS
+            # while the rest stay warm-started. Over ``num_colors``
+            # steps every colour cycles through a re-MIS, which
+            # breaks the lock-in without paying the full cold-start
+            # tax.
+            self._partitioner.set_warm_start_rotate_skip(bool(warm_start_rotate_skip_color))
         elif self.partitioner_algorithm == "luby_fixed":
             if step_layout != "single_world":
                 # Multi-world path reads ``_adjacency_section_end_indices``
@@ -2616,6 +2641,7 @@ class PhoenXWorld:
                     self._copy_state,
                     ms_cap,
                     ms_batch,
+                    self._partitioner.sweep_direction,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=self.device,
@@ -2653,6 +2679,7 @@ class PhoenXWorld:
                 self._copy_state,
                 ms_cap,
                 ms_batch,
+                self._partitioner.sweep_direction,
             ],
             block_dim=self._fuse_tail_block_dim,
             device=self.device,

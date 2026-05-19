@@ -536,12 +536,70 @@ def incremental_init_csr_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def warm_start_periodic_invalidate_kernel(
+    invalidate_counter: wp.array[int],
+    cache_num_entries: wp.array[int],
+    num_colors: wp.array[int],
+    skip_color_plus_one: wp.array[int],
+    invalidate_period: wp.int32,
+    rotate_skip_enabled: wp.int32,
+):
+    """Single-thread coloring-step pre-pass.
+
+    Manages two cross-frame strategies for breaking the warm-start
+    coloring lock-in that biases the PGS solve on stable scenes:
+
+    * **Periodic full invalidate** (``invalidate_period > 0``): zero
+      ``cache_num_entries`` once every ``invalidate_period`` calls.
+      Following ``seed_warm_start_kernel`` then finds an empty cache
+      and greedy MIS re-derives the entire coloring from scratch.
+      Expensive (~10% step overhead in cold mode) but recovers full
+      cold-start stability.
+
+    * **Rotating skip-colour** (``rotate_skip_enabled != 0``): bump
+      the counter and pick one colour per step (``counter % num_colors``)
+      whose seeded entries the seed kernel should SKIP. That colour
+      gets re-MIS'd this step while everything else stays warm-started.
+      Over ``num_colors`` steps each colour is re-MIS'd exactly once,
+      breaking the fixed-point lock-in at ~1/num_colors of the
+      cold-start cost.
+
+    Both can be enabled together; periodic invalidate wins (full
+    rebuild that step).
+    """
+    c = invalidate_counter[0] + wp.int32(1)
+    invalidate_counter[0] = c
+
+    # Default: no skip.
+    skip_color_plus_one[0] = wp.int32(0)
+
+    if invalidate_period > wp.int32(0) and c % invalidate_period == wp.int32(0):
+        cache_num_entries[0] = wp.int32(0)
+        return
+
+    if rotate_skip_enabled != wp.int32(0):
+        nc = num_colors[0]
+        if nc > wp.int32(0):
+            # Skip cached colour ``c % nc`` this step (encoded as +1
+            # to match ``color_tags`` convention).
+            skip_color_plus_one[0] = (c % nc) + wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
 def incremental_begin_sweep_kernel(
     num_colors: wp.array[int],
     color_cursor: wp.array[int],
+    sweep_direction: wp.array[int],
+    advance_direction: wp.int32,
 ):
-    """Copy num_colors into color_cursor for the sweep-time capture_while."""
+    """Copy num_colors into color_cursor for the sweep-time
+    capture_while. When ``advance_direction != 0`` also toggles
+    ``sweep_direction[0]`` between 0 and 1 (symmetric Gauss-Seidel
+    pattern: every other sweep walks the colour list in reverse).
+    """
     color_cursor[0] = num_colors[0]
+    if advance_direction != wp.int32(0):
+        sweep_direction[0] = wp.int32(1) - sweep_direction[0]
 
 
 @wp.kernel(enable_backward=False)

@@ -43,6 +43,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     partitioning_coloring_incremental_greedy_kernel,
     partitioning_coloring_incremental_kernel,
     partitioning_prepare_kernel,
+    warm_start_periodic_invalidate_kernel,
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import scan_variable_length
 from newton._src.solvers.phoenx.solver_config import NUM_INNER_WHILE_ITERATIONS
@@ -378,6 +379,40 @@ class IncrementalContactPartitioner:
         self._fallback_flag: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
         # Sweep-time colour cursor (decremented by PGS kernels).
         self._color_cursor = wp.zeros(1, dtype=wp.int32, device=device)
+
+        # Symmetric Gauss-Seidel toggle. ``_sweep_direction[0] == 0``
+        # means forward color sweep; ``1`` means reverse (overflow
+        # stays last). ``incremental_begin_sweep_kernel`` flips it
+        # each call when ``_symmetric_sweep`` is True. Without
+        # flipping the same constraints get processed first every
+        # sweep, which biases the PGS solution toward early colours;
+        # warm-start coloring makes this bias stable across frames and
+        # the bias accumulates as visible drift (kapla tower
+        # collapses after ~500 frames with warm-start ON and no
+        # alternation).
+        self._sweep_direction: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
+        self._symmetric_sweep: bool = False
+
+        # Periodic warm-start cache invalidation. When ``_warm_start
+        # _invalidate_period > 0``, every Nth call to ``build_csr``
+        # zeros the cache before seeding so greedy MIS re-derives the
+        # coloring from scratch (cold-start). Counter lives device-
+        # side so the check is graph-capture safe (no host roundtrip
+        # mid-replay). Use to break the deterministic frame-to-frame
+        # coloring lock-in on stable scenes (warm-start cached colours
+        # don't drift even when contact counts / priorities do, which
+        # accumulates a solve bias on tall stacks).
+        self._warm_start_invalidate_counter: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
+        self._warm_start_invalidate_period: int = 0
+        # Rotating skip-colour for warm-start. Each step the pre-pass
+        # picks one cached colour (round-robin via the invalidate
+        # counter) whose seeded entries the seed kernel should drop
+        # so they get re-MIS'd instead. Encoded as ``color + 1`` to
+        # match ``color_tags``; ``0`` means "no skip". Used to break
+        # the warm-start coloring lock-in cheaply (~1/num_colors of
+        # the cold-start cost per step).
+        self._warm_start_skip_color_plus_one: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
+        self._warm_start_rotate_skip: bool = False
 
         # Dummies for reusing partitioning_prepare_kernel as adjacency zeroer.
         self._prepare_partition_ends_dummy = wp.zeros(1, dtype=wp.int32, device=device)
@@ -720,6 +755,24 @@ class IncrementalContactPartitioner:
                 warm_start_invalidate_mark_kernel,
             )
 
+            # Pre-seed pass: bump the step counter and apply the
+            # configured strategy for breaking the warm-start
+            # coloring lock-in (periodic full invalidate, rotating
+            # skip-colour, both, or neither). Capture-safe -- a
+            # single-thread device-side kernel; no host roundtrip.
+            wp.launch(
+                warm_start_periodic_invalidate_kernel,
+                dim=1,
+                inputs=[
+                    self._warm_start_invalidate_counter,
+                    self._warm_start_cache.num_entries,
+                    self._num_colors,
+                    self._warm_start_skip_color_plus_one,
+                    wp.int32(self._warm_start_invalidate_period),
+                    wp.int32(1 if self._warm_start_rotate_skip else 0),
+                ],
+            )
+
             wp.launch(
                 seed_warm_start_kernel,
                 dim=self.max_num_interactions,
@@ -731,6 +784,7 @@ class IncrementalContactPartitioner:
                     self._warm_start_cache.num_entries,
                     self._color_tags,
                     self._partition_data_concat,
+                    self._warm_start_skip_color_plus_one,
                 ],
             )
             # Validation pass: detect colour conflicts under the
@@ -997,12 +1051,52 @@ class IncrementalContactPartitioner:
 
     def begin_sweep(self) -> None:
         """Reset the sweep-time colour cursor (copy num_colors -> color_cursor).
-        Call before every PGS sweep."""
+        Call before every PGS sweep. Also bumps ``sweep_direction``
+        when cyclic color sweep is enabled (see :meth:`set_symmetric_sweep`)."""
+        advance = wp.int32(1) if self._symmetric_sweep else wp.int32(0)
         wp.launch(
             incremental_begin_sweep_kernel,
             dim=1,
-            inputs=[self._num_colors, self._color_cursor],
+            inputs=[self._num_colors, self._color_cursor, self._sweep_direction, advance],
         )
+
+    def set_warm_start_invalidate_period(self, period: int) -> None:
+        """Force a cold-start re-coloring every ``period`` build_csr
+        calls. ``0`` disables (default; warm-start cache is reused
+        every frame). Small positive values (e.g. ``5``, ``10``)
+        break the frame-to-frame coloring lock-in that makes tall
+        stacks drift with warm-start on, at a small perf cost (one
+        cold-start build every ``period`` frames).
+        """
+        if period < 0:
+            raise ValueError(f"period must be >= 0 (got {period})")
+        self._warm_start_invalidate_period = int(period)
+
+    def set_warm_start_rotate_skip(self, enabled: bool) -> None:
+        """When ``True``, each ``build_csr`` skips re-seeding one
+        cached colour (rotated round-robin via the step counter), so
+        that colour's constraints get re-MIS'd while the rest stay
+        warm-started. Over ``num_colors`` steps every colour cycles
+        through a re-MIS pass. Cost: ~1/num_colors of the cold-start
+        coloring overhead per step. Use this to break the warm-start
+        fixed-point coloring that biases tall-stack PGS solves
+        without paying the full cold-start cost.
+        """
+        self._warm_start_rotate_skip = bool(enabled)
+
+    def set_symmetric_sweep(self, enabled: bool) -> None:
+        """Enable / disable cyclic-shift Gauss-Seidel: rotate the
+        colour sweep order by one on each PGS sweep.
+
+        With graph-coloring warm-start ON, the same constraint lands
+        in the same colour every frame; a fixed iteration order then
+        biases the solve toward early colours and on tall stacks the
+        bias accumulates into visible drift. Cyclic shift moves every
+        colour through every sweep position equally, averaging the
+        bias out at near-zero cost while keeping the cached coloring
+        and its perf win.
+        """
+        self._symmetric_sweep = bool(enabled)
 
     # Public device arrays (results).
 
@@ -1047,6 +1141,15 @@ class IncrementalContactPartitioner:
     def color_cursor(self) -> wp.array:
         """Sweep-time colour countdown (init by begin_sweep, decremented by PGS)."""
         return self._color_cursor
+
+    @property
+    def sweep_direction(self) -> wp.array:
+        """Symmetric-GS flag (length 1): 0=forward, 1=reverse. The
+        iterate kernels read this when computing which colour to
+        visit. ``begin_sweep`` toggles it (when symmetric sweep is
+        enabled). See :meth:`set_symmetric_sweep`.
+        """
+        return self._sweep_direction
 
     @property
     def interaction_id_to_partition(self) -> wp.array:
