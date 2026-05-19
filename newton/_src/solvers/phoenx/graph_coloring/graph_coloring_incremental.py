@@ -82,6 +82,64 @@ def _greedy_coloring_grid_size(max_num_interactions: int, device: wp.DeviceLike)
 _LOCALITY_TAIL_KEY: int = 0x7FFFFFFFFFFFFFFF
 
 
+_LOCALITY_BODY_MIN_BITS = wp.constant(wp.int64(24))
+_LOCALITY_EID_BITS = wp.constant(wp.int64(25))
+_LOCALITY_BODY_MIN_MASK = wp.constant(wp.int64((1 << 24) - 1))
+_LOCALITY_EID_MASK = wp.constant(wp.int64((1 << 25) - 1))
+
+
+@wp.kernel(enable_backward=False)
+def _locality_combined_keys_kernel(
+    elements: wp.array[ElementInteractionData],
+    element_ids_by_color: wp.array[wp.int32],
+    interaction_id_to_partition: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    keys: wp.array[wp.int64],
+    values: wp.array[wp.int32],
+):
+    """Pack ``(colour, body_min, eid)`` into a single int64 key so a
+    single radix sort produces the desired locality ordering.
+
+    Bit layout (LSB first):
+    * bits 0..24  : ``eid`` (25 bits -> up to 32M constraints)
+    * bits 25..48 : ``body_min`` (24 bits -> up to 16M bodies)
+    * bits 49..63 : ``colour`` (15 bits -> up to 32K colours)
+
+    Replaces the previous two-pass eid-then-(colour, body_min) stable
+    sort. Both passes produced the same final ordering as this single
+    sort (lexicographic on the three fields); merging halves the
+    radix-sort time and cuts a kernel-launch round-trip on every
+    coloring rebuild.
+
+    Slots past ``num_elements[0]`` get ``INT64_MAX`` so they sort to
+    the tail.
+    """
+    tid = wp.tid()
+    if tid >= keys.shape[0]:
+        return
+    if tid >= num_elements[0]:
+        keys[tid] = wp.int64(_LOCALITY_TAIL_KEY)
+        values[tid] = wp.int32(0)
+        return
+    eid = element_ids_by_color[tid]
+    color = interaction_id_to_partition[eid]
+    el = elements[eid]
+    body_min = wp.int32(0x7FFFFF)  # 24-bit sentinel for "no body"
+    for j in range(MAX_BODIES):
+        b = element_interaction_data_get(el, j)
+        if b < wp.int32(0):
+            break
+        if b < body_min:
+            body_min = b
+    key = (
+        (wp.int64(color) << (_LOCALITY_BODY_MIN_BITS + _LOCALITY_EID_BITS))
+        | ((wp.int64(body_min) & _LOCALITY_BODY_MIN_MASK) << _LOCALITY_EID_BITS)
+        | (wp.int64(eid) & _LOCALITY_EID_MASK)
+    )
+    keys[tid] = key
+    values[tid] = eid
+
+
 @wp.kernel(enable_backward=False)
 def _locality_eid_keys_kernel(
     element_ids_by_color: wp.array[wp.int32],
@@ -89,8 +147,8 @@ def _locality_eid_keys_kernel(
     keys: wp.array[wp.int64],
     values: wp.array[wp.int32],
 ):
-    """Pass 1: sort element_ids_by_color by ``eid`` to break ties in
-    the subsequent ``(colour, body_min)`` stable sort deterministically.
+    """Legacy pass-1 kernel (kept for reference; not used after
+    :func:`_locality_combined_keys_kernel` merged both passes).
 
     Pads slots past ``num_elements[0]`` with ``INT64_MAX`` so the radix
     sort lands them at the tail; values are don't-care.
@@ -1009,45 +1067,17 @@ class IncrementalContactPartitioner:
         """Sort each colour slice of ``element_ids_by_color`` by
         ``min(b1, b2)`` so consecutive entries hit nearby body cache
         lines (Kapla / kapla_arena L1/L2 hit rate). PGS correctness is
-        order-independent within a colour. Two-pass radix sort: first
-        by eid (deterministic tie-break), then by packed
-        ``(colour << 32) | body_min`` (colour high half preserves
-        boundaries).
+        order-independent within a colour.
+
+        Single-pass radix sort with a packed
+        ``(colour, body_min, eid)`` key (see
+        :func:`_locality_combined_keys_kernel`). Replaces the previous
+        two-pass design (eid-then-(colour, body_min)) which produced
+        the same final ordering but ran the radix sort twice.
         """
         n = self.max_num_interactions
-        # Pass 1: sort by eid. Makes the within-(colour, body_min) tie
-        # ordering of the pass-2 stable sort deterministic. Cheap
-        # (single radix sort over a buffer already allocated for the
-        # locality sort, runs once per coloring rebuild).
         wp.launch(
-            _locality_eid_keys_kernel,
-            dim=2 * n,
-            inputs=[
-                self._element_ids_by_color,
-                self._num_elements,
-                self._locality_keys,
-                self._locality_values,
-            ],
-        )
-        wp.utils.radix_sort_pairs(self._locality_keys, self._locality_values, n)
-        wp.launch(
-            _locality_writeback_kernel,
-            dim=n,
-            inputs=[
-                self._locality_values,
-                self._num_elements,
-                self._element_ids_by_color,
-            ],
-        )
-        # Pass 2: stable sort by (colour, body_min). Within colours
-        # ``body_min`` is unique by MIS independent-set so this groups
-        # for cache locality and is deterministic. For the overflow
-        # bucket (mass splitting only) ``body_min`` may tie -- ties
-        # inherit the pass-1 eid order, so the bucket's element
-        # ordering is deterministic across runs and the per-batch
-        # partition_key assignment is reproducible.
-        wp.launch(
-            _locality_compute_keys_kernel,
+            _locality_combined_keys_kernel,
             dim=2 * n,
             inputs=[
                 self._elements,
