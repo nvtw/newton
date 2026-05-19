@@ -76,7 +76,7 @@ PLANK_COLORS: tuple[tuple[float, float, float], ...] = (
 )
 
 # Sleeping bodies render at this fraction of their active brightness.
-SLEEP_COLOR_GAIN: float = 0.30
+SLEEP_COLOR_GAIN: float = 0.55
 
 # Sleeping pipeline tuning. ``frames_required`` counts step() calls, so at
 # fps=120 a value of 60 means ~0.5 s of sustained low motion before a body
