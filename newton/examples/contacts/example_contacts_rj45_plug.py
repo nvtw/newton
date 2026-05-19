@@ -228,6 +228,12 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.viewer = viewer
+        # PhoenX dispatch intentionally not added: the plug ships with
+        # a D6 free joint to allow gizmo-driven 6-DoF translation,
+        # which PhoenX's joint set does not include (only REVOLUTE,
+        # PRISMATIC, BALL, FIXED, FREE). TODO: replace the D6 with a
+        # FREE joint to enable the PhoenX path.
+        self.solver_name = "vbd"
         self.pick_stiffness = 50.0
         self.pick_damping = 10.0
 
@@ -515,4 +521,5 @@ class Example:
 
 if __name__ == "__main__":
     viewer, args = newton.examples.init()
-    newton.examples.run(Example(viewer, args), args)
+    example = Example(viewer, args)
+    newton.examples.run(example, args)

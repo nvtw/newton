@@ -85,6 +85,125 @@ else:
     UsdStage = Any
 
 
+@dataclass(frozen=True)
+class _TetrahedronVertexD:
+    """Carrier for the tetrahedron's 4th vertex during the build phase.
+
+    The first three canonical-tet vertices (A=origin, B along +Z, C in
+    YZ plane) fit in :attr:`Model.shape_scale` exactly as for
+    :data:`GeoType.TRIANGLE`. The 4th vertex ``D = (d_x, d_y, d_z)`` has
+    no remaining slot in :attr:`Model.shape_scale`, so we route it
+    through :attr:`ModelBuilder.shape_source` (the slot used by
+    mesh-based shapes for the source ``Mesh``) and have
+    :meth:`ModelBuilder.finalize` quantise it via
+    :func:`encode_vec3 <newton._src.geometry.support_function.encode_vec3>`
+    into the per-shape ``shape_source_ptr`` ``uint64`` that the narrow
+    phase already reads. Frozen + dataclass so it's hashable (the
+    finalize-time geometry dedup uses ``hash(geo)``).
+    """
+
+    d_x: float
+    d_y: float
+    d_z: float
+
+
+def _encode_vec3_uint64(x: float, y: float, z: float) -> int:
+    """Python-side mirror of
+    :func:`newton._src.geometry.support_function.encode_vec3`.
+
+    Bit-identical to the Warp kernel codec (same shared-exponent +
+    20-bit signed mantissa layout). Used by :meth:`ModelBuilder.finalize`
+    to encode the tetrahedron's 4th vertex into the per-shape
+    ``shape_source_ptr`` ``uint64`` slot; the narrow-phase
+    :func:`decode_vec3` reads it back on the GPU.
+
+    Returns:
+        A Python ``int`` in ``[0, 2^64)`` -- safe to push into a
+        ``wp.array[wp.uint64]``.
+    """
+    ax = abs(float(x))
+    ay = abs(float(y))
+    az = abs(float(z))
+    m = max(ax, ay, az)
+
+    if m > 1.0:
+        # ceil(log2(m)): smallest e with 2**e >= m, exactly matching
+        # the kernel's ``int(wp.ceil(wp.log2(m)))``.
+        e = math.ceil(math.log2(m))
+    else:
+        e = 0
+    e = max(0, min(15, int(e)))
+    scale = float(1 << e) if e <= 30 else 2.0**e  # power of two
+
+    # Defensive clamp: kernel does the same clamp post-divide.
+    nx = max(-1.0, min(1.0, float(x) / scale))
+    ny = max(-1.0, min(1.0, float(y) / scale))
+    nz = max(-1.0, min(1.0, float(z) / scale))
+
+    max_int = float((1 << 20) - 1)
+
+    # Symmetric 20-bit quantisation; ``round-half-to-even`` here matches
+    # ``wp.round`` (CUDA ``__float2int_rn``), which uses banker's
+    # rounding. Python's built-in ``round`` is also banker's rounding.
+    ix = int(round((nx * 0.5 + 0.5) * max_int))
+    iy = int(round((ny * 0.5 + 0.5) * max_int))
+    iz = int(round((nz * 0.5 + 0.5) * max_int))
+
+    return ((e & 0xF) << 60) | ((ix & 0xFFFFF) << 40) | ((iy & 0xFFFFF) << 20) | (iz & 0xFFFFF)
+
+
+def _canonicalize_triangle(
+    point_a: Vec3,
+    point_b: Vec3,
+    point_c: Vec3,
+) -> tuple[wp.transform, float, float, float]:
+    """Map three triangle vertices to ``(xform, edge_ab, c_y, c_z)``.
+
+    The :data:`GeoType.TRIANGLE` and :data:`GeoType.TETRAHEDRON`
+    primitives store vertex A at the local origin, B at
+    ``(0, 0, edge_ab)`` along local +Z, and C at ``(0, c_y, c_z)`` in
+    the local YZ plane. The face normal points along local +X.
+
+    Given any three non-colinear input points, this returns the rigid
+    transform whose origin is ``A`` and whose rotation maps the
+    canonical local axes onto the world (or body-local) frame so that
+    placing the canonical triangle through ``xform`` recovers the
+    requested vertices. The face normal direction follows the
+    right-hand rule on ``(B - A) x (C - A)``.
+
+    Raises:
+        ValueError: If ``|B - A|`` is degenerate or A, B, C are
+            colinear (zero triangle area).
+    """
+    a = np.asarray(point_a, dtype=np.float64).reshape(3)
+    b = np.asarray(point_b, dtype=np.float64).reshape(3)
+    c = np.asarray(point_c, dtype=np.float64).reshape(3)
+
+    ab = b - a
+    ac = c - a
+    edge_ab = float(np.linalg.norm(ab))
+    if edge_ab <= 1.0e-12:
+        raise ValueError(f"Degenerate triangle: |B - A| = {edge_ab} is too small.")
+
+    # Canonical convention: local +Z = AB / |AB|, local +Y points from
+    # the AB edge toward C (so c_y > 0), and local +X = +Y x +Z so the
+    # face normal lies along local +X (right-handed frame).
+    local_z = ab / edge_ab
+    c_z = float(np.dot(ac, local_z))
+    perp = ac - c_z * local_z
+    perp_norm = float(np.linalg.norm(perp))
+    if perp_norm <= 1.0e-12 * edge_ab:
+        raise ValueError(f"Degenerate triangle: A={tuple(a)}, B={tuple(b)}, C={tuple(c)} are colinear (zero area).")
+    local_y = perp / perp_norm
+    c_y = perp_norm
+    local_x = np.cross(local_y, local_z)
+
+    rot = np.column_stack((local_x, local_y, local_z)).astype(np.float32)
+    q = wp.quat_from_matrix(wp.mat33(rot.flatten()))
+    xform = wp.transform(p=wp.vec3(float(a[0]), float(a[1]), float(a[2])), q=q)
+    return xform, edge_ab, c_y, c_z
+
+
 class ModelBuilder:
     """A helper class for building simulation models at runtime.
 
@@ -365,7 +484,12 @@ class ModelBuilder:
                     f"sdf_max_resolution must be divisible by 8 (got {self.sdf_max_resolution}). "
                     "This is required because SDF volumes are allocated in 8x8x8 tiles."
                 )
-            hydroelastic_supported = shape_type not in (GeoType.PLANE, GeoType.HFIELD)
+            hydroelastic_supported = shape_type not in (
+                GeoType.PLANE,
+                GeoType.HFIELD,
+                GeoType.TRIANGLE,
+                GeoType.TETRAHEDRON,
+            )
             hydroelastic_requires_configured_sdf = shape_type in (
                 GeoType.SPHERE,
                 GeoType.BOX,
@@ -1166,6 +1290,12 @@ class ModelBuilder:
         """Default rigid contact gap [m] applied when adding a shape whose
         ``ModelBuilder.ShapeConfig.gap`` is ``None``. The resolved per-shape values are later
         propagated to :attr:`Model.shape_gap`."""
+
+        self.mesh_edge_lower_angle_threshold_rad: float = math.radians(0.1)
+        """Lower dihedral-angle threshold [rad] for filtering precomputed mesh edges
+        used by SDF-mesh contact generation. Internal edges with dihedral angle
+        below this value are dropped; boundary and non-manifold edges are always
+        kept. Set to 0 to disable filtering. Default: 0.1 degree."""
 
         self.num_rigid_contacts_per_world: int | None = None
         """Optional per-world rigid-contact allocation budget used to set :attr:`Model.rigid_contact_max`."""
@@ -3656,6 +3786,8 @@ class ModelBuilder:
         label: str | None = None,
         lock_inertia: bool = False,
         is_kinematic: bool = False,
+        linear_velocity: Vec3 | None = None,
+        angular_velocity: Vec3 | None = None,
         custom_attributes: dict[str, Any] | None = None,
     ) -> int:
         """Adds a stand-alone free-floating rigid body to the model.
@@ -3688,6 +3820,12 @@ class ModelBuilder:
                 center of mass, or inertia. This does not affect merging behavior in
                 :meth:`collapse_fixed_joints`, which always accumulates mass and inertia across merged bodies.
             is_kinematic: If True, the body is kinematic and does not respond to forces.
+            linear_velocity: Initial linear velocity of the body in the world frame [m/s].
+                If None (default), the body starts at rest. Written into both
+                :attr:`body_qd` and the auto-created free joint's velocity DoFs so
+                downstream :func:`newton.eval_fk` calls preserve the value.
+            angular_velocity: Initial angular velocity of the body in the world frame
+                [rad/s]. If None (default), the body starts at rest.
             custom_attributes: Dictionary of custom attribute names to values.
 
         Returns:
@@ -3715,6 +3853,18 @@ class ModelBuilder:
         # Create an articulation from the joint
         articulation_label = f"{label}_articulation" if label else None
         self.add_articulation([joint_id], label=articulation_label)
+
+        # Optional initial twist. Written to both ``body_qd`` (the
+        # state used directly by solvers that read body twists) and the
+        # FREE joint's six velocity DoFs (the source of truth that
+        # ``eval_fk`` propagates back to ``body_qd``). Newton's
+        # spatial_vector / FREE-joint qd layout is (linear, angular).
+        if linear_velocity is not None or angular_velocity is not None:
+            lin = axis_to_vec3(linear_velocity) if linear_velocity is not None else wp.vec3()
+            ang = axis_to_vec3(angular_velocity) if angular_velocity is not None else wp.vec3()
+            self.body_qd[body_id] = wp.spatial_vector(lin[0], lin[1], lin[2], ang[0], ang[1], ang[2])
+            qd_start = self.joint_qd_start[joint_id]
+            self.joint_qd[qd_start : qd_start + 6] = [lin[0], lin[1], lin[2], ang[0], ang[1], ang[2]]
 
         return body_id
 
@@ -6042,6 +6192,188 @@ class ModelBuilder:
             xform=xform,
             cfg=cfg,
             scale=scale,
+            label=label,
+            custom_attributes=custom_attributes,
+            color=color,
+        )
+
+    def add_shape_triangle(
+        self,
+        body: int,
+        point_a: Vec3,
+        point_b: Vec3,
+        point_c: Vec3,
+        cfg: ShapeConfig | None = None,
+        as_site: bool = False,
+        color: Vec3 | None = None,
+        label: str | None = None,
+        custom_attributes: dict[str, Any] | None = None,
+    ) -> int:
+        """Adds a single-triangle collision shape or site to a body.
+
+        The triangle is defined directly by its three vertices ``A``,
+        ``B``, ``C`` in either world coordinates (``body=-1``) or
+        body-local coordinates (``body >= 0``).
+
+        Internally the three points are rebased to the engine's
+        canonical local frame -- vertex A at the local origin, edge AB
+        along local +Z, and vertex C in the local YZ plane on the
+        ``c_y > 0`` side -- and the rigid offset that places the
+        canonical triangle at the supplied vertices is folded into the
+        shape's transform.
+
+        The triangle is treated as a double-sided thin shell for
+        collision (no front/back distinction). For mass / inertia the
+        triangle is interpreted as a thin prism extruded symmetrically
+        along the face normal by ``±cfg.margin``, so the full prism
+        thickness equals ``2 * cfg.margin`` and the body's center of
+        mass lands at the triangle centroid ``(A + B + C) / 3``.
+        Hydroelastic contact is not supported for triangles.
+
+        Args:
+            body: The index of the parent body this shape belongs to.
+                Use ``-1`` for shapes not attached to any specific body.
+            point_a [m]: First triangle vertex.
+            point_b [m]: Second triangle vertex. Must differ from
+                ``point_a``.
+            point_c [m]: Third triangle vertex. Must not be colinear
+                with ``A`` and ``B``.
+            cfg: The configuration for the shape's properties. If
+                ``None``, uses :attr:`default_shape_cfg` (or
+                :attr:`default_site_cfg` when ``as_site=True``).
+            as_site: If ``True``, creates a site (non-colliding
+                reference point) instead of a collision shape.
+            color: Optional display RGB color with values in [0, 1]. If
+                ``None``, uses the per-shape palette color.
+            label: Optional unique label for identifying the shape.
+            custom_attributes: Dictionary of custom attribute values for
+                SHAPE frequency attributes.
+
+        Returns:
+            The index of the newly added shape or site.
+        """
+        if cfg is None:
+            cfg = self.default_site_cfg if as_site else self.default_shape_cfg
+        elif as_site:
+            cfg = cfg.copy()
+            cfg.mark_as_site()
+
+        xform, edge_ab, c_y, c_z = _canonicalize_triangle(point_a, point_b, point_c)
+
+        scale = wp.vec3(edge_ab, c_y, c_z)
+        return self.add_shape(
+            body=body,
+            type=GeoType.TRIANGLE,
+            xform=xform,
+            cfg=cfg,
+            scale=scale,
+            label=label,
+            custom_attributes=custom_attributes,
+            color=color,
+        )
+
+    def add_shape_tetrahedron(
+        self,
+        body: int,
+        point_a: Vec3,
+        point_b: Vec3,
+        point_c: Vec3,
+        point_d: Vec3,
+        cfg: ShapeConfig | None = None,
+        as_site: bool = False,
+        color: Vec3 | None = None,
+        label: str | None = None,
+        custom_attributes: dict[str, Any] | None = None,
+    ) -> int:
+        """Adds a single solid tetrahedron collision shape or site to a body.
+
+        The tetrahedron is defined directly by its four vertices ``A``,
+        ``B``, ``C``, ``D`` in either world coordinates (``body=-1``) or
+        body-local coordinates (``body >= 0``).
+
+        Internally the four points are rebased to the engine's canonical
+        local frame -- vertex A at the local origin, edge AB along
+        local +Z, vertex C in the local YZ plane, vertex D unconstrained
+        -- so that the canonical tet placed through the shape's
+        transform recovers the supplied vertices. The first three
+        canonical parameters ``(edge_ab, c_y, c_z)`` pack directly into
+        :attr:`~newton.Model.shape_scale`; vertex D's local coordinates
+        are quantised into the per-shape ``shape_source_ptr`` ``uint64``
+        slot via
+        :func:`encode_vec3 <newton._src.geometry.support_function.encode_vec3>`,
+        and the narrow phase decodes it on the GPU.
+
+        For mass / inertia (when ``cfg.density`` is set) the tetrahedron
+        is treated as a uniform-density solid: the body's mass is
+        ``density * |AB . (AC x AD)| / 6``, the COM lands at the
+        four-vertex centroid ``(A + B + C + D) / 4``, and the inertia
+        tensor about that centroid is the standard solid-tet form.
+        ``cfg.margin`` only inflates the contact surface (it does *not*
+        further extrude the tet for inertia, unlike the triangle's
+        prism interpretation). Hydroelastic contact is not supported.
+
+        Args:
+            body: The index of the parent body this shape belongs to.
+                Use ``-1`` for shapes not attached to any specific body.
+            point_a [m]: First vertex.
+            point_b [m]: Second vertex. Must differ from ``point_a``.
+            point_c [m]: Third vertex. Must not be colinear with A
+                and B.
+            point_d [m]: Fourth vertex. Must not be coplanar with A,
+                B, C (else the tet has zero volume).
+            cfg: The configuration for the shape's properties. If
+                ``None``, uses :attr:`default_shape_cfg` (or
+                :attr:`default_site_cfg` when ``as_site=True``).
+            as_site: If ``True``, creates a site (non-colliding
+                reference point) instead of a collision shape.
+            color: Optional display RGB color with values in [0, 1]. If
+                ``None``, uses the per-shape palette color.
+            label: Optional unique label for identifying the shape.
+            custom_attributes: Dictionary of custom attribute values
+                for SHAPE frequency attributes.
+
+        Returns:
+            The index of the newly added shape or site.
+        """
+        if cfg is None:
+            cfg = self.default_site_cfg if as_site else self.default_shape_cfg
+        elif as_site:
+            cfg = cfg.copy()
+            cfg.mark_as_site()
+
+        xform, edge_ab, c_y, c_z = _canonicalize_triangle(point_a, point_b, point_c)
+
+        # Express D in the canonical local frame: subtract A and rotate
+        # by the inverse of the canonical rotation. ``transform_inverse``
+        # does exactly that for the position part of a rigid transform.
+        d_world = wp.vec3(float(point_d[0]), float(point_d[1]), float(point_d[2]))
+        d_local = wp.transform_point(wp.transform_inverse(xform), d_world)
+        d_x = float(d_local[0])
+        d_y = float(d_local[1])
+        d_z = float(d_local[2])
+
+        # Volume = | det(B-A, C-A, D-A) | / 6. With (edge_ab, c_y, c_z)
+        # well-defined by ``_canonicalize_triangle``, the only remaining
+        # degeneracy is D coplanar with ABC, which corresponds to
+        # ``d_x == 0`` (D in the canonical YZ plane).
+        if abs(d_x) < 1.0e-12:
+            raise ValueError(
+                f"Degenerate tetrahedron: vertex D={tuple(point_d)} is coplanar with A, B, C (zero volume)."
+            )
+
+        scale = wp.vec3(edge_ab, c_y, c_z)
+        # The Python-side ``shape_source`` slot carries D until
+        # :meth:`finalize` encodes it into the ``shape_source_ptr``
+        # uint64. ``_TetrahedronVertexD`` is hashable and isinstance-
+        # detectable, which is exactly what finalize needs to special-
+        # case before the generic ``geo.finalize()`` path.
+        return self.add_shape(
+            body=body,
+            type=GeoType.TETRAHEDRON,
+            xform=xform,
+            cfg=cfg,
+            scale=scale,
+            src=_TetrahedronVertexD(d_x, d_y, d_z),
             label=label,
             custom_attributes=custom_attributes,
             color=color,
@@ -9751,6 +10083,7 @@ class ModelBuilder:
         skip_validation_shapes: bool = False,
         skip_validation_structure: bool = False,
         skip_validation_joint_ordering: bool = True,
+        skip_shape_contact_pairs: bool = False,
     ) -> Model:
         """
         Finalize the builder and create a concrete :class:`~newton.Model` for simulation.
@@ -9771,6 +10104,12 @@ class ModelBuilder:
                 array lengths, monotonicity). Default is False.
             skip_validation_joint_ordering: If True, skips validation of DFS topological joint ordering within
                 articulations. Default is True (opt-in) because this check has O(n log n) complexity.
+            skip_shape_contact_pairs: If True, skips :meth:`find_shape_contact_pairs` and leaves the resulting
+                ``model.shape_contact_pairs`` / ``model.shape_contact_pair_count`` empty. The precomputed pair
+                list is only consumed by the ``"explicit"`` broad phase mode in :class:`CollisionPipeline`,
+                so this is safe whenever ``"nxn"`` or ``"sap"`` is used. Strongly recommended for large scenes
+                (the pair-list builder is an ``O(N^2)`` Python loop over every shape pair). Default is False
+                (preserves existing behaviour).
 
         Returns:
             A fully constructed Model object containing all simulation data on the specified device.
@@ -9866,6 +10205,14 @@ class ModelBuilder:
             finalized_geos = {}  # do not duplicate geometry
             gaussians = []
             for geo in self.shape_source:
+                # GeoType.TETRAHEDRON: Python-side ``shape_source`` carries
+                # ``_TetrahedronVertexD(d_x, d_y, d_z)``; quantise it into
+                # the per-shape ``shape_source_ptr`` ``uint64`` slot via
+                # :func:`encode_vec3`. The narrow phase reads it back via
+                # :func:`decode_vec3` from ``extract_shape_data``.
+                if isinstance(geo, _TetrahedronVertexD):
+                    geo_sources.append(_encode_vec3_uint64(geo.d_x, geo.d_y, geo.d_z))
+                    continue
                 geo_hash = hash(geo)  # avoid repeated hash computations
                 if geo and not isinstance(geo, Heightfield):
                     if geo_hash not in finalized_geos:
@@ -10317,7 +10664,10 @@ class ModelBuilder:
             shape_edge_ranges = []
             edge_chunks = []
             edge_offset = 0
-            edge_cache = {}  # mesh python id → (start, count)
+            edge_cache = {}  # (id(mesh), threshold) → (start, count). For
+            # meshes whose precomputed collision edges were already prepared
+            # by mesh.build_sdf(), the threshold component is None.
+            mesh_edge_lower_angle_threshold_rad = float(self.mesh_edge_lower_angle_threshold_rad)
 
             for i in range(len(self.shape_type)):
                 if (
@@ -10326,11 +10676,17 @@ class ModelBuilder:
                     and (self.shape_flags[i] & ShapeFlags.COLLIDE_SHAPES)
                 ):
                     mesh = self.shape_source[i]
-                    mesh_key = id(mesh)
+                    if mesh._collision_edges is not None:
+                        mesh_key = (id(mesh), None)
+                    else:
+                        mesh_key = (id(mesh), mesh_edge_lower_angle_threshold_rad)
                     if mesh_key in edge_cache:
                         shape_edge_ranges.append(edge_cache[mesh_key])
                     else:
-                        edges = mesh.edges  # lazily computed and cached on the Mesh
+                        if mesh._collision_edges is not None:
+                            edges = mesh._collision_edges
+                        else:
+                            edges = mesh._filter_edges_by_dihedral_angle(mesh_edge_lower_angle_threshold_rad)
                         start = edge_offset
                         count = len(edges)
                         edge_chunks.append(edges)
@@ -10645,7 +11001,11 @@ class ModelBuilder:
             m.equality_constraint_count = len(self.equality_constraint_type)
             m.constraint_mimic_count = len(self.constraint_mimic_joint0)
 
-            self.find_shape_contact_pairs(m)
+            if skip_shape_contact_pairs:
+                m.shape_contact_pairs = wp.empty(0, dtype=wp.vec2i, device=m.device)
+                m.shape_contact_pair_count = 0
+            else:
+                self.find_shape_contact_pairs(m)
 
             # enable ground plane
             m.up_axis = self.up_axis

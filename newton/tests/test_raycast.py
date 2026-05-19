@@ -338,6 +338,103 @@ def test_mesh_ray_intersect(test: TestRaycast, device: str):
             test.assertAlmostEqual(out_t.numpy()[0], expected, delta=1e-3)
 
 
+def test_ray_intersect_triangle(test: TestRaycast, device: str):
+    """Test the :data:`GeoType.TRIANGLE` primitive (canonical YZ-plane triangle).
+
+    Canonical-frame vertices: A=(0,0,0), B=(0,0,edge_ab), C=(0,c_y,c_z).
+    Stored in shape_scale as (edge_ab, c_y, c_z).
+    """
+    out_t = wp.zeros(1, dtype=float, device=device)
+
+    # A right triangle with legs of length 1: B=(0,0,1), C=(0,1,0). Lies in YZ plane at x=0.
+    size = wp.vec3(1.0, 1.0, 0.0)
+    identity = wp.transform_identity()
+    rot_x_90 = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wp.pi / 2.0))
+
+    cases = [
+        # Hit centroid (1/3, 1/3) of YZ triangle from +X.
+        ("hit_front", identity, wp.vec3(2.0, 1.0 / 3.0, 1.0 / 3.0), wp.vec3(-1.0, 0.0, 0.0), 2.0),
+        # Double-sided: same target from -X side.
+        ("hit_back", identity, wp.vec3(-2.0, 1.0 / 3.0, 1.0 / 3.0), wp.vec3(1.0, 0.0, 0.0), 2.0),
+        # Outside the triangle (point (0, 2, 2) is outside the unit right triangle).
+        ("miss_outside", identity, wp.vec3(2.0, 2.0, 2.0), wp.vec3(-1.0, 0.0, 0.0), -1.0),
+        # Ray parallel to plane (along +Y) misses.
+        ("miss_parallel", identity, wp.vec3(0.0, -1.0, 0.5), wp.vec3(0.0, 1.0, 0.0), -1.0),
+        # Ray pointing away from triangle.
+        ("miss_behind", identity, wp.vec3(2.0, 1.0 / 3.0, 1.0 / 3.0), wp.vec3(1.0, 0.0, 0.0), -1.0),
+        # Rotated by 90deg around +Y so the canonical YZ-plane triangle is now in the YX-plane (z=0).
+        # Hit it from +Z.
+        ("hit_rotated", rot_x_90, wp.vec3(1.0 / 3.0, 1.0 / 3.0, 2.0), wp.vec3(0.0, 0.0, -1.0), 2.0),
+    ]
+
+    for name, xform, origin, direction, expected in cases:
+        with test.subTest(name):
+            wp.launch(
+                kernel_test_geom,
+                dim=1,
+                inputs=[out_t, xform, size, GeoType.TRIANGLE, origin, direction, 0],
+                device=device,
+            )
+            test.assertAlmostEqual(out_t.numpy()[0], expected, delta=1e-5)
+
+
+def test_ray_intersect_tetrahedron(test: TestRaycast, device: str):
+    """Test the :data:`GeoType.TETRAHEDRON` primitive (solid 4-face tet).
+
+    Canonical-frame vertices A=(0,0,0), B=(0,0,edge_ab), C=(0,c_y,c_z) packed in shape_scale,
+    D=(d_x,d_y,d_z) packed via ``_encode_vec3_uint64`` into ``shape_source_ptr``.
+    """
+    from newton._src.sim.builder import _encode_vec3_uint64
+
+    out_t = wp.zeros(1, dtype=float, device=device)
+
+    # Right tetrahedron: A=(0,0,0), B=(0,0,1), C=(0,1,0), D=(1,0,0).
+    # All four faces meet at (0,0,0) with the others spanning the unit corners.
+    size = wp.vec3(1.0, 1.0, 0.0)  # (edge_ab=1, c_y=1, c_z=0)
+    encoded_d = wp.uint64(_encode_vec3_uint64(1.0, 0.0, 0.0))
+    identity = wp.transform_identity()
+
+    # Centroid of the tet is at ((0+0+0+1)/4, (0+0+1+0)/4, (0+1+0+0)/4) = (0.25, 0.25, 0.25).
+    centroid = wp.vec3(0.25, 0.25, 0.25)
+
+    cases = [
+        # Shoot at centroid from +X far away; should hit the BCD face (the only face with x>0
+        # interior), but we don't care which face is hit — we just check ``t``.
+        # The face BCD has plane x + y + z = 1, so a ray from (3, 0.25, 0.25) along -X hits at x=0.5,
+        # i.e. t=2.5.
+        ("hit_face_bcd", identity, wp.vec3(3.0, 0.25, 0.25), wp.vec3(-1.0, 0.0, 0.0), 2.5),
+        # Ray from -X along +X: enters face ACD (the y=0 face? no, ACD is in plane x=0 segment...).
+        # Actually faces ABC (yz-plane, x=0), ABD (in xz with y=0... no y=0 face is ABD: A,B,D y=0
+        # all). So ray from (-2, 0.5, 0.5) along +X first hits ABC at x=0, t=2 — but (0, 0.5, 0.5)
+        # is on the BC edge of ABC. Use 0.3, 0.3 instead — inside ABC since y=0.3, z=0.3,
+        # y+z=0.6<1.
+        ("hit_face_abc", identity, wp.vec3(-2.0, 0.3, 0.3), wp.vec3(1.0, 0.0, 0.0), 2.0),
+        # Ray that misses entirely (origin and direction stay clear of the tet).
+        ("miss_outside", identity, wp.vec3(-2.0, 5.0, 5.0), wp.vec3(1.0, 0.0, 0.0), -1.0),
+        # Ray from inside the tet exiting through a face: origin at centroid going +X exits through
+        # BCD (x+y+z=1) at parameter t such that (0.25+t)+0.25+0.25=1 => t=0.25.
+        ("inside_exits_bcd", identity, centroid, wp.vec3(1.0, 0.0, 0.0), 0.25),
+        # Translated tet: centroid at (10.25, 0.25, 0.25); shoot at it from far away.
+        (
+            "hit_translated",
+            wp.transform(wp.vec3(10.0, 0.0, 0.0), wp.quat_identity()),
+            wp.vec3(13.0, 0.25, 0.25),
+            wp.vec3(-1.0, 0.0, 0.0),
+            2.5,
+        ),
+    ]
+
+    for name, xform, origin, direction, expected in cases:
+        with test.subTest(name):
+            wp.launch(
+                kernel_test_geom,
+                dim=1,
+                inputs=[out_t, xform, size, GeoType.TETRAHEDRON, origin, direction, encoded_d],
+                device=device,
+            )
+            test.assertAlmostEqual(out_t.numpy()[0], expected, delta=1e-4)
+
+
 def test_convex_hull_ray_intersect_via_geom(test: TestRaycast, device: str):
     """Test convex hull raycasting through the ray_intersect_geom interface (uses mesh path)."""
     out_t = wp.zeros(1, dtype=float, device=device)
@@ -650,6 +747,8 @@ add_function_test(TestRaycast, "test_ray_intersect_capsule", test_ray_intersect_
 add_function_test(TestRaycast, "test_ray_intersect_cylinder", test_ray_intersect_cylinder, devices=devices)
 add_function_test(TestRaycast, "test_ray_intersect_cone", test_ray_intersect_cone, devices=devices)
 add_function_test(TestRaycast, "test_ray_intersect_ellipsoid", test_ray_intersect_ellipsoid, devices=devices)
+add_function_test(TestRaycast, "test_ray_intersect_triangle", test_ray_intersect_triangle, devices=devices)
+add_function_test(TestRaycast, "test_ray_intersect_tetrahedron", test_ray_intersect_tetrahedron, devices=devices)
 add_function_test(TestRaycast, "test_ray_intersect_mesh", test_ray_intersect_mesh, devices=devices)
 add_function_test(TestRaycast, "test_mesh_ray_intersect", test_mesh_ray_intersect, devices=devices)
 add_function_test(

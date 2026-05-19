@@ -6,6 +6,7 @@
 import warp as wp
 
 from ..utils.heightfield import HeightfieldData, ray_intersect_heightfield_local
+from .support_function import decode_vec3
 from .types import (
     GeoType,
 )
@@ -618,6 +619,153 @@ def ray_intersect_plane(
 
 
 @wp.func
+def _ray_intersect_triangle_mt(
+    ray_origin: wp.vec3,
+    ray_direction: wp.vec3,
+    a: wp.vec3,
+    b: wp.vec3,
+    c: wp.vec3,
+) -> tuple[float, wp.vec3]:
+    """Möller-Trumbore ray/triangle intersection (double-sided).
+
+    Returns ``(t, geometric_normal)`` where ``geometric_normal`` is the
+    triangle normal ``(b-a) x (c-a)`` re-oriented to face the incoming
+    ray, or ``(-1.0, vec3(0))`` on miss / degenerate triangle.
+    """
+    edge1 = b - a
+    edge2 = c - a
+    h = wp.cross(ray_direction, edge2)
+    det = wp.dot(edge1, h)
+
+    if wp.abs(det) < MINVAL:
+        return -1.0, wp.vec3(0.0)
+
+    inv_det = 1.0 / det
+    s = ray_origin - a
+    u = wp.dot(s, h) * inv_det
+    if u < 0.0 or u > 1.0:
+        return -1.0, wp.vec3(0.0)
+
+    q = wp.cross(s, edge1)
+    v = wp.dot(ray_direction, q) * inv_det
+    if v < 0.0 or u + v > 1.0:
+        return -1.0, wp.vec3(0.0)
+
+    t = wp.dot(edge2, q) * inv_det
+    if t < 0.0:
+        return -1.0, wp.vec3(0.0)
+
+    n = wp.cross(edge1, edge2)
+    n_len_sq = wp.dot(n, n)
+    if n_len_sq < MINVAL:
+        return -1.0, wp.vec3(0.0)
+    n = n / wp.sqrt(n_len_sq)
+    if wp.dot(n, ray_direction) > 0.0:
+        n = -n
+    return t, n
+
+
+@wp.func
+def ray_intersect_triangle(
+    geom_to_world: wp.transform, ray_origin: wp.vec3, ray_direction: wp.vec3, size: wp.vec3
+) -> tuple[float, wp.vec3]:
+    """Ray vs the :data:`GeoType.TRIANGLE` primitive (double-sided).
+
+    The canonical-frame vertices, packed in :attr:`Model.shape_scale`, are
+    ``A = (0, 0, 0)``, ``B = (0, 0, size[0])``, ``C = (0, size[1], size[2])``.
+
+    Args:
+        geom_to_world: World transform of the shape.
+        ray_origin: Ray origin in world space.
+        ray_direction: Ray direction in world space (need not be normalized).
+        size: ``(edge_ab, c_y, c_z)`` from :attr:`Model.shape_scale`.
+
+    Returns:
+        ``(t, normal)`` for the closest hit, or ``(-1.0, vec3(0))`` on miss.
+        The normal is in world space and is flipped to face the incoming ray.
+    """
+    ro, rd = map_ray_to_local(geom_to_world, ray_origin, ray_direction)
+
+    a = wp.vec3(0.0, 0.0, 0.0)
+    b = wp.vec3(0.0, 0.0, size[0])
+    c = wp.vec3(0.0, size[1], size[2])
+
+    t, n_local = _ray_intersect_triangle_mt(ro, rd, a, b, c)
+    if t < 0.0:
+        return -1.0, wp.vec3(0.0)
+
+    normal = wp.normalize(wp.transform_vector(geom_to_world, n_local))
+    return t, normal
+
+
+@wp.func
+def ray_intersect_tetrahedron(
+    geom_to_world: wp.transform,
+    ray_origin: wp.vec3,
+    ray_direction: wp.vec3,
+    size: wp.vec3,
+    encoded_d: wp.uint64,
+) -> tuple[float, wp.vec3]:
+    """Ray vs the :data:`GeoType.TETRAHEDRON` primitive (solid, four faces).
+
+    Vertices A/B/C come from :attr:`Model.shape_scale` exactly as for
+    :data:`GeoType.TRIANGLE`; vertex ``D`` is decoded from
+    :attr:`Model.shape_source_ptr` via
+    :func:`decode_vec3 <newton._src.geometry.support_function.decode_vec3>`.
+
+    Returns the entry hit (smallest non-negative ``t`` across the four
+    triangular faces). If the ray origin is inside the tet the entry is
+    behind the origin and the first face crossing in front (the exit) is
+    returned, matching the box / capsule "inside" convention.
+
+    Args:
+        geom_to_world: World transform of the shape.
+        ray_origin: Ray origin in world space.
+        ray_direction: Ray direction in world space (need not be normalized).
+        size: ``(edge_ab, c_y, c_z)`` from :attr:`Model.shape_scale`.
+        encoded_d: Quantised D vertex from :attr:`Model.shape_source_ptr`.
+
+    Returns:
+        ``(t, normal)`` for the closest hit, or ``(-1.0, vec3(0))`` on miss.
+        The normal is in world space and is flipped to face the incoming ray.
+    """
+    ro, rd = map_ray_to_local(geom_to_world, ray_origin, ray_direction)
+
+    a = wp.vec3(0.0, 0.0, 0.0)
+    b = wp.vec3(0.0, 0.0, size[0])
+    c = wp.vec3(0.0, size[1], size[2])
+    d = decode_vec3(encoded_d)
+
+    best_t = 1.0e10
+    best_n = wp.vec3(0.0)
+
+    # Test each of the four triangular faces. Face winding doesn't matter
+    # because Möller-Trumbore here is double-sided.
+    t_f, n_f = _ray_intersect_triangle_mt(ro, rd, a, b, c)
+    if t_f >= 0.0 and t_f < best_t:
+        best_t = t_f
+        best_n = n_f
+    t_f, n_f = _ray_intersect_triangle_mt(ro, rd, a, b, d)
+    if t_f >= 0.0 and t_f < best_t:
+        best_t = t_f
+        best_n = n_f
+    t_f, n_f = _ray_intersect_triangle_mt(ro, rd, a, c, d)
+    if t_f >= 0.0 and t_f < best_t:
+        best_t = t_f
+        best_n = n_f
+    t_f, n_f = _ray_intersect_triangle_mt(ro, rd, b, c, d)
+    if t_f >= 0.0 and t_f < best_t:
+        best_t = t_f
+        best_n = n_f
+
+    if best_t >= 1.0e9:
+        return -1.0, wp.vec3(0.0)
+
+    normal = wp.normalize(wp.transform_vector(geom_to_world, best_n))
+    return best_t, normal
+
+
+@wp.func
 def ray_intersect_mesh(
     geom_to_world: wp.transform,
     ray_origin: wp.vec3,
@@ -816,7 +964,12 @@ def _make_raycast_funcs(enable_heightfields: bool):
             geomtype: The type of the geometry.
             ray_origin: The origin of the ray.
             ray_direction: The direction of the ray.
-            mesh_id: The Warp mesh ID for mesh geometries.
+            mesh_id: Auxiliary 64-bit data from :attr:`Model.shape_source_ptr`.
+                For :data:`GeoType.MESH` / :data:`GeoType.CONVEX_MESH` it is the
+                Warp mesh handle. For :data:`GeoType.TETRAHEDRON` it is the
+                encoded fourth vertex ``D`` (see
+                :func:`encode_vec3 <newton._src.geometry.support_function.encode_vec3>`).
+                Ignored for all other shape types; pass ``wp.uint64(0)``.
             shape_idx: Index of the shape being tested; used only when ``geomtype`` is HFIELD to look up its ``HeightfieldData``.
             shape_heightfield_index: Per-shape index into ``heightfield_data``.
             heightfield_data: Compact array of ``HeightfieldData`` structs, one per HFIELD shape.
@@ -848,6 +1001,12 @@ def _make_raycast_funcs(enable_heightfields: bool):
 
         elif geomtype == GeoType.ELLIPSOID:
             t_hit, normal = ray_intersect_ellipsoid(geom_to_world, ray_origin, ray_direction, size)
+
+        elif geomtype == GeoType.TRIANGLE:
+            t_hit, normal = ray_intersect_triangle(geom_to_world, ray_origin, ray_direction, size)
+
+        elif geomtype == GeoType.TETRAHEDRON:
+            t_hit, normal = ray_intersect_tetrahedron(geom_to_world, ray_origin, ray_direction, size, mesh_id)
 
         elif geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_MESH:
             t_hit, normal, _u, _v, _face = ray_intersect_mesh(
@@ -949,8 +1108,10 @@ def _make_raycast_funcs(enable_heightfields: bool):
 
         geomtype = geom_type[shape_idx]
 
-        # Get mesh ID for mesh-like geometries
-        if geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_MESH:
+        # ``shape_source_ptr`` carries the Warp mesh handle for MESH/CONVEX_MESH
+        # and the encoded fourth vertex D for TETRAHEDRON; ``ray_intersect_geom``
+        # picks the right interpretation based on ``geomtype``.
+        if geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_MESH or geomtype == GeoType.TETRAHEDRON:
             mesh_id = shape_source_ptr[shape_idx]
         else:
             mesh_id = wp.uint64(0)
@@ -1056,8 +1217,10 @@ def _make_raycast_funcs(enable_heightfields: bool):
 
         geomtype = geom_type[shape_idx]
 
-        # Get mesh ID for mesh-like geometries
-        if geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_MESH:
+        # ``shape_source_ptr`` carries the Warp mesh handle for MESH/CONVEX_MESH
+        # and the encoded fourth vertex D for TETRAHEDRON; ``ray_intersect_geom``
+        # picks the right interpretation based on ``geomtype``.
+        if geomtype == GeoType.MESH or geomtype == GeoType.CONVEX_MESH or geomtype == GeoType.TETRAHEDRON:
             mesh_id = shape_source_ptr[shape_idx]
         else:
             mesh_id = wp.uint64(0)

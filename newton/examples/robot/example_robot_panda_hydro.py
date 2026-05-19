@@ -275,27 +275,39 @@ class Example:
         sdf_hydroelastic_config = HydroelasticSDF.Config(
             output_contact_surface=hasattr(viewer, "renderer"),  # Compile in if viewer supports it
         )
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model,
-            reduce_contacts=True,
-            broad_phase="explicit",
-            sdf_hydroelastic_config=sdf_hydroelastic_config,
-        )
+        solver_name_for_pipeline = getattr(args, "solver", "mujoco")
+        cp_kwargs = {
+            "reduce_contacts": True,
+            "broad_phase": "explicit",
+            "sdf_hydroelastic_config": sdf_hydroelastic_config,
+        }
+        if solver_name_for_pipeline == "phoenx":
+            cp_kwargs["contact_matching"] = "sticky"
+        self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)
         self.contacts = self.collision_pipeline.contacts()
 
-        # Create MuJoCo solver with Newton contacts
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            use_mujoco_contacts=False,
-            solver="newton",
-            integrator="implicitfast",
-            cone="elliptic",
-            njmax=500,
-            nconmax=500,
-            iterations=15,
-            ls_iterations=100,
-            impratio=1000.0,
-        )
+        # Solver dispatch. PhoenX has native hydroelastic SDF support
+        # (see ``test_hydroelastic_phoenx.py``); the same Newton
+        # ``CollisionPipeline`` populates ``self.contacts`` for both
+        # backends, so the only branch is the solver instantiation.
+        solver_name = getattr(args, "solver", "mujoco")
+        if solver_name == "phoenx":
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model, substeps=4, solver_iterations=8, velocity_iterations=1
+            )
+        else:
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                use_mujoco_contacts=False,
+                solver="newton",
+                integrator="implicitfast",
+                cone="elliptic",
+                njmax=500,
+                nconmax=500,
+                iterations=15,
+                ls_iterations=100,
+                impratio=1000.0,
+            )
 
         self.viewer.set_model(self.model)
         self.viewer.picking_enabled = False  # Disable interactive picking for this example
@@ -531,6 +543,12 @@ class Example:
             choices=[scene.value for scene in SceneType],
             default=SceneType.PEN.value,
             help="Scene type to load (pen, cube)",
+        )
+        parser.add_argument(
+            "--solver",
+            choices=["mujoco", "phoenx"],
+            default="mujoco",
+            help="Rigid-body solver backend.",
         )
         return parser
 
