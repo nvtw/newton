@@ -352,7 +352,14 @@ class PhoenXWorld:
         warm_start_invalidate_period: int = 4,
         warm_start_rotate_skip_color: bool = True,
         capture_while_greedy_coloring: bool = True,
-        speculative_coloring: bool = False,
+        # Speculative coloring (3-phase pick + validate + commit) is
+        # ~17 % faster than JP-MIS on cold-start MIS work (1.37 vs
+        # 1.65 ms per 100 frames on Kapla nsys) and matches it on the
+        # warm-start fast path. Deterministic via the same fixed
+        # priority permutation as MIS; saturation-safe via overflow
+        # flag + JP fallback. PhoenX is experimental and we don't
+        # need legacy defaults, so this is the new default.
+        speculative_coloring: bool = True,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
