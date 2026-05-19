@@ -3,31 +3,14 @@
 
 """Cross-frame warm-start cache for the greedy MIS partitioner.
 
-Most of the constraint graph is unchanged between adjacent solver
-steps -- the same bodies remain in contact, the same joints / cloth
-triangles / soft tets persist. Recomputing the colouring from
-scratch every step wastes work on constraints whose previous-frame
-colour is still legal.
+Keyed by body-pair (stable across frames, unlike cid which the contact
+matcher re-indexes). The partitioner seeds ``color_tags`` from the
+cache at the top of ``build_csr``, validates against the current
+adjacency, and skips MIS for entries whose cached colour survives.
 
-This module provides a body-pair-indexed cache of previously-assigned
-colours. The partitioner reads it at the top of ``build_csr``,
-validates entries against the current adjacency, and skips MIS for
-constraints whose cached colour survives validation.
-
-Why body-pair, not cid? Contacts get re-indexed every step by the
-contact matcher -- ``cid=42`` last frame and ``cid=42`` this frame
-are different physical constraints. Body indices, however, are
-stable across frames (the builder assigns them once). Keying the
-cache by the constraint's body-pair signature gives a stable handle
-even as cids shuffle.
-
-Multi-contact body pairs (e.g. ring-vs-ring with N contact points)
-all hash to the same key; the cache stores only ONE colour per pair,
-so N-1 of those constraints will be invalidated by the validation
-pass and re-coloured by greedy MIS. The first seeded constraint
-benefits from the warm-start; the others fall back to cold-start.
-Worst case: zero speedup. Best case (joints, cloth tris, soft tets
-with unique body signatures): near-100%% cache hit.
+Multi-contact pairs (N contact points between the same bodies) share
+one cache entry, so N-1 of those re-MIS each step. Best case is near
+100% cache hit for unique-body-pair scenes (joints, cloth tris, etc.).
 """
 
 from __future__ import annotations
@@ -58,21 +41,15 @@ __all__ = [
 
 @wp.struct
 class WarmStartCache:
-    """SoA storage for the body-pair -> colour cache.
-
-    Arrays are sized to ``max_num_interactions`` (upper bound on
-    distinct body pairs == one per constraint). Actual count tracked
-    by ``num_entries[0]``. ``keys`` are sorted ascending so device-side
-    binary search is well-defined; the persist pipeline reorders into
-    this layout after each ``build_csr``.
+    """SoA storage for the body-pair -> colour cache, sized to
+    ``max_num_interactions`` with live count in ``num_entries[0]``.
+    Keys are sorted ascending after each ``build_csr`` so the seed
+    kernel's binary search is well-defined.
     """
 
-    #: Packed body-pair keys. Layout: ``(body_2nd_min << 32) | body_min``.
-    #: Sorted ascending after :func:`persist_warm_start_kernel`.
+    #: Packed body-pair keys: ``(body_2nd_min << 32) | body_min``.
     keys: wp.array[wp.int64]
-    #: Per-key cached colour. Same encoding as ``color_tags``: ``c + 1``
-    #: where ``c`` is the colour index (``0`` would mean "no colour",
-    #: which is never stored).
+    #: Per-key cached colour, encoded ``c + 1`` to match ``color_tags``.
     colors: wp.array[wp.int32]
     #: Live entry count (length 1).
     num_entries: wp.array[wp.int32]
@@ -82,17 +59,9 @@ def warm_start_cache_zeros(
     capacity: int,
     device: wp.context.Devicelike = None,
 ) -> WarmStartCache:
-    """Allocate a zero-initialised :class:`WarmStartCache`.
-
-    Args:
-        capacity: Maximum entries (matches the partitioner's
-            ``max_num_interactions``).
-        device: Warp device for the allocation.
-
-    ``num_entries`` starts at 0 -- so the first build's lookup hits
-    the empty path on every cid (cold start). The persist kernel then
-    populates the cache for subsequent builds.
-    """
+    """Allocate a zero-initialised :class:`WarmStartCache` of capacity
+    ``capacity``. ``num_entries`` starts at 0; the persist kernel
+    populates the cache after the first ``build_csr``."""
     if capacity < 1:
         raise ValueError(f"capacity must be >= 1 (got {capacity})")
     c = WarmStartCache()
@@ -107,17 +76,9 @@ _BODY_INF = wp.constant(wp.int32(0x7FFFFFFF))
 
 @wp.func
 def warm_start_key_func(el: ElementInteractionData) -> wp.int64:
-    """Compute the body-pair cache key for one element.
-
-    Layout: ``(body_2nd_min << 32) | (body_min & 0xFFFFFFFF)``. Uses
-    the two smallest non-negative body endpoints. If the constraint
-    has fewer than two real bodies, the missing slots get a sentinel
-    ``INT32_MAX`` so the key is still unique-per-signature.
-
-    Equivalent ``(body_min, body_2nd_min)`` lexicographic ordering --
-    matches what the radix sort produces, so cached keys land in a
-    deterministic order.
-    """
+    """Pack ``(body_2nd_min << 32) | body_min`` from the two smallest
+    non-negative body endpoints. Missing slots use ``INT32_MAX`` so
+    the key stays unique per body-pair signature."""
     b_min = _BODY_INF
     b_2nd = _BODY_INF
     for j in range(MAX_BODIES):
@@ -138,13 +99,8 @@ def binary_search_warm_start_func(
     num_entries: wp.int32,
     target: wp.int64,
 ) -> wp.int32:
-    """Binary search for ``target`` in ``keys[:num_entries]``. Returns
-    the index of the match or ``-1`` if not found.
-
-    Sorted-array invariant is established by the persist pipeline
-    (radix sort + boundary compaction). Safe to call from inside a
-    captured graph -- no host roundtrip.
-    """
+    """Binary search for ``target`` in ``keys[:num_entries]``; returns
+    the match index or -1. Capture-safe (no host roundtrip)."""
     lo = wp.int32(0)
     hi = num_entries - wp.int32(1)
     while lo <= hi:
@@ -171,26 +127,14 @@ def seed_warm_start_kernel(
     skip_color_start_plus_one: wp.array[wp.int32],
     skip_color_end_plus_one: wp.array[wp.int32],
 ):
-    """For each active constraint, look up its body-pair key in the
-    cache and seed ``color_tags[tid]`` with the cached colour. Empty
-    cache (``cache_num_entries[0] == 0``) leaves ``color_tags`` at 0
-    -- equivalent to cold-start MIS.
+    """Seed ``color_tags[tid]`` from the cache via body-pair key
+    lookup. Empty cache (``cache_num_entries[0] == 0``) is a no-op
+    (cold-start).
 
-    ``skip_color_start_plus_one[0]`` .. ``skip_color_end_plus_one[0]``
-    is the inclusive **encoded** colour range to skip this frame
-    (``color + 1`` matching the ``color_tags`` encoding). Cache
-    entries whose colour falls in the range are NOT seeded, forcing
-    greedy MIS to re-derive them this frame. An empty range
-    (``start > end``) disables skipping (full seed). Used to rotate
-    which colour gets fresh-coloured each frame so the warm-start
-    fast path doesn't lock the full coloring into a fixed point that
-    biases the PGS solve.
-
-    Also stamps ``partition_data_concat[tid]``: the greedy kernel
-    reads this on commit, so we keep it in sync with ``color_tags``
-    here (uncoloured slots get the unpartitioned-marker flag stamped
-    by the adjacency-store kernel earlier; we overwrite for coloured
-    slots).
+    ``skip_color_{start,end}_plus_one[0]`` mark an inclusive
+    encoded-colour range to skip this frame (forces those constraints
+    to re-MIS). Empty range (start > end) disables skipping. Mirrors
+    the colour into ``partition_data_concat`` for the greedy kernel.
     """
     tid = wp.tid()
     if tid >= num_elements[0]:
@@ -228,23 +172,11 @@ def warm_start_invalidate_mark_kernel(
     max_colored_partitions: wp.int32,
     invalid_mark: wp.array[wp.int32],
 ):
-    """Pass 1 of warm-start validation: detect colour conflicts.
-
-    For each ``tid`` with a non-zero seeded colour, scan its
-    neighbours. If any neighbour with ``tid' > tid`` shares the same
-    ``color_tags`` value, this element loses and gets marked
-    invalid. Tie-break by ``tid`` is deterministic and prevents both
-    sides of a conflict from being marked (we'd waste a recolor).
-
-    Race-free: each thread reads from ``color_tags`` (no writes
-    inside this pass) and writes only ``invalid_mark[tid]`` (its own
-    slot). Pass 2 (:func:`warm_start_invalidate_apply_kernel`)
-    consumes ``invalid_mark`` and resets the losers.
-
-    Overflow elements (``color_tags[tid] == max_colored_partitions + 1``)
-    are EXEMPT: by design they conflict with their neighbours and
-    mass splitting solves them Jacobi-style. Leave them coloured.
-    """
+    """Pass 1 of warm-start validation. For each seeded ``tid``, scan
+    neighbours; if any with higher tid shares the same colour, mark
+    ``invalid_mark[tid]``. Tie-break by tid keeps both sides from
+    losing. Race-free (reads-only on ``color_tags``). Overflow-bucket
+    entries are exempt -- mass splitting handles their conflicts."""
     tid = wp.tid()
     if tid >= num_elements[0]:
         return
@@ -286,13 +218,9 @@ def warm_start_emit_pairs_kernel(
     keys_out: wp.array[wp.int64],
     values_out: wp.array[wp.int32],
 ):
-    """Emit one ``(body_pair_key, cid)`` pair per active coloured
-    constraint. Inactive / uncoloured slots get ``INT64_MAX`` keys so
-    the subsequent radix sort pushes them to the tail.
-
-    ``values_out[i] = cid`` so the dedup kernel can recover
-    ``color_tags[cid]`` after the sort permutes positions.
-    """
+    """Emit ``(body_pair_key, cid)`` per active coloured constraint;
+    inactive slots get ``INT64_MAX`` keys (sort pushes them to tail).
+    ``values_out[i] = cid`` so dedup can recover the colour after sort."""
     tid = wp.tid()
     if tid >= keys_out.shape[0]:
         return
@@ -318,11 +246,9 @@ def warm_start_mark_boundaries_kernel(
     num_elements: wp.array[wp.int32],
     is_boundary: wp.array[wp.int32],
 ):
-    """Mark ``is_boundary[i] = 1`` iff ``sorted_keys[i]`` is the FIRST
-    occurrence of its key value (and the slot is within the active
-    region). Drives the subsequent prefix-scan that assigns destination
-    slots in the cache.
-    """
+    """Mark ``is_boundary[i] = 1`` iff ``sorted_keys[i]`` is the first
+    occurrence of its key (within the active region). Feeds the
+    prefix-scan that assigns destination cache slots."""
     tid = wp.tid()
     if tid >= is_boundary.shape[0]:
         return
@@ -355,16 +281,10 @@ def warm_start_dedup_pairs_kernel(
     out_colors: wp.array[wp.int32],
     out_num_entries: wp.array[wp.int32],
 ):
-    """Compact: each thread at a boundary writes ``(key, color)`` to
-    its scan-assigned destination slot. The last-thread writes
-    ``out_num_entries[0] = total_unique`` so the next frame's seed
-    kernel knows the cache size.
-
-    For duplicate-key slots (multi-contact body pairs), we keep
-    whichever entry the sort landed first -- one of the conflicting
-    constraints gets cached; the others will hit the validation pass
-    next frame.
-    """
+    """Compact unique keys into the cache: each boundary thread writes
+    ``(key, color)`` to its scan-assigned slot and atomically updates
+    ``out_num_entries`` to the final unique count. Duplicate keys
+    (multi-contact body pairs) keep the sort's first-landed entry."""
     tid = wp.tid()
     if tid >= sorted_keys.shape[0]:
         return

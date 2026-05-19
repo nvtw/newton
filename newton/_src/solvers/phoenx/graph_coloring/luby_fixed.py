@@ -46,8 +46,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
     MAX_COLORS,
     _GREEDY_BLOCK_DIM,
     _fill_packed_priorities_from_contacts_kernel,
-    _locality_compute_keys_kernel,
-    _locality_eid_keys_kernel,
+    _locality_combined_keys_kernel,
     _locality_writeback_kernel,
     _greedy_coloring_grid_size,
 )
@@ -512,34 +511,12 @@ class FixedIterationLubyPartitioner:
     # --- Internal -----------------------------------------------------------
 
     def _sort_csr_by_body_locality(self) -> None:
-        """Same 2-pass eid + (color, body_min) sort the
-        IncrementalContactPartitioner uses for cache locality +
-        deterministic overflow-bucket ordering."""
+        """Single-pass packed-key sort -- same locality ordering as
+        :class:`IncrementalContactPartitioner` (see
+        :func:`_locality_combined_keys_kernel`)."""
         n = self.max_num_interactions
         wp.launch(
-            _locality_eid_keys_kernel,
-            dim=2 * n,
-            inputs=[
-                self._element_ids_by_color,
-                self._num_elements,
-                self._locality_keys,
-                self._locality_values,
-            ],
-            device=self._device,
-        )
-        wp.utils.radix_sort_pairs(self._locality_keys, self._locality_values, n)
-        wp.launch(
-            _locality_writeback_kernel,
-            dim=n,
-            inputs=[
-                self._locality_values,
-                self._num_elements,
-                self._element_ids_by_color,
-            ],
-            device=self._device,
-        )
-        wp.launch(
-            _locality_compute_keys_kernel,
+            _locality_combined_keys_kernel,
             dim=2 * n,
             inputs=[
                 self._elements,

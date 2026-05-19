@@ -88,18 +88,13 @@ from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContai
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.timer import elapsed_us, read_global_timer_ns
 
-# Cloth-triangle body3 dword offset (3rd vertex of the triangle). Mirrors the
-# layout in :mod:`constraint_cloth_triangle` -- header (type/body1/body2) at
-# dwords 0/1/2, body3 immediately after at dword 3.
+# Body-N dword offsets in the per-constraint header. Each constraint
+# type stores (type, body1, body2) at dwords 0/1/2 then extra bodies
+# at dwords 3/4 (cloth-tri uses body3 only; soft-tet and cloth-bend
+# use body3 + body4).
 _CLOTH_TRIANGLE_OFF_BODY3 = wp.constant(wp.int32(3))
-# Soft-tetrahedron body3 / body4 dword offsets (3rd and 4th vertex). Mirrors
-# the layout in :mod:`constraint_soft_tetrahedron` -- header (type/body1/body2)
-# at dwords 0/1/2, body3 at dword 3, body4 at dword 4.
 _SOFT_TET_OFF_BODY3 = wp.constant(wp.int32(3))
 _SOFT_TET_OFF_BODY4 = wp.constant(wp.int32(4))
-# Cloth-bending body3 / body4 dword offsets. Mirrors
-# :mod:`constraint_cloth_bending` -- same header layout as soft-tet, two
-# extras at dwords 3 and 4.
 _CLOTH_BENDING_OFF_BODY3 = wp.constant(wp.int32(3))
 _CLOTH_BENDING_OFF_BODY4 = wp.constant(wp.int32(4))
 

@@ -335,31 +335,15 @@ class PhoenXWorld:
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
         symmetric_color_sweep: bool = False,
-        # Defaults chosen for the majority of scenes (Kapla, stacks,
-        # contact-heavy rigid). PhoenX is experimental; we don't keep
-        # legacy defaults around. Override per-scene if a regression
-        # ever shows up:
-        # * ``warm_start_invalidate_period=4`` + ``warm_start_rotate
-        #   _skip_color=True`` break the warm-start coloring lock-in
-        #   that drifts tall stacks; combined cost is ~3-5% of cold-
-        #   start coloring time (amortised across periodic full
-        #   rebuilds + a single rotated skipped colour per other
-        #   step).
-        # * ``capture_while_greedy_coloring=True`` exits the greedy
-        #   MIS loop the moment ``num_remaining`` hits 0 instead of
-        #   running the host loop to its fixed cap. On the common
-        #   warm-start fast path it cuts MIS launches 18x.
+        # Defaults tuned for contact-heavy rigid scenes (Kapla, stacks).
+        # cache-stir knobs break the warm-start colouring lock-in;
+        # capture_while + speculative are perf wins with no quality
+        # regression. See the matching ``set_*`` docstrings on the
+        # partitioner.
         warm_start_invalidate_period: int = 4,
         warm_start_rotate_skip_color: bool = True,
         warm_start_rotate_skip_width: int = 1,
         capture_while_greedy_coloring: bool = True,
-        # Speculative coloring (3-phase pick + validate + commit) is
-        # ~17 % faster than JP-MIS on cold-start MIS work (1.37 vs
-        # 1.65 ms per 100 frames on Kapla nsys) and matches it on the
-        # warm-start fast path. Deterministic via the same fixed
-        # priority permutation as MIS; saturation-safe via overflow
-        # flag + JP fallback. PhoenX is experimental and we don't
-        # need legacy defaults, so this is the new default.
         speculative_coloring: bool = True,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
@@ -370,61 +354,32 @@ class PhoenXWorld:
         """Take ownership of pre-built body and constraint containers.
 
         Args:
-            bodies, constraints: Pre-built containers. Joint cids occupy
-                [0, num_joints); contact cids occupy [num_joints, ...).
-            substeps, solver_iterations, velocity_iterations: PGS schedule.
-                ``velocity_iterations=0`` recovers raw PhoenX; ``1`` (default)
-                runs TGS-soft relax for stable tall stacks.
-            gravity: 3-tuple (broadcast) or iterable of num_worlds 3-tuples.
-            rigid_contact_max: Upper bound on Newton's Contacts buffer; sizes
-                contact-column capacity 1:1. ``0`` disables contacts.
-            step_layout: ``"multi_world"`` (per-world fast-tail; scales beyond
-                ~256 worlds) or ``"single_world"`` (global JP colouring with
-                wp.capture_while; wins for a few big worlds).
-            threads_per_world: ``"auto"`` (default), 32, 16, or 8 (multi-world).
-            max_thread_blocks: Hard cap on the single-world PGS persistent grid.
-                ``None`` keeps the auto-size ``clamp(ceil(cap/256), 32, 4*sm)``
-                32-block floor and the SM-derived ceiling, so the
-                grid becomes ``min(ceil(cap / 256),
-                max_thread_blocks)`` blocks. Use this to share the
-                GPU with a co-resident workload or to measure
-                occupancy. No effect on
-                ``step_layout="multi_world"``.
-            mass_splitting: Enable Tonge mass splitting on the overflow
-                partition (C# PhoenX default behaviour). When ``True``,
-                graph coloring caps at ``max_colored_partitions`` colours
-                and any remainder lands in a dedicated overflow bucket
-                solved Jacobi-style with per-(body, partition) copy
-                states; the substep loop broadcasts body / particle
-                state into copies before PGS, averages between
-                iterations, and writes the result back. ``False``
-                (default) preserves the existing single-color-per-
-                element behaviour and zero per-substep mass-splitting
-                overhead.
-            max_colored_partitions: K — the number of "regular" colour
-                buckets when ``mass_splitting=True`` (matches C# PhoenX's
-                ``MassSplitting(maxPartitions=12)``). Constraints that
-                don't fit in ``[0, K)`` end up in colour K (overflow).
-                Ignored when ``mass_splitting=False``.
-            mass_splitting_batch_size: B — overflow constraints are
-                grouped into batches of ``B`` constraints sharing one
-                partition copy. Within a batch, constraints process
-                sequentially (Gauss-Seidel, one thread per batch); across
-                batches, processing is parallel (Jacobi). Larger B keeps
-                ``inv_factor`` bounded so impulses aren't over-damped on
-                hub bodies that touch many overflow contacts.
-                ``8`` (default) mirrors C# PhoenX's
-                ``MassSplitting.BatchingThreshold = 8``. Ignored when
-                ``mass_splitting=False``.
-            partitioner_algorithm: Which graph-colouring backend to use.
-                ``"greedy"`` (default) is :class:`IncrementalContactPartitioner`
-                — JP with capture_while convergence loop, configurable
-                colour cap. ``"luby_fixed"`` is :class:`FixedIterationLubyPartitioner`
-                — fixed ``2 * max_colored_partitions`` kernel launches with
-                Luby-marker propagation per launch, spilling any remainder
-                to the overflow colour. Use ``"luby_fixed"`` when the
-                greedy convergence loop becomes the bottleneck (dense
-                soft-tet/cloth contact graphs).
+            bodies, constraints: Pre-built containers. Joints occupy
+                cid ``[0, num_joints)``; contacts ``[num_joints, ...)``.
+            substeps, solver_iterations, velocity_iterations: PGS
+                schedule. ``velocity_iterations=1`` enables TGS-soft
+                relax (recommended for tall stacks).
+            gravity: 3-tuple or iterable of ``num_worlds`` 3-tuples.
+            rigid_contact_max: Sizes contact-column capacity 1:1; ``0``
+                disables contacts.
+            step_layout: ``"multi_world"`` (per-world fast-tail; scales
+                past ~256 worlds) or ``"single_world"`` (global JP
+                colouring; wins for a few big worlds).
+            threads_per_world: ``"auto"`` (default), 32, 16, or 8.
+            max_thread_blocks: Cap on the single-world PGS persistent
+                grid; ``None`` auto-sizes. No effect on multi-world.
+            mass_splitting: Enable Tonge mass splitting -- coloring caps
+                at ``max_colored_partitions`` and the overflow bucket
+                is solved Jacobi-style on per-partition copy states.
+            max_colored_partitions: Regular-colour cap when mass
+                splitting is on.
+            mass_splitting_batch_size: Overflow batch size (B). Within
+                a batch, constraints process sequentially (one thread);
+                across batches, parallel. ``8`` matches C# PhoenX.
+            partitioner_algorithm: ``"greedy"`` (default) uses
+                :class:`IncrementalContactPartitioner`; ``"luby_fixed"``
+                uses :class:`FixedIterationLubyPartitioner` (fixed
+                launches, spill to overflow on saturation).
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -432,36 +387,28 @@ class PhoenXWorld:
         else:
             self.device = wp.get_device(device)
 
-        #: Opt-in CUDA ``%globaltimer``-based per-column wall-clock
-        #: profiler. When ``True``, every PGS dispatch atomic-adds its
-        #: elapsed microseconds into the column's ``time_us`` slot;
-        #: cleared at the start of every :meth:`step`. Off by default
-        #: to keep the kernel-cache key stable.
+        #: Opt-in per-column wall-clock profiler. When ``True``, PGS
+        #: dispatches atomic-add their elapsed us into the column's
+        #: ``time_us`` slot. Off by default to keep kernel cache stable.
         self.enable_column_timers: bool = bool(enable_column_timers)
-        # Persistent 5-element device scratch for the per-type
-        # ``time_us`` reduction
-        # (joints / cloth_tri / cloth_bend / soft_tet / contacts).
-        # Allocated lazily on the first :meth:`step_report` call.
+        # Lazy 5-element scratch for per-type time_us reduction
+        # (joints/cloth_tri/cloth_bend/soft_tet/contacts).
         self._column_timer_totals: wp.array[wp.float32] | None = None
 
         self.bodies: BodyContainer = bodies
         self.constraints: ConstraintContainer = constraints
 
         self.num_bodies: int = int(bodies.position.shape[0])
-        # Count kinematic bodies once at construction so the per-substep
-        # kinematic kernels can short-circuit when no body is scripted.
-        # ``motion_type`` is written by the builder and never mutated by
-        # the solver, so a single host count at init stays accurate.
+        # Count kinematic bodies once so per-substep kinematic kernels
+        # can short-circuit when no body is scripted. ``motion_type`` is
+        # write-once at build time.
         if self.num_bodies > 0:
             mt = bodies.motion_type.numpy()
             self._num_kinematic_bodies: int = int((mt == int(MOTION_KINEMATIC)).sum())
         else:
             self._num_kinematic_bodies = 0
-        # One contact column covers an entire ``(shape_a, shape_b)``
-        # pair regardless of contact count, so the column count equals
-        # ``rigid_contact_max`` 1:1. The ``max(1, ...)`` keeps the
-        # contact-free path sizing-safe (zero-length wp.array2d isn't
-        # legal).
+        # One contact column per ``(shape_a, shape_b)`` pair so the
+        # column count equals ``rigid_contact_max`` 1:1.
         self.rigid_contact_max: int = int(rigid_contact_max)
         self.max_contact_columns: int = max(1, self.rigid_contact_max) if self.rigid_contact_max > 0 else 0
         self.num_joints: int = int(num_joints)
@@ -676,43 +623,13 @@ class PhoenXWorld:
                 max_greedy_outer_iters=max_greedy_outer_iters,
                 enable_warm_start=_warm_start_active,
             )
-            # Symmetric Gauss-Seidel: alternate forward/reverse colour
-            # iteration each sweep. Reduces iteration-order bias but
-            # is insufficient on its own to fix tall-stack drift
-            # under warm-start (the iteration-order bias is only a
-            # small fraction of the warm-start drift signature).
             self._partitioner.set_symmetric_sweep(bool(symmetric_color_sweep))
-            # Periodic full-rebuild of the warm-start coloring. ``0``
-            # disables (cache reused every frame). A small positive
-            # value (e.g. ``5`` or ``10``) re-derives the coloring
-            # from scratch every Nth frame, which on stable tall
-            # stacks (Kapla tower) breaks the deterministic frame-to-
-            # frame coloring lock-in and the multi-frame solve-bias
-            # accumulation it produces.
             self._partitioner.set_warm_start_invalidate_period(int(warm_start_invalidate_period))
-            # Rotating skip-colour: cheap (~1/num_colors of cold-start
-            # cost) alternative to periodic full-invalidate. Each step
-            # one cached colour is round-robined to a fresh re-MIS
-            # while the rest stay warm-started. Over ``num_colors``
-            # steps every colour cycles through a re-MIS, which
-            # breaks the lock-in without paying the full cold-start
-            # tax.
             self._partitioner.set_warm_start_rotate_skip(
                 bool(warm_start_rotate_skip_color),
                 width=int(warm_start_rotate_skip_width),
             )
-            # Use ``wp.capture_while(num_remaining, ...)`` instead of
-            # the fixed ``MAX_GREEDY_OUTER_ITERS`` host loop on the
-            # greedy MIS path. Skips post-convergence kernel launches
-            # entirely (Kapla converges in ~6 outer iters but the host
-            # loop unrolls to 16 -- 80 wasted launches per build).
             self._partitioner.set_capture_while_greedy(bool(capture_while_greedy_coloring))
-            # Deterministic speculative coloring (Çatalyürek-style).
-            # When True, the greedy build runs 3-phase pick + validate
-            # + commit per round instead of strict JP-MIS, committing
-            # at multiple colours per round. ~3-4x fewer inner kernel
-            # launches on the Kapla scene; coloring quality (number
-            # of colours) is comparable within ~1-2 colours.
             self._partitioner.set_speculative_coloring(bool(speculative_coloring))
         elif self.partitioner_algorithm == "luby_fixed":
             if step_layout != "single_world":
@@ -2827,26 +2744,13 @@ class PhoenXWorld:
                 )
 
     def _singleworld_kernels(self):
-        """Returns (prepare_head, prepare_fused, iterate_head, iterate_fused,
-        relax_head, relax_fused).
-
-        Two factory axes:
-
-        * ``revolute_only``: every joint is revolute -> skip the
-          ``joint_mode`` branch in the iterate hot loop.
-        * ``cloth_support``: ``num_cloth_triangles > 0`` or
-          ``num_soft_tetrahedra > 0`` -> include the cloth-triangle
-          *and* soft-tetrahedron dispatch in the type-tag if/elif. The
-          rigid-only variant is byte-identical to the pre-cloth
-          implementation so rigid scenes pay zero cost; soft-tets reuse
-          the same compile-time gate.
-        """
+        """Return ``(prepare_head, prepare_fused, iterate_head,
+        iterate_fused, relax_head, relax_fused)``. Specialised via
+        compile-time ``revolute_only``, ``cloth_support`` (cloth /
+        soft-tet types in the ctype dispatch), and ``soft_tet_only``
+        (skip ctype read when the container holds only soft tets)."""
         cloth_on = self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0 or self.num_cloth_bending > 0
         revolute_only = bool(self._use_revolute_specialization)
-        # Soft-tet-only: the ConstraintContainer only holds soft-tetrahedron
-        # rows (no joints, no cloth triangles, no cloth bending). Lets the
-        # persistent kernel skip the per-cid type-tag read + 3-way ctype
-        # compare in the iterate / prepare / relax hot path.
         soft_tet_only = (
             self.num_soft_tetrahedra > 0
             and self.num_joints == 0

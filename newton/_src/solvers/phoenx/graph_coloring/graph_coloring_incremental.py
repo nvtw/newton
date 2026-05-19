@@ -43,11 +43,9 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     partitioning_coloring_incremental_greedy_kernel,
     partitioning_coloring_incremental_kernel,
     partitioning_prepare_kernel,
-    speculative_commit_kernel,
     speculative_overflow_exit_kernel,
     speculative_pick_kernel,
     speculative_validate_commit_kernel,
-    speculative_validate_kernel,
     warm_start_periodic_invalidate_kernel,
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import scan_variable_length
@@ -76,11 +74,9 @@ def _greedy_coloring_grid_size(max_num_interactions: int, device: wp.DeviceLike)
     return num_blocks * block_dim
 
 
-# INT64_MAX past num_active so the radix sort pushes inactive slots to
-# the tail. Inactive entries (eid past num_active) never get touched by
-# the iterate kernel anyway -- the tail just has to be sortable.
+# INT64_MAX sentinel: pads inactive slots so the radix sort lands them
+# at the tail (they're never read by the iterate kernel).
 _LOCALITY_TAIL_KEY: int = 0x7FFFFFFFFFFFFFFF
-
 
 _LOCALITY_BODY_MIN_BITS = wp.constant(wp.int64(24))
 _LOCALITY_EID_BITS = wp.constant(wp.int64(25))
@@ -97,22 +93,12 @@ def _locality_combined_keys_kernel(
     keys: wp.array[wp.int64],
     values: wp.array[wp.int32],
 ):
-    """Pack ``(colour, body_min, eid)`` into a single int64 key so a
-    single radix sort produces the desired locality ordering.
+    """Pack ``(colour, body_min, eid)`` into one int64 key so a single
+    radix sort produces the (colour, body_min, eid) locality ordering.
 
-    Bit layout (LSB first):
-    * bits 0..24  : ``eid`` (25 bits -> up to 32M constraints)
-    * bits 25..48 : ``body_min`` (24 bits -> up to 16M bodies)
-    * bits 49..63 : ``colour`` (15 bits -> up to 32K colours)
-
-    Replaces the previous two-pass eid-then-(colour, body_min) stable
-    sort. Both passes produced the same final ordering as this single
-    sort (lexicographic on the three fields); merging halves the
-    radix-sort time and cuts a kernel-launch round-trip on every
-    coloring rebuild.
-
-    Slots past ``num_elements[0]`` get ``INT64_MAX`` so they sort to
-    the tail.
+    Bit layout: colour (bits 49..63, 15b) | body_min (25..48, 24b) |
+    eid (0..24, 25b). Slots past ``num_elements[0]`` get ``INT64_MAX``
+    and sort to the tail.
     """
     tid = wp.tid()
     if tid >= keys.shape[0]:
@@ -136,85 +122,6 @@ def _locality_combined_keys_kernel(
         | ((wp.int64(body_min) & _LOCALITY_BODY_MIN_MASK) << _LOCALITY_EID_BITS)
         | (wp.int64(eid) & _LOCALITY_EID_MASK)
     )
-    keys[tid] = key
-    values[tid] = eid
-
-
-@wp.kernel(enable_backward=False)
-def _locality_eid_keys_kernel(
-    element_ids_by_color: wp.array[wp.int32],
-    num_elements: wp.array[wp.int32],
-    keys: wp.array[wp.int64],
-    values: wp.array[wp.int32],
-):
-    """Legacy pass-1 kernel (kept for reference; not used after
-    :func:`_locality_combined_keys_kernel` merged both passes).
-
-    Pads slots past ``num_elements[0]`` with ``INT64_MAX`` so the radix
-    sort lands them at the tail; values are don't-care.
-    """
-    tid = wp.tid()
-    if tid >= keys.shape[0]:
-        return
-    if tid >= num_elements[0]:
-        keys[tid] = wp.int64(_LOCALITY_TAIL_KEY)
-        values[tid] = wp.int32(0)
-        return
-    eid = element_ids_by_color[tid]
-    keys[tid] = wp.int64(eid)
-    values[tid] = eid
-
-
-@wp.kernel(enable_backward=False)
-def _locality_compute_keys_kernel(
-    elements: wp.array[ElementInteractionData],
-    element_ids_by_color: wp.array[wp.int32],
-    interaction_id_to_partition: wp.array[wp.int32],
-    num_elements: wp.array[wp.int32],
-    keys: wp.array[wp.int64],
-    values: wp.array[wp.int32],
-):
-    """Pass 2: for each slot ``i`` in ``[0, num_elements[0])``, compute
-    a packed ``(colour << 32) | body_min`` key. ``body_min`` is the
-    lowest non-negative endpoint of the element (static endpoints
-    stamped ``-1`` by emission).
-
-    Together with the prior pass-1 eid sort (writeback'd into
-    ``element_ids_by_color``), the stable radix sort produces fully
-    deterministic ``(colour, body_min, eid)`` ordering:
-
-    * Regular colours: ``body_min`` is unique within a colour (MIS
-      independent-set guarantee), so the eid tie-breaker is never
-      needed but doesn't hurt.
-    * Overflow colour: ``body_min`` may repeat (constraints share
-      endpoints, which is why they're overflow). The eid order from
-      pass 1 survives ties in body_min, making the overflow batch
-      assignment (``partition_key = (overflow_offset / batch_size)``)
-      a deterministic function of the active CSR -- otherwise the
-      greedy scatter's atomic-add completion order would leak into
-      partition keys and break cross-run determinism.
-
-    Slots past ``num_elements[0]`` get ``INT64_MAX`` so the radix
-    sort lands them at the tail.
-    """
-    tid = wp.tid()
-    if tid >= keys.shape[0]:
-        return
-    if tid >= num_elements[0]:
-        keys[tid] = wp.int64(_LOCALITY_TAIL_KEY)
-        values[tid] = wp.int32(0)
-        return
-    eid = element_ids_by_color[tid]
-    color = interaction_id_to_partition[eid]
-    el = elements[eid]
-    body_min = wp.int32(0x7FFFFFFF)
-    for j in range(MAX_BODIES):
-        b = element_interaction_data_get(el, j)
-        if b < wp.int32(0):
-            break
-        if b < body_min:
-            body_min = b
-    key = (wp.int64(color) << wp.int64(32)) | (wp.int64(body_min) & wp.int64(0xFFFFFFFF))
     keys[tid] = key
     values[tid] = eid
 
@@ -443,62 +350,35 @@ class IncrementalContactPartitioner:
         # Sweep-time colour cursor (decremented by PGS kernels).
         self._color_cursor = wp.zeros(1, dtype=wp.int32, device=device)
 
-        # Symmetric Gauss-Seidel toggle. ``_sweep_direction[0] == 0``
-        # means forward color sweep; ``1`` means reverse (overflow
-        # stays last). ``incremental_begin_sweep_kernel`` flips it
-        # each call when ``_symmetric_sweep`` is True. Without
-        # flipping the same constraints get processed first every
-        # sweep, which biases the PGS solution toward early colours;
-        # warm-start coloring makes this bias stable across frames and
-        # the bias accumulates as visible drift (kapla tower
-        # collapses after ~500 frames with warm-start ON and no
-        # alternation).
+        # Symmetric Gauss-Seidel: flip 0/1 per begin_sweep when enabled
+        # so the PGS sweep alternates forward/reverse colour order.
+        # See :meth:`set_symmetric_sweep`.
         self._sweep_direction: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
         self._symmetric_sweep: bool = False
 
-        # Periodic warm-start cache invalidation. When ``_warm_start
-        # _invalidate_period > 0``, every Nth call to ``build_csr``
-        # zeros the cache before seeding so greedy MIS re-derives the
-        # coloring from scratch (cold-start). Counter lives device-
-        # side so the check is graph-capture safe (no host roundtrip
-        # mid-replay). Use to break the deterministic frame-to-frame
-        # coloring lock-in on stable scenes (warm-start cached colours
-        # don't drift even when contact counts / priorities do, which
-        # accumulates a solve bias on tall stacks).
+        # Warm-start cache stir: periodic full invalidate +
+        # round-robin per-step skip-colour to break the colouring
+        # lock-in. See :meth:`set_warm_start_invalidate_period`,
+        # :meth:`set_warm_start_rotate_skip`. Counter is device-side
+        # so the schedule is graph-capture safe.
         self._warm_start_invalidate_counter: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
         self._warm_start_invalidate_period: int = 0
-        # Rotating skip-colour for warm-start. Each step the pre-pass
-        # picks one cached colour (round-robin via the invalidate
-        # counter) whose seeded entries the seed kernel should drop
-        # so they get re-MIS'd instead. Encoded as ``color + 1`` to
-        # match ``color_tags``; ``0`` means "no skip". Used to break
-        # the warm-start coloring lock-in cheaply (~1/num_colors of
-        # the cold-start cost per step).
         self._warm_start_skip_color_start_plus_one: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
         self._warm_start_skip_color_end_plus_one: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=device)
-        # Rotate-skip range width in colours per step. ``0`` disables
-        # the stir; ``1`` matches the original single-colour skip;
-        # larger values cycle through colours faster (cost scales
-        # linearly).
         self._warm_start_rotate_skip_width: int = 0
 
-        # Greedy MIS outer-loop strategy. ``True`` uses
-        # ``wp.capture_while`` to exit as soon as ``num_remaining``
-        # hits 0; ``False`` runs a fixed ``MAX_GREEDY_OUTER_ITERS``
-        # host loop with per-thread early-exit (legacy default). The
-        # capture_while path skips ~50-60% of launches on scenes that
-        # converge fast (Kapla 67k-constraint single-world).
+        # Greedy outer-loop: ``capture_while`` (exits when
+        # ``num_remaining`` hits 0) vs fixed ``MAX_GREEDY_OUTER_ITERS``
+        # unroll. See :meth:`set_capture_while_greedy`.
         self._use_capture_while_greedy: bool = False
 
-        # Speculative coloring (Çatalyürek-style). Three-phase per round
-        # (pick + validate + commit) instead of strict JP-MIS's one-phase
-        # local-max scan. Commits at multiple colours per round so dense
-        # contact graphs drain in ~6-10 rounds instead of ~80. Determinism
-        # comes from the fixed priority permutation -- same inputs ->
-        # same colouring across runs and hardware.
+        # Speculative coloring (Çatalyürek-style): 2-phase per round
+        # (pick + fused validate+commit) instead of JP-MIS's local-max
+        # scan. Commits at multiple colours per round so dense graphs
+        # drain in ~6-10 rounds instead of ~80. Same priority
+        # permutation as MIS so determinism is preserved. Scratch
+        # buffers allocated once for capture-safe pointers.
         self._use_speculative_coloring: bool = False
-        # Scratch buffers; allocated once at construction so the
-        # captured graph reuses fixed pointers across replays.
         self._spec_tentative_color: wp.array[wp.int32] = wp.zeros(
             max_num_interactions, dtype=wp.int32, device=device
         )
@@ -1212,74 +1092,40 @@ class IncrementalContactPartitioner:
         )
 
     def set_warm_start_invalidate_period(self, period: int) -> None:
-        """Force a cold-start re-coloring every ``period`` build_csr
-        calls. ``0`` disables (default; warm-start cache is reused
-        every frame). Small positive values (e.g. ``5``, ``10``)
-        break the frame-to-frame coloring lock-in that makes tall
-        stacks drift with warm-start on, at a small perf cost (one
-        cold-start build every ``period`` frames).
-        """
+        """Force a full cold-start re-coloring every ``period``
+        ``build_csr`` calls. ``0`` disables. Breaks the warm-start
+        coloring lock-in that biases the PGS solve on stable scenes."""
         if period < 0:
             raise ValueError(f"period must be >= 0 (got {period})")
         self._warm_start_invalidate_period = int(period)
 
     def set_capture_while_greedy(self, enabled: bool) -> None:
-        """Replace the fixed ``MAX_GREEDY_OUTER_ITERS`` host-side
-        outer loop of the greedy MIS build with a
-        ``wp.capture_while(num_remaining, ...)`` loop. When the MIS
-        converges before the cap, the captured graph skips the
-        post-convergence kernel launches entirely instead of
-        re-running them as per-thread early-exits.
-        """
+        """Use ``wp.capture_while(num_remaining, ...)`` instead of the
+        fixed ``MAX_GREEDY_OUTER_ITERS`` unroll on the greedy MIS outer
+        loop. Skips post-convergence launches when the MIS finishes
+        early."""
         self._use_capture_while_greedy = bool(enabled)
 
     def set_speculative_coloring(self, enabled: bool) -> None:
-        """Switch from strict JP-MIS to deterministic speculative
-        coloring on the greedy build path.
-
-        Speculative coloring runs three phases per round (pick,
-        validate, commit) and commits at multiple colours per round
-        instead of one. On dense contact graphs (Kapla 67k
-        constraints) this drops the inner-launch count from ~80 to
-        ~20-30 -- a clean 3-4x reduction in coloring time. Coloring
-        quality is comparable to JP-MIS within ~1-2 colours; PGS
-        sweep cost is unaffected.
-
-        Determinism: same fixed priority permutation as JP-MIS, plus
-        a 3-kernel split that eliminates the read/write race on
-        ``color_tags`` that a 2-kernel pick+commit would have. Same
-        inputs -> same colouring across runs and hardware.
-        """
+        """Use Çatalyürek-style speculative coloring (pick + fused
+        validate-commit per round) instead of JP-MIS. Commits at
+        multiple colours per round so dense graphs drain in fewer
+        rounds. Deterministic via the same fixed priority permutation."""
         self._use_speculative_coloring = bool(enabled)
 
     def set_warm_start_rotate_skip(self, enabled: bool, width: int = 1) -> None:
-        """When ``enabled``, each ``build_csr`` skips re-seeding
-        ``width`` consecutive cached colours (rotated round-robin via
-        the step counter), so those colours' constraints get re-MIS'd
-        while the rest stay warm-started. Over ``num_colors / width``
-        steps every colour cycles through a re-MIS pass.
-
-        Cost: roughly ``width / num_colors`` of the cold-start
-        coloring overhead per step. ``width=1`` is the cheapest stir
-        (default), ``width=num_colors`` is equivalent to a full
-        invalidate. ``enabled=False`` disables (no skip).
-        """
+        """Each ``build_csr`` skips re-seeding ``width`` consecutive
+        cached colours (round-robin), forcing them to re-MIS while
+        the rest stay warm-started. Cost ~``width / num_colors`` of
+        a cold-start per step. ``enabled=False`` disables."""
         if width < 0:
             raise ValueError(f"width must be >= 0 (got {width})")
         self._warm_start_rotate_skip_width = int(width) if enabled else 0
 
     def set_symmetric_sweep(self, enabled: bool) -> None:
-        """Enable / disable cyclic-shift Gauss-Seidel: rotate the
-        colour sweep order by one on each PGS sweep.
-
-        With graph-coloring warm-start ON, the same constraint lands
-        in the same colour every frame; a fixed iteration order then
-        biases the solve toward early colours and on tall stacks the
-        bias accumulates into visible drift. Cyclic shift moves every
-        colour through every sweep position equally, averaging the
-        bias out at near-zero cost while keeping the cached coloring
-        and its perf win.
-        """
+        """Flip the PGS colour sweep direction on every ``begin_sweep``
+        (symmetric Gauss-Seidel). Counters iteration-order bias from a
+        locked-in warm-start coloring."""
         self._symmetric_sweep = bool(enabled)
 
     # Public device arrays (results).

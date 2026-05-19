@@ -328,27 +328,12 @@ def partitioning_coloring_incremental_greedy_kernel(
     overflow_flag: wp.array[int],
     max_colored_partitions: wp.int32,
 ):
-    """JP-MIS with greedy colour selection. Vertex commits iff highest priority
-    among uncoloured neighbours; gets the smallest colour not used by already-
-    coloured neighbours. Often 2-3x fewer colours than vanilla JP.
-
-    Persistent grid stride driven by ``total_num_threads``. Convergence:
-    ``num_remaining`` is decremented per commit, read by outer
-    ``wp.capture_while``. Forbidden mask is int64 (cap GREEDY_MAX_COLORS=64);
-    overflow sets ``overflow_flag[0]`` for host-side error reporting.
-
-    ``max_colored_partitions``:
-
-    * ``< 0`` -- disabled. Smallest-free search uses the full
-      [0, GREEDY_MAX_COLORS) range; saturation sets ``overflow_flag``.
-      Backward-compatible behaviour.
-    * ``>= 0`` -- soft cap. Smallest-free search caps at
-      ``[0, max_colored_partitions)``. If saturated, the vertex
-      commits at colour ``max_colored_partitions`` (the overflow
-      bucket) instead of flagging overflow. Mass splitting handles
-      the per-bucket within-colour conflicts via copy states. Must
-      be ``<= GREEDY_MAX_COLORS - 1`` so the bucket fits in the
-      int64 forbidden-mask range.
+    """JP-MIS with greedy colour selection. Vertex commits iff highest
+    priority among uncoloured neighbours and gets the smallest colour
+    not used by coloured neighbours. Typically 2-3x fewer colours than
+    vanilla JP. Forbidden mask is int64 (max GREEDY_MAX_COLORS=64
+    colours); saturation routes to overflow (``max_colored_partitions
+    >= 0``, mass splitting) or sets ``overflow_flag`` for JP fallback.
     """
     n = num_elements[0]
     soft_cap = max_colored_partitions >= wp.int32(0)
@@ -421,39 +406,18 @@ def partitioning_coloring_incremental_greedy_kernel(
 # ---------------------------------------------------------------------------
 # Speculative greedy coloring (Çatalyürek-style, deterministic).
 #
-# The legacy ``partitioning_coloring_incremental_greedy_kernel`` above is
-# strict JP-MIS: a vertex commits ONLY if its priority beats every uncoloured
-# neighbour. Per round each constraint commits with probability ~ 1/degree,
-# so on the Kapla 67k-constraint scene the host loop spins through ~80 inner
-# kernel launches to fully drain ``num_remaining``.
+# Each round:
+#   pick    : uncoloured tids pick smallest free colour given coloured nbrs
+#   validate+commit : abort if any uncoloured nbr with higher priority picked
+#                     the same colour; else stamp color_tags + atomic_sub.
 #
-# Speculative coloring is more permissive. Each round runs in three phases:
+# Vs strict JP-MIS this commits at multiple colours per round, so dense
+# graphs (Kapla 67k constraints) drain in ~6-10 rounds × 2 kernels instead
+# of ~80 single-kernel MIS rounds.
 #
-# 1. **Pick** -- every uncoloured constraint picks the smallest colour not
-#    used by its already-coloured neighbours. Writes into a scratch
-#    ``tentative_color`` array. No conflict resolution yet; multiple
-#    neighbours may pick the same colour.
-# 2. **Validate** -- each uncoloured constraint scans its uncoloured
-#    neighbours: if any neighbour with strictly higher priority picked the
-#    *same* tentative colour, abort the commit. Writes a 0/1
-#    ``commit_decision`` flag. Reads-only on ``color_tags`` (no race with
-#    other threads' writes -- those happen in phase 3).
-# 3. **Commit** -- threads with ``commit_decision == 1`` stamp
-#    ``color_tags[tid] = tentative_color[tid]`` and decrement
-#    ``num_remaining``.
-#
-# Determinism: priorities are a fixed permutation (set once at partitioner
-# construction) plus a per-step cost prefix; same inputs -> same outputs
-# across runs and hardware. The 3-kernel split eliminates the read/write
-# race that a 2-kernel pick+commit would otherwise have on neighbours'
-# ``color_tags``.
-#
-# Why this is faster on dense graphs: phase 1's "smallest free" choice
-# already commits a *spread* of colours per round (not just colour 0), so
-# round 2 typically lands at colour 1 or 2 instead of waiting for colour 0
-# stragglers to clear. On Kapla this drops the round count from ~80 to
-# ~6-10 (multiplied by 3 launches/round = 18-30 launches total, vs 80
-# previously).
+# Determinism: same fixed priority permutation as JP-MIS. The race between
+# pick (round R) and validate+commit (round R) is benign under the priority
+# tiebreak -- the lower-priority side always aborts regardless of read order.
 # ---------------------------------------------------------------------------
 
 
@@ -471,21 +435,13 @@ def speculative_pick_kernel(
     tentative_color: wp.array[wp.int32],
     commit_decision: wp.array[wp.int32],
 ):
-    """Speculative phase 1: each uncoloured constraint picks the smallest
-    colour not used by its already-coloured neighbours.
+    """Phase 1: each uncoloured tid picks smallest free colour given
+    coloured neighbours. Writes ``tentative_color[tid]`` (encoded
+    ``c+1``) and clears ``commit_decision[tid]``.
 
-    Writes ``tentative_color[tid]`` (encoded ``c + 1`` to match
-    ``color_tags``) and resets ``commit_decision[tid] = 0``. Sweeps the full
-    constraint range via persistent grid stride.
-
-    If the int64 forbidden mask saturates (>= ``GREEDY_MAX_COLORS``
-    distinct neighbour colours), sets ``overflow_flag[0] = 1``. The
-    host-side build wrapper triggers a JP fallback when this fires,
-    same contract as ``partitioning_coloring_incremental_greedy
-    _kernel``. Without the flag, two saturated constraints sharing a
-    body would tentatively pick the same fallback colour and the
-    commit phase would let them both through (validation only checks
-    higher-priority uncoloured neighbours; both colour-63 picks pass).
+    Sets ``overflow_flag[0]=1`` on saturation (>= GREEDY_MAX_COLORS
+    distinct nbr colours) so the host wrapper triggers JP fallback --
+    same contract as ``partitioning_coloring_incremental_greedy_kernel``.
     """
     if num_remaining[0] <= wp.int32(0):
         return
@@ -530,76 +486,6 @@ def speculative_pick_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def speculative_validate_kernel(
-    color_tags: wp.array[wp.int32],
-    tentative_color: wp.array[wp.int32],
-    packed_priorities: wp.array[wp.int32],
-    adjacency_section_end_indices: wp.array[int],
-    vertex_to_adjacent_elements: wp.array[int],
-    elements: wp.array[ElementInteractionData],
-    num_elements: wp.array[int],
-    total_num_threads: wp.int32,
-    num_remaining: wp.array[int],
-    commit_decision: wp.array[wp.int32],
-):
-    """Speculative phase 2: each uncoloured constraint decides whether its
-    tentative colour is safe to commit this round.
-
-    Conflict rule: abort if any *uncoloured* neighbour has the same
-    ``tentative_color`` AND strictly higher priority. Equal priorities are
-    impossible because the random tiebreaker is a permutation. Phase 2 only
-    *reads* ``color_tags`` and ``tentative_color``; the commit writes happen
-    in phase 3, so neighbours' state can't change underneath us.
-    """
-    if num_remaining[0] <= wp.int32(0):
-        return
-    n = num_elements[0]
-    for tid in range(wp.tid(), n, total_num_threads):
-        if color_tags[tid] != wp.int32(0):
-            continue
-        my_tent = tentative_color[tid]
-        my_prio = contact_partitions_get_random_value(packed_priorities, tid)
-        commit = bool(True)
-        el = elements[tid]
-        for j in range(MAX_BODIES):
-            if not commit:
-                break
-            v = element_interaction_data_get(el, j)
-            if v < 0:
-                break
-            if v > 0:
-                start = adjacency_section_end_indices[v - 1]
-            else:
-                start = 0
-            end = adjacency_section_end_indices[v]
-            for k in range(start, end):
-                neighbor = vertex_to_adjacent_elements[k]
-                if neighbor == tid:
-                    continue
-                ntag = color_tags[neighbor]
-                if ntag != wp.int32(0):
-                    # Already coloured: phase 1 should have folded the
-                    # neighbour's colour into ``forbidden_mask``, but the
-                    # saturation fallback (``c = GREEDY_MAX_COLORS - 1``
-                    # when no soft cap and the int64 mask is full) can
-                    # still pick a colour that conflicts with an
-                    # already-coloured neighbour. Catch that here.
-                    if ntag == my_tent:
-                        commit = False
-                        break
-                    continue
-                if tentative_color[neighbor] != my_tent:
-                    continue  # different tentative, no conflict
-                # Same tentative + uncoloured: tie-break by priority.
-                neigh_prio = contact_partitions_get_random_value(packed_priorities, neighbor)
-                if neigh_prio > my_prio:
-                    commit = False
-                    break
-        if commit:
-            commit_decision[tid] = wp.int32(1)
-
-
-@wp.kernel(enable_backward=False)
 def speculative_validate_commit_kernel(
     partition_data_concat: wp.array[wp.int64],
     color_tags: wp.array[wp.int32],
@@ -612,22 +498,11 @@ def speculative_validate_commit_kernel(
     total_num_threads: wp.int32,
     num_remaining: wp.array[int],
 ):
-    """Fused speculative phase 2+3: validate AND commit in one kernel.
-
-    The 3-phase version splits validate (reads) from commit (writes)
-    to avoid a race where thread B reads ``color_tags[A]`` and sees
-    A's just-written commit. With the priority-tiebreak rule though
-    that race is actually benign: if A and B share a body and both
-    picked colour ``c``, exactly one of them has the higher priority
-    (priorities are a permutation, no ties). The lower-priority side
-    always aborts -- whether it sees the higher-priority side as
-    "not yet coloured but higher priority" (pre-commit read) or as
-    "already coloured at my tentative" (post-commit read) -- the
-    abort outcome is identical.
-
-    Saves one kernel launch per speculative round (~1.7us per
-    launch). With ~14 rounds per build in warm-start mode and ~32
-    in cold-start, that's ~30-50 fewer launches per frame.
+    """Phase 2+3 (fused): validate the tentative pick and commit if
+    no conflict. Race-safe under priority tiebreak: when A and B
+    share a body and both pick colour ``c``, the lower-priority side
+    always aborts whether it reads A as "uncoloured + higher prio"
+    (pre-commit) or "already coloured at my tentative" (post-commit).
     """
     if num_remaining[0] <= wp.int32(0):
         return
@@ -677,48 +552,13 @@ def speculative_overflow_exit_kernel(
     overflow_flag: wp.array[int],
     num_remaining: wp.array[int],
 ):
-    """Force the speculative ``capture_while`` to exit when the
-    forbidden mask saturated (>= ``GREEDY_MAX_COLORS`` distinct
-    neighbour colours). Without this, a saturated constraint whose
-    *only* valid colour is already taken by a coloured neighbour
-    would loop forever -- pick keeps returning the fallback colour,
-    validate keeps aborting on the coloured-neighbour conflict, no
-    one commits, ``num_remaining`` never decreases.
-
-    Zeroing ``num_remaining`` here surfaces the saturation to the
-    host wrapper, which immediately runs the JP fallback on the
-    still-uncoloured constraints.
-    """
+    """Force the speculative ``capture_while`` to exit on saturation
+    (>= GREEDY_MAX_COLORS distinct nbr colours). Otherwise a saturated
+    constraint whose only valid colour is taken by a coloured nbr
+    would loop forever. Zeroing num_remaining surfaces saturation to
+    the host wrapper which runs JP fallback."""
     if overflow_flag[0] != wp.int32(0):
         num_remaining[0] = wp.int32(0)
-
-
-@wp.kernel(enable_backward=False)
-def speculative_commit_kernel(
-    partition_data_concat: wp.array[wp.int64],
-    color_tags: wp.array[wp.int32],
-    tentative_color: wp.array[wp.int32],
-    commit_decision: wp.array[wp.int32],
-    num_elements: wp.array[int],
-    num_remaining: wp.array[int],
-):
-    """Speculative phase 3: write through the commits flagged by phase 2.
-
-    Decoupling commit from validate gives kernel 2 a clean snapshot of
-    ``color_tags`` (no concurrent writes), so the 3-phase pipeline is
-    race-free without explicit synchronisation between launches.
-    """
-    tid = wp.tid()
-    if tid >= num_elements[0]:
-        return
-    if commit_decision[tid] == wp.int32(0):
-        return
-    if color_tags[tid] != wp.int32(0):
-        return  # belt-and-braces (shouldn't happen)
-    c_plus_one = tentative_color[tid]
-    color_tags[tid] = c_plus_one
-    partition_data_concat[tid] = (wp.int64(c_plus_one) << _COLOR_SHIFT) | wp.int64(tid)
-    wp.atomic_sub(num_remaining, 0, 1)
 
 
 @wp.kernel(enable_backward=False)
@@ -848,30 +688,18 @@ def warm_start_periodic_invalidate_kernel(
     invalidate_period: wp.int32,
     rotate_skip_width: wp.int32,
 ):
-    """Single-thread coloring-step pre-pass.
+    """Single-thread pre-pass for warm-start cache stir.
 
-    Manages two cross-frame strategies for breaking the warm-start
-    coloring lock-in that biases the PGS solve on stable scenes:
+    Two strategies for breaking the colouring lock-in (both may be
+    enabled together; periodic-invalidate wins on its trigger step):
 
-    * **Periodic full invalidate** (``invalidate_period > 0``): zero
-      ``cache_num_entries`` once every ``invalidate_period`` calls.
-      Following ``seed_warm_start_kernel`` then finds an empty cache
-      and greedy MIS re-derives the entire coloring from scratch.
-      Expensive (~10% step overhead in cold mode) but recovers full
-      cold-start stability.
-
-    * **Rotating skip-colour range** (``rotate_skip_width > 0``): bump
-      the counter and pick ``rotate_skip_width`` consecutive cached
-      colours per step (start = ``(counter * width) % num_colors``)
-      whose seeded entries the seed kernel should SKIP. Those colours
-      get re-MIS'd this step while the rest stay warm-started. Over
-      ``num_colors / width`` steps every colour is re-MIS'd exactly
-      once. Cost scales linearly with ``width``: ``width=1`` is the
-      cheapest stir, ``width=num_colors`` is equivalent to a full
-      invalidate.
-
-    Both can be enabled together; periodic invalidate wins (full
-    rebuild that step).
+    * Periodic invalidate (``invalidate_period > 0``): zero the cache
+      every Nth call -> next seed is a no-op -> MIS rebuilds cold.
+    * Rotating skip-range (``rotate_skip_width > 0``): pick ``width``
+      consecutive cached colours per step (round-robin via counter)
+      whose seeded entries the seed kernel drops -> those colours
+      re-MIS while the rest stay warm-started. Cost is linear in
+      ``width``.
     """
     c = invalidate_counter[0] + wp.int32(1)
     invalidate_counter[0] = c
@@ -887,18 +715,14 @@ def warm_start_periodic_invalidate_kernel(
     if rotate_skip_width > wp.int32(0):
         nc = num_colors[0]
         if nc > wp.int32(0):
-            # Skip cached colours ``[start, start+width)`` mod nc this
-            # step. Encoded as +1 to match ``color_tags`` convention;
-            # start_plus_one == end_plus_one means a single colour (the
-            # common ``width=1`` rotate-skip case).
+            # Skip cached colours ``[start, start+width)`` mod nc.
+            # Encoded as +1 to match ``color_tags``.
             start = (c * rotate_skip_width) % nc
             width = rotate_skip_width
             if width > nc:
                 width = nc
-            # Inclusive end. Wrap handled by seed kernel via the
-            # modular comparison.
             skip_color_start_plus_one[0] = start + wp.int32(1)
-            skip_color_end_plus_one[0] = start + width  # exclusive in 1-indexed = inclusive in 0-indexed
+            skip_color_end_plus_one[0] = start + width
 
 
 @wp.kernel(enable_backward=False)
