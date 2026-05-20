@@ -248,17 +248,37 @@ class TestBuildCollisionEdges(unittest.TestCase):
     Mesh.build_sdf), exercised directly so we don't pay for the SDF cook."""
 
     def _build(self, mesh: newton.Mesh, **kwargs) -> np.ndarray:
-        defaults = {
+        # Mirror the validation/build split that ``Mesh.build_sdf`` now
+        # performs: ``_validate_collision_edge_options`` resolves the
+        # half-extents (and rejects invalid combinations) before the
+        # downstream ``_build_collision_edges`` call would otherwise pay
+        # for the dihedral pass.
+        validation_keys = (
+            "half_normal_abs",
+            "half_normal_rel",
+            "half_lateral_abs",
+            "half_lateral_rel",
+        )
+        validation_defaults = dict.fromkeys(validation_keys)
+        validation_kwargs = {k: kwargs.pop(k, None) for k in validation_keys}
+        validation_defaults.update(validation_kwargs)
+        build_defaults = {
             "lower_angle_threshold_rad": math.radians(0.1),
             "upper_angle_threshold_rad": math.radians(10.0),
             "enable_box_absorption": False,
-            "half_normal_abs": None,
-            "half_normal_rel": None,
-            "half_lateral_abs": None,
-            "half_lateral_rel": None,
         }
-        defaults.update(kwargs)
-        mesh._build_collision_edges(**defaults)
+        build_defaults.update(kwargs)
+        half_normal, half_lateral = mesh._validate_collision_edge_options(
+            lower_angle_threshold_rad=build_defaults["lower_angle_threshold_rad"],
+            enable_box_absorption=build_defaults["enable_box_absorption"],
+            diagonal=mesh._aabb_diagonal(),
+            **validation_defaults,
+        )
+        mesh._build_collision_edges(
+            **build_defaults,
+            half_normal=half_normal,
+            half_lateral=half_lateral,
+        )
         return mesh._collision_edges
 
     def test_abs_and_rel_together_raises(self):
@@ -371,10 +391,10 @@ class TestCollisionEdgesLifecycle(unittest.TestCase):
     @unittest.skipUnless(_cuda_available, "Requires CUDA device")
     def test_build_sdf_rolls_back_sdf_on_edge_option_failure(self):
         # Negative ``edge_lower_angle_threshold_rad`` combined with box
-        # absorption is rejected inside ``_build_collision_edges``. The
-        # SDF assignment that happens before that call must be reverted so
-        # a corrected retry doesn't trip the "Mesh already has an SDF"
-        # guard.
+        # absorption is rejected by the edge-option validation that runs
+        # before the SDF cook. The mesh must remain SDF-free so a
+        # corrected retry doesn't trip the "Mesh already has an SDF"
+        # guard, and the cache it would have populated must stay empty.
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
         with self.assertRaises(ValueError):
             mesh.build_sdf(
@@ -390,6 +410,30 @@ class TestCollisionEdgesLifecycle(unittest.TestCase):
         # requiring an explicit ``clear_sdf()``.
         mesh.build_sdf(max_resolution=8, edge_lower_angle_threshold_rad=0.0)
         self.assertIsNotNone(mesh.sdf)
+
+    def test_copy_with_topology_override_drops_collision_edges(self):
+        # ``_collision_edges`` is indexed against the original vertex
+        # array, so a geometry-replacing copy must not carry it forward
+        # — otherwise ``ModelBuilder.finalize()`` could feed stale or
+        # out-of-range indices into contact generation.
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        mesh.sdf = object()
+        self._seed_collision_edges(mesh)
+
+        # New topology (a single triangle) -- old cached edges are bogus.
+        new_verts = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+        new_inds = np.array([0, 1, 2], dtype=np.int32)
+        copy_verts = mesh.copy(vertices=new_verts)
+        self.assertIsNone(copy_verts._collision_edges)
+        self.assertIsNone(copy_verts.sdf)
+
+        copy_inds = mesh.copy(indices=new_inds)
+        self.assertIsNone(copy_inds._collision_edges)
+        self.assertIsNone(copy_inds.sdf)
+
+        copy_both = mesh.copy(vertices=new_verts, indices=new_inds)
+        self.assertIsNone(copy_both._collision_edges)
+        self.assertIsNone(copy_both.sdf)
 
 
 if __name__ == "__main__":

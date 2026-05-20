@@ -25,6 +25,11 @@ import warp as wp
 from .broad_phase_sap import BroadPhaseSAP
 from .flags import ShapeFlags
 
+# Length below which an edge or normal vector is treated as numerically
+# degenerate (zero-length). Mirrors the ``MINVAL`` convention used by
+# :mod:`raycast` and :mod:`collision_primitive`.
+MINVAL = 1.0e-15
+
 # -----------------------------------------------------------------------------
 # Result type
 # -----------------------------------------------------------------------------
@@ -112,7 +117,7 @@ def _build_edge_box_kernel(
     n_len = wp.length(n)
 
     # Degenerate edge or missing normal (NaN-filled) -> mark as no-box.
-    if edge_len <= 1.0e-12 or n_len <= 1.0e-12 or wp.isnan(n[0]):
+    if edge_len <= wp.static(MINVAL) or n_len <= wp.static(MINVAL) or wp.isnan(n[0]):
         box_center[i] = wp.vec3(0.0, 0.0, 0.0)
         box_axis_dir[i] = wp.vec3(1.0, 0.0, 0.0)
         box_axis_tang[i] = wp.vec3(0.0, 1.0, 0.0)
@@ -126,7 +131,7 @@ def _build_edge_box_kernel(
 
     tang = wp.cross(n_unit, dir_e)
     tang_len = wp.length(tang)
-    if tang_len <= 1.0e-12:
+    if tang_len <= wp.static(MINVAL):
         box_center[i] = wp.vec3(0.0, 0.0, 0.0)
         box_axis_dir[i] = wp.vec3(1.0, 0.0, 0.0)
         box_axis_tang[i] = wp.vec3(0.0, 1.0, 0.0)
@@ -386,6 +391,7 @@ def find_redundant_edges(
     initial_pair_capacity_factor: int = 8,
     max_retries: int = 3,
     device=None,
+    precomputed_filter: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> EdgeRedundancyResult:
     """Apply the dihedral-angle pre-filter and (optionally) the box-absorption pass.
 
@@ -416,10 +422,20 @@ def find_redundant_edges(
             the manifold-edge count.
         max_retries: Max grow-on-overflow attempts for the SAP pair buffer.
         device: Optional Warp device.
+        precomputed_filter: Optional ``(edges, angles, avg_normals,
+            area_sums)`` already produced by
+            :meth:`Mesh._filter_edges_by_dihedral_angle` with
+            ``return_diagnostics=True`` for the same
+            ``lower_angle_threshold_rad``. When provided, the dihedral
+            filter pass is skipped and these arrays are reused verbatim,
+            saving one full pass over the mesh edges.
     """
-    edges_np, angles_np, normals_np, area_sums_np = mesh._filter_edges_by_dihedral_angle(
-        lower_angle_threshold_rad, return_diagnostics=True
-    )
+    if precomputed_filter is not None:
+        edges_np, angles_np, normals_np, area_sums_np = precomputed_filter
+    else:
+        edges_np, angles_np, normals_np, area_sums_np = mesh._filter_edges_by_dihedral_angle(
+            lower_angle_threshold_rad, return_diagnostics=True
+        )
 
     # Manifold edges have finite per-edge diagnostics; non-pair edges hold NaN.
     manifold_mask = np.isfinite(angles_np) & np.all(np.isfinite(normals_np), axis=1)

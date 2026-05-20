@@ -572,6 +572,14 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         # any positive precision).
         tol_floor = 0.5 * precision_target / (edge_length + 1.0e-12)
 
+        # On very short edges ``tol_floor`` can be >= 0.5 so Brent breaks
+        # at the midpoint on iter 0 with ``x = 0.5``. The interior-only
+        # endpoint check below (``x < 0.2 or x > 0.8``) is then skipped,
+        # which can drop a vertex contact when an endpoint lies inside
+        # the contact threshold while the midpoint sits just outside.
+        # Track this case so we still evaluate both endpoints below.
+        force_endpoint_check = tol_floor >= 0.5
+
         # Initialize Brent's method at the midpoint (SDF value from culling)
         a = float(0.0)
         b = float(1.0)
@@ -676,9 +684,13 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         # boundary (x < 0.2 or x > 0.8).  When solidly interior the
         # bracket has moved both boundaries inward, so the endpoint
         # cannot beat the interior minimum.
+        # ``force_endpoint_check`` overrides this guard for short edges
+        # where the tolerance floor terminated Brent at the midpoint
+        # without contracting either bracket boundary, so an endpoint
+        # contact would otherwise be silently dropped.
         best_t = x
         best_f = fx
-        if x < 0.2 or x > 0.8:
+        if x < 0.2 or x > 0.8 or force_endpoint_check:
             check_t = 0.0 if x < 0.5 else 1.0
             f_end = _sample_sdf_at_t(
                 texture_sdf,
@@ -694,6 +706,25 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
             if f_end < best_f:
                 best_t = check_t
                 best_f = f_end
+            # Short-edge fallback: also probe the opposite endpoint,
+            # since either could be the closer contact when Brent never
+            # contracted the bracket.
+            if force_endpoint_check:
+                other_t = 1.0 - check_t
+                f_other = _sample_sdf_at_t(
+                    texture_sdf,
+                    sdf_mesh_id,
+                    v0,
+                    edge_dir,
+                    other_t,
+                    use_bvh_for_sdf,
+                    sdf_is_heightfield,
+                    hfd_sdf,
+                    elevation_data,
+                )
+                if f_other < best_f:
+                    best_t = other_t
+                    best_f = f_other
 
         p = v0 + edge_dir * best_t
 
