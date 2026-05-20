@@ -14,8 +14,12 @@ import math
 import unittest
 
 import numpy as np
+import warp as wp
 
 import newton
+
+# ``Mesh.build_sdf`` requires CUDA because the SDF cook only runs on GPU.
+_cuda_available = wp.is_cuda_available()
 
 
 def _flat_quad_mesh() -> newton.Mesh:
@@ -319,6 +323,73 @@ class TestBuildCollisionEdges(unittest.TestCase):
         mesh = newton.Mesh(np.zeros((0, 3), dtype=np.float32), np.zeros(0, dtype=np.int32), compute_inertia=False)
         kept = self._build(mesh, enable_box_absorption=True)
         self.assertEqual(kept.shape, (0, 2))
+
+
+class TestCollisionEdgesLifecycle(unittest.TestCase):
+    """Lifecycle invariants for the ``_collision_edges`` cache attached by
+    :meth:`Mesh.build_sdf`: clearing the SDF must also drop the cache,
+    :meth:`Mesh.copy` must carry it alongside the SDF, and a failed
+    ``build_sdf`` retry must not leave a stale SDF behind.
+    """
+
+    @staticmethod
+    def _seed_collision_edges(mesh: newton.Mesh, count: int = 4) -> np.ndarray:
+        """Populate ``_collision_edges`` without paying for an SDF cook."""
+        seeded = np.ascontiguousarray(mesh.edges[:count].astype(np.int32))
+        mesh._collision_edges = seeded
+        return seeded
+
+    def test_clear_sdf_drops_collision_edges_cache(self):
+        # Otherwise ``ModelBuilder.finalize()`` would keep using the
+        # SDF-tuned subset for a mesh that no longer has an SDF.
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        mesh.sdf = object()  # placeholder, only the lifecycle matters here
+        self._seed_collision_edges(mesh)
+
+        mesh.clear_sdf()
+
+        self.assertIsNone(mesh.sdf)
+        self.assertIsNone(mesh._collision_edges)
+
+    def test_copy_carries_collision_edges_with_sdf(self):
+        # A copy of an SDF-backed mesh must reuse the simplified contact
+        # edges; otherwise it silently falls back to the full edge set and
+        # produces different contact counts than the original.
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        mesh.sdf = object()
+        seeded = self._seed_collision_edges(mesh)
+
+        copy = mesh.copy()
+
+        self.assertIs(copy.sdf, mesh.sdf)
+        self.assertIsNotNone(copy._collision_edges)
+        np.testing.assert_array_equal(copy._collision_edges, seeded)
+        # The cache must be an independent buffer so mutating one mesh's
+        # edges does not bleed into the other.
+        self.assertIsNot(copy._collision_edges, mesh._collision_edges)
+
+    @unittest.skipUnless(_cuda_available, "Requires CUDA device")
+    def test_build_sdf_rolls_back_sdf_on_edge_option_failure(self):
+        # Negative ``edge_lower_angle_threshold_rad`` combined with box
+        # absorption is rejected inside ``_build_collision_edges``. The
+        # SDF assignment that happens before that call must be reverted so
+        # a corrected retry doesn't trip the "Mesh already has an SDF"
+        # guard.
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        with self.assertRaises(ValueError):
+            mesh.build_sdf(
+                max_resolution=8,
+                edge_lower_angle_threshold_rad=-1.0,
+                edge_box_absorption=True,
+            )
+
+        self.assertIsNone(mesh.sdf)
+        self.assertIsNone(mesh._collision_edges)
+
+        # Sanity check: a corrected call now succeeds without first
+        # requiring an explicit ``clear_sdf()``.
+        mesh.build_sdf(max_resolution=8, edge_lower_angle_threshold_rad=0.0)
+        self.assertIsNotNone(mesh.sdf)
 
 
 if __name__ == "__main__":

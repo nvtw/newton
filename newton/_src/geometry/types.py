@@ -745,6 +745,8 @@ class Mesh:
             m.com = self.com
             m.has_inertia = self.has_inertia
         m.sdf = self.sdf
+        if self._collision_edges is not None:
+            m._collision_edges = self._collision_edges.copy()
         return m
 
     def build_sdf(
@@ -850,15 +852,22 @@ class Mesh:
             cache_dir=cache_dir,
         )
 
-        self._build_collision_edges(
-            lower_angle_threshold_rad=edge_lower_angle_threshold_rad,
-            upper_angle_threshold_rad=edge_upper_angle_threshold_rad,
-            enable_box_absorption=edge_box_absorption,
-            half_normal_abs=edge_box_half_normal,
-            half_normal_rel=edge_box_half_normal_rel,
-            half_lateral_abs=edge_box_half_lateral,
-            half_lateral_rel=edge_box_half_lateral_rel,
-        )
+        try:
+            self._build_collision_edges(
+                lower_angle_threshold_rad=edge_lower_angle_threshold_rad,
+                upper_angle_threshold_rad=edge_upper_angle_threshold_rad,
+                enable_box_absorption=edge_box_absorption,
+                half_normal_abs=edge_box_half_normal,
+                half_normal_rel=edge_box_half_normal_rel,
+                half_lateral_abs=edge_box_half_lateral,
+                half_lateral_rel=edge_box_half_lateral_rel,
+            )
+        except Exception:
+            # Roll back the SDF attachment so a corrected retry doesn't trip
+            # the "Mesh already has an SDF" guard.
+            self.sdf = None
+            self._collision_edges = None
+            raise
 
         return self.sdf
 
@@ -950,10 +959,16 @@ class Mesh:
     def clear_sdf(self) -> None:
         """Detach and release the currently attached SDF.
 
+        Also drops the simplified collision-edge cache populated by
+        :meth:`build_sdf`, so subsequent mesh-mesh contact generation falls
+        back to the full :attr:`edges` set instead of silently reusing the
+        SDF-tuned subset.
+
         Returns:
             ``None``.
         """
         self.sdf = None
+        self._collision_edges = None
 
     @property
     def vertices(self):
