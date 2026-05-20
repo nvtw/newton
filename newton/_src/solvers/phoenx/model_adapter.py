@@ -26,6 +26,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     JOINT_MODE_CABLE,
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
+    JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
@@ -234,6 +235,15 @@ def _classify_d6_pattern(
         lin_free_idx = next(i for i, lk in enumerate(locked_lin) if not lk)
         return ("CYLINDRICAL_CANDIDATE", lin_free_idx)
 
+    # PLANAR candidate: 1 linear locked + 2 linear free + 2 angular
+    # locked + 1 angular free. The locked linear axis must be PARALLEL
+    # to the free angular axis (both = plane normal). Parallelism check
+    # is done by the caller. ``free_dof_offset`` returns the locked-lin
+    # qd offset (= the plane normal axis qd).
+    if n_lin == 3 and n_ang == 3 and n_lin_locked == 1 and n_lin_free == 2 and n_ang_locked == 2 and n_ang_free == 1:
+        lin_locked_idx = next(i for i, lk in enumerate(locked_lin) if lk)
+        return ("PLANAR_CANDIDATE", lin_locked_idx)
+
     return (None, -1)
 
 
@@ -405,6 +415,22 @@ def build_adbs_init_arrays(
                 else:
                     d6_mode_tag = None  # fall through to the unsupported branch
 
+            if d6_mode_tag == "PLANAR_CANDIDATE":
+                lin_locked_idx = d6_free_dof_offset
+                ang_free_idx = next(i for i, lk in enumerate(locked_ang) if not lk)
+                lin_axis = np.asarray(joint_axis[qd_start_d6 + lin_locked_idx], dtype=np.float64)
+                ang_axis = np.asarray(joint_axis[qd_start_d6 + n_lin + ang_free_idx], dtype=np.float64)
+                lin_norm = float(np.linalg.norm(lin_axis))
+                ang_norm = float(np.linalg.norm(ang_axis))
+                if lin_norm > 1e-12 and ang_norm > 1e-12:
+                    cosine = abs(float(np.dot(lin_axis / lin_norm, ang_axis / ang_norm)))
+                else:
+                    cosine = 0.0
+                if cosine > 0.999:
+                    d6_mode_tag = "PLANAR"
+                else:
+                    d6_mode_tag = None
+
             if d6_mode_tag is None:
                 raise NotImplementedError(
                     f"D6 joint {j} has a configuration that PhoenX cannot yet auto-dispatch "
@@ -414,8 +440,9 @@ def build_adbs_init_arrays(
                     "REVOLUTE (3 lin locked + 2 ang locked + 1 ang free), "
                     "PRISMATIC (2 lin locked + 1 lin free + 3 ang locked), "
                     "UNIVERSAL (3 lin locked + 1 ang locked + 2 ang free), "
-                    "CYLINDRICAL (2 lin locked + 1 lin free + 2 ang locked + 1 ang free, axes parallel). "
-                    "Planar / generic D6 are tracked as Phase 2+ work."
+                    "CYLINDRICAL (2 lin locked + 1 lin free + 2 ang locked + 1 ang free, axes parallel), "
+                    "PLANAR (1 lin locked + 2 lin free + 2 ang locked + 1 ang free, locked-lin and free-ang axes parallel). "
+                    "Generic D6 is tracked as Phase 3 work."
                 )
 
         parent_idx = int(joint_parent[j])
@@ -475,6 +502,7 @@ def build_adbs_init_arrays(
         is_fixed = jtype is newton.JointType.FIXED or (jtype is newton.JointType.D6 and d6_mode_tag == "FIXED")
         is_universal = jtype is newton.JointType.D6 and d6_mode_tag == "UNIVERSAL"
         is_cylindrical = jtype is newton.JointType.D6 and d6_mode_tag == "CYLINDRICAL"
+        is_planar = jtype is newton.JointType.D6 and d6_mode_tag == "PLANAR"
         is_revolute = jtype is newton.JointType.REVOLUTE or (jtype is newton.JointType.D6 and d6_mode_tag == "REVOLUTE")
         is_prismatic = jtype is newton.JointType.PRISMATIC or (
             jtype is newton.JointType.D6 and d6_mode_tag == "PRISMATIC"
@@ -566,6 +594,25 @@ def build_adbs_init_arrays(
                 axis_local = axis_local / axis_len
             else:
                 axis_local = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+            axis_world = _quat_rotate_np(X_w_p[3:], axis_local)
+            anchor2_world = anchor1_world + axis_world
+        elif is_planar:
+            # Planar: 1 lin locked + 2 lin free + 2 ang locked + 1 ang
+            # free, with the locked-lin and free-ang axes parallel (the
+            # plane normal). ``d6_free_dof_offset`` points at the locked
+            # linear DoF; its axis is the plane normal.
+            phoenx_mode = int(JOINT_MODE_PLANAR)
+            lin_locked_qd = qd_start + d6_free_dof_offset
+            axis_local = (
+                np.asarray(joint_axis[lin_locked_qd], dtype=np.float32)
+                if len(joint_axis)
+                else np.asarray([0.0, 0.0, 1.0], dtype=np.float32)
+            )
+            axis_len = float(np.linalg.norm(axis_local))
+            if axis_len > 1e-12:
+                axis_local = axis_local / axis_len
+            else:
+                axis_local = np.asarray([0.0, 0.0, 1.0], dtype=np.float32)
             axis_world = _quat_rotate_np(X_w_p[3:], axis_local)
             anchor2_world = anchor1_world + axis_world
         elif is_revolute or is_prismatic:

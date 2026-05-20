@@ -85,6 +85,7 @@ __all__ = [
     "JOINT_MODE_CABLE",
     "JOINT_MODE_CYLINDRICAL",
     "JOINT_MODE_FIXED",
+    "JOINT_MODE_PLANAR",
     "JOINT_MODE_PRISMATIC",
     "JOINT_MODE_REVOLUTE",
     "JOINT_MODE_UNIVERSAL",
@@ -176,6 +177,23 @@ JOINT_MODE_UNIVERSAL = wp.constant(wp.int32(5))
 #: read in the iterate gate. A follow-up may add paired axial rows for
 #: driving the slide and the spin independently.
 JOINT_MODE_CYLINDRICAL = wp.constant(wp.int32(6))
+#: Planar joint: 2 linear free (in-plane) + 1 rotational free (about
+#: plane normal). The locked linear axis is parallel to the free
+#: rotational axis (= the plane normal). Geometrically: a puck on an
+#: air-hockey table, a wheeled mobile base on flat ground, planar
+#: tiles in a puzzle.
+#:
+#: 3 constraint rows: 1-row linear lock at anchor 1 along ``n_hat``
+#: (kills out-of-plane translation), 2-row angular lock at anchor 2
+#: perpendicular to ``n_hat`` (kills off-axis rotations -- same form
+#: as REVOLUTE's anchor-2 tangent rows). The 3x3 positional Schur is
+#: solved directly via ``wp.inverse(mat33)``. No anchor-3 row --
+#: rotation about ``n_hat`` is free.
+#:
+#: Phase 2 MVP is kinematic-only: no drives / limits / friction on
+#: any of the 3 free DoFs. Adding drives on the in-plane translations
+#: requires paired axial rows along ``t1, t2`` (Phase 2 follow-up).
+JOINT_MODE_PLANAR = wp.constant(wp.int32(7))
 
 
 # ---------------------------------------------------------------------------
@@ -2578,6 +2596,309 @@ def _cylindrical_iterate_at(
 
 
 # ---------------------------------------------------------------------------
+# Planar mode math
+# ---------------------------------------------------------------------------
+#
+# 3 constraint rows operating directly on relative velocity (no anchor
+# lever arms -- PLANAR constrains the bodies' rigid motion, not the
+# position of a designated joint anchor):
+#   1. n_hat · (v_com_2 - v_com_1) = 0  -- locks relative translation
+#      along the plane normal (kills out-of-plane motion).
+#   2. t1 · (ω_2 - ω_1) = 0  -- locks relative rotation about t1.
+#   3. t2 · (ω_2 - ω_1) = 0  -- locks relative rotation about t2.
+#
+# 3 free DoFs: 2 in-plane translations + 1 rotation about ``n_hat``.
+#
+# The K3 matrix is block-diagonal in the (linear, angular_t1, angular_t2)
+# basis because pure-couple angular impulses produce no linear velocity
+# at the COM and pure-force linear impulses produce no angular velocity
+# at the COM. The 2x2 angular sub-block can still cross-couple if
+# ``inv_inertia`` is non-diagonal in the (t1, t2) basis. We invert the
+# full 3x3 with ``wp.inverse(mat33)`` for simplicity.
+#
+# Phase 2 MVP is kinematic-only -- the schema's axial drive row is kept
+# OFF by the adapter; the iterate doesn't apply any axial impulse.
+# Drives on the in-plane translations / about-normal rotation would
+# need paired axial rows (Phase 2 follow-up).
+
+
+@wp.func
+def _planar_prepare_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+):
+    """Planar prepare: linear lock along ``n_hat`` (relative COM
+    velocity) + 2-row angular lock perpendicular to ``n_hat`` (relative
+    angular velocity). 3x3 K matrix inverted directly.
+
+    Drift correction is built into the bias: positional Z-drift between
+    the two bodies' joint anchors and orientation drift between the
+    bodies' n_hat axes (Box2D soft-constraint biases)."""
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    orientation1 = bodies.orientation[b1]
+    orientation2 = bodies.orientation[b2]
+    position1 = bodies.position[b1]
+    position2 = bodies.position[b2]
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
+
+    la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
+    la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
+    la2_b1 = read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
+    la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
+
+    # Snapshot anchor1 lever arms (used for z-drift bias computation).
+    # PLANAR's linear constraint operates on relative COM velocity, not
+    # relative anchor velocity, so the impulse application is at COM
+    # (no skew matrices needed in the iterate's velocity update).
+    r1_b1 = wp.quat_rotate(orientation1, la1_b1)
+    r1_b2 = wp.quat_rotate(orientation2, la1_b2)
+    write_vec3(constraints, base_offset + _OFF_R1_B1, cid, r1_b1)
+    write_vec3(constraints, base_offset + _OFF_R1_B2, cid, r1_b2)
+
+    p1_b1 = position1 + r1_b1
+    p1_b2 = position2 + r1_b2
+
+    # Plane normal: in body 1's frame, stored as la2_b1 - la1_b1 at init
+    # (the init kernel sets anchor2 = anchor1 + normal_axis). Recover it
+    # in world frame by rotating la_diff into body 1's frame. Using
+    # body 1 (rather than mean of body 1 and body 2) keeps n_hat
+    # well-defined when the two bodies' relative orientation drifts.
+    n_hat_body1 = la2_b1 - la1_b1
+    n_hat_len2 = wp.dot(n_hat_body1, n_hat_body1)
+    if n_hat_len2 > 1.0e-20:
+        n_hat = wp.quat_rotate(orientation1, n_hat_body1 / wp.sqrt(n_hat_len2))
+    else:
+        n_hat = wp.vec3f(0.0, 0.0, 1.0)
+    write_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid, n_hat)
+
+    # In-plane tangent basis perpendicular to n_hat. Used for the two
+    # angular constraint rows ``t1 · ω_rel = 0`` and ``t2 · ω_rel = 0``.
+    t1 = create_orthonormal(n_hat)
+    t2 = wp.cross(n_hat, t1)
+    write_vec3(constraints, base_offset + _OFF_T1, cid, t1)
+    write_vec3(constraints, base_offset + _OFF_T2, cid, t2)
+
+    # K3 entries:
+    #   row 0 (linear, along n_hat):
+    #     n_hat · ((inv_mass1 + inv_mass2) * I) · n_hat = inv_mass1 + inv_mass2
+    #     (no angular contribution -- pure-couple impulse produces no
+    #     anchor-velocity change at COM; pure-force impulse produces no
+    #     angular velocity change either at COM).
+    #   rows 1, 2 (angular, along t1, t2):
+    #     t · (inv_inertia1 + inv_inertia2) · t.
+    #     (Inertia is the only contribution since the impulse is a pure
+    #     couple -- no linear coupling.)
+    #   Cross-coupling 0-1 / 0-2 is ZERO (linear ⟂ angular at COM).
+    #   Cross-coupling 1-2 = t1 · (inv_inertia1 + inv_inertia2) · t2 (may
+    #   be non-zero if the inertia tensor is non-diagonal in the t1/t2
+    #   basis).
+    inv_I_sum = inv_inertia1 + inv_inertia2
+    k00 = inv_mass1 + inv_mass2
+    inv_I_t1 = inv_I_sum @ t1
+    inv_I_t2 = inv_I_sum @ t2
+    k11 = wp.dot(t1, inv_I_t1)
+    k22 = wp.dot(t2, inv_I_t2)
+    k12 = wp.dot(t1, inv_I_t2)
+    k3 = wp.mat33f(
+        k00,
+        0.0,
+        0.0,
+        0.0,
+        k11,
+        k12,
+        0.0,
+        k12,
+        k22,
+    )
+    a3_inv = wp.inverse(k3)
+    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a3_inv)
+
+    hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
+    damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
+    dt = 1.0 / idt
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
+    write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
+    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
+
+    # Bias: positional drift between the joint anchors projected onto
+    # n_hat (Z-drift), plus orientation drift between body 1's and body
+    # 2's n_hat-axes (the "pitch/roll" angle). The orientation drift is
+    # tracked via the relative rotation's small-angle log projected onto
+    # t1, t2 (the angular constraint axes). At init the relative
+    # orientation is identity so this term starts at zero.
+    drift1 = p1_b2 - p1_b1
+    bias_lin_n = wp.dot(n_hat, drift1) * bias_rate
+    # n_hat in body 2's frame (after rotation drift).
+    n_hat_body2 = la2_b2 - la1_b2
+    n_hat_body2_len2 = wp.dot(n_hat_body2, n_hat_body2)
+    if n_hat_body2_len2 > 1.0e-20:
+        n_hat_2_world = wp.quat_rotate(orientation2, n_hat_body2 / wp.sqrt(n_hat_body2_len2))
+    else:
+        n_hat_2_world = n_hat
+    # Cross product gives the perpendicular rotation that would align
+    # body 2's n_hat to body 1's n_hat. Projected onto t1, t2 it is the
+    # small-angle "pitch / roll" drift.
+    ang_drift = wp.cross(n_hat_2_world, n_hat)
+    bias_ang_t1 = wp.dot(t1, ang_drift) * bias_rate
+    bias_ang_t2 = wp.dot(t2, ang_drift) * bias_rate
+    write_vec3(constraints, base_offset + _OFF_BIAS1, cid, wp.vec3f(bias_lin_n, bias_ang_t1, bias_ang_t2))
+
+    # Warm-start: ``acc_imp1`` stores the linear impulse along n_hat,
+    # ``acc_imp2`` stores the angular impulse along (t1, t2) basis.
+    acc_imp1_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+    acc_imp2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc_lin_n = wp.dot(n_hat, acc_imp1_world)
+    acc_ang_t1 = wp.dot(t1, acc_imp2_world)
+    acc_ang_t2 = wp.dot(t2, acc_imp2_world)
+    acc_imp1_world = acc_lin_n * n_hat
+    acc_imp2_world = acc_ang_t1 * t1 + acc_ang_t2 * t2
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc_imp1_world)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc_imp2_world)
+
+    # Apply warm-start. Linear impulse acts at the COM (no torque);
+    # angular impulse is a pure couple (no force).
+    velocity1 = velocity1 - inv_mass1 * acc_imp1_world
+    angular_velocity1 = angular_velocity1 - inv_inertia1 @ acc_imp2_world
+    velocity2 = velocity2 + inv_mass2 * acc_imp1_world
+    angular_velocity2 = angular_velocity2 + inv_inertia2 @ acc_imp2_world
+
+    _ms_store_body_pair(
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+    )
+
+
+@wp.func
+def _planar_iterate_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    use_bias: wp.bool,
+):
+    """Planar PGS iterate: 1 linear + 2 angular rows on the relative
+    body motion. No anchor lever arms in the impulse -- the linear
+    impulse acts at the COM (pure force) and the angular impulse is a
+    pure couple (no force)."""
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
+
+    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
+    t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
+    t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
+
+    a3_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
+    if use_bias:
+        bias_packed = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
+    else:
+        bias_packed = wp.vec3f(0.0, 0.0, 0.0)
+    mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
+    impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
+
+    acc_imp1_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+    acc_imp2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc_n = wp.dot(n_hat, acc_imp1_world)
+    acc_t1 = wp.dot(t1, acc_imp2_world)
+    acc_t2 = wp.dot(t2, acc_imp2_world)
+    acc3 = wp.vec3f(acc_n, acc_t1, acc_t2)
+
+    # Velocity Jacobian projected onto the constraint basis:
+    #   row 0: relative COM linear velocity along n_hat.
+    #   rows 1, 2: relative angular velocity along t1, t2.
+    v_rel = velocity2 - velocity1
+    w_rel = angular_velocity2 - angular_velocity1
+    jv3 = wp.vec3f(
+        wp.dot(n_hat, v_rel),
+        wp.dot(t1, w_rel),
+        wp.dot(t2, w_rel),
+    )
+    rhs3 = jv3 + bias_packed
+
+    lam_us = -(a3_inv @ rhs3)
+    lam3 = mass_coeff * lam_us - impulse_coeff * acc3
+    lam3 = lam3 * sor_boost
+
+    # Linear impulse: pure force along n_hat at COM (no torque).
+    lin_imp_world = lam3[0] * n_hat
+    # Angular impulse: pure couple along t1, t2 (no force).
+    ang_imp_world = lam3[1] * t1 + lam3[2] * t2
+
+    velocity1 = velocity1 - inv_mass1 * lin_imp_world
+    angular_velocity1 = angular_velocity1 - inv_inertia1 @ ang_imp_world
+    velocity2 = velocity2 + inv_mass2 * lin_imp_world
+    angular_velocity2 = angular_velocity2 + inv_inertia2 @ ang_imp_world
+
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc_imp1_world + lin_imp_world)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc_imp2_world + ang_imp_world)
+
+    _ms_store_body_pair(
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cable (soft fixed) mode
 # ---------------------------------------------------------------------------
 #
@@ -3685,6 +4006,10 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
         _cylindrical_prepare_at(
             constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
         )
+    elif joint_mode == JOINT_MODE_PLANAR:
+        _planar_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        )
     else:
         _ball_socket_prepare_at(
             constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
@@ -4122,6 +4447,21 @@ def actuated_double_ball_socket_iterate_at(
         )
     elif joint_mode == JOINT_MODE_CYLINDRICAL:
         _cylindrical_iterate_at(
+            constraints,
+            cid,
+            base_offset,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            body_pair,
+            idt,
+            sor_boost,
+            use_bias,
+        )
+    elif joint_mode == JOINT_MODE_PLANAR:
+        _planar_iterate_at(
             constraints,
             cid,
             base_offset,

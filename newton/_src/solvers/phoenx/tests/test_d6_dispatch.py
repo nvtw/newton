@@ -5,11 +5,11 @@
 
 PhoenX's :func:`model_adapter.build_adbs_init_arrays` detects D6 joint
 configurations whose per-DoF lock pattern matches a specialized mode
-(FIXED / BALL / REVOLUTE / PRISMATIC / UNIVERSAL / CYLINDRICAL) and
-routes them to the corresponding constraint kernels. The first four
-route to existing modes (Phase 1); UNIVERSAL (Phase 2b) and CYLINDRICAL
-(Phase 2a) are new modes that reuse the existing positional and axial
-infrastructure with different subsets of rows active.
+(FIXED / BALL / REVOLUTE / PRISMATIC / UNIVERSAL / CYLINDRICAL / PLANAR)
+and routes them to the corresponding constraint kernels. The first
+four route to existing modes (Phase 1); UNIVERSAL (Phase 2b),
+CYLINDRICAL (Phase 2a), and PLANAR (Phase 2c) are new modes built by
+composing existing helpers with different subsets of constraint rows.
 
 Coverage (all CUDA + graph-captured):
 
@@ -18,8 +18,10 @@ Coverage (all CUDA + graph-captured):
 * :class:`TestD6Universal` -- twist-lock invariant.
 * :class:`TestD6Cylindrical` -- 2 free DoFs along the shared axis,
   4 perpendicular DoFs locked.
-* :class:`TestD6Unsupported` -- planar / non-parallel-axes-"cylindrical"
-  configurations still raise (Phase 2c+ work).
+* :class:`TestD6Planar` -- 2 in-plane lin + 1 about-normal ang free,
+  3 perpendicular DoFs locked.
+* :class:`TestD6Unsupported` -- non-parallel-axes "cylindrical" and
+  "planar" configurations still raise (= Phase 3 generic D6 territory).
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
+    JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
@@ -628,6 +631,128 @@ class TestD6Universal(unittest.TestCase):
         )
 
 
+def _build_d6_planar_puck(
+    *,
+    mass: float = 1.0,
+    inertia: float = 1.0e-2,
+    normal: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    locked_lin_index: int = 2,
+    free_ang_index: int = 2,
+) -> newton.Model:
+    """Planar joint: puck constrained to a plane perpendicular to
+    ``normal``. Can translate in the plane (2 in-plane lin axes free)
+    and rotate about ``normal`` (1 ang axis free).
+
+    ``locked_lin_index`` is the slot in the linear sublist that holds
+    the locked direction (= the plane normal). ``free_ang_index`` is
+    the slot in the angular sublist that holds the free direction
+    (= the same plane normal). The adapter checks that the locked-lin
+    axis and free-ang axis are parallel."""
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+    body = builder.add_link(
+        xform=wp.transform_identity(),
+        mass=float(mass),
+        inertia=((inertia, 0, 0), (0, inertia, 0), (0, 0, inertia)),
+    )
+    builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.02, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+
+    lin_axes = []
+    for k in range(3):
+        if k == locked_lin_index:
+            lin_axes.append(newton.ModelBuilder.JointDofConfig(axis=normal, limit_lower=1.0, limit_upper=-1.0))
+        else:
+            lin_axes.append(
+                newton.ModelBuilder.JointDofConfig(axis=(1.0, 0.0, 0.0), limit_lower=-1.0e6, limit_upper=1.0e6)
+            )
+    ang_axes = []
+    for k in range(3):
+        if k == free_ang_index:
+            ang_axes.append(newton.ModelBuilder.JointDofConfig(axis=normal, limit_lower=-1.0e6, limit_upper=1.0e6))
+        else:
+            ang_axes.append(newton.ModelBuilder.JointDofConfig(axis=(1.0, 0.0, 0.0), limit_lower=1.0, limit_upper=-1.0))
+
+    j = builder.add_joint_d6(
+        parent=-1,
+        child=body,
+        linear_axes=lin_axes,
+        angular_axes=ang_axes,
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform_identity(),
+    )
+    builder.add_articulation([j])
+    model = builder.finalize()
+    model.set_gravity((0.0, 0.0, 0.0))
+    return model
+
+
+@unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX D6 tests run on CUDA only")
+class TestD6Planar(unittest.TestCase):
+    """Planar joint: 1 lin locked + 2 lin free + 2 ang locked + 1 ang
+    free, with locked-lin and free-ang axes parallel. The body must:
+
+    * Translate freely in the plane (2 in-plane DoFs unactuated).
+    * Rotate freely about the plane normal (1 angular DoF unactuated).
+    * Stay locked normal to the plane (out-of-plane translation = 0).
+    * Stay locked in pitch / roll (rotation perpendicular to the normal = 0).
+    """
+
+    def test_dispatches_to_planar_mode(self) -> None:
+        model = _build_d6_planar_puck()
+        solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_PLANAR))
+
+    def test_body_stays_in_plane_with_free_in_plane_motion(self) -> None:
+        """Seed a puck with linear velocity in the plane (X+Y) and
+        angular velocity about the normal (Z). After replay, the puck
+        must have translated in X/Y, rotated about Z, and stayed at
+        z = 0 with no off-axis rotation."""
+        model = _build_d6_planar_puck(normal=(0.0, 0.0, 1.0))
+        device = wp.get_device()
+        solver = newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=20)
+
+        s0 = model.state()
+        s1 = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+        # In-plane translation: v_x = 0.5, v_y = 0.3. About-normal spin: omega_z = 1.5.
+        init_qd = np.zeros((1, 6), dtype=np.float32)
+        init_qd[0, 0] = 0.5
+        init_qd[0, 1] = 0.3
+        init_qd[0, 5] = 1.5
+        s0.body_qd.assign(init_qd)
+
+        n_frames = 120
+
+        def _frame() -> None:
+            s0.clear_forces()
+            solver.step(s0, s1, model.control(), None, _DT)
+            wp.copy(s0.body_q, s1.body_q)
+            wp.copy(s0.body_qd, s1.body_qd)
+
+        _frame()
+        with wp.ScopedCapture(device=device) as capture:
+            _frame()
+        graph = capture.graph
+        for _ in range(n_frames - 1):
+            wp.capture_launch(graph)
+
+        body_q = s0.body_q.numpy()[0]
+        body_qd = s0.body_qd.numpy()[0]
+        # z-position locked to ~0 (the plane).
+        self.assertLess(abs(float(body_q[2])), 1e-3, f"z-drift = {body_q[2]}")
+        # In-plane motion: x and y should have advanced (~ vt for v=0.5/0.3, t=0.5s).
+        self.assertGreater(abs(float(body_q[0])), 0.15, f"X translation = {body_q[0]}")
+        self.assertGreater(abs(float(body_q[1])), 0.1, f"Y translation = {body_q[1]}")
+        # Velocity components: v_z and omega_x, omega_y locked.
+        self.assertLess(abs(float(body_qd[2])), 0.05, f"v_z = {body_qd[2]}")
+        self.assertLess(abs(float(body_qd[3])), 0.05, f"omega_x = {body_qd[3]}")
+        self.assertLess(abs(float(body_qd[4])), 0.05, f"omega_y = {body_qd[4]}")
+        # Free velocities retained (no friction, no gravity).
+        self.assertAlmostEqual(float(body_qd[0]), 0.5, delta=0.05, msg=f"v_x = {body_qd[0]}")
+        self.assertAlmostEqual(float(body_qd[1]), 0.3, delta=0.05, msg=f"v_y = {body_qd[1]}")
+        self.assertAlmostEqual(float(body_qd[5]), 1.5, delta=0.05, msg=f"omega_z = {body_qd[5]}")
+
+
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX D6 tests run on CUDA only")
 class TestD6Unsupported(unittest.TestCase):
     """Configurations outside Phase 1's pattern set must raise a
@@ -688,13 +813,35 @@ class TestD6Unsupported(unittest.TestCase):
         j = builder.add_joint_d6(parent=-1, child=body, linear_axes=lin, angular_axes=ang)
         builder.add_articulation([j])
         model = builder.finalize()
-        with self.assertRaisesRegex(NotImplementedError, "Planar / generic D6"):
+        with self.assertRaisesRegex(NotImplementedError, "Generic D6"):
             newton.solvers.SolverPhoenX(model, substeps=1)
 
-    def test_planar_pattern_raises(self) -> None:
-        """2 linear + 1 angular free (planar joint) -- needs Phase 2c."""
-        model = self._make_d6(lin_locks=[False, False, True], ang_locks=[True, True, False])
-        with self.assertRaisesRegex(NotImplementedError, "Phase 2"):
+    # Planar pattern with parallel locked-lin and free-ang axes is now
+    # supported via JOINT_MODE_PLANAR -- see :class:`TestD6Planar`.
+
+    def test_planar_pattern_non_parallel_axes_raises(self) -> None:
+        """A planar-shaped lock pattern with the locked-lin axis NOT
+        parallel to the free-ang axis is not a physical planar joint
+        and must be rejected."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
+        builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+        # Lock the Z translation; free the Y rotation (perpendicular to Z).
+        lin = [
+            newton.ModelBuilder.JointDofConfig(axis=(1, 0, 0), limit_lower=-1.0e6, limit_upper=1.0e6),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 1, 0), limit_lower=-1.0e6, limit_upper=1.0e6),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 0, 1), limit_lower=1.0, limit_upper=-1.0),
+        ]
+        ang = [
+            newton.ModelBuilder.JointDofConfig(axis=(1, 0, 0), limit_lower=1.0, limit_upper=-1.0),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 1, 0), limit_lower=-1.0e6, limit_upper=1.0e6),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 0, 1), limit_lower=1.0, limit_upper=-1.0),
+        ]
+        j = builder.add_joint_d6(parent=-1, child=body, linear_axes=lin, angular_axes=ang)
+        builder.add_articulation([j])
+        model = builder.finalize()
+        with self.assertRaisesRegex(NotImplementedError, "Generic D6"):
             newton.solvers.SolverPhoenX(model, substeps=1)
 
 
