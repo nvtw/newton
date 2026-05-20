@@ -2799,9 +2799,9 @@ def parse_usd(
                         sdf_margin = 0.05
 
                     # Hydroelastic is opt-in via newton:hydroelasticEnabled on the
-                    # NewtonSDFCollisionAPI. newton:kh alone is a material parameter
-                    # and does NOT flip the feature on — users must explicitly
-                    # set the enable bool to true.
+                    # NewtonSDFCollisionAPI. newton:hydroelasticStiffness alone is
+                    # a material parameter and does NOT flip the feature on —
+                    # users must explicitly set the enable bool to true.
                     hydroelastic_enabled = R.get_value(
                         prim, prim_type=PrimType.SHAPE, key="hydroelastic_enabled", verbose=verbose
                     )

@@ -214,7 +214,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             p1.AddAppliedSchema("NewtonSDFCollisionAPI")
             p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(128)
             p1.CreateAttribute("newton:hydroelasticEnabled", Sdf.ValueTypeNames.Bool, custom=True).Set(True)
-            p1.CreateAttribute("newton:kh", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
+            p1.CreateAttribute("newton:hydroelasticStiffness", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
 
             # Body2: no hydroelastic
             _add_rigid_body(stage, "/World/Body2")
@@ -316,7 +316,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
             p1 = m1.GetPrim()
             p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(128)
-            p1.CreateAttribute("newton:kh", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
+            p1.CreateAttribute("newton:hydroelasticStiffness", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
             p1.CreateAttribute("newton:hydroelasticEnabled", Sdf.ValueTypeNames.Bool, custom=True).Set(False)
 
             stage.Save()
@@ -411,7 +411,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             p1.AddAppliedSchema("NewtonSDFCollisionAPI")
             p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(32)
             p1.CreateAttribute("newton:hydroelasticEnabled", Sdf.ValueTypeNames.Bool, custom=True).Set(True)
-            p1.CreateAttribute("newton:kh", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
+            p1.CreateAttribute("newton:hydroelasticStiffness", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
             p1.CreateAttribute("newton:sdfMargin", Sdf.ValueTypeNames.Float, custom=True).Set(0.03)
 
             stage.Save()
@@ -472,7 +472,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             p1.AddAppliedSchema("NewtonSDFCollisionAPI")
             p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(32)
             p1.CreateAttribute("newton:hydroelasticEnabled", Sdf.ValueTypeNames.Bool, custom=True).Set(True)
-            p1.CreateAttribute("newton:kh", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
+            p1.CreateAttribute("newton:hydroelasticStiffness", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
             p1.CreateAttribute("newton:sdfMargin", Sdf.ValueTypeNames.Float, custom=True).Set(0.03)
             p1.CreateAttribute("newton:contactGap", Sdf.ValueTypeNames.Float, custom=True).Set(0.07)
 
@@ -550,7 +550,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             self.assertFalse(builder.shape_flags[s1] & newton.ShapeFlags.HYDROELASTIC)
 
     def test_usd_kh_alone_does_not_enable_hydroelastic(self, device=None):
-        """Authoring newton:kh without hydroelasticEnabled=true must not turn hydro on."""
+        """Authoring newton:hydroelasticStiffness without hydroelasticEnabled=true must not turn hydro on."""
         if device is None or not wp.get_device(device).is_cuda:
             self.skipTest("SDF tests require CUDA device")
 
@@ -568,7 +568,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             p1 = sphere.GetPrim()
             # kh is just a material parameter. Without hydroelasticEnabled=true,
             # the importer must not flip hydro on.
-            p1.CreateAttribute("newton:kh", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
+            p1.CreateAttribute("newton:hydroelasticStiffness", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
 
             stage.Save()
 
