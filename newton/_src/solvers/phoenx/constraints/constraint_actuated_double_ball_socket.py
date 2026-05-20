@@ -1512,6 +1512,20 @@ def _revolute_prepare_at(
     # (rotor / leadscrew inertia) is *baked into* ``inv_inertia_world``
     # at solver construction (see ``SolverPhoenX._bake_joint_armature_into_body_inertia``),
     # so this expression is already armature-aware -- no extra term here.
+    #
+    # NB: we deliberately use the body-COM projection here rather than a
+    # parallel-axis-augmented joint-frame inverse inertia. PGS Gauss-Seidel
+    # converges when each row's ``eff_mass`` matches how its impulse is
+    # applied. The axial impulse is applied via ``inv_inertia_world`` (body
+    # COM-frame), so ``eff_inv`` must be the body-COM projection. Using the
+    # joint-frame ``1/(I_com + m·|r_perp|²)`` here breaks convergence: the
+    # per-iter impulse would be sized assuming joint-frame impedance but
+    # applied with body-frame ``inv_inertia``, producing a transient
+    # ``Δω_body = (I_pivot/I_com) · jv`` that the positional rows cannot
+    # correct in a small iteration budget. The parallel-axis term emerges
+    # naturally from positional/axial row coupling at convergence; users
+    # with skinny links (``I_com ≪ m·|r_perp|²``) should set
+    # ``joint_armature`` to fold rotor inertia into ``I_com_axial`` directly.
     eff_inv = wp.dot(n_hat, inv_inertia1 @ n_hat) + wp.dot(n_hat, inv_inertia2 @ n_hat)
 
     # Revolute twist tracker: ``diff = q2 * inv_init * q1^*`` is the
