@@ -894,15 +894,23 @@ class SolverPhoenX(SolverBase):
     def notify_model_changed(self, flags: int) -> None:
         """Refresh state on Model edits. Joint-property changes rebuild the ADBS
         init arrays from scratch; gravity is reread from ``model.gravity``."""
-        if flags & (int(SolverNotifyFlags.JOINT_PROPERTIES) | int(SolverNotifyFlags.JOINT_DOF_PROPERTIES)):
+        joint_props_changed = bool(
+            flags & (int(SolverNotifyFlags.JOINT_PROPERTIES) | int(SolverNotifyFlags.JOINT_DOF_PROPERTIES))
+        )
+        if joint_props_changed:
             self._adbs = build_adbs_init_arrays(self.model, device=self.device)
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
         if flags & int(SolverNotifyFlags.MODEL_PROPERTIES):
             self.world.gravity = wp.array(self._read_model_gravity_np(self.model), dtype=wp.vec3f, device=self.device)
         # Single body refresh kernel covers both BODY_PROPERTIES and BODY_INERTIAL_PROPERTIES.
+        # Joint-DOF changes also force a refresh: armature is baked into body
+        # inertia at construction, so any change to model.joint_armature
+        # requires resetting the inertia back to Model.body_inv_inertia and
+        # re-baking with the new armature. Without this path, domain
+        # randomization of armature silently keeps the original values.
         body_refresh_mask = int(SolverNotifyFlags.BODY_INERTIAL_PROPERTIES | SolverNotifyFlags.BODY_PROPERTIES)
-        if flags & body_refresh_mask:
+        if (flags & body_refresh_mask) or joint_props_changed:
             if self.model.body_count > 0:
                 self._launch_init_phoenx_bodies(self.model)
                 # Re-bake armature: the kernel just overwrote inertia.

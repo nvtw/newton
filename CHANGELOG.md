@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Refresh PhoenX's baked-in armature on `SolverNotifyFlags.JOINT_DOF_PROPERTIES`: `SolverPhoenX.notify_model_changed` now resets body inertia to `Model.body_inv_inertia` and re-bakes `model.joint_armature` whenever joint-DOF properties change, so domain-randomization edits to armature between episodes actually take effect
 - Fix `SolverMuJoCo` returning `State.joint_qd` in world frame for root `FREE` joints with non-identity `parent_xform`, violating the documented parent-frame contract and corrupting derived `body_qd`.
 
 ## [1.2.0] - 2026-05-12
