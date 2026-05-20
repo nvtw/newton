@@ -402,6 +402,14 @@ class SolverPhoenX(SolverBase):
         joint_X_p = model.joint_X_p.numpy()
         joint_X_c = model.joint_X_c.numpy()
         armature = model.joint_armature.numpy()
+        # Gear-ratio scaling: motor-side rotor inertia ``I_rotor`` reflects
+        # at the joint as ``gear**2 * I_rotor``. The bake reads
+        # ``joint_armature`` (which is the motor-side value when gear != 1)
+        # and adds the gear-scaled value to the body's inertia along the
+        # joint axis. ``gear == 1`` (default) is the back-compatible no-op.
+        joint_gear_np = (
+            model.joint_gear.numpy() if (hasattr(model, "joint_gear") and model.joint_gear is not None) else None
+        )
 
         body_inv_mass = self.bodies.inverse_mass.numpy().copy()
         body_inv_inertia = self.bodies.inverse_inertia.numpy().copy()
@@ -428,7 +436,14 @@ class SolverPhoenX(SolverBase):
             qd = int(joint_qd_start[j])
             if qd >= len(armature):
                 continue
-            a = float(armature[qd])
+            a_motor = float(armature[qd])
+            # Apply gear**2 scaling to convert motor-side to joint-side.
+            gear = 1.0
+            if joint_gear_np is not None and qd < len(joint_gear_np):
+                raw_gear = float(joint_gear_np[qd])
+                if raw_gear > 0.0 and np.isfinite(raw_gear):
+                    gear = raw_gear
+            a = gear * gear * a_motor
             if a <= 0.0:
                 continue
             any_baked = True
@@ -588,6 +603,7 @@ class SolverPhoenX(SolverBase):
                 model.joint_target_ke,
                 model.joint_target_kd,
                 model.joint_effort_limit,
+                model.joint_gear,
                 target_pos,
                 target_vel,
                 wp.int32(0),  # DRIVE_MODE_OFF

@@ -304,6 +304,14 @@ but do not use the articulation kinematic-tree structure.
      - |no|
      - |no|
      - |no|
+   * - :attr:`~newton.Model.joint_gear`
+     - |no|
+     - |no|
+     - |no|
+     - |no|
+     - |no|
+     - |no|
+     - |yes|
 
 | :sup:`2` Not enforced for BALL joints in SemiImplicit.
 

@@ -489,6 +489,16 @@ class Model:
         """Joint velocity limits [m/s or rad/s, depending on joint type], shape [joint_dof_count], float."""
         self.joint_friction: wp.array[wp.float32] | None = None
         """Joint friction force/torque [N or N·m, depending on joint type], shape [joint_dof_count], float."""
+        self.joint_gear: wp.array[wp.float32] | None = None
+        """Per-DoF gear ratio between motor and joint (used by :class:`~newton.solvers.SolverPhoenX`), shape [joint_dof_count], float.
+
+        ``gear_ratio > 1`` means the motor rotates faster than the joint. The
+        solver uses this scalar to convert motor-side properties into joint-frame
+        quantities: ``effective_effort_limit = gear * joint_effort_limit`` and
+        ``effective_armature = gear**2 * joint_armature``. ``1.0`` (default) is the
+        back-compatible no-op -- every quantity is interpreted in joint-frame
+        coordinates, matching the pre-gear convention.
+        """
         self.joint_dof_dim: wp.array2d[wp.int32] | None = None
         """Number of linear and angular dofs per joint, shape [joint_count, 2], int."""
         self.joint_enabled: wp.array[wp.bool] | None = None
@@ -797,6 +807,7 @@ class Model:
         self.attribute_frequency["joint_limit_kd"] = Model.AttributeFrequency.JOINT_DOF
         self.attribute_frequency["joint_effort_limit"] = Model.AttributeFrequency.JOINT_DOF
         self.attribute_frequency["joint_friction"] = Model.AttributeFrequency.JOINT_DOF
+        self.attribute_frequency["joint_gear"] = Model.AttributeFrequency.JOINT_DOF
         self.attribute_frequency["joint_velocity_limit"] = Model.AttributeFrequency.JOINT_DOF
         self.attribute_frequency["mujoco:qfrc_actuator"] = Model.AttributeFrequency.JOINT_DOF
 

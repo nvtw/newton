@@ -583,6 +583,7 @@ class ModelBuilder:
             effort_limit: float = 1e6,
             velocity_limit: float = 1e6,
             friction: float = 0.0,
+            gear_ratio: float = 1.0,
             actuator_mode: JointTargetMode | None = None,
         ):
             self.axis = wp.normalize(axis_to_vec3(axis))
@@ -613,6 +614,25 @@ class ModelBuilder:
             """Maximum velocity the joint axis can achieve. Defaults to 1e6."""
             self.friction = friction
             """Friction coefficient for the joint axis. Defaults to 0.0."""
+            self.gear_ratio = gear_ratio
+            """Gear ratio between the motor and the joint axis.
+
+            ``gear_ratio > 1`` means the motor rotates faster than the joint
+            (typical reduction gearbox: motor side gives lower torque + higher
+            speed, joint side sees higher torque + lower speed). The solver
+            uses this scalar to convert motor-side properties into joint-side
+            quantities -- specifically:
+
+            * :attr:`effort_limit` is interpreted on the *motor side*; the
+              joint-frame effort cap is ``gear_ratio * effort_limit``.
+            * :attr:`armature` is interpreted as the motor-side rotor /
+              leadscrew inertia; the joint-frame reflected inertia is
+              ``gear_ratio**2 * armature``.
+
+            ``gear_ratio = 1`` (default) is the back-compatible no-op: every
+            quantity stays in joint-frame coordinates, matching the
+            pre-gear convention.
+            """
             self.actuator_mode = actuator_mode
             """Actuator mode for this DOF. Determines which actuators are installed (see :class:`JointTargetMode`).
             If None, the mode is inferred from gains and targets."""
@@ -1235,6 +1255,12 @@ class ModelBuilder:
         """Joint velocity limits accumulated for :attr:`Model.joint_velocity_limit`."""
         self.joint_friction: list[float] = []
         """Joint friction values accumulated for :attr:`Model.joint_friction`."""
+        self.joint_gear: list[float] = []
+        """Joint gear ratios accumulated for :attr:`Model.joint_gear`.
+
+        Per-DoF scalar; ``1.0`` (default) is the back-compatible no-op.
+        See :attr:`ModelBuilder.JointDofConfig.gear_ratio` for the
+        motor-vs-joint conversion semantics."""
 
         self.joint_twist_lower: list[float] = []
         """Lower twist limits accumulated for :attr:`Model.joint_twist_lower`."""
@@ -3396,6 +3422,7 @@ class ModelBuilder:
             "joint_effort_limit",
             "joint_velocity_limit",
             "joint_friction",
+            "joint_gear",
             "shape_flags",
             "shape_type",
             "shape_scale",
@@ -3987,6 +4014,7 @@ class ModelBuilder:
             self.joint_effort_limit.append(dim.effort_limit)
             self.joint_velocity_limit.append(dim.velocity_limit)
             self.joint_friction.append(dim.friction)
+            self.joint_gear.append(dim.gear_ratio)
             if np.isfinite(dim.limit_lower):
                 self.joint_limit_lower.append(dim.limit_lower)
             else:
@@ -4064,6 +4092,7 @@ class ModelBuilder:
         effort_limit: float | None = None,
         velocity_limit: float | None = None,
         friction: float | None = None,
+        gear_ratio: float | None = None,
         actuator_mode: JointTargetMode | None = None,
         label: str | None = None,
         collision_filter_parent: bool | None = None,
@@ -4122,6 +4151,7 @@ class ModelBuilder:
                 effort_limit=effort_limit if effort_limit is not None else self.default_joint_cfg.effort_limit,
                 velocity_limit=velocity_limit if velocity_limit is not None else self.default_joint_cfg.velocity_limit,
                 friction=friction if friction is not None else self.default_joint_cfg.friction,
+                gear_ratio=gear_ratio if gear_ratio is not None else self.default_joint_cfg.gear_ratio,
                 actuator_mode=actuator_mode if actuator_mode is not None else self.default_joint_cfg.actuator_mode,
             )
         return self.add_joint(
@@ -4157,6 +4187,7 @@ class ModelBuilder:
         effort_limit: float | None = None,
         velocity_limit: float | None = None,
         friction: float | None = None,
+        gear_ratio: float | None = None,
         actuator_mode: JointTargetMode | None = None,
         label: str | None = None,
         collision_filter_parent: bool | None = None,
@@ -4214,6 +4245,7 @@ class ModelBuilder:
                 effort_limit=effort_limit if effort_limit is not None else self.default_joint_cfg.effort_limit,
                 velocity_limit=velocity_limit if velocity_limit is not None else self.default_joint_cfg.velocity_limit,
                 friction=friction if friction is not None else self.default_joint_cfg.friction,
+                gear_ratio=gear_ratio if gear_ratio is not None else self.default_joint_cfg.gear_ratio,
                 actuator_mode=actuator_mode if actuator_mode is not None else self.default_joint_cfg.actuator_mode,
             )
         return self.add_joint(
@@ -4237,6 +4269,7 @@ class ModelBuilder:
         child_xform: Transform | None = None,
         armature: float | None = None,
         friction: float | None = None,
+        gear_ratio: float | None = None,
         label: str | None = None,
         collision_filter_parent: bool | None = None,
         enabled: bool = True,
@@ -4269,23 +4302,28 @@ class ModelBuilder:
             armature = self.default_joint_cfg.armature
         if friction is None:
             friction = self.default_joint_cfg.friction
+        if gear_ratio is None:
+            gear_ratio = self.default_joint_cfg.gear_ratio
 
         x = ModelBuilder.JointDofConfig(
             axis=Axis.X,
             armature=armature,
             friction=friction,
+            gear_ratio=gear_ratio,
             actuator_mode=actuator_mode,
         )
         y = ModelBuilder.JointDofConfig(
             axis=Axis.Y,
             armature=armature,
             friction=friction,
+            gear_ratio=gear_ratio,
             actuator_mode=actuator_mode,
         )
         z = ModelBuilder.JointDofConfig(
             axis=Axis.Z,
             armature=armature,
             friction=friction,
+            gear_ratio=gear_ratio,
             actuator_mode=actuator_mode,
         )
 
@@ -5484,7 +5522,7 @@ class ModelBuilder:
         self.joint_coord_count = len(self.joint_q)
 
         # Trim per-DOF arrays that were not cleared/rebuilt above
-        for attr_name in ("joint_velocity_limit", "joint_friction"):
+        for attr_name in ("joint_velocity_limit", "joint_friction", "joint_gear"):
             arr = getattr(self, attr_name)
             if len(arr) > self.joint_dof_count:
                 setattr(self, attr_name, arr[: self.joint_dof_count])
@@ -9800,6 +9838,7 @@ class ModelBuilder:
                 ("joint_effort_limit", self.joint_effort_limit),
                 ("joint_velocity_limit", self.joint_velocity_limit),
                 ("joint_friction", self.joint_friction),
+                ("joint_gear", self.joint_gear),
                 ("joint_target_mode", self.joint_target_mode),
             ]
             for name, arr in dof_arrays:
@@ -10941,6 +10980,7 @@ class ModelBuilder:
             m.joint_effort_limit = wp.array(self.joint_effort_limit, dtype=wp.float32, requires_grad=requires_grad)
             m.joint_velocity_limit = wp.array(self.joint_velocity_limit, dtype=wp.float32, requires_grad=requires_grad)
             m.joint_friction = wp.array(self.joint_friction, dtype=wp.float32, requires_grad=requires_grad)
+            m.joint_gear = wp.array(self.joint_gear, dtype=wp.float32, requires_grad=requires_grad)
 
             m.joint_limit_lower = wp.array(self.joint_limit_lower, dtype=wp.float32, requires_grad=requires_grad)
             m.joint_limit_upper = wp.array(self.joint_limit_upper, dtype=wp.float32, requires_grad=requires_grad)

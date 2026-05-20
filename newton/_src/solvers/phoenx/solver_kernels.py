@@ -351,6 +351,7 @@ def _apply_joint_control_kernel(
     joint_target_ke: wp.array[wp.float32],
     joint_target_kd: wp.array[wp.float32],
     joint_effort_limit: wp.array[wp.float32],
+    joint_gear: wp.array[wp.float32],
     control_target_pos: wp.array[wp.float32],
     control_target_vel: wp.array[wp.float32],
     # Drive-mode constants.
@@ -386,6 +387,14 @@ def _apply_joint_control_kernel(
     target = control_target_pos[dof] - joint_q_at_init_per_cid[cid]
     target_vel = control_target_vel[dof]
     effort = joint_effort_limit[dof]
+    # Gear-ratio scaling on motor-side effort: the joint-frame cap is
+    # ``gear * motor_effort_limit``. ``gear == 1`` (default) leaves the
+    # cap untouched, preserving back-compat. Non-positive / non-finite
+    # gears defensively fall back to 1 (the adapter validates more
+    # strictly at init time).
+    gear = joint_gear[dof]
+    if (gear != gear) or gear <= 0.0:
+        gear = 1.0
 
     drive = mode_off
     if tm == target_mode_position or tm == target_mode_position_velocity:
@@ -396,7 +405,7 @@ def _apply_joint_control_kernel(
             drive = mode_velocity
 
     # Clamp non-finite effort (inf) to 0 = "unlimited" for POSITION drives.
-    max_force = effort
+    max_force = gear * effort
     if (max_force != max_force) or (max_force > 1.0e18) or (max_force < -1.0e18):
         max_force = 0.0
 

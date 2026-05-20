@@ -344,6 +344,7 @@ def build_adbs_init_arrays(
     target_kd = _pull_dof_f(model.joint_target_kd)
     joint_armature = _pull_dof_f(model.joint_armature)
     joint_friction = _pull_dof_f(model.joint_friction) if hasattr(model, "joint_friction") else None
+    joint_gear = _pull_dof_f(model.joint_gear) if hasattr(model, "joint_gear") else None
     effort_limit = _pull_dof_f(model.joint_effort_limit)
     limit_lower = _pull_dof_f(model.joint_limit_lower)
     limit_upper = _pull_dof_f(model.joint_limit_upper)
@@ -641,10 +642,21 @@ def build_adbs_init_arrays(
                 target_val = float(target_pos[effective_qd])
             if target_vel is not None:
                 target_vel_val = float(target_vel[effective_qd])
+            # Gear-ratio scaling: motor-side effort and rotor inertia are
+            # converted to joint-frame quantities via ``gear`` and
+            # ``gear**2`` respectively. ``gear == 1`` (default) is a no-op
+            # so models built before the gear field landed are unaffected.
+            gear = 1.0
+            if joint_gear is not None and effective_qd < len(joint_gear):
+                raw_gear = float(joint_gear[effective_qd])
+                # Defensive: clamp non-positive / non-finite to 1 (gear must
+                # be a positive scalar; the adapter is not the place to
+                # validate the URDF / MJCF importer's output).
+                gear = raw_gear if (raw_gear > 0.0 and np.isfinite(raw_gear)) else 1.0
             if effort_limit is not None:
                 # PhoenX reads 0 as "unlimited" for POSITION drives, so clamp inf/NaN to 0.
                 raw = float(effort_limit[effective_qd])
-                max_force = raw if np.isfinite(raw) else 0.0
+                max_force = (gear * raw) if np.isfinite(raw) else 0.0
             if target_mode is not None:
                 drive_mode = _newton_target_mode_to_adbs_drive_mode(
                     int(target_mode[effective_qd]), stiff_drive, damp_drive
@@ -660,12 +672,18 @@ def build_adbs_init_arrays(
                     min_val = lo
                     max_val = hi
             if joint_armature is not None and effective_qd < len(joint_armature):
-                armature_val = float(joint_armature[effective_qd])
+                # Gear**2 scaling: motor rotor inertia reflected through a
+                # gearbox of ratio ``r`` appears at the joint as ``r**2 * I_rotor``.
+                # See JointDofConfig.gear_ratio for the convention.
+                armature_val = gear * gear * float(joint_armature[effective_qd])
             if joint_friction is not None and effective_qd < len(joint_friction):
                 # Newton allows negative / non-finite values in some edge cases.
                 # Clamp to 0 ("disabled") so the iterate's short-circuit fires.
                 raw_fric = float(joint_friction[effective_qd])
-                friction_val = raw_fric if (raw_fric >= 0.0 and np.isfinite(raw_fric)) else 0.0
+                # Friction (like effort) is on the motor side: a motor-side
+                # Coulomb torque of ``μ_motor`` produces ``gear * μ_motor`` at
+                # the joint.
+                friction_val = (gear * raw_fric) if (raw_fric >= 0.0 and np.isfinite(raw_fric)) else 0.0
         else:  # pragma: no cover -- defensive
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
