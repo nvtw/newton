@@ -1112,10 +1112,16 @@ def texture_sample_sdf_grad_hw(
     diff = local_pos - clamped
     diff_mag = wp.length(diff)
 
+    sdf_val = texture_sample_sdf_hw(sdf, local_pos)
+
+    # Out-of-box: the clamp-direction extrapolation defines the gradient
+    # exactly, so skip the six FD texture fetches that would be discarded.
+    if diff_mag > 0.0:
+        return sdf_val, diff / diff_mag
+
     h_x = 0.5 / sdf.inv_sdf_dx[0]
     h_y = 0.5 / sdf.inv_sdf_dx[1]
     h_z = 0.5 / sdf.inv_sdf_dx[2]
-    sdf_val = texture_sample_sdf_hw(sdf, local_pos)
     gx = (
         texture_sample_sdf_hw(sdf, local_pos + wp.vec3(h_x, 0.0, 0.0))
         - texture_sample_sdf_hw(sdf, local_pos - wp.vec3(h_x, 0.0, 0.0))
@@ -1129,8 +1135,6 @@ def texture_sample_sdf_grad_hw(
         - texture_sample_sdf_hw(sdf, local_pos - wp.vec3(0.0, 0.0, h_z))
     ) / (2.0 * h_z)
     grad = wp.vec3(gx, gy, gz)
-    if diff_mag > 0.0:
-        grad = diff / diff_mag
     return sdf_val, grad
 
 
@@ -1166,6 +1170,11 @@ def texture_sample_sdf_grad_only_hw(
     diff = local_pos - clamped
     diff_mag = wp.length(diff)
 
+    # Out-of-box: the clamp-direction extrapolation defines the gradient
+    # exactly, so skip the six FD texture fetches that would be discarded.
+    if diff_mag > 0.0:
+        return diff / diff_mag
+
     h_x = 0.5 / sdf.inv_sdf_dx[0]
     h_y = 0.5 / sdf.inv_sdf_dx[1]
     h_z = 0.5 / sdf.inv_sdf_dx[2]
@@ -1181,10 +1190,7 @@ def texture_sample_sdf_grad_only_hw(
         texture_sample_sdf_hw(sdf, local_pos + wp.vec3(0.0, 0.0, h_z))
         - texture_sample_sdf_hw(sdf, local_pos - wp.vec3(0.0, 0.0, h_z))
     ) / (2.0 * h_z)
-    grad = wp.vec3(gx, gy, gz)
-    if diff_mag > 0.0:
-        grad = diff / diff_mag
-    return grad
+    return wp.vec3(gx, gy, gz)
 
 
 # ============================================================================

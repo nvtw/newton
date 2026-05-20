@@ -947,9 +947,17 @@ class Mesh:
             self._collision_edges = np.ascontiguousarray(full_edges, dtype=np.int32)
             return
 
-        # Project absorption removals back into the full edge set. Both arrays
-        # encode the same raw (a, b) vertex pairs in identical orientation,
-        # so packing each row into a single int64 key gives a cheap np.isin.
+        # Project absorption removals back into the full edge set. Both
+        # ``full_edges`` and ``result.edge_indices`` come from the same
+        # :meth:`_filter_edges_by_dihedral_angle` pass and inherit its
+        # ``orig_edges`` slot encoding, so the (a, b) ordering of each row
+        # is preserved bit-for-bit: ``result.edge_indices`` is exactly the
+        # manifold-only subset of ``full_edges`` with the same orientation
+        # per row. Packing each row into a single int64 key therefore lets
+        # ``np.isin`` recover the removal mask in ``full_edges`` space with
+        # a cheap O(N log N) hash join. If a future refactor changes either
+        # array's row ordering (e.g. by canonicalising ``(min, max)`` here),
+        # this projection must be updated to canonicalise both sides.
         to_remove_pairs = result.edge_indices[resolution.to_remove]
         full_keys = (full_edges[:, 0].astype(np.int64) << 32) | full_edges[:, 1].astype(np.int64)
         remove_keys = (to_remove_pairs[:, 0].astype(np.int64) << 32) | to_remove_pairs[:, 1].astype(np.int64)
