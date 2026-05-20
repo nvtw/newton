@@ -86,6 +86,7 @@ __all__ = [
     "JOINT_MODE_FIXED",
     "JOINT_MODE_PRISMATIC",
     "JOINT_MODE_REVOLUTE",
+    "JOINT_MODE_UNIVERSAL",
     "ActuatedDoubleBallSocketData",
     "actuated_double_ball_socket_initialize_kernel",
     "actuated_double_ball_socket_iterate",
@@ -143,6 +144,19 @@ JOINT_MODE_FIXED = wp.constant(wp.int32(3))
 #: (dwords 0..3 = K22_inv, 4 = gamma_bend, 5 = M_twist_soft,
 #: 6 = gamma_twist), ``bias3`` carries the twist bias.
 JOINT_MODE_CABLE = wp.constant(wp.int32(4))
+#: Universal (Hooke) joint: locks 3 translational DoFs + 1 rotational
+#: DoF about a user-specified axis. Two rotational DoFs perpendicular to
+#: the locked axis are free. Composed from BALL_SOCKET (anchor-1 3-row
+#: positional lock) + REVOLUTE's axial machinery used in *rigid-limit*
+#: mode (``min_value == max_value == 0``, rigid ``hertz_limit``) to
+#: enforce the 1-row angular lock about ``axis_local1``. Reuses the
+#: revolute twist tracker for cumulative-angle position correction.
+#:
+#: This is the D6 universal pattern (3 lin locked + 2 ang locked + 1 ang
+#: free → REVOLUTE; 3 lin locked + 1 ang locked + 2 ang free → UNIVERSAL).
+#: Drives / friction on the two free angular DoFs are not yet stored in
+#: the schema -- a Phase 2 follow-up may add them.
+JOINT_MODE_UNIVERSAL = wp.constant(wp.int32(5))
 
 
 # ---------------------------------------------------------------------------
@@ -602,8 +616,8 @@ def actuated_double_ball_socket_initialize_kernel(
     write_vec3(constraints, _OFF_ACC_IMP1, cid, zero3)
     write_vec3(constraints, _OFF_ACC_IMP2, cid, zero3)
 
-    # ``mode_extras`` block is mode-aliased: REVOLUTE stores the
-    # twist-tracker scratch (inv_initial_orientation, revolution_counter,
+    # ``mode_extras`` block is mode-aliased: REVOLUTE / UNIVERSAL store
+    # the twist-tracker scratch (inv_initial_orientation, revolution_counter,
     # previous_quaternion_angle); PRISMATIC / FIXED / CABLE store the
     # anchor-3 snapshot + bias3 + acc_imp3. Writing both layouts
     # unconditionally would clobber the alias, so we branch.
@@ -3033,6 +3047,227 @@ def _fixed_iterate_at(
 
 
 # ---------------------------------------------------------------------------
+# Universal (Hooke) mode math
+# ---------------------------------------------------------------------------
+#
+# Composition: BALL_SOCKET (anchor-1 3-row positional lock) + 1-row
+# angular lock about the user-specified axis stored in ``axis_local1``.
+# The angular lock reuses the existing axial drive/limit machinery in
+# *rigid-limit* mode -- prepare seeds ``min_value = max_value = 0`` and
+# ``hertz_limit = DEFAULT_HERTZ_LIMIT`` (rigid Box2D) at construction
+# time, so the limit row is always clamped on any non-zero twist drift.
+#
+# The 3-row positional Schur and the 1-row angular Schur are decoupled
+# (the angular impulse along ``n_hat`` produces no positional drift at
+# the joint anchor, and the positional impulse produces no torque
+# about ``n_hat``). PGS solves them block-Gauss-Seidel without needing
+# cross terms.
+
+
+@wp.func
+def _universal_prepare_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+):
+    """Universal prepare: anchor-1 3-row positional lock + 1-row angular
+    twist lock about ``axis_local1``.
+
+    The anchor-1 piece is shared with BALL_SOCKET via
+    :func:`_anchor1_positional_prepare_at`. The angular twist lock reuses
+    REVOLUTE's revolution tracker (cumulative angle about
+    ``axis_local1`` between the two bodies' orientations) plus the
+    shared :func:`_axial_drive_limit_prepare_at` helper in rigid-Box2D
+    mode (``min == max == 0`` was written at init).
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+    orientation1 = bodies.orientation[b1]
+    orientation2 = bodies.orientation[b2]
+
+    # ---- Anchor-1 3-row positional block (shared with BALL_SOCKET) ---
+    (
+        _r1_b1,
+        _r1_b2,
+        _cr1_b1,
+        _cr1_b2,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+        slot1,
+        slot2,
+    ) = _anchor1_positional_prepare_at(
+        constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+    )
+
+    # ---- Angular twist lock (1 row about the locked axis) ------------
+    (
+        _v1,
+        _v2,
+        _w1,
+        _w2,
+        _inv_mass1,
+        _inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        _slot1,
+        _slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
+
+    # Project the locked axis to world frame via body 1's orientation.
+    # Anchor coincidence (|a2 - a1| → 0) doesn't degrade ``axis_local1``,
+    # so this is safer than recovering ``n_hat`` from anchor positions
+    # (matches the revolute twist-tracker convention).
+    n_hat = wp.quat_rotate(orientation1, read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid))
+    write_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid, n_hat)
+
+    # Body-COM inverse axial inertia along ``n_hat``. Same convention as
+    # ``_revolute_prepare_at`` -- see the long comment there for why we
+    # don't substitute a joint-frame value despite the parallel-axis
+    # mismatch.
+    eff_inv = wp.dot(n_hat, inv_inertia1 @ n_hat) + wp.dot(n_hat, inv_inertia2 @ n_hat)
+
+    # Revolution tracker for the locked angular DoF: cumulative angle
+    # between body 1 and body 2 about ``n_hat``. Drift away from 0
+    # triggers the rigid limit clamp downstream.
+    inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
+    diff = orientation2 * inv_init * wp.quat_inverse(orientation1)
+    new_q_angle = extract_rotation_angle(diff, n_hat)
+    old_counter = read_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid)
+    old_prev = read_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
+    new_counter, new_prev = revolution_tracker_update(new_q_angle, old_counter, old_prev)
+    write_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid, new_counter)
+    write_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid, new_prev)
+    cumulative_angle = revolution_tracker_angle(new_counter, new_prev)
+
+    # Shared drive/limit prepare. Drive is disabled at init
+    # (stiffness = damping = 0); the limit row runs in rigid Box2D mode
+    # because we seeded ``min_value == max_value == 0`` and
+    # ``hertz_limit == DEFAULT_HERTZ_LIMIT`` in the adapter -- so the
+    # cumulative-angle prepare always picks ``_CLAMP_MIN`` / ``_CLAMP_MAX``
+    # the moment ``cumulative_angle`` drifts non-zero.
+    dt = 1.0 / idt
+    axial_imp = _axial_drive_limit_prepare_at(
+        constraints,
+        cid,
+        base_offset,
+        cumulative_angle,
+        eff_inv,
+        dt,
+        PHOENX_BOOST_REVOLUTE_DRIVE,
+        PHOENX_BOOST_REVOLUTE_LIMIT,
+    )
+    angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
+    angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
+
+    _ms_store_body_pair(
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+    )
+
+
+@wp.func
+def _universal_iterate_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    use_bias: wp.bool,
+):
+    """Universal PGS iterate: BALL_SOCKET 3-row positional + 1-row
+    angular lock about ``n_hat``.
+
+    The two blocks decouple at the iterate level (no Schur cross terms
+    needed): a pure axial torque ``axial_lam * n_hat`` produces no
+    velocity at the joint anchor, and the anchor-1 positional impulse
+    produces no torque about ``n_hat``. We iterate them sequentially
+    Gauss-Seidel.
+    """
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+
+    # ---- Anchor-1 positional iterate (BALL_SOCKET) -------------------
+    # Reuses the ball-socket iterate; it loads body state, applies the
+    # 3-row positional impulse, and writes the bodies back. Acceptable
+    # to call it as a black box -- the angular block below re-loads.
+    _ball_socket_iterate_at(
+        constraints,
+        cid,
+        base_offset,
+        bodies,
+        particles,
+        copy_state,
+        num_bodies,
+        parallel_id,
+        body_pair,
+        idt,
+        sor_boost,
+        use_bias,
+    )
+
+    # ---- Angular twist lock iterate (1-row axial scalar) -------------
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        _inv_mass1,
+        _inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
+
+    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
+    clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
+    jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
+    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost)
+    angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
+    angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
+
+    _ms_store_body_pair(
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Mode-dispatching entry points
 # ---------------------------------------------------------------------------
 
@@ -3072,6 +3307,10 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
         )
     elif joint_mode == JOINT_MODE_CABLE:
         _cable_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        )
+    elif joint_mode == JOINT_MODE_UNIVERSAL:
+        _universal_prepare_at(
             constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
         )
     else:
@@ -3481,6 +3720,21 @@ def actuated_double_ball_socket_iterate_at(
         )
     elif joint_mode == JOINT_MODE_CABLE:
         _cable_iterate_at(
+            constraints,
+            cid,
+            base_offset,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            body_pair,
+            idt,
+            sor_boost,
+            use_bias,
+        )
+    elif joint_mode == JOINT_MODE_UNIVERSAL:
+        _universal_iterate_at(
             constraints,
             cid,
             base_offset,

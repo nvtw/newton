@@ -4,30 +4,28 @@
 """D6 auto-dispatch tests for :class:`SolverPhoenX`.
 
 PhoenX's :func:`model_adapter.build_adbs_init_arrays` detects D6 joint
-configurations whose per-DoF lock pattern matches one of the existing
-specialized modes (FIXED / BALL / REVOLUTE / PRISMATIC) and routes them
-to the same constraint kernels the native joint types would use. This
-unlocks ``JointType.D6`` for the ~90% of robotics-relevant D6 usage
-(MJCF importers in particular emit D6 for multi-axis joints) without
-adding any new constraint math.
+configurations whose per-DoF lock pattern matches a specialized mode
+(FIXED / BALL / REVOLUTE / PRISMATIC / UNIVERSAL) and routes them to
+the corresponding constraint kernels. The first four route to existing
+modes (Phase 1); UNIVERSAL is a new mode (Phase 2b) composed from the
+BALL_SOCKET 3-row positional lock plus a 1-row angular twist lock that
+reuses the existing axial drive/limit machinery in rigid Box2D mode.
 
-Three layers of coverage, all CUDA + graph-captured:
+Coverage (all CUDA + graph-captured):
 
-* :class:`TestD6Detection` -- adapter-only check. Builds D6 joints with
-  each known pattern, finalises the model, constructs ``SolverPhoenX``,
-  and inspects the ADBS init arrays to confirm the right
-  ``joint_mode`` was selected. Doesn't run physics.
+* :class:`TestD6Detection` -- adapter-only check. Each pattern routes
+  to the right ``joint_mode``; free DoF is picked correctly.
 
-* :class:`TestD6Revolute` -- builds a single-axis-free D6 (revolute
-  equivalent: 3 lin locked + 2 ang locked + 1 ang free) and verifies
-  the simulated swing matches a natively-constructed revolute joint
-  bit-for-bit (or within float tolerance). The same pendulum is used
-  for both setups so any divergence flags a dispatch bug.
+* :class:`TestD6Revolute` -- end-to-end equivalence: a D6 dispatched
+  to REVOLUTE simulates identically to a native ``add_joint_revolute``.
 
-* :class:`TestD6Unsupported` -- configurations that don't match a Phase 1
-  pattern must raise ``NotImplementedError`` with a message pointing at
-  the Phase 2+ work that will support them. Guards against silently
-  routing a cylindrical / universal / planar config to the wrong mode.
+* :class:`TestD6Universal` -- universal joint dispatch + the twist-lock
+  invariant: a pendulum with a locked Z-axis must not accumulate
+  rotation about Z even when swinging freely in X/Y.
+
+* :class:`TestD6Unsupported` -- cylindrical and planar still raise
+  ``NotImplementedError`` (their kernel implementations are Phase 2a /
+  Phase 2c follow-ups).
 """
 
 from __future__ import annotations
@@ -43,6 +41,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     JOINT_MODE_FIXED,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
+    JOINT_MODE_UNIVERSAL,
 )
 
 _FPS = 240
@@ -326,6 +325,179 @@ class TestD6Revolute(unittest.TestCase):
         )
 
 
+def _build_d6_universal_pendulum(
+    *,
+    mass: float = 1.0,
+    length: float = 0.5,
+    inertia: float = 1.0e-2,
+    locked_angular_index: int = 2,
+    locked_axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    init_swing_axis: int = 1,
+    init_swing_angle: float = 0.3,
+) -> newton.Model:
+    """A pendulum hung from a universal joint: 3 lin locked + 1 ang
+    locked + 2 ang free. The pendulum can swing in 2 axes; the locked
+    axis (typically vertical) prevents twist about the suspension line.
+
+    ``locked_axis`` is the world-frame axis that's locked; the two
+    perpendicular axes are free to swing. ``locked_angular_index``
+    picks which of the 3 angular slots in the D6 spec holds the locked
+    axis (the other two get an arbitrary perpendicular direction; their
+    direction is irrelevant since they're not constrained)."""
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+    bob = builder.add_link(
+        xform=wp.transform(p=wp.vec3(0.0, 0.0, -float(length)), q=wp.quat_identity()),
+        mass=float(mass),
+        inertia=((inertia, 0, 0), (0, inertia, 0), (0, 0, inertia)),
+    )
+    builder.add_shape_box(bob, hx=0.01, hy=0.01, hz=0.01, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+
+    lin_axes = [
+        newton.ModelBuilder.JointDofConfig(axis=(1.0, 0.0, 0.0), limit_lower=1.0, limit_upper=-1.0),
+        newton.ModelBuilder.JointDofConfig(axis=(0.0, 1.0, 0.0), limit_lower=1.0, limit_upper=-1.0),
+        newton.ModelBuilder.JointDofConfig(axis=(0.0, 0.0, 1.0), limit_lower=1.0, limit_upper=-1.0),
+    ]
+    ang_axes = []
+    for k in range(3):
+        if k == locked_angular_index:
+            ang_axes.append(newton.ModelBuilder.JointDofConfig(axis=locked_axis, limit_lower=1.0, limit_upper=-1.0))
+        else:
+            ang_axes.append(
+                newton.ModelBuilder.JointDofConfig(axis=(1.0, 0.0, 0.0), limit_lower=-1.0e6, limit_upper=1.0e6)
+            )
+
+    j = builder.add_joint_d6(
+        parent=-1,
+        child=bob,
+        linear_axes=lin_axes,
+        angular_axes=ang_axes,
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform(p=wp.vec3(0.0, 0.0, float(length)), q=wp.quat_identity()),
+    )
+    builder.add_articulation([j])
+    model = builder.finalize()
+    model.set_gravity((0.0, 0.0, -9.81))
+
+    # Seed body angular velocity to swing about an axis perpendicular to
+    # the locked axis. We use direct body_qd seeding (rather than
+    # joint_qd) because for the D6 universal pattern, joint_qd[locked]
+    # would have to stay zero, and seeding only joint_qd of a free axis
+    # via eval_fk requires careful index management. body_qd is the
+    # ground truth for PhoenX's import path anyway.
+    if init_swing_angle != 0.0:
+        # Approximate: spin about ``init_swing_axis`` so the body starts
+        # with non-zero angular velocity perpendicular to the locked axis.
+        qd_arr = np.zeros((1, 6), dtype=np.float32)
+        qd_arr[0, 3 + init_swing_axis] = float(init_swing_angle)  # angular component
+        # Linear velocity at COM for consistency with the joint anchor
+        # (anchor must stay at world origin -> v_com = cross(omega, r)
+        # where r = anchor - com = (0, 0, +length)).
+        omega = np.zeros(3, dtype=np.float32)
+        omega[init_swing_axis] = float(init_swing_angle)
+        r = np.array([0.0, 0.0, float(length)], dtype=np.float32)
+        v_com = np.cross(omega, r)
+        qd_arr[0, 0:3] = v_com
+        # Done in the state directly in the test runner.
+        model._init_body_qd = qd_arr  # stash for test runner
+    return model
+
+
+@unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX D6 tests run on CUDA only")
+class TestD6Universal(unittest.TestCase):
+    """A D6 with 3 lin locked + 1 ang locked + 2 ang free dispatches to
+    JOINT_MODE_UNIVERSAL. The simulated body must:
+
+    * Stay attached at the joint anchor (3 lin locked is enforced).
+    * Stay un-twisted about the locked axis (1 ang locked is enforced
+      via the rigid Box2D path on the axial row).
+    * Swing freely about the 2 perpendicular angular axes (no rotational
+      constraint there).
+    """
+
+    def test_universal_pattern_dispatches_to_universal(self) -> None:
+        model = _build_d6_universal_pendulum(locked_angular_index=2)
+        solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
+
+    def test_universal_locked_axis_stays_zero(self) -> None:
+        """A bob suspended from a universal joint, released with an
+        angular velocity perpendicular to the locked axis, must not
+        accumulate twist about the locked axis. Twist drift > a few
+        milliradians flags a failure of the 1-row angular lock."""
+        # Locked axis = Z (vertical). Bob hangs below; swings in X/Y.
+        model = _build_d6_universal_pendulum(
+            locked_angular_index=2, locked_axis=(0.0, 0.0, 1.0), init_swing_axis=1, init_swing_angle=0.5
+        )
+
+        # Set up and run with seeded angular velocity.
+        device = wp.get_device()
+        solver = newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=20)
+        s0 = model.state()
+        s1 = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+        if hasattr(model, "_init_body_qd"):
+            s0.body_qd.assign(model._init_body_qd)
+
+        n_frames = 60
+
+        def _frame() -> None:
+            s0.clear_forces()
+            solver.step(s0, s1, model.control(), None, _DT)
+            wp.copy(s0.body_q, s1.body_q)
+            wp.copy(s0.body_qd, s1.body_qd)
+
+        # Warm-up + graph capture
+        _frame()
+        with wp.ScopedCapture(device=device) as capture:
+            _frame()
+        graph = capture.graph
+        for _ in range(n_frames - 1):
+            wp.capture_launch(graph)
+
+        # The body's orientation should remain such that its local Z
+        # axis projects close to (0, 0, 1) under the locked-axis (world Z)
+        # constraint. Equivalently: a vector that started along world Z
+        # in the body frame should still align with world Z (twist about
+        # Z is forbidden).
+        body_q = s0.body_q.numpy()[0]
+        body_rot = body_q[3:7]  # quaternion (x, y, z, w)
+        # Body-local Z axis rotated into world.
+        z_local = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        x, y, z, w = body_rot
+        # Quaternion-rotate z_local: t = 2 * cross(q.xyz, v); v' = v + w*t + cross(q.xyz, t)
+        qxyz = np.array([x, y, z], dtype=np.float32)
+        _t_vec_z = 2.0 * np.cross(qxyz, z_local)
+        # Universal allows swing in 2 axes, so the body's "up" axis can
+        # rotate away from world Z -- that's the whole point. What
+        # CAN'T happen is rotation ABOUT world Z (twist). Check the twist
+        # by projecting the body's local X axis onto the X-Y plane: a
+        # universal joint with locked twist keeps this projection fixed
+        # in direction (only its magnitude changes as the body tilts).
+        # At rest the body's X axis points along world X; after swinging,
+        # if no twist, the X axis projected to X-Y plane should still
+        # point along world X (modulo the projection shortening it).
+        x_local = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        t_vec_x = 2.0 * np.cross(qxyz, x_local)
+        x_world = x_local + w * t_vec_x + np.cross(qxyz, t_vec_x)
+        x_world_in_plane = np.array([x_world[0], x_world[1]], dtype=np.float32)
+        plane_len = float(np.linalg.norm(x_world_in_plane))
+        if plane_len > 1e-3:
+            x_world_in_plane = x_world_in_plane / plane_len
+            twist_angle = abs(float(np.arctan2(x_world_in_plane[1], x_world_in_plane[0])))
+        else:
+            twist_angle = 0.0
+        # 50 mrad tolerance: the angular lock uses the rigid Box2D path
+        # (hertz = 1e9) which converges to ~ms-scale on a typical PGS
+        # iteration budget. A broken lock (no constraint applied) would
+        # produce arbitrary twist as the body swings around.
+        self.assertLess(
+            twist_angle,
+            0.05,
+            msg=f"twist about locked axis = {twist_angle:.4f} rad; should be ~0 (universal joint locks twist)",
+        )
+
+
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX D6 tests run on CUDA only")
 class TestD6Unsupported(unittest.TestCase):
     """Configurations outside Phase 1's pattern set must raise a
@@ -365,11 +537,8 @@ class TestD6Unsupported(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "Phase 2"):
             newton.solvers.SolverPhoenX(model, substeps=1)
 
-    def test_universal_pattern_raises(self) -> None:
-        """2 angular axes free (universal joint) -- needs Phase 2b."""
-        model = self._make_d6(lin_locks=[True, True, True], ang_locks=[False, False, True])
-        with self.assertRaisesRegex(NotImplementedError, "Phase 2"):
-            newton.solvers.SolverPhoenX(model, substeps=1)
+    # Universal (1 angular axis locked, 2 angular free) is now supported
+    # via JOINT_MODE_UNIVERSAL -- see :class:`TestD6Universal` below.
 
     def test_planar_pattern_raises(self) -> None:
         """2 linear + 1 angular free (planar joint) -- needs Phase 2c."""

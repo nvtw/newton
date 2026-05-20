@@ -27,6 +27,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     JOINT_MODE_FIXED,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
+    JOINT_MODE_UNIVERSAL,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -212,6 +213,15 @@ def _classify_d6_pattern(
     if n_lin == 3 and n_ang == 3 and n_lin_locked == 2 and n_lin_free == 1 and n_ang_locked == 3:
         lin_free_idx = next(i for i, lk in enumerate(locked_lin) if not lk)
         return ("PRISMATIC", lin_free_idx)
+
+    # UNIVERSAL: 3 linear locked + 1 angular locked + 2 angular free.
+    # The single locked angular DoF (the "no-twist" axis) becomes the
+    # constraint row; the two perpendicular angular DoFs are
+    # unconstrained. ``free_dof_offset`` returns the locked-axis qd
+    # offset so the adapter can pull that DoF's axis vector.
+    if n_lin == 3 and n_ang == 3 and n_lin_locked == 3 and n_ang_locked == 1 and n_ang_free == 2:
+        ang_locked_idx = next(i for i, lk in enumerate(locked_ang) if lk)
+        return ("UNIVERSAL", n_lin + ang_locked_idx)
 
     return (None, -1)
 
@@ -428,6 +438,7 @@ def build_adbs_init_arrays(
         # is determined by ``d6_mode_tag`` for D6 joints, ``jtype`` otherwise.
         is_ball = jtype is newton.JointType.BALL or (jtype is newton.JointType.D6 and d6_mode_tag == "BALL")
         is_fixed = jtype is newton.JointType.FIXED or (jtype is newton.JointType.D6 and d6_mode_tag == "FIXED")
+        is_universal = jtype is newton.JointType.D6 and d6_mode_tag == "UNIVERSAL"
         is_revolute = jtype is newton.JointType.REVOLUTE or (jtype is newton.JointType.D6 and d6_mode_tag == "REVOLUTE")
         is_prismatic = jtype is newton.JointType.PRISMATIC or (
             jtype is newton.JointType.D6 and d6_mode_tag == "PRISMATIC"
@@ -468,6 +479,36 @@ def build_adbs_init_arrays(
             # Pick joint-frame X axis so the anchor-3 basis is well-defined.
             axis_world = _quat_rotate_np(X_w_p[3:], np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
             anchor2_world = anchor1_world + axis_world
+        elif is_universal:
+            # Universal: 3 lin locked + 1 ang locked + 2 ang free. The
+            # locked angular axis defines the constraint; we set
+            # ``anchor2_world = anchor1_world + locked_axis_world`` so
+            # the init kernel snapshots ``axis_local1`` along the locked
+            # direction (same convention as REVOLUTE). The axial row is
+            # configured as a rigid Box2D limit (``min == max == 0``,
+            # rigid ``hertz_limit``) so it always clamps the cumulative
+            # twist back to zero.
+            phoenx_mode = int(JOINT_MODE_UNIVERSAL)
+            locked_qd = qd_start + d6_free_dof_offset  # offset points at the LOCKED axis
+            axis_local = (
+                np.asarray(joint_axis[locked_qd], dtype=np.float32)
+                if len(joint_axis)
+                else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+            )
+            axis_len = float(np.linalg.norm(axis_local))
+            if axis_len > 1e-12:
+                axis_local = axis_local / axis_len
+            else:
+                axis_local = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+            axis_world = _quat_rotate_np(X_w_p[3:], axis_local)
+            anchor2_world = anchor1_world + axis_world
+            # Rigid hard lock at zero twist. The shared axial prepare /
+            # iterate picks the Box2D path (because ``stiffness_limit ==
+            # damping_limit == 0``) and engages the limit clamp on any
+            # cumulative-angle drift.
+            min_val = 0.0
+            max_val = 0.0
+            hertz_limit_val = float(DEFAULT_HERTZ_LIMIT)
         elif is_revolute or is_prismatic:
             phoenx_mode = int(JOINT_MODE_REVOLUTE) if is_revolute else int(JOINT_MODE_PRISMATIC)
             axis_local = (
