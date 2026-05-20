@@ -4477,7 +4477,40 @@ class ModelBuilder:
         custom_attributes: dict[str, Any] | None = None,
         **kwargs,
     ) -> int:
-        """Adds a generic joint with custom linear and angular axes. The number of axes determines the number of degrees of freedom of the joint.
+        """Adds a generic 6-DoF joint with custom linear and angular axes.
+
+        D6 is Newton's canonical joint representation: every standard
+        joint type can be expressed as a D6 with the right per-axis
+        lock pattern. The convenience constructors
+        :meth:`add_joint_revolute`, :meth:`add_joint_prismatic`,
+        :meth:`add_joint_ball`, :meth:`add_joint_fixed`, and
+        :meth:`add_joint_free` are documented separately for ergonomics
+        but produce models that are equivalent to a D6 with the
+        corresponding lock pattern -- a fact that solvers exploit
+        internally (see e.g. :class:`~newton.solvers.SolverPhoenX`'s
+        pattern detection, which routes D6 joints to specialized
+        constraint kernels for the matched type).
+
+        The number of axes in ``linear_axes`` and ``angular_axes``
+        determines the joint's DoF count (up to 6 total). Each axis
+        in either list is a :class:`JointDofConfig` specifying:
+
+        * ``axis``: the direction in the joint frame.
+        * ``limit_lower`` / ``limit_upper``: position bounds along the
+          axis. Set ``limit_lower > limit_upper`` to LOCK the DoF (the
+          sentinel-encoded "no relative motion along this axis" state
+          used by D6 importers); use ``±MAXVAL`` for FREE.
+        * Drive / limit / friction parameters: per-DoF PD gains,
+          effort limits, Coulomb friction, etc.
+
+        Common D6 lock patterns:
+
+        * 3 lin LOCKED + 3 ang LOCKED -> equivalent to FIXED.
+        * 3 lin LOCKED + 3 ang FREE -> equivalent to BALL.
+        * 3 lin LOCKED + 2 ang LOCKED + 1 ang FREE -> equivalent to
+          REVOLUTE about the free angular axis.
+        * 2 lin LOCKED + 1 lin FREE + 3 ang LOCKED -> equivalent to
+          PRISMATIC along the free linear axis.
 
         Args:
             parent: The index of the parent body.

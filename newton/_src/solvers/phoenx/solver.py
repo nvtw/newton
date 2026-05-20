@@ -106,13 +106,23 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
 class SolverPhoenX(SolverBase):
     """Newton :class:`SolverBase` wrapper around :class:`PhoenXWorld`.
 
-    Supports REVOLUTE/PRISMATIC (PD drive + limit), BALL, FIXED, CABLE (soft
-    fixed with PD bend/twist; stretch DoF is rigid), FREE (no column).
-    DISTANCE and D6 raise at construction.
+    Supports REVOLUTE / PRISMATIC (PD drive + limit + Coulomb friction),
+    BALL, FIXED, CABLE (soft fixed with PD bend/twist; stretch DoF is
+    rigid), FREE (no column). DISTANCE raises at construction.
 
-    Newton :class:`Picking` works out of the box: pick force/torque is added to
-    ``state.body_f``, which :meth:`step` imports into PhoenX's force accumulators
-    before integrating.
+    D6 joints are auto-dispatched to a specialized mode based on the
+    per-DoF lock pattern: FIXED (all locked), BALL (3 lin locked + 3 ang
+    free), REVOLUTE (3 lin locked + 2 ang locked + 1 ang free),
+    PRISMATIC (2 lin locked + 1 lin free + 3 ang locked), UNIVERSAL
+    (3 lin locked + 1 ang locked + 2 ang free), CYLINDRICAL (2 lin
+    locked + 1 lin free + 2 ang locked + 1 ang free with the free axes
+    parallel), or PLANAR (1 lin locked + 2 lin free + 2 ang locked +
+    1 ang free with the locked-lin and free-ang axes parallel).
+    Configurations outside these patterns raise a descriptive error.
+
+    Newton :class:`Picking` works out of the box: pick force/torque is
+    added to ``state.body_f``, which :meth:`step` imports into PhoenX's
+    force accumulators before integrating.
     """
 
     def __init__(
