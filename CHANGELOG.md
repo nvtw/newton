@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add `body_qdd` extended state attribute support to `SolverPhoenX`, populated as a finite difference of pre-step and post-step COM-frame velocity over the outer `dt`. Enables `newton.sensors.SensorIMU` on top of PhoenX (accelerometer reports specific force; gyroscope reports body angular velocity)
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
 - Add `ViewerGL.show_loading_splash()` / `ViewerGL.hide_loading_splash()` displaying a stylized Newton's-cradle overlay while the GL viewer waits on Warp kernel compilation; raised automatically by `newton.examples.init()` for visible GL viewers
 - Add `ModelBuilder.mesh_edge_lower_angle_threshold_rad` (default 0.1 degree) to drop near-coplanar internal edges when packing precomputed mesh edges for SDF-mesh contact generation. Boundary and non-manifold edges are always kept; set to `0` to disable filtering

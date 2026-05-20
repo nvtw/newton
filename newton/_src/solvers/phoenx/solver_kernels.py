@@ -34,10 +34,12 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 __all__ = [
     "_apply_joint_control_kernel",
     "_contact_impulse_to_force_wrapper_kernel",
+    "_export_body_qdd_kernel",
     "_export_body_state_kernel",
     "_import_body_state_kernel",
     "_init_phoenx_body_container_kernel",
     "_seed_kinematic_initial_pose_kernel",
+    "_snapshot_pre_step_velocity_kernel",
 ]
 
 
@@ -224,6 +226,47 @@ def _accumulate_substep_velocity_kernel(
     src = tid + 1  # PhoenX slot 0 is the static world anchor.
     vel_accum[tid] = vel_accum[tid] + velocity[src] * substep_dt
     omega_accum[tid] = omega_accum[tid] + angular_velocity[src] * substep_dt
+
+
+@wp.kernel(enable_backward=False)
+def _snapshot_pre_step_velocity_kernel(
+    # PhoenX body container (length N + 1 with slot 0 = anchor).
+    velocity: wp.array[wp.vec3f],
+    angular_velocity: wp.array[wp.vec3f],
+    # Snapshot buffers (length N -- one per Newton body, slot 0 omitted).
+    vel_prev_out: wp.array[wp.vec3f],
+    omega_prev_out: wp.array[wp.vec3f],
+):
+    """Snapshot pre-step COM-velocity for the body_qdd readout. Captured right
+    after :func:`_import_body_state_kernel` so the FD covers the full outer dt."""
+    tid = wp.tid()
+    src = tid + 1
+    vel_prev_out[tid] = velocity[src]
+    omega_prev_out[tid] = angular_velocity[src]
+
+
+@wp.kernel(enable_backward=False)
+def _export_body_qdd_kernel(
+    # PhoenX body container (slot index = tid + 1).
+    velocity: wp.array[wp.vec3f],
+    angular_velocity: wp.array[wp.vec3f],
+    # Pre-step snapshot from :func:`_snapshot_pre_step_velocity_kernel`.
+    vel_prev: wp.array[wp.vec3f],
+    omega_prev: wp.array[wp.vec3f],
+    inv_dt: wp.float32,
+    # Newton State output.
+    body_qdd: wp.array[wp.spatial_vector],
+):
+    """FD-derived ``body_qdd`` from the outer-step velocity delta:
+    ``a = (qd_now - qd_prev) / dt``. Newton convention: ``spatial_top`` is
+    linear acceleration (world frame, includes gravity-induced terms),
+    ``spatial_bottom`` is angular acceleration (world frame). Matches the
+    sign convention consumed by :class:`~newton.sensors.SensorIMU`."""
+    tid = wp.tid()
+    src = tid + 1
+    lin_acc = (velocity[src] - vel_prev[tid]) * inv_dt
+    ang_acc = (angular_velocity[src] - omega_prev[tid]) * inv_dt
+    body_qdd[tid] = wp.spatial_vector(lin_acc, ang_acc)
 
 
 @wp.kernel(enable_backward=False)

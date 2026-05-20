@@ -35,6 +35,7 @@ from newton._src.solvers.phoenx.model_adapter import (
 from newton._src.solvers.phoenx.solver_kernels import (
     _apply_joint_control_kernel,
     _contact_impulse_to_force_wrapper_kernel,
+    _export_body_qdd_kernel,
     _export_body_state_avg_kernel,
     _export_body_state_fd_kernel,
     _export_body_state_kernel,
@@ -42,6 +43,7 @@ from newton._src.solvers.phoenx.solver_kernels import (
     _init_phoenx_body_container_kernel,
     _seed_kinematic_initial_pose_kernel,
     _snapshot_pre_step_pose_kernel,
+    _snapshot_pre_step_velocity_kernel,
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 from newton._src.solvers.solver import SolverBase
@@ -180,6 +182,10 @@ class SolverPhoenX(SolverBase):
         self._fd_orient_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.quatf, device=self.device)
         self._substep_vel_accum = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
         self._substep_omega_accum = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
+        # body_qdd snapshot buffers (linear + angular velocity, pre-step).
+        # Always allocated; the FD launch is gated on state.body_qdd being live.
+        self._qdd_vel_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
+        self._qdd_omega_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
 
         # Identity orientation everywhere so the first _update_inertia is well-defined.
         self.bodies.orientation.assign(np.tile([0.0, 0.0, 0.0, 1.0], (num_bodies_phoenx, 1)).astype(np.float32))
@@ -653,6 +659,44 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
+    def _snapshot_pre_step_velocity(self) -> None:
+        """Snapshot pre-step linear + angular velocity for the body_qdd readout.
+        Captured after :meth:`_import_body_state` so the FD covers the outer dt."""
+        n = int(self.model.body_count)
+        if n == 0:
+            return
+        wp.launch(
+            _snapshot_pre_step_velocity_kernel,
+            dim=n,
+            inputs=[self.bodies.velocity, self.bodies.angular_velocity],
+            outputs=[self._qdd_vel_prev, self._qdd_omega_prev],
+            device=self.device,
+        )
+
+    def _export_body_qdd(self, state_out: State, dt: float) -> None:
+        """Pack post-step ``body_qdd`` into ``state_out`` as a finite-difference
+        of (post-step - pre-step) velocity over the outer dt. Newton convention:
+        ``spatial_top`` is linear acceleration (world frame, includes
+        gravity-induced terms), ``spatial_bottom`` is angular acceleration
+        (world frame). Matches what :class:`~newton.sensors.SensorIMU` consumes."""
+        n = int(self.model.body_count)
+        if n == 0:
+            return
+        inv_dt = 1.0 / float(dt) if dt > 0.0 else 0.0
+        wp.launch(
+            _export_body_qdd_kernel,
+            dim=n,
+            inputs=[
+                self.bodies.velocity,
+                self.bodies.angular_velocity,
+                self._qdd_vel_prev,
+                self._qdd_omega_prev,
+                wp.float32(inv_dt),
+            ],
+            outputs=[state_out.body_qdd],
+            device=self.device,
+        )
+
     def _export_body_state(self, state_out: State, dt: float) -> None:
         """Pack PhoenX body state back into state_out.body_q / body_qd, switching
         on ``self._velocity_readout``."""
@@ -760,6 +804,14 @@ class SolverPhoenX(SolverBase):
         if self._velocity_readout == "finite_difference":
             self._snapshot_pre_step_pose()
 
+        # body_qdd readout: snapshot pre-step velocity so FD covers the outer dt.
+        # Gated on state_out.body_qdd allocation (stable across graph capture
+        # since the user requests the attribute on the Model before allocating
+        # State).
+        want_body_qdd = state_out.body_qdd is not None
+        if want_body_qdd:
+            self._snapshot_pre_step_velocity()
+
         if self._velocity_readout == "substep_average":
             self._substep_vel_accum.zero_()
             self._substep_omega_accum.zero_()
@@ -794,6 +846,8 @@ class SolverPhoenX(SolverBase):
         self._last_dt = float(dt) / max(1, self.world.substeps)
 
         self._export_body_state(state_out, dt=float(dt))
+        if want_body_qdd:
+            self._export_body_qdd(state_out, dt=float(dt))
         # Sync joint_q/joint_qd via eval_ik for policies that read them.
         if state_out.joint_q is not None and state_out.joint_qd is not None and int(self.model.joint_count) > 0:
             newton.eval_ik(self.model, state_out, state_out.joint_q, state_out.joint_qd)
