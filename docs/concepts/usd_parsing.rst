@@ -860,7 +860,8 @@ verifying the Newton import.
    Applying ``NewtonSDFCollisionAPI`` declares the prim's SDF configuration
    and opts the prim into SDF generation. The importer fills in schema
    defaults for any attributes that are not authored (e.g.
-   ``sdfMaxResolution=64``, ``sdfMargin=0.05``). Hydroelastic contacts are
+   ``sdfMaxResolution=64``; ``sdfMargin`` defaults to the value of
+   ``newton:contactGap``). Hydroelastic contacts are
    folded into the same API and are **opt-in**: ``newton:hydroelasticEnabled``
    defaults to ``false``. Set it to ``true`` to enable hydroelastic contacts
    on a shape (``hydroelasticStiffness`` defaults to ``1e10``).
