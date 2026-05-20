@@ -6,10 +6,11 @@
 #
 # Shows how to programmatically create a variety of
 # collision shapes using the newton.ModelBuilder() API.
-# Supports XPBD (default) and VBD solvers.
+# Supports XPBD (default), VBD, and PhoenX solvers.
 #
-# Command: python -m newton.examples basic_shapes
-# With VBD: python -m newton.examples basic_shapes --solver vbd
+# Command:    python -m newton.examples basic_shapes
+# With VBD:    python -m newton.examples basic_shapes --solver vbd
+# With PhoenX: python -m newton.examples basic_shapes --solver phoenx
 #
 #
 ###########################################################################
@@ -28,11 +29,28 @@ class Example:
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 10
-        self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.viewer = viewer
         self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "xpbd"
+
+        # Per-solver substepping. PhoenX handles substeps internally
+        # (one kernel launch per outer step, vs. one per inner step for
+        # XPBD/VBD), so we want as few outer steps as possible to keep
+        # graph-capture overhead and ``model.collide()`` work down. The
+        # outer loop swaps ``state_0`` and ``state_1`` after each
+        # ``solver.step``; CUDA graph capture bakes those references in,
+        # so the outer count must be EVEN -- otherwise the captured
+        # graph reads from the same stale slot every replay and the
+        # simulation freezes after one frame. We use the smallest even
+        # count: 2 outer steps per frame for PhoenX, plus
+        # ``substeps=5`` internally for ~10 effective substeps per
+        # frame (parity with the XPBD branch's 10x outer loop).
+        if self.solver_type == "phoenx":
+            self.sim_substeps = 2
+            self.sim_dt = self.frame_dt / self.sim_substeps
+        else:
+            self.sim_substeps = 10
+            self.sim_dt = self.frame_dt / self.sim_substeps
 
         builder = newton.ModelBuilder()
 
@@ -42,6 +60,14 @@ class Example:
             # VBD: Higher stiffness for stable rigid body contacts
             builder.default_shape_cfg.ke = 1.0e6  # Contact stiffness
             builder.default_shape_cfg.kd = 1.0e1  # Contact damping
+        elif self.solver_type == "phoenx":
+            # PhoenX: PGS solver consumes contacts from the shared
+            # collision pipeline; it does not use ke/kd (rigid contact),
+            # but it does honour mu_torsional / mu_rolling when the
+            # adapter wires them through. Use the same XPBD defaults
+            # for cross-solver consistency.
+            builder.default_shape_cfg.mu_torsional = 0.01
+            builder.default_shape_cfg.mu_rolling = 3e-3
         else:
             builder.default_shape_cfg.mu_torsional = 0.01  # Contact stiffness
             builder.default_shape_cfg.mu_rolling = 3e-3  # Contact stiffness
@@ -107,6 +133,23 @@ class Example:
                 self.model,
                 iterations=10,
             )
+        elif self.solver_type == "phoenx":
+            # PhoenX handles its substep loop internally, so the outer
+            # ``sim_substeps`` is just 2 (the minimum even count
+            # required for the swap-based graph-capture pattern in
+            # ``simulate``). 2 outer * 5 inner = 10 effective substeps
+            # per frame -- parity with the XPBD branch.
+            #
+            # ``step_layout="single_world"`` is right for a single big
+            # scene like this; the default ``"multi_world"`` is tuned
+            # for many small worlds (~256+) and pays per-world dispatch
+            # overhead with no upside on a 7-body scene.
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model,
+                substeps=3,
+                solver_iterations=5,
+                step_layout="single_world",
+            )
         else:
             self.solver = newton.solvers.SolverXPBD(self.model, iterations=10)
 
@@ -138,13 +181,17 @@ class Example:
             self.graph = None
 
     def simulate(self):
+        # Run collision once per frame and reuse the contact set
+        # across all substeps. ``model.collide()`` is by far the most
+        # expensive op in this example (broadphase + narrowphase over
+        # 7 shapes + ground), and the contact geometry barely shifts
+        # within a single frame, so re-running it per substep is wasted
+        # work for all three solver backends.
+        self.state_0.clear_forces()
+        self.viewer.apply_forces(self.state_0)
+        self.model.collide(self.state_0, self.contacts)
+
         for _ in range(self.sim_substeps):
-            self.state_0.clear_forces()
-
-            # apply forces to the model
-            self.viewer.apply_forces(self.state_0)
-
-            self.model.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
@@ -237,9 +284,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--solver",
         type=str,
-        default="xpbd",
-        choices=["vbd", "xpbd"],
-        help="Solver type: xpbd (default) or vbd",
+        default="phoenx",
+        choices=["vbd", "xpbd", "phoenx"],
+        help="Solver type: xpbd (default), vbd, or phoenx",
     )
 
     viewer, args = newton.examples.init(parser)
