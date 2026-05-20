@@ -982,9 +982,8 @@ class PhoenXWorld:
         of whether sleeping is enabled::
 
             world.wake_on_external_input()  # no-op when disabled
-            model.collide(state, contacts=contacts,
-                          collision_pipeline=cp)
-            world.step(dt=dt, contacts=contacts)   # no shape_aabb args
+            model.collide(state, contacts=contacts, collision_pipeline=cp)
+            world.step(dt=dt, contacts=contacts)  # no shape_aabb args
 
         Pre-requisites:
           * ``collision_pipeline`` was constructed with
@@ -1005,8 +1004,7 @@ class PhoenXWorld:
         """
         if self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0:
             raise RuntimeError(
-                "attach_collision_pipeline is rigid-only; cloth / soft-tet "
-                "scenes use setup_cloth_collision_pipeline()"
+                "attach_collision_pipeline is rigid-only; cloth / soft-tet scenes use setup_cloth_collision_pipeline()"
             )
 
         import numpy as _np  # noqa: PLC0415
@@ -1168,6 +1166,7 @@ class PhoenXWorld:
         stiffness_limit: wp.array,
         damping_limit: wp.array,
         armature: wp.array | None = None,
+        friction_coefficient: wp.array | None = None,
     ) -> None:
         """Pack ``num_joints`` actuated-DBS joint columns. Call once after
         :meth:`__init__`, before the first :meth:`step`. All input arrays must
@@ -1201,11 +1200,20 @@ class PhoenXWorld:
                 on PhoenX's pre-armature behaviour are unaffected.
                 Folded into the axial drive / limit effective inertia
                 only; rigid 5-row positional locks are unchanged.
+            friction_coefficient: Per-joint Coulomb friction limit on
+                the axial DoF [N*m for revolute, N for prismatic].
+                ``None`` (default) zero-fills, disabling friction on
+                every joint. Operates independently of the drive --
+                total axial impulse is the sum of the clamped drive PD
+                term and the clamped friction term, matching MuJoCo's
+                ``dof_frictionloss + actuator`` decomposition.
         """
         if self.num_joints <= 0:
             return
         if armature is None:
             armature = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
+        if friction_coefficient is None:
+            friction_coefficient = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
         # Detect whether the single-world solve can use the revolute-
         # only iterate kernels. ``joint_mode`` is a host-readable
         # ``wp.array[int32]`` of length ``num_joints``; one D2H copy
@@ -1244,6 +1252,7 @@ class PhoenXWorld:
                 stiffness_limit,
                 damping_limit,
                 armature,
+                friction_coefficient,
             ],
             device=self.device,
         )

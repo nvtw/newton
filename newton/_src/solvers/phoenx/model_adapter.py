@@ -96,6 +96,7 @@ class AdbsInitArrays:
         stiffness_limit: wp.array,
         damping_limit: wp.array,
         armature: wp.array,
+        friction_coefficient: wp.array,
         joint_idx_to_cid: wp.array,
         joint_idx_to_dof_start: wp.array,
         joint_q_at_init: wp.array,
@@ -121,6 +122,7 @@ class AdbsInitArrays:
         self.stiffness_limit = stiffness_limit
         self.damping_limit = damping_limit
         self.armature = armature
+        self.friction_coefficient = friction_coefficient
         self.joint_idx_to_cid = joint_idx_to_cid
         self.joint_idx_to_dof_start = joint_idx_to_dof_start
         #: Per-ADBS-column initial Newton joint coordinate. PhoenX measures
@@ -153,6 +155,7 @@ class AdbsInitArrays:
             "stiffness_limit": self.stiffness_limit,
             "damping_limit": self.damping_limit,
             "armature": self.armature,
+            "friction_coefficient": self.friction_coefficient,
         }
 
 
@@ -215,6 +218,7 @@ def build_adbs_init_arrays(
             stiffness_limit=empty_f,
             damping_limit=empty_f,
             armature=empty_f,
+            friction_coefficient=empty_f,
             joint_idx_to_cid=joint_idx_to_cid,
             joint_idx_to_dof_start=joint_idx_to_dof_start,
             joint_q_at_init=empty_f,
@@ -246,6 +250,7 @@ def build_adbs_init_arrays(
     target_ke = _pull_dof_f(model.joint_target_ke)
     target_kd = _pull_dof_f(model.joint_target_kd)
     joint_armature = _pull_dof_f(model.joint_armature)
+    joint_friction = _pull_dof_f(model.joint_friction) if hasattr(model, "joint_friction") else None
     effort_limit = _pull_dof_f(model.joint_effort_limit)
     limit_lower = _pull_dof_f(model.joint_limit_lower)
     limit_upper = _pull_dof_f(model.joint_limit_upper)
@@ -309,6 +314,8 @@ def build_adbs_init_arrays(
         damping_ratio_limit_val = float(DEFAULT_DAMPING_RATIO)
         # Armature only applies to REVOLUTE/PRISMATIC axial rows; 0 elsewhere.
         armature_val = 0.0
+        # Coulomb friction on the axial DoF (revolute / prismatic only).
+        friction_val = 0.0
 
         if jtype is newton.JointType.BALL:
             phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
@@ -388,6 +395,11 @@ def build_adbs_init_arrays(
                     max_val = hi
             if joint_armature is not None and qd_start < len(joint_armature):
                 armature_val = float(joint_armature[qd_start])
+            if joint_friction is not None and qd_start < len(joint_friction):
+                # Newton allows negative / non-finite values in some edge cases.
+                # Clamp to 0 ("disabled") so the iterate's short-circuit fires.
+                raw_fric = float(joint_friction[qd_start])
+                friction_val = raw_fric if (raw_fric >= 0.0 and np.isfinite(raw_fric)) else 0.0
         else:  # pragma: no cover -- defensive
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
@@ -428,6 +440,7 @@ def build_adbs_init_arrays(
                 "stiffness_limit": stiff_limit,
                 "damping_limit": damp_limit,
                 "armature": armature_val,
+                "friction_coefficient": friction_val,
                 "joint_q_at_init": init_q,
             }
         )
@@ -473,6 +486,7 @@ def build_adbs_init_arrays(
         stiffness_limit=_stack_f("stiffness_limit"),
         damping_limit=_stack_f("damping_limit"),
         armature=_stack_f("armature"),
+        friction_coefficient=_stack_f("friction_coefficient"),
         joint_idx_to_cid=wp.array(joint_idx_to_cid_np, dtype=wp.int32, device=device),
         joint_idx_to_dof_start=wp.array(joint_idx_to_dof_start_np, dtype=wp.int32, device=device),
         joint_q_at_init=_stack_f("joint_q_at_init"),

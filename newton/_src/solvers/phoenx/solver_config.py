@@ -48,6 +48,19 @@ PHOENX_BOOST_CABLE_TWIST = wp.constant(wp.float32(10.0))
 #: via effective_gap clamping. Box2D-style normal path uses its own omega cap.
 PHOENX_BOOST_CONTACT_NORMAL = wp.constant(wp.float32(1.0))
 
+#: Slip velocity at which the Coulomb-friction row saturates [m/s for
+#: prismatic, rad/s for revolute]. PhoenX's friction row is a saturated
+#: soft constraint with regularization ``gamma`` chosen so that the
+#: equivalent slip at the saturation impulse equals this constant:
+#: ``gamma = PHOENX_FRICTION_SLIP_VELOCITY / (μ * dt)``. A smaller slip
+#: velocity yields sharper Coulomb behaviour (closer to a hard stick);
+#: a larger value smooths the transition into viscous-blended friction.
+#: ``1 mm/s`` (or ``1 mrad/s``) is small enough to be invisible in robot
+#: control loops but large enough to keep the regularization well above
+#: float32 noise at typical dt values. Matches the role of MuJoCo's
+#: ``solref`` regularization on ``dof_frictionloss``.
+PHOENX_FRICTION_SLIP_VELOCITY = wp.constant(wp.float32(1.0e-3))
+
 
 __all__ = [
     "FUSE_TAIL_BLOCK_DIM",
@@ -61,5 +74,6 @@ __all__ = [
     "PHOENX_BOOST_REVOLUTE_DRIVE",
     "PHOENX_BOOST_REVOLUTE_LIMIT",
     "PHOENX_CONTACT_MATCHING",
+    "PHOENX_FRICTION_SLIP_VELOCITY",
     "PHOENX_USE_GREEDY_COLORING",
 ]
