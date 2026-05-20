@@ -2723,7 +2723,9 @@ def parse_usd(
                 sdf_target_voxel_size = R.get_value(
                     prim, prim_type=PrimType.SHAPE, key="sdf_target_voxel_size", verbose=verbose
                 )
-                # Schema default is 0 meaning "use sdfMaxResolution instead"
+                # Schema sentinel is -inf meaning "use sdfMaxResolution instead";
+                # the <= 0 check also rejects any authored non-positive value as
+                # out of the documented (0, inf) range.
                 if sdf_target_voxel_size is not None and sdf_target_voxel_size <= 0:
                     sdf_target_voxel_size = None
                 if sdf_target_voxel_size is None:
@@ -2735,7 +2737,8 @@ def parse_usd(
                 sdf_narrow_band_outer = R.get_value(
                     prim, prim_type=PrimType.SHAPE, key="sdf_narrow_band_outer", verbose=verbose
                 )
-                # Fractional variants: when authored non-zero, override absolute.
+                # Fractional variants: when authored (not the -inf sentinel),
+                # override the absolute siblings via fraction * bbox_diagonal.
                 nb_inner_frac = R.get_value(
                     prim, prim_type=PrimType.SHAPE, key="sdf_narrow_band_inner_fraction", verbose=verbose
                 )
@@ -2745,7 +2748,9 @@ def parse_usd(
                 margin_frac = R.get_value(
                     prim, prim_type=PrimType.SHAPE, key="sdf_margin_fraction", verbose=verbose
                 )
-                has_fractional = any(f is not None and f != 0 for f in (nb_inner_frac, nb_outer_frac, margin_frac))
+                has_fractional = any(
+                    f is not None and f != float("-inf") for f in (nb_inner_frac, nb_outer_frac, margin_frac)
+                )
                 # Mesh shapes use `physics:meshScale` to scale the geometry at
                 # build time. Fractional SDF distances must be computed against
                 # the *scaled* bbox, so pass meshScale through when available.
@@ -2757,9 +2762,9 @@ def parse_usd(
                         f"falling back to absolute values.",
                         stacklevel=_external_stacklevel(),
                     )
-                if nb_inner_frac is not None and nb_inner_frac != 0 and bbox_diag is not None:
+                if nb_inner_frac is not None and nb_inner_frac != float("-inf") and bbox_diag is not None:
                     sdf_narrow_band_inner = nb_inner_frac * bbox_diag
-                if nb_outer_frac is not None and nb_outer_frac != 0 and bbox_diag is not None:
+                if nb_outer_frac is not None and nb_outer_frac != float("-inf") and bbox_diag is not None:
                     sdf_narrow_band_outer = nb_outer_frac * bbox_diag
                 default_nb = builder.default_shape_cfg.sdf_narrow_band_range
                 sdf_narrow_band_range = (
@@ -2774,11 +2779,12 @@ def parse_usd(
                     sdf_texture_format = builder.default_shape_cfg.sdf_texture_format
 
                 sdf_margin = R.get_value(prim, prim_type=PrimType.SHAPE, key="sdf_margin", verbose=verbose)
-                if margin_frac is not None and margin_frac != 0 and bbox_diag is not None:
+                if margin_frac is not None and margin_frac != float("-inf") and bbox_diag is not None:
                     sdf_margin = margin_frac * bbox_diag
-                elif sdf_margin is None and has_sdf_api:
-                    # Applied API, no authored margin: fall back to schema default.
-                    sdf_margin = 0.05
+                elif sdf_margin == float("-inf"):
+                    # Schema sentinel: builder.finalize falls back to shape_gap
+                    # when ShapeConfig.sdf_margin is None.
+                    sdf_margin = None
 
                 # Hydroelastic is opt-in via newton:hydroelasticEnabled on the
                 # NewtonSDFCollisionAPI. newton:hydroelasticStiffness alone is
