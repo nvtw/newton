@@ -476,14 +476,21 @@ def triangle_inertia(
     return vol, first, second
 
 
+#: Number of scalar components reduced per triangle: 1 (volume) + 3 (first
+#: moment) + 9 (second moment, 3x3 row-major). Lowering the mesh-inertia
+#: reduction into 13 scalar prefix-scans makes it bit-exact reproducible
+#: across runs — ``wp.atomic_add`` does floating-point sums in
+#: scheduling-dependent order, and float addition is not associative.
+_MESH_INERTIA_NUM_SCALARS: int = 13
+
+
 @wp.kernel
 def compute_solid_mesh_inertia(
     indices: wp.array[int],
     vertices: wp.array[wp.vec3],
-    # outputs
-    volume: wp.array[float],
-    first: wp.array[wp.vec3],
-    second: wp.array[wp.mat33],
+    # outputs: per-triangle scratch, shape (13, num_tris). Component layout:
+    # [0]=volume, [1:4]=first, [4:13]=second (row-major 3x3).
+    per_tri: wp.array2d[float],
 ):
     i = wp.tid()
     p = vertices[indices[i * 3 + 0]]
@@ -491,9 +498,19 @@ def compute_solid_mesh_inertia(
     r = vertices[indices[i * 3 + 2]]
 
     v, f, s = triangle_inertia(p, q, r)
-    wp.atomic_add(volume, 0, v)
-    wp.atomic_add(first, 0, f)
-    wp.atomic_add(second, 0, s)
+    per_tri[0, i] = v
+    per_tri[1, i] = f[0]
+    per_tri[2, i] = f[1]
+    per_tri[3, i] = f[2]
+    per_tri[4, i] = s[0, 0]
+    per_tri[5, i] = s[0, 1]
+    per_tri[6, i] = s[0, 2]
+    per_tri[7, i] = s[1, 0]
+    per_tri[8, i] = s[1, 1]
+    per_tri[9, i] = s[1, 2]
+    per_tri[10, i] = s[2, 0]
+    per_tri[11, i] = s[2, 1]
+    per_tri[12, i] = s[2, 2]
 
 
 @wp.kernel
@@ -501,10 +518,9 @@ def compute_hollow_mesh_inertia(
     indices: wp.array[int],
     vertices: wp.array[wp.vec3],
     thickness: wp.array[float],
-    # outputs
-    volume: wp.array[float],
-    first: wp.array[wp.vec3],
-    second: wp.array[wp.mat33],
+    # outputs: per-triangle scratch, shape (13, num_tris). Layout matches
+    # :func:`compute_solid_mesh_inertia`.
+    per_tri: wp.array2d[float],
 ):
     tid = wp.tid()
     i = indices[tid * 3 + 0]
@@ -528,7 +544,7 @@ def compute_hollow_mesh_inertia(
     vk0 = vk - tk
     vk1 = vk + tk
 
-    v_total = 0.0
+    v_total = float(0.0)
     f_total = wp.vec3(0.0)
     s_total = wp.mat33(0.0)
 
@@ -565,9 +581,44 @@ def compute_hollow_mesh_inertia(
     f_total += f
     s_total += s
 
-    wp.atomic_add(volume, 0, v_total)
-    wp.atomic_add(first, 0, f_total)
-    wp.atomic_add(second, 0, s_total)
+    per_tri[0, tid] = v_total
+    per_tri[1, tid] = f_total[0]
+    per_tri[2, tid] = f_total[1]
+    per_tri[3, tid] = f_total[2]
+    per_tri[4, tid] = s_total[0, 0]
+    per_tri[5, tid] = s_total[0, 1]
+    per_tri[6, tid] = s_total[0, 2]
+    per_tri[7, tid] = s_total[1, 0]
+    per_tri[8, tid] = s_total[1, 1]
+    per_tri[9, tid] = s_total[1, 2]
+    per_tri[10, tid] = s_total[2, 0]
+    per_tri[11, tid] = s_total[2, 1]
+    per_tri[12, tid] = s_total[2, 2]
+
+
+def _deterministic_sum_per_triangle(per_tri: wp.array) -> tuple[float, wp.vec3, wp.mat33]:
+    """Reduce a ``(13, num_tris)`` per-triangle scratch buffer to scalar
+    totals via per-component inclusive prefix scan.
+
+    ``wp.utils.array_scan`` runs deterministically (single sequential
+    summation tree) so the result is bit-exact reproducible across runs,
+    in contrast to ``wp.atomic_add`` where ordering depends on GPU
+    scheduling. The last entry of each scanned row holds the sum.
+    """
+    num_tris = per_tri.shape[1]
+    scratch = wp.zeros(num_tris, dtype=float, device=per_tri.device)
+    totals = np.empty(_MESH_INERTIA_NUM_SCALARS, dtype=np.float32)
+    for c in range(_MESH_INERTIA_NUM_SCALARS):
+        wp.utils.array_scan(per_tri[c], scratch, inclusive=True)
+        totals[c] = float(scratch.numpy()[-1])
+    V_tot = float(totals[0])
+    F_tot = wp.vec3(float(totals[1]), float(totals[2]), float(totals[3]))
+    S_tot = wp.mat33(
+        float(totals[4]), float(totals[5]), float(totals[6]),
+        float(totals[7]), float(totals[8]), float(totals[9]),
+        float(totals[10]), float(totals[11]), float(totals[12]),
+    )
+    return V_tot, F_tot, S_tot
 
 
 def compute_inertia_mesh(
@@ -598,13 +649,12 @@ def compute_inertia_mesh(
     indices = np.array(indices).flatten()
     num_tris = len(indices) // 3
 
-    # Allocating for mass and inertia
-    com_warp = wp.zeros(1, dtype=wp.vec3)
-    I_warp = wp.zeros(1, dtype=wp.mat33)
-    vol_warp = wp.zeros(1, dtype=float)
-
     wp_vertices = wp.array(vertices, dtype=wp.vec3)
     wp_indices = wp.array(indices, dtype=int)
+
+    # Per-triangle scratch fed into a deterministic prefix-scan reduction
+    # instead of ``atomic_add``. See :data:`_MESH_INERTIA_NUM_SCALARS`.
+    per_tri = wp.zeros((_MESH_INERTIA_NUM_SCALARS, max(num_tris, 1)), dtype=float)
 
     if is_solid:
         wp.launch(
@@ -614,11 +664,7 @@ def compute_inertia_mesh(
                 wp_indices,
                 wp_vertices,
             ],
-            outputs=[
-                vol_warp,
-                com_warp,
-                I_warp,
-            ],
+            outputs=[per_tri],
         )
     else:
         if isinstance(thickness, float):
@@ -631,16 +677,18 @@ def compute_inertia_mesh(
                 wp_vertices,
                 wp.array(thickness, dtype=float),
             ],
-            outputs=[
-                vol_warp,
-                com_warp,
-                I_warp,
-            ],
+            outputs=[per_tri],
         )
 
-    V_tot = float(vol_warp.numpy()[0])  # signed volume
-    F_tot = com_warp.numpy()[0]  # first moment
-    S_tot = I_warp.numpy()[0]  # second moment
+    V_tot, F_tot_v3, S_tot_m33 = _deterministic_sum_per_triangle(per_tri)
+    F_tot = np.array([F_tot_v3[0], F_tot_v3[1], F_tot_v3[2]])
+    S_tot = np.array(
+        [
+            [S_tot_m33[0, 0], S_tot_m33[0, 1], S_tot_m33[0, 2]],
+            [S_tot_m33[1, 0], S_tot_m33[1, 1], S_tot_m33[1, 2]],
+            [S_tot_m33[2, 0], S_tot_m33[2, 1], S_tot_m33[2, 2]],
+        ]
+    )
 
     # If the winding is inward, flip signs
     if V_tot < 0:
