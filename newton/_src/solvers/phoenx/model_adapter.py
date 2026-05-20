@@ -24,6 +24,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     DRIVE_MODE_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
+    JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
@@ -223,6 +224,16 @@ def _classify_d6_pattern(
         ang_locked_idx = next(i for i, lk in enumerate(locked_ang) if lk)
         return ("UNIVERSAL", n_lin + ang_locked_idx)
 
+    # CYLINDRICAL candidate: 2 linear locked + 1 linear free + 2 angular
+    # locked + 1 angular free. The free axes must be parallel for this to
+    # be a true cylindrical joint -- that parallelism check is done by
+    # the caller (it needs ``joint_axis`` array access). ``free_dof_offset``
+    # returns the linear-free qd offset; the angular-free offset is
+    # implicit (the single unlocked angular slot).
+    if n_lin == 3 and n_ang == 3 and n_lin_locked == 2 and n_lin_free == 1 and n_ang_locked == 2 and n_ang_free == 1:
+        lin_free_idx = next(i for i, lk in enumerate(locked_lin) if not lk)
+        return ("CYLINDRICAL_CANDIDATE", lin_free_idx)
+
     return (None, -1)
 
 
@@ -372,6 +383,28 @@ def build_adbs_init_arrays(
                     locked_ang.append(is_locked)
 
             d6_mode_tag, d6_free_dof_offset = _classify_d6_pattern(n_lin, n_ang, locked_lin, locked_ang)
+
+            # CYLINDRICAL is a candidate after the lock-count test; the
+            # true cylindrical requires the free linear axis to be
+            # parallel to the free angular axis (so the two free DoFs
+            # share a single ``n_hat``). Otherwise it's a more general
+            # D6 we don't yet support.
+            if d6_mode_tag == "CYLINDRICAL_CANDIDATE":
+                lin_free_idx = d6_free_dof_offset
+                ang_free_idx = next(i for i, lk in enumerate(locked_ang) if not lk)
+                lin_axis = np.asarray(joint_axis[qd_start_d6 + lin_free_idx], dtype=np.float64)
+                ang_axis = np.asarray(joint_axis[qd_start_d6 + n_lin + ang_free_idx], dtype=np.float64)
+                lin_norm = float(np.linalg.norm(lin_axis))
+                ang_norm = float(np.linalg.norm(ang_axis))
+                if lin_norm > 1e-12 and ang_norm > 1e-12:
+                    cosine = abs(float(np.dot(lin_axis / lin_norm, ang_axis / ang_norm)))
+                else:
+                    cosine = 0.0
+                if cosine > 0.999:  # within ~2.5 degrees of parallel
+                    d6_mode_tag = "CYLINDRICAL"
+                else:
+                    d6_mode_tag = None  # fall through to the unsupported branch
+
             if d6_mode_tag is None:
                 raise NotImplementedError(
                     f"D6 joint {j} has a configuration that PhoenX cannot yet auto-dispatch "
@@ -379,8 +412,10 @@ def build_adbs_init_arrays(
                     f"locked={tuple(locked_lin)} linear, {tuple(locked_ang)} angular). "
                     "Currently supported patterns: FIXED (all locked), BALL (3 lin locked + 3 ang free), "
                     "REVOLUTE (3 lin locked + 2 ang locked + 1 ang free), "
-                    "PRISMATIC (2 lin locked + 1 lin free + 3 ang locked). "
-                    "Cylindrical / universal / planar / generic D6 are tracked as Phase 2+ work."
+                    "PRISMATIC (2 lin locked + 1 lin free + 3 ang locked), "
+                    "UNIVERSAL (3 lin locked + 1 ang locked + 2 ang free), "
+                    "CYLINDRICAL (2 lin locked + 1 lin free + 2 ang locked + 1 ang free, axes parallel). "
+                    "Planar / generic D6 are tracked as Phase 2+ work."
                 )
 
         parent_idx = int(joint_parent[j])
@@ -439,6 +474,7 @@ def build_adbs_init_arrays(
         is_ball = jtype is newton.JointType.BALL or (jtype is newton.JointType.D6 and d6_mode_tag == "BALL")
         is_fixed = jtype is newton.JointType.FIXED or (jtype is newton.JointType.D6 and d6_mode_tag == "FIXED")
         is_universal = jtype is newton.JointType.D6 and d6_mode_tag == "UNIVERSAL"
+        is_cylindrical = jtype is newton.JointType.D6 and d6_mode_tag == "CYLINDRICAL"
         is_revolute = jtype is newton.JointType.REVOLUTE or (jtype is newton.JointType.D6 and d6_mode_tag == "REVOLUTE")
         is_prismatic = jtype is newton.JointType.PRISMATIC or (
             jtype is newton.JointType.D6 and d6_mode_tag == "PRISMATIC"
@@ -509,6 +545,29 @@ def build_adbs_init_arrays(
             min_val = 0.0
             max_val = 0.0
             hertz_limit_val = float(DEFAULT_HERTZ_LIMIT)
+        elif is_cylindrical:
+            # Cylindrical: 2 lin locked + 1 lin free + 2 ang locked + 1 ang
+            # free, with the two free axes parallel (verified above). The
+            # shared axis defines ``n_hat``; anchor2 = anchor1 + axis so
+            # the prepare can recover it from ``axis_local1``. MVP is
+            # kinematic-only -- all axial drive / limit / friction
+            # parameters stay zero, the axial row short-circuits in the
+            # iterate. Future work can promote one or both free DoFs to
+            # driven by adding paired axial rows.
+            phoenx_mode = int(JOINT_MODE_CYLINDRICAL)
+            lin_free_qd = qd_start + d6_free_dof_offset
+            axis_local = (
+                np.asarray(joint_axis[lin_free_qd], dtype=np.float32)
+                if len(joint_axis)
+                else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+            )
+            axis_len = float(np.linalg.norm(axis_local))
+            if axis_len > 1e-12:
+                axis_local = axis_local / axis_len
+            else:
+                axis_local = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+            axis_world = _quat_rotate_np(X_w_p[3:], axis_local)
+            anchor2_world = anchor1_world + axis_world
         elif is_revolute or is_prismatic:
             phoenx_mode = int(JOINT_MODE_REVOLUTE) if is_revolute else int(JOINT_MODE_PRISMATIC)
             axis_local = (

@@ -5,27 +5,21 @@
 
 PhoenX's :func:`model_adapter.build_adbs_init_arrays` detects D6 joint
 configurations whose per-DoF lock pattern matches a specialized mode
-(FIXED / BALL / REVOLUTE / PRISMATIC / UNIVERSAL) and routes them to
-the corresponding constraint kernels. The first four route to existing
-modes (Phase 1); UNIVERSAL is a new mode (Phase 2b) composed from the
-BALL_SOCKET 3-row positional lock plus a 1-row angular twist lock that
-reuses the existing axial drive/limit machinery in rigid Box2D mode.
+(FIXED / BALL / REVOLUTE / PRISMATIC / UNIVERSAL / CYLINDRICAL) and
+routes them to the corresponding constraint kernels. The first four
+route to existing modes (Phase 1); UNIVERSAL (Phase 2b) and CYLINDRICAL
+(Phase 2a) are new modes that reuse the existing positional and axial
+infrastructure with different subsets of rows active.
 
 Coverage (all CUDA + graph-captured):
 
-* :class:`TestD6Detection` -- adapter-only check. Each pattern routes
-  to the right ``joint_mode``; free DoF is picked correctly.
-
-* :class:`TestD6Revolute` -- end-to-end equivalence: a D6 dispatched
-  to REVOLUTE simulates identically to a native ``add_joint_revolute``.
-
-* :class:`TestD6Universal` -- universal joint dispatch + the twist-lock
-  invariant: a pendulum with a locked Z-axis must not accumulate
-  rotation about Z even when swinging freely in X/Y.
-
-* :class:`TestD6Unsupported` -- cylindrical and planar still raise
-  ``NotImplementedError`` (their kernel implementations are Phase 2a /
-  Phase 2c follow-ups).
+* :class:`TestD6Detection` -- adapter-only check.
+* :class:`TestD6Revolute` -- end-to-end equivalence with native revolute.
+* :class:`TestD6Universal` -- twist-lock invariant.
+* :class:`TestD6Cylindrical` -- 2 free DoFs along the shared axis,
+  4 perpendicular DoFs locked.
+* :class:`TestD6Unsupported` -- planar / non-parallel-axes-"cylindrical"
+  configurations still raise (Phase 2c+ work).
 """
 
 from __future__ import annotations
@@ -38,6 +32,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
@@ -325,6 +320,141 @@ class TestD6Revolute(unittest.TestCase):
         )
 
 
+def _build_d6_cylindrical_piston(
+    *,
+    mass: float = 1.0,
+    inertia: float = 1.0e-2,
+    axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    free_lin_index: int = 2,
+    free_ang_index: int = 2,
+    init_slide: float = 0.0,
+    init_spin: float = 0.0,
+) -> newton.Model:
+    """Cylindrical joint: piston that can slide along ``axis`` and spin
+    about ``axis``. The other 2 linear axes (perpendicular) and 2 angular
+    axes (perpendicular) are locked.
+
+    The free linear and angular axes share ``axis`` (parallel) -- this
+    is the requirement for the cylindrical pattern to be detected. The
+    other two linear / angular axes are populated with arbitrary
+    perpendicular directions (their direction is irrelevant since
+    they're locked)."""
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+    body = builder.add_link(
+        xform=wp.transform_identity(),
+        mass=float(mass),
+        inertia=((inertia, 0, 0), (0, inertia, 0), (0, 0, inertia)),
+    )
+    builder.add_shape_box(body, hx=0.02, hy=0.02, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+
+    lin_axes = []
+    for k in range(3):
+        if k == free_lin_index:
+            lin_axes.append(newton.ModelBuilder.JointDofConfig(axis=axis, limit_lower=-1.0e6, limit_upper=1.0e6))
+        else:
+            lin_axes.append(newton.ModelBuilder.JointDofConfig(axis=(1.0, 0.0, 0.0), limit_lower=1.0, limit_upper=-1.0))
+    ang_axes = []
+    for k in range(3):
+        if k == free_ang_index:
+            ang_axes.append(newton.ModelBuilder.JointDofConfig(axis=axis, limit_lower=-1.0e6, limit_upper=1.0e6))
+        else:
+            ang_axes.append(newton.ModelBuilder.JointDofConfig(axis=(1.0, 0.0, 0.0), limit_lower=1.0, limit_upper=-1.0))
+
+    j = builder.add_joint_d6(
+        parent=-1,
+        child=body,
+        linear_axes=lin_axes,
+        angular_axes=ang_axes,
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform_identity(),
+    )
+    builder.add_articulation([j])
+    model = builder.finalize()
+    # No gravity for the kinematic tests below; we test the constraint
+    # behavior in isolation.
+    model.set_gravity((0.0, 0.0, 0.0))
+
+    # Seed via joint_q so eval_fk produces a consistent body_q.
+    if init_slide != 0.0 or init_spin != 0.0:
+        q_arr = np.zeros(model.joint_coord_count, dtype=np.float32)
+        q_arr[free_lin_index] = float(init_slide)
+        q_arr[3 + free_ang_index] = float(init_spin)
+        model.joint_q.assign(q_arr)
+    return model
+
+
+@unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX D6 tests run on CUDA only")
+class TestD6Cylindrical(unittest.TestCase):
+    """Cylindrical joint: 2 lin locked + 1 lin free + 2 ang locked + 1
+    ang free, with the free linear and angular axes parallel. The body
+    must:
+
+    * Slide and spin freely along/about the shared axis (2 free DoFs).
+    * Stay locked in the 4 perpendicular DoFs (no perpendicular
+      translation, no off-axis rotation)."""
+
+    def test_dispatches_to_cylindrical_mode(self) -> None:
+        model = _build_d6_cylindrical_piston()
+        solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_CYLINDRICAL))
+
+    def test_body_translates_and_rotates_only_along_axis(self) -> None:
+        """Seed a body with linear velocity along Z and angular velocity
+        about Z. After many frames, the body must:
+
+        * Have moved along Z (translation is free) and rotated about Z
+          (rotation is free).
+        * Stayed at x = y = 0 (perpendicular translation is locked).
+        * Have angular velocity perpendicular to Z still ~0 (perpendicular
+          rotation is locked).
+        """
+        model = _build_d6_cylindrical_piston(axis=(0.0, 0.0, 1.0))
+        device = wp.get_device()
+        solver = newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=20)
+
+        s0 = model.state()
+        s1 = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+        # Seed body_qd: linear along Z (1 m/s) and angular about Z (2 rad/s).
+        # Other components zero.
+        init_qd = np.zeros((1, 6), dtype=np.float32)
+        init_qd[0, 2] = 1.0  # v_z
+        init_qd[0, 5] = 2.0  # omega_z
+        s0.body_qd.assign(init_qd)
+
+        n_frames = 120
+
+        def _frame() -> None:
+            s0.clear_forces()
+            solver.step(s0, s1, model.control(), None, _DT)
+            wp.copy(s0.body_q, s1.body_q)
+            wp.copy(s0.body_qd, s1.body_qd)
+
+        _frame()
+        with wp.ScopedCapture(device=device) as capture:
+            _frame()
+        graph = capture.graph
+        for _ in range(n_frames - 1):
+            wp.capture_launch(graph)
+
+        body_q = s0.body_q.numpy()[0]
+        body_qd = s0.body_qd.numpy()[0]
+        # Position: lateral (x, y) must be ~0 (locked); z arbitrary (free).
+        self.assertLess(abs(float(body_q[0])), 1e-3, f"lateral X drift = {body_q[0]}")
+        self.assertLess(abs(float(body_q[1])), 1e-3, f"lateral Y drift = {body_q[1]}")
+        # The body must actually have translated along Z by ~1 m (1 m/s * 0.5 s).
+        self.assertGreater(abs(float(body_q[2])), 0.3, f"Z translation = {body_q[2]} -- slide didn't happen")
+        # Velocity: perpendicular components (vx, vy, omega_x, omega_y) ~0.
+        self.assertLess(abs(float(body_qd[0])), 0.05, f"v_x = {body_qd[0]}")
+        self.assertLess(abs(float(body_qd[1])), 0.05, f"v_y = {body_qd[1]}")
+        self.assertLess(abs(float(body_qd[3])), 0.05, f"omega_x = {body_qd[3]}")
+        self.assertLess(abs(float(body_qd[4])), 0.05, f"omega_y = {body_qd[4]}")
+        # Free components retained: v_z still ~1, omega_z still ~2 (no friction).
+        self.assertAlmostEqual(float(body_qd[2]), 1.0, delta=0.05, msg=f"v_z = {body_qd[2]}")
+        self.assertAlmostEqual(float(body_qd[5]), 2.0, delta=0.05, msg=f"omega_z = {body_qd[5]}")
+
+
 def _build_d6_universal_pendulum(
     *,
     mass: float = 1.0,
@@ -530,15 +660,36 @@ class TestD6Unsupported(unittest.TestCase):
         builder.add_articulation([j])
         return builder.finalize()
 
-    def test_cylindrical_pattern_raises(self) -> None:
-        """1 linear free + 1 angular free along same axis -- needs the
-        Phase 2a cylindrical mode."""
-        model = self._make_d6(lin_locks=[True, True, False], ang_locks=[True, True, False])
-        with self.assertRaisesRegex(NotImplementedError, "Phase 2"):
-            newton.solvers.SolverPhoenX(model, substeps=1)
+    # Cylindrical (1 lin + 1 ang free along same axis) and universal
+    # (1 ang locked + 2 ang free) are now supported via JOINT_MODE_CYLINDRICAL
+    # and JOINT_MODE_UNIVERSAL respectively -- see TestD6Cylindrical and
+    # TestD6Universal classes for their end-to-end coverage.
 
-    # Universal (1 angular axis locked, 2 angular free) is now supported
-    # via JOINT_MODE_UNIVERSAL -- see :class:`TestD6Universal` below.
+    def test_cylindrical_with_non_parallel_axes_raises(self) -> None:
+        """A "cylindrical-shaped" lock pattern (2 lin + 1 lin free,
+        2 ang + 1 ang free) with the free axes NOT parallel is not a
+        physical cylindrical joint -- it's a more general D6. The
+        adapter must reject it with a Phase 2+ message."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
+        builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+        # Linear free along Z, angular free along X -- perpendicular.
+        lin = [
+            newton.ModelBuilder.JointDofConfig(axis=(1, 0, 0), limit_lower=1.0, limit_upper=-1.0),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 1, 0), limit_lower=1.0, limit_upper=-1.0),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 0, 1), limit_lower=-1.0e6, limit_upper=1.0e6),
+        ]
+        ang = [
+            newton.ModelBuilder.JointDofConfig(axis=(1, 0, 0), limit_lower=-1.0e6, limit_upper=1.0e6),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 1, 0), limit_lower=1.0, limit_upper=-1.0),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 0, 1), limit_lower=1.0, limit_upper=-1.0),
+        ]
+        j = builder.add_joint_d6(parent=-1, child=body, linear_axes=lin, angular_axes=ang)
+        builder.add_articulation([j])
+        model = builder.finalize()
+        with self.assertRaisesRegex(NotImplementedError, "Planar / generic D6"):
+            newton.solvers.SolverPhoenX(model, substeps=1)
 
     def test_planar_pattern_raises(self) -> None:
         """2 linear + 1 angular free (planar joint) -- needs Phase 2c."""
