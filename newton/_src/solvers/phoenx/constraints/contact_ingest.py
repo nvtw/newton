@@ -748,6 +748,29 @@ def _build_tangent1_from_velocity(n: wp.vec3f, dv: wp.vec3f) -> wp.vec3f:
     )
 
 
+#: Maximum prev-frame penetration depth [m] before the sticky-anchor
+#: branch is rejected and the gather falls back to the fresh narrow-phase
+#: anchor.
+#:
+#: The "carry prev anchor forward" branch computes penetration with the
+#: prev body-local anchor under the *current* body pose. When the body
+#: rotates between frames, the drifted prev anchor's world position can
+#: plunge centimetres below a static collider even though the actual
+#: contact only moved sub-millimetre. ``contact_prepare_for_iteration_at``
+#: turns that bogus penetration into a Baumgarte bias that saturates at
+#: ``-max_push_speed`` once depth crosses ~3 cm (bias rate ~62.8 rad/s
+#: from ``DEFAULT_HERTZ_CONTACT=10``), the PGS sweep accumulates an
+#: impulse orders of magnitude too large, and the body launches metres
+#: upward -- bunny-on-ground at rest is the canonical repro (see
+#: ``_probe_lambdas.py``: lambda jumps from ~30 to 5900 N·s in one frame
+#: ~250 frames after first contact).
+#:
+#: ``0.01`` m sits well clear of the bias saturation regime while still
+#: allowing the sticky path to absorb sub-cm prev-anchor drift from
+#: normal rest-pose body oscillation.
+_PREV_ANCHOR_PEN_MAX: float = 0.01
+
+
 @wp.kernel(enable_backward=False)
 def _contact_warmstart_gather_kernel(
     pair_source_idx: wp.array[wp.int32],
@@ -766,14 +789,18 @@ def _contact_warmstart_gather_kernel(
 
     One thread per output column. For each contact ``k`` in the range:
 
-    * Matched (``prev_k = rigid_contact_match_index[k] >= 0``):
-      copy ``lambdas, normal, tangent1, local_p0, local_p1`` from
-      ``cc.prev_*[prev_k]``. Fixed-frame warm-start preserves impulse
-      meaning since the ``(n, t1, t2)`` basis is identical.
-    * Unmatched (``< 0``): run PhoenX ``Initialize`` -- pull
-      ``normal`` and body-local anchors from the upstream buffer,
-      derive ``tangent1`` from tangential relative velocity, zero
-      impulses.
+    * Matched (``prev_k = rigid_contact_match_index[k] >= 0``) and prev
+      anchor still describes the contact accurately: carry the prev
+      ``(lambdas, normal, tangent1, local_p0, local_p1)`` forward.
+      Preserves sticky friction in the body-local frame.
+    * Matched but prev anchor has drifted too deep (see
+      :data:`_PREV_ANCHOR_PEN_MAX`): keep impulses, but reseat
+      ``(normal, tangent1, local_p0, local_p1)`` to the fresh narrow-phase
+      values. Tangent1 is rebuilt from current tangential relative
+      velocity. This catches the rotation-induced staleness that lets
+      the sticky path inject metres-per-second of phantom Baumgarte
+      push into a resting body.
+    * Unmatched (``< 0``): cold-start -- fresh geometry, zero impulses.
 
     ``prev_cid_of_contact`` gates reads of stale prev slots that
     belonged to an already-overwritten frame.
@@ -828,9 +855,17 @@ def _contact_warmstart_gather_kernel(
             fresh_p2_world = bodies.position[b2] + fresh_r2
             fresh_penetration = -wp.dot(fresh_p2_world - fresh_p1_world, fresh_n)
 
-            if fresh_penetration > prev_penetration:
-                # Prev frame has grown stale -- overwrite anchors /
-                # normal / tangent but carry impulses forward.
+            # Absolute staleness: the prev anchor sits more than
+            # :data:`_PREV_ANCHOR_PEN_MAX` below the fresh contact
+            # surface. The body must have rotated enough between frames
+            # that the saved body-local point is now well below where
+            # the contact actually is -- reseating to the fresh anchor
+            # is the only way to keep the Baumgarte bias bounded.
+            prev_too_deep = prev_penetration > wp.float32(_PREV_ANCHOR_PEN_MAX)
+
+            if prev_too_deep or fresh_penetration > prev_penetration:
+                # Prev anchors are stale -- overwrite geometry but carry
+                # impulses forward in the fresh basis.
                 dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
                     bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
                 )
@@ -846,7 +881,7 @@ def _contact_warmstart_gather_kernel(
                 continue
 
             # Prev frame still describes the contact accurately --
-            # carry the full PhoenX state forward.
+            # carry the full PhoenX state forward (sticky path).
             cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
             cc_set_tangent1_lambda(cc, k, cc_get_prev_tangent1_lambda(cc, prev_k))
             cc_set_tangent2_lambda(cc, k, cc_get_prev_tangent2_lambda(cc, prev_k))
