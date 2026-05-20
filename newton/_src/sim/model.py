@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import warnings
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any
 
@@ -819,6 +820,51 @@ class Model:
 
         self.actuators: list[Actuator] = []
         """List of actuator instances for this model."""
+
+    @property
+    def sdf_block_coords(self) -> None:
+        """Deprecated.  Always returns ``None``.
+
+        Per-SDF active-block coordinates were removed when the hydroelastic
+        broadphase started deriving them arithmetically from each SDF's
+        coarse-texture dimensions.  The attribute is retained for one
+        release cycle so existing callers do not break.
+
+        .. deprecated:: 1.3
+            This attribute will be removed in Newton 1.5.
+        """
+        warnings.warn(
+            "Model.sdf_block_coords is deprecated and always returns None; "
+            "it will be removed in Newton 1.5. The hydroelastic broadphase "
+            "now derives block coordinates arithmetically from each SDF's "
+            "coarse-texture dimensions and no longer needs this attribute.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return None
+
+    @property
+    def sdf_index2blocks(self) -> None:
+        """Deprecated.  Always returns ``None``.
+
+        Per-SDF ``[start, end)`` indices into ``sdf_block_coords`` were
+        removed when the hydroelastic broadphase started deriving block
+        ranges arithmetically from each SDF's coarse-texture dimensions.
+        The attribute is retained for one release cycle so existing
+        callers do not break.
+
+        .. deprecated:: 1.3
+            This attribute will be removed in Newton 1.5.
+        """
+        warnings.warn(
+            "Model.sdf_index2blocks is deprecated and always returns None; "
+            "it will be removed in Newton 1.5. The hydroelastic broadphase "
+            "now derives block ranges arithmetically from each SDF's "
+            "coarse-texture dimensions and no longer needs this attribute.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return None
 
     def state(self, requires_grad: bool | None = None) -> State:
         """
