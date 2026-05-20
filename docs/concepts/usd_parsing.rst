@@ -613,9 +613,6 @@ attributes, along with any unit or semantic differences.
      - ``newton:sdfTextureFormat``
      - ``BitsPerPixel8/16/32`` → ``uint8`` / ``uint16`` / ``float32``.
    * - *(no equivalent)*
-     - ``newton:sdfEnabled``
-     - Defaults to ``true`` when ``NewtonSDFCollisionAPI`` is applied.
-   * - *(no equivalent)*
      - ``newton:sdfTargetVoxelSize``
      - Absolute voxel size [m]; when ``> 0``, overrides ``sdfMaxResolution``.
 
@@ -860,17 +857,17 @@ verifying the Newton import.
 
 .. tip::
 
-   Applying ``NewtonSDFCollisionAPI`` declares the prim's SDF configuration;
-   the importer treats that as opting in to SDF generation via the schema
-   default ``sdfEnabled=true`` and fills in schema defaults for any attributes
-   that are not authored (e.g. ``sdfMaxResolution=64``, ``sdfMargin=0.05``).
-   Hydroelastic contacts are folded into the same API and are **opt-in**:
-   ``newton:hydroelasticEnabled`` defaults to ``false``. Set it to ``true``
-   to enable hydroelastic contacts on a shape (``kh`` defaults to ``1e10``).
+   Applying ``NewtonSDFCollisionAPI`` declares the prim's SDF configuration
+   and opts the prim into SDF generation. The importer fills in schema
+   defaults for any attributes that are not authored (e.g.
+   ``sdfMaxResolution=64``, ``sdfMargin=0.05``). Hydroelastic contacts are
+   folded into the same API and are **opt-in**: ``newton:hydroelasticEnabled``
+   defaults to ``false``. Set it to ``true`` to enable hydroelastic contacts
+   on a shape (``hydroelasticStiffness`` defaults to ``1e10``).
    ``newton:hydroelasticStiffness`` authored on its own is a material
-   parameter and does **not** flip hydroelastic contacts on.
-   ``newton:sdfEnabled=false`` always wins as an explicit disable and
-   preserves the other authored values.
+   parameter and does **not** flip hydroelastic contacts on. To disable SDF
+   generation, remove the ``NewtonSDFCollisionAPI`` from the prim (e.g. via
+   USD variant sets) — there is no separate toggle attribute.
 
 
 Limitations

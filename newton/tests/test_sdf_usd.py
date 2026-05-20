@@ -269,37 +269,6 @@ class TestSDFUSDParsing(unittest.TestCase):
                 "Expected SDF built with sdfMargin during finalize.",
             )
 
-    def test_usd_sdf_enabled_false(self, device=None):
-        """newton:sdfEnabled=false suppresses SDF building even with params authored."""
-        if device is None or not wp.get_device(device).is_cuda:
-            self.skipTest("SDF tests require CUDA device")
-
-        from pxr import Sdf, Usd, UsdPhysics
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            usd_path = Path(tmpdir) / "test_sdf_disabled.usda"
-            stage = Usd.Stage.CreateNew(str(usd_path))
-            UsdPhysics.Scene.Define(stage, "/PhysicsScene")
-
-            _add_rigid_body(stage, "/World/Body1")
-            m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
-            p1 = m1.GetPrim()
-            p1.CreateAttribute("newton:sdfEnabled", Sdf.ValueTypeNames.Bool, custom=True).Set(False)
-            p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(128)
-
-            stage.Save()
-
-            builder = newton.ModelBuilder()
-            result = parse_usd(builder, str(usd_path))
-            s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
-
-            # SDF params should not be stored when sdfEnabled=false
-            self.assertIsNone(builder.shape_sdf_max_resolution[s1])
-
-            builder.finalize(device=device)
-            mesh1 = builder.shape_source[s1]
-            self.assertIsNone(mesh1.sdf, "SDF should not be built when sdfEnabled=false")
-
     def test_usd_hydroelastic_enabled_false(self, device=None):
         """newton:hydroelasticEnabled=false suppresses hydroelastic even with kh authored."""
         if device is None or not wp.get_device(device).is_cuda:
@@ -486,7 +455,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             self.assertAlmostEqual(builder.shape_gap[s1], 0.07, places=5)
 
     def test_usd_sdf_api_applied_no_authored_attrs(self, device=None):
-        """Applying NewtonSDFCollisionAPI enables SDF via the schema default sdfEnabled=true."""
+        """Applying NewtonSDFCollisionAPI enables SDF generation with schema defaults."""
         if device is None or not wp.get_device(device).is_cuda:
             self.skipTest("SDF tests require CUDA device")
 
@@ -500,9 +469,8 @@ class TestSDFUSDParsing(unittest.TestCase):
             _add_rigid_body(stage, "/World/Body1")
             m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
             p1 = m1.GetPrim()
-            # Apply the API without authoring any attributes. The schema default
-            # sdfEnabled=true must make the importer enable SDF with schema
-            # defaults (sdfMaxResolution=64).
+            # Apply the API without authoring any attributes. The importer
+            # must enable SDF with schema defaults (sdfMaxResolution=64).
             p1.AddAppliedSchema("NewtonSDFCollisionAPI")
 
             stage.Save()
@@ -626,12 +594,6 @@ add_function_test(
     TestSDFUSDParsing,
     "test_usd_sdf_margin",
     TestSDFUSDParsing.test_usd_sdf_margin,
-    devices=devices,
-)
-add_function_test(
-    TestSDFUSDParsing,
-    "test_usd_sdf_enabled_false",
-    TestSDFUSDParsing.test_usd_sdf_enabled_false,
     devices=devices,
 )
 add_function_test(

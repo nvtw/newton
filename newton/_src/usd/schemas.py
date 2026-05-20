@@ -88,7 +88,6 @@ class SchemaResolverNewton(SchemaResolver):
             "ke": SchemaAttribute("newton:contact_ke", None),
             "kd": SchemaAttribute("newton:contact_kd", None),
             # SDF (Signed Distance Field) configuration — from NewtonSDFCollisionAPI
-            "sdf_enabled": SchemaAttribute("newton:sdfEnabled", None),
             "sdf_max_resolution": SchemaAttribute("newton:sdfMaxResolution", None),
             "sdf_narrow_band_inner": SchemaAttribute("newton:sdfNarrowBandInner", None),
             "sdf_narrow_band_outer": SchemaAttribute("newton:sdfNarrowBandOuter", None),
