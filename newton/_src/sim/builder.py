@@ -312,9 +312,9 @@ class ModelBuilder:
         as the SDF generation margin for backward compatibility — a tight ``gap``
         therefore implies a tight SDF, which gives accurate near-surface contact
         resolution. Set :attr:`sdf_margin` explicitly to decouple the two values.
-        Not accepted on mesh shapes — for user meshes, pass ``margin`` to
-        :meth:`~newton.geometry.Mesh.build_sdf` before calling
-        :meth:`ModelBuilder.add_shape_mesh`."""
+        Not accepted on mesh-backed shapes (``MESH``, ``CONVEX_MESH``) — for
+        user meshes, pass ``margin`` to :meth:`~newton.geometry.Mesh.build_sdf`
+        before calling :meth:`ModelBuilder.add_shape_mesh`."""
 
         def configure_sdf(
             self,
