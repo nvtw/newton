@@ -107,6 +107,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(128)
             p1.CreateAttribute("newton:sdfNarrowBandInner", Sdf.ValueTypeNames.Float, custom=True).Set(-0.02)
             p1.CreateAttribute("newton:sdfNarrowBandOuter", Sdf.ValueTypeNames.Float, custom=True).Set(0.02)
+            p1.CreateAttribute("newton:sdfTextureFormat", Sdf.ValueTypeNames.Token, custom=True).Set("float32")
 
             # Body without SDF attributes (should use defaults)
             _add_rigid_body(stage, "/World/Body2")
@@ -126,6 +127,8 @@ class TestSDFUSDParsing(unittest.TestCase):
             self.assertIsNone(builder.shape_sdf_max_resolution[s2])
             self.assertAlmostEqual(builder.shape_sdf_narrow_band_range[s1][0], -0.02, places=4)
             self.assertAlmostEqual(builder.shape_sdf_narrow_band_range[s1][1], 0.02, places=4)
+            self.assertEqual(builder.shape_sdf_texture_format[s1], "float32")
+            self.assertEqual(builder.shape_sdf_texture_format[s2], "uint16")
 
             # After finalize, the deferred SDF lands in the model (not on the
             # shared Mesh — finalize() must not mutate user-owned geometry).
