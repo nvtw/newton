@@ -2880,7 +2880,13 @@ def parse_usd(
                     # so we strip SDF fields and pass a clean cfg. SDF building is
                     # deferred to finalize() where instances can be deduplicated.
                     # We write SDF params directly to the builder's per-shape lists
-                    # after the shape is added.
+                    # after the shape is added. Validate the SDF fields here so
+                    # invalid values (e.g. sdf_max_resolution not divisible by 8,
+                    # unknown sdf_texture_format) are caught before stripping
+                    # bypasses ShapeConfig.validate. shape_type=None skips the
+                    # hydroelastic-requires-SDF check (which only fires for
+                    # primitives) while still running the SDF-format checks.
+                    shape_params["cfg"].validate(shape_type=None)
                     mesh_shape_params = dict(shape_params)
                     mesh_shape_params["cfg"] = replace(
                         shape_params["cfg"],

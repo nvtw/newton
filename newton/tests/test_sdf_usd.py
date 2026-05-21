@@ -402,6 +402,29 @@ class TestSDFUSDParsing(unittest.TestCase):
                 "Applied SDF API should land an SDF entry on the finalized model.",
             )
 
+    def test_usd_mesh_invalid_sdf_max_resolution_raises(self):
+        """USD mesh path must validate sdf_max_resolution divisible-by-8 before stripping cfg."""
+        from pxr import Sdf, Usd, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            usd_path = Path(tmpdir) / "test_mesh_invalid_sdf_res.usda"
+            stage = Usd.Stage.CreateNew(str(usd_path))
+            UsdPhysics.Scene.Define(stage, "/PhysicsScene")
+
+            _add_rigid_body(stage, "/World/Body1")
+            m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
+            p1 = m1.GetPrim()
+            # 63 is not divisible by 8 — ShapeConfig.validate would reject it,
+            # but the importer strips SDF fields before add_shape_mesh, so the
+            # validation must fire explicitly in the USD mesh path.
+            p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(63)
+
+            stage.Save()
+
+            builder = newton.ModelBuilder()
+            with self.assertRaisesRegex(ValueError, "sdf_max_resolution must be divisible by 8"):
+                parse_usd(builder, str(usd_path))
+
     def test_add_shape_convex_hull_rejects_hydroelastic(self):
         """add_shape_convex_hull must raise when cfg.is_hydroelastic is set, regardless of mesh.sdf."""
         builder = newton.ModelBuilder()
