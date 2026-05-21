@@ -1699,6 +1699,7 @@ def _make_singleworld_dispatch_func(
     cloth_support: bool,
     enable_column_timers: bool,
     soft_tet_only: bool,
+    has_joints: bool,
     is_prepare: bool,
     use_bias: bool,
 ):
@@ -1935,48 +1936,56 @@ def _make_singleworld_dispatch_func(
                                 cid,
                                 elapsed_us(_t0, read_global_timer_ns()),
                             )
-                if not dispatched:
-                    # Joint (ADBS or revolute specialisation).
-                    if wp.static(is_prepare):
-                        if wp.static(revolute_only):
-                            revolute_prepare_for_iteration(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                            )
+                # Joint (ADBS or revolute specialisation). The outer
+                # ``if wp.static(has_joints):`` is a true compile-time
+                # gate -- when the scene has zero joints the entire
+                # 8-mode ADBS dispatcher (~5 kLOC of inlined code)
+                # disappears from the kernel. The static MUST stand
+                # alone as its own ``if``; compound conditions like
+                # ``not dispatched and wp.static(...)`` do not
+                # constant-fold reliably in Warp's codegen.
+                if wp.static(has_joints):
+                    if not dispatched:
+                        if wp.static(is_prepare):
+                            if wp.static(revolute_only):
+                                revolute_prepare_for_iteration(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
+                            else:
+                                actuated_double_ball_socket_prepare_for_iteration(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
                         else:
-                            actuated_double_ball_socket_prepare_for_iteration(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                            if wp.static(revolute_only):
+                                revolute_iterate(
+                                    constraints,
+                                    cid,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    parallel_id,
+                                    idt,
+                                    sor_boost,
+                                    use_bias,
+                                )
+                            else:
+                                actuated_double_ball_socket_iterate(
+                                    constraints,
+                                    cid,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    parallel_id,
+                                    idt,
+                                    sor_boost,
+                                    use_bias,
+                                )
+                        if wp.static(enable_column_timers):
+                            constraint_accumulate_time_us(
+                                constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
                             )
-                    else:
-                        if wp.static(revolute_only):
-                            revolute_iterate(
-                                constraints,
-                                cid,
-                                bodies,
-                                particles,
-                                copy_state,
-                                num_bodies,
-                                parallel_id,
-                                idt,
-                                sor_boost,
-                                use_bias,
-                            )
-                        else:
-                            actuated_double_ball_socket_iterate(
-                                constraints,
-                                cid,
-                                bodies,
-                                particles,
-                                copy_state,
-                                num_bodies,
-                                parallel_id,
-                                idt,
-                                sor_boost,
-                                use_bias,
-                            )
-                    if wp.static(enable_column_timers):
-                        constraint_accumulate_time_us(
-                            constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
-                        )
 
     return _dispatch_one_cid
 
@@ -1990,6 +1999,7 @@ def _make_singleworld_persistent_kernel(
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
     cluster_aware: bool = False,
+    has_joints: bool = True,
 ):
     """Persistent-grid PGS kernel for the requested phase + specialisation.
 
@@ -2028,6 +2038,7 @@ def _make_singleworld_persistent_kernel(
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
         soft_tet_only=soft_tet_only,
+        has_joints=has_joints,
         is_prepare=is_prepare,
         use_bias=use_bias,
     )
@@ -2175,6 +2186,7 @@ def _make_singleworld_fused_kernel(
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
     cluster_aware: bool = False,
+    has_joints: bool = True,
 ):
     """Single-block tail-fused PGS kernel; same axes as
     :func:`_make_singleworld_persistent_kernel` (including the
@@ -2188,6 +2200,7 @@ def _make_singleworld_fused_kernel(
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
         soft_tet_only=soft_tet_only,
+        has_joints=has_joints,
         is_prepare=is_prepare,
         use_bias=use_bias,
     )
@@ -2318,6 +2331,7 @@ def get_singleworld_kernel(
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
     cluster_aware: bool = False,
+    has_joints: bool = True,
 ):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
@@ -2329,4 +2343,5 @@ def get_singleworld_kernel(
         enable_column_timers=enable_column_timers,
         soft_tet_only=soft_tet_only,
         cluster_aware=cluster_aware,
+        has_joints=has_joints,
     )
