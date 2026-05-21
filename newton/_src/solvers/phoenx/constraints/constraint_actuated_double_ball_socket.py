@@ -3540,14 +3540,28 @@ def revolute_prepare_for_iteration(
     parallel_id: wp.int32,
     idt: wp.float32,
 ):
-    """Revolute-only prepare entry, skipping the ``joint_mode``
-    dispatch. Counterpart of :func:`revolute_iterate`."""
+    """Revolute-only prepare entry. Routes into the unified
+    :func:`_box2d_pivot_slide_prepare_at` with ``joint_mode`` passed
+    as the compile-time-known REVOLUTE tag so the dispatch flags
+    fold to (has_schur_3plus2, has_angular_axial) on inlining."""
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
-    _revolute_prepare_at(constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
+    _box2d_pivot_slide_prepare_at(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        copy_state,
+        num_bodies,
+        parallel_id,
+        body_pair,
+        idt,
+        JOINT_MODE_REVOLUTE,
+    )
 
 
 @wp.func
