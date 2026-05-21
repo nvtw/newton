@@ -90,9 +90,10 @@ class Example:
         )
         builder.add_shape_ellipsoid(body_ellipsoid, rx=0.5, ry=0.5, rz=0.25)
 
-        # CAPSULE
+        # CAPSULE (tilted slightly off vertical so it doesn't drop perfectly axis-aligned)
         self.capsule_pos = wp.vec3(0.0, 0.0, drop_z)
-        body_capsule = builder.add_body(xform=wp.transform(p=self.capsule_pos, q=wp.quat_identity()), label="capsule")
+        self.capsule_rot = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.1)
+        body_capsule = builder.add_body(xform=wp.transform(p=self.capsule_pos, q=self.capsule_rot), label="capsule")
         builder.add_shape_capsule(body_capsule, radius=0.3, half_height=0.7)
 
         # CYLINDER
@@ -119,6 +120,29 @@ class Example:
         self.cone_pos = wp.vec3(0.0, 6.0, drop_z)
         body_cone = builder.add_body(xform=wp.transform(p=self.cone_pos, q=wp.quat_identity()), label="cone")
         builder.add_shape_cone(body_cone, radius=0.45, half_height=0.6)
+
+        # EXTRA CAPSULES: a column of capsules stepping out in +y and up in +z.
+        # Each is offset 5 m further along y and starts 5 m higher than the
+        # previous one so they drop in a cascade. All share the original
+        # capsule's small tilt so they tip onto their sides instead of
+        # balancing on end.
+        self.extra_capsule_count = 10
+        self.extra_capsule_y_spacing = 5.0
+        self.extra_capsule_z_spacing = 5.0
+        self.extra_capsule_y0 = 10.0  # first extra capsule sits past the cone (y=6)
+        self.extra_capsule_positions: list[wp.vec3] = []
+        for i in range(self.extra_capsule_count):
+            pos = wp.vec3(
+                0.0,
+                self.extra_capsule_y0 + i * self.extra_capsule_y_spacing,
+                drop_z + (i + 1) * self.extra_capsule_z_spacing,
+            )
+            self.extra_capsule_positions.append(pos)
+            body = builder.add_body(
+                xform=wp.transform(p=pos, q=self.capsule_rot),
+                label=f"capsule_{i + 1}",
+            )
+            builder.add_shape_capsule(body, radius=0.3, half_height=0.7)
 
         # Color rigid bodies for VBD solver
         if self.solver_type == "vbd":
@@ -225,13 +249,13 @@ class Example:
             lambda q, qd: newton.math.vec_allclose(q, ellipsoid_q, atol=2e-2),
             [1],
         )
-        self.capsule_pos[2] = 1.0
-        capsule_q = wp.transform(self.capsule_pos, wp.quat_identity())
+        # Capsule starts tilted ~0.1 rad off vertical, so it tips and settles
+        # on its side (body center at z = radius = 0.3) rather than upright.
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "capsule at rest pose",
-            lambda q, qd: newton.math.vec_allclose(q, capsule_q, atol=2e-4),
+            lambda q, qd: abs(q[0]) < 0.1 and abs(q[1]) < 0.1 and q[2] > 0.0 and q[2] < 0.35,
             [2],
         )
         # Custom test for cylinder: allow 0.01 error for X and Y, strict for Z and rotation
@@ -270,6 +294,20 @@ class Example:
             lambda q, qd: q[2] > -0.05 and abs(q[0]) < 0.1 and abs(q[1] - 4.0) < 0.1,
             [5],
         )
+        # Extra capsules start at body index 7 (after sphere, ellipsoid, capsule,
+        # cylinder, box, mesh, cone). They each drop from progressively higher
+        # ``z`` and tip onto their sides, settling with the body center at
+        # ``z ~= radius = 0.3`` and roughly at their initial ``y`` (small
+        # roll-out allowed because the tilt is around the +y axis).
+        for i, pos in enumerate(self.extra_capsule_positions):
+            expected_y = pos[1]
+            newton.examples.test_body_state(
+                self.model,
+                self.state_0,
+                f"capsule_{i + 1} at rest pose",
+                lambda q, qd, ey=expected_y: abs(q[0]) < 1.0 and abs(q[1] - ey) < 1.0 and q[2] > 0.0 and q[2] < 0.35,
+                [7 + i],
+            )
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
