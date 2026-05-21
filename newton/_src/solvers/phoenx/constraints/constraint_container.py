@@ -29,6 +29,7 @@ __all__ = [
     "CONSTRAINT_TYPE_INVALID",
     "CONSTRAINT_TYPE_OFFSET",
     "CONSTRAINT_TYPE_SOFT_TETRAHEDRON",
+    "CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN",
     "DEFAULT_DAMPING_RATIO",
     "DEFAULT_HERTZ_ANGULAR",
     "DEFAULT_HERTZ_CONTACT",
@@ -90,6 +91,12 @@ CONSTRAINT_TYPE_SOFT_TETRAHEDRON = wp.constant(wp.int32(11))
 #: opposite vertices of the two triangles; body3 / body4 are the shared
 #: edge. See :mod:`constraint_cloth_bending`.
 CONSTRAINT_TYPE_CLOTH_BENDING = wp.constant(wp.int32(12))
+#: Block stable Neo-Hookean XPBD soft-body tetrahedron (Ton-That, Kry &
+#: Andrews 2024 ``Parallel Block Neo-Hookean XPBD using Graph Clustering``).
+#: Hydrostatic + deviatoric constraints solved as a coupled 2x2 Schur
+#: system. Endpoints body1..body4 are particle indices. See
+#: :mod:`constraint_soft_tet_neohookean`.
+CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN = wp.constant(wp.int32(13))
 
 CONSTRAINT_TYPE_OFFSET = wp.constant(wp.int32(0))
 CONSTRAINT_BODY1_OFFSET = wp.constant(wp.int32(1))

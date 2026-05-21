@@ -67,6 +67,12 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     constraint_container_zeros,
 )
+from newton._src.solvers.phoenx.constraints.constraint_soft_tet_neohookean import (
+    SOFT_TET_NEOHOOKEAN_DWORDS,
+    SOFT_TET_NEOHOOKEAN_TIME_US_OFFSET,
+    SoftBodyConstraintType,
+    soft_tet_neohookean_init_rows_kernel,
+)
 from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
     SOFT_TET_DWORDS,
     SOFT_TET_TIME_US_OFFSET,
@@ -438,6 +444,11 @@ class PhoenXWorld:
         self.num_soft_tetrahedra: int = int(num_soft_tetrahedra)
         if self.num_soft_tetrahedra < 0:
             raise ValueError(f"num_soft_tetrahedra must be >= 0 (got {self.num_soft_tetrahedra})")
+        # Soft-tet constraint variant tracker. Stamped by
+        # :meth:`populate_soft_tetrahedra_from_model`; consulted in
+        # :meth:`_singleworld_kernels` to gate the soft_tet_only
+        # specialisation off when the block Neo-Hookean variant is in use.
+        self._soft_tet_uses_neohookean: bool = False
         # Lazily allocate the particle store only when cloth is present;
         # rigid-only scenes pay zero memory for particles.
         self.particles: ParticleContainer | None = None
@@ -1166,7 +1177,12 @@ class PhoenXWorld:
         if int(num_cloth_bending) > 0:
             widths.append(int(CLOTH_BENDING_DWORDS))
         if int(num_soft_tetrahedra) > 0:
+            # Both ARAP and block Neo-Hookean variants share this cid
+            # range; the choice is made at populate time. Reserve enough
+            # dwords for either variant up-front so the container stays
+            # static across runs.
             widths.append(int(SOFT_TET_DWORDS))
+            widths.append(int(SOFT_TET_NEOHOOKEAN_DWORDS))
         return max(widths)
 
     @staticmethod
@@ -1466,6 +1482,7 @@ class PhoenXWorld:
         self,
         model,
         *,
+        constraint_type: SoftBodyConstraintType = SoftBodyConstraintType.ARAP,
         beta_lambda: float = 0.1,
         beta_mu: float = 0.1,
     ) -> None:
@@ -1487,18 +1504,25 @@ class PhoenXWorld:
         ``_num_active_constraints`` to the joint + cloth + soft-tet sum.
 
         Args:
-            beta_mu: Macklin XPBD damping on the shear row [1/s]. Enters
-                the lambda numerator as ``gamma_mu * grad . (x -
+            constraint_type: Selects between the corotational ARAP shear
+                row (:attr:`SoftBodyConstraintType.ARAP`) and the
+                block-coupled stable Neo-Hookean variant
+                (:attr:`SoftBodyConstraintType.BLOCK_NEOHOOKEAN`) from
+                Ton-That, Kry & Andrews 2024. Both variants share the
+                same row range; the per-row constraint type tag at dword
+                0 routes the dispatcher to the matching kernel. Default
+                preserves the prior single-row ARAP behaviour for
+                backward compatibility.
+            beta_mu: Macklin XPBD damping on the shear (ARAP) /
+                deviatoric (Neo-Hookean) row [1/s]. Enters the lambda
+                numerator as ``gamma_mu * grad . (x -
                 position_prev_substep)`` with ``gamma_mu = beta_mu *
-                substep_dt`` -- velocity-projected damping that does
-                NOT damp at rest. ``0.0`` => bare XPBD (matches Jitter2
-                ``FemTetPBD``); ``~0.1`` is a reasonable default that
-                lets a free-falling soft cube settle within ~30 substeps
-                on impact rather than ringing indefinitely.
-            beta_lambda: Reserved -- the volume row is not yet
-                implemented in :func:`soft_tetrahedron_iterate_at`; the
-                value is stamped into the row data so a future port can
-                pick it up without an API change.
+                substep_dt`` -- velocity-projected damping that does NOT
+                damp at rest. ``0.0`` => bare XPBD; ``~0.1`` settles a
+                free-falling soft cube within ~30 substeps.
+            beta_lambda: Damping on the volume / hydrostatic row [1/s].
+                Used by the block Neo-Hookean variant; reserved for the
+                ARAP variant (volume row not implemented there).
         """
         if self.num_soft_tetrahedra == 0:
             return
@@ -1522,22 +1546,42 @@ class PhoenXWorld:
         wp.copy(self.particles.position, model.particle_q)
         wp.copy(self.particles.velocity, model.particle_qd)
         wp.copy(self.particles.inverse_mass, model.particle_inv_mass)
-        wp.launch(
-            soft_tet_init_rows_kernel,
-            dim=self.num_soft_tetrahedra,
-            inputs=[
-                self.constraints,
-                wp.int32(self._soft_tet_offset),  # cid_offset (after joints, cloth tris, cloth bending)
-                wp.int32(self.num_bodies),
-                model.tet_indices,
-                model.particle_q,
-                model.tet_poses,
-                model.tet_materials,
-                wp.float32(beta_lambda),
-                wp.float32(beta_mu),
-            ],
-            device=self.device,
-        )
+        if constraint_type == SoftBodyConstraintType.BLOCK_NEOHOOKEAN:
+            wp.launch(
+                soft_tet_neohookean_init_rows_kernel,
+                dim=self.num_soft_tetrahedra,
+                inputs=[
+                    self.constraints,
+                    wp.int32(self._soft_tet_offset),
+                    wp.int32(self.num_bodies),
+                    model.tet_indices,
+                    model.particle_q,
+                    model.tet_poses,
+                    model.tet_materials,
+                    wp.float32(beta_lambda),  # hydrostatic-row damping
+                    wp.float32(beta_mu),  # deviatoric-row damping
+                ],
+                device=self.device,
+            )
+            self._soft_tet_uses_neohookean = True
+        else:
+            wp.launch(
+                soft_tet_init_rows_kernel,
+                dim=self.num_soft_tetrahedra,
+                inputs=[
+                    self.constraints,
+                    wp.int32(self._soft_tet_offset),  # cid_offset (after joints, cloth tris, cloth bending)
+                    wp.int32(self.num_bodies),
+                    model.tet_indices,
+                    model.particle_q,
+                    model.tet_poses,
+                    model.tet_materials,
+                    wp.float32(beta_lambda),
+                    wp.float32(beta_mu),
+                ],
+                device=self.device,
+            )
+            self._soft_tet_uses_neohookean = False
         self._num_active_constraints.fill_(self._contact_offset)
 
     def setup_cloth_collision_pipeline(
@@ -2980,8 +3024,14 @@ class PhoenXWorld:
         loops over its 1..4 constraint members)."""
         cloth_on = self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0 or self.num_cloth_bending > 0
         revolute_only = bool(self._use_revolute_specialization)
+        # ``soft_tet_only`` is an ARAP-specific specialisation: skip the
+        # ctype-tag read and route every non-contact cid straight to
+        # ``soft_tetrahedron_iterate_at``. Disable it when the block
+        # Neo-Hookean variant is in use so dispatch falls through to the
+        # ctype tree (which has both variants as elif branches).
         soft_tet_only = (
             self.num_soft_tetrahedra > 0
+            and not self._soft_tet_uses_neohookean
             and self.num_joints == 0
             and self.num_cloth_triangles == 0
             and self.num_cloth_bending == 0
@@ -3136,6 +3186,15 @@ class PhoenXWorld:
         else:
             self._column_timer_totals.zero_()
         if self._contact_offset > 0:
+            # Per-schema time_us dword offset differs between the ARAP
+            # and block Neo-Hookean variants; pick the one the scene
+            # actually populated. Mixed variants in one container would
+            # need a per-cid type-tag read here; not currently supported.
+            soft_tet_time_off = (
+                int(SOFT_TET_NEOHOOKEAN_TIME_US_OFFSET)
+                if self._soft_tet_uses_neohookean
+                else int(SOFT_TET_TIME_US_OFFSET)
+            )
             wp.launch(
                 _reduce_constraint_time_us_kernel,
                 dim=self._contact_offset,
@@ -3144,7 +3203,7 @@ class PhoenXWorld:
                     wp.int32(ADBS_TIME_US_OFFSET),
                     wp.int32(CLOTH_TRIANGLE_TIME_US_OFFSET),
                     wp.int32(CLOTH_BENDING_TIME_US_OFFSET),
-                    wp.int32(SOFT_TET_TIME_US_OFFSET),
+                    wp.int32(soft_tet_time_off),
                     wp.int32(self.num_joints),
                     wp.int32(self.num_cloth_triangles),
                     wp.int32(self.num_cloth_bending),
@@ -3178,6 +3237,11 @@ class PhoenXWorld:
         """Zero every per-column ``time_us`` slot. Called at step start
         when :attr:`enable_column_timers` is set."""
         if self._contact_offset > 0:
+            soft_tet_time_off = (
+                int(SOFT_TET_NEOHOOKEAN_TIME_US_OFFSET)
+                if self._soft_tet_uses_neohookean
+                else int(SOFT_TET_TIME_US_OFFSET)
+            )
             wp.launch(
                 _zero_constraint_time_us_kernel,
                 dim=self._contact_offset,
@@ -3187,7 +3251,7 @@ class PhoenXWorld:
                     wp.int32(ADBS_TIME_US_OFFSET),
                     wp.int32(CLOTH_TRIANGLE_TIME_US_OFFSET),
                     wp.int32(CLOTH_BENDING_TIME_US_OFFSET),
-                    wp.int32(SOFT_TET_TIME_US_OFFSET),
+                    wp.int32(soft_tet_time_off),
                     wp.int32(self.num_joints),
                     wp.int32(self.num_cloth_triangles),
                     wp.int32(self.num_cloth_bending),

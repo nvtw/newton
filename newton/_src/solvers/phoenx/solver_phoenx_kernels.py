@@ -63,12 +63,18 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_BENDING,
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
+    CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN,
     ConstraintContainer,
     constraint_accumulate_time_us,
     constraint_get_body1,
     constraint_get_body2,
     constraint_get_type,
     read_int,
+)
+from newton._src.solvers.phoenx.constraints.constraint_soft_tet_neohookean import (
+    SOFT_TET_NEOHOOKEAN_TIME_US_OFFSET,
+    soft_tet_neohookean_iterate_at,
+    soft_tet_neohookean_prepare_for_iteration_at,
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
     SOFT_TET_TIME_US_OFFSET,
@@ -1876,6 +1882,31 @@ def _make_singleworld_dispatch_func(
                             constraint_accumulate_time_us(
                                 constraints,
                                 SOFT_TET_TIME_US_OFFSET,
+                                cid,
+                                elapsed_us(_t0, read_global_timer_ns()),
+                            )
+                    elif ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN:
+                        if wp.static(is_prepare):
+                            soft_tet_neohookean_prepare_for_iteration_at(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                            )
+                        else:
+                            soft_tet_neohookean_iterate_at(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                parallel_id,
+                                idt,
+                                sor_boost,
+                            )
+                        dispatched = True
+                        if wp.static(enable_column_timers):
+                            constraint_accumulate_time_us(
+                                constraints,
+                                SOFT_TET_NEOHOOKEAN_TIME_US_OFFSET,
                                 cid,
                                 elapsed_us(_t0, read_global_timer_ns()),
                             )
