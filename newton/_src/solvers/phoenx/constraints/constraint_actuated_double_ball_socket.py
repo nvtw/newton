@@ -1551,14 +1551,13 @@ def _ball_socket_prepare_at(
     body_pair: ConstraintBodies,
     idt: wp.float32,
 ):
-    """Ball-socket prepare pass.
-
-    Strict subset of :func:`_revolute_prepare_at`: only the 3-row
-    anchor-1 lock is built. Delegates to
-    :func:`_anchor1_positional_prepare_at` for the shared 3-row
-    assemble + warm-start; then commits the warm-started velocities
-    to body storage.
-    """
+    """Ball-socket prepare pass: anchor-1 3-row lock only. Zeros the
+    anchor-2 Schur slots (``ut_ai``, ``s_inv``, ``bias2``) and the
+    anchor-2 warm-start (``acc_imp2``) so the shared
+    :func:`_pivot_iterate` Block A math degenerates to a standalone
+    anchor-1 solve at run time (lam2 = 0 -> no anchor-2 impulse, lam1
+    falls out as ``-A1^-1 (Jv + bias1)`` exactly as the old
+    ball-socket-specific iterate did)."""
     b1 = body_pair.b1
     b2 = body_pair.b2
 
@@ -1576,6 +1575,24 @@ def _ball_socket_prepare_at(
     ) = _anchor1_positional_prepare_at(
         constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
     )
+
+    # Zero the anchor-2 Schur slots so _pivot_iterate degenerates to
+    # an anchor-1 standalone solve. ut_ai @ rhs1 = 0, s_inv_22 @ ... = 0
+    # -> lam2 = 0 -> u_lam2_us = 0 -> lam1 = -A1^-1 @ rhs1.
+    zero_mat = wp.mat33f(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    write_mat33(constraints, base_offset + _OFF_UT_AI, cid, zero_mat)
+    write_mat33(constraints, base_offset + _OFF_S_INV, cid, zero_mat)
+    write_vec3(constraints, base_offset + _OFF_BIAS2, cid, wp.vec3f(0.0, 0.0, 0.0))
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, wp.vec3f(0.0, 0.0, 0.0))
+    # r2 / t1 / t2 are read by _pivot_iterate but only multiplied by
+    # zero coefficients (cr2 @ lam2_world = cr2 @ 0 = 0), so their
+    # values don't matter. Leaving them uninitialised would be a
+    # latent NaN trap if a future tweak ever reorders the math, so
+    # stamp them as identity-ish for safety.
+    write_vec3(constraints, base_offset + _OFF_R2_B1, cid, wp.vec3f(0.0, 0.0, 0.0))
+    write_vec3(constraints, base_offset + _OFF_R2_B2, cid, wp.vec3f(0.0, 0.0, 0.0))
+    write_vec3(constraints, base_offset + _OFF_T1, cid, wp.vec3f(1.0, 0.0, 0.0))
+    write_vec3(constraints, base_offset + _OFF_T2, cid, wp.vec3f(0.0, 1.0, 0.0))
 
     _ms_store_body_pair(
         bodies,
@@ -1608,78 +1625,27 @@ def _ball_socket_iterate_at(
     sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
-    """Ball-socket PGS iterate.
-
-    Single 3-row positional solve: ``lam1_us = -A1^-1 * (J v + bias)``
-    followed by the shared soft-constraint softening
-    ``lam1 = mass_coeff * lam1_us - impulse_coeff * acc1`` and the
-    usual ``acc1 += lam1`` warm-start update. No anchor-2 or anchor-3
-    rows, no axial block.
-
-    ``use_bias=False`` zeroes ``bias1`` -- the Box2D v3 TGS-soft
-    relax-pass convention that enforces ``Jv = 0`` without
-    re-injecting positional drift as velocity.
-    """
-    b1 = body_pair.b1
-    b2 = body_pair.b2
-
-    (
-        velocity1,
-        velocity2,
-        angular_velocity1,
-        angular_velocity2,
-        inv_mass1,
-        inv_mass2,
-        inv_inertia1,
-        inv_inertia2,
-        slot1,
-        slot2,
-    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
-
-    r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
-    r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
-
-    cr1_b1 = wp.skew(r1_b1)
-    cr1_b2 = wp.skew(r1_b2)
-
-    a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
-    if use_bias:
-        bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
-    else:
-        bias1 = wp.vec3f(0.0, 0.0, 0.0)
-    mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
-    impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
-
-    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-
-    jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
-    rhs1 = jv1 + bias1
-
-    lam1_us = -(a1_inv @ rhs1)
-    lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
-    lam1 = lam1 * sor_boost
-
-    velocity1 = velocity1 - inv_mass1 * lam1
-    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1)
-    velocity2 = velocity2 + inv_mass2 * lam1
-    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1)
-
-    _ms_store_body_pair(
+    """Ball-socket PGS iterate: pivot-family compound with anchor-2,
+    anchor-3, and axial drive all disabled. The anchor-2 Schur slots
+    are zeroed by :func:`_ball_socket_prepare_at`, so Block A
+    degenerates to the anchor-1 standalone solve. See
+    :func:`_pivot_iterate`."""
+    _pivot_iterate(
+        constraints,
+        cid,
+        base_offset,
         bodies,
         particles,
         copy_state,
-        b1,
-        b2,
-        slot1,
-        slot2,
         num_bodies,
-        velocity1,
-        angular_velocity1,
-        velocity2,
-        angular_velocity2,
+        parallel_id,
+        body_pair,
+        idt,
+        sor_boost,
+        use_bias,
+        False,  # has_anchor3
+        False,  # has_axial_drive
     )
-
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
 
 
 # ---------------------------------------------------------------------------
