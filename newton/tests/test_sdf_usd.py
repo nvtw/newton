@@ -124,6 +124,8 @@ class TestSDFUSDParsing(unittest.TestCase):
             # SDF params stored on builder but not yet built (deferred to finalize)
             self.assertEqual(builder.shape_sdf_max_resolution[s1], 128)
             self.assertIsNone(builder.shape_sdf_max_resolution[s2])
+            self.assertAlmostEqual(builder.shape_sdf_narrow_band_range[s1][0], -0.02, places=4)
+            self.assertAlmostEqual(builder.shape_sdf_narrow_band_range[s1][1], 0.02, places=4)
 
             # After finalize, the deferred SDF lands in the model (not on the
             # shared Mesh — finalize() must not mutate user-owned geometry).
