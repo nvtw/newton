@@ -868,18 +868,27 @@ verifying the Newton import.
 
 .. tip::
 
-   Applying ``NewtonSDFCollisionAPI`` declares the prim's SDF configuration
-   and opts the prim into SDF generation. The importer fills in schema
-   defaults for any attributes that are not authored (e.g.
-   ``sdfMaxResolution=64``; ``sdfMargin`` defaults to the value of
-   ``newton:contactGap``). Hydroelastic contacts are
-   folded into the same API and are **opt-in**: ``newton:hydroelasticEnabled``
-   defaults to ``false``. Set it to ``true`` to enable hydroelastic contacts
-   on a shape (``hydroelasticStiffness`` defaults to ``1e10``).
+   Applying ``NewtonSDFCollisionAPI`` declares the prim's SDF configuration.
+   The importer fills in schema defaults for any attributes that are not
+   authored (e.g. ``sdfMaxResolution=64``; ``sdfMargin`` defaults to the
+   value of ``newton:contactGap``).
+
+   For **mesh** shapes, applying the API causes ``ModelBuilder.finalize()``
+   to build a deferred SDF on the underlying ``Mesh``. For **primitive**
+   shapes (sphere, box, capsule, cylinder, cone, ellipsoid), the SDF
+   parameters are recorded but no texture SDF is generated unless
+   ``newton:hydroelasticEnabled = true`` is also set — primitive texture
+   SDFs are produced today only along the hydroelastic contact path.
+
+   Hydroelastic contacts are folded into the same API and are **opt-in**:
+   ``newton:hydroelasticEnabled`` defaults to ``false``. Set it to
+   ``true`` to enable hydroelastic contacts on a shape
+   (``hydroelasticStiffness`` defaults to ``1e10``).
    ``newton:hydroelasticStiffness`` authored on its own is a material
-   parameter and does **not** flip hydroelastic contacts on. To disable SDF
-   generation, remove the ``NewtonSDFCollisionAPI`` from the prim (e.g. via
-   USD variant sets) — there is no separate toggle attribute.
+   parameter and does **not** flip hydroelastic contacts on. To remove
+   the configuration entirely, remove ``NewtonSDFCollisionAPI`` from the
+   prim (e.g. via USD variant sets) — there is no separate toggle
+   attribute.
 
 
 Limitations
