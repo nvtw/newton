@@ -34,6 +34,7 @@ import queue
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -65,15 +66,30 @@ class LiveMp4Recorder:
     to be called from that thread; the writer thread is internal.
     """
 
+    #: Maximum number of pending frames buffered between the renderer and the
+    #: ffmpeg writer thread. Large enough to absorb the multi-second hiccups
+    #: that occur when the encoder primes its rate-control look-ahead or when
+    #: the OS briefly preempts the writer thread, while still bounded so a
+    #: stalled ffmpeg cannot exhaust memory.
+    _QUEUE_MAXSIZE = 256
+
+    #: Minimum interval (seconds) between successive "dropped frame" warnings
+    #: so a sustained slow-encoder stall doesn't flood the log.
+    _DROP_WARN_INTERVAL_S = 5.0
+
     def __init__(self):
         self._proc: subprocess.Popen | None = None
         self._queue: queue.Queue[bytes | None] | None = None
         self._worker: threading.Thread | None = None
+        self._stderr_reader: threading.Thread | None = None
+        self._stderr_lines: list[str] = []
         self._output_path: Path | None = None
         self._width = 0
         self._height = 0
         self._quality = 90.0
         self._filename_prefix = "newton_recording"
+        self._dropped_frames = 0
+        self._last_drop_warn_t = 0.0
 
     @property
     def is_recording(self) -> bool:
@@ -126,6 +142,31 @@ class LiveMp4Recorder:
             pass
         return "libx264"
 
+    def _stderr_reader_loop(self):
+        """Drain ffmpeg's stderr and keep the most recent lines around.
+
+        ffmpeg writes its banner, per-frame progress, and any encoder errors
+        to stderr. We need to drain the pipe so the subprocess doesn't block
+        when its stderr buffer fills, and we keep the tail so that on an
+        unexpected exit we can surface the actual encoder error.
+        """
+        assert self._proc is not None
+        assert self._proc.stderr is not None
+        max_lines = 200
+        try:
+            for raw in self._proc.stderr:
+                try:
+                    line = raw.decode("utf-8", errors="replace").rstrip()
+                except Exception:
+                    continue
+                if not line:
+                    continue
+                self._stderr_lines.append(line)
+                if len(self._stderr_lines) > max_lines:
+                    del self._stderr_lines[: len(self._stderr_lines) - max_lines]
+        except Exception:
+            pass
+
     def _writer_loop(self):
         assert self._proc is not None
         assert self._proc.stdin is not None
@@ -151,10 +192,39 @@ class LiveMp4Recorder:
                 # usually means the encoder couldn't initialize (e.g. a
                 # hardware encoder on a machine without the driver).
                 # Surface it instead of silently producing an empty file.
-                logger.warning(
-                    "ffmpeg exited unexpectedly during recording to %s; the output file may be empty or truncated.",
-                    self._output_path,
-                )
+                tail = self._format_stderr_tail()
+                if tail:
+                    logger.warning(
+                        "ffmpeg exited unexpectedly during recording to %s; "
+                        "the output file may be empty or truncated. ffmpeg stderr tail:\n%s",
+                        self._output_path,
+                        tail,
+                    )
+                else:
+                    logger.warning(
+                        "ffmpeg exited unexpectedly during recording to %s; the output file may be empty or truncated.",
+                        self._output_path,
+                    )
+
+    def _format_stderr_tail(self, max_lines: int = 20) -> str:
+        """Return the tail of captured ffmpeg stderr, indented for logging."""
+        if not self._stderr_lines:
+            return ""
+        tail = self._stderr_lines[-max_lines:]
+        return "\n".join("  " + line for line in tail)
+
+    def _note_dropped_frame(self):
+        """Record one dropped frame and log a rate-limited warning."""
+        self._dropped_frames += 1
+        now = time.monotonic()
+        if now - self._last_drop_warn_t < self._DROP_WARN_INTERVAL_S:
+            return
+        self._last_drop_warn_t = now
+        logger.warning(
+            "MP4 recording dropped %d frame(s) so far due to encoder backpressure; "
+            "the recorded video may stutter. Consider lowering the recording FPS or quality.",
+            self._dropped_frames,
+        )
 
     def start(
         self,
@@ -304,16 +374,21 @@ class LiveMp4Recorder:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
         except Exception:
             logger.exception("Failed to launch ffmpeg for recording.")
             self._proc = None
             return False
 
-        self._queue = queue.Queue(maxsize=8)
+        self._stderr_lines = []
+        self._dropped_frames = 0
+        self._last_drop_warn_t = 0.0
+        self._queue = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
         self._worker = threading.Thread(target=self._writer_loop, name="newton-mp4-writer", daemon=True)
         self._worker.start()
+        self._stderr_reader = threading.Thread(target=self._stderr_reader_loop, name="newton-mp4-stderr", daemon=True)
+        self._stderr_reader.start()
         self._output_path = output_path
         logger.info("Started recording to %s using encoder %s.", output_path, codec)
         return True
@@ -336,7 +411,7 @@ class LiveMp4Recorder:
             self._queue.put_nowait(frame_bytes)
         except queue.Full:
             # Keep renderer real-time by dropping frames under sustained pressure.
-            pass
+            self._note_dropped_frame()
 
     def write_frame(self, frame_rgb: np.ndarray):
         """Queue a frame for encoding. Frame must be HxWx3 uint8."""
@@ -353,7 +428,7 @@ class LiveMp4Recorder:
             self._queue.put_nowait(frame.tobytes())
         except queue.Full:
             # Keep renderer real-time by dropping frames under sustained pressure.
-            pass
+            self._note_dropped_frame()
 
     def stop(self) -> Path | None:
         """Stop recording and flush the output file."""
@@ -387,8 +462,43 @@ class LiveMp4Recorder:
             except Exception:
                 pass
 
+        if self._stderr_reader is not None:
+            self._stderr_reader.join(timeout=2.0)
+            self._stderr_reader = None
+        try:
+            if self._proc.stderr is not None:
+                self._proc.stderr.close()
+        except Exception:
+            pass
+
+        returncode = self._proc.returncode
+        if returncode is not None and returncode != 0:
+            tail = self._format_stderr_tail()
+            if tail:
+                logger.warning(
+                    "ffmpeg exited with code %d while finalizing %s. ffmpeg stderr tail:\n%s",
+                    returncode,
+                    self._output_path,
+                    tail,
+                )
+            else:
+                logger.warning(
+                    "ffmpeg exited with code %d while finalizing %s.",
+                    returncode,
+                    self._output_path,
+                )
+
+        if self._dropped_frames:
+            logger.info(
+                "MP4 recording dropped %d frame(s) total due to encoder backpressure.",
+                self._dropped_frames,
+            )
+
         stopped_path = self._output_path
         logger.info("Stopped recording: %s", stopped_path)
         self._proc = None
         self._queue = None
+        self._stderr_lines = []
+        self._dropped_frames = 0
+        self._last_drop_warn_t = 0.0
         return stopped_path

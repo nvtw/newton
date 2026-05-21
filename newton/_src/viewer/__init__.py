@@ -39,7 +39,7 @@ Layers:
     activated layer's model.
 """
 
-from .viewer import ViewerBase, ViewerLayer
+from .viewer import Layer, ViewerBase
 from .viewer_file import ViewerFile
 from .viewer_gl import ViewerGL
 from .viewer_null import ViewerNull
@@ -48,10 +48,10 @@ from .viewer_usd import ViewerUSD
 from .viewer_viser import ViewerViser
 
 __all__ = [
+    "Layer",
     "ViewerBase",
     "ViewerFile",
     "ViewerGL",
-    "ViewerLayer",
     "ViewerNull",
     "ViewerRerun",
     "ViewerUSD",

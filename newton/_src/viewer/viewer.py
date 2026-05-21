@@ -55,6 +55,7 @@ _LAYER_STATE_ATTRS: tuple[str, ...] = (
     "_user_spacing",
     "_visible_worlds",
     "_visible_worlds_mask",
+    "scene_scale",
     "show_joints",
     "show_com",
     "show_particles",
@@ -88,7 +89,7 @@ _LAYER_STATE_ATTRS: tuple[str, ...] = (
 )
 
 
-class ViewerLayer:
+class Layer:
     """Container holding per-model viewer state for one layer.
 
     A layer represents the rendering output of a single model/solver inside
@@ -160,9 +161,9 @@ class ViewerBase(ABC):
         # Layer registry. The default layer is always present and has an
         # empty name prefix to keep backward compatibility for code that
         # never calls activate().
-        self._layers: dict[str, ViewerLayer] = {}
+        self._layers: dict[str, Layer] = {}
         self._active_layer_id: str = _DEFAULT_LAYER_ID
-        self._layers[_DEFAULT_LAYER_ID] = ViewerLayer(_DEFAULT_LAYER_ID)
+        self._layers[_DEFAULT_LAYER_ID] = Layer(_DEFAULT_LAYER_ID)
 
         # All model-dependent state is initialized by clear_model()
         self.clear_model()
@@ -172,29 +173,29 @@ class ViewerBase(ABC):
     # ------------------------------------------------------------------
 
     @property
-    def layer(self) -> ViewerLayer:
-        """The currently active :class:`ViewerLayer`.
+    def layer(self) -> Layer:
+        """The currently active :class:`Layer`.
 
         Returns:
-            ViewerLayer: The layer that subsequent ``set_model`` / ``log_*``
+            Layer: The layer that subsequent ``set_model`` / ``log_*``
             calls will be routed into. Always non-None: the default layer
             is created automatically.
         """
         return self._layers[self._active_layer_id]
 
     @property
-    def layers(self) -> dict[str, ViewerLayer]:
+    def layers(self) -> dict[str, Layer]:
         """All registered layers keyed by layer id.
 
         Returns:
-            dict[str, ViewerLayer]: Mapping from layer id to layer object.
+            dict[str, Layer]: Mapping from layer id to layer object.
             Includes the internal default layer; callers iterating for UI
             display typically want to filter it out via
-            :attr:`ViewerLayer.layer_id`.
+            :attr:`Layer.layer_id`.
         """
         return self._layers
 
-    def activate(self, layer_id: str) -> ViewerLayer:
+    def activate(self, layer_id: str) -> Layer:
         """Activate a layer; create it on first use.
 
         Switches the "current write target" of the viewer. After this call,
@@ -213,7 +214,7 @@ class ViewerBase(ABC):
                 existing layer when the id is already known.
 
         Returns:
-            ViewerLayer: The activated layer object.
+            Layer: The activated layer object.
         """
         if not isinstance(layer_id, str) or not layer_id:
             raise ValueError("layer_id must be a non-empty string")
@@ -225,7 +226,7 @@ class ViewerBase(ABC):
 
         # Create the target layer if needed.
         if layer_id not in self._layers:
-            self._layers[layer_id] = ViewerLayer(layer_id)
+            self._layers[layer_id] = Layer(layer_id)
             # Initialize default per-model state directly on ``self`` (without
             # invoking subclass ``clear_model`` overrides, which would destroy
             # backend resources owned by other live layers).
@@ -299,7 +300,7 @@ class ViewerBase(ABC):
         if layer_id == self._active_layer_id:
             self.model_changed = True
 
-    def _snapshot_layer(self, layer: ViewerLayer) -> None:
+    def _snapshot_layer(self, layer: Layer) -> None:
         """Copy all per-model attributes from ``self`` into ``layer.state``."""
         for attr in _LAYER_STATE_ATTRS:
             if hasattr(self, attr):
@@ -308,7 +309,7 @@ class ViewerBase(ABC):
             if hasattr(self, attr):
                 layer.state[attr] = getattr(self, attr)
 
-    def _restore_layer(self, layer: ViewerLayer) -> None:
+    def _restore_layer(self, layer: Layer) -> None:
         """Copy all per-model attributes from ``layer.state`` onto ``self``."""
         for attr in _LAYER_STATE_ATTRS:
             if attr in layer.state:

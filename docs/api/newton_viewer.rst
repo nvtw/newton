@@ -13,10 +13,10 @@ newton.viewer
    :toctree: _generated
    :nosignatures:
 
+   Layer
    ViewerBase
    ViewerFile
    ViewerGL
-   ViewerLayer
    ViewerNull
    ViewerRerun
    ViewerUSD

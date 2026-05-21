@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import collections
 import ctypes
+import logging
 import math
 import re
 import time
@@ -29,6 +30,8 @@ from .picking import Picking
 from .recording import LiveMp4Recorder
 from .viewer import _DEFAULT_LAYER_ID, ViewerBase
 from .wind import Wind
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_version_tuple(version: str) -> tuple[int, ...]:
@@ -1793,6 +1796,14 @@ class ViewerGL(ViewerBase):
         if self._record_frame_gpu is None or self._record_frame_gpu.shape != (h, w, 3):
             # Framebuffer changed underneath us (e.g. resize during recording);
             # cleanest behavior is to stop and let the user start a new recording.
+            prev_shape = None if self._record_frame_gpu is None else tuple(self._record_frame_gpu.shape)
+            logger.warning(
+                "Stopping MP4 recording: framebuffer size changed from %s to (%d, %d, 3) "
+                "after recording started. Start a new recording to capture at the new resolution.",
+                prev_shape,
+                h,
+                w,
+            )
             self._stop_recording()
             return
 
