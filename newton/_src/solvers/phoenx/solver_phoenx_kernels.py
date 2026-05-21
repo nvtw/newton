@@ -1033,7 +1033,7 @@ def _constraints_to_elements_kernel(
         if b1 < 0 and b2 >= 0:
             b1 = b2
             b2 = -1
-        elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1)
+        elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles:
         # Cloth-triangle: three unified-index particle endpoints already
@@ -1067,7 +1067,7 @@ def _constraints_to_elements_kernel(
                 slot1 = v
             else:
                 slot2 = v
-        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, -1, -1, -1)
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, -1, -1, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending:
         # Cloth-bending: 4 unified-index particle endpoints. body1 / body2
@@ -1106,7 +1106,7 @@ def _constraints_to_elements_kernel(
                 slot2 = v
             else:
                 slot3 = v
-        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1)
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
         # Soft-tetrahedron: four unified-index particle endpoints stored
@@ -1148,7 +1148,7 @@ def _constraints_to_elements_kernel(
                 slot2 = v
             else:
                 slot3 = v
-        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1)
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
         return
     local_cid = tid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra
     b1 = contact_get_body1(contact_cols, local_cid)
@@ -1185,12 +1185,13 @@ def _constraints_to_elements_kernel(
             if particles.inverse_mass[b2 - num_bodies] == 0.0:
                 b2 = -1
 
-    # Resolve up to three extra nodes per side. Rigid sides have
-    # extras at -1; cloth-tri sides have two extras (third stays -1);
-    # soft-tet sides have all three extras populated.
+    # Resolve up to two extra nodes per side (the third is dropped by
+    # the Opt-E soft-tet 4th-vertex experiment; see ``side0_kind ==
+    # SOFT_TETRAHEDRON`` branch and PERF_NOTES.md). Rigid sides leave
+    # both extras at -1; cloth-tri sides populate both; soft-tet sides
+    # populate both (3rd vertex intentionally skipped).
     e0a = wp.int32(-1)
     e0b = wp.int32(-1)
-    e0c = wp.int32(-1)
     if side0_kind == wp.int32(1):  # CLOTH_TRIANGLE
         e0a = side0_extra[0]
         e0b = side0_extra[1]
@@ -1214,7 +1215,6 @@ def _constraints_to_elements_kernel(
             e0b = -1
     e1a = wp.int32(-1)
     e1b = wp.int32(-1)
-    e1c = wp.int32(-1)
     if side1_kind == wp.int32(1):  # CLOTH_TRIANGLE
         e1a = side1_extra[0]
         e1b = side1_extra[1]
@@ -1272,7 +1272,7 @@ def _constraints_to_elements_kernel(
         else:
             s5 = v
         cnt = cnt + 1
-    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5)
+    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5, -1, -1)
 
 
 @wp.kernel(enable_backward=False)

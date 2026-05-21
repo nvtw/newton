@@ -37,6 +37,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     ElementInteractionData,
     element_interaction_data_get,
+    vec8i,
 )
 
 __all__ = ["ConstraintClusterBuilder"]
@@ -49,16 +50,12 @@ MAX_CLUSTER_SIZE = wp.constant(wp.int32(4))
 #: Hard cap on the union of bodies referenced by all constraints in a
 #: cluster. Caller-imposed: downstream block solves want the per-cluster
 #: node footprint bounded so per-cluster scratch can be tile-allocated.
-#: A cluster's body union is checked incrementally as new members are
-#: admitted; candidates that would push the union over this cap are
-#: skipped (a quality regression, never a correctness violation -- the
-#: actual cluster body union is always <= this cap).
+#: The cap also matches the widened ``ElementInteractionData`` slot
+#: count (``MAX_BODIES`` = 8), so a cluster's body union packs into the
+#: same struct used for individual constraints -- useful for feeding
+#: clusters back through the existing graph coloring partitioner as
+#: supernodal elements (downstream work).
 MAX_BODIES_PER_CLUSTER = wp.constant(wp.int32(8))
-
-#: 8-int fixed-width vector for the per-seed body-union scratch. Used
-#: locally in :func:`_cluster_grow_seeds_kernel` to track which bodies
-#: the cluster has already touched, in O(1)-slot lookups.
-vec8i = wp.types.vector(length=8, dtype=wp.int32)
 
 #: "Empty" sentinel for the internal cluster-id arrays. INT32_MAX is the
 #: smallest value larger than any valid constraint id, so ``atomic_min``

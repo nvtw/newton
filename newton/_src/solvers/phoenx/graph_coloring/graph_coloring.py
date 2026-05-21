@@ -17,7 +17,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     partitioning_coloring_kernel,
     partitioning_prepare_kernel,
     set_int_array_kernel,
-    vec6i,
+    vec8i,
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import scan_variable_length, sort_variable_length_int64
 
@@ -32,7 +32,7 @@ __all__ = [
     "element_interaction_data_get",
     "element_interaction_data_make",
     "maximal_independent_set_partitioning",
-    "vec6i",
+    "vec8i",
 ]
 
 
@@ -209,10 +209,7 @@ class ContactPartitioner:
         rng = np.random.default_rng(seed)
         priorities = rng.permutation(max_num_interactions).astype(np.int32) + 1
         if priorities.max() >= (1 << 24):
-            raise ValueError(
-                f"max_num_interactions ({max_num_interactions}) exceeds the 2^24 "
-                "packed-priority limit."
-            )
+            raise ValueError(f"max_num_interactions ({max_num_interactions}) exceeds the 2^24 packed-priority limit.")
         packed_init = (priorities & 0x00FFFFFF).astype(np.int32)
         self._packed_priorities = wp.from_numpy(packed_init, dtype=wp.int32, device=device)
 
