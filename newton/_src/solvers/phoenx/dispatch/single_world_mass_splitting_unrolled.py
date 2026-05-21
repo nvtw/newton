@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 class SingleWorldMassSplittingUnrolledDispatcher:
     """Single-world + mass-splitting PGS with no ``wp.capture_while``."""
 
-    __slots__ = ("_world", "_launch_bound")
+    __slots__ = ("_launch_bound", "_world")
 
     def __init__(self, world: PhoenXWorld) -> None:
         self._world = world
@@ -54,6 +54,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         contact_views = w._contact_views if w._contact_views is not None else w._contact_views_placeholder
         ms_cap = wp.int32(int(w.max_colored_partitions))
         ms_batch = wp.int32(int(w.mass_splitting_batch_size))
+        cluster_members = w._cluster_members_for_launch()
         for _ in range(self._launch_bound):
             wp.launch(
                 head_kernel,
@@ -83,6 +84,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                     ms_cap,
                     ms_batch,
                     w._partitioner.sweep_direction,
+                    cluster_members,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=w.device,
@@ -105,16 +107,22 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         w._partitioner.begin_sweep()
         self._unrolled_sweep(prepare_head, idt)
         launch_average_and_broadcast(
-            copy_state, bodies, particles_or_sentinel,
-            num_bodies=num_bodies, inv_dt=inv_dt,
+            copy_state,
+            bodies,
+            particles_or_sentinel,
+            num_bodies=num_bodies,
+            inv_dt=inv_dt,
         )
 
         for _ in range(w.solver_iterations):
             w._partitioner.begin_sweep()
             self._unrolled_sweep(iterate_head, idt)
             launch_average_and_broadcast(
-                copy_state, bodies, particles_or_sentinel,
-                num_bodies=num_bodies, inv_dt=inv_dt,
+                copy_state,
+                bodies,
+                particles_or_sentinel,
+                num_bodies=num_bodies,
+                inv_dt=inv_dt,
             )
 
         w._mass_splitting_writeback()
@@ -135,8 +143,11 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             w._partitioner.begin_sweep()
             self._unrolled_sweep(relax_head, idt)
             launch_average_and_broadcast(
-                copy_state, bodies, particles_or_sentinel,
-                num_bodies=num_bodies, inv_dt=inv_dt,
+                copy_state,
+                bodies,
+                particles_or_sentinel,
+                num_bodies=num_bodies,
+                inv_dt=inv_dt,
             )
 
         w._mass_splitting_writeback()

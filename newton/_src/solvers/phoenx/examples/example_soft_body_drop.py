@@ -252,20 +252,7 @@ class Example:
             num_soft_tetrahedra=int(self.model.tet_count),
             device=self.device,
         )
-        # Constraint clustering and mass splitting target overlapping
-        # problems (both compress the colour count on dense graphs) but
-        # use different mechanisms; the cluster-aware PGS sweep is
-        # gated against the mass-splitting overflow column for now, so
-        # turning on ``--enable-clustering`` forces mass splitting off
-        # for this run. See PhoenXWorld._cluster_aware_active for the
-        # gate.
         self.enable_clustering: bool = bool(enable_clustering)
-        mass_splitting_for_run = ENABLE_MASS_SPLITTING and not self.enable_clustering
-        if self.enable_clustering and ENABLE_MASS_SPLITTING:
-            print(
-                "[PhoenX SoftBodyDrop] --enable-clustering: mass splitting force-disabled "
-                "for this run (cluster-aware path doesn't yet support the overflow column)."
-            )
         self.world = PhoenXWorld(
             bodies=bodies,
             constraints=constraints,
@@ -285,7 +272,7 @@ class Example:
             * self.cube_resolution
             * max(1, self.grid_x * self.grid_y),
             step_layout="single_world",
-            mass_splitting=mass_splitting_for_run,
+            mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             # On dense soft-body stacks greedy MIS produces a pyramidal
             # colour-size distribution that the head/fused tail solver
@@ -495,8 +482,10 @@ if __name__ == "__main__":
             "Enable PhoenX constraint clustering for this run. "
             "Soft-tet constraints get clustered into K=4 groups (body union <= 8); "
             "the main partitioner colours the supernodal graph and the PGS sweep "
-            "iterates cluster members per slot. Force-disables mass splitting "
-            "(the cluster-aware path doesn't support the overflow column yet)."
+            "iterates cluster members per slot. Composes with mass splitting: "
+            "cluster members in the overflow column share their thread (Gauss-"
+            "Seidel within the cluster) and the supernodal body-union seeds the "
+            "interaction graph slot allocation."
         ),
     )
     viewer, args = newton.examples.init(parser)

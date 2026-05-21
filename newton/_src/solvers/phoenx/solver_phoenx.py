@@ -673,21 +673,27 @@ class PhoenXWorld:
         # cluster id and the cluster-aware kernel variant loops over
         # ``cluster_members[cluster_id]`` (a vec4i of constraint ids,
         # -1 padded) running the standard per-cid dispatch tree on each
-        # member. Cluster builds inside the captured step graph; output
-        # surfaced via ``step_report().num_clusters``.
+        # member.
+        #
+        # Mass splitting cooperates with clustering: the overflow
+        # column's ``parallel_id`` is computed per CSR slot, so all
+        # members in a cluster share the same ``parallel_id`` and
+        # therefore the same copy-state slot. Members are processed
+        # sequentially in one thread (Gauss-Seidel within the cluster);
+        # different clusters in the overflow column own different
+        # parallel_ids (Jacobi across clusters). The interaction graph
+        # emit reads ``supernodal_elements`` so it allocates one slot
+        # per (cluster body, partition_key) -- exactly what the
+        # cluster-aware iterate consumes. See
+        # :meth:`_rebuild_mass_splitting_graph` for the wiring.
         #
         # ``_cluster_aware_active`` gates the dispatch path. Initial
-        # scope: single-world layout, no mass-splitting -- the
-        # mass-splitting overflow column has its own per-slot Jacobi
-        # semantics that interact with the cluster member loop and need
-        # a follow-up. Falls back to per-constraint coloring otherwise.
+        # scope: single-world layout (multi-world per-world coloring
+        # uses different kernels and is a follow-up).
         self.enable_clustering: bool = bool(enable_clustering)
         self._clustering: ClusteringPipeline | None = None
         self._cluster_aware_active: bool = (
-            self.enable_clustering
-            and self._constraint_capacity > 0
-            and step_layout == "single_world"
-            and not self.mass_splitting_enabled
+            self.enable_clustering and self._constraint_capacity > 0 and step_layout == "single_world"
         )
         if self.enable_clustering and self._constraint_capacity > 0:
             self._clustering = ClusteringPipeline(
@@ -2509,18 +2515,35 @@ class PhoenXWorld:
         ``highest_index_in_use`` arrays.
 
         Single-world only. Graph-capture safe.
+
+        Cluster-aware variant: when ``_cluster_aware_active`` is True
+        the partitioner coloured the supernodal graph, so each CSR
+        slot is a cluster id and ``element_ids_by_color`` indexes the
+        ``supernodal_elements`` array (body union per cluster). The
+        emit kernel reads from the supernodal array and gates on
+        ``num_clusters`` -- same shape, smaller graph. The body-union
+        view also naturally deduplicates per-cluster (body, partition_key)
+        emits across the cluster's members, which is exactly what the
+        copy-state slot allocator wants: members share their thread
+        in iterate, so they share the slot.
         """
         # The emit kernel atomically appends one entry per non-static
         # endpoint; the previous step's build call has already left
         # ``scratch.num_pairs`` at 0 so the launch picks up clean.
+        if self._cluster_aware_active and self._clustering is not None:
+            elements_for_emit = self._clustering.supernodal_elements
+            active_count_for_emit = self._clustering.num_clusters
+        else:
+            elements_for_emit = self._elements
+            active_count_for_emit = self._num_active_constraints
         wp.launch(
             record_all_interactions_kernel,
             dim=self._constraint_capacity,
             inputs=[
-                self._elements,
+                elements_for_emit,
                 self._partitioner.element_ids_by_color,
                 self._partitioner.color_starts,
-                self._num_active_constraints,
+                active_count_for_emit,
                 self._partitioner.interaction_id_to_partition,
                 wp.int32(int(self.max_colored_partitions)),
                 wp.int32(int(self.mass_splitting_batch_size)),

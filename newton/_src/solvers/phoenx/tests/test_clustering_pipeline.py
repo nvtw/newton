@@ -257,6 +257,8 @@ def _run_joint_scene_capture(
     *,
     enable_clustering: bool,
     frames: int,
+    mass_splitting: bool = False,
+    max_colored_partitions: int = 12,
 ) -> dict:
     """Run a small captured-graph joint sim. Returns final state
     summary + step_report metrics from the last frame."""
@@ -266,7 +268,8 @@ def _run_joint_scene_capture(
         solver_iterations=4,
         velocity_iterations=0,
         step_layout="single_world",
-        mass_splitting=False,  # gated out for the cluster-aware path
+        mass_splitting=mass_splitting,
+        max_colored_partitions=max_colored_partitions,
         enable_clustering=enable_clustering,
     )
 
@@ -403,6 +406,43 @@ class TestClusteringJointScenePhysics(unittest.TestCase):
                 f"{float(np.max(np.abs(r1['body_q'] - r2['body_q']))):.6e}"
             ),
         )
+
+    def test_joint_scene_clustering_with_mass_splitting(self) -> None:
+        """Mass splitting and constraint clustering must compose: the
+        cluster-aware iterate loops over cluster members per slot, so
+        the mass-splitting overflow column's per-batch ``parallel_id``
+        semantics (all members in one slot share the same
+        ``parallel_id`` == Gauss-Seidel within the cluster) work
+        unchanged; the interaction graph emit reads from
+        ``supernodal_elements`` so it allocates one copy-state slot
+        per (cluster body, partition_key).
+
+        The default ``max_colored_partitions=12`` keeps the small
+        scene out of the overflow path -- the smoke test here is that
+        the cluster-aware kernels link correctly through the mass-
+        splitting dispatcher (which broadcasts / averages / writes
+        back around each sweep). For an actual overflow exerciser,
+        scenes with more constraints than colours are needed; that's
+        covered by the soft_body_drop example with --enable-clustering.
+        """
+        model = _build_dense_joint_model(num_spokes=6)
+        result = _run_joint_scene_capture(
+            model,
+            enable_clustering=True,
+            frames=6,
+            mass_splitting=True,
+        )
+
+        # Cluster output must be populated and the simulation must
+        # still produce finite, bounded body poses.
+        self.assertIsNotNone(result["num_clusters"])
+        self.assertGreater(int(result["num_clusters"]), 0)
+        q = result["body_q"]
+        self.assertTrue(np.all(np.isfinite(q)))
+        for axis, lo, hi in (("x", -3.0, 3.0), ("y", -3.0, 3.0), ("z", -2.0, 5.0)):
+            vals = q[:, "xyz".index(axis)]
+            self.assertGreater(float(vals.min()), lo, msg=f"body escaped past {axis} >= {lo}")
+            self.assertLess(float(vals.max()), hi, msg=f"body escaped past {axis} <= {hi}")
 
     def test_joint_scene_clustering_vs_baseline_equivalence(self) -> None:
         """Clustering-on and clustering-off must both produce stable
