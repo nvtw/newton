@@ -36,6 +36,9 @@ Run::
 
 from __future__ import annotations
 
+import os
+import pathlib
+
 import numpy as np
 import warp as wp
 
@@ -261,7 +264,11 @@ class Example:
             velocity_iterations=self.velocity_iterations,
             # Scale contact buffer with cube_resolution^2 since soft-tet
             # contacts roughly track the surface-triangle count per cube.
-            rigid_contact_max=2 * 1024 * self.cube_resolution * self.cube_resolution * max(1, self.grid_x * self.grid_y),
+            rigid_contact_max=2
+            * 1024
+            * self.cube_resolution
+            * self.cube_resolution
+            * max(1, self.grid_x * self.grid_y),
             step_layout="single_world",
             mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
@@ -376,7 +383,43 @@ class Example:
             self._simulate_one_frame()
         self.sim_time += self.frame_dt
         self._frame_index += 1
+        # Optional snapshot dump for the standalone coloring / clustering
+        # benchmarks. Trigger via ``PHOENX_DUMP_COLORING_GRAPH=<frame> python
+        # -m ...example_soft_body_drop``. Mirrors the kapla hook.
+        dump_frame_env = os.environ.get("PHOENX_DUMP_COLORING_GRAPH")
+        if dump_frame_env is not None and int(dump_frame_env) == self._frame_index:
+            self._dump_coloring_graph()
         print_column_timings(self.world, self._frame_index, label="soft_body_drop")
+
+    def _dump_coloring_graph(self) -> None:
+        """Write the active constraint graph to ``soft_body_drop_graph.npz``
+        for the standalone coloring / clustering benchmarks.
+
+        ``num_bodies`` in the npz stores the partitioner's
+        ``max_num_nodes`` (rigid bodies + particles); the bench loader
+        passes that directly as ``max_num_nodes`` so adjacency sizing
+        covers every body id referenced in the elements array.
+        """
+        partitioner = self.world._partitioner
+        n_active = int(self.world._num_active_constraints.numpy()[0])
+        elements_struct = partitioner._elements.numpy()[:n_active]
+        bodies = elements_struct["bodies"].astype(np.int32, copy=False)
+        cost = partitioner._cost_values.numpy()[:n_active].astype(np.int32, copy=False)
+        jitter = partitioner._random_values.numpy()[:n_active].astype(np.int32, copy=False)
+        num_nodes = self.world.num_bodies + self.world.num_particles
+        out_path = pathlib.Path("soft_body_drop_graph.npz").resolve()
+        np.savez(
+            out_path,
+            bodies=bodies,
+            cost_values=cost,
+            random_values=jitter,
+            num_bodies=np.int32(num_nodes),
+            frame_index=np.int32(self._frame_index),
+        )
+        print(
+            f"[PhoenX SoftBodyDrop] dumped coloring graph to {out_path} "
+            f"(frame={self._frame_index}, n={n_active}, nodes={num_nodes})"
+        )
 
     def test_final(self) -> None:
         positions = self.state.particle_q.numpy()
