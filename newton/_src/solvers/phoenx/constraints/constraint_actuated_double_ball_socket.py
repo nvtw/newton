@@ -1003,6 +1003,192 @@ def _axial_drive_limit_iterate(
 
 
 @wp.func
+def _planar_3row_block(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    v1: wp.vec3f,
+    v2: wp.vec3f,
+    w1: wp.vec3f,
+    w2: wp.vec3f,
+    im1: wp.float32,
+    im2: wp.float32,
+    ii1: wp.mat33f,
+    ii2: wp.mat33f,
+    n_hat: wp.vec3f,
+    t1: wp.vec3f,
+    t2: wp.vec3f,
+    bias_packed: wp.vec3f,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+):
+    """PLANAR 3-row block: 1 linear lock along ``n_hat`` (relative
+    COM motion) + 2 angular tangent locks along ``t1`` / ``t2``
+    (relative angular motion). No anchor lever arms -- the linear
+    impulse acts at the COM (pure force) and the angular impulse is a
+    pure couple. Reads ``A1_INV`` (the 3x3 inverse of the planar K
+    matrix, stored in the same slot REVOLUTE / FIXED use for their
+    anchor-1 inverse) plus ``ACC_IMP1`` (linear acc along n_hat) /
+    ``ACC_IMP2`` (angular acc along t1, t2)."""
+    a3_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
+    acc_imp1_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+    acc_imp2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc3 = wp.vec3f(
+        wp.dot(n_hat, acc_imp1_world),
+        wp.dot(t1, acc_imp2_world),
+        wp.dot(t2, acc_imp2_world),
+    )
+
+    v_rel = v2 - v1
+    w_rel = w2 - w1
+    jv3 = wp.vec3f(wp.dot(n_hat, v_rel), wp.dot(t1, w_rel), wp.dot(t2, w_rel))
+    rhs3 = jv3 + bias_packed
+    lam_us = -(a3_inv @ rhs3)
+    lam3 = mass_coeff * lam_us - impulse_coeff * acc3
+    lam3 = lam3 * sor_boost
+    lin_imp_world = lam3[0] * n_hat
+    ang_imp_world = lam3[1] * t1 + lam3[2] * t2
+    v1 = v1 - im1 * lin_imp_world
+    w1 = w1 - ii1 @ ang_imp_world
+    v2 = v2 + im2 * lin_imp_world
+    w2 = w2 + ii2 @ ang_imp_world
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc_imp1_world + lin_imp_world)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc_imp2_world + ang_imp_world)
+    return v1, v2, w1, w2
+
+
+@wp.func
+def _anchor1_standalone_block(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    v1: wp.vec3f,
+    v2: wp.vec3f,
+    w1: wp.vec3f,
+    w2: wp.vec3f,
+    im1: wp.float32,
+    im2: wp.float32,
+    ii1: wp.mat33f,
+    ii2: wp.mat33f,
+    cr1_b1: wp.mat33f,
+    cr1_b2: wp.mat33f,
+    bias1: wp.vec3f,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+):
+    """3-row Box2D-soft anchor-1 positional lock, standalone (no
+    anchor-2 coupling). Used by BALL_SOCKET, UNIVERSAL, and CABLE's
+    point-lock block. Reads ``A1_INV`` / ``ACC_IMP1`` from the
+    constraint; updates body velocities and writes the accumulator
+    back."""
+    a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
+    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+    jv1 = -v1 + cr1_b1 @ w1 + v2 - cr1_b2 @ w2
+    rhs1 = jv1 + bias1
+    lam1_us = -(a1_inv @ rhs1)
+    lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+    lam1 = lam1 * sor_boost
+    v1 = v1 - im1 * lam1
+    w1 = w1 - ii1 @ (cr1_b1 @ lam1)
+    v2 = v2 + im2 * lam1
+    w2 = w2 + ii2 @ (cr1_b2 @ lam1)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
+    return v1, v2, w1, w2
+
+
+@wp.func
+def _cable_anchor2_pd_block(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    v1: wp.vec3f,
+    v2: wp.vec3f,
+    w1: wp.vec3f,
+    w2: wp.vec3f,
+    im1: wp.float32,
+    im2: wp.float32,
+    ii1: wp.mat33f,
+    ii2: wp.mat33f,
+    t1: wp.vec3f,
+    t2: wp.vec3f,
+    cr2_b1: wp.mat33f,
+    cr2_b2: wp.mat33f,
+    sor_boost: wp.float32,
+):
+    """Cable anchor-2 2-row PD-soft tangent block (bend). Uses the
+    ``lambda = -M_soft * (Jv + bias + gamma * acc)`` PD formulation
+    (vs the Box2D-soft ``lambda = mass_coeff * lam_us - impulse_coeff *
+    acc`` used for hard locks). PD bias is UNCONDITIONAL -- it encodes
+    the spring force, not a drift correction, and zeroing it on the
+    relax pass would cancel the spring."""
+    k22_inv_00 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_00, cid)
+    k22_inv_01 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_01, cid)
+    k22_inv_10 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_10, cid)
+    k22_inv_11 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_11, cid)
+    gamma_bend = read_float(constraints, base_offset + _OFF_CABLE_GAMMA_BEND, cid)
+    bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
+    acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc2_t1 = wp.dot(t1, acc2_world)
+    acc2_t2 = wp.dot(t2, acc2_world)
+    jv2_world = -v1 + cr2_b1 @ w1 + v2 - cr2_b2 @ w2
+    jv2_t1 = wp.dot(t1, jv2_world)
+    jv2_t2 = wp.dot(t2, jv2_world)
+    rhs2_t1 = jv2_t1 + bias2[0] + gamma_bend * acc2_t1
+    rhs2_t2 = jv2_t2 + bias2[1] + gamma_bend * acc2_t2
+    lam2_t1 = -(k22_inv_00 * rhs2_t1 + k22_inv_01 * rhs2_t2)
+    lam2_t2 = -(k22_inv_10 * rhs2_t1 + k22_inv_11 * rhs2_t2)
+    lam2_t1 = lam2_t1 * sor_boost
+    lam2_t2 = lam2_t2 * sor_boost
+    lam2_world = lam2_t1 * t1 + lam2_t2 * t2
+    v1 = v1 - im1 * lam2_world
+    w1 = w1 - ii1 @ (cr2_b1 @ lam2_world)
+    v2 = v2 + im2 * lam2_world
+    w2 = w2 + ii2 @ (cr2_b2 @ lam2_world)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world + lam2_world)
+    return v1, v2, w1, w2
+
+
+@wp.func
+def _cable_anchor3_pd_block(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    v1: wp.vec3f,
+    v2: wp.vec3f,
+    w1: wp.vec3f,
+    w2: wp.vec3f,
+    im1: wp.float32,
+    im2: wp.float32,
+    ii1: wp.mat33f,
+    ii2: wp.mat33f,
+    t2: wp.vec3f,
+    cr3_b1: wp.mat33f,
+    cr3_b2: wp.mat33f,
+    sor_boost: wp.float32,
+):
+    """Cable anchor-3 1-row PD-soft scalar block (twist). PD bias is
+    UNCONDITIONAL (spring, not drift)."""
+    m_twist_soft = read_float(constraints, base_offset + _OFF_CABLE_M_TWIST_SOFT, cid)
+    gamma_twist = read_float(constraints, base_offset + _OFF_CABLE_GAMMA_TWIST, cid)
+    bias3 = read_float(constraints, base_offset + _OFF_BIAS3, cid)
+    acc3_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid)
+    acc3_t2 = wp.dot(t2, acc3_world)
+    jv3_world = -v1 + cr3_b1 @ w1 + v2 - cr3_b2 @ w2
+    jv3_t2 = wp.dot(t2, jv3_world)
+    lam3 = -m_twist_soft * (jv3_t2 + bias3 + gamma_twist * acc3_t2)
+    lam3 = lam3 * sor_boost
+    lam3_world = lam3 * t2
+    v1 = v1 - im1 * lam3_world
+    w1 = w1 - ii1 @ (cr3_b1 @ lam3_world)
+    v2 = v2 + im2 * lam3_world
+    w2 = w2 + ii2 @ (cr3_b2 @ lam3_world)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3_world + lam3_world)
+    return v1, v2, w1, w2
+
+
+@wp.func
 def _anchor1_anchor2_schur_block(
     constraints: ConstraintContainer,
     cid: wp.int32,
@@ -2573,105 +2759,6 @@ def _planar_prepare_at(
     )
 
 
-@wp.func
-def _planar_iterate_at(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    copy_state: CopyStateContainer,
-    num_bodies: wp.int32,
-    parallel_id: wp.int32,
-    body_pair: ConstraintBodies,
-    idt: wp.float32,
-    sor_boost: wp.float32,
-    use_bias: wp.bool,
-):
-    """Planar PGS iterate: 1 linear + 2 angular rows on the relative
-    body motion. No anchor lever arms in the impulse -- the linear
-    impulse acts at the COM (pure force) and the angular impulse is a
-    pure couple (no force)."""
-    b1 = body_pair.b1
-    b2 = body_pair.b2
-
-    (
-        velocity1,
-        velocity2,
-        angular_velocity1,
-        angular_velocity2,
-        inv_mass1,
-        inv_mass2,
-        inv_inertia1,
-        inv_inertia2,
-        slot1,
-        slot2,
-    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
-
-    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-    t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
-    t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
-
-    a3_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
-    if use_bias:
-        bias_packed = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
-    else:
-        bias_packed = wp.vec3f(0.0, 0.0, 0.0)
-    mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
-    impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
-
-    acc_imp1_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-    acc_imp2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
-    acc_n = wp.dot(n_hat, acc_imp1_world)
-    acc_t1 = wp.dot(t1, acc_imp2_world)
-    acc_t2 = wp.dot(t2, acc_imp2_world)
-    acc3 = wp.vec3f(acc_n, acc_t1, acc_t2)
-
-    # Velocity Jacobian projected onto the constraint basis:
-    #   row 0: relative COM linear velocity along n_hat.
-    #   rows 1, 2: relative angular velocity along t1, t2.
-    v_rel = velocity2 - velocity1
-    w_rel = angular_velocity2 - angular_velocity1
-    jv3 = wp.vec3f(
-        wp.dot(n_hat, v_rel),
-        wp.dot(t1, w_rel),
-        wp.dot(t2, w_rel),
-    )
-    rhs3 = jv3 + bias_packed
-
-    lam_us = -(a3_inv @ rhs3)
-    lam3 = mass_coeff * lam_us - impulse_coeff * acc3
-    lam3 = lam3 * sor_boost
-
-    # Linear impulse: pure force along n_hat at COM (no torque).
-    lin_imp_world = lam3[0] * n_hat
-    # Angular impulse: pure couple along t1, t2 (no force).
-    ang_imp_world = lam3[1] * t1 + lam3[2] * t2
-
-    velocity1 = velocity1 - inv_mass1 * lin_imp_world
-    angular_velocity1 = angular_velocity1 - inv_inertia1 @ ang_imp_world
-    velocity2 = velocity2 + inv_mass2 * lin_imp_world
-    angular_velocity2 = angular_velocity2 + inv_inertia2 @ ang_imp_world
-
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc_imp1_world + lin_imp_world)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc_imp2_world + ang_imp_world)
-
-    _ms_store_body_pair(
-        bodies,
-        particles,
-        copy_state,
-        b1,
-        b2,
-        slot1,
-        slot2,
-        num_bodies,
-        velocity1,
-        angular_velocity1,
-        velocity2,
-        angular_velocity2,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Cable (soft fixed) mode
 # ---------------------------------------------------------------------------
@@ -2948,165 +3035,6 @@ def _cable_prepare_at(
     write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
     write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, 0.0)
     write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, 0.0)
-
-
-@wp.func
-def _cable_iterate_at(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    copy_state: CopyStateContainer,
-    num_bodies: wp.int32,
-    parallel_id: wp.int32,
-    body_pair: ConstraintBodies,
-    idt: wp.float32,
-    sor_boost: wp.float32,
-    use_bias: wp.bool,
-):
-    """Cable-mode PGS iterate.
-
-    Three independent block solves (block Gauss-Seidel within a sweep):
-    anchor-1 3-row Box2D-soft point lock, anchor-2 tangent 2-row
-    PD-soft (bend), anchor-3 scalar 1-row PD-soft (twist). The PD
-    blocks use ``lambda = -M_soft * (Jv + bias + gamma * acc)``.
-
-    ``use_bias`` only gates the *anchor-1* drift bias, matching the
-    Box2D v3 TGS-soft relax-pass convention for hard positional
-    locks. The anchor-2 / anchor-3 PD biases are NOT gated: those
-    biases encode the spring force ``k * theta`` (not a drift
-    correction), so zeroing them on the relax pass would cancel the
-    spring entirely (the relax iterate would drive
-    ``acc -> -Jv/gamma -> 0`` with the bias gone, and at convergence
-    ``gamma * acc`` exactly cancels the next main-pass bias). Same
-    rule the standalone PD axial-drive iterate follows -- its
-    ``bias_drive`` is unconditional in
-    :func:`_axial_drive_limit_iterate`.
-    """
-    b1 = body_pair.b1
-    b2 = body_pair.b2
-
-    (
-        velocity1,
-        velocity2,
-        angular_velocity1,
-        angular_velocity2,
-        inv_mass1,
-        inv_mass2,
-        inv_inertia1,
-        inv_inertia2,
-        slot1,
-        slot2,
-    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
-
-    r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
-    r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
-    r2_b1 = read_vec3(constraints, base_offset + _OFF_R2_B1, cid)
-    r2_b2 = read_vec3(constraints, base_offset + _OFF_R2_B2, cid)
-    r3_b1 = read_vec3(constraints, base_offset + _OFF_R3_B1, cid)
-    r3_b2 = read_vec3(constraints, base_offset + _OFF_R3_B2, cid)
-    t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
-    t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
-
-    cr1_b1 = wp.skew(r1_b1)
-    cr1_b2 = wp.skew(r1_b2)
-    cr2_b1 = wp.skew(r2_b1)
-    cr2_b2 = wp.skew(r2_b2)
-    cr3_b1 = wp.skew(r3_b1)
-    cr3_b2 = wp.skew(r3_b2)
-
-    a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
-    mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
-    impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
-
-    # ---- Block 1: anchor-1 3-row Box2D-soft -------------------------
-    if use_bias:
-        bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
-    else:
-        bias1 = wp.vec3f(0.0, 0.0, 0.0)
-
-    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-    jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
-    rhs1 = jv1 + bias1
-    lam1_us = -(a1_inv @ rhs1)
-    lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
-    lam1 = lam1 * sor_boost
-    velocity1 = velocity1 - inv_mass1 * lam1
-    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1)
-    velocity2 = velocity2 + inv_mass2 * lam1
-    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
-
-    # ---- Block 2: anchor-2 tangent 2-row PD-soft (bend) -------------
-    k22_inv_00 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_00, cid)
-    k22_inv_01 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_01, cid)
-    k22_inv_10 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_10, cid)
-    k22_inv_11 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_11, cid)
-    gamma_bend = read_float(constraints, base_offset + _OFF_CABLE_GAMMA_BEND, cid)
-    # NB: PD spring bias is unconditional (see docstring); only the
-    # anchor-1 drift bias is gated by ``use_bias``.
-    bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
-
-    acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
-    acc2_t1 = wp.dot(t1, acc2_world)
-    acc2_t2 = wp.dot(t2, acc2_world)
-
-    jv2_world = -velocity1 + cr2_b1 @ angular_velocity1 + velocity2 - cr2_b2 @ angular_velocity2
-    jv2_t1 = wp.dot(t1, jv2_world)
-    jv2_t2 = wp.dot(t2, jv2_world)
-
-    rhs2_t1 = jv2_t1 + bias2[0] + gamma_bend * acc2_t1
-    rhs2_t2 = jv2_t2 + bias2[1] + gamma_bend * acc2_t2
-
-    lam2_t1 = -(k22_inv_00 * rhs2_t1 + k22_inv_01 * rhs2_t2)
-    lam2_t2 = -(k22_inv_10 * rhs2_t1 + k22_inv_11 * rhs2_t2)
-    lam2_t1 = lam2_t1 * sor_boost
-    lam2_t2 = lam2_t2 * sor_boost
-    lam2_world = lam2_t1 * t1 + lam2_t2 * t2
-
-    velocity1 = velocity1 - inv_mass1 * lam2_world
-    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr2_b1 @ lam2_world)
-    velocity2 = velocity2 + inv_mass2 * lam2_world
-    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr2_b2 @ lam2_world)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world + lam2_world)
-
-    # ---- Block 3: anchor-3 scalar 1-row PD-soft (twist) -------------
-    m_twist_soft = read_float(constraints, base_offset + _OFF_CABLE_M_TWIST_SOFT, cid)
-    gamma_twist = read_float(constraints, base_offset + _OFF_CABLE_GAMMA_TWIST, cid)
-    # NB: PD spring bias is unconditional (see docstring).
-    bias3 = read_float(constraints, base_offset + _OFF_BIAS3, cid)
-
-    acc3_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid)
-    acc3_t2 = wp.dot(t2, acc3_world)
-
-    jv3_world = -velocity1 + cr3_b1 @ angular_velocity1 + velocity2 - cr3_b2 @ angular_velocity2
-    jv3_t2 = wp.dot(t2, jv3_world)
-
-    lam3 = -m_twist_soft * (jv3_t2 + bias3 + gamma_twist * acc3_t2)
-    lam3 = lam3 * sor_boost
-    lam3_world = lam3 * t2
-
-    velocity1 = velocity1 - inv_mass1 * lam3_world
-    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr3_b1 @ lam3_world)
-    velocity2 = velocity2 + inv_mass2 * lam3_world
-    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr3_b2 @ lam3_world)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3_world + lam3_world)
-
-    _ms_store_body_pair(
-        bodies,
-        particles,
-        copy_state,
-        b1,
-        b2,
-        slot1,
-        slot2,
-        num_bodies,
-        velocity1,
-        angular_velocity1,
-        velocity2,
-        angular_velocity2,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -3875,87 +3803,58 @@ def actuated_double_ball_socket_iterate_at(
     use_bias: wp.bool,
 ):
     """Building-block iterate dispatcher. Reads ``joint_mode`` once and
-    treats it as a "feature vector" that selects which row-block
-    helpers fire. Every block helper is called from exactly this site,
-    each gated by a single ``if`` -- one inlined copy per block in the
-    kernel binary, regardless of how many joint modes activate it.
+    treats it as a feature vector that selects which row-block helpers
+    fire. Each block helper is called from exactly this site, gated by
+    a single ``if`` -- one inlined copy per block in the kernel
+    binary, regardless of how many joint modes activate it.
 
-    CABLE and PLANAR have row structures that don't fit the shared
-    Box2D-soft block grammar (CABLE uses PD-soft, PLANAR uses COM-frame
-    Jacobians) and dispatch to their own iterate functions. The other
-    six modes -- BALL_SOCKET, REVOLUTE, FIXED, UNIVERSAL, PRISMATIC,
-    CYLINDRICAL -- all decompose into a subset of the five row blocks
-    defined above (:func:`_anchor1_anchor2_schur_block`,
-    :func:`_anchor1_anchor2_tangent_4row_block`,
-    :func:`_anchor3_scalar_block`, :func:`_angular_axial_block`,
-    :func:`_linear_axial_block`).
+    PLANAR has a unique row structure (COM-frame Jacobians, no anchor
+    lever arms) that doesn't fit the shared anchor-lever-arm grammar
+    and routes out to its own iterate. Every other joint mode --
+    BALL_SOCKET, REVOLUTE, FIXED, UNIVERSAL, PRISMATIC, CYLINDRICAL,
+    CABLE -- decomposes into a subset of eight row blocks defined
+    above.
 
-    Joint-mode -> block matrix:
+    Joint-mode -> block matrix (Y means the block fires for this mode):
 
-        ==============   ====  =====  =====  ====  ====
-        Mode             3+2S  Tan4   A3sc   AngA  LinA
-        ==============   ====  =====  =====  ====  ====
-        BALL_SOCKET      Y     -      -      -     -
-        REVOLUTE         Y     -      -      Y     -
-        FIXED            Y     -      Y      -     -
-        UNIVERSAL        Y     -      -      Y     -
-        PRISMATIC        -     Y      Y      -     Y
-        CYLINDRICAL      -     Y      -      -     Y
-        ==============   ====  =====  =====  ====  ====
+        ===========   ====  ====  =====  ====  ====  =====  ====  ====
+        Mode          A1    A1A2  Tan4   A3sc  CblA2 CblA3  AngA  LinA
+        ===========   ====  ====  =====  ====  ====  =====  ====  ====
+        BALL_SOCKET   Y     -     -      -     -     -      -     -
+        REVOLUTE      -     Y     -      -     -     -      Y     -
+        FIXED         -     Y     -      Y     -     -      -     -
+        UNIVERSAL     Y     -     -      -     -     -      Y     -
+        PRISMATIC     -     -     Y      Y     -     -      -     Y
+        CYLINDRICAL   -     -     Y      -     -     -      -     Y
+        CABLE         Y     -     -      -     Y     Y      -     -
+        ===========   ====  ====  =====  ====  ====  =====  ====  ====
 
-    ``use_bias`` is the Box2D v3 TGS-soft flag -- pass ``True`` on the
-    main solve pass to apply positional drift correction via the
-    prepared lock biases; ``False`` on the relax pass to enforce
-    ``Jv = 0`` without re-injecting position-error velocity. The axial
-    drive / limit / friction rows are unaffected by ``use_bias`` (their
-    biases encode motor / limit targets, not drift)."""
+    A1 = :func:`_anchor1_standalone_block` (Box2D-soft 3-row)
+    A1A2 = :func:`_anchor1_anchor2_schur_block` (3+2 Schur)
+    Tan4 = :func:`_anchor1_anchor2_tangent_4row_block` (4-row direct)
+    A3sc = :func:`_anchor3_scalar_block` (Box2D-soft 1-row)
+    CblA2 = :func:`_cable_anchor2_pd_block` (PD-soft 2-row bend)
+    CblA3 = :func:`_cable_anchor3_pd_block` (PD-soft 1-row twist)
+    AngA = :func:`_angular_axial_block`
+    LinA = :func:`_linear_axial_block`
+
+    ``use_bias`` is the Box2D v3 TGS-soft flag (gates positional drift
+    biases on Box2D-soft blocks; CABLE PD blocks read their biases
+    unconditionally as spring forces, not drift)."""
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
 
-    # CABLE and PLANAR have unique math -- route them out.
-    if joint_mode == JOINT_MODE_CABLE:
-        _cable_iterate_at(
-            constraints,
-            cid,
-            base_offset,
-            bodies,
-            particles,
-            copy_state,
-            num_bodies,
-            parallel_id,
-            body_pair,
-            idt,
-            sor_boost,
-            use_bias,
-        )
-        return
-    if joint_mode == JOINT_MODE_PLANAR:
-        _planar_iterate_at(
-            constraints,
-            cid,
-            base_offset,
-            bodies,
-            particles,
-            copy_state,
-            num_bodies,
-            parallel_id,
-            body_pair,
-            idt,
-            sor_boost,
-            use_bias,
-        )
-        return
-
-    # Block-enable flags for the remaining 6 modes.
-    schur_3plus2 = (
-        joint_mode == JOINT_MODE_REVOLUTE
-        or joint_mode == JOINT_MODE_FIXED
-        or joint_mode == JOINT_MODE_BALL_SOCKET
-        or joint_mode == JOINT_MODE_UNIVERSAL
+    # Block-enable flags computed from joint_mode.
+    has_anchor1_only = (
+        joint_mode == JOINT_MODE_BALL_SOCKET or joint_mode == JOINT_MODE_UNIVERSAL or joint_mode == JOINT_MODE_CABLE
     )
-    tangent_4row = joint_mode == JOINT_MODE_PRISMATIC or joint_mode == JOINT_MODE_CYLINDRICAL
-    has_anchor3 = joint_mode == JOINT_MODE_FIXED or joint_mode == JOINT_MODE_PRISMATIC
+    has_schur_3plus2 = joint_mode == JOINT_MODE_REVOLUTE or joint_mode == JOINT_MODE_FIXED
+    has_tangent_4row = joint_mode == JOINT_MODE_PRISMATIC or joint_mode == JOINT_MODE_CYLINDRICAL
+    has_anchor3_box2d = joint_mode == JOINT_MODE_FIXED or joint_mode == JOINT_MODE_PRISMATIC
+    has_cable_anchor2 = joint_mode == JOINT_MODE_CABLE
+    has_cable_anchor3 = joint_mode == JOINT_MODE_CABLE
     has_angular_axial = joint_mode == JOINT_MODE_REVOLUTE or joint_mode == JOINT_MODE_UNIVERSAL
     has_linear_axial = joint_mode == JOINT_MODE_PRISMATIC or joint_mode == JOINT_MODE_CYLINDRICAL
+    has_planar = joint_mode == JOINT_MODE_PLANAR
 
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -3972,15 +3871,17 @@ def actuated_double_ball_socket_iterate_at(
         slot2,
     ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
-    # Common anchor data + tangent basis used by anchors 1/2.
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
+    cr1_b1 = wp.skew(r1_b1)
+    cr1_b2 = wp.skew(r1_b2)
+    # anchor-2 lever arms / tangent basis used by every block that
+    # involves anchor-2 or anchor-3 (BALL_SOCKET / CABLE-anchor1 don't
+    # read these but the dispatcher reads are scalar-cheap).
     r2_b1 = read_vec3(constraints, base_offset + _OFF_R2_B1, cid)
     r2_b2 = read_vec3(constraints, base_offset + _OFF_R2_B2, cid)
     t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
     t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
-    cr1_b1 = wp.skew(r1_b1)
-    cr1_b2 = wp.skew(r1_b2)
     cr2_b1 = wp.skew(r2_b1)
     cr2_b2 = wp.skew(r2_b2)
 
@@ -3993,8 +3894,28 @@ def actuated_double_ball_socket_iterate_at(
     mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
     impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
 
-    # Block A1: anchor-1 3-row + anchor-2 2-row tangent (3+2 Schur).
-    if schur_3plus2:
+    # ---- Block A: anchor-1 positional lock ---------------------------
+    if has_anchor1_only:
+        v1, v2, w1, w2 = _anchor1_standalone_block(
+            constraints,
+            cid,
+            base_offset,
+            v1,
+            v2,
+            w1,
+            w2,
+            im1,
+            im2,
+            ii1,
+            ii2,
+            cr1_b1,
+            cr1_b2,
+            bias1,
+            mass_coeff,
+            impulse_coeff,
+            sor_boost,
+        )
+    if has_schur_3plus2:
         v1, v2, w1, w2 = _anchor1_anchor2_schur_block(
             constraints,
             cid,
@@ -4019,9 +3940,7 @@ def actuated_double_ball_socket_iterate_at(
             impulse_coeff,
             sor_boost,
         )
-
-    # Block A2: anchor-1 2-row tangent + anchor-2 2-row tangent (4-row direct).
-    if tangent_4row:
+    if has_tangent_4row:
         v1, v2, w1, w2 = _anchor1_anchor2_tangent_4row_block(
             constraints,
             cid,
@@ -4047,17 +3966,125 @@ def actuated_double_ball_socket_iterate_at(
             sor_boost,
         )
 
-    # Block B: anchor-3 1-row scalar lock along t2.
-    if has_anchor3:
+    # ---- Block B: anchor-2 PD-soft (cable bend) ----------------------
+    if has_cable_anchor2:
+        v1, v2, w1, w2 = _cable_anchor2_pd_block(
+            constraints,
+            cid,
+            base_offset,
+            v1,
+            v2,
+            w1,
+            w2,
+            im1,
+            im2,
+            ii1,
+            ii2,
+            t1,
+            t2,
+            cr2_b1,
+            cr2_b2,
+            sor_boost,
+        )
+
+    # ---- Block C: anchor-3 scalar lock -------------------------------
+    if has_anchor3_box2d or has_cable_anchor3:
         r3_b1 = read_vec3(constraints, base_offset + _OFF_R3_B1, cid)
         r3_b2 = read_vec3(constraints, base_offset + _OFF_R3_B2, cid)
         cr3_b1 = wp.skew(r3_b1)
         cr3_b2 = wp.skew(r3_b2)
-        if use_bias:
-            bias3 = read_float(constraints, base_offset + _OFF_BIAS3, cid)
-        else:
-            bias3 = wp.float32(0.0)
-        v1, v2, w1, w2 = _anchor3_scalar_block(
+        if has_anchor3_box2d:
+            if use_bias:
+                bias3 = read_float(constraints, base_offset + _OFF_BIAS3, cid)
+            else:
+                bias3 = wp.float32(0.0)
+            v1, v2, w1, w2 = _anchor3_scalar_block(
+                constraints,
+                cid,
+                base_offset,
+                v1,
+                v2,
+                w1,
+                w2,
+                im1,
+                im2,
+                ii1,
+                ii2,
+                t2,
+                cr3_b1,
+                cr3_b2,
+                bias3,
+                mass_coeff,
+                impulse_coeff,
+                sor_boost,
+            )
+        if has_cable_anchor3:
+            v1, v2, w1, w2 = _cable_anchor3_pd_block(
+                constraints,
+                cid,
+                base_offset,
+                v1,
+                v2,
+                w1,
+                w2,
+                im1,
+                im2,
+                ii1,
+                ii2,
+                t2,
+                cr3_b1,
+                cr3_b2,
+                sor_boost,
+            )
+
+    # ---- Block D: axial drive / limit / friction ---------------------
+    if has_angular_axial or has_linear_axial:
+        n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
+        clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
+        if has_angular_axial:
+            w1, w2 = _angular_axial_block(
+                constraints,
+                cid,
+                base_offset,
+                w1,
+                w2,
+                ii1,
+                ii2,
+                n_hat,
+                clamp,
+                idt,
+                sor_boost,
+            )
+        if has_linear_axial:
+            v1, v2, w1, w2 = _linear_axial_block(
+                constraints,
+                cid,
+                base_offset,
+                v1,
+                v2,
+                w1,
+                w2,
+                im1,
+                im2,
+                ii1,
+                ii2,
+                r1_b1,
+                r1_b2,
+                n_hat,
+                clamp,
+                idt,
+                sor_boost,
+            )
+
+    # ---- Block E: PLANAR 3-row COM-frame solve -----------------------
+    # PLANAR is the only mode whose row Jacobian acts on relative COM
+    # motion (no anchor lever arms). It reuses the ``A1_INV`` /
+    # ``ACC_IMP1`` / ``ACC_IMP2`` slots with PLANAR-specific semantics:
+    # ``ACC_IMP1`` is the linear-along-n_hat impulse, ``ACC_IMP2`` is
+    # the (t1, t2) angular impulse. ``n_hat`` is the plane normal.
+    if has_planar:
+        n_hat_planar = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
+        v1, v2, w1, w2 = _planar_3row_block(
             constraints,
             cid,
             base_offset,
@@ -4069,54 +4096,12 @@ def actuated_double_ball_socket_iterate_at(
             im2,
             ii1,
             ii2,
+            n_hat_planar,
+            t1,
             t2,
-            cr3_b1,
-            cr3_b2,
-            bias3,
+            bias1,
             mass_coeff,
             impulse_coeff,
-            sor_boost,
-        )
-
-    # Block C1: angular axial drive / limit / friction about n_hat.
-    if has_angular_axial:
-        n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-        clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
-        w1, w2 = _angular_axial_block(
-            constraints,
-            cid,
-            base_offset,
-            w1,
-            w2,
-            ii1,
-            ii2,
-            n_hat,
-            clamp,
-            idt,
-            sor_boost,
-        )
-
-    # Block C2: linear axial drive / limit / friction along n_hat.
-    if has_linear_axial:
-        n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-        clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
-        v1, v2, w1, w2 = _linear_axial_block(
-            constraints,
-            cid,
-            base_offset,
-            v1,
-            v2,
-            w1,
-            w2,
-            im1,
-            im2,
-            ii1,
-            ii2,
-            r1_b1,
-            r1_b2,
-            n_hat,
-            clamp,
-            idt,
             sor_boost,
         )
 
