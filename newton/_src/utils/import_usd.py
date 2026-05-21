@@ -219,7 +219,10 @@ def parse_usd(
             colliders on bodies with visual-only geometry. Default is False.
         parse_mujoco_options: Whether MuJoCo solver options from the PhysicsScene should be parsed. If False, solver options are not loaded and custom attributes retain their default values. Default is True.
         mesh_maxhullvert: Maximum vertices for convex hull approximation of meshes. Note that an authored ``newton:maxHullVertices`` attribute on any shape with a ``NewtonMeshCollisionAPI`` will take priority over this value.
-        schema_resolvers: Resolver instances in priority order. Default is to only parse Newton-specific attributes.
+        schema_resolvers: Resolver instances in priority order. Default (``None`` or ``[]``) is to only
+            parse Newton-specific attributes via :class:`SchemaResolverNewton` so that ``newton:*`` SDF
+            and hydroelastic attributes are not silently dropped. Pass a list containing different
+            resolvers to override.
             Schema resolvers collect per-prim "solver-specific" attributes, see :ref:`schema_resolvers` for more information.
             These include namespaced attributes such as ``newton:*``, ``physx*``
             (e.g., ``physxScene:*``, ``physxRigidBody:*``, ``physxSDFMeshCollision:*``), and ``mjc:*`` that
