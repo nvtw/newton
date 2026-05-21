@@ -111,6 +111,7 @@ class Example:
         density: float = 500.0,
         soft_body_thickness: float = 0.005,
         soft_body_gap: float = 0.010,
+        enable_clustering: bool = False,
     ):
         if int(num_cubes) < 1:
             raise ValueError(f"num_cubes must be >= 1, got {num_cubes}")
@@ -251,6 +252,20 @@ class Example:
             num_soft_tetrahedra=int(self.model.tet_count),
             device=self.device,
         )
+        # Constraint clustering and mass splitting target overlapping
+        # problems (both compress the colour count on dense graphs) but
+        # use different mechanisms; the cluster-aware PGS sweep is
+        # gated against the mass-splitting overflow column for now, so
+        # turning on ``--enable-clustering`` forces mass splitting off
+        # for this run. See PhoenXWorld._cluster_aware_active for the
+        # gate.
+        self.enable_clustering: bool = bool(enable_clustering)
+        mass_splitting_for_run = ENABLE_MASS_SPLITTING and not self.enable_clustering
+        if self.enable_clustering and ENABLE_MASS_SPLITTING:
+            print(
+                "[PhoenX SoftBodyDrop] --enable-clustering: mass splitting force-disabled "
+                "for this run (cluster-aware path doesn't yet support the overflow column)."
+            )
         self.world = PhoenXWorld(
             bodies=bodies,
             constraints=constraints,
@@ -270,7 +285,7 @@ class Example:
             * self.cube_resolution
             * max(1, self.grid_x * self.grid_y),
             step_layout="single_world",
-            mass_splitting=ENABLE_MASS_SPLITTING,
+            mass_splitting=mass_splitting_for_run,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             # On dense soft-body stacks greedy MIS produces a pyramidal
             # colour-size distribution that the head/fused tail solver
@@ -279,6 +294,7 @@ class Example:
             # on the 7-cube/res=3 stack.
             mass_splitting_batch_size=2,
             partitioner_algorithm="greedy",
+            enable_clustering=self.enable_clustering,
             enable_column_timers=ENABLE_COLUMN_TIMERS,
             device=self.device,
         )
@@ -472,6 +488,17 @@ if __name__ == "__main__":
     parser.add_argument("--density", type=float, default=500.0)
     parser.add_argument("--soft-body-thickness", type=float, default=0.005)
     parser.add_argument("--soft-body-gap", type=float, default=0.010)
+    parser.add_argument(
+        "--enable-clustering",
+        action="store_true",
+        help=(
+            "Enable PhoenX constraint clustering for this run. "
+            "Soft-tet constraints get clustered into K=4 groups (body union <= 8); "
+            "the main partitioner colours the supernodal graph and the PGS sweep "
+            "iterates cluster members per slot. Force-disables mass splitting "
+            "(the cluster-aware path doesn't support the overflow column yet)."
+        ),
+    )
     viewer, args = newton.examples.init(parser)
     viewer._paused = True
     example = Example(
@@ -490,5 +517,6 @@ if __name__ == "__main__":
         density=args.density,
         soft_body_thickness=args.soft_body_thickness,
         soft_body_gap=args.soft_body_gap,
+        enable_clustering=args.enable_clustering,
     )
     newton.examples.run(example, args)
