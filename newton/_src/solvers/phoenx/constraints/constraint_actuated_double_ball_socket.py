@@ -3678,6 +3678,20 @@ def _universal_prepare_at(
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
 
+    # Zero the anchor-2 Schur slots so _pivot_iterate degenerates to an
+    # anchor-1-only positional solve (UNIVERSAL has no anchor-2 row;
+    # only the anchor-1 3-row lock + the 1-row angular twist lock
+    # handled via the axial-drive block).
+    zero_mat = wp.mat33f(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    write_mat33(constraints, base_offset + _OFF_UT_AI, cid, zero_mat)
+    write_mat33(constraints, base_offset + _OFF_S_INV, cid, zero_mat)
+    write_vec3(constraints, base_offset + _OFF_BIAS2, cid, wp.vec3f(0.0, 0.0, 0.0))
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, wp.vec3f(0.0, 0.0, 0.0))
+    write_vec3(constraints, base_offset + _OFF_R2_B1, cid, wp.vec3f(0.0, 0.0, 0.0))
+    write_vec3(constraints, base_offset + _OFF_R2_B2, cid, wp.vec3f(0.0, 0.0, 0.0))
+    write_vec3(constraints, base_offset + _OFF_T1, cid, wp.vec3f(1.0, 0.0, 0.0))
+    write_vec3(constraints, base_offset + _OFF_T2, cid, wp.vec3f(0.0, 1.0, 0.0))
+
     _ms_store_body_pair(
         bodies,
         particles,
@@ -3709,23 +3723,13 @@ def _universal_iterate_at(
     sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
-    """Universal PGS iterate: BALL_SOCKET 3-row positional + 1-row
-    angular lock about ``n_hat``.
-
-    The two blocks decouple at the iterate level (no Schur cross terms
-    needed): a pure axial torque ``axial_lam * n_hat`` produces no
-    velocity at the joint anchor, and the anchor-1 positional impulse
-    produces no torque about ``n_hat``. We iterate them sequentially
-    Gauss-Seidel.
-    """
-    b1 = body_pair.b1
-    b2 = body_pair.b2
-
-    # ---- Anchor-1 positional iterate (BALL_SOCKET) -------------------
-    # Reuses the ball-socket iterate; it loads body state, applies the
-    # 3-row positional impulse, and writes the bodies back. Acceptable
-    # to call it as a black box -- the angular block below re-loads.
-    _ball_socket_iterate_at(
+    """Universal PGS iterate: pivot-family compound (anchor-1 3-row
+    positional + 1-row angular twist lock about ``n_hat`` via the
+    shared axial-drive block). UNIVERSAL = REVOLUTE flags applied
+    to a column whose anchor-2 Schur slots have been zeroed at
+    populate time (so Block A's Schur math collapses to the
+    anchor-1 standalone solve)."""
+    _pivot_iterate(
         constraints,
         cid,
         base_offset,
@@ -3738,42 +3742,8 @@ def _universal_iterate_at(
         idt,
         sor_boost,
         use_bias,
-    )
-
-    # ---- Angular twist lock iterate (1-row axial scalar) -------------
-    (
-        velocity1,
-        velocity2,
-        angular_velocity1,
-        angular_velocity2,
-        _inv_mass1,
-        _inv_mass2,
-        inv_inertia1,
-        inv_inertia2,
-        slot1,
-        slot2,
-    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
-
-    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-    clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
-    jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost)
-    angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
-    angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
-
-    _ms_store_body_pair(
-        bodies,
-        particles,
-        copy_state,
-        b1,
-        b2,
-        slot1,
-        slot2,
-        num_bodies,
-        velocity1,
-        angular_velocity1,
-        velocity2,
-        angular_velocity2,
+        False,  # has_anchor3
+        True,  # has_axial_drive (the universal angular twist lock)
     )
 
 
