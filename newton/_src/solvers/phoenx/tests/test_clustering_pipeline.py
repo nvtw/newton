@@ -191,6 +191,22 @@ class TestSolverPhoenXClusteringFlag(unittest.TestCase):
         self.assertGreaterEqual(int(report.num_clusters), 1)
         self.assertLessEqual(int(report.num_clusters), int(report.num_active_constraints))
 
+        # The side-channel supernodal partitioner must also be populated
+        # and its colour count must be <= the per-constraint count
+        # (clustering can only reduce, never grow, the chromatic
+        # bound).
+        self.assertIsNotNone(report.supernodal_num_colors)
+        self.assertGreaterEqual(int(report.supernodal_num_colors), 1)
+        self.assertLessEqual(
+            int(report.supernodal_num_colors),
+            max(1, int(report.num_colors)),
+            msg=(
+                f"supernodal colouring ({report.supernodal_num_colors}) "
+                f"exceeded per-constraint colouring ({report.num_colors}) -- "
+                "clustering only ever fattens nodes, so colour count must not grow"
+            ),
+        )
+
 
 if __name__ == "__main__":
     wp.init()

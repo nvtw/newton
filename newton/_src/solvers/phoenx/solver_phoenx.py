@@ -313,6 +313,14 @@ class PhoenXWorld:
         set. The cluster output is currently a measurement hook -- the
         PGS sweep still runs against the per-constraint coloring."""
 
+        supernodal_num_colors: int | None = None
+        """Number of colours produced by the side-channel partitioner
+        running on the supernodal element graph (i.e. the colour count
+        a cluster-aware dispatch would consume). ``None`` unless
+        :attr:`PhoenXWorld.enable_clustering` is set. Compare against
+        :attr:`num_colors` to quantify the colouring win from
+        clustering."""
+
     def __init__(
         self,
         bodies: BodyContainer,
@@ -666,16 +674,38 @@ class PhoenXWorld:
         # constraint element graph is also clustered (K=4 / 8-body cap)
         # and a supernodal element view is built. Currently only a
         # measurement hook -- the PGS sweep still runs against the
-        # per-constraint coloring. See ``step_report().num_clusters`` for
-        # the per-step output count.
+        # per-constraint coloring. The supernodal colouring runs on a
+        # dedicated partitioner instance whose result is exposed via
+        # ``step_report().supernodal_num_colors`` so we can quantify
+        # the reduction in colour count before committing to a
+        # cluster-aware dispatch path. See ``step_report().num_clusters``
+        # for the per-step cluster count.
         self.enable_clustering: bool = bool(enable_clustering)
         self._clustering: ClusteringPipeline | None = None
+        self._supernodal_partitioner: IncrementalContactPartitioner | None = None
         if self.enable_clustering and self._constraint_capacity > 0:
             self._clustering = ClusteringPipeline(
                 max_num_interactions=self._constraint_capacity,
                 max_num_nodes=max(1, self.num_bodies + self.num_particles),
                 device=self.device,
             )
+            # Measurement-only partitioner. Sized to the worst-case
+            # cluster count (== constraint capacity, when every
+            # constraint is its own singleton cluster). Warm-start is
+            # disabled because (a) the supernodal element graph
+            # differs from the per-constraint graph the main
+            # partitioner caches against, and (b) we want the supernodal
+            # colouring to reflect a cold-start measurement -- no
+            # cross-frame cache effects muddling the result.
+            self._supernodal_partitioner = IncrementalContactPartitioner(
+                max_num_interactions=self._constraint_capacity,
+                max_num_nodes=max(1, self.num_bodies + self.num_particles),
+                device=self.device,
+                use_tile_scan=True,
+                enable_warm_start=False,
+            )
+            self._supernodal_partitioner.set_capture_while_greedy(bool(capture_while_greedy_coloring))
+            self._supernodal_partitioner.set_speculative_coloring(bool(speculative_coloring))
 
         # Mass-splitting data plane. Always allocated (sentinel-sized
         # when disabled) so the constraint kernels can take
@@ -1889,13 +1919,20 @@ class PhoenXWorld:
         if self._constraint_capacity > 0:
             if self._clustering is not None:
                 # Build the cluster + supernodal-element views from the
-                # current per-constraint element graph. Outputs land in
-                # ``self._clustering`` and are not yet consumed by the
-                # partitioner / PGS sweep -- this is currently a
-                # measurement hook to validate graph-capture safety and
-                # surface real-scene cluster statistics via
-                # ``step_report().num_clusters``.
+                # current per-constraint element graph, then colour the
+                # supernodal graph on a side-channel partitioner so we
+                # can quantify the colour-count reduction. The main
+                # partitioner / PGS sweep still use the per-constraint
+                # element graph -- the supernodal colouring is purely
+                # observational. ``step_report().num_clusters`` /
+                # ``.supernodal_num_colors`` surface the result.
                 self._clustering.build(self._elements, self._num_active_constraints)
+                if self._supernodal_partitioner is not None:
+                    self._supernodal_partitioner.reset(
+                        self._clustering.supernodal_elements,
+                        self._clustering.num_clusters,
+                    )
+                    self._supernodal_partitioner.build_csr_greedy_with_jp_fallback()
             self._partitioner.reset(self._elements, self._num_active_constraints)
             if self.step_layout == "single_world":
                 if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
@@ -3269,6 +3306,8 @@ class PhoenXWorld:
         cluster_kwargs: dict[str, int | None] = {}
         if self._clustering is not None:
             cluster_kwargs["num_clusters"] = int(self._clustering.num_clusters.numpy()[0])
+        if self._supernodal_partitioner is not None:
+            cluster_kwargs["supernodal_num_colors"] = int(self._supernodal_partitioner.num_colors.numpy()[0])
 
         # Per-body degree from the partitioner's adjacency CSR end array.
         # max_body_degree is the lower bound on any valid graph colouring.
