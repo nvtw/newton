@@ -5517,6 +5517,16 @@ class ModelBuilder:
                     "Mesh-backed shapes do not use cfg.sdf_* for SDF generation. "
                     "Build and attach an SDF on the mesh via mesh.build_sdf()."
                 )
+            if type == GeoType.CONVEX_MESH and cfg.is_hydroelastic:
+                # finalize() only consumes mesh-attached SDFs for GeoType.MESH;
+                # a hydroelastic CONVEX_MESH would fall into the primitive
+                # branch where _create_primitive_mesh returns None, leaving an
+                # invalid shape_sdf_index entry. Reject up front.
+                raise ValueError(
+                    "Hydroelastic is not supported on GeoType.CONVEX_MESH. "
+                    "Use add_shape_mesh() with a watertight Mesh whose mesh.sdf "
+                    "was built via Mesh.build_sdf()."
+                )
             if cfg.is_hydroelastic and (src is None or getattr(src, "sdf", None) is None):
                 raise ValueError(
                     "Hydroelastic mesh-backed shapes require mesh.sdf. "

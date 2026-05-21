@@ -402,6 +402,19 @@ class TestSDFUSDParsing(unittest.TestCase):
                 "Applied SDF API should land an SDF entry on the finalized model.",
             )
 
+    def test_add_shape_convex_hull_rejects_hydroelastic(self):
+        """add_shape_convex_hull must raise when cfg.is_hydroelastic is set, regardless of mesh.sdf."""
+        builder = newton.ModelBuilder()
+        body = builder.add_body()
+        # 4-vertex tetrahedron — minimum valid input for a convex hull
+        mesh = newton.Mesh(
+            vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)],
+            indices=[0, 1, 2, 0, 1, 3, 0, 2, 3, 1, 2, 3],
+        )
+        cfg = newton.ModelBuilder.ShapeConfig(is_hydroelastic=True)
+        with self.assertRaisesRegex(ValueError, "Hydroelastic is not supported on GeoType.CONVEX_MESH"):
+            builder.add_shape_convex_hull(body, mesh=mesh, cfg=cfg)
+
     def test_usd_sdf_api_applied_hydroelastic_schema_default_wins(self, device=None):
         """When NewtonSDFCollisionAPI is applied and hydroelasticEnabled is unauthored, the schema default (False) wins over a True builder default."""
         if device is None or not wp.get_device(device).is_cuda:
