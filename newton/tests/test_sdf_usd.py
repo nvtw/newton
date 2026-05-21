@@ -569,18 +569,9 @@ add_function_test(
     TestSDFUSDParsing.test_usd_kh_alone_does_not_enable_hydroelastic,
     devices=devices,
 )
-add_function_test(
-    TestSDFUSDParsing,
-    "test_usd_hydroelastic_mesh_with_kh_without_sdf_config_raises",
-    TestSDFUSDParsing.test_usd_hydroelastic_mesh_with_kh_without_sdf_config_raises,
-    devices=devices,
-)
-add_function_test(
-    TestSDFUSDParsing,
-    "test_usd_hydroelastic_mesh_without_sdf_config_raises",
-    TestSDFUSDParsing.test_usd_hydroelastic_mesh_without_sdf_config_raises,
-    devices=devices,
-)
+# The two test_usd_hydroelastic_mesh_*_raises methods validate parse-time
+# ValueErrors on the host; they do not call wp.launch and need no CUDA
+# device, so they are registered as plain unittest methods.
 
 
 if __name__ == "__main__":
