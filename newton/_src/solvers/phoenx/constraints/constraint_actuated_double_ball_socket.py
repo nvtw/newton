@@ -1373,6 +1373,78 @@ def _anchor1_positional_prepare_at(
 
 
 @wp.func
+def _slide_anchor1_anchor2_K4_factor_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_inertia1: wp.mat33f,
+    inv_inertia2: wp.mat33f,
+    cr1_b1: wp.mat33f,
+    cr1_b2: wp.mat33f,
+    cr2_b1: wp.mat33f,
+    cr2_b2: wp.mat33f,
+    t1: wp.vec3f,
+    t2: wp.vec3f,
+):
+    """Build the 4-row tangent K-matrix factorisation shared by
+    PRISMATIC and CYLINDRICAL. Computes the 3x3 anchor-anchor coupling
+    blocks (``b11``, ``b22``, ``b12``), projects onto the tangent
+    basis to assemble the 4x4 ``K4``, inverts it, and writes
+    ``A4_INV`` back to the column. Returns ``(b11, b22, b12)`` so the
+    caller can reuse them for axial-row effective mass or anchor-3
+    coupling without recomputing the per-pair sums."""
+    eye3 = wp.identity(3, dtype=wp.float32)
+    m_diag = (inv_mass1 + inv_mass2) * eye3
+
+    b11 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1)) + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
+    b22 = m_diag + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1)) + cr2_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
+    b12 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1)) + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
+
+    b11_t1 = b11 @ t1
+    b11_t2 = b11 @ t2
+    b22_t1 = b22 @ t1
+    b22_t2 = b22 @ t2
+    b12_t1 = b12 @ t1
+    b12_t2 = b12 @ t2
+
+    k4_00 = wp.dot(t1, b11_t1)
+    k4_01 = wp.dot(t1, b11_t2)
+    k4_11 = wp.dot(t2, b11_t2)
+    k4_02 = wp.dot(t1, b12_t1)
+    k4_03 = wp.dot(t1, b12_t2)
+    k4_12 = wp.dot(t2, b12_t1)
+    k4_13 = wp.dot(t2, b12_t2)
+    k4_22 = wp.dot(t1, b22_t1)
+    k4_23 = wp.dot(t1, b22_t2)
+    k4_33 = wp.dot(t2, b22_t2)
+
+    k4 = wp.mat44f(
+        k4_00,
+        k4_01,
+        k4_02,
+        k4_03,
+        k4_01,
+        k4_11,
+        k4_12,
+        k4_13,
+        k4_02,
+        k4_12,
+        k4_22,
+        k4_23,
+        k4_03,
+        k4_13,
+        k4_23,
+        k4_33,
+    )
+    a4_inv = wp.inverse(k4)
+    write_mat44(constraints, base_offset + _OFF_A4_INV, cid, a4_inv)
+
+    return b11, b22, b12
+
+
+@wp.func
 def _pivot_anchor1_anchor2_K_factor_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
@@ -2062,91 +2134,38 @@ def _prismatic_prepare_at(
     cr3_b1 = wp.skew(r3_b1)
     cr3_b2 = wp.skew(r3_b2)
 
-    eye3 = wp.identity(3, dtype=wp.float32)
-    m_diag = (inv_mass1 + inv_mass2) * eye3
-
-    b11 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1)) + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
-    b22 = m_diag + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1)) + cr2_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
-    b33 = m_diag + cr3_b1 @ (inv_inertia1 @ wp.transpose(cr3_b1)) + cr3_b2 @ (inv_inertia2 @ wp.transpose(cr3_b2))
-    b12 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1)) + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
-    b13 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr3_b1)) + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr3_b2))
-    b23 = m_diag + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr3_b1)) + cr2_b2 @ (inv_inertia2 @ wp.transpose(cr3_b2))
-
-    # ---- Project to tangent basis ------------------------------------
-    # T_2x3 = [t1; t2]; each 2x2 block for (anchor i, anchor j) is
-    # [[t1.B_ij.t1, t1.B_ij.t2], [t2.B_ij.t1, t2.B_ij.t2]].
-    b11_t1 = b11 @ t1
-    b11_t2 = b11 @ t2
-    b22_t1 = b22 @ t1
-    b22_t2 = b22 @ t2
-    b12_t1 = b12 @ t1
-    b12_t2 = b12 @ t2
-    # b21 = b12^T, computed on-the-fly where needed.
-    b13_t2 = b13 @ t2  # c-vector is [a1,a3] and [a2,a3] projected onto t2.
-    b23_t2 = b23 @ t2
-
-    # 4x4 K4: rows/cols = (a1 t1, a1 t2, a2 t1, a2 t2).
-    # K4[i,j] in the 2x2 diagonal block is anchor i tangent-tangent; in
-    # the off-diagonal block (a1, a2) it's t_i . B12 . t_j (and its
-    # transpose for (a2, a1)).
-    k4_00 = wp.dot(t1, b11_t1)
-    k4_01 = wp.dot(t1, b11_t2)
-    k4_11 = wp.dot(t2, b11_t2)
-    k4_02 = wp.dot(t1, b12_t1)  # t1 . B12 . t1
-    k4_03 = wp.dot(t1, b12_t2)  # t1 . B12 . t2
-    k4_12 = wp.dot(t2, b12_t1)  # t2 . B12 . t1
-    k4_13 = wp.dot(t2, b12_t2)  # t2 . B12 . t2
-    k4_22 = wp.dot(t1, b22_t1)
-    k4_23 = wp.dot(t1, b22_t2)
-    k4_33 = wp.dot(t2, b22_t2)
-
-    # K4 is symmetric (K_ij = K_ji because B_ii is symmetric and the
-    # (a2,a1) block equals the transpose of the (a1,a2) block).
-    k4 = wp.mat44f(
-        k4_00,
-        k4_01,
-        k4_02,
-        k4_03,
-        k4_01,
-        k4_11,
-        k4_12,
-        k4_13,
-        k4_02,
-        k4_12,
-        k4_22,
-        k4_23,
-        k4_03,
-        k4_13,
-        k4_23,
-        k4_33,
+    # 4-row K-factor (shared with CYLINDRICAL). Returns b11/b22/b12 so
+    # PRISMATIC can reuse them when computing the axial effective
+    # inertia (``n_hat . b11 . n_hat``) below.
+    b11, _b22, _b12 = _slide_anchor1_anchor2_K4_factor_at(
+        constraints,
+        cid,
+        base_offset,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        cr1_b1,
+        cr1_b2,
+        cr2_b1,
+        cr2_b2,
+        t1,
+        t2,
     )
 
-    # c-vector: coupling of the 4 tangent rows with the a3 scalar row
-    # (which is along t2 at anchor 3).
-    c0 = wp.dot(t1, b13_t2)  # row (a1, t1) with (a3, t2).
-    c1 = wp.dot(t2, b13_t2)
-    c2 = wp.dot(t1, b23_t2)
-    c3 = wp.dot(t2, b23_t2)
-    c = wp.vec4f(c0, c1, c2, c3)
-
-    # d scalar: t2 . B33 . t2.
-    b33_t2 = b33 @ t2
-    d_scalar = wp.dot(t2, b33_t2)
-
-    # ---- Block-GS factorisation --------------------------------------
-    # a4_inv: straight inverse of the 4x4 tangent block (no Schur
-    # compaction). s_scalar_inv: 1 / d_scalar (standalone), NOT the
-    # Schur scalar -- the iterate uses block Gauss-Seidel to share
-    # code with CYLINDRICAL and FIXED's scalar block. The c-coupling
-    # vector is no longer needed; we still write it (as 0) to keep
-    # the column schema stable for old warm-start data.
-    a4_inv = wp.inverse(k4)
+    # Anchor-3 standalone scalar for the block-GS path: d = t2 . B33 . t2.
+    eye3 = wp.identity(3, dtype=wp.float32)
+    m_diag = (inv_mass1 + inv_mass2) * eye3
+    b33 = m_diag + cr3_b1 @ (inv_inertia1 @ wp.transpose(cr3_b1)) + cr3_b2 @ (inv_inertia2 @ wp.transpose(cr3_b2))
+    d_scalar = wp.dot(t2, b33 @ t2)
     if wp.abs(d_scalar) > 1.0e-20:
         s_scalar_inv = 1.0 / d_scalar
     else:
         s_scalar_inv = 0.0
 
-    write_mat44(constraints, base_offset + _OFF_A4_INV, cid, a4_inv)
+    # ``C_PRIS`` is dormant under block-GS (Schur coupling vector was
+    # consumed when the prepare math was Schur-based; the iterate no
+    # longer reads it). Stamp it as zero for column-schema stability.
     write_vec4(constraints, base_offset + _OFF_C_PRIS, cid, wp.vec4f(0.0, 0.0, 0.0, 0.0))
     write_float(constraints, base_offset + _OFF_S_SCALAR_INV, cid, s_scalar_inv)
 
@@ -2392,51 +2411,24 @@ def _cylindrical_prepare_at(
     cr2_b1 = wp.skew(r2_b1)
     cr2_b2 = wp.skew(r2_b2)
 
-    eye3 = wp.identity(3, dtype=wp.float32)
-    m_diag = (inv_mass1 + inv_mass2) * eye3
-
-    b11 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1)) + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
-    b22 = m_diag + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1)) + cr2_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
-    b12 = m_diag + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1)) + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
-
-    # 4x4 K4 in (a1 t1, a1 t2, a2 t1, a2 t2) basis. Symmetric.
-    b11_t1 = b11 @ t1
-    b11_t2 = b11 @ t2
-    b22_t1 = b22 @ t1
-    b22_t2 = b22 @ t2
-    b12_t1 = b12 @ t1
-    b12_t2 = b12 @ t2
-
-    k4_00 = wp.dot(t1, b11_t1)
-    k4_01 = wp.dot(t1, b11_t2)
-    k4_11 = wp.dot(t2, b11_t2)
-    k4_02 = wp.dot(t1, b12_t1)
-    k4_03 = wp.dot(t1, b12_t2)
-    k4_12 = wp.dot(t2, b12_t1)
-    k4_13 = wp.dot(t2, b12_t2)
-    k4_22 = wp.dot(t1, b22_t1)
-    k4_23 = wp.dot(t1, b22_t2)
-    k4_33 = wp.dot(t2, b22_t2)
-    k4 = wp.mat44f(
-        k4_00,
-        k4_01,
-        k4_02,
-        k4_03,
-        k4_01,
-        k4_11,
-        k4_12,
-        k4_13,
-        k4_02,
-        k4_12,
-        k4_22,
-        k4_23,
-        k4_03,
-        k4_13,
-        k4_23,
-        k4_33,
+    # 4-row K-factor (shared with PRISMATIC). Returns b11 (anchor-1
+    # self block) for the axial effective-inertia computation below;
+    # b22 / b12 are unused in CYLINDRICAL.
+    b11, _b22, _b12 = _slide_anchor1_anchor2_K4_factor_at(
+        constraints,
+        cid,
+        base_offset,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        cr1_b1,
+        cr1_b2,
+        cr2_b1,
+        cr2_b2,
+        t1,
+        t2,
     )
-    a4_inv = wp.inverse(k4)
-    write_mat44(constraints, base_offset + _OFF_A4_INV, cid, a4_inv)
 
     hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
