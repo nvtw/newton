@@ -597,12 +597,14 @@ attributes, along with any unit or semantic differences.
      - ``newton:sdfMaxResolution``
      - Direct mapping; must be divisible by 8.
    * - ``physxSDFMeshCollision:sdfNarrowBandThickness``
-     - ``newton:sdfNarrowBandInnerFraction``,
-       ``newton:sdfNarrowBandOuterFraction``
-     - Split into inner / outer halves — see *Narrow band split* below.
+     - ``newton:sdfNarrowBandInner``,
+       ``newton:sdfNarrowBandOuter``
+     - Absolute distances [m]. Split into inner / outer halves — see
+       *Narrow band split* below.
    * - ``physxSDFMeshCollision:sdfMargin``
-     - ``newton:sdfMarginFraction``
-     - Both are fractions of the mesh AABB diagonal.
+     - ``newton:sdfMargin``
+     - Absolute distance [m]. PhysX authors a fraction of the mesh AABB
+       diagonal; multiply by the diagonal before authoring on Newton.
    * - ``physxSDFMeshCollision:sdfBitsPerSubgridPixel``
      - ``newton:sdfTextureFormat``
      - ``BitsPerPixel8/16/32`` → ``uint8`` / ``uint16`` / ``float32``.
@@ -612,19 +614,11 @@ attributes, along with any unit or semantic differences.
 
 .. note::
 
-   **Narrow band split.** PhysX authors a single fraction of the mesh AABB
-   diagonal. Newton splits it into inner / outer halves: set
-   ``newton:sdfNarrowBandInnerFraction`` to the negated value and
-   ``newton:sdfNarrowBandOuterFraction`` to the positive value
-   (e.g. ``-0.01`` and ``0.01``).
-
-.. note::
-
-   **Absolute vs. fractional.** Newton also exposes absolute-distance variants
-   (``newton:sdfNarrowBandInner``, ``newton:sdfNarrowBandOuter``,
-   ``newton:sdfMargin``) in meters. When both forms are authored, the
-   fractional one wins at parse time. PhysX-ported assets naturally use the
-   fractional form.
+   **Narrow band split.** PhysX authors a single thickness around the
+   surface. Newton splits it into inner / outer halves: set
+   ``newton:sdfNarrowBandInner`` to the negated value and
+   ``newton:sdfNarrowBandOuter`` to the positive value in meters
+   (e.g. ``-0.02`` and ``0.02``).
 
 **Hydroelastic contacts (per mesh shape, opt-in):**
 
@@ -684,9 +678,9 @@ The same asset using Newton schemas:
            float newton:contactMargin = 0.002
            float newton:contactGap = 0.003
            uniform int newton:sdfMaxResolution = 256
-           uniform float newton:sdfNarrowBandInnerFraction = -0.01
-           uniform float newton:sdfNarrowBandOuterFraction = 0.01
-           uniform float newton:sdfMarginFraction = 0.01
+           uniform float newton:sdfNarrowBandInner = -0.02
+           uniform float newton:sdfNarrowBandOuter = 0.02
+           uniform float newton:sdfMargin = 0.02
            uniform token newton:sdfTextureFormat = "uint16"
        }
    }
@@ -695,8 +689,10 @@ Two details are worth highlighting:
 
 * ``newton:contactGap = 0.003`` (PhysX ``contactOffset=0.005`` minus
   ``restOffset=0.002``), because Newton's gap is additive on top of the margin.
-* The single PhysX narrow-band thickness ``0.01`` becomes an inner/outer pair
-  ``(-0.01, 0.01)`` as fractions of the mesh AABB diagonal.
+* PhysX authors the narrow-band thickness as a fraction of the mesh AABB
+  diagonal; Newton authors absolute distances [m] split into inner/outer
+  halves. For a unit-cube-ish mesh, a PhysX fraction of ``0.01`` corresponds
+  to roughly ``±0.02`` m (``0.01 * sqrt(3)``).
 
 To also opt into hydroelastic contacts, set ``newton:hydroelasticEnabled=true``
 on the same ``NewtonSDFCollisionAPI`` and author ``newton:hydroelasticStiffness``:
@@ -723,6 +719,8 @@ conventions. The snippet below is executed as part of the documentation test
 suite, so it doubles as an end-to-end regression against Newton's importer.
 
 .. testcode::
+
+   import math
 
    from pxr import Sdf, Usd, UsdGeom, UsdPhysics
 
@@ -751,6 +749,18 @@ suite, so it doubles as an end-to-end regression against Newton's importer.
                                               op.appendedItems, op.addedItems,
                                               op.orderedItems) if items)
 
+   def _bbox_diag(prim) -> float | None:
+       """Compute the local-space AABB diagonal [m] of a USD prim, or
+       ``None`` if the bbox is empty."""
+       cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                 includedPurposes=[UsdGeom.Tokens.default_])
+       rng = cache.ComputeLocalBound(prim).ComputeAlignedRange()
+       if rng.IsEmpty():
+           return None
+       size = rng.GetSize()
+       diag = size.GetLength()
+       return float(diag) if diag > 0 else None
+
    def port_physx_sdf_to_newton(stage: Usd.Stage) -> int:
        """Rewrite PhysxSDFMeshCollisionAPI / PhysxCollisionAPI attrs on each
        prim as NewtonSDFCollisionAPI / NewtonCollisionAPI attrs. Returns the
@@ -775,17 +785,23 @@ suite, so it doubles as an end-to-end regression against Newton's importer.
            if res is not None:
                _set(prim, "newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, int(res))
 
-           # Narrow band: single fraction -> (inner=-t, outer=+t).
-           t = _get(prim, "physxSDFMeshCollision:sdfNarrowBandThickness")
-           if t is not None:
-               t = float(t)
-               _set(prim, "newton:sdfNarrowBandInnerFraction", Sdf.ValueTypeNames.Float, -t)
-               _set(prim, "newton:sdfNarrowBandOuterFraction", Sdf.ValueTypeNames.Float, t)
+           # PhysX authors narrow band / margin as a fraction of the mesh
+           # AABB diagonal. Newton authors absolute distances [m], so
+           # multiply by the bbox diagonal at port time.
+           diag = _bbox_diag(prim)
 
-           # Margin (fractional on both sides).
+           # Narrow band: single fraction -> (inner=-t*diag, outer=+t*diag).
+           t = _get(prim, "physxSDFMeshCollision:sdfNarrowBandThickness")
+           if t is not None and diag is not None:
+               abs_t = float(t) * diag
+               _set(prim, "newton:sdfNarrowBandInner", Sdf.ValueTypeNames.Float, -abs_t)
+               _set(prim, "newton:sdfNarrowBandOuter", Sdf.ValueTypeNames.Float, abs_t)
+
+           # Margin: fraction -> absolute [m] via diag.
            m = _get(prim, "physxSDFMeshCollision:sdfMargin")
-           if m is not None:
-               _set(prim, "newton:sdfMarginFraction", Sdf.ValueTypeNames.Float, float(m))
+           if m is not None and diag is not None:
+               _set(prim, "newton:sdfMargin", Sdf.ValueTypeNames.Float,
+                    float(m) * diag)
 
            # Texture format token translation.
            bits = _get(prim, "physxSDFMeshCollision:sdfBitsPerSubgridPixel")
@@ -839,9 +855,10 @@ suite, so it doubles as an end-to-end regression against Newton's importer.
    assert _close(_get(p, "newton:contactMargin"), 0.002)
    assert _close(_get(p, "newton:contactGap"), 0.003)
    assert _get(p, "newton:sdfMaxResolution") == 256
-   assert _close(_get(p, "newton:sdfNarrowBandInnerFraction"), -0.01)
-   assert _close(_get(p, "newton:sdfNarrowBandOuterFraction"), 0.01)
-   assert _close(_get(p, "newton:sdfMarginFraction"), 0.02)
+   _diag = math.sqrt(3)  # unit cube [-0.5, 0.5]^3
+   assert _close(_get(p, "newton:sdfNarrowBandInner"), -0.01 * _diag, tol=1e-5)
+   assert _close(_get(p, "newton:sdfNarrowBandOuter"), 0.01 * _diag, tol=1e-5)
+   assert _close(_get(p, "newton:sdfMargin"), 0.02 * _diag, tol=1e-5)
    assert _get(p, "newton:sdfTextureFormat") == "uint16"
    assert _has_applied_schema(p, "NewtonSDFCollisionAPI")
 
