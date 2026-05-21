@@ -2681,15 +2681,10 @@ def parse_usd(
                 # SDF parameters. Applying NewtonSDFCollisionAPI is the canonical
                 # signal that SDF generation is configured for this shape.
                 has_sdf_api = _prim_has_applied_schema(prim, "NewtonSDFCollisionAPI")
-                sdf_max_resolution = R.get_value(
-                    prim, prim_type=PrimType.SHAPE, key="sdf_max_resolution", verbose=verbose
-                )
-                if sdf_max_resolution is None:
-                    # When the API is applied but the attribute is not authored,
-                    # fall back to the schema default (64). Otherwise use the
-                    # Newton builder default (which is None for this field).
-                    sdf_max_resolution = 64 if has_sdf_api else builder.default_shape_cfg.sdf_max_resolution
 
+                # Resolve target_voxel_size first because it overrides
+                # sdf_max_resolution and the two are mutually exclusive in
+                # ShapeConfig.validate().
                 sdf_target_voxel_size = R.get_value(
                     prim, prim_type=PrimType.SHAPE, key="sdf_target_voxel_size", verbose=verbose
                 )
@@ -2700,6 +2695,19 @@ def parse_usd(
                     sdf_target_voxel_size = None
                 if sdf_target_voxel_size is None:
                     sdf_target_voxel_size = builder.default_shape_cfg.sdf_target_voxel_size
+
+                sdf_max_resolution = R.get_value(
+                    prim, prim_type=PrimType.SHAPE, key="sdf_max_resolution", verbose=verbose
+                )
+                if sdf_max_resolution is None:
+                    # When the API is applied but neither attribute is authored,
+                    # fall back to the schema default (64). When target voxel
+                    # size already drives the resolution, leave max_resolution
+                    # unset so the two don't conflict in ShapeConfig.validate().
+                    if has_sdf_api and sdf_target_voxel_size is None:
+                        sdf_max_resolution = 64
+                    else:
+                        sdf_max_resolution = builder.default_shape_cfg.sdf_max_resolution
 
                 sdf_narrow_band_inner = R.get_value(
                     prim, prim_type=PrimType.SHAPE, key="sdf_narrow_band_inner", verbose=verbose

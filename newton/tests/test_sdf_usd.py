@@ -402,6 +402,33 @@ class TestSDFUSDParsing(unittest.TestCase):
                 "Applied SDF API should land an SDF entry on the finalized model.",
             )
 
+    def test_usd_sdf_api_applied_target_voxel_size_only(self):
+        """Authoring only newton:sdfTargetVoxelSize must not also inject the API default for sdfMaxResolution."""
+        from pxr import Sdf, Usd, UsdGeom, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            usd_path = Path(tmpdir) / "test_target_voxel_only.usda"
+            stage = Usd.Stage.CreateNew(str(usd_path))
+            UsdPhysics.Scene.Define(stage, "/PhysicsScene")
+
+            _add_rigid_body(stage, "/World/Body1")
+            sphere = UsdGeom.Sphere.Define(stage, "/World/Body1/CollisionSphere")
+            sphere.CreateRadiusAttr(0.2)
+            UsdPhysics.CollisionAPI.Apply(sphere.GetPrim())
+            p1 = sphere.GetPrim()
+            p1.AddAppliedSchema("NewtonSDFCollisionAPI")
+            p1.CreateAttribute("newton:sdfTargetVoxelSize", Sdf.ValueTypeNames.Float, custom=True).Set(0.01)
+
+            stage.Save()
+
+            builder = newton.ModelBuilder()
+            # Must not raise: target_voxel_size and max_resolution are mutually exclusive.
+            result = parse_usd(builder, str(usd_path))
+            s1 = result["path_shape_map"]["/World/Body1/CollisionSphere"]
+
+            self.assertIsNone(builder.shape_sdf_max_resolution[s1])
+            self.assertAlmostEqual(builder.shape_sdf_target_voxel_size[s1], 0.01, places=5)
+
     def test_usd_sdf_api_applied_no_hydroelastic_by_default(self, device=None):
         """Applying NewtonSDFCollisionAPI without authoring hydroelasticEnabled leaves hydro OFF."""
         if device is None or not wp.get_device(device).is_cuda:
