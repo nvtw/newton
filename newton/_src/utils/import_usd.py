@@ -2739,21 +2739,21 @@ def parse_usd(
                 if kh is None:
                     kh = builder.default_shape_cfg.kh
 
-                    # Early validation: hydroelastic meshes need an SDF source.
-                    # For primitives, a texture SDF is generated from a synthesized
-                    # watertight mesh at finalize(), but meshes require either an
-                    # attached mesh.sdf or a resolution/voxel_size so one can be
-                    # built deferred.
-                    if (
-                        is_hydroelastic
-                        and key == UsdPhysics.ObjectType.MeshShape
-                        and sdf_max_resolution is None
-                        and sdf_target_voxel_size is None
-                    ):
-                        raise ValueError(
-                            f"{prim.GetPath()}: hydroelastic mesh requires newton:sdfMaxResolution "
-                            f"or newton:sdfTargetVoxelSize so an SDF can be generated."
-                        )
+                # Early validation: hydroelastic meshes need an SDF source.
+                # For primitives, a texture SDF is generated from a synthesized
+                # watertight mesh at finalize(), but meshes require either an
+                # attached mesh.sdf or a resolution/voxel_size so one can be
+                # built deferred.
+                if (
+                    is_hydroelastic
+                    and key == UsdPhysics.ObjectType.MeshShape
+                    and sdf_max_resolution is None
+                    and sdf_target_voxel_size is None
+                ):
+                    raise ValueError(
+                        f"{prim.GetPath()}: hydroelastic mesh requires newton:sdfMaxResolution "
+                        f"or newton:sdfTargetVoxelSize so an SDF can be generated."
+                    )
 
                 shape_params = {
                     "body": body_id,

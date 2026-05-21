@@ -481,6 +481,29 @@ class TestSDFUSDParsing(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "hydroelastic mesh requires"):
                 parse_usd(builder, str(usd_path))
 
+    def test_usd_hydroelastic_mesh_with_kh_without_sdf_config_raises(self, device=None):
+        """Authoring newton:hydroelasticStiffness must not bypass the hydroelastic-mesh SDF-source validation."""
+        del device  # validation is host-side and independent of device
+
+        from pxr import Sdf, Usd, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            usd_path = Path(tmpdir) / "test_hydro_mesh_kh_invalid.usda"
+            stage = Usd.Stage.CreateNew(str(usd_path))
+            UsdPhysics.Scene.Define(stage, "/PhysicsScene")
+
+            _add_rigid_body(stage, "/World/Body1")
+            m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
+            p1 = m1.GetPrim()
+            p1.CreateAttribute("newton:hydroelasticEnabled", Sdf.ValueTypeNames.Bool, custom=True).Set(True)
+            p1.CreateAttribute("newton:hydroelasticStiffness", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
+
+            stage.Save()
+
+            builder = newton.ModelBuilder()
+            with self.assertRaisesRegex(ValueError, "hydroelastic mesh requires"):
+                parse_usd(builder, str(usd_path))
+
 
 devices = get_selected_cuda_test_devices()
 add_function_test(
@@ -539,6 +562,12 @@ add_function_test(
     TestSDFUSDParsing,
     "test_usd_kh_alone_does_not_enable_hydroelastic",
     TestSDFUSDParsing.test_usd_kh_alone_does_not_enable_hydroelastic,
+    devices=devices,
+)
+add_function_test(
+    TestSDFUSDParsing,
+    "test_usd_hydroelastic_mesh_with_kh_without_sdf_config_raises",
+    TestSDFUSDParsing.test_usd_hydroelastic_mesh_with_kh_without_sdf_config_raises,
     devices=devices,
 )
 add_function_test(
