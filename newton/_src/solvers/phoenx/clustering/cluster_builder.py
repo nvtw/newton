@@ -163,6 +163,23 @@ def _body_set_contains(body_set: vec8i, body: wp.int32) -> wp.bool:
 
 
 @wp.func
+def _body_overlap_with_seed(seed_set: vec8i, neigh_el: ElementInteractionData) -> wp.int32:
+    """Count how many of ``neigh_el``'s bodies appear in ``seed_set``.
+    Higher overlap means fewer new bodies are added when admitting the
+    neighbour into the cluster -- exactly what minimises the chance of
+    hitting the body cap. Used by validate to pick the top-3 admission
+    candidates."""
+    cnt = wp.int32(0)
+    for b_idx in range(MAX_BODIES):
+        b = element_interaction_data_get(neigh_el, b_idx)
+        if b < 0:
+            break
+        if _body_set_contains(seed_set, b):
+            cnt += wp.int32(1)
+    return cnt
+
+
+@wp.func
 def _body_set_count_new(body_set: vec8i, neigh_el: ElementInteractionData) -> wp.int32:
     """How many of ``neigh_el``'s bodies are NOT already in ``body_set``."""
     new_count = wp.int32(0)
@@ -393,16 +410,26 @@ def _cluster_validate_seeds_kernel(
         wp.atomic_add(progress_flag, 0, wp.int32(1))
         return
 
-    # Pass 1: find the ks-1 = 3 smallest-id confirmed neighbours.
-    # Insertion-sort into three slot locals (cand0 < cand1 < cand2).
-    # A neighbour can appear in multiple body adjacency lists (shared
-    # >= 2 bodies); the dedup against {cand0, cand1, cand2} keeps the
-    # set unique.
-    cand0 = _EMPTY
-    cand1 = _EMPTY
-    cand2 = _EMPTY
-
+    # Pass 1: find the ks-1 = 3 confirmed neighbours with MAXIMUM body
+    # overlap with the seed (tiebreak by lower neighbour id for
+    # determinism). The 3 slots are kept sorted DESCENDING by
+    # (overlap, -id) so cand0 is the best candidate to admit first.
+    # This is the only departure from a faithful port of Algorithm 4:
+    # the paper sorts by Jaccard distance globally, which is equivalent
+    # to "more overlap = closer". We use overlap-with-seed since the
+    # seed's body set is what's checked against the body cap; admitting
+    # a high-overlap neighbour adds few new bodies, freeing room for
+    # more admissions before the cap fires.
     el = elements[tid]
+    seed_body_set = _body_set_init_from(el)
+
+    cand0 = _EMPTY
+    cand0_ov = wp.int32(-1)
+    cand1 = _EMPTY
+    cand1_ov = wp.int32(-1)
+    cand2 = _EMPTY
+    cand2_ov = wp.int32(-1)
+
     for j in range(MAX_BODIES):
         v = element_interaction_data_get(el, j)
         if v < 0:
@@ -422,16 +449,29 @@ def _cluster_validate_seeds_kernel(
                 continue
             if neighbor == cand0 or neighbor == cand1 or neighbor == cand2:
                 continue
-            # Insertion-sort against the 3 slot maxima.
-            if neighbor < cand0:
+            ov = _body_overlap_with_seed(seed_body_set, elements[neighbor])
+            # Comparator: candidate beats slot if higher overlap, or
+            # equal overlap with smaller id (deterministic tiebreak).
+            beats_0 = ov > cand0_ov or (ov == cand0_ov and neighbor < cand0)
+            if beats_0:
                 cand2 = cand1
+                cand2_ov = cand1_ov
                 cand1 = cand0
+                cand1_ov = cand0_ov
                 cand0 = neighbor
-            elif neighbor < cand1:
+                cand0_ov = ov
+                continue
+            beats_1 = ov > cand1_ov or (ov == cand1_ov and neighbor < cand1)
+            if beats_1:
                 cand2 = cand1
+                cand2_ov = cand1_ov
                 cand1 = neighbor
-            elif neighbor < cand2:
+                cand1_ov = ov
+                continue
+            beats_2 = ov > cand2_ov or (ov == cand2_ov and neighbor < cand2)
+            if beats_2:
                 cand2 = neighbor
+                cand2_ov = ov
 
     # Pass 2: body-cap admit decisions in id-sorted order. Track which
     # of the three candidates were admitted so the release pass can
