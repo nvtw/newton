@@ -2745,6 +2745,12 @@ def parse_usd(
                     is_hydroelastic = True
                 elif hydroelastic_enabled is False:
                     is_hydroelastic = False
+                elif has_sdf_api:
+                    # The API is applied but newton:hydroelasticEnabled is
+                    # unauthored: the schema default (False) is the canonical
+                    # signal — overriding it via builder.default_shape_cfg
+                    # would silently flip hydro on for every API-applied shape.
+                    is_hydroelastic = False
                 else:
                     is_hydroelastic = builder.default_shape_cfg.is_hydroelastic
                 if kh is None:

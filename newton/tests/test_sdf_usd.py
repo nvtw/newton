@@ -402,6 +402,34 @@ class TestSDFUSDParsing(unittest.TestCase):
                 "Applied SDF API should land an SDF entry on the finalized model.",
             )
 
+    def test_usd_sdf_api_applied_hydroelastic_schema_default_wins(self, device=None):
+        """When NewtonSDFCollisionAPI is applied and hydroelasticEnabled is unauthored, the schema default (False) wins over a True builder default."""
+        if device is None or not wp.get_device(device).is_cuda:
+            self.skipTest("SDF tests require CUDA device")
+
+        from pxr import Usd, UsdGeom, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            usd_path = Path(tmpdir) / "test_hydro_schema_default.usda"
+            stage = Usd.Stage.CreateNew(str(usd_path))
+            UsdPhysics.Scene.Define(stage, "/PhysicsScene")
+
+            _add_rigid_body(stage, "/World/Body1")
+            sphere = UsdGeom.Sphere.Define(stage, "/World/Body1/CollisionSphere")
+            sphere.CreateRadiusAttr(0.2)
+            UsdPhysics.CollisionAPI.Apply(sphere.GetPrim())
+            p1 = sphere.GetPrim()
+            p1.AddAppliedSchema("NewtonSDFCollisionAPI")
+
+            stage.Save()
+
+            builder = newton.ModelBuilder()
+            builder.default_shape_cfg.is_hydroelastic = True
+            result = parse_usd(builder, str(usd_path))
+            s1 = result["path_shape_map"]["/World/Body1/CollisionSphere"]
+
+            self.assertFalse(builder.shape_flags[s1] & newton.ShapeFlags.HYDROELASTIC)
+
     def test_usd_sdf_api_applied_target_voxel_size_only(self):
         """Authoring only newton:sdfTargetVoxelSize must not also inject the API default for sdfMaxResolution."""
         from pxr import Sdf, Usd, UsdGeom, UsdPhysics
@@ -588,6 +616,12 @@ add_function_test(
     TestSDFUSDParsing,
     "test_usd_sdf_api_applied_no_hydroelastic_by_default",
     TestSDFUSDParsing.test_usd_sdf_api_applied_no_hydroelastic_by_default,
+    devices=devices,
+)
+add_function_test(
+    TestSDFUSDParsing,
+    "test_usd_sdf_api_applied_hydroelastic_schema_default_wins",
+    TestSDFUSDParsing.test_usd_sdf_api_applied_hydroelastic_schema_default_wins,
     devices=devices,
 )
 add_function_test(
