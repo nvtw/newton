@@ -17,6 +17,7 @@ from .kernels import (
     apply_rigid_restitution,
     bending_constraint,
     convert_contact_impulse_to_force,
+    convert_joint_impulse_to_joint_reaction_f,
     convert_joint_impulse_to_parent_f,
     copy_kinematic_body_state_kernel,
     solve_body_contact_positions,
@@ -65,6 +66,11 @@ class SolverXPBD(SolverBase):
         and the body-frame contribution of :attr:`~newton.Control.joint_f`.
         In equilibrium this wrench counters all applied forces (gravity,
         contacts, ``State.body_f``) by Newton's third law.
+
+        :attr:`~newton.State.joint_reaction_f` reports the same total wrench
+        keyed per joint and expressed in the joint-local frame at the
+        parent-side joint anchor.  It carries the same approximation caveats
+        as ``body_parent_f``.
 
     Joint limitations:
         - Supported joint types: PRISMATIC, REVOLUTE, BALL, FIXED, FREE, DISTANCE, D6.
@@ -293,9 +299,13 @@ class SolverXPBD(SolverBase):
                 )
 
         # Optional per-joint accumulated child-side spatial impulse, used to
-        # populate ``state_out.body_parent_f`` after the iteration loop.
+        # populate ``state_out.body_parent_f`` and/or ``state_out.joint_reaction_f``
+        # after the iteration loop.
         joint_impulse = None
-        if state_out.body_parent_f is not None and model.joint_count > 0:
+        need_joint_impulse = (
+            state_out.body_parent_f is not None or state_out.joint_reaction_f is not None
+        ) and model.joint_count > 0
+        if need_joint_impulse:
             joint_impulse = wp.zeros(model.joint_count, dtype=wp.spatial_vector, device=model.device)
 
         if control is None:
@@ -661,6 +671,31 @@ class SolverXPBD(SolverBase):
                             dt,
                         ],
                         outputs=[state_out.body_parent_f],
+                        device=model.device,
+                    )
+
+            # Populate optional ``state_out.joint_reaction_f`` (per-joint
+            # reaction wrench in joint-local frame at the parent-side joint
+            # anchor) from the same accumulated child-side impulse.  Disabled
+            # and ``FREE`` joints remain zero-initialized.
+            if state_out.joint_reaction_f is not None:
+                state_out.joint_reaction_f.zero_()
+                if joint_impulse is not None:
+                    wp.launch(
+                        kernel=convert_joint_impulse_to_joint_reaction_f,
+                        dim=model.joint_count,
+                        inputs=[
+                            joint_impulse,
+                            model.joint_enabled,
+                            model.joint_type,
+                            model.joint_parent,
+                            model.joint_child,
+                            model.joint_X_p,
+                            body_q,
+                            model.body_com,
+                            dt,
+                        ],
+                        outputs=[state_out.joint_reaction_f],
                         device=model.device,
                     )
 

@@ -1033,6 +1033,298 @@ def test_xpbd_parent_force_zero_for_free_body(test, device):
     )
 
 
+def test_xpbd_joint_reaction_f_static_pendulum(test, device):
+    """Static single-revolute pendulum: ``joint_reaction_f`` reports m*g along +Z in joint frame.
+
+    With identity ``joint_X_p`` (joint anchor frame == world frame), the
+    joint-local frame coincides with world frame so:
+        ``joint_reaction_f[joint][2] ~= m * g``
+    and the torque about the joint axis (Y) ~= 0.
+    """
+    gravity = 9.81
+    builder = newton.ModelBuilder(gravity=-gravity, up_axis=newton.Axis.Z)
+    builder.request_state_attributes("joint_reaction_f")
+
+    link = builder.add_link()
+    builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+    joint = builder.add_joint_revolute(
+        -1,
+        link,
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()),
+        axis=wp.vec3(0.0, 1.0, 0.0),
+    )
+    builder.add_articulation([joint])
+    model = builder.finalize(device=device)
+
+    solver = newton.solvers.SolverXPBD(model, iterations=8)
+    state_in = model.state()
+    state_out = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+
+    test.assertIsNotNone(state_in.joint_reaction_f)
+    test.assertEqual(state_in.joint_reaction_f.shape[0], model.joint_count)
+
+    dt = 1.0 / 60.0
+    num_substeps = 8
+    sub_dt = dt / num_substeps
+    settle_steps = 60
+    avg_steps = 30
+
+    for _ in range(settle_steps):
+        for _ in range(num_substeps):
+            solver.step(state_in, state_out, None, None, sub_dt)
+            state_in, state_out = state_out, state_in
+
+    reaction_avg = np.zeros(6)
+    for _ in range(avg_steps):
+        for _ in range(num_substeps):
+            solver.step(state_in, state_out, None, None, sub_dt)
+            state_in, state_out = state_out, state_in
+        reaction_avg += state_in.joint_reaction_f.numpy()[0]
+    reaction_avg /= avg_steps
+
+    weight = float(model.body_mass.numpy()[0]) * gravity
+    np.testing.assert_allclose(
+        reaction_avg[2], weight, rtol=0.01, err_msg="joint_reaction_f[2] should match m*g (joint frame == world frame)"
+    )
+    np.testing.assert_allclose(
+        reaction_avg[:2], 0.0, atol=0.1, err_msg="joint_reaction_f horizontal force should be ~0"
+    )
+    np.testing.assert_allclose(
+        reaction_avg[3:6], 0.0, atol=0.1, err_msg="joint_reaction_f torque about joint anchor should be ~0"
+    )
+
+
+def test_xpbd_joint_reaction_f_consistent_with_body_parent_f(test, device):
+    """``joint_reaction_f`` and ``body_parent_f`` must report the same wrench.
+
+    Both extended attributes are populated from the same internal
+    ``joint_impulse`` accumulator -- the difference is only the reference
+    point and frame of the reported wrench.  For a single revolute pendulum
+    with **identity** ``joint_X_p``, the parent-side joint-local frame
+    coincides with world frame, so the two reports are related by a pure
+    moment translation:
+
+        joint_reaction_f.linear = body_parent_f.linear
+        joint_reaction_f.torque = body_parent_f.torque - cross(r, F)
+
+    where ``r = anchor_pos - child_COM_world`` (here ``(0, 0, 1)`` in the
+    settled hanging configuration).  This verifies the kernel's translation
+    math without depending on solver-specific dynamics.
+    """
+    gravity = 9.81
+    builder = newton.ModelBuilder(gravity=-gravity, up_axis=newton.Axis.Z)
+    builder.request_state_attributes("body_parent_f", "joint_reaction_f")
+
+    link = builder.add_link()
+    builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+    joint = builder.add_joint_revolute(
+        -1,
+        link,
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()),
+        axis=wp.vec3(0.0, 1.0, 0.0),
+        target_ke=0.0,
+        target_kd=5.0,
+    )
+    builder.add_articulation([joint])
+    model = builder.finalize(device=device)
+
+    solver = newton.solvers.SolverXPBD(model, iterations=8)
+    state_in = model.state()
+    state_out = model.state()
+    control = model.control()
+
+    qd_start = int(model.joint_qd_start.numpy()[joint])
+    joint_f_np = control.joint_f.numpy().copy()
+    joint_f_np[qd_start] = 1.5  # motor torque about Y
+    control.joint_f.assign(wp.array(joint_f_np, dtype=wp.float32))
+
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+
+    dt = 1.0 / 60.0
+    num_substeps = 16
+    sub_dt = dt / num_substeps
+    settle_steps = 240
+    avg_steps = 60
+
+    for _ in range(settle_steps):
+        for _ in range(num_substeps):
+            state_in.clear_forces()
+            solver.step(state_in, state_out, control, None, sub_dt)
+            state_in, state_out = state_out, state_in
+
+    parent_f_avg = np.zeros(6)
+    reaction_avg = np.zeros(6)
+    com_pos_avg = np.zeros(3)
+    for _ in range(avg_steps):
+        for _ in range(num_substeps):
+            state_in.clear_forces()
+            solver.step(state_in, state_out, control, None, sub_dt)
+            state_in, state_out = state_out, state_in
+        parent_f_avg += state_in.body_parent_f.numpy()[0]
+        reaction_avg += state_in.joint_reaction_f.numpy()[0]
+        body_q = state_in.body_q.numpy()[0]
+        com_local = model.body_com.numpy()[0]
+        com_pos_avg += body_q[:3] + np.array(_quat_rotate(body_q[3:7], com_local))
+    parent_f_avg /= avg_steps
+    reaction_avg /= avg_steps
+    com_pos_avg /= avg_steps
+
+    # Linear components are identical (parent_xform is identity, so no rotation).
+    np.testing.assert_allclose(
+        reaction_avg[:3],
+        parent_f_avg[:3],
+        rtol=0.02,
+        atol=0.5,
+        err_msg=(
+            "joint_reaction_f.linear should equal body_parent_f.linear (identity X_wp):\n"
+            f"  reaction = {reaction_avg[:3]}\n"
+            f"  parent_f = {parent_f_avg[:3]}"
+        ),
+    )
+
+    # Torque relation: joint_reaction_f.tau = body_parent_f.tau - cross(r, F)
+    # with r = anchor_pos - child_com_pos.  Anchor is at world origin.
+    f_world = parent_f_avg[:3]
+    r = -com_pos_avg
+    expected_tau = parent_f_avg[3:6] - np.cross(r, f_world)
+    np.testing.assert_allclose(
+        reaction_avg[3:6],
+        expected_tau,
+        atol=0.5,
+        rtol=0.05,
+        err_msg=(
+            "joint_reaction_f.tau != body_parent_f.tau - cross(r, F):\n"
+            f"  reaction.tau = {reaction_avg[3:6]}\n"
+            f"  expected     = {expected_tau}\n"
+            f"  parent_f.tau = {parent_f_avg[3:6]}\n"
+            f"  r = {r},  F = {f_world}"
+        ),
+    )
+
+
+def _quat_rotate(quat_xyzw, vec):
+    """Helper: rotate ``vec`` by the quaternion (x, y, z, w) used by Warp."""
+    x, y, z, w = quat_xyzw
+    vx, vy, vz = vec
+    # v' = v + 2*q.xyz x (q.xyz x v + q.w * v)
+    cx = y * vz - z * vy
+    cy = z * vx - x * vz
+    cz = x * vy - y * vx
+    tx = cx + w * vx
+    ty = cy + w * vy
+    tz = cz + w * vz
+    rx = vx + 2.0 * (y * tz - z * ty)
+    ry = vy + 2.0 * (z * tx - x * tz)
+    rz = vz + 2.0 * (x * ty - y * tx)
+    return (rx, ry, rz)
+
+
+def test_xpbd_joint_reaction_f_rotated_parent_frame(test, device):
+    """Reaction wrench rotates with ``joint_X_p`` orientation.
+
+    Place the joint anchor with a +90° rotation about world X
+    (``rot_x_90``: world +Y -> +Z, world +Z -> -Y).  The inverse maps world
+    +Z back into the **joint-local +Y axis**, so a world-frame reaction
+    along +Z (supporting weight) shows up as joint-local +Y.
+
+    This verifies that the wrench is reported in the parent-side joint-local
+    frame rather than world frame.
+    """
+    gravity = 9.81
+    builder = newton.ModelBuilder(gravity=-gravity, up_axis=newton.Axis.Z)
+    builder.request_state_attributes("joint_reaction_f")
+
+    link = builder.add_link()
+    builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+    # parent_xform rotates the joint frame +90° about X: joint_X +Z -> world +Y,
+    # joint_X +Y -> world -Z.  So a world +Z force becomes joint-local -Y.
+    rot_x_90 = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.5 * wp.pi)
+    parent_xform = wp.transform(wp.vec3(0.0, 0.0, 0.0), rot_x_90)
+    # child_xform offset places the COM 1 m below the world joint anchor; we
+    # rotate the child-side anchor identically so eval_fk produces a
+    # configuration where the link hangs straight down in world.
+    child_xform = wp.transform(wp.vec3(0.0, 0.0, 1.0), rot_x_90)
+
+    joint = builder.add_joint_revolute(
+        -1,
+        link,
+        parent_xform=parent_xform,
+        child_xform=child_xform,
+        axis=wp.vec3(0.0, 1.0, 0.0),
+    )
+    builder.add_articulation([joint])
+    model = builder.finalize(device=device)
+
+    solver = newton.solvers.SolverXPBD(model, iterations=8)
+    state_in = model.state()
+    state_out = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+
+    dt = 1.0 / 60.0
+    num_substeps = 8
+    sub_dt = dt / num_substeps
+    settle_steps = 60
+    avg_steps = 30
+
+    for _ in range(settle_steps):
+        for _ in range(num_substeps):
+            solver.step(state_in, state_out, None, None, sub_dt)
+            state_in, state_out = state_out, state_in
+
+    reaction_avg = np.zeros(6)
+    for _ in range(avg_steps):
+        for _ in range(num_substeps):
+            solver.step(state_in, state_out, None, None, sub_dt)
+            state_in, state_out = state_out, state_in
+        reaction_avg += state_in.joint_reaction_f.numpy()[0]
+    reaction_avg /= avg_steps
+
+    weight = float(model.body_mass.numpy()[0]) * gravity
+    # quat_inverse(rot_x_90) rotates world +Z into joint-local +Y.
+    # The world-frame reaction force at the child COM is +m*g*z_hat, so
+    # in joint-local frame it should appear as +weight along Y.
+    np.testing.assert_allclose(
+        reaction_avg[1], weight, rtol=0.02, err_msg="rotated frame: joint-local +Y should carry the weight reaction"
+    )
+    np.testing.assert_allclose(
+        reaction_avg[0], 0.0, atol=0.1, err_msg="rotated frame: joint-local X force should be ~0"
+    )
+    np.testing.assert_allclose(
+        reaction_avg[2], 0.0, atol=0.1, err_msg="rotated frame: joint-local Z force should be ~0"
+    )
+
+
+def test_xpbd_joint_reaction_f_not_allocated(test, device):
+    """``joint_reaction_f`` is ``None`` when not requested; ``step`` runs without it."""
+    builder = newton.ModelBuilder()
+    link = builder.add_link()
+    builder.add_shape_sphere(link, radius=0.1)
+    joint = builder.add_joint_revolute(
+        -1,
+        link,
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform_identity(),
+        axis=wp.vec3(0.0, 1.0, 0.0),
+    )
+    builder.add_articulation([joint])
+    model = builder.finalize(device=device)
+
+    solver = newton.solvers.SolverXPBD(model, iterations=2)
+    state_in = model.state()
+    state_out = model.state()
+
+    test.assertIsNone(state_in.joint_reaction_f)
+    test.assertIsNone(state_out.joint_reaction_f)
+
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+    solver.step(state_in, state_out, None, None, 1.0 / 60.0)
+
+    test.assertIsNone(state_out.joint_reaction_f)
+
+
 def test_xpbd_parent_f_centripetal_zero_g(test, device):
     """Two free bodies on a hinge, zero gravity, in steady-state rotation.
 
@@ -1541,6 +1833,38 @@ add_function_test(
     TestSolverXPBD,
     "test_xpbd_parent_f_newton_second_law_zero_g",
     test_xpbd_parent_f_newton_second_law_zero_g,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_joint_reaction_f_static_pendulum",
+    test_xpbd_joint_reaction_f_static_pendulum,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_joint_reaction_f_consistent_with_body_parent_f",
+    test_xpbd_joint_reaction_f_consistent_with_body_parent_f,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_joint_reaction_f_rotated_parent_frame",
+    test_xpbd_joint_reaction_f_rotated_parent_frame,
+    devices=devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestSolverXPBD,
+    "test_xpbd_joint_reaction_f_not_allocated",
+    test_xpbd_joint_reaction_f_not_allocated,
     devices=devices,
     check_output=False,
 )

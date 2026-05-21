@@ -6,6 +6,7 @@
 
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
 - Add `ViewerGL.show_loading_splash()` / `ViewerGL.hide_loading_splash()` displaying a stylized Newton's-cradle overlay while the GL viewer waits on Warp kernel compilation; raised automatically by `newton.examples.init()` for visible GL viewers
+- Add `joint_reaction_f` extended state attribute reporting per-joint reaction wrenches (constraint reaction plus `Control.joint_f` contribution) in the joint-local frame at the parent-side joint anchor; populated by `SolverXPBD`
 - Add `cable_cross_slide_table` example demonstrating a cable-driven XY table
 - Add an optional `kernel_block_dim` argument to `SensorTiledCamera.update()` for tuning the Warp ray-tracer's `render_megakernel` launch shape.
 - Add robotics tutorial notebook covering ModelBuilder, solvers, CUDA graphs, IK, and pick-and-place

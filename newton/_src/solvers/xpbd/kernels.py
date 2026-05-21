@@ -2461,6 +2461,85 @@ def convert_joint_impulse_to_parent_f(
 
 
 @wp.kernel
+def convert_joint_impulse_to_joint_reaction_f(
+    joint_impulse: wp.array[wp.spatial_vector],
+    joint_enabled: wp.array[bool],
+    joint_type: wp.array[int],
+    joint_parent: wp.array[int],
+    joint_child: wp.array[int],
+    joint_X_p: wp.array[wp.transform],
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    dt: float,
+    # output
+    joint_reaction_f: wp.array[wp.spatial_vector],
+):
+    """Convert accumulated child-side joint impulse to ``state.joint_reaction_f``.
+
+    The accumulated ``joint_impulse[joint_id]`` is the spatial wrench transmitted
+    from parent to child, expressed in world frame at the **child body's COM**,
+    pre-multiplied by ``dt`` (see :func:`apply_joint_forces` and
+    :func:`solve_body_joints` for the two contributions).
+
+    This kernel converts that to the per-joint reaction wrench expressed in the
+    **parent-side joint-local frame** at the joint anchor:
+
+    1. Divide by ``dt`` to recover the wrench (``f`` in [N], ``tau`` in [N·m]).
+    2. Translate the moment reference from the child COM to the parent-side
+       joint anchor world position ``X_wp.translation``:
+       ``tau_at_anchor = tau - cross(r, f)`` where
+       ``r = X_wp.translation - child_com_world``.
+    3. Rotate ``(f, tau_at_anchor)`` into the joint-local frame by
+       ``quat_inverse(X_wp.rotation)``.
+
+    The result has the same sign convention as :attr:`State.body_parent_f`:
+    positive = wrench applied by parent on child.  Disabled and ``FREE`` joints
+    contribute zero (their entries inherit the zero-init from the caller).
+    """
+    tid = wp.tid()
+
+    if not joint_enabled[tid]:
+        return
+    if joint_type[tid] == JointType.FREE:
+        return
+
+    id_c = joint_child[tid]
+    if id_c < 0:
+        return
+
+    inv_dt = 1.0 / dt
+    impulse = joint_impulse[tid]
+    f = wp.spatial_top(impulse) * inv_dt
+    tau = wp.spatial_bottom(impulse) * inv_dt
+
+    # parent-side joint anchor in world frame
+    X_pj = joint_X_p[tid]
+    id_p = joint_parent[tid]
+    if id_p >= 0:
+        X_wp = body_q[id_p] * X_pj
+    else:
+        X_wp = X_pj
+
+    anchor_pos = wp.transform_get_translation(X_wp)
+    anchor_rot = wp.transform_get_rotation(X_wp)
+
+    # child COM in world frame
+    pose_c = body_q[id_c]
+    com_c_world = wp.transform_point(pose_c, body_com[id_c])
+
+    # translate moment reference from child COM to joint anchor
+    r = anchor_pos - com_c_world
+    tau_at_anchor = tau - wp.cross(r, f)
+
+    # rotate into joint-local frame
+    q_inv = wp.quat_inverse(anchor_rot)
+    f_local = wp.quat_rotate(q_inv, f)
+    tau_local = wp.quat_rotate(q_inv, tau_at_anchor)
+
+    joint_reaction_f[tid] = wp.spatial_vector(f_local, tau_local)
+
+
+@wp.kernel
 def update_body_velocities(
     poses: wp.array[wp.transform],
     poses_prev: wp.array[wp.transform],

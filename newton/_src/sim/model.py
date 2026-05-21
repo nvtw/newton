@@ -776,6 +776,9 @@ class Model:
         self.attribute_frequency["joint_enabled"] = Model.AttributeFrequency.JOINT
         self.attribute_frequency["joint_twist_lower"] = Model.AttributeFrequency.JOINT
         self.attribute_frequency["joint_twist_upper"] = Model.AttributeFrequency.JOINT
+        # Extended state attribute keyed per joint — lives on State (not Model) and is only
+        # allocated when explicitly requested via request_state_attributes().
+        self.attribute_frequency["joint_reaction_f"] = Model.AttributeFrequency.JOINT
 
         # attributes per joint coord
         self.attribute_frequency["joint_q"] = Model.AttributeFrequency.JOINT_COORD
@@ -866,6 +869,11 @@ class Model:
 
         if "body_parent_f" in requested:
             s.body_parent_f = wp.zeros_like(self.body_qd, requires_grad=requires_grad)
+
+        if "joint_reaction_f" in requested and self.joint_count:
+            s.joint_reaction_f = wp.zeros(
+                self.joint_count, dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad
+            )
 
         if "mujoco:qfrc_actuator" in requested:
             if not hasattr(s, "mujoco"):

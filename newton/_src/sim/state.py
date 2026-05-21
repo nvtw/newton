@@ -59,6 +59,7 @@ class State:
         (
             "body_qdd",
             "body_parent_f",
+            "joint_reaction_f",
             "mujoco:qfrc_actuator",
         )
     )
@@ -144,6 +145,21 @@ class State:
 
         .. note::
             :attr:`body_parent_f` represents incoming joint wrenches in world frame, referenced to the body's center of mass (COM).
+        """
+
+        self.joint_reaction_f: wp.array | None = None
+        """Per-joint reaction wrenches [N, N·m], shape (joint_count,), dtype :class:`spatial_vector`.
+        First three entries: linear force [N]; last three: torque [N·m].
+
+        This is an extended state attribute; see :ref:`extended_state_attributes` for more information.
+
+        .. note::
+            :attr:`joint_reaction_f` represents the **total** wrench transmitted from the parent
+            through the joint to the child (constraint reaction plus the contribution from
+            :attr:`Control.joint_f`), expressed in the joint-local frame anchored at the
+            parent-side joint anchor (``X_wp = body_q[parent] * joint_X_p``, or ``joint_X_p``
+            directly when ``joint_parent == -1``).  Sign convention: positive = wrench applied
+            by the parent on the child.  Free and disabled joints report zero.
         """
 
         self.joint_q: wp.array | None = None
