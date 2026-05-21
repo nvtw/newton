@@ -1747,44 +1747,6 @@ def _ball_socket_prepare_at(
     )
 
 
-@wp.func
-def _ball_socket_iterate_at(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    copy_state: CopyStateContainer,
-    num_bodies: wp.int32,
-    parallel_id: wp.int32,
-    body_pair: ConstraintBodies,
-    idt: wp.float32,
-    sor_boost: wp.float32,
-    use_bias: wp.bool,
-):
-    """Ball-socket PGS iterate: pivot-family compound with anchor-2,
-    anchor-3, and axial drive all disabled. The anchor-2 Schur slots
-    are zeroed by :func:`_ball_socket_prepare_at`, so Block A
-    degenerates to the anchor-1 standalone solve. See
-    :func:`_pivot_iterate`."""
-    _pivot_iterate(
-        constraints,
-        cid,
-        base_offset,
-        bodies,
-        particles,
-        copy_state,
-        num_bodies,
-        parallel_id,
-        body_pair,
-        idt,
-        sor_boost,
-        use_bias,
-        False,  # has_anchor3
-        False,  # has_axial_drive
-    )
-
-
 # ---------------------------------------------------------------------------
 # Revolute (hinge) mode math
 # ---------------------------------------------------------------------------
@@ -1976,41 +1938,6 @@ def _revolute_prepare_at(
         angular_velocity1,
         velocity2,
         angular_velocity2,
-    )
-
-
-@wp.func
-def _revolute_iterate_at(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    copy_state: CopyStateContainer,
-    num_bodies: wp.int32,
-    parallel_id: wp.int32,
-    body_pair: ConstraintBodies,
-    idt: wp.float32,
-    sor_boost: wp.float32,
-    use_bias: wp.bool,
-):
-    """Revolute-mode PGS iterate: pivot-family compound (anchor1+anchor2
-    Schur + angular axial drive). See :func:`_pivot_iterate`."""
-    _pivot_iterate(
-        constraints,
-        cid,
-        base_offset,
-        bodies,
-        particles,
-        copy_state,
-        num_bodies,
-        parallel_id,
-        body_pair,
-        idt,
-        sor_boost,
-        use_bias,
-        False,  # has_anchor3
-        True,  # has_axial_drive
     )
 
 
@@ -2272,41 +2199,6 @@ def _prismatic_prepare_at(
     )
 
 
-@wp.func
-def _prismatic_iterate_at(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    copy_state: CopyStateContainer,
-    num_bodies: wp.int32,
-    parallel_id: wp.int32,
-    body_pair: ConstraintBodies,
-    idt: wp.float32,
-    sor_boost: wp.float32,
-    use_bias: wp.bool,
-):
-    """Prismatic-mode PGS iterate: slide-family compound (4-row tangent
-    + anchor-3 scalar + linear axial drive). See :func:`_slide_iterate`."""
-    _slide_iterate(
-        constraints,
-        cid,
-        base_offset,
-        bodies,
-        particles,
-        copy_state,
-        num_bodies,
-        parallel_id,
-        body_pair,
-        idt,
-        sor_boost,
-        use_bias,
-        True,  # has_anchor3
-        True,  # has_axial_drive
-    )
-
-
 # ---------------------------------------------------------------------------
 # Cylindrical mode math
 # ---------------------------------------------------------------------------
@@ -2503,43 +2395,6 @@ def _cylindrical_prepare_at(
         angular_velocity1,
         velocity2,
         angular_velocity2,
-    )
-
-
-@wp.func
-def _cylindrical_iterate_at(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    copy_state: CopyStateContainer,
-    num_bodies: wp.int32,
-    parallel_id: wp.int32,
-    body_pair: ConstraintBodies,
-    idt: wp.float32,
-    sor_boost: wp.float32,
-    use_bias: wp.bool,
-):
-    """Cylindrical PGS iterate: PRISMATIC minus the anchor-3 scalar
-    row (so rotation about the slide axis stays free). Slide-family
-    compound (4-row tangent + linear axial, no anchor3). See
-    :func:`_slide_iterate`."""
-    _slide_iterate(
-        constraints,
-        cid,
-        base_offset,
-        bodies,
-        particles,
-        copy_state,
-        num_bodies,
-        parallel_id,
-        body_pair,
-        idt,
-        sor_boost,
-        use_bias,
-        False,  # has_anchor3
-        True,  # has_axial_drive (no-op when drive_mode/clamp = OFF)
     )
 
 
@@ -3492,43 +3347,6 @@ def _fixed_prepare_at(
     write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, 0.0)
 
 
-@wp.func
-def _fixed_iterate_at(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    copy_state: CopyStateContainer,
-    num_bodies: wp.int32,
-    parallel_id: wp.int32,
-    body_pair: ConstraintBodies,
-    idt: wp.float32,
-    sor_boost: wp.float32,
-    use_bias: wp.bool,
-):
-    """Fixed-mode PGS iterate: pivot-family compound (anchor1+anchor2
-    Schur + anchor-3 scalar lock, no axial drive). FIXED is literally
-    REVOLUTE's block 1 plus an extra anchor-3 row. See
-    :func:`_pivot_iterate`."""
-    _pivot_iterate(
-        constraints,
-        cid,
-        base_offset,
-        bodies,
-        particles,
-        copy_state,
-        num_bodies,
-        parallel_id,
-        body_pair,
-        idt,
-        sor_boost,
-        use_bias,
-        True,  # has_anchor3
-        False,  # has_axial_drive
-    )
-
-
 # ---------------------------------------------------------------------------
 # Universal (Hooke) mode math
 # ---------------------------------------------------------------------------
@@ -3678,45 +3496,6 @@ def _universal_prepare_at(
         angular_velocity1,
         velocity2,
         angular_velocity2,
-    )
-
-
-@wp.func
-def _universal_iterate_at(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    copy_state: CopyStateContainer,
-    num_bodies: wp.int32,
-    parallel_id: wp.int32,
-    body_pair: ConstraintBodies,
-    idt: wp.float32,
-    sor_boost: wp.float32,
-    use_bias: wp.bool,
-):
-    """Universal PGS iterate: pivot-family compound (anchor-1 3-row
-    positional + 1-row angular twist lock about ``n_hat`` via the
-    shared axial-drive block). UNIVERSAL = REVOLUTE flags applied
-    to a column whose anchor-2 Schur slots have been zeroed at
-    populate time (so Block A's Schur math collapses to the
-    anchor-1 standalone solve)."""
-    _pivot_iterate(
-        constraints,
-        cid,
-        base_offset,
-        bodies,
-        particles,
-        copy_state,
-        num_bodies,
-        parallel_id,
-        body_pair,
-        idt,
-        sor_boost,
-        use_bias,
-        False,  # has_anchor3
-        True,  # has_axial_drive (the universal angular twist lock)
     )
 
 
@@ -4134,8 +3913,12 @@ def actuated_double_ball_socket_iterate_at(
     on in both passes -- see the per-mode iterates).
     """
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
-    if joint_mode == JOINT_MODE_REVOLUTE:
-        _revolute_iterate_at(
+    if joint_mode == JOINT_MODE_REVOLUTE or joint_mode == JOINT_MODE_UNIVERSAL:
+        # REVOLUTE and UNIVERSAL both inline the same _pivot_iterate
+        # flag combo (anchor-1+anchor-2 Schur + angular axial drive,
+        # no anchor-3 lock). UNIVERSAL's prepare zeros the anchor-2
+        # Schur slots so Block A degenerates to anchor-1 standalone.
+        _pivot_iterate(
             constraints,
             cid,
             base_offset,
@@ -4148,9 +3931,11 @@ def actuated_double_ball_socket_iterate_at(
             idt,
             sor_boost,
             use_bias,
+            False,  # has_anchor3
+            True,  # has_axial_drive
         )
     elif joint_mode == JOINT_MODE_PRISMATIC:
-        _prismatic_iterate_at(
+        _slide_iterate(
             constraints,
             cid,
             base_offset,
@@ -4163,9 +3948,11 @@ def actuated_double_ball_socket_iterate_at(
             idt,
             sor_boost,
             use_bias,
+            True,  # has_anchor3
+            True,  # has_axial_drive
         )
     elif joint_mode == JOINT_MODE_FIXED:
-        _fixed_iterate_at(
+        _pivot_iterate(
             constraints,
             cid,
             base_offset,
@@ -4178,6 +3965,8 @@ def actuated_double_ball_socket_iterate_at(
             idt,
             sor_boost,
             use_bias,
+            True,  # has_anchor3
+            False,  # has_axial_drive
         )
     elif joint_mode == JOINT_MODE_CABLE:
         _cable_iterate_at(
@@ -4194,23 +3983,8 @@ def actuated_double_ball_socket_iterate_at(
             sor_boost,
             use_bias,
         )
-    elif joint_mode == JOINT_MODE_UNIVERSAL:
-        _universal_iterate_at(
-            constraints,
-            cid,
-            base_offset,
-            bodies,
-            particles,
-            copy_state,
-            num_bodies,
-            parallel_id,
-            body_pair,
-            idt,
-            sor_boost,
-            use_bias,
-        )
     elif joint_mode == JOINT_MODE_CYLINDRICAL:
-        _cylindrical_iterate_at(
+        _slide_iterate(
             constraints,
             cid,
             base_offset,
@@ -4223,6 +3997,8 @@ def actuated_double_ball_socket_iterate_at(
             idt,
             sor_boost,
             use_bias,
+            False,  # has_anchor3
+            True,  # has_axial_drive (no-op in MVP since drive_mode/clamp = OFF)
         )
     elif joint_mode == JOINT_MODE_PLANAR:
         _planar_iterate_at(
@@ -4240,7 +4016,8 @@ def actuated_double_ball_socket_iterate_at(
             use_bias,
         )
     else:
-        _ball_socket_iterate_at(
+        # BALL_SOCKET
+        _pivot_iterate(
             constraints,
             cid,
             base_offset,
@@ -4253,6 +4030,8 @@ def actuated_double_ball_socket_iterate_at(
             idt,
             sor_boost,
             use_bias,
+            False,  # has_anchor3
+            False,  # has_axial_drive
         )
 
 
@@ -4393,8 +4172,21 @@ def revolute_iterate(
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
-    _revolute_iterate_at(
-        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, sor_boost, use_bias
+    _pivot_iterate(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        copy_state,
+        num_bodies,
+        parallel_id,
+        body_pair,
+        idt,
+        sor_boost,
+        use_bias,
+        False,  # has_anchor3
+        True,  # has_axial_drive
     )
 
 
