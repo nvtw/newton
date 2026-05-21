@@ -150,11 +150,14 @@ class TestSolverPhoenXClusteringFlag(unittest.TestCase):
     )
     def test_flag_runs_step_and_surfaces_num_clusters(self) -> None:
         model = _build_two_link_chain_model()
+        # ``step_layout="single_world"`` is currently required for the
+        # cluster-aware dispatch path (initial scope).
         solver = newton.solvers.SolverPhoenX(
             model,
             substeps=2,
             solver_iterations=4,
             velocity_iterations=0,
+            step_layout="single_world",
             enable_clustering=True,
         )
 
@@ -191,21 +194,12 @@ class TestSolverPhoenXClusteringFlag(unittest.TestCase):
         self.assertGreaterEqual(int(report.num_clusters), 1)
         self.assertLessEqual(int(report.num_clusters), int(report.num_active_constraints))
 
-        # The side-channel supernodal partitioner must also be populated
-        # and its colour count must be <= the per-constraint count
-        # (clustering can only reduce, never grow, the chromatic
-        # bound).
-        self.assertIsNotNone(report.supernodal_num_colors)
-        self.assertGreaterEqual(int(report.supernodal_num_colors), 1)
-        self.assertLessEqual(
-            int(report.supernodal_num_colors),
-            max(1, int(report.num_colors)),
-            msg=(
-                f"supernodal colouring ({report.supernodal_num_colors}) "
-                f"exceeded per-constraint colouring ({report.num_colors}) -- "
-                "clustering only ever fattens nodes, so colour count must not grow"
-            ),
-        )
+        # In cluster-aware mode the main partitioner colours the
+        # supernodal graph, so ``num_colors`` is the cluster-level
+        # chromatic bound and must be sane (>= 1 with at least one
+        # cluster, and not larger than the active cluster count).
+        self.assertGreaterEqual(int(report.num_colors), 1)
+        self.assertLessEqual(int(report.num_colors), int(report.num_clusters))
 
 
 if __name__ == "__main__":
