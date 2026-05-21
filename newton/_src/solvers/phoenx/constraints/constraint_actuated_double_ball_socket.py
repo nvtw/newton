@@ -1363,6 +1363,71 @@ def _anchor1_positional_prepare_at(
 
 
 # ---------------------------------------------------------------------------
+# Shared pivot-family K-factor prepare
+#
+# REVOLUTE and FIXED both build the same 3+2 Schur factorisation of the
+# anchor-1 full 3-row + anchor-2 2-row-tangent block. Extract the
+# construction here and let both modes call it, then carry on with their
+# mode-specific extras (axial drive vs anchor-3 scalar).
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _pivot_anchor1_anchor2_K_factor_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_inertia1: wp.mat33f,
+    inv_inertia2: wp.mat33f,
+    cr1_b1: wp.mat33f,
+    cr1_b2: wp.mat33f,
+    cr2_b1: wp.mat33f,
+    cr2_b2: wp.mat33f,
+    t1: wp.vec3f,
+    t2: wp.vec3f,
+):
+    """Build the 3+2 Schur factorisation for the anchor-1 + anchor-2
+    block shared by REVOLUTE and FIXED. Computes ``A1`` (anchor-1 3x3
+    effective mass), ``A2`` (anchor-2 3x3), ``B`` (anchor-1/2
+    cross-coupling), projects to the tangent basis, inverts the 2x2
+    Schur complement, and writes ``A1_INV`` / ``UT_AI`` / ``S_INV``
+    back to the column."""
+    eye3 = wp.identity(3, dtype=wp.float32)
+
+    a1 = inv_mass1 * eye3
+    a1 = a1 + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1))
+    a1 = a1 + inv_mass2 * eye3
+    a1 = a1 + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
+
+    a2 = inv_mass1 * eye3
+    a2 = a2 + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1))
+    a2 = a2 + inv_mass2 * eye3
+    a2 = a2 + cr2_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
+
+    b_mat = (inv_mass1 + inv_mass2) * eye3
+    b_mat = b_mat + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1))
+    b_mat = b_mat + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
+
+    t_mat = wp.mat33f(t1[0], t2[0], 0.0, t1[1], t2[1], 0.0, t1[2], t2[2], 0.0)
+    tt = wp.transpose(t_mat)
+    u_mat = b_mat @ t_mat
+    d_mat = tt @ (a2 @ t_mat)
+
+    a1_inv = wp.inverse(a1)
+    ut_ai = wp.transpose(u_mat) @ a1_inv
+    s_mat = d_mat - ut_ai @ u_mat
+    s22 = wp.mat22f(s_mat[0, 0], s_mat[0, 1], s_mat[1, 0], s_mat[1, 1])
+    s22_inv = wp.inverse(s22)
+    s_inv_packed = wp.mat33f(s22_inv[0, 0], s22_inv[0, 1], 0.0, s22_inv[1, 0], s22_inv[1, 1], 0.0, 0.0, 0.0, 0.0)
+
+    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
+    write_mat33(constraints, base_offset + _OFF_UT_AI, cid, ut_ai)
+    write_mat33(constraints, base_offset + _OFF_S_INV, cid, s_inv_packed)
+
+
+# ---------------------------------------------------------------------------
 # Shared axial (drive + limit) prepare helper
 # ---------------------------------------------------------------------------
 
@@ -1726,64 +1791,22 @@ def _revolute_prepare_at(
     cr2_b1 = wp.skew(r2_b1)
     cr2_b2 = wp.skew(r2_b2)
 
-    eye3 = wp.identity(3, dtype=wp.float32)
-
-    a1 = inv_mass1 * eye3
-    a1 = a1 + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1))
-    a1 = a1 + inv_mass2 * eye3
-    a1 = a1 + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
-
-    a2 = inv_mass1 * eye3
-    a2 = a2 + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1))
-    a2 = a2 + inv_mass2 * eye3
-    a2 = a2 + cr2_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
-
-    b_mat = (inv_mass1 + inv_mass2) * eye3
-    b_mat = b_mat + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1))
-    b_mat = b_mat + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
-
-    t_mat = wp.mat33f(
-        t1[0],
-        t2[0],
-        0.0,
-        t1[1],
-        t2[1],
-        0.0,
-        t1[2],
-        t2[2],
-        0.0,
+    # 3+2 Schur factorisation (shared with FIXED via the helper).
+    _pivot_anchor1_anchor2_K_factor_at(
+        constraints,
+        cid,
+        base_offset,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        cr1_b1,
+        cr1_b2,
+        cr2_b1,
+        cr2_b2,
+        t1,
+        t2,
     )
-    tt = wp.transpose(t_mat)
-
-    u_mat = b_mat @ t_mat
-    d_mat = tt @ (a2 @ t_mat)
-
-    a1_inv = wp.inverse(a1)
-    ut_ai = wp.transpose(u_mat) @ a1_inv
-    s_mat = d_mat - ut_ai @ u_mat
-
-    s22 = wp.mat22f(
-        s_mat[0, 0],
-        s_mat[0, 1],
-        s_mat[1, 0],
-        s_mat[1, 1],
-    )
-    s22_inv = wp.inverse(s22)
-    s_inv_packed = wp.mat33f(
-        s22_inv[0, 0],
-        s22_inv[0, 1],
-        0.0,
-        s22_inv[1, 0],
-        s22_inv[1, 1],
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-    )
-
-    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
-    write_mat33(constraints, base_offset + _OFF_UT_AI, cid, ut_ai)
-    write_mat33(constraints, base_offset + _OFF_S_INV, cid, s_inv_packed)
 
     hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
@@ -3372,66 +3395,24 @@ def _fixed_prepare_at(
     cr3_b1 = wp.skew(r3_b1)
     cr3_b2 = wp.skew(r3_b2)
 
+    # 3+2 Schur factorisation for anchor-1 + anchor-2 (shared with REVOLUTE).
+    _pivot_anchor1_anchor2_K_factor_at(
+        constraints,
+        cid,
+        base_offset,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        cr1_b1,
+        cr1_b2,
+        cr2_b1,
+        cr2_b2,
+        t1,
+        t2,
+    )
+
     eye3 = wp.identity(3, dtype=wp.float32)
-
-    # Anchor-1 3x3 block (full point lock).
-    a1 = inv_mass1 * eye3
-    a1 = a1 + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1))
-    a1 = a1 + inv_mass2 * eye3
-    a1 = a1 + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
-
-    # Anchor-2 3x3 coupling (REVOLUTE convention).
-    a2 = inv_mass1 * eye3
-    a2 = a2 + cr2_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1))
-    a2 = a2 + inv_mass2 * eye3
-    a2 = a2 + cr2_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
-
-    b_mat = (inv_mass1 + inv_mass2) * eye3
-    b_mat = b_mat + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1))
-    b_mat = b_mat + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
-
-    t_mat = wp.mat33f(
-        t1[0],
-        t2[0],
-        0.0,
-        t1[1],
-        t2[1],
-        0.0,
-        t1[2],
-        t2[2],
-        0.0,
-    )
-    tt = wp.transpose(t_mat)
-
-    u_mat = b_mat @ t_mat
-    d_mat = tt @ (a2 @ t_mat)
-
-    a1_inv = wp.inverse(a1)
-    ut_ai = wp.transpose(u_mat) @ a1_inv
-    s_mat = d_mat - ut_ai @ u_mat
-
-    s22 = wp.mat22f(
-        s_mat[0, 0],
-        s_mat[0, 1],
-        s_mat[1, 0],
-        s_mat[1, 1],
-    )
-    s22_inv = wp.inverse(s22)
-    s_inv_packed = wp.mat33f(
-        s22_inv[0, 0],
-        s22_inv[0, 1],
-        0.0,
-        s22_inv[1, 0],
-        s22_inv[1, 1],
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-    )
-
-    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
-    write_mat33(constraints, base_offset + _OFF_UT_AI, cid, ut_ai)
-    write_mat33(constraints, base_offset + _OFF_S_INV, cid, s_inv_packed)
 
     # Anchor-3 standalone scalar: d = t2 . B33 . t2. Block Gauss-Seidel
     # treats anchor-3 as decoupled from anchors 1+2 within a PGS step;
