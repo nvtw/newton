@@ -36,6 +36,7 @@ from newton._src.solvers.phoenx.cloth_step import (
     cloth_predict_kernel,
     cloth_recover_kernel,
 )
+from newton._src.solvers.phoenx.clustering import ClusteringPipeline
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     ADBS_DWORDS,
     ADBS_TIME_US_OFFSET,
@@ -306,6 +307,12 @@ class PhoenXWorld:
         """Total wall-clock microseconds spent in contact dispatches.
         ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
 
+        num_clusters: int | None = None
+        """Number of constraint clusters from the last step's clustering
+        pipeline. ``None`` unless :attr:`PhoenXWorld.enable_clustering` is
+        set. The cluster output is currently a measurement hook -- the
+        PGS sweep still runs against the per-constraint coloring."""
+
     def __init__(
         self,
         bodies: BodyContainer,
@@ -345,6 +352,7 @@ class PhoenXWorld:
         warm_start_rotate_skip_width: int = 1,
         capture_while_greedy_coloring: bool = True,
         speculative_coloring: bool = True,
+        enable_clustering: bool = False,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
@@ -652,6 +660,21 @@ class PhoenXWorld:
             raise ValueError(
                 f"Unknown partitioner_algorithm '{self.partitioner_algorithm}'. "
                 "Expected one of: 'greedy', 'luby_fixed'."
+            )
+
+        # Optional clustering pipeline. When enabled, the per-step
+        # constraint element graph is also clustered (K=4 / 8-body cap)
+        # and a supernodal element view is built. Currently only a
+        # measurement hook -- the PGS sweep still runs against the
+        # per-constraint coloring. See ``step_report().num_clusters`` for
+        # the per-step output count.
+        self.enable_clustering: bool = bool(enable_clustering)
+        self._clustering: ClusteringPipeline | None = None
+        if self.enable_clustering and self._constraint_capacity > 0:
+            self._clustering = ClusteringPipeline(
+                max_num_interactions=self._constraint_capacity,
+                max_num_nodes=max(1, self.num_bodies + self.num_particles),
+                device=self.device,
             )
 
         # Mass-splitting data plane. Always allocated (sentinel-sized
@@ -1864,6 +1887,15 @@ class PhoenXWorld:
         if self._sleeping_enabled:
             self._run_sleeping_pass(shape_body, shape_aabb_lower, shape_aabb_upper)
         if self._constraint_capacity > 0:
+            if self._clustering is not None:
+                # Build the cluster + supernodal-element views from the
+                # current per-constraint element graph. Outputs land in
+                # ``self._clustering`` and are not yet consumed by the
+                # partitioner / PGS sweep -- this is currently a
+                # measurement hook to validate graph-capture safety and
+                # surface real-scene cluster statistics via
+                # ``step_report().num_clusters``.
+                self._clustering.build(self._elements, self._num_active_constraints)
             self._partitioner.reset(self._elements, self._num_active_constraints)
             if self.step_layout == "single_world":
                 if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
@@ -3234,6 +3266,10 @@ class PhoenXWorld:
         else:
             timer_kwargs = {}
 
+        cluster_kwargs: dict[str, int | None] = {}
+        if self._clustering is not None:
+            cluster_kwargs["num_clusters"] = int(self._clustering.num_clusters.numpy()[0])
+
         # Per-body degree from the partitioner's adjacency CSR end array.
         # max_body_degree is the lower bound on any valid graph colouring.
         if num_active > 0 and self.num_bodies > 0:
@@ -3265,6 +3301,7 @@ class PhoenXWorld:
                 num_active_constraints=num_active,
                 max_body_degree=max_body_degree,
                 **timer_kwargs,
+                **cluster_kwargs,
             )
 
         nc_per_world = self._world_num_colors.numpy().astype(np.int32, copy=False)
@@ -3292,6 +3329,7 @@ class PhoenXWorld:
             num_active_constraints=num_active,
             max_body_degree=max_body_degree,
             **timer_kwargs,
+            **cluster_kwargs,
         )
 
     def gather_contact_wrenches(self, out: wp.array) -> None:
