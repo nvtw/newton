@@ -2748,7 +2748,7 @@ def parse_usd(
                         verbose=verbose,
                     )
                     shape_id = builder.add_shape_mesh(
-                        scale=wp.vec3(*shape_spec.meshScale),
+                        scale=scale,
                         mesh=mesh,
                         **shape_params,
                     )
@@ -2808,7 +2808,7 @@ def parse_usd(
                         shape_scale = wp.vec3(shape_spec.radius, shape_spec.halfHeight, 0.0)
                     elif key == UsdPhysics.ObjectType.MeshShape:
                         shape_geo_type = GeoType.MESH
-                        shape_scale = wp.vec3(*shape_spec.meshScale)
+                        shape_scale = scale
                         shape_src = _get_mesh_cached(prim)
                     if shape_geo_type is not None:
                         expected_fallback_collider_paths.add(path)

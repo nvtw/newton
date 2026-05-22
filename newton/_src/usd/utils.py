@@ -307,7 +307,47 @@ def get_scale(prim: Usd.Prim, local: bool = True, xform_cache: UsdGeom.XformCach
     """
     mat = get_transform_matrix(prim, local=local, xform_cache=xform_cache)
     _pos, _rot, scale = wp.transform_decompose(mat)
+    scale = np.array(scale, dtype=np.float32)
+
+    authored_scale = _get_authored_scale(prim, local=local)
+    if authored_scale is not None:
+        sign = np.sign(authored_scale)
+        sign[sign == 0.0] = 1.0
+        scale = np.abs(scale) * sign
+
     return wp.vec3(*scale)
+
+
+def _get_authored_scale(prim: Usd.Prim, local: bool = True) -> np.ndarray | None:
+    """Return the product of authored scale ops, preserving negative signs."""
+    if UsdGeom is None:
+        return None
+
+    prims = [prim]
+    if not local:
+        prims = []
+        current = prim
+        while current and current.IsValid() and not current.IsPseudoRoot():
+            prims.append(current)
+            current = current.GetParent()
+        prims.reverse()
+
+    scale = np.ones(3, dtype=np.float32)
+    found = False
+    for p in prims:
+        xformable = UsdGeom.Xformable(p)
+        if not xformable:
+            continue
+        for op in xformable.GetOrderedXformOps():
+            if op.GetOpType() != UsdGeom.XformOp.TypeScale:
+                continue
+            value = op.Get()
+            if value is None:
+                continue
+            scale *= np.array(value, dtype=np.float32)
+            found = True
+
+    return scale if found else None
 
 
 def get_gprim_axis(prim: Usd.Prim, name: str = "axis", default: AxisType = "Z") -> Axis:
