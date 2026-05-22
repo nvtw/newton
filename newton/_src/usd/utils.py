@@ -338,13 +338,20 @@ def _get_authored_scale(prim: Usd.Prim, local: bool = True) -> np.ndarray | None
         xformable = UsdGeom.Xformable(p)
         if not xformable:
             continue
+        if not local and xformable.GetResetXformStack():
+            scale = np.ones(3, dtype=np.float32)
+            found = False
         for op in xformable.GetOrderedXformOps():
             if op.GetOpType() != UsdGeom.XformOp.TypeScale:
                 continue
             value = op.Get()
             if value is None:
                 continue
-            scale *= np.array(value, dtype=np.float32)
+            op_scale = np.array(value, dtype=np.float32)
+            if op.IsInverseOp():
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    op_scale = np.divide(1.0, op_scale, out=np.ones_like(op_scale), where=op_scale != 0.0)
+            scale *= op_scale
             found = True
 
     return scale if found else None

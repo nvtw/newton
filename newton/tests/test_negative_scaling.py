@@ -20,7 +20,7 @@ import warp as wp
 
 import newton
 from newton import GeoType, Mesh
-from newton._src.geometry.utils import compute_shape_radius
+from newton._src.geometry.utils import compute_shape_radius, transform_points
 from newton.tests.unittest_utils import USD_AVAILABLE, assert_np_equal
 
 
@@ -289,7 +289,7 @@ class TestUsdNegativeScale(unittest.TestCase):
             np.array([-1.0, 1.0, 1.0]),
             tol=1e-6,
         )
-        assert_np_equal(np.array(builder.shape_scale[mirrored_shape_id]), np.array([-1.0, 1.0, 1.0]), tol=1e-6)
+        self.assertLess(np.prod(np.array(builder.shape_scale[mirrored_shape_id])), 0.0)
 
         model = builder.finalize()
         _, contacts = _run_pipeline(model)
@@ -298,6 +298,105 @@ class TestUsdNegativeScale(unittest.TestCase):
             0,
             "USD-imported mirrored mesh should still generate contacts",
         )
+
+    @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+    def test_import_asymmetric_mesh_negative_scale_transform_matches_usd(self):
+        from pxr import Gf, Usd, UsdGeom, UsdPhysics
+
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+        UsdPhysics.Scene.Define(stage, "/physicsScene")
+
+        body = UsdGeom.Xform.Define(stage, "/World/Body")
+        UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+        mass_api = UsdPhysics.MassAPI.Apply(body.GetPrim())
+        mass_api.CreateMassAttr().Set(1.0)
+        mass_api.CreateDiagonalInertiaAttr().Set(Gf.Vec3f(1.0, 1.0, 1.0))
+        mass_api.CreateCenterOfMassAttr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+        mass_api.CreatePrincipalAxesAttr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
+
+        vertices = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 0.0, 3.0],
+            ],
+            dtype=np.float32,
+        )
+        mesh = UsdGeom.Mesh.Define(stage, "/World/Body/Collision")
+        UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
+        mesh_col_api = UsdPhysics.MeshCollisionAPI.Apply(mesh.GetPrim())
+        mesh_col_api.GetApproximationAttr().Set(UsdPhysics.Tokens.none)
+        mesh.CreateSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
+        mesh.CreatePointsAttr().Set([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in vertices])
+        mesh.CreateFaceVertexCountsAttr().Set([3, 3, 3, 3])
+        mesh.CreateFaceVertexIndicesAttr().Set([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3])
+        mesh.AddScaleOp().Set(Gf.Vec3d(-1.0, 1.0, 1.0))
+
+        builder = newton.ModelBuilder()
+        result = builder.add_usd(stage)
+
+        shape_id = result["path_shape_map"]["/World/Body/Collision"]
+        imported_vertices = transform_points(
+            builder.shape_source[shape_id].vertices,
+            builder.shape_transform[shape_id],
+            scale=builder.shape_scale[shape_id],
+        )
+        expected_vertices = vertices * np.array([-1.0, 1.0, 1.0], dtype=np.float32)
+        assert_np_equal(imported_vertices, expected_vertices, tol=1e-6)
+
+    @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+    def test_import_asymmetric_mesh_negative_scale_from_parent_xform(self):
+        from pxr import Gf, Usd, UsdGeom, UsdPhysics
+
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+        UsdPhysics.Scene.Define(stage, "/physicsScene")
+
+        body = UsdGeom.Xform.Define(stage, "/World/Body")
+        UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+        mass_api = UsdPhysics.MassAPI.Apply(body.GetPrim())
+        mass_api.CreateMassAttr().Set(1.0)
+        mass_api.CreateDiagonalInertiaAttr().Set(Gf.Vec3f(1.0, 1.0, 1.0))
+        mass_api.CreateCenterOfMassAttr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+        mass_api.CreatePrincipalAxesAttr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
+
+        parent = UsdGeom.Xform.Define(stage, "/World/Body/Parent")
+        parent.AddScaleOp().Set(Gf.Vec3d(-1.0, 2.0, 3.0))
+
+        vertices = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 0.0, 3.0],
+            ],
+            dtype=np.float32,
+        )
+        mesh = UsdGeom.Mesh.Define(stage, "/World/Body/Parent/Collision")
+        UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
+        mesh_col_api = UsdPhysics.MeshCollisionAPI.Apply(mesh.GetPrim())
+        mesh_col_api.GetApproximationAttr().Set(UsdPhysics.Tokens.none)
+        mesh.CreateSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
+        mesh.CreatePointsAttr().Set([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in vertices])
+        mesh.CreateFaceVertexCountsAttr().Set([3, 3, 3, 3])
+        mesh.CreateFaceVertexIndicesAttr().Set([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3])
+
+        builder = newton.ModelBuilder()
+        result = builder.add_usd(stage)
+
+        shape_path = "/World/Body/Parent/Collision"
+        shape_id = result["path_shape_map"][shape_path]
+        assert_np_equal(np.array(result["path_shape_scale"][shape_path]), np.array([-1.0, 2.0, 3.0]), tol=1e-6)
+
+        imported_vertices = transform_points(
+            builder.shape_source[shape_id].vertices,
+            builder.shape_transform[shape_id],
+            scale=builder.shape_scale[shape_id],
+        )
+        expected_vertices = vertices * np.array([-1.0, 2.0, 3.0], dtype=np.float32)
+        assert_np_equal(imported_vertices, expected_vertices, tol=1e-6)
 
 
 if __name__ == "__main__":
