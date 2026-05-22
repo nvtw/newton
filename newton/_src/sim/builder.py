@@ -5512,11 +5512,13 @@ class ModelBuilder:
         # Normalize / validate negative scale components by shape type. Symmetric
         # primitives (sphere, box, capsule, cylinder, ellipsoid, plane, gaussian)
         # are point-symmetric and produce identical geometry under sign flip of any
-        # scale component, so we silently absorb the sign. Cones are asymmetric
-        # along their height axis (apex vs. base), so negative components would
-        # change the geometry and are rejected. Heightfields are not yet supported
-        # with mirroring (row/col ordering semantics). Mesh-class shapes carry
-        # signed scale natively through the collision pipeline.
+        # scale component, so we silently absorb the sign. Cones are rotationally
+        # symmetric around their height axis (+Z, with apex at +half_height), so
+        # the radial sign on scale[0] is silently absorbed (scale[2] is unused);
+        # a negative half-height (scale[1]) would swap the apex and base and is
+        # rejected. Heightfields are not yet supported with mirroring (row/col
+        # ordering semantics). Mesh-class shapes carry signed scale natively
+        # through the collision pipeline.
         if type in (
             GeoType.SPHERE,
             GeoType.BOX,
@@ -5528,11 +5530,12 @@ class ModelBuilder:
         ):
             scale = (abs(float(scale[0])), abs(float(scale[1])), abs(float(scale[2])))
         elif type == GeoType.CONE:
-            if any(float(s) < 0.0 for s in scale):
+            if float(scale[1]) < 0.0:
                 raise ValueError(
-                    f"Cone shape requires non-negative scale; got {tuple(float(s) for s in scale)}. "
-                    "Negative components would flip the apex/base or invalidate the slope test."
+                    f"Cone shape requires non-negative height scale (scale[1]); got {tuple(float(s) for s in scale)}. "
+                    "A negative height would swap the apex and base."
                 )
+            scale = (abs(float(scale[0])), float(scale[1]), abs(float(scale[2])))
         elif type == GeoType.HFIELD:
             if any(float(s) < 0.0 for s in scale):
                 raise ValueError(
