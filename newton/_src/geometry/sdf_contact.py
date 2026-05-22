@@ -685,15 +685,15 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     fv = fu
 
         # Short edges can terminate before Brent samples near either
-        # endpoint, so check both endpoints at the actual zero-iteration
-        # threshold. Longer edges only need the closer endpoint when
-        # Brent converged near a boundary.
+        # endpoint. Only use the two-endpoint rescue when the current
+        # best point would be rejected by the contact threshold; otherwise
+        # keep the interior contact that Brent already found.
         best_t = x
         best_f = fx
         endpoint_check_count = int(0)
         endpoint_t0 = float(0.0)
         endpoint_t1 = float(0.0)
-        if check_short_edge_endpoints:
+        if check_short_edge_endpoints and best_f >= precision_target:
             endpoint_check_count = 2
             endpoint_t1 = 1.0
         elif x < 0.2 or x > 0.8:
