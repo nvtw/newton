@@ -289,11 +289,7 @@ class ModelBuilder:
         the memory of ``"float32"``). ``"float32"`` stores full-precision
         values. ``"uint8"`` uses 8-bit textures for minimum memory."""
         is_hydroelastic: bool = False
-        """Whether the shape collides using SDF-based hydroelastics (**experimental**). For hydroelastic collisions, both participating shapes must have is_hydroelastic set to True. Defaults to False.
-
-        .. warning::
-            Hydroelastic contact handling is experimental; behaviour and
-            defaults may change without notice.
+        """Whether the shape collides using SDF-based hydroelastics. For hydroelastic collisions, both participating shapes must have is_hydroelastic set to True. Defaults to False.
 
         .. note::
             Hydroelastic collision handling only works with volumetric shapes and in particular will not work for shapes like flat meshes or cloth.
@@ -327,9 +323,8 @@ class ModelBuilder:
                     previous target_voxel_size setting.
                 target_voxel_size: Target voxel size for sparse SDF grid. If provided, enables
                     SDF generation and clears any previous max_resolution setting.
-                is_hydroelastic: Whether to use SDF-based hydroelastic contacts
-                    (**experimental**, see :attr:`ShapeConfig.is_hydroelastic`).
-                    Both shapes in a pair must have this enabled.
+                is_hydroelastic: Whether to use SDF-based hydroelastic contacts. Both shapes
+                    in a pair must have this enabled.
                 kh: Contact stiffness coefficient for hydroelastic collisions.
                 texture_format: Subgrid texture storage format. ``"uint16"``
                     (default) uses 16-bit normalized textures. ``"float32"``

@@ -543,21 +543,13 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
     ) -> tuple[float, wp.vec3]:
         """Find the deepest point on an edge relative to an SDF volume.
 
-        Uses Brent's method (up to 5 iterations) to minimize the SDF value
-        along the edge parameterized as ``p(t) = v0 + t * edge_dir`` for
-        t in [0, 1]. The initial midpoint SDF value is provided by the
-        caller (cached from culling) to avoid a redundant evaluation.
+        Brent's method (up to 5 iterations) minimizes the SDF along
+        ``p(t) = v0 + t * edge_dir`` for t in [0, 1]. The midpoint SDF is
+        passed in from culling to avoid a redundant evaluation.
 
-        ``precision_target`` is the world-space precision the caller cares
-        about (typically the contact gap). Brent's tolerance floor is set
-        to ``precision_target / edge_length / 2`` in parametric space so
-        edges much shorter than the target precision exit Brent in 0
-        iters (the midpoint is already accurate enough). Long edges still
-        run the full 5 iters to converge.
-
-        After the interior search, evaluates the more promising endpoint
-        (the one closer to the unconverged bracket boundary) so that vertex
-        contacts at edge corners are not missed.
+        ``precision_target`` (typically the contact gap) sets a parametric
+        tolerance floor of ``precision_target / edge_length / 2`` so short
+        edges converge in fewer iterations.
 
         Returns:
             Tuple of (distance, contact_point).
@@ -566,19 +558,9 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         edge_dir = v1 - v0
         edge_length = wp.length(edge_dir)
 
-        # Parametric tolerance floor: skip Brent for edges where the
-        # midpoint already meets ``precision_target``. ``+ 1e-12`` keeps
-        # zero-length edges from dividing by zero (they trivially meet
-        # any positive precision).
+        # Parametric tolerance floor; ``+ 1e-12`` guards zero-length edges.
         tol_floor = 0.5 * precision_target / (edge_length + 1.0e-12)
-
-        # On very short edges ``tol_floor`` can be >= 0.5 so Brent breaks
-        # at the midpoint on iter 0 with ``x = 0.5``. The interior-only
-        # endpoint check below (``x < 0.2 or x > 0.8``) is then skipped,
-        # which can drop a vertex contact when an endpoint lies inside
-        # the contact threshold while the midpoint sits just outside.
-        # Track this case so we still evaluate both endpoints below.
-        force_endpoint_check = tol_floor >= 0.5
+        check_short_edge_endpoints = tol_floor >= 0.25
 
         # Initialize Brent's method at the midpoint (SDF value from culling)
         a = float(0.0)
@@ -597,7 +579,10 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
             tol = wp.max(1.0e-2 * wp.abs(x) + 1.0e-8, tol_floor)
             tol2 = 2.0 * tol
 
-            if wp.abs(x - m) <= tol2 - 0.5 * (b - a):
+            # Force one iteration so the bracket is always contracted,
+            # otherwise short edges can exit Brent at iter 0 with x=0.5
+            # and the endpoint guard below would drop vertex contacts.
+            if _iter > 0 and wp.abs(x - m) <= tol2 - 0.5 * (b - a):
                 break
 
             # Try inverse parabolic interpolation
@@ -680,18 +665,30 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     v_brent = u
                     fv = fu
 
-        # Check the closer endpoint only when Brent converged near a
-        # boundary (x < 0.2 or x > 0.8).  When solidly interior the
-        # bracket has moved both boundaries inward, so the endpoint
-        # cannot beat the interior minimum.
-        # ``force_endpoint_check`` overrides this guard for short edges
-        # where the tolerance floor terminated Brent at the midpoint
-        # without contracting either bracket boundary, so an endpoint
-        # contact would otherwise be silently dropped.
+        # Short edges can terminate before Brent samples near either
+        # endpoint, so check both endpoints at the actual zero-iteration
+        # threshold. Longer edges only need the closer endpoint when
+        # Brent converged near a boundary.
         best_t = x
         best_f = fx
-        if x < 0.2 or x > 0.8 or force_endpoint_check:
-            check_t = 0.0 if x < 0.5 else 1.0
+        endpoint_check_count = int(0)
+        endpoint_t0 = float(0.0)
+        endpoint_t1 = float(0.0)
+        if check_short_edge_endpoints:
+            endpoint_check_count = 2
+            endpoint_t1 = 1.0
+        elif x < 0.2 or x > 0.8:
+            endpoint_check_count = 1
+            endpoint_t0 = 0.0 if x < 0.5 else 1.0
+
+        for endpoint_idx in range(2):
+            if endpoint_idx >= endpoint_check_count:
+                continue
+
+            check_t = endpoint_t0
+            if endpoint_idx == 1:
+                check_t = endpoint_t1
+
             f_end = _sample_sdf_at_t(
                 texture_sdf,
                 sdf_mesh_id,
@@ -706,25 +703,6 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
             if f_end < best_f:
                 best_t = check_t
                 best_f = f_end
-            # Short-edge fallback: also probe the opposite endpoint,
-            # since either could be the closer contact when Brent never
-            # contracted the bracket.
-            if force_endpoint_check:
-                other_t = 1.0 - check_t
-                f_other = _sample_sdf_at_t(
-                    texture_sdf,
-                    sdf_mesh_id,
-                    v0,
-                    edge_dir,
-                    other_t,
-                    use_bvh_for_sdf,
-                    sdf_is_heightfield,
-                    hfd_sdf,
-                    elevation_data,
-                )
-                if f_other < best_f:
-                    best_t = other_t
-                    best_f = f_other
 
         p = v0 + edge_dir * best_t
 
