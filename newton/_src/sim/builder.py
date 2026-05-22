@@ -4388,10 +4388,11 @@ class ModelBuilder:
 
         .. note::
 
-            Cable joints are supported by :class:`newton.solvers.SolverVBD`, which uses an
-            AVBD backend for rigid bodies. For cable joints, the stretch and bend behavior
-            is defined by the parent/child attachment transforms; the joint axis stored in
-            :class:`JointDofConfig` is not currently used directly.
+            Cable joints are represented in the joint data model, but their two entries
+            are VBD stretch and bend/twist constraint slots rather than
+            ``joint_q`` coordinates. Cable body transforms are integrated directly by
+            :class:`newton.solvers.SolverVBD`; they are not reconstructed by
+            :func:`newton.eval_fk`.
 
         Args:
             parent: The index of the parent body.
@@ -4828,13 +4829,11 @@ class ModelBuilder:
             plt.legend(loc="upper left", fontsize=6)
         plt.show()
 
-    def collapse_fixed_joints(
-        self, verbose: bool = wp.config.verbose, joints_to_keep: list[str] | None = None
-    ) -> dict[str, Any]:
+    def collapse_fixed_joints(self, verbose: bool = False, joints_to_keep: list[str] | None = None) -> dict[str, Any]:
         """Removes fixed joints from the model and merges the bodies they connect. This is useful for simplifying the model for faster and more stable simulation.
 
         Args:
-            verbose: If True, print additional information about the collapsed joints. Defaults to the value of `wp.config.verbose`.
+            verbose: If True, print additional information about the collapsed joints.
             joints_to_keep: An optional list of joint labels to be excluded from the collapse process.
         """
 
