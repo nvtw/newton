@@ -2036,12 +2036,10 @@ class PhoenXWorld:
             # VELOCITY_LEVEL. No-op for STATIC particles and rigid-only
             # scenes (num_particles == 0).
             self._recover_particle_velocities()
-            # Refresh ``bodies.inverse_inertia_world`` after
-            # _integrate_positions rotated every body -- any subsequent
-            # solve (relax + next substep) would project impulses
-            # through a stale ``R * I^-1 * R^T``, biasing anisotropic
-            # robot links.
-            self._refresh_world_inertia()
+            # ``inverse_inertia_world`` is refreshed inline by
+            # :func:`_integrate_velocities_kernel` from the
+            # just-rotated quat, so no separate launch is needed --
+            # one extra mat33 mul vs a full body re-pass.
             alpha = float(k + 1) * inv_n
             self._kinematic_interpolate_substep(alpha)
             self._apply_global_damping()

@@ -1374,8 +1374,14 @@ def _integrate_velocities_kernel(
     bodies: BodyContainer,
     dt: wp.float32,
 ):
-    """Advance pose for dynamic bodies only. Kinematic bodies advance via
-    lerp/slerp in :func:`_kinematic_interpolate_substep_kernel`."""
+    """Advance pose for dynamic bodies only AND refresh
+    ``inverse_inertia_world`` from the just-rotated orientation in the
+    same pass. Fusing the two reduces per-substep launches from 2 to 1,
+    keeps the freshly-rotated quat in a register for the inertia
+    rebuild, and lets the next relax / next substep solve see
+    ``R * I^-1 * R^T`` aligned with the integrated pose. Kinematic
+    bodies advance via lerp/slerp in
+    :func:`_kinematic_interpolate_substep_kernel`."""
     i = wp.tid()
     mt = bodies.motion_type[i]
     if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
@@ -1389,7 +1395,12 @@ def _integrate_velocities_kernel(
 
     bodies.position[i] = bodies.position[i] + bodies.velocity[i] * dt
     q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
-    bodies.orientation[i] = wp.normalize(q_rot * bodies.orientation[i])
+    q_new = wp.normalize(q_rot * bodies.orientation[i])
+    bodies.orientation[i] = q_new
+    # Refresh world-frame inverse inertia using the just-rotated quat
+    # (one extra mat33 mul, no extra global load).
+    r = wp.quat_to_matrix(q_new)
+    bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
 
 
 @wp.kernel(enable_backward=False)
