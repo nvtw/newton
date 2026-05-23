@@ -444,6 +444,13 @@ class PhoenXWorld:
         self.num_soft_tetrahedra: int = int(num_soft_tetrahedra)
         if self.num_soft_tetrahedra < 0:
             raise ValueError(f"num_soft_tetrahedra must be >= 0 (got {self.num_soft_tetrahedra})")
+        # Stamp the scene-wide ``has_position_level_writers`` flag on the
+        # body container so :func:`body_set_access_mode` can warp-uniform
+        # short-circuit in rigid-only scenes. Re-stamped by
+        # :meth:`setup_cloth_collision_pipeline` and
+        # :meth:`populate_soft_tetrahedra_from_model` whenever the cloth /
+        # soft-tet counts change.
+        self._refresh_has_position_level_writers()
         # Soft-tet constraint variant tracker. Stamped by
         # :meth:`populate_soft_tetrahedra_from_model`; consulted in
         # :meth:`_singleworld_kernels` to gate the soft_tet_only
@@ -1370,6 +1377,19 @@ class PhoenXWorld:
         if self._particle_sentinel is None:
             self._particle_sentinel = particle_container_zeros(1, device=self.device)
         return self._particle_sentinel
+
+    def _refresh_has_position_level_writers(self) -> None:
+        """Stamp :attr:`BodyContainer.has_position_level_writers` from
+        the current cloth-triangle / cloth-bending / soft-tet counts.
+
+        Only those constraint types ever write
+        ``ACCESS_MODE_POSITION_LEVEL``, so the flag is 1 iff any of
+        them is present. :func:`body_set_access_mode` reads this single
+        element first; in rigid-only scenes the load is warp-uniform
+        and the whole flip dead-code-eliminates.
+        """
+        flag = int(self.num_cloth_triangles > 0 or self.num_cloth_bending > 0 or self.num_soft_tetrahedra > 0)
+        self.bodies.has_position_level_writers.fill_(flag)
 
     def populate_cloth_triangles_from_model(
         self,

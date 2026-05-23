@@ -17,6 +17,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_KINEMATIC,
     MOTION_STATIC,
     BodyContainer,
+    body_set_access_mode,
 )
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     ADBS_TIME_US_OFFSET,
@@ -1946,6 +1947,18 @@ def _make_singleworld_dispatch_func(
                 # constant-fold reliably in Warp's codegen.
                 if wp.static(has_joints):
                     if not dispatched:
+                        # Joint constraints are velocity-level. In cloth scenes
+                        # (``cloth_support=True``) a prior position-level write
+                        # (cloth iterate) may have left these bodies in
+                        # ``ACCESS_MODE_POSITION_LEVEL``; flip them back. The
+                        # ``wp.static`` gate compile-time-eliminates both the
+                        # b1/b2 reads and the inlined flip body for rigid-only
+                        # scenes, restoring the dr_legs hot path.
+                        if wp.static(cloth_support):
+                            _b1_flip = constraint_get_body1(constraints, cid)
+                            _b2_flip = constraint_get_body2(constraints, cid)
+                            body_set_access_mode(bodies, _b1_flip, ACCESS_MODE_VELOCITY_LEVEL, idt)
+                            body_set_access_mode(bodies, _b2_flip, ACCESS_MODE_VELOCITY_LEVEL, idt)
                         if wp.static(is_prepare):
                             if wp.static(revolute_only):
                                 revolute_prepare_for_iteration(

@@ -83,6 +83,15 @@ class BodyContainer:
     #: ``body_set_access_mode`` to flip lazily.
     access_mode: wp.array[wp.int32]
 
+    #: Single-element scene-wide flag. ``1`` if the scene contains any
+    #: constraint type that can write ``ACCESS_MODE_POSITION_LEVEL``
+    #: (cloth triangle, cloth bending, soft-tet XPBD) -- ``0`` otherwise.
+    #: Read as the first line of :func:`body_set_access_mode` /
+    #: :func:`particle_set_access_mode`: a warp-uniform broadcast load
+    #: that short-circuits the whole flip in rigid-only scenes without
+    #: touching the scattered :attr:`access_mode` array.
+    has_position_level_writers: wp.array[wp.int32]
+
     #: Per-body sleep label. ``-1`` = awake; any non-negative value is
     #: the *root body id* (the lowest body id in the island this body
     #: was in at the moment it fell asleep). Acts as both the sleeping
@@ -140,6 +149,7 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.position_prev_substep = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.orientation_prev_substep = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
     c.access_mode = wp.full(num_bodies, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
+    c.has_position_level_writers = wp.zeros(1, dtype=wp.int32, device=device)
     c.island_root = wp.full(num_bodies, value=-1, dtype=wp.int32, device=device)
     c.frames_below_threshold = wp.zeros(num_bodies, dtype=wp.int32, device=device)
     return c
@@ -154,17 +164,18 @@ def body_set_access_mode(
 ):
     """Lazy SoA wrapper around :func:`synchronize_pose_velocity`.
 
-    Hot-path optimisation: gate every other field read behind a single
-    ``access_mode[b]`` load. The common case in rigid scenes is
-    ``current == new`` (every constraint just touched the same body
-    or the body is permanently STATIC) -- early-returning before
-    touching the six dual fields keeps this wrapper at one int read +
-    one branch per body-touch.
+    First check is the warp-uniform scene-wide gate
+    :attr:`BodyContainer.has_position_level_writers` -- when ``0``
+    (no cloth / cloth-bend / soft-tet in the scene) the entire flip
+    is provably a no-op, and the broadcast load avoids touching the
+    scattered :attr:`access_mode` array. Second check is the per-body
+    same-mode fast path.
 
     Mirrors Jitter2 ``TinyRigidState.SynchronizeVelAndPosStateUpdates``
-    (``MassSplitting/TinyRigidState.cs:62-65``), which also returns at
-    the top before touching the dual state.
+    (``MassSplitting/TinyRigidState.cs:62-65``).
     """
+    if bodies.has_position_level_writers[0] == 0:
+        return
     current = bodies.access_mode[b]
     # Early-out paths -- match the no-op short-circuits in
     # :func:`synchronize_pose_velocity`. Skipping the function call

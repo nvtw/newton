@@ -15,9 +15,8 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
-from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer, body_set_access_mode
+from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
@@ -483,17 +482,34 @@ def contact_iterate_at_multi(
         DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
     )
 
-    # Mass-splitting slot lookup. Identity when disabled.
-    v1, inv_factor1, slot1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
-    v2, inv_factor2, slot2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
-    w1, _wfb1, _wsb1 = read_angular_velocity_unified(bodies, copy_state, b1, parallel_id, num_bodies)
-    w2, _wfb2, _wsb2 = read_angular_velocity_unified(bodies, copy_state, b2, parallel_id, num_bodies)
-    inv_factor1_f = wp.float32(inv_factor1)
-    inv_factor2_f = wp.float32(inv_factor2)
-    inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
-    inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
-    inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_factor1_f
-    inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_factor2_f
+    # Mass-splitting fast path: when ``highest_index_in_use[0] == 0`` the
+    # whole slot-aware machinery is identity. Bypass it with direct SoA reads
+    # so NVRTC doesn't inline the read_*_unified / get_state_index bodies
+    # into the rigid hot path. Same pattern as ``_ms_load_body_pair`` for
+    # joint constraints. Sets ``slot1 = slot2 = -1`` so the writeback below
+    # takes the matching fast path.
+    if copy_state.highest_index_in_use[0] == wp.int32(0):
+        v1 = bodies.velocity[b1]
+        v2 = bodies.velocity[b2]
+        w1 = bodies.angular_velocity[b1]
+        w2 = bodies.angular_velocity[b2]
+        inv_mass1 = bodies.inverse_mass[b1]
+        inv_mass2 = bodies.inverse_mass[b2]
+        inv_inertia1 = bodies.inverse_inertia_world[b1]
+        inv_inertia2 = bodies.inverse_inertia_world[b2]
+        slot1 = wp.int32(-1)
+        slot2 = wp.int32(-1)
+    else:
+        v1, inv_factor1, slot1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
+        v2, inv_factor2, slot2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
+        w1, _wfb1, _wsb1 = read_angular_velocity_unified(bodies, copy_state, b1, parallel_id, num_bodies)
+        w2, _wfb2, _wsb2 = read_angular_velocity_unified(bodies, copy_state, b2, parallel_id, num_bodies)
+        inv_factor1_f = wp.float32(inv_factor1)
+        inv_factor2_f = wp.float32(inv_factor2)
+        inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
+        inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
+        inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_factor1_f
+        inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_factor2_f
 
     # Body pose for per-contact lever-arm recompute.
     orientation1 = bodies.orientation[b1]
@@ -600,10 +616,19 @@ def contact_iterate_at_multi(
             )
         it += 1
 
-    write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
-    write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
-    write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
-    write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2)
+    # Mass-splitting fast-path writeback: matches the load gate above.
+    # ``slot1 == slot2 == -1`` means the load took the disabled path, so write
+    # directly to ``bodies.*`` without the write_*_unified inlining.
+    if slot1 < wp.int32(0) and slot2 < wp.int32(0):
+        bodies.velocity[b1] = v1
+        bodies.velocity[b2] = v2
+        bodies.angular_velocity[b1] = w1
+        bodies.angular_velocity[b2] = w2
+    else:
+        write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
+        write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
+        write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
+        write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2)
 
 
 @wp.func
@@ -637,8 +662,10 @@ def contact_iterate_multi(
         frozen2 = (bodies.motion_type[b2] != MOTION_DYNAMIC) or (bodies.island_root[b2] >= wp.int32(0))
         if frozen1 and frozen2:
             return
-    body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
-    body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
+    # Access-mode flip is the caller's responsibility now -- moved out of the
+    # constraint hot path into the dispatcher under ``wp.static(cloth_support)``.
+    # The fast-tail kernel that calls this entry is rigid-only by design,
+    # so the flip is provably a no-op there.
     body_pair = constraint_bodies_make(b1, b2)
     contact_iterate_at_multi(
         constraints,

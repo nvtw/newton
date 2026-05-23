@@ -24,8 +24,7 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
-from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
+from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     _PD_NYQUIST_HEADROOM_MAX,
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
@@ -3000,8 +2999,6 @@ def actuated_double_ball_socket_iterate_multi(
     """
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
-    body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
-    body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     joint_mode = read_int(constraints, _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
@@ -3449,8 +3446,6 @@ def actuated_double_ball_socket_prepare_for_iteration(
     # iterate touching a body that's also a cloth node, future use)
     # is finite-diffed into velocity before we read it. No-op when
     # the body is already VELOCITY_LEVEL or STATIC.
-    body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
-    body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     actuated_double_ball_socket_prepare_for_iteration_at(
         constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
@@ -3475,8 +3470,6 @@ def actuated_double_ball_socket_iterate(
     """
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
-    body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
-    body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     actuated_double_ball_socket_iterate_at(
         constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, sor_boost, use_bias
@@ -3508,8 +3501,6 @@ def revolute_iterate(
     """
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
-    body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
-    body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     _pivot_iterate(
         constraints,
@@ -3546,8 +3537,6 @@ def revolute_prepare_for_iteration(
     fold to (has_schur_3plus2, has_angular_axial) on inlining."""
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
-    body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
-    body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     _box2d_pivot_slide_prepare_at(
         constraints,
@@ -3587,8 +3576,6 @@ def revolute_iterate_multi(
     """
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
-    body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
-    body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
     _revolute_iterate_at_multi(
         constraints,
