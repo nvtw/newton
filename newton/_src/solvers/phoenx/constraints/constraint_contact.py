@@ -649,19 +649,10 @@ def contact_iterate_multi(
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
-    # Backup safety for the sleep-transition frame. The broad-phase
-    # filter drops frozen-vs-frozen pairs, but contacts the broad
-    # phase already produced *before* the per-step sleeping pass
-    # stamped a body's ``island_root`` survive into the substep
-    # solve. Without this guard the positional-bias term re-injects
-    # energy into the freshly-sleeping bodies and the whole island
-    # explodes. Frozen = sleeping (``island_root >= 0``) or non-dynamic
-    # (STATIC / KINEMATIC, which also catches the world anchor at slot 0).
-    if b1 >= 0 and b1 < num_bodies and b2 >= 0 and b2 < num_bodies:
-        frozen1 = (bodies.motion_type[b1] != MOTION_DYNAMIC) or (bodies.island_root[b1] >= wp.int32(0))
-        frozen2 = (bodies.motion_type[b2] != MOTION_DYNAMIC) or (bodies.island_root[b2] >= wp.int32(0))
-        if frozen1 and frozen2:
-            return
+    # Sleep-transition safety (drop frozen-vs-frozen contacts) is now
+    # the caller's responsibility, gated at the kernel level by
+    # ``wp.static(has_sleeping)``. Rigid scenes without sleeping skip
+    # the 4 scattered motion_type/island_root loads entirely.
     # Access-mode flip is the caller's responsibility now -- moved out of the
     # constraint hot path into the dispatcher under ``wp.static(cloth_support)``.
     # The fast-tail kernel that calls this entry is rigid-only by design,

@@ -622,7 +622,7 @@ def _per_world_greedy_coloring_kernel(
 
 
 @functools.cache
-def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool, enable_column_timers: bool = False):
+def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False):
     """Build the multi-world fused prepare + iterate fast-tail kernel."""
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -756,21 +756,34 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool, enable_c
                             )
                     else:
                         local_cid = cid - num_joints
-                        contact_iterate_multi(
-                            contact_cols,
-                            local_cid,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            True,
-                            inner_sweeps,
-                            copy_state,
-                            wp.int32(0),
-                            sor_boost,
-                        )
+                        # Sleep-transition guard: drop contacts where both endpoints
+                        # are frozen (sleeping or non-dynamic). DCE'd when no
+                        # sleeping body could exist in the scene.
+                        skip_frozen = False
+                        if wp.static(has_sleeping):
+                            cb1 = contact_get_body1(contact_cols, local_cid)
+                            cb2 = contact_get_body2(contact_cols, local_cid)
+                            if cb1 >= 0 and cb1 < num_bodies and cb2 >= 0 and cb2 < num_bodies:
+                                fr1 = (bodies.motion_type[cb1] != MOTION_DYNAMIC) or (bodies.island_root[cb1] >= wp.int32(0))
+                                fr2 = (bodies.motion_type[cb2] != MOTION_DYNAMIC) or (bodies.island_root[cb2] >= wp.int32(0))
+                                if fr1 and fr2:
+                                    skip_frozen = True
+                        if not skip_frozen:
+                            contact_iterate_multi(
+                                contact_cols,
+                                local_cid,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                True,
+                                inner_sweeps,
+                                copy_state,
+                                wp.int32(0),
+                                sor_boost,
+                            )
                         if wp.static(enable_column_timers):
                             contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                     base += tpw
@@ -784,7 +797,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool, enable_c
 
 
 @functools.cache
-def _make_fast_tail_relax_kernel(*, revolute_only: bool, enable_column_timers: bool = False):
+def _make_fast_tail_relax_kernel(*, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False):
     """Multi-world relax fast-tail kernel (use_bias=False, num_sweeps=num_iterations)."""
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -867,21 +880,32 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool, enable_column_timers: b
                         )
                 else:
                     local_cid = cid - num_joints
-                    contact_iterate_multi(
-                        contact_cols,
-                        local_cid,
-                        bodies,
-                        particles,
-                        num_bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        False,
-                        num_iterations,
-                        copy_state,
-                        wp.int32(0),
-                        sor_boost,
-                    )
+                    # Sleep-transition guard (DCE'd when has_sleeping=False).
+                    skip_frozen = False
+                    if wp.static(has_sleeping):
+                        cb1 = contact_get_body1(contact_cols, local_cid)
+                        cb2 = contact_get_body2(contact_cols, local_cid)
+                        if cb1 >= 0 and cb1 < num_bodies and cb2 >= 0 and cb2 < num_bodies:
+                            fr1 = (bodies.motion_type[cb1] != MOTION_DYNAMIC) or (bodies.island_root[cb1] >= wp.int32(0))
+                            fr2 = (bodies.motion_type[cb2] != MOTION_DYNAMIC) or (bodies.island_root[cb2] >= wp.int32(0))
+                            if fr1 and fr2:
+                                skip_frozen = True
+                    if not skip_frozen:
+                        contact_iterate_multi(
+                            contact_cols,
+                            local_cid,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            False,
+                            num_iterations,
+                            copy_state,
+                            wp.int32(0),
+                            sor_boost,
+                        )
                     if wp.static(enable_column_timers):
                         contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                 base += tpw
@@ -986,17 +1010,19 @@ def _reduce_contact_time_us_kernel(
     wp.atomic_add(totals, 4, contact_cols.data[off, local_cid])
 
 
-def get_fast_tail_kernel(*, kind: str, revolute_only: bool, enable_column_timers: bool = False):
+def get_fast_tail_kernel(*, kind: str, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False):
     """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``
-    or ``"relax"``. Each (kind, revolute_only, enable_column_timers)
-    tuple is cached after first build by the underlying factory's
-    ``functools.cache``."""
+    or ``"relax"``. Each (kind, revolute_only, has_sleeping,
+    enable_column_timers) tuple is cached after first build by the
+    underlying factory's ``functools.cache``."""
     if kind == "prepare_plus_iterate":
         return _make_fast_tail_prepare_plus_iterate_kernel(
-            revolute_only=revolute_only, enable_column_timers=enable_column_timers
+            revolute_only=revolute_only, has_sleeping=has_sleeping, enable_column_timers=enable_column_timers
         )
     if kind == "relax":
-        return _make_fast_tail_relax_kernel(revolute_only=revolute_only, enable_column_timers=enable_column_timers)
+        return _make_fast_tail_relax_kernel(
+            revolute_only=revolute_only, has_sleeping=has_sleeping, enable_column_timers=enable_column_timers
+        )
     raise ValueError(f"unknown fast-tail kernel kind: {kind!r}")
 
 
