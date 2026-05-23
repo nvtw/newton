@@ -956,6 +956,57 @@ class PhoenXWorld:
 
         self._assert_invariants()
 
+        self._pre_compile_dispatch_kernels()
+
+    def _pre_compile_dispatch_kernels(self) -> None:
+        """Eagerly instantiate the factory-built PGS kernels for the current
+        scene spec and parallel-compile their warp modules.
+
+        Each ``module="unique"`` PGS dispatcher kernel (single-world
+        head/fused prepare + iterate + relax, multi-world fast-tail
+        prepare+iter + relax) is its own warp module and inlines the
+        scene-specialised ``_dispatch_one_cid`` helper. On a cold cache
+        each one costs ~10-15 s of NVRTC; loaded lazily on the first
+        ``step()`` they serialise on a single Python thread.
+
+        When ``wp.config.load_module_max_workers`` is set above 1 we
+        instantiate every variant the active step layout will launch and
+        hand the modules to :func:`wp.force_load`, which then drives
+        codegen + NVRTC across a thread pool. The warp-side codegen
+        phase is serialised on a module-level lock (see
+        :func:`warp._src.context._codegen_lock`) so per-Adjoint state
+        stays consistent; the heavy NVRTC step runs outside the lock.
+
+        No-op when ``load_module_max_workers`` is unset, 0, or 1 — the
+        kernels stay lazy and behaviour is bit-identical to the prior
+        release.
+        """
+        max_workers = wp.config.load_module_max_workers
+        if max_workers is None or max_workers <= 1:
+            return
+
+        kernels: list = []
+        if self.step_layout == "single_world":
+            # Six head/fused prepare + iterate + relax variants for the
+            # current cloth / soft-tet / joint specialisation.
+            kernels.extend(self._singleworld_kernels())
+        else:
+            fast_tail_kw = {
+                "revolute_only": bool(self._use_revolute_specialization),
+                "has_sleeping": bool(self._sleeping_enabled),
+                "enable_column_timers": self.enable_column_timers,
+            }
+            kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw))
+            kernels.append(get_fast_tail_kernel(kind="relax", **fast_tail_kw))
+
+        # De-duplicate by module; ``functools.cache`` already collapses
+        # identical (axes-tuple) factory calls but cheap to be defensive.
+        modules = list({kernel.module for kernel in kernels if kernel is not None})
+        if not modules:
+            return
+
+        wp.force_load(device=self.device, modules=modules, max_workers=max_workers)
+
     def _assert_invariants(self) -> None:
         """Validate per-step buffer shapes against the documented schema."""
         expected_constraint_dwords = self.required_constraint_dwords(
