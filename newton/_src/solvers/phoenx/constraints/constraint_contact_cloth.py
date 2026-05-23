@@ -113,11 +113,14 @@ __all__ = [
     "contact_iterate",
     "contact_iterate_at",
     "contact_iterate_at_cloth_aware",
+    "contact_iterate_at_lean",
     "contact_iterate_cloth_aware",
     "contact_prepare_for_iteration",
     "contact_prepare_for_iteration_at",
     "contact_prepare_for_iteration_at_cloth_aware",
+    "contact_prepare_for_iteration_at_lean",
     "contact_prepare_for_iteration_cloth_aware",
+    "contact_prepare_for_iteration_lean",
 ]
 
 
@@ -183,7 +186,7 @@ def _side_world_contact_point(
 # ---------------------------------------------------------------------------
 
 
-def _make_contact_prepare_for_iteration_at(cloth_support: bool):
+def _make_contact_prepare_for_iteration_at(cloth_support: bool, has_mass_splitting: bool = True):
     @wp.func
     def impl(
         constraints: ContactColumnContainer,
@@ -251,7 +254,8 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
             position2 = bodies.position[b2]
             body_com1 = bodies.body_com[b1]
             body_com2 = bodies.body_com[b2]
-            if copy_state.highest_index_in_use[0] == wp.int32(0):
+            if wp.static(not has_mass_splitting):
+                # Compile-time lean path: slot lookup dead-code-eliminated.
                 slot1 = wp.int32(-1)
                 slot2 = wp.int32(-1)
                 inv_mass1 = bodies.inverse_mass[b1]
@@ -534,7 +538,21 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
             # the load took the disabled fast-path; >=0 means a slot lookup
             # was done. The fast-path here bypasses ``read_*_unified`` /
             # ``write_*_unified`` inlining for the rigid hot loop.
-            if slot1 < wp.int32(0) and slot2 < wp.int32(0):
+            if wp.static(not has_mass_splitting):
+                # Compile-time lean writeback: direct SoA only.
+                v1_cur = bodies.velocity[b1]
+                v2_cur = bodies.velocity[b2]
+                w1_cur = bodies.angular_velocity[b1]
+                w2_cur = bodies.angular_velocity[b2]
+                v1_new = v1_cur - inv_mass1 * total_lin_imp_on_b2
+                v2_new = v2_cur + inv_mass2 * total_lin_imp_on_b2
+                w1_new = w1_cur - inv_inertia1 @ total_ang_imp_on_b1
+                w2_new = w2_cur + inv_inertia2 @ total_ang_imp_on_b2
+                bodies.velocity[b1] = v1_new
+                bodies.velocity[b2] = v2_new
+                bodies.angular_velocity[b1] = w1_new
+                bodies.angular_velocity[b2] = w2_new
+            elif slot1 < wp.int32(0) and slot2 < wp.int32(0):
                 v1_cur = bodies.velocity[b1]
                 v2_cur = bodies.velocity[b2]
                 w1_cur = bodies.angular_velocity[b1]
@@ -564,7 +582,7 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool):
     return impl
 
 
-def _make_contact_iterate_at(cloth_support: bool):
+def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = True):
     @wp.func
     def impl(
         constraints: ContactColumnContainer,
@@ -622,7 +640,19 @@ def _make_contact_iterate_at(cloth_support: bool):
             orientation2 = bodies.orientation[b2]
             body_com1 = bodies.body_com[b1]
             body_com2 = bodies.body_com[b2]
-            if copy_state.highest_index_in_use[0] == wp.int32(0):
+            if wp.static(not has_mass_splitting):
+                # Compile-time lean: slot lookup dead-code-eliminated.
+                v1 = bodies.velocity[b1]
+                v2 = bodies.velocity[b2]
+                w1 = bodies.angular_velocity[b1]
+                w2 = bodies.angular_velocity[b2]
+                inv_mass1 = bodies.inverse_mass[b1]
+                inv_mass2 = bodies.inverse_mass[b2]
+                inv_inertia1 = bodies.inverse_inertia_world[b1]
+                inv_inertia2 = bodies.inverse_inertia_world[b2]
+                slot1 = wp.int32(-1)
+                slot2 = wp.int32(-1)
+            elif copy_state.highest_index_in_use[0] == wp.int32(0):
                 v1 = bodies.velocity[b1]
                 v2 = bodies.velocity[b2]
                 w1 = bodies.angular_velocity[b1]
@@ -828,7 +858,7 @@ def _make_contact_iterate_at(cloth_support: bool):
 
         if wp.static(not cloth_support):
             # Mass-splitting fast-path writeback (matches the load gate above).
-            if slot1 < wp.int32(0) and slot2 < wp.int32(0):
+            if wp.static(not has_mass_splitting) or (slot1 < wp.int32(0) and slot2 < wp.int32(0)):
                 bodies.velocity[b1] = v1
                 bodies.velocity[b2] = v2
                 bodies.angular_velocity[b1] = w1
@@ -846,8 +876,10 @@ def _make_contact_iterate_at(cloth_support: bool):
 # ``@wp.func`` wrappers below reference them.
 
 contact_prepare_for_iteration_at = _make_contact_prepare_for_iteration_at(cloth_support=False)
+contact_prepare_for_iteration_at_lean = _make_contact_prepare_for_iteration_at(cloth_support=False, has_mass_splitting=False)
 contact_prepare_for_iteration_at_cloth_aware = _make_contact_prepare_for_iteration_at(cloth_support=True)
 contact_iterate_at = _make_contact_iterate_at(cloth_support=False)
+contact_iterate_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False)
 contact_iterate_at_cloth_aware = _make_contact_iterate_at(cloth_support=True)
 
 
@@ -875,6 +907,40 @@ def contact_prepare_for_iteration(
     # level writers exist, so the flip is provably a no-op.
     body_pair = constraint_bodies_make(b1, b2)
     contact_prepare_for_iteration_at(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_lean(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    """Mass-splitting-free entry. Used by the multi-world fast-tail
+    kernel where mass splitting is rejected at construction."""
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_prepare_for_iteration_at_lean(
         constraints,
         cid,
         0,

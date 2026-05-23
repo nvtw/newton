@@ -482,34 +482,20 @@ def contact_iterate_at_multi(
         DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
     )
 
-    # Mass-splitting fast path: when ``highest_index_in_use[0] == 0`` the
-    # whole slot-aware machinery is identity. Bypass it with direct SoA reads
-    # so NVRTC doesn't inline the read_*_unified / get_state_index bodies
-    # into the rigid hot path. Same pattern as ``_ms_load_body_pair`` for
-    # joint constraints. Sets ``slot1 = slot2 = -1`` so the writeback below
-    # takes the matching fast path.
-    if copy_state.highest_index_in_use[0] == wp.int32(0):
-        v1 = bodies.velocity[b1]
-        v2 = bodies.velocity[b2]
-        w1 = bodies.angular_velocity[b1]
-        w2 = bodies.angular_velocity[b2]
-        inv_mass1 = bodies.inverse_mass[b1]
-        inv_mass2 = bodies.inverse_mass[b2]
-        inv_inertia1 = bodies.inverse_inertia_world[b1]
-        inv_inertia2 = bodies.inverse_inertia_world[b2]
-        slot1 = wp.int32(-1)
-        slot2 = wp.int32(-1)
-    else:
-        v1, inv_factor1, slot1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
-        v2, inv_factor2, slot2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
-        w1, _wfb1, _wsb1 = read_angular_velocity_unified(bodies, copy_state, b1, parallel_id, num_bodies)
-        w2, _wfb2, _wsb2 = read_angular_velocity_unified(bodies, copy_state, b2, parallel_id, num_bodies)
-        inv_factor1_f = wp.float32(inv_factor1)
-        inv_factor2_f = wp.float32(inv_factor2)
-        inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
-        inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
-        inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_factor1_f
-        inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_factor2_f
+    # ``contact_iterate_at_multi`` is only invoked from the multi-world
+    # fast-tail kernel, where mass splitting is rejected at construction
+    # time. Use direct SoA reads (no slot lookup) so NVRTC doesn't compile
+    # the unreachable ``read_*_unified`` slow path into the kernel binary.
+    v1 = bodies.velocity[b1]
+    v2 = bodies.velocity[b2]
+    w1 = bodies.angular_velocity[b1]
+    w2 = bodies.angular_velocity[b2]
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    slot1 = wp.int32(-1)
+    slot2 = wp.int32(-1)
 
     # Body pose for per-contact lever-arm recompute.
     orientation1 = bodies.orientation[b1]
@@ -616,19 +602,11 @@ def contact_iterate_at_multi(
             )
         it += 1
 
-    # Mass-splitting fast-path writeback: matches the load gate above.
-    # ``slot1 == slot2 == -1`` means the load took the disabled path, so write
-    # directly to ``bodies.*`` without the write_*_unified inlining.
-    if slot1 < wp.int32(0) and slot2 < wp.int32(0):
-        bodies.velocity[b1] = v1
-        bodies.velocity[b2] = v2
-        bodies.angular_velocity[b1] = w1
-        bodies.angular_velocity[b2] = w2
-    else:
-        write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
-        write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
-        write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
-        write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2)
+    # Direct SoA writes -- fast-tail-only function (no mass splitting).
+    bodies.velocity[b1] = v1
+    bodies.velocity[b2] = v2
+    bodies.angular_velocity[b1] = w1
+    bodies.angular_velocity[b2] = w2
 
 
 @wp.func

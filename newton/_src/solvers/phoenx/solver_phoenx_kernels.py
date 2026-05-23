@@ -59,6 +59,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_iterate_cloth_aware,
     contact_prepare_for_iteration,
     contact_prepare_for_iteration_cloth_aware,
+    contact_prepare_for_iteration_lean,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_BENDING,
@@ -684,7 +685,10 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool, has_slee
                         )
                 else:
                     local_cid = cid - num_joints
-                    contact_prepare_for_iteration(
+                    # Multi-world fast-tail: mass splitting is rejected at
+                    # construction, so call the lean variant to keep the
+                    # slot lookup out of the kernel binary.
+                    contact_prepare_for_iteration_lean(
                         contact_cols,
                         local_cid,
                         bodies,

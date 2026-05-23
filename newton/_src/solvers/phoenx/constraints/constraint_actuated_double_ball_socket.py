@@ -800,6 +800,39 @@ def _ms_load_body_pair(
 
 
 @wp.func
+def _ms_load_body_pair_lean(
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    b1: wp.int32,
+    b2: wp.int32,
+    parallel_id: wp.int32,
+    num_bodies: wp.int32,
+):
+    """Mass-splitting-free variant of :func:`_ms_load_body_pair`.
+    Direct SoA reads with no ``copy_state`` touch, no slot logic, no
+    Tonge ``inv_factor`` multiply. Returns ``slot1 = slot2 = -1`` so
+    the matching :func:`_ms_store_body_pair_lean` writeback fires.
+
+    Used when ``has_mass_splitting=False`` is known at kernel-compile
+    time (the common multi-world fast-tail case). Eliminates the
+    dead-code slow path from the kernel binary.
+    """
+    return (
+        bodies.velocity[b1],
+        bodies.velocity[b2],
+        bodies.angular_velocity[b1],
+        bodies.angular_velocity[b2],
+        bodies.inverse_mass[b1],
+        bodies.inverse_mass[b2],
+        bodies.inverse_inertia_world[b1],
+        bodies.inverse_inertia_world[b2],
+        wp.int32(-1),
+        wp.int32(-1),
+    )
+
+
+@wp.func
 def _ms_store_body_pair(
     bodies: BodyContainer,
     particles: ParticleContainer,
@@ -830,6 +863,28 @@ def _ms_store_body_pair(
     write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
     write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
     write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2)
+
+
+@wp.func
+def _ms_store_body_pair_lean(
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    b1: wp.int32,
+    b2: wp.int32,
+    slot1: wp.int32,
+    slot2: wp.int32,
+    num_bodies: wp.int32,
+    v1: wp.vec3f,
+    w1: wp.vec3f,
+    v2: wp.vec3f,
+    w2: wp.vec3f,
+):
+    """Mass-splitting-free writeback. Direct SoA writes only."""
+    bodies.velocity[b1] = v1
+    bodies.velocity[b2] = v2
+    bodies.angular_velocity[b1] = w1
+    bodies.angular_velocity[b2] = w2
 
 
 # ---------------------------------------------------------------------------
@@ -2748,6 +2803,10 @@ def _revolute_iterate_at_multi(
     b2 = body_pair.b2
 
     # ---- Body state (hoisted out of the sweep loop) ------------------
+    # ``_revolute_iterate_at_multi`` is only invoked from the multi-world
+    # fast-tail kernel, where ``mass_splitting`` is rejected at PhoenXWorld
+    # construction. Use the lean direct-read path so NVRTC doesn't compile
+    # the unreachable slot lookup into the kernel binary.
     (
         velocity1,
         velocity2,
@@ -2759,7 +2818,7 @@ def _revolute_iterate_at_multi(
         inv_inertia2,
         slot1,
         slot2,
-    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
+    ) = _ms_load_body_pair_lean(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
     # ---- Constraint constants ----------------------------------------
     r1_b1 = read_vec3(constraints, base_offset + _OFF_R1_B1, cid)
@@ -2949,7 +3008,9 @@ def _revolute_iterate_at_multi(
         it += 1
 
     # ---- Writeback ---------------------------------------------------
-    _ms_store_body_pair(
+    # See the matching ``_ms_load_body_pair_lean`` comment at the top of
+    # this function for why the lean store is safe here.
+    _ms_store_body_pair_lean(
         bodies,
         particles,
         copy_state,
