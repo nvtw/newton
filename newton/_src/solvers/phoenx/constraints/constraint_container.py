@@ -28,6 +28,7 @@ __all__ = [
     "CONSTRAINT_TYPE_CONTACT",
     "CONSTRAINT_TYPE_INVALID",
     "CONSTRAINT_TYPE_OFFSET",
+    "CONSTRAINT_TYPE_SOFT_HEXAHEDRON",
     "CONSTRAINT_TYPE_SOFT_TETRAHEDRON",
     "CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN",
     "DEFAULT_DAMPING_RATIO",
@@ -97,6 +98,10 @@ CONSTRAINT_TYPE_CLOTH_BENDING = wp.constant(wp.int32(12))
 #: system. Endpoints body1..body4 are particle indices. See
 #: :mod:`constraint_soft_tet_neohookean`.
 CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN = wp.constant(wp.int32(13))
+#: 8-node trilinear-hex co-rotational ARAP, single deformation gradient
+#: evaluated at the hex center (1-point Gauss). Endpoints body1..body8 are
+#: particle indices. See :mod:`constraint_soft_hexahedron`.
+CONSTRAINT_TYPE_SOFT_HEXAHEDRON = wp.constant(wp.int32(14))
 
 CONSTRAINT_TYPE_OFFSET = wp.constant(wp.int32(0))
 CONSTRAINT_BODY1_OFFSET = wp.constant(wp.int32(1))

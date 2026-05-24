@@ -66,6 +66,11 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     constraint_container_zeros,
 )
+from newton._src.solvers.phoenx.constraints.constraint_soft_hexahedron import (
+    SOFT_HEX_DWORDS,
+    SOFT_HEX_TIME_US_OFFSET,
+    soft_hex_init_rows_from_arrays_kernel,
+)
 from newton._src.solvers.phoenx.constraints.constraint_soft_tet_neohookean import (
     SOFT_TET_NEOHOOKEAN_DWORDS,
     SOFT_TET_NEOHOOKEAN_TIME_US_OFFSET,
@@ -311,6 +316,10 @@ class PhoenXWorld:
         """Total wall-clock microseconds spent in contact dispatches.
         ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
 
+        time_us_total_soft_hexahedra: float | None = None
+        """Total wall-clock microseconds spent in soft-hex dispatches.
+        ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
+
     def __init__(
         self,
         bodies: BodyContainer,
@@ -325,6 +334,7 @@ class PhoenXWorld:
         num_cloth_triangles: int = 0,
         num_cloth_bending: int = 0,
         num_soft_tetrahedra: int = 0,
+        num_soft_hexahedra: int = 0,
         collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         num_worlds: int = 1,
@@ -396,8 +406,10 @@ class PhoenXWorld:
         #: dispatches atomic-add their elapsed us into the column's
         #: ``time_us`` slot. Off by default to keep kernel cache stable.
         self.enable_column_timers: bool = bool(enable_column_timers)
-        # Lazy 5-element scratch for per-type time_us reduction
-        # (joints/cloth_tri/cloth_bend/soft_tet/contacts).
+        # Lazy 6-element scratch for per-type time_us reduction
+        # (joints/cloth_tri/cloth_bend/soft_tet/contacts/soft_hex).
+        # Slot ordering kept stable: contacts stays at index 4 so the
+        # contact-side reduction kernel doesn't need rewiring.
         self._column_timer_totals: wp.array[wp.float32] | None = None
 
         self.bodies: BodyContainer = bodies
@@ -431,6 +443,9 @@ class PhoenXWorld:
         self.num_soft_tetrahedra: int = int(num_soft_tetrahedra)
         if self.num_soft_tetrahedra < 0:
             raise ValueError(f"num_soft_tetrahedra must be >= 0 (got {self.num_soft_tetrahedra})")
+        self.num_soft_hexahedra: int = int(num_soft_hexahedra)
+        if self.num_soft_hexahedra < 0:
+            raise ValueError(f"num_soft_hexahedra must be >= 0 (got {self.num_soft_hexahedra})")
         # Stamp the scene-wide ``has_position_level_writers`` flag on the
         # body container so :func:`body_set_access_mode` can warp-uniform
         # short-circuit in rigid-only scenes. Re-stamped by
@@ -558,13 +573,15 @@ class PhoenXWorld:
 
         # cid layout in the shared :class:`ConstraintContainer`:
         #   [0, num_joints):                                                                              joints
-        #   [num_joints, num_joints + num_cloth_triangles):                                               cloth tris
-        #   [num_joints + num_cloth_triangles, num_joints + num_cloth_triangles + num_cloth_bending):     cloth bending
-        #   [..., num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra):            soft tets
-        #   [..., ...):                                                                                   contacts
+        #   [num_joints, +num_cloth_triangles):                                                           cloth tris
+        #   [+num_cloth_triangles, +num_cloth_bending):                                                   cloth bending
+        #   [+num_cloth_bending, +num_soft_tetrahedra):                                                   soft tets
+        #   [+num_soft_tetrahedra, +num_soft_hexahedra):                                                  soft hexes
+        #   [+num_soft_hexahedra, ...):                                                                   contacts
         self._cloth_bending_offset: int = self.num_joints + self.num_cloth_triangles
         self._soft_tet_offset: int = self._cloth_bending_offset + self.num_cloth_bending
-        self._contact_offset: int = self._soft_tet_offset + self.num_soft_tetrahedra
+        self._soft_hex_offset: int = self._soft_tet_offset + self.num_soft_tetrahedra
+        self._contact_offset: int = self._soft_hex_offset + self.num_soft_hexahedra
         self._constraint_capacity: int = max(1, self._contact_offset + self.max_contact_columns)
 
         # Persistent grid fixed at construction (graph-capture stability).
@@ -955,14 +972,19 @@ class PhoenXWorld:
     def _assert_invariants(self) -> None:
         """Validate per-step buffer shapes against the documented schema."""
         expected_constraint_dwords = self.required_constraint_dwords(
-            self.num_joints, self.num_cloth_triangles, self.num_soft_tetrahedra, self.num_cloth_bending
+            self.num_joints,
+            self.num_cloth_triangles,
+            self.num_soft_tetrahedra,
+            self.num_cloth_bending,
+            self.num_soft_hexahedra,
         )
         expected_constraint_cols = max(
             1,
             int(self.num_joints)
             + int(self.num_cloth_triangles)
             + int(self.num_cloth_bending)
-            + int(self.num_soft_tetrahedra),
+            + int(self.num_soft_tetrahedra)
+            + int(self.num_soft_hexahedra),
         )
         actual_constraint_shape = self.constraints.data.shape
         assert actual_constraint_shape == (expected_constraint_dwords, expected_constraint_cols), (
@@ -1070,9 +1092,10 @@ class PhoenXWorld:
             phoenx_body_offset: Newton-id -> PhoenX-slot offset (1 for
                 the typical "slot 0 = world anchor" convention).
         """
-        if self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0:
+        if self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0 or self.num_soft_hexahedra > 0:
             raise RuntimeError(
-                "attach_collision_pipeline is rigid-only; cloth / soft-tet scenes use setup_cloth_collision_pipeline()"
+                "attach_collision_pipeline is rigid-only; cloth / soft-tet / soft-hex scenes "
+                "use setup_cloth_collision_pipeline()"
             )
 
         import numpy as _np  # noqa: PLC0415
@@ -1170,6 +1193,7 @@ class PhoenXWorld:
         num_cloth_triangles: int = 0,
         num_soft_tetrahedra: int = 0,
         num_cloth_bending: int = 0,
+        num_soft_hexahedra: int = 0,
     ) -> int:
         """Dword width = max over active types."""
         widths = [int(CONTACT_DWORDS)]
@@ -1186,6 +1210,8 @@ class PhoenXWorld:
             # static across runs.
             widths.append(int(SOFT_TET_DWORDS))
             widths.append(int(SOFT_TET_NEOHOOKEAN_DWORDS))
+        if int(num_soft_hexahedra) > 0:
+            widths.append(int(SOFT_HEX_DWORDS))
         return max(widths)
 
     @staticmethod
@@ -1195,6 +1221,7 @@ class PhoenXWorld:
         num_cloth_triangles: int = 0,
         num_soft_tetrahedra: int = 0,
         num_cloth_bending: int = 0,
+        num_soft_hexahedra: int = 0,
     ) -> ConstraintContainer:
         """Factory for a correctly-sized :class:`ConstraintContainer`.
 
@@ -1204,15 +1231,24 @@ class PhoenXWorld:
         * ``[num_joints, +num_cloth_triangles)`` -- cloth triangles
         * ``[..., +num_cloth_bending)`` -- cloth bending hinges
         * ``[..., +num_soft_tetrahedra)`` -- soft-body tets
+        * ``[..., +num_soft_hexahedra)`` -- soft-body hexes
         """
         cap = max(
             1,
-            int(num_joints) + int(num_cloth_triangles) + int(num_cloth_bending) + int(num_soft_tetrahedra),
+            int(num_joints)
+            + int(num_cloth_triangles)
+            + int(num_cloth_bending)
+            + int(num_soft_tetrahedra)
+            + int(num_soft_hexahedra),
         )
         return constraint_container_zeros(
             num_constraints=cap,
             num_dwords=PhoenXWorld.required_constraint_dwords(
-                num_joints, num_cloth_triangles, num_soft_tetrahedra, num_cloth_bending
+                num_joints,
+                num_cloth_triangles,
+                num_soft_tetrahedra,
+                num_cloth_bending,
+                num_soft_hexahedra,
             ),
             device=device,
         )
@@ -1384,7 +1420,12 @@ class PhoenXWorld:
         element first; in rigid-only scenes the load is warp-uniform
         and the whole flip dead-code-eliminates.
         """
-        flag = int(self.num_cloth_triangles > 0 or self.num_cloth_bending > 0 or self.num_soft_tetrahedra > 0)
+        flag = int(
+            self.num_cloth_triangles > 0
+            or self.num_cloth_bending > 0
+            or self.num_soft_tetrahedra > 0
+            or self.num_soft_hexahedra > 0
+        )
         self.bodies.has_position_level_writers.fill_(flag)
 
     def populate_cloth_triangles_from_model(
@@ -1598,6 +1639,87 @@ class PhoenXWorld:
                 device=self.device,
             )
             self._soft_tet_uses_neohookean = False
+        self._num_active_constraints.fill_(self._contact_offset)
+
+    def populate_soft_hexahedra_from_arrays(
+        self,
+        hex_indices: wp.array,  # wp.array2d[wp.int32], shape [num_hexahedra, 8]
+        particle_q: wp.array,  # wp.array[wp.vec3f], rest particle positions
+        hex_materials: wp.array,  # wp.array2d[wp.float32], shape [num_hexahedra, 2] = (k_mu, beta_mu)
+        particle_qd: wp.array | None = None,  # wp.array[wp.vec3f], initial particle velocities (optional)
+        particle_inv_mass: wp.array | None = None,  # wp.array[wp.float32], optional inverse masses
+    ) -> None:
+        """Stamp soft-hexahedron constraint rows from caller-supplied arrays.
+
+        Hex constraints occupy ``[num_joints + num_cloth_triangles +
+        num_cloth_bending + num_soft_tetrahedra, num_joints + ... +
+        num_soft_hexahedra)`` in the :class:`ConstraintContainer`. Builds
+        ``inv_rest = J^{-T}`` and ``rest_volume = 8 det(J)`` from the
+        rest particle positions of each hex's 8 corners.
+
+        Caller is responsible for stamping ``hex_indices[h, 0..7]`` in
+        canonical isoparametric 8-corner order (see
+        :mod:`constraint_soft_hexahedron`).
+
+        Args:
+            hex_indices: ``[num_hexahedra, 8]`` int32 particle indices
+                per hex, in canonical corner order.
+            particle_q: ``[num_particles, 3]`` float32 rest positions.
+                Copied into :attr:`particles.position`.
+            hex_materials: ``[num_hexahedra, 2]`` float32 ``(k_mu,
+                beta_mu)`` per hex: ``k_mu`` is the shear modulus [Pa]
+                (XPBD compliance ``alpha_mu = 1 / k_mu``); ``beta_mu``
+                is Macklin XPBD damping [1/s] applied via
+                ``gamma_mu = beta_mu * substep_dt``.
+            particle_qd: Optional initial velocities. ``None`` leaves
+                :attr:`particles.velocity` at its default (zeros from
+                container construction).
+            particle_inv_mass: Optional inverse-mass array. ``None``
+                leaves :attr:`particles.inverse_mass` at its default.
+                Pin a particle by setting its inv_mass to 0.
+
+        Idempotent across repeated calls; safe to combine with
+        :meth:`populate_soft_tetrahedra_from_model` in mixed scenes
+        (each populator stamps its own cid range and ``_num_active_constraints``
+        is advanced to ``_contact_offset`` so contacts append after).
+        """
+        if self.num_soft_hexahedra == 0:
+            return
+        if self.particles is None:
+            raise RuntimeError("populate_soft_hexahedra_from_arrays requires num_particles > 0")
+        if hex_indices.shape[0] != self.num_soft_hexahedra:
+            raise ValueError(
+                f"populate_soft_hexahedra_from_arrays: hex_indices.shape[0] "
+                f"({hex_indices.shape[0]}) != world.num_soft_hexahedra ({self.num_soft_hexahedra})"
+            )
+        if hex_indices.shape[1] != 8:
+            raise ValueError(
+                f"populate_soft_hexahedra_from_arrays: hex_indices must be [N, 8] "
+                f"(got shape {tuple(hex_indices.shape)})"
+            )
+        if hex_materials.shape[0] != self.num_soft_hexahedra:
+            raise ValueError(
+                f"populate_soft_hexahedra_from_arrays: hex_materials.shape[0] "
+                f"({hex_materials.shape[0]}) != num_soft_hexahedra ({self.num_soft_hexahedra})"
+            )
+        wp.copy(self.particles.position, particle_q)
+        if particle_qd is not None:
+            wp.copy(self.particles.velocity, particle_qd)
+        if particle_inv_mass is not None:
+            wp.copy(self.particles.inverse_mass, particle_inv_mass)
+        wp.launch(
+            soft_hex_init_rows_from_arrays_kernel,
+            dim=self.num_soft_hexahedra,
+            inputs=[
+                self.constraints,
+                wp.int32(self._soft_hex_offset),
+                wp.int32(self.num_bodies),
+                hex_indices,
+                particle_q,
+                hex_materials,
+            ],
+            device=self.device,
+        )
         self._num_active_constraints.fill_(self._contact_offset)
 
     def setup_cloth_collision_pipeline(
@@ -2247,6 +2369,7 @@ class PhoenXWorld:
                 wp.int32(self.num_cloth_triangles),
                 wp.int32(self.num_cloth_bending),
                 wp.int32(self.num_soft_tetrahedra),
+                wp.int32(self.num_soft_hexahedra),
                 wp.int32(self.num_bodies),
                 self._elements,
             ],
@@ -2832,6 +2955,7 @@ class PhoenXWorld:
                     wp.int32(self.num_cloth_triangles),
                     wp.int32(self.num_cloth_bending),
                     wp.int32(self.num_soft_tetrahedra),
+                    wp.int32(self.num_soft_hexahedra),
                     wp.int32(self.num_bodies),
                     wp.int32(self._singleworld_total_threads),
                     wp.int32(self._fuse_threshold),
@@ -2872,6 +2996,7 @@ class PhoenXWorld:
                 wp.int32(self.num_cloth_triangles),
                 wp.int32(self.num_cloth_bending),
                 wp.int32(self.num_soft_tetrahedra),
+                wp.int32(self.num_soft_hexahedra),
                 wp.int32(self.num_bodies),
                 wp.int32(self._fuse_threshold),
                 self._copy_state,
@@ -2993,21 +3118,28 @@ class PhoenXWorld:
         """Return ``(prepare_head, prepare_fused, iterate_head,
         iterate_fused, relax_head, relax_fused)``. Specialised via
         compile-time ``revolute_only``, ``cloth_support`` (cloth /
-        soft-tet types in the ctype dispatch) and ``soft_tet_only``
-        (skip ctype read when the container holds only soft tets)."""
-        cloth_on = self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0 or self.num_cloth_bending > 0
+        soft-tet / soft-hex types in the ctype dispatch) and
+        ``soft_tet_only`` (skip ctype read when the container holds
+        only soft tets)."""
+        cloth_on = (
+            self.num_cloth_triangles > 0
+            or self.num_soft_tetrahedra > 0
+            or self.num_cloth_bending > 0
+            or self.num_soft_hexahedra > 0
+        )
         revolute_only = bool(self._use_revolute_specialization)
         # ``soft_tet_only`` is an ARAP-specific specialisation: skip the
         # ctype-tag read and route every non-contact cid straight to
         # ``soft_tetrahedron_iterate_at``. Disable it when the block
-        # Neo-Hookean variant is in use so dispatch falls through to the
-        # ctype tree (which has both variants as elif branches).
+        # Neo-Hookean variant is in use, or when soft hexes are present
+        # (they need the ctype tree to route to the hex iterate).
         soft_tet_only = (
             self.num_soft_tetrahedra > 0
             and not self._soft_tet_uses_neohookean
             and self.num_joints == 0
             and self.num_cloth_triangles == 0
             and self.num_cloth_bending == 0
+            and self.num_soft_hexahedra == 0
         )
         kw = {
             "revolute_only": revolute_only,
@@ -3155,7 +3287,7 @@ class PhoenXWorld:
         the eager-mode viewer loop.
         """
         if self._column_timer_totals is None:
-            self._column_timer_totals = wp.zeros(5, dtype=wp.float32, device=self.device)
+            self._column_timer_totals = wp.zeros(6, dtype=wp.float32, device=self.device)
         else:
             self._column_timer_totals.zero_()
         if self._contact_offset > 0:
@@ -3177,10 +3309,12 @@ class PhoenXWorld:
                     wp.int32(CLOTH_TRIANGLE_TIME_US_OFFSET),
                     wp.int32(CLOTH_BENDING_TIME_US_OFFSET),
                     wp.int32(soft_tet_time_off),
+                    wp.int32(SOFT_HEX_TIME_US_OFFSET),
                     wp.int32(self.num_joints),
                     wp.int32(self.num_cloth_triangles),
                     wp.int32(self.num_cloth_bending),
                     wp.int32(self.num_soft_tetrahedra),
+                    wp.int32(self.num_soft_hexahedra),
                     self._column_timer_totals,
                 ],
                 device=self.device,
@@ -3204,6 +3338,7 @@ class PhoenXWorld:
             "time_us_total_cloth_bending": float(totals[2]),
             "time_us_total_soft_tetrahedra": float(totals[3]),
             "time_us_total_contacts": float(totals[4]),
+            "time_us_total_soft_hexahedra": float(totals[5]),
         }
 
     def _zero_column_timers(self) -> None:
@@ -3225,10 +3360,12 @@ class PhoenXWorld:
                     wp.int32(CLOTH_TRIANGLE_TIME_US_OFFSET),
                     wp.int32(CLOTH_BENDING_TIME_US_OFFSET),
                     wp.int32(soft_tet_time_off),
+                    wp.int32(SOFT_HEX_TIME_US_OFFSET),
                     wp.int32(self.num_joints),
                     wp.int32(self.num_cloth_triangles),
                     wp.int32(self.num_cloth_bending),
                     wp.int32(self.num_soft_tetrahedra),
+                    wp.int32(self.num_soft_hexahedra),
                 ],
                 device=self.device,
             )

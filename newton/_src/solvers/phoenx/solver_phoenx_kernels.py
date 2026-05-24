@@ -64,6 +64,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_BENDING,
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
+    CONSTRAINT_TYPE_SOFT_HEXAHEDRON,
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN,
     ConstraintContainer,
@@ -72,6 +73,11 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_get_body2,
     constraint_get_type,
     read_int,
+)
+from newton._src.solvers.phoenx.constraints.constraint_soft_hexahedron import (
+    SOFT_HEX_TIME_US_OFFSET,
+    soft_hexahedron_iterate_at,
+    soft_hexahedron_prepare_for_iteration_at,
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_tet_neohookean import (
     SOFT_TET_NEOHOOKEAN_TIME_US_OFFSET,
@@ -105,6 +111,15 @@ _SOFT_TET_OFF_BODY3 = wp.constant(wp.int32(3))
 _SOFT_TET_OFF_BODY4 = wp.constant(wp.int32(4))
 _CLOTH_BENDING_OFF_BODY3 = wp.constant(wp.int32(3))
 _CLOTH_BENDING_OFF_BODY4 = wp.constant(wp.int32(4))
+# Soft hex stamps body1/body2 at dwords 1/2 (header) and body3..body8 at
+# dwords 3..8. Used by ``_constraints_to_elements_kernel`` to emit the
+# 8-body element interaction.
+_SOFT_HEX_OFF_BODY3 = wp.constant(wp.int32(3))
+_SOFT_HEX_OFF_BODY4 = wp.constant(wp.int32(4))
+_SOFT_HEX_OFF_BODY5 = wp.constant(wp.int32(5))
+_SOFT_HEX_OFF_BODY6 = wp.constant(wp.int32(6))
+_SOFT_HEX_OFF_BODY7 = wp.constant(wp.int32(7))
+_SOFT_HEX_OFF_BODY8 = wp.constant(wp.int32(8))
 
 
 __all__ = [
@@ -944,10 +959,12 @@ def _zero_constraint_time_us_kernel(
     cloth_tri_off: wp.int32,
     cloth_bend_off: wp.int32,
     soft_tet_off: wp.int32,
+    soft_hex_off: wp.int32,
     num_joints: wp.int32,
     num_cloth_triangles: wp.int32,
     num_cloth_bending: wp.int32,
     num_soft_tetrahedra: wp.int32,
+    num_soft_hexahedra: wp.int32,
 ):
     """Zero every constraint column's ``time_us`` slot at step start.
 
@@ -965,6 +982,8 @@ def _zero_constraint_time_us_kernel(
         off = cloth_bend_off
     elif cid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
         off = soft_tet_off
+    elif cid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra + num_soft_hexahedra:
+        off = soft_hex_off
     else:
         return
     constraints.data[off, cid] = wp.float32(0.0)
@@ -990,14 +1009,18 @@ def _reduce_constraint_time_us_kernel(
     cloth_tri_off: wp.int32,
     cloth_bend_off: wp.int32,
     soft_tet_off: wp.int32,
+    soft_hex_off: wp.int32,
     num_joints: wp.int32,
     num_cloth_triangles: wp.int32,
     num_cloth_bending: wp.int32,
     num_soft_tetrahedra: wp.int32,
+    num_soft_hexahedra: wp.int32,
     totals: wp.array[wp.float32],
 ):
     """Atomic-sum every constraint column's ``time_us`` slot into
-    ``totals[0..3]`` = (joints, cloth_tri, cloth_bend, soft_tet)."""
+    ``totals[0..5]`` = (joints, cloth_tri, cloth_bend, soft_tet, contacts, soft_hex).
+
+    Slot 4 (contacts) is filled by :func:`_reduce_contact_time_us_kernel`."""
     cid = wp.tid()
     if cid < num_joints:
         wp.atomic_add(totals, 0, constraints.data[adbs_off, cid])
@@ -1007,6 +1030,8 @@ def _reduce_constraint_time_us_kernel(
         wp.atomic_add(totals, 2, constraints.data[cloth_bend_off, cid])
     elif cid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
         wp.atomic_add(totals, 3, constraints.data[soft_tet_off, cid])
+    elif cid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra + num_soft_hexahedra:
+        wp.atomic_add(totals, 5, constraints.data[soft_hex_off, cid])
 
 
 @wp.kernel(enable_backward=False, module="unique")
@@ -1051,6 +1076,7 @@ def _constraints_to_elements_kernel(
     num_cloth_triangles: wp.int32,
     num_cloth_bending: wp.int32,
     num_soft_tetrahedra: wp.int32,
+    num_soft_hexahedra: wp.int32,
     num_bodies: wp.int32,
     elements: wp.array[ElementInteractionData],
 ):
@@ -1197,7 +1223,81 @@ def _constraints_to_elements_kernel(
                 slot3 = v
         elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
         return
-    local_cid = tid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra
+    if tid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra + num_soft_hexahedra:
+        # Soft-hexahedron: 8 unified-index particle endpoints in body1..body8.
+        # Pinned particles collapse to -1 (same convention as tet/cloth).
+        # ElementInteractionData's vec8i slots fit a full hex without
+        # compaction-overflow risk; we still compact -1s so the
+        # partitioner's adjacency loop sees a contiguous prefix.
+        h0 = constraint_get_body1(constraints, tid)
+        h1 = constraint_get_body2(constraints, tid)
+        h2 = read_int(constraints, _SOFT_HEX_OFF_BODY3, tid)
+        h3 = read_int(constraints, _SOFT_HEX_OFF_BODY4, tid)
+        h4 = read_int(constraints, _SOFT_HEX_OFF_BODY5, tid)
+        h5 = read_int(constraints, _SOFT_HEX_OFF_BODY6, tid)
+        h6 = read_int(constraints, _SOFT_HEX_OFF_BODY7, tid)
+        h7 = read_int(constraints, _SOFT_HEX_OFF_BODY8, tid)
+        if h0 >= num_bodies and particles.inverse_mass[h0 - num_bodies] == 0.0:
+            h0 = -1
+        if h1 >= num_bodies and particles.inverse_mass[h1 - num_bodies] == 0.0:
+            h1 = -1
+        if h2 >= num_bodies and particles.inverse_mass[h2 - num_bodies] == 0.0:
+            h2 = -1
+        if h3 >= num_bodies and particles.inverse_mass[h3 - num_bodies] == 0.0:
+            h3 = -1
+        if h4 >= num_bodies and particles.inverse_mass[h4 - num_bodies] == 0.0:
+            h4 = -1
+        if h5 >= num_bodies and particles.inverse_mass[h5 - num_bodies] == 0.0:
+            h5 = -1
+        if h6 >= num_bodies and particles.inverse_mass[h6 - num_bodies] == 0.0:
+            h6 = -1
+        if h7 >= num_bodies and particles.inverse_mass[h7 - num_bodies] == 0.0:
+            h7 = -1
+        slot0 = wp.int32(-1)
+        slot1 = wp.int32(-1)
+        slot2 = wp.int32(-1)
+        slot3 = wp.int32(-1)
+        slot4 = wp.int32(-1)
+        slot5 = wp.int32(-1)
+        slot6 = wp.int32(-1)
+        slot7 = wp.int32(-1)
+        if h0 >= 0:
+            slot0 = h0
+        for cand in range(7):
+            v = h1
+            if cand == 1:
+                v = h2
+            elif cand == 2:
+                v = h3
+            elif cand == 3:
+                v = h4
+            elif cand == 4:
+                v = h5
+            elif cand == 5:
+                v = h6
+            elif cand == 6:
+                v = h7
+            if v < 0:
+                continue
+            if slot0 < 0:
+                slot0 = v
+            elif slot1 < 0:
+                slot1 = v
+            elif slot2 < 0:
+                slot2 = v
+            elif slot3 < 0:
+                slot3 = v
+            elif slot4 < 0:
+                slot4 = v
+            elif slot5 < 0:
+                slot5 = v
+            elif slot6 < 0:
+                slot6 = v
+            else:
+                slot7 = v
+        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, slot4, slot5, slot6, slot7)
+        return
+    local_cid = tid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra - num_soft_hexahedra
     b1 = contact_get_body1(contact_cols, local_cid)
     b2 = contact_get_body2(contact_cols, local_cid)
     side0_kind = contact_get_side0_kind(contact_cols, local_cid)
@@ -1780,6 +1880,7 @@ def _make_singleworld_dispatch_func(
         num_cloth_triangles: wp.int32,
         num_cloth_bending: wp.int32,
         num_soft_tetrahedra: wp.int32,
+        num_soft_hexahedra: wp.int32,
         num_bodies: wp.int32,
         idt: wp.float32,
         sor_boost: wp.float32,
@@ -1802,8 +1903,10 @@ def _make_singleworld_dispatch_func(
         #    range we dispatch on the type tag (each schema stamps its
         #    type into dword 0 at populate time).
         dispatched = False
-        if cid >= num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
-            local_cid = cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra
+        if cid >= num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra + num_soft_hexahedra:
+            local_cid = (
+                cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra - num_soft_hexahedra
+            )
             if wp.static(cloth_support):
                 if wp.static(is_prepare):
                     contact_prepare_for_iteration_cloth_aware(
@@ -1961,6 +2064,31 @@ def _make_singleworld_dispatch_func(
                                 cid,
                                 elapsed_us(_t0, read_global_timer_ns()),
                             )
+                    elif ctype == CONSTRAINT_TYPE_SOFT_HEXAHEDRON:
+                        if wp.static(is_prepare):
+                            soft_hexahedron_prepare_for_iteration_at(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                            )
+                        else:
+                            soft_hexahedron_iterate_at(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                parallel_id,
+                                idt,
+                                sor_boost,
+                            )
+                        dispatched = True
+                        if wp.static(enable_column_timers):
+                            constraint_accumulate_time_us(
+                                constraints,
+                                SOFT_HEX_TIME_US_OFFSET,
+                                cid,
+                                elapsed_us(_t0, read_global_timer_ns()),
+                            )
                     elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
                         if wp.static(is_prepare):
                             cloth_bending_prepare_for_iteration_at(
@@ -2112,6 +2240,7 @@ def _make_singleworld_persistent_kernel(
         num_cloth_triangles: wp.int32,
         num_cloth_bending: wp.int32,
         num_soft_tetrahedra: wp.int32,
+        num_soft_hexahedra: wp.int32,
         num_bodies: wp.int32,
         total_num_threads: wp.int32,
         fuse_threshold: wp.int32,
@@ -2183,6 +2312,7 @@ def _make_singleworld_persistent_kernel(
                     num_cloth_triangles,
                     num_cloth_bending,
                     num_soft_tetrahedra,
+                    num_soft_hexahedra,
                     num_bodies,
                     idt,
                     sor_boost,
@@ -2240,6 +2370,7 @@ def _make_singleworld_fused_kernel(
         num_cloth_triangles: wp.int32,
         num_cloth_bending: wp.int32,
         num_soft_tetrahedra: wp.int32,
+        num_soft_hexahedra: wp.int32,
         num_bodies: wp.int32,
         fuse_threshold: wp.int32,
         copy_state: CopyStateContainer,
@@ -2303,6 +2434,7 @@ def _make_singleworld_fused_kernel(
                         num_cloth_triangles,
                         num_cloth_bending,
                         num_soft_tetrahedra,
+                        num_soft_hexahedra,
                         num_bodies,
                         idt,
                         sor_boost,
