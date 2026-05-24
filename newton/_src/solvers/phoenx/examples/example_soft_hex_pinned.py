@@ -207,6 +207,41 @@ class Example:
             yaw=180.0,
         )
 
+        # Pre-allocate render buffers so :meth:`render` is allocation-free.
+        # ``ViewerGL._update_vbo`` expects per-element ``wp.array[vec3]``
+        # color buffers; a tuple in ``log_points(colors=...)`` crashes
+        # on ``colors.numpy()`` because the GL path doesn't expand scalar
+        # colors. The 12 cube edges are stable across runs.
+        _edges_np = np.array(
+            [
+                [0, 1],
+                [1, 2],
+                [2, 3],
+                [3, 0],  # bottom face
+                [4, 5],
+                [5, 6],
+                [6, 7],
+                [7, 4],  # top face
+                [0, 4],
+                [1, 5],
+                [2, 6],
+                [3, 7],  # vertical edges
+            ],
+            dtype=np.int32,
+        )
+        self._edge_start_ids = _edges_np[:, 0]
+        self._edge_end_ids = _edges_np[:, 1]
+        self._point_color = wp.array(
+            np.tile(np.array([0.8, 0.3, 0.3], dtype=np.float32), (8, 1)),
+            dtype=wp.vec3f,
+            device=self.device,
+        )
+        self._line_color = wp.array(
+            np.tile(np.array([0.9, 0.7, 0.2], dtype=np.float32), (_edges_np.shape[0], 1)),
+            dtype=wp.vec3f,
+            device=self.device,
+        )
+
         self._frame_index = 0
         self._capture()
 
@@ -246,38 +281,20 @@ class Example:
         and the wire-frame outline so the hex deformation is visible.
         """
         positions = self.world.particles.position.numpy()
-        # 12 cube edges connecting corners under the canonical ordering.
-        edges = np.array(
-            [
-                [0, 1],
-                [1, 2],
-                [2, 3],
-                [3, 0],  # bottom face
-                [4, 5],
-                [5, 6],
-                [6, 7],
-                [7, 4],  # top face
-                [0, 4],
-                [1, 5],
-                [2, 6],
-                [3, 7],  # vertical edges
-            ],
-            dtype=np.int32,
-        )
-        starts = positions[edges[:, 0]]
-        ends = positions[edges[:, 1]]
+        starts = positions[self._edge_start_ids]
+        ends = positions[self._edge_end_ids]
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_points(
             "hex_corners",
             wp.array(positions, dtype=wp.vec3f),
             radii=0.02 * self.cube_size,
-            colors=(0.8, 0.3, 0.3),
+            colors=self._point_color,
         )
         self.viewer.log_lines(
             "hex_edges",
             wp.array(starts, dtype=wp.vec3f),
             wp.array(ends, dtype=wp.vec3f),
-            colors=(0.9, 0.7, 0.2),
+            colors=self._line_color,
             width=0.01 * self.cube_size,
         )
         self.viewer.end_frame()
