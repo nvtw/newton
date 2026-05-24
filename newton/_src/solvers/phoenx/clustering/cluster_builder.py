@@ -938,22 +938,17 @@ class ConstraintClusterBuilder:
     # --- capture_while bodies ------------------------------------------------
 
     def _inner_round_body(self) -> None:
-        """Body of the per-Ks_target capture_while. Unrolls
-        ``_INNER_UNROLL`` propose+grow+validate+commit rounds; the
-        capture_while predicate is ``progress_flag``, reset at the top of
-        every body invocation and bumped by the validate kernel each
-        time a cluster commits.
-        """
-        # Clear progress_flag for this body invocation. If no cluster
-        # commits across the unrolled rounds, progress_flag stays 0 and
-        # capture_while exits.
-        wp.launch(
-            _cluster_set_progress_kernel,
-            dim=1,
-            inputs=[wp.int32(0), self._progress_flag],
-            device=self._device,
-        )
+        """Unrolls ``_INNER_UNROLL`` propose+grow+validate+commit rounds.
 
+        ``progress_flag`` is unused now that the host-side loop is
+        bounded by :data:`_MAX_OUTER_ITERS` rather than gated by
+        ``wp.capture_while``: kernels still atomic-add into the flag
+        as a side effect but nobody reads it. The dedicated 1-thread
+        ``_cluster_set_progress_kernel`` launch that used to clear it
+        at the top of every body call has been removed (~10 us per
+        invocation, ~30 invocations per step on the soft-body scene =
+        300 us of pure host launch overhead).
+        """
         n = self._max_num_interactions
         for _ in range(_INNER_UNROLL):
             wp.launch(
