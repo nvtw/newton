@@ -178,7 +178,6 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _reduce_constraint_time_us_kernel,
     _reduce_contact_time_us_kernel,
     _reduce_total_colours_kernel,
-    _reset_head_active_kernel,
     _set_kinematic_pose_batch_kernel,
     _sync_num_active_constraints_kernel,
     _zero_constraint_time_us_kernel,
@@ -2979,6 +2978,7 @@ class PhoenXWorld:
                 ms_batch,
                 self._partitioner.sweep_direction,
                 cluster_members,
+                self._head_active,
             ],
             block_dim=self._fuse_tail_block_dim,
             device=self.device,
@@ -3010,8 +3010,12 @@ class PhoenXWorld:
         first frame where the cube contacts the cloth.
         """
 
+        # ``head_active`` is re-armed by the previous round's tail kernel
+        # (see :func:`_make_singleworld_fused_kernel`), so the per-round
+        # ``_reset_head_active_kernel`` launch is gone. Initial state is
+        # set to 1 once at solver setup; subsequent rounds inherit
+        # ``head_active[0] = 1`` from the tail's lane-0 writeback.
         def _round() -> None:
-            wp.launch(_reset_head_active_kernel, dim=1, inputs=[self._head_active], device=self.device)
             wp.capture_while(
                 self._head_active,
                 self._capture_singleworld_sweep,

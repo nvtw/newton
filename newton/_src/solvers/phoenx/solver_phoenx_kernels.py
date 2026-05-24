@@ -623,7 +623,9 @@ def _per_world_greedy_coloring_kernel(
 
 
 @functools.cache
-def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False):
+def _make_fast_tail_prepare_plus_iterate_kernel(
+    *, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False
+):
     """Build the multi-world fused prepare + iterate fast-tail kernel."""
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -768,8 +770,12 @@ def _make_fast_tail_prepare_plus_iterate_kernel(*, revolute_only: bool, has_slee
                             cb1 = contact_get_body1(contact_cols, local_cid)
                             cb2 = contact_get_body2(contact_cols, local_cid)
                             if cb1 >= 0 and cb1 < num_bodies and cb2 >= 0 and cb2 < num_bodies:
-                                fr1 = (bodies.motion_type[cb1] != MOTION_DYNAMIC) or (bodies.island_root[cb1] >= wp.int32(0))
-                                fr2 = (bodies.motion_type[cb2] != MOTION_DYNAMIC) or (bodies.island_root[cb2] >= wp.int32(0))
+                                fr1 = (bodies.motion_type[cb1] != MOTION_DYNAMIC) or (
+                                    bodies.island_root[cb1] >= wp.int32(0)
+                                )
+                                fr2 = (bodies.motion_type[cb2] != MOTION_DYNAMIC) or (
+                                    bodies.island_root[cb2] >= wp.int32(0)
+                                )
                                 if fr1 and fr2:
                                     skip_frozen = True
                         if not skip_frozen:
@@ -890,8 +896,12 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool, has_sleeping: bool, ena
                         cb1 = contact_get_body1(contact_cols, local_cid)
                         cb2 = contact_get_body2(contact_cols, local_cid)
                         if cb1 >= 0 and cb1 < num_bodies and cb2 >= 0 and cb2 < num_bodies:
-                            fr1 = (bodies.motion_type[cb1] != MOTION_DYNAMIC) or (bodies.island_root[cb1] >= wp.int32(0))
-                            fr2 = (bodies.motion_type[cb2] != MOTION_DYNAMIC) or (bodies.island_root[cb2] >= wp.int32(0))
+                            fr1 = (bodies.motion_type[cb1] != MOTION_DYNAMIC) or (
+                                bodies.island_root[cb1] >= wp.int32(0)
+                            )
+                            fr2 = (bodies.motion_type[cb2] != MOTION_DYNAMIC) or (
+                                bodies.island_root[cb2] >= wp.int32(0)
+                            )
                             if fr1 and fr2:
                                 skip_frozen = True
                     if not skip_frozen:
@@ -2284,6 +2294,13 @@ def _make_singleworld_fused_kernel(
         ms_batch_size: wp.int32,
         sweep_direction: wp.array[wp.int32],
         cluster_members: wp.array[wp.vec4i],
+        # Re-arm the head_active flag for the next outer round so the
+        # caller no longer needs a dedicated 1-thread ``_reset_head_active``
+        # launch between rounds. The head kernel zeros this flag when it
+        # can't make progress; the outer ``wp.capture_while(color_cursor)``
+        # only re-enters the body when there's still work, so the unread
+        # writes when ``cursor==0`` are harmless.
+        head_active: wp.array[wp.int32],
     ):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
@@ -2372,6 +2389,11 @@ def _make_singleworld_fused_kernel(
             cursor = cursor - 1
         if lane == 0:
             color_cursor[0] = cursor
+            # Re-arm head_active for the NEXT outer round; the head
+            # kernel will zero it again if it has no work. Replaces the
+            # dedicated 1-thread ``_reset_head_active_kernel`` launch the
+            # caller used to issue between rounds.
+            head_active[0] = 1
 
     return kernel
 
