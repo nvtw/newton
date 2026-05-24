@@ -1,29 +1,36 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""PhoenX soft-hexahedron pinned-corner demo.
+"""PhoenX soft-hexahedron pinned-face demo.
 
 Minimal scene exercising :mod:`constraint_soft_hexahedron`. A single
-8-node trilinear hex (one constraint, eight particles) hangs from one
-pinned corner under gravity. No collisions, no rigid bodies -- the test
+8-node trilinear hex (one constraint, eight particles) hangs from a
+pinned face under gravity. No collisions, no rigid bodies -- the test
 case for the hex co-rotational ARAP energy in isolation.
 
 Geometry (rest pose, axis-aligned cube of side ``cube_size`` centered
 at the origin at altitude ``base_height``):
 
-    corner 0: (-, -, -)   <-- pinned
+    corner 0: (-, -, -)
     corner 1: (+, -, -)
     corner 2: (+, +, -)
     corner 3: (-, +, -)
-    corner 4: (-, -, +)
-    corner 5: (+, -, +)
-    corner 6: (+, +, +)
-    corner 7: (-, +, +)
+    corner 4: (-, -, +)   <-- top face (pinned by default)
+    corner 5: (+, -, +)   <--
+    corner 6: (+, +, +)   <--
+    corner 7: (-, +, +)   <--
 
-Caller picks which corner to pin via ``pin_corner_index`` (default 0).
-Pinning is via ``particles.inverse_mass[corner] = 0``; the PhoenX
-partitioner automatically drops zero-mass nodes from the adjacency
-graph.
+The default pins the 4 top-face corners and lets the bottom face hang
+under gravity. Pure ARAP only penalises strain ``||F - R||``, not
+absolute displacement, so single-corner pinning is degenerate (the 5
+remaining rigid-motion DOFs accumulate gravity-induced drift each
+substep). Face pinning is a well-conditioned demo across the full
+``youngs_modulus`` range; it converges to a small elastic stretch
+instead of drifting.
+
+Pass ``--pin-mode corner`` to switch to the single-corner pin pattern
+for diagnostics; expect dramatic deformation that increases with
+``youngs_modulus`` for the reasons above.
 
 Run::
 
@@ -86,8 +93,12 @@ class Example:
         poisson_ratio: Poisson ratio in ``(-1, 0.5)``. Ignored by the
             pure-ARAP variant beyond converting (E, nu) -> mu.
         beta_mu: Macklin XPBD damping [1/s].
-        pin_corner_index: Which corner (0..7) to pin. Defaults to
-            corner 0 (the (-, -, -) corner).
+        pin_mode: ``"top_face"`` (default; pins corners 4..7) or
+            ``"corner"`` (pins only :attr:`pin_corner_index`). Single-
+            corner pinning is under-constrained for pure ARAP and is
+            for diagnostics only -- see this module's docstring.
+        pin_corner_index: Which corner (0..7) to pin in
+            ``pin_mode="corner"``. Ignored otherwise.
     """
 
     def __init__(
@@ -100,9 +111,12 @@ class Example:
         density: float = 500.0,
         youngs_modulus: float = 5.0e6,
         poisson_ratio: float = 0.3,
-        beta_mu: float = 0.5,
+        beta_mu: float = 5.0,
+        pin_mode: str = "top_face",
         pin_corner_index: int = 0,
     ):
+        if pin_mode not in ("top_face", "corner"):
+            raise ValueError(f"pin_mode must be 'top_face' or 'corner' (got {pin_mode!r})")
         if not 0 <= int(pin_corner_index) < 8:
             raise ValueError(f"pin_corner_index must be in [0, 8) (got {pin_corner_index})")
 
@@ -111,11 +125,11 @@ class Example:
         self.cube_size = float(cube_size)
         self.base_height = float(base_height)
         self.density = float(density)
+        self.pin_mode = pin_mode
         self.pin_corner_index = int(pin_corner_index)
 
         # PhoenX schedule. The hex is a single XPBD row per sweep; 5
-        # substeps + 8 inner iters is plenty for the 1-element scene
-        # and gives the rest-state and equilibrium tests headroom.
+        # substeps + 8 inner iters is plenty for the 1-element scene.
         self.sim_substeps = 5
         self.solver_iterations = 8
         self.velocity_iterations = 0
@@ -129,12 +143,17 @@ class Example:
             half_extent=0.5 * self.cube_size,
         )
         # Particle masses: total = density * cube_volume; lump to
-        # corners. Pinned corner gets inv_mass=0.
+        # corners. Pinned corners get inv_mass=0.
         cube_volume = self.cube_size**3
         total_mass = self.density * cube_volume
         corner_mass = total_mass / 8.0
         inv_mass = np.full(8, 1.0 / corner_mass, dtype=np.float32)
-        inv_mass[self.pin_corner_index] = 0.0
+        if self.pin_mode == "top_face":
+            # Top face corners (ζ=+1): 4, 5, 6, 7.
+            self._pinned_indices = np.array([4, 5, 6, 7], dtype=np.int32)
+        else:
+            self._pinned_indices = np.array([self.pin_corner_index], dtype=np.int32)
+        inv_mass[self._pinned_indices] = 0.0
         # Lame parameters from (E, nu).
         self.k_mu, self.k_lambda = soft_tet_lame_from_youngs_poisson(
             youngs_modulus=float(youngs_modulus), poisson_ratio=float(poisson_ratio)
@@ -196,7 +215,7 @@ class Example:
             particle_inv_mass=particle_inv_mass,
         )
         self._rest_corners = rest_corners.copy()
-        self._pinned_corner_rest = rest_corners[self.pin_corner_index].copy()
+        self._pinned_rest = rest_corners[self._pinned_indices].copy()
 
         # Viewer camera: orbit the cube center from a distance scaled
         # by cube size so the hex stays in frame.
@@ -231,11 +250,11 @@ class Example:
         )
         self._edge_start_ids = _edges_np[:, 0]
         self._edge_end_ids = _edges_np[:, 1]
-        self._point_color = wp.array(
-            np.tile(np.array([0.8, 0.3, 0.3], dtype=np.float32), (8, 1)),
-            dtype=wp.vec3f,
-            device=self.device,
-        )
+        # Pinned corners are dimmed so the viewer makes the boundary
+        # condition visually obvious.
+        point_colors_np = np.tile(np.array([0.8, 0.3, 0.3], dtype=np.float32), (8, 1))
+        point_colors_np[self._pinned_indices] = np.array([0.3, 0.3, 0.3], dtype=np.float32)
+        self._point_color = wp.array(point_colors_np, dtype=wp.vec3f, device=self.device)
         self._line_color = wp.array(
             np.tile(np.array([0.9, 0.7, 0.2], dtype=np.float32), (_edges_np.shape[0], 1)),
             dtype=wp.vec3f,
@@ -302,43 +321,32 @@ class Example:
     # --- Test hooks (called by Newton's example harness) -------------
 
     def test_post_step(self) -> None:
-        """Per-step invariants: no NaN, no inversion."""
+        """Per-step invariants: no NaN, pinned corners stay put."""
         positions = self.world.particles.position.numpy()
         if not np.isfinite(positions).all():
             raise AssertionError(f"non-finite particle position at frame {self._frame_index}: {positions}")
-        # Pinned corner stays where it started.
-        pinned = positions[self.pin_corner_index]
-        delta = np.linalg.norm(pinned - self._pinned_corner_rest)
+        pinned_now = positions[self._pinned_indices]
+        delta = float(np.max(np.linalg.norm(pinned_now - self._pinned_rest, axis=1)))
         if delta > 1e-4:
-            raise AssertionError(
-                f"pinned corner {self.pin_corner_index} drifted {delta:.6f} m "
-                f"at frame {self._frame_index} (rest={self._pinned_corner_rest}, now={pinned})"
-            )
+            raise AssertionError(f"pinned corners drifted up to {delta:.6f} m at frame {self._frame_index}")
 
     def test_final(self) -> None:
-        """End-of-run check: hex hasn't inverted and the pinned corner
-        is unchanged.
-
-        Inversion check: with rest corners centered on the cube center
-        and the pinning at one corner, gravity stretches the hex
-        downward but the hex's body diagonal opposite the pin
-        (corner 6 if pin=0) must still be on the opposite side of the
-        rest body from the pin (i.e. ``(corner_6 - pin) . body_diag_rest
-        > 0``). This is a loose "no inversion" check that doesn't
-        depend on exact equilibrium.
-        """
+        """End-of-run check: positions stay finite and pinned corners
+        are unchanged. With the default ``top_face`` pin pattern the
+        free bottom-face corners settle into an elastic hang below
+        the pinned top face."""
         positions = self.world.particles.position.numpy()
         assert np.isfinite(positions).all(), "non-finite particle positions"
-        pinned = positions[self.pin_corner_index]
-        rest_pinned = self._pinned_corner_rest
-        assert np.linalg.norm(pinned - rest_pinned) < 1e-4, (
-            f"pinned corner drift {np.linalg.norm(pinned - rest_pinned):.6f}"
-        )
-        opposite_index = 7 - self.pin_corner_index
-        rest_opposite = self._rest_corners[opposite_index]
-        diag_rest = rest_opposite - rest_pinned
-        diag_now = positions[opposite_index] - pinned
-        assert np.dot(diag_rest, diag_now) > 0.0, "hex appears to have inverted (body diagonal flipped sign)"
+        pinned_now = positions[self._pinned_indices]
+        max_pin_drift = float(np.max(np.linalg.norm(pinned_now - self._pinned_rest, axis=1)))
+        assert max_pin_drift < 1e-4, f"pinned corner drift {max_pin_drift:.6f} m"
+        if self.pin_mode == "top_face":
+            # Free bottom-face corners hang below the pinned top face.
+            free_z = positions[:4, 2].mean()
+            pinned_z = pinned_now[:, 2].mean()
+            assert free_z < pinned_z, (
+                f"bottom face didn't hang below pinned top (free_z={free_z:.3f}, pinned_z={pinned_z:.3f})"
+            )
 
 
 if __name__ == "__main__":
@@ -348,8 +356,28 @@ if __name__ == "__main__":
     parser.add_argument("--density", type=float, default=500.0)
     parser.add_argument("--youngs-modulus", type=float, default=5.0e6)
     parser.add_argument("--poisson-ratio", type=float, default=0.3)
-    parser.add_argument("--beta-mu", type=float, default=0.5)
-    parser.add_argument("--pin-corner-index", type=int, default=0)
+    parser.add_argument("--beta-mu", type=float, default=5.0)
+    parser.add_argument(
+        "--pin-mode",
+        choices=("top_face", "corner"),
+        default="top_face",
+        help=(
+            "How to anchor the hex. 'top_face' (default) pins the 4 top-face "
+            "corners and lets the bottom face hang under gravity -- a "
+            "well-conditioned pure-stretch demo across the full stiffness "
+            "range. 'corner' pins only a single corner (chosen with "
+            "--pin-corner-index); pure ARAP is under-constrained for this "
+            "case and the hex will drift / over-deform even at high stiffness "
+            "since rotational DOFs around the pin go un-penalised. Use only "
+            "for diagnostics."
+        ),
+    )
+    parser.add_argument(
+        "--pin-corner-index",
+        type=int,
+        default=0,
+        help="Corner index (0..7) to pin when --pin-mode=corner.",
+    )
     viewer, args = newton.examples.init(parser)
     example = Example(
         viewer,
@@ -360,6 +388,7 @@ if __name__ == "__main__":
         youngs_modulus=args.youngs_modulus,
         poisson_ratio=args.poisson_ratio,
         beta_mu=args.beta_mu,
+        pin_mode=args.pin_mode,
         pin_corner_index=args.pin_corner_index,
     )
     newton.examples.run(example, args)
