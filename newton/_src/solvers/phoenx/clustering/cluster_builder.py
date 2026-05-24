@@ -67,12 +67,13 @@ _EMPTY = wp.constant(wp.int32(0x7FFFFFFF))
 #: launches (propose / grow / validate / commit / clear_pending).
 _INNER_UNROLL = 4
 
-#: Hard cap on capture_while iterations per Ks_target. ``_INNER_UNROLL *
+#: Hard cap on host-unrolled rounds per Ks_target. ``_INNER_UNROLL *
 #: _MAX_OUTER_ITERS`` rounds in total. K=4 cluster size + 1-hop MIS
 #: means a typical tet-mesh constraint graph drains in well under 16
-#: rounds; this gives headroom for adversarial cases without unbounded
-#: growth in captured-graph size.
-_MAX_OUTER_ITERS = wp.constant(wp.int32(32))
+#: rounds; this gives headroom for adversarial cases. The loop is
+#: unrolled on the host (no ``wp.capture_while``); converged rounds are
+#: cheap because every kernel early-exits on committed elements.
+_MAX_OUTER_ITERS = wp.constant(wp.int32(8))
 
 
 # --- Init kernels ------------------------------------------------------------
@@ -872,6 +873,17 @@ class ConstraintClusterBuilder:
         self._num_elements_handle = num_elements
         self._packed_prio_handle = packed_priorities
         self._adj_handle = adj
+        # Host-unrolled outer loop over Ks_target. Replaces the previous
+        # ``wp.capture_while(progress_flag, body)`` with a fixed-iteration
+        # unroll: bracketed kernels already early-exit on committed
+        # elements, and the captured graph's per-iteration launch
+        # overhead is ~µs, much less than the CUDA conditional-graph
+        # node overhead the capture_while emitted. See
+        # ``feedback_avoid_conditional_while.md`` and PERF_NOTES.md for
+        # the general rule. Iteration cap is :data:`_MAX_OUTER_ITERS`
+        # times :data:`_INNER_UNROLL` = 32 sub-rounds; tet meshes drain
+        # well under that.
+        max_outer = int(_MAX_OUTER_ITERS)
         for ks in (self.MAX_CLUSTER_SIZE, 3, 2, 1):
             wp.launch(
                 _cluster_set_ks_kernel,
@@ -880,15 +892,8 @@ class ConstraintClusterBuilder:
                 outputs=[self._ks_target],
                 device=self._device,
             )
-            # Prime progress_flag to a positive value so capture_while
-            # enters the body at least once.
-            wp.launch(
-                _cluster_set_progress_kernel,
-                dim=1,
-                inputs=[wp.int32(1), self._progress_flag],
-                device=self._device,
-            )
-            wp.capture_while(self._progress_flag, self._inner_round_body)
+            for _ in range(max_outer):
+                self._inner_round_body()
 
         # 3) Compaction: seed bitmap -> scan -> dense ids -> per-element.
         wp.launch(
