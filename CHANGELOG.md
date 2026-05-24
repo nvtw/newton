@@ -22,6 +22,10 @@
 - Remove the `cbor2` `<6` dependency ceiling after updating recorder deserialization to accept mapping-like decoded containers
 - Require Warp 1.14 and configure Warp logging through `warp.config.log_level`; use Newton's `--quiet` flag or `--warp-config log_level=...` instead of legacy `verbose` or `quiet` config keys
 
+### Removed
+
+- Remove the `SolverPhoenX` constraint clustering pipeline (`ConstraintClusterBuilder`, `SupernodalElements`, `ClusteringPipeline`), the `enable_clustering` parameter on `SolverPhoenX` and `PhoenXWorld`, the `--enable-clustering` CLI flag on `example_soft_body_drop`, the `cluster_aware` axis and `cluster_members` parameter on the single-world PGS kernels, and the `StepReport.num_clusters` field. The cluster-aware dispatch path was 10x slower than the non-clustered path on dense soft-body scenes and never produced a speedup on any tested scene; the parallelism loss from serializing up to 4 cluster members per thread could not be recovered without implementing body-fetch amortization (the paper's core mechanism), which would still not flip the sign on dense graphs
+
 ### Fixed
 
 - Refresh PhoenX's baked-in armature on `SolverNotifyFlags.JOINT_DOF_PROPERTIES`: `SolverPhoenX.notify_model_changed` now resets body inertia to `Model.body_inv_inertia` and re-bakes `model.joint_armature` whenever joint-DOF properties change, so domain-randomization edits to armature between episodes actually take effect

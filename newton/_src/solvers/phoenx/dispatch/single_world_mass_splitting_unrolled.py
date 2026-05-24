@@ -54,7 +54,6 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         contact_views = w._contact_views if w._contact_views is not None else w._contact_views_placeholder
         ms_cap = wp.int32(int(w.max_colored_partitions))
         ms_batch = wp.int32(int(w.mass_splitting_batch_size))
-        cluster_members = w._cluster_members_for_launch()
         for _ in range(self._launch_bound):
             wp.launch(
                 head_kernel,
@@ -84,7 +83,6 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                     ms_cap,
                     ms_batch,
                     w._partitioner.sweep_direction,
-                    cluster_members,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=w.device,
@@ -98,7 +96,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             return
 
         inv_dt = 1.0 / w.substep_dt
-        prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
+        prepare_head, _, iterate_head, _, _, _ = w._singleworld_kernels()
         particles_or_sentinel = w._particles_or_sentinel()
         num_bodies = w.num_bodies
         copy_state = w._copy_state

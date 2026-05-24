@@ -1761,9 +1761,7 @@ def _make_singleworld_dispatch_func(
     constraint-type dispatch tree (contact / soft-tet / cloth-tri /
     cloth-bending / joint). All static specialisation axes are captured
     here so the head + fused kernels can call this in a single line
-    instead of duplicating the ~220-line tree, and the cluster-aware
-    path can invoke it inside a per-member ``vec4i`` loop without
-    inlining the tree twice.
+    instead of duplicating the ~220-line tree.
 
     ``@functools.cache``-keyed on the static axes; every (axes-tuple)
     builds one function once.
@@ -2062,7 +2060,6 @@ def _make_singleworld_persistent_kernel(
     cloth_support: bool,
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
-    cluster_aware: bool = False,
     has_joints: bool = True,
 ):
     """Persistent-grid PGS kernel for the requested phase + specialisation.
@@ -2082,16 +2079,6 @@ def _make_singleworld_persistent_kernel(
     ``enable_column_timers`` is a static axis: when True, each per-cid
     dispatch is bracketed with ``%globaltimer`` reads and the elapsed
     microseconds are atomic-added to the column's ``time_us`` slot.
-
-    ``cluster_aware=True``: each slot in ``element_ids_by_color`` is a
-    cluster id; the kernel reads ``cluster_members[cluster_id]`` (a
-    ``vec4i`` of constraint ids, -1-padded) and runs the dispatch tree
-    sequentially for each non-negative member. Used by the constraint
-    clustering path; see :mod:`clustering.cluster_builder`. When
-    ``False`` (default), each slot is a constraint id processed directly
-    -- ``cluster_members`` is unused but always present in the kernel
-    signature (callers pass a 1-element placeholder when not
-    clustering).
     """
     is_prepare = phase == "prepare"
     is_iterate = phase == "iterate"
@@ -2133,7 +2120,6 @@ def _make_singleworld_persistent_kernel(
         max_colored_partitions: wp.int32,
         ms_batch_size: wp.int32,
         sweep_direction: wp.array[wp.int32],
-        cluster_members: wp.array[wp.vec4i],
     ):
         tid = wp.tid()
         if color_cursor[0] <= 0:
@@ -2184,56 +2170,25 @@ def _make_singleworld_persistent_kernel(
                 if is_overflow_color:
                     # Batch index = partition_key stamped by emit.
                     parallel_id = t_slot / ms_batch_size
-                if wp.static(cluster_aware):
-                    # Each CSR slot is a cluster id; ``cluster_members``
-                    # holds the (up to 4) constraint ids per cluster,
-                    # sorted ascending and -1 padded. Process members
-                    # sequentially in this thread -- they share bodies
-                    # so they must NOT run in parallel.
-                    cluster_id = element_ids_by_color[start + t_slot]
-                    members = cluster_members[cluster_id]
-                    for member_slot in range(4):
-                        cid = members[member_slot]
-                        if cid < 0:
-                            break
-                        _dispatch_one_cid(
-                            constraints,
-                            contact_cols,
-                            bodies,
-                            particles,
-                            cc,
-                            contacts,
-                            copy_state,
-                            num_joints,
-                            num_cloth_triangles,
-                            num_cloth_bending,
-                            num_soft_tetrahedra,
-                            num_bodies,
-                            idt,
-                            sor_boost,
-                            cid,
-                            parallel_id,
-                        )
-                else:
-                    cid = element_ids_by_color[start + t_slot]
-                    _dispatch_one_cid(
-                        constraints,
-                        contact_cols,
-                        bodies,
-                        particles,
-                        cc,
-                        contacts,
-                        copy_state,
-                        num_joints,
-                        num_cloth_triangles,
-                        num_cloth_bending,
-                        num_soft_tetrahedra,
-                        num_bodies,
-                        idt,
-                        sor_boost,
-                        cid,
-                        parallel_id,
-                    )
+                cid = element_ids_by_color[start + t_slot]
+                _dispatch_one_cid(
+                    constraints,
+                    contact_cols,
+                    bodies,
+                    particles,
+                    cc,
+                    contacts,
+                    copy_state,
+                    num_joints,
+                    num_cloth_triangles,
+                    num_cloth_bending,
+                    num_soft_tetrahedra,
+                    num_bodies,
+                    idt,
+                    sor_boost,
+                    cid,
+                    parallel_id,
+                )
 
         if tid == 0:
             color_cursor[0] = cursor - 1
@@ -2249,12 +2204,10 @@ def _make_singleworld_fused_kernel(
     cloth_support: bool,
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
-    cluster_aware: bool = False,
     has_joints: bool = True,
 ):
     """Single-block tail-fused PGS kernel; same axes as
-    :func:`_make_singleworld_persistent_kernel` (including the
-    cluster-aware vec4i loop)."""
+    :func:`_make_singleworld_persistent_kernel`."""
     is_prepare = phase == "prepare"
     is_iterate = phase == "iterate"
     use_bias = is_iterate
@@ -2293,7 +2246,6 @@ def _make_singleworld_fused_kernel(
         max_colored_partitions: wp.int32,
         ms_batch_size: wp.int32,
         sweep_direction: wp.array[wp.int32],
-        cluster_members: wp.array[wp.vec4i],
         # Re-arm the head_active flag for the next outer round so the
         # caller no longer needs a dedicated 1-thread ``_reset_head_active``
         # launch between rounds. The head kernel zeros this flag when it
@@ -2338,53 +2290,25 @@ def _make_singleworld_fused_kernel(
                     t_slot = t_slot_base + inner
                     if t_slot >= count:
                         break
-                    if wp.static(cluster_aware):
-                        # Cluster-aware: CSR slot is a cluster id;
-                        # process its 1..4 members sequentially.
-                        cluster_id = element_ids_by_color[start + t_slot]
-                        members = cluster_members[cluster_id]
-                        for member_slot in range(4):
-                            cid = members[member_slot]
-                            if cid < 0:
-                                break
-                            _dispatch_one_cid(
-                                constraints,
-                                contact_cols,
-                                bodies,
-                                particles,
-                                cc,
-                                contacts,
-                                copy_state,
-                                num_joints,
-                                num_cloth_triangles,
-                                num_cloth_bending,
-                                num_soft_tetrahedra,
-                                num_bodies,
-                                idt,
-                                sor_boost,
-                                cid,
-                                parallel_id,
-                            )
-                    else:
-                        cid = element_ids_by_color[start + t_slot]
-                        _dispatch_one_cid(
-                            constraints,
-                            contact_cols,
-                            bodies,
-                            particles,
-                            cc,
-                            contacts,
-                            copy_state,
-                            num_joints,
-                            num_cloth_triangles,
-                            num_cloth_bending,
-                            num_soft_tetrahedra,
-                            num_bodies,
-                            idt,
-                            sor_boost,
-                            cid,
-                            parallel_id,
-                        )
+                    cid = element_ids_by_color[start + t_slot]
+                    _dispatch_one_cid(
+                        constraints,
+                        contact_cols,
+                        bodies,
+                        particles,
+                        cc,
+                        contacts,
+                        copy_state,
+                        num_joints,
+                        num_cloth_triangles,
+                        num_cloth_bending,
+                        num_soft_tetrahedra,
+                        num_bodies,
+                        idt,
+                        sor_boost,
+                        cid,
+                        parallel_id,
+                    )
             _sync_threads()
             cursor = cursor - 1
         if lane == 0:
@@ -2406,7 +2330,6 @@ def get_singleworld_kernel(
     cloth_support: bool,
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
-    cluster_aware: bool = False,
     has_joints: bool = True,
 ):
     """Lazy singleworld kernel builder. Each axis combination is cached
@@ -2418,6 +2341,5 @@ def get_singleworld_kernel(
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
         soft_tet_only=soft_tet_only,
-        cluster_aware=cluster_aware,
         has_joints=has_joints,
     )

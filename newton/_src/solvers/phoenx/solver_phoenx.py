@@ -36,7 +36,6 @@ from newton._src.solvers.phoenx.cloth_step import (
     cloth_predict_kernel,
     cloth_recover_kernel,
 )
-from newton._src.solvers.phoenx.clustering import ClusteringPipeline
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     ADBS_DWORDS,
     ADBS_TIME_US_OFFSET,
@@ -312,16 +311,6 @@ class PhoenXWorld:
         """Total wall-clock microseconds spent in contact dispatches.
         ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
 
-        num_clusters: int | None = None
-        """Number of constraint clusters from the last step's clustering
-        pipeline. ``None`` unless :attr:`PhoenXWorld.enable_clustering` is
-        set. When the cluster-aware dispatch path is active,
-        :attr:`num_colors` is the colouring of the supernodal graph
-        (one node per cluster), so the ratio
-        ``num_active_constraints / num_clusters`` quantifies the
-        per-thread compaction and :attr:`num_colors` is the post-
-        clustering chromatic bound."""
-
     def __init__(
         self,
         bodies: BodyContainer,
@@ -361,7 +350,6 @@ class PhoenXWorld:
         warm_start_rotate_skip_width: int = 1,
         capture_while_greedy_coloring: bool = True,
         speculative_coloring: bool = True,
-        enable_clustering: bool = False,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
@@ -682,48 +670,6 @@ class PhoenXWorld:
                 f"Unknown partitioner_algorithm '{self.partitioner_algorithm}'. "
                 "Expected one of: 'greedy', 'luby_fixed'."
             )
-
-        # Optional clustering pipeline. When enabled, the per-step
-        # constraint element graph is clustered (K=4 / 8-body cap) and
-        # the main partitioner consumes the resulting supernodal element
-        # array. The PGS sweep iterates clusters: each CSR slot is a
-        # cluster id and the cluster-aware kernel variant loops over
-        # ``cluster_members[cluster_id]`` (a vec4i of constraint ids,
-        # -1 padded) running the standard per-cid dispatch tree on each
-        # member.
-        #
-        # Mass splitting cooperates with clustering: the overflow
-        # column's ``parallel_id`` is computed per CSR slot, so all
-        # members in a cluster share the same ``parallel_id`` and
-        # therefore the same copy-state slot. Members are processed
-        # sequentially in one thread (Gauss-Seidel within the cluster);
-        # different clusters in the overflow column own different
-        # parallel_ids (Jacobi across clusters). The interaction graph
-        # emit reads ``supernodal_elements`` so it allocates one slot
-        # per (cluster body, partition_key) -- exactly what the
-        # cluster-aware iterate consumes. See
-        # :meth:`_rebuild_mass_splitting_graph` for the wiring.
-        #
-        # ``_cluster_aware_active`` gates the dispatch path. Initial
-        # scope: single-world layout (multi-world per-world coloring
-        # uses different kernels and is a follow-up).
-        self.enable_clustering: bool = bool(enable_clustering)
-        self._clustering: ClusteringPipeline | None = None
-        self._cluster_aware_active: bool = (
-            self.enable_clustering and self._constraint_capacity > 0 and step_layout == "single_world"
-        )
-        if self.enable_clustering and self._constraint_capacity > 0:
-            self._clustering = ClusteringPipeline(
-                max_num_interactions=self._constraint_capacity,
-                max_num_nodes=max(1, self.num_bodies + self.num_particles),
-                device=self.device,
-            )
-        # Placeholder cluster_members buffer (1-element) so kernels that
-        # always take ``cluster_members`` in their signature can be
-        # launched even when cluster_aware is False. The kernels gate
-        # the actual lookup on a static axis so the placeholder is
-        # never read.
-        self._cluster_members_placeholder: wp.array[wp.vec4i] = wp.zeros(1, dtype=wp.vec4i, device=self.device)
 
         # Mass-splitting data plane. Always allocated (sentinel-sized
         # when disabled) so the constraint kernels can take
@@ -2032,20 +1978,7 @@ class PhoenXWorld:
         if self._sleeping_enabled:
             self._run_sleeping_pass(shape_body, shape_aabb_lower, shape_aabb_upper)
         if self._constraint_capacity > 0:
-            if self._clustering is not None:
-                # Build cluster + supernodal element views from the
-                # per-constraint element graph. When the cluster-aware
-                # dispatch path is active, the main partitioner colours
-                # the supernodal graph (one CSR slot per cluster) and
-                # the PGS sweep iterates members per cluster.
-                self._clustering.build(self._elements, self._num_active_constraints)
-            if self._cluster_aware_active and self._clustering is not None:
-                self._partitioner.reset(
-                    self._clustering.supernodal_elements,
-                    self._clustering.num_clusters,
-                )
-            else:
-                self._partitioner.reset(self._elements, self._num_active_constraints)
+            self._partitioner.reset(self._elements, self._num_active_constraints)
             if self.step_layout == "single_world":
                 if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
                     # In-graph JP fallback if greedy's 64-colour bitmask overflows.
@@ -2627,35 +2560,18 @@ class PhoenXWorld:
         ``highest_index_in_use`` arrays.
 
         Single-world only. Graph-capture safe.
-
-        Cluster-aware variant: when ``_cluster_aware_active`` is True
-        the partitioner coloured the supernodal graph, so each CSR
-        slot is a cluster id and ``element_ids_by_color`` indexes the
-        ``supernodal_elements`` array (body union per cluster). The
-        emit kernel reads from the supernodal array and gates on
-        ``num_clusters`` -- same shape, smaller graph. The body-union
-        view also naturally deduplicates per-cluster (body, partition_key)
-        emits across the cluster's members, which is exactly what the
-        copy-state slot allocator wants: members share their thread
-        in iterate, so they share the slot.
         """
         # The emit kernel atomically appends one entry per non-static
         # endpoint; the previous step's build call has already left
         # ``scratch.num_pairs`` at 0 so the launch picks up clean.
-        if self._cluster_aware_active and self._clustering is not None:
-            elements_for_emit = self._clustering.supernodal_elements
-            active_count_for_emit = self._clustering.num_clusters
-        else:
-            elements_for_emit = self._elements
-            active_count_for_emit = self._num_active_constraints
         wp.launch(
             record_all_interactions_kernel,
             dim=self._constraint_capacity,
             inputs=[
-                elements_for_emit,
+                self._elements,
                 self._partitioner.element_ids_by_color,
                 self._partitioner.color_starts,
-                active_count_for_emit,
+                self._num_active_constraints,
                 self._partitioner.interaction_id_to_partition,
                 wp.int32(int(self.max_colored_partitions)),
                 wp.int32(int(self.mass_splitting_batch_size)),
@@ -2887,18 +2803,6 @@ class PhoenXWorld:
 
     # Single-world dispatch (wp.capture_while over the global colour CSR).
 
-    def _cluster_members_for_launch(self) -> wp.array:
-        """Return the cluster_members buffer to pass to PGS kernels.
-
-        When cluster-aware dispatch is active, this is the clustering
-        pipeline's real ``cluster_members`` (vec4i per cluster). When
-        not active, a 1-element placeholder -- the kernel's static
-        ``cluster_aware=False`` axis means the placeholder is never
-        read."""
-        if self._cluster_aware_active and self._clustering is not None:
-            return self._clustering.cluster_members
-        return self._cluster_members_placeholder
-
     def _capture_singleworld_sweep(self, kernel, **kw) -> None:
         """capture_while body: head-path sweep on the persistent grid, unrolled
         NUM_INNER_WHILE_ITERATIONS times. Tail launches no-op once head_active
@@ -2907,7 +2811,6 @@ class PhoenXWorld:
         idt = kw.get("idt", wp.float32(0.0))
         ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
         ms_batch = wp.int32(int(self.mass_splitting_batch_size))
-        cluster_members = self._cluster_members_for_launch()
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
             wp.launch(
                 kernel,
@@ -2937,7 +2840,6 @@ class PhoenXWorld:
                     ms_cap,
                     ms_batch,
                     self._partitioner.sweep_direction,
-                    cluster_members,
                 ],
                 block_dim=_SINGLEWORLD_BLOCK_DIM,
                 device=self.device,
@@ -2950,7 +2852,6 @@ class PhoenXWorld:
         idt = kw.get("idt", wp.float32(0.0))
         ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
         ms_batch = wp.int32(int(self.mass_splitting_batch_size))
-        cluster_members = self._cluster_members_for_launch()
         wp.launch_tiled(
             kernel,
             dim=[1],
@@ -2977,7 +2878,6 @@ class PhoenXWorld:
                 ms_cap,
                 ms_batch,
                 self._partitioner.sweep_direction,
-                cluster_members,
                 self._head_active,
             ],
             block_dim=self._fuse_tail_block_dim,
@@ -3093,10 +2993,8 @@ class PhoenXWorld:
         """Return ``(prepare_head, prepare_fused, iterate_head,
         iterate_fused, relax_head, relax_fused)``. Specialised via
         compile-time ``revolute_only``, ``cloth_support`` (cloth /
-        soft-tet types in the ctype dispatch), ``soft_tet_only``
-        (skip ctype read when the container holds only soft tets) and
-        ``cluster_aware`` (each CSR slot is a cluster id, the kernel
-        loops over its 1..4 constraint members)."""
+        soft-tet types in the ctype dispatch) and ``soft_tet_only``
+        (skip ctype read when the container holds only soft tets)."""
         cloth_on = self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0 or self.num_cloth_bending > 0
         revolute_only = bool(self._use_revolute_specialization)
         # ``soft_tet_only`` is an ARAP-specific specialisation: skip the
@@ -3116,7 +3014,6 @@ class PhoenXWorld:
             "cloth_support": cloth_on,
             "enable_column_timers": self.enable_column_timers,
             "soft_tet_only": soft_tet_only,
-            "cluster_aware": self._cluster_aware_active,
             "has_joints": self.num_joints > 0,
         }
         return (
@@ -3477,10 +3374,6 @@ class PhoenXWorld:
         else:
             timer_kwargs = {}
 
-        cluster_kwargs: dict[str, int | None] = {}
-        if self._clustering is not None:
-            cluster_kwargs["num_clusters"] = int(self._clustering.num_clusters.numpy()[0])
-
         # Per-body degree from the partitioner's adjacency CSR end array.
         # max_body_degree is the lower bound on any valid graph colouring.
         if num_active > 0 and self.num_bodies > 0:
@@ -3512,7 +3405,6 @@ class PhoenXWorld:
                 num_active_constraints=num_active,
                 max_body_degree=max_body_degree,
                 **timer_kwargs,
-                **cluster_kwargs,
             )
 
         nc_per_world = self._world_num_colors.numpy().astype(np.int32, copy=False)
@@ -3540,7 +3432,6 @@ class PhoenXWorld:
             num_active_constraints=num_active,
             max_body_degree=max_body_degree,
             **timer_kwargs,
-            **cluster_kwargs,
         )
 
     def gather_contact_wrenches(self, out: wp.array) -> None:

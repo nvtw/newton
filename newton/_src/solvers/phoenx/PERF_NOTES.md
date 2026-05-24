@@ -77,10 +77,9 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - **Memory: real 25% saving on ``copy_state`` capacity** (sized as ``constraint_capacity * MAX_BODIES``). On contact-heavy scenes (kapla, large cloth) this is the difference between fitting comfortably and pressuring GPU memory.
 - Kept for code hygiene: the constant now matches actual usage, the compact loop is shorter, and the ``vec6i`` is one cache-line word smaller. Tests updated: ``test_graph_coloring{,_overflow}`` had hardcoded ``itemsize=32`` (the old ``vec8i`` byte width); now derived from ``MAX_BODIES``.
 
-### Re-widen MAX_BODIES 6 → 8 (constraint clustering prep)
-- 2026-05-21: ``ElementInteractionData`` re-widened to ``vec8i`` so a K=4 constraint cluster's body-union (capped at 8, see ``MAX_BODIES_PER_CLUSTER`` in the clustering module) packs into the same struct used for individual constraints. This lets the upcoming supernodal-element kernel emit one ``ElementInteractionData`` per cluster and feed it straight back into the existing graph-coloring partitioner without an alternate struct type.
-- **Memory: ``copy_state`` per-row footprint goes back to 8 ints** (undoes the 25% saving from the 2026-05-12 shrink). The trade is intentional: the same struct now serves both per-constraint and per-cluster adjacency, and the saving is recovered downstream when clustering reduces the active interaction count by a factor of 2-4×.
-- Existing kernels are unaffected at runtime — the adjacency walk still early-exits on the first -1, so the trailing two -1 slots cost zero. The five ``element_interaction_data_make`` callsites in ``_constraints_to_elements_kernel`` were padded with two extra ``-1`` args.
+### Re-widen MAX_BODIES 6 → 8
+- 2026-05-21: ``ElementInteractionData`` re-widened to ``vec8i`` to keep headroom for wider constraints. Existing kernels are unaffected at runtime — the adjacency walk still early-exits on the first -1, so the trailing -1 slots cost zero. The five ``element_interaction_data_make`` callsites in ``_constraints_to_elements_kernel`` were padded with two extra ``-1`` args.
+- **Memory: ``copy_state`` per-row footprint goes back to 8 ints** (undoes the 25% saving from the 2026-05-12 shrink).
 
 ### Warm-start coloring cache stir (drift fix on tall stacks)
 - 2026-05-19: graph-coloring warm-start was reusing the same per-(body-pair) colour across frames, which made the PGS solve converge to a biased fixed point under the locked coloring. On the Kapla tower (10620 bricks, ~67k contact columns, single-world) the bias compounded over a few hundred frames into a full tower collapse: max brick drift 3.33 m at 1000 frames, mean 0.09 m.

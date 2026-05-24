@@ -5,10 +5,8 @@
 
 A small reusable helper that owns the two-array CSR ``(section_end_indices,
 vertex_to_adjacent_elements)`` describing which constraint elements touch
-each body. The PhoenX graph coloring pipeline already constructs this for
-its JP-MIS neighbour walk; clustering wants the same view of the
-constraint graph, so this module factors the build steps into a
-standalone class.
+each body. The PhoenX graph coloring pipeline constructs this for its
+JP-MIS neighbour walk.
 
 The class delegates to the existing kernels in
 :mod:`graph_coloring.graph_coloring_common` to keep behaviour byte-for-byte

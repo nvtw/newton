@@ -142,7 +142,6 @@ class SolverPhoenX(SolverBase):
         mass_splitting_batch_size: int = 8,
         partitioner_algorithm: str = "greedy",
         enable_warm_start_coloring: bool = True,
-        enable_clustering: bool = False,
         sor_boost: float = 1.0,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
@@ -164,11 +163,6 @@ class SolverPhoenX(SolverBase):
                 ``"luby_fixed"`` (single-world only).
             enable_warm_start_coloring: Reuse previous-frame colour
                 assignments. No-op on multi-world.
-            enable_clustering: Build a constraint-cluster + supernodal-
-                element view of the active constraint graph each step.
-                Currently a measurement hook -- the PGS sweep still
-                runs against the per-constraint coloring. The cluster
-                count is surfaced via ``step_report().num_clusters``.
             sor_boost: Per-impulse SOR factor. 1.0 = vanilla PGS;
                 1.1-1.5 typical; ``>= 2.0`` diverges.
             sleeping_velocity_threshold: Per-island sleep cutoff
@@ -307,7 +301,6 @@ class SolverPhoenX(SolverBase):
             mass_splitting_batch_size=mass_splitting_batch_size,
             partitioner_algorithm=partitioner_algorithm,
             enable_warm_start_coloring=enable_warm_start_coloring,
-            enable_clustering=enable_clustering,
             sor_boost=sor_boost,
             sleeping_velocity_threshold=float(sleeping_velocity_threshold),
             sleeping_frames_required=int(sleeping_frames_required),

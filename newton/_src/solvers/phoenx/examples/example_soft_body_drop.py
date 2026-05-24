@@ -111,7 +111,6 @@ class Example:
         density: float = 500.0,
         soft_body_thickness: float = 0.005,
         soft_body_gap: float = 0.010,
-        enable_clustering: bool = False,
     ):
         if int(num_cubes) < 1:
             raise ValueError(f"num_cubes must be >= 1, got {num_cubes}")
@@ -252,7 +251,6 @@ class Example:
             num_soft_tetrahedra=int(self.model.tet_count),
             device=self.device,
         )
-        self.enable_clustering: bool = bool(enable_clustering)
         self.world = PhoenXWorld(
             bodies=bodies,
             constraints=constraints,
@@ -281,7 +279,6 @@ class Example:
             # on the 7-cube/res=3 stack.
             mass_splitting_batch_size=2,
             partitioner_algorithm="greedy",
-            enable_clustering=self.enable_clustering,
             enable_column_timers=ENABLE_COLUMN_TIMERS,
             device=self.device,
         )
@@ -386,8 +383,8 @@ class Example:
             self._simulate_one_frame()
         self.sim_time += self.frame_dt
         self._frame_index += 1
-        # Optional snapshot dump for the standalone coloring / clustering
-        # benchmarks. Trigger via ``PHOENX_DUMP_COLORING_GRAPH=<frame> python
+        # Optional snapshot dump for the standalone coloring benchmark.
+        # Trigger via ``PHOENX_DUMP_COLORING_GRAPH=<frame> python
         # -m ...example_soft_body_drop``. Mirrors the kapla hook.
         dump_frame_env = os.environ.get("PHOENX_DUMP_COLORING_GRAPH")
         if dump_frame_env is not None and int(dump_frame_env) == self._frame_index:
@@ -396,7 +393,7 @@ class Example:
 
     def _dump_coloring_graph(self) -> None:
         """Write the active constraint graph to ``soft_body_drop_graph.npz``
-        for the standalone coloring / clustering benchmarks.
+        for the standalone coloring benchmark.
 
         ``num_bodies`` in the npz stores the partitioner's
         ``max_num_nodes`` (rigid bodies + particles); the bench loader
@@ -475,19 +472,6 @@ if __name__ == "__main__":
     parser.add_argument("--density", type=float, default=500.0)
     parser.add_argument("--soft-body-thickness", type=float, default=0.005)
     parser.add_argument("--soft-body-gap", type=float, default=0.010)
-    parser.add_argument(
-        "--enable-clustering",
-        action="store_true",
-        help=(
-            "Enable PhoenX constraint clustering for this run. "
-            "Soft-tet constraints get clustered into K=4 groups (body union <= 8); "
-            "the main partitioner colours the supernodal graph and the PGS sweep "
-            "iterates cluster members per slot. Composes with mass splitting: "
-            "cluster members in the overflow column share their thread (Gauss-"
-            "Seidel within the cluster) and the supernodal body-union seeds the "
-            "interaction graph slot allocation."
-        ),
-    )
     viewer, args = newton.examples.init(parser)
     viewer._paused = True
     example = Example(
@@ -506,6 +490,5 @@ if __name__ == "__main__":
         density=args.density,
         soft_body_thickness=args.soft_body_thickness,
         soft_body_gap=args.soft_body_gap,
-        enable_clustering=args.enable_clustering,
     )
     newton.examples.run(example, args)

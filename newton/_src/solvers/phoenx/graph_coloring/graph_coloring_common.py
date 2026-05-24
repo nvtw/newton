@@ -25,12 +25,10 @@ vec8i = wp.types.vector(length=8, dtype=wp.int32)
 @wp.struct
 class ElementInteractionData:
     # Body slots; -1 = inactive. Slots 0..1 = primary pair; 2..7 optional.
-    # Width 8 fits every individual constraint type (joint=2, cloth-tri=3,
-    # cloth-bending=4, soft-tet shear=4, soft-tet-vs-soft-tet contact=6)
-    # and also a K=4 cluster of constraints whose body union is capped at
-    # 8 (see ``MAX_BODIES_PER_CLUSTER`` in the clustering module). Was 6
-    # historically (see PERF_NOTES.md 2026-05-12); re-widened to 8 to
-    # support constraint clustering's supernodal-element representation.
+    # Width 8 fits every constraint type (joint=2, cloth-tri=3,
+    # cloth-bending=4, soft-tet shear=4, soft-tet-vs-soft-tet contact=6,
+    # cloth-cloth contact=6). Was 6 historically (see PERF_NOTES.md
+    # 2026-05-12); re-widened to 8.
     bodies: vec8i
 
 
