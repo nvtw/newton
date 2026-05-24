@@ -379,12 +379,8 @@ class IncrementalContactPartitioner:
         # permutation as MIS so determinism is preserved. Scratch
         # buffers allocated once for capture-safe pointers.
         self._use_speculative_coloring: bool = False
-        self._spec_tentative_color: wp.array[wp.int32] = wp.zeros(
-            max_num_interactions, dtype=wp.int32, device=device
-        )
-        self._spec_commit_decision: wp.array[wp.int32] = wp.zeros(
-            max_num_interactions, dtype=wp.int32, device=device
-        )
+        self._spec_tentative_color: wp.array[wp.int32] = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+        self._spec_commit_decision: wp.array[wp.int32] = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
         # Dummies for reusing partitioning_prepare_kernel as adjacency zeroer.
         self._prepare_partition_ends_dummy = wp.zeros(1, dtype=wp.int32, device=device)
@@ -1067,6 +1063,7 @@ class IncrementalContactPartitioner:
                     self._num_elements,
                     wp.int32(self._greedy_grid_size),
                     self._num_remaining,
+                    wp.int32(self._max_colored_partitions_kernel_arg),
                 ],
                 block_dim=_GREEDY_BLOCK_DIM,
             )

@@ -506,50 +506,70 @@ def speculative_validate_commit_kernel(
     num_elements: wp.array[int],
     total_num_threads: wp.int32,
     num_remaining: wp.array[int],
+    max_colored_partitions: wp.int32,
 ):
     """Phase 2+3 (fused): validate the tentative pick and commit if
     no conflict. Race-safe under priority tiebreak: when A and B
     share a body and both pick colour ``c``, the lower-priority side
     always aborts whether it reads A as "uncoloured + higher prio"
     (pre-commit) or "already coloured at my tentative" (post-commit).
+
+    The overflow colour (``c == max_colored_partitions`` when
+    ``max_colored_partitions >= 0``) is exempt from the neighbour
+    conflict check: mass splitting resolves within-colour conflicts in
+    that bucket via per-(body, partition) copy states, so multiple
+    neighbouring elements are allowed to share it. Without this exemption
+    the speculative path deadlocks on dense scenes that spill every
+    element to the overflow bucket -- the first iteration colours one
+    element per neighbourhood, then subsequent iterations see the
+    coloured overflow neighbour and reject ``commit`` forever
+    (``ntag == my_tent`` on every neighbour).
     """
     if num_remaining[0] <= wp.int32(0):
         return
     n = num_elements[0]
+    # Encoded overflow tag (``c+1`` in the tentative_color encoding) when
+    # the soft cap is configured; ``-1`` disables the exemption when
+    # ``max_colored_partitions < 0`` (no overflow bucket).
+    overflow_tent = wp.where(max_colored_partitions >= wp.int32(0), max_colored_partitions + wp.int32(1), wp.int32(-1))
     for tid in range(wp.tid(), n, total_num_threads):
         if color_tags[tid] != wp.int32(0):
             continue
         my_tent = tentative_color[tid]
         my_prio = contact_partitions_get_random_value(packed_priorities, tid)
         commit = bool(True)
-        el = elements[tid]
-        for j in range(MAX_BODIES):
-            if not commit:
-                break
-            v = element_interaction_data_get(el, j)
-            if v < 0:
-                break
-            if v > 0:
-                start = adjacency_section_end_indices[v - 1]
-            else:
-                start = 0
-            end = adjacency_section_end_indices[v]
-            for k in range(start, end):
-                neighbor = vertex_to_adjacent_elements[k]
-                if neighbor == tid:
-                    continue
-                ntag = color_tags[neighbor]
-                if ntag != wp.int32(0):
-                    if ntag == my_tent:
+        # Overflow picks skip neighbour validation: mass splitting
+        # handles intra-bucket conflicts.
+        is_overflow_pick = my_tent == overflow_tent
+        if not is_overflow_pick:
+            el = elements[tid]
+            for j in range(MAX_BODIES):
+                if not commit:
+                    break
+                v = element_interaction_data_get(el, j)
+                if v < 0:
+                    break
+                if v > 0:
+                    start = adjacency_section_end_indices[v - 1]
+                else:
+                    start = 0
+                end = adjacency_section_end_indices[v]
+                for k in range(start, end):
+                    neighbor = vertex_to_adjacent_elements[k]
+                    if neighbor == tid:
+                        continue
+                    ntag = color_tags[neighbor]
+                    if ntag != wp.int32(0):
+                        if ntag == my_tent:
+                            commit = False
+                            break
+                        continue
+                    if tentative_color[neighbor] != my_tent:
+                        continue
+                    neigh_prio = contact_partitions_get_random_value(packed_priorities, neighbor)
+                    if neigh_prio > my_prio:
                         commit = False
                         break
-                    continue
-                if tentative_color[neighbor] != my_tent:
-                    continue
-                neigh_prio = contact_partitions_get_random_value(packed_priorities, neighbor)
-                if neigh_prio > my_prio:
-                    commit = False
-                    break
         if commit:
             color_tags[tid] = my_tent
             partition_data_concat[tid] = (wp.int64(my_tent) << _COLOR_SHIFT) | wp.int64(tid)
