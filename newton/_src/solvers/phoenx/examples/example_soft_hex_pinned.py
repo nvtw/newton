@@ -20,17 +20,21 @@ at the origin at altitude ``base_height``):
     corner 6: (+, +, +)   <--
     corner 7: (-, +, +)   <--
 
-The default pins the 4 top-face corners and lets the bottom face hang
-under gravity. Pure ARAP only penalises strain ``||F - R||``, not
-absolute displacement, so single-corner pinning is degenerate (the 5
-remaining rigid-motion DOFs accumulate gravity-induced drift each
-substep). Face pinning is a well-conditioned demo across the full
-``youngs_modulus`` range; it converges to a small elastic stretch
-instead of drifting.
+The hex uses the stable block Neo-Hookean energy from Smith et al.
+2018, projected as two coupled XPBD multipliers (hydrostatic +
+deviatoric) solved via a 2x2 Schur complement -- the same formulation
+the existing ``constraint_soft_tet_neohookean`` uses for tets. Volume
+preservation is built into the constraint via the hydrostatic
+``det(F) - gamma`` row.
 
-Pass ``--pin-mode corner`` to switch to the single-corner pin pattern
-for diagnostics; expect dramatic deformation that increases with
-``youngs_modulus`` for the reasons above.
+The default pins the 4 top-face corners and lets the bottom face hang
+under gravity. Pass ``--pin-mode corner`` to pin only one corner --
+single-element / single-pin scenes are degenerate for any XPBD
+constraint (the under-constrained rigid-motion DOFs let high-stiffness
+PGS iterations overshoot), so the corner mode is for diagnostics only.
+Face pinning is a well-conditioned demo across the practical stiffness
+range; FP32 numerics fail somewhere around ``youngs_modulus = 1e10``
+regardless of pin pattern.
 
 Run::
 
@@ -94,11 +98,14 @@ class Example:
             pure-ARAP variant beyond converting (E, nu) -> mu.
         beta_mu: Macklin XPBD damping [1/s].
         pin_mode: ``"top_face"`` (default; pins corners 4..7) or
-            ``"corner"`` (pins only :attr:`pin_corner_index`). Single-
-            corner pinning is under-constrained for pure ARAP and is
-            for diagnostics only -- see this module's docstring.
+            ``"corner"`` (pins only :attr:`pin_corner_index`). With
+            ``corner`` mode the chosen corner should be on the top
+            face (z=+1 signs, indices 4..7), otherwise gravity has no
+            equilibrium and the cube falls past the pin.
         pin_corner_index: Which corner (0..7) to pin in
-            ``pin_mode="corner"``. Ignored otherwise.
+            ``pin_mode="corner"``. Default 6 is the (+, +, +) top
+            corner, which lets the cube hang from a top vertex.
+            Ignored otherwise.
     """
 
     def __init__(
@@ -113,7 +120,7 @@ class Example:
         poisson_ratio: float = 0.3,
         beta_mu: float = 5.0,
         pin_mode: str = "top_face",
-        pin_corner_index: int = 0,
+        pin_corner_index: int = 6,
     ):
         if pin_mode not in ("top_face", "corner"):
             raise ValueError(f"pin_mode must be 'top_face' or 'corner' (got {pin_mode!r})")
@@ -203,7 +210,7 @@ class Example:
         particle_qd = wp.zeros(8, dtype=wp.vec3f, device=self.device)
         particle_inv_mass = wp.array(inv_mass, dtype=wp.float32, device=self.device)
         hex_materials = wp.array(
-            np.array([[self.k_mu, beta_mu]], dtype=np.float32),
+            np.array([[self.k_mu, self.k_lambda, beta_mu, beta_mu]], dtype=np.float32),
             dtype=wp.float32,
             device=self.device,
         )
@@ -364,19 +371,23 @@ if __name__ == "__main__":
         help=(
             "How to anchor the hex. 'top_face' (default) pins the 4 top-face "
             "corners and lets the bottom face hang under gravity -- a "
-            "well-conditioned pure-stretch demo across the full stiffness "
-            "range. 'corner' pins only a single corner (chosen with "
-            "--pin-corner-index); pure ARAP is under-constrained for this "
-            "case and the hex will drift / over-deform even at high stiffness "
-            "since rotational DOFs around the pin go un-penalised. Use only "
-            "for diagnostics."
+            "well-conditioned demo for the Neo-Hookean coupled solve. "
+            "'corner' pins a single corner; single-element + single-pin is "
+            "degenerate for any XPBD constraint (the unsupported rigid-motion "
+            "DOFs let high-stiffness PGS overshoot) so this mode is for "
+            "diagnostics only."
         ),
     )
     parser.add_argument(
         "--pin-corner-index",
         type=int,
-        default=0,
-        help="Corner index (0..7) to pin when --pin-mode=corner.",
+        default=6,
+        help=(
+            "Corner index (0..7) to pin when --pin-mode=corner. "
+            "Default 6 is the (+,+,+) top corner. Pinning a bottom "
+            "corner (0..3) has no static equilibrium under gravity -- "
+            "the cube falls past the pin."
+        ),
     )
     viewer, args = newton.examples.init(parser)
     example = Example(

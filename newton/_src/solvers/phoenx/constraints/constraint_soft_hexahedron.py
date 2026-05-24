@@ -1,50 +1,50 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Position-level XPBD soft-body hexahedron (8-node trilinear ARAP).
+"""Stable block Neo-Hookean XPBD soft-body hexahedron.
 
-Single per-hex XPBD row per PGS sweep, mirroring
-:mod:`constraint_soft_tetrahedron`'s formulation but evaluated on a
-trilinear 8-node hex at 1-point Gauss quadrature (the hex center):
+8-node trilinear hex sibling of :mod:`constraint_soft_tet_neohookean`.
+Same Ton-That, Kry & Andrews 2024 block-coupled formulation, but the
+deformation gradient is evaluated at 1-point Gauss quadrature (hex
+center) on standard isoparametric trilinear shape functions::
 
-    C        = V_rest * sqrt(||F - R||_F^2 + eps)
-    F        = sum_i x_i (x) B_i      (3x3, B_i = world-space dN_i / dX at center)
-    R        = polar(F)               (warm-started APD Newton, same as tet)
+    Psi_neo(F) = (mu / 2) (tr(F^T F) - 3) + (lambda / 2) (det(F) - gamma)^2
+    gamma      = 1 + mu / lambda
 
-The B_i vectors are reconstructed inside the kernel from a stored
-``inv_rest`` mat33f equal to the inverse-transpose of the rest Jacobian
-at the hex center::
+split into the two scalar XPBD rows::
 
-    J        = sum_i X_i (x) grad_ref N_i(0)   (3x3, rest Jacobian)
-    inv_rest = J^{-T}
+    C^H(x) = det(F) - gamma                 (hydrostatic / volume)
+    C^D(x) = sqrt(tr(F^T F) + eps)          (deviatoric / shear)
+    alpha^H = 1 / (lambda * V_rest)
+    alpha^D = 1 / (mu * V_rest)
+
+projected jointly via a 2x2 Schur complement -- one constraint with
+two coupled multipliers, **not** two independent rows. The combined
+solve is what makes the formulation robust on single elements with
+under-determined pin patterns: ``C^H`` directly resists the volumetric
+modes that pure ARAP can't see, ``C^D`` handles shear, and the coupling
+matrix balances them so high stiffness no longer overshoots into
+runaway deformation.
+
+ARAP's polar-decomposition warm start is gone -- the Neo-Hookean
+energy is rotation-invariant by construction (it's a function of
+``F^T F`` and ``det(F)`` only), so there's no rotation to track.
+
+Per-corner gradients use the same shape-gradient chain rule as the
+ARAP variant lived under here previously:
+
+    F        = sum_i x_i (x) B_i               (3x3, B_i world shape grad)
     B_i      = (1/8) inv_rest * (xi_i, eta_i, zeta_i)
+    inv_rest = J^{-T} at the hex center
+    g_i      = dC/dF * B_i                     (one mat33-vec3 per corner)
 
-where ``(xi_i, eta_i, zeta_i)`` in {-1, +1}^3 are the corner-sign
-triplets of the standard isoparametric 8-node hex ordering. Storing only
-``J^{-T}`` (mat33f) keeps the per-row footprint comparable to the tet
-schema; the 8 B-vectors are re-derived from the constant corner-sign
-table at iterate time (8 mat33-vec3 products per sweep, identical to
-the tet's chain-rule cost).
+Storage uses one ``inv_rest`` mat33f equal to J^{-T} at the hex center;
+the 8 ``B_i`` are reconstructed in-kernel from the constant corner-sign
+table. Rest volume: ``V = 8 * det(J)`` (for an axis-aligned cube of
+side ``L``, ``J = (L/2) I`` and ``V = L^3``).
 
-Rest volume: ``V = 8 * det(J)``. For an axis-aligned cube of side L,
-``J = (L/2) I`` and ``V = L^3`` as expected.
-
-Per-vertex gradient via chain rule:
-
-    dC/dF        = (V / c_norm) * (F - R)
-    g_i = dC/dx_i = (V / c_norm) * (F - R) * B_i
-
-i.e. one mat33-vec3 per corner. No sum-rule (each corner is symmetric
-under the trilinear shape functions, unlike the tet's asymmetric
-"edges-from-A" encoding).
-
-The XPBD/PGS solve mirrors :func:`soft_tetrahedron_iterate_at`: same
-Macklin damping anchor (``gamma_mu = beta_mu * dt``), same single-row
-Schur denominator, same ``alpha_mu = 1 / k_mu`` convention with the
-rest volume folded into ``C`` rather than ``alpha``.
-
-Corner ordering (matches standard isoparametric convention used by
-e.g. VTK_HEXAHEDRON, Abaqus C3D8, glTF / OBJ box meshes):
+Corner ordering (canonical isoparametric, matches VTK_HEXAHEDRON /
+Abaqus C3D8):
 
     i | (xi, eta, zeta)
     0 | (-1, -1, -1)
@@ -55,11 +55,6 @@ e.g. VTK_HEXAHEDRON, Abaqus C3D8, glTF / OBJ box meshes):
     5 | (+1, -1, +1)
     6 | (+1, +1, +1)
     7 | (-1, +1, +1)
-
-Caller is responsible for stamping body1..body8 in this order. Mixed
-orderings will not invert (det(J) flips sign and the absolute-value
-volume + polar decomposition absorb the chirality), but the per-corner
-gradient indexing assumes consecutive i = 0..7 follow this table.
 """
 
 from __future__ import annotations
@@ -75,14 +70,9 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     read_float,
     read_int,
     read_mat33,
-    read_quat,
     write_float,
     write_int,
     write_mat33,
-    write_quat,
-)
-from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
-    _extract_rotation,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
@@ -101,8 +91,10 @@ __all__ = [
     "soft_hex_init_rows_from_arrays_kernel",
     "soft_hexahedron_iterate_at",
     "soft_hexahedron_prepare_for_iteration_at",
-    "soft_hexahedron_set_alpha_mu",
-    "soft_hexahedron_set_beta_mu",
+    "soft_hexahedron_set_alpha_d",
+    "soft_hexahedron_set_alpha_h",
+    "soft_hexahedron_set_beta_d",
+    "soft_hexahedron_set_beta_h",
     "soft_hexahedron_set_body1",
     "soft_hexahedron_set_body2",
     "soft_hexahedron_set_body3",
@@ -111,13 +103,14 @@ __all__ = [
     "soft_hexahedron_set_body6",
     "soft_hexahedron_set_body7",
     "soft_hexahedron_set_body8",
+    "soft_hexahedron_set_gamma",
     "soft_hexahedron_set_inv_rest",
     "soft_hexahedron_set_rest_volume",
     "soft_hexahedron_set_type",
 ]
 
 
-_PHOENX_SOFT_HEX_STIFFNESS_FLOOR = wp.constant(wp.float32(1.0e-6))
+_PHOENX_NEOHOOKEAN_STIFFNESS_FLOOR = wp.constant(wp.float32(1.0e-6))
 
 
 # ---------------------------------------------------------------------------
@@ -127,9 +120,9 @@ _PHOENX_SOFT_HEX_STIFFNESS_FLOOR = wp.constant(wp.float32(1.0e-6))
 
 @wp.struct
 class SoftHexahedronData:
-    """Per-constraint dword layout for one 8-node soft hexahedron.
+    """Per-constraint dword layout for one block Neo-Hookean hexahedron.
 
-    Mirrors :class:`SoftTetrahedronData` field-for-field with the
+    Mirrors :class:`SoftTetNeoHookeanData` field-for-field with the
     4-body endpoint set extended to 8. The mandatory 3-int32 header
     (``constraint_type`` / ``body1`` / ``body2``) lives at dwords 0/1/2.
     """
@@ -145,14 +138,20 @@ class SoftHexahedronData:
     body8: wp.int32  # particle index of corner 7 (-,+,+)
 
     # inv_rest = J^{-T} where J is the rest Jacobian at the hex center.
-    # B_i = (1/8) inv_rest * (xi_i, eta_i, zeta_i) is the world-space
-    # shape-function gradient for corner i; the kernel reconstructs all
-    # 8 B_i from this single mat33 + the static corner-sign table.
+    # B_i = (1/8) inv_rest * (xi_i, eta_i, zeta_i).
     inv_rest: wp.mat33f
     rest_volume: wp.float32  # V = 8 * det(J)
 
-    alpha_mu: wp.float32  # 1 / Lame mu (shear compliance)
-    beta_mu: wp.float32  # Macklin XPBD damping coefficient
+    #: ``1 + mu / lambda`` -- stable Neo-Hookean offset.
+    gamma: wp.float32
+    #: ``1 / (lambda * V_rest)`` -- hydrostatic compliance.
+    alpha_h: wp.float32
+    #: ``1 / (mu * V_rest)`` -- deviatoric compliance.
+    alpha_d: wp.float32
+    #: Macklin XPBD damping coefficient on the hydrostatic row [1/s].
+    beta_h: wp.float32
+    #: Macklin XPBD damping coefficient on the deviatoric row [1/s].
+    beta_d: wp.float32
 
     inv_mass_a: wp.float32
     inv_mass_b: wp.float32
@@ -163,11 +162,12 @@ class SoftHexahedronData:
     inv_mass_g: wp.float32
     inv_mass_h: wp.float32
 
-    rotation: wp.quatf  # corotational warm-start (closest-rotation to F)
-    lambda_sum_mu: wp.float32  # shear-row XPBD accumulator
+    #: Hydrostatic XPBD multiplier accumulator (reset each substep).
+    lambda_sum_h: wp.float32
+    #: Deviatoric XPBD multiplier accumulator (reset each substep).
+    lambda_sum_d: wp.float32
 
-    #: Opt-in per-column wall-clock accumulator (microseconds). See
-    #: :func:`constraint_accumulate_time_us`.
+    #: Opt-in per-column wall-clock accumulator (microseconds).
     time_us: wp.float32
 
 
@@ -184,8 +184,11 @@ _OFF_BODY7 = wp.constant(dword_offset_of(SoftHexahedronData, "body7"))
 _OFF_BODY8 = wp.constant(dword_offset_of(SoftHexahedronData, "body8"))
 _OFF_INV_REST = wp.constant(dword_offset_of(SoftHexahedronData, "inv_rest"))
 _OFF_REST_VOLUME = wp.constant(dword_offset_of(SoftHexahedronData, "rest_volume"))
-_OFF_ALPHA_MU = wp.constant(dword_offset_of(SoftHexahedronData, "alpha_mu"))
-_OFF_BETA_MU = wp.constant(dword_offset_of(SoftHexahedronData, "beta_mu"))
+_OFF_GAMMA = wp.constant(dword_offset_of(SoftHexahedronData, "gamma"))
+_OFF_ALPHA_H = wp.constant(dword_offset_of(SoftHexahedronData, "alpha_h"))
+_OFF_ALPHA_D = wp.constant(dword_offset_of(SoftHexahedronData, "alpha_d"))
+_OFF_BETA_H = wp.constant(dword_offset_of(SoftHexahedronData, "beta_h"))
+_OFF_BETA_D = wp.constant(dword_offset_of(SoftHexahedronData, "beta_d"))
 _OFF_INV_MASS_A = wp.constant(dword_offset_of(SoftHexahedronData, "inv_mass_a"))
 _OFF_INV_MASS_B = wp.constant(dword_offset_of(SoftHexahedronData, "inv_mass_b"))
 _OFF_INV_MASS_C = wp.constant(dword_offset_of(SoftHexahedronData, "inv_mass_c"))
@@ -194,8 +197,8 @@ _OFF_INV_MASS_E = wp.constant(dword_offset_of(SoftHexahedronData, "inv_mass_e"))
 _OFF_INV_MASS_F = wp.constant(dword_offset_of(SoftHexahedronData, "inv_mass_f"))
 _OFF_INV_MASS_G = wp.constant(dword_offset_of(SoftHexahedronData, "inv_mass_g"))
 _OFF_INV_MASS_H = wp.constant(dword_offset_of(SoftHexahedronData, "inv_mass_h"))
-_OFF_ROTATION = wp.constant(dword_offset_of(SoftHexahedronData, "rotation"))
-_OFF_LAMBDA_SUM_MU = wp.constant(dword_offset_of(SoftHexahedronData, "lambda_sum_mu"))
+_OFF_LAMBDA_SUM_H = wp.constant(dword_offset_of(SoftHexahedronData, "lambda_sum_h"))
+_OFF_LAMBDA_SUM_D = wp.constant(dword_offset_of(SoftHexahedronData, "lambda_sum_d"))
 SOFT_HEX_TIME_US_OFFSET = wp.constant(dword_offset_of(SoftHexahedronData, "time_us"))
 
 SOFT_HEX_DWORDS: int = num_dwords(SoftHexahedronData)
@@ -257,13 +260,28 @@ def soft_hexahedron_set_rest_volume(c: ConstraintContainer, cid: wp.int32, v: wp
 
 
 @wp.func
-def soft_hexahedron_set_alpha_mu(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_ALPHA_MU, cid, v)
+def soft_hexahedron_set_gamma(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_GAMMA, cid, v)
 
 
 @wp.func
-def soft_hexahedron_set_beta_mu(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
-    write_float(c, _OFF_BETA_MU, cid, v)
+def soft_hexahedron_set_alpha_h(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_ALPHA_H, cid, v)
+
+
+@wp.func
+def soft_hexahedron_set_alpha_d(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_ALPHA_D, cid, v)
+
+
+@wp.func
+def soft_hexahedron_set_beta_h(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_BETA_H, cid, v)
+
+
+@wp.func
+def soft_hexahedron_set_beta_d(c: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    write_float(c, _OFF_BETA_D, cid, v)
 
 
 # ---------------------------------------------------------------------------
@@ -272,35 +290,21 @@ def soft_hexahedron_set_beta_mu(c: ConstraintContainer, cid: wp.int32, v: wp.flo
 
 
 _ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
-_DET_F_EPS = wp.constant(wp.float32(1.0e-8))
-_ARAP_EPS = wp.constant(wp.float32(1.0e-8))
-#: Cold-start polar-decomposition iteration count, matches the tet's
-#: prepare-time budget. APD's quadratic convergence covers a cold
-#: (identity) start in ~6 iters even on heavily-sheared input.
-_PREPARE_ROT_ITERS = wp.constant(wp.int32(6))
-#: Refine polar-decomposition iteration count per PGS sweep. Same
-#: budget as the tet iterate; the warm-started quaternion lands at
-#: machine precision in 2-3 refines.
-_ITERATE_ROT_ITERS = wp.constant(wp.int32(3))
+#: Floor for the deviatoric constraint magnitude (avoids division by zero
+#: when the element fully collapses, F -> 0).
+_DEV_EPS = wp.constant(wp.float32(1.0e-12))
+#: Floor for the Schur-complement determinant during the 2x2 inverse.
+_DET_FLOOR = wp.constant(wp.float32(1.0e-30))
 
-#: 1/8 factor folded into B-vector reconstruction. ``B_i = ONE_EIGHTH *
-#: inv_rest * (xi_i, eta_i, zeta_i)``.
+#: 1/8 factor folded into B-vector reconstruction.
 _ONE_EIGHTH = wp.constant(wp.float32(0.125))
 
 
 @wp.func
 def _corner_sign(i: wp.int32) -> wp.vec3f:
-    """Reference-cube corner sign triplet for the standard
-    isoparametric 8-node hex ordering. Returns ``(xi_i, eta_i, zeta_i)``
-    in {-1, +1}^3 for ``i`` in ``[0, 8)``; ``(0, 0, 0)`` for out-of-range.
-
-    The branchless form would be ``((i&1)*2-1, ((i>>1)&1)*2-1,
-    ((i>>2)&1)*2-1)`` for a Gray-code ordering, but the standard
-    convention (matching VTK_HEXAHEDRON / Abaqus C3D8) is not pure
-    binary -- corners 2 and 3 swap relative to a naive bit-pattern.
-    Spell the table out so the corner numbering matches user
-    expectations.
-    """
+    """Reference-cube corner sign triplet ``(xi_i, eta_i, zeta_i)``
+    in ``{-1, +1}^3`` for the standard isoparametric 8-node hex
+    ordering. ``(0, 0, 0)`` for out-of-range ``i``."""
     if i == wp.int32(0):
         return wp.vec3f(-1.0, -1.0, -1.0)
     if i == wp.int32(1):
@@ -327,8 +331,7 @@ def _corner_sign(i: wp.int32) -> wp.vec3f:
 
 @wp.func
 def _shape_gradient(inv_rest: wp.mat33f, i: wp.int32) -> wp.vec3f:
-    """World-space shape-function gradient for corner ``i`` at the hex
-    center: ``B_i = (1/8) inv_rest * sign_i``."""
+    """World-space shape-function gradient ``B_i = (1/8) inv_rest * sign_i``."""
     return _ONE_EIGHTH * (inv_rest * _corner_sign(i))
 
 
@@ -346,13 +349,10 @@ def _compute_F_hex(
 ) -> wp.mat33f:
     """Deformation gradient at the hex center: ``F = sum_i x_i (x) B_i``.
 
-    Expanded explicitly rather than via a loop so the per-corner sign
-    triplet folds into compile-time constant scalings of inv_rest's
-    columns. After common subexpression elimination this evaluates to
-    the same number of multiplies as ``sum_i (1/8) x_i * (sign_i^T
-    inv_rest^T)``, but it's spelled out structurally for clarity.
+    Spelled out as 9 explicit accumulators so the compiler can hoist
+    ``B_i`` once per corner; each entry is the sum of 8 ``x_i[a]*B_i[b]``
+    products.
     """
-    # B_i = (1/8) inv_rest * sign_i.
     b0 = _shape_gradient(inv_rest, wp.int32(0))
     b1 = _shape_gradient(inv_rest, wp.int32(1))
     b2 = _shape_gradient(inv_rest, wp.int32(2))
@@ -361,7 +361,6 @@ def _compute_F_hex(
     b5 = _shape_gradient(inv_rest, wp.int32(5))
     b6 = _shape_gradient(inv_rest, wp.int32(6))
     b7 = _shape_gradient(inv_rest, wp.int32(7))
-    # F = sum_i x_i b_i^T. Each (x_i, b_i) contributes a rank-1 update.
     F00 = (
         x0[0] * b0[0]
         + x1[0] * b1[0]
@@ -472,12 +471,10 @@ def soft_hexahedron_prepare_for_iteration_at(
     idt: wp.float32,
 ):
     """Substep-entry prepare: flip access mode to POSITION_LEVEL on all
-    8 corners, cache inverse masses, reset XPBD warm starts, cold-start
-    the polar-decomposition rotation against the substep-entry pose.
-
-    Mirrors :func:`soft_tetrahedron_prepare_for_iteration_at` -- the
-    rotation quaternion warm start is preserved across substeps and
-    only refreshed via Newton iters here, never reset to identity.
+    8 corners, cache inverse masses, reset both XPBD multipliers to
+    zero. No polar-decomposition warm start -- the Neo-Hookean
+    formulation is rotation-invariant (depends only on ``F^T F`` and
+    ``det(F)``).
     """
     body0 = read_int(constraints, _OFF_BODY1, cid)
     body1 = read_int(constraints, _OFF_BODY2, cid)
@@ -523,21 +520,8 @@ def soft_hexahedron_prepare_for_iteration_at(
     write_float(constraints, _OFF_INV_MASS_G, cid, particles.inverse_mass[p6] * wp.float32(inv_factor6))
     write_float(constraints, _OFF_INV_MASS_H, cid, particles.inverse_mass[p7] * wp.float32(inv_factor7))
 
-    write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, wp.float32(0.0))
-
-    x0 = read_position_with_slot(bodies, particles, copy_state, body0, slot0, num_bodies)
-    x1 = read_position_with_slot(bodies, particles, copy_state, body1, slot1, num_bodies)
-    x2 = read_position_with_slot(bodies, particles, copy_state, body2, slot2, num_bodies)
-    x3 = read_position_with_slot(bodies, particles, copy_state, body3, slot3, num_bodies)
-    x4 = read_position_with_slot(bodies, particles, copy_state, body4, slot4, num_bodies)
-    x5 = read_position_with_slot(bodies, particles, copy_state, body5, slot5, num_bodies)
-    x6 = read_position_with_slot(bodies, particles, copy_state, body6, slot6, num_bodies)
-    x7 = read_position_with_slot(bodies, particles, copy_state, body7, slot7, num_bodies)
-    inv_rest = read_mat33(constraints, _OFF_INV_REST, cid)
-    F = _compute_F_hex(x0, x1, x2, x3, x4, x5, x6, x7, inv_rest)
-    rotation = read_quat(constraints, _OFF_ROTATION, cid)
-    rotation = _extract_rotation(F, rotation, _PREPARE_ROT_ITERS)
-    write_quat(constraints, _OFF_ROTATION, cid, rotation)
+    write_float(constraints, _OFF_LAMBDA_SUM_H, cid, wp.float32(0.0))
+    write_float(constraints, _OFF_LAMBDA_SUM_D, cid, wp.float32(0.0))
 
 
 @wp.func
@@ -552,18 +536,21 @@ def soft_hexahedron_iterate_at(
     idt: wp.float32,
     sor_boost: wp.float32,
 ):
-    """One PGS sweep on a soft-body hexahedron.
+    """One block Neo-Hookean PGS sweep on a soft-body hexahedron.
 
-    Reads 8 corner positions, evaluates ``F`` and the warm-started
-    closest-rotation ``R``, builds the rest-volume-weighted Frobenius
-    constraint ``C = V_rest * ||F - R||_F``, applies one Schur-complement
-    correction with Macklin damping, and writes back the 8 updated
-    corner positions.
+    Evaluates ``(C^H, C^D)`` and the per-corner gradients of both,
+    then solves the 2x2 Schur-complement system::
 
-    Body fields are unified indices: ``i_p = body - num_bodies`` is the
-    particle slot. Reads / writes route through the slot-aware unified
-    helpers so mass splitting (when enabled) lands position-level work
-    in the slot.
+        A . [d lambda^H; d lambda^D] = -([C^H; C^D] + alpha_tilde [...] + damping)
+
+        A_{HH} = (1 + gamma_H) sum_v w_v ||g^H_v||^2 + alpha_tilde^H
+        A_{DD} = (1 + gamma_D) sum_v w_v ||g^D_v||^2 + alpha_tilde^D
+        A_{HD} = sum_v w_v g^H_v . g^D_v
+        gamma_i = beta_i * dt
+
+    Final position update::
+
+        d x_v = w_v (g^H_v d lambda^H + g^D_v d lambda^D)
     """
     body0 = read_int(constraints, _OFF_BODY1, cid)
     body1 = read_int(constraints, _OFF_BODY2, cid)
@@ -609,11 +596,13 @@ def soft_hexahedron_iterate_at(
     inv_mass6 = read_float(constraints, _OFF_INV_MASS_G, cid)
     inv_mass7 = read_float(constraints, _OFF_INV_MASS_H, cid)
     inv_rest = read_mat33(constraints, _OFF_INV_REST, cid)
-    rest_volume = read_float(constraints, _OFF_REST_VOLUME, cid)
-    alpha_mu = read_float(constraints, _OFF_ALPHA_MU, cid)
-    beta_mu = read_float(constraints, _OFF_BETA_MU, cid)
-    rotation = read_quat(constraints, _OFF_ROTATION, cid)
-    lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
+    gamma_offset = read_float(constraints, _OFF_GAMMA, cid)
+    alpha_h = read_float(constraints, _OFF_ALPHA_H, cid)
+    alpha_d = read_float(constraints, _OFF_ALPHA_D, cid)
+    beta_h = read_float(constraints, _OFF_BETA_H, cid)
+    beta_d = read_float(constraints, _OFF_BETA_D, cid)
+    lambda_h = read_float(constraints, _OFF_LAMBDA_SUM_H, cid)
+    lambda_d = read_float(constraints, _OFF_LAMBDA_SUM_D, cid)
 
     x0 = read_position_with_slot(bodies, particles, copy_state, body0, slot0, num_bodies)
     x1 = read_position_with_slot(bodies, particles, copy_state, body1, slot1, num_bodies)
@@ -624,7 +613,6 @@ def soft_hexahedron_iterate_at(
     x6 = read_position_with_slot(bodies, particles, copy_state, body6, slot6, num_bodies)
     x7 = read_position_with_slot(bodies, particles, copy_state, body7, slot7, num_bodies)
 
-    # XPBD Macklin damping anchor (velocity-projected).
     dx0 = x0 - particles.position_prev_substep[p0]
     dx1 = x1 - particles.position_prev_substep[p1]
     dx2 = x2 - particles.position_prev_substep[p2]
@@ -635,83 +623,161 @@ def soft_hexahedron_iterate_at(
     dx7 = x7 - particles.position_prev_substep[p7]
 
     F = _compute_F_hex(x0, x1, x2, x3, x4, x5, x6, x7, inv_rest)
-    rotation = _extract_rotation(F, rotation, _ITERATE_ROT_ITERS)
-    R = wp.quat_to_matrix(rotation)
 
-    S = F - R
-    s00 = S[0, 0]
-    s01 = S[0, 1]
-    s02 = S[0, 2]
-    s10 = S[1, 0]
-    s11 = S[1, 1]
-    s12 = S[1, 2]
-    s20 = S[2, 0]
-    s21 = S[2, 1]
-    s22 = S[2, 2]
-    s_norm_sq = (
-        s00 * s00 + s01 * s01 + s02 * s02 + s10 * s10 + s11 * s11 + s12 * s12 + s20 * s20 + s21 * s21 + s22 * s22
+    # Columns of F (Warp mat33 stores row-major).
+    f0 = wp.vec3f(F[0, 0], F[1, 0], F[2, 0])
+    f1 = wp.vec3f(F[0, 1], F[1, 1], F[2, 1])
+    f2 = wp.vec3f(F[0, 2], F[1, 2], F[2, 2])
+
+    # Hydrostatic: C^H = det(F) - gamma. d det(F) / dF = cofactor matrix
+    # (columns are pairwise cross products of F's columns).
+    cof0 = wp.cross(f1, f2)
+    cof1 = wp.cross(f2, f0)
+    cof2 = wp.cross(f0, f1)
+    det_f = wp.dot(f0, cof0)
+    c_h = det_f - gamma_offset
+    dCH_dF = wp.mat33f(
+        cof0[0],
+        cof1[0],
+        cof2[0],
+        cof0[1],
+        cof1[1],
+        cof2[1],
+        cof0[2],
+        cof1[2],
+        cof2[2],
     )
-    c_norm = wp.sqrt(s_norm_sq + _ARAP_EPS)
 
-    if c_norm < _DET_F_EPS:
-        # Pure rotation; persist refined rotation and bail.
-        write_quat(constraints, _OFF_ROTATION, cid, rotation)
-        return
+    # Deviatoric: C^D = sqrt(tr(F^T F) + eps). dC^D / dF = F / C^D.
+    i_c = (
+        f0[0] * f0[0]
+        + f0[1] * f0[1]
+        + f0[2] * f0[2]
+        + f1[0] * f1[0]
+        + f1[1] * f1[1]
+        + f1[2] * f1[2]
+        + f2[0] * f2[0]
+        + f2[1] * f2[1]
+        + f2[2] * f2[2]
+    )
+    c_d = wp.sqrt(i_c + _DEV_EPS)
+    inv_cd = wp.float32(1.0) / c_d
+    dCD_dF = F * inv_cd
 
-    # dC/dF = V_rest * S / c_norm.
-    inv_c = wp.float32(1.0) / c_norm
-    dCdF = (rest_volume * inv_c) * S
-    c_arap = rest_volume * c_norm
+    # Per-corner gradients: g_i = dC/dF * B_i (8 mat33-vec3 each row).
+    b0 = _shape_gradient(inv_rest, wp.int32(0))
+    b1 = _shape_gradient(inv_rest, wp.int32(1))
+    b2 = _shape_gradient(inv_rest, wp.int32(2))
+    b3 = _shape_gradient(inv_rest, wp.int32(3))
+    b4 = _shape_gradient(inv_rest, wp.int32(4))
+    b5 = _shape_gradient(inv_rest, wp.int32(5))
+    b6 = _shape_gradient(inv_rest, wp.int32(6))
+    b7 = _shape_gradient(inv_rest, wp.int32(7))
 
-    # Per-corner gradient: g_i = dC/dF * B_i.
-    g0 = dCdF * _shape_gradient(inv_rest, wp.int32(0))
-    g1 = dCdF * _shape_gradient(inv_rest, wp.int32(1))
-    g2 = dCdF * _shape_gradient(inv_rest, wp.int32(2))
-    g3 = dCdF * _shape_gradient(inv_rest, wp.int32(3))
-    g4 = dCdF * _shape_gradient(inv_rest, wp.int32(4))
-    g5 = dCdF * _shape_gradient(inv_rest, wp.int32(5))
-    g6 = dCdF * _shape_gradient(inv_rest, wp.int32(6))
-    g7 = dCdF * _shape_gradient(inv_rest, wp.int32(7))
+    g_h0 = dCH_dF * b0
+    g_h1 = dCH_dF * b1
+    g_h2 = dCH_dF * b2
+    g_h3 = dCH_dF * b3
+    g_h4 = dCH_dF * b4
+    g_h5 = dCH_dF * b5
+    g_h6 = dCH_dF * b6
+    g_h7 = dCH_dF * b7
+
+    g_d0 = dCD_dF * b0
+    g_d1 = dCD_dF * b1
+    g_d2 = dCD_dF * b2
+    g_d3 = dCD_dF * b3
+    g_d4 = dCD_dF * b4
+    g_d5 = dCD_dF * b5
+    g_d6 = dCD_dF * b6
+    g_d7 = dCD_dF * b7
+
+    # Schur-complement matrix entries.
+    a_hh = (
+        inv_mass0 * wp.dot(g_h0, g_h0)
+        + inv_mass1 * wp.dot(g_h1, g_h1)
+        + inv_mass2 * wp.dot(g_h2, g_h2)
+        + inv_mass3 * wp.dot(g_h3, g_h3)
+        + inv_mass4 * wp.dot(g_h4, g_h4)
+        + inv_mass5 * wp.dot(g_h5, g_h5)
+        + inv_mass6 * wp.dot(g_h6, g_h6)
+        + inv_mass7 * wp.dot(g_h7, g_h7)
+    )
+    a_dd = (
+        inv_mass0 * wp.dot(g_d0, g_d0)
+        + inv_mass1 * wp.dot(g_d1, g_d1)
+        + inv_mass2 * wp.dot(g_d2, g_d2)
+        + inv_mass3 * wp.dot(g_d3, g_d3)
+        + inv_mass4 * wp.dot(g_d4, g_d4)
+        + inv_mass5 * wp.dot(g_d5, g_d5)
+        + inv_mass6 * wp.dot(g_d6, g_d6)
+        + inv_mass7 * wp.dot(g_d7, g_d7)
+    )
+    a_hd = (
+        inv_mass0 * wp.dot(g_h0, g_d0)
+        + inv_mass1 * wp.dot(g_h1, g_d1)
+        + inv_mass2 * wp.dot(g_h2, g_d2)
+        + inv_mass3 * wp.dot(g_h3, g_d3)
+        + inv_mass4 * wp.dot(g_h4, g_d4)
+        + inv_mass5 * wp.dot(g_h5, g_d5)
+        + inv_mass6 * wp.dot(g_h6, g_d6)
+        + inv_mass7 * wp.dot(g_h7, g_d7)
+    )
 
     idt_sq = idt * idt
     dt = wp.float32(1.0) / idt
-    bias_mu = idt_sq * alpha_mu
-    gamma_mu = beta_mu * dt
+    bias_h = idt_sq * alpha_h
+    bias_d = idt_sq * alpha_d
+    gamma_h = beta_h * dt
+    gamma_d = beta_d * dt
 
-    grad2_im = (
-        inv_mass0 * wp.dot(g0, g0)
-        + inv_mass1 * wp.dot(g1, g1)
-        + inv_mass2 * wp.dot(g2, g2)
-        + inv_mass3 * wp.dot(g3, g3)
-        + inv_mass4 * wp.dot(g4, g4)
-        + inv_mass5 * wp.dot(g5, g5)
-        + inv_mass6 * wp.dot(g6, g6)
-        + inv_mass7 * wp.dot(g7, g7)
+    grad_h_dot_dx = (
+        wp.dot(g_h0, dx0)
+        + wp.dot(g_h1, dx1)
+        + wp.dot(g_h2, dx2)
+        + wp.dot(g_h3, dx3)
+        + wp.dot(g_h4, dx4)
+        + wp.dot(g_h5, dx5)
+        + wp.dot(g_h6, dx6)
+        + wp.dot(g_h7, dx7)
     )
-    grad_dot_dx = (
-        wp.dot(g0, dx0)
-        + wp.dot(g1, dx1)
-        + wp.dot(g2, dx2)
-        + wp.dot(g3, dx3)
-        + wp.dot(g4, dx4)
-        + wp.dot(g5, dx5)
-        + wp.dot(g6, dx6)
-        + wp.dot(g7, dx7)
+    grad_d_dot_dx = (
+        wp.dot(g_d0, dx0)
+        + wp.dot(g_d1, dx1)
+        + wp.dot(g_d2, dx2)
+        + wp.dot(g_d3, dx3)
+        + wp.dot(g_d4, dx4)
+        + wp.dot(g_d5, dx5)
+        + wp.dot(g_d6, dx6)
+        + wp.dot(g_d7, dx7)
     )
-    denom = (wp.float32(1.0) + gamma_mu) * grad2_im + bias_mu
 
-    if denom > wp.float32(0.0):
-        d_lam = -(c_arap + bias_mu * lambda_sum_mu + gamma_mu * grad_dot_dx) / denom
-        d_lam = d_lam * sor_boost
-        x0 = x0 + (d_lam * inv_mass0) * g0
-        x1 = x1 + (d_lam * inv_mass1) * g1
-        x2 = x2 + (d_lam * inv_mass2) * g2
-        x3 = x3 + (d_lam * inv_mass3) * g3
-        x4 = x4 + (d_lam * inv_mass4) * g4
-        x5 = x5 + (d_lam * inv_mass5) * g5
-        x6 = x6 + (d_lam * inv_mass6) * g6
-        x7 = x7 + (d_lam * inv_mass7) * g7
-        lambda_sum_mu = lambda_sum_mu + d_lam
+    A11 = (wp.float32(1.0) + gamma_h) * a_hh + bias_h
+    A22 = (wp.float32(1.0) + gamma_d) * a_dd + bias_d
+    A12 = a_hd
+
+    b_h = c_h + bias_h * lambda_h + gamma_h * grad_h_dot_dx
+    b_d = c_d + bias_d * lambda_d + gamma_d * grad_d_dot_dx
+
+    det_a = A11 * A22 - A12 * A12
+    if det_a < _DET_FLOOR:
+        return
+
+    inv_det = wp.float32(1.0) / det_a
+    dlam_h = -(A22 * b_h - A12 * b_d) * inv_det
+    dlam_d = -(-A12 * b_h + A11 * b_d) * inv_det
+
+    dlam_h = dlam_h * sor_boost
+    dlam_d = dlam_d * sor_boost
+
+    x0 = x0 + inv_mass0 * (dlam_h * g_h0 + dlam_d * g_d0)
+    x1 = x1 + inv_mass1 * (dlam_h * g_h1 + dlam_d * g_d1)
+    x2 = x2 + inv_mass2 * (dlam_h * g_h2 + dlam_d * g_d2)
+    x3 = x3 + inv_mass3 * (dlam_h * g_h3 + dlam_d * g_d3)
+    x4 = x4 + inv_mass4 * (dlam_h * g_h4 + dlam_d * g_d4)
+    x5 = x5 + inv_mass5 * (dlam_h * g_h5 + dlam_d * g_d5)
+    x6 = x6 + inv_mass6 * (dlam_h * g_h6 + dlam_d * g_d6)
+    x7 = x7 + inv_mass7 * (dlam_h * g_h7 + dlam_d * g_d7)
 
     write_position_unified(bodies, particles, copy_state, body0, slot0, num_bodies, x0)
     write_position_unified(bodies, particles, copy_state, body1, slot1, num_bodies, x1)
@@ -722,15 +788,12 @@ def soft_hexahedron_iterate_at(
     write_position_unified(bodies, particles, copy_state, body6, slot6, num_bodies, x6)
     write_position_unified(bodies, particles, copy_state, body7, slot7, num_bodies, x7)
 
-    write_quat(constraints, _OFF_ROTATION, cid, rotation)
-    write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, lambda_sum_mu)
+    write_float(constraints, _OFF_LAMBDA_SUM_H, cid, lambda_h + dlam_h)
+    write_float(constraints, _OFF_LAMBDA_SUM_D, cid, lambda_d + dlam_d)
 
 
 # ---------------------------------------------------------------------------
-# Population helper: array-based init (no Newton ``Model`` dependency).
-# Lets callers build a hex constraint from raw particle indices + rest
-# corners + per-hex (k_mu, beta_mu) -- the soft-body equivalent of the
-# minimal "pin a cube corner" scene the test example uses.
+# Builder-side init: array-based stamping (no Newton ``Model`` dependency).
 # ---------------------------------------------------------------------------
 
 
@@ -741,25 +804,25 @@ def soft_hex_init_rows_from_arrays_kernel(
     num_bodies: wp.int32,
     # [num_hexes, 8] particle indices in canonical 8-corner order.
     hex_indices: wp.array2d[wp.int32],
-    # [num_particles] rest corner positions (used for both J and V).
+    # [num_particles] rest corner positions.
     particle_q: wp.array[wp.vec3f],
-    # [num_hexes, 2] = (k_mu, beta_mu). Volumetric Lame is handled
-    # implicitly by the ARAP residual; the explicit lambda row is the
-    # tet's responsibility, not the hex's (matches the tet's
-    # ``soft_tet_init_rows_kernel`` schedule).
+    # [num_hexes, 4] = (k_mu, k_lambda, beta_h, beta_d).
     hex_materials: wp.array2d[wp.float32],
 ):
     """Stamp one soft-hexahedron row from caller-supplied arrays.
 
-    Builds ``inv_rest = J^{-T}`` and ``rest_volume = 8 det(J)`` from the
-    rest particle positions of the 8 corners. The caller is responsible
-    for stamping ``hex_indices[h, 0..7]`` in canonical isoparametric
-    order (see this module's docstring); any other ordering will
-    produce a non-physical rest pose.
+    Builds ``inv_rest = J^{-T}`` and ``rest_volume = 8 det(J)`` from
+    the rest particle positions of the 8 corners. Computes the
+    stable Neo-Hookean compliances::
+
+        gamma   = 1 + mu / lambda
+        alpha^H = 1 / (lambda * V_rest)
+        alpha^D = 1 / (mu * V_rest)
 
     Body indices follow the unified convention: rigid bodies occupy
-    ``[0, num_bodies)`` and particles occupy ``[num_bodies, num_bodies
-    + num_particles)``. This kernel applies the ``+num_bodies`` shift.
+    ``[0, num_bodies)`` and particles occupy ``[num_bodies,
+    num_bodies + num_particles)``. This kernel applies the
+    ``+num_bodies`` shift.
     """
     h = wp.tid()
     cid = cid_offset + h
@@ -792,7 +855,7 @@ def soft_hex_init_rows_from_arrays_kernel(
     X6 = particle_q[p6]
     X7 = particle_q[p7]
 
-    # Rest Jacobian J = sum_i X_i (x) grad_ref N_i(0) = (1/8) sum_i X_i (x) sign_i.
+    # Rest Jacobian J = (1/8) sum_i X_i (x) sign_i.
     s0 = _corner_sign(wp.int32(0))
     s1 = _corner_sign(wp.int32(1))
     s2 = _corner_sign(wp.int32(2))
@@ -898,25 +961,33 @@ def soft_hex_init_rows_from_arrays_kernel(
     rest_volume = wp.float32(8.0) * wp.abs(det_j)
     soft_hexahedron_set_rest_volume(constraints, cid, rest_volume)
 
-    # inv_rest = J^{-T} (transpose of the inverse). The chain rule we
-    # use is ``g_i = dC/dF * (1/8) inv_rest * sign_i``; storing inv(J)^T
-    # collapses the two-step "compute inv(J), then transpose at use" into
-    # one stored matrix.
     inv_j = wp.inverse(J)
     inv_rest = wp.transpose(inv_j)
     soft_hexahedron_set_inv_rest(constraints, cid, inv_rest)
 
     k_mu = hex_materials[h, 0]
-    if k_mu < _PHOENX_SOFT_HEX_STIFFNESS_FLOOR:
-        k_mu = _PHOENX_SOFT_HEX_STIFFNESS_FLOOR
-    soft_hexahedron_set_alpha_mu(constraints, cid, wp.float32(1.0) / k_mu)
-    soft_hexahedron_set_beta_mu(constraints, cid, hex_materials[h, 1])
+    if k_mu < _PHOENX_NEOHOOKEAN_STIFFNESS_FLOOR:
+        k_mu = _PHOENX_NEOHOOKEAN_STIFFNESS_FLOOR
+    k_lambda = hex_materials[h, 1]
+    if k_lambda < _PHOENX_NEOHOOKEAN_STIFFNESS_FLOOR:
+        k_lambda = _PHOENX_NEOHOOKEAN_STIFFNESS_FLOOR
 
-    # XPBD warm starts start at zero / identity-rotation; iterate-time
-    # APD Newton refines from there. Note ``wp.quatf()`` defaults to
-    # ``(0, 0, 0, 0)`` not identity -- explicitly write identity.
-    write_quat(constraints, _OFF_ROTATION, cid, wp.quatf(0.0, 0.0, 0.0, 1.0))
-    write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, wp.float32(0.0))
+    v_eff = rest_volume
+    if v_eff < _PHOENX_NEOHOOKEAN_STIFFNESS_FLOOR:
+        v_eff = _PHOENX_NEOHOOKEAN_STIFFNESS_FLOOR
+
+    gamma_offset = wp.float32(1.0) + k_mu / k_lambda
+    alpha_h = wp.float32(1.0) / (k_lambda * v_eff)
+    alpha_d = wp.float32(1.0) / (k_mu * v_eff)
+
+    soft_hexahedron_set_gamma(constraints, cid, gamma_offset)
+    soft_hexahedron_set_alpha_h(constraints, cid, alpha_h)
+    soft_hexahedron_set_alpha_d(constraints, cid, alpha_d)
+    soft_hexahedron_set_beta_h(constraints, cid, hex_materials[h, 2])
+    soft_hexahedron_set_beta_d(constraints, cid, hex_materials[h, 3])
+
+    write_float(constraints, _OFF_LAMBDA_SUM_H, cid, wp.float32(0.0))
+    write_float(constraints, _OFF_LAMBDA_SUM_D, cid, wp.float32(0.0))
     write_float(constraints, _OFF_INV_MASS_A, cid, wp.float32(0.0))
     write_float(constraints, _OFF_INV_MASS_B, cid, wp.float32(0.0))
     write_float(constraints, _OFF_INV_MASS_C, cid, wp.float32(0.0))

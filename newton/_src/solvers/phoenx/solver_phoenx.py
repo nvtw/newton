@@ -1645,7 +1645,7 @@ class PhoenXWorld:
         self,
         hex_indices: wp.array,  # wp.array2d[wp.int32], shape [num_hexahedra, 8]
         particle_q: wp.array,  # wp.array[wp.vec3f], rest particle positions
-        hex_materials: wp.array,  # wp.array2d[wp.float32], shape [num_hexahedra, 2] = (k_mu, beta_mu)
+        hex_materials: wp.array,  # wp.array2d[wp.float32], shape [num_hexahedra, 4] = (k_mu, k_lambda, beta_h, beta_d)
         particle_qd: wp.array | None = None,  # wp.array[wp.vec3f], initial particle velocities (optional)
         particle_inv_mass: wp.array | None = None,  # wp.array[wp.float32], optional inverse masses
     ) -> None:
@@ -1653,9 +1653,13 @@ class PhoenXWorld:
 
         Hex constraints occupy ``[num_joints + num_cloth_triangles +
         num_cloth_bending + num_soft_tetrahedra, num_joints + ... +
-        num_soft_hexahedra)`` in the :class:`ConstraintContainer`. Builds
-        ``inv_rest = J^{-T}`` and ``rest_volume = 8 det(J)`` from the
-        rest particle positions of each hex's 8 corners.
+        num_soft_hexahedra)`` in the :class:`ConstraintContainer`.
+        Builds ``inv_rest = J^{-T}`` and ``rest_volume = 8 det(J)``
+        from the rest corner positions of each hex; converts the per-
+        element ``(k_mu, k_lambda)`` Lame pair into the stable
+        Neo-Hookean compliances ``alpha^H = 1/(k_lambda * V)``,
+        ``alpha^D = 1/(k_mu * V)`` and the rest offset
+        ``gamma = 1 + k_mu / k_lambda``.
 
         Caller is responsible for stamping ``hex_indices[h, 0..7]`` in
         canonical isoparametric 8-corner order (see
@@ -1666,11 +1670,12 @@ class PhoenXWorld:
                 per hex, in canonical corner order.
             particle_q: ``[num_particles, 3]`` float32 rest positions.
                 Copied into :attr:`particles.position`.
-            hex_materials: ``[num_hexahedra, 2]`` float32 ``(k_mu,
-                beta_mu)`` per hex: ``k_mu`` is the shear modulus [Pa]
-                (XPBD compliance ``alpha_mu = 1 / k_mu``); ``beta_mu``
-                is Macklin XPBD damping [1/s] applied via
-                ``gamma_mu = beta_mu * substep_dt``.
+            hex_materials: ``[num_hexahedra, 4]`` float32
+                ``(k_mu, k_lambda, beta_h, beta_d)`` per hex.
+                ``k_mu`` / ``k_lambda`` are the second / first Lame
+                parameters [Pa]; ``beta_h`` / ``beta_d`` are Macklin
+                XPBD damping coefficients on the hydrostatic / deviatoric
+                rows [1/s] (``0`` => bare XPBD).
             particle_qd: Optional initial velocities. ``None`` leaves
                 :attr:`particles.velocity` at its default (zeros from
                 container construction).
@@ -1680,8 +1685,9 @@ class PhoenXWorld:
 
         Idempotent across repeated calls; safe to combine with
         :meth:`populate_soft_tetrahedra_from_model` in mixed scenes
-        (each populator stamps its own cid range and ``_num_active_constraints``
-        is advanced to ``_contact_offset`` so contacts append after).
+        (each populator stamps its own cid range and
+        ``_num_active_constraints`` is advanced to ``_contact_offset``
+        so contacts append after).
         """
         if self.num_soft_hexahedra == 0:
             return
@@ -1697,10 +1703,10 @@ class PhoenXWorld:
                 f"populate_soft_hexahedra_from_arrays: hex_indices must be [N, 8] "
                 f"(got shape {tuple(hex_indices.shape)})"
             )
-        if hex_materials.shape[0] != self.num_soft_hexahedra:
+        if hex_materials.shape[0] != self.num_soft_hexahedra or hex_materials.shape[1] != 4:
             raise ValueError(
-                f"populate_soft_hexahedra_from_arrays: hex_materials.shape[0] "
-                f"({hex_materials.shape[0]}) != num_soft_hexahedra ({self.num_soft_hexahedra})"
+                f"populate_soft_hexahedra_from_arrays: hex_materials must be "
+                f"[N, 4] = (k_mu, k_lambda, beta_h, beta_d) (got shape {tuple(hex_materials.shape)})"
             )
         wp.copy(self.particles.position, particle_q)
         if particle_qd is not None:
