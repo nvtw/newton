@@ -180,6 +180,9 @@ class ViewerRTX(ViewerUSD):
         self._last_perf_time: float | None = None
         self.gui = None
 
+        self._loading_splash_active: bool = False
+        self._loading_splash_text: str | None = None
+
         # Generate a temporary USD path to share with OVRTX renderer
         fd, output_path = tempfile.mkstemp(suffix=".usd")
         os.close(fd)
@@ -1802,6 +1805,16 @@ void main() {
     def _ui_populate_rendering_panel(self, imgui):
         """Render RTX-specific items inside the Rendering Options panel section."""
         _changed, self._async = imgui.checkbox("Asynchronous Rendering", self._async)
+
+    def show_loading_splash(self, text: str | None = None) -> None:
+        """Display a centered Newton's-cradle loading splash with optional sub-label."""
+        self._loading_splash_active = True
+        self._loading_splash_text = text
+
+    def hide_loading_splash(self) -> None:
+        """Remove the splash set by :meth:`show_loading_splash`."""
+        self._loading_splash_active = False
+        self._loading_splash_text = None
 
     @override
     def is_paused(self) -> bool:

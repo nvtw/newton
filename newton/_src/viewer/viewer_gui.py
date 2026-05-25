@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import math
 from time import perf_counter
 
 import numpy as np
@@ -420,10 +421,16 @@ class ViewerGui:
         """Render GUI into the active OpenGL framebuffer."""
         if update_fps:
             self._update_fps()
-        if not self.is_available or not self.show_ui:
+        if not self.is_available:
+            return
+        splash_active = bool(getattr(self._viewer, "_loading_splash_active", False))
+        if not self.show_ui and not splash_active:
             return
         self.ui.begin_frame()
-        self._render_ui()
+        if self.show_ui:
+            self._render_ui()
+        if splash_active:
+            self._render_loading_splash()
         self.ui.end_frame()
         self.ui.render()
 
@@ -554,6 +561,109 @@ class ViewerGui:
         if hasattr(viewer, "gizmo_is_using"):
             viewer.gizmo_is_using = giz.is_using_any()
 
+    def _render_loading_splash(self):
+        """Render a stylized Newton's-cradle loading splash, optionally with a sub-label.
+
+        The cradle is drawn statically with the leftmost ball lifted; this is
+        a one-frame snapshot, not an animation.  Sizes scale with the current
+        ImGui font size so the splash stays legible across DPI settings.
+        """
+        if not self.is_available:
+            return
+        text = getattr(self._viewer, "_loading_splash_text", None)
+        imgui = self.ui.imgui
+        viewport = imgui.get_main_viewport()
+
+        # Scale relative to the default 13 px ImGui font so the splash
+        # respects user/DPI font scaling.
+        scale = imgui.get_font_size() / 13.0
+        ball_radius = 16.0 * scale
+        # 2.05 (vs 2.0) leaves a hairline gap between balls so adjacent
+        # rest-position balls remain visually distinguishable.
+        ball_spacing = ball_radius * 2.05
+        string_length = 80.0 * scale
+        bar_thickness = 5.0 * scale
+        text_gap = 18.0 * scale
+        bar_overhang = 8.0 * scale
+        string_thickness = 1.5 * scale
+        n_balls = 5
+
+        # Center the cradle's full bounding box (bar -> deepest ball) at the
+        # viewport center.  ``pivot_y`` is the bar's *bottom* edge (where
+        # strings attach), not the bar centerline — hence the
+        # ``+ bar_thickness`` after positioning the bbox top.
+        cradle_height = bar_thickness + string_length + ball_radius
+        cx = viewport.pos.x + viewport.size.x * 0.5
+        cy = viewport.pos.y + viewport.size.y * 0.5
+        pivot_y = cy - cradle_height * 0.5 + bar_thickness
+
+        imgui.set_next_window_pos(imgui.ImVec2(viewport.pos.x, viewport.pos.y))
+        imgui.set_next_window_size(imgui.ImVec2(viewport.size.x, viewport.size.y))
+        flags = (
+            imgui.WindowFlags_.no_decoration
+            | imgui.WindowFlags_.no_inputs
+            | imgui.WindowFlags_.no_saved_settings
+            | imgui.WindowFlags_.no_focus_on_appearing
+            | imgui.WindowFlags_.no_nav
+            | imgui.WindowFlags_.no_bring_to_front_on_focus
+            | imgui.WindowFlags_.no_move
+            | imgui.WindowFlags_.no_background
+        )
+        if imgui.begin("##loading_splash", None, flags)[0]:
+            draw_list = imgui.get_window_draw_list()
+
+            dim_col = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.0, 0.0, 0.0, 0.55))
+            ball_col = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.88, 0.88, 0.92, 1.0))
+            string_col = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.55, 0.55, 0.6, 1.0))
+            bar_col = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.45, 0.45, 0.5, 1.0))
+            text_col = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.9, 0.9, 0.9, 1.0))
+
+            # Dim the underlying scene.  Drawn manually rather than via
+            # ``set_next_window_bg_alpha`` so the dim color is independent
+            # of the active ImGui style.
+            draw_list.add_rect_filled(
+                imgui.ImVec2(viewport.pos.x, viewport.pos.y),
+                imgui.ImVec2(viewport.pos.x + viewport.size.x, viewport.pos.y + viewport.size.y),
+                dim_col,
+            )
+
+            first_pivot_x = cx - (n_balls - 1) * ball_spacing * 0.5
+            bar_half = (n_balls - 1) * ball_spacing * 0.5 + ball_radius + bar_overhang
+            draw_list.add_rect_filled(
+                imgui.ImVec2(cx - bar_half, pivot_y - bar_thickness),
+                imgui.ImVec2(cx + bar_half, pivot_y),
+                bar_col,
+            )
+
+            swing_angle = math.radians(32.0)
+            for i in range(n_balls):
+                pivot_x = first_pivot_x + i * ball_spacing
+                if i == 0:
+                    ball_x = pivot_x - math.sin(swing_angle) * string_length
+                    ball_y = pivot_y + math.cos(swing_angle) * string_length
+                else:
+                    ball_x = pivot_x
+                    ball_y = pivot_y + string_length
+
+                draw_list.add_line(
+                    imgui.ImVec2(pivot_x, pivot_y),
+                    imgui.ImVec2(ball_x, ball_y),
+                    string_col,
+                    string_thickness,
+                )
+                draw_list.add_circle_filled(
+                    imgui.ImVec2(ball_x, ball_y),
+                    ball_radius,
+                    ball_col,
+                )
+
+            if text:
+                text_size = imgui.calc_text_size(text)
+                text_x = cx - text_size.x * 0.5
+                text_y = pivot_y + string_length + ball_radius + text_gap
+                draw_list.add_text(imgui.ImVec2(text_x, text_y), text_col, text)
+        imgui.end()
+
     def _render_ui(self):
         """Render the complete ImGui interface."""
         if not self.is_available:
@@ -618,21 +728,30 @@ class ViewerGui:
                 imgui.set_next_item_open(True, imgui.Cond_.appearing)
                 if imgui.collapsing_header("Visualization", flags=header_flags):
                     imgui.separator()
+                    renderer = getattr(viewer, "renderer", None)
                     _changed, viewer.show_joints = imgui.checkbox("Show Joints", viewer.show_joints)
+                    if viewer.show_joints and renderer is not None and hasattr(renderer, "joint_scale"):
+                        _, renderer.joint_scale = imgui.slider_float("Joint Scale", renderer.joint_scale, 0.25, 5.0)
                     _changed, viewer.show_contacts = imgui.checkbox("Show Contacts", viewer.show_contacts)
-                    if viewer.show_contacts:
-                        renderer = getattr(viewer, "renderer", None)
-                        if renderer is not None and hasattr(renderer, "arrow_scale"):
-                            _, renderer.arrow_scale = imgui.slider_float("Arrow Scale", renderer.arrow_scale, 0.25, 5.0)
+                    if viewer.show_contacts and renderer is not None:
+                        if hasattr(renderer, "arrow_length_scale"):
+                            _, renderer.arrow_length_scale = imgui.slider_float(
+                                "Contact Length", renderer.arrow_length_scale, 0.25, 5.0
+                            )
+                        if hasattr(renderer, "arrow_scale"):
+                            _, renderer.arrow_scale = imgui.slider_float(
+                                "Contact Width", renderer.arrow_scale, 0.25, 5.0
+                            )
                     _changed, viewer.show_particles = imgui.checkbox("Show Particles", viewer.show_particles)
                     _changed, viewer.show_springs = imgui.checkbox("Show Springs", viewer.show_springs)
                     _changed, viewer.show_com = imgui.checkbox("Show Center of Mass", viewer.show_com)
+                    if viewer.show_com and renderer is not None and hasattr(renderer, "com_scale"):
+                        _, renderer.com_scale = imgui.slider_float("COM Scale", renderer.com_scale, 0.25, 5.0)
                     _changed, viewer.show_triangles = imgui.checkbox("Show Cloth", viewer.show_triangles)
                     _changed, viewer.show_collision = imgui.checkbox("Show Collision", viewer.show_collision)
                     sdf_margin_mode = getattr(viewer, "sdf_margin_mode", None)
                     SDFMarginMode = getattr(type(viewer), "SDFMarginMode", None)
                     if sdf_margin_mode is not None and SDFMarginMode is not None:
-                        renderer = getattr(viewer, "renderer", None)
                         _sdf_margin_labels = ["Off", "Margin", "Margin + Gap"]
                         _, new_sdf_idx = imgui.combo("Gap + Margin", int(sdf_margin_mode), _sdf_margin_labels)
                         viewer.sdf_margin_mode = SDFMarginMode(new_sdf_idx)

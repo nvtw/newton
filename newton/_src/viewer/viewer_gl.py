@@ -256,6 +256,9 @@ class ViewerGL(ViewerBase):
         self.renderer.register_mouse_scroll(self.on_mouse_scroll)
         self.renderer.register_resize(self.on_resize)
 
+        self._loading_splash_active: bool = False
+        self._loading_splash_text: str | None = None
+
         # initialize viewer-local timer for per-frame integration
         self._last_time = time.perf_counter()
 
@@ -294,13 +297,15 @@ class ViewerGL(ViewerBase):
         """Return the underlying UI object (for backward compatibility)."""
         return self.gui.ui if self.gui else None
 
-    def _hash_geometry(self, geo_type: int, geo_scale, thickness: float, is_solid: bool, geo_src=None) -> int:
+    def _hash_geometry(
+        self, geo_type: int, geo_scale, thickness: float, is_solid: bool, geo_src=None, mirror: bool = False
+    ) -> int:
         # For capsules, ignore (radius, half_height) in the geometry hash so varying-length capsules batch together.
         # Capsule dimensions are stored per-shape in model.shape_scale as (radius, half_height, _unused) and
         # are remapped in set_model() to per-instance render scales (radius, radius, half_height).
         if geo_type == nt.GeoType.CAPSULE:
             geo_scale = (1.0, 1.0)
-        return super()._hash_geometry(geo_type, geo_scale, thickness, is_solid, geo_src)
+        return super()._hash_geometry(geo_type, geo_scale, thickness, is_solid, geo_src, mirror)
 
     def _invalidate_pbo(self):
         """Invalidate PBO resources, forcing reallocation on next get_frame() call."""
@@ -376,6 +381,21 @@ class ViewerGL(ViewerBase):
         indices = wp.array(mesh.indices, dtype=wp.int32, device=self.device)
 
         self._point_mesh.update(points, indices, normals, uvs)
+
+    @override
+    def _arrow_scale(self) -> float:
+        """Contact-arrow length multiplier, sourced from the GL renderer."""
+        return self.renderer.arrow_length_scale
+
+    @override
+    def _joint_scale(self) -> float:
+        """Joint-axis length multiplier, sourced from the GL renderer."""
+        return self.renderer.joint_scale
+
+    @override
+    def _com_scale(self) -> float:
+        """COM sphere radius multiplier, sourced from the GL renderer."""
+        return self.renderer.com_scale
 
     @override
     def log_gizmo(
@@ -1125,6 +1145,8 @@ class ViewerGL(ViewerBase):
 
         if radii is None:
             radii = wp.full(num_points, 0.1, dtype=wp.float32, device=self.device)
+        elif isinstance(radii, (int, float, np.integer, np.floating)):
+            radii = wp.full(num_points, float(radii), dtype=wp.float32, device=self.device)
 
         # If a point object is first created/recreated and no colors are provided,
         # initialize to white to avoid uninitialized instance color buffers.
@@ -1657,6 +1679,28 @@ class ViewerGL(ViewerBase):
             bool: True if paused, False otherwise.
         """
         return self._paused
+
+    def show_loading_splash(self, text: str | None = None) -> None:
+        """Display a centered Newton's-cradle loading splash with optional sub-label.
+
+        The splash dims the underlying scene and renders even when the rest
+        of the ImGui UI is hidden.  Call :meth:`hide_loading_splash` to
+        remove it.
+
+        Args:
+            text: Optional sub-label drawn below the cradle.
+
+        Note:
+            Not thread-safe.  Must be called on the thread that owns this
+            viewer's GL context.
+        """
+        self._loading_splash_active = True
+        self._loading_splash_text = text
+
+    def hide_loading_splash(self) -> None:
+        """Remove the splash set by :meth:`show_loading_splash`."""
+        self._loading_splash_active = False
+        self._loading_splash_text = None
 
     @override
     def should_step(self) -> bool:
