@@ -649,10 +649,13 @@ def _make_contact_iterate_at(
         mu_s = contact_get_friction(constraints, cid)
         mu_k = contact_get_friction_dynamic(constraints, cid)
 
-        dt_substep = wp.float32(1.0) / idt
-        _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
-        )
+        mass_coeff = wp.float32(1.0)
+        impulse_coeff = wp.float32(0.0)
+        if wp.static(use_bias):
+            dt_substep = wp.float32(1.0) / idt
+            _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+                DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+            )
 
         if wp.static(cloth_support):
             side0_kind = contact_get_side0_kind(constraints, cid)
@@ -784,16 +787,17 @@ def _make_contact_iterate_at(
             eff_t1 = cc_get_eff_t1(cc, k)
             eff_t2 = cc_get_eff_t2(cc, k)
             bias_val = cc_get_bias(cc, k)
-            bias_t1_val = cc_get_bias_t1(cc, k)
-            bias_t2_val = cc_get_bias_t2(cc, k)
+            bias_t1_val = wp.float32(0.0)
+            bias_t2_val = wp.float32(0.0)
+            if wp.static(use_bias):
+                bias_t1_val = cc_get_bias_t1(cc, k)
+                bias_t2_val = cc_get_bias_t2(cc, k)
             # Speculative rows always keep their gap bias (incl. relax)
             # to avoid the "honey" artefact at the speculative shell.
             is_speculative = bias_val > wp.float32(0.0)
             if wp.static(not use_bias):
                 if not is_speculative:
                     bias_val = wp.float32(0.0)
-                bias_t1_val = wp.float32(0.0)
-                bias_t2_val = wp.float32(0.0)
 
             # Normal row: optional soft-contact PD, speculative rigid,
             # soft penetrating main, or rigid relax.
