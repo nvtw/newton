@@ -425,6 +425,33 @@ class TestSDFUSDParsing(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "sdf_max_resolution must be divisible by 8"):
                 parse_usd(builder, str(usd_path))
 
+    def test_deferred_sdf_distinguishes_shape_scales(self, device=None):
+        """Two shapes sharing the same Mesh at different scales must produce distinct SDF entries."""
+        if device is None or not wp.get_device(device).is_cuda:
+            self.skipTest("SDF tests require CUDA device")
+
+        mesh = newton.Mesh(
+            vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)],
+            indices=[0, 1, 2, 0, 1, 3, 0, 2, 3, 1, 2, 3],
+        )
+
+        builder = newton.ModelBuilder()
+        b0 = builder.add_body()
+        s0 = builder.add_shape_mesh(b0, mesh=mesh, scale=(1.0, 1.0, 1.0))
+        b1 = builder.add_body()
+        s1 = builder.add_shape_mesh(b1, mesh=mesh, scale=(2.0, 1.0, 1.0))
+
+        builder.shape_sdf_max_resolution[s0] = 32
+        builder.shape_sdf_max_resolution[s1] = 32
+
+        model = builder.finalize(device=device)
+        idx0 = int(model.shape_sdf_index.numpy()[s0])
+        idx1 = int(model.shape_sdf_index.numpy()[s1])
+
+        self.assertGreaterEqual(idx0, 0)
+        self.assertGreaterEqual(idx1, 0)
+        self.assertNotEqual(idx0, idx1)
+
     def test_add_shape_convex_hull_rejects_hydroelastic(self):
         """add_shape_convex_hull must raise when cfg.is_hydroelastic is set, regardless of mesh.sdf."""
         builder = newton.ModelBuilder()
@@ -664,6 +691,12 @@ add_function_test(
     TestSDFUSDParsing,
     "test_usd_kh_alone_does_not_enable_hydroelastic",
     TestSDFUSDParsing.test_usd_kh_alone_does_not_enable_hydroelastic,
+    devices=devices,
+)
+add_function_test(
+    TestSDFUSDParsing,
+    "test_deferred_sdf_distinguishes_shape_scales",
+    TestSDFUSDParsing.test_deferred_sdf_distinguishes_shape_scales,
     devices=devices,
 )
 # The two test_usd_hydroelastic_mesh_*_raises methods validate parse-time
