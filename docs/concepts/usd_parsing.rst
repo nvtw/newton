@@ -537,27 +537,34 @@ After importing the USD file with the custom attributes shown above, they become
 
 Attributes with the same name in different namespaces are completely independent and stored separately. This allows the same attribute name to be used for different purposes across namespaces. In the example above, ``mass_scale`` appears in both the default namespace (as a model attribute) and in ``namespace_a`` (as a state attribute). These are treated as completely separate attributes with independent values, assignments, and storage locations.
 
-.. _porting_physx_sdf_assets:
+.. _sdf_hydroelastic_usd:
 
-Porting PhysX SDF Assets to Newton
-----------------------------------
+SDF Collision and Hydroelastic Contact
+--------------------------------------
 
-USD assets authored for PhysX commonly configure SDF-based mesh collision through
-``PhysxSDFMeshCollisionAPI`` and configure collision margins through
-``PhysxCollisionAPI``. Newton defines its own codeless API schemas
-(``NewtonSDFCollisionAPI`` and ``NewtonCollisionAPI``) for the same concepts,
-with naming and unit conventions chosen to match Newton's internal
-representation. Hydroelastic configuration is folded into
-``NewtonSDFCollisionAPI`` and opted into via ``newton:hydroelasticEnabled``.
+Newton configures SDF-based mesh collision and hydroelastic contact through the
+``NewtonSDFCollisionAPI`` codeless schema (applied to ``Gprim`` shapes). The
+schema covers two related but distinct concerns:
 
-Newton's USD importer reads only the ``newton:*`` attributes for SDF and
-hydroelastic configuration. ``physxSDFMeshCollision:*`` attributes are collected
-(see :ref:`schema_resolvers`) but not applied. To use SDF or hydroelastic contacts
-on an asset authored for PhysX, author the Newton schemas alongside (or in place
-of) the PhysX ones.
+* **SDF collision** — resolution, narrow band, AABB padding, texture format.
+  These attributes have a one-to-one mapping with PhysX's
+  ``PhysxSDFMeshCollisionAPI``, so assets authored for PhysX can be ported.
+* **Hydroelastic contact** — opt-in via ``newton:hydroelasticEnabled``,
+  parameterized by ``newton:hydroelasticStiffness``. **Newton-only**: PhysX
+  has no equivalent schema, so hydroelastic configuration must be authored
+  fresh on a Newton-ready asset; there is nothing to port.
 
-Attribute Mapping
-~~~~~~~~~~~~~~~~~
+Collision margin and gap are inherited from ``NewtonCollisionAPI`` and
+covered alongside the SDF mapping below.
+
+Newton's USD importer reads only the ``newton:*`` attributes. ``physx*:*``
+attributes are collected by the schema resolver (see :ref:`schema_resolvers`)
+but not applied. To make a PhysX-authored asset work in Newton, author the
+Newton schemas alongside (or in place of) the PhysX ones — manually or with
+the :ref:`programmatic helper <porting_physx_sdf_assets>` below.
+
+SDF Attribute Mapping (PhysX ↔ Newton)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The following tables show the one-to-one mapping between PhysX and Newton schema
 attributes, along with any unit or semantic differences.
@@ -620,15 +627,38 @@ attributes, along with any unit or semantic differences.
    ``newton:sdfNarrowBandOuter`` to the positive value in meters
    (e.g. ``-0.02`` and ``0.02``).
 
-**Hydroelastic contacts (per mesh shape, opt-in):**
+Hydroelastic Attributes (Newton-only)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-PhysX does not expose a hydroelastic configuration schema for rigid-body contacts.
-Hydroelastic contacts in Newton are configured on ``NewtonSDFCollisionAPI`` and
-opted into by authoring ``newton:hydroelasticEnabled=true``. Author
-``newton:hydroelasticStiffness`` [N/m^3] to override the default contact stiffness coefficient.
+PhysX does not expose a hydroelastic configuration schema for rigid-body
+contacts, so there is no PhysX attribute to map from. Hydroelastic contacts
+are authored fresh on ``NewtonSDFCollisionAPI``:
 
-Before and After
-~~~~~~~~~~~~~~~~
+.. list-table::
+   :header-rows: 1
+   :widths: 30 20 50
+
+   * - **Attribute**
+     - **Default**
+     - **Notes**
+   * - ``newton:hydroelasticEnabled``
+     - ``false``
+     - Opt-in. Both shapes in a contact pair must set ``true`` for
+       hydroelastic contacts to be generated.
+   * - ``newton:hydroelasticStiffness``
+     - ``1e10`` [N/m³]
+     - Contact stiffness coefficient. Authored alone (without
+       ``hydroelasticEnabled=true``) it is a material parameter and does
+       **not** turn hydroelastic on.
+
+Hydroelastic contact uses the same SDF representation as SDF collision, so
+its configuration lives on the same applied API. A mesh that opts into
+hydroelastic must also have an SDF source (an ``sdfMaxResolution`` or
+``sdfTargetVoxelSize`` authored, or an attached ``mesh.sdf``); the importer
+validates this at parse time.
+
+Authoring Examples
+~~~~~~~~~~~~~~~~~~
 
 A typical PhysX-authored SDF mesh collider looks like this:
 
@@ -709,8 +739,10 @@ on the same ``NewtonSDFCollisionAPI`` and author ``newton:hydroelasticStiffness`
        float newton:hydroelasticStiffness = 1e7
    }
 
-Programmatic Porting
-~~~~~~~~~~~~~~~~~~~~
+.. _porting_physx_sdf_assets:
+
+Programmatic Porting from PhysX
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The following helper rewrites PhysX SDF attributes to their Newton equivalents
 on every prim that has ``PhysxSDFMeshCollisionAPI`` applied. It is a starting
