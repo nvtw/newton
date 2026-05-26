@@ -163,8 +163,8 @@ __all__ = [
 ]
 
 
-#: Max threads-per-world for fast-tail kernels (= warp size). The grid is
-#: always num_worlds * _STRAGGLER_BLOCK_DIM; surplus threads early-exit.
+#: Warp size and default max threads-per-world for fast-tail kernels.
+#: Dynamic auto launches keep this upper bound; fixed launches may use less.
 _STRAGGLER_BLOCK_DIM: int = 32
 
 # PGS sweeps per *_iterate_multi call. Must evenly divide solver_iterations.
@@ -180,8 +180,9 @@ _PRIORITY_JITTER_MASK = wp.constant(wp.int64((1 << 32) - 1))
 def _choose_fast_tail_worlds_per_block(num_worlds: int) -> int:
     """Worlds per physical block in the fast-tail kernels.
 
-    Each world owns one warp (32 threads); block size is ``32 * wpb``
-    so ``__syncwarp()`` stays valid. Three-tier by world count,
+    Dynamic launches reserve one warp (32 threads) per world; fixed-tpw
+    launches can pack multiple worlds per warp. Block size is still an integer
+    warp count, so ``__syncwarp()`` stays valid. Three-tier by world count,
     empirically tuned on RTX PRO 6000 (sm_120, 188 SMs):
     ``wpb = 2`` below 512 worlds, ``wpb = 4`` up to 2048, ``wpb = 8``
     above.
@@ -214,8 +215,8 @@ __syncwarp();
 def _sync_warp(): ...
 
 
-# Adaptive threads-per-world picker. Fast-tail grid is fixed; effective tpw
-# read from a 1-elem buffer per step. Smaller tpw early-exits surplus lanes.
+# Adaptive threads-per-world picker for dynamic auto launches. The effective
+# tpw is read from a 1-elem buffer per step; fixed-tpw kernels bypass it.
 
 
 @wp.kernel(enable_backward=False)
@@ -244,7 +245,7 @@ def _pick_threads_per_world_kernel(
     tpw_choice: wp.array[wp.int32],
 ):
     """One-thread pick of tpw in {16, 32}. tpw=16 wins when warps/SM >= 8 AND
-    mean cids/colour <= 6 (sparse colours, saturated SMs); else tpw=32.
+    mean cids/colour <= 10 (sparse colours, saturated SMs); else tpw=32.
     Auto picker never emits tpw=8 (the static arg can)."""
     if wp.tid() != 0:
         return
@@ -262,7 +263,7 @@ def _pick_threads_per_world_kernel(
     saturation_x16 = (warps_at_tpw32 * wp.int32(16)) / wp.max(sm_count, wp.int32(1))
 
     pick = wp.int32(32)
-    if mean_x16 <= wp.int32(6 * 16) and saturation_x16 >= wp.int32(8 * 16):
+    if mean_x16 <= wp.int32(10 * 16) and saturation_x16 >= wp.int32(8 * 16):
         pick = wp.int32(16)
 
     tpw_choice[0] = pick
@@ -648,7 +649,7 @@ def _per_world_greedy_coloring_kernel(
 
 @functools.cache
 def _make_fast_tail_prepare_plus_iterate_kernel(
-    *, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False
+    *, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False, fixed_tpw: int = 0
 ):
     """Build the multi-world fused prepare + iterate fast-tail kernel."""
 
@@ -674,7 +675,12 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         copy_state: CopyStateContainer,
     ):
         tid = wp.tid()
-        tpw = tpw_buf[0]
+        if wp.static(fixed_tpw > 0):
+            if tpw_buf[0] != wp.int32(fixed_tpw):
+                return
+            tpw = wp.int32(fixed_tpw)
+        else:
+            tpw = tpw_buf[0]
         local_tid = tid % tpw
         world_id = tid / tpw
         if world_id >= num_worlds:
@@ -831,7 +837,9 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
 
 
 @functools.cache
-def _make_fast_tail_relax_kernel(*, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False):
+def _make_fast_tail_relax_kernel(
+    *, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False, fixed_tpw: int = 0
+):
     """Multi-world relax fast-tail kernel (use_bias=False, num_sweeps=num_iterations)."""
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -856,7 +864,12 @@ def _make_fast_tail_relax_kernel(*, revolute_only: bool, has_sleeping: bool, ena
         copy_state: CopyStateContainer,
     ):
         tid = wp.tid()
-        tpw = tpw_buf[0]
+        if wp.static(fixed_tpw > 0):
+            if tpw_buf[0] != wp.int32(fixed_tpw):
+                return
+            tpw = wp.int32(fixed_tpw)
+        else:
+            tpw = tpw_buf[0]
         local_tid = tid % tpw
         world_id = tid / tpw
         if world_id >= num_worlds:
@@ -1058,18 +1071,32 @@ def _reduce_contact_time_us_kernel(
     wp.atomic_add(totals, 4, contact_cols.data[off, local_cid])
 
 
-def get_fast_tail_kernel(*, kind: str, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False):
+def get_fast_tail_kernel(
+    *,
+    kind: str,
+    revolute_only: bool,
+    has_sleeping: bool = False,
+    enable_column_timers: bool = False,
+    fixed_tpw: int = 0,
+):
     """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``
     or ``"relax"``. Each (kind, revolute_only, has_sleeping,
-    enable_column_timers) tuple is cached after first build by the
-    underlying factory's ``functools.cache``."""
+    enable_column_timers, fixed_tpw) tuple is cached after first build by the
+    underlying factory's ``functools.cache``. ``fixed_tpw=0`` keeps the
+    graph-capture-safe dynamic threads-per-world buffer read."""
     if kind == "prepare_plus_iterate":
         return _make_fast_tail_prepare_plus_iterate_kernel(
-            revolute_only=revolute_only, has_sleeping=has_sleeping, enable_column_timers=enable_column_timers
+            revolute_only=revolute_only,
+            has_sleeping=has_sleeping,
+            enable_column_timers=enable_column_timers,
+            fixed_tpw=fixed_tpw,
         )
     if kind == "relax":
         return _make_fast_tail_relax_kernel(
-            revolute_only=revolute_only, has_sleeping=has_sleeping, enable_column_timers=enable_column_timers
+            revolute_only=revolute_only,
+            has_sleeping=has_sleeping,
+            enable_column_timers=enable_column_timers,
+            fixed_tpw=fixed_tpw,
         )
     raise ValueError(f"unknown fast-tail kernel kind: {kind!r}")
 

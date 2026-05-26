@@ -112,15 +112,16 @@ class TestPreCompileDispatchKernelsFires(unittest.TestCase):
             world = _build_minimal_scene(step_layout="multi_world").world
             force_load.assert_called_once()
             loaded_modules = set(force_load.call_args.kwargs["modules"])
-            fast_tail_kw = {
+            base_fast_tail_kw = {
                 "revolute_only": bool(world._use_revolute_specialization),
                 "has_sleeping": bool(world._sleeping_enabled),
                 "enable_column_timers": world.enable_column_timers,
             }
-            expected_modules = {
-                get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw).module,
-                get_fast_tail_kernel(kind="relax", **fast_tail_kw).module,
-            }
+            expected_modules = set()
+            for fixed_tpw in world._fast_tail_auto_fixed_choices():
+                fast_tail_kw = {**base_fast_tail_kw, "fixed_tpw": fixed_tpw}
+                expected_modules.add(get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw).module)
+                expected_modules.add(get_fast_tail_kernel(kind="relax", **fast_tail_kw).module)
             self.assertEqual(loaded_modules, expected_modules)
 
 

@@ -566,23 +566,25 @@ class PhoenXWorld:
         if isinstance(threads_per_world, str):
             if threads_per_world != "auto":
                 raise ValueError(f"threads_per_world must be 'auto' or one of (8, 16, 32) (got {threads_per_world!r})")
-            # Host-side fast-path: the picker's saturation gate for
-            # tpw=16 is "num_worlds >= 8 * sm_count". Below that, the
-            # Below 8*sm_count worlds the picker would always emit tpw=32,
-            # so pin and skip the per-step picker (~10us saved).
+            # Host-side fast path: below the saturation point the picker
+            # would always emit 32, so pin and skip the per-step picker.
             _sm = getattr(self.device, "sm_count", 0) or 1
-            if self.num_worlds < 8 * _sm:
-                self._tpw_auto: bool = False
-                initial_tpw = _STRAGGLER_BLOCK_DIM
-            else:
-                self._tpw_auto = True
-                initial_tpw = _STRAGGLER_BLOCK_DIM
+            self._tpw_auto: bool = self.num_worlds >= 8 * _sm
+            initial_tpw = _STRAGGLER_BLOCK_DIM
+            if self._tpw_auto:
+                joints_per_world = self.num_joints / max(1, self.num_worlds)
+                contacts_capacity_per_world = self.max_contact_columns / max(1, self.num_worlds)
+                dense_joint_world = joints_per_world > 40.0
+                dense_contact_only_world = self.num_joints == 0 and contacts_capacity_per_world > 256.0
+                if dense_joint_world or dense_contact_only_world:
+                    self._tpw_auto = False
         else:
             tpw_int = int(threads_per_world)
             if tpw_int not in (8, 16, 32):
                 raise ValueError(f"threads_per_world must be 'auto' or one of (8, 16, 32) (got {tpw_int})")
             self._tpw_auto = False
             initial_tpw = tpw_int
+        self._tpw_launch_bound: int = _STRAGGLER_BLOCK_DIM if self._tpw_auto else int(initial_tpw)
         self._tpw_choice: wp.array[wp.int32] = wp.array([initial_tpw], dtype=wp.int32, device=self.device)
         # Scratch for the picker's parallel colour-count reduction.
         # Reset to 0 each step before the reduction kernel runs.
@@ -976,6 +978,14 @@ class PhoenXWorld:
 
         self._pre_compile_dispatch_kernels()
 
+    def _fast_tail_fixed_tpw(self) -> int:
+        """Static kernel axis for fixed-tpw launches; 0 keeps dynamic lookup."""
+        return 0 if self._tpw_auto else int(self._tpw_launch_bound)
+
+    def _fast_tail_auto_fixed_choices(self) -> tuple[int, ...]:
+        """Static fast-tail variants captured for dynamic auto mode."""
+        return (16, 32) if self._tpw_auto and self.step_layout != "single_world" else (self._fast_tail_fixed_tpw(),)
+
     def _pre_compile_dispatch_kernels(self) -> None:
         """Eagerly instantiate the factory-built PGS kernels for the current
         scene spec and parallel-compile their warp modules.
@@ -1009,13 +1019,15 @@ class PhoenXWorld:
             # current cloth / soft-tet / joint specialisation.
             kernels.extend(self._singleworld_kernels())
         else:
-            fast_tail_kw = {
+            base_fast_tail_kw = {
                 "revolute_only": bool(self._use_revolute_specialization),
                 "has_sleeping": bool(self._sleeping_enabled),
                 "enable_column_timers": self.enable_column_timers,
             }
-            kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw))
-            kernels.append(get_fast_tail_kernel(kind="relax", **fast_tail_kw))
+            for fixed_tpw in self._fast_tail_auto_fixed_choices():
+                fast_tail_kw = {**base_fast_tail_kw, "fixed_tpw": fixed_tpw}
+                kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw))
+                kernels.append(get_fast_tail_kernel(kind="relax", **fast_tail_kw))
 
         # De-duplicate by module; ``functools.cache`` already collapses
         # identical (axes-tuple) factory calls but cheap to be defensive.
@@ -2986,38 +2998,40 @@ class PhoenXWorld:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
-        kernel = get_fast_tail_kernel(
-            kind="prepare_plus_iterate",
-            revolute_only=bool(self._use_revolute_specialization),
-            has_sleeping=bool(self._sleeping_enabled),
-            enable_column_timers=self.enable_column_timers,
-        )
-        wp.launch(
-            kernel,
-            dim=self._fast_tail_launch_dim(),
-            block_dim=self._fast_tail_block_dim(),
-            inputs=[
-                self.constraints,
-                self._contact_cols,
-                self.bodies,
-                self._particles_or_sentinel(),
-                idt,
-                wp.float32(self.sor_boost),
-                self._world_element_ids_by_color,
-                self._world_color_starts,
-                self._world_csr_offsets,
-                self._world_num_colors,
-                self._contact_container,
-                contact_views,
-                wp.int32(self.solver_iterations),
-                wp.int32(self.num_worlds),
-                wp.int32(self.num_joints),
-                wp.int32(self.num_bodies),
-                self._tpw_choice,
-                self._copy_state,
-            ],
-            device=self.device,
-        )
+        for fixed_tpw in self._fast_tail_auto_fixed_choices():
+            kernel = get_fast_tail_kernel(
+                kind="prepare_plus_iterate",
+                revolute_only=bool(self._use_revolute_specialization),
+                has_sleeping=bool(self._sleeping_enabled),
+                enable_column_timers=self.enable_column_timers,
+                fixed_tpw=fixed_tpw,
+            )
+            wp.launch(
+                kernel,
+                dim=self._fast_tail_launch_dim_for(fixed_tpw if fixed_tpw > 0 else self._tpw_launch_bound),
+                block_dim=self._fast_tail_block_dim(),
+                inputs=[
+                    self.constraints,
+                    self._contact_cols,
+                    self.bodies,
+                    self._particles_or_sentinel(),
+                    idt,
+                    wp.float32(self.sor_boost),
+                    self._world_element_ids_by_color,
+                    self._world_color_starts,
+                    self._world_csr_offsets,
+                    self._world_num_colors,
+                    self._contact_container,
+                    contact_views,
+                    wp.int32(self.solver_iterations),
+                    wp.int32(self.num_worlds),
+                    wp.int32(self.num_joints),
+                    wp.int32(self.num_bodies),
+                    self._tpw_choice,
+                    self._copy_state,
+                ],
+                device=self.device,
+            )
 
     def _relax_velocities(self) -> None:
         """TGS-soft relax (bias=False) — removes drift velocity from main bias."""
@@ -3025,18 +3039,21 @@ class PhoenXWorld:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
-        kernel = get_fast_tail_kernel(
-            kind="relax",
-            revolute_only=bool(self._use_revolute_specialization),
-            has_sleeping=bool(self._sleeping_enabled),
-            enable_column_timers=self.enable_column_timers,
-        )
-        self._launch_fast_iter(
-            kernel,
-            self.velocity_iterations,
-            idt,
-            contact_views,
-        )
+        for fixed_tpw in self._fast_tail_auto_fixed_choices():
+            kernel = get_fast_tail_kernel(
+                kind="relax",
+                revolute_only=bool(self._use_revolute_specialization),
+                has_sleeping=bool(self._sleeping_enabled),
+                enable_column_timers=self.enable_column_timers,
+                fixed_tpw=fixed_tpw,
+            )
+            self._launch_fast_iter(
+                kernel,
+                self.velocity_iterations,
+                idt,
+                contact_views,
+                launch_tpw_bound=fixed_tpw if fixed_tpw > 0 else self._tpw_launch_bound,
+            )
 
     # Single-world dispatch (wp.capture_while over the global colour CSR).
 
@@ -3260,13 +3277,15 @@ class PhoenXWorld:
         """``_STRAGGLER_BLOCK_DIM * worlds_per_block`` (integer warps for __syncwarp)."""
         return _STRAGGLER_BLOCK_DIM * _choose_fast_tail_worlds_per_block(self.num_worlds)
 
-    def _fast_tail_launch_dim(self) -> int:
-        """Padded launch dim. Sized for max tpw = _STRAGGLER_BLOCK_DIM=32; lower
-        tpw early-exits surplus lanes. Fixed shape so the per-step picker stays
-        inside the captured graph."""
+    def _fast_tail_launch_dim_for(self, tpw_bound: int) -> int:
+        """Padded launch dim for a fast-tail tpw upper bound."""
         block_dim = self._fast_tail_block_dim()
-        raw = self.num_worlds * _STRAGGLER_BLOCK_DIM
+        raw = self.num_worlds * int(tpw_bound)
         return ((raw + block_dim - 1) // block_dim) * block_dim
+
+    def _fast_tail_launch_dim(self) -> int:
+        """Padded launch dim for the current fast-tail tpw upper bound."""
+        return self._fast_tail_launch_dim_for(self._tpw_launch_bound)
 
     def _pick_tpw(self) -> None:
         """Per-step GPU tpw picker: parallel reduction over _world_num_colors,
@@ -3299,11 +3318,12 @@ class PhoenXWorld:
         num_iterations: int,
         idt: wp.float32,
         contact_views: ContactViews,
+        launch_tpw_bound: int | None = None,
     ) -> None:
         """Launch an iterate/relax kernel running ``num_iterations`` sweeps internally."""
         wp.launch(
             kernel,
-            dim=self._fast_tail_launch_dim(),
+            dim=self._fast_tail_launch_dim_for(launch_tpw_bound or self._tpw_launch_bound),
             block_dim=self._fast_tail_block_dim(),
             inputs=[
                 self.constraints,

@@ -4,21 +4,13 @@
 """Invariant checks on PhoenX's CUDA launch geometry.
 
 The solver's perf model assumes every main constraint-solve kernel
-launches **exactly one CUDA block of 256 threads per world**:
-
-    wp.launch(
-        kernel,
-        dim=self.num_worlds * _STRAGGLER_BLOCK_DIM,
-        block_dim=_STRAGGLER_BLOCK_DIM,
-        ...
-    )
-
-Each world's 256-thread block walks its per-color CSR bucket
-cooperatively via ``tid % _STRAGGLER_BLOCK_DIM`` /
-``tid / _STRAGGLER_BLOCK_DIM``. Breaking this invariant -- e.g. by
-dispatching ``dim=num_worlds``, or using a different block size --
-would silently serialise the solve or run the kernels with wrong
-thread-block conventions.
+launches a padded integer-warp grid: dynamic auto mode reserves one
+warp per world, while fixed ``threads_per_world`` may pack multiple
+worlds into a warp. Each world walks its per-color CSR bucket via
+``tid % tpw`` / ``tid / tpw``. Breaking this invariant -- e.g. by
+dispatching ``dim=num_worlds``, or using a non-warp block size -- would
+silently serialise the solve or run the kernels with wrong thread-block
+conventions.
 
 These tests hook :func:`warp.launch` for the duration of a single
 :meth:`PhoenXWorld.step` call, capture ``(kernel_name, dim,
@@ -40,12 +32,20 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
 )
 from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums
 
-_prepare_plus_iterate_kernel = get_fast_tail_kernel(kind="prepare_plus_iterate", revolute_only=False)
-_relax_kernel = get_fast_tail_kernel(kind="relax", revolute_only=False)
-_MAIN_SOLVE_KERNELS = {
-    _prepare_plus_iterate_kernel.key,
-    _relax_kernel.key,
-}
+
+def _main_solve_kernel_launch_bounds(world) -> dict[str, int]:
+    base_fast_tail_kw = {
+        "revolute_only": bool(world._use_revolute_specialization),
+        "has_sleeping": bool(world._sleeping_enabled),
+        "enable_column_timers": world.enable_column_timers,
+    }
+    bounds = {}
+    for fixed_tpw in world._fast_tail_auto_fixed_choices():
+        fast_tail_kw = {**base_fast_tail_kw, "fixed_tpw": fixed_tpw}
+        launch_bound = fixed_tpw if fixed_tpw > 0 else world._tpw_launch_bound
+        bounds[get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw).key] = launch_bound
+        bounds[get_fast_tail_kernel(kind="relax", **fast_tail_kw).key] = launch_bound
+    return bounds
 
 
 def _collect_launches(world, *, step_dt: float = 1.0 / 60.0) -> list[dict]:
@@ -85,39 +85,43 @@ def _collect_launches(world, *, step_dt: float = 1.0 / 60.0) -> list[dict]:
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX launch-shape tests require CUDA")
-class TestPhoenXOneBlockPerWorld(unittest.TestCase):
-    """One CUDA block per world across every main-solve kernel."""
+class TestPhoenXFastTailLaunchGeometry(unittest.TestCase):
+    """Warp-aligned launch geometry across every main-solve kernel."""
 
-    def _assert_one_warp_per_world(self, captured: list[dict], num_worlds: int) -> None:
+    def _assert_fast_tail_geometry(self, captured: list[dict], world) -> None:
         # Filter to just the kernels this invariant covers.
-        main = [c for c in captured if c["kernel"] in _MAIN_SOLVE_KERNELS]
+        main_bounds = _main_solve_kernel_launch_bounds(world)
+        main = [c for c in captured if c["kernel"] in main_bounds]
         self.assertGreater(
             len(main),
             0,
             msg=("did not observe any main-solve kernel launch during step() -- test plumbing broken"),
         )
-        wpb = _choose_fast_tail_worlds_per_block(num_worlds)
+        wpb = _choose_fast_tail_worlds_per_block(world.num_worlds)
         expected_block_dim = int(_STRAGGLER_BLOCK_DIM) * wpb
-        raw_dim = num_worlds * int(_STRAGGLER_BLOCK_DIM)
-        expected_dim = ((raw_dim + expected_block_dim - 1) // expected_block_dim) * expected_block_dim
         for c in main:
+            launch_bound = main_bounds[c["kernel"]]
+            raw_dim = world.num_worlds * int(launch_bound)
+            expected_dim = ((raw_dim + expected_block_dim - 1) // expected_block_dim) * expected_block_dim
+            kernel_name = c["kernel"]
+            block_dim = c["block_dim"]
+            dim = c["dim"]
             self.assertEqual(
-                c["block_dim"],
+                block_dim,
                 expected_block_dim,
                 msg=(
-                    f"{c['kernel']}: block_dim={c['block_dim']} != "
+                    f"{kernel_name}: block_dim={block_dim} != "
                     f"{expected_block_dim} (_STRAGGLER_BLOCK_DIM={_STRAGGLER_BLOCK_DIM}"
                     f" x wpb={wpb})"
                 ),
             )
             self.assertEqual(
-                c["dim"],
+                dim,
                 expected_dim,
                 msg=(
-                    f"{c['kernel']}: dim={c['dim']} != padded "
-                    f"num_worlds ({num_worlds}) * _STRAGGLER_BLOCK_DIM "
-                    f"({_STRAGGLER_BLOCK_DIM}) rounded up to multiple of "
-                    f"{expected_block_dim} = {expected_dim}"
+                    f"{kernel_name}: dim={dim} != padded num_worlds "
+                    f"({world.num_worlds}) * tpw launch bound ({launch_bound}) "
+                    f"rounded up to multiple of {expected_block_dim} = {expected_dim}"
                 ),
             )
 
@@ -125,20 +129,20 @@ class TestPhoenXOneBlockPerWorld(unittest.TestCase):
         """Single-world baseline: block_dim = 32 * wpb, dim padded up."""
         world, _ = _build_n_pendulums(num_worlds=1)
         captured = _collect_launches(world)
-        self._assert_one_warp_per_world(captured, num_worlds=1)
+        self._assert_fast_tail_geometry(captured, world)
 
     def test_eight_worlds(self) -> None:
-        """Every main-solve kernel packs 8 worlds into the heuristic's wpb."""
+        """Every main-solve kernel uses the heuristic world-group block size."""
         world, _ = _build_n_pendulums(num_worlds=8)
         captured = _collect_launches(world)
-        self._assert_one_warp_per_world(captured, num_worlds=8)
+        self._assert_fast_tail_geometry(captured, world)
 
     def test_sixtyfour_worlds(self) -> None:
         """Scales cleanly at 64 worlds too (catches a hypothetical
         max_blocks clamp regression)."""
         world, _ = _build_n_pendulums(num_worlds=64)
         captured = _collect_launches(world)
-        self._assert_one_warp_per_world(captured, num_worlds=64)
+        self._assert_fast_tail_geometry(captured, world)
 
     def test_all_main_kernels_observed(self) -> None:
         """Fused prepare+iterate and relax must both appear under the
@@ -150,15 +154,10 @@ class TestPhoenXOneBlockPerWorld(unittest.TestCase):
         # Prepare + iterate always run when there are active
         # constraints. Relax runs when velocity_iterations > 0 (our
         # test harness uses velocity_iterations=1).
-        self.assertIn(
-            _prepare_plus_iterate_kernel.key,
-            kernels_seen,
-            msg="fused prepare+iterate kernel did not fire -- solver pipeline regressed",
-        )
-        self.assertIn(
-            _relax_kernel.key,
-            kernels_seen,
-            msg=("relax kernel did not fire -- velocity_iterations=1 should always run one relax pass"),
+        expected = set(_main_solve_kernel_launch_bounds(world))
+        self.assertTrue(
+            expected.issubset(kernels_seen),
+            msg=("fused prepare+iterate and relax kernels should both run when constraints are active"),
         )
 
 
