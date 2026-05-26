@@ -118,13 +118,19 @@ __all__ = [
     "contact_iterate_cloth_aware",
     "contact_iterate_lean",
     "contact_iterate_lean_no_sleep",
+    "contact_iterate_lean_no_sleep_no_soft_pd",
+    "contact_iterate_lean_no_soft_pd",
     "contact_iterate_no_sleep",
+    "contact_iterate_no_sleep_no_soft_pd",
+    "contact_iterate_no_soft_pd",
     "contact_prepare_for_iteration",
     "contact_prepare_for_iteration_at",
     "contact_prepare_for_iteration_at_cloth_aware",
     "contact_prepare_for_iteration_at_lean",
     "contact_prepare_for_iteration_cloth_aware",
     "contact_prepare_for_iteration_lean",
+    "contact_prepare_for_iteration_lean_no_soft_pd",
+    "contact_prepare_for_iteration_no_soft_pd",
 ]
 
 
@@ -190,7 +196,9 @@ def _side_world_contact_point(
 # ---------------------------------------------------------------------------
 
 
-def _make_contact_prepare_for_iteration_at(cloth_support: bool, has_mass_splitting: bool = True):
+def _make_contact_prepare_for_iteration_at(
+    cloth_support: bool, has_mass_splitting: bool = True, has_soft_contact_pd: bool = True
+):
     @wp.func
     def impl(
         constraints: ContactColumnContainer,
@@ -481,30 +489,32 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool, has_mass_splitti
             cc_set_bias_t2(cc, k, bias_t2_val)
 
             # Soft-contact PD normal row (per-contact stiffness/damping).
-            # Sentinel arrays (length 0) short-circuit to the legacy path.
-            stiffness_arr_len = contacts.rigid_contact_stiffness.shape[0]
-            damping_arr_len = contacts.rigid_contact_damping.shape[0]
-            if stiffness_arr_len > k or damping_arr_len > k:
-                k_n = wp.float32(0.0)
-                c_n = wp.float32(0.0)
-                if stiffness_arr_len > k:
-                    k_n = contacts.rigid_contact_stiffness[k]
-                if damping_arr_len > k:
-                    c_n = contacts.rigid_contact_damping[k]
-                if (k_n > wp.float32(0.0) or c_n > wp.float32(0.0)) and eff_n > wp.float32(0.0):
-                    eff_inv_n = wp.float32(1.0) / eff_n
-                    # ``-effective_gap`` flips sign so spring depth is +ve
-                    # for penetration; matches the lam_n >= 0 clamp.
-                    pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(
-                        k_n, c_n, -effective_gap, eff_inv_n, dt_substep, PHOENX_BOOST_CONTACT_NORMAL
-                    )
-                    cc_set_pd_gamma(cc, k, pd_gamma_n)
-                    cc_set_pd_bias(cc, k, pd_bias_n)
-                    cc_set_pd_eff_soft(cc, k, pd_eff_soft_n)
+            # Scenes without stiffness/damping arrays use a specialised iterate
+            # variant and skip these per-contact scratch writes entirely.
+            if wp.static(has_soft_contact_pd):
+                stiffness_arr_len = contacts.rigid_contact_stiffness.shape[0]
+                damping_arr_len = contacts.rigid_contact_damping.shape[0]
+                if stiffness_arr_len > k or damping_arr_len > k:
+                    k_n = wp.float32(0.0)
+                    c_n = wp.float32(0.0)
+                    if stiffness_arr_len > k:
+                        k_n = contacts.rigid_contact_stiffness[k]
+                    if damping_arr_len > k:
+                        c_n = contacts.rigid_contact_damping[k]
+                    if (k_n > wp.float32(0.0) or c_n > wp.float32(0.0)) and eff_n > wp.float32(0.0):
+                        eff_inv_n = wp.float32(1.0) / eff_n
+                        # ``-effective_gap`` flips sign so spring depth is +ve
+                        # for penetration; matches the lam_n >= 0 clamp.
+                        pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(
+                            k_n, c_n, -effective_gap, eff_inv_n, dt_substep, PHOENX_BOOST_CONTACT_NORMAL
+                        )
+                        cc_set_pd_gamma(cc, k, pd_gamma_n)
+                        cc_set_pd_bias(cc, k, pd_bias_n)
+                        cc_set_pd_eff_soft(cc, k, pd_eff_soft_n)
+                    else:
+                        cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
                 else:
                     cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
-            else:
-                cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
 
             # Warm-start impulse scatter. Rigid path accumulates into
             # body-level totals; cloth-aware scatters per side.
@@ -600,7 +610,9 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool, has_mass_splitti
     return impl
 
 
-def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = True, use_bias: bool = True):
+def _make_contact_iterate_at(
+    cloth_support: bool, has_mass_splitting: bool = True, use_bias: bool = True, has_soft_contact_pd: bool = True
+):
     @wp.func
     def impl(
         constraints: ContactColumnContainer,
@@ -783,17 +795,33 @@ def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = Tru
                 bias_t1_val = wp.float32(0.0)
                 bias_t2_val = wp.float32(0.0)
 
-            # Normal row: soft-contact PD (when prepare wrote pd_eff_soft),
-            # speculative rigid, soft penetrating main, or rigid relax.
-            pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
+            # Normal row: optional soft-contact PD, speculative rigid,
+            # soft penetrating main, or rigid relax.
             lam_n_old = cc_get_normal_lambda(cc, k)
-            if pd_eff_soft_n > wp.float32(0.0):
-                pd_gamma_n = cc_get_pd_gamma(cc, k)
-                pd_bias_n = cc_get_pd_bias(cc, k)
-                d_lam_n_us = -pd_eff_soft_n * (jv_n - pd_bias_n + pd_gamma_n * lam_n_old)
-                d_lam_n_us = d_lam_n_us * sor_boost
-                lam_n_new = wp.max(lam_n_old + d_lam_n_us, wp.float32(0.0))
-                d_lam_n = lam_n_new - lam_n_old
+            if wp.static(has_soft_contact_pd):
+                pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
+                if pd_eff_soft_n > wp.float32(0.0):
+                    pd_gamma_n = cc_get_pd_gamma(cc, k)
+                    pd_bias_n = cc_get_pd_bias(cc, k)
+                    d_lam_n_us = -pd_eff_soft_n * (jv_n - pd_bias_n + pd_gamma_n * lam_n_old)
+                    d_lam_n_us = d_lam_n_us * sor_boost
+                    lam_n_new = wp.max(lam_n_old + d_lam_n_us, wp.float32(0.0))
+                    d_lam_n = lam_n_new - lam_n_old
+                else:
+                    if is_speculative:
+                        mass_coeff_n = wp.float32(1.0)
+                        impulse_coeff_n = wp.float32(0.0)
+                    elif wp.static(use_bias):
+                        mass_coeff_n = mass_coeff
+                        impulse_coeff_n = impulse_coeff
+                    else:
+                        mass_coeff_n = wp.float32(1.0)
+                        impulse_coeff_n = wp.float32(0.0)
+                    d_lam_n_us = -eff_n * (jv_n + bias_val)
+                    d_lam_n = mass_coeff_n * d_lam_n_us - impulse_coeff_n * lam_n_old
+                    d_lam_n = d_lam_n * sor_boost
+                    lam_n_new = wp.max(lam_n_old + d_lam_n, wp.float32(0.0))
+                    d_lam_n = lam_n_new - lam_n_old
             else:
                 if is_speculative:
                     mass_coeff_n = wp.float32(1.0)
@@ -897,14 +925,28 @@ def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = Tru
 # ``@wp.func`` wrappers below reference them.
 
 contact_prepare_for_iteration_at = _make_contact_prepare_for_iteration_at(cloth_support=False)
+contact_prepare_for_iteration_at_no_soft_pd = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_soft_contact_pd=False
+)
 contact_prepare_for_iteration_at_lean = _make_contact_prepare_for_iteration_at(
     cloth_support=False, has_mass_splitting=False
+)
+contact_prepare_for_iteration_at_lean_no_soft_pd = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_mass_splitting=False, has_soft_contact_pd=False
 )
 contact_prepare_for_iteration_at_cloth_aware = _make_contact_prepare_for_iteration_at(cloth_support=True)
 contact_iterate_at = _make_contact_iterate_at(cloth_support=False, use_bias=True)
 contact_relax_at = _make_contact_iterate_at(cloth_support=False, use_bias=False)
+contact_iterate_at_no_soft_pd = _make_contact_iterate_at(cloth_support=False, use_bias=True, has_soft_contact_pd=False)
+contact_relax_at_no_soft_pd = _make_contact_iterate_at(cloth_support=False, use_bias=False, has_soft_contact_pd=False)
 contact_iterate_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False, use_bias=True)
 contact_relax_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False, use_bias=False)
+contact_iterate_at_lean_no_soft_pd = _make_contact_iterate_at(
+    cloth_support=False, has_mass_splitting=False, use_bias=True, has_soft_contact_pd=False
+)
+contact_relax_at_lean_no_soft_pd = _make_contact_iterate_at(
+    cloth_support=False, has_mass_splitting=False, use_bias=False, has_soft_contact_pd=False
+)
 contact_iterate_at_cloth_aware = _make_contact_iterate_at(cloth_support=True, use_bias=True)
 contact_relax_at_cloth_aware = _make_contact_iterate_at(cloth_support=True, use_bias=False)
 
@@ -949,6 +991,38 @@ def contact_prepare_for_iteration(
 
 
 @wp.func
+def contact_prepare_for_iteration_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_prepare_for_iteration_at_no_soft_pd(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
 def contact_prepare_for_iteration_lean(
     constraints: ContactColumnContainer,
     cid: wp.int32,
@@ -967,6 +1041,38 @@ def contact_prepare_for_iteration_lean(
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
     contact_prepare_for_iteration_at_lean(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_lean_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_prepare_for_iteration_at_lean_no_soft_pd(
         constraints,
         cid,
         0,
@@ -1097,6 +1203,60 @@ def contact_iterate(
 
 
 @wp.func
+def contact_iterate_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
+        return
+    body_pair = constraint_bodies_make(b1, b2)
+    if use_bias:
+        contact_iterate_at_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+
+
+@wp.func
 def _contact_iterate_guard_allows(
     bodies: BodyContainer,
     b1: wp.int32,
@@ -1150,6 +1310,58 @@ def contact_iterate_no_sleep(
         )
     else:
         contact_relax_at(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+
+
+@wp.func
+def contact_iterate_no_sleep_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    if use_bias:
+        contact_iterate_at_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_no_soft_pd(
             constraints,
             cid,
             0,
@@ -1221,6 +1433,60 @@ def contact_iterate_lean(
 
 
 @wp.func
+def contact_iterate_lean_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
+        return
+    body_pair = constraint_bodies_make(b1, b2)
+    if use_bias:
+        contact_iterate_at_lean_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_lean_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+
+
+@wp.func
 def contact_iterate_lean_no_sleep(
     constraints: ContactColumnContainer,
     cid: wp.int32,
@@ -1256,6 +1522,58 @@ def contact_iterate_lean_no_sleep(
         )
     else:
         contact_relax_at_lean(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+
+
+@wp.func
+def contact_iterate_lean_no_sleep_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    if use_bias:
+        contact_iterate_at_lean_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_lean_no_soft_pd(
             constraints,
             cid,
             0,

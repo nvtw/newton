@@ -811,6 +811,7 @@ class PhoenXWorld:
             self._enable_body_pair_grouping = False
 
         self._contact_views: ContactViews | None = None
+        self._has_soft_contact_pd: bool = False
         self._contact_views_placeholder: ContactViews = self._make_placeholder_contact_views()
 
         # ----- Pairwise contact filter (packed int64 keys) -----
@@ -2205,6 +2206,7 @@ class PhoenXWorld:
         if contacts is None or self.max_contact_columns == 0 or self._ingest_scratch is None:
             self._num_active_constraints.fill_(self._contact_offset)
             self._contact_views = None
+            self._has_soft_contact_pd = False
             return
 
         if getattr(contacts, "contact_matching", False) is False:
@@ -2231,16 +2233,13 @@ class PhoenXWorld:
         # the per-contact shape check in the kernels.
         if self._soft_contact_sentinel is None:
             self._soft_contact_sentinel = wp.zeros(0, dtype=wp.float32, device=self.device)
-        contact_stiffness = (
-            contacts.rigid_contact_stiffness
-            if getattr(contacts, "rigid_contact_stiffness", None) is not None
-            else self._soft_contact_sentinel
+        contact_stiffness_src = getattr(contacts, "rigid_contact_stiffness", None)
+        contact_damping_src = getattr(contacts, "rigid_contact_damping", None)
+        self._has_soft_contact_pd = (contact_stiffness_src is not None and int(contact_stiffness_src.shape[0]) > 0) or (
+            contact_damping_src is not None and int(contact_damping_src.shape[0]) > 0
         )
-        contact_damping = (
-            contacts.rigid_contact_damping
-            if getattr(contacts, "rigid_contact_damping", None) is not None
-            else self._soft_contact_sentinel
-        )
+        contact_stiffness = contact_stiffness_src if contact_stiffness_src is not None else self._soft_contact_sentinel
+        contact_damping = contact_damping_src if contact_damping_src is not None else self._soft_contact_sentinel
         contact_friction = (
             contacts.rigid_contact_friction
             if getattr(contacts, "rigid_contact_friction", None) is not None
@@ -3195,6 +3194,7 @@ class PhoenXWorld:
             "has_joints": self.num_joints > 0,
             "has_mass_splitting": self.mass_splitting_enabled,
             "has_sleeping": self._sleeping_enabled,
+            "has_soft_contact_pd": bool(self._has_soft_contact_pd),
         }
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),
