@@ -251,6 +251,10 @@ class Example:
             num_soft_tetrahedra=int(self.model.tet_count),
             device=self.device,
         )
+        # Overflow-only soft-tet sweeps are one large parallel partition.
+        # Use more persistent-grid blocks than rigid stacks while keeping
+        # the solver-wide one-warp block size unchanged.
+        max_thread_blocks = 8 * self.device.sm_count if self.device.is_cuda else None
         self.world = PhoenXWorld(
             bodies=bodies,
             constraints=constraints,
@@ -272,11 +276,10 @@ class Example:
             step_layout="single_world",
             mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
-            # On dense soft-body stacks greedy MIS produces a pyramidal
-            # colour-size distribution that the head/fused tail solver
-            # exploits; Luby-fixed produces more uniform sizes which keeps
-            # the expensive head kernel busy longer. Greedy wins by ~50%
-            # on the 7-cube/res=3 stack.
+            max_thread_blocks=max_thread_blocks,
+            # Batch size controls the short sequential run inside each
+            # overflow worker. Keep the deterministic greedy partitioner;
+            # it still owns the bounded-colour overflow layout.
             mass_splitting_batch_size=2,
             partitioner_algorithm="greedy",
             enable_column_timers=ENABLE_COLUMN_TIMERS,
