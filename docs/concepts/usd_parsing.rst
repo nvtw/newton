@@ -715,11 +715,17 @@ Programmatic Porting
 The following helper rewrites PhysX SDF attributes to their Newton equivalents
 on every prim that has ``PhysxSDFMeshCollisionAPI`` applied. It is a starting
 point — edit the token map if your assets use different bit-depth or texture
-conventions. The snippet below is executed as part of the documentation test
-suite, so it doubles as an end-to-end regression against Newton's importer.
+conventions. A ``defaults`` argument controls how unauthored PhysX attributes
+are handled: ``PortDefaults.NEWTON`` (default) leaves the corresponding
+Newton attributes unauthored so the Newton importer applies its own schema
+defaults, while ``PortDefaults.PHYSX`` backfills from the PhysX schema
+defaults so the ported authoring preserves PhysX-fidelity behavior. The
+snippet below is executed as part of the documentation test suite, so it
+doubles as an end-to-end regression against Newton's importer.
 
 .. testcode::
 
+   import enum
    import math
 
    from pxr import Sdf, Usd, UsdGeom, UsdPhysics
@@ -730,11 +736,46 @@ suite, so it doubles as an end-to-end regression against Newton's importer.
        "BitsPerPixel32": "float32",
    }
 
+   # PhysX per-shape schema defaults for SDF attributes. restOffset / contactOffset
+   # default to -inf in PhysX (defer to scene-level defaults) and therefore have no
+   # per-shape value to backfill — they are intentionally omitted here.
+   _PHYSX_DEFAULTS = {
+       "physxSDFMeshCollision:sdfResolution": 256,
+       "physxSDFMeshCollision:sdfNarrowBandThickness": 0.01,
+       "physxSDFMeshCollision:sdfMargin": 0.01,
+       "physxSDFMeshCollision:sdfBitsPerSubgridPixel": "BitsPerPixel16",
+   }
+
+
+   class PortDefaults(enum.Enum):
+       """Controls how unauthored PhysX attributes are handled during porting.
+
+       ``NEWTON``: leave the corresponding Newton attribute unauthored so the
+       Newton importer applies its own schema defaults at parse time
+       (sdfMaxResolution=64, narrow band (-0.1, 0.1) m, padding fallback to
+       contactGap, texture uint16).
+
+       ``PHYSX``: backfill from PhysX schema defaults so the ported authoring
+       preserves what PhysX would have used at runtime (sdfResolution=256,
+       narrow band ±0.01 × bbox-diag, padding 0.01 × bbox-diag, texture
+       uint16). Use when you want PhysX-fidelity behavior in Newton.
+       """
+
+       NEWTON = "newton"
+       PHYSX = "physx"
+
    def _get(prim, name):
        attr = prim.GetAttribute(name)
        if not attr or not attr.HasAuthoredValue():
            return None
        return attr.Get()
+
+   def _physx_attr(prim, name, defaults):
+       """Read a PhysX attribute, falling back to its schema default in PHYSX mode."""
+       v = _get(prim, name)
+       if v is None and defaults is PortDefaults.PHYSX:
+           return _PHYSX_DEFAULTS.get(name)
+       return v
 
    def _set(prim, name, type_name, value):
        prim.CreateAttribute(name, type_name, custom=False).Set(value)
@@ -761,27 +802,36 @@ suite, so it doubles as an end-to-end regression against Newton's importer.
        diag = size.GetLength()
        return float(diag) if diag > 0 else None
 
-   def port_physx_sdf_to_newton(stage: Usd.Stage) -> int:
+   def port_physx_sdf_to_newton(
+       stage: Usd.Stage, defaults: PortDefaults = PortDefaults.NEWTON,
+   ) -> int:
        """Rewrite PhysxSDFMeshCollisionAPI / PhysxCollisionAPI attrs on each
        prim as NewtonSDFCollisionAPI / NewtonCollisionAPI attrs. Returns the
-       number of prims modified."""
+       number of prims modified. See :class:`PortDefaults` for the meaning of
+       ``defaults``."""
        modified = 0
        for prim in stage.Traverse():
            if not _has_applied_schema(prim, "PhysxSDFMeshCollisionAPI"):
                continue
 
            # Margins: newton:contactMargin == restOffset;
-           # newton:contactGap == contactOffset - restOffset.
+           # newton:contactGap == contactOffset - restOffset. PhysX uses -inf
+           # as a "defer to scene default" sentinel on both fields; skip the
+           # mapping in that case so we don't write -inf into newton:contactMargin
+           # (which has no sentinel).
            rest = _get(prim, "physxCollision:restOffset")
            contact = _get(prim, "physxCollision:contactOffset")
-           if rest is not None:
+           if rest is not None and rest != float("-inf"):
                _set(prim, "newton:contactMargin", Sdf.ValueTypeNames.Float, float(rest))
-           if rest is not None and contact is not None:
+           if (
+               rest is not None and contact is not None
+               and rest != float("-inf") and contact != float("-inf")
+           ):
                _set(prim, "newton:contactGap", Sdf.ValueTypeNames.Float,
                     float(contact) - float(rest))
 
            # SDF resolution (direct).
-           res = _get(prim, "physxSDFMeshCollision:sdfResolution")
+           res = _physx_attr(prim, "physxSDFMeshCollision:sdfResolution", defaults)
            if res is not None:
                _set(prim, "newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, int(res))
 
@@ -791,20 +841,20 @@ suite, so it doubles as an end-to-end regression against Newton's importer.
            diag = _bbox_diag(prim)
 
            # Narrow band: single fraction -> (inner=-t*diag, outer=+t*diag).
-           t = _get(prim, "physxSDFMeshCollision:sdfNarrowBandThickness")
+           t = _physx_attr(prim, "physxSDFMeshCollision:sdfNarrowBandThickness", defaults)
            if t is not None and diag is not None:
                abs_t = float(t) * diag
                _set(prim, "newton:sdfNarrowBandInner", Sdf.ValueTypeNames.Float, -abs_t)
                _set(prim, "newton:sdfNarrowBandOuter", Sdf.ValueTypeNames.Float, abs_t)
 
            # Margin: fraction -> absolute [m] via diag.
-           m = _get(prim, "physxSDFMeshCollision:sdfMargin")
+           m = _physx_attr(prim, "physxSDFMeshCollision:sdfMargin", defaults)
            if m is not None and diag is not None:
                _set(prim, "newton:sdfPadding", Sdf.ValueTypeNames.Float,
                     float(m) * diag)
 
            # Texture format token translation.
-           bits = _get(prim, "physxSDFMeshCollision:sdfBitsPerSubgridPixel")
+           bits = _physx_attr(prim, "physxSDFMeshCollision:sdfBitsPerSubgridPixel", defaults)
            if bits is not None:
                fmt = _BITS_TO_FORMAT.get(str(bits))
                if fmt is not None:
@@ -861,6 +911,45 @@ suite, so it doubles as an end-to-end regression against Newton's importer.
    assert _close(_get(p, "newton:sdfPadding"), 0.02 * _diag, tol=1e-5)
    assert _get(p, "newton:sdfTextureFormat") == "uint16"
    assert _has_applied_schema(p, "NewtonSDFCollisionAPI")
+
+   # PHYSX-mode demo: a fresh stage that applies PhysxSDFMeshCollisionAPI
+   # without authoring any of its attributes (the common case for assets
+   # that rely on PhysX runtime defaults). PHYSX mode backfills from the
+   # PhysX schema defaults so the resulting Newton authoring matches what
+   # PhysX would have used at runtime.
+   stage2 = Usd.Stage.CreateInMemory()
+   mesh2 = UsdGeom.Mesh.Define(stage2, "/Body/CollisionMesh")
+   mesh2.CreatePointsAttr([(-0.5, -0.5, -0.5), (0.5, -0.5, -0.5), (0.5, 0.5, -0.5),
+                           (-0.5, 0.5, -0.5), (-0.5, -0.5, 0.5), (0.5, -0.5, 0.5),
+                           (0.5, 0.5, 0.5), (-0.5, 0.5, 0.5)])
+   mesh2.CreateFaceVertexCountsAttr([4, 4, 4, 4, 4, 4])
+   mesh2.CreateFaceVertexIndicesAttr([0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 5, 4,
+                                      2, 3, 7, 6, 0, 3, 7, 4, 1, 2, 6, 5])
+   p2 = mesh2.GetPrim()
+   p2.AddAppliedSchema("PhysxSDFMeshCollisionAPI")
+   assert port_physx_sdf_to_newton(stage2, defaults=PortDefaults.PHYSX) == 1
+   assert _get(p2, "newton:sdfMaxResolution") == 256
+   assert _close(_get(p2, "newton:sdfNarrowBandOuter"), 0.01 * _diag, tol=1e-5)
+   assert _close(_get(p2, "newton:sdfPadding"), 0.01 * _diag, tol=1e-5)
+   assert _get(p2, "newton:sdfTextureFormat") == "uint16"
+
+   # NEWTON mode (the default) on the same kind of stage leaves Newton attrs
+   # unauthored, so the importer applies its own schema defaults at parse time.
+   stage3 = Usd.Stage.CreateInMemory()
+   mesh3 = UsdGeom.Mesh.Define(stage3, "/Body/CollisionMesh")
+   mesh3.CreatePointsAttr([(-0.5, -0.5, -0.5), (0.5, -0.5, -0.5), (0.5, 0.5, -0.5),
+                           (-0.5, 0.5, -0.5), (-0.5, -0.5, 0.5), (0.5, -0.5, 0.5),
+                           (0.5, 0.5, 0.5), (-0.5, 0.5, 0.5)])
+   mesh3.CreateFaceVertexCountsAttr([4, 4, 4, 4, 4, 4])
+   mesh3.CreateFaceVertexIndicesAttr([0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 5, 4,
+                                      2, 3, 7, 6, 0, 3, 7, 4, 1, 2, 6, 5])
+   p3 = mesh3.GetPrim()
+   p3.AddAppliedSchema("PhysxSDFMeshCollisionAPI")
+   assert port_physx_sdf_to_newton(stage3) == 1  # default is PortDefaults.NEWTON
+   assert _get(p3, "newton:sdfMaxResolution") is None
+   assert _get(p3, "newton:sdfNarrowBandOuter") is None
+   assert _get(p3, "newton:sdfPadding") is None
+   assert _has_applied_schema(p3, "NewtonSDFCollisionAPI")
 
 The helper leaves the original ``PhysxSDFMeshCollisionAPI`` attributes in place
 so the asset continues to work with PhysX; you can optionally remove them after
