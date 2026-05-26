@@ -95,7 +95,7 @@ examples = [
 rtx = [
     "newton[importers]",    # include import dependencies (USD)
     "pyglet>=2.1.6,<3",     # for the viewer window/presentation
-    "ovrtx>=0.2",           # NVIDIA OVRTX renderer
+    "ovrtx>=0.3",           # NVIDIA OVRTX renderer
 ]
 
 # PyTorch is no longer required to run RL policies (examples and actuators

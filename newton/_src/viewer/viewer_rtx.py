@@ -147,9 +147,9 @@ class ViewerRTX(ViewerUSD):
                 flight.
         """
         # FIXME: Disable USD checks in OVRTX that refuse to load the library if `usd-core` is present.
-        # This is a temporary workaround until OVRTX is shipped with namespaced USD libs.
-        # Note that disabling the check may cause crashes when the version of `usd-core` is the same as
-        # as the version of the USD libs shipped with OVRTX.
+        # OVRTX 0.3+ ships with namespaced USD builds that should be safe to use in conjunction with
+        # `usd-core`, but the check wasn't removed yet. Upcoming OVRTX releases should remove the check,
+        # at which point we can remove this hack.
         os.environ.setdefault("OVRTX_SKIP_USD_CHECK", "1")
 
         try:
@@ -683,7 +683,7 @@ void main() {
             config = ovrtx.RendererConfig()
             config.log_level = "error"
             self._rtx = ovrtx.Renderer(config=config)
-            self._rtx.add_usd(ovrtx_usd_path)
+            self._rtx.open_usd(ovrtx_usd_path)
 
             # Flat prim-path list for a single transform binding
             self._all_instance_paths = []
@@ -1015,7 +1015,7 @@ void main() {
             _UsdShade.MaterialBindingAPI.Apply(capsule.GetPrim())
             _UsdShade.MaterialBindingAPI(capsule).Bind(_UsdShade.Material.Get(stage, mat_path))
 
-        handle = self._rtx.add_usd_layer(stage.GetRootLayer().ExportToString(), path_prefix=target_path)
+        handle = self._rtx.add_usd_reference_from_string(stage.GetRootLayer().ExportToString(), prefix_path=target_path)
         self._line_batch_handles[name] = handle
         return True
 
@@ -1405,20 +1405,14 @@ void main() {
         if self._rtx is None or not self._camera_dirty:
             return
         with wp.ScopedTimer("ViewerRTX::update_camera", active=PROFILE_ENABLED, use_nvtx=True):
-            import ovrtx.math
+            from ovrtx import Semantic
 
             mat = self._compute_camera_matrix()
-            cam_mat = ovrtx.math.Matrix4d()
-            for i in range(4):
-                for j in range(4):
-                    cam_mat[i][j] = mat[i, j]
-
-            from ovrtx import Semantic
 
             self._rtx.write_attribute(
                 prim_paths=[self._camera_prim_path],
                 attribute_name="omni:xform",
-                tensor=cam_mat.to_dltensor(),
+                tensor=mat[np.newaxis, ...],
                 semantic=Semantic.XFORM_MAT4x4,
             )
             self._camera_dirty = False
@@ -1659,7 +1653,7 @@ void main() {
                 # wait for async rendering to complete
                 with wp.ScopedTimer("ViewerRTX::rtx_wait", active=PROFILE_ENABLED, use_nvtx=True):
                     if self._render_result is not None:
-                        self._render_products = self._render_result.wait()
+                        self._render_products = self._render_result.wait().fetch()
             else:
                 # render synchronously
                 with wp.ScopedTimer("ViewerRTX::rtx_step", active=PROFILE_ENABLED, use_nvtx=True):
@@ -1675,7 +1669,7 @@ void main() {
                         if "LdrColor" in frame.render_vars:
                             with wp.ScopedTimer("ViewerRTX::fb_map", active=PROFILE_ENABLED, use_nvtx=True):
                                 with frame.render_vars["LdrColor"].map(device=Device.CUDA) as mapping:
-                                    pixels = wp.from_dlpack(mapping.tensor, dtype=wp.vec4ub)
+                                    pixels = wp.from_dlpack(mapping, dtype=wp.vec4ub)
                                     with wp.ScopedTimer(
                                         "ViewerRTX::blit_to_window", active=PROFILE_ENABLED, use_nvtx=True
                                     ):
@@ -1747,7 +1741,7 @@ void main() {
         if self._render_products is not None:
             products = self._render_products
         elif self._render_result is not None:
-            products = self._render_result.wait()
+            products = self._render_result.wait().fetch()
         else:
             raise RuntimeError("save_screenshot() requires at least one completed render frame")
 
@@ -1757,7 +1751,7 @@ void main() {
             for frame in product.frames:
                 if "LdrColor" in frame.render_vars:
                     with frame.render_vars["LdrColor"].map(device=Device.CPU) as mapping:
-                        pixels = np.array(np.from_dlpack(mapping.tensor), copy=True)
+                        pixels = np.array(np.from_dlpack(mapping), copy=True)
                     return pixels
 
         raise RuntimeError("save_screenshot() could not find the LdrColor render output")
@@ -1792,7 +1786,7 @@ void main() {
 
         # Drain async pipeline before releasing the renderer
         if self._render_result is not None:
-            self._render_result.wait()
+            self._render_result.wait().fetch()
             self._render_result = None
         self._render_products = None
 
@@ -1911,7 +1905,7 @@ void main() {
     def close(self):
         # wait for async rendering results before closing
         if self._render_result is not None:
-            self._render_result.wait()
+            self._render_result.wait().fetch()
             self._render_result = None
 
         # release render products
