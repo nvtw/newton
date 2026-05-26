@@ -1045,7 +1045,7 @@ class PhoenXWorld:
                 "enable_column_timers": self.enable_column_timers,
             }
             for fixed_tpw in self._fast_tail_auto_fixed_choices():
-                fast_tail_kw = {**base_fast_tail_kw, "fixed_tpw": fixed_tpw}
+                fast_tail_kw = {**base_fast_tail_kw, "fixed_tpw": fixed_tpw, "guard_tpw": self._tpw_auto}
                 kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw))
                 kernels.append(get_fast_tail_kernel(kind="relax", **fast_tail_kw))
 
@@ -3035,6 +3035,7 @@ class PhoenXWorld:
                 has_sleeping=bool(self._sleeping_enabled),
                 enable_column_timers=self.enable_column_timers,
                 fixed_tpw=fixed_tpw,
+                guard_tpw=self._tpw_auto,
             )
             wp.launch(
                 kernel,
@@ -3076,6 +3077,7 @@ class PhoenXWorld:
                 has_sleeping=bool(self._sleeping_enabled),
                 enable_column_timers=self.enable_column_timers,
                 fixed_tpw=fixed_tpw,
+                guard_tpw=self._tpw_auto,
             )
             self._launch_fast_iter(
                 kernel,
@@ -3303,9 +3305,20 @@ class PhoenXWorld:
             get_singleworld_kernel(phase="relax", fused=True, **kw),
         )
 
+    def _fast_tail_worlds_per_block(self) -> int:
+        """Choose fast-tail block packing from topology known at finalize time."""
+        wpb = _choose_fast_tail_worlds_per_block(self.num_worlds)
+        if self.step_layout != "single_world" and self._tpw_launch_bound <= 16 and self.num_worlds >= 512:
+            inv_worlds = 1.0 / float(max(1, self.num_worlds))
+            joints_per_world = float(self.num_joints) * inv_worlds
+            contacts_per_world = float(self.max_contact_columns) * inv_worlds
+            if joints_per_world <= 48.0 and contacts_per_world <= 64.0:
+                wpb = min(wpb, 2)
+        return wpb
+
     def _fast_tail_block_dim(self) -> int:
         """``_STRAGGLER_BLOCK_DIM * worlds_per_block`` (integer warps for __syncwarp)."""
-        return _STRAGGLER_BLOCK_DIM * _choose_fast_tail_worlds_per_block(self.num_worlds)
+        return _STRAGGLER_BLOCK_DIM * self._fast_tail_worlds_per_block()
 
     def _fast_tail_launch_dim_for(self, tpw_bound: int) -> int:
         """Padded launch dim for a fast-tail tpw upper bound."""

@@ -655,7 +655,12 @@ def _per_world_greedy_coloring_kernel(
 
 @functools.cache
 def _make_fast_tail_prepare_plus_iterate_kernel(
-    *, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False, fixed_tpw: int = 0
+    *,
+    revolute_only: bool,
+    has_sleeping: bool,
+    enable_column_timers: bool = False,
+    fixed_tpw: int = 0,
+    guard_tpw: bool = True,
 ):
     """Build the multi-world fused prepare + iterate fast-tail kernel."""
 
@@ -682,8 +687,9 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
     ):
         tid = wp.tid()
         if wp.static(fixed_tpw > 0):
-            if tpw_buf[0] != wp.int32(fixed_tpw):
-                return
+            if wp.static(guard_tpw):
+                if tpw_buf[0] != wp.int32(fixed_tpw):
+                    return
             tpw = wp.int32(fixed_tpw)
         else:
             tpw = tpw_buf[0]
@@ -844,7 +850,12 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
 
 @functools.cache
 def _make_fast_tail_relax_kernel(
-    *, revolute_only: bool, has_sleeping: bool, enable_column_timers: bool = False, fixed_tpw: int = 0
+    *,
+    revolute_only: bool,
+    has_sleeping: bool,
+    enable_column_timers: bool = False,
+    fixed_tpw: int = 0,
+    guard_tpw: bool = True,
 ):
     """Multi-world relax fast-tail kernel (use_bias=False, num_sweeps=num_iterations)."""
 
@@ -871,8 +882,9 @@ def _make_fast_tail_relax_kernel(
     ):
         tid = wp.tid()
         if wp.static(fixed_tpw > 0):
-            if tpw_buf[0] != wp.int32(fixed_tpw):
-                return
+            if wp.static(guard_tpw):
+                if tpw_buf[0] != wp.int32(fixed_tpw):
+                    return
             tpw = wp.int32(fixed_tpw)
         else:
             tpw = tpw_buf[0]
@@ -1084,18 +1096,21 @@ def get_fast_tail_kernel(
     has_sleeping: bool = False,
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
+    guard_tpw: bool = True,
 ):
     """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``
     or ``"relax"``. Each (kind, revolute_only, has_sleeping,
-    enable_column_timers, fixed_tpw) tuple is cached after first build by the
-    underlying factory's ``functools.cache``. ``fixed_tpw=0`` keeps the
-    graph-capture-safe dynamic threads-per-world buffer read."""
+    enable_column_timers, fixed_tpw, guard_tpw) tuple is cached after first
+    build by the underlying factory's ``functools.cache``. ``fixed_tpw=0``
+    keeps the graph-capture-safe dynamic threads-per-world buffer read;
+    ``guard_tpw`` keeps fixed variants selectable in auto mode."""
     if kind == "prepare_plus_iterate":
         return _make_fast_tail_prepare_plus_iterate_kernel(
             revolute_only=revolute_only,
             has_sleeping=has_sleeping,
             enable_column_timers=enable_column_timers,
             fixed_tpw=fixed_tpw,
+            guard_tpw=guard_tpw,
         )
     if kind == "relax":
         return _make_fast_tail_relax_kernel(
@@ -1103,6 +1118,7 @@ def get_fast_tail_kernel(
             has_sleeping=has_sleeping,
             enable_column_timers=enable_column_timers,
             fixed_tpw=fixed_tpw,
+            guard_tpw=guard_tpw,
         )
     raise ValueError(f"unknown fast-tail kernel kind: {kind!r}")
 

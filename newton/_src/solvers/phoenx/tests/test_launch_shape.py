@@ -27,7 +27,6 @@ import warp as wp
 
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _STRAGGLER_BLOCK_DIM,
-    _choose_fast_tail_worlds_per_block,
     get_fast_tail_kernel,
 )
 from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums
@@ -41,7 +40,7 @@ def _main_solve_kernel_launch_bounds(world) -> dict[str, int]:
     }
     bounds = {}
     for fixed_tpw in world._fast_tail_auto_fixed_choices():
-        fast_tail_kw = {**base_fast_tail_kw, "fixed_tpw": fixed_tpw}
+        fast_tail_kw = {**base_fast_tail_kw, "fixed_tpw": fixed_tpw, "guard_tpw": world._tpw_auto}
         launch_bound = fixed_tpw if fixed_tpw > 0 else world._tpw_launch_bound
         bounds[get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw).key] = launch_bound
         bounds[get_fast_tail_kernel(kind="relax", **fast_tail_kw).key] = launch_bound
@@ -73,7 +72,7 @@ def _collect_launches(world, *, step_dt: float = 1.0 / 60.0) -> list[dict]:
         captured.append(
             {
                 "kernel": getattr(kernel, "key", str(kernel)),
-                "dim": (int(dim) if not isinstance(dim, (list, tuple)) else tuple(int(d) for d in dim)),
+                "dim": (int(dim) if not isinstance(dim, list | tuple) else tuple(int(d) for d in dim)),
                 "block_dim": int(block_dim),
             }
         )
@@ -97,8 +96,8 @@ class TestPhoenXFastTailLaunchGeometry(unittest.TestCase):
             0,
             msg=("did not observe any main-solve kernel launch during step() -- test plumbing broken"),
         )
-        wpb = _choose_fast_tail_worlds_per_block(world.num_worlds)
-        expected_block_dim = int(_STRAGGLER_BLOCK_DIM) * wpb
+        expected_block_dim = world._fast_tail_block_dim()
+        wpb = expected_block_dim // int(_STRAGGLER_BLOCK_DIM)
         for c in main:
             launch_bound = main_bounds[c["kernel"]]
             raw_dim = world.num_worlds * int(launch_bound)
