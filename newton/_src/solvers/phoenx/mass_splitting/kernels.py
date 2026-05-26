@@ -79,12 +79,19 @@ def _broadcast_rigid_to_copy_states_kernel(
     source is static / pinned).
     """
     node_id = wp.tid()
-    # Disabled fast path: zero slots populated → no work.
-    if copy_state.highest_index_in_use[0] == wp.int32(0):
+    if node_id >= copy_state.section_end.shape[0]:
         return
-    start, end = _section_range(copy_state, node_id)
-    if start >= end:
+    # Fast bail via the cached count. Empty nodes (count==0) skip the
+    # whole broadcast loop. Mass-splitting-disabled scenes hit this
+    # path with count==0 for every node, replacing the per-thread
+    # ``highest_index_in_use[0]`` probe.
+    count = copy_state.count_per_node[node_id]
+    if count <= wp.int32(0):
         return
+    start = wp.int32(0)
+    if node_id > wp.int32(0):
+        start = copy_state.section_end[node_id - wp.int32(1)]
+    end = start + count
 
     pos = wp.vec3f(0.0, 0.0, 0.0)
     orient = wp.quatf(0.0, 0.0, 0.0, 1.0)
@@ -163,12 +170,19 @@ def _average_and_broadcast_kernel(
     zeros so the write is harmless on that field.
     """
     node_id = wp.tid()
-    if copy_state.highest_index_in_use[0] == wp.int32(0):
+    if node_id >= copy_state.section_end.shape[0]:
         return
-    start, end = _section_range(copy_state, node_id)
-    count = end - start
+    # Fast bail via the cached count: single-slot / empty nodes are
+    # a no-op for the average. One load instead of the section_end +
+    # highest_index_in_use chain. Mass-splitting-disabled scenes hit
+    # this path with count == 0 for every node.
+    count = copy_state.count_per_node[node_id]
     if count <= wp.int32(1):
         return
+    start = wp.int32(0)
+    if node_id > wp.int32(0):
+        start = copy_state.section_end[node_id - wp.int32(1)]
+    end = start + count
 
     # Synchronize every slot to VELOCITY_LEVEL first (C# pattern).
     # Position-level work gets encoded as velocity deltas relative to
@@ -230,11 +244,15 @@ def _copy_state_into_rigids_kernel(
     broadcast for those).
     """
     node_id = wp.tid()
-    if copy_state.highest_index_in_use[0] == wp.int32(0):
+    if node_id >= copy_state.section_end.shape[0]:
         return
-    start, end = _section_range(copy_state, node_id)
-    if start >= end:
+    # Fast bail via the cached count: empty / unbuilt nodes do nothing.
+    count = copy_state.count_per_node[node_id]
+    if count <= wp.int32(0):
         return
+    start = wp.int32(0)
+    if node_id > wp.int32(0):
+        start = copy_state.section_end[node_id - wp.int32(1)]
     if copy_state.access_mode[start] == _ACCESS_MODE_STATIC:
         return
 
