@@ -130,12 +130,39 @@ def assert_constraint_header(struct_type: object) -> None:
             )
 
 
+#: Width of the per-cid slot cache. Matches
+#: :data:`newton._src.solvers.phoenx.graph_coloring.graph_coloring_common.MAX_BODIES`
+#: (the largest possible endpoint count -- soft-hex with 8 vertices).
+#: Keeping it at the same upper bound means a single cache schema fits
+#: every constraint type that uses mass-splitting slot routing.
+SLOT_CACHE_MAX_BODIES: int = 8
+
+
 @wp.struct
 class ConstraintContainer:
     """``data`` shape: (num_dwords, num_constraints), cid is inner dim for
-    coalesced loads."""
+    coalesced loads.
+
+    ``slot_cache`` / ``count_cache`` are the per-cid slot / Tonge-count
+    tables stamped once per frame by
+    :func:`build_constraint_slot_cache`. The constraint iterates read
+    them directly instead of calling :func:`get_state_index` 2-8 times
+    per call, eliminating the dependent body-load -> slot-lookup chain
+    on the hot path.
+    """
 
     data: wp.array2d[wp.float32]
+    #: Per-cid slot cache: ``slot_cache[cid, v]`` is the slot index for
+    #: vertex ``v`` of constraint ``cid`` under the parallel-id that
+    #: vertex's iterate will see (parallel_id = 0 for regular colours,
+    #: ``csr_offset_in_overflow / ms_batch_size`` for overflow). ``-1``
+    #: means no slot (direct body/particle storage).
+    slot_cache: wp.array2d[wp.int32]
+    #: Per-cid Tonge mass-divisor cache: ``count_cache[cid, v]`` is the
+    #: number of copy-state slots vertex ``v`` occupies. Iterate kernels
+    #: ignore this (slot is enough); prepare kernels use it to scale
+    #: ``inv_mass`` by ``1 / N``.
+    count_cache: wp.array2d[wp.int32]
 
 
 def constraint_container_zeros(
@@ -146,6 +173,21 @@ def constraint_container_zeros(
     """Allocate a zero-initialised :class:`ConstraintContainer`."""
     c = ConstraintContainer()
     c.data = wp.zeros((num_dwords, num_constraints), dtype=wp.float32, device=device)
+    # Cache starts at the no-slot fallback so reads before the first
+    # build hit the same direct-storage path as ``get_state_index``'s
+    # mass-splitting-disabled fast path.
+    c.slot_cache = wp.full(
+        (max(num_constraints, 1), SLOT_CACHE_MAX_BODIES),
+        value=-1,
+        dtype=wp.int32,
+        device=device,
+    )
+    c.count_cache = wp.full(
+        (max(num_constraints, 1), SLOT_CACHE_MAX_BODIES),
+        value=1,
+        dtype=wp.int32,
+        device=device,
+    )
     return c
 
 

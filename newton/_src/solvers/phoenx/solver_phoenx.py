@@ -123,6 +123,7 @@ from newton._src.solvers.phoenx.islands.island_builder import (
 from newton._src.solvers.phoenx.mass_splitting import (
     CopyStateContainer,
     InteractionGraphScratch,
+    build_constraint_slot_cache,
     build_interaction_graph,
     copy_state_container_zeros,
     interaction_graph_scratch_zeros,
@@ -2710,6 +2711,21 @@ class PhoenXWorld:
         )
         # Sort + dedup + sections; writes back into self._copy_state.
         build_interaction_graph(self._interaction_graph_scratch, self._copy_state)
+        # Per-cid slot / count cache for the iterate hot path. Reads
+        # ``copy_state.section_end`` / ``partition_list`` (just stamped)
+        # plus the partitioner's CSR; writes ``constraints.slot_cache``
+        # and ``constraints.count_cache``. Constraint iterates then
+        # bypass :func:`get_state_index` on the inner loop.
+        build_constraint_slot_cache(
+            self._partitioner.element_ids_by_color,
+            self._partitioner.color_starts,
+            self._num_active_constraints,
+            self._elements,
+            self._copy_state,
+            self.constraints,
+            max_colored_partitions=int(self.max_colored_partitions),
+            ms_batch_size=int(self.mass_splitting_batch_size),
+        )
 
     def _maybe_fallback_from_per_world_greedy_overflow(self, nw: int) -> None:
         """Multi-world analogue of

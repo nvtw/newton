@@ -60,10 +60,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
-    get_state_index,
-    read_position_unified,
     read_position_with_slot,
-    set_access_mode_unified,
     set_access_mode_with_slot,
     write_position_unified,
 )
@@ -350,11 +347,7 @@ def _extract_rotation(F: wp.mat33f, q_init: wp.quatf, max_iters: wp.int32) -> wp
         h12 = wp.float32(-0.5) * (b21 + b12)
 
         det_h = (
-            -h02 * h02 * h11
-            + wp.float32(2.0) * h01 * h02 * h12
-            - h00 * h12 * h12
-            - h01 * h01 * h22
-            + h00 * h11 * h22
+            -h02 * h02 * h11 + wp.float32(2.0) * h01 * h02 * h12 - h00 * h12 * h12 - h01 * h01 * h22 + h00 * h11 * h22
         )
 
         if wp.abs(det_h) < _APD_DETH_EPS:
@@ -367,19 +360,13 @@ def _extract_rotation(F: wp.mat33f, q_init: wp.quatf, max_iters: wp.int32) -> wp
             # H^{-1} via cofactors. The 0.25 in factor folds the
             # combined sign / scale from Kugelstadt's derivation.
             omega_x = factor * (
-                (h11 * h22 - h12 * h12) * g_x
-                + (h02 * h12 - h01 * h22) * g_y
-                + (h01 * h12 - h02 * h11) * g_z
+                (h11 * h22 - h12 * h12) * g_x + (h02 * h12 - h01 * h22) * g_y + (h01 * h12 - h02 * h11) * g_z
             )
             omega_y = factor * (
-                (h02 * h12 - h01 * h22) * g_x
-                + (h00 * h22 - h02 * h02) * g_y
-                + (h01 * h02 - h00 * h12) * g_z
+                (h02 * h12 - h01 * h22) * g_x + (h00 * h22 - h02 * h02) * g_y + (h01 * h02 - h00 * h12) * g_z
             )
             omega_z = factor * (
-                (h01 * h12 - h02 * h11) * g_x
-                + (h01 * h02 - h00 * h12) * g_y
-                + (h00 * h11 - h01 * h01) * g_z
+                (h01 * h12 - h02 * h11) * g_x + (h01 * h02 - h00 * h12) * g_y + (h00 * h11 - h01 * h01) * g_z
             )
 
         l2 = omega_x * omega_x + omega_y * omega_y + omega_z * omega_z
@@ -497,12 +484,19 @@ def soft_tetrahedron_prepare_for_iteration_at(
     p_c = body_c - num_bodies
     p_d = body_d - num_bodies
 
-    # One slot lookup per vertex, reused for access-mode flip + position
-    # read + inverse-mass scaling below.
-    slot_a, inv_factor_a = get_state_index(copy_state, body_a, parallel_id)
-    slot_b, inv_factor_b = get_state_index(copy_state, body_b, parallel_id)
-    slot_c, inv_factor_c = get_state_index(copy_state, body_c, parallel_id)
-    slot_d, inv_factor_d = get_state_index(copy_state, body_d, parallel_id)
+    # Pre-stamped slot / Tonge-count tables -- skips the per-call
+    # :func:`get_state_index` lookup chain (~2 dependent loads per
+    # vertex). Stamped by :func:`build_constraint_slot_cache` once per
+    # frame after the partitioner CSR is built; the cid here indexes the
+    # same row the build kernel wrote.
+    slot_a = constraints.slot_cache[cid, 0]
+    slot_b = constraints.slot_cache[cid, 1]
+    slot_c = constraints.slot_cache[cid, 2]
+    slot_d = constraints.slot_cache[cid, 3]
+    inv_factor_a = constraints.count_cache[cid, 0]
+    inv_factor_b = constraints.count_cache[cid, 1]
+    inv_factor_c = constraints.count_cache[cid, 2]
+    inv_factor_d = constraints.count_cache[cid, 3]
 
     set_access_mode_with_slot(
         bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
@@ -580,14 +574,15 @@ def soft_tetrahedron_iterate_at(
     p_c = body_c - num_bodies
     p_d = body_d - num_bodies
 
-    # One slot lookup per vertex, reused below for access-mode flip,
-    # position read, and position write. Saves ``set_access_mode_unified``
-    # + ``read_position_unified``'s redundant :func:`get_state_index` walk
-    # (~4 array loads each) on the iterate hot path.
-    slot_a, _ifa = get_state_index(copy_state, body_a, parallel_id)
-    slot_b, _ifb = get_state_index(copy_state, body_b, parallel_id)
-    slot_c, _ifc = get_state_index(copy_state, body_c, parallel_id)
-    slot_d, _ifd = get_state_index(copy_state, body_d, parallel_id)
+    # Per-cid slot cache stamped by :func:`build_constraint_slot_cache`
+    # once per frame. One independent load per vertex (vs. the per-call
+    # ``body -> slot_for_pid0[body]`` dependent chain). ``inv_factor``
+    # isn't needed on the iterate hot path -- it's already folded into
+    # the row's stored ``inv_mass`` by prepare.
+    slot_a = constraints.slot_cache[cid, 0]
+    slot_b = constraints.slot_cache[cid, 1]
+    slot_c = constraints.slot_cache[cid, 2]
+    slot_d = constraints.slot_cache[cid, 3]
 
     set_access_mode_with_slot(
         bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
@@ -651,9 +646,7 @@ def soft_tetrahedron_iterate_at(
     s21 = S[2, 1]
     s22 = S[2, 2]
     s_norm_sq = (
-        s00 * s00 + s01 * s01 + s02 * s02
-        + s10 * s10 + s11 * s11 + s12 * s12
-        + s20 * s20 + s21 * s21 + s22 * s22
+        s00 * s00 + s01 * s01 + s02 * s02 + s10 * s10 + s11 * s11 + s12 * s12 + s20 * s20 + s21 * s21 + s22 * s22
     )
     c_norm = wp.sqrt(s_norm_sq + _ARAP_EPS)
 
@@ -680,12 +673,7 @@ def soft_tetrahedron_iterate_at(
         + inv_mass_c * wp.dot(g_c, g_c)
         + inv_mass_d * wp.dot(g_d, g_d)
     )
-    grad_dot_dx = (
-        wp.dot(g_a, dx_a)
-        + wp.dot(g_b, dx_b)
-        + wp.dot(g_c, dx_c)
-        + wp.dot(g_d, dx_d)
-    )
+    grad_dot_dx = wp.dot(g_a, dx_a) + wp.dot(g_b, dx_b) + wp.dot(g_c, dx_c) + wp.dot(g_d, dx_d)
     denom = (wp.float32(1.0) + gamma_mu) * grad2_im + bias_mu
 
     if denom > wp.float32(0.0):

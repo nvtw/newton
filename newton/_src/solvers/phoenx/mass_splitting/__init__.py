@@ -57,10 +57,14 @@ from newton._src.solvers.phoenx.mass_splitting.kernels import (
     launch_broadcast_rigid_to_copy_states,
     launch_copy_state_into_rigids,
 )
+from newton._src.solvers.phoenx.mass_splitting.slot_cache import (
+    build_constraint_slot_cache,
+)
 
 __all__ = [
     "CopyStateContainer",
     "InteractionGraphScratch",
+    "build_constraint_slot_cache",
     "build_interaction_graph",
     "copy_state_container_zeros",
     "get_state_index",
