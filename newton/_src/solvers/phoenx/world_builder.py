@@ -1074,6 +1074,8 @@ class WorldBuilder:
         c.orientation_prev_substep = wp.array(orientations, dtype=wp.quatf, device=device)
         c.access_mode = wp.full(n, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
         c.has_position_level_writers = wp.zeros(1, dtype=wp.int32, device=device)
+        c.island_root = wp.full(n, value=-1, dtype=wp.int32, device=device)
+        c.frames_below_threshold = wp.zeros(n, dtype=wp.int32, device=device)
         return c
 
     def _pack_joint_arrays(self, device: wp.context.Device) -> dict:
