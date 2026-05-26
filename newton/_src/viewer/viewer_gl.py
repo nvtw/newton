@@ -333,7 +333,10 @@ class ViewerGL(ViewerBase):
         # which we must emit a video frame; ``_record_last_frame_bytes``
         # caches the most recent encoded frame so repeating it (when the
         # sim is slower than the recording FPS) is cheap.
-        self._record_fps: int = 60
+        self._record_fps: float = 60.0
+        self._record_fps_text: str = "60"
+        self._record_fps_manual: bool = False
+        self._record_sim_fps: float | None = None
         self._record_next_sim_t: float | None = None
         self._record_last_frame_bytes: bytes | None = None
 
@@ -1657,7 +1660,14 @@ class ViewerGL(ViewerBase):
         Args:
             time: Current simulation time.
         """
+        prev_time = float(self.time)
         super().begin_frame(time)
+        sim_dt = float(time) - prev_time
+        if sim_dt > 0.0 and math.isfinite(sim_dt):
+            self._record_sim_fps = 1.0 / sim_dt
+            if not self._record_fps_manual and not self._recorder.is_recording:
+                self._record_fps = self._record_sim_fps
+                self._record_fps_text = self._format_record_fps(self._record_fps)
         self._gizmo_log = {}
 
     @override
@@ -1732,12 +1742,46 @@ class ViewerGL(ViewerBase):
         # Capture this frame for live MP4 recording, if active.
         self._record_frame_if_needed()
 
+    @staticmethod
+    def _format_record_fps(fps: float) -> str:
+        """Return a compact user-facing FPS string."""
+        if not math.isfinite(fps) or fps <= 0.0:
+            return "60"
+        if abs(fps - round(fps)) < 1.0e-3:
+            return str(int(round(fps)))
+        return f"{fps:.3f}".rstrip("0").rstrip(".")
+
+    def _parse_record_fps_text(self) -> float | None:
+        """Parse the recording FPS text box, returning None while invalid."""
+        try:
+            fps = float(self._record_fps_text.strip())
+        except ValueError:
+            return None
+        if not math.isfinite(fps) or fps <= 0.0:
+            return None
+        return fps
+
+    def _sync_record_fps_from_text(self) -> bool:
+        """Update ``_record_fps`` from the UI text field if it is valid."""
+        fps = self._parse_record_fps_text()
+        if fps is None:
+            return False
+        self._record_fps = fps
+        return True
+
+    def _use_simulation_record_fps(self):
+        """Reset the recording FPS text field to the current simulation rate."""
+        if self._record_sim_fps is not None:
+            self._record_fps = self._record_sim_fps
+        self._record_fps_text = self._format_record_fps(self._record_fps)
+        self._record_fps_manual = False
+
     def _start_recording(self, output_path: str | Path | None = None) -> bool:
         """Start live MP4 recording at the current framebuffer size.
 
-        The MP4 is encoded at a fixed ``self._record_fps`` and is paced by
-        the simulator's clock (``ViewerBase.time``), so the on-disk video
-        plays back in sync with sim time regardless of render speed.
+        The MP4 is encoded at the FPS selected in the Recording panel and
+        paced by the simulator's clock (``ViewerBase.time``), so the on-disk
+        video plays back in sync with sim time regardless of render speed.
 
         Args:
             output_path: Optional output file path. ``None`` selects a
@@ -1746,6 +1790,10 @@ class ViewerGL(ViewerBase):
         Returns:
             ``True`` if recording started successfully.
         """
+        if not self._sync_record_fps_from_text():
+            logger.warning("Cannot start MP4 recording: invalid recording FPS %r.", self._record_fps_text)
+            return False
+
         # Use the renderer's cached screen size — this is what get_frame()
         # validates against, so the preallocated capture buffer is
         # guaranteed to match on HiDPI/scaled displays.
@@ -1788,7 +1836,8 @@ class ViewerGL(ViewerBase):
         if not self._recorder.is_recording or self._record_next_sim_t is None:
             return
 
-        record_dt = 1.0 / float(self._record_fps)
+        record_fps = max(1.0e-6, float(self._record_fps))
+        record_dt = 1.0 / record_fps
         # Nothing to emit yet: sim has not advanced past the next slot.
         if self.time + 0.5 * record_dt < self._record_next_sim_t:
             return
@@ -1818,7 +1867,7 @@ class ViewerGL(ViewerBase):
         # Emit at least one frame; if the sim leapt forward, emit duplicates
         # to keep playback wall-clock-accurate. Cap to avoid runaway loops
         # if the sim time jumps unexpectedly (e.g. after a long pause).
-        max_emit = max(1, 4 * self._record_fps)  # at most ~4 s worth of catch-up
+        max_emit = max(1, int(math.ceil(4.0 * record_fps)))  # at most ~4 s worth of catch-up
         emitted = 0
         while self.time + 0.5 * record_dt >= self._record_next_sim_t and emitted < max_emit:
             self._recorder.write_frame_bytes(self._record_last_frame_bytes, w, h)
@@ -2864,20 +2913,30 @@ class ViewerGL(ViewerBase):
                     output_path = self._recorder.output_path
                     imgui.text("Status: recording")
                     imgui.text(f"Quality: {self._recorder.quality:.0f}/100")
-                    imgui.text(f"FPS: {self._record_fps}")
+                    imgui.text(f"FPS: {self._format_record_fps(self._record_fps)}")
                     if output_path is not None:
                         imgui.text_wrapped(str(output_path))
                     if imgui.button("Stop Recording"):
                         self._stop_recording()
                 else:
-                    # Recording FPS chooser (sim-time-paced, so playback
-                    # speed is independent of render speed).
-                    imgui.text("Recording FPS:")
-                    for choice in (30, 60, 120):
-                        if imgui.radio_button(f"{choice}##rec_fps", self._record_fps == choice):
-                            self._record_fps = choice
-                        imgui.same_line()
-                    imgui.new_line()
+                    sim_fps_text = (
+                        self._format_record_fps(self._record_sim_fps) if self._record_sim_fps is not None else "unknown"
+                    )
+                    imgui.text(f"Simulation Rate: {sim_fps_text} Hz")
+
+                    changed, fps_text = imgui.input_text("Video FPS", self._record_fps_text)
+                    if changed:
+                        self._record_fps_text = fps_text
+                        self._record_fps_manual = True
+                        self._sync_record_fps_from_text()
+
+                    if self._parse_record_fps_text() is None:
+                        imgui.text("Enter a positive FPS value.")
+
+                    if imgui.button("Use Simulation Rate"):
+                        self._use_simulation_record_fps()
+                    imgui.same_line()
+                    imgui.text("(default)")
 
                     imgui.text("Status: idle")
                     imgui.text_wrapped(str(self._recorder.suggested_output_path()))
