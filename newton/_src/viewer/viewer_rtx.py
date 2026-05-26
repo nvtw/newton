@@ -20,13 +20,14 @@ import math
 import os
 import tempfile
 import warnings
+from collections.abc import Callable, Sequence
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import warp as wp
 
-from ..core.types import override
+from ..core.types import Axis, override
 
 try:
     from pxr import Gf, UsdGeom
@@ -114,18 +115,37 @@ class ViewerRTX(ViewerUSD):
 
     def __init__(
         self,
-        width=1280,
-        height=720,
-        fps=60,
-        up_axis="Z",
-        num_frames=None,
-        scaling=1.0,
-        headless=False,
-        paused=False,
-        environment="default",
-        vsync=False,
-        async_rendering=True,
+        width: int = 1280,
+        height: int = 720,
+        vsync: bool = False,
+        headless: bool = False,
+        paused: bool = False,
+        fps: int = 60,
+        up_axis: Literal["X", "Y", "Z"] = "Z",
+        num_frames: int | None = None,
+        scaling: float = 1.0,
+        environment: Literal["default", "studio", "none"] = "default",
+        async_rendering: bool = True,
     ):
+        """Initialize the OVRTX-backed real-time ray-tracing viewer.
+
+        Args:
+            width: Window width in pixels.
+            height: Window height in pixels.
+            vsync: Enable vertical sync.
+            headless: Run in headless mode (no window).
+            paused: Start the viewer in paused mode.
+            fps: Stage frames-per-second metadata used by OVRTX.
+            up_axis: Scene up axis (``"X"``, ``"Y"`` or ``"Z"``).
+            num_frames: Number of frames to render in headless mode before
+                :meth:`is_running` returns ``False``. ``None`` means run
+                indefinitely. Ignored when a window is visible.
+            scaling: Uniform world-scale applied at the ``/root`` xform.
+            environment: Lighting preset; one of :attr:`ENVIRONMENTS`.
+            async_rendering: Submit OVRTX render work asynchronously and
+                present the previous frame while the next one is still in
+                flight.
+        """
         # FIXME: Disable USD checks in OVRTX that refuse to load the library if `usd-core` is present.
         # This is a temporary workaround until OVRTX is shipped with namespaced USD libs.
         # Note that disabling the check may cause crashes when the version of `usd-core` is the same as
@@ -1171,8 +1191,21 @@ void main() {
         return key_code in self._keys_down
 
     @override
-    def log_gizmo(self, name, transform):
-        self._gizmo_log[name] = transform
+    def log_gizmo(
+        self,
+        name: str,
+        transform: wp.transform,
+        *,
+        translate: Sequence[Axis] | None = None,
+        rotate: Sequence[Axis] | None = None,
+        snap_to: wp.transform | None = None,
+    ):
+        self._gizmo_log[name] = {
+            "transform": transform,
+            "snap_to": snap_to,
+            "translate": (Axis.X, Axis.Y, Axis.Z) if translate is None else tuple(translate),
+            "rotate": (Axis.X, Axis.Y, Axis.Z) if rotate is None else tuple(rotate),
+        }
 
     @override
     def log_state(self, state):
@@ -1585,9 +1618,13 @@ void main() {
                 if hidden or count == 0:
                     continue
 
-                if count == self._point_batch_synced_counts.get(name, count):
+                # Sentinel default ensures the first sync for a batch always
+                # falls into the rebuild branch below, which writes all the
+                # supporting attributes (scales, colors, etc.). The fast path
+                # is reserved for same-count updates that pass no new colors
+                # or radii — otherwise we'd skip refreshing them.
+                if count == self._point_batch_synced_counts.get(name, -1) and colors is None and radii is None:
                     self._write_ovrtx_array_attribute(prim_path, "positions", positions)
-                    self._point_batch_synced_counts[name] = count
                     continue
 
                 point_colors = colors if colors is not None else self._point_batch_colors.get(name)
@@ -1811,7 +1848,11 @@ void main() {
         """Render RTX-specific items inside the Rendering Options panel section."""
         _changed, self._async = imgui.checkbox("Asynchronous Rendering", self._async)
 
-    def register_ui_callback(self, callback, position="side"):
+    def register_ui_callback(
+        self,
+        callback: Callable[[Any], None],
+        position: Literal["side", "stats", "free", "panel", "rendering"] = "side",
+    ):
         """
         Register a UI callback to be rendered during the UI phase.
 
@@ -1824,6 +1865,8 @@ void main() {
                      "panel" - Top-level collapsing headers in left panel
                      "rendering" - Extra items inside the Rendering Options section
         """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
         if self.gui is not None:
             self.gui.register_ui_callback(callback, position=position)
         else:
