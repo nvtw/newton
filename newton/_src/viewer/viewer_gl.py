@@ -214,10 +214,6 @@ class ViewerGL(ViewerBase):
         if plot_history_size <= 0:
             raise ValueError("plot_history_size must be > 0")
 
-        # Pre-initialize callback registry; clear_model() (called from
-        # super().__init__()) resets the "side" slot on each model change.
-        self._ui_callbacks = {"side": [], "stats": [], "free": [], "panel": [], "rendering": []}
-
         # Rolling buffers for log_scalar() time-series plots.
         self._scalar_buffers: dict[str, collections.deque] = {}
         self._scalar_arrays: dict[str, np.ndarray | None] = {}
@@ -256,9 +252,6 @@ class ViewerGL(ViewerBase):
         self.renderer.register_mouse_scroll(self.on_mouse_scroll)
         self.renderer.register_resize(self.on_resize)
 
-        self._loading_splash_active: bool = False
-        self._loading_splash_text: str | None = None
-
         # initialize viewer-local timer for per-frame integration
         self._last_time = time.perf_counter()
 
@@ -270,11 +263,11 @@ class ViewerGL(ViewerBase):
         self._gizmo_log = None
         self.gizmo_is_using = False
 
-        # Register GL-specific rendering options (sky, shadows, wireframe, colors)
-        self._ui_callbacks["rendering"].append(self._ui_populate_rendering_panel)
-
-        # Draw image-logger floating windows outside the sidebar window.
-        self._ui_callbacks["free"].append(lambda _imgui: self._image_logger.draw())
+        if self.gui is not None:
+            # Register GL-specific rendering options (sky, shadows, wireframe, colors)
+            self.gui.register_ui_callback(self._ui_populate_rendering_panel, position="rendering")
+            # Draw image-logger floating windows outside the sidebar window.
+            self.gui.register_ui_callback(lambda _imgui: self._image_logger.draw(), position="free")
 
         # a low resolution sphere mesh for point rendering
         self._point_mesh = None
@@ -358,14 +351,30 @@ class ViewerGL(ViewerBase):
                      "panel" - Top-level collapsing headers in left panel
                      "rendering" - Extra items inside the Rendering Options section
         """
-        if not callable(callback):
-            raise TypeError("callback must be callable")
+        if self.gui is not None:
+            self.gui.register_ui_callback(callback, position=position)
 
-        if position not in self._ui_callbacks:
-            valid_positions = list(self._ui_callbacks.keys())
-            raise ValueError(f"Invalid position '{position}'. Must be one of: {valid_positions}")
+    def show_loading_splash(self, text: str | None = None) -> None:
+        """Display a centered Newton's-cradle loading splash with optional sub-label.
 
-        self._ui_callbacks[position].append(callback)
+        The splash dims the underlying scene and renders even when the rest
+        of the ImGui UI is hidden.  Call :meth:`hide_loading_splash` to
+        remove it.
+
+        Args:
+            text: Optional sub-label drawn below the cradle.
+
+        Note:
+            Not thread-safe.  Must be called on the thread that owns this
+            viewer's GL context.
+        """
+        if self.gui is not None:
+            self.gui.show_loading_splash(text)
+
+    def hide_loading_splash(self) -> None:
+        """Remove the splash set by :meth:`show_loading_splash`."""
+        if self.gui is not None:
+            self.gui.hide_loading_splash()
 
     # helper function to create a low resolution sphere mesh for point rendering
     def _create_point_mesh(self):
@@ -480,10 +489,6 @@ class ViewerGL(ViewerBase):
         self._packed_vbo_xforms = None
         self._packed_vbo_xforms_host = None
 
-        # Clear example-specific UI callbacks; panel/stats persist
-        self._ui_callbacks["side"] = []
-        self._ui_callbacks["free"] = []
-
         # Clear scalar plot buffers
         self._scalar_buffers.clear()
         self._scalar_arrays.clear()
@@ -499,6 +504,10 @@ class ViewerGL(ViewerBase):
         # opens the window after the user manually closed it).
         if getattr(self, "_image_logger", None) is not None:
             self._image_logger.clear()
+
+        # Drop example-registered side/free UI callbacks (panel/stats/rendering persist).
+        if getattr(self, "gui", None) is not None:
+            self.gui.clear_example_callbacks()
 
         super().clear_model()
 
@@ -1680,28 +1689,6 @@ class ViewerGL(ViewerBase):
         """
         return self._paused
 
-    def show_loading_splash(self, text: str | None = None) -> None:
-        """Display a centered Newton's-cradle loading splash with optional sub-label.
-
-        The splash dims the underlying scene and renders even when the rest
-        of the ImGui UI is hidden.  Call :meth:`hide_loading_splash` to
-        remove it.
-
-        Args:
-            text: Optional sub-label drawn below the cradle.
-
-        Note:
-            Not thread-safe.  Must be called on the thread that owns this
-            viewer's GL context.
-        """
-        self._loading_splash_active = True
-        self._loading_splash_text = text
-
-    def hide_loading_splash(self) -> None:
-        """Remove the splash set by :meth:`show_loading_splash`."""
-        self._loading_splash_active = False
-        self._loading_splash_text = None
-
     @override
     def should_step(self) -> bool:
         """
@@ -1931,10 +1918,6 @@ class ViewerGL(ViewerBase):
             modifiers: Active modifier bitmask for this event.
         """
         pass
-
-    def _frame_camera_on_model(self):
-        """Frame the camera to show all visible objects in the scene."""
-        self.gui.frame_camera_on_model()
 
     def _update_camera(self, dt: float):
         """

@@ -146,9 +146,6 @@ class ViewerRTX(ViewerUSD):
                 f"Unknown RTX environment {self._environment!r}. Choose from: {', '.join(self.ENVIRONMENTS)}"
             )
 
-        # Pre-initialize fields that clear_model() (called from super().__init__) touches
-        self._ui_callbacks: dict[str, list] = {"side": [], "stats": [], "free": [], "panel": [], "rendering": []}
-        self._ui_callbacks["rendering"].append(self._ui_populate_rendering_panel)
         self._paused = paused
 
         # OVRTX
@@ -180,8 +177,11 @@ class ViewerRTX(ViewerUSD):
         self._last_perf_time: float | None = None
         self.gui = None
 
-        self._loading_splash_active: bool = False
-        self._loading_splash_text: str | None = None
+        # ``gui`` is created lazily in ``_init_window``; any ``register_ui_callback`` /
+        # ``show_loading_splash`` calls that arrive before then are buffered here and
+        # flushed once the GUI exists.
+        self._pending_ui_callbacks: list[tuple] = []
+        self._pending_splash: tuple[bool, str | None] | None = None
 
         # Generate a temporary USD path to share with OVRTX renderer
         fd, output_path = tempfile.mkstemp(suffix=".usd")
@@ -346,6 +346,19 @@ void main() {
             self._should_close = True
 
         self.gui = ViewerGui(self, self._window)
+        # Register RTX-specific items in the Rendering Options panel.
+        self.gui.register_ui_callback(self._ui_populate_rendering_panel, position="rendering")
+        # Drain any registrations that arrived before the GUI was ready.
+        for callback, position in self._pending_ui_callbacks:
+            self.gui.register_ui_callback(callback, position=position)
+        self._pending_ui_callbacks = []
+        if self._pending_splash is not None:
+            active, text = self._pending_splash
+            if active:
+                self.gui.show_loading_splash(text)
+            else:
+                self.gui.hide_loading_splash()
+            self._pending_splash = None
 
     @property
     def ui(self):
@@ -418,10 +431,6 @@ void main() {
         rx = (x - vp_x) / vp_w * self.camera.width
         ry = (y - vp_y) / vp_h * self.camera.height
         return float(rx), float(ry)
-
-    def _frame_camera_on_model(self):
-        """Frame the camera to show all visible objects in the scene."""
-        self.gui.frame_camera_on_model()
 
     # -------------------------------------------------------- USD scene helpers
 
@@ -1736,15 +1745,11 @@ void main() {
 
     # ----------------------------------------------------------- viewer API
 
-    def register_ui_callback(self, callback, position="side"):
-        if position not in self._ui_callbacks:
-            valid = list(self._ui_callbacks.keys())
-            raise ValueError(f"Invalid position {position!r}. Valid: {valid}")
-        self._ui_callbacks[position].append(callback)
-
     def clear_model(self):
-        self._ui_callbacks["side"] = []
-        self._ui_callbacks["free"] = []
+        # Drop example-registered side/free UI callbacks (panel/stats/rendering persist).
+        if getattr(self, "gui", None) is not None:
+            self.gui.clear_example_callbacks()
+
         self.picking = None
         self.wind = None
 
@@ -1806,15 +1811,43 @@ void main() {
         """Render RTX-specific items inside the Rendering Options panel section."""
         _changed, self._async = imgui.checkbox("Asynchronous Rendering", self._async)
 
+    def register_ui_callback(self, callback, position="side"):
+        """
+        Register a UI callback to be rendered during the UI phase.
+
+        Args:
+            callback: Function to be called during UI rendering
+            position: Position where the UI should be rendered. One of:
+                     "side" - Side callback (default)
+                     "stats" - Stats/metrics area
+                     "free" - Free-floating UI elements
+                     "panel" - Top-level collapsing headers in left panel
+                     "rendering" - Extra items inside the Rendering Options section
+        """
+        if self.gui is not None:
+            self.gui.register_ui_callback(callback, position=position)
+        else:
+            # Buffer until the GUI window is created in ``_init_window``.
+            self._pending_ui_callbacks.append((callback, position))
+
     def show_loading_splash(self, text: str | None = None) -> None:
-        """Display a centered Newton's-cradle loading splash with optional sub-label."""
-        self._loading_splash_active = True
-        self._loading_splash_text = text
+        """Display a centered Newton's-cradle loading splash with optional sub-label.
+
+        Args:
+            text: Optional sub-label drawn below the cradle.
+        """
+        if self.gui is not None:
+            self.gui.show_loading_splash(text)
+        else:
+            # Buffer until the GUI window is created in ``_init_window``.
+            self._pending_splash = (True, text)
 
     def hide_loading_splash(self) -> None:
         """Remove the splash set by :meth:`show_loading_splash`."""
-        self._loading_splash_active = False
-        self._loading_splash_text = None
+        if self.gui is not None:
+            self.gui.hide_loading_splash()
+        else:
+            self._pending_splash = (False, None)
 
     @override
     def is_paused(self) -> bool:

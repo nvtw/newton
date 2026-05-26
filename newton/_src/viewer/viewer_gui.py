@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from time import perf_counter
+from typing import Any, Literal
 
 import numpy as np
 import warp as wp
@@ -34,6 +36,15 @@ class ViewerGui:
     def __init__(self, viewer, window):
         self._viewer = viewer
         self.ui = UI(window)
+
+        # UI callback registry. Backend viewers (GL/RTX) register their
+        # ``_ui_populate_rendering_panel`` here, examples register their
+        # ``side`` / ``free`` / ``panel`` / ``stats`` callbacks.
+        self._ui_callbacks: dict[str, list] = {"side": [], "stats": [], "free": [], "panel": [], "rendering": []}
+
+        # Loading-splash overlay state.
+        self._loading_splash_active: bool = False
+        self._loading_splash_text: str | None = None
 
         # Camera keyboard movement (shared with GL/RTX)
         self._cam_vel = np.zeros(3, dtype=np.float32)
@@ -423,19 +434,58 @@ class ViewerGui:
             self._update_fps()
         if not self.is_available:
             return
-        splash_active = bool(getattr(self._viewer, "_loading_splash_active", False))
-        if not self.show_ui and not splash_active:
+        if not self.show_ui and not self._loading_splash_active:
             return
         self.ui.begin_frame()
         if self.show_ui:
             self._render_ui()
-        if splash_active:
+        if self._loading_splash_active:
             self._render_loading_splash()
         self.ui.end_frame()
         self.ui.render()
 
-    def register_ui_callback(self, callback, position="side"):
-        self._viewer.register_ui_callback(callback, position=position)
+    def register_ui_callback(
+        self,
+        callback: Callable[[Any], None],
+        position: Literal["side", "stats", "free", "panel", "rendering"] = "side",
+    ):
+        """Register a UI callback to be rendered during the UI phase.
+
+        Args:
+            callback: Function called during UI rendering, receiving the active
+                ImGui context as its only argument.
+            position: One of ``"side"``, ``"stats"``, ``"free"``, ``"panel"``,
+                ``"rendering"``.
+        """
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        if position not in self._ui_callbacks:
+            valid_positions = list(self._ui_callbacks.keys())
+            raise ValueError(f"Invalid position '{position}'. Must be one of: {valid_positions}")
+        self._ui_callbacks[position].append(callback)
+
+    def clear_example_callbacks(self) -> None:
+        """Drop example-registered ``side`` / ``free`` callbacks across a model switch.
+
+        Backend rendering options (``rendering``) and persistent ``panel`` /
+        ``stats`` callbacks survive.
+        """
+        self._ui_callbacks["side"] = []
+        self._ui_callbacks["free"] = []
+
+    def show_loading_splash(self, text: str | None = None) -> None:
+        """Display a centered Newton's-cradle loading splash.
+
+        Args:
+            text: Optional sub-label drawn below the cradle.
+        """
+        self._loading_splash_active = True
+        self._loading_splash_text = text
+
+    def hide_loading_splash(self) -> None:
+        """Remove the splash set by :meth:`show_loading_splash`."""
+        self._loading_splash_active = False
+        self._loading_splash_text = None
 
     def _render_gizmos(self):
         viewer = self._viewer
@@ -570,7 +620,7 @@ class ViewerGui:
         """
         if not self.is_available:
             return
-        text = getattr(self._viewer, "_loading_splash_text", None)
+        text = self._loading_splash_text
         imgui = self.ui.imgui
         viewport = imgui.get_main_viewport()
 
@@ -674,7 +724,7 @@ class ViewerGui:
         self._render_stats_overlay()
         self._render_scalar_plots()
 
-        for callback in self._viewer._ui_callbacks["free"]:
+        for callback in self._ui_callbacks["free"]:
             callback(self.ui.imgui)
 
     def _render_left_panel(self):
@@ -713,7 +763,7 @@ class ViewerGui:
                 imgui.separator()
 
             # Top-level collapsing headers injected by the viewer (e.g. example browser)
-            for callback in viewer._ui_callbacks.get("panel", []):
+            for callback in self._ui_callbacks.get("panel", []):
                 callback(self.ui.imgui)
 
             if viewer.model is not None:
@@ -766,7 +816,7 @@ class ViewerGui:
 
             imgui.set_next_item_open(True, imgui.Cond_.appearing)
             if imgui.collapsing_header("Example Options"):
-                for callback in viewer._ui_callbacks["side"]:
+                for callback in self._ui_callbacks["side"]:
                     callback(self.ui.imgui)
 
             imgui.set_next_item_open(True, imgui.Cond_.appearing)
@@ -774,7 +824,7 @@ class ViewerGui:
                 imgui.separator()
                 _changed, viewer.vsync = imgui.checkbox("VSync", viewer.vsync)
                 # Viewer-specific rendering options (e.g. GL sky/shadows/wireframe)
-                for callback in viewer._ui_callbacks.get("rendering", []):
+                for callback in self._ui_callbacks.get("rendering", []):
                     callback(self.ui.imgui)
 
             wind = getattr(viewer, "wind", None)
@@ -894,7 +944,7 @@ class ViewerGui:
                 imgui.separator()
                 imgui.text(f"Unique Objects: {len(objects)}")
 
-        for callback in viewer._ui_callbacks["stats"]:
+        for callback in self._ui_callbacks["stats"]:
             callback(self.ui.imgui)
 
         imgui.end()
