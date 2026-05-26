@@ -38,12 +38,16 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_body2,
     contact_get_contact_count,
     contact_get_contact_first,
+    contact_get_count1,
+    contact_get_count2,
     contact_get_friction,
     contact_get_friction_dynamic,
     contact_get_side0_kind,
     contact_get_side0_nodes_extra,
     contact_get_side1_kind,
     contact_get_side1_nodes_extra,
+    contact_get_slot1,
+    contact_get_slot2,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -99,9 +103,6 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
     effective_mass_scalar,
 )
 from newton._src.solvers.phoenx.mass_splitting.access import (
-    get_state_index,
-    read_angular_velocity_with_slot,
-    read_velocity_unified,
     write_angular_velocity_unified,
     write_velocity_unified,
 )
@@ -266,8 +267,14 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool, has_mass_splitti
                 inv_inertia1 = bodies.inverse_inertia_world[b1]
                 inv_inertia2 = bodies.inverse_inertia_world[b2]
             else:
-                slot1, inv_factor1 = get_state_index(copy_state, b1, parallel_id)
-                slot2, inv_factor2 = get_state_index(copy_state, b2, parallel_id)
+                slot1 = contact_get_slot1(constraints, cid)
+                slot2 = contact_get_slot2(constraints, cid)
+                inv_factor1 = contact_get_count1(constraints, cid)
+                inv_factor2 = contact_get_count2(constraints, cid)
+                if inv_factor1 <= wp.int32(0):
+                    inv_factor1 = wp.int32(1)
+                if inv_factor2 <= wp.int32(0):
+                    inv_factor2 = wp.int32(1)
                 inv_factor1_f = wp.float32(inv_factor1)
                 inv_factor2_f = wp.float32(inv_factor2)
                 inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
@@ -569,10 +576,18 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool, has_mass_splitti
                 bodies.angular_velocity[b1] = w1_new
                 bodies.angular_velocity[b2] = w2_new
             else:
-                v1_cur, _vfb1, _vsb1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
-                v2_cur, _vfb2, _vsb2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
-                w1_cur = read_angular_velocity_with_slot(bodies, copy_state, b1, slot1)
-                w2_cur = read_angular_velocity_with_slot(bodies, copy_state, b2, slot2)
+                if slot1 < wp.int32(0):
+                    v1_cur = bodies.velocity[b1]
+                    w1_cur = bodies.angular_velocity[b1]
+                else:
+                    v1_cur = copy_state.velocity[slot1]
+                    w1_cur = copy_state.angular_velocity[slot1]
+                if slot2 < wp.int32(0):
+                    v2_cur = bodies.velocity[b2]
+                    w2_cur = bodies.angular_velocity[b2]
+                else:
+                    v2_cur = copy_state.velocity[slot2]
+                    w2_cur = copy_state.angular_velocity[slot2]
                 v1_new = v1_cur - inv_mass1 * total_lin_imp_on_b2
                 v2_new = v2_cur + inv_mass2 * total_lin_imp_on_b2
                 w1_new = w1_cur - inv_inertia1 @ total_ang_imp_on_b1
@@ -667,14 +682,26 @@ def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = Tru
                 slot1 = wp.int32(-1)
                 slot2 = wp.int32(-1)
             else:
-                v1, inv_factor1, slot1 = read_velocity_unified(
-                    bodies, particles, copy_state, b1, parallel_id, num_bodies
-                )
-                v2, inv_factor2, slot2 = read_velocity_unified(
-                    bodies, particles, copy_state, b2, parallel_id, num_bodies
-                )
-                w1 = read_angular_velocity_with_slot(bodies, copy_state, b1, slot1)
-                w2 = read_angular_velocity_with_slot(bodies, copy_state, b2, slot2)
+                slot1 = contact_get_slot1(constraints, cid)
+                slot2 = contact_get_slot2(constraints, cid)
+                inv_factor1 = contact_get_count1(constraints, cid)
+                inv_factor2 = contact_get_count2(constraints, cid)
+                if inv_factor1 <= wp.int32(0):
+                    inv_factor1 = wp.int32(1)
+                if inv_factor2 <= wp.int32(0):
+                    inv_factor2 = wp.int32(1)
+                if slot1 < wp.int32(0):
+                    v1 = bodies.velocity[b1]
+                    w1 = bodies.angular_velocity[b1]
+                else:
+                    v1 = copy_state.velocity[slot1]
+                    w1 = copy_state.angular_velocity[slot1]
+                if slot2 < wp.int32(0):
+                    v2 = bodies.velocity[b2]
+                    w2 = bodies.angular_velocity[b2]
+                else:
+                    v2 = copy_state.velocity[slot2]
+                    w2 = copy_state.angular_velocity[slot2]
                 inv_factor1_f = wp.float32(inv_factor1)
                 inv_factor2_f = wp.float32(inv_factor2)
                 inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f

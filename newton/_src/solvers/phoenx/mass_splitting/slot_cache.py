@@ -19,6 +19,15 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    ContactColumnContainer,
+    contact_get_body1,
+    contact_get_body2,
+    contact_set_count1,
+    contact_set_count2,
+    contact_set_slot1,
+    contact_set_slot2,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_BENDING,
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
@@ -62,6 +71,8 @@ def build_slot_cache_kernel(
     num_active_constraints: wp.array[wp.int32],
     copy_state: CopyStateContainer,
     constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    contact_offset: wp.int32,
     max_colored_partitions: wp.int32,
     ms_batch_size: wp.int32,
 ):
@@ -85,14 +96,6 @@ def build_slot_cache_kernel(
     if csr_pos >= num_active_constraints[0]:
         return
     cid = element_ids_by_color[csr_pos]
-    # ``cid`` can be either a constraint-container cid (joint / cloth /
-    # soft-tet / soft-hex range) or a contact local_cid offset past the
-    # constraint container's bounds. The slot cache is sized to the
-    # constraint container, so contact entries skip the write -- contact
-    # iterates still use :func:`get_state_index` directly.
-    if cid >= constraints.slot_cache.shape[0]:
-        return
-
     # parallel_id discovery. ``max_colored_partitions < 0`` disables the
     # overflow bucket entirely (everything stays in regular colours), so
     # parallel_id is statically 0 for every cid.
@@ -101,6 +104,22 @@ def build_slot_cache_kernel(
         overflow_start = color_starts[max_colored_partitions]
         if csr_pos >= overflow_start:
             parallel_id = (csr_pos - overflow_start) / ms_batch_size
+
+    if cid >= contact_offset:
+        local_cid = cid - contact_offset
+        if local_cid >= wp.int32(0) and local_cid < contact_cols.data.shape[1]:
+            b1 = contact_get_body1(contact_cols, local_cid)
+            b2 = contact_get_body2(contact_cols, local_cid)
+            slot1, count1 = get_state_index(copy_state, b1, parallel_id)
+            slot2, count2 = get_state_index(copy_state, b2, parallel_id)
+            contact_set_slot1(contact_cols, local_cid, slot1)
+            contact_set_slot2(contact_cols, local_cid, slot2)
+            contact_set_count1(contact_cols, local_cid, count1)
+            contact_set_count2(contact_cols, local_cid, count2)
+        return
+
+    if cid >= constraints.slot_cache.shape[0]:
+        return
 
     # Read bodies in the iterate's NATURAL order (per-ctype) so the
     # cache row aligns with the per-vertex slot lookup pattern in the
@@ -201,6 +220,8 @@ def build_constraint_slot_cache(
     num_active_constraints: wp.array,
     copy_state: CopyStateContainer,
     constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    contact_offset: int,
     max_colored_partitions: int,
     ms_batch_size: int,
 ) -> None:
@@ -214,7 +235,9 @@ def build_constraint_slot_cache(
             cid count.
         copy_state: The world's mass-splitting copy state.
         constraints: Target -- ``slot_cache`` / ``count_cache`` get
-            stamped.
+            stamped for non-contact constraints.
+        contact_cols: Target for contact endpoint slot/count caches.
+        contact_offset: First global cid belonging to contact columns.
         max_colored_partitions: Soft cap from the solver config; ``-1``
             disables overflow.
         ms_batch_size: Mass-splitting overflow batch size (matches the
@@ -235,6 +258,8 @@ def build_constraint_slot_cache(
             num_active_constraints,
             copy_state,
             constraints,
+            contact_cols,
+            wp.int32(contact_offset),
             wp.int32(max_colored_partitions),
             wp.int32(ms_batch_size),
         ],

@@ -71,12 +71,16 @@ __all__ = [
     "contact_get_body2",
     "contact_get_contact_count",
     "contact_get_contact_first",
+    "contact_get_count1",
+    "contact_get_count2",
     "contact_get_friction",
     "contact_get_friction_dynamic",
     "contact_get_side0_kind",
     "contact_get_side0_nodes_extra",
     "contact_get_side1_kind",
     "contact_get_side1_nodes_extra",
+    "contact_get_slot1",
+    "contact_get_slot2",
     "contact_iterate_at_multi",
     "contact_iterate_multi",
     "contact_pair_wrench_kernel",
@@ -88,12 +92,16 @@ __all__ = [
     "contact_set_body2",
     "contact_set_contact_count",
     "contact_set_contact_first",
+    "contact_set_count1",
+    "contact_set_count2",
     "contact_set_friction",
     "contact_set_friction_dynamic",
     "contact_set_side0_kind",
     "contact_set_side0_nodes_extra",
     "contact_set_side1_kind",
     "contact_set_side1_nodes_extra",
+    "contact_set_slot1",
+    "contact_set_slot2",
     "contact_views_make",
     "contact_world_error",
     "contact_world_error_at",
@@ -145,6 +153,16 @@ class ContactConstraintData:
     side0_nodes_extra: wp.vec3i
     side1_nodes_extra: wp.vec3i
 
+    #: Mass-splitting slot cache for rigid endpoints. Stamped once per
+    #: step after coloring; read by the contact prepare / iterate hot
+    #: path to avoid per-iteration partition-list lookup.
+    slot1: wp.int32
+    slot2: wp.int32
+    #: Per-endpoint slot count used as Tonge's inverse-mass factor.
+    #: ``1`` means no split / no slot.
+    count1: wp.int32
+    count2: wp.int32
+
     #: Opt-in per-column wall-clock accumulator (microseconds). Written
     #: atomically by the head/tail dispatch when
     #: :attr:`PhoenXWorld.enable_column_timers` is set; cleared at the
@@ -165,6 +183,10 @@ _OFF_SIDE0_KIND = wp.constant(dword_offset_of(ContactConstraintData, "side0_kind
 _OFF_SIDE1_KIND = wp.constant(dword_offset_of(ContactConstraintData, "side1_kind"))
 _OFF_SIDE0_NODES_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "side0_nodes_extra"))
 _OFF_SIDE1_NODES_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "side1_nodes_extra"))
+_OFF_SLOT1 = wp.constant(dword_offset_of(ContactConstraintData, "slot1"))
+_OFF_SLOT2 = wp.constant(dword_offset_of(ContactConstraintData, "slot2"))
+_OFF_COUNT1 = wp.constant(dword_offset_of(ContactConstraintData, "count1"))
+_OFF_COUNT2 = wp.constant(dword_offset_of(ContactConstraintData, "count2"))
 CONTACT_TIME_US_OFFSET = wp.constant(dword_offset_of(ContactConstraintData, "time_us"))
 
 
@@ -428,6 +450,46 @@ def contact_set_side1_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32
     _col_write_int(c, _OFF_SIDE1_NODES_EXTRA + wp.int32(2), local_cid, v[2])
 
 
+@wp.func
+def contact_get_slot1(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_SLOT1, local_cid)
+
+
+@wp.func
+def contact_set_slot1(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_SLOT1, local_cid, v)
+
+
+@wp.func
+def contact_get_slot2(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_SLOT2, local_cid)
+
+
+@wp.func
+def contact_set_slot2(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_SLOT2, local_cid, v)
+
+
+@wp.func
+def contact_get_count1(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_COUNT1, local_cid)
+
+
+@wp.func
+def contact_set_count1(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_COUNT1, local_cid, v)
+
+
+@wp.func
+def contact_get_count2(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    return _col_read_int(c, _OFF_COUNT2, local_cid)
+
+
+@wp.func
+def contact_set_count2(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
+    _col_write_int(c, _OFF_COUNT2, local_cid, v)
+
+
 # ---------------------------------------------------------------------------
 # Prepare / iterate (rigid single-sweep) live in
 # :mod:`constraint_contact_cloth`. One factory there generates both rigid
@@ -488,8 +550,6 @@ def contact_iterate_at_multi(
     inv_mass2 = bodies.inverse_mass[b2]
     inv_inertia1 = bodies.inverse_inertia_world[b1]
     inv_inertia2 = bodies.inverse_inertia_world[b2]
-    slot1 = wp.int32(-1)
-    slot2 = wp.int32(-1)
 
     # Body pose for per-contact lever-arm recompute.
     orientation1 = bodies.orientation[b1]

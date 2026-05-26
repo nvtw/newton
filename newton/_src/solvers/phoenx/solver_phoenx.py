@@ -2722,6 +2722,8 @@ class PhoenXWorld:
             self._num_active_constraints,
             self._copy_state,
             self.constraints,
+            self._contact_cols,
+            self._contact_offset,
             max_colored_partitions=int(self.max_colored_partitions),
             ms_batch_size=int(self.mass_splitting_batch_size),
         )
