@@ -27,6 +27,8 @@ from typing import Any, Literal
 import numpy as np
 import warp as wp
 
+import newton
+
 from ..core.types import Axis, override
 
 try:
@@ -383,7 +385,8 @@ void main() {
             self._pending_splash = None
 
     @property
-    def ui(self):
+    def ui(self) -> Any | None:
+        """Return the underlying UI object, or ``None`` if the GUI has not been created yet."""
         if self.gui is None:
             return None
         return self.gui.ui
@@ -399,7 +402,7 @@ void main() {
         return self._vsync
 
     @vsync.setter
-    def vsync(self, enabled: bool):
+    def vsync(self, enabled: bool) -> None:
         """
         Set the vsync state.
 
@@ -771,7 +774,13 @@ void main() {
     # ------------------------------------------------ ViewerUSD overrides
 
     @override
-    def set_model(self, model, max_worlds=None):
+    def set_model(self, model: newton.Model | None, max_worlds: int | None = None) -> None:
+        """Set the Newton model to visualize.
+
+        Args:
+            model: The Newton model instance.
+            max_worlds: Maximum number of worlds to render (``None`` = all).
+        """
         super().set_model(model, max_worlds=max_worlds)
         if model is not None:
             from pyglet.math import Vec3 as PyVec3
@@ -806,13 +815,25 @@ void main() {
                 )
 
     @override
-    def set_world_offsets(self, spacing):
+    def set_world_offsets(self, spacing: tuple[float, float, float] | list[float] | wp.vec3) -> None:
+        """Set world offsets and update the picking system.
+
+        Args:
+            spacing: Spacing between worlds along each axis [m].
+        """
         super().set_world_offsets(spacing)
         if self.picking is not None:
             self.picking.world_offsets = self.world_offsets
 
     @override
-    def set_camera(self, pos, pitch: float, yaw: float):
+    def set_camera(self, pos: wp.vec3, pitch: float, yaw: float) -> None:
+        """Set the camera position, pitch, and yaw.
+
+        Args:
+            pos: Camera position [m].
+            pitch: Camera pitch [deg].
+            yaw: Camera yaw [deg].
+        """
         from pyglet.math import Vec3 as PyVec3
 
         try:
@@ -1156,6 +1177,15 @@ void main() {
 
     @override
     def is_key_down(self, key: str | int) -> bool:
+        """Check whether a key is currently pressed.
+
+        Args:
+            key: Either a string representing a character/key name, or an int
+                representing a pyglet key constant.
+
+        Returns:
+            bool: True if the key is currently held down.
+        """
         pyglet = self._pyglet
         if pyglet is None:
             return False
@@ -1201,7 +1231,21 @@ void main() {
         translate: Sequence[Axis] | None = None,
         rotate: Sequence[Axis] | None = None,
         snap_to: wp.transform | None = None,
-    ):
+    ) -> None:
+        """Log a gizmo GUI element for the given name and transform.
+
+        Args:
+            name: The name of the gizmo.
+            transform: The transform of the gizmo.
+            translate: Axes on which the translation handles are shown.
+                Defaults to all axes when ``None``. Pass an empty sequence
+                to hide all translation handles.
+            rotate: Axes on which the rotation rings are shown.
+                Defaults to all axes when ``None``. Pass an empty sequence
+                to hide all rotation rings.
+            snap_to: Optional world transform to snap to when this gizmo is
+                released by the user.
+        """
         self._gizmo_log[name] = {
             "transform": transform,
             "snap_to": snap_to,
@@ -1210,7 +1254,12 @@ void main() {
         }
 
     @override
-    def log_state(self, state):
+    def log_state(self, state: newton.State) -> None:
+        """Update the viewer with the given state of the simulation.
+
+        Args:
+            state: The current state of the simulation.
+        """
         self._last_state = state
         if self.model is None:
             return
@@ -1262,7 +1311,12 @@ void main() {
         )
 
     @override
-    def apply_forces(self, state):
+    def apply_forces(self, state: newton.State) -> None:
+        """Apply viewer-driven forces (picking, wind) to the model.
+
+        Args:
+            state: The current simulation state.
+        """
         if self.picking_enabled and self.picking is not None:
             self.picking._apply_picking_force(state)
 
@@ -1270,7 +1324,12 @@ void main() {
             self.wind._apply_wind_force(state)
 
     @override
-    def begin_frame(self, time):
+    def begin_frame(self, time: float) -> None:
+        """Begin a new frame.
+
+        Args:
+            time: Current simulation time [s].
+        """
         with wp.ScopedTimer("ViewerRTX::begin_frame", active=PROFILE_ENABLED, use_nvtx=True):
             super().begin_frame(time)
             self._pending_xforms.clear()
@@ -1302,7 +1361,13 @@ void main() {
             self._last_perf_time = now
 
     @override
-    def end_frame(self):
+    def end_frame(self) -> None:
+        """Finish rendering the current frame.
+
+        On the first call, the RTX renderer is initialized from the USD stage
+        built up during the build phase; subsequent calls update transforms
+        and dispatch the next ray-traced render.
+        """
         if self._phase == self._PHASE_BUILD:
             self._init_ovrtx()
 
@@ -1316,10 +1381,51 @@ void main() {
 
     @override
     def log_mesh(
-        self, name, points, indices, normals=None, uvs=None, texture=None, hidden=False, backface_culling=True
-    ):
+        self,
+        name: str,
+        points: wp.array[wp.vec3],
+        indices: wp.array[wp.int32] | wp.array[wp.uint32],
+        normals: wp.array[wp.vec3] | None = None,
+        uvs: wp.array[wp.vec2] | None = None,
+        texture: np.ndarray | str | None = None,
+        hidden: bool = False,
+        backface_culling: bool = True,
+        color: tuple[float, float, float] | None = None,
+        roughness: float | None = None,
+        metallic: float | None = None,
+    ) -> None:
+        """Log a mesh for rendering.
+
+        Args:
+            name: Unique name for the mesh.
+            points: Vertex positions [m].
+            indices: Triangle indices.
+            normals: Vertex normals.
+            uvs: Vertex UVs.
+            texture: Texture path/URL or image array (H, W, C).
+            hidden: Whether the mesh is hidden.
+            backface_culling: Enable backface culling.
+            color: Optional base color as an RGB tuple with values in
+                [0, 1]. Used when no texture is provided.
+            roughness: Surface roughness in ``[0, 1]``. ``0`` is perfectly
+                smooth, ``1`` is fully rough.
+            metallic: Metallicity in ``[0, 1]``. ``0`` is dielectric, ``1``
+                is metal.
+        """
         if self._phase == self._PHASE_BUILD:
-            super().log_mesh(name, points, indices, normals, uvs, texture, hidden, backface_culling)
+            super().log_mesh(
+                name,
+                points,
+                indices,
+                normals,
+                uvs,
+                texture,
+                hidden,
+                backface_culling,
+                color=color,
+                roughness=roughness,
+                metallic=metallic,
+            )
             self._mesh_prim_paths[name] = self._get_path(name)
         elif name in self._mesh_prim_paths:
             pts = (
@@ -1336,7 +1442,27 @@ void main() {
                 )
 
     @override
-    def log_instances(self, name, mesh, xforms, scales, colors, materials, hidden=False):
+    def log_instances(
+        self,
+        name: str,
+        mesh: str,
+        xforms: wp.array[wp.transform] | None,
+        scales: wp.array[wp.vec3] | None,
+        colors: wp.array[wp.vec3] | None,
+        materials: wp.array[wp.vec4] | None,
+        hidden: bool = False,
+    ) -> None:
+        """Log a batch of mesh instances for rendering.
+
+        Args:
+            name: Unique name for the instancer.
+            mesh: Name of the base mesh previously registered via :meth:`log_mesh`.
+            xforms: Array of transforms.
+            scales: Array of scales.
+            colors: Array of colors.
+            materials: Array of materials.
+            hidden: Whether the instances are hidden.
+        """
         if self._phase == self._PHASE_BUILD:
             super().log_instances(name, mesh, xforms, scales, colors, materials, hidden)
             if xforms is not None:
@@ -1350,7 +1476,25 @@ void main() {
                 self._pending_xforms[name] = (xforms, scales)
 
     @override
-    def log_lines(self, name, starts, ends, colors, width: float = 0.01, hidden=False):
+    def log_lines(
+        self,
+        name: str,
+        starts: wp.array[wp.vec3] | None,
+        ends: wp.array[wp.vec3] | None,
+        colors: (wp.array[wp.vec3] | wp.array[wp.float32] | tuple[float, float, float] | list[float] | None),
+        width: float = 0.01,
+        hidden: bool = False,
+    ) -> None:
+        """Log line segments for rendering.
+
+        Args:
+            name: Unique identifier for the line batch.
+            starts: Array of line start positions [m], shape ``[N, 3]``, or ``None`` for empty.
+            ends: Array of line end positions [m], shape ``[N, 3]``, or ``None`` for empty.
+            colors: Array of per-line RGB colors, a single RGB triplet, or ``None`` for empty.
+            width: Line width [m].
+            hidden: Whether the lines are initially hidden.
+        """
         if self._phase == self._PHASE_BUILD:
             super().log_lines(name, starts, ends, colors, width, hidden)
             self._line_batch_paths[name] = self._get_path(name)
@@ -1364,7 +1508,23 @@ void main() {
             self._pending_line_batches[name] = (starts, ends, colors, float(width), bool(hidden))
 
     @override
-    def log_points(self, name, points, radii=None, colors=None, hidden=False):
+    def log_points(
+        self,
+        name: str,
+        points: wp.array[wp.vec3] | None,
+        radii: wp.array[wp.float32] | float | None = None,
+        colors: (wp.array[wp.vec3] | wp.array[wp.float32] | tuple[float, float, float] | list[float] | None) = None,
+        hidden: bool = False,
+    ) -> None:
+        """Log a batch of points for rendering as spheres.
+
+        Args:
+            name: Unique name for the point batch.
+            points: Array of point positions [m].
+            radii: Per-point radii [m] or a single radius value.
+            colors: Array of point colors, a single RGB triplet, or ``None``.
+            hidden: Whether the points are hidden.
+        """
         if self._phase == self._PHASE_BUILD:
             if points is None:
                 return None
@@ -1778,7 +1938,14 @@ void main() {
 
     # ----------------------------------------------------------- viewer API
 
-    def clear_model(self):
+    def clear_model(self) -> None:
+        """Reset RTX-specific model-dependent state to defaults.
+
+        Called when the current model is discarded (e.g. before
+        :meth:`set_model`, or when switching examples). Drops example-registered
+        UI callbacks, releases the picking and wind helpers, and drains the
+        async rendering pipeline before releasing the renderer.
+        """
         # Drop example-registered side/free UI callbacks (panel/stats/rendering persist).
         if getattr(self, "gui", None) is not None:
             self.gui.clear_example_callbacks()
@@ -1890,10 +2057,19 @@ void main() {
 
     @override
     def is_paused(self) -> bool:
+        """Check if the simulation is paused.
+
+        Returns:
+            bool: True if paused, False otherwise.
+        """
         return self._paused
 
     @override
     def should_step(self) -> bool:
+        """Return True if the loop should advance one step.
+
+        Consumes a pending single-step request, so call exactly once per frame.
+        """
         if not self._paused:
             self._step_requested = False
             return True
@@ -1912,17 +2088,29 @@ void main() {
 
     @override
     def is_running(self) -> bool:
+        """Check if the viewer is still running.
+
+        In headless mode the viewer stops once ``num_frames`` is reached.
+        In windowed mode the viewer keeps running until the user closes the
+        window, ignoring ``num_frames`` so the window does not disappear
+        unexpectedly.
+
+        Returns:
+            bool: True while the viewer should continue rendering.
+        """
         if self._should_close:
             return False
-        # In headless mode num_frames acts as a hard stop (e.g. for CI tests).
-        # In windowed mode the user closes the window themselves; ignoring
-        # num_frames prevents the window from disappearing unexpectedly.
         if self._headless and self.num_frames is not None:
             return self._frame_count < self.num_frames
         return True
 
     @override
-    def close(self):
+    def close(self) -> None:
+        """Close the viewer and release rendering resources.
+
+        Waits for any in-flight asynchronous render, releases the OVRTX
+        renderer, transform bindings, and the underlying pyglet window.
+        """
         # wait for async rendering results before closing
         if self._render_result is not None:
             self._render_result.wait().fetch()
