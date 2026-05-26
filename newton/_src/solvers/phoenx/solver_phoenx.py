@@ -570,9 +570,9 @@ class PhoenXWorld:
             # Host-side fast path: below the saturation point the picker
             # would always emit 32, so pin and skip the per-step picker.
             # Saturated small joint worlds consistently prefer tpw=16;
-            # choose it here so graph capture does not need guarded no-op
-            # 32-lane fast-tail variants. Keep dense/mixed cases on the
-            # dynamic picker unless static topology already rules them out.
+            # dense contact-only worlds prefer tpw=8 once enough worlds are
+            # resident to keep the GPU full. Pick those at construction so
+            # graph capture does not need guarded no-op fast-tail variants.
             _sm = getattr(self.device, "sm_count", 0) or 1
             self._tpw_auto: bool = self.num_worlds >= 8 * _sm
             initial_tpw = _STRAGGLER_BLOCK_DIM
@@ -585,7 +585,10 @@ class PhoenXWorld:
                 if small_joint_world:
                     self._tpw_auto = False
                     initial_tpw = 16
-                elif dense_joint_world or dense_contact_only_world:
+                elif dense_contact_only_world:
+                    self._tpw_auto = False
+                    initial_tpw = 8
+                elif dense_joint_world:
                     self._tpw_auto = False
         else:
             tpw_int = int(threads_per_world)
