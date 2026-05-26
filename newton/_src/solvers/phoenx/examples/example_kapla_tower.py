@@ -349,7 +349,7 @@ class Example:
             mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,
-            mass_splitting_batch_size=8,
+            mass_splitting_batch_size=1,
             sor_boost=1.0,
             device=self.device,
         )
