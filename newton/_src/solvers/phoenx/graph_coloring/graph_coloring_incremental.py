@@ -798,9 +798,23 @@ class IncrementalContactPartitioner:
         # 3. **JP-MIS + fixed unroll** (neither flag set): legacy
         #    behaviour for contexts where capture_while overhead
         #    dominates.
-        if self._use_speculative_coloring:
-            if self._use_capture_while_greedy:
-                wp.capture_while(self._num_remaining, self._capture_speculative_step)
+        # K=0 means every uncoloured row must spill to the overflow bucket;
+        # skip the greedy/speculative neighbour scans and let the spill kernel
+        # stamp the same overflow colour deterministically.
+        if self._max_colored_partitions_kernel_arg != 0:
+            if self._use_speculative_coloring:
+                if self._use_capture_while_greedy:
+                    wp.capture_while(self._num_remaining, self._capture_speculative_step)
+                else:
+                    outer_iters = (
+                        self._max_greedy_outer_iters_override
+                        if self._max_greedy_outer_iters_override is not None
+                        else int(MAX_GREEDY_OUTER_ITERS)
+                    )
+                    for _ in range(outer_iters):
+                        self._capture_speculative_step()
+            elif self._use_capture_while_greedy:
+                wp.capture_while(self._num_remaining, self._capture_build_csr_greedy_step)
             else:
                 outer_iters = (
                     self._max_greedy_outer_iters_override
@@ -808,17 +822,7 @@ class IncrementalContactPartitioner:
                     else int(MAX_GREEDY_OUTER_ITERS)
                 )
                 for _ in range(outer_iters):
-                    self._capture_speculative_step()
-        elif self._use_capture_while_greedy:
-            wp.capture_while(self._num_remaining, self._capture_build_csr_greedy_step)
-        else:
-            outer_iters = (
-                self._max_greedy_outer_iters_override
-                if self._max_greedy_outer_iters_override is not None
-                else int(MAX_GREEDY_OUTER_ITERS)
-            )
-            for _ in range(outer_iters):
-                self._capture_build_csr_greedy_step()
+                    self._capture_build_csr_greedy_step()
         # Force-spill anything still uncoloured into the overflow colour.
         # No-op when capture_while drained num_remaining naturally; only
         # fires when the iter-cap watcher triggered the early exit. Mass
@@ -833,6 +837,8 @@ class IncrementalContactPartitioner:
                 wp.int32(self._max_colored_partitions_kernel_arg),
             ],
         )
+        if self._max_colored_partitions_kernel_arg == 0:
+            wp.launch(greedy_clear_int_kernel, dim=1, inputs=[self._num_remaining])
         wp.launch(
             greedy_color_histogram_kernel,
             dim=self.max_num_interactions,

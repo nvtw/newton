@@ -613,14 +613,6 @@ def soft_tetrahedron_iterate_at(
     x_c = read_position_with_slot(bodies, particles, copy_state, body_c, slot_c, num_bodies)
     x_d = read_position_with_slot(bodies, particles, copy_state, body_d, slot_d, num_bodies)
 
-    # XPBD damping anchor (Macklin et al. 2020): velocity-projected
-    # damping via ``gamma * grad . (x - position_prev_substep)``;
-    # ``beta_mu == 0`` recovers bare XPBD.
-    dx_a = x_a - particles.position_prev_substep[p_a]
-    dx_b = x_b - particles.position_prev_substep[p_b]
-    dx_c = x_c - particles.position_prev_substep[p_c]
-    dx_d = x_d - particles.position_prev_substep[p_d]
-
     F = _compute_F(x_a, x_b, x_c, x_d, inv_rest)
 
     # Cheap refine of the warm-started rotation (PhysX
@@ -667,13 +659,23 @@ def soft_tetrahedron_iterate_at(
     bias_mu = idt_sq * alpha_mu
     gamma_mu = beta_mu * dt
 
+    grad_dot_dx = wp.float32(0.0)
+    if beta_mu != wp.float32(0.0):
+        # XPBD damping anchor (Macklin et al. 2020): velocity-projected
+        # damping via ``gamma * grad . (x - position_prev_substep)``;
+        # ``beta_mu == 0`` recovers bare XPBD and skips the anchor loads.
+        dx_a = x_a - particles.position_prev_substep[p_a]
+        dx_b = x_b - particles.position_prev_substep[p_b]
+        dx_c = x_c - particles.position_prev_substep[p_c]
+        dx_d = x_d - particles.position_prev_substep[p_d]
+        grad_dot_dx = wp.dot(g_a, dx_a) + wp.dot(g_b, dx_b) + wp.dot(g_c, dx_c) + wp.dot(g_d, dx_d)
+
     grad2_im = (
         inv_mass_a * wp.dot(g_a, g_a)
         + inv_mass_b * wp.dot(g_b, g_b)
         + inv_mass_c * wp.dot(g_c, g_c)
         + inv_mass_d * wp.dot(g_d, g_d)
     )
-    grad_dot_dx = wp.dot(g_a, dx_a) + wp.dot(g_b, dx_b) + wp.dot(g_c, dx_c) + wp.dot(g_d, dx_d)
     denom = (wp.float32(1.0) + gamma_mu) * grad2_im + bias_mu
 
     if denom > wp.float32(0.0):

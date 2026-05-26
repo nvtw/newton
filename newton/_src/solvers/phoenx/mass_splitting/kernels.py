@@ -134,12 +134,14 @@ def _broadcast_rigid_to_copy_states_kernel(
         # Orientation slot is unused for particles; leave the broadcast
         # default of identity. Same for angular velocity (vec3f(0)).
 
+    is_body = node_id < num_bodies
     for slot in range(start, end):
         copy_state.position[slot] = pos
-        copy_state.orientation[slot] = orient
         copy_state.velocity[slot] = vel
-        copy_state.angular_velocity[slot] = ang
         copy_state.access_mode[slot] = mode
+        if is_body:
+            copy_state.orientation[slot] = orient
+            copy_state.angular_velocity[slot] = ang
 
 
 @wp.kernel(enable_backward=False)
@@ -184,17 +186,17 @@ def _average_and_broadcast_kernel(
         start = copy_state.section_end[node_id - wp.int32(1)]
     end = start + count
 
-    # Synchronize every slot to VELOCITY_LEVEL first (C# pattern).
-    # Position-level work gets encoded as velocity deltas relative to
-    # the body / particle's substep-start snapshot.
-    for slot in range(start, end):
-        slot_synchronize_to_velocity_level(bodies, particles, copy_state, node_id, slot, num_bodies, inv_dt)
-
+    # Synchronize each slot to VELOCITY_LEVEL and accumulate it in the
+    # same pass. The synchronization is per-slot and only depends on the
+    # substep-start anchor, so a separate reread pass is redundant.
     sum_v = wp.vec3f(0.0, 0.0, 0.0)
     sum_w = wp.vec3f(0.0, 0.0, 0.0)
+    is_body = node_id < num_bodies
     for slot in range(start, end):
+        slot_synchronize_to_velocity_level(bodies, particles, copy_state, node_id, slot, num_bodies, inv_dt)
         sum_v = sum_v + copy_state.velocity[slot]
-        sum_w = sum_w + copy_state.angular_velocity[slot]
+        if is_body:
+            sum_w = sum_w + copy_state.angular_velocity[slot]
 
     inv_count = wp.float32(1.0) / wp.float32(count)
     avg_v = sum_v * inv_count
@@ -202,7 +204,8 @@ def _average_and_broadcast_kernel(
 
     for slot in range(start, end):
         copy_state.velocity[slot] = avg_v
-        copy_state.angular_velocity[slot] = avg_w
+        if is_body:
+            copy_state.angular_velocity[slot] = avg_w
 
 
 @wp.kernel(enable_backward=False)
