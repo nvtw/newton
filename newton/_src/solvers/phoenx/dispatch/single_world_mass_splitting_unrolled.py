@@ -124,7 +124,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 inv_dt=inv_dt,
             )
 
-        w._mass_splitting_writeback()
+        w._mass_splitting_writeback(already_averaged=True)
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
@@ -149,7 +149,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 inv_dt=inv_dt,
             )
 
-        w._mass_splitting_writeback()
+        w._mass_splitting_writeback(already_averaged=True)
 
 
 __all__ = ["SingleWorldMassSplittingUnrolledDispatcher"]

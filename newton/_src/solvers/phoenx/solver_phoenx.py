@@ -2649,28 +2649,25 @@ class PhoenXWorld:
             dt=self.substep_dt,
         )
 
-    def _mass_splitting_writeback(self) -> None:
-        """Write each body / particle's slot-0 velocity back to the
-        body / particle container after the PGS sweeps complete. No-op
-        when disabled.
+    def _mass_splitting_writeback(self, *, already_averaged: bool = False) -> None:
+        """Write each body / particle's slot-0 velocity back to storage.
 
-        Calls :func:`launch_average_and_broadcast` first to merge any
-        divergent slots (overflow-bucket bodies have multiple slots
-        that the iterate kernel touched Jacobi-style). After the
-        average, all of a body's slots hold the same averaged
-        velocity, so the subsequent writeback reading slot[0] picks
-        up all the per-slot impulse contributions. For bodies with a
-        single slot (regular colours, no overflow) the average is a
-        no-op.
+        Unless ``already_averaged`` is true, first merge divergent
+        overflow-bucket slots with :func:`launch_average_and_broadcast`.
+        Dispatchers pass ``already_averaged=True`` only when the
+        immediately preceding operation was that same average pass. The
+        writeback kernel still synchronizes slot 0 to velocity level, so
+        single-slot position-level writes are preserved.
         """
         inv_dt = 1.0 / self.substep_dt
-        launch_average_and_broadcast(
-            self._copy_state,
-            self.bodies,
-            self._particles_or_sentinel(),
-            num_bodies=self.num_bodies,
-            inv_dt=inv_dt,
-        )
+        if not already_averaged:
+            launch_average_and_broadcast(
+                self._copy_state,
+                self.bodies,
+                self._particles_or_sentinel(),
+                num_bodies=self.num_bodies,
+                inv_dt=inv_dt,
+            )
         launch_copy_state_into_rigids(
             self._copy_state,
             self.bodies,

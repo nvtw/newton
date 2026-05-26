@@ -85,7 +85,7 @@ class SingleWorldMassSplittingDispatcher:
         # Writeback slot[0].velocity -> body.velocity. step()'s
         # integrate_positions then advances bodies with the post-PGS
         # velocity.
-        w._mass_splitting_writeback()
+        w._mass_splitting_writeback(already_averaged=True)
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
@@ -112,7 +112,7 @@ class SingleWorldMassSplittingDispatcher:
 
         # Second writeback after relax: relax also routes through slots,
         # so the next substep would see stale body.velocity otherwise.
-        w._mass_splitting_writeback()
+        w._mass_splitting_writeback(already_averaged=True)
 
 
 __all__ = ["SingleWorldMassSplittingDispatcher"]
