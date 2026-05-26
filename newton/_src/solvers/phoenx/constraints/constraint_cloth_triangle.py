@@ -271,20 +271,18 @@ def _build_projector(xa: wp.vec3f, xb: wp.vec3f, xc: wp.vec3f):
 def _extract_rotation_2d(
     f00: wp.float32, f01: wp.float32, f10: wp.float32, f11: wp.float32, angle: wp.float32
 ) -> wp.float32:
-    """2D closest-rotation extraction (Mueller polar decomposition by
-    quaternion-axis iteration, ported to 2D). Warm-starts from
-    ``angle``."""
-    a = angle
-    for _ in range(_EXTRACT_ROT_MAX_ITERS):
-        c = wp.cos(a)
-        s = wp.sin(a)
-        cross_sum = (c * f10 - s * f00) + ((-s) * f11 - c * f01)
-        dot_sum = (c * f00 + s * f10) + ((-s) * f01 + c * f11)
-        delta = cross_sum / (wp.abs(dot_sum) + _EXTRACT_ROT_EPS)
-        a = a + delta
-        if delta < _EXTRACT_ROT_EPS and -delta < _EXTRACT_ROT_EPS:
-            break
-    return a
+    """Closest 2D rotation angle for deformation gradient ``F``.
+
+    Maximising ``trace(R(theta)^T F)`` gives the closed form
+    ``theta = atan2(f10 - f01, f00 + f11)``. Keep the previous angle
+    only for the fully degenerate case where the polar rotation is
+    undefined.
+    """
+    y = f10 - f01
+    x = f00 + f11
+    if x * x + y * y <= _EXTRACT_ROT_EPS * _EXTRACT_ROT_EPS:
+        return angle
+    return wp.atan2(y, x)
 
 
 # ---------------------------------------------------------------------------
