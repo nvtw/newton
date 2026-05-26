@@ -64,16 +64,22 @@ class SingleWorldMassSplittingDispatcher:
         w._partitioner.begin_sweep()
         w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
         launch_average_and_broadcast(
-            copy_state, bodies, particles_or_sentinel,
-            num_bodies=num_bodies, inv_dt=inv_dt,
+            copy_state,
+            bodies,
+            particles_or_sentinel,
+            num_bodies=num_bodies,
+            inv_dt=inv_dt,
         )
 
         for _ in range(w.solver_iterations):
             w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
             launch_average_and_broadcast(
-                copy_state, bodies, particles_or_sentinel,
-                num_bodies=num_bodies, inv_dt=inv_dt,
+                copy_state,
+                bodies,
+                particles_or_sentinel,
+                num_bodies=num_bodies,
+                inv_dt=inv_dt,
             )
 
         # Writeback slot[0].velocity -> body.velocity. step()'s
@@ -97,8 +103,11 @@ class SingleWorldMassSplittingDispatcher:
             w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
             launch_average_and_broadcast(
-                copy_state, bodies, particles_or_sentinel,
-                num_bodies=num_bodies, inv_dt=inv_dt,
+                copy_state,
+                bodies,
+                particles_or_sentinel,
+                num_bodies=num_bodies,
+                inv_dt=inv_dt,
             )
 
         # Second writeback after relax: relax also routes through slots,

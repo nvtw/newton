@@ -33,7 +33,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.geometry.support_function import encode_vec3
-from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, MOTION_STATIC
+from newton._src.solvers.phoenx.body import MOTION_STATIC
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,

@@ -141,8 +141,7 @@ class Example:
         q = self.state_0.particle_q.numpy()
         z_max = float(q[:, 2].max())
         assert z_max > 0.5, (
-            f"no cloth particle was caught by the box -- expected at "
-            f"least one above z=0.5, got z_max={z_max}"
+            f"no cloth particle was caught by the box -- expected at least one above z=0.5, got z_max={z_max}"
         )
 
     def render(self):

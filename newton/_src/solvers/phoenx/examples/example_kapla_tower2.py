@@ -115,7 +115,7 @@ TOWER_GRID_SPACING: tuple[float, float] = (9.0, 9.0)
 # time. Set both to ``None`` to disable. ``extents`` are full side
 # lengths in the USDA frame.
 BRICK_FILTER_BOX_CENTER: tuple[float, float, float] | None = (17.1, -25.0, 0.0)
-BRICK_FILTER_BOX_EXTENTS: tuple[float, float, float] | None = (0.05*100, 0.4*100, 1.0*100)
+BRICK_FILTER_BOX_EXTENTS: tuple[float, float, float] | None = (0.05 * 100, 0.4 * 100, 1.0 * 100)
 
 # Invisible kinematic sphere parented to the camera. PhoenX's
 # inferred-velocity path on :data:`MOTION_KINEMATIC` bodies turns
@@ -268,9 +268,7 @@ class Example:
                 raise ValueError(f"BRICK_FILTER_BOX_EXTENTS must be non-negative (got {BRICK_FILTER_BOX_EXTENTS})")
             filter_box = (fc, fh)  # type: ignore[assignment]
         elif (BRICK_FILTER_BOX_CENTER is None) ^ (BRICK_FILTER_BOX_EXTENTS is None):
-            raise ValueError(
-                "BRICK_FILTER_BOX_CENTER and BRICK_FILTER_BOX_EXTENTS must both be set or both be None"
-            )
+            raise ValueError("BRICK_FILTER_BOX_CENTER and BRICK_FILTER_BOX_EXTENTS must both be set or both be None")
         self._brick_filter_box = filter_box
 
         # Per-cell newton-id list (cell_index = j * nx + i, row-major).
@@ -285,11 +283,7 @@ class Example:
                 wz = float(pz)
                 if filter_box is not None:
                     (fcx, fcy, fcz), (fhx, fhy, fhz) = filter_box
-                    if (
-                        abs(wx - fcx) <= fhx
-                        and abs(wy - fcy) <= fhy
-                        and abs(wz - fcz) <= fhz
-                    ):
+                    if abs(wx - fcx) <= fhx and abs(wy - fcy) <= fhy and abs(wz - fcz) <= fhz:
                         num_filtered += 1
                         continue
                 body = builder.add_body(
@@ -438,9 +432,7 @@ class Example:
         # is the static world anchor in PhoenX, so we add +1 below).
         self._drift_t_start: float = time.perf_counter()
         initial_positions_np = self.bodies.position.numpy().copy()
-        flat_newton_ids: list[int] = [
-            newton_idx for cell_ids in self._brick_newton_ids for newton_idx in cell_ids
-        ]
+        flat_newton_ids: list[int] = [newton_idx for cell_ids in self._brick_newton_ids for newton_idx in cell_ids]
         self._drift_newton_ids: np.ndarray = np.asarray(flat_newton_ids, dtype=np.int64)
         self._drift_initial_positions: np.ndarray = np.asarray(
             [initial_positions_np[idx + 1] for idx in flat_newton_ids],
@@ -510,7 +502,11 @@ class Example:
             warm_start_rotate_skip_width=int(os.environ.get("PHOENX_DRIFT_ROTATE_WIDTH", "1")),
             capture_while_greedy_coloring=(os.environ.get("PHOENX_DRIFT_CAPTURE_WHILE", "1") == "1"),
             speculative_coloring=(os.environ.get("PHOENX_DRIFT_SPECULATIVE", "1") == "1"),
-            max_greedy_outer_iters=(int(os.environ.get("PHOENX_DRIFT_MAX_GREEDY_ITERS")) if os.environ.get("PHOENX_DRIFT_MAX_GREEDY_ITERS") else None),
+            max_greedy_outer_iters=(
+                int(os.environ.get("PHOENX_DRIFT_MAX_GREEDY_ITERS"))
+                if os.environ.get("PHOENX_DRIFT_MAX_GREEDY_ITERS")
+                else None
+            ),
             sor_boost=sor_boost,
             sleeping_velocity_threshold=SLEEPING_VELOCITY_THRESHOLD if ENABLE_SLEEPING else 0.0,
             sleeping_frames_required=SLEEPING_FRAMES_REQUIRED,

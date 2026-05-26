@@ -36,7 +36,6 @@ from newton._src.solvers.phoenx.examples.example_common import (
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
-
 # Scene constants. Same shape as test_cloth_mass_splitting's regression
 # scene, picked so the cube-vs-cloth contact set genuinely overflows
 # beyond the 12-colour cap -- otherwise mass splitting's overflow path
@@ -78,9 +77,7 @@ class _ClothMassSplittingScene:
             ),
             mass=_CUBE_MASS,
         )
-        builder.add_shape_box(
-            self._cube_body, hx=_CUBE_HALF_SIDE, hy=_CUBE_HALF_SIDE, hz=_CUBE_HALF_SIDE
-        )
+        builder.add_shape_box(self._cube_body, hx=_CUBE_HALF_SIDE, hy=_CUBE_HALF_SIDE, hz=_CUBE_HALF_SIDE)
 
         cloth_origin = wp.vec3(-_CLOTH_DIM_X * _CELL * 0.5, -_CLOTH_DIM_Y * _CELL * 0.5, _CLOTH_Z)
         builder.add_cloth_grid(
@@ -114,13 +111,22 @@ class _ClothMassSplittingScene:
             init_phoenx_bodies_kernel,
             dim=int(self.model.body_count),
             inputs=[
-                self.model.body_q, state_init.body_qd, self.model.body_com,
-                self.model.body_inv_mass, self.model.body_inv_inertia,
+                self.model.body_q,
+                state_init.body_qd,
+                self.model.body_com,
+                self.model.body_inv_mass,
+                self.model.body_inv_inertia,
             ],
             outputs=[
-                bodies.position, bodies.orientation, bodies.velocity,
-                bodies.angular_velocity, bodies.inverse_mass, bodies.inverse_inertia,
-                bodies.inverse_inertia_world, bodies.motion_type, bodies.body_com,
+                bodies.position,
+                bodies.orientation,
+                bodies.velocity,
+                bodies.angular_velocity,
+                bodies.inverse_mass,
+                bodies.inverse_inertia,
+                bodies.inverse_inertia_world,
+                bodies.motion_type,
+                bodies.body_com,
             ],
             device=device,
         )

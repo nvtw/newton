@@ -193,10 +193,7 @@ def _validate_independent_set(
                 test.assertNotIn(
                     bi,
                     used,
-                    msg=(
-                        f"colour {color}: body {bi} shared between two elements "
-                        f"(offender elem={eid})"
-                    ),
+                    msg=(f"colour {color}: body {bi} shared between two elements (offender elem={eid})"),
                 )
                 used.add(bi)
     test.assertTrue(seen.all(), msg=f"not every element was assigned a colour ({(~seen).sum()} missing)")

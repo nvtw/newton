@@ -614,9 +614,15 @@ def _deterministic_sum_per_triangle(per_tri: wp.array) -> tuple[float, wp.vec3, 
     V_tot = float(totals[0])
     F_tot = wp.vec3(float(totals[1]), float(totals[2]), float(totals[3]))
     S_tot = wp.mat33(
-        float(totals[4]), float(totals[5]), float(totals[6]),
-        float(totals[7]), float(totals[8]), float(totals[9]),
-        float(totals[10]), float(totals[11]), float(totals[12]),
+        float(totals[4]),
+        float(totals[5]),
+        float(totals[6]),
+        float(totals[7]),
+        float(totals[8]),
+        float(totals[9]),
+        float(totals[10]),
+        float(totals[11]),
+        float(totals[12]),
     )
     return V_tot, F_tot, S_tot
 

@@ -24,7 +24,6 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
 )
 from newton._src.solvers.phoenx.graph_coloring.luby_fixed import (
-    MAX_LUBY_COLORS,
     FixedIterationLubyPartitioner,
 )
 
@@ -186,10 +185,7 @@ class TestFixedIterationLubyPartitioner(unittest.TestCase):
                     self.assertNotIn(
                         b,
                         used,
-                        msg=(
-                            f"colour {color}: node {b} shared between two "
-                            f"elements (offender elem={eid})"
-                        ),
+                        msg=(f"colour {color}: node {b} shared between two elements (offender elem={eid})"),
                     )
                     used.add(b)
         self.assertTrue(seen.all(), msg="not every element was assigned a colour")
@@ -224,9 +220,7 @@ class TestFixedIterationLubyPartitioner(unittest.TestCase):
         for color in range(result["num_colors"]):
             if color == result["max_luby_colors"]:
                 continue  # overflow
-            count = (
-                result["color_starts"][color + 1] - result["color_starts"][color]
-            )
+            count = result["color_starts"][color + 1] - result["color_starts"][color]
             self.assertLessEqual(count, 1, msg=f"colour {color}: {count} > 1 in clique")
         self._validate_within_color_disjoint(bodies, result, overflow_color=4)
 
@@ -241,9 +235,7 @@ class TestFixedIterationLubyPartitioner(unittest.TestCase):
         result = _run_luby(bodies, num_bodies=5, device=device, max_luby_colors=2)
         overflow = result["max_luby_colors"]
         # 4-clique cannot fit in 2 colours; >=2 must spill to overflow.
-        overflow_count = int(
-            result["color_starts"][overflow + 1] - result["color_starts"][overflow]
-        )
+        overflow_count = int(result["color_starts"][overflow + 1] - result["color_starts"][overflow])
         self.assertGreaterEqual(
             overflow_count,
             2,
@@ -295,9 +287,7 @@ class TestFixedIterationLubyPartitioner(unittest.TestCase):
         )
         device = wp.get_preferred_device()
         budget = 16  # likely well below required chromatic number
-        result = _run_luby(
-            bodies, num_bodies=500, device=device, max_luby_colors=budget
-        )
+        result = _run_luby(bodies, num_bodies=500, device=device, max_luby_colors=budget)
         self._validate_within_color_disjoint(bodies, result, overflow_color=budget)
 
     # --- Determinism --------------------------------------------------

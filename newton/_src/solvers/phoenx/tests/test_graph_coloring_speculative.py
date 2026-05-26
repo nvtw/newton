@@ -164,8 +164,11 @@ class TestSpeculativeColoring(unittest.TestCase):
         elements = _make_elements(bodies_np, device)
         num_elements_arr = wp.array([bodies_np.shape[0]], dtype=wp.int32, device=device)
         p = _make_partitioner(
-            bodies_np.shape[0], num_bodies, device,
-            speculative=True, capture_while=True,
+            bodies_np.shape[0],
+            num_bodies,
+            device,
+            speculative=True,
+            capture_while=True,
         )
         result = _captured_build(p, elements, num_elements_arr, device)
         _assert_valid_coloring(self, bodies_np, result)
@@ -181,8 +184,12 @@ class TestSpeculativeColoring(unittest.TestCase):
 
         def run() -> np.ndarray:
             p = _make_partitioner(
-                bodies_np.shape[0], num_bodies, device,
-                speculative=True, capture_while=True, seed=123,
+                bodies_np.shape[0],
+                num_bodies,
+                device,
+                speculative=True,
+                capture_while=True,
+                seed=123,
             )
             r = _captured_build(p, elements, num_elements_arr, device, num_replays=1)
             return r["interaction_id_to_partition"]
@@ -202,9 +209,13 @@ class TestSpeculativeColoring(unittest.TestCase):
         elements = _make_elements(bodies_np, device)
         num_elements_arr = wp.array([bodies_np.shape[0]], dtype=wp.int32, device=device)
         p = _make_partitioner(
-            bodies_np.shape[0], num_bodies, device,
-            speculative=True, capture_while=True,
-            enable_warm_start=True, seed=7,
+            bodies_np.shape[0],
+            num_bodies,
+            device,
+            speculative=True,
+            capture_while=True,
+            enable_warm_start=True,
+            seed=7,
         )
         result = _captured_build(p, elements, num_elements_arr, device, num_replays=5)
         _assert_valid_coloring(self, bodies_np, result)
@@ -222,8 +233,11 @@ class TestWarmStartStir(unittest.TestCase):
         elements = _make_elements(bodies_np, device)
         num_elements_arr = wp.array([bodies_np.shape[0]], dtype=wp.int32, device=device)
         p = _make_partitioner(
-            bodies_np.shape[0], num_bodies, device,
-            enable_warm_start=True, capture_while=True,
+            bodies_np.shape[0],
+            num_bodies,
+            device,
+            enable_warm_start=True,
+            capture_while=True,
             rotate_skip=True,
         )
         result = _captured_build(p, elements, num_elements_arr, device, num_replays=8)
@@ -240,8 +254,11 @@ class TestWarmStartStir(unittest.TestCase):
         elements = _make_elements(bodies_np, device)
         num_elements_arr = wp.array([bodies_np.shape[0]], dtype=wp.int32, device=device)
         p = _make_partitioner(
-            bodies_np.shape[0], num_bodies, device,
-            enable_warm_start=True, capture_while=True,
+            bodies_np.shape[0],
+            num_bodies,
+            device,
+            enable_warm_start=True,
+            capture_while=True,
             invalidate_period=3,
         )
         result = _captured_build(p, elements, num_elements_arr, device, num_replays=7)

@@ -26,13 +26,12 @@ import warp as wp
 
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
-    contact_get_contact_count,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
+    _COLOR_SHIFT,
     GREEDY_MAX_COLORS,
     MAX_BODIES,
     ElementInteractionData,
-    _COLOR_SHIFT,
     element_interaction_data_get,
     greedy_color_histogram_kernel,
     greedy_count_and_scan_color_starts_kernel,
@@ -44,11 +43,10 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import (
     MAX_COLORS,
-    _GREEDY_BLOCK_DIM,
     _fill_packed_priorities_from_contacts_kernel,
+    _greedy_coloring_grid_size,
     _locality_combined_keys_kernel,
     _locality_writeback_kernel,
-    _greedy_coloring_grid_size,
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import scan_variable_length
 
@@ -157,9 +155,7 @@ def luby_coloring_kernel(
             neighbor = vertex_to_adjacent_elements[k]
             if neighbor == tid:
                 continue
-            if _luby_is_removed(
-                partition_data_concat, removed_marker, neighbor, color, luby_base, luby_marker
-            ):
+            if _luby_is_removed(partition_data_concat, removed_marker, neighbor, color, luby_base, luby_marker):
                 continue
             if packed_priorities[neighbor] > self_prio:
                 is_local_max = False
@@ -184,9 +180,7 @@ def luby_coloring_kernel(
             neighbor = vertex_to_adjacent_elements[k]
             if neighbor == tid:
                 continue
-            if _luby_is_removed(
-                partition_data_concat, removed_marker, neighbor, color, luby_base, luby_marker
-            ):
+            if _luby_is_removed(partition_data_concat, removed_marker, neighbor, color, luby_base, luby_marker):
                 continue
             removed_marker[neighbor] = luby_marker
 
@@ -245,9 +239,7 @@ class FixedIterationLubyPartitioner:
             # and use it as the colour budget directly.
             max_luby_colors = int(max_colored_partitions)
         if max_luby_colors < 1 or max_luby_colors >= int(GREEDY_MAX_COLORS):
-            raise ValueError(
-                f"max_luby_colors must be in [1, {int(GREEDY_MAX_COLORS)}); got {max_luby_colors}"
-            )
+            raise ValueError(f"max_luby_colors must be in [1, {int(GREEDY_MAX_COLORS)}); got {max_luby_colors}")
         self.max_num_interactions = max_num_interactions
         self.max_num_nodes = max_num_nodes
         self.max_luby_colors = int(max_luby_colors)
@@ -259,10 +251,7 @@ class FixedIterationLubyPartitioner:
         rng = np.random.default_rng(seed)
         priorities = rng.permutation(max_num_interactions).astype(np.int32) + 1
         if priorities.max() >= (1 << 24):
-            raise ValueError(
-                f"max_num_interactions ({max_num_interactions}) exceeds the 2^24 "
-                "packed-priority limit."
-            )
+            raise ValueError(f"max_num_interactions ({max_num_interactions}) exceeds the 2^24 packed-priority limit.")
         self._random_values = wp.from_numpy(priorities, dtype=wp.int32, device=device)
         packed_init = (priorities & 0x00FFFFFF).astype(np.int32)
         self._packed_priorities = wp.from_numpy(packed_init, dtype=wp.int32, device=device)
@@ -541,4 +530,4 @@ class FixedIterationLubyPartitioner:
         )
 
 
-__all__ = ["FixedIterationLubyPartitioner", "MAX_LUBY_COLORS", "luby_coloring_kernel"]
+__all__ = ["MAX_LUBY_COLORS", "FixedIterationLubyPartitioner", "luby_coloring_kernel"]

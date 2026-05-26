@@ -202,9 +202,7 @@ class Example:
         # Seed every slot's orientation to identity so the rotation-
         # to-matrix call in the inertia-refresh kernel doesn't blow up
         # on the zero-quaternion default.
-        bodies.orientation.assign(
-            np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32)
-        )
+        bodies.orientation.assign(np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32))
         wp.launch(
             init_phoenx_bodies_kernel,
             dim=self.model.body_count,
@@ -269,9 +267,7 @@ class Example:
         # snapshot body-local anchor offsets, so it must run *after*
         # the body container has been seeded above.
         if num_joints > 0:
-            self.world.initialize_actuated_double_ball_socket_joints(
-                **self._adbs.to_initialize_kwargs()
-            )
+            self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
 
         # ---- Viewer ---------------------------------------------------
         self._xforms = wp.zeros(num_phoenx_bodies, dtype=wp.transform, device=self.device)
@@ -407,9 +403,7 @@ class Example:
         # one strut body all three axes are parallel (the pin
         # direction); we average them later for numerical stability.
         qd_starts = [*builder.joint_qd_start, builder.joint_dof_count]
-        body_joints: list[list[tuple[np.ndarray, np.ndarray]]] = [
-            [] for _ in range(builder.body_count)
-        ]
+        body_joints: list[list[tuple[np.ndarray, np.ndarray]]] = [[] for _ in range(builder.body_count)]
         for j in range(len(builder.joint_parent)):
             if builder.joint_type[j] != newton.JointType.REVOLUTE:
                 continue
@@ -435,11 +429,7 @@ class Example:
         for shape_idx in range(n_shapes):
             body_idx = builder.shape_body[shape_idx]
             mesh_src = builder.shape_source[shape_idx]
-            if (
-                body_idx < 0
-                or mesh_src is None
-                or not hasattr(mesh_src, "vertices")
-            ):
+            if body_idx < 0 or mesh_src is None or not hasattr(mesh_src, "vertices"):
                 continue
             verts = np.asarray(mesh_src.vertices, dtype=np.float32)
             if verts.shape[0] != _TILES_PER_STRUT * 8:
@@ -465,9 +455,7 @@ class Example:
             builder.shape_source[shape_idx] = None
             builder.shape_type[shape_idx] = int(newton.GeoType.BOX)
             builder.shape_scale[shape_idx] = (0.0, 0.0, 0.0)
-            builder.shape_flags[shape_idx] = (
-                builder.shape_flags[shape_idx] & ~visible_bit & ~collide_bit
-            )
+            builder.shape_flags[shape_idx] = builder.shape_flags[shape_idx] & ~visible_bit & ~collide_bit
 
         # Add two box tiles per strut from the joint anchor triple.
         for body_idx, color in strut_data:
@@ -558,9 +546,7 @@ class Example:
         # the tile centre lies on the slab midplane.
         anchors_3d = np.stack([j[0] for j in joints])
         hinge_offsets = anchors_3d @ hinge_axis
-        plane_coords = np.stack(
-            [anchors_3d @ u, anchors_3d @ v], axis=1
-        )
+        plane_coords = np.stack([anchors_3d @ u, anchors_3d @ v], axis=1)
 
         # Pick the middle hinge: minimise distance to the midpoint
         # of the other two within the in-plane (u, v) frame.
@@ -571,11 +557,7 @@ class Example:
         )
         i_mid, i_a, i_b = min(
             order,
-            key=lambda t: float(
-                np.linalg.norm(
-                    plane_coords[t[0]] - 0.5 * (plane_coords[t[1]] + plane_coords[t[2]])
-                )
-            ),
+            key=lambda t: float(np.linalg.norm(plane_coords[t[0]] - 0.5 * (plane_coords[t[1]] + plane_coords[t[2]]))),
         )
         middle_uv = plane_coords[i_mid]
         # The strut midplane sits halfway between the two slab
@@ -608,11 +590,7 @@ class Example:
             # 0.5 mm.
             half_length = 0.5 * (anchor_distance + _TILE_HALF_WIDTH_M)
             centre_uv = middle_uv + half_length * length_dir_uv
-            centre = (
-                centre_uv[0] * u
-                + centre_uv[1] * v
-                + slab_centre_offset * hinge_axis
-            )
+            centre = centre_uv[0] * u + centre_uv[1] * v + slab_centre_offset * hinge_axis
 
             axes = np.column_stack((length_axis, width_axis, hinge_axis))
             half_extents = np.array(
@@ -710,8 +688,7 @@ class Example:
             assert np.isfinite(vel).all(), f"strut {newton_idx} vel non-finite ({vel})"
             r = float(np.linalg.norm(pos))
             assert r < radius_tolerance, (
-                f"strut {newton_idx} flew off the sphere: r={r:.3f} m, "
-                f"tol={radius_tolerance:.3f}, pos={pos}"
+                f"strut {newton_idx} flew off the sphere: r={r:.3f} m, tol={radius_tolerance:.3f}, pos={pos}"
             )
 
 

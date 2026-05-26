@@ -40,9 +40,8 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
-    get_state_index,
-    read_position_unified,
-    set_access_mode_unified,
+    read_position_with_slot,
+    set_access_mode_with_slot,
     write_position_unified,
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
@@ -323,20 +322,26 @@ def cloth_triangle_prepare_for_iteration_at(
     p_b = body_b - num_bodies
     p_c = body_c - num_bodies
 
-    # Flip access mode for each vertex (matches C# FemTriPBD prepare).
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_b, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_c, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
+    # Per-cid slot / count cache stamped by
+    # :func:`build_constraint_slot_cache`. Replaces three
+    # ``get_state_index`` walks on the prepare hot path.
+    slot_a = constraints.slot_cache[cid, 0]
+    slot_b = constraints.slot_cache[cid, 1]
+    slot_c = constraints.slot_cache[cid, 2]
+    inv_factor_a = constraints.count_cache[cid, 0]
+    inv_factor_b = constraints.count_cache[cid, 1]
+    inv_factor_c = constraints.count_cache[cid, 2]
 
-    _slot_a, inv_factor_a = get_state_index(copy_state, body_a, parallel_id)
-    _slot_b, inv_factor_b = get_state_index(copy_state, body_b, parallel_id)
-    _slot_c, inv_factor_c = get_state_index(copy_state, body_c, parallel_id)
+    # Flip access mode for each vertex (matches C# FemTriPBD prepare).
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_b, slot_b, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_c, slot_c, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
 
     write_float(constraints, _OFF_INV_MASS_A, cid, particles.inverse_mass[p_a] * wp.float32(inv_factor_a))
     write_float(constraints, _OFF_INV_MASS_B, cid, particles.inverse_mass[p_b] * wp.float32(inv_factor_b))
@@ -381,17 +386,24 @@ def cloth_triangle_iterate_at(
     p_b = body_b - num_bodies
     p_c = body_c - num_bodies
 
+    # Per-cid slot cache: one independent load per vertex vs. the
+    # ``set_access_mode_unified`` + ``read_position_unified`` chains
+    # each doing their own ``get_state_index`` walk.
+    slot_a = constraints.slot_cache[cid, 0]
+    slot_b = constraints.slot_cache[cid, 1]
+    slot_c = constraints.slot_cache[cid, 2]
+
     # Flip each vertex's access mode (slot-aware). C# FemTriPBD calls
     # SetAccessMode on every iterate too; safe to repeat -- a no-op
     # when already POSITION_LEVEL or STATIC.
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_b, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_b, slot_b, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
-    set_access_mode_unified(
-        bodies, particles, copy_state, body_c, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    set_access_mode_with_slot(
+        bodies, particles, copy_state, body_c, slot_c, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
 
     inv_mass_a = read_float(constraints, _OFF_INV_MASS_A, cid)
@@ -414,9 +426,9 @@ def cloth_triangle_iterate_at(
     # at average time is intentional (Tonge mass splitting: each iter
     # contributes ``1/N`` progress, accumulating across solver iters).
     # Matches Jitter2's ``FemTriPBD.Iterate`` single-slot pattern.
-    x_a, _ifa, slot_a = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
-    x_b, _ifb, slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
-    x_c, _ifc, slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
+    x_a = read_position_with_slot(bodies, particles, copy_state, body_a, slot_a, num_bodies)
+    x_b = read_position_with_slot(bodies, particles, copy_state, body_b, slot_b, num_bodies)
+    x_c = read_position_with_slot(bodies, particles, copy_state, body_c, slot_c, num_bodies)
     # ``dx = x - position_prev_substep`` is the XPBD damping term anchor
     # (Macklin et al. 2020 "Detailed Rigid Body Simulation with XPBD"):
     # the ``gamma * grad . dx`` term in the lambda numerator is real

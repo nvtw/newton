@@ -664,8 +664,12 @@ def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = Tru
                 slot1 = wp.int32(-1)
                 slot2 = wp.int32(-1)
             else:
-                v1, inv_factor1, slot1 = read_velocity_unified(bodies, particles, copy_state, b1, parallel_id, num_bodies)
-                v2, inv_factor2, slot2 = read_velocity_unified(bodies, particles, copy_state, b2, parallel_id, num_bodies)
+                v1, inv_factor1, slot1 = read_velocity_unified(
+                    bodies, particles, copy_state, b1, parallel_id, num_bodies
+                )
+                v2, inv_factor2, slot2 = read_velocity_unified(
+                    bodies, particles, copy_state, b2, parallel_id, num_bodies
+                )
                 w1 = read_angular_velocity_with_slot(bodies, copy_state, b1, slot1)
                 w2 = read_angular_velocity_with_slot(bodies, copy_state, b2, slot2)
                 inv_factor1_f = wp.float32(inv_factor1)
@@ -876,7 +880,9 @@ def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = Tru
 # ``@wp.func`` wrappers below reference them.
 
 contact_prepare_for_iteration_at = _make_contact_prepare_for_iteration_at(cloth_support=False)
-contact_prepare_for_iteration_at_lean = _make_contact_prepare_for_iteration_at(cloth_support=False, has_mass_splitting=False)
+contact_prepare_for_iteration_at_lean = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_mass_splitting=False
+)
 contact_prepare_for_iteration_at_cloth_aware = _make_contact_prepare_for_iteration_at(cloth_support=True)
 contact_iterate_at = _make_contact_iterate_at(cloth_support=False)
 contact_iterate_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False)

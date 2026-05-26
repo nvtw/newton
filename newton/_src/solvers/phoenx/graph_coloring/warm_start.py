@@ -18,24 +18,23 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
-    GREEDY_MAX_COLORS,
+    _COLOR_SHIFT,
     MAX_BODIES,
     ElementInteractionData,
-    _COLOR_SHIFT,
     element_interaction_data_get,
 )
 
 __all__ = [
     "WarmStartCache",
-    "warm_start_cache_zeros",
-    "warm_start_key_func",
     "binary_search_warm_start_func",
     "seed_warm_start_kernel",
-    "warm_start_invalidate_mark_kernel",
-    "warm_start_invalidate_apply_kernel",
-    "warm_start_emit_pairs_kernel",
-    "warm_start_mark_boundaries_kernel",
+    "warm_start_cache_zeros",
     "warm_start_dedup_pairs_kernel",
+    "warm_start_emit_pairs_kernel",
+    "warm_start_invalidate_apply_kernel",
+    "warm_start_invalidate_mark_kernel",
+    "warm_start_key_func",
+    "warm_start_mark_boundaries_kernel",
     "warm_start_reset_count_kernel",
 ]
 

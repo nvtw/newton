@@ -16,7 +16,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
-from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer
+from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
@@ -55,12 +55,6 @@ from newton._src.solvers.phoenx.helpers.data_packing import (
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     apply_pair_velocity_impulse,
-)
-from newton._src.solvers.phoenx.mass_splitting.access import (
-    read_angular_velocity_unified,
-    read_velocity_unified,
-    write_angular_velocity_unified,
-    write_velocity_unified,
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer

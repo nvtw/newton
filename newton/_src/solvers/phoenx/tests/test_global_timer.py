@@ -130,10 +130,7 @@ class TestGlobalTimerNative(unittest.TestCase):
         self.assertGreater(
             busy_ns,
             noop_ns,
-            msg=(
-                f"busy-spin elapsed ({busy_ns} ns) must exceed no-op "
-                f"baseline ({noop_ns} ns)"
-            ),
+            msg=(f"busy-spin elapsed ({busy_ns} ns) must exceed no-op baseline ({noop_ns} ns)"),
         )
 
     def test_more_work_takes_more_time(self) -> None:
@@ -147,10 +144,7 @@ class TestGlobalTimerNative(unittest.TestCase):
         self.assertGreater(
             large_median,
             small_median,
-            msg=(
-                f"10x workload should take longer: "
-                f"small_median={small_median} ns, large_median={large_median} ns"
-            ),
+            msg=(f"10x workload should take longer: small_median={small_median} ns, large_median={large_median} ns"),
         )
 
 

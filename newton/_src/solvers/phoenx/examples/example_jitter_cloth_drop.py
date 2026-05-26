@@ -31,7 +31,6 @@ from newton._src.solvers.phoenx.examples.example_common import (
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
-
 ENABLE_MASS_SPLITTING: bool = True
 MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
 
@@ -87,15 +86,11 @@ class Example:
             ),
             mass=5.0,
         )
-        builder.add_shape_capsule(
-            self._capsule_body, radius=capsule_radius, half_height=capsule_half
-        )
+        builder.add_shape_capsule(self._capsule_body, radius=capsule_radius, half_height=capsule_half)
 
         sphere_radius = 0.5
         self._sphere_body = builder.add_body(
-            xform=wp.transform(
-                p=wp.vec3(1.0, 0.0, drop_height + 0.5), q=wp.quat_identity()
-            ),
+            xform=wp.transform(p=wp.vec3(1.0, 0.0, drop_height + 0.5), q=wp.quat_identity()),
             mass=3.0,
         )
         builder.add_shape_sphere(self._sphere_body, radius=sphere_radius)
@@ -105,9 +100,7 @@ class Example:
         # intent (commented-out 25x25 grid + 4 corner BallSocket pins);
         # using fix_left + fix_right is the closest match in Newton's
         # add_cloth_grid API and produces equivalent behaviour.
-        cloth_origin = wp.vec3(
-            -cloth_dim * cloth_cell * 0.5, -cloth_dim * cloth_cell * 0.5, cloth_z
-        )
+        cloth_origin = wp.vec3(-cloth_dim * cloth_cell * 0.5, -cloth_dim * cloth_cell * 0.5, cloth_z)
         builder.add_cloth_grid(
             pos=cloth_origin,
             rot=wp.quat_identity(),

@@ -842,9 +842,7 @@ class TestSleepingKinematicWake(unittest.TestCase):
     kinematic" knob -- the lower-level path is the right surface.
     """
 
-    def _build_scene(
-        self, *, n_layers: int = 3, box_half: float = 0.1, pusher_radius: float = 0.15
-    ):
+    def _build_scene(self, *, n_layers: int = 3, box_half: float = 0.1, pusher_radius: float = 0.15):
         """Build a brick-stack + sphere pusher scene exactly like the
         kapla example wires up its camera collider: Newton model,
         sleeping-aware ``CollisionPipeline``, manual PhoenX body
@@ -877,7 +875,10 @@ class TestSleepingKinematicWake(unittest.TestCase):
             z = box_half + i * (2.0 * box_half + 1e-3)
             b = mb.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, z), q=wp.quat_identity()))
             mb.add_shape_box(
-                b, hx=box_half, hy=box_half, hz=box_half,
+                b,
+                hx=box_half,
+                hy=box_half,
+                hz=box_half,
                 cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.6),
             )
         # Pusher: starts 2 m away (no broad-phase contact with the
@@ -886,7 +887,8 @@ class TestSleepingKinematicWake(unittest.TestCase):
             xform=wp.transform(p=wp.vec3(2.0, 0.0, box_half), q=wp.quat_identity()),
         )
         mb.add_shape_sphere(
-            pusher_id, radius=pusher_radius,
+            pusher_id,
+            radius=pusher_radius,
             cfg=newton.ModelBuilder.ShapeConfig(density=1000.0),
         )
         mb.gravity = -GRAVITY
@@ -920,21 +922,30 @@ class TestSleepingKinematicWake(unittest.TestCase):
             bodies.orientation,
             wp.array(
                 np.tile([0.0, 0.0, 0.0, 1.0], (num_phx_bodies, 1)).astype(np.float32),
-                dtype=wp.quatf, device=device,
+                dtype=wp.quatf,
+                device=device,
             ),
         )
         wp.launch(
             init_phoenx_bodies_kernel,
             dim=model.body_count,
             inputs=[
-                model.body_q, state.body_qd, model.body_com,
-                model.body_inv_mass, model.body_inv_inertia,
+                model.body_q,
+                state.body_qd,
+                model.body_com,
+                model.body_inv_mass,
+                model.body_inv_inertia,
             ],
             outputs=[
-                bodies.position, bodies.orientation, bodies.velocity,
-                bodies.angular_velocity, bodies.inverse_mass,
-                bodies.inverse_inertia, bodies.inverse_inertia_world,
-                bodies.motion_type, bodies.body_com,
+                bodies.position,
+                bodies.orientation,
+                bodies.velocity,
+                bodies.angular_velocity,
+                bodies.inverse_mass,
+                bodies.inverse_inertia,
+                bodies.inverse_inertia_world,
+                bodies.motion_type,
+                bodies.body_com,
             ],
             device=device,
         )
@@ -1007,9 +1018,7 @@ class TestSleepingKinematicWake(unittest.TestCase):
             "device": device,
         }
 
-    def _step_frame(
-        self, scene, pusher_xyz: tuple[float, float, float], dt: float
-    ) -> None:
+    def _step_frame(self, scene, pusher_xyz: tuple[float, float, float], dt: float) -> None:
         """One outer step: stage pusher target, sync dynamic state,
         collide, step. Mirrors the kapla example's per-frame pipeline."""
         world = scene["world"]
@@ -1025,14 +1034,22 @@ class TestSleepingKinematicWake(unittest.TestCase):
         pos_arr = wp.array([pusher_xyz], dtype=wp.vec3f, device=device)
         orient_arr = wp.array([(0.0, 0.0, 0.0, 1.0)], dtype=wp.quatf, device=device)
         world.set_kinematic_poses_batch(
-            body_ids=body_id_arr, positions=pos_arr, orientations=orient_arr,
+            body_ids=body_id_arr,
+            positions=pos_arr,
+            orientations=orient_arr,
         )
         # Also patch state.body_q[pusher] so Newton's CollisionPipeline
         # broad-phase sees the live kinematic position (the kapla
         # example does this with a one-line write kernel).
         bq = state.body_q.numpy()
         bq[scene["pusher_id"]] = (
-            pusher_xyz[0], pusher_xyz[1], pusher_xyz[2], 0.0, 0.0, 0.0, 1.0,
+            pusher_xyz[0],
+            pusher_xyz[1],
+            pusher_xyz[2],
+            0.0,
+            0.0,
+            0.0,
+            1.0,
         )
         state.body_q.assign(bq)
 
@@ -1044,10 +1061,10 @@ class TestSleepingKinematicWake(unittest.TestCase):
                 dim=n - 1,
                 inputs=[state.body_q, state.body_qd, scene["model"].body_com],
                 outputs=[
-                    bodies.position[1 : n],
-                    bodies.orientation[1 : n],
-                    bodies.velocity[1 : n],
-                    bodies.angular_velocity[1 : n],
+                    bodies.position[1:n],
+                    bodies.orientation[1:n],
+                    bodies.velocity[1:n],
+                    bodies.angular_velocity[1:n],
                 ],
                 device=device,
             )
@@ -1068,10 +1085,10 @@ class TestSleepingKinematicWake(unittest.TestCase):
                 scene["phoenx_to_newton"],
                 dim=n - 1,
                 inputs=[
-                    bodies.position[1 : n],
-                    bodies.orientation[1 : n],
-                    bodies.velocity[1 : n],
-                    bodies.angular_velocity[1 : n],
+                    bodies.position[1:n],
+                    bodies.orientation[1:n],
+                    bodies.velocity[1:n],
+                    bodies.angular_velocity[1:n],
                     scene["model"].body_com,
                 ],
                 outputs=[state.body_q, state.body_qd],
@@ -1094,14 +1111,13 @@ class TestSleepingKinematicWake(unittest.TestCase):
         flags_before = (bodies.island_root.numpy() >= 0).astype(np.int32)
         for s in stack_slots:
             self.assertEqual(
-                int(flags_before[s]), 1,
-                msg=(
-                    "stack must be fully sleeping before pusher arrives; "
-                    f"got sleep flags={flags_before.tolist()}"
-                ),
+                int(flags_before[s]),
+                1,
+                msg=(f"stack must be fully sleeping before pusher arrives; got sleep flags={flags_before.tolist()}"),
             )
         self.assertEqual(
-            int(flags_before[pusher_slot]), 0,
+            int(flags_before[pusher_slot]),
+            0,
             msg="kinematic pusher must never carry a sleep flag",
         )
         positions_before = bodies.position.numpy().copy()
@@ -1115,7 +1131,8 @@ class TestSleepingKinematicWake(unittest.TestCase):
         flags_after = (bodies.island_root.numpy() >= 0).astype(np.int32)
         still_sleeping = [s for s in stack_slots if int(flags_after[s]) == 1]
         self.assertEqual(
-            still_sleeping, [],
+            still_sleeping,
+            [],
             msg=(
                 "Every stack body should have woken after the kinematic "
                 "pusher moved into the stack. "
@@ -1124,11 +1141,10 @@ class TestSleepingKinematicWake(unittest.TestCase):
             ),
         )
         positions_after = bodies.position.numpy()
-        max_disp = float(
-            np.linalg.norm(positions_after[stack_slots] - positions_before[stack_slots], axis=1).max()
-        )
+        max_disp = float(np.linalg.norm(positions_after[stack_slots] - positions_before[stack_slots], axis=1).max())
         self.assertGreater(
-            max_disp, 1e-3,
+            max_disp,
+            1e-3,
             msg=(
                 "Stack bodies did not visibly move after the kinematic "
                 f"pusher entered the column (max displacement = {max_disp:.6f} m). "

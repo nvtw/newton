@@ -47,18 +47,17 @@ from newton._src.solvers.phoenx.examples.example_common import (
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
-
-CLOTH_DIM_X = 16      # 16x8 cloth -> 17x9 = 153 particles, 256 tris
+CLOTH_DIM_X = 16  # 16x8 cloth -> 17x9 = 153 particles, 256 tris
 CLOTH_DIM_Y = 8
-CELL = 0.1            # 0.1 m per cell -> 1.6 x 0.8 m cloth
+CELL = 0.1  # 0.1 m per cell -> 1.6 x 0.8 m cloth
 CLOTH_Z = 2.0
-CUBE_DROP_DZ = 1.0    # cube starts 1 m above cloth (impact speed ~4.4 m/s)
+CUBE_DROP_DZ = 1.0  # cube starts 1 m above cloth (impact speed ~4.4 m/s)
 CUBE_HALF_SIDE = 0.2
 PARTICLE_MASS = 0.05
 CUBE_MASS = 1.0
 SUBSTEPS = 4
 SOLVER_ITERATIONS = 16
-N_FRAMES = 60         # 1 s @ 60 fps -- impact happens around frame ~30
+N_FRAMES = 60  # 1 s @ 60 fps -- impact happens around frame ~30
 DT = 1.0 / 60.0
 
 
@@ -241,9 +240,7 @@ class TestClothMassSplitting(unittest.TestCase):
 
     def _run(self, *, mass_splitting: bool):
         device = wp.get_preferred_device()
-        world, model, state, pipeline, contacts, cube_body = _build_scene(
-            mass_splitting=mass_splitting, device=device
-        )
+        world, model, state, pipeline, contacts, cube_body = _build_scene(mass_splitting=mass_splitting, device=device)
         rest_positions = model.particle_q.numpy().copy()
 
         # fix_left + fix_right pins the i=0 and i=dim_x columns of the
@@ -271,10 +268,11 @@ class TestClothMassSplitting(unittest.TestCase):
         cube_q = state.body_q.numpy()
 
         import sys
+
         bbox = positions.max(axis=0) - positions.min(axis=0)
         sys.stderr.write(
-            f"\n[diag mass_splitting={mass_splitting}] cube_z={float(cube_q[cube_body,2]):.4f} "
-            f"cloth_z=[{float(positions[:,2].min()):.4f},{float(positions[:,2].mean()):.4f},{float(positions[:,2].max()):.4f}] "
+            f"\n[diag mass_splitting={mass_splitting}] cube_z={float(cube_q[cube_body, 2]):.4f} "
+            f"cloth_z=[{float(positions[:, 2].min()):.4f},{float(positions[:, 2].mean()):.4f},{float(positions[:, 2].max()):.4f}] "
             f"bbox_z={float(bbox[2]):.4f}\n"
         )
 
@@ -292,14 +290,11 @@ class TestClothMassSplitting(unittest.TestCase):
         # 2. Pinned particles barely drifted. PBD has zero compliance at
         # the pin so this should be < a few millimetres even with
         # contact perturbations.
-        pinned_drift = np.linalg.norm(
-            positions[pinned_indices] - rest_positions[pinned_indices], axis=1
-        )
+        pinned_drift = np.linalg.norm(positions[pinned_indices] - rest_positions[pinned_indices], axis=1)
         self.assertLess(
             float(pinned_drift.max()),
             5.0e-3,
-            f"pinned particle drifted with mass_splitting={mass_splitting}: "
-            f"max drift = {pinned_drift.max():.4f} m",
+            f"pinned particle drifted with mass_splitting={mass_splitting}: max drift = {pinned_drift.max():.4f} m",
         )
 
         # 3. Cloth bounding box is sane: every axis between 1 cm and a
@@ -312,14 +307,12 @@ class TestClothMassSplitting(unittest.TestCase):
             self.assertGreater(
                 float(bbox[axis]),
                 0.01,
-                f"cloth collapsed on {label}-axis with mass_splitting={mass_splitting}: "
-                f"bbox = {bbox.tolist()}",
+                f"cloth collapsed on {label}-axis with mass_splitting={mass_splitting}: bbox = {bbox.tolist()}",
             )
             self.assertLess(
                 float(bbox[axis]),
                 cloth_side * 5.0,
-                f"cloth blew up on {label}-axis with mass_splitting={mass_splitting}: "
-                f"bbox = {bbox.tolist()}",
+                f"cloth blew up on {label}-axis with mass_splitting={mass_splitting}: bbox = {bbox.tolist()}",
             )
 
         # 4. No edge stretched / compressed wildly. Rest ratio = 1.0;
@@ -336,8 +329,7 @@ class TestClothMassSplitting(unittest.TestCase):
         self.assertLess(
             float(ratios.max()),
             3.0,
-            f"cloth edge stretched to {ratios.max():.3f}x rest with "
-            f"mass_splitting={mass_splitting}",
+            f"cloth edge stretched to {ratios.max():.3f}x rest with mass_splitting={mass_splitting}",
         )
 
         # 5. Cube must rest ON the cloth, not fall through. With the
@@ -357,8 +349,7 @@ class TestClothMassSplitting(unittest.TestCase):
         self.assertGreater(
             cube_z,
             CUBE_HALF_SIDE + 0.05,
-            f"cube ended up on / near the ground with mass_splitting={mass_splitting}: "
-            f"cube_z = {cube_z:.4f}",
+            f"cube ended up on / near the ground with mass_splitting={mass_splitting}: cube_z = {cube_z:.4f}",
         )
 
     def test_mass_splitting_off_baseline(self):

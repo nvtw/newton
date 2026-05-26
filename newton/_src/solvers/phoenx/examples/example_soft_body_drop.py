@@ -78,7 +78,7 @@ from newton._src.solvers.phoenx.timer import print_column_timings
 # enough intra-thread feedback for convergence. Tests pass with
 # ``=0``; raising it doesn't help (more launches, worse FPS).
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 0
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
 
 #: Opt-in per-column wall-clock profiling. When ``True`` the solver
 #: brackets every PGS dispatch with CUDA ``%globaltimer`` reads and

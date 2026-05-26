@@ -108,6 +108,7 @@ class TestMassSplittingConfig(unittest.TestCase):
         # is stale -- under-sizing silently drops emit_pair entries
         # and leaves bodies without their mass-splitting slot.
         from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_BODIES
+
         expected_capacity = w._constraint_capacity * int(MAX_BODIES)
         self.assertEqual(w._copy_state.position.shape[0], expected_capacity)
         self.assertEqual(w._copy_state.section_end.shape[0], w.num_bodies + w.num_particles)

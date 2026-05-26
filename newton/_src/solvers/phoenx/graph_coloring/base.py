@@ -36,8 +36,6 @@ from typing import Protocol, runtime_checkable
 
 import warp as wp
 
-from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import ElementInteractionData
-
 
 @runtime_checkable
 class ContactPartitioner(Protocol):

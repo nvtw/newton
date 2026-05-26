@@ -28,7 +28,6 @@ from newton._src.solvers.phoenx.tests.test_soft_body_mass_splitting_momentum imp
     _SoftCubeMassSplittingScene,
 )
 
-
 _N_FRAMES = 15  # impact happens around frame 6-8 at the test's drop height
 
 

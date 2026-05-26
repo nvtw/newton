@@ -34,7 +34,6 @@ from newton._src.solvers.phoenx.examples.example_common import (
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
-
 _GRAVITY = 9.81
 _SUBSTEPS = 4
 _SOLVER_ITERATIONS = 16
@@ -133,13 +132,22 @@ class _SoftCubeMassSplittingScene:
                 init_phoenx_bodies_kernel,
                 dim=int(self.model.body_count),
                 inputs=[
-                    self.model.body_q, state_init.body_qd, self.model.body_com,
-                    self.model.body_inv_mass, self.model.body_inv_inertia,
+                    self.model.body_q,
+                    state_init.body_qd,
+                    self.model.body_com,
+                    self.model.body_inv_mass,
+                    self.model.body_inv_inertia,
                 ],
                 outputs=[
-                    bodies.position, bodies.orientation, bodies.velocity,
-                    bodies.angular_velocity, bodies.inverse_mass, bodies.inverse_inertia,
-                    bodies.inverse_inertia_world, bodies.motion_type, bodies.body_com,
+                    bodies.position,
+                    bodies.orientation,
+                    bodies.velocity,
+                    bodies.angular_velocity,
+                    bodies.inverse_mass,
+                    bodies.inverse_inertia,
+                    bodies.inverse_inertia_world,
+                    bodies.motion_type,
+                    bodies.body_com,
                 ],
                 device=device,
             )
