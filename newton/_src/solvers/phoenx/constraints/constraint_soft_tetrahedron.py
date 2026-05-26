@@ -60,9 +60,9 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
-    read_position_with_slot,
-    set_access_mode_with_slot,
-    write_position_unified,
+    read_particle_position_with_slot,
+    set_particle_access_mode_with_slot,
+    write_particle_position_with_slot,
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
@@ -498,18 +498,10 @@ def soft_tetrahedron_prepare_for_iteration_at(
     inv_factor_c = constraints.count_cache[cid, 2]
     inv_factor_d = constraints.count_cache[cid, 3]
 
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_b, slot_b, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_c, slot_c, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_d, slot_d, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
+    set_particle_access_mode_with_slot(particles, copy_state, p_a, slot_a, _ACCESS_MODE_POSITION_LEVEL, idt)
+    set_particle_access_mode_with_slot(particles, copy_state, p_b, slot_b, _ACCESS_MODE_POSITION_LEVEL, idt)
+    set_particle_access_mode_with_slot(particles, copy_state, p_c, slot_c, _ACCESS_MODE_POSITION_LEVEL, idt)
+    set_particle_access_mode_with_slot(particles, copy_state, p_d, slot_d, _ACCESS_MODE_POSITION_LEVEL, idt)
 
     write_float(constraints, _OFF_INV_MASS_A, cid, particles.inverse_mass[p_a] * wp.float32(inv_factor_a))
     write_float(constraints, _OFF_INV_MASS_B, cid, particles.inverse_mass[p_b] * wp.float32(inv_factor_b))
@@ -524,10 +516,10 @@ def soft_tetrahedron_prepare_for_iteration_at(
     # it (and relying on iterate's break-out) drifts the FP momentum
     # accumulation by ~12% on the soft-body-mass-splitting momentum
     # test even though break-out exits in 1-2 iters in practice.
-    x_a = read_position_with_slot(bodies, particles, copy_state, body_a, slot_a, num_bodies)
-    x_b = read_position_with_slot(bodies, particles, copy_state, body_b, slot_b, num_bodies)
-    x_c = read_position_with_slot(bodies, particles, copy_state, body_c, slot_c, num_bodies)
-    x_d = read_position_with_slot(bodies, particles, copy_state, body_d, slot_d, num_bodies)
+    x_a = read_particle_position_with_slot(particles, copy_state, p_a, slot_a)
+    x_b = read_particle_position_with_slot(particles, copy_state, p_b, slot_b)
+    x_c = read_particle_position_with_slot(particles, copy_state, p_c, slot_c)
+    x_d = read_particle_position_with_slot(particles, copy_state, p_d, slot_d)
     inv_rest = read_mat33(constraints, _OFF_INV_REST, cid)
     F = _compute_F(x_a, x_b, x_c, x_d, inv_rest)
     rotation = read_quat(constraints, _OFF_ROTATION, cid)
@@ -584,18 +576,10 @@ def soft_tetrahedron_iterate_at(
     slot_c = constraints.slot_cache[cid, 2]
     slot_d = constraints.slot_cache[cid, 3]
 
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_b, slot_b, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_c, slot_c, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_d, slot_d, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
+    set_particle_access_mode_with_slot(particles, copy_state, p_a, slot_a, _ACCESS_MODE_POSITION_LEVEL, idt)
+    set_particle_access_mode_with_slot(particles, copy_state, p_b, slot_b, _ACCESS_MODE_POSITION_LEVEL, idt)
+    set_particle_access_mode_with_slot(particles, copy_state, p_c, slot_c, _ACCESS_MODE_POSITION_LEVEL, idt)
+    set_particle_access_mode_with_slot(particles, copy_state, p_d, slot_d, _ACCESS_MODE_POSITION_LEVEL, idt)
 
     inv_mass_a = read_float(constraints, _OFF_INV_MASS_A, cid)
     inv_mass_b = read_float(constraints, _OFF_INV_MASS_B, cid)
@@ -608,10 +592,10 @@ def soft_tetrahedron_iterate_at(
     rotation = read_quat(constraints, _OFF_ROTATION, cid)
     lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
 
-    x_a = read_position_with_slot(bodies, particles, copy_state, body_a, slot_a, num_bodies)
-    x_b = read_position_with_slot(bodies, particles, copy_state, body_b, slot_b, num_bodies)
-    x_c = read_position_with_slot(bodies, particles, copy_state, body_c, slot_c, num_bodies)
-    x_d = read_position_with_slot(bodies, particles, copy_state, body_d, slot_d, num_bodies)
+    x_a = read_particle_position_with_slot(particles, copy_state, p_a, slot_a)
+    x_b = read_particle_position_with_slot(particles, copy_state, p_b, slot_b)
+    x_c = read_particle_position_with_slot(particles, copy_state, p_c, slot_c)
+    x_d = read_particle_position_with_slot(particles, copy_state, p_d, slot_d)
 
     F = _compute_F(x_a, x_b, x_c, x_d, inv_rest)
 
@@ -687,10 +671,10 @@ def soft_tetrahedron_iterate_at(
         x_d = x_d + (d_lam * inv_mass_d) * g_d
         lambda_sum_mu = lambda_sum_mu + d_lam
 
-    write_position_unified(bodies, particles, copy_state, body_a, slot_a, num_bodies, x_a)
-    write_position_unified(bodies, particles, copy_state, body_b, slot_b, num_bodies, x_b)
-    write_position_unified(bodies, particles, copy_state, body_c, slot_c, num_bodies, x_c)
-    write_position_unified(bodies, particles, copy_state, body_d, slot_d, num_bodies, x_d)
+    write_particle_position_with_slot(particles, copy_state, p_a, slot_a, x_a)
+    write_particle_position_with_slot(particles, copy_state, p_b, slot_b, x_b)
+    write_particle_position_with_slot(particles, copy_state, p_c, slot_c, x_c)
+    write_particle_position_with_slot(particles, copy_state, p_d, slot_d, x_d)
 
     write_quat(constraints, _OFF_ROTATION, cid, rotation)
     write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, lambda_sum_mu)

@@ -332,7 +332,14 @@ def _make_contact_prepare_for_iteration_at(
                     margin1,
                     n,
                 )
-                inv_n = contact_endpoint_inv_mass_along(
+                side0_is_deformable = side0_kind == wp.int32(
+                    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE
+                ) or side0_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON)
+                side1_is_deformable = side1_kind == wp.int32(
+                    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE
+                ) or side1_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON)
+
+                inv0_n = contact_endpoint_inv_mass_along(
                     side0_kind,
                     side0_nodes,
                     bary0,
@@ -343,7 +350,36 @@ def _make_contact_prepare_for_iteration_at(
                     parallel_id,
                     p0_world,
                     n,
-                ) + contact_endpoint_inv_mass_along(
+                )
+                inv0_t1 = inv0_n
+                inv0_t2 = inv0_n
+                if not side0_is_deformable:
+                    inv0_t1 = contact_endpoint_inv_mass_along(
+                        side0_kind,
+                        side0_nodes,
+                        bary0,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        p0_world,
+                        t1_dir,
+                    )
+                    inv0_t2 = contact_endpoint_inv_mass_along(
+                        side0_kind,
+                        side0_nodes,
+                        bary0,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        p0_world,
+                        t2_dir,
+                    )
+
+                inv1_n = contact_endpoint_inv_mass_along(
                     side1_kind,
                     side1_nodes,
                     bary1,
@@ -355,52 +391,37 @@ def _make_contact_prepare_for_iteration_at(
                     p1_world,
                     n,
                 )
-                inv_t1 = contact_endpoint_inv_mass_along(
-                    side0_kind,
-                    side0_nodes,
-                    bary0,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    parallel_id,
-                    p0_world,
-                    t1_dir,
-                ) + contact_endpoint_inv_mass_along(
-                    side1_kind,
-                    side1_nodes,
-                    bary1,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    parallel_id,
-                    p1_world,
-                    t1_dir,
-                )
-                inv_t2 = contact_endpoint_inv_mass_along(
-                    side0_kind,
-                    side0_nodes,
-                    bary0,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    parallel_id,
-                    p0_world,
-                    t2_dir,
-                ) + contact_endpoint_inv_mass_along(
-                    side1_kind,
-                    side1_nodes,
-                    bary1,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    parallel_id,
-                    p1_world,
-                    t2_dir,
-                )
+                inv1_t1 = inv1_n
+                inv1_t2 = inv1_n
+                if not side1_is_deformable:
+                    inv1_t1 = contact_endpoint_inv_mass_along(
+                        side1_kind,
+                        side1_nodes,
+                        bary1,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        p1_world,
+                        t1_dir,
+                    )
+                    inv1_t2 = contact_endpoint_inv_mass_along(
+                        side1_kind,
+                        side1_nodes,
+                        bary1,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        p1_world,
+                        t2_dir,
+                    )
+
+                inv_n = inv0_n + inv1_n
+                inv_t1 = inv0_t1 + inv1_t1
+                inv_t2 = inv0_t2 + inv1_t2
                 eff_n = wp.float32(0.0)
                 if inv_n > wp.float32(1.0e-12):
                     eff_n = wp.float32(1.0) / inv_n

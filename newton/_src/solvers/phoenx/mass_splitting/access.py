@@ -37,14 +37,20 @@ __all__ = [
     "get_state_index",
     "read_angular_velocity_unified",
     "read_orientation_unified",
+    "read_particle_position_with_slot",
+    "read_particle_velocity_unified",
     "read_position_unified",
     "read_position_with_slot",
     "read_velocity_unified",
     "set_access_mode_unified",
     "set_access_mode_with_slot",
+    "set_particle_access_mode_unified",
+    "set_particle_access_mode_with_slot",
     "slot_synchronize_to_velocity_level",
     "write_angular_velocity_unified",
     "write_orientation_unified",
+    "write_particle_position_with_slot",
+    "write_particle_velocity_with_slot",
     "write_position_unified",
     "write_velocity_unified",
 ]
@@ -157,6 +163,21 @@ def read_velocity_unified(
 
 
 @wp.func
+def read_particle_velocity_unified(
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    node_id: wp.int32,
+    particle_id: wp.int32,
+    parallel_id: wp.int32,
+):
+    """Read linear velocity for a known particle endpoint."""
+    slot, inv_factor = get_state_index(copy_state, node_id, parallel_id)
+    if slot < wp.int32(0):
+        return particles.velocity[particle_id], inv_factor, slot
+    return copy_state.velocity[slot], inv_factor, slot
+
+
+@wp.func
 def read_angular_velocity_unified(
     bodies: BodyContainer,
     copy_state: CopyStateContainer,
@@ -212,6 +233,71 @@ def read_position_with_slot(
             return bodies.position[node_id]
         return particles.position[node_id - num_bodies]
     return copy_state.position[slot]
+
+
+@wp.func
+def read_particle_position_with_slot(
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    particle_id: wp.int32,
+    slot: wp.int32,
+) -> wp.vec3f:
+    """Read a particle position using a precomputed copy-state slot."""
+    if slot < wp.int32(0):
+        return particles.position[particle_id]
+    return copy_state.position[slot]
+
+
+@wp.func
+def set_particle_access_mode_with_slot(
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    particle_id: wp.int32,
+    slot: wp.int32,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Particle-only slot-aware access-mode flip.
+
+    This is the particle branch of :func:`set_access_mode_with_slot` for
+    constraints whose endpoints are known particles (soft-tets / cloth).
+    It preserves the same dual-state synchronization while skipping the
+    rigid-body orientation path.
+    """
+    if slot < wp.int32(0):
+        particle_set_access_mode(particles, particle_id, new_access_mode, inv_dt)
+        return
+
+    current = copy_state.access_mode[slot]
+    if current == new_access_mode:
+        return
+    pos_prev = particles.position_prev_substep[particle_id]
+    pos_new, vel_new, mode_new = synchronize_position_velocity(
+        copy_state.position[slot],
+        copy_state.velocity[slot],
+        pos_prev,
+        current,
+        new_access_mode,
+        inv_dt,
+    )
+    copy_state.position[slot] = pos_new
+    copy_state.velocity[slot] = vel_new
+    copy_state.access_mode[slot] = mode_new
+
+
+@wp.func
+def set_particle_access_mode_unified(
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    node_id: wp.int32,
+    particle_id: wp.int32,
+    parallel_id: wp.int32,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Slot-aware access-mode flip for a known particle endpoint."""
+    slot, _inv_factor = get_state_index(copy_state, node_id, parallel_id)
+    set_particle_access_mode_with_slot(particles, copy_state, particle_id, slot, new_access_mode, inv_dt)
 
 
 @wp.func
@@ -353,6 +439,36 @@ def write_angular_velocity_unified(
         bodies.angular_velocity[node_id] = value
         return
     copy_state.angular_velocity[slot] = value
+
+
+@wp.func
+def write_particle_position_with_slot(
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    particle_id: wp.int32,
+    slot: wp.int32,
+    value: wp.vec3f,
+):
+    """Write a particle position using a precomputed copy-state slot."""
+    if slot < wp.int32(0):
+        particles.position[particle_id] = value
+        return
+    copy_state.position[slot] = value
+
+
+@wp.func
+def write_particle_velocity_with_slot(
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    particle_id: wp.int32,
+    slot: wp.int32,
+    value: wp.vec3f,
+):
+    """Write linear velocity for a known particle endpoint."""
+    if slot < wp.int32(0):
+        particles.velocity[particle_id] = value
+        return
+    copy_state.velocity[slot] = value
 
 
 @wp.func
