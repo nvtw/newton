@@ -22,10 +22,6 @@ from typing import TYPE_CHECKING
 
 import warp as wp
 
-from newton._src.solvers.phoenx.mass_splitting import (
-    launch_average_and_broadcast,
-)
-
 if TYPE_CHECKING:
     from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
@@ -54,33 +50,16 @@ class SingleWorldMassSplittingDispatcher:
 
         inv_dt = 1.0 / w.substep_dt
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
-        particles_or_sentinel = w._particles_or_sentinel()
-        num_bodies = w.num_bodies
-        copy_state = w._copy_state
-        bodies = w.bodies
-
         # Prepare applies the warm-start impulse to each body's slots;
         # average so the iterate phase starts from converged slot values.
         w._partitioner.begin_sweep()
         w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
-        launch_average_and_broadcast(
-            copy_state,
-            bodies,
-            particles_or_sentinel,
-            num_bodies=num_bodies,
-            inv_dt=inv_dt,
-        )
+        w._mass_splitting_average_and_broadcast(inv_dt)
 
         for _ in range(w.solver_iterations):
             w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
-            launch_average_and_broadcast(
-                copy_state,
-                bodies,
-                particles_or_sentinel,
-                num_bodies=num_bodies,
-                inv_dt=inv_dt,
-            )
+            w._mass_splitting_average_and_broadcast(inv_dt)
 
         # Writeback slot[0].velocity -> body.velocity. step()'s
         # integrate_positions then advances bodies with the post-PGS
@@ -94,21 +73,10 @@ class SingleWorldMassSplittingDispatcher:
 
         inv_dt = 1.0 / w.substep_dt
         _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
-        particles_or_sentinel = w._particles_or_sentinel()
-        num_bodies = w.num_bodies
-        copy_state = w._copy_state
-        bodies = w.bodies
-
         for _ in range(w.velocity_iterations):
             w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
-            launch_average_and_broadcast(
-                copy_state,
-                bodies,
-                particles_or_sentinel,
-                num_bodies=num_bodies,
-                inv_dt=inv_dt,
-            )
+            w._mass_splitting_average_and_broadcast(inv_dt)
 
         # Second writeback after relax: relax also routes through slots,
         # so the next substep would see stale body.velocity otherwise.

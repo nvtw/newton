@@ -28,6 +28,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import (
+    ACCESS_MODE_POSITION_LEVEL,
     ACCESS_MODE_STATIC,
     ACCESS_MODE_VELOCITY_LEVEL,
 )
@@ -41,6 +42,7 @@ from newton._src.solvers.phoenx.mass_splitting.interaction_graph import (
 )
 from newton._src.solvers.phoenx.mass_splitting.kernels import (
     launch_average_and_broadcast,
+    launch_average_and_broadcast_grouped,
     launch_broadcast_rigid_to_copy_states,
     launch_copy_state_into_rigids,
 )
@@ -214,6 +216,65 @@ class TestBroadcastAverage(unittest.TestCase):
         np.testing.assert_allclose(sum_b1_v_after, sum_b1_v_before, rtol=1e-5)
         np.testing.assert_allclose(sum_b0_w_after, sum_b0_w_before, rtol=1e-5)
         np.testing.assert_allclose(sum_b1_w_after, sum_b1_w_before, rtol=1e-5)
+
+    def test_grouped_average_matches_scalar(self):
+        device = wp.get_preferred_device()
+        capacity = 16
+        num_bodies = 1
+        num_particles = 2
+        num_nodes = num_bodies + num_particles
+        bodies = body_container_zeros(num_bodies=num_bodies, device=device)
+        particles = particle_container_zeros(num_particles=num_particles, device=device)
+        cs_scalar = copy_state_container_zeros(capacity=capacity, num_nodes=num_nodes, device=device)
+        cs_grouped = copy_state_container_zeros(capacity=capacity, num_nodes=num_nodes, device=device)
+        scratch = interaction_graph_scratch_zeros(capacity=capacity, device=device)
+
+        pairs = [(0, 0), (0, 1), (0, 4), (1, 0), (1, 1), (1, 3), (2, 0), (2, 2)]
+        _seed_pairs_direct(scratch, pairs, device)
+        build_interaction_graph(scratch, cs_scalar)
+        _seed_pairs_direct(scratch, pairs, device)
+        build_interaction_graph(scratch, cs_grouped)
+
+        bodies.position_prev_substep.assign(np.asarray([(0.0, 0.0, 0.0)], dtype=np.float32))
+        bodies.orientation_prev_substep.assign(np.asarray([(0.0, 0.0, 0.0, 1.0)], dtype=np.float32))
+        particles.position_prev_substep.assign(np.asarray([(1.0, 2.0, 3.0), (-1.0, 0.5, 2.0)], dtype=np.float32))
+
+        pos = np.zeros((capacity, 3), dtype=np.float32)
+        vel = np.zeros((capacity, 3), dtype=np.float32)
+        ang = np.zeros((capacity, 3), dtype=np.float32)
+        mode = np.full(capacity, int(ACCESS_MODE_VELOCITY_LEVEL), dtype=np.int32)
+
+        pos[0] = np.array([0.01, 0.02, 0.03], dtype=np.float32)
+        mode[0] = int(ACCESS_MODE_POSITION_LEVEL)
+        vel[1] = np.array([0.5, -0.25, 0.75], dtype=np.float32)
+        ang[1] = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        vel[2] = np.array([1.0, 0.0, -1.0], dtype=np.float32)
+        ang[2] = np.array([0.3, 0.0, -0.1], dtype=np.float32)
+
+        pos[3] = np.array([1.03, 2.00, 3.00], dtype=np.float32)
+        mode[3] = int(ACCESS_MODE_POSITION_LEVEL)
+        vel[4] = np.array([0.0, 2.0, 0.0], dtype=np.float32)
+        pos[5] = np.array([0.97, 2.06, 3.00], dtype=np.float32)
+        mode[5] = int(ACCESS_MODE_POSITION_LEVEL)
+
+        vel[6] = np.array([1.0, -1.0, 0.5], dtype=np.float32)
+        pos[7] = np.array([-0.98, 0.51, 2.04], dtype=np.float32)
+        mode[7] = int(ACCESS_MODE_POSITION_LEVEL)
+
+        for cs in (cs_scalar, cs_grouped):
+            cs.position.assign(pos)
+            cs.velocity.assign(vel)
+            cs.angular_velocity.assign(ang)
+            cs.access_mode.assign(mode)
+
+        inv_dt = 100.0
+        launch_average_and_broadcast(cs_scalar, bodies, particles, num_bodies, inv_dt)
+        launch_average_and_broadcast_grouped(cs_grouped, bodies, particles, num_bodies, inv_dt)
+        wp.synchronize_device(device)
+
+        np.testing.assert_array_equal(cs_grouped.access_mode.numpy()[:8], cs_scalar.access_mode.numpy()[:8])
+        np.testing.assert_array_equal(cs_grouped.velocity.numpy()[:8], cs_scalar.velocity.numpy()[:8])
+        np.testing.assert_array_equal(cs_grouped.angular_velocity.numpy()[:3], cs_scalar.angular_velocity.numpy()[:3])
 
     def test_writeback_round_trip_identity(self):
         # Broadcast → no constraint mutation → writeback. The body

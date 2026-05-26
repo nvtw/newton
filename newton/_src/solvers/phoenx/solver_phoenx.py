@@ -129,6 +129,7 @@ from newton._src.solvers.phoenx.mass_splitting import (
     copy_state_container_zeros,
     interaction_graph_scratch_zeros,
     launch_average_and_broadcast,
+    launch_average_and_broadcast_grouped,
     launch_broadcast_rigid_to_copy_states,
     launch_copy_state_into_rigids,
     record_all_interactions_kernel,
@@ -685,6 +686,13 @@ class PhoenXWorld:
             _has_dynamic_rigid_rows = _has_dynamic_rigid_rows or bool(
                 np.any((motion_type == int(MOTION_DYNAMIC)) & (inverse_mass > 0.0))
             )
+        # The grouped average pays tile collective work for every node,
+        # including single-slot rigid nodes. Use it only for particle-
+        # dominant mass-splitting worlds where the cooperative slot
+        # broadcast wins; keep rigid-heavy scenes on the scalar path.
+        self._mass_splitting_grouped_average = bool(
+            self.mass_splitting_enabled and self.device.is_cuda and self.num_particles > self.num_bodies
+        )
         if warm_start_invalidate_period is None:
             warm_start_invalidate_period = 4 if _has_dynamic_rigid_rows else 0
         if warm_start_rotate_skip_color is None:
@@ -2720,11 +2728,32 @@ class PhoenXWorld:
             dt=self.substep_dt,
         )
 
+    def _mass_splitting_average_and_broadcast(self, inv_dt: float | None = None) -> None:
+        """Merge divergent mass-splitting slots after one PGS sweep."""
+        if inv_dt is None:
+            inv_dt = 1.0 / self.substep_dt
+        if self._mass_splitting_grouped_average:
+            launch_average_and_broadcast_grouped(
+                self._copy_state,
+                self.bodies,
+                self._particles_or_sentinel(),
+                num_bodies=self.num_bodies,
+                inv_dt=inv_dt,
+            )
+            return
+        launch_average_and_broadcast(
+            self._copy_state,
+            self.bodies,
+            self._particles_or_sentinel(),
+            num_bodies=self.num_bodies,
+            inv_dt=inv_dt,
+        )
+
     def _mass_splitting_writeback(self, *, already_averaged: bool = False) -> None:
         """Write each body / particle's slot-0 velocity back to storage.
 
         Unless ``already_averaged`` is true, first merge divergent
-        overflow-bucket slots with :func:`launch_average_and_broadcast`.
+        overflow-bucket slots with the mass-splitting average pass.
         Dispatchers pass ``already_averaged=True`` only when the
         immediately preceding operation was that same average pass. The
         writeback kernel still synchronizes slot 0 to velocity level, so
@@ -2732,13 +2761,7 @@ class PhoenXWorld:
         """
         inv_dt = 1.0 / self.substep_dt
         if not already_averaged:
-            launch_average_and_broadcast(
-                self._copy_state,
-                self.bodies,
-                self._particles_or_sentinel(),
-                num_bodies=self.num_bodies,
-                inv_dt=inv_dt,
-            )
+            self._mass_splitting_average_and_broadcast(inv_dt)
         launch_copy_state_into_rigids(
             self._copy_state,
             self.bodies,
@@ -3167,25 +3190,13 @@ class PhoenXWorld:
             # Prepare applies the warm-start impulse to each body's
             # slots. Average it so the iterate phase starts from
             # converged slot values.
-            launch_average_and_broadcast(
-                self._copy_state,
-                self.bodies,
-                self._particles_or_sentinel(),
-                num_bodies=self.num_bodies,
-                inv_dt=1.0 / self.substep_dt,
-            )
+            self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
 
         for _ in range(self.solver_iterations):
             self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
             if self.mass_splitting_enabled:
-                launch_average_and_broadcast(
-                    self._copy_state,
-                    self.bodies,
-                    self._particles_or_sentinel(),
-                    num_bodies=self.num_bodies,
-                    inv_dt=1.0 / self.substep_dt,
-                )
+                self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
 
     def _relax_velocities_singleworld(self) -> None:
         """Single-world TGS-soft relax sweeps (bias OFF)."""
@@ -3197,13 +3208,7 @@ class PhoenXWorld:
             self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
             if self.mass_splitting_enabled:
-                launch_average_and_broadcast(
-                    self._copy_state,
-                    self.bodies,
-                    self._particles_or_sentinel(),
-                    num_bodies=self.num_bodies,
-                    inv_dt=1.0 / self.substep_dt,
-                )
+                self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
 
     def _singleworld_kernels(self):
         """Return ``(prepare_head, prepare_fused, iterate_head,

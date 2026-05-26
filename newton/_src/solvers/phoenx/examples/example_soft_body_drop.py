@@ -82,7 +82,7 @@ MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 8
 #: ``%globaltimer`` reads + one atomic_add per dispatch and breaks
 #: CUDA-graph capture (the print path performs a D2H read), so leave
 #: off for benchmarks / shipped runs.
-ENABLE_COLUMN_TIMERS: bool = True
+ENABLE_COLUMN_TIMERS: bool = False
 
 
 class Example:
@@ -270,6 +270,7 @@ class Example:
             step_layout="single_world",
             mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
+            mass_splitting_unrolled=True,
             max_thread_blocks=max_thread_blocks,
             # Batch size controls the short sequential run inside each
             # overflow worker. Keep the deterministic greedy partitioner;
