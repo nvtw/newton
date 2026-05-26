@@ -58,8 +58,9 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
-    read_position_with_slot,
-    set_access_mode_with_slot,
+    get_state_index,
+    read_position_unified,
+    set_access_mode_unified,
     write_position_unified,
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
@@ -208,30 +209,23 @@ def cloth_bending_prepare_for_iteration_at(
     p_c = body_c - num_bodies
     p_d = body_d - num_bodies
 
-    # Per-cid slot / count cache stamped by
-    # :func:`build_constraint_slot_cache` -- see
-    # ``soft_tetrahedron_prepare_for_iteration_at``.
-    slot_a = constraints.slot_cache[cid, 0]
-    slot_b = constraints.slot_cache[cid, 1]
-    slot_c = constraints.slot_cache[cid, 2]
-    slot_d = constraints.slot_cache[cid, 3]
-    inv_factor_a = constraints.count_cache[cid, 0]
-    inv_factor_b = constraints.count_cache[cid, 1]
-    inv_factor_c = constraints.count_cache[cid, 2]
-    inv_factor_d = constraints.count_cache[cid, 3]
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_b, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_c, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_d, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    )
 
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_b, slot_b, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_c, slot_c, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_d, slot_d, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
-    )
+    _sa, inv_factor_a = get_state_index(copy_state, body_a, parallel_id)
+    _sb, inv_factor_b = get_state_index(copy_state, body_b, parallel_id)
+    _sc, inv_factor_c = get_state_index(copy_state, body_c, parallel_id)
+    _sd, inv_factor_d = get_state_index(copy_state, body_d, parallel_id)
 
     write_float(constraints, _OFF_INV_MASS_A, cid, particles.inverse_mass[p_a] * wp.float32(inv_factor_a))
     write_float(constraints, _OFF_INV_MASS_B, cid, particles.inverse_mass[p_b] * wp.float32(inv_factor_b))
@@ -265,22 +259,17 @@ def cloth_bending_iterate_at(
     body_c = read_int(constraints, _OFF_BODY3, cid)
     body_d = read_int(constraints, _OFF_BODY4, cid)
 
-    slot_a = constraints.slot_cache[cid, 0]
-    slot_b = constraints.slot_cache[cid, 1]
-    slot_c = constraints.slot_cache[cid, 2]
-    slot_d = constraints.slot_cache[cid, 3]
-
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_a, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_b, slot_b, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_b, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_c, slot_c, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_c, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
-    set_access_mode_with_slot(
-        bodies, particles, copy_state, body_d, slot_d, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
+    set_access_mode_unified(
+        bodies, particles, copy_state, body_d, parallel_id, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
     )
 
     rest_angle = read_float(constraints, _OFF_REST_ANGLE, cid)
@@ -292,10 +281,10 @@ def cloth_bending_iterate_at(
     inv_mass_c = read_float(constraints, _OFF_INV_MASS_C, cid)
     inv_mass_d = read_float(constraints, _OFF_INV_MASS_D, cid)
 
-    x0 = read_position_with_slot(bodies, particles, copy_state, body_a, slot_a, num_bodies)
-    x1 = read_position_with_slot(bodies, particles, copy_state, body_b, slot_b, num_bodies)
-    x2 = read_position_with_slot(bodies, particles, copy_state, body_c, slot_c, num_bodies)
-    x3 = read_position_with_slot(bodies, particles, copy_state, body_d, slot_d, num_bodies)
+    x0, _ifa, slot_a = read_position_unified(bodies, particles, copy_state, body_a, parallel_id, num_bodies)
+    x1, _ifb, slot_b = read_position_unified(bodies, particles, copy_state, body_b, parallel_id, num_bodies)
+    x2, _ifc, slot_c = read_position_unified(bodies, particles, copy_state, body_c, parallel_id, num_bodies)
+    x3, _ifd, slot_d = read_position_unified(bodies, particles, copy_state, body_d, parallel_id, num_bodies)
 
     x02 = x2 - x0
     x03 = x3 - x0

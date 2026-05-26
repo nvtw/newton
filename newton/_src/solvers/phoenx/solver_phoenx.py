@@ -2720,7 +2720,6 @@ class PhoenXWorld:
             self._partitioner.element_ids_by_color,
             self._partitioner.color_starts,
             self._num_active_constraints,
-            self._elements,
             self._copy_state,
             self.constraints,
             max_colored_partitions=int(self.max_colored_partitions),

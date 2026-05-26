@@ -19,14 +19,35 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer
-from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
-    MAX_BODIES,
-    ElementInteractionData,
-    element_interaction_data_get,
+from newton._src.solvers.phoenx.constraints.constraint_container import (
+    CONSTRAINT_TYPE_CLOTH_BENDING,
+    CONSTRAINT_TYPE_CLOTH_TRIANGLE,
+    CONSTRAINT_TYPE_SOFT_HEXAHEDRON,
+    CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
+    CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN,
+    ConstraintContainer,
+    constraint_get_type,
+    read_int,
 )
 from newton._src.solvers.phoenx.mass_splitting.access import get_state_index
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
+
+#: ConstraintContainer body-field offsets per type. Must match the
+#: schemas in :mod:`constraints.constraint_*` (kept in sync with
+#: ``_<TYPE>_OFF_BODY*`` in :mod:`solver_phoenx_kernels`). The natural
+#: body order matters because the iterate / prepare functions read
+#: ``slot_cache[cid, v]`` indexed by the SAME ordinal that they read
+#: ``body{v+1}`` from the constraint row -- if the cache stored
+#: compacted (pinned-dropped) order, the slot for vertex ``v`` would
+#: end up routed to the wrong body in pinned-cloth scenes.
+_OFF_BODY1 = wp.constant(wp.int32(1))
+_OFF_BODY2 = wp.constant(wp.int32(2))
+_OFF_BODY3 = wp.constant(wp.int32(3))
+_OFF_BODY4 = wp.constant(wp.int32(4))
+_OFF_BODY5 = wp.constant(wp.int32(5))
+_OFF_BODY6 = wp.constant(wp.int32(6))
+_OFF_BODY7 = wp.constant(wp.int32(7))
+_OFF_BODY8 = wp.constant(wp.int32(8))
 
 __all__ = [
     "build_constraint_slot_cache",
@@ -39,7 +60,6 @@ def build_slot_cache_kernel(
     element_ids_by_color: wp.array[wp.int32],
     color_starts: wp.array[wp.int32],
     num_active_constraints: wp.array[wp.int32],
-    elements: wp.array[ElementInteractionData],
     copy_state: CopyStateContainer,
     constraints: ConstraintContainer,
     max_colored_partitions: wp.int32,
@@ -82,23 +102,103 @@ def build_slot_cache_kernel(
         if csr_pos >= overflow_start:
             parallel_id = (csr_pos - overflow_start) / ms_batch_size
 
-    el = elements[cid]
-    for v in range(MAX_BODIES):
-        body = element_interaction_data_get(el, v)
-        if body < wp.int32(0):
-            constraints.slot_cache[cid, v] = wp.int32(-1)
-            constraints.count_cache[cid, v] = wp.int32(1)
-            continue
-        slot, count = get_state_index(copy_state, body, parallel_id)
-        constraints.slot_cache[cid, v] = slot
-        constraints.count_cache[cid, v] = count
+    # Read bodies in the iterate's NATURAL order (per-ctype) so the
+    # cache row aligns with the per-vertex slot lookup pattern in the
+    # iterate / prepare functions. ``elements[cid]`` is compacted
+    # (pinned particles dropped + reordered to a contiguous prefix) and
+    # is the correct shape for the adjacency / partitioner, but the
+    # WRONG shape for iterate-time slot lookup: e.g. a cloth triangle
+    # with body2 pinned has ``elements[cid].bodies = (body1, body3,
+    # -1, ...)`` while the iterate reads ``body_a, body_b, body_c`` at
+    # constraint-row offsets ``BODY1, BODY2, BODY3``. Reading from the
+    # constraint row preserves the natural order for every type.
+    ctype = constraint_get_type(constraints, cid)
+    if ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON or ctype == CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN:
+        b0 = read_int(constraints, _OFF_BODY1, cid)
+        b1 = read_int(constraints, _OFF_BODY2, cid)
+        b2 = read_int(constraints, _OFF_BODY3, cid)
+        b3 = read_int(constraints, _OFF_BODY4, cid)
+        slot0, count0 = get_state_index(copy_state, b0, parallel_id)
+        slot1, count1 = get_state_index(copy_state, b1, parallel_id)
+        slot2, count2 = get_state_index(copy_state, b2, parallel_id)
+        slot3, count3 = get_state_index(copy_state, b3, parallel_id)
+        constraints.slot_cache[cid, 0] = slot0
+        constraints.slot_cache[cid, 1] = slot1
+        constraints.slot_cache[cid, 2] = slot2
+        constraints.slot_cache[cid, 3] = slot3
+        constraints.count_cache[cid, 0] = count0
+        constraints.count_cache[cid, 1] = count1
+        constraints.count_cache[cid, 2] = count2
+        constraints.count_cache[cid, 3] = count3
+    elif ctype == CONSTRAINT_TYPE_CLOTH_TRIANGLE:
+        b0 = read_int(constraints, _OFF_BODY1, cid)
+        b1 = read_int(constraints, _OFF_BODY2, cid)
+        b2 = read_int(constraints, _OFF_BODY3, cid)
+        slot0, count0 = get_state_index(copy_state, b0, parallel_id)
+        slot1, count1 = get_state_index(copy_state, b1, parallel_id)
+        slot2, count2 = get_state_index(copy_state, b2, parallel_id)
+        constraints.slot_cache[cid, 0] = slot0
+        constraints.slot_cache[cid, 1] = slot1
+        constraints.slot_cache[cid, 2] = slot2
+        constraints.count_cache[cid, 0] = count0
+        constraints.count_cache[cid, 1] = count1
+        constraints.count_cache[cid, 2] = count2
+    elif ctype == CONSTRAINT_TYPE_CLOTH_BENDING:
+        b0 = read_int(constraints, _OFF_BODY1, cid)
+        b1 = read_int(constraints, _OFF_BODY2, cid)
+        b2 = read_int(constraints, _OFF_BODY3, cid)
+        b3 = read_int(constraints, _OFF_BODY4, cid)
+        slot0, count0 = get_state_index(copy_state, b0, parallel_id)
+        slot1, count1 = get_state_index(copy_state, b1, parallel_id)
+        slot2, count2 = get_state_index(copy_state, b2, parallel_id)
+        slot3, count3 = get_state_index(copy_state, b3, parallel_id)
+        constraints.slot_cache[cid, 0] = slot0
+        constraints.slot_cache[cid, 1] = slot1
+        constraints.slot_cache[cid, 2] = slot2
+        constraints.slot_cache[cid, 3] = slot3
+        constraints.count_cache[cid, 0] = count0
+        constraints.count_cache[cid, 1] = count1
+        constraints.count_cache[cid, 2] = count2
+        constraints.count_cache[cid, 3] = count3
+    elif ctype == CONSTRAINT_TYPE_SOFT_HEXAHEDRON:
+        b0 = read_int(constraints, _OFF_BODY1, cid)
+        b1 = read_int(constraints, _OFF_BODY2, cid)
+        b2 = read_int(constraints, _OFF_BODY3, cid)
+        b3 = read_int(constraints, _OFF_BODY4, cid)
+        b4 = read_int(constraints, _OFF_BODY5, cid)
+        b5 = read_int(constraints, _OFF_BODY6, cid)
+        b6 = read_int(constraints, _OFF_BODY7, cid)
+        b7 = read_int(constraints, _OFF_BODY8, cid)
+        slot0, count0 = get_state_index(copy_state, b0, parallel_id)
+        slot1, count1 = get_state_index(copy_state, b1, parallel_id)
+        slot2, count2 = get_state_index(copy_state, b2, parallel_id)
+        slot3, count3 = get_state_index(copy_state, b3, parallel_id)
+        slot4, count4 = get_state_index(copy_state, b4, parallel_id)
+        slot5, count5 = get_state_index(copy_state, b5, parallel_id)
+        slot6, count6 = get_state_index(copy_state, b6, parallel_id)
+        slot7, count7 = get_state_index(copy_state, b7, parallel_id)
+        constraints.slot_cache[cid, 0] = slot0
+        constraints.slot_cache[cid, 1] = slot1
+        constraints.slot_cache[cid, 2] = slot2
+        constraints.slot_cache[cid, 3] = slot3
+        constraints.slot_cache[cid, 4] = slot4
+        constraints.slot_cache[cid, 5] = slot5
+        constraints.slot_cache[cid, 6] = slot6
+        constraints.slot_cache[cid, 7] = slot7
+        constraints.count_cache[cid, 0] = count0
+        constraints.count_cache[cid, 1] = count1
+        constraints.count_cache[cid, 2] = count2
+        constraints.count_cache[cid, 3] = count3
+        constraints.count_cache[cid, 4] = count4
+        constraints.count_cache[cid, 5] = count5
+        constraints.count_cache[cid, 6] = count6
+        constraints.count_cache[cid, 7] = count7
 
 
 def build_constraint_slot_cache(
     element_ids_by_color: wp.array,
     color_starts: wp.array,
     num_active_constraints: wp.array,
-    elements: wp.array,
     copy_state: CopyStateContainer,
     constraints: ConstraintContainer,
     max_colored_partitions: int,
@@ -112,8 +212,6 @@ def build_constraint_slot_cache(
         color_starts: Partitioner's per-colour CSR offsets.
         num_active_constraints: Length-1 device array with the live
             cid count.
-        elements: Per-cid ``ElementInteractionData`` body lists (built
-            by the adjacency kernel).
         copy_state: The world's mass-splitting copy state.
         constraints: Target -- ``slot_cache`` / ``count_cache`` get
             stamped.
@@ -135,7 +233,6 @@ def build_constraint_slot_cache(
             element_ids_by_color,
             color_starts,
             num_active_constraints,
-            elements,
             copy_state,
             constraints,
             wp.int32(max_colored_partitions),
