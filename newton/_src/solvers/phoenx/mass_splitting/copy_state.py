@@ -87,6 +87,23 @@ class CopyStateContainer:
     #: body/particle access — this is the disabled-fast-path probe.
     highest_index_in_use: wp.array[wp.int32]
 
+    #: Per-node cache: the slot index for ``parallel_id == 0`` if the node
+    #: has one (the first / smallest partition key always lives at
+    #: ``section_end[node-1]`` by sort construction), else ``-1``.
+    #: Stamped at the end of :func:`build_interaction_graph` and read by
+    #: :func:`get_state_index` to skip the section_end + partition_list
+    #: load chain on the hot path. Length: ``num_bodies + num_particles``.
+    #: Generic across constraint types (rigid joints, cloth, soft-tet,
+    #: contacts) -- every iterate that calls ``get_state_index(node, 0)``
+    #: benefits.
+    slot_for_pid0: wp.array[wp.int32]
+
+    #: Per-node cache: total slot count = ``section_end[node] -
+    #: section_end[node-1]`` (with ``section_end[-1] = 0``). Used as the
+    #: ``inv_factor`` return value in :func:`get_state_index`. Stamped
+    #: alongside ``slot_for_pid0``. Length: ``num_bodies + num_particles``.
+    count_per_node: wp.array[wp.int32]
+
 
 def copy_state_container_zeros(
     capacity: int,
@@ -123,4 +140,8 @@ def copy_state_container_zeros(
     c.section_end = wp.zeros(num_nodes, dtype=wp.int32, device=device)
     c.partition_list = wp.zeros(capacity, dtype=wp.int32, device=device)
     c.highest_index_in_use = wp.zeros(1, dtype=wp.int32, device=device)
+    # ``slot_for_pid0`` starts at -1 (no slot) so :func:`get_state_index`
+    # returns the no-slot fallback until the first build runs.
+    c.slot_for_pid0 = wp.full(num_nodes, value=-1, dtype=wp.int32, device=device)
+    c.count_per_node = wp.zeros(num_nodes, dtype=wp.int32, device=device)
     return c

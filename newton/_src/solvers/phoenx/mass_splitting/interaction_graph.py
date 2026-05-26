@@ -294,6 +294,60 @@ def _mark_boundaries_and_count_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _build_pid0_cache_kernel(
+    section_end: wp.array[wp.int32],
+    partition_list: wp.array[wp.int32],
+    highest_index_in_use: wp.array[wp.int32],
+    slot_for_pid0: wp.array[wp.int32],
+    count_per_node: wp.array[wp.int32],
+):
+    """Stamp per-node caches read by :func:`get_state_index` on the hot
+    path. Runs after Stage 5's inclusive scan, so ``section_end`` is
+    cumulative and ``partition_list[0:highest_index_in_use[0]]`` is
+    dense / sorted.
+
+    For each node ``i``:
+        start = section_end[i-1]   (0 if i==0)
+        end = section_end[i]
+        count = end - start
+        slot = start if (count > 0 and partition_list[start] == 0) else -1
+
+    The slot is the location of the ``parallel_id == 0`` entry if it
+    exists. Sort order guarantees the smallest partition key sits at
+    ``start``, so a single equality check picks the regular-colour slot.
+    ``count`` is the inv_factor return value used by prepare-phase
+    code to apply Tonge's ``1/N`` mass scaling.
+
+    No-op when the build emitted zero pairs (``highest_index_in_use[0]
+    == 0``) -- ``slot_for_pid0`` was zero-initialised to -1 and stays so,
+    matching the disabled-fast-path semantics of :func:`get_state_index`.
+    """
+    node_id = wp.tid()
+    if node_id >= section_end.shape[0]:
+        return
+    if highest_index_in_use[0] == wp.int32(0):
+        # Mass splitting disabled / no pairs emitted: keep cache at the
+        # zero-init values (slot=-1, count=0).
+        slot_for_pid0[node_id] = wp.int32(-1)
+        count_per_node[node_id] = wp.int32(0)
+        return
+    start = wp.int32(0)
+    if node_id > wp.int32(0):
+        start = section_end[node_id - wp.int32(1)]
+    end = section_end[node_id]
+    count = end - start
+    count_per_node[node_id] = count
+    if count == wp.int32(0):
+        slot_for_pid0[node_id] = wp.int32(-1)
+        return
+    # Sort places the smallest partition key first; check it.
+    if partition_list[start] == wp.int32(0):
+        slot_for_pid0[node_id] = start
+    else:
+        slot_for_pid0[node_id] = wp.int32(-1)
+
+
+@wp.kernel(enable_backward=False)
 def _compact_partition_list_kernel(
     keys: wp.array[wp.int64],
     is_boundary: wp.array[wp.int32],
@@ -396,7 +450,24 @@ def build_interaction_graph(
     # Empty-node holes are filled automatically (sum scan over zeros).
     wp.utils.array_scan(copy_state.section_end, copy_state.section_end, inclusive=True)
 
-    # Stage 6: reset the emit counter so the next build starts clean.
+    # Stage 6: stamp the per-node parallel_id=0 / count caches that
+    # :func:`get_state_index` reads on the hot path. Collapses 3
+    # dependent loads (section_end[node-1], section_end[node],
+    # partition_list[start]) to 1-2 loads per call.
+    wp.launch(
+        _build_pid0_cache_kernel,
+        dim=num_nodes,
+        inputs=[
+            copy_state.section_end,
+            copy_state.partition_list,
+            copy_state.highest_index_in_use,
+            copy_state.slot_for_pid0,
+            copy_state.count_per_node,
+        ],
+        device=device,
+    )
+
+    # Stage 7: reset the emit counter so the next build starts clean.
     # Done last so callers can still read num_pairs immediately after
     # build for diagnostics.
     wp.launch(

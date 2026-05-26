@@ -93,10 +93,27 @@ def get_state_index(
     ``slot >= 0`` => index into the SoA arrays with ``inv_factor =
     count`` (total slots for this node, used for Tonge ``1/N`` mass
     scaling).
+
+    Hot path: ``parallel_id == 0`` (regular colours) reads the cached
+    ``slot_for_pid0`` / ``count_per_node`` arrays stamped by
+    :func:`build_interaction_graph` -- one load each, no dependent
+    section_end + partition_list lookup chain. Generic across all
+    constraint types (joints, contacts, cloth, soft-tet, soft-hex).
     """
-    if copy_state.highest_index_in_use[0] == wp.int32(0):
-        return wp.int32(-1), wp.int32(1)
     if node_id < wp.int32(0) or node_id >= copy_state.section_end.shape[0]:
+        return wp.int32(-1), wp.int32(1)
+    # parallel_id == 0 (regular colour) is the common case: hit the
+    # per-node cache. Both the "no slot" (mass splitting disabled or
+    # node not in graph) and "single slot" cases resolve in one load
+    # of ``slot_for_pid0``.
+    if parallel_id == wp.int32(0):
+        slot = copy_state.slot_for_pid0[node_id]
+        if slot < wp.int32(0):
+            return wp.int32(-1), wp.int32(1)
+        return slot, copy_state.count_per_node[node_id]
+    # Slow path: overflow colour (parallel_id > 0). Binary-search the
+    # node's partition list.
+    if copy_state.highest_index_in_use[0] == wp.int32(0):
         return wp.int32(-1), wp.int32(1)
     start = wp.int32(0)
     if node_id > wp.int32(0):
@@ -104,13 +121,6 @@ def get_state_index(
     end = copy_state.section_end[node_id]
     count = end - start
     if count == wp.int32(0):
-        return wp.int32(-1), wp.int32(1)
-    # parallel_id == 0 (regular colour) is always the smallest key, so
-    # if present it lives at partition_list[start] -- skip the binary
-    # search for the regular-colour iterate hot path.
-    if parallel_id == wp.int32(0):
-        if copy_state.partition_list[start] == wp.int32(0):
-            return start, count
         return wp.int32(-1), wp.int32(1)
     local = _binary_search_partition_list(copy_state.partition_list, start, end, parallel_id)
     if local < wp.int32(0):
