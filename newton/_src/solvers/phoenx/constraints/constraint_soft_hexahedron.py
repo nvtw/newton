@@ -76,7 +76,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
-    get_state_index,
     read_position_with_slot,
     set_access_mode_with_slot,
     write_position_unified,
@@ -493,14 +492,26 @@ def soft_hexahedron_prepare_for_iteration_at(
     p6 = body6 - num_bodies
     p7 = body7 - num_bodies
 
-    slot0, inv_factor0 = get_state_index(copy_state, body0, parallel_id)
-    slot1, inv_factor1 = get_state_index(copy_state, body1, parallel_id)
-    slot2, inv_factor2 = get_state_index(copy_state, body2, parallel_id)
-    slot3, inv_factor3 = get_state_index(copy_state, body3, parallel_id)
-    slot4, inv_factor4 = get_state_index(copy_state, body4, parallel_id)
-    slot5, inv_factor5 = get_state_index(copy_state, body5, parallel_id)
-    slot6, inv_factor6 = get_state_index(copy_state, body6, parallel_id)
-    slot7, inv_factor7 = get_state_index(copy_state, body7, parallel_id)
+    # Per-cid slot / count cache stamped by
+    # :func:`build_constraint_slot_cache`; soft-hex uses all 8 cache
+    # columns (the schema's ``MAX_BODIES`` upper bound was chosen for
+    # exactly this case).
+    slot0 = constraints.slot_cache[cid, 0]
+    slot1 = constraints.slot_cache[cid, 1]
+    slot2 = constraints.slot_cache[cid, 2]
+    slot3 = constraints.slot_cache[cid, 3]
+    slot4 = constraints.slot_cache[cid, 4]
+    slot5 = constraints.slot_cache[cid, 5]
+    slot6 = constraints.slot_cache[cid, 6]
+    slot7 = constraints.slot_cache[cid, 7]
+    inv_factor0 = constraints.count_cache[cid, 0]
+    inv_factor1 = constraints.count_cache[cid, 1]
+    inv_factor2 = constraints.count_cache[cid, 2]
+    inv_factor3 = constraints.count_cache[cid, 3]
+    inv_factor4 = constraints.count_cache[cid, 4]
+    inv_factor5 = constraints.count_cache[cid, 5]
+    inv_factor6 = constraints.count_cache[cid, 6]
+    inv_factor7 = constraints.count_cache[cid, 7]
 
     set_access_mode_with_slot(bodies, particles, copy_state, body0, slot0, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt)
     set_access_mode_with_slot(bodies, particles, copy_state, body1, slot1, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt)
@@ -569,14 +580,14 @@ def soft_hexahedron_iterate_at(
     p6 = body6 - num_bodies
     p7 = body7 - num_bodies
 
-    slot0, _if0 = get_state_index(copy_state, body0, parallel_id)
-    slot1, _if1 = get_state_index(copy_state, body1, parallel_id)
-    slot2, _if2 = get_state_index(copy_state, body2, parallel_id)
-    slot3, _if3 = get_state_index(copy_state, body3, parallel_id)
-    slot4, _if4 = get_state_index(copy_state, body4, parallel_id)
-    slot5, _if5 = get_state_index(copy_state, body5, parallel_id)
-    slot6, _if6 = get_state_index(copy_state, body6, parallel_id)
-    slot7, _if7 = get_state_index(copy_state, body7, parallel_id)
+    slot0 = constraints.slot_cache[cid, 0]
+    slot1 = constraints.slot_cache[cid, 1]
+    slot2 = constraints.slot_cache[cid, 2]
+    slot3 = constraints.slot_cache[cid, 3]
+    slot4 = constraints.slot_cache[cid, 4]
+    slot5 = constraints.slot_cache[cid, 5]
+    slot6 = constraints.slot_cache[cid, 6]
+    slot7 = constraints.slot_cache[cid, 7]
 
     set_access_mode_with_slot(bodies, particles, copy_state, body0, slot0, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt)
     set_access_mode_with_slot(bodies, particles, copy_state, body1, slot1, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt)

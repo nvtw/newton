@@ -66,7 +66,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
-    get_state_index,
     read_position_with_slot,
     set_access_mode_with_slot,
     write_position_unified,
@@ -360,10 +359,17 @@ def soft_tet_neohookean_prepare_for_iteration_at(
     p_c = body_c - num_bodies
     p_d = body_d - num_bodies
 
-    slot_a, inv_factor_a = get_state_index(copy_state, body_a, parallel_id)
-    slot_b, inv_factor_b = get_state_index(copy_state, body_b, parallel_id)
-    slot_c, inv_factor_c = get_state_index(copy_state, body_c, parallel_id)
-    slot_d, inv_factor_d = get_state_index(copy_state, body_d, parallel_id)
+    # Per-cid slot / count cache stamped by
+    # :func:`build_constraint_slot_cache` -- see
+    # ``soft_tetrahedron_prepare_for_iteration_at`` for the rationale.
+    slot_a = constraints.slot_cache[cid, 0]
+    slot_b = constraints.slot_cache[cid, 1]
+    slot_c = constraints.slot_cache[cid, 2]
+    slot_d = constraints.slot_cache[cid, 3]
+    inv_factor_a = constraints.count_cache[cid, 0]
+    inv_factor_b = constraints.count_cache[cid, 1]
+    inv_factor_c = constraints.count_cache[cid, 2]
+    inv_factor_d = constraints.count_cache[cid, 3]
 
     set_access_mode_with_slot(
         bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
@@ -432,10 +438,10 @@ def soft_tet_neohookean_iterate_at(
     p_c = body_c - num_bodies
     p_d = body_d - num_bodies
 
-    slot_a, _ifa = get_state_index(copy_state, body_a, parallel_id)
-    slot_b, _ifb = get_state_index(copy_state, body_b, parallel_id)
-    slot_c, _ifc = get_state_index(copy_state, body_c, parallel_id)
-    slot_d, _ifd = get_state_index(copy_state, body_d, parallel_id)
+    slot_a = constraints.slot_cache[cid, 0]
+    slot_b = constraints.slot_cache[cid, 1]
+    slot_c = constraints.slot_cache[cid, 2]
+    slot_d = constraints.slot_cache[cid, 3]
 
     set_access_mode_with_slot(
         bodies, particles, copy_state, body_a, slot_a, num_bodies, _ACCESS_MODE_POSITION_LEVEL, idt
