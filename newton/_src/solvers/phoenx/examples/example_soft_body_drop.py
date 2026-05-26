@@ -70,15 +70,15 @@ from newton._src.solvers.phoenx.timer import print_column_timings
 # overflow bucket. Dropping the cap to ``0`` puts ALL soft-tet rows
 # into the overflow bucket -- which is mass-splitting's Jacobi-block
 # path, batched ``ms_batch_size`` cids per thread with
-# ``_average_and_broadcast`` between PGS iterations. On this scene
-# the pure-Jacobi path is *faster* than the Gauss-Seidel coloured
+# ``_average_and_broadcast`` between PGS iterations. On this pure soft
+# scene the pure-Jacobi path is faster than the Gauss-Seidel coloured
 # path because the GPU runs one big parallel block instead of
 # ``N_colors`` sequential dispatches, and the in-batch sequential
-# Gauss-Seidel of ``ms_batch_size=8`` (the default) still provides
-# enough intra-thread feedback for convergence. Tests pass with
-# ``=0``; raising it doesn't help (more launches, worse FPS).
+# Gauss-Seidel of ``ms_batch_size=2`` still provides enough intra-thread
+# feedback for convergence. Mixed rigid/soft scenes should keep a
+# nonzero cap so rigid contacts retain coloured Gauss-Seidel updates.
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 0
 
 #: Opt-in per-column wall-clock profiling. When ``True`` the solver
 #: brackets every PGS dispatch with CUDA ``%globaltimer`` reads and
