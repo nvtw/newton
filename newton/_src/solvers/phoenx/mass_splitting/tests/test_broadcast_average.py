@@ -43,6 +43,7 @@ from newton._src.solvers.phoenx.mass_splitting.interaction_graph import (
 from newton._src.solvers.phoenx.mass_splitting.kernels import (
     launch_average_and_broadcast,
     launch_average_and_broadcast_grouped,
+    launch_average_and_broadcast_rigid_velocity,
     launch_broadcast_rigid_to_copy_states,
     launch_copy_state_into_rigids,
 )
@@ -216,6 +217,34 @@ class TestBroadcastAverage(unittest.TestCase):
         np.testing.assert_allclose(sum_b1_v_after, sum_b1_v_before, rtol=1e-5)
         np.testing.assert_allclose(sum_b0_w_after, sum_b0_w_before, rtol=1e-5)
         np.testing.assert_allclose(sum_b1_w_after, sum_b1_w_before, rtol=1e-5)
+
+    def test_rigid_velocity_average_matches_scalar_velocity_slots(self):
+        # Rigid-only scenes have no position-level writers, so the
+        # specialized average can skip access-mode synchronization and
+        # still match the generic kernel for velocity-level slots.
+        device = wp.get_preferred_device()
+        bodies, particles, cs_scalar, num_bodies, _ = _setup_two_bodies_three_partitions(device)
+        _, _, cs_rigid, _, _ = _setup_two_bodies_three_partitions(device)
+        dt = 0.01
+        launch_broadcast_rigid_to_copy_states(cs_scalar, bodies, particles, num_bodies, dt)
+        launch_broadcast_rigid_to_copy_states(cs_rigid, bodies, particles, num_bodies, dt)
+        wp.synchronize_device(device)
+
+        rng = np.random.default_rng(seed=20260526)
+        vel_h = cs_scalar.velocity.numpy().copy()
+        ang_h = cs_scalar.angular_velocity.numpy().copy()
+        vel_h[0:5] = rng.normal(size=(5, 3)).astype(np.float32)
+        ang_h[0:5] = rng.normal(size=(5, 3)).astype(np.float32)
+        for cs in (cs_scalar, cs_rigid):
+            cs.velocity.assign(vel_h)
+            cs.angular_velocity.assign(ang_h)
+
+        launch_average_and_broadcast(cs_scalar, bodies, particles, num_bodies, 1.0 / dt)
+        launch_average_and_broadcast_rigid_velocity(cs_rigid, bodies, particles, num_bodies, 1.0 / dt)
+        wp.synchronize_device(device)
+
+        np.testing.assert_array_equal(cs_rigid.velocity.numpy()[:5], cs_scalar.velocity.numpy()[:5])
+        np.testing.assert_array_equal(cs_rigid.angular_velocity.numpy()[:5], cs_scalar.angular_velocity.numpy()[:5])
 
     def test_grouped_average_matches_scalar(self):
         device = wp.get_preferred_device()

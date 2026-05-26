@@ -130,6 +130,7 @@ from newton._src.solvers.phoenx.mass_splitting import (
     interaction_graph_scratch_zeros,
     launch_average_and_broadcast,
     launch_average_and_broadcast_grouped,
+    launch_average_and_broadcast_rigid_velocity,
     launch_broadcast_rigid_to_copy_states,
     launch_copy_state_into_rigids,
     record_all_interactions_kernel,
@@ -702,6 +703,17 @@ class PhoenXWorld:
         # broadcast wins; keep rigid-heavy scenes on the scalar path.
         self._mass_splitting_grouped_average = bool(
             self.mass_splitting_enabled and self.device.is_cuda and self.num_particles > self.num_bodies
+        )
+        # Rigid contacts and joints are velocity-level constraints. Mixed
+        # deformable worlds can contain position-level cloth/soft rows, so
+        # they must keep the generic access-mode synchronization path.
+        self._mass_splitting_velocity_only_average = bool(
+            self.mass_splitting_enabled
+            and self.num_particles == 0
+            and self.num_cloth_triangles == 0
+            and self.num_cloth_bending == 0
+            and self.num_soft_tetrahedra == 0
+            and self.num_soft_hexahedra == 0
         )
         if warm_start_invalidate_period is None:
             warm_start_invalidate_period = 4 if _has_dynamic_rigid_rows else 0
@@ -2753,6 +2765,15 @@ class PhoenXWorld:
         """Merge divergent mass-splitting slots after one PGS sweep."""
         if inv_dt is None:
             inv_dt = 1.0 / self.substep_dt
+        if self._mass_splitting_velocity_only_average:
+            launch_average_and_broadcast_rigid_velocity(
+                self._copy_state,
+                self.bodies,
+                self._particles_or_sentinel(),
+                num_bodies=self.num_bodies,
+                inv_dt=inv_dt,
+            )
+            return
         if self._mass_splitting_grouped_average:
             launch_average_and_broadcast_grouped(
                 self._copy_state,

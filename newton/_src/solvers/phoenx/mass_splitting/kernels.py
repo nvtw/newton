@@ -26,6 +26,8 @@ that each process one node with a deterministic warp-tile reduction.
 
 from __future__ import annotations
 
+import functools
+
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import (
@@ -45,6 +47,7 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 __all__ = [
     "launch_average_and_broadcast",
     "launch_average_and_broadcast_grouped",
+    "launch_average_and_broadcast_rigid_velocity",
     "launch_broadcast_rigid_to_copy_states",
     "launch_copy_state_into_rigids",
 ]
@@ -171,76 +174,86 @@ def _sync_particle_slot_to_velocity_level(
     return copy_state.velocity[slot]
 
 
-@wp.kernel(enable_backward=False)
-def _average_and_broadcast_kernel(
-    copy_state: CopyStateContainer,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    num_bodies: wp.int32,
-    inv_dt: wp.float32,
-):
-    """Synchronise per-slot dual state to VELOCITY_LEVEL, then average
-    velocity / angular_velocity across a node's slots and broadcast the
-    result.
+@functools.cache
+def _make_average_and_broadcast_kernel(*, velocity_only: bool):
+    @wp.kernel(enable_backward=False, module="unique")
+    def kernel(
+        copy_state: CopyStateContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        num_bodies: wp.int32,
+        inv_dt: wp.float32,
+    ):
+        """Synchronize slots when needed, average velocities, then broadcast.
 
-    Mirrors the C# pattern in
-    ``MassSplittingRigidBodyInteractionGraph.AverageAndBroadcast``
-    (``MassSplitting/MassSplittingRigidBodyInteractionGraph.cs:324-378``):
-    each slot's ``SetAccessMode(VelocityLevel, ...)`` is called BEFORE
-    the velocity sum. Position-level work done by constraint iterates
-    is thus encoded as ``v = (slot.position - body.position_prev_substep)
-    / dt`` and folded into the velocity average for free -- no separate
-    position-averaging code needed. The synchronize anchor is the
-    body / particle's ``position_prev_substep`` (substep-start snapshot).
+        The ``velocity_only`` specialization is for rigid-only worlds. Rigid
+        contacts and joints write velocity-level slots only, so that variant
+        can skip access-mode synchronization and particle branches while using
+        the same deterministic scalar average/broadcast loop.
+        """
+        node_id = wp.tid()
+        if node_id >= copy_state.section_end.shape[0]:
+            return
+        # Fast bail via the cached count: single-slot / empty nodes are
+        # a no-op for the average. One load instead of the section_end +
+        # highest_index_in_use chain. Mass-splitting-disabled scenes hit
+        # this path with count == 0 for every node.
+        count = copy_state.count_per_node[node_id]
+        if count <= wp.int32(1):
+            return
+        start = wp.int32(0)
+        if node_id > wp.int32(0):
+            start = copy_state.section_end[node_id - wp.int32(1)]
+        end = start + count
+        inv_count = wp.float32(1.0) / wp.float32(count)
 
-    Bodies with a single slot (or zero) are a no-op for the average;
-    bodies with N>1 slots get their N velocities averaged and
-    broadcast. For particle nodes the angular_velocity sum is over
-    zeros so the write is harmless on that field.
-    """
-    node_id = wp.tid()
-    if node_id >= copy_state.section_end.shape[0]:
-        return
-    # Fast bail via the cached count: single-slot / empty nodes are
-    # a no-op for the average. One load instead of the section_end +
-    # highest_index_in_use chain. Mass-splitting-disabled scenes hit
-    # this path with count == 0 for every node.
-    count = copy_state.count_per_node[node_id]
-    if count <= wp.int32(1):
-        return
-    start = wp.int32(0)
-    if node_id > wp.int32(0):
-        start = copy_state.section_end[node_id - wp.int32(1)]
-    end = start + count
+        if wp.static(velocity_only):
+            sum_v = wp.vec3f(0.0, 0.0, 0.0)
+            sum_w = wp.vec3f(0.0, 0.0, 0.0)
+            for slot in range(start, end):
+                sum_v = sum_v + copy_state.velocity[slot]
+                sum_w = sum_w + copy_state.angular_velocity[slot]
 
-    # Synchronize each slot to VELOCITY_LEVEL and accumulate it in the
-    # same pass. Split rigid and particle nodes before the slot loop so
-    # particle nodes do not execute the orientation / angular-velocity
-    # access path.
-    inv_count = wp.float32(1.0) / wp.float32(count)
-    if node_id < num_bodies:
+            avg_v = sum_v * inv_count
+            avg_w = sum_w * inv_count
+            for slot in range(start, end):
+                copy_state.velocity[slot] = avg_v
+                copy_state.angular_velocity[slot] = avg_w
+            return
+
+        # Synchronize each slot to VELOCITY_LEVEL and accumulate it in
+        # the same pass. Split rigid and particle nodes before the slot
+        # loop so particle nodes do not execute the orientation / angular-
+        # velocity access path.
+        if node_id < num_bodies:
+            sum_v = wp.vec3f(0.0, 0.0, 0.0)
+            sum_w = wp.vec3f(0.0, 0.0, 0.0)
+            for slot in range(start, end):
+                slot_synchronize_to_velocity_level(bodies, particles, copy_state, node_id, slot, num_bodies, inv_dt)
+                sum_v = sum_v + copy_state.velocity[slot]
+                sum_w = sum_w + copy_state.angular_velocity[slot]
+
+            avg_v = sum_v * inv_count
+            avg_w = sum_w * inv_count
+            for slot in range(start, end):
+                copy_state.velocity[slot] = avg_v
+                copy_state.angular_velocity[slot] = avg_w
+            return
+
+        particle_id = node_id - num_bodies
         sum_v = wp.vec3f(0.0, 0.0, 0.0)
-        sum_w = wp.vec3f(0.0, 0.0, 0.0)
         for slot in range(start, end):
-            slot_synchronize_to_velocity_level(bodies, particles, copy_state, node_id, slot, num_bodies, inv_dt)
-            sum_v = sum_v + copy_state.velocity[slot]
-            sum_w = sum_w + copy_state.angular_velocity[slot]
+            sum_v = sum_v + _sync_particle_slot_to_velocity_level(copy_state, particles, particle_id, slot, inv_dt)
 
         avg_v = sum_v * inv_count
-        avg_w = sum_w * inv_count
         for slot in range(start, end):
             copy_state.velocity[slot] = avg_v
-            copy_state.angular_velocity[slot] = avg_w
-        return
 
-    particle_id = node_id - num_bodies
-    sum_v = wp.vec3f(0.0, 0.0, 0.0)
-    for slot in range(start, end):
-        sum_v = sum_v + _sync_particle_slot_to_velocity_level(copy_state, particles, particle_id, slot, inv_dt)
+    return kernel
 
-    avg_v = sum_v * inv_count
-    for slot in range(start, end):
-        copy_state.velocity[slot] = avg_v
+
+_average_and_broadcast_kernel = _make_average_and_broadcast_kernel(velocity_only=False)
+_average_and_broadcast_rigid_velocity_kernel = _make_average_and_broadcast_kernel(velocity_only=True)
 
 
 @wp.kernel(enable_backward=False)
@@ -445,6 +458,24 @@ def launch_average_and_broadcast(
     num_nodes = copy_state.section_end.shape[0]
     wp.launch(
         _average_and_broadcast_kernel,
+        dim=num_nodes,
+        inputs=[copy_state, bodies, particles, wp.int32(num_bodies), wp.float32(inv_dt)],
+        block_dim=_MASS_SPLITTING_PER_NODE_BLOCK_DIM,
+        device=copy_state.section_end.device,
+    )
+
+
+def launch_average_and_broadcast_rigid_velocity(
+    copy_state: CopyStateContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: int,
+    inv_dt: float,
+) -> None:
+    """Launch the rigid-only velocity-level average/broadcast specialization."""
+    num_nodes = copy_state.section_end.shape[0]
+    wp.launch(
+        _average_and_broadcast_rigid_velocity_kernel,
         dim=num_nodes,
         inputs=[copy_state, bodies, particles, wp.int32(num_bodies), wp.float32(inv_dt)],
         block_dim=_MASS_SPLITTING_PER_NODE_BLOCK_DIM,
