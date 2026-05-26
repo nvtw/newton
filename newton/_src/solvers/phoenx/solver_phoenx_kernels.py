@@ -1368,13 +1368,13 @@ def _constraints_to_elements_kernel(
             if particles.inverse_mass[b2 - num_bodies] == 0.0:
                 b2 = -1
 
-    # Resolve up to two extra nodes per side (the third is dropped by
-    # the Opt-E soft-tet 4th-vertex experiment; see ``side0_kind ==
-    # SOFT_TETRAHEDRON`` branch and PERF_NOTES.md). Rigid sides leave
-    # both extras at -1; cloth-tri sides populate both; soft-tet sides
-    # populate both (3rd vertex intentionally skipped).
+    # Resolve up to three extra nodes per side. Rigid sides leave all
+    # extras at -1; cloth-tri sides populate two; soft-tet sides populate
+    # all three so contact coloring covers every particle the iterate can
+    # read or write.
     e0a = wp.int32(-1)
     e0b = wp.int32(-1)
+    e0c = wp.int32(-1)
     if side0_kind == wp.int32(1):  # CLOTH_TRIANGLE
         e0a = side0_extra[0]
         e0b = side0_extra[1]
@@ -1383,21 +1383,18 @@ def _constraints_to_elements_kernel(
         if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
             e0b = -1
     elif side0_kind == wp.int32(2):  # SOFT_TETRAHEDRON
-        # Opt-E experiment: emit only 2 extras (3 nodes total per soft-tet
-        # side: b1 + e0a + e0b) into the coloring adjacency. The 4th tet
-        # vertex (e0c) is opposite the contact face -- its barycentric
-        # weight is zero on a true face contact, so dropping it from the
-        # adjacency graph sparsifies coloring without changing the
-        # iterate's impulse on the 4th vertex (which is zero anyway for
-        # face contacts, small for edge/vertex contacts).
         e0a = side0_extra[0]
         e0b = side0_extra[1]
+        e0c = side0_extra[2]
         if e0a >= 0 and particles.inverse_mass[e0a - num_bodies] == 0.0:
             e0a = -1
         if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
             e0b = -1
+        if e0c >= 0 and particles.inverse_mass[e0c - num_bodies] == 0.0:
+            e0c = -1
     e1a = wp.int32(-1)
     e1b = wp.int32(-1)
+    e1c = wp.int32(-1)
     if side1_kind == wp.int32(1):  # CLOTH_TRIANGLE
         e1a = side1_extra[0]
         e1b = side1_extra[1]
@@ -1406,18 +1403,19 @@ def _constraints_to_elements_kernel(
         if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
             e1b = -1
     elif side1_kind == wp.int32(2):  # SOFT_TETRAHEDRON
-        # Opt-E experiment: see side0 comment.
         e1a = side1_extra[0]
         e1b = side1_extra[1]
+        e1c = side1_extra[2]
         if e1a >= 0 and particles.inverse_mass[e1a - num_bodies] == 0.0:
             e1a = -1
         if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
             e1b = -1
+        if e1c >= 0 and particles.inverse_mass[e1c - num_bodies] == 0.0:
+            e1c = -1
 
     # Compact: drop -1s into a contiguous prefix (the partitioner's
-    # adjacency loop stops on the first -1). Up to 6 nodes per contact
-    # after the soft-tet 4th-vertex drop (see soft-tet branches above):
-    # tet-tet = 3+3; tet-cloth = 3+3; tet-rigid = 3+1; cloth-cloth =
+    # adjacency loop stops on the first -1). Up to 8 nodes per contact:
+    # tet-tet = 4+4; tet-cloth = 4+3; tet-rigid = 4+1; cloth-cloth =
     # 3+3; cloth-rigid = 3+1; rigid-rigid = 1+1.
     s0 = wp.int32(-1)
     s1 = wp.int32(-1)
@@ -1425,8 +1423,10 @@ def _constraints_to_elements_kernel(
     s3 = wp.int32(-1)
     s4 = wp.int32(-1)
     s5 = wp.int32(-1)
+    s6 = wp.int32(-1)
+    s7 = wp.int32(-1)
     cnt = wp.int32(0)
-    for cand in range(6):
+    for cand in range(8):
         v = wp.int32(-1)
         if cand == 0:
             v = b1
@@ -1437,9 +1437,13 @@ def _constraints_to_elements_kernel(
         elif cand == 3:
             v = e0b
         elif cand == 4:
+            v = e0c
+        elif cand == 5:
             v = e1a
-        else:
+        elif cand == 6:
             v = e1b
+        else:
+            v = e1c
         if v < 0:
             continue
         if cnt == 0:
@@ -1452,10 +1456,14 @@ def _constraints_to_elements_kernel(
             s3 = v
         elif cnt == 4:
             s4 = v
-        else:
+        elif cnt == 5:
             s5 = v
+        elif cnt == 6:
+            s6 = v
+        else:
+            s7 = v
         cnt = cnt + 1
-    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5, -1, -1)
+    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5, s6, s7)
 
 
 @wp.kernel(enable_backward=False)
