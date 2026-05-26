@@ -131,12 +131,32 @@ def contact_endpoint_velocity_at_point(
         v_c, _, _ = read_particle_velocity_unified(particles, copy_state, nodes[2], nodes[2] - num_bodies, parallel_id)
         return bary[0] * v_a + bary[1] * v_b + bary[2] * v_c
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
-        v_a, _, _ = read_particle_velocity_unified(particles, copy_state, nodes[0], nodes[0] - num_bodies, parallel_id)
-        v_b, _, _ = read_particle_velocity_unified(particles, copy_state, nodes[1], nodes[1] - num_bodies, parallel_id)
-        v_c, _, _ = read_particle_velocity_unified(particles, copy_state, nodes[2], nodes[2] - num_bodies, parallel_id)
-        v_d, _, _ = read_particle_velocity_unified(particles, copy_state, nodes[3], nodes[3] - num_bodies, parallel_id)
-        bary_d = wp.float32(1.0) - bary[0] - bary[1] - bary[2]
-        return bary[0] * v_a + bary[1] * v_b + bary[2] * v_c + bary_d * v_d
+        weight_a = bary[0]
+        weight_b = bary[1]
+        weight_c = bary[2]
+        weight_d = wp.float32(1.0) - weight_a - weight_b - weight_c
+        v = wp.vec3f(0.0, 0.0, 0.0)
+        if weight_a != wp.float32(0.0):
+            v_a, _, _ = read_particle_velocity_unified(
+                particles, copy_state, nodes[0], nodes[0] - num_bodies, parallel_id
+            )
+            v = v + weight_a * v_a
+        if weight_b != wp.float32(0.0):
+            v_b, _, _ = read_particle_velocity_unified(
+                particles, copy_state, nodes[1], nodes[1] - num_bodies, parallel_id
+            )
+            v = v + weight_b * v_b
+        if weight_c != wp.float32(0.0):
+            v_c, _, _ = read_particle_velocity_unified(
+                particles, copy_state, nodes[2], nodes[2] - num_bodies, parallel_id
+            )
+            v = v + weight_c * v_c
+        if weight_d != wp.float32(0.0):
+            v_d, _, _ = read_particle_velocity_unified(
+                particles, copy_state, nodes[3], nodes[3] - num_bodies, parallel_id
+            )
+            v = v + weight_d * v_d
+        return v
     b = nodes[0]
     if b < 0:
         return wp.vec3f(0.0, 0.0, 0.0)
@@ -192,21 +212,28 @@ def contact_endpoint_inv_mass_along(
             + bary[2] * bary[2] * particles.inverse_mass[p_c] * wp.float32(inv_f_c)
         )
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
-        _, inv_f_a = get_state_index(copy_state, nodes[0], parallel_id)
-        _, inv_f_b = get_state_index(copy_state, nodes[1], parallel_id)
-        _, inv_f_c = get_state_index(copy_state, nodes[2], parallel_id)
-        _, inv_f_d = get_state_index(copy_state, nodes[3], parallel_id)
-        p_a = nodes[0] - num_bodies
-        p_b = nodes[1] - num_bodies
-        p_c = nodes[2] - num_bodies
-        p_d = nodes[3] - num_bodies
-        bary_d = wp.float32(1.0) - bary[0] - bary[1] - bary[2]
-        return (
-            bary[0] * bary[0] * particles.inverse_mass[p_a] * wp.float32(inv_f_a)
-            + bary[1] * bary[1] * particles.inverse_mass[p_b] * wp.float32(inv_f_b)
-            + bary[2] * bary[2] * particles.inverse_mass[p_c] * wp.float32(inv_f_c)
-            + bary_d * bary_d * particles.inverse_mass[p_d] * wp.float32(inv_f_d)
-        )
+        weight_a = bary[0]
+        weight_b = bary[1]
+        weight_c = bary[2]
+        weight_d = wp.float32(1.0) - weight_a - weight_b - weight_c
+        result = wp.float32(0.0)
+        if weight_a != wp.float32(0.0):
+            _, inv_f_a = get_state_index(copy_state, nodes[0], parallel_id)
+            p_a = nodes[0] - num_bodies
+            result = result + weight_a * weight_a * particles.inverse_mass[p_a] * wp.float32(inv_f_a)
+        if weight_b != wp.float32(0.0):
+            _, inv_f_b = get_state_index(copy_state, nodes[1], parallel_id)
+            p_b = nodes[1] - num_bodies
+            result = result + weight_b * weight_b * particles.inverse_mass[p_b] * wp.float32(inv_f_b)
+        if weight_c != wp.float32(0.0):
+            _, inv_f_c = get_state_index(copy_state, nodes[2], parallel_id)
+            p_c = nodes[2] - num_bodies
+            result = result + weight_c * weight_c * particles.inverse_mass[p_c] * wp.float32(inv_f_c)
+        if weight_d != wp.float32(0.0):
+            _, inv_f_d = get_state_index(copy_state, nodes[3], parallel_id)
+            p_d = nodes[3] - num_bodies
+            result = result + weight_d * weight_d * particles.inverse_mass[p_d] * wp.float32(inv_f_d)
+        return result
     b = nodes[0]
     if b < 0:
         return wp.float32(0.0)
@@ -298,50 +325,53 @@ def contact_endpoint_apply_impulse(
             )
         return
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        weight_a = bary[0]
+        weight_b = bary[1]
+        weight_c = bary[2]
+        weight_d = wp.float32(1.0) - weight_a - weight_b - weight_c
         p_a = nodes[0] - num_bodies
         p_b = nodes[1] - num_bodies
         p_c = nodes[2] - num_bodies
         p_d = nodes[3] - num_bodies
-        bary_d = wp.float32(1.0) - bary[0] - bary[1] - bary[2]
         inv_m_a_raw = particles.inverse_mass[p_a]
         inv_m_b_raw = particles.inverse_mass[p_b]
         inv_m_c_raw = particles.inverse_mass[p_c]
         inv_m_d_raw = particles.inverse_mass[p_d]
-        if inv_m_a_raw > wp.float32(0.0):
+        if weight_a != wp.float32(0.0) and inv_m_a_raw > wp.float32(0.0):
             v_a, inv_f_a, slot_a = read_particle_velocity_unified(particles, copy_state, nodes[0], p_a, parallel_id)
             write_particle_velocity_with_slot(
                 particles,
                 copy_state,
                 p_a,
                 slot_a,
-                v_a + bary[0] * impulse * inv_m_a_raw * wp.float32(inv_f_a),
+                v_a + weight_a * impulse * inv_m_a_raw * wp.float32(inv_f_a),
             )
-        if inv_m_b_raw > wp.float32(0.0):
+        if weight_b != wp.float32(0.0) and inv_m_b_raw > wp.float32(0.0):
             v_b, inv_f_b, slot_b = read_particle_velocity_unified(particles, copy_state, nodes[1], p_b, parallel_id)
             write_particle_velocity_with_slot(
                 particles,
                 copy_state,
                 p_b,
                 slot_b,
-                v_b + bary[1] * impulse * inv_m_b_raw * wp.float32(inv_f_b),
+                v_b + weight_b * impulse * inv_m_b_raw * wp.float32(inv_f_b),
             )
-        if inv_m_c_raw > wp.float32(0.0):
+        if weight_c != wp.float32(0.0) and inv_m_c_raw > wp.float32(0.0):
             v_c, inv_f_c, slot_c = read_particle_velocity_unified(particles, copy_state, nodes[2], p_c, parallel_id)
             write_particle_velocity_with_slot(
                 particles,
                 copy_state,
                 p_c,
                 slot_c,
-                v_c + bary[2] * impulse * inv_m_c_raw * wp.float32(inv_f_c),
+                v_c + weight_c * impulse * inv_m_c_raw * wp.float32(inv_f_c),
             )
-        if inv_m_d_raw > wp.float32(0.0):
+        if weight_d != wp.float32(0.0) and inv_m_d_raw > wp.float32(0.0):
             v_d, inv_f_d, slot_d = read_particle_velocity_unified(particles, copy_state, nodes[3], p_d, parallel_id)
             write_particle_velocity_with_slot(
                 particles,
                 copy_state,
                 p_d,
                 slot_d,
-                v_d + bary_d * impulse * inv_m_d_raw * wp.float32(inv_f_d),
+                v_d + weight_d * impulse * inv_m_d_raw * wp.float32(inv_f_d),
             )
         return
     b = nodes[0]

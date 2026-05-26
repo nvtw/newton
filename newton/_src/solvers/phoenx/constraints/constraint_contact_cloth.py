@@ -103,6 +103,7 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
     effective_mass_scalar,
 )
 from newton._src.solvers.phoenx.mass_splitting.access import (
+    set_particle_access_mode_unified,
     write_angular_velocity_unified,
     write_velocity_unified,
 )
@@ -132,6 +133,60 @@ __all__ = [
     "contact_prepare_for_iteration_lean_no_soft_pd",
     "contact_prepare_for_iteration_no_soft_pd",
 ]
+
+
+@wp.func
+def _soft_tet_endpoint_set_access_mode_for_column(
+    nodes: wp.vec4i,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+    cc: ContactContainer,
+    contact_first: wp.int32,
+    contact_count: wp.int32,
+    is_side1: wp.bool,
+):
+    # A contact column can contain multiple contact points. Use the union
+    # of nonzero barycentric weights so access modes cover exactly the
+    # particles the column can read or write.
+    use_a = bool(False)
+    use_b = bool(False)
+    use_c = bool(False)
+    use_d = bool(False)
+    for i in range(contact_count):
+        k = contact_first + i
+        bary = cc_get_side1_bary(cc, k) if is_side1 else cc_get_side0_bary(cc, k)
+        weight_a = bary[0]
+        weight_b = bary[1]
+        weight_c = bary[2]
+        weight_d = wp.float32(1.0) - weight_a - weight_b - weight_c
+        if weight_a != wp.float32(0.0):
+            use_a = bool(True)
+        if weight_b != wp.float32(0.0):
+            use_b = bool(True)
+        if weight_c != wp.float32(0.0):
+            use_c = bool(True)
+        if weight_d != wp.float32(0.0):
+            use_d = bool(True)
+    if use_a and nodes[0] >= wp.int32(0):
+        set_particle_access_mode_unified(
+            particles, copy_state, nodes[0], nodes[0] - num_bodies, parallel_id, new_access_mode, inv_dt
+        )
+    if use_b and nodes[1] >= wp.int32(0):
+        set_particle_access_mode_unified(
+            particles, copy_state, nodes[1], nodes[1] - num_bodies, parallel_id, new_access_mode, inv_dt
+        )
+    if use_c and nodes[2] >= wp.int32(0):
+        set_particle_access_mode_unified(
+            particles, copy_state, nodes[2], nodes[2] - num_bodies, parallel_id, new_access_mode, inv_dt
+        )
+    if use_d and nodes[3] >= wp.int32(0):
+        set_particle_access_mode_unified(
+            particles, copy_state, nodes[3], nodes[3] - num_bodies, parallel_id, new_access_mode, inv_dt
+        )
 
 
 @wp.func
@@ -165,17 +220,23 @@ def _side_world_contact_point(
         )
         return anchor + (sign * margin) * n
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
-        p_a = nodes[0] - num_bodies
-        p_b = nodes[1] - num_bodies
-        p_c = nodes[2] - num_bodies
-        p_d = nodes[3] - num_bodies
-        bary_d = wp.float32(1.0) - bary[0] - bary[1] - bary[2]
-        anchor = (
-            bary[0] * particles.position[p_a]
-            + bary[1] * particles.position[p_b]
-            + bary[2] * particles.position[p_c]
-            + bary_d * particles.position[p_d]
-        )
+        weight_a = bary[0]
+        weight_b = bary[1]
+        weight_c = bary[2]
+        weight_d = wp.float32(1.0) - weight_a - weight_b - weight_c
+        anchor = wp.vec3f(0.0, 0.0, 0.0)
+        if weight_a != wp.float32(0.0):
+            p_a = nodes[0] - num_bodies
+            anchor = anchor + weight_a * particles.position[p_a]
+        if weight_b != wp.float32(0.0):
+            p_b = nodes[1] - num_bodies
+            anchor = anchor + weight_b * particles.position[p_b]
+        if weight_c != wp.float32(0.0):
+            p_c = nodes[2] - num_bodies
+            anchor = anchor + weight_c * particles.position[p_c]
+        if weight_d != wp.float32(0.0):
+            p_d = nodes[3] - num_bodies
+            anchor = anchor + weight_d * particles.position[p_d]
         return anchor + (sign * margin) * n
     b = nodes[0]
     local_p = cc_get_local_p1(cc, k) if is_side1 else cc_get_local_p0(cc, k)
@@ -1132,28 +1193,62 @@ def contact_prepare_for_iteration_cloth_aware(
     side1_kind = contact_get_side1_kind(constraints, cid)
     side0_extra = contact_get_side0_nodes_extra(constraints, cid)
     side1_extra = contact_get_side1_nodes_extra(constraints, cid)
-    contact_endpoint_set_access_mode(
-        side0_kind,
-        wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2]),
-        bodies,
-        particles,
-        copy_state,
-        num_bodies,
-        parallel_id,
-        ACCESS_MODE_VELOCITY_LEVEL,
-        idt,
-    )
-    contact_endpoint_set_access_mode(
-        side1_kind,
-        wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2]),
-        bodies,
-        particles,
-        copy_state,
-        num_bodies,
-        parallel_id,
-        ACCESS_MODE_VELOCITY_LEVEL,
-        idt,
-    )
+    contact_first = contact_get_contact_first(constraints, cid)
+    contact_count = contact_get_contact_count(constraints, cid)
+    side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
+    side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
+    if side0_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        _soft_tet_endpoint_set_access_mode_for_column(
+            side0_nodes,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+            cc,
+            contact_first,
+            contact_count,
+            False,
+        )
+    else:
+        contact_endpoint_set_access_mode(
+            side0_kind,
+            side0_nodes,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+        )
+    if side1_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        _soft_tet_endpoint_set_access_mode_for_column(
+            side1_nodes,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+            cc,
+            contact_first,
+            contact_count,
+            True,
+        )
+    else:
+        contact_endpoint_set_access_mode(
+            side1_kind,
+            side1_nodes,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+        )
     body_pair = constraint_bodies_make(b1, b2)
     contact_prepare_for_iteration_at_cloth_aware(
         constraints,
@@ -1636,28 +1731,62 @@ def contact_iterate_cloth_aware(
     side1_kind = contact_get_side1_kind(constraints, cid)
     side0_extra = contact_get_side0_nodes_extra(constraints, cid)
     side1_extra = contact_get_side1_nodes_extra(constraints, cid)
-    contact_endpoint_set_access_mode(
-        side0_kind,
-        wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2]),
-        bodies,
-        particles,
-        copy_state,
-        num_bodies,
-        parallel_id,
-        ACCESS_MODE_VELOCITY_LEVEL,
-        idt,
-    )
-    contact_endpoint_set_access_mode(
-        side1_kind,
-        wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2]),
-        bodies,
-        particles,
-        copy_state,
-        num_bodies,
-        parallel_id,
-        ACCESS_MODE_VELOCITY_LEVEL,
-        idt,
-    )
+    contact_first = contact_get_contact_first(constraints, cid)
+    contact_count = contact_get_contact_count(constraints, cid)
+    side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
+    side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
+    if side0_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        _soft_tet_endpoint_set_access_mode_for_column(
+            side0_nodes,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+            cc,
+            contact_first,
+            contact_count,
+            False,
+        )
+    else:
+        contact_endpoint_set_access_mode(
+            side0_kind,
+            side0_nodes,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+        )
+    if side1_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        _soft_tet_endpoint_set_access_mode_for_column(
+            side1_nodes,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+            cc,
+            contact_first,
+            contact_count,
+            True,
+        )
+    else:
+        contact_endpoint_set_access_mode(
+            side1_kind,
+            side1_nodes,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+        )
     body_pair = constraint_bodies_make(b1, b2)
     if use_bias:
         contact_iterate_at_cloth_aware(

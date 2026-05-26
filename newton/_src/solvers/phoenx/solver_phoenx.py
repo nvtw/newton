@@ -1174,7 +1174,7 @@ class PhoenXWorld:
                 "use setup_cloth_collision_pipeline()"
             )
 
-        import numpy as _np  # noqa: PLC0415
+        import numpy as _np
 
         shape_body_np = shape_body.numpy() if isinstance(shape_body, wp.array) else _np.asarray(shape_body)
         shape_body_phx = _np.where(shape_body_np < 0, 0, shape_body_np + int(phoenx_body_offset))
@@ -1856,9 +1856,9 @@ class PhoenXWorld:
         Returns:
             The constructed :class:`CollisionPipeline`.
         """
-        from newton._src.geometry.flags import ShapeFlags  # noqa: PLC0415
-        from newton._src.geometry.types import GeoType  # noqa: PLC0415
-        from newton._src.sim.collide import CollisionPipeline  # noqa: PLC0415
+        from newton._src.geometry.flags import ShapeFlags
+        from newton._src.geometry.types import GeoType
+        from newton._src.sim.collide import CollisionPipeline
 
         def _soft_tet_collision_mask(tet_indices: np.ndarray) -> np.ndarray:
             tets = np.asarray(tet_indices, dtype=np.int32).reshape(-1, 4)
@@ -2468,6 +2468,7 @@ class PhoenXWorld:
             inputs=[
                 self.constraints,
                 self._contact_cols,
+                self._contact_container,
                 self.bodies,
                 self._particles_or_sentinel(),
                 self._num_active_constraints,

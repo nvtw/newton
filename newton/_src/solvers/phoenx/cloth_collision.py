@@ -198,6 +198,7 @@ def _phoenx_populate_shape_endpoints_kernel(
 
 
 _DEGENERATE_EPS = wp.constant(wp.float32(1.0e-12))
+_TET_SURFACE_BARY_EPS = wp.constant(wp.float32(1.0e-4))
 
 
 @wp.func
@@ -506,6 +507,44 @@ def _barycentric_in_tet(p: wp.vec3f, xa: wp.vec3f, xb: wp.vec3f, xc: wp.vec3f, x
     gamma = bcd[1]
     delta = bcd[2]
     alpha = wp.float32(1.0) - beta - gamma - delta
+
+    # Contacts on a tetrahedron lie on its surface, so one barycentric
+    # coordinate should be zero. Snap only the near-zero numerical case
+    # and leave genuinely off-face points unchanged. The exact zero lets
+    # the contact endpoint helpers skip the unused node.
+    abs_alpha = wp.abs(alpha)
+    abs_beta = wp.abs(beta)
+    abs_gamma = wp.abs(gamma)
+    abs_delta = wp.abs(delta)
+    min_abs = abs_alpha
+    drop = wp.int32(0)
+    if abs_beta < min_abs:
+        min_abs = abs_beta
+        drop = wp.int32(1)
+    if abs_gamma < min_abs:
+        min_abs = abs_gamma
+        drop = wp.int32(2)
+    if abs_delta < min_abs:
+        min_abs = abs_delta
+        drop = wp.int32(3)
+
+    if min_abs <= _TET_SURFACE_BARY_EPS:
+        if drop == wp.int32(0):
+            alpha = wp.float32(0.0)
+        elif drop == wp.int32(1):
+            beta = wp.float32(0.0)
+        elif drop == wp.int32(2):
+            gamma = wp.float32(0.0)
+        else:
+            delta = wp.float32(0.0)
+
+        sum_kept = alpha + beta + gamma + delta
+        if wp.abs(sum_kept) > _DEGENERATE_EPS:
+            inv_sum = wp.float32(1.0) / sum_kept
+            alpha = alpha * inv_sum
+            beta = beta * inv_sum
+            gamma = gamma * inv_sum
+
     return wp.vec3f(alpha, beta, gamma)
 
 

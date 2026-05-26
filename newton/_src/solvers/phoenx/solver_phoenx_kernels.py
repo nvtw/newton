@@ -46,6 +46,8 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_accumulate_time_us,
     contact_get_body1,
     contact_get_body2,
+    contact_get_contact_count,
+    contact_get_contact_first,
     contact_get_side0_kind,
     contact_get_side0_nodes_extra,
     contact_get_side1_kind,
@@ -98,7 +100,11 @@ from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
     soft_tetrahedron_iterate_at,
     soft_tetrahedron_prepare_for_iteration_at,
 )
-from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
+from newton._src.solvers.phoenx.constraints.contact_container import (
+    ContactContainer,
+    cc_get_side0_bary,
+    cc_get_side1_bary,
+)
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     GREEDY_MAX_COLORS,
     MAX_BODIES,
@@ -1101,10 +1107,40 @@ def get_fast_tail_kernel(
     raise ValueError(f"unknown fast-tail kernel kind: {kind!r}")
 
 
+@wp.func
+def _contact_soft_tet_active_nodes(
+    cc: ContactContainer,
+    contact_first: wp.int32,
+    contact_count: wp.int32,
+    is_side1: wp.bool,
+):
+    use0 = bool(False)
+    use1 = bool(False)
+    use2 = bool(False)
+    use3 = bool(False)
+    for i in range(contact_count):
+        k = contact_first + i
+        bary = cc_get_side1_bary(cc, k) if is_side1 else cc_get_side0_bary(cc, k)
+        w0 = bary[0]
+        w1 = bary[1]
+        w2 = bary[2]
+        w3 = wp.float32(1.0) - w0 - w1 - w2
+        if w0 != wp.float32(0.0):
+            use0 = bool(True)
+        if w1 != wp.float32(0.0):
+            use1 = bool(True)
+        if w2 != wp.float32(0.0):
+            use2 = bool(True)
+        if w3 != wp.float32(0.0):
+            use3 = bool(True)
+    return use0, use1, use2, use3
+
+
 @wp.kernel(enable_backward=False, module="unique")
 def _constraints_to_elements_kernel(
     constraints: ConstraintContainer,
     contact_cols: ContactColumnContainer,
+    cc: ContactContainer,
     bodies: BodyContainer,
     particles: ParticleContainer,
     num_constraints: wp.array[wp.int32],
@@ -1341,6 +1377,25 @@ def _constraints_to_elements_kernel(
     side0_extra = contact_get_side0_nodes_extra(contact_cols, local_cid)
     side1_extra = contact_get_side1_nodes_extra(contact_cols, local_cid)
 
+    contact_first = contact_get_contact_first(contact_cols, local_cid)
+    contact_count = contact_get_contact_count(contact_cols, local_cid)
+    side0_use0 = bool(True)
+    side0_use1 = bool(True)
+    side0_use2 = bool(True)
+    side0_use3 = bool(True)
+    side1_use0 = bool(True)
+    side1_use1 = bool(True)
+    side1_use2 = bool(True)
+    side1_use3 = bool(True)
+    if side0_kind == wp.int32(2):  # SOFT_TETRAHEDRON
+        side0_use0, side0_use1, side0_use2, side0_use3 = _contact_soft_tet_active_nodes(
+            cc, contact_first, contact_count, False
+        )
+    if side1_kind == wp.int32(2):  # SOFT_TETRAHEDRON
+        side1_use0, side1_use1, side1_use2, side1_use3 = _contact_soft_tet_active_nodes(
+            cc, contact_first, contact_count, True
+        )
+
     # Resolve a unified-index node to ``-1`` when its inverse mass is
     # zero (anchored). The lookup container depends on the side's
     # kind: rigid -> bodies; cloth -> particles (subtract num_bodies
@@ -1354,14 +1409,18 @@ def _constraints_to_elements_kernel(
     # moving into a sleeping stack). Pure STATIC bodies still
     # collapse to -1.
     if b1 >= 0:
-        if side0_kind == wp.int32(0):
+        if side0_kind == wp.int32(2) and not side0_use0:
+            b1 = -1
+        elif side0_kind == wp.int32(0):
             if bodies.inverse_mass[b1] == 0.0 and bodies.motion_type[b1] != MOTION_KINEMATIC:
                 b1 = -1
         else:
             if particles.inverse_mass[b1 - num_bodies] == 0.0:
                 b1 = -1
     if b2 >= 0:
-        if side1_kind == wp.int32(0):
+        if side1_kind == wp.int32(2) and not side1_use0:
+            b2 = -1
+        elif side1_kind == wp.int32(0):
             if bodies.inverse_mass[b2] == 0.0 and bodies.motion_type[b2] != MOTION_KINEMATIC:
                 b2 = -1
         else:
@@ -1370,8 +1429,7 @@ def _constraints_to_elements_kernel(
 
     # Resolve up to three extra nodes per side. Rigid sides leave all
     # extras at -1; cloth-tri sides populate two; soft-tet sides populate
-    # all three so contact coloring covers every particle the iterate can
-    # read or write.
+    # only the nonzero-barycentric nodes the iterate can read or write.
     e0a = wp.int32(-1)
     e0b = wp.int32(-1)
     e0c = wp.int32(-1)
@@ -1383,9 +1441,12 @@ def _constraints_to_elements_kernel(
         if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
             e0b = -1
     elif side0_kind == wp.int32(2):  # SOFT_TETRAHEDRON
-        e0a = side0_extra[0]
-        e0b = side0_extra[1]
-        e0c = side0_extra[2]
+        if side0_use1:
+            e0a = side0_extra[0]
+        if side0_use2:
+            e0b = side0_extra[1]
+        if side0_use3:
+            e0c = side0_extra[2]
         if e0a >= 0 and particles.inverse_mass[e0a - num_bodies] == 0.0:
             e0a = -1
         if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
@@ -1403,9 +1464,12 @@ def _constraints_to_elements_kernel(
         if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
             e1b = -1
     elif side1_kind == wp.int32(2):  # SOFT_TETRAHEDRON
-        e1a = side1_extra[0]
-        e1b = side1_extra[1]
-        e1c = side1_extra[2]
+        if side1_use1:
+            e1a = side1_extra[0]
+        if side1_use2:
+            e1b = side1_extra[1]
+        if side1_use3:
+            e1c = side1_extra[2]
         if e1a >= 0 and particles.inverse_mass[e1a - num_bodies] == 0.0:
             e1a = -1
         if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
