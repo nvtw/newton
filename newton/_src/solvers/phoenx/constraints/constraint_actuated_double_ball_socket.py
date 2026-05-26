@@ -2869,7 +2869,8 @@ def _revolute_iterate_at_multi(
     impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
 
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-    acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc2_world_initial = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc2_tan = wp.vec2f(wp.dot(t1, acc2_world_initial), wp.dot(t2, acc2_world_initial))
 
     n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
     clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
@@ -2937,10 +2938,6 @@ def _revolute_iterate_at_multi(
     it = wp.int32(0)
     while it < num_sweeps:
         # Positional PGS: anchor-1 (3 rows) + anchor-2 tangent (2 rows)
-        acc2_t1 = wp.dot(t1, acc2_world)
-        acc2_t2 = wp.dot(t2, acc2_world)
-        acc2_tan = wp.vec2f(acc2_t1, acc2_t2)
-
         jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
         jv2_world = -velocity1 + cr2_b1 @ angular_velocity1 + velocity2 - cr2_b2 @ angular_velocity2
         jv2_t1 = wp.dot(t1, jv2_world)
@@ -2976,7 +2973,7 @@ def _revolute_iterate_at_multi(
         angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1 + cr2_b2 @ lam2_world)
 
         acc1 = acc1 + lam1
-        acc2_world = acc2_world + lam2_world
+        acc2_tan = acc2_tan + lam2
 
         # Axial drive + limit scalar PGS
         jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
@@ -3041,6 +3038,7 @@ def _revolute_iterate_at_multi(
         angular_velocity2,
     )
 
+    acc2_world = acc2_tan[0] * t1 + acc2_tan[1] * t2
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1)
     write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world)
     if drive_active:
