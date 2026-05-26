@@ -440,11 +440,10 @@ def speculative_pick_kernel(
     overflow_flag: wp.array[int],
     max_colored_partitions: wp.int32,
     tentative_color: wp.array[wp.int32],
-    commit_decision: wp.array[wp.int32],
 ):
     """Phase 1: each uncoloured tid picks smallest free colour given
     coloured neighbours. Writes ``tentative_color[tid]`` (encoded
-    ``c+1``) and clears ``commit_decision[tid]``.
+    ``c+1``).
 
     Sets ``overflow_flag[0]=1`` on saturation (>= GREEDY_MAX_COLORS
     distinct nbr colours) so the host wrapper triggers JP fallback --
@@ -457,8 +456,6 @@ def speculative_pick_kernel(
     saturation_limit = max_colored_partitions if soft_cap else wp.int32(GREEDY_MAX_COLORS)
 
     for tid in range(wp.tid(), n, total_num_threads):
-        # Reset commit decision for this round; coloured tids skip the pick.
-        commit_decision[tid] = wp.int32(0)
         if color_tags[tid] != wp.int32(0):
             continue
         el = elements[tid]
