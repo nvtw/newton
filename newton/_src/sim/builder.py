@@ -302,18 +302,18 @@ class ModelBuilder:
             For MuJoCo, stiffness values will internally be scaled by masses.
             Users should choose kh to match their desired force-to-penetration ratio.
         """
-        sdf_margin: float | None = None
-        """SDF generation margin [m] for primitive shapes. When a texture SDF is
+        sdf_padding: float | None = None
+        """SDF AABB padding [m] for primitive shapes. When a texture SDF is
         generated from a primitive (box, sphere, capsule, cylinder, cone) during
-        :meth:`ModelBuilder.finalize`, this value is used as the expansion distance
-        around the surface. Conceptually distinct from :attr:`gap` (collision-pipeline
-        broad-phase inflation) and :attr:`margin` (contact surface inflation), but
-        when left at the sentinel ``None`` value, ``finalize`` reuses :attr:`gap`
-        as the SDF generation margin for backward compatibility — a tight ``gap``
-        therefore implies a tight SDF, which gives accurate near-surface contact
-        resolution. Set :attr:`sdf_margin` explicitly to decouple the two values.
-        Not accepted on mesh-backed shapes (``MESH``, ``CONVEX_MESH``) — for
-        user meshes, pass ``margin`` to :meth:`~newton.geometry.Mesh.build_sdf`
+        :meth:`ModelBuilder.finalize`, this value extends the SDF's bounding box
+        beyond the mesh AABB. Distinct from :attr:`gap` (collision-pipeline
+        broad-phase inflation) and :attr:`margin` (contact-surface inflation),
+        but when left at the sentinel ``None`` value, ``finalize`` reuses
+        :attr:`gap` as the SDF padding for backward compatibility — a tight
+        ``gap`` therefore implies a tight SDF, which gives accurate near-surface
+        contact resolution. Set :attr:`sdf_padding` explicitly to decouple the
+        two values. Not accepted on mesh-backed shapes (``MESH``, ``CONVEX_MESH``)
+        — for user meshes, pass ``margin`` to :meth:`~newton.geometry.Mesh.build_sdf`
         before calling :meth:`ModelBuilder.add_shape_mesh`."""
 
         def configure_sdf(
@@ -972,7 +972,7 @@ class ModelBuilder:
         """Per-shape SDF maximum resolutions retained until :meth:`finalize <ModelBuilder.finalize>`."""
         self.shape_sdf_texture_format: list[str] = []
         """Per-shape SDF texture format retained until :meth:`finalize <ModelBuilder.finalize>`."""
-        self.shape_sdf_margin: list[float | None] = []
+        self.shape_sdf_padding: list[float | None] = []
         """Per-shape SDF generation margins [m] retained until :meth:`finalize <ModelBuilder.finalize>`.
         When ``None``, :attr:`shape_gap` is used for primitive texture SDF generation."""
 
@@ -3304,7 +3304,7 @@ class ModelBuilder:
             "shape_sdf_max_resolution",
             "shape_sdf_target_voxel_size",
             "shape_sdf_texture_format",
-            "shape_sdf_margin",
+            "shape_sdf_padding",
             "particle_qd",
             "particle_mass",
             "particle_radius",
@@ -5517,7 +5517,7 @@ class ModelBuilder:
                 or cfg.sdf_target_voxel_size is not None
                 or cfg.sdf_narrow_band_range != (-0.1, 0.1)
                 or cfg.sdf_texture_format != "uint16"
-                or cfg.sdf_margin is not None
+                or cfg.sdf_padding is not None
             ):
                 raise ValueError(
                     "Mesh-backed shapes do not use cfg.sdf_* for SDF generation. "
@@ -5650,7 +5650,7 @@ class ModelBuilder:
         self.shape_sdf_target_voxel_size.append(cfg.sdf_target_voxel_size)
         self.shape_sdf_max_resolution.append(cfg.sdf_max_resolution)
         self.shape_sdf_texture_format.append(cfg.sdf_texture_format)
-        self.shape_sdf_margin.append(cfg.sdf_margin)
+        self.shape_sdf_padding.append(cfg.sdf_padding)
 
         if cfg.has_shape_collision and cfg.collision_filter_parent:
             for parent_body, joint_idx in self.joint_parents.get(body, ()):
@@ -10233,13 +10233,13 @@ class ModelBuilder:
                 sdf_target_voxel_size = self.shape_sdf_target_voxel_size[i]
                 sdf_max_resolution = self.shape_sdf_max_resolution[i]
                 sdf_tex_fmt = self.shape_sdf_texture_format[i]
-                sdf_margin = self.shape_sdf_margin[i]
-                # SDF generation margin: use the per-shape sdf_margin when the
+                sdf_padding = self.shape_sdf_padding[i]
+                # SDF AABB padding: use the per-shape sdf_padding when the
                 # caller has set it explicitly; otherwise fall back to shape_gap
                 # so the SDF tracks the broad-phase tolerance. A tight gap then
                 # produces a tight SDF, which is what hydroelastic tests rely on
                 # for accurate near-surface penetration depths.
-                sdf_gen_margin = sdf_margin if sdf_margin is not None else shape_gap
+                sdf_gen_margin = sdf_padding if sdf_padding is not None else shape_gap
                 is_hydroelastic = bool(shape_flags & ShapeFlags.HYDROELASTIC)
                 has_shape_collision = bool(shape_flags & ShapeFlags.COLLIDE_SHAPES)
 

@@ -602,7 +602,7 @@ attributes, along with any unit or semantic differences.
      - Absolute distances [m]. Split into inner / outer halves — see
        *Narrow band split* below.
    * - ``physxSDFMeshCollision:sdfMargin``
-     - ``newton:sdfMargin``
+     - ``newton:sdfPadding``
      - Absolute distance [m]. PhysX authors a fraction of the mesh AABB
        diagonal; multiply by the diagonal before authoring on Newton.
    * - ``physxSDFMeshCollision:sdfBitsPerSubgridPixel``
@@ -680,7 +680,7 @@ The same asset using Newton schemas:
            uniform int newton:sdfMaxResolution = 256
            uniform float newton:sdfNarrowBandInner = -0.02
            uniform float newton:sdfNarrowBandOuter = 0.02
-           uniform float newton:sdfMargin = 0.02
+           uniform float newton:sdfPadding = 0.02
            uniform token newton:sdfTextureFormat = "uint16"
        }
    }
@@ -800,7 +800,7 @@ suite, so it doubles as an end-to-end regression against Newton's importer.
            # Margin: fraction -> absolute [m] via diag.
            m = _get(prim, "physxSDFMeshCollision:sdfMargin")
            if m is not None and diag is not None:
-               _set(prim, "newton:sdfMargin", Sdf.ValueTypeNames.Float,
+               _set(prim, "newton:sdfPadding", Sdf.ValueTypeNames.Float,
                     float(m) * diag)
 
            # Texture format token translation.
@@ -858,7 +858,7 @@ suite, so it doubles as an end-to-end regression against Newton's importer.
    _diag = math.sqrt(3)  # unit cube [-0.5, 0.5]^3
    assert _close(_get(p, "newton:sdfNarrowBandInner"), -0.01 * _diag, tol=1e-5)
    assert _close(_get(p, "newton:sdfNarrowBandOuter"), 0.01 * _diag, tol=1e-5)
-   assert _close(_get(p, "newton:sdfMargin"), 0.02 * _diag, tol=1e-5)
+   assert _close(_get(p, "newton:sdfPadding"), 0.02 * _diag, tol=1e-5)
    assert _get(p, "newton:sdfTextureFormat") == "uint16"
    assert _has_applied_schema(p, "NewtonSDFCollisionAPI")
 
@@ -870,7 +870,7 @@ verifying the Newton import.
 
    Applying ``NewtonSDFCollisionAPI`` declares the prim's SDF configuration.
    The importer fills in schema defaults for any attributes that are not
-   authored (e.g. ``sdfMaxResolution=64``; ``sdfMargin`` defaults to the
+   authored (e.g. ``sdfMaxResolution=64``; ``sdfPadding`` defaults to the
    value of ``newton:contactGap``).
 
    For **mesh** shapes, applying the API causes ``ModelBuilder.finalize()``

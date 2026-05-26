@@ -240,15 +240,15 @@ class TestSDFUSDParsing(unittest.TestCase):
             # Body2: hydroelastic disabled (default)
             self.assertFalse(builder.shape_flags[s2] & newton.ShapeFlags.HYDROELASTIC)
 
-    def test_usd_sdf_margin(self, device=None):
-        """USD newton:sdfMargin is passed to mesh.build_sdf(margin=...)."""
+    def test_usd_sdf_padding(self, device=None):
+        """USD newton:sdfPadding is passed to mesh.build_sdf(margin=...)."""
         if device is None or not wp.get_device(device).is_cuda:
             self.skipTest("SDF tests require CUDA device")
 
         from pxr import Sdf, Usd, UsdPhysics
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            usd_path = Path(tmpdir) / "test_sdf_margin.usda"
+            usd_path = Path(tmpdir) / "test_sdf_padding.usda"
             stage = Usd.Stage.CreateNew(str(usd_path))
             UsdPhysics.Scene.Define(stage, "/PhysicsScene")
 
@@ -256,7 +256,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
             p1 = m1.GetPrim()
             p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(64)
-            p1.CreateAttribute("newton:sdfMargin", Sdf.ValueTypeNames.Float, custom=True).Set(0.05)
+            p1.CreateAttribute("newton:sdfPadding", Sdf.ValueTypeNames.Float, custom=True).Set(0.05)
 
             stage.Save()
 
@@ -270,7 +270,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             self.assertGreaterEqual(
                 int(model.shape_sdf_index.numpy()[s1]),
                 0,
-                "Expected SDF built with sdfMargin during finalize.",
+                "Expected SDF built with sdfPadding during finalize.",
             )
 
     def test_usd_hydroelastic_enabled_false(self, device=None):
@@ -302,15 +302,15 @@ class TestSDFUSDParsing(unittest.TestCase):
             self.assertEqual(builder.shape_sdf_max_resolution[s1], 128)
             self.assertFalse(builder.shape_flags[s1] & newton.ShapeFlags.HYDROELASTIC)
 
-    def test_usd_sdf_margin_hydroelastic_primitive(self, device=None):
-        """newton:sdfMargin on a hydroelastic primitive (Sphere) is routed to shape_sdf_margin."""
+    def test_usd_sdf_padding_hydroelastic_primitive(self, device=None):
+        """newton:sdfPadding on a hydroelastic primitive (Sphere) is routed to shape_sdf_padding."""
         if device is None or not wp.get_device(device).is_cuda:
             self.skipTest("SDF tests require CUDA device")
 
         from pxr import Sdf, Usd, UsdGeom, UsdPhysics
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            usd_path = Path(tmpdir) / "test_sdf_margin_sphere.usda"
+            usd_path = Path(tmpdir) / "test_sdf_padding_sphere.usda"
             stage = Usd.Stage.CreateNew(str(usd_path))
             UsdPhysics.Scene.Define(stage, "/PhysicsScene")
 
@@ -323,7 +323,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(32)
             p1.CreateAttribute("newton:hydroelasticEnabled", Sdf.ValueTypeNames.Bool, custom=True).Set(True)
             p1.CreateAttribute("newton:hydroelasticStiffness", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
-            p1.CreateAttribute("newton:sdfMargin", Sdf.ValueTypeNames.Float, custom=True).Set(0.03)
+            p1.CreateAttribute("newton:sdfPadding", Sdf.ValueTypeNames.Float, custom=True).Set(0.03)
 
             stage.Save()
 
@@ -332,18 +332,18 @@ class TestSDFUSDParsing(unittest.TestCase):
             s1 = result["path_shape_map"]["/World/Body1/CollisionSphere"]
 
             self.assertTrue(builder.shape_flags[s1] & newton.ShapeFlags.HYDROELASTIC)
-            # sdfMargin lives in its own per-shape list, not the collision gap.
-            self.assertAlmostEqual(builder.shape_sdf_margin[s1], 0.03, places=5)
+            # sdfPadding lives in its own per-shape list, not the collision gap.
+            self.assertAlmostEqual(builder.shape_sdf_padding[s1], 0.03, places=5)
 
-    def test_usd_sdf_margin_does_not_affect_shape_gap(self, device=None):
-        """newton:sdfMargin and newton:contactGap populate distinct per-shape lists."""
+    def test_usd_sdf_padding_does_not_affect_shape_gap(self, device=None):
+        """newton:sdfPadding and newton:contactGap populate distinct per-shape lists."""
         if device is None or not wp.get_device(device).is_cuda:
             self.skipTest("SDF tests require CUDA device")
 
         from pxr import Sdf, Usd, UsdGeom, UsdPhysics
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            usd_path = Path(tmpdir) / "test_sdf_margin_vs_gap.usda"
+            usd_path = Path(tmpdir) / "test_sdf_padding_vs_gap.usda"
             stage = Usd.Stage.CreateNew(str(usd_path))
             UsdPhysics.Scene.Define(stage, "/PhysicsScene")
 
@@ -356,7 +356,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(32)
             p1.CreateAttribute("newton:hydroelasticEnabled", Sdf.ValueTypeNames.Bool, custom=True).Set(True)
             p1.CreateAttribute("newton:hydroelasticStiffness", Sdf.ValueTypeNames.Float, custom=True).Set(1e7)
-            p1.CreateAttribute("newton:sdfMargin", Sdf.ValueTypeNames.Float, custom=True).Set(0.03)
+            p1.CreateAttribute("newton:sdfPadding", Sdf.ValueTypeNames.Float, custom=True).Set(0.03)
             p1.CreateAttribute("newton:contactGap", Sdf.ValueTypeNames.Float, custom=True).Set(0.07)
 
             stage.Save()
@@ -365,7 +365,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             result = parse_usd(builder, str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionSphere"]
 
-            self.assertAlmostEqual(builder.shape_sdf_margin[s1], 0.03, places=5)
+            self.assertAlmostEqual(builder.shape_sdf_padding[s1], 0.03, places=5)
             self.assertAlmostEqual(builder.shape_gap[s1], 0.07, places=5)
 
     def test_usd_sdf_api_applied_no_authored_attrs(self, device=None):
@@ -620,8 +620,8 @@ add_function_test(
 )
 add_function_test(
     TestSDFUSDParsing,
-    "test_usd_sdf_margin",
-    TestSDFUSDParsing.test_usd_sdf_margin,
+    "test_usd_sdf_padding",
+    TestSDFUSDParsing.test_usd_sdf_padding,
     devices=devices,
 )
 add_function_test(
@@ -632,14 +632,14 @@ add_function_test(
 )
 add_function_test(
     TestSDFUSDParsing,
-    "test_usd_sdf_margin_hydroelastic_primitive",
-    TestSDFUSDParsing.test_usd_sdf_margin_hydroelastic_primitive,
+    "test_usd_sdf_padding_hydroelastic_primitive",
+    TestSDFUSDParsing.test_usd_sdf_padding_hydroelastic_primitive,
     devices=devices,
 )
 add_function_test(
     TestSDFUSDParsing,
-    "test_usd_sdf_margin_does_not_affect_shape_gap",
-    TestSDFUSDParsing.test_usd_sdf_margin_does_not_affect_shape_gap,
+    "test_usd_sdf_padding_does_not_affect_shape_gap",
+    TestSDFUSDParsing.test_usd_sdf_padding_does_not_affect_shape_gap,
     devices=devices,
 )
 add_function_test(

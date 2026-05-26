@@ -2724,11 +2724,11 @@ def parse_usd(
                 if sdf_texture_format is None:
                     sdf_texture_format = builder.default_shape_cfg.sdf_texture_format
 
-                sdf_margin = R.get_value(prim, prim_type=PrimType.SHAPE, key="sdf_margin", verbose=verbose)
-                if sdf_margin == float("-inf"):
+                sdf_padding = R.get_value(prim, prim_type=PrimType.SHAPE, key="sdf_padding", verbose=verbose)
+                if sdf_padding == float("-inf"):
                     # Schema sentinel: builder.finalize falls back to shape_gap
-                    # when ShapeConfig.sdf_margin is None.
-                    sdf_margin = None
+                    # when ShapeConfig.sdf_padding is None.
+                    sdf_padding = None
 
                 # Hydroelastic is opt-in via newton:hydroelasticEnabled on the
                 # NewtonSDFCollisionAPI. newton:hydroelasticStiffness alone is
@@ -2794,7 +2794,7 @@ def parse_usd(
                         sdf_narrow_band_range=sdf_narrow_band_range,
                         sdf_target_voxel_size=sdf_target_voxel_size,
                         sdf_texture_format=sdf_texture_format,
-                        sdf_margin=sdf_margin,
+                        sdf_padding=sdf_padding,
                         is_hydroelastic=is_hydroelastic,
                         kh=kh,
                     ),
@@ -2891,7 +2891,7 @@ def parse_usd(
                         sdf_target_voxel_size=None,
                         sdf_narrow_band_range=(-0.1, 0.1),
                         sdf_texture_format="uint16",
-                        sdf_margin=None,
+                        sdf_padding=None,
                         is_hydroelastic=False,
                     )
                     shape_id = builder.add_shape_mesh(
@@ -2904,7 +2904,7 @@ def parse_usd(
                     builder.shape_sdf_target_voxel_size[shape_id] = sdf_target_voxel_size
                     builder.shape_sdf_narrow_band_range[shape_id] = sdf_narrow_band_range
                     builder.shape_sdf_texture_format[shape_id] = sdf_texture_format
-                    builder.shape_sdf_margin[shape_id] = sdf_margin
+                    builder.shape_sdf_padding[shape_id] = sdf_padding
                     # kh is a material parameter; persist it regardless of
                     # hydroelastic state so overrides survive even when hydro
                     # is disabled.
