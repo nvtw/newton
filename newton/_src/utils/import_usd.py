@@ -283,9 +283,7 @@ def parse_usd(
     if mesh_maxhullvert is None:
         mesh_maxhullvert = Mesh.MAX_HULL_VERTICES
 
-    if not schema_resolvers:
-        # Treat both None and [] as "use the default" so newton:* SDF/hydro
-        # attributes aren't silently dropped when callers pass an empty list.
+    if schema_resolvers is None:
         schema_resolvers = [SchemaResolverNewton()]
     collect_schema_attrs = len(schema_resolvers) > 0
 
