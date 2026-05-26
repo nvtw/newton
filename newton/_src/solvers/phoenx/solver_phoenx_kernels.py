@@ -221,6 +221,14 @@ __syncwarp();
 def _sync_warp(): ...
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncwarp(mask);
+#endif
+""")
+def _sync_warp_mask(mask: wp.uint32): ...
+
+
 # Adaptive threads-per-world picker for dynamic auto launches. The effective
 # tpw is read from a 1-elem buffer per step; fixed-tpw kernels bypass it.
 
@@ -698,6 +706,23 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         if world_id >= num_worlds:
             return
 
+        sync_mask = wp.uint32(0xFFFFFFFF)
+        if wp.static(fixed_tpw == 8):
+            warp_lane = tid & wp.int32(31)
+            if warp_lane < wp.int32(8):
+                sync_mask = wp.uint32(0x000000FF)
+            elif warp_lane < wp.int32(16):
+                sync_mask = wp.uint32(0x0000FF00)
+            elif warp_lane < wp.int32(24):
+                sync_mask = wp.uint32(0x00FF0000)
+            else:
+                sync_mask = wp.uint32(0xFF000000)
+        elif wp.static(fixed_tpw == 16):
+            if (tid & wp.int32(31)) < wp.int32(16):
+                sync_mask = wp.uint32(0x0000FFFF)
+            else:
+                sync_mask = wp.uint32(0xFFFF0000)
+
         n_colors = world_num_colors[world_id]
         world_base = world_csr_offsets[world_id]
 
@@ -748,7 +773,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                         contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                 base += tpw
 
-            _sync_warp()
+            _sync_warp_mask(sync_mask)
             c += 1
 
         # Iterate phase: outer = num_iterations / _FUSED_INNER_SWEEPS, each
@@ -840,7 +865,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                     base += tpw
 
-                _sync_warp()
+                _sync_warp_mask(sync_mask)
                 c += 1
 
             it_outer += 1
@@ -892,6 +917,23 @@ def _make_fast_tail_relax_kernel(
         world_id = tid / tpw
         if world_id >= num_worlds:
             return
+
+        sync_mask = wp.uint32(0xFFFFFFFF)
+        if wp.static(fixed_tpw == 8):
+            warp_lane = tid & wp.int32(31)
+            if warp_lane < wp.int32(8):
+                sync_mask = wp.uint32(0x000000FF)
+            elif warp_lane < wp.int32(16):
+                sync_mask = wp.uint32(0x0000FF00)
+            elif warp_lane < wp.int32(24):
+                sync_mask = wp.uint32(0x00FF0000)
+            else:
+                sync_mask = wp.uint32(0xFF000000)
+        elif wp.static(fixed_tpw == 16):
+            if (tid & wp.int32(31)) < wp.int32(16):
+                sync_mask = wp.uint32(0x0000FFFF)
+            else:
+                sync_mask = wp.uint32(0xFFFF0000)
 
         n_colors = world_num_colors[world_id]
         world_base = world_csr_offsets[world_id]
@@ -979,7 +1021,7 @@ def _make_fast_tail_relax_kernel(
                         contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                 base += tpw
 
-            _sync_warp()
+            _sync_warp_mask(sync_mask)
             c += 1
 
     return kernel
