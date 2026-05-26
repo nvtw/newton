@@ -651,26 +651,14 @@ def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = Tru
             side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
             side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
         else:
-            # Mass-splitting fast path (see contact_iterate_at_multi for the
-            # full rationale). Direct SoA reads when ``highest_index_in_use[0]
-            # == 0``; ``slot1 == slot2 == -1`` flags the matching writeback.
+            # Mass-splitting contact columns read slot/count values stamped by
+            # the graph build; no-slot endpoints are cached as ``(-1, 1)``.
             orientation1 = bodies.orientation[b1]
             orientation2 = bodies.orientation[b2]
             body_com1 = bodies.body_com[b1]
             body_com2 = bodies.body_com[b2]
             if wp.static(not has_mass_splitting):
                 # Compile-time lean: slot lookup dead-code-eliminated.
-                v1 = bodies.velocity[b1]
-                v2 = bodies.velocity[b2]
-                w1 = bodies.angular_velocity[b1]
-                w2 = bodies.angular_velocity[b2]
-                inv_mass1 = bodies.inverse_mass[b1]
-                inv_mass2 = bodies.inverse_mass[b2]
-                inv_inertia1 = bodies.inverse_inertia_world[b1]
-                inv_inertia2 = bodies.inverse_inertia_world[b2]
-                slot1 = wp.int32(-1)
-                slot2 = wp.int32(-1)
-            elif copy_state.highest_index_in_use[0] == wp.int32(0):
                 v1 = bodies.velocity[b1]
                 v2 = bodies.velocity[b2]
                 w1 = bodies.angular_velocity[b1]
