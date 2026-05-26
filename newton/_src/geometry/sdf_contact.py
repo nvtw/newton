@@ -558,28 +558,23 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         sdf_is_heightfield: bool,
         hfd_sdf: HeightfieldData,
         elevation_data: wp.array[wp.float32],
-        precision_target: float,
     ) -> tuple[float, wp.vec3]:
         """Find the deepest point on an edge relative to an SDF volume.
 
-        Brent's method (up to 5 iterations) minimizes the SDF along
-        ``p(t) = v0 + t * edge_dir`` for t in [0, 1]. The midpoint SDF is
-        passed in from culling to avoid a redundant evaluation.
+        Uses Brent's method (5 iterations) to minimize the SDF value along the
+        edge parameterized as ``p(t) = v0 + t * edge_dir`` for t in [0, 1].
+        The initial midpoint SDF value is provided by the caller (cached from
+        culling) to avoid a redundant evaluation.
 
-        ``precision_target`` (typically the contact gap) sets a parametric
-        tolerance floor of ``precision_target / edge_length / 2`` so short
-        edges converge in fewer iterations.
+        After the interior search, evaluates the more promising endpoint
+        (the one closer to the unconverged bracket boundary) so that vertex
+        contacts at edge corners are not missed.
 
         Returns:
             Tuple of (distance, contact_point).
         """
         golden = 0.3819660112501051  # (3 - sqrt(5)) / 2
         edge_dir = v1 - v0
-        edge_length = wp.length(edge_dir)
-
-        # Parametric tolerance floor; ``+ 1e-12`` guards zero-length edges.
-        tol_floor = 0.5 * precision_target / (edge_length + 1.0e-12)
-        check_short_edge_endpoints = tol_floor >= 0.25
 
         # Initialize Brent's method at the midpoint (SDF value from culling)
         a = float(0.0)
@@ -595,13 +590,10 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
 
         for _iter in range(5):
             m = 0.5 * (a + b)
-            tol = wp.max(1.0e-2 * wp.abs(x) + 1.0e-8, tol_floor)
+            tol = 1.0e-2 * wp.abs(x) + 1.0e-8
             tol2 = 2.0 * tol
 
-            # Force one iteration so the bracket is always contracted,
-            # otherwise short edges can exit Brent at iter 0 with x=0.5
-            # and the endpoint guard below would drop vertex contacts.
-            if _iter > 0 and wp.abs(x - m) <= tol2 - 0.5 * (b - a):
+            if wp.abs(x - m) <= tol2 - 0.5 * (b - a):
                 break
 
             # Try inverse parabolic interpolation
@@ -684,30 +676,14 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     v_brent = u
                     fv = fu
 
-        # Short edges can terminate before Brent samples near either
-        # endpoint. Only use the two-endpoint rescue when the current
-        # best point would be rejected by the contact threshold; otherwise
-        # keep the interior contact that Brent already found.
+        # Check the closer endpoint only when Brent converged near a
+        # boundary (x < 0.2 or x > 0.8).  When solidly interior the
+        # bracket has moved both boundaries inward, so the endpoint
+        # cannot beat the interior minimum.
         best_t = x
         best_f = fx
-        endpoint_check_count = int(0)
-        endpoint_t0 = float(0.0)
-        endpoint_t1 = float(0.0)
-        if check_short_edge_endpoints and best_f >= precision_target:
-            endpoint_check_count = 2
-            endpoint_t1 = 1.0
-        elif x < 0.2 or x > 0.8:
-            endpoint_check_count = 1
-            endpoint_t0 = 0.0 if x < 0.5 else 1.0
-
-        for endpoint_idx in range(2):
-            if endpoint_idx >= endpoint_check_count:
-                continue
-
-            check_t = endpoint_t0
-            if endpoint_idx == 1:
-                check_t = endpoint_t1
-
+        if x < 0.2 or x > 0.8:
+            check_t = 0.0 if x < 0.5 else 1.0
             f_end = _sample_sdf_at_t(
                 texture_sdf,
                 sdf_mesh_id,
@@ -1131,7 +1107,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 sdf_is_hfield,
                                 hfd_sdf,
                                 heightfield_elevations,
-                                contact_threshold_unscaled,
                             )
 
                             # Quick threshold check before computing the gradient
@@ -1488,7 +1463,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 sdf_is_hfield,
                                 hfd_sdf,
                                 heightfield_elevations,
-                                contact_threshold_unscaled,
                             )
 
                             # Quick threshold check before computing the gradient
