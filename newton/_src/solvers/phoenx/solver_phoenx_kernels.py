@@ -57,6 +57,9 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_iterate,
     contact_iterate_cloth_aware,
+    contact_iterate_lean,
+    contact_iterate_lean_no_sleep,
+    contact_iterate_no_sleep,
     contact_prepare_for_iteration,
     contact_prepare_for_iteration_cloth_aware,
     contact_prepare_for_iteration_lean,
@@ -1845,6 +1848,122 @@ def _singleworld_color_range_from_cursor(
 
 
 @functools.cache
+def _make_singleworld_rigid_contact_dispatch_func(
+    *,
+    has_mass_splitting: bool,
+    has_sleeping: bool,
+    is_prepare: bool,
+    use_bias: bool,
+):
+    @wp.func
+    def _dispatch_rigid_contact(
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        cc: ContactContainer,
+        contacts: ContactViews,
+        copy_state: CopyStateContainer,
+        num_bodies: wp.int32,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        local_cid: wp.int32,
+        parallel_id: wp.int32,
+    ):
+        if wp.static(is_prepare):
+            if wp.static(has_mass_splitting):
+                contact_prepare_for_iteration(
+                    contact_cols,
+                    local_cid,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    idt,
+                    cc,
+                    contacts,
+                    copy_state,
+                    parallel_id,
+                )
+            else:
+                contact_prepare_for_iteration_lean(
+                    contact_cols,
+                    local_cid,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    idt,
+                    cc,
+                    contacts,
+                    copy_state,
+                    parallel_id,
+                )
+        else:
+            if wp.static(has_mass_splitting):
+                if wp.static(has_sleeping):
+                    contact_iterate(
+                        contact_cols,
+                        local_cid,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        use_bias,
+                        copy_state,
+                        parallel_id,
+                        sor_boost,
+                    )
+                else:
+                    contact_iterate_no_sleep(
+                        contact_cols,
+                        local_cid,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        use_bias,
+                        copy_state,
+                        parallel_id,
+                        sor_boost,
+                    )
+            else:
+                if wp.static(has_sleeping):
+                    contact_iterate_lean(
+                        contact_cols,
+                        local_cid,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        use_bias,
+                        copy_state,
+                        parallel_id,
+                        sor_boost,
+                    )
+                else:
+                    contact_iterate_lean_no_sleep(
+                        contact_cols,
+                        local_cid,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        use_bias,
+                        copy_state,
+                        parallel_id,
+                        sor_boost,
+                    )
+
+    return _dispatch_rigid_contact
+
+
+@functools.cache
 def _make_singleworld_dispatch_func(
     *,
     revolute_only: bool,
@@ -1852,6 +1971,8 @@ def _make_singleworld_dispatch_func(
     enable_column_timers: bool,
     soft_tet_only: bool,
     has_joints: bool,
+    has_mass_splitting: bool,
+    has_sleeping: bool,
     is_prepare: bool,
     use_bias: bool,
 ):
@@ -1866,6 +1987,13 @@ def _make_singleworld_dispatch_func(
     ``@functools.cache``-keyed on the static axes; every (axes-tuple)
     builds one function once.
     """
+
+    _dispatch_rigid_contact = _make_singleworld_rigid_contact_dispatch_func(
+        has_mass_splitting=has_mass_splitting,
+        has_sleeping=has_sleeping,
+        is_prepare=is_prepare,
+        use_bias=use_bias,
+    )
 
     @wp.func
     def _dispatch_one_cid(
@@ -1908,63 +2036,68 @@ def _make_singleworld_dispatch_func(
                 cid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra - num_soft_hexahedra
             )
             if wp.static(cloth_support):
-                if wp.static(is_prepare):
-                    contact_prepare_for_iteration_cloth_aware(
+                # Mixed cloth/soft scenes still produce many rigid-rigid
+                # contact columns. Route those through the lean rigid path;
+                # only columns with a non-rigid endpoint need endpoint helpers.
+                side0_kind = contact_get_side0_kind(contact_cols, local_cid)
+                side1_kind = contact_get_side1_kind(contact_cols, local_cid)
+                if side0_kind == wp.int32(0) and side1_kind == wp.int32(0):
+                    _dispatch_rigid_contact(
                         contact_cols,
-                        local_cid,
                         bodies,
                         particles,
-                        num_bodies,
-                        idt,
                         cc,
                         contacts,
                         copy_state,
+                        num_bodies,
+                        idt,
+                        sor_boost,
+                        local_cid,
                         parallel_id,
                     )
                 else:
-                    contact_iterate_cloth_aware(
-                        contact_cols,
-                        local_cid,
-                        bodies,
-                        particles,
-                        num_bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        use_bias,
-                        copy_state,
-                        parallel_id,
-                        sor_boost,
-                    )
+                    if wp.static(is_prepare):
+                        contact_prepare_for_iteration_cloth_aware(
+                            contact_cols,
+                            local_cid,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            copy_state,
+                            parallel_id,
+                        )
+                    else:
+                        contact_iterate_cloth_aware(
+                            contact_cols,
+                            local_cid,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            use_bias,
+                            copy_state,
+                            parallel_id,
+                            sor_boost,
+                        )
             else:
-                if wp.static(is_prepare):
-                    contact_prepare_for_iteration(
-                        contact_cols,
-                        local_cid,
-                        bodies,
-                        particles,
-                        num_bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        copy_state,
-                        parallel_id,
-                    )
-                else:
-                    contact_iterate(
-                        contact_cols,
-                        local_cid,
-                        bodies,
-                        particles,
-                        num_bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        use_bias,
-                        copy_state,
-                        parallel_id,
-                        sor_boost,
-                    )
+                _dispatch_rigid_contact(
+                    contact_cols,
+                    bodies,
+                    particles,
+                    cc,
+                    contacts,
+                    copy_state,
+                    num_bodies,
+                    idt,
+                    sor_boost,
+                    local_cid,
+                    parallel_id,
+                )
             dispatched = True
             if wp.static(enable_column_timers):
                 contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
@@ -2189,6 +2322,8 @@ def _make_singleworld_persistent_kernel(
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
     has_joints: bool = True,
+    has_mass_splitting: bool = True,
+    has_sleeping: bool = True,
 ):
     """Persistent-grid PGS kernel for the requested phase + specialisation.
 
@@ -2218,6 +2353,8 @@ def _make_singleworld_persistent_kernel(
         enable_column_timers=enable_column_timers,
         soft_tet_only=soft_tet_only,
         has_joints=has_joints,
+        has_mass_splitting=has_mass_splitting,
+        has_sleeping=has_sleeping,
         is_prepare=is_prepare,
         use_bias=use_bias,
     )
@@ -2335,6 +2472,8 @@ def _make_singleworld_fused_kernel(
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
     has_joints: bool = True,
+    has_mass_splitting: bool = True,
+    has_sleeping: bool = True,
 ):
     """Single-block tail-fused PGS kernel; same axes as
     :func:`_make_singleworld_persistent_kernel`."""
@@ -2348,6 +2487,8 @@ def _make_singleworld_fused_kernel(
         enable_column_timers=enable_column_timers,
         soft_tet_only=soft_tet_only,
         has_joints=has_joints,
+        has_mass_splitting=has_mass_splitting,
+        has_sleeping=has_sleeping,
         is_prepare=is_prepare,
         use_bias=use_bias,
     )
@@ -2463,6 +2604,8 @@ def get_singleworld_kernel(
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
     has_joints: bool = True,
+    has_mass_splitting: bool = True,
+    has_sleeping: bool = True,
 ):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
@@ -2474,4 +2617,6 @@ def get_singleworld_kernel(
         enable_column_timers=enable_column_timers,
         soft_tet_only=soft_tet_only,
         has_joints=has_joints,
+        has_mass_splitting=has_mass_splitting,
+        has_sleeping=has_sleeping,
     )

@@ -115,6 +115,9 @@ __all__ = [
     "contact_iterate_at_cloth_aware",
     "contact_iterate_at_lean",
     "contact_iterate_cloth_aware",
+    "contact_iterate_lean",
+    "contact_iterate_lean_no_sleep",
+    "contact_iterate_no_sleep",
     "contact_prepare_for_iteration",
     "contact_prepare_for_iteration_at",
     "contact_prepare_for_iteration_at_cloth_aware",
@@ -1037,21 +1040,140 @@ def contact_iterate(
 ):
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
-    # Backup safety for the sleep-transition frame. See the matching
-    # guard in :func:`contact_iterate_multi` for the full reasoning --
-    # contacts the broad phase already produced before the per-step
-    # sleeping pass stamped ``island_root`` survive into the substep
-    # solve, and without this guard the positional-bias term explodes
-    # the freshly-sleeping island.
-    if b1 >= 0 and b1 < num_bodies and b2 >= 0 and b2 < num_bodies:
-        frozen1 = (bodies.motion_type[b1] != MOTION_DYNAMIC) or (bodies.island_root[b1] >= wp.int32(0))
-        frozen2 = (bodies.motion_type[b2] != MOTION_DYNAMIC) or (bodies.island_root[b2] >= wp.int32(0))
-        if frozen1 and frozen2:
-            return
+    if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
+        return
     # Access-mode flip is the caller's responsibility now (dispatcher only
     # routes rigid-only scenes here, so the flip is provably a no-op).
     body_pair = constraint_bodies_make(b1, b2)
     contact_iterate_at(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        use_bias,
+        copy_state,
+        parallel_id,
+        sor_boost,
+    )
+
+
+@wp.func
+def _contact_iterate_guard_allows(
+    bodies: BodyContainer,
+    b1: wp.int32,
+    b2: wp.int32,
+    num_bodies: wp.int32,
+) -> wp.bool:
+    # Backup safety for the sleep-transition frame. Contacts produced
+    # before the sleeping pass can survive into this step; if both
+    # endpoints are frozen, skip the row.
+    if b1 >= 0 and b1 < num_bodies and b2 >= 0 and b2 < num_bodies:
+        frozen1 = (bodies.motion_type[b1] != MOTION_DYNAMIC) or (bodies.island_root[b1] >= wp.int32(0))
+        frozen2 = (bodies.motion_type[b2] != MOTION_DYNAMIC) or (bodies.island_root[b2] >= wp.int32(0))
+        if frozen1 and frozen2:
+            return False
+    return True
+
+
+@wp.func
+def contact_iterate_no_sleep(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_iterate_at(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        use_bias,
+        copy_state,
+        parallel_id,
+        sor_boost,
+    )
+
+
+@wp.func
+def contact_iterate_lean(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
+        return
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_iterate_at_lean(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        use_bias,
+        copy_state,
+        parallel_id,
+        sor_boost,
+    )
+
+
+@wp.func
+def contact_iterate_lean_no_sleep(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_iterate_at_lean(
         constraints,
         cid,
         0,

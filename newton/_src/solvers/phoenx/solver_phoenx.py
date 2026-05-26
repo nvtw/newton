@@ -3168,6 +3168,8 @@ class PhoenXWorld:
             "enable_column_timers": self.enable_column_timers,
             "soft_tet_only": soft_tet_only,
             "has_joints": self.num_joints > 0,
+            "has_mass_splitting": self.mass_splitting_enabled,
+            "has_sleeping": self._sleeping_enabled,
         }
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),

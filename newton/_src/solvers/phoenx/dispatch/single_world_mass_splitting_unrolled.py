@@ -75,6 +75,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                     wp.int32(w.num_cloth_triangles),
                     wp.int32(w.num_cloth_bending),
                     wp.int32(w.num_soft_tetrahedra),
+                    wp.int32(w.num_soft_hexahedra),
                     wp.int32(w.num_bodies),
                     wp.int32(w._singleworld_total_threads),
                     wp.int32(-1),  # fuse_threshold disabled -> head handles all sizes
