@@ -23,19 +23,41 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import CONTACT_DW
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_container_zeros,
 )
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_BODIES
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
-def _make_kwargs(num_bodies: int = 1, num_joints: int = 0, rigid_contact_max: int = 0) -> dict:
+def _make_kwargs(
+    num_bodies: int = 1,
+    num_joints: int = 0,
+    rigid_contact_max: int = 0,
+    num_particles: int = 0,
+    num_cloth_triangles: int = 0,
+    num_cloth_bending: int = 0,
+    num_soft_tetrahedra: int = 0,
+    num_soft_hexahedra: int = 0,
+) -> dict:
     """Build a minimal (bodies, constraints, ...) kwarg dict."""
     device = wp.get_device()
     bodies = body_container_zeros(num_bodies, device=device)
-    constraints = PhoenXWorld.make_constraint_container(num_joints=num_joints, device=device)
+    constraints = PhoenXWorld.make_constraint_container(
+        num_joints=num_joints,
+        device=device,
+        num_cloth_triangles=num_cloth_triangles,
+        num_soft_tetrahedra=num_soft_tetrahedra,
+        num_cloth_bending=num_cloth_bending,
+        num_soft_hexahedra=num_soft_hexahedra,
+    )
     return {
         "bodies": bodies,
         "constraints": constraints,
         "num_joints": num_joints,
         "rigid_contact_max": rigid_contact_max,
+        "num_particles": num_particles,
+        "num_cloth_triangles": num_cloth_triangles,
+        "num_cloth_bending": num_cloth_bending,
+        "num_soft_tetrahedra": num_soft_tetrahedra,
+        "num_soft_hexahedra": num_soft_hexahedra,
         "device": device,
     }
 
@@ -99,17 +121,32 @@ class TestMassSplittingConfig(unittest.TestCase):
         )
         self.assertTrue(w.mass_splitting_enabled)
         self.assertEqual(w.max_colored_partitions, 12)
-        # Capacity sized for ``constraint_capacity * MAX_BODIES`` -- a
-        # soft-tet-vs-soft-tet contact emits up to 8 endpoint pairs
-        # (4 + 4 vertices). Cloth-cloth contacts emit 6, cloth-rigid 4,
-        # tet-rigid 5, etc. The constant ``_MS_ENDPOINTS_PER_CONSTRAINT
-        # = int(MAX_BODIES)`` in ``solver_phoenx.py`` carries this
-        # upper bound. The earlier ``* 2`` figure (rigid-only path)
-        # is stale -- under-sizing silently drops emit_pair entries
-        # and leaves bodies without their mass-splitting slot.
-        from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_BODIES
+        # Rigid-only worlds only emit the two body endpoints per
+        # contact/joint, so copy-state scratch should not be inflated
+        # to the deformable-contact upper bound.
+        expected_capacity = 2 * 2 + 128 * 2
+        self.assertEqual(w._copy_state.position.shape[0], expected_capacity)
+        self.assertEqual(w._copy_state.section_end.shape[0], w.num_bodies + w.num_particles)
+        self.assertEqual(int(w._copy_state.highest_index_in_use.numpy()[0]), 0)
 
-        expected_capacity = w._constraint_capacity * int(MAX_BODIES)
+    def test_enabled_uses_wide_contact_capacity_with_particles(self) -> None:
+        w = PhoenXWorld(
+            **_make_kwargs(
+                num_bodies=4,
+                num_joints=1,
+                rigid_contact_max=7,
+                num_particles=16,
+                num_cloth_triangles=2,
+                num_cloth_bending=3,
+                num_soft_tetrahedra=5,
+                num_soft_hexahedra=1,
+            ),
+            mass_splitting=True,
+            max_colored_partitions=12,
+            step_layout="single_world",
+        )
+        max_bodies = int(MAX_BODIES)
+        expected_capacity = 1 * 2 + 2 * 3 + 3 * 4 + 5 * 4 + 1 * max_bodies + 7 * max_bodies
         self.assertEqual(w._copy_state.position.shape[0], expected_capacity)
         self.assertEqual(w._copy_state.section_end.shape[0], w.num_bodies + w.num_particles)
         self.assertEqual(int(w._copy_state.highest_index_in_use.numpy()[0]), 0)

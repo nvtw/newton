@@ -226,6 +226,32 @@ def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]
     return wp.array(arr_np, dtype=wp.vec3f, device=device)
 
 
+def _mass_splitting_copy_capacity(
+    *,
+    num_joints: int,
+    num_cloth_triangles: int,
+    num_cloth_bending: int,
+    num_soft_tetrahedra: int,
+    num_soft_hexahedra: int,
+    num_particles: int,
+    max_contact_columns: int,
+) -> int:
+    """Upper-bound emitted ``(node, partition)`` pairs for copy-state scratch."""
+    contact_endpoints = 2
+    if num_particles > 0 or num_cloth_triangles > 0 or num_soft_tetrahedra > 0 or num_soft_hexahedra > 0:
+        # Cloth/soft contacts can touch up to two soft tets: 4 + 4 nodes.
+        contact_endpoints = int(MAX_BODIES)
+    capacity = (
+        int(num_joints) * 2
+        + int(num_cloth_triangles) * 3
+        + int(num_cloth_bending) * 4
+        + int(num_soft_tetrahedra) * 4
+        + int(num_soft_hexahedra) * int(MAX_BODIES)
+        + int(max_contact_columns) * contact_endpoints
+    )
+    return max(1, capacity)
+
+
 #: Persistent-grid block dim for the single-world iterate / prepare /
 #: relax kernels. One warp per block (32 threads) gives the most blocks
 #: in flight per SM and decouples the per-block ``__syncthreads()`` to
@@ -696,21 +722,21 @@ class PhoenXWorld:
         # average / writeback kernels short-circuit on
         # ``highest_index_in_use[0] == 0``.
         if self.mass_splitting_enabled:
-            # Worst-case entry count: every constraint contributes one
-            # entry per endpoint. ``MAX_BODIES`` (8) is the safe upper
-            # bound across every constraint type the partitioner can
-            # see -- rigid-rigid contacts have 2, joints have 2, cloth
-            # triangles have 3 nodes, cloth-bending has 4, soft tets
-            # have 4, cloth-rigid contacts have up to 5 (1 rigid + 3
-            # / 4 cloth nodes), cloth-cloth contacts have 6, and
-            # soft-tet-vs-cloth-tri contacts have 7. Under-sizing this
-            # silently drops pairs at :func:`emit_pair`'s atomic-add
-            # boundary, which leaves participating particles without
-            # slot allocations and forces their constraints to fall
-            # through to direct body/particle storage -- bypassing the
-            # Tonge averaging that the contact iterates assume.
-            _MS_ENDPOINTS_PER_CONSTRAINT = int(MAX_BODIES)
-            ms_capacity = max(1, self._constraint_capacity * _MS_ENDPOINTS_PER_CONSTRAINT)
+            # Worst-case emitted ``(node, partition)`` pairs for this
+            # scene. Rigid-only worlds only need two endpoints per
+            # contact/joint; deformable contact worlds keep the full
+            # ``MAX_BODIES`` bound because soft-tet/cloth contacts can
+            # touch up to eight nodes. This directly sizes the radix-sort
+            # scratch used by the mass-splitting interaction graph.
+            ms_capacity = _mass_splitting_copy_capacity(
+                num_joints=self.num_joints,
+                num_cloth_triangles=self.num_cloth_triangles,
+                num_cloth_bending=self.num_cloth_bending,
+                num_soft_tetrahedra=self.num_soft_tetrahedra,
+                num_soft_hexahedra=self.num_soft_hexahedra,
+                num_particles=self.num_particles,
+                max_contact_columns=self.max_contact_columns,
+            )
             ms_nodes = max(1, self.num_bodies + self.num_particles)
         else:
             # Sentinel containers — kernels see highest_index_in_use==0
