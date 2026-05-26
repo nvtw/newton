@@ -14,15 +14,14 @@ Port of C# ``MassSplitting`` substep helpers
   iterations. Averages linear / angular velocity across a node's slots;
   position / orientation stay at broadcast-time values.
 * :func:`launch_average_and_broadcast_grouped` -- CUDA fast path for
-  the same operation, using one warp block for eight nodes while
-  preserving scalar reduction order.
+  the same operation, using one warp block per node with a fixed tile
+  reduction and cooperative slot writes.
 * :func:`launch_copy_state_into_rigids` -- once post-PGS. Writes
   slot[0]'s averaged velocity back to body / particle storage.
 
 The scalar kernels launch one thread per unified-node-id and short-circuit
 on empty copy-state ranges. The grouped average launches 32-thread blocks
-that each process eight nodes, keeping one leader lane per node for the
-ordered sum and using the remaining subgroup lanes for broadcast writes.
+that each process one node with a deterministic warp-tile reduction.
 """
 
 from __future__ import annotations
@@ -252,17 +251,15 @@ def _average_and_broadcast_grouped_kernel(
     num_bodies: wp.int32,
     inv_dt: wp.float32,
 ):
-    """Generic average/broadcast with several nodes per warp block.
+    """Generic average/broadcast with one warp block per node.
 
-    Lane 0 of each four-lane subgroup computes that node's average in
-    scalar slot order. The subgroup then broadcasts the scalar result
-    back to the node's slots cooperatively. This preserves the serial
-    reduction order while reducing the second slot loop.
+    The 32 lanes cooperatively synchronize and sum a node's copy-state
+    slots, then broadcast the averaged velocity back to those slots. The
+    reduction tree is fixed, so this remains deterministic while avoiding
+    the scalar slot scan that dominates particle-heavy soft bodies.
     """
     block, lane = wp.tid()
-    group = lane / _MASS_SPLITTING_GROUPED_LANES_PER_NODE_WP
-    local = lane - group * _MASS_SPLITTING_GROUPED_LANES_PER_NODE_WP
-    node_id = block * wp.int32(_MASS_SPLITTING_GROUPED_NODES_PER_BLOCK) + group
+    node_id = block
 
     count = wp.int32(0)
     start = wp.int32(0)
@@ -274,55 +271,55 @@ def _average_and_broadcast_grouped_kernel(
                 start = copy_state.section_end[node_id - wp.int32(1)]
             end = start + count
 
-    avg_x = wp.float32(0.0)
-    avg_y = wp.float32(0.0)
-    avg_z = wp.float32(0.0)
-    avg_wx = wp.float32(0.0)
-    avg_wy = wp.float32(0.0)
-    avg_wz = wp.float32(0.0)
-    is_body = node_id < num_bodies
-
-    if local == wp.int32(0) and count > wp.int32(1):
-        sum_v = wp.vec3f(0.0, 0.0, 0.0)
-        sum_w = wp.vec3f(0.0, 0.0, 0.0)
-        if is_body:
-            for slot in range(start, end):
-                slot_synchronize_to_velocity_level(bodies, particles, copy_state, node_id, slot, num_bodies, inv_dt)
-                sum_v = sum_v + copy_state.velocity[slot]
-                sum_w = sum_w + copy_state.angular_velocity[slot]
-        else:
-            p = node_id - num_bodies
-            for slot in range(start, end):
-                sum_v = sum_v + _sync_particle_slot_to_velocity_level(copy_state, particles, p, slot, inv_dt)
-        inv_count = wp.float32(1.0) / wp.float32(count)
-        avg_v = sum_v * inv_count
-        avg_x = avg_v[0]
-        avg_y = avg_v[1]
-        avg_z = avg_v[2]
-        if is_body:
-            avg_w = sum_w * inv_count
-            avg_wx = avg_w[0]
-            avg_wy = avg_w[1]
-            avg_wz = avg_w[2]
-
-    group_leader = group * _MASS_SPLITTING_GROUPED_LANES_PER_NODE_WP
-    avg_x = wp.tile(avg_x)[group_leader]
-    avg_y = wp.tile(avg_y)[group_leader]
-    avg_z = wp.tile(avg_z)[group_leader]
-    avg_wx = wp.tile(avg_wx)[group_leader]
-    avg_wy = wp.tile(avg_wy)[group_leader]
-    avg_wz = wp.tile(avg_wz)[group_leader]
-
     if count <= wp.int32(1):
         return
+
+    is_body = node_id < num_bodies
+    sum_x = wp.float32(0.0)
+    sum_y = wp.float32(0.0)
+    sum_z = wp.float32(0.0)
+    sum_wx = wp.float32(0.0)
+    sum_wy = wp.float32(0.0)
+    sum_wz = wp.float32(0.0)
+
+    slot = start + lane
+    if is_body:
+        while slot < end:
+            slot_synchronize_to_velocity_level(bodies, particles, copy_state, node_id, slot, num_bodies, inv_dt)
+            v = copy_state.velocity[slot]
+            w = copy_state.angular_velocity[slot]
+            sum_x = sum_x + v[0]
+            sum_y = sum_y + v[1]
+            sum_z = sum_z + v[2]
+            sum_wx = sum_wx + w[0]
+            sum_wy = sum_wy + w[1]
+            sum_wz = sum_wz + w[2]
+            slot = slot + wp.int32(32)
+    else:
+        p = node_id - num_bodies
+        while slot < end:
+            v = _sync_particle_slot_to_velocity_level(copy_state, particles, p, slot, inv_dt)
+            sum_x = sum_x + v[0]
+            sum_y = sum_y + v[1]
+            sum_z = sum_z + v[2]
+            slot = slot + wp.int32(32)
+
+    inv_count = wp.float32(1.0) / wp.float32(count)
+    avg_x = wp.tile_sum(wp.tile(sum_x))[0] * inv_count
+    avg_y = wp.tile_sum(wp.tile(sum_y))[0] * inv_count
+    avg_z = wp.tile_sum(wp.tile(sum_z))[0] * inv_count
+    avg_wx = wp.tile_sum(wp.tile(sum_wx))[0] * inv_count
+    avg_wy = wp.tile_sum(wp.tile(sum_wy))[0] * inv_count
+    avg_wz = wp.tile_sum(wp.tile(sum_wz))[0] * inv_count
+
     avg_v = wp.vec3f(avg_x, avg_y, avg_z)
     avg_w = wp.vec3f(avg_wx, avg_wy, avg_wz)
-    slot = start + local
+    slot = start + lane
     while slot < end:
         copy_state.velocity[slot] = avg_v
         if is_body:
             copy_state.angular_velocity[slot] = avg_w
-        slot = slot + _MASS_SPLITTING_GROUPED_LANES_PER_NODE_WP
+        slot = slot + wp.int32(32)
 
 
 @wp.kernel(enable_backward=False)
@@ -397,8 +394,8 @@ def _copy_state_into_rigids_kernel(
         particles.position[p] = particles.position_prev_substep[p] + dt * vel
 
 
-_MASS_SPLITTING_GROUPED_NODES_PER_BLOCK: int = 8
-_MASS_SPLITTING_GROUPED_LANES_PER_NODE: int = 4
+_MASS_SPLITTING_GROUPED_NODES_PER_BLOCK: int = 1
+_MASS_SPLITTING_GROUPED_LANES_PER_NODE: int = 32
 _MASS_SPLITTING_GROUPED_LANES_PER_NODE_WP = wp.constant(wp.int32(_MASS_SPLITTING_GROUPED_LANES_PER_NODE))
 
 # Per-node mass-splitting kernels iterate sequentially over a small
@@ -464,7 +461,7 @@ def launch_average_and_broadcast_grouped(
 ) -> None:
     """Launch grouped generic average/broadcast.
 
-    Uses one 32-thread block for eight nodes, four lanes per node.
+    Uses one 32-thread block per node.
     """
     num_nodes = copy_state.section_end.shape[0]
     num_blocks = (num_nodes + _MASS_SPLITTING_GROUPED_NODES_PER_BLOCK - 1) // _MASS_SPLITTING_GROUPED_NODES_PER_BLOCK
