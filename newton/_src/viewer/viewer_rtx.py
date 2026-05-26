@@ -167,6 +167,8 @@ class ViewerRTX(ViewerUSD):
             )
 
         self._paused = paused
+        self._step_requested = False
+        self._reset_callback: Callable[[], None] | None = None
 
         # OVRTX
         self._rtx = None
@@ -1889,6 +1891,24 @@ void main() {
     @override
     def is_paused(self) -> bool:
         return self._paused
+
+    @override
+    def should_step(self) -> bool:
+        if not self._paused:
+            self._step_requested = False
+            return True
+        if self._step_requested:
+            self._step_requested = False
+            return True
+        return False
+
+    def set_reset_callback(self, callback: Callable[[], None] | None) -> None:
+        """Register a callback invoked when the user clicks the Reset button.
+
+        Args:
+            callback: Called with no arguments on reset, or ``None`` to remove.
+        """
+        self._reset_callback = callback
 
     @override
     def is_running(self) -> bool:
