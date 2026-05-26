@@ -23,8 +23,8 @@ minimum that:
 
 * exercises the mass-splitting overflow bucket (multiple soft-tet
   rows per particle when batch_size <= 5 tets/cube);
-* exercises both colored and uncoloured paths via the same
-  ``max_colored_partitions=0`` knob the shipping example uses;
+* exercises both colored and uncoloured paths via the
+  ``max_colored_partitions=0`` overflow-only regression knob;
 * leaves the cubes free-falling for a non-trivial amount before
   contact;
 
@@ -261,10 +261,10 @@ class TestSoftBodySettling(unittest.TestCase):
         )
 
     def test_settles_with_overflow_only(self):
-        """``max_colored_partitions=0`` -- the shipping example
-        default. All soft-tet rows route to the Jacobi-block overflow
-        bucket; ``_average_and_broadcast_kernel`` reconciles batches
-        between PGS iterations."""
+        """``max_colored_partitions=0`` -- overflow-only regression mode.
+        All soft-tet rows route to the Jacobi-block overflow bucket;
+        ``_average_and_broadcast_kernel`` reconciles batches between
+        PGS iterations."""
         device = wp.get_preferred_device()
         _, world, contacts, collision_pipeline, state = _build_settling_scene(
             device=device, max_colored_partitions=0, mass_splitting_batch_size=2

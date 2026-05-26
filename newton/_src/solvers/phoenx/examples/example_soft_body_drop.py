@@ -65,20 +65,14 @@ from newton._src.solvers.phoenx.timer import print_column_timings
 # splitting.
 # Mass-splitting setup. With dense soft-tet meshes (15k tets sharing
 # ~7k particles via the voxel hex-to-tet decomposition) the contact
-# graph has high vertex-degree, and the greedy coloring with a moderate
-# colour cap spills ~50% of constraints into the sequential-batch
-# overflow bucket. Dropping the cap to ``0`` puts ALL soft-tet rows
-# into the overflow bucket -- which is mass-splitting's Jacobi-block
-# path, batched ``ms_batch_size`` cids per thread with
-# ``_average_and_broadcast`` between PGS iterations. On this pure soft
-# scene the pure-Jacobi path is faster than the Gauss-Seidel coloured
-# path because the GPU runs one big parallel block instead of
-# ``N_colors`` sequential dispatches, and the in-batch sequential
-# Gauss-Seidel of ``ms_batch_size=2`` still provides enough intra-thread
-# feedback for convergence. Mixed rigid/soft scenes should keep a
-# nonzero cap so rigid contacts retain coloured Gauss-Seidel updates.
+# graph has high vertex-degree. Keep a bounded coloured prefix so this
+# example exercises the partitioned Gauss-Seidel path, then spill the
+# remaining high-degree rows to the mass-splitting overflow bucket
+# where they are processed in deterministic Jacobi-block batches.
+# ``8`` is faster than ``12`` on the default scene while still keeping
+# real colour partitions active.
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 0
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 8
 
 #: Opt-in per-column wall-clock profiling. When ``True`` the solver
 #: brackets every PGS dispatch with CUDA ``%globaltimer`` reads and
@@ -251,9 +245,9 @@ class Example:
             num_soft_tetrahedra=int(self.model.tet_count),
             device=self.device,
         )
-        # Overflow-only soft-tet sweeps are one large parallel partition.
-        # Use more persistent-grid blocks than rigid stacks while keeping
-        # the solver-wide one-warp block size unchanged.
+        # Dense soft-tet sweeps have enough rows to benefit from more
+        # persistent-grid blocks than rigid stacks while keeping the
+        # solver-wide one-warp block size unchanged.
         max_thread_blocks = 8 * self.device.sm_count if self.device.is_cuda else None
         self.world = PhoenXWorld(
             bodies=bodies,
