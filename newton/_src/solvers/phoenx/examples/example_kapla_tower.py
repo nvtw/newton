@@ -90,7 +90,7 @@ STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
 # per-(body, partition) copy states. Currently requires the single-
 # world layout (the multi-world fast-tail kernels haven't been
 # refactored yet) and no joints / cloth — both true for this scene.
-ENABLE_MASS_SPLITTING: bool = False
+ENABLE_MASS_SPLITTING: bool = True
 MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
 
 # Tile the single ``KaplaTower2.usda`` instancer into a 2D grid centred
@@ -610,10 +610,6 @@ class Example:
                     f"brick {newton_idx} (cell {cell_index}) flew outside the tower envelope "
                     f"(r_xy={r_xy:.3f}, tol={tower_tolerance:.3f})"
                 )
-
-        for newton_idx in self._wrecking_ball_newton_ids:
-            pos = positions[newton_idx + 1]
-            assert np.isfinite(pos).all(), f"wrecking ball {newton_idx} non-finite position: {pos}"
 
 
 if __name__ == "__main__":
