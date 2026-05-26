@@ -600,7 +600,7 @@ def _make_contact_prepare_for_iteration_at(cloth_support: bool, has_mass_splitti
     return impl
 
 
-def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = True):
+def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = True, use_bias: bool = True):
     @wp.func
     def impl(
         constraints: ContactColumnContainer,
@@ -613,7 +613,6 @@ def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = Tru
         idt: wp.float32,
         cc: ContactContainer,
         contacts: ContactViews,
-        use_bias: wp.bool,
         copy_state: CopyStateContainer,
         parallel_id: wp.int32,
         sor_boost: wp.float32,
@@ -778,7 +777,7 @@ def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = Tru
             # Speculative rows always keep their gap bias (incl. relax)
             # to avoid the "honey" artefact at the speculative shell.
             is_speculative = bias_val > wp.float32(0.0)
-            if not use_bias:
+            if wp.static(not use_bias):
                 if not is_speculative:
                     bias_val = wp.float32(0.0)
                 bias_t1_val = wp.float32(0.0)
@@ -799,7 +798,7 @@ def _make_contact_iterate_at(cloth_support: bool, has_mass_splitting: bool = Tru
                 if is_speculative:
                     mass_coeff_n = wp.float32(1.0)
                     impulse_coeff_n = wp.float32(0.0)
-                elif use_bias:
+                elif wp.static(use_bias):
                     mass_coeff_n = mass_coeff
                     impulse_coeff_n = impulse_coeff
                 else:
@@ -902,9 +901,12 @@ contact_prepare_for_iteration_at_lean = _make_contact_prepare_for_iteration_at(
     cloth_support=False, has_mass_splitting=False
 )
 contact_prepare_for_iteration_at_cloth_aware = _make_contact_prepare_for_iteration_at(cloth_support=True)
-contact_iterate_at = _make_contact_iterate_at(cloth_support=False)
-contact_iterate_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False)
-contact_iterate_at_cloth_aware = _make_contact_iterate_at(cloth_support=True)
+contact_iterate_at = _make_contact_iterate_at(cloth_support=False, use_bias=True)
+contact_relax_at = _make_contact_iterate_at(cloth_support=False, use_bias=False)
+contact_iterate_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False, use_bias=True)
+contact_relax_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False, use_bias=False)
+contact_iterate_at_cloth_aware = _make_contact_iterate_at(cloth_support=True, use_bias=True)
+contact_relax_at_cloth_aware = _make_contact_iterate_at(cloth_support=True, use_bias=False)
 
 
 # Entry-point wrappers: read header, flip access modes, then call the
@@ -1060,22 +1062,38 @@ def contact_iterate(
     # Access-mode flip is the caller's responsibility now (dispatcher only
     # routes rigid-only scenes here, so the flip is provably a no-op).
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at(
-        constraints,
-        cid,
-        0,
-        bodies,
-        particles,
-        num_bodies,
-        body_pair,
-        idt,
-        cc,
-        contacts,
-        use_bias,
-        copy_state,
-        parallel_id,
-        sor_boost,
-    )
+    if use_bias:
+        contact_iterate_at(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
 
 
 @wp.func
@@ -1114,22 +1132,38 @@ def contact_iterate_no_sleep(
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at(
-        constraints,
-        cid,
-        0,
-        bodies,
-        particles,
-        num_bodies,
-        body_pair,
-        idt,
-        cc,
-        contacts,
-        use_bias,
-        copy_state,
-        parallel_id,
-        sor_boost,
-    )
+    if use_bias:
+        contact_iterate_at(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
 
 
 @wp.func
@@ -1152,22 +1186,38 @@ def contact_iterate_lean(
     if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
         return
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at_lean(
-        constraints,
-        cid,
-        0,
-        bodies,
-        particles,
-        num_bodies,
-        body_pair,
-        idt,
-        cc,
-        contacts,
-        use_bias,
-        copy_state,
-        parallel_id,
-        sor_boost,
-    )
+    if use_bias:
+        contact_iterate_at_lean(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_lean(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
 
 
 @wp.func
@@ -1188,22 +1238,38 @@ def contact_iterate_lean_no_sleep(
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at_lean(
-        constraints,
-        cid,
-        0,
-        bodies,
-        particles,
-        num_bodies,
-        body_pair,
-        idt,
-        cc,
-        contacts,
-        use_bias,
-        copy_state,
-        parallel_id,
-        sor_boost,
-    )
+    if use_bias:
+        contact_iterate_at_lean(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_lean(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
 
 
 @wp.func
@@ -1250,19 +1316,35 @@ def contact_iterate_cloth_aware(
         idt,
     )
     body_pair = constraint_bodies_make(b1, b2)
-    contact_iterate_at_cloth_aware(
-        constraints,
-        cid,
-        0,
-        bodies,
-        particles,
-        num_bodies,
-        body_pair,
-        idt,
-        cc,
-        contacts,
-        use_bias,
-        copy_state,
-        parallel_id,
-        sor_boost,
-    )
+    if use_bias:
+        contact_iterate_at_cloth_aware(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_cloth_aware(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
