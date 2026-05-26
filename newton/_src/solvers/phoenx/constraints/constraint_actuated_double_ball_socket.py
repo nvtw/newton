@@ -501,6 +501,30 @@ _OFF_CLAMP = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "clamp"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_world"))
 _OFF_ACC_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_drive"))
 _OFF_ACC_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_limit"))
+
+
+@wp.func
+def _read_s_inv_22(constraints: ConstraintContainer, base_offset: wp.int32, cid: wp.int32) -> wp.mat22f:
+    """Read the live 2x2 Schur inverse packed at the front of ``S_INV``."""
+    off = base_offset + _OFF_S_INV
+    return wp.mat22f(
+        read_float(constraints, off + wp.int32(0), cid),
+        read_float(constraints, off + wp.int32(1), cid),
+        read_float(constraints, off + wp.int32(2), cid),
+        read_float(constraints, off + wp.int32(3), cid),
+    )
+
+
+@wp.func
+def _write_s_inv_22(constraints: ConstraintContainer, base_offset: wp.int32, cid: wp.int32, s_inv: wp.mat22f):
+    """Write only the live 2x2 Schur inverse entries."""
+    off = base_offset + _OFF_S_INV
+    write_float(constraints, off + wp.int32(0), cid, s_inv[0, 0])
+    write_float(constraints, off + wp.int32(1), cid, s_inv[0, 1])
+    write_float(constraints, off + wp.int32(2), cid, s_inv[1, 0])
+    write_float(constraints, off + wp.int32(3), cid, s_inv[1, 1])
+
+
 ADBS_TIME_US_OFFSET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "time_us"))
 
 #: Total dword count of one unified joint constraint.
@@ -1276,8 +1300,7 @@ def _anchor1_anchor2_schur_block(
     back."""
     a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
     ut_ai = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
-    s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
-    s_inv_22 = wp.mat22f(s_inv_packed[0, 0], s_inv_packed[0, 1], s_inv_packed[1, 0], s_inv_packed[1, 1])
+    s_inv_22 = _read_s_inv_22(constraints, base_offset, cid)
 
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
     acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
@@ -1614,11 +1637,10 @@ def _pivot_anchor1_anchor2_K_factor_at(
     s_mat = d_mat - ut_ai @ u_mat
     s22 = wp.mat22f(s_mat[0, 0], s_mat[0, 1], s_mat[1, 0], s_mat[1, 1])
     s22_inv = wp.inverse(s22)
-    s_inv_packed = wp.mat33f(s22_inv[0, 0], s22_inv[0, 1], 0.0, s22_inv[1, 0], s22_inv[1, 1], 0.0, 0.0, 0.0, 0.0)
 
     write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
     write_mat33(constraints, base_offset + _OFF_UT_AI, cid, ut_ai)
-    write_mat33(constraints, base_offset + _OFF_S_INV, cid, s_inv_packed)
+    _write_s_inv_22(constraints, base_offset, cid, s22_inv)
 
 
 # ---------------------------------------------------------------------------
@@ -2835,13 +2857,7 @@ def _revolute_iterate_at_multi(
 
     a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
     ut_ai = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
-    s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
-    s_inv_22 = wp.mat22f(
-        s_inv_packed[0, 0],
-        s_inv_packed[0, 1],
-        s_inv_packed[1, 0],
-        s_inv_packed[1, 1],
-    )
+    s_inv_22 = _read_s_inv_22(constraints, base_offset, cid)
     if use_bias:
         bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
         bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
