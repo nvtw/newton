@@ -40,6 +40,8 @@ __all__ = [
     "cc_get_prev_tangent1",
     "cc_get_prev_tangent1_lambda",
     "cc_get_prev_tangent2_lambda",
+    "cc_get_r0",
+    "cc_get_r1",
     "cc_get_side0_bary",
     "cc_get_side1_bary",
     "cc_get_tangent1",
@@ -58,6 +60,8 @@ __all__ = [
     "cc_set_pd_bias",
     "cc_set_pd_eff_soft",
     "cc_set_pd_gamma",
+    "cc_set_r0",
+    "cc_set_r1",
     "cc_set_side0_bary",
     "cc_set_side1_bary",
     "cc_set_tangent1",
@@ -79,10 +83,11 @@ CC_LAMBDA_DWORDS_PER_CONTACT: int = 3
 #: the three triangle nodes via barycentric weights.
 CC_DWORDS_PER_CONTACT: int = 21
 
-#: 9 = eff_n + eff_t1 + eff_t2 + bias + bias_t1 + bias_t2 + pd_gamma + pd_bias + pd_eff_soft.
-#: pd_* are non-zero only for soft contacts (user K/D); pd_eff_soft > 0 switches
-#: the normal row to absolute PD spring-damper. r1/r2 are recomputed in iterate.
-CC_DERIVED_DWORDS_PER_CONTACT: int = 9
+#: 15 = eff_n + eff_t1 + eff_t2 + bias + bias_t1 + bias_t2 + pd_gamma + pd_bias +
+#: pd_eff_soft + r0(3) + r1(3). pd_* are non-zero only for soft contacts (user
+#: K/D); pd_eff_soft > 0 switches the normal row to absolute PD spring-damper.
+#: Rigid-contact prepare caches lever arms for the velocity sweeps.
+CC_DERIVED_DWORDS_PER_CONTACT: int = 15
 
 
 # Compile-time dword offsets.
@@ -118,6 +123,12 @@ _CC_OFF_BIAS_T2 = wp.constant(5)
 _CC_OFF_PD_GAMMA = wp.constant(6)
 _CC_OFF_PD_BIAS = wp.constant(7)
 _CC_OFF_PD_EFF_SOFT = wp.constant(8)
+_CC_OFF_R0_X = wp.constant(9)
+_CC_OFF_R0_Y = wp.constant(10)
+_CC_OFF_R0_Z = wp.constant(11)
+_CC_OFF_R1_X = wp.constant(12)
+_CC_OFF_R1_Y = wp.constant(13)
+_CC_OFF_R1_Z = wp.constant(14)
 
 
 @wp.struct
@@ -413,6 +424,38 @@ def cc_get_pd_eff_soft(cc: ContactContainer, k: wp.int32) -> wp.float32:
 @wp.func
 def cc_set_pd_eff_soft(cc: ContactContainer, k: wp.int32, v: wp.float32):
     write2d_f32(cc.derived, _CC_OFF_PD_EFF_SOFT, k, v)
+
+
+@wp.func
+def cc_get_r0(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
+    return wp.vec3f(
+        read2d_f32(cc.derived, _CC_OFF_R0_X, k),
+        read2d_f32(cc.derived, _CC_OFF_R0_Y, k),
+        read2d_f32(cc.derived, _CC_OFF_R0_Z, k),
+    )
+
+
+@wp.func
+def cc_set_r0(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
+    write2d_f32(cc.derived, _CC_OFF_R0_X, k, v[0])
+    write2d_f32(cc.derived, _CC_OFF_R0_Y, k, v[1])
+    write2d_f32(cc.derived, _CC_OFF_R0_Z, k, v[2])
+
+
+@wp.func
+def cc_get_r1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
+    return wp.vec3f(
+        read2d_f32(cc.derived, _CC_OFF_R1_X, k),
+        read2d_f32(cc.derived, _CC_OFF_R1_Y, k),
+        read2d_f32(cc.derived, _CC_OFF_R1_Z, k),
+    )
+
+
+@wp.func
+def cc_set_r1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
+    write2d_f32(cc.derived, _CC_OFF_R1_X, k, v[0])
+    write2d_f32(cc.derived, _CC_OFF_R1_Y, k, v[1])
+    write2d_f32(cc.derived, _CC_OFF_R1_Z, k, v[2])
 
 
 # ---------------------------------------------------------------------------

@@ -72,6 +72,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_pd_bias,
     cc_get_pd_eff_soft,
     cc_get_pd_gamma,
+    cc_get_r0,
+    cc_get_r1,
     cc_get_side0_bary,
     cc_get_side1_bary,
     cc_get_tangent1,
@@ -89,6 +91,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_pd_bias,
     cc_set_pd_eff_soft,
     cc_set_pd_gamma,
+    cc_set_r0,
+    cc_set_r1,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
@@ -569,6 +573,9 @@ def _make_contact_prepare_for_iteration_at(
             cc_set_bias(cc, k, bias_val)
             cc_set_bias_t1(cc, k, bias_t1_val)
             cc_set_bias_t2(cc, k, bias_t2_val)
+            if wp.static(not cloth_support):
+                cc_set_r0(cc, k, r1)
+                cc_set_r1(cc, k, r2)
 
             # Soft-contact PD normal row (per-contact stiffness/damping).
             # Scenes without stiffness/damping arrays use a specialised iterate
@@ -749,10 +756,6 @@ def _make_contact_iterate_at(
         else:
             # Mass-splitting contact columns read slot/count values stamped by
             # the graph build; no-slot endpoints are cached as ``(-1, 1)``.
-            orientation1 = bodies.orientation[b1]
-            orientation2 = bodies.orientation[b2]
-            body_com1 = bodies.body_com[b1]
-            body_com2 = bodies.body_com[b2]
             if wp.static(not has_mass_splitting):
                 # Compile-time lean: slot lookup dead-code-eliminated.
                 v1 = bodies.velocity[b1]
@@ -855,10 +858,8 @@ def _make_contact_iterate_at(
                 )
                 vel_rel = v1_at_p - v0_at_p
             else:
-                local_p0 = cc_get_local_p0(cc, k)
-                local_p1 = cc_get_local_p1(cc, k)
-                r1 = wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
-                r2 = wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
+                r1 = cc_get_r0(cc, k)
+                r2 = cc_get_r1(cc, k)
                 vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
 
             jv_n = wp.dot(vel_rel, n)
