@@ -17,6 +17,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.body import (
+    MOTION_DYNAMIC,
     MOTION_KINEMATIC,
     BodyContainer,
 )
@@ -382,8 +383,8 @@ class PhoenXWorld:
         # capture_while + speculative are perf wins with no quality
         # regression. See the matching ``set_*`` docstrings on the
         # partitioner.
-        warm_start_invalidate_period: int = 4,
-        warm_start_rotate_skip_color: bool = True,
+        warm_start_invalidate_period: int | None = None,
+        warm_start_rotate_skip_color: bool | None = None,
         warm_start_rotate_skip_width: int = 1,
         capture_while_greedy_coloring: bool = True,
         speculative_coloring: bool = True,
@@ -670,6 +671,25 @@ class PhoenXWorld:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
         # num_bodies + num_particles)`` are particles.
         self.partitioner_algorithm: str = str(partitioner_algorithm)
+        # The cache-stir defaults are needed for contact-heavy dynamic
+        # rigid stacks, where a perfectly locked colouring can bias the
+        # PGS fixed point over many frames. Deformable-only worlds pay
+        # the recolouring cost but do not have that rigid-stack drift
+        # mode, so let them reuse the cached colouring unless a caller
+        # explicitly opts into stirring. Mixed rigid/deformable scenes
+        # keep the rigid-stack defaults.
+        _has_dynamic_rigid_rows = self.num_joints > 0
+        if self.num_bodies > 0:
+            motion_type = bodies.motion_type.numpy()
+            inverse_mass = bodies.inverse_mass.numpy()
+            _has_dynamic_rigid_rows = _has_dynamic_rigid_rows or bool(
+                np.any((motion_type == int(MOTION_DYNAMIC)) & (inverse_mass > 0.0))
+            )
+        if warm_start_invalidate_period is None:
+            warm_start_invalidate_period = 4 if _has_dynamic_rigid_rows else 0
+        if warm_start_rotate_skip_color is None:
+            warm_start_rotate_skip_color = _has_dynamic_rigid_rows
+
         # Warm-start coloring only feeds the single-world greedy build;
         # the per-world multi-world path uses a different kernel that
         # never reads the cache. Skip the allocation in that case.
@@ -1808,8 +1828,29 @@ class PhoenXWorld:
         Returns:
             The constructed :class:`CollisionPipeline`.
         """
+        from newton._src.geometry.flags import ShapeFlags  # noqa: PLC0415
         from newton._src.geometry.types import GeoType  # noqa: PLC0415
         from newton._src.sim.collide import CollisionPipeline  # noqa: PLC0415
+
+        def _soft_tet_collision_mask(tet_indices: np.ndarray) -> np.ndarray:
+            tets = np.asarray(tet_indices, dtype=np.int32).reshape(-1, 4)
+            if tets.shape[0] == 0:
+                return np.zeros(0, dtype=bool)
+
+            face_counts: dict[tuple[int, int, int], int] = {}
+            for a, b, c, d in tets:
+                for face in ((a, b, c), (a, d, b), (b, d, c), (a, c, d)):
+                    key = tuple(sorted((int(face[0]), int(face[1]), int(face[2]))))
+                    face_counts[key] = face_counts.get(key, 0) + 1
+
+            surface_vertices: set[int] = set()
+            for face, count in face_counts.items():
+                if count == 1:
+                    surface_vertices.update(face)
+            if not surface_vertices:
+                return np.ones(tets.shape[0], dtype=bool)
+            surface = np.fromiter(surface_vertices, dtype=np.int32)
+            return np.isin(tets, surface).any(axis=1)
 
         if self.num_cloth_triangles == 0 and self.num_soft_tetrahedra == 0:
             raise RuntimeError(
@@ -1821,7 +1862,7 @@ class PhoenXWorld:
         T = int(self.num_cloth_triangles)
         Tet = int(self.num_soft_tetrahedra)
 
-        # Unified shape_world / shape_flags arrays of length S+T.
+        # Unified shape_world / shape_flags arrays of length S+T+Tet.
         # Rigid prefix mirrors model.shape_*; suffix lands in world 0
         # with default flags (= same flag value as a typical dynamic
         # rigid shape so the broad phase doesn't cull cloth tris).
@@ -1840,6 +1881,11 @@ class PhoenXWorld:
                 if seed_value != 0:
                     arr = unified_shape_flags.numpy()
                     arr[S:] = seed_value
+                    if Tet > 0:
+                        tet_collides = _soft_tet_collision_mask(model.tet_indices.numpy())
+                        collide_bit = int(ShapeFlags.COLLIDE_SHAPES)
+                        tet_flags = arr[S + T : S + T + Tet]
+                        tet_flags[~tet_collides] &= ~collide_bit
                     unified_shape_flags.assign(arr)
 
         # Length-1 sentinel for the unused mesh-indices argument in the
