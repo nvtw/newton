@@ -270,7 +270,6 @@ class Example:
         )
 
         self.state_0 = self.model.state()
-        self.state_1 = self.model.state()
         self.control = self.model.control()
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
@@ -406,22 +405,9 @@ class Example:
         # One collide() per frame -- ``--fps`` chooses how often
         # broad/narrow-phase fires. PhoenX advances
         # ``args.sim_substeps`` PGS substeps inside the single
-        # ``solver.step`` below.
-        #
-        # The pattern intentionally avoids swapping ``state_0`` and
-        # ``state_1`` after the step. Under CUDA graph capture the
-        # kernel sequence binds the body_q / body_qd buffers it reads
-        # by reference at capture time. A single Python-level swap
-        # leaves ``self.state_0`` aliased to the buffer the graph
-        # *writes*, so each subsequent replay re-reads the
-        # never-updated input buffer -- the pelvis gets pinned inside
-        # a ~1 cm cube. Working examples (h1 / anymal_d) hide this
-        # by running an even outer-substep loop so the swaps end at
-        # the captured-input buffer; here we step once per frame so
-        # we copy ``body_q`` / ``body_qd`` back into ``state_0``
-        # instead. The copy is captured alongside the kernel chain,
-        # so each replay refreshes ``state_0`` with the just-stepped
-        # pose.
+        # ``solver.step`` below. PhoenX imports ``state_0`` into its
+        # internal body container before advancing, so in-place export
+        # is graph-safe and avoids copy-back kernels.
         #
         # Animation targets are scattered into
         # ``control.joint_target_pos`` by a Warp kernel that reads
@@ -447,9 +433,7 @@ class Example:
         self.model.collide(self.state_0, self.contacts)
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
-        self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.frame_dt)
-        wp.copy(self.state_0.body_q, self.state_1.body_q)
-        wp.copy(self.state_0.body_qd, self.state_1.body_qd)
+        self.solver.step(self.state_0, self.state_0, self.control, self.contacts, self.frame_dt)
         if self._animation_enabled:
             wp.launch(_advance_sim_time, dim=1, inputs=[self._sim_time_wp, self.frame_dt])
 
