@@ -818,6 +818,17 @@ def _contact_warmstart_gather_kernel(
     b1 = contacts.shape_body[sa]
     b2 = contacts.shape_body[sb]
 
+    body_com1 = bodies.body_com[b1]
+    body_com2 = bodies.body_com[b2]
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+    x1 = bodies.position[b1]
+    x2 = bodies.position[b2]
+    v1 = bodies.velocity[b1]
+    v2 = bodies.velocity[b2]
+    w1 = bodies.angular_velocity[b1]
+    w2 = bodies.angular_velocity[b2]
+
     for i in range(count):
         k = start_contact + i
 
@@ -836,23 +847,21 @@ def _contact_warmstart_gather_kernel(
         # ``body_com`` when building the world-space lever arm so
         # asymmetric meshes (bunny, nut) don't appear shifted by
         # ``|body_com|`` relative to where the narrow phase saw them.
-        body_com1 = bodies.body_com[b1]
-        body_com2 = bodies.body_com[b2]
-        fresh_r1 = wp.quat_rotate(bodies.orientation[b1], fresh_local_p0 - body_com1)
-        fresh_r2 = wp.quat_rotate(bodies.orientation[b2], fresh_local_p1 - body_com2)
+        fresh_r1 = wp.quat_rotate(q1, fresh_local_p0 - body_com1)
+        fresh_r2 = wp.quat_rotate(q2, fresh_local_p1 - body_com2)
 
         if prev_valid == wp.int32(1):
             prev_n = cc_get_prev_normal(cc, prev_k)
             prev_lp0 = cc_get_prev_local_p0(cc, prev_k)
             prev_lp1 = cc_get_prev_local_p1(cc, prev_k)
-            prev_r1 = wp.quat_rotate(bodies.orientation[b1], prev_lp0 - body_com1)
-            prev_r2 = wp.quat_rotate(bodies.orientation[b2], prev_lp1 - body_com2)
-            prev_p1_world = bodies.position[b1] + prev_r1
-            prev_p2_world = bodies.position[b2] + prev_r2
+            prev_r1 = wp.quat_rotate(q1, prev_lp0 - body_com1)
+            prev_r2 = wp.quat_rotate(q2, prev_lp1 - body_com2)
+            prev_p1_world = x1 + prev_r1
+            prev_p2_world = x2 + prev_r2
             prev_penetration = -wp.dot(prev_p2_world - prev_p1_world, prev_n)
 
-            fresh_p1_world = bodies.position[b1] + fresh_r1
-            fresh_p2_world = bodies.position[b2] + fresh_r2
+            fresh_p1_world = x1 + fresh_r1
+            fresh_p2_world = x2 + fresh_r2
             fresh_penetration = -wp.dot(fresh_p2_world - fresh_p1_world, fresh_n)
 
             # Absolute staleness: the prev anchor sits more than
@@ -866,9 +875,7 @@ def _contact_warmstart_gather_kernel(
             if prev_too_deep or fresh_penetration > prev_penetration:
                 # Prev anchors are stale -- overwrite geometry but carry
                 # impulses forward in the fresh basis.
-                dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
-                    bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
-                )
+                dv = (v2 + wp.cross(w2, fresh_r2)) - (v1 + wp.cross(w1, fresh_r1))
                 fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
 
                 cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
@@ -892,9 +899,7 @@ def _contact_warmstart_gather_kernel(
             continue
 
         # New contact -- PhoenX ``Initialize``.
-        dv = (bodies.velocity[b2] + wp.cross(bodies.angular_velocity[b2], fresh_r2)) - (
-            bodies.velocity[b1] + wp.cross(bodies.angular_velocity[b1], fresh_r1)
-        )
+        dv = (v2 + wp.cross(w2, fresh_r2)) - (v1 + wp.cross(w1, fresh_r1))
         t1 = _build_tangent1_from_velocity(fresh_n, dv)
 
         cc_set_normal_lambda(cc, k, wp.float32(0.0))
