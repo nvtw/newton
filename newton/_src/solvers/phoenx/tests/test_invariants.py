@@ -31,6 +31,7 @@ def _make_kwargs(
     num_bodies: int = 1,
     num_joints: int = 0,
     rigid_contact_max: int = 0,
+    max_contact_columns: int | None = None,
     num_particles: int = 0,
     num_cloth_triangles: int = 0,
     num_cloth_bending: int = 0,
@@ -53,6 +54,7 @@ def _make_kwargs(
         "constraints": constraints,
         "num_joints": num_joints,
         "rigid_contact_max": rigid_contact_max,
+        "max_contact_columns": max_contact_columns,
         "num_particles": num_particles,
         "num_cloth_triangles": num_cloth_triangles,
         "num_cloth_bending": num_cloth_bending,
@@ -68,6 +70,22 @@ class TestInvariants(unittest.TestCase):
     def test_correct_construction_accepted(self) -> None:
         """A correctly-built world constructs without raising."""
         PhoenXWorld(**_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=10))
+
+    def test_contact_columns_can_be_sized_independently(self) -> None:
+        """Per-column storage can use a tighter pair budget than per-contact state."""
+        w = PhoenXWorld(**_make_kwargs(num_bodies=2, num_joints=1, rigid_contact_max=128, max_contact_columns=12))
+        self.assertEqual(w.rigid_contact_max, 128)
+        self.assertEqual(w.max_contact_columns, 12)
+        self.assertEqual(w._contact_container.lambdas.shape[1], 128)
+        self.assertEqual(w._contact_cols.data.shape[1], 12)
+        self.assertEqual(w._constraint_capacity, w.num_joints + 12)
+
+    def test_invalid_contact_column_capacity_raises(self) -> None:
+        """Column-capacity mistakes should fail at construction."""
+        with self.assertRaisesRegex(ValueError, "max_contact_columns must be >= 1"):
+            PhoenXWorld(**_make_kwargs(num_bodies=2, rigid_contact_max=10, max_contact_columns=0))
+        with self.assertRaisesRegex(ValueError, "max_contact_columns must be None or 0"):
+            PhoenXWorld(**_make_kwargs(num_bodies=2, rigid_contact_max=0, max_contact_columns=1))
 
     def test_undersized_constraint_container_raises(self) -> None:
         """Allocating ``ConstraintContainer`` directly with a mismatched

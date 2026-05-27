@@ -359,6 +359,7 @@ class PhoenXWorld:
         velocity_iterations: int = 1,
         gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         rigid_contact_max: int = 0,
+        max_contact_columns: int | None = None,
         num_joints: int = 0,
         num_particles: int = 0,
         num_cloth_triangles: int = 0,
@@ -405,8 +406,12 @@ class PhoenXWorld:
                 schedule. ``velocity_iterations=1`` enables TGS-soft
                 relax (recommended for tall stacks).
             gravity: 3-tuple or iterable of ``num_worlds`` 3-tuples.
-            rigid_contact_max: Sizes contact-column capacity 1:1; ``0``
-                disables contacts.
+            rigid_contact_max: Sizes per-contact state. ``0`` disables
+                contacts.
+            max_contact_columns: Optional cap for per-column state.
+                Contact columns are grouped by shape or body pair, so
+                broad-phase pair budgets can be much tighter than
+                ``rigid_contact_max`` in manifold-heavy scenes.
             step_layout: ``"multi_world"`` (per-world fast-tail; scales
                 past ~256 worlds) or ``"single_world"`` (global JP
                 colouring; wins for a few big worlds).
@@ -454,10 +459,20 @@ class PhoenXWorld:
             self._num_kinematic_bodies: int = int((mt == int(MOTION_KINEMATIC)).sum())
         else:
             self._num_kinematic_bodies = 0
-        # One contact column per ``(shape_a, shape_b)`` pair so the
-        # column count equals ``rigid_contact_max`` 1:1.
         self.rigid_contact_max: int = int(rigid_contact_max)
-        self.max_contact_columns: int = max(1, self.rigid_contact_max) if self.rigid_contact_max > 0 else 0
+        if self.rigid_contact_max < 0:
+            raise ValueError(f"rigid_contact_max must be >= 0 (got {self.rigid_contact_max})")
+        if self.rigid_contact_max > 0:
+            if max_contact_columns is None:
+                self.max_contact_columns = max(1, self.rigid_contact_max)
+            else:
+                self.max_contact_columns = int(max_contact_columns)
+                if self.max_contact_columns < 1:
+                    raise ValueError(f"max_contact_columns must be >= 1 (got {self.max_contact_columns})")
+        else:
+            if max_contact_columns not in (None, 0):
+                raise ValueError("max_contact_columns must be None or 0 when rigid_contact_max is 0")
+            self.max_contact_columns = 0
         self.num_joints: int = int(num_joints)
         if self.num_joints < 0:
             raise ValueError(f"num_joints must be >= 0 (got {self.num_joints})")
@@ -1189,7 +1204,7 @@ class PhoenXWorld:
                 "use setup_cloth_collision_pipeline()"
             )
 
-        import numpy as _np
+        import numpy as _np  # noqa: PLC0415
 
         shape_body_np = shape_body.numpy() if isinstance(shape_body, wp.array) else _np.asarray(shape_body)
         shape_body_phx = _np.where(shape_body_np < 0, 0, shape_body_np + int(phoenx_body_offset))
@@ -1871,9 +1886,9 @@ class PhoenXWorld:
         Returns:
             The constructed :class:`CollisionPipeline`.
         """
-        from newton._src.geometry.flags import ShapeFlags
-        from newton._src.geometry.types import GeoType
-        from newton._src.sim.collide import CollisionPipeline
+        from newton._src.geometry.flags import ShapeFlags  # noqa: PLC0415
+        from newton._src.geometry.types import GeoType  # noqa: PLC0415
+        from newton._src.sim.collide import CollisionPipeline  # noqa: PLC0415
 
         def _soft_tet_collision_mask(tet_indices: np.ndarray) -> np.ndarray:
             tets = np.asarray(tet_indices, dtype=np.int32).reshape(-1, 4)

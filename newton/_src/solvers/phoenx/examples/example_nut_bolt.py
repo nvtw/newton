@@ -388,10 +388,10 @@ class Example:
         # without bloating downstream PhoenX allocations: the contact
         # column container, partitioner adjacency CSR, and PGS
         # persistent-grid launch dim are all sized from
-        # ``rigid_contact_max`` (``ContactColumnContainer`` and
-        # ``_constraint_capacity`` in :mod:`solver_phoenx`), so an
-        # over-budget here costs O(rigid_contact_max) launches even on
-        # frames with zero contacts. 16 broad-phase pairs/cell covers
+        # ``rigid_contact_max`` for per-contact state and from a
+        # separate contact-column cap for per-pair solver state, so an
+        # over-budget contact count does not force per-column kernels to
+        # scan empty manifold slots. 16 broad-phase pairs/cell covers
         # the 3 real pairs plus SAP overlap chaff with comfortable
         # slack. The ``+ 64`` / ``+ 8`` floors keep the 1x1 case above
         # global minima.
@@ -428,6 +428,7 @@ class Example:
             f"[PhoenX Nut-Bolt] contact_budget: "
             f"rigid_contact_max={rigid_contact_max} "
             f"shape_pairs_max={int(self.collision_pipeline.shape_pairs_max)} "
+            f"contact_column_max={int(self.collision_pipeline.shape_pairs_max)} "
             f"broad_phase=sap"
         )
 
@@ -528,6 +529,7 @@ class Example:
             velocity_iterations=1,
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
+            max_contact_columns=int(self.collision_pipeline.shape_pairs_max),
             default_friction=SHAPE_CFG.mu,
             num_worlds=(nx * ny) if self.multi_scene else 1,
             step_layout=step_layout,
