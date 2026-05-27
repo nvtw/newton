@@ -1162,7 +1162,8 @@ class Mesh:
         sharing each pair edge. Returns ``(valid, cos_ab, angles,
         unit_avg, area_sum)`` aligned with the inputs. ``valid`` is the
         non-degenerate-pair mask used by both callers; degenerate pairs
-        carry NaN sentinels in ``angles``/``unit_avg``/``area_sum``.
+        carry NaN sentinels in ``angles``/``area_sum`` and zero-length
+        average normals.
         """
         n_a = face_normals[tri_a]
         n_b = face_normals[tri_b]
@@ -1178,10 +1179,11 @@ class Mesh:
             unit_b = n_b / np.where(norm_b[:, None] > 0.0, norm_b[:, None], 1.0)
         avg = unit_a + unit_b
         avg_norm = np.linalg.norm(avg, axis=1)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            unit_avg = avg / np.where(avg_norm[:, None] > 0.0, avg_norm[:, None], 1.0)
-        # Opposing normals (avg ~= 0) or degenerate triangle -> NaN.
-        unit_avg[(~valid) | (avg_norm == 0.0)] = np.nan
+        # Opposing normals or degenerate triangle -> zero-length avg_normal, which
+        # _build_edge_box_kernel's ``n_len <= MINVAL`` guard treats as no valid box.
+        avg_norm_epsilon = 1.0e-6
+        safe_avg = valid & (avg_norm > avg_norm_epsilon)
+        unit_avg = np.where(safe_avg[:, None], avg / np.where(safe_avg, avg_norm, 1.0)[:, None], 0.0)
         # Cross-product magnitude = 2 * triangle area, so the sum of the
         # two adjacent triangle areas is 0.5 * (||n_a|| + ||n_b||).
         area_sum_pair = np.where(valid, 0.5 * (norm_a + norm_b), np.nan)

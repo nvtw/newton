@@ -41,6 +41,21 @@ def _single_triangle_mesh() -> newton.Mesh:
     return newton.Mesh(vertices, indices, compute_inertia=False)
 
 
+def _near_antiparallel_pair_mesh() -> newton.Mesh:
+    """Two adjacent triangles whose face normals nearly cancel."""
+    vertices = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 1.0e-7],
+        ],
+        dtype=np.float32,
+    )
+    indices = np.array([0, 1, 2, 0, 1, 3], dtype=np.int32)
+    return newton.Mesh(vertices, indices, compute_inertia=False)
+
+
 def _non_manifold_mesh() -> newton.Mesh:
     """Three triangles sharing the edge (v0, v1)."""
     vertices = np.array(
@@ -169,6 +184,15 @@ class TestMeshEdgeAngleFilter(unittest.TestCase):
         boundary_mask = np.array([row != (0, 2) for row in rows])
         self.assertTrue(bool(np.all(np.isnan(angles[boundary_mask]))))
         self.assertTrue(bool(np.all(np.isnan(area_sums[boundary_mask]))))
+
+    def test_diagnostics_zero_avg_normal_for_near_antiparallel_faces(self):
+        mesh = _near_antiparallel_pair_mesh()
+        edges, _angles, normals, area_sums = mesh._filter_edges_by_dihedral_angle(-1.0, return_diagnostics=True)
+        rows = [tuple(sorted((int(a), int(b)))) for a, b in edges]
+        shared = rows.index((0, 1))
+
+        np.testing.assert_allclose(normals[shared], [0.0, 0.0, 0.0], atol=0.0)
+        self.assertTrue(math.isfinite(float(area_sums[shared])))
 
     def test_filter_preserves_edges_subset_and_order(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
