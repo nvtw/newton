@@ -229,7 +229,7 @@ class SolverPhoenX(SolverBase):
                 if existing_filter is None:
                     needs_new_cp = True
             if needs_new_cp:
-                import newton as _newton  # noqa: PLC0415  -- local to keep the import cycle tight
+                import newton as _newton
 
                 # PhoenX-tight rigid_contact_max from shape_contact_pair_count;
                 # Newton's default ignores COLLIDE_SHAPES filter and overshoots
@@ -237,11 +237,11 @@ class SolverPhoenX(SolverBase):
                 tight_rcm = _estimate_rigid_contact_max_phoenx(model)
                 if tight_rcm is not None:
                     model.rigid_contact_max = 0  # bypass "already sized" short-circuit
-                from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
+                from newton._src.solvers.phoenx.cloth_collision import (
                     PhoenXClothShareVertexFilterData,
                     phoenx_cloth_share_vertex_filter,
                 )
-                from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
+                from newton._src.solvers.phoenx.solver_config import (
                     PHOENX_CONTACT_MATCHING,
                 )
 
@@ -314,7 +314,7 @@ class SolverPhoenX(SolverBase):
         # call ``build_phoenx_share_vertex_filter_data`` themselves and
         # overwrite this binding without losing the sleeping fields.
         if self._sleeping_enabled and int(model.shape_count) > 0:
-            from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
+            from newton._src.solvers.phoenx.cloth_collision import (
                 build_phoenx_share_vertex_filter_data,
             )
 
@@ -544,7 +544,7 @@ class SolverPhoenX(SolverBase):
     def _install_shape_materials(self) -> None:
         """Stream Model's per-shape (mu_static, mu_dynamic, restitution) into
         PhoenX's material table; each shape gets its own material index."""
-        from newton._src.solvers.phoenx.materials import (  # noqa: PLC0415
+        from newton._src.solvers.phoenx.materials import (
             CombineMode,
             Material,
             material_table_from_list,
@@ -623,7 +623,7 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
-    def _accumulate_joint_forces(self, state_in: State, control: Control) -> None:
+    def _accumulate_joint_forces(self, state_in: State, control: Control, dt: float) -> None:
         """Fold ``control.joint_f`` into ``state_in.body_f`` (Newton's EFFORT path)."""
         if control is None or control.joint_f is None:
             return
@@ -648,8 +648,12 @@ class SolverPhoenX(SolverBase):
                 model.joint_dof_dim,
                 model.joint_axis,
                 control.joint_f,
+                dt,
             ],
-            outputs=[state_in.body_f],
+            outputs=[
+                state_in.body_f,
+                None,  # joint_impulse: PhoenX does not populate body_parent_f
+            ],
             device=self.device,
         )
 
@@ -822,7 +826,7 @@ class SolverPhoenX(SolverBase):
             control = self.model.control(clone_variables=False)
 
         self._apply_joint_control(control)
-        self._accumulate_joint_forces(state_in, control)
+        self._accumulate_joint_forces(state_in, control, dt)
         self._import_body_state(state_in)
 
         # FD readout snapshots the imported (state_in-aligned) pose so the
