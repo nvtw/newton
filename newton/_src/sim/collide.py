@@ -1376,6 +1376,8 @@ class CollisionPipeline:
             heightfield_data=model.heightfield_data,
             heightfield_elevations=model.heightfield_elevations,
             mesh_edge_indices=model.mesh_edge_indices,
+            mesh_edge_centers=model.mesh_edge_centers,
+            mesh_edge_halves=model.mesh_edge_halves,
             shape_edge_range=model.shape_edge_range,
             writer_data=writer_data,
             device=self.device,

@@ -1699,6 +1699,8 @@ class NarrowPhase:
             # slot per shape (not per candidate pair).
             num_shapes = shape_aabb_lower.shape[0] if shape_aabb_lower is not None else max_candidate_pairs
             self._empty_edge_indices = wp.zeros(1, dtype=wp.vec2i, device=device)
+            self._empty_edge_centers = wp.zeros(1, dtype=wp.vec3, device=device)
+            self._empty_edge_halves = wp.zeros(1, dtype=wp.vec3, device=device)
             self._empty_edge_range = wp.full(max(num_shapes, 1), (-1, 0), dtype=wp.vec2i, device=device)
 
             if hydroelastic_sdf is not None:
@@ -1780,6 +1782,8 @@ class NarrowPhase:
         heightfield_data: wp.array[HeightfieldData] | None = None,
         heightfield_elevations: wp.array[wp.float32] | None = None,
         mesh_edge_indices: wp.array[wp.vec2i] | None = None,
+        mesh_edge_centers: wp.array[wp.vec3] | None = None,
+        mesh_edge_halves: wp.array[wp.vec3] | None = None,
         shape_edge_range: wp.array[wp.vec2i] | None = None,
         writer_data: Any,
         device: Devicelike | None = None,  # Device to launch on
@@ -2046,6 +2050,11 @@ class NarrowPhase:
                 texture_sdf_data = wp.zeros(0, dtype=TextureSDFData, device=device)
             if mesh_edge_indices is None:
                 mesh_edge_indices = self._empty_edge_indices
+            has_precomputed_edge_data = int(mesh_edge_centers is not None and mesh_edge_halves is not None)
+            if mesh_edge_centers is None:
+                mesh_edge_centers = self._empty_edge_centers
+            if mesh_edge_halves is None:
+                mesh_edge_halves = self._empty_edge_halves
             if shape_edge_range is None:
                 shape_edge_range = self._empty_edge_range
 
@@ -2085,6 +2094,9 @@ class NarrowPhase:
                             heightfield_data,
                             heightfield_elevations,
                             mesh_edge_indices,
+                            mesh_edge_centers,
+                            mesh_edge_halves,
+                            wp.int32(has_precomputed_edge_data),
                             shape_edge_range,
                             self.mesh_mesh_block_offsets,
                             reducer_data,
@@ -2115,6 +2127,9 @@ class NarrowPhase:
                             heightfield_data,
                             heightfield_elevations,
                             mesh_edge_indices,
+                            mesh_edge_centers,
+                            mesh_edge_halves,
+                            wp.int32(has_precomputed_edge_data),
                             shape_edge_range,
                             writer_data,
                             self.num_tile_blocks,
@@ -2268,6 +2283,8 @@ class NarrowPhase:
         shape_local_aabb_lower = kwargs.pop("shape_local_aabb_lower", None)
         shape_local_aabb_upper = kwargs.pop("shape_local_aabb_upper", None)
         mesh_edge_indices = kwargs.pop("mesh_edge_indices", None)
+        mesh_edge_centers = kwargs.pop("mesh_edge_centers", None)
+        mesh_edge_halves = kwargs.pop("mesh_edge_halves", None)
         shape_edge_range = kwargs.pop("shape_edge_range", None)
         if kwargs:
             unknown_keys = sorted(kwargs.keys())
@@ -2339,6 +2356,8 @@ class NarrowPhase:
             shape_collision_aabb_upper=shape_collision_aabb_upper,
             shape_voxel_resolution=shape_voxel_resolution,
             mesh_edge_indices=mesh_edge_indices,
+            mesh_edge_centers=mesh_edge_centers,
+            mesh_edge_halves=mesh_edge_halves,
             shape_edge_range=shape_edge_range,
             writer_data=writer_data,
             device=device,

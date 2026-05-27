@@ -306,11 +306,15 @@ class Model:
         self.heightfield_elevations: wp.array[wp.float32] | None = None
         """Concatenated 1D elevation array for all heightfields. Kernels index via HeightfieldData.data_offset."""
 
-        # Mesh edge data (packed array + per-shape slice)
+        # Mesh edge data (packed arrays + per-shape slice)
         self.mesh_edge_indices: wp.array[wp.vec2i] | None = None
         """Packed unique edge vertex pairs for all mesh shapes, shape [total_edge_count]."""
+        self.mesh_edge_centers: wp.array[wp.vec3] | None = None
+        """Packed local-space collision-edge centers, shape [total_edge_count, 3] [m]."""
+        self.mesh_edge_halves: wp.array[wp.vec3] | None = None
+        """Packed local-space half-vectors from edge center to endpoint, shape [total_edge_count, 3] [m]."""
         self.shape_edge_range: wp.array[wp.vec2i] | None = None
-        """Per-shape (start, count) into mesh_edge_indices, shape [shape_count]. (-1,0) if no edges."""
+        """Per-shape (start, count) into mesh edge arrays, shape [shape_count]. (-1,0) if no edges."""
 
         # SDF storage (compact table + per-shape index indirection)
         self.shape_sdf_index: wp.array[wp.int32] | None = None

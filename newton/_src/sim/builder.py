@@ -10778,6 +10778,8 @@ class ModelBuilder:
 
             shape_edge_ranges = []
             edge_chunks = []
+            edge_center_chunks = []
+            edge_half_chunks = []
             edge_offset = 0
             edge_cache = {}  # (id(mesh), threshold) → (start, count). For
             # meshes whose precomputed collision edges were already prepared
@@ -10805,6 +10807,12 @@ class ModelBuilder:
                         start = edge_offset
                         count = len(edges)
                         edge_chunks.append(edges)
+                        if count > 0:
+                            vertices = np.asarray(mesh.vertices, dtype=np.float32)
+                            edge_v0 = vertices[edges[:, 0]]
+                            edge_v1 = vertices[edges[:, 1]]
+                            edge_center_chunks.append(np.ascontiguousarray((edge_v0 + edge_v1) * 0.5, dtype=np.float32))
+                            edge_half_chunks.append(np.ascontiguousarray((edge_v1 - edge_v0) * 0.5, dtype=np.float32))
                         edge_offset += count
                         entry = (start, count)
                         edge_cache[mesh_key] = entry
@@ -10819,8 +10827,18 @@ class ModelBuilder:
             )
             m.mesh_edge_indices = (
                 wp.array(np.concatenate(edge_chunks), dtype=wp.vec2i, device=device)
-                if edge_chunks
+                if edge_offset > 0
                 else wp.zeros(1, dtype=wp.vec2i, device=device)
+            )
+            m.mesh_edge_centers = (
+                wp.array(np.concatenate(edge_center_chunks), dtype=wp.vec3, device=device)
+                if edge_offset > 0
+                else wp.zeros(1, dtype=wp.vec3, device=device)
+            )
+            m.mesh_edge_halves = (
+                wp.array(np.concatenate(edge_half_chunks), dtype=wp.vec3, device=device)
+                if edge_offset > 0
+                else wp.zeros(1, dtype=wp.vec3, device=device)
             )
 
             # ---------------------

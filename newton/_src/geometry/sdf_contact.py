@@ -389,6 +389,30 @@ def get_edge_from_mesh(
 
 
 @wp.func
+def get_edge_from_mesh_cached(
+    mesh_id: wp.uint64,
+    mesh_edge_indices: wp.array[wp.vec2i],
+    mesh_edge_centers: wp.array[wp.vec3],
+    mesh_edge_halves: wp.array[wp.vec3],
+    has_precomputed_edge_data: int,
+    edge_range: wp.vec2i,
+    mesh_scale: wp.vec3,
+    X_mesh_ws: wp.transform,
+    edge_idx: int,
+) -> tuple[wp.vec3, wp.vec3]:
+    """Extract an edge, preferring packed center/half-vector data when available."""
+    if has_precomputed_edge_data != 0:
+        packed_idx = edge_range[0] + edge_idx
+        center_local = wp.cw_mul(mesh_edge_centers[packed_idx], mesh_scale)
+        half_local = wp.cw_mul(mesh_edge_halves[packed_idx], mesh_scale)
+        center = wp.transform_point(X_mesh_ws, center_local)
+        half = wp.transform_vector(X_mesh_ws, half_local)
+        return center - half, center + half
+
+    return get_edge_from_mesh(mesh_id, mesh_edge_indices, edge_range, mesh_scale, X_mesh_ws, edge_idx)
+
+
+@wp.func
 def get_edge_from_heightfield(
     hfd: HeightfieldData,
     elevation_data: wp.array[wp.float32],
@@ -883,6 +907,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         heightfield_data: wp.array[HeightfieldData],
         heightfield_elevations: wp.array[wp.float32],
         mesh_edge_indices: wp.array[wp.vec2i],
+        mesh_edge_centers: wp.array[wp.vec3],
+        mesh_edge_halves: wp.array[wp.vec3],
+        has_precomputed_edge_data: int,
         shape_edge_range: wp.array[wp.vec2i],
         writer_data: Any,
         total_num_blocks: int,
@@ -1022,18 +1049,24 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         hfd_tri, heightfield_elevations, X_mesh_to_sdf, edge_idx
                                     )
                                 else:
-                                    v0_scaled, v1_scaled = get_edge_from_mesh(
+                                    v0_scaled, v1_scaled = get_edge_from_mesh_cached(
                                         mesh_id_tri,
                                         mesh_edge_indices,
+                                        mesh_edge_centers,
+                                        mesh_edge_halves,
+                                        has_precomputed_edge_data,
                                         edge_range_tri,
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         edge_idx,
                                     )
                             else:
-                                v0_scaled, v1_scaled = get_edge_from_mesh(
+                                v0_scaled, v1_scaled = get_edge_from_mesh_cached(
                                     mesh_id_tri,
                                     mesh_edge_indices,
+                                    mesh_edge_centers,
+                                    mesh_edge_halves,
+                                    has_precomputed_edge_data,
                                     edge_range_tri,
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
@@ -1092,18 +1125,24 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                                 else:
-                                    v0s, v1s = get_edge_from_mesh(
+                                    v0s, v1s = get_edge_from_mesh_cached(
                                         mesh_id_tri,
                                         mesh_edge_indices,
+                                        mesh_edge_centers,
+                                        mesh_edge_halves,
+                                        has_precomputed_edge_data,
                                         edge_range_tri,
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         my_edge_idx,
                                     )
                             else:
-                                v0s, v1s = get_edge_from_mesh(
+                                v0s, v1s = get_edge_from_mesh_cached(
                                     mesh_id_tri,
                                     mesh_edge_indices,
+                                    mesh_edge_centers,
+                                    mesh_edge_halves,
+                                    has_precomputed_edge_data,
                                     edge_range_tri,
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
@@ -1231,6 +1270,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         heightfield_data: wp.array[HeightfieldData],
         heightfield_elevations: wp.array[wp.float32],
         mesh_edge_indices: wp.array[wp.vec2i],
+        mesh_edge_centers: wp.array[wp.vec3],
+        mesh_edge_halves: wp.array[wp.vec3],
+        has_precomputed_edge_data: int,
         shape_edge_range: wp.array[wp.vec2i],
         block_offsets: wp.array[wp.int32],
         reducer_data: GlobalContactReducerData,
@@ -1382,18 +1424,24 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         hfd_tri, heightfield_elevations, X_mesh_to_sdf, edge_idx
                                     )
                                 else:
-                                    v0_scaled, v1_scaled = get_edge_from_mesh(
+                                    v0_scaled, v1_scaled = get_edge_from_mesh_cached(
                                         mesh_id_tri,
                                         mesh_edge_indices,
+                                        mesh_edge_centers,
+                                        mesh_edge_halves,
+                                        has_precomputed_edge_data,
                                         edge_range_tri,
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         edge_idx,
                                     )
                             else:
-                                v0_scaled, v1_scaled = get_edge_from_mesh(
+                                v0_scaled, v1_scaled = get_edge_from_mesh_cached(
                                     mesh_id_tri,
                                     mesh_edge_indices,
+                                    mesh_edge_centers,
+                                    mesh_edge_halves,
+                                    has_precomputed_edge_data,
                                     edge_range_tri,
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
@@ -1449,18 +1497,24 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                                 else:
-                                    v0s, v1s = get_edge_from_mesh(
+                                    v0s, v1s = get_edge_from_mesh_cached(
                                         mesh_id_tri,
                                         mesh_edge_indices,
+                                        mesh_edge_centers,
+                                        mesh_edge_halves,
+                                        has_precomputed_edge_data,
                                         edge_range_tri,
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         my_edge_idx,
                                     )
                             else:
-                                v0s, v1s = get_edge_from_mesh(
+                                v0s, v1s = get_edge_from_mesh_cached(
                                     mesh_id_tri,
                                     mesh_edge_indices,
+                                    mesh_edge_centers,
+                                    mesh_edge_halves,
+                                    has_precomputed_edge_data,
                                     edge_range_tri,
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
