@@ -1148,10 +1148,10 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 
             # Get plane world transform
             X_plane_ws = shape_transform[plane_shape]
-            X_plane_sw = wp.transform_inverse(X_plane_ws)
 
             # Get plane normal in world space (plane normal is along local +Z, pointing upward)
             plane_normal = wp.transform_vector(X_plane_ws, wp.vec3(0.0, 0.0, 1.0))
+            plane_pos = wp.transform_get_translation(X_plane_ws)
 
             # Get mesh scale
             scale_data = shape_data[mesh_shape]
@@ -1175,13 +1175,8 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                 vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
 
                 # Project vertex onto plane to get closest point
-                vertex_in_plane_space = wp.transform_point(X_plane_sw, vertex_world)
-                point_on_plane_local = wp.vec3(vertex_in_plane_space[0], vertex_in_plane_space[1], 0.0)
-                point_on_plane = wp.transform_point(X_plane_ws, point_on_plane_local)
-
-                # Compute distance
-                diff = vertex_world - point_on_plane
-                distance = wp.dot(diff, plane_normal)
+                distance = wp.dot(vertex_world - plane_pos, plane_normal)
+                point_on_plane = vertex_world - plane_normal * distance
 
                 # Check if this vertex generates a contact
                 if distance < gap_sum + total_margin_offset:
@@ -1280,10 +1275,10 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 
             # Get plane world transform
             X_plane_ws = shape_transform[plane_shape]
-            X_plane_sw = wp.transform_inverse(X_plane_ws)
 
             # Get plane normal in world space (plane normal is along local +Z)
             plane_normal = wp.transform_vector(X_plane_ws, wp.vec3(0.0, 0.0, 1.0))
+            plane_pos = wp.transform_get_translation(X_plane_ws)
 
             # Get mesh scale
             scale_data = shape_data[mesh_shape]
@@ -1312,13 +1307,8 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
                     vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
 
                     # Project vertex onto plane to get closest point
-                    vertex_in_plane_space = wp.transform_point(X_plane_sw, vertex_world)
-                    point_on_plane_local = wp.vec3(vertex_in_plane_space[0], vertex_in_plane_space[1], 0.0)
-                    point_on_plane = wp.transform_point(X_plane_ws, point_on_plane_local)
-
-                    # Compute distance
-                    diff = vertex_world - point_on_plane
-                    distance = wp.dot(diff, plane_normal)
+                    distance = wp.dot(vertex_world - plane_pos, plane_normal)
+                    point_on_plane = vertex_world - plane_normal * distance
 
                     # Check if this vertex generates a contact
                     if distance < gap_sum + total_margin_offset:
