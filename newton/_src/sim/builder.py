@@ -10373,7 +10373,13 @@ class ModelBuilder:
                     if mesh_key in edge_cache:
                         shape_edge_ranges.append(edge_cache[mesh_key])
                     else:
-                        edges = mesh.edges  # lazily computed and cached on the Mesh
+                        # ``Mesh.build_sdf()`` caches a simplified edge set on
+                        # the mesh for SDF-mesh contact generation; fall back
+                        # to the full edge list otherwise.
+                        if mesh._collision_edges is not None:
+                            edges = mesh._collision_edges
+                        else:
+                            edges = mesh.edges  # lazily computed and cached on the Mesh
                         start = edge_offset
                         count = len(edges)
                         edge_chunks.append(edges)

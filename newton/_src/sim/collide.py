@@ -534,8 +534,8 @@ class CollisionPipeline:
             shape_pairs_filtered: Precomputed shape pairs for EXPLICIT mode.
                 When broad_phase is "explicit", uses model.shape_contact_pairs if not provided. For
                 "nxn"/"sap" modes, ignored.
-            sdf_hydroelastic_config: Configuration for
-                hydroelastic collision handling. Defaults to None.
+            sdf_hydroelastic_config: Configuration for hydroelastic collision
+                handling. Defaults to None.
             shape_pairs_max: Override for the broad-phase candidate-pair
                 buffer capacity used by the ``"nxn"`` and ``"sap"`` modes.
                 Defaults to the worst-case ``N*(N-1)/2`` per-world bound,

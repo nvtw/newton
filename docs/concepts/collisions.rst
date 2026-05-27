@@ -876,6 +876,8 @@ Two approaches available:
         margin=0.005,                         # Extra AABB padding [m] (0.05)
         shape_margin=0.001,                   # Shrink SDF surface inward [m] (0.0)
         scale=(1.0, 1.0, 1.0),                # Bake non-unit scale into the SDF (None)
+        edge_lower_angle_threshold_rad=math.radians(0.1),  # Drop near-coplanar edges below this angle (0.1 deg)
+        edge_box_absorption=False,            # Drop edges fully covered by another edge's oriented box
     )
 
 ``max_resolution`` sets the voxel count along the longest AABB axis (must be divisible by 8);
@@ -886,6 +888,21 @@ memory and build time). Set the SDF ``margin`` to at least the sum of the shape'
 full contact detection range. Pass ``scale`` when the shape will be added with non-unit scale
 to bake it into the SDF grid. ``shape_margin`` is mainly useful for hydroelastic collision
 where a compliant-layer offset is desired.
+
+**Edge simplification.** ``mesh.build_sdf(...)`` also runs a dihedral-angle pre-filter over
+the mesh's manifold edges and caches the surviving subset on the mesh; the SDF-mesh contact
+pipeline picks up that cached set in preference to the unfiltered :attr:`~Mesh.edges`,
+which materially reduces edge-vs-shape work for typical CAD or scanned meshes. The default
+threshold (``edge_lower_angle_threshold_rad=math.radians(0.1)``) drops only edges that are
+geometrically coplanar to within 0.1 degrees, so it is safe for most meshes; raise it to
+prune more aggressively, set it to ``0`` to keep every manifold edge, or pass a negative
+value (e.g. ``-1.0``) to opt out of the simplification pass entirely. Set
+``edge_box_absorption=True`` to additionally drop manifold edges that are fully covered by
+another nearby edge's oriented box — useful for densely tessellated curved surfaces.
+``edge_box_half_normal``/``edge_box_half_normal_rel`` and
+``edge_box_half_lateral``/``edge_box_half_lateral_rel`` tune the box extents (absolute
+metres or fractions of the mesh AABB diagonal); see :meth:`~Mesh.build_sdf` for full
+parameter docs.
 
 **On-disk SDF cache.** Pass ``cache_dir`` to persist the cooked SDF and skip the cook on
 subsequent runs:
