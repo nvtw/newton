@@ -306,9 +306,63 @@ class ViewerUSD(ViewerBase):
         # undefined data and produce incorrect results.
         if texture is not None and uvs is not None and name not in self._texture_materials:
             self._create_texture_material(name, mesh_prim, texture)
+        elif (
+            texture is None
+            and (roughness is not None or metallic is not None)
+            and name not in self._texture_materials
+        ):
+            # No texture but caller asked for explicit surface BRDF parameters.
+            # Bind a UsdPreviewSurface that routes diffuseColor through the
+            # per-instance ``displayColor`` primvar so each instance keeps its
+            # own color while sharing the same roughness/metallic on the
+            # prototype.
+            self._create_display_color_material(name, mesh_prim, roughness, metallic)
 
         # how to hide the prototype mesh but not the instances in USD?
         mesh_prim.GetVisibilityAttr().Set("inherited" if not hidden else "invisible", self._frame_index)
+
+    def _create_display_color_material(
+        self,
+        mesh_name: str,
+        mesh_prim,
+        roughness: float | None,
+        metallic: float | None,
+    ):
+        """Bind a ``displayColor``-driven UsdPreviewSurface to ``mesh_prim``.
+
+        Each instance of this prototype sets its own ``primvars:displayColor``
+        via :meth:`log_instances`; the surface shader's ``diffuseColor`` reads
+        that primvar via a :class:`UsdPrimvarReader_float3` so the instance
+        color flows into the BRDF. ``roughness`` and ``metallic`` are baked
+        onto the shader so every instance shares them.
+        """
+        from pxr import Sdf as _Sdf
+        from pxr import UsdShade
+
+        safe = mesh_name.replace("/", "_").lstrip("_")
+        mat_path = f"/root/Materials/mat_{safe}"
+        self._ensure_scopes_for_path(self.stage, mat_path)
+
+        material = UsdShade.Material.Define(self.stage, mat_path)
+        surface = UsdShade.Shader.Define(self.stage, f"{mat_path}/PreviewSurface")
+        surface.CreateIdAttr("UsdPreviewSurface")
+        if roughness is not None:
+            surface.CreateInput("roughness", _Sdf.ValueTypeNames.Float).Set(float(roughness))
+        if metallic is not None:
+            surface.CreateInput("metallic", _Sdf.ValueTypeNames.Float).Set(float(metallic))
+        diff_input = surface.CreateInput("diffuseColor", _Sdf.ValueTypeNames.Color3f)
+        material.CreateSurfaceOutput().ConnectToSource(surface.ConnectableAPI(), "surface")
+
+        primvar_reader = UsdShade.Shader.Define(self.stage, f"{mat_path}/DisplayColor")
+        primvar_reader.CreateIdAttr("UsdPrimvarReader_float3")
+        primvar_reader.CreateInput("varname", _Sdf.ValueTypeNames.Token).Set("displayColor")
+        primvar_reader.CreateInput("fallback", _Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.5, 0.5, 0.5))
+        primvar_reader.CreateOutput("result", _Sdf.ValueTypeNames.Float3)
+        diff_input.ConnectToSource(primvar_reader.ConnectableAPI(), "result")
+
+        UsdShade.MaterialBindingAPI.Apply(mesh_prim.GetPrim())
+        UsdShade.MaterialBindingAPI(mesh_prim.GetPrim()).Bind(material)
+        self._texture_materials[mesh_name] = material
 
     def _create_texture_material(self, mesh_name: str, mesh_prim, texture):
         """Create a UsdPreviewSurface material with a diffuse texture and bind it to *mesh_prim*."""

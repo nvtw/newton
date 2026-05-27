@@ -172,14 +172,46 @@ class Example:
         self.viewer = viewer
         self.args = args
 
-        # Three layers driven by different solvers. The colors make it easy
-        # to tell them apart when toggling individual layers on/off in the
-        # "Layers" group of the viewer sidebar. Each layer captures its own
-        # CUDA graph on construction (where supported).
+        # The RTX backend defaults to a flat dome light and a near-black
+        # floor, which makes the pendulum colors hard to read. Swap in the
+        # studio lighting rig, a brighter slightly-glossy floor, and a
+        # near-white sky/dome color so the visible background reads as
+        # overcast-daylight rather than the studio preset's cool blue.
+        # No-ops for any other backend.
+        rtx_viewer = getattr(newton.viewer, "ViewerRTX", None)
+        if rtx_viewer is not None and isinstance(viewer, rtx_viewer):
+            # Studio rig + a near-white dome and an anthrazit floor. The
+            # dome intensity is a compromise: pushing it higher (~2200)
+            # gets the sky to pure white but the strong IBL bounce washes
+            # the floor to near-white too; ~1200 keeps the sky clearly
+            # bright (~232) while letting the dark albedo read as the
+            # intended anthrazit gray (~173 near the camera, fading to a
+            # specular sky-reflection ~199 toward the horizon — the
+            # "diffuse mirror" look). Rigid-body shapes get a matte
+            # plastic BRDF so the link colors don't read as polished.
+            viewer.set_environment("studio")
+            viewer.set_sky_color(color=(1.0, 1.0, 1.0), intensity=1800.0)
+            # Dark, matte checker floor: low base diffuse + high roughness
+            # so the bright dome doesn't lay a foggy specular sheen on the
+            # floor. ``_generate_floor_textures`` produces a checker with
+            # the light squares only ~2x the base luminance so they don't
+            # become a secondary sky source under IBL.
+            viewer.set_ground_material(diffuse=(0.02, 0.02, 0.025), roughness=0.85)
+            viewer.set_body_material(roughness=0.9, metallic=0.0)
+
+        # Three layers driven by different solvers. The colors form a
+        # saturated red/blue/green triad spaced ~120° apart on the hue
+        # wheel — bold, mutually distinguishable, no pink/magenta in the
+        # red (the green channel is held low and blue lower) and no
+        # earthy/dirt tones in the green (the red channel is held low so
+        # it doesn't drift toward olive). All three are highly chromatic
+        # against the anthrazit floor. Layers can be toggled independently
+        # via the "Layers" sidebar; each captures its own CUDA graph on
+        # construction (where supported).
         specs = [
-            ("XPBD", (0.95, 0.45, 0.10), newton.solvers.SolverXPBD),
-            ("Featherstone", (0.20, 0.70, 0.95), newton.solvers.SolverFeatherstone),
-            ("MuJoCo Warp", (0.50, 0.85, 0.30), newton.solvers.SolverMuJoCo),
+            ("XPBD", (1.00, 0.22, 0.08), newton.solvers.SolverXPBD),               # vermillion red
+            ("Featherstone", (0.05, 0.40, 1.00), newton.solvers.SolverFeatherstone),  # azure blue
+            ("MuJoCo Warp", (0.05, 0.82, 0.32), newton.solvers.SolverMuJoCo),         # emerald green
         ]
         self.layers: list[_SolverLayer] = [
             _SolverLayer(name, color, factory, self.viewer, self.sim_substeps, self.sim_dt)
@@ -194,7 +226,7 @@ class Example:
         # is obvious; raise ``spacing`` (each link is 2 m long, so ~9 m gives
         # a comfortable gap between neighboring swing planes) to lay them
         # out side-by-side along the world X-axis instead.
-        spacing = 0.0
+        spacing = 0.001
         n = len(self.layers)
         for i, layer in enumerate(self.layers):
             self.viewer.activate(layer.layer_id)

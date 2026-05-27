@@ -589,12 +589,20 @@ void main() {
         )
         rs.CreateRelationship("products").SetTargets([Sdf.Path(self._render_product_path)])
 
+    def _resolve_dome_color_intensity(self, default_color, default_intensity):
+        """Pick dome color/intensity, letting :meth:`set_sky_color` override the preset."""
+        color = self._sky_color if self._sky_color is not None else default_color
+        intensity = self._sky_intensity if self._sky_intensity is not None else default_intensity
+        return color, intensity
+
     def _add_default_lights(self):
         """Default lighting: dome light + distant directional light."""
         from pxr import UsdLux
 
+        dome_color, dome_intensity = self._resolve_dome_color_intensity((1.0, 1.0, 1.0), 150.0)
         dome = UsdLux.DomeLight.Define(self.stage, "/root/_RTXDomeLight")
-        dome.GetIntensityAttr().Set(150.0)
+        dome.GetColorAttr().Set(Gf.Vec3f(*dome_color))
+        dome.GetIntensityAttr().Set(float(dome_intensity))
 
         distant = UsdLux.DistantLight.Define(self.stage, "/root/_RTXDistantLight")
         distant.GetIntensityAttr().Set(900.0)
@@ -611,38 +619,132 @@ void main() {
         """Studio lighting rig from dome + warm distant + cool fill sphere."""
         from pxr import Sdf, UsdLux
 
-        # Dome light — cool-tinted low ambient
+        # Dome light — cool-tinted low ambient (overridable via set_sky_color())
+        dome_color, dome_intensity = self._resolve_dome_color_intensity((0.250, 0.319, 0.409), 200.0)
         dome_xf = UsdGeom.Xform.Define(self.stage, "/root/_RTXDomeLight")
         dome_xf.ClearXformOpOrder()
         dome = UsdLux.DomeLight.Define(self.stage, "/root/_RTXDomeLight/_RTXDomeLight")
-        dome.GetColorAttr().Set(Gf.Vec3f(0.250, 0.319, 0.409))
-        dome.GetIntensityAttr().Set(200.0)
+        dome.GetColorAttr().Set(Gf.Vec3f(*dome_color))
+        dome.GetIntensityAttr().Set(float(dome_intensity))
 
-        # Distant light — warm key, angled from above-behind
+        # Distant light — near-neutral key, angled from above-behind. The
+        # color is held close to white (was a strong cream tint) so the
+        # floor's grazing-angle reflection doesn't read as sand colored.
         dist_xf = UsdGeom.Xform.Define(self.stage, "/root/_RTXDistantLight")
         dist_xf.ClearXformOpOrder()
         dist_xf.AddRotateXYZOp().Set(Gf.Vec3f(41.4, 0.0, -175.7))
         distant = UsdLux.DistantLight.Define(self.stage, "/root/_RTXDistantLight/_RTXDistantLight")
-        distant.GetColorAttr().Set(Gf.Vec3f(1.0, 0.906, 0.722))
+        distant.GetColorAttr().Set(Gf.Vec3f(1.0, 0.98, 0.95))
         distant.GetIntensityAttr().Set(3000.0)
 
-        # Cool fill sphere light (blue-white)
+        # Near-neutral fill sphere light (was strongly cool); pairs with the
+        # near-neutral key for clean directional shading without a
+        # color cast on the floor.
         fill_xf = UsdGeom.Xform.Define(self.stage, "/root/_RTXFillLight")
         fill_xf.ClearXformOpOrder()
         fill_xf.AddTranslateOp().Set(Gf.Vec3d(5.0, 0.0, 5.5))
         fill = UsdLux.SphereLight.Define(self.stage, "/root/_RTXFillLight/_RTXFillLight")
         fill.GetPrim().SetMetadata("apiSchemas", Sdf.TokenListOp.Create(prependedItems=["ShapingAPI"]))
-        fill.GetColorAttr().Set(Gf.Vec3f(0.468, 0.684, 1.0))
+        fill.GetColorAttr().Set(Gf.Vec3f(0.95, 0.97, 1.0))
         fill.GetIntensityAttr().Set(300000.0)
         fill.GetRadiusAttr().Set(0.5)
 
+    def _generate_floor_textures(self) -> tuple[str, str]:
+        """Procedurally generate a sharp-edged checkerboard for the floor.
+
+        Builds a high-resolution color tile (so even under the texture's
+        default bilinear sampling the tile boundaries are only one or two
+        texel-wide blends — visually crisp) and a matching roughness tile
+        that gives the dark squares a slightly more polished look than the
+        light squares. The base color is :attr:`_ground_diffuse` (used as
+        the dark square); the light square is a lightened version of it,
+        so :meth:`set_ground_material` still drives the overall hue.
+
+        Returns:
+            (color_png_path, roughness_png_path)
+        """
+        import os
+        import tempfile
+
+        from PIL import Image
+
+        # 1024x1024 tile with a 4x4 checker (256x256 px per square). Under
+        # repeat tiling this gives perfectly sharp transitions for any UV
+        # scale; the only blurring is on the few texels nearest a square's
+        # edge, which subtends well under a pixel on screen at normal
+        # camera distances.
+        size = 1024
+        tiles_per_axis = 4
+        tile_px = size // tiles_per_axis
+        idx = np.arange(tiles_per_axis)
+        # Per-square 0/1 pattern, then repeat to the full tile size.
+        checker_lo_res = ((idx[:, None] + idx[None, :]) % 2).astype(np.float32)
+        checker = np.repeat(np.repeat(checker_lo_res, tile_px, axis=0), tile_px, axis=1)
+
+        # Two-tone checker: anthrazit dark squares (slight cool blue lift
+        # on top of the user-set base so they read as anthracite under the
+        # warm studio IBL) against near-white light squares.
+        base_lin = self._srgb_to_linear_np(np.asarray(self._ground_diffuse, dtype=np.float32))
+        dark_lin = np.minimum(base_lin + np.array([0.0, 0.006, 0.024], dtype=np.float32), 1.0)
+        light_lin = np.array([0.92, 0.92, 0.92], dtype=np.float32)
+        color_lin = (
+            (1.0 - checker)[..., None] * dark_lin[None, None, :]
+            + checker[..., None] * light_lin[None, None, :]
+        )
+        color_srgb = self._linear_to_srgb_np(color_lin)
+
+        # Roughness: uniform across both squares — the texture is just for
+        # the diffuse color pattern. ``set_ground_material(roughness=...)``
+        # is what controls how much sky reflects in the floor; tuning per-
+        # square roughness here only created a confusing "wet stripes" look.
+        rough = np.full_like(checker, float(self._ground_roughness)).clip(0.04, 0.96)
+
+        color_u8 = (color_srgb * 255.0).astype(np.uint8)
+        rough_u8 = (rough * 255.0).astype(np.uint8)
+
+        out_dir = tempfile.mkdtemp(prefix="newton_rtx_floor_")
+        color_path = os.path.join(out_dir, "floor_color.png").replace(os.sep, "/")
+        rough_path = os.path.join(out_dir, "floor_rough.png").replace(os.sep, "/")
+        Image.fromarray(color_u8).save(color_path)
+        Image.fromarray(rough_u8, mode="L").save(rough_path)
+        return color_path, rough_path
+
+    @staticmethod
+    def _linear_to_srgb_np(linear: np.ndarray) -> np.ndarray:
+        """Inverse of :meth:`_srgb_to_linear_np`, applied per-channel."""
+        linear = np.clip(linear.astype(np.float32), 0.0, 1.0)
+        return np.where(
+            linear <= 0.0031308,
+            linear * 12.92,
+            1.055 * np.power(linear, 1.0 / 2.4) - 0.055,
+        ).astype(np.float32)
+
     def _apply_ground_material(self):
-        """Bind a dark, shiny UsdPreviewSurface material to ground-plane meshes."""
+        """Bind a procedural-concrete UsdPreviewSurface to the ground plane(s).
+
+        Generates a tileable color + roughness texture pair (see
+        :meth:`_generate_floor_textures`) and wires both through
+        :class:`UsdUVTexture` nodes onto a :class:`UsdPreviewSurface`. The
+        UV reader pulls the plane's ``st`` primvar and a
+        :class:`UsdTransform2d` scales it so the tile repeats densely
+        across the floor (the plane itself spans tens of metres).
+        """
         from pxr import Sdf, UsdShade
 
         plane_prims = [prim for name, prim in self._meshes.items() if "plane" in name.lower()]
         if not plane_prims:
             return
+
+        try:
+            color_path, rough_path = self._generate_floor_textures()
+        except Exception as exc:  # noqa: BLE001
+            # Fall back to a flat material if PIL/numpy choke at viewer init.
+            warnings.warn(
+                f"ViewerRTX: procedural floor texture generation failed ({exc}); "
+                "falling back to flat ground material.",
+                stacklevel=2,
+            )
+            color_path = rough_path = None
 
         mat_path = "/root/Materials/mat_ground"
         self._ensure_scopes_for_path(self.stage, mat_path)
@@ -650,14 +752,174 @@ void main() {
         material = UsdShade.Material.Define(self.stage, mat_path)
         surface = UsdShade.Shader.Define(self.stage, f"{mat_path}/PreviewSurface")
         surface.CreateIdAttr("UsdPreviewSurface")
-        surface.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.05, 0.05, 0.06))
-        surface.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.15)
-        surface.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+        surface.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(float(self._ground_metallic))
         material.CreateSurfaceOutput().ConnectToSource(surface.ConnectableAPI(), "surface")
+
+        if color_path is None or rough_path is None:
+            # Flat fallback (linear diffuse + scalar roughness).
+            ground_diffuse_linear = self._srgb_to_linear_np(np.asarray(self._ground_diffuse, dtype=np.float32))
+            surface.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+                Gf.Vec3f(*ground_diffuse_linear.tolist())
+            )
+            surface.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(float(self._ground_roughness))
+        else:
+            # UV plumbing: st primvar -> UsdTransform2d (tile scale) -> textures.
+            st_reader = UsdShade.Shader.Define(self.stage, f"{mat_path}/PrimvarSt")
+            st_reader.CreateIdAttr("UsdPrimvarReader_float2")
+            st_reader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
+            st_reader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
+
+            uv_transform = UsdShade.Shader.Define(self.stage, f"{mat_path}/UvTransform")
+            uv_transform.CreateIdAttr("UsdTransform2d")
+            uv_transform.CreateInput("in", Sdf.ValueTypeNames.Float2).ConnectToSource(
+                st_reader.ConnectableAPI(), "result"
+            )
+            # Tile density: the ground plane spans tens of metres in world
+            # units but its st primvar is in plane-local UVs; scaling here
+            # picks how many copies of the 512x512 tile fit across the
+            # plane. Larger value = more repeats = finer-looking grain.
+            uv_transform.CreateInput("scale", Sdf.ValueTypeNames.Float2).Set(Gf.Vec2f(24.0, 24.0))
+            uv_transform.CreateOutput("result", Sdf.ValueTypeNames.Float2)
+
+            def _build_texture(child: str, file_path: str, srgb: bool, output_name: str, output_type):
+                tex = UsdShade.Shader.Define(self.stage, f"{mat_path}/{child}")
+                tex.CreateIdAttr("UsdUVTexture")
+                tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(file_path)
+                tex.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(
+                    uv_transform.ConnectableAPI(), "result"
+                )
+                tex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("sRGB" if srgb else "raw")
+                tex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
+                tex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
+                tex.CreateOutput(output_name, output_type)
+                return tex
+
+            color_tex = _build_texture("ColorTex", color_path, srgb=True, output_name="rgb", output_type=Sdf.ValueTypeNames.Float3)
+            surface.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(
+                color_tex.ConnectableAPI(), "rgb"
+            )
+
+            rough_tex = _build_texture("RoughTex", rough_path, srgb=False, output_name="r", output_type=Sdf.ValueTypeNames.Float)
+            surface.CreateInput("roughness", Sdf.ValueTypeNames.Float).ConnectToSource(
+                rough_tex.ConnectableAPI(), "r"
+            )
 
         for prim in plane_prims:
             UsdShade.MaterialBindingAPI.Apply(prim.GetPrim())
             UsdShade.MaterialBindingAPI(prim).Bind(material)
+
+    def set_environment(self, environment: Literal["default", "studio", "none"]) -> None:
+        """Select the OVRTX lighting preset for the upcoming first frame.
+
+        Must be called before the first :meth:`end_frame` (i.e. during the
+        build phase): the chosen rig is materialized as USD lights when the
+        stage is serialized to OVRTX, after which it can no longer change.
+
+        Args:
+            environment: One of :attr:`ENVIRONMENTS` (``"default"``,
+                ``"studio"``, or ``"none"``).
+
+        Raises:
+            RuntimeError: If called after the first frame has been rendered.
+            ValueError: If ``environment`` is not a recognized preset.
+        """
+        if self._phase != self._PHASE_BUILD:
+            raise RuntimeError("set_environment() must be called before the first simulation frame")
+        environment = environment.lower()
+        if environment not in self.ENVIRONMENTS:
+            raise ValueError(
+                f"Unknown RTX environment {environment!r}. Choose from: {', '.join(self.ENVIRONMENTS)}"
+            )
+        self._environment = environment
+
+    def set_sky_color(
+        self,
+        color: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        intensity: float | None = None,
+    ) -> None:
+        """Override the dome light's color (and optionally its intensity).
+
+        The dome light drives both the visible sky background and the
+        image-based ambient lighting on the scene, so a near-white color
+        produces an overcast-daylight look and lightens shadow side of
+        objects. To keep the lighting balance of the chosen environment
+        preset intact, leave ``intensity`` as ``None`` — only the color
+        is overridden.
+
+        Must be called before the first :meth:`end_frame`; after OVRTX is
+        initialized the lights are frozen.
+
+        Args:
+            color: Linear RGB color in ``[0, 1]``. Defaults to pure white.
+            intensity: Dome light intensity. ``None`` keeps the preset's
+                default (150 for ``"default"``, 200 for ``"studio"``).
+
+        Raises:
+            RuntimeError: If called after the first frame has been rendered.
+        """
+        if self._phase != self._PHASE_BUILD:
+            raise RuntimeError("set_sky_color() must be called before the first simulation frame")
+        self._sky_color = (float(color[0]), float(color[1]), float(color[2]))
+        self._sky_intensity = None if intensity is None else float(intensity)
+
+    def set_body_material(
+        self,
+        roughness: float = 0.9,
+        metallic: float = 0.0,
+    ) -> None:
+        """Override the default surface BRDF for rigid-body shape meshes.
+
+        Each shape's per-instance color (set via ``shape_color`` on the model)
+        flows in through the ``displayColor`` primvar; this method controls
+        the roughness/metallic that the underlying ``UsdPreviewSurface``
+        applies on top of that color. Defaults to a matte dielectric
+        (``roughness=0.9``, ``metallic=0.0``) so colored links read as
+        plastic rather than as polished plastic / chrome.
+
+        Must be called before the first :meth:`end_frame`; after OVRTX is
+        initialized the materials are frozen.
+
+        Args:
+            roughness: Surface roughness in ``[0, 1]``. ``0`` is mirror-like,
+                ``1`` is fully diffuse.
+            metallic: Metallicity in ``[0, 1]``. ``0`` is dielectric, ``1``
+                is metal.
+
+        Raises:
+            RuntimeError: If called after the first frame has been rendered.
+        """
+        if self._phase != self._PHASE_BUILD:
+            raise RuntimeError("set_body_material() must be called before the first simulation frame")
+        self._body_roughness = float(roughness)
+        self._body_metallic = float(metallic)
+
+    def set_ground_material(
+        self,
+        diffuse: tuple[float, float, float] = (0.05, 0.05, 0.06),
+        roughness: float = 0.15,
+        metallic: float = 0.0,
+    ) -> None:
+        """Override the ground-plane :class:`UsdPreviewSurface` parameters.
+
+        Must be called before the first :meth:`end_frame`. After OVRTX is
+        initialized the material binding is frozen.
+
+        Args:
+            diffuse: Linear RGB diffuse color in ``[0, 1]``. Defaults to the
+                original near-black floor.
+            roughness: Surface roughness in ``[0, 1]``. ``0`` is mirror-like,
+                ``1`` is fully diffuse.
+            metallic: Metallicity in ``[0, 1]``. ``0`` is dielectric, ``1``
+                is metal.
+
+        Raises:
+            RuntimeError: If called after the first frame has been rendered.
+        """
+        if self._phase != self._PHASE_BUILD:
+            raise RuntimeError("set_ground_material() must be called before the first simulation frame")
+        self._ground_diffuse = (float(diffuse[0]), float(diffuse[1]), float(diffuse[2]))
+        self._ground_roughness = float(roughness)
+        self._ground_metallic = float(metallic)
 
     def add_background_usd(self, path: str):
         """Add a reference to a background USD (e.g. Gaussian splat scan).
@@ -1461,6 +1723,13 @@ void main() {
                 is metal.
         """
         if self._phase == self._PHASE_BUILD:
+            # When the caller didn't author its own BRDF, fall back to the
+            # viewer-wide rigid-body defaults so meshes render through a
+            # ``displayColor``-driven UsdPreviewSurface rather than OVRTX's
+            # default (which reads as polished plastic).
+            if texture is None and roughness is None and metallic is None:
+                roughness = self._body_roughness
+                metallic = self._body_metallic
             super().log_mesh(
                 name,
                 points,
@@ -1512,6 +1781,12 @@ void main() {
             hidden: Whether the instances are hidden.
         """
         if self._phase == self._PHASE_BUILD:
+            # ``shape_color`` values are sRGB display colors but the
+            # UsdPreviewSurface diffuseColor input (driven through the
+            # displayColor primvar) is interpreted in linear space by
+            # OVRTX. Without conversion the colors render as washed-out
+            # pastels. Convert before forwarding to the USD writer.
+            colors = self._srgb_colors_to_linear(colors)
             super().log_instances(name, mesh, xforms, scales, colors, materials, hidden)
             if xforms is not None:
                 count = len(xforms)
@@ -1522,6 +1797,36 @@ void main() {
                 if scales is None:
                     scales = wp.ones(len(xforms), dtype=wp.vec3, device=xforms.device)
                 self._pending_xforms[name] = (xforms, scales)
+
+    @staticmethod
+    def _srgb_to_linear_np(srgb: np.ndarray) -> np.ndarray:
+        """Standard IEC 61966-2-1 sRGB → linear conversion, applied per-channel."""
+        srgb = np.clip(srgb.astype(np.float32), 0.0, 1.0)
+        return np.where(
+            srgb <= 0.04045,
+            srgb / 12.92,
+            ((srgb + 0.055) / 1.055) ** 2.4,
+        ).astype(np.float32)
+
+    def _srgb_colors_to_linear(
+        self,
+        colors: wp.array[wp.vec3] | None,
+    ) -> wp.array[wp.vec3] | None:
+        """Return a new wp.array with each color converted from sRGB → linear.
+
+        Used by :meth:`log_instances` (and similar paths that author
+        ``displayColor`` for an OVRTX-bound mesh) to keep the rendered
+        bodies' colors faithful to the input sRGB values that
+        ``shape_color`` is conventionally authored in.
+        """
+        if colors is None:
+            return None
+        arr = colors.numpy() if isinstance(colors, wp.array) else np.asarray(colors, dtype=np.float32)
+        if arr.size == 0:
+            return colors
+        linear = self._srgb_to_linear_np(arr)
+        device = colors.device if isinstance(colors, wp.array) else self.device
+        return wp.array(linear, dtype=wp.vec3, device=device)
 
     @override
     def log_lines(
@@ -2050,6 +2355,25 @@ void main() {
 
         self._flat_total_shapes = 0
         self._per_layer_flat = []
+
+        # Ground material defaults — overridable via set_ground_material()
+        # before the first frame.
+        self._ground_diffuse: tuple[float, float, float] = (0.05, 0.05, 0.06)
+        self._ground_roughness: float = 0.15
+        self._ground_metallic: float = 0.0
+
+        # Default surface BRDF for rigid-body shape meshes. Bodies route
+        # their per-instance color through ``displayColor``; these knobs
+        # control the roughness/metallic shared by every body. Defaults to
+        # a matte plastic look — override via set_body_material() before
+        # the first frame.
+        self._body_roughness: float = 0.9
+        self._body_metallic: float = 0.0
+
+        # Sky/dome-light overrides. ``None`` means "use the preset's value".
+        # Set via set_sky_color() before the first frame.
+        self._sky_color: tuple[float, float, float] | None = None
+        self._sky_intensity: float | None = None
 
         self._last_state = None
         self._last_control = None
