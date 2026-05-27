@@ -118,6 +118,7 @@ def _compute_shape_vbo_xforms(
     shape_type: wp.array[int],
     shape_world: wp.array[int],
     world_offsets: wp.array[wp.vec3],
+    layer_xform: wp.transform,
     write_indices: wp.array[int],
     out_world_xforms: wp.array[wp.transformf],
     out_vbo_xforms: wp.array[wp.mat44],
@@ -142,6 +143,7 @@ def _compute_shape_vbo_xforms(
             p = wp.transform_get_translation(xform)
             xform = wp.transform(p + world_offsets[wi], wp.transform_get_rotation(xform))
 
+    xform = wp.transform_multiply(layer_xform, xform)
     out_world_xforms[out_idx] = xform
 
     p = wp.transform_get_translation(xform)
@@ -1558,6 +1560,7 @@ class ViewerGL(ViewerBase):
                     self.model.shape_type,
                     self.model.shape_world,
                     self.world_offsets,
+                    self.layer.xform,
                     self._packed_write_indices,
                 ],
                 outputs=[self._packed_world_xforms, self._packed_vbo_xforms],

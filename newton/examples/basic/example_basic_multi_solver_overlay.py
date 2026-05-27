@@ -6,14 +6,21 @@
 #
 # Demonstrates the viewer "layer" system by running three simulations of
 # the same quadruple-pendulum chain in a single viewer window, each driven
-# by a different solver (XPBD, Featherstone, MuJoCo Warp). The layers can
-# be toggled independently via the "Layers" group in the viewer sidebar so
-# the visual divergence between the solvers becomes obvious.
+# by a different solver (XPBD, Featherstone, MuJoCo Warp). By default the
+# layers overlay exactly so the per-solver divergence is obvious; bumping
+# the ``spacing`` constant lays them out side-by-side along the world
+# X-axis via ``viewer.set_layer_transform``. Layers can also be toggled
+# independently via the "Layers" group in the viewer sidebar.
 #
 # Layers are created via ``viewer.activate(layer_id)``. Each layer owns its
 # own model, state, and shape batches; the viewer accumulates the render
 # objects from all layers and draws them together every frame. Each layer
 # also captures its own CUDA graph so per-solver stepping stays fast.
+# The per-layer transform applied via ``set_layer_transform`` is a pure
+# render-time displacement: it shifts every drawn object in the layer
+# without changing the underlying physics state, so passing
+# ``wp.transform_identity()`` (or a zero-translation transform) makes the
+# layers overlay exactly.
 #
 # Command: python -m newton.examples basic_multi_solver_overlay
 #
@@ -176,9 +183,21 @@ class Example:
         # Bind each layer to the viewer. Activating then calling ``set_model``
         # is all the per-solver wiring needed — the viewer auto-prefixes object
         # names so all three pendulums coexist in the same scene.
-        for layer in self.layers:
+        # ``set_layer_transform`` positions each layer relative to the others.
+        # The default ``spacing = 0`` overlays them so per-solver divergence
+        # is obvious; raise ``spacing`` (each link is 2 m long, so ~9 m gives
+        # a comfortable gap between neighboring swing planes) to lay them
+        # out side-by-side along the world X-axis instead.
+        spacing = 0.0
+        n = len(self.layers)
+        for i, layer in enumerate(self.layers):
             self.viewer.activate(layer.layer_id)
             self.viewer.set_model(layer.model)
+            shift = (i - 0.5 * (n - 1)) * spacing
+            self.viewer.set_layer_transform(
+                layer.layer_id,
+                wp.transform(wp.vec3(shift, 0.0, 0.0), wp.quat_identity()),
+            )
 
     def step(self):
         for layer in self.layers:

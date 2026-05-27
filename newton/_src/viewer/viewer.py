@@ -97,16 +97,19 @@ class Layer:
     contact/joint/COM caches, world offsets, visibility toggles, and any
     other state that is normally bound to one model.
 
-    Each layer carries a ``visible`` flag and a stable ``layer_id`` string
-    that is used as a prefix for every backend object name emitted while the
+    Each layer carries a ``visible`` flag, a per-layer rendering ``xform``
+    (applied to every drawn position/orientation in the layer; defaults to
+    the identity transform so layers overlay), and a stable ``layer_id``
+    string used as a prefix for every backend object name emitted while the
     layer is active. The prefix prevents name collisions when more than one
     layer logs into the same backend.
 
     Layers are managed by :class:`ViewerBase`. Use
     :meth:`ViewerBase.activate` to switch which layer receives subsequent
     ``set_model`` / ``log_state`` / ``log_*`` calls; use
-    :meth:`ViewerBase.set_layer_visible` to toggle visibility independently
-    per layer.
+    :meth:`ViewerBase.set_layer_visible` to toggle visibility and
+    :meth:`ViewerBase.set_layer_transform` to position layers independently
+    (e.g. overlay vs. side-by-side vs. rotated comparison).
     """
 
     def __init__(self, layer_id: str):
@@ -118,6 +121,7 @@ class Layer:
         """
         self.layer_id = layer_id
         self.visible = True
+        self.xform: wp.transform = wp.transform_identity()
         self.state: dict[str, Any] = {}
 
     @property
@@ -299,6 +303,49 @@ class ViewerBase(ABC):
         # hidden flag is propagated through the cached log_* calls.
         if layer_id == self._active_layer_id:
             self.model_changed = True
+
+    def set_layer_transform(
+        self,
+        layer_id: str,
+        xform: wp.transform | tuple[float, float, float] | list[float] | wp.vec3,
+    ) -> None:
+        """Set a per-layer rendering transform.
+
+        The transform is applied to every drawn position/orientation in the
+        layer (shapes, contacts, joints, COM markers, inertia boxes,
+        hydroelastic contact surfaces, gaussians, SDF margin wireframes).
+        It is independent of the per-world spacing controlled by
+        :meth:`set_world_offsets`: layer transforms reposition a whole
+        layer (e.g. an entire solver's view in a multi-solver comparison)
+        while world offsets space worlds *within* a model. The two compose
+        — the world offset is applied first, then the layer transform.
+
+        Pass :func:`wp.transform_identity` to make a layer overlay with the
+        others (the default). Pass a translated transform to lay layers
+        out side-by-side, or include a rotation to compare from different
+        viewing angles. As a convenience, a plain vec3/tuple/list is
+        accepted and treated as a pure translation.
+
+        Args:
+            layer_id: Identifier of the layer to position.
+            xform: Layer transform, or a translation as a tuple, list, or
+                :class:`wp.vec3` (pure translation, identity rotation).
+
+        Raises:
+            KeyError: If the layer id is not registered.
+        """
+        if layer_id not in self._layers:
+            raise KeyError(f"Unknown layer: {layer_id}")
+        if isinstance(xform, (list, tuple)):
+            xform = wp.transform(
+                wp.vec3(float(xform[0]), float(xform[1]), float(xform[2])),
+                wp.quat_identity(),
+            )
+        elif isinstance(xform, wp.vec3):
+            xform = wp.transform(xform, wp.quat_identity())
+        elif not isinstance(xform, wp.transform):
+            xform = wp.transform(*xform)
+        self._layers[layer_id].xform = xform
 
     def _snapshot_layer(self, layer: Layer) -> None:
         """Copy all per-model attributes from ``self`` into ``layer.state``."""
@@ -873,7 +920,7 @@ class ViewerBase(ABC):
             visible = self._should_show_shape(shapes.flags, shapes.static) and not layer_hidden
 
             if visible:
-                shapes.update(state, world_offsets=self.world_offsets)
+                shapes.update(state, world_offsets=self.world_offsets, layer_xform=self.layer.xform)
 
             colors = shapes.colors if self.model_changed or shapes.colors_changed else None
             materials = shapes.materials if self.model_changed else None
@@ -967,6 +1014,7 @@ class ViewerBase(ABC):
                     wp.vec3(world_xform.p[0] + offset[0], world_xform.p[1] + offset[1], world_xform.p[2] + offset[2]),
                     world_xform.q,
                 )
+            world_xform = wp.transform_multiply(self.layer.xform, world_xform)
             self.log_gaussian(gname, gaussian, xform=world_xform, hidden=False)
 
     def _log_non_shape_state(self, state: newton.State):
@@ -983,7 +1031,7 @@ class ViewerBase(ABC):
         for shapes in self._sdf_isomesh_instances.values():
             visible = self.show_collision and not layer_hidden
             if visible:
-                shapes.update(state, world_offsets=self.world_offsets)
+                shapes.update(state, world_offsets=self.world_offsets, layer_xform=self.layer.xform)
             send_appearance = self.model_changed or sdf_isomesh_just_populated
             self.log_instances(
                 shapes.name,
@@ -1040,6 +1088,7 @@ class ViewerBase(ABC):
                     self.model.shape_body,
                     self.model.shape_world,
                     self.world_offsets,
+                    self.layer.xform,
                     self._visible_worlds_mask,
                     contacts.rigid_contact_count,
                     contacts.rigid_contact_shape0,
@@ -1124,6 +1173,7 @@ class ViewerBase(ABC):
                 shape_pairs,
                 self.model.shape_world,
                 self.world_offsets,
+                self.layer.xform,
                 self._visible_worlds_mask,
                 num_contacts,
                 0.0,
@@ -1794,13 +1844,20 @@ class ViewerBase(ABC):
 
             self.world_xforms = wp.zeros_like(self.xforms)
 
-        def update(self, state: newton.State, world_offsets: wp.array[wp.vec3]):
+        def update(
+            self,
+            state: newton.State,
+            world_offsets: wp.array[wp.vec3],
+            layer_xform: wp.transform,
+        ):
             """
             Update the world transforms of the shape instances.
 
             Args:
                 state: The current state of the simulation.
                 world_offsets: The world offsets.
+                layer_xform: The per-layer rendering transform applied on top
+                    of the per-world offsets.
             """
             from .kernels import update_shape_xforms  # noqa: PLC0415
 
@@ -1813,6 +1870,7 @@ class ViewerBase(ABC):
                     state.body_q,
                     self.worlds,
                     world_offsets,
+                    layer_xform,
                 ],
                 outputs=[self.world_xforms],
                 device=self.device,
@@ -2327,6 +2385,7 @@ class ViewerBase(ABC):
                 self.model.body_inv_mass,
                 self.model.body_world,
                 self.world_offsets,
+                self.layer.xform,
                 self._visible_worlds_mask,
                 wp.vec3(0.5, 0.5, 0.5),  # color
             ],
@@ -2542,6 +2601,7 @@ class ViewerBase(ABC):
         # Update world transforms for the active mode
         body_q = state.body_q.numpy() if state is not None and state.body_q is not None else None
         offsets_np = self.world_offsets.numpy() if self.world_offsets is not None else None
+        layer_mat_np = self._transform_to_mat44(self.layer.xform).reshape(4, 4, order="F")
 
         for s, (_vertex_data, body_idx, shape_xf, world_idx) in edge_cache.items():
             name = self._qualify(f"/model/sdf_margin_wf/{mode.value}/{s}")
@@ -2557,6 +2617,7 @@ class ViewerBase(ABC):
                 world_mat[12] += offsets_np[world_idx][0]
                 world_mat[13] += offsets_np[world_idx][1]
                 world_mat[14] += offsets_np[world_idx][2]
+            world_mat = (layer_mat_np @ world_mat.reshape(4, 4, order="F")).ravel(order="F")
             self.log_wireframe_shape(name, None, world_mat, hidden=False)
 
     def _log_joints(self, state: newton.State):
@@ -2598,6 +2659,7 @@ class ViewerBase(ABC):
                 state.body_q,
                 self.model.body_world,
                 self.world_offsets,
+                self.layer.xform,
                 self._visible_worlds_mask,
                 self.model.shape_collision_radius,
                 self.model.shape_body,
@@ -2635,6 +2697,7 @@ class ViewerBase(ABC):
                 self.model.body_com,
                 self.model.body_world,
                 self.world_offsets,
+                self.layer.xform,
                 self._visible_worlds_mask,
             ],
             outputs=[self._com_positions],
