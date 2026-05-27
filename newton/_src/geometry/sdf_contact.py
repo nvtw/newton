@@ -529,7 +529,7 @@ def get_edge_count(shape_type: int, edge_range: wp.vec2i, hfd: HeightfieldData) 
     return edge_range[1]
 
 
-def _create_sdf_contact_funcs(enable_heightfields: bool):
+def _create_sdf_contact_funcs(enable_heightfields: bool, force_texture_sdf: bool = False):
     """Generate SDF contact functions with heightfield branches eliminated at compile time.
 
     When ``enable_heightfields`` is False, ``wp.static`` strips all heightfield code
@@ -539,6 +539,8 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
 
     Args:
         enable_heightfields: When False, all heightfield code paths are compiled out.
+        force_texture_sdf: When True, every mesh SDF query is known to use
+            texture data, so BVH fallback branches are compiled out.
 
     Returns:
         The ``do_edge_sdf_collision`` function.
@@ -558,7 +560,9 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
     ) -> float:
         """Sample SDF at the point ``v0 + tt * edge_dir``."""
         pp = v0 + edge_dir * tt
-        if wp.static(enable_heightfields):
+        if wp.static(force_texture_sdf):
+            return texture_sample_sdf(texture_sdf, pp)
+        elif wp.static(enable_heightfields):
             if sdf_is_heightfield:
                 return sample_sdf_heightfield(hfd_sdf, elevation_data, pp)
             elif use_bvh_for_sdf:
@@ -878,8 +882,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     writer_func: Any,
     enable_heightfields: bool = True,
     reduce_contacts: bool = False,
+    force_texture_sdf: bool = False,
 ):
-    do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields)
+    do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields, force_texture_sdf)
 
     # Derive a stable module name from the factory arguments so that
     # identical configurations share the compiled CUDA kernel.  This is
@@ -888,7 +893,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # compiled code, otherwise FMA-fusion or register-allocation
     # differences between independent JIT compilations can produce subtly
     # different floating-point results, breaking bit-exact reproducibility.
-    _module = f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}"
+    _module = f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_{force_texture_sdf}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def mesh_sdf_collision_kernel(
@@ -969,7 +974,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 # SDF availability: heightfields always use on-the-fly evaluation
                 use_bvh_for_sdf = False
-                if not sdf_is_hfield:
+                sdf_idx = int(0)
+                if wp.static(force_texture_sdf):
+                    sdf_idx = shape_sdf_index[sdf_shape]
+                elif not sdf_is_hfield:
                     sdf_idx = shape_sdf_index[sdf_shape]
                     use_bvh_for_sdf = sdf_idx < 0 or sdf_idx >= texture_sdf_table.shape[0]
                     if not use_bvh_for_sdf:
@@ -992,7 +1000,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     sdf_scale = wp.vec3(1.0, 1.0, 1.0)
                 else:
                     sdf_scale = mesh_scale_sdf
-                    if not use_bvh_for_sdf:
+                    if wp.static(force_texture_sdf):
+                        texture_sdf = texture_sdf_table[sdf_idx]
+                        if texture_sdf.scale_baked:
+                            sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+                    elif not use_bvh_for_sdf:
                         texture_sdf = texture_sdf_table[sdf_idx]
                         if texture_sdf.scale_baked:
                             sdf_scale = wp.vec3(1.0, 1.0, 1.0)
@@ -1078,7 +1090,16 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                             threshold = bsphere_radius + contact_threshold_unscaled
 
-                            if sdf_is_heightfield:
+                            if wp.static(force_texture_sdf):
+                                culling_radius = threshold
+                                clamped = wp.min(wp.max(bsphere_center, sdf_aabb_lower), sdf_aabb_upper)
+                                aabb_dist_sq = wp.length_sq(bsphere_center - clamped)
+                                if aabb_dist_sq > culling_radius * culling_radius:
+                                    add_edge = False
+                                else:
+                                    midpoint_sdf = texture_sample_sdf(texture_sdf, bsphere_center)
+                                    add_edge = midpoint_sdf <= culling_radius
+                            elif sdf_is_heightfield:
                                 midpoint_sdf = sample_sdf_heightfield(hfd_sdf, heightfield_elevations, bsphere_center)
                                 add_edge = midpoint_sdf <= threshold
                             elif use_bvh_for_sdf:
@@ -1167,7 +1188,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             # Quick threshold check before computing the gradient
                             dist_approx = dist_unscaled * min_sdf_scale
                             if dist_approx < contact_threshold:
-                                if wp.static(enable_heightfields):
+                                if wp.static(force_texture_sdf):
+                                    # Brent already produced the SDF value at
+                                    # ``point_unscaled``; skip the redundant value
+                                    # sample inside the gradient call and reuse
+                                    # ``dist_unscaled`` from Brent.
+                                    direction_unscaled = texture_sample_sdf_grad_only_hw(texture_sdf, point_unscaled)
+                                elif wp.static(enable_heightfields):
                                     if sdf_is_hfield:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_heightfield(
                                             hfd_sdf, heightfield_elevations, point_unscaled
@@ -1351,7 +1378,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         hfd_sdf = heightfield_data[shape_heightfield_index[sdf_shape]]
 
                 use_bvh_for_sdf = False
-                if not sdf_is_hfield:
+                sdf_idx = int(0)
+                if wp.static(force_texture_sdf):
+                    sdf_idx = shape_sdf_index[sdf_shape]
+                elif not sdf_is_hfield:
                     sdf_idx = shape_sdf_index[sdf_shape]
                     use_bvh_for_sdf = sdf_idx < 0 or sdf_idx >= texture_sdf_table.shape[0]
                     if not use_bvh_for_sdf:
@@ -1375,7 +1405,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     sdf_scale = wp.vec3(1.0, 1.0, 1.0)
                 else:
                     sdf_scale = mesh_scale_sdf
-                    if not use_bvh_for_sdf:
+                    if wp.static(force_texture_sdf):
+                        texture_sdf = texture_sdf_table[sdf_idx]
+                        if texture_sdf.scale_baked:
+                            sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+                    elif not use_bvh_for_sdf:
                         texture_sdf = texture_sdf_table[sdf_idx]
                         if texture_sdf.scale_baked:
                             sdf_scale = wp.vec3(1.0, 1.0, 1.0)
@@ -1453,7 +1487,16 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                             threshold = bsphere_radius + contact_threshold_unscaled
 
-                            if sdf_is_heightfield:
+                            if wp.static(force_texture_sdf):
+                                culling_radius = threshold
+                                clamped = wp.min(wp.max(bsphere_center, sdf_aabb_lower), sdf_aabb_upper)
+                                aabb_dist_sq = wp.length_sq(bsphere_center - clamped)
+                                if aabb_dist_sq > culling_radius * culling_radius:
+                                    add_edge = False
+                                else:
+                                    midpoint_sdf = texture_sample_sdf(texture_sdf, bsphere_center)
+                                    add_edge = midpoint_sdf <= culling_radius
+                            elif sdf_is_heightfield:
                                 midpoint_sdf = sample_sdf_heightfield(hfd_sdf, heightfield_elevations, bsphere_center)
                                 add_edge = midpoint_sdf <= threshold
                             elif use_bvh_for_sdf:
@@ -1539,7 +1582,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             # Quick threshold check before computing the gradient
                             dist_approx = dist_unscaled * min_sdf_scale
                             if dist_approx < contact_threshold:
-                                if wp.static(enable_heightfields):
+                                if wp.static(force_texture_sdf):
+                                    # Brent already produced the SDF value at
+                                    # ``point_unscaled``; skip the redundant value
+                                    # sample inside the gradient call and reuse
+                                    # ``dist_unscaled`` from Brent.
+                                    direction_unscaled = texture_sample_sdf_grad_only_hw(texture_sdf, point_unscaled)
+                                elif wp.static(enable_heightfields):
                                     if sdf_is_hfield:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_heightfield(
                                             hfd_sdf, heightfield_elevations, point_unscaled

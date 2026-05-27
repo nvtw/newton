@@ -853,10 +853,22 @@ class CollisionPipeline:
             has_meshes = False
             has_heightfields = False
             use_lean_gjk_mpr = False
+            mesh_sdf_uses_texture = False
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
                 has_heightfields = bool((shape_types == int(GeoType.HFIELD)).any())
                 has_meshes = bool((shape_types == int(GeoType.MESH)).any())
+                if has_meshes and not has_heightfields and model.shape_sdf_index is not None:
+                    mesh_shape_indices = np.flatnonzero(shape_types == int(GeoType.MESH))
+                    sdf_indices = model.shape_sdf_index.numpy()[mesh_shape_indices]
+                    coarse_textures = getattr(model, "texture_sdf_coarse_textures", None) or []
+                    in_range = bool(
+                        sdf_indices.size > 0 and np.all(sdf_indices >= 0) and np.all(sdf_indices < len(coarse_textures))
+                    )
+                    if in_range:
+                        mesh_sdf_uses_texture = all(
+                            coarse_textures[int(sdf_idx)] is not None for sdf_idx in np.unique(sdf_indices)
+                        )
                 # Use lean GJK/MPR kernel when scene has no capsules, ellipsoids,
                 # cylinders, or cones (which need full support function and axial
                 # rolling post-processing). The lean support function handles
@@ -893,6 +905,7 @@ class CollisionPipeline:
                 has_meshes=has_meshes,
                 has_heightfields=has_heightfields,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
+                mesh_sdf_uses_texture=mesh_sdf_uses_texture,
                 deterministic=deterministic,
                 contact_max=rigid_contact_max,
                 verify_buffers=verify_buffers,

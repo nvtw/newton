@@ -1465,6 +1465,7 @@ class NarrowPhase:
         has_meshes: bool = True,
         has_heightfields: bool = False,
         use_lean_gjk_mpr: bool = False,
+        mesh_sdf_uses_texture: bool = False,
         deterministic: bool = False,
         contact_max: int | None = None,
         verify_buffers: bool = True,
@@ -1491,6 +1492,9 @@ class NarrowPhase:
                 Defaults to True for safety. Set to False when constructing from a model with no meshes.
             has_heightfields: Whether the scene contains any heightfield shapes (GeoType.HFIELD). When True,
                 heightfield collision buffers and kernels are allocated. Defaults to False.
+            mesh_sdf_uses_texture: Compile mesh-SDF kernels without BVH
+                fallback branches. Only set when every mesh shape has a
+                valid texture SDF and no heightfields are present.
             deterministic: Sort contacts after the narrow phase so that results are
                 independent of GPU thread scheduling.  Adds a radix sort + gather
                 pass.  Hydroelastic contacts are not yet covered.
@@ -1615,11 +1619,13 @@ class NarrowPhase:
                     write_contact_to_reducer,
                     enable_heightfields=has_heightfields,
                     reduce_contacts=True,
+                    force_texture_sdf=mesh_sdf_uses_texture,
                 )
             else:
                 self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     writer_func,
                     enable_heightfields=has_heightfields,
+                    force_texture_sdf=mesh_sdf_uses_texture,
                 )
         else:
             self.mesh_plane_contacts_kernel = None
