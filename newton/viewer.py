@@ -9,6 +9,7 @@ from ._src.viewer import (
     ViewerGL,
     ViewerNull,
     ViewerRerun,
+    ViewerRTX,
     ViewerUSD,
     ViewerViser,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "ViewerFile",
     "ViewerGL",
     "ViewerNull",
+    "ViewerRTX",
     "ViewerRerun",
     "ViewerUSD",
     "ViewerViser",

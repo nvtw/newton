@@ -18,17 +18,16 @@ import numpy as np
 import warp as wp
 
 import newton as nt
-from newton.selection import ArticulationView
 
 from ..core.types import Axis, override
 from ..utils.render import copy_rgb_frame_uint8
 from .camera import Camera
-from .gl.gui import UI
 from .gl.image_logger import ImageLogger
 from .gl.opengl import LinesGL, MeshGL, MeshInstancerGL, RendererGL
 from .picking import Picking
 from .recording import LiveMp4Recorder
 from .viewer import _DEFAULT_LAYER_ID, ViewerBase
+from .viewer_gui import ViewerGui
 from .wind import Wind
 
 logger = logging.getLogger(__name__)
@@ -204,6 +203,7 @@ class ViewerGL(ViewerBase):
         height: int = 1080,
         vsync: bool = False,
         headless: bool = False,
+        paused: bool = False,
         plot_history_size: int = 250,
     ):
         """
@@ -214,6 +214,7 @@ class ViewerGL(ViewerBase):
             height: Window height in pixels.
             vsync: Enable vertical sync.
             headless: Run in headless mode (no window).
+            paused: Start the viewer in paused mode.
             plot_history_size: Maximum number of samples kept per
                 :meth:`log_scalar` signal for the live time-series plots.
         """
@@ -221,10 +222,6 @@ class ViewerGL(ViewerBase):
             raise TypeError("plot_history_size must be an integer")
         if plot_history_size <= 0:
             raise ValueError("plot_history_size must be > 0")
-
-        # Pre-initialize callback registry; clear_model() (called from
-        # super().__init__()) resets the "side" slot on each model change.
-        self._ui_callbacks = {"side": [], "stats": [], "free": [], "panel": []}
 
         # Rolling buffers for log_scalar() time-series plots.
         self._scalar_buffers: dict[str, collections.deque] = {}
@@ -252,24 +249,9 @@ class ViewerGL(ViewerBase):
         fb_w, fb_h = self.renderer.window.get_framebuffer_size()
         self.camera = Camera(width=fb_w, height=fb_h, up_axis="Z")
 
-        self._paused = False
+        self._paused = paused
         self._step_requested = False
         self._reset_callback: Callable[[], None] | None = None
-
-        # Selection panel state
-        self._selection_ui_state = {
-            "selected_articulation_pattern": "*",
-            "selected_articulation_view": None,
-            "selected_attribute": "joint_q",
-            "attribute_options": ["joint_q", "joint_qd", "joint_f", "body_q", "body_qd"],
-            "include_joints": "",
-            "exclude_joints": "",
-            "include_links": "",
-            "exclude_links": "",
-            "show_values": False,
-            "selected_batch_idx": 0,
-            "error_message": "",
-        }
 
         self.renderer.register_key_press(self.on_key_press)
         self.renderer.register_key_release(self.on_key_release)
@@ -279,35 +261,22 @@ class ViewerGL(ViewerBase):
         self.renderer.register_mouse_scroll(self.on_mouse_scroll)
         self.renderer.register_resize(self.on_resize)
 
-        self._loading_splash_active: bool = False
-        self._loading_splash_text: str | None = None
-
-        # Camera movement settings
-        self._camera_speed = 0.04
-        self._camera_orbit_sensitivity = 0.1
-        self._camera_dolly_scroll_sensitivity = 0.15
-        self._camera_dolly_drag_sensitivity = 0.01
-        self._cam_vel = np.zeros(3, dtype=np.float32)
-        self._cam_speed = 4.0  # m/s
-        self._cam_damp_tau = 0.083  # s
-
         # initialize viewer-local timer for per-frame integration
         self._last_time = time.perf_counter()
 
         # Only create UI in non-headless mode to avoid OpenGL context dependency
         if not headless:
-            self.ui = UI(self.renderer.window)
+            self.gui = ViewerGui(self, self.renderer.window)
         else:
-            self.ui = None
+            self.gui = None
         self._gizmo_log = None
-        self._gizmo_active = {}
         self.gizmo_is_using = False
 
-        # Performance tracking
-        self._fps_history = []
-        self._last_fps_time = time.perf_counter()
-        self._frame_count = 0
-        self._current_fps = 0.0
+        if self.gui is not None:
+            # Register GL-specific rendering options (sky, shadows, wireframe, colors)
+            self.gui.register_ui_callback(self._ui_populate_rendering_panel, position="rendering")
+            # Draw image-logger floating windows outside the sidebar window.
+            self.gui.register_ui_callback(lambda _imgui: self._image_logger.draw(), position="free")
 
         # a low resolution sphere mesh for point rendering
         self._point_mesh = None
@@ -341,6 +310,18 @@ class ViewerGL(ViewerBase):
         self._record_sim_fps: float | None = None
         self._record_next_sim_t: float | None = None
         self._record_last_frame_bytes: bytes | None = None
+
+        # Register sidebar panel callbacks for layer visibility and recording
+        # inside the shared ViewerGui "panel" slot (the rendering-options
+        # callback is registered above when ``self.gui`` was created).
+        if self.gui is not None:
+            self.gui.register_ui_callback(self._render_layers_panel, position="panel")
+            self.gui.register_ui_callback(self._render_recording_panel, position="panel")
+
+    @property
+    def ui(self):
+        """Return the underlying UI object (for backward compatibility)."""
+        return self.gui.ui if self.gui else None
 
     @override
     def _extra_layer_state_attrs(self) -> tuple[str, ...]:
@@ -410,7 +391,7 @@ class ViewerGL(ViewerBase):
     def register_ui_callback(
         self,
         callback: Callable[[Any], None],
-        position: Literal["side", "stats", "free", "panel"] = "side",
+        position: Literal["side", "stats", "free", "panel", "rendering"] = "side",
     ):
         """
         Register a UI callback to be rendered during the UI phase.
@@ -422,15 +403,32 @@ class ViewerGL(ViewerBase):
                      "stats" - Stats/metrics area
                      "free" - Free-floating UI elements
                      "panel" - Top-level collapsing headers in left panel
+                     "rendering" - Extra items inside the Rendering Options section
         """
-        if not callable(callback):
-            raise TypeError("callback must be callable")
+        if self.gui is not None:
+            self.gui.register_ui_callback(callback, position=position)
 
-        if position not in self._ui_callbacks:
-            valid_positions = list(self._ui_callbacks.keys())
-            raise ValueError(f"Invalid position '{position}'. Must be one of: {valid_positions}")
+    def show_loading_splash(self, text: str | None = None) -> None:
+        """Display a centered Newton's-cradle loading splash with optional sub-label.
 
-        self._ui_callbacks[position].append(callback)
+        The splash dims the underlying scene and renders even when the rest
+        of the ImGui UI is hidden.  Call :meth:`hide_loading_splash` to
+        remove it.
+
+        Args:
+            text: Optional sub-label drawn below the cradle.
+
+        Note:
+            Not thread-safe.  Must be called on the thread that owns this
+            viewer's GL context.
+        """
+        if self.gui is not None:
+            self.gui.show_loading_splash(text)
+
+    def hide_loading_splash(self) -> None:
+        """Remove the splash set by :meth:`show_loading_splash`."""
+        if self.gui is not None:
+            self.gui.hide_loading_splash()
 
     # helper function to create a low resolution sphere mesh for point rendering
     def _create_point_mesh(self):
@@ -512,56 +510,22 @@ class ViewerGL(ViewerBase):
         """Reset GL-specific model-dependent state to defaults.
 
         Called from ``__init__`` (via ``super().__init__`` → ``clear_model``)
-        and whenever the current model is discarded. Only resources owned by
-        the currently active layer are destroyed so other layers' models
-        keep rendering.
+        and whenever the current model is discarded.
         """
-        # Only destroy backend objects owned by the active layer so other
-        # live layers retain their meshes / instancers / lines / wireframes.
-        owns = self._is_layer_owned_path
-
-        def _filter_destroy(d: dict) -> dict:
-            kept: dict = {}
-            for k, v in d.items():
-                if owns(k):
-                    if hasattr(v, "destroy"):
-                        v.destroy()
-                else:
-                    kept[k] = v
-            return kept
-
-        self.objects = _filter_destroy(getattr(self, "objects", {}))
-        self.lines = _filter_destroy(getattr(self, "lines", {}))
-        self.arrows = _filter_destroy(getattr(self, "arrows", {}))
-
-        # Wireframe shapes are keyed on layer-qualified names; filter by ownership.
-        # VBO owners are shared across layers by ``id(vertex_data)``; after
-        # destroying this layer's shared shapes, drop any owners with no
-        # surviving references so their GL buffers are freed immediately
-        # instead of leaking until viewer close().
-        wireframe_shapes = getattr(self, "wireframe_shapes", {})
-        kept_wf: dict = {}
-        for k, v in wireframe_shapes.items():
-            if owns(k):
-                v.destroy()
-            else:
-                kept_wf[k] = v
-        self.wireframe_shapes = kept_wf
-        if not hasattr(self, "_wireframe_vbo_owners"):
-            self._wireframe_vbo_owners = {}
-        else:
-            # An owner is still live iff at least one remaining wireframe
-            # shape shares its VAO handle (``create_shared`` aliases the
-            # GLuint object, so identity is sufficient).
-            live_vao_ids = {id(s.vao) for s in kept_wf.values() if hasattr(s, "vao")}
-            orphan_keys = [
-                key
-                for key, owner in self._wireframe_vbo_owners.items()
-                if hasattr(owner, "vao") and id(owner.vao) not in live_vao_ids
-            ]
-            for key in orphan_keys:
-                owner = self._wireframe_vbo_owners.pop(key)
-                owner.destroy()
+        # Render object and line caches (path -> GL object)
+        for obj in getattr(self, "objects", {}).values():
+            if hasattr(obj, "destroy"):
+                obj.destroy()
+        self.objects = {}
+        for obj in getattr(self, "lines", {}).values():
+            obj.destroy()
+        self.lines = {}
+        for obj in getattr(self, "arrows", {}).values():
+            obj.destroy()
+        self.arrows = {}
+        self._destroy_all_wireframes()
+        self.wireframe_shapes = {}
+        self._wireframe_vbo_owners: dict[int, WireframeShapeGL] = {}
 
         # Interactive picking and wind force helpers
         self.picking = None
@@ -579,10 +543,6 @@ class ViewerGL(ViewerBase):
         self._packed_vbo_xforms = None
         self._packed_vbo_xforms_host = None
 
-        # Clear example-specific UI callbacks; panel/stats persist
-        self._ui_callbacks["side"] = []
-        self._ui_callbacks["free"] = []
-
         # Clear scalar plot buffers
         self._scalar_buffers.clear()
         self._scalar_arrays.clear()
@@ -598,6 +558,10 @@ class ViewerGL(ViewerBase):
         # opens the window after the user manually closed it).
         if getattr(self, "_image_logger", None) is not None:
             self._image_logger.clear()
+
+        # Drop example-registered side/free UI callbacks (panel/stats/rendering persist).
+        if getattr(self, "gui", None) is not None:
+            self.gui.clear_example_callbacks()
 
         super().clear_model()
 
@@ -746,10 +710,7 @@ class ViewerGL(ViewerBase):
         from .gl.opengl import MeshInstancerGL  # noqa: PLC0415
 
         current_names = {s.name for s in self._shape_instances.values()}
-        owns = self._is_layer_owned_path
-        stale = [
-            k for k, v in self.objects.items() if isinstance(v, MeshInstancerGL) and owns(k) and k not in current_names
-        ]
+        stale = [k for k, v in self.objects.items() if isinstance(v, MeshInstancerGL) and k not in current_names]
         for k in stale:
             obj = self.objects.pop(k)
             del obj
@@ -859,9 +820,6 @@ class ViewerGL(ViewerBase):
         assert normals is None or isinstance(normals, wp.array)
         assert uvs is None or isinstance(uvs, wp.array)
 
-        # Route user-supplied names through the active layer (idempotent).
-        name = self._qualify(name)
-
         if name not in self.objects:
             self.objects[name] = MeshGL(
                 len(points), len(indices), self.device, hidden=hidden, backface_culling=backface_culling
@@ -905,13 +863,6 @@ class ViewerGL(ViewerBase):
             materials: Array of materials.
             hidden: Whether the instances are hidden.
         """
-        # Route user-supplied names through the active layer (idempotent).
-        # ``mesh`` is the path of a previously registered mesh; qualify it
-        # the same way so a caller using the bare path produced by
-        # ``log_mesh`` finds the prototype the active layer registered.
-        name = self._qualify(name)
-        mesh = self._qualify(mesh)
-
         if mesh not in self.objects:
             raise RuntimeError(f"Path {mesh} not found")
 
@@ -968,17 +919,9 @@ class ViewerGL(ViewerBase):
             materials: Capsule instance materials (wp.vec4), length N or None (no update).
             hidden: Whether the instances are hidden.
         """
-        # Route the user-supplied capsule batch name through the active
-        # layer so two layers calling ``log_capsules`` with the same path
-        # don't overwrite each other (idempotent on already-qualified names).
-        name = self._qualify(name)
-
         # Render capsules via instanced cylinder body + instanced sphere caps.
-        # Prototype mesh keys are qualified with the active layer so a
-        # ``clear_model()`` on one layer does not destroy prototypes shared
-        # by capsule instancers in other live layers.
-        sphere_mesh = self._qualify("/geometry/_capsule_instancer/sphere")
-        cylinder_mesh = self._qualify("/geometry/_capsule_instancer/cylinder")
+        sphere_mesh = "/geometry/_capsule_instancer/sphere"
+        cylinder_mesh = "/geometry/_capsule_instancer/cylinder"
 
         if sphere_mesh not in self.objects:
             self.log_geo(sphere_mesh, nt.GeoType.SPHERE, (1.0,), 0.0, True, hidden=True)
@@ -1068,9 +1011,6 @@ class ViewerGL(ViewerBase):
                 ``RendererGL.line_width``.
             hidden: Whether the lines are initially hidden.
         """
-        # Route user-supplied names through the active layer (idempotent).
-        name = self._qualify(name)
-
         # Handle empty logs by resetting the LinesGL object
         if starts is None or ends is None or colors is None:
             if name in self.lines:
@@ -1136,8 +1076,6 @@ class ViewerGL(ViewerBase):
                 ``RendererGL.arrow_scale``.
             hidden: Whether the arrows are initially hidden.
         """
-        # Route user-supplied names through the active layer (idempotent).
-        name = self._qualify(name)
         if starts is None or ends is None or colors is None:
             if name in self.arrows:
                 self.arrows[name].update(None, None, None)
@@ -1189,8 +1127,6 @@ class ViewerGL(ViewerBase):
             world_matrix: 4x4 float32 world matrix, or ``None`` to keep current.
             hidden: Whether the shape is hidden.
         """
-        # Route user-supplied names through the active layer (idempotent).
-        name = self._qualify(name)
         existing = self.wireframe_shapes.get(name)
 
         if vertex_data is not None:
@@ -1248,9 +1184,6 @@ class ViewerGL(ViewerBase):
             colors: Array of point colors.
             hidden: Whether the points are hidden.
         """
-        # Route user-supplied names through the active layer (idempotent).
-        name = self._qualify(name)
-
         if points is None:
             if name in self.objects:
                 self.objects[name].hidden = True
@@ -1314,9 +1247,6 @@ class ViewerGL(ViewerBase):
             xform: Optional world-space transform applied to all splat centers.
             hidden: Whether the point cloud should be hidden.
         """
-        # Route user-supplied names through the active layer (idempotent).
-        name = self._qualify(name)
-
         if hidden:
             if name in self.objects:
                 self.objects[name].hidden = True
@@ -1446,9 +1376,6 @@ class ViewerGL(ViewerBase):
             array: Array data to visualize, or ``None`` to remove a previously
                 logged array.
         """
-        # Route user-supplied names through the active layer (idempotent).
-        name = self._qualify(name)
-
         if array is None:
             self._array_buffers.pop(name, None)
             self._array_dirty.discard(name)
@@ -1471,9 +1398,6 @@ class ViewerGL(ViewerBase):
     @override
     def log_image(self, name: str, image: wp.array[Any] | np.ndarray) -> None:
         """See :meth:`~newton.viewer.ViewerBase.log_image`."""
-        # Route user-supplied names through the active layer (idempotent)
-        # so two layers logging the same image name don't stomp each other.
-        name = self._qualify(name)
         self._image_logger.log(name, image)
 
     @override
@@ -1502,8 +1426,6 @@ class ViewerGL(ViewerBase):
         """
         if smoothing < 1:
             raise ValueError("smoothing must be >= 1")
-        # Route user-supplied names through the active layer (idempotent).
-        name = self._qualify(name)
         val = float(value.item() if hasattr(value, "item") else value)
         buf = self._scalar_buffers.get(name)
         if buf is None:
@@ -1573,9 +1495,8 @@ class ViewerGL(ViewerBase):
             # ---- Upload pinned host slices to GL per instancer ----
             host_np = self._packed_vbo_xforms_host.numpy()
 
-            layer_hidden = self._layer_force_hidden()
             for key, shapes, offset, count in self._packed_groups:
-                visible = self._should_show_shape(shapes.flags, shapes.static) and not layer_hidden
+                visible = self._should_show_shape(shapes.flags, shapes.static)
                 colors = shapes.colors if self.model_changed or shapes.colors_changed else None
                 materials = shapes.materials if self.model_changed else None
 
@@ -1727,23 +1648,347 @@ class ViewerGL(ViewerBase):
         # Render the scene and present it
         self.renderer.render(self.camera, self.objects, self.lines, self.wireframe_shapes, self.arrows)
 
-        # Always update FPS tracking, even if UI is hidden
-        self._update_fps()
-
-        # The splash needs an ImGui frame even when the user has hidden
-        # the regular UI, so the gate also opens for an active splash.
-        if self.ui and self.ui.is_available and (self.show_ui or self._loading_splash_active):
-            self.ui.begin_frame()
-            if self.show_ui:
-                self._render_ui()
-            self._render_loading_splash()
-            self.ui.end_frame()
-            self.ui.render()
+        if self.gui:
+            self.gui.render_frame(update_fps=True)
 
         self.renderer.present()
 
         # Capture this frame for live MP4 recording, if active.
         self._record_frame_if_needed()
+
+    def get_frame(self, target_image: wp.array | None = None, render_ui: bool = False) -> wp.array:
+        """
+        Retrieve the last rendered frame.
+
+        This method uses OpenGL Pixel Buffer Objects (PBO) and CUDA interoperability
+        to transfer pixel data entirely on the GPU, avoiding expensive CPU-GPU transfers.
+
+        Args:
+            target_image:
+                Optional pre-allocated Warp array with shape `(height, width, 3)`
+                and dtype `wp.uint8`. If `None`, a new array will be created.
+            render_ui: Whether to render the UI.
+
+        Returns:
+            wp.array: GPU array containing RGB image data with shape `(height, width, 3)`
+                and dtype `wp.uint8`. Origin is top-left (OpenGL's bottom-left is flipped).
+        """
+
+        gl = RendererGL.gl
+        w, h = self.renderer._screen_width, self.renderer._screen_height
+
+        # Lazy initialization of PBO (Pixel Buffer Object).
+        if self._pbo is None:
+            pbo_id = (gl.GLuint * 1)()
+            gl.glGenBuffers(1, pbo_id)
+            self._pbo = pbo_id[0]
+
+            # Allocate PBO storage.
+            gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, self._pbo)
+            gl.glBufferData(gl.GL_PIXEL_PACK_BUFFER, gl.GLsizeiptr(w * h * 3), None, gl.GL_STREAM_READ)
+            gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, 0)
+
+            # Register with CUDA.
+            self._wp_pbo = wp.RegisteredGLBuffer(
+                gl_buffer_id=int(self._pbo),
+                device=self.device,
+                flags=wp.RegisteredGLBuffer.READ_ONLY,
+            )
+
+            # Set alignment once.
+            gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
+
+        # GPU-to-GPU readback into PBO.
+        assert self.renderer._frame_fbo is not None
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.renderer._frame_fbo)
+        gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, self._pbo)
+
+        if render_ui and self.gui:
+            self.gui.render_frame(update_fps=False)
+
+        gl.glReadPixels(0, 0, w, h, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, ctypes.c_void_p(0))
+        gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, 0)
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+
+        # Map PBO buffer and copy using RGB kernel.
+        assert self._wp_pbo is not None
+        buf = self._wp_pbo.map(dtype=wp.uint8, shape=(w * h * 3,))
+
+        if target_image is None:
+            target_image = wp.empty(
+                shape=(h, w, 3),
+                dtype=wp.uint8,  # pyright: ignore[reportArgumentType]
+                device=self.device,
+            )
+
+        if target_image.shape != (h, w, 3):
+            raise ValueError(f"Shape of `target_image` must be ({h}, {w}, 3), got {target_image.shape}")
+
+        # Launch the RGB kernel.
+        wp.launch(
+            copy_rgb_frame_uint8,
+            dim=(w, h),
+            inputs=[buf, w, h],
+            outputs=[target_image],
+            device=self.device,
+        )
+
+        # Unmap the PBO buffer.
+        self._wp_pbo.unmap()
+
+        return target_image
+
+    @override
+    def is_running(self) -> bool:
+        """
+        Check if the viewer is still running.
+
+        Returns:
+            bool: True if the window is open, False if closed.
+        """
+        return not self.renderer.has_exit()
+
+    @override
+    def is_paused(self) -> bool:
+        """
+        Check if the simulation is paused.
+
+        Returns:
+            bool: True if paused, False otherwise.
+        """
+        return self._paused
+
+    @override
+    def should_step(self) -> bool:
+        """
+        Return True if the loop should advance one step.
+
+        Consumes a pending single-step request, so call exactly once per frame.
+        """
+        if not self._paused:
+            self._step_requested = False
+            return True
+        if self._step_requested:
+            self._step_requested = False
+            return True
+        return False
+
+    def set_reset_callback(self, callback: Callable[[], None] | None) -> None:
+        """Register a callback invoked when the user clicks the Reset button.
+
+        Args:
+            callback: Called with no arguments on reset, or ``None`` to remove.
+        """
+        self._reset_callback = callback
+
+    @override
+    def close(self):
+        """
+        Close the viewer and clean up resources.
+        """
+        if self._recorder.is_recording:
+            self._stop_recording()
+        self._clear_array_textures()
+        self._invalidate_pbo()
+        if self._image_logger is not None:
+            self._image_logger.clear()
+        self.renderer.close()
+
+    @property
+    def vsync(self) -> bool:
+        """
+        Get the current vsync state.
+
+        Returns:
+            bool: True if vsync is enabled, False otherwise.
+        """
+        return self.renderer.get_vsync()
+
+    @vsync.setter
+    def vsync(self, enabled: bool):
+        """
+        Set the vsync state.
+
+        Args:
+            enabled: Enable or disable vsync.
+        """
+        self.renderer.set_vsync(enabled)
+
+    @override
+    def is_key_down(self, key: str | int) -> bool:
+        """
+        Check if a key is currently pressed.
+
+        Args:
+            key: Either a string representing a character/key name, or an int
+                 representing a pyglet key constant.
+
+                 String examples: 'w', 'a', 's', 'd', 'space', 'escape', 'enter'
+                 Int examples: pyglet.window.key.W, pyglet.window.key.SPACE
+
+        Returns:
+            bool: True if the key is currently pressed, False otherwise.
+        """
+        try:
+            import pyglet
+        except Exception:
+            return False
+
+        if isinstance(key, str):
+            # Convert string to pyglet key constant
+            key = key.lower()
+
+            # Handle single characters
+            if len(key) == 1 and key.isalpha():
+                key_code = getattr(pyglet.window.key, key.upper(), None)
+            elif len(key) == 1 and key.isdigit():
+                key_code = getattr(pyglet.window.key, f"_{key}", None)
+            else:
+                # Handle special key names
+                special_keys = {
+                    "space": pyglet.window.key.SPACE,
+                    "escape": pyglet.window.key.ESCAPE,
+                    "esc": pyglet.window.key.ESCAPE,
+                    "enter": pyglet.window.key.ENTER,
+                    "return": pyglet.window.key.ENTER,
+                    "tab": pyglet.window.key.TAB,
+                    "shift": pyglet.window.key.LSHIFT,
+                    "ctrl": pyglet.window.key.LCTRL,
+                    "alt": pyglet.window.key.LALT,
+                    "up": pyglet.window.key.UP,
+                    "down": pyglet.window.key.DOWN,
+                    "left": pyglet.window.key.LEFT,
+                    "right": pyglet.window.key.RIGHT,
+                    "backspace": pyglet.window.key.BACKSPACE,
+                    "delete": pyglet.window.key.DELETE,
+                }
+                key_code = special_keys.get(key, None)
+
+            if key_code is None:
+                return False
+        else:
+            # Assume it's already a pyglet key constant
+            key_code = key
+
+        return self.renderer.is_key_down(key_code)
+
+    def _is_ctrl_down(self) -> bool:
+        """Return True when either Ctrl key is currently held."""
+        try:
+            import pyglet
+
+            return self.renderer.is_key_down(pyglet.window.key.LCTRL) or self.renderer.is_key_down(
+                pyglet.window.key.RCTRL
+            )
+        except Exception:
+            return False
+
+    # events
+
+    def on_mouse_scroll(self, x: float, y: float, scroll_x: float, scroll_y: float):
+        """
+        Handle mouse scroll for dolly and FOV adjustment.
+
+        Args:
+            x: Mouse X position in window coordinates.
+            y: Mouse Y position in window coordinates.
+            scroll_x: Horizontal scroll delta.
+            scroll_y: Vertical scroll delta.
+        """
+        if self.gui:
+            self.gui.handle_mouse_scroll(scroll_y, is_ctrl_down=self._is_ctrl_down())
+
+    def _to_framebuffer_coords(self, x: float, y: float) -> tuple[float, float]:
+        """Convert window coordinates to framebuffer coordinates."""
+        fb_w, fb_h = self.renderer.window.get_framebuffer_size()
+        win_w, win_h = self.renderer.window.get_size()
+        if win_w <= 0 or win_h <= 0:
+            return float(x), float(y)
+        scale_x = fb_w / win_w
+        scale_y = fb_h / win_h
+        return float(x) * scale_x, float(y) * scale_y
+
+    def on_mouse_press(self, x: float, y: float, button: int, modifiers: int):
+        """
+        Handle mouse press events (object picking).
+
+        Args:
+            x: Mouse X position in window coordinates.
+            y: Mouse Y position in window coordinates.
+            button: Mouse button pressed.
+            modifiers: Modifier keys.
+        """
+        if self.gui:
+            self.gui.handle_mouse_press(x, y, button, self._to_framebuffer_coords)
+
+    def on_mouse_release(self, x: float, y: float, button: int, modifiers: int):
+        """
+        Handle mouse release events to stop dragging.
+
+        Args:
+            x: Mouse X position in window coordinates.
+            y: Mouse Y position in window coordinates.
+            button: Mouse button released.
+            modifiers: Modifier keys.
+        """
+        if self.gui:
+            self.gui.handle_mouse_release(x, y, button)
+
+    def on_mouse_drag(
+        self,
+        x: float,
+        y: float,
+        dx: float,
+        dy: float,
+        buttons: int,
+        modifiers: int,
+    ):
+        """
+        Handle mouse drag events for camera and picking.
+
+        Args:
+            x: Mouse X position in window coordinates.
+            y: Mouse Y position in window coordinates.
+            dx: Mouse delta along X since previous event.
+            dy: Mouse delta along Y since previous event.
+            buttons: Mouse buttons pressed.
+            modifiers: Modifier keys.
+        """
+        if self.gui:
+            self.gui.handle_mouse_drag(x, y, dx, dy, buttons, self._to_framebuffer_coords, modifiers)
+
+    def on_mouse_motion(self, x: float, y: float, dx: float, dy: float):
+        """
+        Handle mouse motion events (not used).
+
+        Args:
+            x: Mouse X position in window coordinates.
+            y: Mouse Y position in window coordinates.
+            dx: Mouse delta along X since previous event.
+            dy: Mouse delta along Y since previous event.
+        """
+        pass
+
+    def on_key_press(self, symbol: int, modifiers: int):
+        """
+        Handle key press events for UI and simulation control.
+
+        Args:
+            symbol: Key symbol.
+            modifiers: Modifier keys.
+        """
+        if self.gui:
+            self.gui.handle_key_press(symbol, close_fn=self.renderer.close)
+
+    def on_key_release(self, symbol: int, modifiers: int):
+        """
+        Handle key release events (not used).
+
+        Args:
+            symbol: Released key code.
+            modifiers: Active modifier bitmask for this event.
+        """
+        pass
 
     @staticmethod
     def _format_record_fps(fps: float) -> str:
@@ -1877,520 +2122,73 @@ class ViewerGL(ViewerBase):
             self._record_next_sim_t += record_dt
             emitted += 1
 
-    def get_frame(self, target_image: wp.array | None = None, render_ui: bool = False) -> wp.array:
+    def _render_layers_panel(self, imgui):
+        """Sidebar "Layers" section: toggle visibility of user-registered layers.
+
+        Only shown when at least one user layer has been registered via
+        :meth:`activate` (so the default layer alone produces no UI).
         """
-        Retrieve the last rendered frame.
+        user_layers = [lyr for lid, lyr in self._layers.items() if lid != _DEFAULT_LAYER_ID]
+        if not user_layers:
+            return
+        imgui.set_next_item_open(True, imgui.Cond_.appearing)
+        if imgui.collapsing_header("Layers"):
+            imgui.separator()
+            for lyr in user_layers:
+                changed, new_visible = imgui.checkbox(f"Show '{lyr.layer_id}'", lyr.visible)
+                if changed:
+                    self.set_layer_visible(lyr.layer_id, new_visible)
 
-        This method uses OpenGL Pixel Buffer Objects (PBO) and CUDA interoperability
-        to transfer pixel data entirely on the GPU, avoiding expensive CPU-GPU transfers.
+    def _render_recording_panel(self, imgui):
+        """Sidebar "Recording" section: start/stop live MP4 capture."""
+        imgui.set_next_item_open(False, imgui.Cond_.once)
+        if not imgui.collapsing_header("Recording"):
+            return
+        imgui.separator()
 
-        Args:
-            target_image:
-                Optional pre-allocated Warp array with shape `(height, width, 3)`
-                and dtype `wp.uint8`. If `None`, a new array will be created.
-            render_ui: Whether to render the UI.
-
-        Returns:
-            wp.array: GPU array containing RGB image data with shape `(height, width, 3)`
-                and dtype `wp.uint8`. Origin is top-left (OpenGL's bottom-left is flipped).
-        """
-
-        gl = RendererGL.gl
-        w, h = self.renderer._screen_width, self.renderer._screen_height
-
-        # Lazy initialization of PBO (Pixel Buffer Object).
-        if self._pbo is None:
-            pbo_id = (gl.GLuint * 1)()
-            gl.glGenBuffers(1, pbo_id)
-            self._pbo = pbo_id[0]
-
-            # Allocate PBO storage.
-            gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, self._pbo)
-            gl.glBufferData(gl.GL_PIXEL_PACK_BUFFER, gl.GLsizeiptr(w * h * 3), None, gl.GL_STREAM_READ)
-            gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, 0)
-
-            # Register with CUDA.
-            self._wp_pbo = wp.RegisteredGLBuffer(
-                gl_buffer_id=int(self._pbo),
-                device=self.device,
-                flags=wp.RegisteredGLBuffer.READ_ONLY,
-            )
-
-            # Set alignment once.
-            gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
-
-        # GPU-to-GPU readback into PBO.
-        assert self.renderer._frame_fbo is not None
-        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.renderer._frame_fbo)
-        gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, self._pbo)
-
-        if render_ui and self.ui:
-            self.ui.begin_frame()
-            self._render_ui()
-            self.ui.end_frame()
-            self.ui.render()
-
-        gl.glReadPixels(0, 0, w, h, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, ctypes.c_void_p(0))
-        gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, 0)
-        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
-
-        # Map PBO buffer and copy using RGB kernel.
-        assert self._wp_pbo is not None
-        buf = self._wp_pbo.map(dtype=wp.uint8, shape=(w * h * 3,))
-
-        if target_image is None:
-            target_image = wp.empty(
-                shape=(h, w, 3),
-                dtype=wp.uint8,  # pyright: ignore[reportArgumentType]
-                device=self.device,
-            )
-
-        if target_image.shape != (h, w, 3):
-            raise ValueError(f"Shape of `target_image` must be ({h}, {w}, 3), got {target_image.shape}")
-
-        # Launch the RGB kernel.
-        wp.launch(
-            copy_rgb_frame_uint8,
-            dim=(w, h),
-            inputs=[buf, w, h],
-            outputs=[target_image],
-            device=self.device,
+        changed, quality = imgui.slider_float(
+            "Video Quality",
+            float(self._recorder.quality),
+            0.0,
+            100.0,
+            "%.0f",
         )
+        if changed:
+            self._recorder.set_quality(float(quality))
 
-        # Unmap the PBO buffer.
-        self._wp_pbo.unmap()
-
-        return target_image
-
-    @override
-    def is_running(self) -> bool:
-        """
-        Check if the viewer is still running.
-
-        Returns:
-            bool: True if the window is open, False if closed.
-        """
-        return not self.renderer.has_exit()
-
-    @override
-    def is_paused(self) -> bool:
-        """
-        Check if the simulation is paused.
-
-        Returns:
-            bool: True if paused, False otherwise.
-        """
-        return self._paused
-
-    def show_loading_splash(self, text: str | None = None) -> None:
-        """Display a centered Newton's-cradle loading splash with optional sub-label.
-
-        The splash dims the underlying scene and renders even when the rest
-        of the ImGui UI is hidden.  Call :meth:`hide_loading_splash` to
-        remove it.
-
-        Args:
-            text: Optional sub-label drawn below the cradle.
-
-        Note:
-            Not thread-safe.  Must be called on the thread that owns this
-            viewer's GL context.
-        """
-        self._loading_splash_active = True
-        self._loading_splash_text = text
-
-    def hide_loading_splash(self) -> None:
-        """Remove the splash set by :meth:`show_loading_splash`."""
-        self._loading_splash_active = False
-        self._loading_splash_text = None
-
-    @override
-    def should_step(self) -> bool:
-        """
-        Return True if the loop should advance one step.
-
-        Consumes a pending single-step request, so call exactly once per frame.
-        """
-        if not self._paused:
-            self._step_requested = False
-            return True
-        if self._step_requested:
-            self._step_requested = False
-            return True
-        return False
-
-    def set_reset_callback(self, callback: Callable[[], None] | None) -> None:
-        """Register a callback invoked when the user clicks the Reset button.
-
-        Args:
-            callback: Called with no arguments on reset, or ``None`` to remove.
-        """
-        self._reset_callback = callback
-
-    @override
-    def close(self):
-        """
-        Close the viewer and clean up resources.
-        """
         if self._recorder.is_recording:
-            self._stop_recording()
-        self._clear_array_textures()
-        self._invalidate_pbo()
-        if self._image_logger is not None:
-            self._image_logger.clear()
-        self.renderer.close()
-
-    @property
-    def vsync(self) -> bool:
-        """
-        Get the current vsync state.
-
-        Returns:
-            bool: True if vsync is enabled, False otherwise.
-        """
-        return self.renderer.get_vsync()
-
-    @vsync.setter
-    def vsync(self, enabled: bool):
-        """
-        Set the vsync state.
-
-        Args:
-            enabled: Enable or disable vsync.
-        """
-        self.renderer.set_vsync(enabled)
-
-    @override
-    def is_key_down(self, key: str | int) -> bool:
-        """
-        Check if a key is currently pressed.
-
-        Args:
-            key: Either a string representing a character/key name, or an int
-                 representing a pyglet key constant.
-
-                 String examples: 'w', 'a', 's', 'd', 'space', 'escape', 'enter'
-                 Int examples: pyglet.window.key.W, pyglet.window.key.SPACE
-
-        Returns:
-            bool: True if the key is currently pressed, False otherwise.
-        """
-        try:
-            import pyglet
-        except Exception:
-            return False
-
-        if isinstance(key, str):
-            # Convert string to pyglet key constant
-            key = key.lower()
-
-            # Handle single characters
-            if len(key) == 1 and key.isalpha():
-                key_code = getattr(pyglet.window.key, key.upper(), None)
-            elif len(key) == 1 and key.isdigit():
-                key_code = getattr(pyglet.window.key, f"_{key}", None)
-            else:
-                # Handle special key names
-                special_keys = {
-                    "space": pyglet.window.key.SPACE,
-                    "escape": pyglet.window.key.ESCAPE,
-                    "esc": pyglet.window.key.ESCAPE,
-                    "enter": pyglet.window.key.ENTER,
-                    "return": pyglet.window.key.ENTER,
-                    "tab": pyglet.window.key.TAB,
-                    "shift": pyglet.window.key.LSHIFT,
-                    "ctrl": pyglet.window.key.LCTRL,
-                    "alt": pyglet.window.key.LALT,
-                    "up": pyglet.window.key.UP,
-                    "down": pyglet.window.key.DOWN,
-                    "left": pyglet.window.key.LEFT,
-                    "right": pyglet.window.key.RIGHT,
-                    "backspace": pyglet.window.key.BACKSPACE,
-                    "delete": pyglet.window.key.DELETE,
-                }
-                key_code = special_keys.get(key, None)
-
-            if key_code is None:
-                return False
+            output_path = self._recorder.output_path
+            imgui.text("Status: recording")
+            imgui.text(f"Quality: {self._recorder.quality:.0f}/100")
+            imgui.text(f"FPS: {self._format_record_fps(self._record_fps)}")
+            if output_path is not None:
+                imgui.text_wrapped(str(output_path))
+            if imgui.button("Stop Recording"):
+                self._stop_recording()
         else:
-            # Assume it's already a pyglet key constant
-            key_code = key
+            sim_fps_text = (
+                self._format_record_fps(self._record_sim_fps) if self._record_sim_fps is not None else "unknown"
+            )
+            imgui.text(f"Simulation Rate: {sim_fps_text} Hz")
 
-        return self.renderer.is_key_down(key_code)
+            changed, fps_text = imgui.input_text("Video FPS", self._record_fps_text)
+            if changed:
+                self._record_fps_text = fps_text
+                self._record_fps_manual = True
+                self._sync_record_fps_from_text()
 
-    # events
+            if self._parse_record_fps_text() is None:
+                imgui.text("Enter a positive FPS value.")
 
-    def on_mouse_scroll(self, x: float, y: float, scroll_x: float, scroll_y: float):
-        """
-        Handle mouse scroll for dolly and FOV adjustment.
+            if imgui.button("Use Simulation Rate"):
+                self._use_simulation_record_fps()
+            imgui.same_line()
+            imgui.text("(default)")
 
-        Args:
-            x: Mouse X position in window coordinates.
-            y: Mouse Y position in window coordinates.
-            scroll_x: Horizontal scroll delta.
-            scroll_y: Vertical scroll delta.
-        """
-        if self._ui_is_capturing_mouse():
-            return
-
-        if self._is_ctrl_down():
-            fov_delta = scroll_y * 2.0
-            self.camera.fov -= fov_delta
-            self.camera.fov = max(min(self.camera.fov, 90.0), 15.0)
-        else:
-            self.camera.dolly(scroll_y * self._camera_dolly_scroll_sensitivity)
-
-    def _is_ctrl_down(self) -> bool:
-        """Return True when either Ctrl key is currently held."""
-        try:
-            import pyglet
-        except Exception:
-            return False
-
-        return self.renderer.is_key_down(pyglet.window.key.LCTRL) or self.renderer.is_key_down(pyglet.window.key.RCTRL)
-
-    def _camera_pan_scale(self) -> float:
-        """World-space meters per window pixel for screen-plane camera panning."""
-        height = max(float(self.camera.height), 1.0)
-        if hasattr(self.renderer, "window"):
-            _, window_height = self.renderer.window.get_size()
-            height = max(float(window_height), 1.0)
-        distance = max(self.camera.pivot_distance, self.camera.MIN_PIVOT_DISTANCE)
-        visible_height = 2.0 * distance * np.tan(np.radians(self.camera.fov) * 0.5)
-        return visible_height / height
-
-    def _to_framebuffer_coords(self, x: float, y: float) -> tuple[float, float]:
-        """Convert window coordinates to framebuffer coordinates."""
-        fb_w, fb_h = self.renderer.window.get_framebuffer_size()
-        win_w, win_h = self.renderer.window.get_size()
-        if win_w <= 0 or win_h <= 0:
-            return float(x), float(y)
-        scale_x = fb_w / win_w
-        scale_y = fb_h / win_h
-        return float(x) * scale_x, float(y) * scale_y
-
-    def on_mouse_press(self, x: float, y: float, button: int, modifiers: int):
-        """
-        Handle mouse press events (object picking).
-
-        Args:
-            x: Mouse X position in window coordinates.
-            y: Mouse Y position in window coordinates.
-            button: Mouse button pressed.
-            modifiers: Modifier keys.
-        """
-        if self._ui_is_capturing_mouse():
-            return
-
-        import pyglet
-
-        # Handle right-click for picking
-        if button == pyglet.window.mouse.RIGHT and self.picking_enabled and self.picking is not None:
-            fb_x, fb_y = self._to_framebuffer_coords(x, y)
-            ray_start, ray_dir = self.camera.get_world_ray(fb_x, fb_y)
-            if self._last_state is not None:
-                self.picking.pick(self._last_state, ray_start, ray_dir)
-
-    def on_mouse_release(self, x: float, y: float, button: int, modifiers: int):
-        """
-        Handle mouse release events to stop dragging.
-
-        Args:
-            x: Mouse X position in window coordinates.
-            y: Mouse Y position in window coordinates.
-            button: Mouse button released.
-            modifiers: Modifier keys.
-        """
-        if self.picking is not None:
-            self.picking.release()
-
-    def on_mouse_drag(
-        self,
-        x: float,
-        y: float,
-        dx: float,
-        dy: float,
-        buttons: int,
-        modifiers: int,
-    ):
-        """
-        Handle mouse drag events for camera and picking.
-
-        Args:
-            x: Mouse X position in window coordinates.
-            y: Mouse Y position in window coordinates.
-            dx: Mouse delta along X since previous event.
-            dy: Mouse delta along Y since previous event.
-            buttons: Mouse buttons pressed.
-            modifiers: Modifier keys.
-        """
-        if self._ui_is_capturing_mouse():
-            return
-
-        import pyglet
-
-        if buttons & pyglet.window.mouse.MIDDLE:
-            if modifiers & pyglet.window.key.MOD_CTRL:
-                self.camera.dolly(dy * self._camera_dolly_drag_sensitivity)
-            elif modifiers & pyglet.window.key.MOD_SHIFT:
-                pan_scale = self._camera_pan_scale()
-                self.camera.pan(-dx * pan_scale, -dy * pan_scale)
-            else:
-                sensitivity = self._camera_orbit_sensitivity
-                self.camera.orbit(delta_yaw=-dx * sensitivity, delta_pitch=dy * sensitivity)
-            return
-
-        if buttons & pyglet.window.mouse.LEFT:
-            sensitivity = 0.1
-            dx *= sensitivity
-            dy *= sensitivity
-
-            # Map screen-space right drag to a right turn (clockwise),
-            # independent of world up-axis convention.
-            self.camera.yaw = (self.camera.yaw - dx + 180.0) % 360.0 - 180.0
-            self.camera.pitch = max(min(self.camera.pitch + dy, 89.0), -89.0)
-            self.camera.sync_pivot_to_view()
-
-        if buttons & pyglet.window.mouse.RIGHT and self.picking_enabled:
-            fb_x, fb_y = self._to_framebuffer_coords(x, y)
-            ray_start, ray_dir = self.camera.get_world_ray(fb_x, fb_y)
-
-            if self.picking is not None and self.picking.is_picking():
-                self.picking.update(ray_start, ray_dir)
-
-    def on_mouse_motion(self, x: float, y: float, dx: float, dy: float):
-        """
-        Handle mouse motion events (not used).
-
-        Args:
-            x: Mouse X position in window coordinates.
-            y: Mouse Y position in window coordinates.
-            dx: Mouse delta along X since previous event.
-            dy: Mouse delta along Y since previous event.
-        """
-        pass
-
-    def _ui_is_capturing_mouse(self) -> bool:
-        """Return whether the UI wants to consume mouse input this frame."""
-        if not self.ui:
-            return False
-
-        if hasattr(self.ui, "is_capturing_mouse"):
-            return bool(self.ui.is_capturing_mouse())
-
-        if hasattr(self.ui, "is_capturing"):
-            return bool(self.ui.is_capturing())
-
-        return False
-
-    def _ui_is_capturing_keyboard(self) -> bool:
-        """Return whether the UI wants to consume keyboard input this frame."""
-        if not self.ui:
-            return False
-
-        if hasattr(self.ui, "is_capturing_keyboard"):
-            return bool(self.ui.is_capturing_keyboard())
-
-        if hasattr(self.ui, "is_capturing"):
-            return bool(self.ui.is_capturing())
-
-        return False
-
-    def on_key_press(self, symbol: int, modifiers: int):
-        """
-        Handle key press events for UI and simulation control.
-
-        Args:
-            symbol: Key symbol.
-            modifiers: Modifier keys.
-        """
-        if self._ui_is_capturing_keyboard():
-            return
-
-        try:
-            import pyglet
-        except Exception:
-            return
-
-        if symbol == pyglet.window.key.H:
-            self.show_ui = not self.show_ui
-        elif symbol == pyglet.window.key.SPACE:
-            # Toggle pause with space key
-            self._paused = not self._paused
-        elif symbol == pyglet.window.key.PERIOD and self._paused:
-            self._step_requested = True
-        elif symbol == pyglet.window.key.F:
-            # Frame camera around model bounds
-            self._frame_camera_on_model()
-        elif symbol == pyglet.window.key.ESCAPE:
-            # Exit with Escape key
-            self.renderer.close()
-
-    def on_key_release(self, symbol: int, modifiers: int):
-        """
-        Handle key release events (not used).
-
-        Args:
-            symbol: Released key code.
-            modifiers: Active modifier bitmask for this event.
-        """
-        pass
-
-    def _frame_camera_on_model(self):
-        """
-        Frame the camera to show all visible objects in the scene.
-        """
-        if self.model is None:
-            return
-
-        # Compute bounds from all visible objects
-        min_bounds = np.array([float("inf")] * 3)
-        max_bounds = np.array([float("-inf")] * 3)
-        found_objects = False
-
-        # Check body positions if available
-        if hasattr(self, "_last_state") and self._last_state is not None:
-            if hasattr(self._last_state, "body_q") and self._last_state.body_q is not None:
-                body_q = self._last_state.body_q.numpy()
-                # body_q is an array of transforms (7 values: 3 pos + 4 quat)
-                # Extract positions (first 3 values of each transform)
-                for i in range(len(body_q)):
-                    pos = body_q[i, :3]
-                    min_bounds = np.minimum(min_bounds, pos)
-                    max_bounds = np.maximum(max_bounds, pos)
-                    found_objects = True
-
-        # If no objects found, use default bounds
-        if not found_objects:
-            min_bounds = np.array([-5.0, -5.0, -5.0])
-            max_bounds = np.array([5.0, 5.0, 5.0])
-
-        # Calculate center and size of bounding box
-        center = (min_bounds + max_bounds) * 0.5
-        size = max_bounds - min_bounds
-        max_extent = np.max(size)
-
-        # Ensure minimum size to avoid camera being too close
-        if max_extent < 1.0:
-            max_extent = 1.0
-
-        # Calculate camera distance based on field of view
-        # Distance = extent / tan(fov/2) with some padding
-        fov_rad = np.radians(self.camera.fov)
-        padding = 1.5
-        distance = max_extent / (2.0 * np.tan(fov_rad / 2.0)) * padding
-
-        # Position camera at distance from current viewing direction, looking at center
-        from pyglet.math import Vec3 as PyVec3
-
-        front = self.camera.get_front()
-        new_pos = PyVec3(
-            center[0] - front.x * distance,
-            center[1] - front.y * distance,
-            center[2] - front.z * distance,
-        )
-        self.camera.pos = new_pos
-        self.camera.set_pivot(center)
+            imgui.text("Status: idle")
+            imgui.text_wrapped(str(self._recorder.suggested_output_path()))
+            if imgui.button("Start Recording"):
+                self._start_recording()
 
     def _update_camera(self, dt: float):
         """
@@ -2399,53 +2197,8 @@ class ViewerGL(ViewerBase):
         Args:
             dt: Time delta since last update.
         """
-        if self._ui_is_capturing_keyboard():
-            return
-
-        # camera-relative basis
-        forward = np.array(self.camera.get_front(), dtype=np.float32)
-        right = np.array(self.camera.get_right(), dtype=np.float32)
-        up = np.array(self.camera.get_up(), dtype=np.float32)
-
-        # keep motion in the horizontal plane
-        forward -= up * float(np.dot(forward, up))
-        right -= up * float(np.dot(right, up))
-        # renormalize
-        fn = float(np.linalg.norm(forward))
-        ln = float(np.linalg.norm(right))
-        if fn > 1.0e-6:
-            forward /= fn
-        if ln > 1.0e-6:
-            right /= ln
-
-        import pyglet
-
-        desired = np.zeros(3, dtype=np.float32)
-        if self.renderer.is_key_down(pyglet.window.key.W) or self.renderer.is_key_down(pyglet.window.key.UP):
-            desired += forward
-        if self.renderer.is_key_down(pyglet.window.key.S) or self.renderer.is_key_down(pyglet.window.key.DOWN):
-            desired -= forward
-        if self.renderer.is_key_down(pyglet.window.key.A) or self.renderer.is_key_down(pyglet.window.key.LEFT):
-            desired -= right  # strafe left
-        if self.renderer.is_key_down(pyglet.window.key.D) or self.renderer.is_key_down(pyglet.window.key.RIGHT):
-            desired += right  # strafe right
-        if self.renderer.is_key_down(pyglet.window.key.Q):
-            desired -= up  # pan down
-        if self.renderer.is_key_down(pyglet.window.key.E):
-            desired += up  # pan up
-
-        dn = float(np.linalg.norm(desired))
-        if dn > 1.0e-6:
-            desired = desired / dn * self._cam_speed
-        else:
-            desired[:] = 0.0
-
-        tau = max(1.0e-4, float(self._cam_damp_tau))
-        self._cam_vel += (desired - self._cam_vel) * (dt / tau)
-
-        # integrate position
-        dv = type(self.camera.pos)(*self._cam_vel)
-        self.camera.translate(dv * dt)
+        if self.gui:
+            self.gui.update_camera_from_keys(dt, self.renderer.is_key_down)
 
     def on_resize(self, width: int, height: int):
         """
@@ -2459,556 +2212,37 @@ class ViewerGL(ViewerBase):
         self.camera.update_screen_size(fb_w, fb_h)
         self._invalidate_pbo()
 
-        if self._recorder.is_recording:
-            # ffmpeg was started with a fixed resolution; stop cleanly on resize.
-            self._stop_recording()
-
         if self.ui:
             self.ui.resize(width, height)
 
-    def _update_fps(self):
-        """
-        Update FPS calculation and statistics.
-        """
-        current_time = time.perf_counter()
-        self._frame_count += 1
-
-        # Update FPS every second
-        if current_time - self._last_fps_time >= 1.0:
-            time_delta = current_time - self._last_fps_time
-            self._current_fps = self._frame_count / time_delta
-            self._fps_history.append(self._current_fps)
-
-            # Keep only last 60 FPS readings
-            if len(self._fps_history) > 60:
-                self._fps_history.pop(0)
-
-            self._last_fps_time = current_time
-            self._frame_count = 0
-
-    def _render_gizmos(self):
-        self.gizmo_is_using = False
-        if not self._gizmo_log:
-            self._gizmo_active.clear()
-            return
-        if not self.ui:
-            self._gizmo_active.clear()
-            return
-
-        giz = self.ui.giz
-        io = self.ui.io
-
-        # Setup ImGuizmo viewport
-        giz.set_orthographic(False)
-        giz.set_rect(0.0, 0.0, float(io.display_size[0]), float(io.display_size[1]))
-        giz.set_gizmo_size_clip_space(0.07)
-        giz.set_axis_limit(0.0)
-        giz.set_plane_limit(0.0)
-        giz.allow_axis_flip(False)
-
-        # Camera matrices
-        view = self.camera.get_view_matrix().reshape(4, 4).transpose()
-        proj = self.camera.get_projection_matrix().reshape(4, 4).transpose()
-
-        def m44_to_mat16(m):
-            """Row-major 4x4 -> giz.Matrix16 (column-major, 16 floats)."""
-            m = np.asarray(m, dtype=np.float32).reshape(4, 4)
-            return giz.Matrix16(m.flatten(order="F").tolist())
-
-        def safe_bool(value) -> bool:
-            try:
-                return bool(value)
-            except Exception:
-                return False
-
-        view_ = m44_to_mat16(view)
-        proj_ = m44_to_mat16(proj)
-
-        axis_translate = {
-            Axis.X: giz.OPERATION.translate_x,
-            Axis.Y: giz.OPERATION.translate_y,
-            Axis.Z: giz.OPERATION.translate_z,
-        }
-        axis_rotate = {
-            Axis.X: giz.OPERATION.rotate_x,
-            Axis.Y: giz.OPERATION.rotate_y,
-            Axis.Z: giz.OPERATION.rotate_z,
-        }
-
-        # Draw & mutate each gizmo
-        logged_ids = set()
-        for gid, gizmo_data in self._gizmo_log.items():
-            logged_ids.add(gid)
-            transform = gizmo_data["transform"]
-            snap_to = gizmo_data["snap_to"]
-            translate = gizmo_data["translate"]
-            rotate = gizmo_data["rotate"]
-
-            # Use compound ops when all axes are active (includes plane handles).
-            if len(translate) == 3:
-                t_ops = (giz.OPERATION.translate,)
-            else:
-                t_ops = tuple(axis_translate[a] for a in translate)
-
-            if len(rotate) == 3:
-                r_ops = (giz.OPERATION.rotate,)
-            else:
-                r_ops = tuple(axis_rotate[a] for a in rotate)
-
-            ops = t_ops + r_ops
-            was_active = self._gizmo_active.get(gid, False)
-            if not ops:
-                if was_active and snap_to is not None:
-                    transform[:] = snap_to
-                self._gizmo_active[gid] = False
-                continue
-
-            giz.push_id(str(gid))
-
-            M = wp.transform_to_matrix(transform)
-            M_ = m44_to_mat16(M)
-
-            op_modified = False
-            for op in ops:
-                op_modified = safe_bool(giz.manipulate(view_, proj_, op, giz.MODE.world, M_, None, None)) or op_modified
-
-            any_gizmo_is_using = safe_bool(giz.is_using_any())
-            if hasattr(giz, "is_using"):
-                # manipulate() only reports matrix changes this frame. Keep the
-                # gizmo active across stationary drag frames until release.
-                is_active = safe_bool(giz.is_using()) and any_gizmo_is_using
-            else:
-                is_active = op_modified or (was_active and any_gizmo_is_using)
-
-            if was_active and not is_active and snap_to is not None:
-                transform[:] = snap_to
-            else:
-                M[:] = M_.values.reshape(4, 4, order="F")
-                transform[:] = wp.transform_from_matrix(M)
-
-            self._gizmo_active[gid] = is_active
-
-            giz.pop_id()
-
-        # Drop stale interaction state for gizmos that are no longer logged.
-        for gid in tuple(self._gizmo_active):
-            if gid not in logged_ids:
-                del self._gizmo_active[gid]
-
-        self.gizmo_is_using = giz.is_using_any()
-
-    def _render_loading_splash(self):
-        """Render a stylized Newton's-cradle loading splash, optionally with a sub-label.
-
-        The cradle is drawn statically with the leftmost ball lifted; this is
-        a one-frame snapshot, not an animation.  Sizes scale with the current
-        ImGui font size so the splash stays legible across DPI settings.
-        """
-        if not self._loading_splash_active or not self.ui:
-            return
-        imgui = self.ui.imgui
-        viewport = imgui.get_main_viewport()
-
-        # Scale relative to the default 13 px ImGui font so the splash
-        # respects user/DPI font scaling.
-        scale = imgui.get_font_size() / 13.0
-        ball_radius = 16.0 * scale
-        # 2.05 (vs 2.0) leaves a hairline gap between balls so adjacent
-        # rest-position balls remain visually distinguishable.
-        ball_spacing = ball_radius * 2.05
-        string_length = 80.0 * scale
-        bar_thickness = 5.0 * scale
-        text_gap = 18.0 * scale
-        bar_overhang = 8.0 * scale
-        string_thickness = 1.5 * scale
-        n_balls = 5
-
-        # Center the cradle's full bounding box (bar -> deepest ball) at the
-        # viewport center.  ``pivot_y`` is the bar's *bottom* edge (where
-        # strings attach), not the bar centerline — hence the
-        # ``+ bar_thickness`` after positioning the bbox top.
-        cradle_height = bar_thickness + string_length + ball_radius
-        cx = viewport.pos.x + viewport.size.x * 0.5
-        cy = viewport.pos.y + viewport.size.y * 0.5
-        pivot_y = cy - cradle_height * 0.5 + bar_thickness
-
-        imgui.set_next_window_pos(imgui.ImVec2(viewport.pos.x, viewport.pos.y))
-        imgui.set_next_window_size(imgui.ImVec2(viewport.size.x, viewport.size.y))
-        flags = (
-            imgui.WindowFlags_.no_decoration
-            | imgui.WindowFlags_.no_inputs
-            | imgui.WindowFlags_.no_saved_settings
-            | imgui.WindowFlags_.no_focus_on_appearing
-            | imgui.WindowFlags_.no_nav
-            | imgui.WindowFlags_.no_bring_to_front_on_focus
-            | imgui.WindowFlags_.no_move
-            | imgui.WindowFlags_.no_background
-        )
-        if imgui.begin("##loading_splash", None, flags)[0]:
-            draw_list = imgui.get_window_draw_list()
-
-            dim_col = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.0, 0.0, 0.0, 0.55))
-            ball_col = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.88, 0.88, 0.92, 1.0))
-            string_col = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.55, 0.55, 0.6, 1.0))
-            bar_col = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.45, 0.45, 0.5, 1.0))
-            text_col = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.9, 0.9, 0.9, 1.0))
-
-            # Dim the underlying scene.  Drawn manually rather than via
-            # ``set_next_window_bg_alpha`` so the dim color is independent
-            # of the active ImGui style.
-            draw_list.add_rect_filled(
-                imgui.ImVec2(viewport.pos.x, viewport.pos.y),
-                imgui.ImVec2(viewport.pos.x + viewport.size.x, viewport.pos.y + viewport.size.y),
-                dim_col,
-            )
-
-            first_pivot_x = cx - (n_balls - 1) * ball_spacing * 0.5
-            bar_half = (n_balls - 1) * ball_spacing * 0.5 + ball_radius + bar_overhang
-            draw_list.add_rect_filled(
-                imgui.ImVec2(cx - bar_half, pivot_y - bar_thickness),
-                imgui.ImVec2(cx + bar_half, pivot_y),
-                bar_col,
-            )
-
-            swing_angle = math.radians(32.0)
-            for i in range(n_balls):
-                pivot_x = first_pivot_x + i * ball_spacing
-                if i == 0:
-                    ball_x = pivot_x - math.sin(swing_angle) * string_length
-                    ball_y = pivot_y + math.cos(swing_angle) * string_length
-                else:
-                    ball_x = pivot_x
-                    ball_y = pivot_y + string_length
-
-                draw_list.add_line(
-                    imgui.ImVec2(pivot_x, pivot_y),
-                    imgui.ImVec2(ball_x, ball_y),
-                    string_col,
-                    string_thickness,
-                )
-                draw_list.add_circle_filled(
-                    imgui.ImVec2(ball_x, ball_y),
-                    ball_radius,
-                    ball_col,
-                )
-
-            if self._loading_splash_text:
-                text_size = imgui.calc_text_size(self._loading_splash_text)
-                text_x = cx - text_size.x * 0.5
-                text_y = pivot_y + string_length + ball_radius + text_gap
-                draw_list.add_text(imgui.ImVec2(text_x, text_y), text_col, self._loading_splash_text)
-        imgui.end()
-
-    def _render_ui(self):
-        """
-        Render the complete ImGui interface (left panel, stats overlay, and custom UI).
-        """
-        if not self.ui or not self.ui.is_available:
-            return
-
-        # Render gizmos
-        self._render_gizmos()
-
-        # Render left panel
-        self._render_left_panel()
-
-        # Render top-right stats overlay
-        self._render_stats_overlay()
-
-        # Render scalar time-series plots (from log_scalar calls)
-        self._render_scalar_plots()
-
-        # allow users to create custom windows
-        for callback in self._ui_callbacks["free"]:
-            callback(self.ui.imgui)
-
-    def _render_left_panel(self):
-        """
-        Render the left panel with model info and visualization controls.
-        """
-        imgui = self.ui.imgui
-
-        # Use theme colors directly
-        nav_highlight_color = self.ui.get_theme_color(imgui.Col_.nav_cursor, (1.0, 1.0, 1.0, 1.0))
-
-        # Position the window on the left side
-        io = self.ui.io
-        imgui.set_next_window_pos(imgui.ImVec2(10, 10))
-        imgui.set_next_window_size(imgui.ImVec2(_SIDEBAR_WIDTH_PX, io.display_size[1] - 20))
-
-        # Main control panel window - use safe flag values
-        flags = imgui.WindowFlags_.no_resize.value
-
-        if imgui.begin(f"Newton Viewer v{nt.__version__}", flags=flags):
-            imgui.separator()
-
-            # Collapsing headers default-open handling (first frame only)
-            header_flags = 0
-
-            # Run controls — shown once a model is loaded
-            if self.model is not None:
-                changed, self._paused = imgui.checkbox("Pause", self._paused)
-                imgui.same_line()
-                imgui.begin_disabled(not self._paused)
-                if imgui.button("Step"):
-                    self._step_requested = True
-                imgui.end_disabled()
-                if self._reset_callback is not None:
-                    imgui.same_line()
-                    if imgui.button("Reset"):
-                        self._reset_callback()
-                imgui.separator()
-
-            # Panel callbacks (e.g. example browser) - top-level collapsing headers
-            for callback in self._ui_callbacks["panel"]:
-                callback(self.ui.imgui)
-
-            # Model Information section
-            if self.model is not None:
-                imgui.set_next_item_open(True, imgui.Cond_.appearing)
-                if imgui.collapsing_header("Model Information", flags=header_flags):
-                    imgui.separator()
-                    axis_names = ["X", "Y", "Z"]
-                    imgui.text(f"Up Axis: {axis_names[self.model.up_axis]}")
-                    gravity = self.model.gravity.numpy()[0]
-                    gravity_text = f"Gravity: ({gravity[0]:.2f}, {gravity[1]:.2f}, {gravity[2]:.2f})"
-                    imgui.text(gravity_text)
-
-                # Visualization Controls section
-                imgui.set_next_item_open(True, imgui.Cond_.appearing)
-                if imgui.collapsing_header("Visualization", flags=header_flags):
-                    imgui.separator()
-
-                    # Joint visualization
-                    show_joints = self.show_joints
-                    changed, self.show_joints = imgui.checkbox("Show Joints", show_joints)
-
-                    if self.show_joints:
-                        _, self.renderer.joint_scale = imgui.slider_float(
-                            "Joint Scale", self.renderer.joint_scale, 0.25, 5.0
-                        )
-
-                    # Contact visualization
-                    show_contacts = self.show_contacts
-                    changed, self.show_contacts = imgui.checkbox("Show Contacts", show_contacts)
-
-                    if self.show_contacts:
-                        _, self.renderer.arrow_length_scale = imgui.slider_float(
-                            "Contact Length", self.renderer.arrow_length_scale, 0.25, 5.0
-                        )
-                        _, self.renderer.arrow_scale = imgui.slider_float(
-                            "Contact Width", self.renderer.arrow_scale, 0.25, 5.0
-                        )
-
-                    # Particle visualization
-                    show_particles = self.show_particles
-                    changed, self.show_particles = imgui.checkbox("Show Particles", show_particles)
-
-                    # Spring visualization
-                    show_springs = self.show_springs
-                    changed, self.show_springs = imgui.checkbox("Show Springs", show_springs)
-
-                    # Center of mass visualization
-                    show_com = self.show_com
-                    changed, self.show_com = imgui.checkbox("Show Center of Mass", show_com)
-
-                    if self.show_com:
-                        _, self.renderer.com_scale = imgui.slider_float("COM Scale", self.renderer.com_scale, 0.25, 5.0)
-
-                    # Triangle mesh visualization
-                    show_triangles = self.show_triangles
-                    changed, self.show_triangles = imgui.checkbox("Show Cloth", show_triangles)
-
-                    # Collision geometry toggle
-                    show_collision = self.show_collision
-                    changed, self.show_collision = imgui.checkbox("Show Collision", show_collision)
-
-                    # Gap + margin wireframe mode
-                    _sdf_margin_labels = ["Off", "Margin", "Margin + Gap"]
-                    _, new_sdf_idx = imgui.combo("Gap + Margin", int(self.sdf_margin_mode), _sdf_margin_labels)
-                    self.sdf_margin_mode = self.SDFMarginMode(new_sdf_idx)
-
-                    if self.sdf_margin_mode != self.SDFMarginMode.OFF:
-                        _, self.renderer.wireframe_line_width = imgui.slider_float(
-                            "Wireframe Width (px)", self.renderer.wireframe_line_width, 0.5, 5.0
-                        )
-
-                    # Visual geometry toggle
-                    show_visual = self.show_visual
-                    changed, self.show_visual = imgui.checkbox("Show Visual", show_visual)
-
-                    # Inertia boxes toggle
-                    show_inertia_boxes = self.show_inertia_boxes
-                    changed, self.show_inertia_boxes = imgui.checkbox("Show Inertia Boxes", show_inertia_boxes)
-
-            # Layers section — toggle visibility of overlaid solvers/models.
-            # Only shown when more than just the default layer has been
-            # registered (i.e., the user opted in via viewer.activate()).
-            user_layers = [lyr for lid, lyr in self._layers.items() if lid != _DEFAULT_LAYER_ID]
-            if user_layers:
-                imgui.set_next_item_open(True, imgui.Cond_.appearing)
-                if imgui.collapsing_header("Layers", flags=header_flags):
-                    imgui.separator()
-                    for lyr in user_layers:
-                        changed, new_visible = imgui.checkbox(f"Show '{lyr.layer_id}'", lyr.visible)
-                        if changed:
-                            self.set_layer_visible(lyr.layer_id, new_visible)
-
-            imgui.set_next_item_open(True, imgui.Cond_.appearing)
-            if imgui.collapsing_header("Example Options"):
-                # Render UI callbacks for side panel
-                for callback in self._ui_callbacks["side"]:
-                    callback(self.ui.imgui)
-
-            # Rendering Options section
-            imgui.set_next_item_open(True, imgui.Cond_.appearing)
-            if imgui.collapsing_header("Rendering Options"):
-                imgui.separator()
-
-                # VSync
-                changed, vsync = imgui.checkbox("VSync", self.vsync)
-                if changed:
-                    self.vsync = vsync
-
-                # Sky rendering
-                changed, self.renderer.draw_sky = imgui.checkbox("Sky", self.renderer.draw_sky)
-
-                # Shadow rendering
-                changed, self.renderer.draw_shadows = imgui.checkbox("Shadows", self.renderer.draw_shadows)
-
-                # Wireframe mode
-                changed, self.renderer.draw_wireframe = imgui.checkbox("Wireframe", self.renderer.draw_wireframe)
-
-                def _edit_color3(
-                    label: str, color: tuple[float, float, float]
-                ) -> tuple[bool, tuple[float, float, float]]:
-                    """Normalize color_edit3 input/output across imgui_bundle versions."""
-                    if _IMGUI_BUNDLE_IMVEC4_COLOR_EDIT3:
-                        changed, updated_color = imgui.color_edit3(label, imgui.ImVec4(*color, 1.0))
-                        return changed, (updated_color.x, updated_color.y, updated_color.z)
-
-                    changed, updated_color = imgui.color_edit3(label, color)
-                    return changed, (updated_color[0], updated_color[1], updated_color[2])
-
-                # Light color
-                changed, self.renderer._light_color = _edit_color3("Light Color", self.renderer._light_color)
-                # Sky color
-                changed, self.renderer.sky_upper = _edit_color3("Sky Color", self.renderer.sky_upper)
-                # Ground color
-                changed, self.renderer.sky_lower = _edit_color3("Ground Color", self.renderer.sky_lower)
-
-            # Recording section
-            imgui.set_next_item_open(False, imgui.Cond_.once)
-            if imgui.collapsing_header("Recording"):
-                imgui.separator()
-
-                changed, quality = imgui.slider_float(
-                    "Video Quality",
-                    float(self._recorder.quality),
-                    0.0,
-                    100.0,
-                    "%.0f",
-                )
-                if changed:
-                    self._recorder.set_quality(float(quality))
-
-                if self._recorder.is_recording:
-                    output_path = self._recorder.output_path
-                    imgui.text("Status: recording")
-                    imgui.text(f"Quality: {self._recorder.quality:.0f}/100")
-                    imgui.text(f"FPS: {self._format_record_fps(self._record_fps)}")
-                    if output_path is not None:
-                        imgui.text_wrapped(str(output_path))
-                    if imgui.button("Stop Recording"):
-                        self._stop_recording()
-                else:
-                    sim_fps_text = (
-                        self._format_record_fps(self._record_sim_fps) if self._record_sim_fps is not None else "unknown"
-                    )
-                    imgui.text(f"Simulation Rate: {sim_fps_text} Hz")
-
-                    changed, fps_text = imgui.input_text("Video FPS", self._record_fps_text)
-                    if changed:
-                        self._record_fps_text = fps_text
-                        self._record_fps_manual = True
-                        self._sync_record_fps_from_text()
-
-                    if self._parse_record_fps_text() is None:
-                        imgui.text("Enter a positive FPS value.")
-
-                    if imgui.button("Use Simulation Rate"):
-                        self._use_simulation_record_fps()
-                    imgui.same_line()
-                    imgui.text("(default)")
-
-                    imgui.text("Status: idle")
-                    imgui.text_wrapped(str(self._recorder.suggested_output_path()))
-                    if imgui.button("Start Recording"):
-                        self._start_recording()
-
-            self._image_logger.draw_controls()
-
-            # Wind Effects section
-            if self.wind is not None:
-                imgui.set_next_item_open(False, imgui.Cond_.once)
-                if imgui.collapsing_header("Wind"):
-                    imgui.separator()
-
-                    changed, amplitude = imgui.slider_float("Wind Amplitude", self.wind.amplitude, -2.0, 2.0, "%.2f")
-                    if changed:
-                        self.wind.amplitude = amplitude
-
-                    changed, period = imgui.slider_float("Wind Period", self.wind.period, 1.0, 30.0, "%.2f")
-                    if changed:
-                        self.wind.period = period
-
-                    changed, frequency = imgui.slider_float("Wind Frequency", self.wind.frequency, 0.1, 5.0, "%.2f")
-                    if changed:
-                        self.wind.frequency = frequency
-
-                    direction = [self.wind.direction[0], self.wind.direction[1], self.wind.direction[2]]
-                    changed, direction = imgui.slider_float3("Wind Direction", direction, -1.0, 1.0, "%.2f")
-                    if changed:
-                        self.wind.direction = direction
-
-            # Camera Information section
-            imgui.set_next_item_open(True, imgui.Cond_.appearing)
-            if imgui.collapsing_header("Controls"):
-                imgui.separator()
-
-                pos = self.camera.pos
-                pos_text = f"Position: ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})"
-                imgui.text(pos_text)
-                imgui.text(f"FOV: {self.camera.fov:.1f}°")
-                imgui.text(f"Pitch: {self.camera.pitch:.1f}°")
-                imgui.text(f"Yaw: {self.camera.yaw:.1f}°")
-
-                # Camera controls hint
-                imgui.separator()
-                imgui.push_style_color(imgui.Col_.text, imgui.ImVec4(*nav_highlight_color))
-                imgui.text("Controls:")
-                imgui.pop_style_color()
-                imgui.text("WASD - Move camera")
-                imgui.text("QE - Pan up/down")
-                imgui.text("Left Click - Look around")
-                imgui.text("Right Click - Pick objects")
-                imgui.text("Middle Click - Orbit")
-                imgui.text("Shift + Middle Click - Pan")
-                imgui.text("Ctrl + Middle Click - Dolly")
-                imgui.text("Scroll - Dolly")
-                imgui.text("Ctrl + Scroll - FOV zoom")
-                imgui.text("Space - Pause/Resume")
-                imgui.text(". - Step one frame (when paused)")
-                imgui.text("H - Toggle UI")
-                imgui.text("F - Frame camera around model")
-
-            # Selection API section
-            self._render_selection_panel()
-
-        imgui.end()
-
-        # Draw image-logger windows. Must be outside the sidebar begin/end block.
-        self._image_logger.draw()
+    def _ui_populate_rendering_panel(self, imgui):
+        """Render GL-specific items inside the Rendering Options panel section."""
+        # Sky rendering
+        _changed, self.renderer.draw_sky = imgui.checkbox("Sky", self.renderer.draw_sky)
+
+        # Shadow rendering
+        _changed, self.renderer.draw_shadows = imgui.checkbox("Shadows", self.renderer.draw_shadows)
+
+        # Wireframe mode
+        _changed, self.renderer.draw_wireframe = imgui.checkbox("Wireframe", self.renderer.draw_wireframe)
+
+        def _edit_color3(label: str, color: tuple[float, float, float]) -> tuple[bool, tuple[float, float, float]]:
+            """Normalize color_edit3 input/output across imgui_bundle versions."""
+            if _IMGUI_BUNDLE_IMVEC4_COLOR_EDIT3:
+                changed, updated_color = imgui.color_edit3(label, imgui.ImVec4(*color, 1.0))
+                return changed, (updated_color.x, updated_color.y, updated_color.z)
+
+            changed, updated_color = imgui.color_edit3(label, color)
+            return changed, (updated_color[0], updated_color[1], updated_color[2])
+
+        # Light color
+        _changed, self.renderer._light_color = _edit_color3("Light Color", self.renderer._light_color)
+        # Sky color
+        _changed, self.renderer.sky_upper = _edit_color3("Sky Color", self.renderer.sky_upper)
+        # Ground color
+        _changed, self.renderer.sky_lower = _edit_color3("Ground Color", self.renderer.sky_lower)
+
+        self._image_logger.draw_controls()
 
     @staticmethod
     def _build_heatmap_color_lut() -> np.ndarray:
@@ -3182,487 +2416,3 @@ class ViewerGL(ViewerBase):
         else:
             range_text = "min --  max --"
         imgui.text(f"{shape_text}  {range_text}")
-
-    def _render_scalar_plots(self):
-        """Render an ImGui window with live line plots and array heatmaps."""
-        if not self._scalar_buffers and not self._array_buffers:
-            return
-
-        imgui = self.ui.imgui
-        io = self.ui.io
-
-        window_width = 400
-        item_height = len(self._scalar_buffers) * 140 + len(self._array_buffers) * 260
-        window_height = min(
-            io.display_size[1] - 20,
-            item_height + 60,
-        )
-        imgui.set_next_window_pos(
-            imgui.ImVec2(io.display_size[0] - window_width - 10, io.display_size[1] - window_height - 10),
-            imgui.Cond_.appearing,
-        )
-        imgui.set_next_window_size(
-            imgui.ImVec2(window_width, window_height),
-            imgui.Cond_.appearing,
-        )
-
-        expanded = imgui.begin("Plots")
-        if expanded:
-            graph_size = imgui.ImVec2(-1, 100)
-            n = self._plot_history_size
-            for name, buf in self._scalar_buffers.items():
-                arr = self._scalar_arrays.get(name)
-                if arr is None:
-                    # Pad with NaN on the left so the x-axis scale is fixed
-                    # but pre-history values are not drawn.
-                    arr = np.full(n, np.nan, dtype=np.float32)
-                    arr[n - len(buf) :] = np.array(buf, dtype=np.float32)
-                    self._scalar_arrays[name] = arr
-                overlay = f"{buf[-1]:.4g}" if buf else ""
-                if imgui.collapsing_header(
-                    name,
-                    imgui.TreeNodeFlags_.default_open.value,
-                ):
-                    imgui.plot_lines(f"##{name}", arr, graph_size=graph_size, overlay_text=overlay)
-
-            for name, array in self._array_buffers.items():
-                if imgui.collapsing_header(
-                    name,
-                    imgui.TreeNodeFlags_.default_open.value,
-                ):
-                    self._render_array_heatmap(name, array, window_width - 40.0)
-        imgui.end()
-
-    def _render_stats_overlay(self):
-        """
-        Render performance stats overlay in the top-right corner.
-        """
-        imgui = self.ui.imgui
-        io = self.ui.io
-
-        # Use fallback color for FPS display
-        fps_color = (1.0, 1.0, 1.0, 1.0)  # Bright white
-
-        # Position in top-right corner
-        window_pos = (io.display_size[0] - 10, 10)
-        imgui.set_next_window_pos(imgui.ImVec2(window_pos[0], window_pos[1]), pivot=imgui.ImVec2(1.0, 0.0))
-
-        # Transparent background, auto-sized, non-resizable/movable - use safe flags
-        #        try:
-        flags: imgui.WindowFlags = (
-            imgui.WindowFlags_.no_decoration.value
-            | imgui.WindowFlags_.always_auto_resize.value
-            | imgui.WindowFlags_.no_resize.value
-            | imgui.WindowFlags_.no_saved_settings.value
-            | imgui.WindowFlags_.no_focus_on_appearing.value
-            | imgui.WindowFlags_.no_nav.value
-            | imgui.WindowFlags_.no_move.value
-        )
-
-        # Set semi-transparent background for the overlay window
-        pushed_window_bg = False
-        try:
-            # Preferred API name in pyimgui
-            imgui.set_next_window_bg_alpha(0.7)
-        except AttributeError:
-            # Fallback: temporarily override window bg color alpha
-            try:
-                style = imgui.get_style()
-                bg = style.color_(imgui.Col_.window_bg)
-                r, g, b = bg.x, bg.y, bg.z
-            except Exception:
-                # Reasonable dark default
-                r, g, b = 0.094, 0.094, 0.094
-            imgui.push_style_color(imgui.Col_.window_bg, imgui.ImVec4(r, g, b, 0.7))
-            pushed_window_bg = True
-
-        if imgui.begin("Performance Stats", flags=flags):
-            # FPS display
-            fps_text = f"FPS: {self._current_fps:.1f}"
-            imgui.push_style_color(imgui.Col_.text, imgui.ImVec4(*fps_color))
-            imgui.text(fps_text)
-            imgui.pop_style_color()
-
-            # Model stats
-            if self.model is not None:
-                imgui.separator()
-                imgui.text(f"Worlds: {self.model.world_count}")
-                imgui.text(f"Bodies: {self.model.body_count}")
-                imgui.text(f"Shapes: {self.model.shape_count}")
-                imgui.text(f"Joints: {self.model.joint_count}")
-                imgui.text(f"Particles: {self.model.particle_count}")
-                imgui.text(f"Springs: {self.model.spring_count}")
-                imgui.text(f"Triangles: {self.model.tri_count}")
-                imgui.text(f"Edges: {self.model.edge_count}")
-                imgui.text(f"Tetrahedra: {self.model.tet_count}")
-
-            # Rendered objects count
-            imgui.separator()
-            imgui.text(f"Unique Objects: {len(self.objects)}")
-
-        # Custom stats
-        for callback in self._ui_callbacks["stats"]:
-            callback(self.ui.imgui)
-
-        imgui.end()
-
-        # Restore bg color if we pushed it
-        if pushed_window_bg:
-            imgui.pop_style_color()
-
-    def _render_selection_panel(self):
-        """
-        Render the selection panel for Newton Model introspection.
-        """
-        imgui = self.ui.imgui
-
-        # Selection Panel section
-        header_flags = 0
-        imgui.set_next_item_open(False, imgui.Cond_.appearing)  # Default to closed
-        if imgui.collapsing_header("Selection API", flags=header_flags):
-            imgui.separator()
-
-            # Check if we have state data available
-            if self._last_state is None:
-                imgui.text("No state data available.")
-                imgui.text("Start simulation to enable selection.")
-                return
-
-            state = self._selection_ui_state
-
-            # Display error message if any
-            if state["error_message"]:
-                imgui.push_style_color(imgui.Col_.text, imgui.ImVec4(1.0, 0.3, 0.3, 1.0))
-                imgui.text(f"Error: {state['error_message']}")
-                imgui.pop_style_color()
-                imgui.separator()
-
-            # Articulation Pattern Input
-            imgui.text("Articulation Pattern:")
-            imgui.push_item_width(200)
-            _changed, state["selected_articulation_pattern"] = imgui.input_text(
-                "##pattern", state["selected_articulation_pattern"]
-            )
-            imgui.pop_item_width()
-            if imgui.is_item_hovered():
-                tooltip = "Pattern to match articulations (e.g., '*', 'robot*', 'cartpole')"
-                imgui.set_tooltip(tooltip)
-
-            # Joint filtering
-            imgui.spacing()
-            imgui.text("Joint Filters (optional):")
-            imgui.push_item_width(150)
-            imgui.text("Include:")
-            imgui.same_line()
-            _, state["include_joints"] = imgui.input_text("##inc_joints", state["include_joints"])
-            if imgui.is_item_hovered():
-                imgui.set_tooltip("Comma-separated joint names/patterns")
-
-            imgui.text("Exclude:")
-            imgui.same_line()
-            _, state["exclude_joints"] = imgui.input_text("##exc_joints", state["exclude_joints"])
-            if imgui.is_item_hovered():
-                imgui.set_tooltip("Comma-separated joint names/patterns")
-            imgui.pop_item_width()
-
-            # Link filtering
-            imgui.spacing()
-            imgui.text("Link Filters (optional):")
-            imgui.push_item_width(150)
-            imgui.text("Include:")
-            imgui.same_line()
-            _, state["include_links"] = imgui.input_text("##inc_links", state["include_links"])
-            if imgui.is_item_hovered():
-                imgui.set_tooltip("Comma-separated link names/patterns")
-
-            imgui.text("Exclude:")
-            imgui.same_line()
-            _, state["exclude_links"] = imgui.input_text("##exc_links", state["exclude_links"])
-            if imgui.is_item_hovered():
-                imgui.set_tooltip("Comma-separated link names/patterns")
-            imgui.pop_item_width()
-
-            # Create View Button
-            imgui.spacing()
-            if imgui.button("Create Articulation View"):
-                self._create_articulation_view()
-
-            # Show view info if created
-            if state["selected_articulation_view"] is not None:
-                view = state["selected_articulation_view"]
-                imgui.separator()
-                imgui.text(f"  Count: {view.count}")
-                imgui.text(f"  Joints: {view.joint_count}")
-                imgui.text(f"  Links: {view.link_count}")
-                imgui.text(f"  DOFs: {view.joint_dof_count}")
-                imgui.text(f"  Fixed base: {view.is_fixed_base}")
-                imgui.text(f"  Floating base: {view.is_floating_base}")
-
-                # Attribute selector
-                imgui.spacing()
-                imgui.text("Select Attribute:")
-                imgui.push_item_width(150)
-                if state["selected_attribute"] in state["attribute_options"]:
-                    current_attr_idx = state["attribute_options"].index(state["selected_attribute"])
-                else:
-                    current_attr_idx = 0
-                _, new_attr_idx = imgui.combo("##attribute", current_attr_idx, state["attribute_options"])
-                state["selected_attribute"] = state["attribute_options"][new_attr_idx]
-                imgui.pop_item_width()
-
-                # Toggle values display
-                _, state["show_values"] = imgui.checkbox("Show Values", state["show_values"])
-
-                # Display attribute values if requested
-                if state["show_values"]:
-                    self._render_attribute_values(view, state["selected_attribute"])
-
-    def _create_articulation_view(self):
-        """
-        Create an ArticulationView based on current UI state.
-        """
-        state = self._selection_ui_state
-
-        try:
-            # Clear any previous error
-            state["error_message"] = ""
-
-            # Parse filter strings
-            if state["include_joints"]:
-                include_joints = [j.strip() for j in state["include_joints"].split(",") if j.strip()]
-            else:
-                include_joints = None
-
-            if state["exclude_joints"]:
-                exclude_joints = [j.strip() for j in state["exclude_joints"].split(",") if j.strip()]
-            else:
-                exclude_joints = None
-
-            if state["include_links"]:
-                include_links = [link.strip() for link in state["include_links"].split(",") if link.strip()]
-            else:
-                include_links = None
-
-            if state["exclude_links"]:
-                exclude_links = [link.strip() for link in state["exclude_links"].split(",") if link.strip()]
-            else:
-                exclude_links = None
-
-            # Create ArticulationView
-            state["selected_articulation_view"] = ArticulationView(
-                model=self.model,
-                pattern=state["selected_articulation_pattern"],
-                include_joints=include_joints,
-                exclude_joints=exclude_joints,
-                include_links=include_links,
-                exclude_links=exclude_links,
-                verbose=False,  # Don't print to console in UI
-            )
-
-        except Exception as e:
-            state["error_message"] = str(e)
-            state["selected_articulation_view"] = None
-
-    def _render_attribute_values(self, view: ArticulationView, attribute_name: str):
-        """
-        Render the values of the selected attribute in the selection panel.
-
-        Args:
-            view: The current articulation view.
-            attribute_name: The attribute to display.
-        """
-        imgui = self.ui.imgui
-        state = self._selection_ui_state
-
-        try:
-            # Determine source based on attribute
-            if attribute_name.startswith("joint_f"):
-                # Forces come from control
-                if hasattr(self, "_last_control") and self._last_control is not None:
-                    source = self._last_control
-                else:
-                    imgui.text("No control data available for forces")
-                    return
-            else:
-                # Other attributes come from state or model
-                source = self._last_state
-
-            # Get the attribute values
-            # get_attribute returns shape (world_count, count_per_world, value_count, *trailing)
-            raw_values = view.get_attribute(attribute_name, source).numpy()
-
-            imgui.separator()
-            imgui.text(f"Attribute: {attribute_name}")
-            imgui.text(f"Shape: {raw_values.shape}")
-            imgui.text(f"Dtype: {raw_values.dtype}")
-
-            # Reshape: (world_count, count_per_world, value_count, *trailing) →
-            #          (world_count, count_per_world * value_count * prod(trailing))
-            world_count = raw_values.shape[0]
-            values = raw_values.reshape(world_count, -1)
-
-            # World selector
-            if world_count > 1:
-                imgui.spacing()
-                imgui.text("World Selection:")
-                imgui.push_item_width(100)
-
-                state["selected_batch_idx"] = max(0, min(state["selected_batch_idx"], world_count - 1))
-
-                _, state["selected_batch_idx"] = imgui.slider_int(
-                    "##batch", state["selected_batch_idx"], 0, world_count - 1
-                )
-                imgui.pop_item_width()
-                imgui.same_line()
-                imgui.text(f"World {state['selected_batch_idx']} / {world_count}")
-
-            batch_idx = state["selected_batch_idx"] if world_count > 1 else 0
-            flat_values = values[batch_idx]
-
-            # Display values as sliders in a scrollable region
-            imgui.spacing()
-            imgui.text("Values:")
-
-            # Create a child window for scrollable content
-            child_flags = int(imgui.ChildFlags_.borders)
-            if imgui.begin_child("values_scroll", imgui.ImVec2(0, 300), child_flags):
-                names = self._get_attribute_names(view, attribute_name)
-                self._render_value_sliders(flat_values, names, attribute_name, state)
-
-            imgui.end_child()
-
-            # Show some statistics for numeric data
-            if flat_values.dtype.kind in "biufc":  # numeric types
-                imgui.spacing()
-                if world_count > 1:
-                    imgui.text(f"Statistics for World {batch_idx}:")
-                else:
-                    imgui.text("Statistics:")
-
-                imgui.text(f"  Min: {np.min(flat_values):.6f}")
-                imgui.text(f"  Max: {np.max(flat_values):.6f}")
-                imgui.text(f"  Mean: {np.mean(flat_values):.6f}")
-                if flat_values.size > 1:
-                    imgui.text(f"  Std: {np.std(flat_values):.6f}")
-
-        except Exception as e:
-            imgui.text(f"Error getting attribute: {e!s}")
-
-    def _get_attribute_names(self, view: ArticulationView, attribute_name: str):
-        """
-        Get the names associated with an attribute (joint names, link names, etc.).
-
-        Args:
-            view: The current articulation view.
-            attribute_name: The attribute to get names for.
-
-        Returns:
-            list or None: List of names or None if not available.
-        """
-        try:
-            if attribute_name.startswith("joint_q") or attribute_name.startswith("joint_f"):
-                # For joint positions/velocities/forces, return DOF names or coord names
-                if attribute_name == "joint_q":
-                    return view.joint_coord_names
-                else:  # joint_qd, joint_f
-                    return view.joint_dof_names
-            elif attribute_name.startswith("body_"):
-                # For body attributes, return body/link names
-                return view.body_names
-            else:
-                return None
-        except Exception:
-            return None
-
-    def _render_value_sliders(self, values: np.ndarray, names: list[str], attribute_name: str, state: dict):
-        """
-        Render values as individual sliders for each DOF.
-
-        Args:
-            values: Array of values to display.
-            names: List of names for each value.
-            attribute_name: The attribute being displayed.
-            state: UI state dictionary.
-        """
-        imgui = self.ui.imgui
-
-        # Determine appropriate slider ranges based on attribute type
-        if attribute_name.startswith("joint_q"):
-            # Joint positions - use reasonable angle/position ranges
-            slider_min, slider_max = -3.14159, 3.14159  # Default to ±π
-        elif attribute_name.startswith("joint_qd"):
-            # Joint velocities - use reasonable velocity ranges
-            slider_min, slider_max = -10.0, 10.0
-        elif attribute_name.startswith("joint_f"):
-            # Joint forces - use reasonable force ranges
-            slider_min, slider_max = -100.0, 100.0
-        else:
-            # For other attributes, use data-driven ranges
-            if len(values) > 0 and values.dtype.kind in "biufc":  # numeric
-                val_min, val_max = float(np.min(values)), float(np.max(values))
-                val_range = val_max - val_min
-                if val_range < 1e-6:  # Nearly constant values
-                    slider_min = val_min - 1.0
-                    slider_max = val_max + 1.0
-                else:
-                    # Add 20% padding
-                    padding = val_range * 0.2
-                    slider_min = val_min - padding
-                    slider_max = val_max + padding
-            else:
-                slider_min, slider_max = -1.0, 1.0
-
-        # Initialize slider state if needed
-        if "slider_values" not in state:
-            state["slider_values"] = {}
-
-        slider_key = f"{attribute_name}_sliders"
-        if slider_key not in state["slider_values"]:
-            state["slider_values"][slider_key] = [float(v) for v in values]
-
-        # Ensure slider values array has correct length
-        current_sliders = state["slider_values"][slider_key]
-        while len(current_sliders) < len(values):
-            current_sliders.append(0.0)
-        while len(current_sliders) > len(values):
-            current_sliders.pop()
-
-        # Update slider values to match current data
-        for i, val in enumerate(values):
-            if i < len(current_sliders):
-                current_sliders[i] = float(val)
-
-        # Render sliders (read-only display)
-        imgui.begin_disabled()
-        for i, val in enumerate(values):
-            name = names[i] if names and i < len(names) else f"[{i}]"
-
-            if isinstance(val, int | float) or hasattr(val, "dtype"):
-                # shorten floating base key for ui
-                # todo: consider doing this in the importers
-                if name.startswith("floating_base"):
-                    name = "base"
-
-                # Truncate name for display but keep full name for tooltip
-                display_name = name[:8] + "..." if len(name) > 8 else name
-                # Pad display name to ensure consistent width
-                display_name = f"{display_name:<11}"
-
-                # Show truncated name with tooltip
-                imgui.text(display_name)
-                if imgui.is_item_hovered() and len(name) > 8:
-                    imgui.set_tooltip(name)
-                imgui.same_line()
-
-                # Use slider for numeric values with fixed width
-                imgui.push_item_width(150)
-                slider_id = f"##{attribute_name}_{i}"
-                _changed, _new_val = imgui.slider_float(slider_id, current_sliders[i], slider_min, slider_max, "%.6f")
-                imgui.pop_item_width()
-                # if changed:
-                #     current_sliders[i] = new_val
-
-            else:
-                # For non-numeric values, just show as text
-                imgui.text(f"{name}: {val}")
-        imgui.end_disabled()
