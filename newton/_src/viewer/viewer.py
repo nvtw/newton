@@ -1037,7 +1037,9 @@ class ViewerBase(ABC):
             normals_list: list[np.ndarray] = []
             uvs_list: list[np.ndarray] = []
             inds: list[int] = []
-            for p0, p1, p2, opp in faces:
+            for p0, face_p1, face_p2, opp in faces:
+                p1 = face_p1
+                p2 = face_p2
                 n = np.cross(p1 - p0, p2 - p0)
                 n_norm = float(np.linalg.norm(n))
                 if n_norm > 0.0:
@@ -1634,25 +1636,6 @@ class ViewerBase(ABC):
             raise ValueError(f"Unsupported geo_type for ensure_geometry: {geo_type}")
 
         mesh_path = f"/geometry/{base_name}_{len(self._geometry_cache)}"
-<<<<<<< HEAD
-        self.log_geo(
-            mesh_path,
-            int(geo_type),
-            tuple(scale_list),
-            float(thickness),
-            bool(is_solid),
-            geo_src=geo_src
-            if geo_type
-            in (
-                newton.GeoType.MESH,
-                newton.GeoType.CONVEX_MESH,
-                newton.GeoType.HFIELD,
-                newton.GeoType.TETRAHEDRON,
-            )
-            else None,
-            hidden=True,
-        )
-=======
 
         if mirror and geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH) and geo_src is not None:
             self._log_mesh_winding_flipped(mesh_path, geo_src, thickness, is_solid, hidden=True)
@@ -1664,11 +1647,16 @@ class ViewerBase(ABC):
                 float(thickness),
                 bool(is_solid),
                 geo_src=geo_src
-                if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.HFIELD)
+                if geo_type
+                in (
+                    newton.GeoType.MESH,
+                    newton.GeoType.CONVEX_MESH,
+                    newton.GeoType.HFIELD,
+                    newton.GeoType.TETRAHEDRON,
+                )
                 else None,
                 hidden=True,
             )
->>>>>>> main
         self._geometry_cache[geo_hash] = mesh_path
         return mesh_path
 
