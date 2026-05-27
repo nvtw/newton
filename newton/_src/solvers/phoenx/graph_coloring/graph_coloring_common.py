@@ -590,6 +590,8 @@ def greedy_overflow_spill_kernel(
     color_tags: wp.array[wp.int32],
     partition_data_concat: wp.array[wp.int64],
     num_elements: wp.array[wp.int32],
+    num_remaining: wp.array[wp.int32],
+    overflow_flag: wp.array[wp.int32],
     max_colored_partitions: wp.int32,
 ):
     """Assign every still-uncoloured element to the overflow colour
@@ -601,6 +603,8 @@ def greedy_overflow_spill_kernel(
     machinery, so spilling here gives correct physics with potentially
     more colours than the optimal MIS would have found -- the tradeoff
     that lets us cap the outer iteration loop on dense graphs."""
+    if num_remaining[0] == wp.int32(0) and overflow_flag[0] == wp.int32(0):
+        return
     tid = wp.tid()
     if tid >= num_elements[0]:
         return

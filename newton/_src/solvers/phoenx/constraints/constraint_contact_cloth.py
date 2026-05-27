@@ -794,10 +794,10 @@ def _make_contact_iterate_at(
             n = cc_get_normal(cc, k)
             t1_dir = cc_get_tangent1(cc, k)
             t2_dir = wp.cross(n, t1_dir)
-            margin0 = contacts.rigid_contact_margin0[k]
-            margin1 = contacts.rigid_contact_margin1[k]
 
             if wp.static(cloth_support):
+                margin0 = contacts.rigid_contact_margin0[k]
+                margin1 = contacts.rigid_contact_margin1[k]
                 bary0 = cc_get_side0_bary(cc, k)
                 bary1 = cc_get_side1_bary(cc, k)
                 p0_world = _side_world_contact_point(

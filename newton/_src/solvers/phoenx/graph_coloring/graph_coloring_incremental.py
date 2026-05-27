@@ -834,6 +834,8 @@ class IncrementalContactPartitioner:
                 self._color_tags,
                 self._partition_data_concat,
                 self._num_elements,
+                self._num_remaining,
+                self._overflow_flag,
                 wp.int32(self._max_colored_partitions_kernel_arg),
             ],
         )
