@@ -3628,6 +3628,90 @@ def Xform "TestBody" (
         )
 
     @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+    def test_granular_loading_with_newton_sites(self):
+        """Verify that prims with NewtonSiteAPI are recognized as sites, in parity with MjcSiteAPI."""
+        from pxr import Usd
+
+        # Same shape mix as test_granular_loading_with_sites, but the two Site* prims
+        # carry NewtonSiteAPI (from newton-usd-schemas) instead of MjcSiteAPI.
+        usd_content = """#usda 1.0
+(
+    upAxis = "Z"
+)
+
+def PhysicsScene "physicsScene"
+{
+}
+
+def Xform "TestBody" (
+    prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+)
+{
+    double3 xformOp:translate = (0, 0, 1)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    def Cube "CollisionBox" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        double size = 1.0
+    }
+
+    def Sphere "VisualSphere"
+    {
+        double radius = 0.3
+        double3 xformOp:translate = (1, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Site1" (
+        prepend apiSchemas = ["NewtonSiteAPI"]
+    )
+    {
+        double radius = 0.1
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Site2" (
+        prepend apiSchemas = ["NewtonSiteAPI"]
+    )
+    {
+        double size = 0.2
+        double3 xformOp:translate = (0, -1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+"""
+        stage = Usd.Stage.CreateInMemory()
+        stage.GetRootLayer().ImportFromString(usd_content)
+
+        # load_sites=True, load_visual_shapes=False -> collision + sites only
+        builder_sites = newton.ModelBuilder()
+        builder_sites.add_usd(stage, load_sites=True, load_visual_shapes=False)
+        site_flag = int(newton.ShapeFlags.SITE)
+        sites_in_result = sum(1 for i in range(builder_sites.shape_count) if builder_sites.shape_flags[i] & site_flag)
+        self.assertEqual(sites_in_result, 2, "NewtonSiteAPI prims should be loaded as sites")
+        self.assertEqual(
+            builder_sites.shape_count,
+            3,
+            "Should load 1 collision + 2 NewtonSiteAPI sites with load_visual_shapes=False",
+        )
+
+        # load_sites=False -> NewtonSiteAPI prims must be skipped entirely (not loaded as plain visual shapes)
+        builder_no_sites = newton.ModelBuilder()
+        builder_no_sites.add_usd(stage, load_sites=False)
+        sites_in_no_sites = sum(
+            1 for i in range(builder_no_sites.shape_count) if builder_no_sites.shape_flags[i] & site_flag
+        )
+        self.assertEqual(sites_in_no_sites, 0, "load_sites=False should skip NewtonSiteAPI prims")
+        self.assertEqual(
+            builder_no_sites.shape_count,
+            2,
+            "load_sites=False should leave 1 collision + 1 visual shape, with NewtonSiteAPI prims excluded entirely",
+        )
+
+    @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
     def test_import_usd_gravcomp(self):
         """Test parsing of gravcomp from USD"""
         from pxr import Sdf, Usd, UsdPhysics
@@ -7109,7 +7193,12 @@ def Xform "BodyWithoutVisuals" (
 
         mesh = builder.shape_source[collision_shape]
         self.assertIsNotNone(mesh)
-        np.testing.assert_allclose(np.array(mesh.color), np.array([0.2, 0.4, 0.6]), atol=1e-6, rtol=1e-6)
+        np.testing.assert_allclose(
+            np.array(mesh.color),
+            np.array(newton.utils.color_linear_to_srgb((0.2, 0.4, 0.6))),
+            atol=1e-6,
+            rtol=1e-6,
+        )
         self.assertAlmostEqual(mesh.roughness, 0.35, places=6)
         self.assertAlmostEqual(mesh.metallic, 0.75, places=6)
 
@@ -8240,6 +8329,61 @@ def Mesh "cube"
 }
 """
 
+    @staticmethod
+    def _create_stage_with_texture(texture_asset: str, source_color_space: str | None = None):
+        from pxr import Sdf, Usd, UsdGeom, UsdShade
+
+        stage = Usd.Stage.CreateInMemory()
+        mesh = UsdGeom.Mesh.Define(stage, "/TexturedMesh")
+        mesh.CreatePointsAttr().Set([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)])
+        mesh.CreateFaceVertexCountsAttr().Set([3])
+        mesh.CreateFaceVertexIndicesAttr().Set([0, 1, 2])
+
+        material = UsdShade.Material.Define(stage, "/Materials/PBR")
+        preview = UsdShade.Shader.Define(stage, "/Materials/PBR/PreviewSurface")
+        preview.CreateIdAttr("UsdPreviewSurface")
+        texture = UsdShade.Shader.Define(stage, "/Materials/PBR/Albedo")
+        texture.CreateIdAttr("UsdUVTexture")
+        texture.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(Sdf.AssetPath(texture_asset))
+        if source_color_space is not None:
+            texture.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set(source_color_space)
+        preview.CreateInput("baseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(texture.ConnectableAPI(), "rgb")
+        material.CreateSurfaceOutput().ConnectToSource(preview.ConnectableAPI(), "surface")
+        UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(material)
+        return stage, mesh.GetPrim()
+
+    @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+    def test_get_mesh_converts_linear_texture_to_display_space(self):
+        from PIL import Image
+
+        source_rgba = np.array([[[64, 128, 255, 200]]], dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            texture_path = os.path.join(tmpdir, "linear.png")
+            Image.fromarray(source_rgba).save(texture_path)
+
+            _stage, prim = self._create_stage_with_texture(texture_path, source_color_space="raw")
+            mesh = usd.get_mesh(prim)
+
+        self.assertIsInstance(mesh.texture, np.ndarray)
+        texture = np.asarray(mesh.texture)
+        linear_rgb = source_rgba[0, 0, :3].astype(np.float32) / 255.0
+        expected_rgb = np.where(
+            linear_rgb <= 0.0031308,
+            linear_rgb * 12.92,
+            1.055 * np.power(linear_rgb, 1.0 / 2.4) - 0.055,
+        )
+        expected_rgb = np.clip(np.round(expected_rgb * 255.0), 0.0, 255.0).astype(np.uint8)
+        np.testing.assert_array_equal(texture[0, 0, :3], expected_rgb)
+        self.assertEqual(texture[0, 0, 3], source_rgba[0, 0, 3])
+
+    @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+    def test_get_mesh_leaves_display_texture_paths_lazy(self):
+        _stage, prim = self._create_stage_with_texture("display.png", source_color_space="sRGB")
+
+        mesh = usd.get_mesh(prim)
+
+        self.assertEqual(mesh.texture, "display.png")
+
     @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
     def test_get_mesh_loads_normals_when_requested(self):
         """get_mesh with load_normals=True produces a Mesh with non-None normals."""
@@ -9256,6 +9400,96 @@ class TestResolveUsdFromUrl(unittest.TestCase):
         escaped_urls = [u for u in downloaded_urls if "secret.usd" in u]
         self.assertEqual(len(escaped_urls), 0)
         self.assertFalse(os.path.exists(os.path.join(tmpdir, "..", "secret.usd")))
+
+
+class TestUsdMaterialColorSpaces(unittest.TestCase):
+    def test_texture_color_space_auto_uses_file_attribute_fallback(self):
+        from newton._src.usd.utils import _get_texture_source_color_space  # noqa: PLC0415
+
+        shader = mock.Mock()
+        source_color_space_input = mock.Mock()
+        source_color_space_input.Get.return_value = "auto"
+        shader.GetInput.return_value = source_color_space_input
+
+        file_attr = mock.Mock()
+        file_attr.GetColorSpace.return_value = "raw"
+
+        self.assertEqual(_get_texture_source_color_space(shader, file_attr), "raw")
+
+    @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+    def test_preview_surface_color_is_converted_to_display_space(self):
+        from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
+
+        stage = Usd.Stage.CreateInMemory()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/Mesh")
+        mesh.GetPointsAttr().Set(
+            [
+                Gf.Vec3f(0.0, 0.0, 0.0),
+                Gf.Vec3f(1.0, 0.0, 0.0),
+                Gf.Vec3f(0.0, 1.0, 0.0),
+            ]
+        )
+        mesh.GetFaceVertexCountsAttr().Set([3])
+        mesh.GetFaceVertexIndicesAttr().Set([0, 1, 2])
+
+        material = UsdShade.Material.Define(stage, "/World/Looks/Material")
+        shader = UsdShade.Shader.Define(stage, "/World/Looks/Material/PreviewSurface")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        linear_color = (0.25, 0.5, 0.75)
+        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*linear_color))
+        material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+        UsdShade.MaterialBindingAPI(mesh).Bind(material)
+
+        from newton._src.usd.utils import resolve_material_properties_for_prim  # noqa: PLC0415
+
+        material_props = resolve_material_properties_for_prim(mesh.GetPrim())
+
+        np.testing.assert_allclose(
+            material_props["color"],
+            newton.utils.color_linear_to_srgb(linear_color),
+            atol=1e-6,
+        )
+
+    @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+    def test_preview_surface_color_space_api_display_color_is_not_converted(self):
+        from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
+
+        stage = Usd.Stage.CreateInMemory()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/Mesh")
+        mesh.GetPointsAttr().Set(
+            [
+                Gf.Vec3f(0.0, 0.0, 0.0),
+                Gf.Vec3f(1.0, 0.0, 0.0),
+                Gf.Vec3f(0.0, 1.0, 0.0),
+            ]
+        )
+        mesh.GetFaceVertexCountsAttr().Set([3])
+        mesh.GetFaceVertexIndicesAttr().Set([0, 1, 2])
+
+        material = UsdShade.Material.Define(stage, "/World/Looks/Material")
+        shader = UsdShade.Shader.Define(stage, "/World/Looks/Material/PreviewSurface")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        display_color = (0.25, 0.5, 0.75)
+        color_input = shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f)
+        color_input.Set(Gf.Vec3f(*display_color))
+        Usd.ColorSpaceAPI.Apply(shader.GetPrim()).CreateColorSpaceNameAttr().Set("srgb_rec709_scene")
+        material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+        UsdShade.MaterialBindingAPI(mesh).Bind(material)
+
+        from newton._src.usd.utils import resolve_material_properties_for_prim  # noqa: PLC0415
+
+        self.assertEqual(
+            Usd.ColorSpaceAPI.ComputeColorSpaceName(color_input.GetAttr(), None),
+            "srgb_rec709_scene",
+        )
+
+        material_props = resolve_material_properties_for_prim(mesh.GetPrim())
+
+        np.testing.assert_allclose(
+            material_props["color"],
+            display_color,
+            atol=1e-6,
+        )
 
 
 if __name__ == "__main__":
