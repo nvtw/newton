@@ -23,7 +23,7 @@ from .contact_reduction_global import GlobalContactReducerData, export_and_reduc
 # Both kernels assume ``wp.block_dim() == MESH_SDF_BLOCK_DIM`` so that the
 # tile-stack capacity below correctly sizes the cooperative push overflow
 # margin.
-MESH_SDF_BLOCK_DIM = 256
+MESH_SDF_BLOCK_DIM = 128
 
 # Capacity of the cooperative edge-selection tile stack. Sized to
 # ``2 * MESH_SDF_BLOCK_DIM`` so that the inner push loop can never
