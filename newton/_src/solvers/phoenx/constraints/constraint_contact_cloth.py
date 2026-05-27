@@ -344,10 +344,6 @@ def _make_contact_prepare_for_iteration_at(
                 slot2 = contact_get_slot2(constraints, cid)
                 inv_factor1 = contact_get_count1(constraints, cid)
                 inv_factor2 = contact_get_count2(constraints, cid)
-                if inv_factor1 <= wp.int32(0):
-                    inv_factor1 = wp.int32(1)
-                if inv_factor2 <= wp.int32(0):
-                    inv_factor2 = wp.int32(1)
                 inv_factor1_f = wp.float32(inv_factor1)
                 inv_factor2_f = wp.float32(inv_factor2)
                 inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
@@ -773,10 +769,6 @@ def _make_contact_iterate_at(
                 slot2 = contact_get_slot2(constraints, cid)
                 inv_factor1 = contact_get_count1(constraints, cid)
                 inv_factor2 = contact_get_count2(constraints, cid)
-                if inv_factor1 <= wp.int32(0):
-                    inv_factor1 = wp.int32(1)
-                if inv_factor2 <= wp.int32(0):
-                    inv_factor2 = wp.int32(1)
                 if slot1 < wp.int32(0):
                     v1 = bodies.velocity[b1]
                     w1 = bodies.angular_velocity[b1]

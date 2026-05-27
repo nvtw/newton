@@ -244,7 +244,7 @@ class IncrementalContactPartitioner:
         # entirely. See :mod:`warm_start` for the design.
         self.enable_warm_start: bool = bool(enable_warm_start)
         if self.enable_warm_start:
-            from newton._src.solvers.phoenx.graph_coloring.warm_start import (
+            from newton._src.solvers.phoenx.graph_coloring.warm_start import (  # noqa: PLC0415
                 warm_start_cache_zeros,
             )
 
@@ -716,7 +716,7 @@ class IncrementalContactPartitioner:
         # constraints not in the cache stay at 0 and get coloured
         # normally by MIS.
         if self.enable_warm_start:
-            from newton._src.solvers.phoenx.graph_coloring.warm_start import (
+            from newton._src.solvers.phoenx.graph_coloring.warm_start import (  # noqa: PLC0415
                 seed_warm_start_kernel,
                 warm_start_invalidate_apply_kernel,
                 warm_start_invalidate_mark_kernel,
@@ -787,7 +787,7 @@ class IncrementalContactPartitioner:
         #
         # 1. **Speculative coloring** (``use_speculative_coloring`` on):
         #    3-phase round (pick + validate + commit) commits at
-        #    multiple colours per round; ~6-10 rounds × 3 kernels = 18-30
+        #    multiple colours per round; ~6-10 rounds x 3 kernels = 18-30
         #    launches on Kapla vs ~80 with JP-MIS. Race-free by
         #    construction (no concurrent ``color_tags`` writes within a
         #    phase).
@@ -887,7 +887,7 @@ class IncrementalContactPartitioner:
         boundary entries into the cache (atomic-max sets
         ``num_entries``).
         """
-        from newton._src.solvers.phoenx.graph_coloring.warm_start import (
+        from newton._src.solvers.phoenx.graph_coloring.warm_start import (  # noqa: PLC0415
             warm_start_dedup_pairs_kernel,
             warm_start_emit_pairs_kernel,
             warm_start_mark_boundaries_kernel,
@@ -959,7 +959,7 @@ class IncrementalContactPartitioner:
         n = self.max_num_interactions
         wp.launch(
             _locality_combined_keys_kernel,
-            dim=2 * n,
+            dim=n,
             inputs=[
                 self._elements,
                 self._element_ids_by_color,
