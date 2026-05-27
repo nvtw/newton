@@ -22,8 +22,9 @@ from .contact_reduction_global import GlobalContactReducerData, export_and_reduc
 # ``mesh_sdf_collision_kernel`` and ``mesh_sdf_collision_global_reduce_kernel``.
 # Both kernels assume ``wp.block_dim() == MESH_SDF_BLOCK_DIM`` so that the
 # tile-stack capacity below correctly sizes the cooperative push overflow
-# margin.
-MESH_SDF_BLOCK_DIM = 128
+# margin. A two-warp block keeps the cooperative stack compact while
+# preserving enough lanes to hide SDF texture/query latency.
+MESH_SDF_BLOCK_DIM = 64
 
 # Capacity of the cooperative edge-selection tile stack. Sized to
 # ``2 * MESH_SDF_BLOCK_DIM`` so that the inner push loop can never
