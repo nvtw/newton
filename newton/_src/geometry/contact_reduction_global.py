@@ -678,6 +678,12 @@ def _zero_active_count_kernel(
     ht_active_slots[ht_capacity] = 0
 
 
+@wp.kernel(enable_backward=False)
+def _advance_export_epoch_kernel(export_epoch: wp.array[wp.int32]):
+    """Advance the per-frame export deduplication epoch."""
+    export_epoch[0] = export_epoch[0] + 1
+
+
 class GlobalContactReducer:
     """Global contact reduction using hashtable-based tracking.
 
@@ -792,8 +798,11 @@ class GlobalContactReducer:
             self.contact_area = wp.zeros(0, dtype=wp.float32, device=device)
             self.contact_nbin_entry = wp.zeros(0, dtype=wp.int32, device=device)
 
-        # Per-contact dedup flags for cross-entry deduplication during export
+        # Per-contact dedup flags for cross-entry deduplication during export.
+        # ``export_epoch`` lets export mark the current frame without clearing
+        # the full capacity-sized flag array every collision pass.
         self.exported_flags = wp.zeros(capacity, dtype=wp.int32, device=device)
+        self.export_epoch = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Atomic counter for contact allocation
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
@@ -935,6 +944,10 @@ class GlobalContactReducer:
         data.ht_values_per_key = self.values_per_key
         data.deterministic = 1 if self.deterministic else 0
         return data
+
+    def advance_export_epoch(self):
+        """Advance the epoch used by export-time cross-entry deduplication."""
+        wp.launch(_advance_export_epoch_kernel, dim=1, inputs=[self.export_epoch], device=self.device)
 
 
 @wp.func
@@ -1398,6 +1411,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
         contact_fingerprints: wp.array[wp.int32],
         # Global dedup flags: one int per buffer contact, for cross-entry deduplication
         exported_flags: wp.array[wp.int32],
+        exported_epoch: wp.array[wp.int32],
         # Shape data for extracting margin and effective radius
         shape_types: wp.array[int],
         shape_data: wp.array[wp.vec4],
@@ -1426,6 +1440,8 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
         # Early exit if no active entries (fast path for empty work)
         if num_active == 0:
             return
+
+        export_epoch = exported_epoch[0]
 
         # Grid stride loop over active entries
         for i in range(tid, num_active, total_num_threads):
@@ -1457,8 +1473,8 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
 
                 # Cross-entry dedup: same contact can win slots in different entries
                 # (e.g., normal-bin AND voxel entry). Atomic flag per contact_id.
-                old_flag = wp.atomic_add(exported_flags, contact_id, 1)
-                if old_flag > 0:
+                old_flag = wp.atomic_exch(exported_flags, contact_id, export_epoch)
+                if old_flag == export_epoch:
                     continue
 
                 # Unpack contact data

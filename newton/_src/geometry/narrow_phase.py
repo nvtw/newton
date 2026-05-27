@@ -2126,8 +2126,9 @@ class NarrowPhase:
 
             # Export reduced contacts from hashtable
             if self.reduce_contacts:
-                # Zero exported_flags for cross-entry deduplication
-                self.global_contact_reducer.exported_flags.zero_()
+                # Advance export epoch for cross-entry deduplication without
+                # clearing the full capacity-sized flag array.
+                self.global_contact_reducer.advance_export_epoch()
                 wp.launch(
                     kernel=self.export_reduced_contacts_kernel,
                     dim=self.total_num_threads,
@@ -2140,6 +2141,7 @@ class NarrowPhase:
                         self.global_contact_reducer.shape_pairs,
                         self.global_contact_reducer.contact_fingerprints,
                         self.global_contact_reducer.exported_flags,
+                        self.global_contact_reducer.export_epoch,
                         shape_types,
                         shape_data,
                         shape_gap,
