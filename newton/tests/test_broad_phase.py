@@ -2116,6 +2116,49 @@ class TestBroadPhase(unittest.TestCase):
         self.assertTrue(has_sphere_b_ground, "SAP: Sphere B (large margin) should overlap ground")
         self.assertFalse(has_sphere_a_ground, "SAP: Sphere A (small margin) should NOT overlap ground")
 
+    def test_sap_mixed_sign_direction_preserves_overlaps(self):
+        # Candidate 5 in BroadPhaseSAP's fixed search pattern is (1, -1, 0).
+        # Its projection radius must use abs(direction); otherwise thin/tall
+        # boxes can produce inverted intervals and miss real AABB overlaps.
+        aabb_lower = wp.array(
+            [
+                wp.vec3(0.0, 0.0, 0.0),
+                wp.vec3(0.1, 1.0, 0.0),
+                wp.vec3(5.0, 5.0, 0.0),
+            ],
+            dtype=wp.vec3,
+        )
+        aabb_upper = wp.array(
+            [
+                wp.vec3(0.2, 2.0, 1.0),
+                wp.vec3(0.3, 3.0, 1.0),
+                wp.vec3(6.0, 6.0, 1.0),
+            ],
+            dtype=wp.vec3,
+        )
+        shape_gap = wp.empty(0, dtype=wp.float32)
+        collision_group = wp.array([1, 1, 1], dtype=wp.int32)
+        shape_world = wp.array([0, 0, 0], dtype=wp.int32)
+
+        sap_bp = BroadPhaseSAP(shape_world)
+        sap_bp.direction_active_index.fill_(5)
+
+        pairs = wp.zeros(8, dtype=wp.vec2i)
+        pair_count = wp.zeros(1, dtype=wp.int32)
+        sap_bp.launch(
+            aabb_lower,
+            aabb_upper,
+            shape_gap,
+            collision_group,
+            shape_world,
+            3,
+            pairs,
+            pair_count,
+        )
+
+        found = {tuple(pair) for pair in pairs.numpy()[: int(pair_count.numpy()[0])]}
+        self.assertIn((0, 1), found)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)
