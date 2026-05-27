@@ -22,7 +22,13 @@
 # ``wp.transform_identity()`` (or a zero-translation transform) makes the
 # layers overlay exactly.
 #
-# Command: python -m newton.examples basic_multi_solver_overlay
+# Works with every viewer backend that supports layers: ``ViewerGL`` (the
+# default), ``ViewerRTX`` (ray-traced; install with ``pip install -e
+# .[rtx]``), and ``ViewerNull`` for headless testing.
+#
+# Commands:
+#   python -m newton.examples basic_multi_solver_overlay
+#   python -m newton.examples basic_multi_solver_overlay --viewer rtx
 #
 ###########################################################################
 

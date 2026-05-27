@@ -59,7 +59,7 @@ def write_transforms(xform: wp.array[wp.transform], scale: wp.array[wp.vec3], of
 
 
 @wp.kernel(enable_backward=False)
-def update_and_write_shape_transforms(
+def update_and_write_shape_transforms_scatter(
     shape_xforms: wp.array[wp.transform],
     shape_parents: wp.array[int],
     body_q: wp.array[wp.transform],
@@ -67,13 +67,18 @@ def update_and_write_shape_transforms(
     world_offsets: wp.array[wp.vec3],
     layer_xform: wp.transform,
     scales: wp.array[wp.vec3],
-    mat44_offset: int,
+    mat44_indices: wp.array[int],
     m_out: wp.array[wp.mat44d],
 ):
-    """Fused kernel: compute world transform from body state then write as mat44d.
+    """Fused kernel: compute each shape's world transform from body state and
+    write it as mat44d into a scattered position in ``m_out``.
 
-    Combines the work of ``update_shape_xforms`` and ``write_transforms`` into a
-    single pass, eliminating the intermediate ``world_xforms`` write and read.
+    Scattered indices (instead of a contiguous ``mat44_offset`` + tid base)
+    are needed when one layer's shape batches are interleaved with another's
+    in the OVRTX-bound matrices tensor — e.g. the multi-solver overlay,
+    where ``picking_line`` lands between layers. The kernel is launched
+    once per layer with that layer's ``body_q``, ``world_offsets``, and
+    ``layer_xform``.
     """
     tid = wp.tid()
     xf = shape_xforms[tid]
@@ -95,7 +100,7 @@ def update_and_write_shape_transforms(
     q64 = wp.quatd(wp.float64(q[0]), wp.float64(q[1]), wp.float64(q[2]), wp.float64(q[3]))
     s64 = wp.vec3d(wp.float64(sc[0]), wp.float64(sc[1]), wp.float64(sc[2]))
     # NOTE: transpose needed
-    m_out[mat44_offset + tid] = wp.transpose(wp.transform_compose(p64, q64, s64))
+    m_out[mat44_indices[tid]] = wp.transpose(wp.transform_compose(p64, q64, s64))
 
 
 class ViewerRTX(ViewerUSD):
@@ -730,48 +735,89 @@ void main() {
 
         self._phase = self._PHASE_RENDER
 
-    def _build_flat_shape_arrays(self):
-        """Concatenate per-batch shape arrays into flat warp arrays matching the mat44d layout.
+    @override
+    def _extra_layer_state_attrs(self) -> tuple[str, ...]:
+        """Per-layer attributes specific to ViewerRTX.
 
-        Called once at the end of the build phase.  The resulting arrays are static
-        (topology does not change per-frame) and allow all shape transforms to be
-        updated with a single ``update_and_write_shape_transforms`` kernel launch instead of
-        one launch per shape batch.
+        ``_last_state`` is the most recent :class:`newton.State` handed to
+        ``log_state`` for this layer; it is read at ``end_frame`` time to
+        update OVRTX rigid-body transforms. Splitting it per-layer is what
+        lets a multi-solver overlay (each layer driven by a different
+        solver state) refresh every layer's transforms each frame instead
+        of only the last-activated layer's.
         """
-        # _shape_instances is keyed by geometry hash (int), not by name; build a reverse map.
-        name_to_shapes = {s.name: s for s in self._shape_instances.values()}
+        return ("_last_state",)
 
-        chunks_xforms = []
-        chunks_parents = []
-        chunks_worlds = []
-        chunks_scales = []
-        flat_mat44_offset = 0
-        found_shape = False
+    def _build_flat_shape_arrays(self):
+        """Build per-layer flat shape arrays for OVRTX transform updates.
 
+        Called once at the end of the build phase. Each layer that owns
+        shape instances gets its own ``(xforms, parents, worlds, scales,
+        mat44_indices)`` tuple appended to :attr:`_per_layer_flat`. The
+        per-shape ``mat44_indices`` map each shape into its position in
+        the OVRTX-bound matrices tensor, which lets us launch the kernel
+        once per layer (each with that layer's ``body_q``,
+        ``world_offsets``, and ``layer.xform``) without requiring
+        contiguous per-layer ranges — handy because ``picking_line`` is
+        registered between the first and second layer's shape batches.
+        """
+        # Snapshot the currently active layer so each layer's
+        # _shape_instances and world_offsets are reachable from layer.state.
+        self._snapshot_layer(self._layers[self._active_layer_id])
+
+        # Map each instance-batch name to its base offset in the
+        # OVRTX-bound matrices tensor. _instance_prim_paths preserves
+        # insertion order, which matches _all_instance_paths.
+        name_to_mat44_base = {}
+        offset = 0
         for name, paths in self._instance_prim_paths.items():
-            count = len(paths)
-            shapes = name_to_shapes.get(name)
-            if shapes is not None:
-                found_shape = True
+            name_to_mat44_base[name] = offset
+            offset += len(paths)
+
+        self._per_layer_flat: list[tuple] = []
+        total_shapes = 0
+
+        for layer_id, lyr in self._layers.items():
+            si = lyr.state.get("_shape_instances") or {}
+            if not si:
+                continue
+
+            chunks_xforms = []
+            chunks_parents = []
+            chunks_worlds = []
+            chunks_scales = []
+            chunks_mat44 = []
+
+            for shapes in si.values():
+                base = name_to_mat44_base.get(shapes.name)
+                if base is None:
+                    # Shape batch did not produce instance prim paths
+                    # (e.g. zero-instance batch); skip it.
+                    continue
+                n = len(shapes.xforms)
                 chunks_xforms.append(shapes.xforms.numpy())
                 chunks_parents.append(shapes.parents.numpy())
                 chunks_worlds.append(shapes.worlds.numpy())
                 chunks_scales.append(shapes.scales.numpy())
-            elif not found_shape:
-                # Non-shape entry (e.g. future pre-shape prim) before any shapes;
-                # keep track so the flat section starts at the right mat44d offset.
-                flat_mat44_offset += count
+                chunks_mat44.append(np.arange(base, base + n, dtype=np.int32))
 
-        if not chunks_xforms:
-            return
+            if not chunks_xforms:
+                continue
 
-        dev = self.device
-        self._flat_shape_xforms = wp.array(np.concatenate(chunks_xforms, axis=0), dtype=wp.transform, device=dev)
-        self._flat_shape_parents = wp.array(np.concatenate(chunks_parents, axis=0), dtype=int, device=dev)
-        self._flat_shape_worlds = wp.array(np.concatenate(chunks_worlds, axis=0), dtype=int, device=dev)
-        self._flat_shape_scales = wp.array(np.concatenate(chunks_scales, axis=0), dtype=wp.vec3, device=dev)
-        self._flat_total_shapes = len(self._flat_shape_xforms)
-        self._flat_mat44_offset = flat_mat44_offset
+            dev = self.device
+            self._per_layer_flat.append(
+                (
+                    layer_id,
+                    wp.array(np.concatenate(chunks_xforms, axis=0), dtype=wp.transform, device=dev),
+                    wp.array(np.concatenate(chunks_parents, axis=0), dtype=int, device=dev),
+                    wp.array(np.concatenate(chunks_worlds, axis=0), dtype=int, device=dev),
+                    wp.array(np.concatenate(chunks_scales, axis=0), dtype=wp.vec3, device=dev),
+                    wp.array(np.concatenate(chunks_mat44, axis=0), dtype=int, device=dev),
+                )
+            )
+            total_shapes += sum(c.shape[0] for c in chunks_xforms)
+
+        self._flat_total_shapes = total_shapes
 
     # ------------------------------------------------ ViewerUSD overrides
 
@@ -1582,37 +1628,47 @@ void main() {
             self._camera_dirty = False
 
     def _update_ovrtx_transforms(self):
-        has_flat_shape_arrays = self._flat_total_shapes > 0
+        has_flat_shape_arrays = bool(self._per_layer_flat)
         if not self._transform_binding or (not has_flat_shape_arrays and not self._pending_xforms):
             return
         with wp.ScopedTimer("ViewerRTX::update_transforms", active=PROFILE_ENABLED, use_nvtx=True):
             from ovrtx import Device
 
             rtx_device = Device.CUDA if self.device.is_cuda else Device.CPU
+
+            # Snapshot the active layer so each layer's _last_state and
+            # world_offsets can be read uniformly from layer.state below.
+            self._snapshot_layer(self._layers[self._active_layer_id])
+
             with self._transform_binding.map(device=rtx_device) as mapping:
                 matrices = wp.from_dlpack(mapping.tensor, dtype=wp.mat44d)  # (N, 4, 4) float64
 
-                body_q = self._last_state.body_q if self._last_state is not None else None
-                world_offsets = self.world_offsets
-
                 if has_flat_shape_arrays:
-                    # Single kernel launch for all shape batches.
-                    wp.launch(
-                        update_and_write_shape_transforms,
-                        dim=self._flat_total_shapes,
-                        inputs=[
-                            self._flat_shape_xforms,
-                            self._flat_shape_parents,
-                            body_q,
-                            self._flat_shape_worlds,
-                            world_offsets,
-                            self.layer.xform,
-                            self._flat_shape_scales,
-                            self._flat_mat44_offset,
-                            matrices,
-                        ],
-                        device=matrices.device,
-                    )
+                    # One launch per layer with that layer's body_q,
+                    # world_offsets, and layer.xform. Scatter writes via
+                    # mat44_indices handle the non-contiguous case where
+                    # picking_line interleaves between layers.
+                    for layer_id, xforms, parents, worlds, scales, mat44_indices in self._per_layer_flat:
+                        lyr = self._layers[layer_id]
+                        last_state = lyr.state.get("_last_state")
+                        if last_state is None:
+                            continue
+                        wp.launch(
+                            update_and_write_shape_transforms_scatter,
+                            dim=len(xforms),
+                            inputs=[
+                                xforms,
+                                parents,
+                                last_state.body_q,
+                                worlds,
+                                lyr.state.get("world_offsets"),
+                                lyr.xform,
+                                scales,
+                                mat44_indices,
+                                matrices,
+                            ],
+                            device=matrices.device,
+                        )
 
                 # Handle any remaining pre-computed transforms (e.g. picking line).
                 if self._pending_xforms:
@@ -1992,12 +2048,8 @@ void main() {
         self._pending_line_batches = {}
         self._pending_point_batches = {}
 
-        self._flat_shape_xforms = None
-        self._flat_shape_parents = None
-        self._flat_shape_worlds = None
-        self._flat_shape_scales = None
         self._flat_total_shapes = 0
-        self._flat_mat44_offset = 0
+        self._per_layer_flat = []
 
         self._last_state = None
         self._last_control = None
