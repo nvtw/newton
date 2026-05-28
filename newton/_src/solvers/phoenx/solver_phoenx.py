@@ -318,11 +318,11 @@ class PhoenXWorld:
         """Joint constraint columns (static for the world's lifetime)."""
 
         num_active_constraints: int
-        """num_joints + num_contact_columns."""
+        """Active cids, including joints, deformables, and contacts."""
 
         max_body_degree: int
-        """Max constraints incident to any single body. Hard lower bound on the
-        colour count any valid colouring can achieve. 0 if no step yet."""
+        """Max constraints incident to any body or particle node. Hard lower
+        bound on the colour count any valid colouring can achieve."""
 
         time_us_total_joints: float | None = None
         """Total wall-clock microseconds spent in joint dispatches (sum of
@@ -3670,20 +3670,25 @@ class PhoenXWorld:
             if self._contact_views is not None and self._ingest_scratch is not None
             else 0
         )
-        num_active = self.num_joints + num_contact_columns
+        num_active = (
+            int(self._num_active_constraints.numpy()[0])
+            if self._num_active_constraints is not None
+            else self._contact_offset + num_contact_columns
+        )
 
         if self.enable_column_timers:
             timer_kwargs = self._gather_column_timers(num_contact_columns)
         else:
             timer_kwargs = {}
 
-        # Per-body degree from the partitioner's adjacency CSR end array.
-        # max_body_degree is the lower bound on any valid graph colouring.
-        if num_active > 0 and self.num_bodies > 0:
+        # Unified-node degree from the partitioner's adjacency CSR end array.
+        # Rigid bodies occupy [0, num_bodies); particles follow after that.
+        num_nodes = self.num_bodies + self.num_particles
+        if num_active > 0 and num_nodes > 0:
             ends = self._partitioner._adjacency_section_end_indices.numpy()
-            n_bodies = min(int(self.num_bodies), int(ends.shape[0]))
-            if n_bodies > 0:
-                degrees = ends[:n_bodies].astype(np.int64, copy=False)
+            n_nodes = min(int(num_nodes), int(ends.shape[0]))
+            if n_nodes > 0:
+                degrees = ends[:n_nodes].astype(np.int64, copy=False)
                 degrees[1:] = degrees[1:] - degrees[:-1]
                 max_body_degree = int(degrees.max(initial=0))
             else:
