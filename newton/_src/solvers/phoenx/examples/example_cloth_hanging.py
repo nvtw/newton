@@ -219,7 +219,6 @@ class Example:
             self.model,
             cloth_thickness=cloth_thickness,
             cloth_gap=cloth_gap,
-            cloth_self_collision=False,
             rigid_contact_max=8192,
         )
         self.contacts = self.collision_pipeline.contacts()

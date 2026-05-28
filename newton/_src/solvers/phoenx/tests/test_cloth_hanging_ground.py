@@ -30,6 +30,68 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
     "PhoenX cloth contacts run on CUDA only.",
 )
 class TestClothHangingGroundContact(unittest.TestCase):
+    def test_cloth_self_collision_defaults_enabled(self):
+        device = wp.get_preferred_device()
+        with wp.ScopedDevice(device):
+            scene = _GroundCubeClothScene(device)
+            self.assertIsNotNone(scene.graph, "expected CUDA graph-captured stepping")
+
+            groups = scene.pipeline.unified_shape_collision_group.numpy()
+            rigid_count = int(scene.model.shape_count)
+            tri_count = int(scene.model.tri_count)
+            cloth_groups = groups[rigid_count : rigid_count + tri_count]
+
+            self.assertTrue(np.all(cloth_groups == 1))
+
+    def test_soft_body_self_collision_defaults_enabled(self):
+        device = wp.get_preferred_device()
+        with wp.ScopedDevice(device):
+            builder = newton.ModelBuilder()
+            builder.add_soft_grid(
+                pos=wp.vec3(0.0, 0.0, 0.0),
+                rot=wp.quat_identity(),
+                vel=wp.vec3(0.0, 0.0, 0.0),
+                dim_x=1,
+                dim_y=1,
+                dim_z=1,
+                cell_x=0.1,
+                cell_y=0.1,
+                cell_z=0.1,
+                density=1000.0,
+                k_mu=1.0e5,
+                k_lambda=1.0e5,
+                k_damp=0.0,
+                add_surface_mesh_edges=False,
+                particle_radius=0.0,
+            )
+            model = builder.finalize(device=device)
+            bodies = body_container_zeros(1, device=device)
+            constraints = PhoenXWorld.make_constraint_container(
+                num_joints=0,
+                num_cloth_triangles=0,
+                num_soft_tetrahedra=int(model.tet_count),
+                device=device,
+            )
+            world = PhoenXWorld(
+                bodies=bodies,
+                constraints=constraints,
+                num_joints=0,
+                num_particles=int(model.particle_count),
+                num_cloth_triangles=0,
+                num_soft_tetrahedra=int(model.tet_count),
+                num_worlds=1,
+                step_layout="single_world",
+                device=device,
+            )
+            pipeline = world.setup_cloth_collision_pipeline(model)
+
+            groups = pipeline.unified_shape_collision_group.numpy()
+            rigid_count = int(model.shape_count)
+            tet_count = int(model.tet_count)
+            tet_groups = groups[rigid_count : rigid_count + tet_count]
+
+            self.assertTrue(np.all(tet_groups == 1))
+
     def test_cloth_self_collision_can_be_disabled(self):
         device = wp.get_preferred_device()
         with wp.ScopedDevice(device):
