@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Position-level XPBD soft-tetrahedron constraint.
-
-Uses a corotated ARAP shear row and a standard volume row
-``C = V_rest * (det(F) - 1)``. The split mirrors PhysX high-stiffness
-corotational soft-body solves.
-"""
+"""Position-level XPBD soft-tetrahedron constraint."""
 
 from __future__ import annotations
 
@@ -228,8 +223,8 @@ def soft_tetrahedron_set_beta_mu(c: ConstraintContainer, cid: wp.int32, v: wp.fl
 
 
 _ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
-_DET_F_EPS = wp.constant(wp.float32(1.0e-8))
 _ARAP_EPS = wp.constant(wp.float32(1.0e-8))
+_ARAP_BLOCK_DET_FLOOR = wp.constant(wp.float32(1.0e-30))
 _EXTRACT_ROT_EPS = wp.constant(wp.float32(1.0e-6))
 #: Cold-start polar-decomposition iteration count, used in
 #: :func:`soft_tetrahedron_prepare_for_iteration_at`. Kugelstadt APD
@@ -432,24 +427,7 @@ def soft_tetrahedron_iterate_at(
     idt: wp.float32,
     sor_boost: wp.float32,
 ):
-    """One PhysX-style ARAP PGS sweep on a soft-body tetrahedron.
-
-    Refines the warm-started rotation with 4 Mueller polar-decomp
-    iterations (the cold-start 30-iter pass happens once per substep
-    in :func:`soft_tetrahedron_prepare_for_iteration_at`), then applies
-
-        C = sqrt(||F - R||_F^2 + eps)
-        dC/dF = (F - R) / C
-        per-vertex grads via the inv_rest chain-rule shortcut
-
-    with PhysX-style V-baked compliance ``alpha_mu = 1 / (k_mu * V)``.
-
-    Body fields are unified indices: ``i_p = body - num_bodies`` is the
-    particle slot. Reads / writes route through the slot-aware unified
-    helpers so mass splitting routes position-level work into the slot
-    when one exists; without it the helpers fall through to particle
-    storage and behaviour matches the rigid-only path.
-    """
+    """One coupled ARAP shear + volume XPBD sweep on a soft-body tetrahedron."""
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
     body_c = read_int(constraints, _OFF_BODY3, cid)
@@ -522,84 +500,88 @@ def soft_tetrahedron_iterate_at(
     )
     c_norm = wp.sqrt(s_norm_sq + _ARAP_EPS)
 
-    if c_norm < _DET_F_EPS:
-        # Pure rotation: nothing to apply. Persist the refined
-        # quaternion and bail.
-        write_quat(constraints, _OFF_ROTATION, cid, rotation)
-        return
-
     # C = V * c_norm; dC/dF = V * S / c_norm.
     inv_c = wp.float32(1.0) / c_norm
-    dCdF = (rest_volume * inv_c) * S
-    c_arap = rest_volume * c_norm
-    g_a, g_b, g_c, g_d = tet_chain_rule_gradients(dCdF, inv_rest)
+    dCdF_mu = (rest_volume * inv_c) * S
+    c_mu = rest_volume * c_norm
+    g_mu_a, g_mu_b, g_mu_c, g_mu_d = tet_chain_rule_gradients(dCdF_mu, inv_rest)
+
+    det_f, dJ_dF = deformation_gradient_determinant_cofactor(F)
+    c_lambda = rest_volume * (det_f - wp.float32(1.0))
+    dCdF_lambda = rest_volume * dJ_dF
+    g_lambda_a, g_lambda_b, g_lambda_c, g_lambda_d = tet_chain_rule_gradients(dCdF_lambda, inv_rest)
 
     idt_sq = idt * idt
     dt = wp.float32(1.0) / idt
     bias_mu = idt_sq * alpha_mu
-    gamma_mu = beta_mu * dt
-
-    grad_dot_dx = wp.float32(0.0)
-    if beta_mu != wp.float32(0.0):
-        # XPBD damping anchor (Macklin et al. 2020): velocity-projected
-        # damping via ``gamma * grad . (x - position_prev_substep)``;
-        # ``beta_mu == 0`` recovers bare XPBD and skips the anchor loads.
-        dx_a = x_a - particles.position_prev_substep[p_a]
-        dx_b = x_b - particles.position_prev_substep[p_b]
-        dx_c = x_c - particles.position_prev_substep[p_c]
-        dx_d = x_d - particles.position_prev_substep[p_d]
-        grad_dot_dx = wp.dot(g_a, dx_a) + wp.dot(g_b, dx_b) + wp.dot(g_c, dx_c) + wp.dot(g_d, dx_d)
-
-    grad2_im = (
-        inv_mass_a * wp.dot(g_a, g_a)
-        + inv_mass_b * wp.dot(g_b, g_b)
-        + inv_mass_c * wp.dot(g_c, g_c)
-        + inv_mass_d * wp.dot(g_d, g_d)
-    )
-    denom = (wp.float32(1.0) + gamma_mu) * grad2_im + bias_mu
-
-    if denom > wp.float32(0.0):
-        d_lam = -(c_arap + bias_mu * lambda_sum_mu + gamma_mu * grad_dot_dx) / denom
-        d_lam = d_lam * sor_boost
-        x_a = x_a + (d_lam * inv_mass_a) * g_a
-        x_b = x_b + (d_lam * inv_mass_b) * g_b
-        x_c = x_c + (d_lam * inv_mass_c) * g_c
-        x_d = x_d + (d_lam * inv_mass_d) * g_d
-        lambda_sum_mu = lambda_sum_mu + d_lam
-
-    F = tet_deformation_gradient(x_a, x_b, x_c, x_d, inv_rest)
-    det_f, dJ_dF = deformation_gradient_determinant_cofactor(F)
-    c_volume = rest_volume * (det_f - wp.float32(1.0))
-    dCdF_volume = rest_volume * dJ_dF
-    g_a, g_b, g_c, g_d = tet_chain_rule_gradients(dCdF_volume, inv_rest)
-
     bias_lambda = idt_sq * alpha_lambda
+    gamma_mu = beta_mu * dt
     gamma_lambda = beta_lambda * dt
 
-    grad_dot_dx = wp.float32(0.0)
-    if beta_lambda != wp.float32(0.0):
+    grad_mu_dot_dx = wp.float32(0.0)
+    grad_lambda_dot_dx = wp.float32(0.0)
+    if beta_mu != wp.float32(0.0) or beta_lambda != wp.float32(0.0):
+        # XPBD damping anchor (Macklin et al. 2020): velocity-projected
+        # damping via ``gamma * grad . (x - position_prev_substep)``;
+        # zero damping recovers bare XPBD and skips the anchor loads.
         dx_a = x_a - particles.position_prev_substep[p_a]
         dx_b = x_b - particles.position_prev_substep[p_b]
         dx_c = x_c - particles.position_prev_substep[p_c]
         dx_d = x_d - particles.position_prev_substep[p_d]
-        grad_dot_dx = wp.dot(g_a, dx_a) + wp.dot(g_b, dx_b) + wp.dot(g_c, dx_c) + wp.dot(g_d, dx_d)
+        grad_mu_dot_dx = wp.dot(g_mu_a, dx_a) + wp.dot(g_mu_b, dx_b) + wp.dot(g_mu_c, dx_c) + wp.dot(g_mu_d, dx_d)
+        grad_lambda_dot_dx = (
+            wp.dot(g_lambda_a, dx_a) + wp.dot(g_lambda_b, dx_b) + wp.dot(g_lambda_c, dx_c) + wp.dot(g_lambda_d, dx_d)
+        )
 
-    grad2_im = (
-        inv_mass_a * wp.dot(g_a, g_a)
-        + inv_mass_b * wp.dot(g_b, g_b)
-        + inv_mass_c * wp.dot(g_c, g_c)
-        + inv_mass_d * wp.dot(g_d, g_d)
+    a_mu_mu = (
+        inv_mass_a * wp.dot(g_mu_a, g_mu_a)
+        + inv_mass_b * wp.dot(g_mu_b, g_mu_b)
+        + inv_mass_c * wp.dot(g_mu_c, g_mu_c)
+        + inv_mass_d * wp.dot(g_mu_d, g_mu_d)
     )
-    denom = (wp.float32(1.0) + gamma_lambda) * grad2_im + bias_lambda
+    a_lambda_lambda = (
+        inv_mass_a * wp.dot(g_lambda_a, g_lambda_a)
+        + inv_mass_b * wp.dot(g_lambda_b, g_lambda_b)
+        + inv_mass_c * wp.dot(g_lambda_c, g_lambda_c)
+        + inv_mass_d * wp.dot(g_lambda_d, g_lambda_d)
+    )
+    a_mu_lambda = (
+        inv_mass_a * wp.dot(g_mu_a, g_lambda_a)
+        + inv_mass_b * wp.dot(g_mu_b, g_lambda_b)
+        + inv_mass_c * wp.dot(g_mu_c, g_lambda_c)
+        + inv_mass_d * wp.dot(g_mu_d, g_lambda_d)
+    )
 
-    if denom > wp.float32(0.0):
-        d_lam = -(c_volume + bias_lambda * lambda_sum_lambda + gamma_lambda * grad_dot_dx) / denom
-        d_lam = d_lam * sor_boost
-        x_a = x_a + (d_lam * inv_mass_a) * g_a
-        x_b = x_b + (d_lam * inv_mass_b) * g_b
-        x_c = x_c + (d_lam * inv_mass_c) * g_c
-        x_d = x_d + (d_lam * inv_mass_d) * g_d
-        lambda_sum_lambda = lambda_sum_lambda + d_lam
+    A11 = (wp.float32(1.0) + gamma_mu) * a_mu_mu + bias_mu
+    A22 = (wp.float32(1.0) + gamma_lambda) * a_lambda_lambda + bias_lambda
+    A12 = a_mu_lambda
+
+    b_mu = c_mu + bias_mu * lambda_sum_mu + gamma_mu * grad_mu_dot_dx
+    b_lambda = c_lambda + bias_lambda * lambda_sum_lambda + gamma_lambda * grad_lambda_dot_dx
+
+    det_a = A11 * A22 - A12 * A12
+    d_lam_mu = wp.float32(0.0)
+    d_lam_lambda = wp.float32(0.0)
+
+    if det_a > _ARAP_BLOCK_DET_FLOOR:
+        inv_det = wp.float32(1.0) / det_a
+        d_lam_mu = -(A22 * b_mu - A12 * b_lambda) * inv_det
+        d_lam_lambda = -(-A12 * b_mu + A11 * b_lambda) * inv_det
+    else:
+        if A11 > wp.float32(0.0):
+            d_lam_mu = -b_mu / A11
+        if A22 > wp.float32(0.0):
+            d_lam_lambda = -b_lambda / A22
+
+    d_lam_mu = d_lam_mu * sor_boost
+    d_lam_lambda = d_lam_lambda * sor_boost
+
+    x_a = x_a + inv_mass_a * (d_lam_mu * g_mu_a + d_lam_lambda * g_lambda_a)
+    x_b = x_b + inv_mass_b * (d_lam_mu * g_mu_b + d_lam_lambda * g_lambda_b)
+    x_c = x_c + inv_mass_c * (d_lam_mu * g_mu_c + d_lam_lambda * g_lambda_c)
+    x_d = x_d + inv_mass_d * (d_lam_mu * g_mu_d + d_lam_lambda * g_lambda_d)
+    lambda_sum_mu = lambda_sum_mu + d_lam_mu
+    lambda_sum_lambda = lambda_sum_lambda + d_lam_lambda
 
     write_particle_position_with_slot(particles, copy_state, p_a, slot_a, x_a)
     write_particle_position_with_slot(particles, copy_state, p_b, slot_b, x_b)
