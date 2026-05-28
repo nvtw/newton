@@ -263,7 +263,6 @@ class TestClothMassSplitting(unittest.TestCase):
 
         for _ in range(N_FRAMES - 1):
             wp.capture_launch(graph)
-        wp.synchronize_device(device)
 
         positions = state.particle_q.numpy()
         cube_q = state.body_q.numpy()

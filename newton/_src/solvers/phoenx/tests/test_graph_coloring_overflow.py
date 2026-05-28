@@ -279,7 +279,6 @@ class TestColoringOverflowBucket(unittest.TestCase):
         )
         p.reset(elements_arr, num_elements_arr)
         p.build_csr_greedy_with_jp_fallback()
-        wp.synchronize_device(device)
         self.assertEqual(int(p.num_colors.numpy()[0]), n)
         # No overflow flag must have been raised.
         self.assertEqual(int(p._overflow_flag.numpy()[0]), 0)

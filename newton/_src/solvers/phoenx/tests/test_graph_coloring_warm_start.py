@@ -25,6 +25,7 @@ these tests exercise the eager path for fast unit feedback.
 from __future__ import annotations
 
 import unittest
+from collections import defaultdict
 
 import numpy as np
 import warp as wp
@@ -266,7 +267,6 @@ class TestWarmStartIndependentSet(unittest.TestCase):
         p.reset(elements, num_elements_arr)
         p.build_csr_greedy()
         # The cache is now populated.
-        wp.synchronize_device(device)
         cache_size = int(p._warm_start_cache.num_entries.numpy()[0])
         self.assertGreater(cache_size, 0, msg="warm-start cache should be populated after first build")
         self.assertLessEqual(
@@ -388,7 +388,6 @@ class TestWarmStartCacheStructure(unittest.TestCase):
         p = _make_partitioner(n, 400, device, enable_warm_start=True, seed=0)
         p.reset(elements, num_elements_arr)
         p.build_csr_greedy()
-        wp.synchronize_device(device)
 
         cache_size = int(p._warm_start_cache.num_entries.numpy()[0])
         self.assertGreater(cache_size, 0)
@@ -432,7 +431,6 @@ class TestWarmStartCacheStructure(unittest.TestCase):
         p = _make_partitioner(n, 400, device, enable_warm_start=True, seed=0)
         p.reset(elements, num_elements_arr)
         p.build_csr_greedy()
-        wp.synchronize_device(device)
 
         cache_size = int(p._warm_start_cache.num_entries.numpy()[0])
         keys = p._warm_start_cache.keys.numpy()[:cache_size]
@@ -446,24 +444,22 @@ class TestWarmStartCacheStructure(unittest.TestCase):
 
         def host_key(bodies_row: np.ndarray) -> int:
             b_min = BODY_INF
-            b_2nd = BODY_INF
+            b_second = BODY_INF
             for raw in bodies_row:
                 b = int(raw)
                 if b < 0:
                     break
                 if b < b_min:
-                    b_2nd = b_min
+                    b_second = b_min
                     b_min = b
-                elif b < b_2nd:
-                    b_2nd = b
-            return (b_2nd << 32) | (b_min & 0xFFFFFFFF)
+                elif b < b_second:
+                    b_second = b
+            return (b_second << 32) | (b_min & 0xFFFFFFFF)
 
         host_keys = np.array([host_key(bodies_np[i]) for i in range(n)], dtype=np.int64)
 
         # Map each unique key -> set of colours actually assigned to
         # constraints with that key.
-        from collections import defaultdict
-
         per_key_colors: dict[int, set[int]] = defaultdict(set)
         for cid in range(n):
             color = int(eid_to_color[cid])

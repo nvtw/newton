@@ -167,7 +167,6 @@ class TestSoftConstraint(unittest.TestCase):
                 gravity=(0.0, -GRAVITY, 0.0),
             )
             run_settle_loop(world, frames=SETTLE_FRAMES, dt=1.0 / FPS)
-            wp.synchronize_device()
             pos = world.bodies.position.numpy()
             ori = world.bodies.orientation.numpy()
             p1 = pos[1] + _quat_rotate_np(ori[1], _ANCHOR1)
@@ -204,7 +203,6 @@ class TestSoftConstraint(unittest.TestCase):
             peak = 0.0
             for _ in range(30):
                 world.step(dt=1.0 / FPS)
-                wp.synchronize_device()
                 w = world.bodies.angular_velocity.numpy()[cube]
                 # Only the constrained DoFs (x, y) feel the spring;
                 # the free z-axis is decoupled.
@@ -243,7 +241,6 @@ class TestLimitSpringDamper(unittest.TestCase):
             damping_limit=damping_limit,
         )
         run_settle_loop(world, frames=SETTLE_FRAMES, dt=1.0 / FPS)
-        wp.synchronize_device()
         return _axial_twist(world.bodies.orientation.numpy()[cube])
 
     def test_box2d_formulation_clamps_at_limit(self) -> None:
@@ -294,7 +291,6 @@ class TestPDDrive(unittest.TestCase):
             peak = 0.0
             for _ in range(30):
                 world.step(dt=1.0 / FPS)
-                wp.synchronize_device()
                 ori = world.bodies.orientation.numpy()[cube]
                 peak = max(peak, _axial_twist(ori))
             peaks[damping] = peak
@@ -334,7 +330,6 @@ class TestMaxForceDriveSaturation(unittest.TestCase):
             )
             for _ in range(15):  # short window so cap matters
                 world.step(dt=1.0 / FPS)
-                wp.synchronize_device()
             twists[label] = _axial_twist(world.bodies.orientation.numpy()[cube])
         self.assertLess(
             twists["capped"],
@@ -367,7 +362,6 @@ class TestColoringPriorityBias(unittest.TestCase):
         scene.finalize()
         for _ in range(SETTLE_FRAMES):
             scene.step()
-        wp.synchronize_device()
         nc = int(scene.world._world_num_colors.numpy()[0])
         # One pair -> exactly one column -> one colour.
         self.assertGreaterEqual(nc, 1, msg="at least one colour required when contact exists")

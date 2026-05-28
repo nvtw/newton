@@ -868,7 +868,6 @@ class TestIncrementalGraphColoring(unittest.TestCase):
             wp.capture_while(p.num_remaining, p.launch)
 
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
         first_assignment = p.interaction_id_to_partition.numpy().copy()
         first_color = int(p.current_color.numpy()[0])
 
@@ -877,7 +876,6 @@ class TestIncrementalGraphColoring(unittest.TestCase):
         # is still valid.
         p.reset(elements_arr, num_elements_arr)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
         second_assignment = p.interaction_id_to_partition.numpy().copy()
         second_color = int(p.current_color.numpy()[0])
 

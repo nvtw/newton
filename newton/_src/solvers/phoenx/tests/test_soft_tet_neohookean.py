@@ -120,7 +120,6 @@ class TestSoftTetNeoHookean(unittest.TestCase):
         world_neo = _build_phoenx_world_for_soft_cube(
             model, device, constraint_type=SoftBodyConstraintType.BLOCK_NEOHOOKEAN
         )
-        wp.synchronize_device(device)
         types_neo = world_neo.constraints.data.numpy()[0].view(np.int32)
         expected_neo = int(CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN)
         self.assertTrue(
@@ -130,7 +129,6 @@ class TestSoftTetNeoHookean(unittest.TestCase):
         )
 
         world_arap = _build_phoenx_world_for_soft_cube(model, device, constraint_type=SoftBodyConstraintType.ARAP)
-        wp.synchronize_device(device)
         types_arap = world_arap.constraints.data.numpy()[0].view(np.int32)
         expected_arap = int(CONSTRAINT_TYPE_SOFT_TETRAHEDRON)
         self.assertTrue(
@@ -152,7 +150,6 @@ class TestSoftTetNeoHookean(unittest.TestCase):
         n_frames = int(T / dt)
         for _ in range(n_frames):
             world.step(dt)
-        wp.synchronize_device(device)
         p_final = world.particles.position.numpy()
         self.assertTrue(np.all(np.isfinite(p_final)), "non-finite particle position after free fall")
         final_mean_z = float(p_final[:, 2].mean())
@@ -182,7 +179,6 @@ class TestSoftTetNeoHookean(unittest.TestCase):
         p_initial = world.particles.position.numpy().copy()
         for _ in range(20):
             world.step(1.0 / 60.0)
-        wp.synchronize_device(device)
         p_final = world.particles.position.numpy()
         self.assertTrue(np.all(np.isfinite(p_final)), "non-finite particle position at rest")
         # Drift bound: under a stable solver, no particle should walk
@@ -208,7 +204,6 @@ class TestSoftTetNeoHookean(unittest.TestCase):
             world.step(1.0 / 60.0)
         for _ in range(5):
             wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
         self.assertTrue(np.all(np.isfinite(world.particles.position.numpy())))
 
 

@@ -144,7 +144,6 @@ class TestSoftHexahedron(unittest.TestCase):
         p_initial = world.particles.position.numpy().copy()
         for _ in range(20):
             wp.capture_launch(graph)
-        wp.synchronize_device(device)
         positions = world.particles.position.numpy()
         self.assertTrue(np.isfinite(positions).all())
         # Bound the drift to a fraction of the cube edge. The stable
@@ -179,7 +178,6 @@ class TestSoftHexahedron(unittest.TestCase):
         n_frames = int(T / dt)
         for _ in range(n_frames):
             wp.capture_launch(graph)
-        wp.synchronize_device(device)
         positions = world.particles.position.numpy()
         self.assertTrue(np.isfinite(positions).all())
         final_mean_z = float(positions[:, 2].mean())
@@ -218,7 +216,6 @@ class TestSoftHexahedron(unittest.TestCase):
         graph = _capture_step_graph(world, dt, device)
         for _ in range(120):  # 2 s at 60 Hz
             wp.capture_launch(graph)
-        wp.synchronize_device(device)
         positions = world.particles.position.numpy()
         self.assertTrue(np.isfinite(positions).all())
 

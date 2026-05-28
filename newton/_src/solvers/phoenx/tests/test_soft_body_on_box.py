@@ -34,7 +34,6 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 class TestSoftBodyOnBox(unittest.TestCase):
     def test_soft_cube_settles_on_static_box(self):
         device = wp.get_preferred_device()
-        box_top_z = 0.1
         box_h = 0.1
 
         builder = newton.ModelBuilder()
@@ -109,7 +108,6 @@ class TestSoftBodyOnBox(unittest.TestCase):
         for _ in range(n_frames):
             world.collide(state, contacts)
             world.step(dt, contacts=contacts)
-        wp.synchronize()
 
         p_final = world.particles.position.numpy()
         self.assertTrue(np.all(np.isfinite(p_final)), "non-finite particle position")

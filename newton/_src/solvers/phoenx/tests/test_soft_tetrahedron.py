@@ -104,7 +104,6 @@ class TestSoftTetrahedronInternal(unittest.TestCase):
         p_initial = world.particles.position.numpy().copy()
         for _ in range(10):
             world.step(1.0 / 60.0)
-        wp.synchronize_device(device)
         p_final = world.particles.position.numpy()
         # Rest pose should be near-identity (no force applied, no
         # velocity, no gravity). Allow tiny float drift from the
@@ -126,7 +125,6 @@ class TestSoftTetrahedronInternal(unittest.TestCase):
         n_frames = int(T / dt)
         for _ in range(n_frames):
             world.step(dt)
-        wp.synchronize_device(device)
         p_final = world.particles.position.numpy()
         self.assertTrue(np.all(np.isfinite(p_final)), "non-finite particle position after free fall")
         final_mean_z = float(p_final[:, 2].mean())
@@ -151,7 +149,6 @@ class TestSoftTetrahedronInternal(unittest.TestCase):
             world.step(1.0 / 60.0)
         for _ in range(5):
             wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
         self.assertTrue(np.all(np.isfinite(world.particles.position.numpy())))
 
 

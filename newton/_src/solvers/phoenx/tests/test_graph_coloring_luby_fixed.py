@@ -122,7 +122,6 @@ def _run_luby(
     p = FixedIterationLubyPartitioner(**kwargs)
     p.reset(elements, num_elements_arr)
     p.build_csr()
-    wp.synchronize_device(device)
 
     num_colors = int(p.num_colors.numpy()[0])
     starts = p.color_starts.numpy().copy()

@@ -280,7 +280,6 @@ class TestSoftBodyMassSplittingMomentum(unittest.TestCase):
 
         for _ in range(_SETTLE_FRAMES):
             scene.step()
-        wp.synchronize_device(device)
 
         p = scene.world.particles.position.numpy()
         self.assertTrue(np.all(np.isfinite(p)), "non-finite particle position after settle")

@@ -93,10 +93,9 @@ class TestClothBending(unittest.TestCase):
     def test_bending_constraint_runs(self):
         # Bare smoke test: cloth with bending constraints runs without
         # NaN, settles under gravity (pinned on one edge).
-        world, model, device = self._build_cloth(bending_stiffness=1.0)
+        world, _, _ = self._build_cloth(bending_stiffness=1.0)
         for _ in range(60):
             world.step(1.0 / 60.0)
-        wp.synchronize_device(device)
         p = world.particles.position.numpy()
         self.assertTrue(np.all(np.isfinite(p)), "non-finite particle position after stepping")
 
@@ -105,13 +104,11 @@ class TestClothBending(unittest.TestCase):
         # near-flat (no folding) even under gravity. The dihedral-angle
         # constraint pulls every hinge back toward its rest angle (0
         # for the flat cloth grid here).
-        device = wp.get_preferred_device()
-        world_soft, model_soft, _ = self._build_cloth(bending_stiffness=0.01)
-        world_stiff, model_stiff, _ = self._build_cloth(bending_stiffness=1.0e6)
+        world_soft, _, _ = self._build_cloth(bending_stiffness=0.01)
+        world_stiff, _, _ = self._build_cloth(bending_stiffness=1.0e6)
         for _ in range(30):
             world_soft.step(1.0 / 60.0)
             world_stiff.step(1.0 / 60.0)
-        wp.synchronize_device(device)
         p_soft = world_soft.particles.position.numpy()
         p_stiff = world_stiff.particles.position.numpy()
         self.assertTrue(np.all(np.isfinite(p_soft)))
@@ -130,13 +127,12 @@ class TestClothBending(unittest.TestCase):
         )
 
     def test_runs_under_graph_capture(self):
-        world, model, device = self._build_cloth(bending_stiffness=1.0)
+        world, _, device = self._build_cloth(bending_stiffness=1.0)
         world.step(1.0 / 60.0)  # warm-up
         with wp.ScopedCapture(device=device) as capture:
             world.step(1.0 / 60.0)
         for _ in range(5):
             wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
         self.assertTrue(np.all(np.isfinite(world.particles.position.numpy())))
 
 

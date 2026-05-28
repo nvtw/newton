@@ -172,7 +172,6 @@ class TestPicking(unittest.TestCase):
         # Zero velocity baseline so we measure the impulse cleanly.
         world.particles.velocity.zero_()
         picking.apply_force(dt=1.0 / 60.0)
-        wp.synchronize_device(device)
         v_after = world.particles.velocity.numpy()
         inv_mass = world.particles.inverse_mass.numpy()
         tri_indices = model.tri_indices.numpy()
@@ -198,7 +197,6 @@ class TestPicking(unittest.TestCase):
         world.bodies.force.zero_()
         world.bodies.torque.zero_()
         picking.apply_force(dt=1.0 / 60.0)
-        wp.synchronize_device(device)
         self.assertTrue(np.all(world.particles.velocity.numpy() == 0.0))
         self.assertTrue(np.all(world.bodies.force.numpy() == 0.0))
         self.assertTrue(np.all(world.bodies.torque.numpy() == 0.0))

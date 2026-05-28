@@ -97,7 +97,6 @@ def _extract_via_kernel(F_list, q_init_list, max_iters, device) -> np.ndarray:
         outputs=[q_out_arr],
         device=device,
     )
-    wp.synchronize_device(device)
     return q_out_arr.numpy()
 
 
@@ -142,7 +141,7 @@ class TestExtractRotationAPD(unittest.TestCase):
         angles = [0.2, -0.5, 0.7, 1.1, -1.3]
         Fs, qs_init = [], []
         Rs_known = []
-        for axis, ang in zip(axes, angles):
+        for axis, ang in zip(axes, angles, strict=True):
             q_known = _axis_angle_to_quat(axis, ang)
             R = _quat_to_matrix(q_known.astype(np.float64))
             Rs_known.append(R)
@@ -179,7 +178,7 @@ class TestExtractRotationAPD(unittest.TestCase):
             np.array([[0.95, -0.1, 0.05], [-0.1, 1.05, -0.05], [0.05, -0.05, 1.0]]),
         ]
         Fs, qs_init, Rs_known = [], [], []
-        for axis, ang, S in zip(axes, angles, stretches):
+        for axis, ang, S in zip(axes, angles, stretches, strict=True):
             q_known = _axis_angle_to_quat(axis, ang)
             R = _quat_to_matrix(q_known.astype(np.float64))
             F = R @ S

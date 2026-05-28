@@ -202,7 +202,6 @@ class TestSelfContactFilter(unittest.TestCase):
             ],
             device=device,
         )
-        wp.synchronize_device()
 
         cols = pair_columns.numpy()
         # Pair 0 (self-contact on body 1) must be dropped; pair 1
@@ -245,7 +244,6 @@ class TestSelfContactFilter(unittest.TestCase):
             ],
             device=device,
         )
-        wp.synchronize_device()
         self.assertEqual(int(pair_columns.numpy()[0]), 0)
 
 

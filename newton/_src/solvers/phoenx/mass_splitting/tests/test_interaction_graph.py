@@ -204,7 +204,6 @@ class TestInteractionGraphBuild(unittest.TestCase):
         with wp.ScopedCapture(device=device) as capture:
             build_interaction_graph(scratch, cs)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
 
         self.assertEqual(int(cs.highest_index_in_use.numpy()[0]), 0)
         np.testing.assert_array_equal(cs.section_end.numpy(), 0)
@@ -240,14 +239,12 @@ class TestInteractionGraphBuild(unittest.TestCase):
         # Launch with original seed.
         _seed_pairs_direct(scratch, [(0, 1), (1, 2), (2, 3), (3, 4)], device)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
         np.testing.assert_array_equal(cs.section_end.numpy(), [1, 2, 3, 4])
         self.assertEqual(int(cs.highest_index_in_use.numpy()[0]), 4)
 
         # Re-seed differently and relaunch the SAME captured graph.
         _seed_pairs_direct(scratch, [(0, 7), (0, 8), (3, 0)], device)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
         np.testing.assert_array_equal(cs.section_end.numpy(), [2, 2, 2, 3])
         self.assertEqual(int(cs.highest_index_in_use.numpy()[0]), 3)
 

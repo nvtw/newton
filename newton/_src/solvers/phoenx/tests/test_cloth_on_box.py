@@ -105,7 +105,6 @@ class TestClothOnBox(unittest.TestCase):
         for _ in range(n_frames):
             world.collide(state, contacts)
             world.step(1.0 / 60.0, contacts=contacts)
-        wp.synchronize()
 
         p_final = world.particles.position.numpy()
         self.assertTrue(np.all(np.isfinite(p_final)), "non-finite particle position")

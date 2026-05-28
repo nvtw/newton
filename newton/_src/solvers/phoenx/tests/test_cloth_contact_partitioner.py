@@ -141,7 +141,6 @@ class TestClothContactPartitioner(unittest.TestCase):
         world._rebuild_elements()
         world._partitioner.reset(world._elements, world._num_active_constraints)
         world._partitioner.build_csr_greedy_with_jp_fallback()
-        wp.synchronize()
 
         n_active = int(world._num_active_constraints.numpy()[0])
         n_colors = int(world._partitioner.num_colors.numpy()[0])
@@ -182,7 +181,7 @@ class TestClothContactPartitioner(unittest.TestCase):
             sets = []
             for cid in cids_in_color:
                 arr = elements[cid]["bodies"]
-                sets.append((int(cid), set(int(x) for x in arr if int(x) >= 0)))
+                sets.append((int(cid), {int(x) for x in arr if int(x) >= 0}))
             for i in range(len(sets)):
                 for j in range(i + 1, len(sets)):
                     ci, ni = sets[i]

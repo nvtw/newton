@@ -297,7 +297,6 @@ def _read_probe_velocity(bodies, particles, copy_state, node_id, parallel_id, nu
         ],
         device=device,
     )
-    wp.synchronize_device(device)
     return out_v.numpy()[0], int(out_f.numpy()[0]), int(out_s.numpy()[0])
 
 
@@ -406,7 +405,6 @@ class TestAccessRouting(unittest.TestCase):
             ],
             device=device,
         )
-        wp.synchronize_device(device)
         self.assertEqual(int(out_s.numpy()[0]), 1)
         np.testing.assert_allclose(out_v.numpy()[0], [21.0, 0.0, 0.0])
 
@@ -431,7 +429,6 @@ class TestAccessRouting(unittest.TestCase):
             ],
             device=device,
         )
-        wp.synchronize_device(device)
         self.assertEqual(int(out_s.numpy()[0]), 4)
         np.testing.assert_allclose(out_w.numpy()[0], [34.0, 0.0, 0.0])
 
@@ -456,7 +453,6 @@ class TestAccessRouting(unittest.TestCase):
             ],
             device=device,
         )
-        wp.synchronize_device(device)
         self.assertEqual(int(out_s.numpy()[0]), 0)
         np.testing.assert_allclose(out_q.numpy()[0], [0.0, 0.0, 0.0, 40.0])
 
@@ -479,7 +475,6 @@ class TestAccessRouting(unittest.TestCase):
             ],
             device=device,
         )
-        wp.synchronize_device(device)
         np.testing.assert_allclose(out_v.numpy()[0], [99.0, 88.0, 77.0])
         # Body 1's direct velocity should be unchanged (writeback went to slot).
         np.testing.assert_allclose(bodies.velocity.numpy()[1], [0.0, 0.7, 0.0])
@@ -506,7 +501,6 @@ class TestAccessRouting(unittest.TestCase):
             ],
             device=device,
         )
-        wp.synchronize_device(device)
         np.testing.assert_allclose(bodies.velocity.numpy()[1], [55.0, 66.0, 77.0])
         np.testing.assert_allclose(out_v.numpy()[0], [55.0, 66.0, 77.0])
 
@@ -529,7 +523,6 @@ class TestAccessRouting(unittest.TestCase):
             ],
             device=device,
         )
-        wp.synchronize_device(device)
         np.testing.assert_allclose(particles.velocity.numpy()[0], [7.7, 8.8, 9.9])
 
     def test_graph_capture_safe(self):

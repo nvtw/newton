@@ -210,7 +210,6 @@ class TestMassSplittingSolverWiring(unittest.TestCase):
         device = wp.get_preferred_device()
         world = _make_minimal_world(mass_splitting=False, device=device)
         world.step(0.01)
-        wp.synchronize_device(device)
         self.assertEqual(int(world._copy_state.highest_index_in_use.numpy()[0]), 0)
         self.assertEqual(int(world._interaction_graph_scratch.num_pairs.numpy()[0]), 0)
 
@@ -317,7 +316,6 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
             _sync_newton_to_phoenx(model, state, world.bodies, world.device)
             model.collide(state, contacts=contacts, collision_pipeline=collision_pipeline)
             world.step(dt=dt, contacts=contacts, shape_body=shape_body)
-        wp.synchronize_device(world.device)
         return world.bodies.position.numpy().copy(), world.bodies.velocity.numpy().copy()
 
     def test_single_box_on_plane_matches_disabled(self):
@@ -457,7 +455,6 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         for _ in range(30):
             solver0.step(state0, state0, control=None, contacts=contacts0, dt=1.0 / 60.0)
             solver1.step(state1, state1, control=None, contacts=contacts1, dt=1.0 / 60.0)
-        wp.synchronize_device(device)
         q0 = state0.body_q.numpy()
         q1 = state1.body_q.numpy()
         np.testing.assert_allclose(q1, q0, rtol=1e-3, atol=1e-3)
@@ -540,7 +537,6 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
             w0.step(1.0 / 60.0, contacts=c0)
             w1.collide(s1, c1)
             w1.step(1.0 / 60.0, contacts=c1)
-        wp.synchronize_device(device)
         p0 = w0.particles.position.numpy()
         p1 = w1.particles.position.numpy()
         # Cloth particles should land at the same height (within float
@@ -569,7 +565,6 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         # that no kernel crashes and bodies fall.
         for _ in range(5):
             wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
         pos = world.bodies.position.numpy()
         # Bodies should have moved downward from their initial z (>= 0.55).
         self.assertLess(float(pos[1][2]), 1.0)

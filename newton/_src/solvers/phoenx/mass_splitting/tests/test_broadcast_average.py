@@ -163,7 +163,6 @@ class TestBroadcastAverage(unittest.TestCase):
         with wp.ScopedCapture(device=device) as capture:
             launch_average_and_broadcast(cs, bodies, particles, num_bodies, 1.0 / dt)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
 
         vel = cs.velocity.numpy()
         ang = cs.angular_velocity.numpy()
@@ -204,7 +203,6 @@ class TestBroadcastAverage(unittest.TestCase):
         sum_b1_w_before = ang_h[2:5].sum(axis=0)
 
         launch_average_and_broadcast(cs, bodies, particles, num_bodies, 1.0 / dt)
-        wp.synchronize_device(device)
 
         vel_after = cs.velocity.numpy()
         ang_after = cs.angular_velocity.numpy()
@@ -241,7 +239,6 @@ class TestBroadcastAverage(unittest.TestCase):
 
         launch_average_and_broadcast(cs_scalar, bodies, particles, num_bodies, 1.0 / dt)
         launch_average_and_broadcast_rigid_velocity(cs_rigid, bodies, particles, num_bodies, 1.0 / dt)
-        wp.synchronize_device(device)
 
         np.testing.assert_array_equal(cs_rigid.velocity.numpy()[:5], cs_scalar.velocity.numpy()[:5])
         np.testing.assert_array_equal(cs_rigid.angular_velocity.numpy()[:5], cs_scalar.angular_velocity.numpy()[:5])
@@ -299,7 +296,6 @@ class TestBroadcastAverage(unittest.TestCase):
         inv_dt = 100.0
         launch_average_and_broadcast(cs_scalar, bodies, particles, num_bodies, inv_dt)
         launch_average_and_broadcast_grouped(cs_grouped, bodies, particles, num_bodies, inv_dt)
-        wp.synchronize_device(device)
 
         np.testing.assert_array_equal(cs_grouped.access_mode.numpy()[:8], cs_scalar.access_mode.numpy()[:8])
         np.testing.assert_array_equal(cs_grouped.velocity.numpy()[:8], cs_scalar.velocity.numpy()[:8])
@@ -318,7 +314,6 @@ class TestBroadcastAverage(unittest.TestCase):
 
         launch_broadcast_rigid_to_copy_states(cs, bodies, particles, num_bodies, dt)
         launch_copy_state_into_rigids(cs, bodies, particles, num_bodies, 1.0 / dt)
-        wp.synchronize_device(device)
 
         np.testing.assert_allclose(bodies.velocity.numpy(), v_orig)
         np.testing.assert_allclose(bodies.angular_velocity.numpy(), w_orig)
@@ -374,7 +369,6 @@ class TestBroadcastAverage(unittest.TestCase):
         cs.velocity.assign(vel_h)
 
         launch_copy_state_into_rigids(cs, bodies, particles, num_bodies, 1.0 / dt)
-        wp.synchronize_device(device)
 
         np.testing.assert_array_equal(bodies.velocity.numpy()[0], v_orig_b0)
 
