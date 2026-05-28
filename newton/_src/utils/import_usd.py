@@ -12,7 +12,7 @@ import os
 import posixpath
 import re
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin
 
@@ -2651,6 +2651,101 @@ def parse_usd(
                     shape_kd = builder.default_shape_cfg.kd
 
                 shape_color = material_props.get("color")
+
+                # SDF parameters. Applying NewtonSDFCollisionAPI is the canonical
+                # signal that SDF generation is configured for this shape.
+                has_sdf_api = prim.HasAPI("NewtonSDFCollisionAPI")
+
+                # Resolve target_voxel_size first because it overrides
+                # sdf_max_resolution and the two are mutually exclusive in
+                # ShapeConfig.validate().
+                sdf_target_voxel_size = R.get_value(
+                    prim, prim_type=PrimType.SHAPE, key="sdf_target_voxel_size", verbose=verbose
+                )
+                # Schema sentinel is -inf meaning "use sdfMaxResolution instead";
+                # the <= 0 check also rejects any authored non-positive value as
+                # out of the documented (0, inf) range.
+                if sdf_target_voxel_size is not None and sdf_target_voxel_size <= 0:
+                    sdf_target_voxel_size = None
+                if sdf_target_voxel_size is None:
+                    sdf_target_voxel_size = builder.default_shape_cfg.sdf_target_voxel_size
+
+                sdf_max_resolution = R.get_value(
+                    prim, prim_type=PrimType.SHAPE, key="sdf_max_resolution", verbose=verbose
+                )
+                if sdf_max_resolution is None:
+                    # When the API is applied but neither attribute is authored,
+                    # fall back to the schema default (64). When target voxel
+                    # size already drives the resolution, leave max_resolution
+                    # unset so the two don't conflict in ShapeConfig.validate().
+                    if has_sdf_api and sdf_target_voxel_size is None:
+                        sdf_max_resolution = 64
+                    else:
+                        sdf_max_resolution = builder.default_shape_cfg.sdf_max_resolution
+
+                sdf_narrow_band_inner = R.get_value(
+                    prim, prim_type=PrimType.SHAPE, key="sdf_narrow_band_inner", verbose=verbose
+                )
+                sdf_narrow_band_outer = R.get_value(
+                    prim, prim_type=PrimType.SHAPE, key="sdf_narrow_band_outer", verbose=verbose
+                )
+                default_nb = builder.default_shape_cfg.sdf_narrow_band_range
+                sdf_narrow_band_range = (
+                    sdf_narrow_band_inner if sdf_narrow_band_inner is not None else default_nb[0],
+                    sdf_narrow_band_outer if sdf_narrow_band_outer is not None else default_nb[1],
+                )
+
+                sdf_texture_format = R.get_value(
+                    prim, prim_type=PrimType.SHAPE, key="sdf_texture_format", verbose=verbose
+                )
+                if sdf_texture_format is None:
+                    sdf_texture_format = builder.default_shape_cfg.sdf_texture_format
+
+                sdf_padding = R.get_value(prim, prim_type=PrimType.SHAPE, key="sdf_padding", verbose=verbose)
+                if sdf_padding == float("-inf"):
+                    # Schema sentinel: builder.finalize falls back to shape_gap
+                    # when ShapeConfig.sdf_padding is None.
+                    sdf_padding = None
+
+                # Hydroelastic is opt-in via newton:hydroelasticEnabled on the
+                # NewtonSDFCollisionAPI. newton:hydroelasticStiffness alone is
+                # a material parameter and does NOT flip the feature on —
+                # users must explicitly set the enable bool to true.
+                hydroelastic_enabled = R.get_value(
+                    prim, prim_type=PrimType.SHAPE, key="hydroelastic_enabled", verbose=verbose
+                )
+                kh = R.get_value(prim, prim_type=PrimType.SHAPE, key="kh", verbose=verbose)
+                if hydroelastic_enabled is True:
+                    is_hydroelastic = True
+                elif hydroelastic_enabled is False:
+                    is_hydroelastic = False
+                elif has_sdf_api:
+                    # The API is applied but newton:hydroelasticEnabled is
+                    # unauthored: the schema default (False) is the canonical
+                    # signal — overriding it via builder.default_shape_cfg
+                    # would silently flip hydro on for every API-applied shape.
+                    is_hydroelastic = False
+                else:
+                    is_hydroelastic = builder.default_shape_cfg.is_hydroelastic
+                if kh is None:
+                    kh = builder.default_shape_cfg.kh
+
+                # Early validation: hydroelastic meshes need an SDF source.
+                # For primitives, a texture SDF is generated from a synthesized
+                # watertight mesh at finalize(), but meshes require either an
+                # attached mesh.sdf or a resolution/voxel_size so one can be
+                # built deferred.
+                if (
+                    is_hydroelastic
+                    and key == UsdPhysics.ObjectType.MeshShape
+                    and sdf_max_resolution is None
+                    and sdf_target_voxel_size is None
+                ):
+                    raise ValueError(
+                        f"{prim.GetPath()}: hydroelastic mesh requires newton:sdfMaxResolution "
+                        f"or newton:sdfTargetVoxelSize so an SDF can be generated."
+                    )
+
                 shape_params = {
                     "body": body_id,
                     "xform": shape_xform,
@@ -2672,6 +2767,13 @@ def parse_usd(
                         density=shape_density,
                         collision_group=collision_group,
                         is_visible=collider_is_visible,
+                        sdf_max_resolution=sdf_max_resolution,
+                        sdf_narrow_band_range=sdf_narrow_band_range,
+                        sdf_target_voxel_size=sdf_target_voxel_size,
+                        sdf_texture_format=sdf_texture_format,
+                        sdf_padding=sdf_padding,
+                        is_hydroelastic=is_hydroelastic,
+                        kh=kh,
                     ),
                     "label": path,
                     "custom_attributes": shape_custom_attrs,
@@ -2748,11 +2850,44 @@ def parse_usd(
                         default=mesh_maxhullvert,
                         verbose=verbose,
                     )
+                    # add_shape_mesh() rejects SDF params in ShapeConfig for meshes,
+                    # so we strip SDF fields and pass a clean cfg. SDF building is
+                    # deferred to finalize() where instances can be deduplicated.
+                    # We write SDF params directly to the builder's per-shape lists
+                    # after the shape is added. Validate the SDF fields here so
+                    # invalid values (e.g. sdf_max_resolution not divisible by 8,
+                    # unknown sdf_texture_format) are caught before stripping
+                    # bypasses ShapeConfig.validate. shape_type=None skips the
+                    # hydroelastic-requires-SDF check (which only fires for
+                    # primitives) while still running the SDF-format checks.
+                    shape_params["cfg"].validate(shape_type=None)
+                    mesh_shape_params = dict(shape_params)
+                    mesh_shape_params["cfg"] = replace(
+                        shape_params["cfg"],
+                        sdf_max_resolution=None,
+                        sdf_target_voxel_size=None,
+                        sdf_narrow_band_range=(-0.1, 0.1),
+                        sdf_texture_format="uint16",
+                        sdf_padding=None,
+                        is_hydroelastic=False,
+                    )
                     shape_id = builder.add_shape_mesh(
                         scale=wp.vec3(*shape_spec.meshScale),
                         mesh=mesh,
-                        **shape_params,
+                        **mesh_shape_params,
                     )
+                    # Store SDF intent on the builder (deferred to finalize).
+                    builder.shape_sdf_max_resolution[shape_id] = sdf_max_resolution
+                    builder.shape_sdf_target_voxel_size[shape_id] = sdf_target_voxel_size
+                    builder.shape_sdf_narrow_band_range[shape_id] = sdf_narrow_band_range
+                    builder.shape_sdf_texture_format[shape_id] = sdf_texture_format
+                    builder.shape_sdf_padding[shape_id] = sdf_padding
+                    # kh is a material parameter; persist it regardless of
+                    # hydroelastic state so overrides survive even when hydro
+                    # is disabled.
+                    builder.shape_material_kh[shape_id] = kh
+                    if is_hydroelastic:
+                        builder.shape_flags[shape_id] |= ShapeFlags.HYDROELASTIC
                     if not skip_mesh_approximation:
                         approximation = usd.get_attribute(prim, "physics:approximation", None)
                         if approximation is not None:
