@@ -66,15 +66,16 @@ def cloth_predict_kernel(
     integrates the same expression, so a subsequent constraint flip
     to ``POSITION_LEVEL`` is consistent with the predicted state.
 
-    Particles with ``inverse_mass == 0`` get ``access_mode = STATIC``
-    so synchronize is a no-op on them; the snapshot anchors them in
-    place.
+    Particles with ``inverse_mass == 0`` get ``access_mode = STATIC``.
+    Nonzero velocity advances them kinematically; zero velocity keeps
+    ordinary pinned particles anchored.
     """
     i = wp.tid()
     p = particles.position[i]
     particles.position_prev_substep[i] = p
     if particles.inverse_mass[i] == wp.float32(0.0):
         particles.access_mode[i] = ACCESS_MODE_STATIC
+        particles.position[i] = p + substep_dt * particles.velocity[i]
         return
     particles.access_mode[i] = ACCESS_MODE_VELOCITY_LEVEL
     v = particles.velocity[i] + gravity[0] * substep_dt

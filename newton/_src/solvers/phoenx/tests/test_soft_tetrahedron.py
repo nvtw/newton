@@ -89,6 +89,22 @@ def _build_phoenx_world_for_soft_cube(
     return world
 
 
+def _total_tet_volume(model, positions: np.ndarray) -> float:
+    tet_indices = model.tet_indices.numpy().reshape(-1, 4)
+    volume = 0.0
+    for a, b, c, d in tet_indices:
+        xa = positions[a]
+        xb = positions[b]
+        xc = positions[c]
+        xd = positions[d]
+        volume += abs(float(np.dot(xb - xa, np.cross(xc - xa, xd - xa)))) / 6.0
+    return volume
+
+
+def _volume_error(model, positions: np.ndarray, rest_volume: float) -> float:
+    return abs(_total_tet_volume(model, positions) - rest_volume) / rest_volume
+
+
 @unittest.skipUnless(
     wp.get_preferred_device().is_cuda,
     "PhoenX soft-body tests are CUDA-only.",
@@ -135,6 +151,27 @@ class TestSoftTetrahedronInternal(unittest.TestCase):
         # accumulates a small explicit-Euler bias; tight tolerance
         # would be 1%).
         self.assertAlmostEqual(actual_drop, expected_drop, delta=0.1 * expected_drop)
+
+    def test_volume_stiffness_controls_volume_recovery(self):
+        device = wp.get_preferred_device()
+
+        def run(k_lambda: float) -> float:
+            model = _build_soft_cube(k_mu=1.0e2, k_lambda=k_lambda)
+            world = _build_phoenx_world_for_soft_cube(model, device, gravity=(0.0, 0.0, 0.0))
+            rest = world.particles.position.numpy().copy()
+            rest_volume = _total_tet_volume(model, rest)
+            center = rest.mean(axis=0)
+            compressed = center + (rest - center) * np.array([1.0, 1.0, 0.65], dtype=np.float32)
+            compressed_wp = wp.array(compressed, dtype=wp.vec3f, device=device)
+            wp.copy(world.particles.position, compressed_wp)
+            wp.copy(world.particles.position_prev_substep, compressed_wp)
+            for _ in range(30):
+                world.step(1.0 / 120.0)
+            return _volume_error(model, world.particles.position.numpy(), rest_volume)
+
+        low_error = run(1.0e2)
+        high_error = run(1.0e7)
+        self.assertLess(high_error, 0.6 * low_error)
 
     def test_runs_under_graph_capture(self):
         # Load-bearing capture-safety check: the soft-tet prepare /

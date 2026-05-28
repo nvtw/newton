@@ -87,10 +87,7 @@ def _animate_right_face_kernel(
         target = wp.vec3(rest[0], center_y + y * c - z * s, center_z + y * s + z * c)
 
     velocity = (target - previous) * inv_dt
-    particles.position[particle_id] = target
-    particles.position_prev_substep[particle_id] = previous
     particles.velocity[particle_id] = velocity
-    state_q[particle_id] = target
     state_qd[particle_id] = velocity
 
 
@@ -218,14 +215,13 @@ class SoftBeamExample:
             mass_splitting_unrolled=True,
             max_thread_blocks=max_thread_blocks,
             mass_splitting_batch_size=1,
-            sor_boost=0.1,
             partitioner_algorithm="greedy",
             device=self.device,
         )
         self.world.gravity.assign(np.array([[0.0, 0.0, 0.0]], dtype=np.float32))
         self.world.populate_soft_tetrahedra_from_model(
             self.model,
-            constraint_type=SoftBodyConstraintType.BLOCK_NEOHOOKEAN,
+            constraint_type=SoftBodyConstraintType.ARAP,
             beta_lambda=float(beta),
             beta_mu=float(beta),
         )

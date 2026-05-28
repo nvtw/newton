@@ -8,6 +8,7 @@ from __future__ import annotations
 import warp as wp
 
 __all__ = [
+    "deformation_gradient_determinant_cofactor",
     "neohookean_constraints_from_F",
     "neohookean_is_rest_manifold",
     "tet_chain_rule_gradients",
@@ -69,21 +70,15 @@ def tet_chain_rule_gradients(
 
 
 @wp.func
-def neohookean_constraints_from_F(
-    F: wp.mat33f,
-    gamma_offset: wp.float32,
-    dev_eps: wp.float32,
-):
-    """Return block Neo-Hookean constraints and ``dC/dF`` matrices."""
+def deformation_gradient_determinant_cofactor(F: wp.mat33f):
+    """Return det(F) and its cofactor gradient d det(F) / dF."""
     f0 = wp.vec3f(F[0, 0], F[1, 0], F[2, 0])
     f1 = wp.vec3f(F[0, 1], F[1, 1], F[2, 1])
     f2 = wp.vec3f(F[0, 2], F[1, 2], F[2, 2])
-
     cof0 = wp.cross(f1, f2)
     cof1 = wp.cross(f2, f0)
     cof2 = wp.cross(f0, f1)
-    c_h = wp.dot(f0, cof0) - gamma_offset
-    dCH_dF = wp.mat33f(
+    cofactor = wp.mat33f(
         cof0[0],
         cof1[0],
         cof2[0],
@@ -94,6 +89,22 @@ def neohookean_constraints_from_F(
         cof1[2],
         cof2[2],
     )
+    return wp.dot(f0, cof0), cofactor
+
+
+@wp.func
+def neohookean_constraints_from_F(
+    F: wp.mat33f,
+    gamma_offset: wp.float32,
+    dev_eps: wp.float32,
+):
+    """Return block Neo-Hookean constraints and ``dC/dF`` matrices."""
+    f0 = wp.vec3f(F[0, 0], F[1, 0], F[2, 0])
+    f1 = wp.vec3f(F[0, 1], F[1, 1], F[2, 1])
+    f2 = wp.vec3f(F[0, 2], F[1, 2], F[2, 2])
+
+    det_f, dCH_dF = deformation_gradient_determinant_cofactor(F)
+    c_h = det_f - gamma_offset
 
     i_c = (
         f0[0] * f0[0]

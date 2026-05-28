@@ -3,10 +3,9 @@
 
 """Position-level XPBD soft-tetrahedron constraint.
 
-Uses one co-rotated ARAP row, ``C = V_rest * ||F - R||_F``, with a
-warm-started analytical polar decomposition. The volume row is reserved
-but inactive; use the block Neo-Hookean variant when volume preservation
-matters under large deformation.
+Uses a corotated ARAP shear row and a standard volume row
+``C = V_rest * (det(F) - 1)``. The split mirrors PhysX high-stiffness
+corotational soft-body solves.
 """
 
 from __future__ import annotations
@@ -29,6 +28,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_quat,
 )
 from newton._src.solvers.phoenx.constraints.soft_body_math import (
+    deformation_gradient_determinant_cofactor,
     tet_chain_rule_gradients,
     tet_deformation_gradient,
 )
@@ -115,7 +115,7 @@ class SoftTetrahedronData:
     inv_rest: wp.mat33f
     rest_volume: wp.float32
 
-    alpha_lambda: wp.float32  # 1 / Lame lambda (volume compliance, reserved)
+    alpha_lambda: wp.float32  # 1 / Lame lambda (volume compliance)
     alpha_mu: wp.float32  # 1 / Lame mu (shear compliance)
 
     # Macklin XPBD damping coefficients. ``gamma = beta * dt`` enters
@@ -125,7 +125,7 @@ class SoftTetrahedronData:
     # damping term (Macklin et al. 2020 "Detailed Rigid Body
     # Simulation with XPBD"). Jitter2 ``FemTetPBD`` omits this term;
     # Newton's variant collapses to bare XPBD when ``beta == 0``.
-    beta_lambda: wp.float32  # PD damping on volume row (reserved -- volume row not yet implemented)
+    beta_lambda: wp.float32  # PD damping on volume row
     beta_mu: wp.float32  # PD damping on shear row
 
     inv_mass_a: wp.float32
@@ -134,7 +134,7 @@ class SoftTetrahedronData:
     inv_mass_d: wp.float32
 
     rotation: wp.quatf  # corotational warm-start (3D analogue of cloth's scalar angle)
-    lambda_sum_lambda: wp.float32  # volume row accumulator (reserved)
+    lambda_sum_lambda: wp.float32  # volume row accumulator
     lambda_sum_mu: wp.float32  # shear row accumulator
 
     #: Opt-in per-column wall-clock accumulator (microseconds). See
@@ -480,9 +480,12 @@ def soft_tetrahedron_iterate_at(
     inv_mass_d = read_float(constraints, _OFF_INV_MASS_D, cid)
     inv_rest = read_mat33(constraints, _OFF_INV_REST, cid)
     rest_volume = read_float(constraints, _OFF_REST_VOLUME, cid)
+    alpha_lambda = read_float(constraints, _OFF_ALPHA_LAMBDA, cid)
     alpha_mu = read_float(constraints, _OFF_ALPHA_MU, cid)
+    beta_lambda = read_float(constraints, _OFF_BETA_LAMBDA, cid)
     beta_mu = read_float(constraints, _OFF_BETA_MU, cid)
     rotation = read_quat(constraints, _OFF_ROTATION, cid)
+    lambda_sum_lambda = read_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid)
     lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
 
     x_a = read_particle_position_with_slot(particles, copy_state, p_a, slot_a)
@@ -564,12 +567,47 @@ def soft_tetrahedron_iterate_at(
         x_d = x_d + (d_lam * inv_mass_d) * g_d
         lambda_sum_mu = lambda_sum_mu + d_lam
 
+    F = tet_deformation_gradient(x_a, x_b, x_c, x_d, inv_rest)
+    det_f, dJ_dF = deformation_gradient_determinant_cofactor(F)
+    c_volume = rest_volume * (det_f - wp.float32(1.0))
+    dCdF_volume = rest_volume * dJ_dF
+    g_a, g_b, g_c, g_d = tet_chain_rule_gradients(dCdF_volume, inv_rest)
+
+    bias_lambda = idt_sq * alpha_lambda
+    gamma_lambda = beta_lambda * dt
+
+    grad_dot_dx = wp.float32(0.0)
+    if beta_lambda != wp.float32(0.0):
+        dx_a = x_a - particles.position_prev_substep[p_a]
+        dx_b = x_b - particles.position_prev_substep[p_b]
+        dx_c = x_c - particles.position_prev_substep[p_c]
+        dx_d = x_d - particles.position_prev_substep[p_d]
+        grad_dot_dx = wp.dot(g_a, dx_a) + wp.dot(g_b, dx_b) + wp.dot(g_c, dx_c) + wp.dot(g_d, dx_d)
+
+    grad2_im = (
+        inv_mass_a * wp.dot(g_a, g_a)
+        + inv_mass_b * wp.dot(g_b, g_b)
+        + inv_mass_c * wp.dot(g_c, g_c)
+        + inv_mass_d * wp.dot(g_d, g_d)
+    )
+    denom = (wp.float32(1.0) + gamma_lambda) * grad2_im + bias_lambda
+
+    if denom > wp.float32(0.0):
+        d_lam = -(c_volume + bias_lambda * lambda_sum_lambda + gamma_lambda * grad_dot_dx) / denom
+        d_lam = d_lam * sor_boost
+        x_a = x_a + (d_lam * inv_mass_a) * g_a
+        x_b = x_b + (d_lam * inv_mass_b) * g_b
+        x_c = x_c + (d_lam * inv_mass_c) * g_c
+        x_d = x_d + (d_lam * inv_mass_d) * g_d
+        lambda_sum_lambda = lambda_sum_lambda + d_lam
+
     write_particle_position_with_slot(particles, copy_state, p_a, slot_a, x_a)
     write_particle_position_with_slot(particles, copy_state, p_b, slot_b, x_b)
     write_particle_position_with_slot(particles, copy_state, p_c, slot_c, x_c)
     write_particle_position_with_slot(particles, copy_state, p_d, slot_d, x_d)
 
     write_quat(constraints, _OFF_ROTATION, cid, rotation)
+    write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, lambda_sum_lambda)
     write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, lambda_sum_mu)
 
 
