@@ -84,7 +84,7 @@ GRID_DIMS_DEFAULT: tuple[int, int] = (80, 80)
 # runs, so we exit explicitly after this many simulation steps. Bump
 # (or set ``MAX_FRAMES = 10**9``) if you want the example to run
 # indefinitely.
-MAX_FRAMES: int = 500
+MAX_FRAMES: int = 10**9
 # Centre-to-centre spacing [m] applied at ``scene_scale=1.0``. The
 # M20 nut/bolt assembly is ~5 cm across; 0.1 m leaves ~5 cm clearance
 # between neighbours so their SDF narrow bands don't overlap.
@@ -178,8 +178,8 @@ class Example:
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 1
-        self.solver_iterations = 10
+        self.sim_substeps = 5
+        self.solver_iterations = 8
         self._frame: int = 0
 
         # Scene-wide geometric scale. ``1.0`` matches the M20 bolt
@@ -398,10 +398,12 @@ class Example:
         # 96/cell turned out to overflow on settle frames (~97
         # contacts/pair observed at 20x20, "Contact buffer overflowed
         # 38689 > 38464"); 128/cell still tripped the warning on the
-        # 50x50 scene's settle (peaks of 129-130 contacts/pair). 160/cell
-        # gives ~25% headroom over the measured peak across all the
-        # tested grids without bloating downstream PhoenX scratch.
-        rigid_contact_max_estimate = 160 * num_pairs_total + 64
+        # 50x50 scene's settle (peaks of 129-130 contacts/pair); 160/cell
+        # still tripped on the 80x80 scene's settle (peaks of ~160.13
+        # contacts/pair, "Contact buffer overflowed 1024850 > 1024064").
+        # 192/cell gives ~20% headroom over the measured 80x80 peak
+        # without bloating downstream PhoenX scratch.
+        rigid_contact_max_estimate = 192 * num_pairs_total + 64
         shape_pairs_max_estimate = 16 * num_pairs_total + 8
         # ``max_triangle_pairs`` sizes the SDF narrow phase's GLOBAL
         # contact-reducer buffer (``GlobalContactReducer.capacity``).

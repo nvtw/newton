@@ -91,7 +91,7 @@ STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
 # world layout (the multi-world fast-tail kernels haven't been
 # refactored yet) and no joints / cloth — both true for this scene.
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 8
 
 # Tile the single ``KaplaTower2.usda`` instancer into a 2D grid centred
 # on the origin. ``(1, 1)`` reproduces the original scene; bigger
@@ -122,21 +122,30 @@ class Example:
     :class:`PhoenXWorld`, sync back.
     """
 
-    # Frames 0..WARMUP_FRAMES-1 pin global damping to 1.0 so the
-    # USD-extracted brick poses (which carry mm-scale overlaps where
-    # planks meet) don't kick the tower into divergence on frame 1.
-    WARMUP_FRAMES: int = 20
+    # Render frames 0..WARMUP_FRAMES-1 pin global damping to 1.0 so
+    # the USD-extracted brick poses (which carry mm-scale overlaps
+    # where planks meet) don't kick the tower into divergence on the
+    # first step. One render frame = ``steps_per_frame`` physics
+    # ticks, so 10 frames at 60 fps == 20 physics ticks at 120 Hz
+    # (matches the original warmup duration).
+    WARMUP_FRAMES: int = 10
 
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.args = args
         self.device = wp.get_device()
 
+        # Physics ticks at 120 Hz; rendering runs at 60 fps so each
+        # render frame advances physics by two ticks (see
+        # :meth:`simulate`). ``frame_dt`` is the per-tick dt handed to
+        # PhoenX, not the wall-clock render period.
         self.fps = 120
+        self.render_fps = 60
+        self.steps_per_frame = self.fps // self.render_fps
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.frame_index: int = 0
-        self.sim_substeps = 4
+        self.sim_substeps = 6
         # iters=3 + sor=1.5 below settles slightly *better* than the
         # vanilla iters=4 sor=1.0 at +13% FPS. Over-relaxation
         # (omega=1.5) accelerates lambda propagation through tall
@@ -144,7 +153,7 @@ class Example:
         # propagation, not friction convergence (where cone clipping
         # would eat the boost). Validated by 1000-frame stability:
         # max brick velocity 0.66 m/s vs 0.73 m/s vanilla.
-        self.solver_iterations = 10 if ENABLE_MASS_SPLITTING else 4
+        self.solver_iterations = 10 if ENABLE_MASS_SPLITTING else 6
         self.velocity_iterations = 1
 
         self._build_scene()
@@ -444,18 +453,27 @@ class Example:
                 device=self.device,
             )
         self._sync_newton_to_phoenx()
-        self.model.collide(
-            self.state,
-            contacts=self.contacts,
-            collision_pipeline=self.collision_pipeline,
-        )
-        self.picking.apply_force()
-        self.world.step(
-            dt=self.frame_dt,
-            contacts=self.contacts,
-            shape_body=self._shape_body,
-        )
-        self._sync_phoenx_to_newton()
+        # Two 120 Hz physics ticks per 60 fps render frame. Each tick
+        # needs its own narrow-phase pass because contacts evolve as
+        # bricks shift between ticks; reusing the first tick's
+        # contact set bleeds penetration and destabilises the tower.
+        # Intermediate ticks skip the Newton->PhoenX sync: PhoenX's
+        # post-step body container *is* the source of truth, and
+        # ``_sync_phoenx_to_newton`` already refreshes ``state.body_q``
+        # in time for the next ``collide`` call.
+        for _ in range(self.steps_per_frame):
+            self.model.collide(
+                self.state,
+                contacts=self.contacts,
+                collision_pipeline=self.collision_pipeline,
+            )
+            self.picking.apply_force()
+            self.world.step(
+                dt=self.frame_dt,
+                contacts=self.contacts,
+                shape_body=self._shape_body,
+            )
+            self._sync_phoenx_to_newton()
 
     def _sync_newton_to_phoenx(self) -> None:
         # Camera collider is always the last body and is driven by the
@@ -539,7 +557,7 @@ class Example:
         dump_frame_env = os.environ.get("PHOENX_DUMP_COLORING_GRAPH")
         if dump_frame_env is not None and int(dump_frame_env) == self.frame_index:
             self._dump_coloring_graph()
-        self.sim_time += self.frame_dt
+        self.sim_time += self.frame_dt * self.steps_per_frame
         self.frame_index += 1
 
     def _dump_coloring_graph(self) -> None:
