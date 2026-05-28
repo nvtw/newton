@@ -32,9 +32,9 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     greedy_scatter_elements_by_color_kernel,
     incremental_begin_sweep_kernel,
     incremental_fill_minus_one_kernel,
-    incremental_init_csr_kernel,
     incremental_init_kernel,
     incremental_init_remaining_ids_kernel,
+    incremental_reset_loop_state_csr_kernel,
     incremental_reset_loop_state_kernel,
     incremental_tile_compact_csr_and_advance_kernel,
     incremental_tile_compact_remaining_and_advance_kernel,
@@ -579,25 +579,17 @@ class IncrementalContactPartitioner:
     def _build_csr_inner(self) -> None:
         """Capture-safe body of :meth:`build_csr` (no host reads)."""
         wp.launch(
-            incremental_init_csr_kernel,
-            dim=1,
-            inputs=[
-                self._current_color,
-                self._num_remaining,
-                self._num_colors,
-                self._color_starts,
-                self._num_elements,
-            ],
-        )
-        # Reset the MAX_COLORS overflow flag for this build.
-        self._overflow_flag.zero_()
-        wp.launch(
-            incremental_reset_loop_state_kernel,
+            incremental_reset_loop_state_csr_kernel,
             dim=self.max_num_interactions,
             inputs=[
                 self._partition_data_concat,
                 self._color_tags,
                 self._interaction_id_to_partition,
+                self._current_color,
+                self._num_remaining,
+                self._num_colors,
+                self._color_starts,
+                self._overflow_flag,
                 self._num_elements,
             ],
         )
@@ -679,17 +671,6 @@ class IncrementalContactPartitioner:
     def _build_csr_greedy_inner(self) -> None:
         """Capture-safe body of :meth:`build_csr_greedy`."""
         wp.launch(
-            incremental_init_csr_kernel,
-            dim=1,
-            inputs=[
-                self._current_color,
-                self._num_remaining,
-                self._num_colors,
-                self._color_starts,
-                self._num_elements,
-            ],
-        )
-        wp.launch(
             greedy_reset_init_kernel,
             dim=int(GREEDY_MAX_COLORS),
             inputs=[
@@ -700,12 +681,17 @@ class IncrementalContactPartitioner:
             ],
         )
         wp.launch(
-            incremental_reset_loop_state_kernel,
+            incremental_reset_loop_state_csr_kernel,
             dim=self.max_num_interactions,
             inputs=[
                 self._partition_data_concat,
                 self._color_tags,
                 self._interaction_id_to_partition,
+                self._current_color,
+                self._num_remaining,
+                self._num_colors,
+                self._color_starts,
+                self._overflow_flag,
                 self._num_elements,
             ],
         )

@@ -690,21 +690,6 @@ def incremental_init_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def incremental_init_csr_kernel(
-    current_color: wp.array[int],
-    num_remaining: wp.array[int],
-    num_colors: wp.array[int],
-    color_starts: wp.array[int],
-    num_elements: wp.array[int],
-):
-    """Single-thread CSR coloring state init."""
-    current_color[0] = 0
-    num_remaining[0] = num_elements[0]
-    num_colors[0] = 0
-    color_starts[0] = 0
-
-
-@wp.kernel(enable_backward=False)
 def warm_start_periodic_invalidate_kernel(
     invalidate_counter: wp.array[int],
     cache_num_entries: wp.array[int],
@@ -801,6 +786,33 @@ def incremental_reset_loop_state_kernel(
     """Reset per-element partitioner state without touching adjacency.
     Skipped between PGS iterations since the constraint set is unchanged."""
     tid = wp.tid()
+    if tid >= num_elements[0]:
+        return
+    partition_data_concat[tid] = _UNPARTITIONED | wp.int64(tid)
+    color_tags[tid] = wp.int32(0)
+    interaction_id_to_partition[tid] = -1
+
+
+@wp.kernel(enable_backward=False)
+def incremental_reset_loop_state_csr_kernel(
+    partition_data_concat: wp.array[wp.int64],
+    color_tags: wp.array[wp.int32],
+    interaction_id_to_partition: wp.array[int],
+    current_color: wp.array[int],
+    num_remaining: wp.array[int],
+    num_colors: wp.array[int],
+    color_starts: wp.array[int],
+    overflow_flag: wp.array[int],
+    num_elements: wp.array[int],
+):
+    """Reset per-element coloring state and CSR build scalars."""
+    tid = wp.tid()
+    if tid == wp.int32(0):
+        current_color[0] = wp.int32(0)
+        num_remaining[0] = num_elements[0]
+        num_colors[0] = wp.int32(0)
+        color_starts[0] = wp.int32(0)
+        overflow_flag[0] = wp.int32(0)
     if tid >= num_elements[0]:
         return
     partition_data_concat[tid] = _UNPARTITIONED | wp.int64(tid)
