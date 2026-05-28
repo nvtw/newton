@@ -75,10 +75,14 @@ __all__ = [
     "contact_get_count2",
     "contact_get_friction",
     "contact_get_friction_dynamic",
+    "contact_get_side0_counts_extra",
     "contact_get_side0_kind",
     "contact_get_side0_nodes_extra",
+    "contact_get_side0_slots_extra",
+    "contact_get_side1_counts_extra",
     "contact_get_side1_kind",
     "contact_get_side1_nodes_extra",
+    "contact_get_side1_slots_extra",
     "contact_get_slot1",
     "contact_get_slot2",
     "contact_iterate_at_multi",
@@ -96,10 +100,14 @@ __all__ = [
     "contact_set_count2",
     "contact_set_friction",
     "contact_set_friction_dynamic",
+    "contact_set_side0_counts_extra",
     "contact_set_side0_kind",
     "contact_set_side0_nodes_extra",
+    "contact_set_side0_slots_extra",
+    "contact_set_side1_counts_extra",
     "contact_set_side1_kind",
     "contact_set_side1_nodes_extra",
+    "contact_set_side1_slots_extra",
     "contact_set_slot1",
     "contact_set_slot2",
     "contact_views_make",
@@ -153,15 +161,19 @@ class ContactConstraintData:
     side0_nodes_extra: wp.vec3i
     side1_nodes_extra: wp.vec3i
 
-    #: Mass-splitting slot cache for rigid endpoints. Stamped once per
-    #: step after coloring; read by the contact prepare / iterate hot
-    #: path to avoid per-iteration partition-list lookup.
+    #: Mass-splitting slot cache for endpoint node 0 on each side.
     slot1: wp.int32
     slot2: wp.int32
+    #: Slot cache for endpoint nodes 1..3 on each side. Rigid endpoints
+    #: leave these at ``-1``.
+    side0_slots_extra: wp.vec3i
+    side1_slots_extra: wp.vec3i
     #: Per-endpoint slot count used as Tonge's inverse-mass factor.
     #: ``1`` means no split / no slot.
     count1: wp.int32
     count2: wp.int32
+    side0_counts_extra: wp.vec3i
+    side1_counts_extra: wp.vec3i
 
     #: Opt-in per-column wall-clock accumulator (microseconds). Written
     #: atomically by the head/tail dispatch when
@@ -185,8 +197,12 @@ _OFF_SIDE0_NODES_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "sid
 _OFF_SIDE1_NODES_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "side1_nodes_extra"))
 _OFF_SLOT1 = wp.constant(dword_offset_of(ContactConstraintData, "slot1"))
 _OFF_SLOT2 = wp.constant(dword_offset_of(ContactConstraintData, "slot2"))
+_OFF_SIDE0_SLOTS_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "side0_slots_extra"))
+_OFF_SIDE1_SLOTS_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "side1_slots_extra"))
 _OFF_COUNT1 = wp.constant(dword_offset_of(ContactConstraintData, "count1"))
 _OFF_COUNT2 = wp.constant(dword_offset_of(ContactConstraintData, "count2"))
+_OFF_SIDE0_COUNTS_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "side0_counts_extra"))
+_OFF_SIDE1_COUNTS_EXTRA = wp.constant(dword_offset_of(ContactConstraintData, "side1_counts_extra"))
 CONTACT_TIME_US_OFFSET = wp.constant(dword_offset_of(ContactConstraintData, "time_us"))
 
 
@@ -451,6 +467,38 @@ def contact_set_side1_nodes_extra(c: ContactColumnContainer, local_cid: wp.int32
 
 
 @wp.func
+def contact_get_side0_slots_extra(c: ContactColumnContainer, local_cid: wp.int32) -> wp.vec3i:
+    return wp.vec3i(
+        _col_read_int(c, _OFF_SIDE0_SLOTS_EXTRA + wp.int32(0), local_cid),
+        _col_read_int(c, _OFF_SIDE0_SLOTS_EXTRA + wp.int32(1), local_cid),
+        _col_read_int(c, _OFF_SIDE0_SLOTS_EXTRA + wp.int32(2), local_cid),
+    )
+
+
+@wp.func
+def contact_set_side0_slots_extra(c: ContactColumnContainer, local_cid: wp.int32, v: wp.vec3i):
+    _col_write_int(c, _OFF_SIDE0_SLOTS_EXTRA + wp.int32(0), local_cid, v[0])
+    _col_write_int(c, _OFF_SIDE0_SLOTS_EXTRA + wp.int32(1), local_cid, v[1])
+    _col_write_int(c, _OFF_SIDE0_SLOTS_EXTRA + wp.int32(2), local_cid, v[2])
+
+
+@wp.func
+def contact_get_side1_slots_extra(c: ContactColumnContainer, local_cid: wp.int32) -> wp.vec3i:
+    return wp.vec3i(
+        _col_read_int(c, _OFF_SIDE1_SLOTS_EXTRA + wp.int32(0), local_cid),
+        _col_read_int(c, _OFF_SIDE1_SLOTS_EXTRA + wp.int32(1), local_cid),
+        _col_read_int(c, _OFF_SIDE1_SLOTS_EXTRA + wp.int32(2), local_cid),
+    )
+
+
+@wp.func
+def contact_set_side1_slots_extra(c: ContactColumnContainer, local_cid: wp.int32, v: wp.vec3i):
+    _col_write_int(c, _OFF_SIDE1_SLOTS_EXTRA + wp.int32(0), local_cid, v[0])
+    _col_write_int(c, _OFF_SIDE1_SLOTS_EXTRA + wp.int32(1), local_cid, v[1])
+    _col_write_int(c, _OFF_SIDE1_SLOTS_EXTRA + wp.int32(2), local_cid, v[2])
+
+
+@wp.func
 def contact_get_slot1(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
     return _col_read_int(c, _OFF_SLOT1, local_cid)
 
@@ -488,6 +536,38 @@ def contact_get_count2(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int
 @wp.func
 def contact_set_count2(c: ContactColumnContainer, local_cid: wp.int32, v: wp.int32):
     _col_write_int(c, _OFF_COUNT2, local_cid, v)
+
+
+@wp.func
+def contact_get_side0_counts_extra(c: ContactColumnContainer, local_cid: wp.int32) -> wp.vec3i:
+    return wp.vec3i(
+        _col_read_int(c, _OFF_SIDE0_COUNTS_EXTRA + wp.int32(0), local_cid),
+        _col_read_int(c, _OFF_SIDE0_COUNTS_EXTRA + wp.int32(1), local_cid),
+        _col_read_int(c, _OFF_SIDE0_COUNTS_EXTRA + wp.int32(2), local_cid),
+    )
+
+
+@wp.func
+def contact_set_side0_counts_extra(c: ContactColumnContainer, local_cid: wp.int32, v: wp.vec3i):
+    _col_write_int(c, _OFF_SIDE0_COUNTS_EXTRA + wp.int32(0), local_cid, v[0])
+    _col_write_int(c, _OFF_SIDE0_COUNTS_EXTRA + wp.int32(1), local_cid, v[1])
+    _col_write_int(c, _OFF_SIDE0_COUNTS_EXTRA + wp.int32(2), local_cid, v[2])
+
+
+@wp.func
+def contact_get_side1_counts_extra(c: ContactColumnContainer, local_cid: wp.int32) -> wp.vec3i:
+    return wp.vec3i(
+        _col_read_int(c, _OFF_SIDE1_COUNTS_EXTRA + wp.int32(0), local_cid),
+        _col_read_int(c, _OFF_SIDE1_COUNTS_EXTRA + wp.int32(1), local_cid),
+        _col_read_int(c, _OFF_SIDE1_COUNTS_EXTRA + wp.int32(2), local_cid),
+    )
+
+
+@wp.func
+def contact_set_side1_counts_extra(c: ContactColumnContainer, local_cid: wp.int32, v: wp.vec3i):
+    _col_write_int(c, _OFF_SIDE1_COUNTS_EXTRA + wp.int32(0), local_cid, v[0])
+    _col_write_int(c, _OFF_SIDE1_COUNTS_EXTRA + wp.int32(1), local_cid, v[1])
+    _col_write_int(c, _OFF_SIDE1_COUNTS_EXTRA + wp.int32(2), local_cid, v[2])
 
 
 # ---------------------------------------------------------------------------

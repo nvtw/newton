@@ -21,8 +21,16 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     _col_write_int,
     contact_set_contact_count,
     contact_set_contact_first,
+    contact_set_count1,
+    contact_set_count2,
     contact_set_friction,
     contact_set_friction_dynamic,
+    contact_set_side0_counts_extra,
+    contact_set_side0_slots_extra,
+    contact_set_side1_counts_extra,
+    contact_set_side1_slots_extra,
+    contact_set_slot1,
+    contact_set_slot2,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_BODY1_OFFSET,
@@ -694,6 +702,14 @@ def _contact_pack_columns_kernel(
     contact_set_friction_dynamic(contact_cols, tid, mu_dynamic)
     contact_set_contact_first(contact_cols, tid, first)
     contact_set_contact_count(contact_cols, tid, count)
+    contact_set_slot1(contact_cols, tid, wp.int32(-1))
+    contact_set_slot2(contact_cols, tid, wp.int32(-1))
+    contact_set_side0_slots_extra(contact_cols, tid, wp.vec3i(-1, -1, -1))
+    contact_set_side1_slots_extra(contact_cols, tid, wp.vec3i(-1, -1, -1))
+    contact_set_count1(contact_cols, tid, wp.int32(1))
+    contact_set_count2(contact_cols, tid, wp.int32(1))
+    contact_set_side0_counts_extra(contact_cols, tid, wp.vec3i(1, 1, 1))
+    contact_set_side1_counts_extra(contact_cols, tid, wp.vec3i(1, 1, 1))
 
 
 # ---------------------------------------------------------------------------

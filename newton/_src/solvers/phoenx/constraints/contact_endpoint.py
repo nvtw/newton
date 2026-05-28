@@ -74,11 +74,9 @@ from newton._src.solvers.phoenx.cloth_collision import (
 )
 from newton._src.solvers.phoenx.mass_splitting.access import (
     get_state_index,
-    read_angular_velocity_unified,
-    read_particle_velocity_unified,
-    read_velocity_unified,
-    set_access_mode_unified,
-    set_particle_access_mode_unified,
+    read_angular_velocity_with_slot,
+    set_access_mode_with_slot,
+    set_particle_access_mode_with_slot,
     write_angular_velocity_unified,
     write_particle_velocity_with_slot,
     write_velocity_unified,
@@ -88,14 +86,42 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
     "contact_endpoint_apply_impulse",
+    "contact_endpoint_apply_impulse_cached",
     "contact_endpoint_inv_mass_along",
+    "contact_endpoint_inv_mass_along_cached",
     "contact_endpoint_set_access_mode",
+    "contact_endpoint_set_access_mode_cached",
     "contact_endpoint_velocity_at_point",
+    "contact_endpoint_velocity_at_point_cached",
 ]
 
 
 @wp.func
-def contact_endpoint_velocity_at_point(
+def _read_particle_velocity_with_slot(
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    particle_id: wp.int32,
+    slot: wp.int32,
+) -> wp.vec3f:
+    if slot < wp.int32(0):
+        return particles.velocity[particle_id]
+    return copy_state.velocity[slot]
+
+
+@wp.func
+def _read_body_velocity_with_slot(
+    bodies: BodyContainer,
+    copy_state: CopyStateContainer,
+    body_id: wp.int32,
+    slot: wp.int32,
+) -> wp.vec3f:
+    if slot < wp.int32(0):
+        return bodies.velocity[body_id]
+    return copy_state.velocity[slot]
+
+
+@wp.func
+def contact_endpoint_velocity_at_point_cached(
     kind: wp.int32,
     nodes: wp.vec4i,
     bary: wp.vec3f,
@@ -104,31 +130,18 @@ def contact_endpoint_velocity_at_point(
     copy_state: CopyStateContainer,
     num_bodies: wp.int32,
     parallel_id: wp.int32,
+    slots: wp.vec4i,
+    counts: wp.vec4i,
     contact_point_world: wp.vec3f,
 ) -> wp.vec3f:
-    """Velocity of this side at the contact point (world frame).
-
-    Rigid: ``v + omega x r``, where ``r = p_world - bodies.position[b]``.
-    Cloth: barycentric-weighted particle velocities (3 nodes).
-    Soft-tet: 4-node barycentric-weighted particle velocities. The 4th
-    weight is derived as ``1 - bary[0] - bary[1] - bary[2]`` (the bary
-    is stored as 3 floats; the iterate recovers the 4th on the fly).
-    Static-anchor (``nodes[0] < 0``) returns zero.
-
-    Mass-splitting aware: each velocity read routes through
-    :func:`read_velocity_unified` (unified body-or-particle index) so
-    the constraint sees the per-``parallel_id`` copy-state slot when
-    one exists. Particles are first-class mass-splitting participants
-    (same pattern as rigid bodies): cloth-triangle and soft-tet
-    endpoints read every node via :func:`read_velocity_unified` too.
-    Falls through to direct ``bodies.velocity`` / ``particles.velocity``
-    reads when no slot is allocated (mass-splitting disabled, regular-
-    colour constraint, or node outside the interaction graph).
-    """
+    """Velocity of one contact side using pre-stamped endpoint slots."""
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
-        v_a, _, _ = read_particle_velocity_unified(particles, copy_state, nodes[0], nodes[0] - num_bodies, parallel_id)
-        v_b, _, _ = read_particle_velocity_unified(particles, copy_state, nodes[1], nodes[1] - num_bodies, parallel_id)
-        v_c, _, _ = read_particle_velocity_unified(particles, copy_state, nodes[2], nodes[2] - num_bodies, parallel_id)
+        p_a = nodes[0] - num_bodies
+        p_b = nodes[1] - num_bodies
+        p_c = nodes[2] - num_bodies
+        v_a = _read_particle_velocity_with_slot(particles, copy_state, p_a, slots[0])
+        v_b = _read_particle_velocity_with_slot(particles, copy_state, p_b, slots[1])
+        v_c = _read_particle_velocity_with_slot(particles, copy_state, p_c, slots[2])
         return bary[0] * v_a + bary[1] * v_b + bary[2] * v_c
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
         weight_a = bary[0]
@@ -137,40 +150,26 @@ def contact_endpoint_velocity_at_point(
         weight_d = wp.float32(1.0) - weight_a - weight_b - weight_c
         v = wp.vec3f(0.0, 0.0, 0.0)
         if weight_a != wp.float32(0.0):
-            v_a, _, _ = read_particle_velocity_unified(
-                particles, copy_state, nodes[0], nodes[0] - num_bodies, parallel_id
-            )
-            v = v + weight_a * v_a
+            v = v + weight_a * _read_particle_velocity_with_slot(particles, copy_state, nodes[0] - num_bodies, slots[0])
         if weight_b != wp.float32(0.0):
-            v_b, _, _ = read_particle_velocity_unified(
-                particles, copy_state, nodes[1], nodes[1] - num_bodies, parallel_id
-            )
-            v = v + weight_b * v_b
+            v = v + weight_b * _read_particle_velocity_with_slot(particles, copy_state, nodes[1] - num_bodies, slots[1])
         if weight_c != wp.float32(0.0):
-            v_c, _, _ = read_particle_velocity_unified(
-                particles, copy_state, nodes[2], nodes[2] - num_bodies, parallel_id
-            )
-            v = v + weight_c * v_c
+            v = v + weight_c * _read_particle_velocity_with_slot(particles, copy_state, nodes[2] - num_bodies, slots[2])
         if weight_d != wp.float32(0.0):
-            v_d, _, _ = read_particle_velocity_unified(
-                particles, copy_state, nodes[3], nodes[3] - num_bodies, parallel_id
-            )
-            v = v + weight_d * v_d
+            v = v + weight_d * _read_particle_velocity_with_slot(particles, copy_state, nodes[3] - num_bodies, slots[3])
         return v
     b = nodes[0]
     if b < 0:
         return wp.vec3f(0.0, 0.0, 0.0)
-    v_lin, _, _ = read_velocity_unified(bodies, particles, copy_state, b, parallel_id, num_bodies)
-    v_ang, _, _ = read_angular_velocity_unified(bodies, copy_state, b, parallel_id, num_bodies)
-    # Position is read from ``bodies`` directly; ``copy_state.position``
-    # is the broadcast-time snapshot and is intentionally not used for
-    # lever arms (matches the rigid-rigid contact iterate's pattern).
+    slot = slots[0]
+    v_lin = _read_body_velocity_with_slot(bodies, copy_state, b, slot)
+    v_ang = read_angular_velocity_with_slot(bodies, copy_state, b, slot)
     r = contact_point_world - bodies.position[b]
     return v_lin + wp.cross(v_ang, r)
 
 
 @wp.func
-def contact_endpoint_inv_mass_along(
+def contact_endpoint_inv_mass_along_cached(
     kind: wp.int32,
     nodes: wp.vec4i,
     bary: wp.vec3f,
@@ -179,37 +178,20 @@ def contact_endpoint_inv_mass_along(
     copy_state: CopyStateContainer,
     num_bodies: wp.int32,
     parallel_id: wp.int32,
+    slots: wp.vec4i,
+    counts: wp.vec4i,
     contact_point_world: wp.vec3f,
     direction: wp.vec3f,
 ) -> wp.float32:
-    """This side's contribution to the row's effective inverse mass:
-    ``J . M^-1 . J^T`` along ``direction``.
-
-    Rigid: ``inv_mass + (r x d) . inv_inertia_world . (r x d)``.
-    Cloth: ``sum_i bary_i^2 * inv_mass_i`` (3 nodes; no orientation).
-    Soft-tet: ``sum_i bary_i^2 * inv_mass_i`` over 4 nodes (4th weight
-    derived as ``1 - sum(bary[0..2])``).
-    Static-anchor / pinned-particle (``inv_mass == 0``) returns 0.
-
-    Mass-splitting aware: each per-node ``inverse_mass`` is scaled by
-    that ``(node, parallel_id)`` slot's ``inv_factor`` (Tonge:
-    ``mass_per_slot = mass / N``, so ``inv_mass_per_slot = inv_mass *
-    N``). Particles use the same pattern as rigid bodies. With
-    splitting disabled or the node outside the interaction graph,
-    ``inv_factor = 1`` and the result matches the unscaled legacy
-    formula.
-    """
+    """Endpoint contribution to ``J M^-1 J^T`` using cached counts."""
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
-        _, inv_f_a = get_state_index(copy_state, nodes[0], parallel_id)
-        _, inv_f_b = get_state_index(copy_state, nodes[1], parallel_id)
-        _, inv_f_c = get_state_index(copy_state, nodes[2], parallel_id)
         p_a = nodes[0] - num_bodies
         p_b = nodes[1] - num_bodies
         p_c = nodes[2] - num_bodies
         return (
-            bary[0] * bary[0] * particles.inverse_mass[p_a] * wp.float32(inv_f_a)
-            + bary[1] * bary[1] * particles.inverse_mass[p_b] * wp.float32(inv_f_b)
-            + bary[2] * bary[2] * particles.inverse_mass[p_c] * wp.float32(inv_f_c)
+            bary[0] * bary[0] * particles.inverse_mass[p_a] * wp.float32(counts[0])
+            + bary[1] * bary[1] * particles.inverse_mass[p_b] * wp.float32(counts[1])
+            + bary[2] * bary[2] * particles.inverse_mass[p_c] * wp.float32(counts[2])
         )
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
         weight_a = bary[0]
@@ -218,21 +200,21 @@ def contact_endpoint_inv_mass_along(
         weight_d = wp.float32(1.0) - weight_a - weight_b - weight_c
         result = wp.float32(0.0)
         if weight_a != wp.float32(0.0):
-            _, inv_f_a = get_state_index(copy_state, nodes[0], parallel_id)
-            p_a = nodes[0] - num_bodies
-            result = result + weight_a * weight_a * particles.inverse_mass[p_a] * wp.float32(inv_f_a)
+            result = result + weight_a * weight_a * particles.inverse_mass[nodes[0] - num_bodies] * wp.float32(
+                counts[0]
+            )
         if weight_b != wp.float32(0.0):
-            _, inv_f_b = get_state_index(copy_state, nodes[1], parallel_id)
-            p_b = nodes[1] - num_bodies
-            result = result + weight_b * weight_b * particles.inverse_mass[p_b] * wp.float32(inv_f_b)
+            result = result + weight_b * weight_b * particles.inverse_mass[nodes[1] - num_bodies] * wp.float32(
+                counts[1]
+            )
         if weight_c != wp.float32(0.0):
-            _, inv_f_c = get_state_index(copy_state, nodes[2], parallel_id)
-            p_c = nodes[2] - num_bodies
-            result = result + weight_c * weight_c * particles.inverse_mass[p_c] * wp.float32(inv_f_c)
+            result = result + weight_c * weight_c * particles.inverse_mass[nodes[2] - num_bodies] * wp.float32(
+                counts[2]
+            )
         if weight_d != wp.float32(0.0):
-            _, inv_f_d = get_state_index(copy_state, nodes[3], parallel_id)
-            p_d = nodes[3] - num_bodies
-            result = result + weight_d * weight_d * particles.inverse_mass[p_d] * wp.float32(inv_f_d)
+            result = result + weight_d * weight_d * particles.inverse_mass[nodes[3] - num_bodies] * wp.float32(
+                counts[3]
+            )
         return result
     b = nodes[0]
     if b < 0:
@@ -240,11 +222,7 @@ def contact_endpoint_inv_mass_along(
     inv_m = bodies.inverse_mass[b]
     if inv_m == wp.float32(0.0):
         return wp.float32(0.0)
-    # Rigid side IS in the mass-splitting graph; scale ``inv_mass`` /
-    # ``inv_inertia`` by the body's slot count so the per-slot row
-    # sees ``mass / N`` (Tonge).
-    _, inv_factor = get_state_index(copy_state, b, parallel_id)
-    inv_f = wp.float32(inv_factor)
+    inv_f = wp.float32(counts[0])
     r = contact_point_world - bodies.position[b]
     rc = wp.cross(r, direction)
     inv_i = bodies.inverse_inertia_world[b] * inv_f
@@ -252,7 +230,7 @@ def contact_endpoint_inv_mass_along(
 
 
 @wp.func
-def contact_endpoint_apply_impulse(
+def contact_endpoint_apply_impulse_cached(
     kind: wp.int32,
     nodes: wp.vec4i,
     bary: wp.vec3f,
@@ -261,34 +239,12 @@ def contact_endpoint_apply_impulse(
     copy_state: CopyStateContainer,
     num_bodies: wp.int32,
     parallel_id: wp.int32,
+    slots: wp.vec4i,
+    counts: wp.vec4i,
     contact_point_world: wp.vec3f,
     impulse: wp.vec3f,
 ):
-    """Scatter a 3D impulse vector onto this side's nodes.
-
-    The caller picks the impulse sign per side (typically
-    ``J_side0 = -direction * lambda_dt`` and
-    ``J_side1 = +direction * lambda_dt``).
-
-    Rigid: ``v += J * inv_mass``,
-    ``omega += inv_inertia_world . (r x J)``.
-    Cloth: each node ``i`` gets ``v_i += bary_i * J * inv_mass_i``
-    (3 nodes).
-    Soft-tet: same per-node formula over 4 nodes (4th weight derived
-    as ``1 - sum(bary[0..2])``).
-    Static-anchor / pinned-particle is a no-op.
-
-    Mass-splitting aware: each read / write routes through
-    :func:`read_velocity_unified` / :func:`write_velocity_unified` so
-    the impulse lands in the correct ``(node, parallel_id)`` slot.
-    ``inverse_mass`` / ``inverse_inertia_world`` are scaled by that
-    slot's ``inv_factor`` so the per-slot velocity delta matches the
-    Tonge ``mass_per_slot = mass / N`` accounting; after
-    :func:`launch_average_and_broadcast` reduces the N slots back to
-    the body / particle, the net impulse on the entity equals what a
-    non-split run would have produced. Particles use the same pattern
-    as rigid bodies.
-    """
+    """Scatter a contact impulse using pre-stamped endpoint slots/counts."""
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
         p_a = nodes[0] - num_bodies
         p_b = nodes[1] - num_bodies
@@ -297,31 +253,19 @@ def contact_endpoint_apply_impulse(
         inv_m_b_raw = particles.inverse_mass[p_b]
         inv_m_c_raw = particles.inverse_mass[p_c]
         if inv_m_a_raw > wp.float32(0.0):
-            v_a, inv_f_a, slot_a = read_particle_velocity_unified(particles, copy_state, nodes[0], p_a, parallel_id)
+            v_a = _read_particle_velocity_with_slot(particles, copy_state, p_a, slots[0])
             write_particle_velocity_with_slot(
-                particles,
-                copy_state,
-                p_a,
-                slot_a,
-                v_a + bary[0] * impulse * inv_m_a_raw * wp.float32(inv_f_a),
+                particles, copy_state, p_a, slots[0], v_a + bary[0] * impulse * inv_m_a_raw * wp.float32(counts[0])
             )
         if inv_m_b_raw > wp.float32(0.0):
-            v_b, inv_f_b, slot_b = read_particle_velocity_unified(particles, copy_state, nodes[1], p_b, parallel_id)
+            v_b = _read_particle_velocity_with_slot(particles, copy_state, p_b, slots[1])
             write_particle_velocity_with_slot(
-                particles,
-                copy_state,
-                p_b,
-                slot_b,
-                v_b + bary[1] * impulse * inv_m_b_raw * wp.float32(inv_f_b),
+                particles, copy_state, p_b, slots[1], v_b + bary[1] * impulse * inv_m_b_raw * wp.float32(counts[1])
             )
         if inv_m_c_raw > wp.float32(0.0):
-            v_c, inv_f_c, slot_c = read_particle_velocity_unified(particles, copy_state, nodes[2], p_c, parallel_id)
+            v_c = _read_particle_velocity_with_slot(particles, copy_state, p_c, slots[2])
             write_particle_velocity_with_slot(
-                particles,
-                copy_state,
-                p_c,
-                slot_c,
-                v_c + bary[2] * impulse * inv_m_c_raw * wp.float32(inv_f_c),
+                particles, copy_state, p_c, slots[2], v_c + bary[2] * impulse * inv_m_c_raw * wp.float32(counts[2])
             )
         return
     if kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
@@ -338,40 +282,24 @@ def contact_endpoint_apply_impulse(
         inv_m_c_raw = particles.inverse_mass[p_c]
         inv_m_d_raw = particles.inverse_mass[p_d]
         if weight_a != wp.float32(0.0) and inv_m_a_raw > wp.float32(0.0):
-            v_a, inv_f_a, slot_a = read_particle_velocity_unified(particles, copy_state, nodes[0], p_a, parallel_id)
+            v_a = _read_particle_velocity_with_slot(particles, copy_state, p_a, slots[0])
             write_particle_velocity_with_slot(
-                particles,
-                copy_state,
-                p_a,
-                slot_a,
-                v_a + weight_a * impulse * inv_m_a_raw * wp.float32(inv_f_a),
+                particles, copy_state, p_a, slots[0], v_a + weight_a * impulse * inv_m_a_raw * wp.float32(counts[0])
             )
         if weight_b != wp.float32(0.0) and inv_m_b_raw > wp.float32(0.0):
-            v_b, inv_f_b, slot_b = read_particle_velocity_unified(particles, copy_state, nodes[1], p_b, parallel_id)
+            v_b = _read_particle_velocity_with_slot(particles, copy_state, p_b, slots[1])
             write_particle_velocity_with_slot(
-                particles,
-                copy_state,
-                p_b,
-                slot_b,
-                v_b + weight_b * impulse * inv_m_b_raw * wp.float32(inv_f_b),
+                particles, copy_state, p_b, slots[1], v_b + weight_b * impulse * inv_m_b_raw * wp.float32(counts[1])
             )
         if weight_c != wp.float32(0.0) and inv_m_c_raw > wp.float32(0.0):
-            v_c, inv_f_c, slot_c = read_particle_velocity_unified(particles, copy_state, nodes[2], p_c, parallel_id)
+            v_c = _read_particle_velocity_with_slot(particles, copy_state, p_c, slots[2])
             write_particle_velocity_with_slot(
-                particles,
-                copy_state,
-                p_c,
-                slot_c,
-                v_c + weight_c * impulse * inv_m_c_raw * wp.float32(inv_f_c),
+                particles, copy_state, p_c, slots[2], v_c + weight_c * impulse * inv_m_c_raw * wp.float32(counts[2])
             )
         if weight_d != wp.float32(0.0) and inv_m_d_raw > wp.float32(0.0):
-            v_d, inv_f_d, slot_d = read_particle_velocity_unified(particles, copy_state, nodes[3], p_d, parallel_id)
+            v_d = _read_particle_velocity_with_slot(particles, copy_state, p_d, slots[3])
             write_particle_velocity_with_slot(
-                particles,
-                copy_state,
-                p_d,
-                slot_d,
-                v_d + weight_d * impulse * inv_m_d_raw * wp.float32(inv_f_d),
+                particles, copy_state, p_d, slots[3], v_d + weight_d * impulse * inv_m_d_raw * wp.float32(counts[3])
             )
         return
     b = nodes[0]
@@ -380,14 +308,152 @@ def contact_endpoint_apply_impulse(
     inv_m_raw = bodies.inverse_mass[b]
     if inv_m_raw == wp.float32(0.0):
         return
-    v_lin, inv_f, slot = read_velocity_unified(bodies, particles, copy_state, b, parallel_id, num_bodies)
-    v_ang, _, _ = read_angular_velocity_unified(bodies, copy_state, b, parallel_id, num_bodies)
-    inv_f_f = wp.float32(inv_f)
+    slot = slots[0]
+    inv_f_f = wp.float32(counts[0])
+    v_lin = _read_body_velocity_with_slot(bodies, copy_state, b, slot)
+    v_ang = read_angular_velocity_with_slot(bodies, copy_state, b, slot)
     inv_m = inv_m_raw * inv_f_f
     inv_i = bodies.inverse_inertia_world[b] * inv_f_f
     r = contact_point_world - bodies.position[b]
     write_velocity_unified(bodies, particles, copy_state, b, slot, num_bodies, v_lin + impulse * inv_m)
     write_angular_velocity_unified(bodies, copy_state, b, slot, v_ang + inv_i @ wp.cross(r, impulse))
+
+
+@wp.func
+def contact_endpoint_set_access_mode_cached(
+    kind: wp.int32,
+    nodes: wp.vec4i,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    slots: wp.vec4i,
+    counts: wp.vec4i,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+):
+    """Flip every node on this side using cached endpoint slots."""
+    if kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[0] - num_bodies, slots[0], new_access_mode, inv_dt
+        )
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[1] - num_bodies, slots[1], new_access_mode, inv_dt
+        )
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[2] - num_bodies, slots[2], new_access_mode, inv_dt
+        )
+        return
+    if kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[0] - num_bodies, slots[0], new_access_mode, inv_dt
+        )
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[1] - num_bodies, slots[1], new_access_mode, inv_dt
+        )
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[2] - num_bodies, slots[2], new_access_mode, inv_dt
+        )
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[3] - num_bodies, slots[3], new_access_mode, inv_dt
+        )
+        return
+    b = nodes[0]
+    if b < 0:
+        return
+    set_access_mode_with_slot(bodies, particles, copy_state, b, slots[0], num_bodies, new_access_mode, inv_dt)
+
+
+@wp.func
+def _contact_endpoint_slot_counts(
+    copy_state: CopyStateContainer,
+    nodes: wp.vec4i,
+    parallel_id: wp.int32,
+):
+    slot0, count0 = get_state_index(copy_state, nodes[0], parallel_id)
+    slot1, count1 = get_state_index(copy_state, nodes[1], parallel_id)
+    slot2, count2 = get_state_index(copy_state, nodes[2], parallel_id)
+    slot3, count3 = get_state_index(copy_state, nodes[3], parallel_id)
+    return wp.vec4i(slot0, slot1, slot2, slot3), wp.vec4i(count0, count1, count2, count3)
+
+
+@wp.func
+def contact_endpoint_velocity_at_point(
+    kind: wp.int32,
+    nodes: wp.vec4i,
+    bary: wp.vec3f,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    contact_point_world: wp.vec3f,
+) -> wp.vec3f:
+    slots, counts = _contact_endpoint_slot_counts(copy_state, nodes, parallel_id)
+    return contact_endpoint_velocity_at_point_cached(
+        kind, nodes, bary, bodies, particles, copy_state, num_bodies, parallel_id, slots, counts, contact_point_world
+    )
+
+
+@wp.func
+def contact_endpoint_inv_mass_along(
+    kind: wp.int32,
+    nodes: wp.vec4i,
+    bary: wp.vec3f,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    contact_point_world: wp.vec3f,
+    direction: wp.vec3f,
+) -> wp.float32:
+    slots, counts = _contact_endpoint_slot_counts(copy_state, nodes, parallel_id)
+    return contact_endpoint_inv_mass_along_cached(
+        kind,
+        nodes,
+        bary,
+        bodies,
+        particles,
+        copy_state,
+        num_bodies,
+        parallel_id,
+        slots,
+        counts,
+        contact_point_world,
+        direction,
+    )
+
+
+@wp.func
+def contact_endpoint_apply_impulse(
+    kind: wp.int32,
+    nodes: wp.vec4i,
+    bary: wp.vec3f,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    contact_point_world: wp.vec3f,
+    impulse: wp.vec3f,
+):
+    slots, counts = _contact_endpoint_slot_counts(copy_state, nodes, parallel_id)
+    contact_endpoint_apply_impulse_cached(
+        kind,
+        nodes,
+        bary,
+        bodies,
+        particles,
+        copy_state,
+        num_bodies,
+        parallel_id,
+        slots,
+        counts,
+        contact_point_world,
+        impulse,
+    )
 
 
 @wp.func
@@ -402,43 +468,7 @@ def contact_endpoint_set_access_mode(
     new_access_mode: wp.int32,
     inv_dt: wp.float32,
 ):
-    """Flip every node on this side to ``new_access_mode``.
-
-    Cloth: flip all three particles. Soft-tet: flip all four. Rigid:
-    flip the body (if ``nodes[0] >= 0``; static-anchor world shapes
-    are no-ops). Routes through :func:`set_access_mode_unified` so
-    when mass splitting is engaged the per-slot dual state is
-    synchronised in lockstep with the body / particle storage — same
-    pattern used by every other PhoenX constraint kernel. Without
-    splitting the unified helper falls through to direct body /
-    particle access-mode flips.
-    """
-    if kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
-        set_particle_access_mode_unified(
-            particles, copy_state, nodes[0], nodes[0] - num_bodies, parallel_id, new_access_mode, inv_dt
-        )
-        set_particle_access_mode_unified(
-            particles, copy_state, nodes[1], nodes[1] - num_bodies, parallel_id, new_access_mode, inv_dt
-        )
-        set_particle_access_mode_unified(
-            particles, copy_state, nodes[2], nodes[2] - num_bodies, parallel_id, new_access_mode, inv_dt
-        )
-        return
-    if kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
-        set_particle_access_mode_unified(
-            particles, copy_state, nodes[0], nodes[0] - num_bodies, parallel_id, new_access_mode, inv_dt
-        )
-        set_particle_access_mode_unified(
-            particles, copy_state, nodes[1], nodes[1] - num_bodies, parallel_id, new_access_mode, inv_dt
-        )
-        set_particle_access_mode_unified(
-            particles, copy_state, nodes[2], nodes[2] - num_bodies, parallel_id, new_access_mode, inv_dt
-        )
-        set_particle_access_mode_unified(
-            particles, copy_state, nodes[3], nodes[3] - num_bodies, parallel_id, new_access_mode, inv_dt
-        )
-        return
-    b = nodes[0]
-    if b < 0:
-        return
-    set_access_mode_unified(bodies, particles, copy_state, b, parallel_id, num_bodies, new_access_mode, inv_dt)
+    slots, counts = _contact_endpoint_slot_counts(copy_state, nodes, parallel_id)
+    contact_endpoint_set_access_mode_cached(
+        kind, nodes, bodies, particles, copy_state, num_bodies, parallel_id, slots, counts, new_access_mode, inv_dt
+    )

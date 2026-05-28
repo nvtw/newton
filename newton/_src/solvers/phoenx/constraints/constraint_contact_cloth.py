@@ -42,10 +42,14 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_count2,
     contact_get_friction,
     contact_get_friction_dynamic,
+    contact_get_side0_counts_extra,
     contact_get_side0_kind,
     contact_get_side0_nodes_extra,
+    contact_get_side0_slots_extra,
+    contact_get_side1_counts_extra,
     contact_get_side1_kind,
     contact_get_side1_nodes_extra,
+    contact_get_side1_slots_extra,
     contact_get_slot1,
     contact_get_slot2,
 )
@@ -97,17 +101,23 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent2_lambda,
 )
 from newton._src.solvers.phoenx.constraints.contact_endpoint import (
-    contact_endpoint_apply_impulse,
-    contact_endpoint_inv_mass_along,
-    contact_endpoint_set_access_mode,
-    contact_endpoint_velocity_at_point,
+    contact_endpoint_apply_impulse_cached as contact_endpoint_apply_impulse,
+)
+from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    contact_endpoint_inv_mass_along_cached as contact_endpoint_inv_mass_along,
+)
+from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    contact_endpoint_set_access_mode_cached as contact_endpoint_set_access_mode,
+)
+from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    contact_endpoint_velocity_at_point_cached as contact_endpoint_velocity_at_point,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     apply_pair_velocity_impulse,
     effective_mass_scalar,
 )
 from newton._src.solvers.phoenx.mass_splitting.access import (
-    set_particle_access_mode_unified,
+    set_particle_access_mode_with_slot,
     write_angular_velocity_unified,
     write_velocity_unified,
 )
@@ -146,6 +156,8 @@ def _soft_tet_endpoint_set_access_mode_for_column(
     copy_state: CopyStateContainer,
     num_bodies: wp.int32,
     parallel_id: wp.int32,
+    slots: wp.vec4i,
+    counts: wp.vec4i,
     new_access_mode: wp.int32,
     inv_dt: wp.float32,
     cc: ContactContainer,
@@ -176,20 +188,20 @@ def _soft_tet_endpoint_set_access_mode_for_column(
         if weight_d != wp.float32(0.0):
             use_d = bool(True)
     if use_a and nodes[0] >= wp.int32(0):
-        set_particle_access_mode_unified(
-            particles, copy_state, nodes[0], nodes[0] - num_bodies, parallel_id, new_access_mode, inv_dt
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[0] - num_bodies, slots[0], new_access_mode, inv_dt
         )
     if use_b and nodes[1] >= wp.int32(0):
-        set_particle_access_mode_unified(
-            particles, copy_state, nodes[1], nodes[1] - num_bodies, parallel_id, new_access_mode, inv_dt
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[1] - num_bodies, slots[1], new_access_mode, inv_dt
         )
     if use_c and nodes[2] >= wp.int32(0):
-        set_particle_access_mode_unified(
-            particles, copy_state, nodes[2], nodes[2] - num_bodies, parallel_id, new_access_mode, inv_dt
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[2] - num_bodies, slots[2], new_access_mode, inv_dt
         )
     if use_d and nodes[3] >= wp.int32(0):
-        set_particle_access_mode_unified(
-            particles, copy_state, nodes[3], nodes[3] - num_bodies, parallel_id, new_access_mode, inv_dt
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[3] - num_bodies, slots[3], new_access_mode, inv_dt
         )
 
 
@@ -319,6 +331,28 @@ def _make_contact_prepare_for_iteration_at(
             side1_extra = contact_get_side1_nodes_extra(constraints, cid)
             side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
             side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
+            side0_slots_extra = contact_get_side0_slots_extra(constraints, cid)
+            side1_slots_extra = contact_get_side1_slots_extra(constraints, cid)
+            side0_counts_extra = contact_get_side0_counts_extra(constraints, cid)
+            side1_counts_extra = contact_get_side1_counts_extra(constraints, cid)
+            side0_slots = wp.vec4i(
+                contact_get_slot1(constraints, cid), side0_slots_extra[0], side0_slots_extra[1], side0_slots_extra[2]
+            )
+            side1_slots = wp.vec4i(
+                contact_get_slot2(constraints, cid), side1_slots_extra[0], side1_slots_extra[1], side1_slots_extra[2]
+            )
+            side0_counts = wp.vec4i(
+                contact_get_count1(constraints, cid),
+                side0_counts_extra[0],
+                side0_counts_extra[1],
+                side0_counts_extra[2],
+            )
+            side1_counts = wp.vec4i(
+                contact_get_count2(constraints, cid),
+                side1_counts_extra[0],
+                side1_counts_extra[1],
+                side1_counts_extra[2],
+            )
         else:
             # Mass-splitting fast path: ``highest_index_in_use[0] == 0`` means
             # slot lookup would return (-1, 1) identity. Bypass the
@@ -409,6 +443,8 @@ def _make_contact_prepare_for_iteration_at(
                     copy_state,
                     num_bodies,
                     parallel_id,
+                    side0_slots,
+                    side0_counts,
                     p0_world,
                     n,
                 )
@@ -424,6 +460,8 @@ def _make_contact_prepare_for_iteration_at(
                         copy_state,
                         num_bodies,
                         parallel_id,
+                        side0_slots,
+                        side0_counts,
                         p0_world,
                         t1_dir,
                     )
@@ -436,6 +474,8 @@ def _make_contact_prepare_for_iteration_at(
                         copy_state,
                         num_bodies,
                         parallel_id,
+                        side0_slots,
+                        side0_counts,
                         p0_world,
                         t2_dir,
                     )
@@ -449,6 +489,8 @@ def _make_contact_prepare_for_iteration_at(
                     copy_state,
                     num_bodies,
                     parallel_id,
+                    side1_slots,
+                    side1_counts,
                     p1_world,
                     n,
                 )
@@ -464,6 +506,8 @@ def _make_contact_prepare_for_iteration_at(
                         copy_state,
                         num_bodies,
                         parallel_id,
+                        side1_slots,
+                        side1_counts,
                         p1_world,
                         t1_dir,
                     )
@@ -476,6 +520,8 @@ def _make_contact_prepare_for_iteration_at(
                         copy_state,
                         num_bodies,
                         parallel_id,
+                        side1_slots,
+                        side1_counts,
                         p1_world,
                         t2_dir,
                     )
@@ -617,6 +663,8 @@ def _make_contact_prepare_for_iteration_at(
                     copy_state,
                     num_bodies,
                     parallel_id,
+                    side0_slots,
+                    side0_counts,
                     p0_world,
                     -imp,
                 )
@@ -629,6 +677,8 @@ def _make_contact_prepare_for_iteration_at(
                     copy_state,
                     num_bodies,
                     parallel_id,
+                    side1_slots,
+                    side1_counts,
                     p1_world,
                     imp,
                 )
@@ -749,6 +799,28 @@ def _make_contact_iterate_at(
             side1_extra = contact_get_side1_nodes_extra(constraints, cid)
             side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
             side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
+            side0_slots_extra = contact_get_side0_slots_extra(constraints, cid)
+            side1_slots_extra = contact_get_side1_slots_extra(constraints, cid)
+            side0_counts_extra = contact_get_side0_counts_extra(constraints, cid)
+            side1_counts_extra = contact_get_side1_counts_extra(constraints, cid)
+            side0_slots = wp.vec4i(
+                contact_get_slot1(constraints, cid), side0_slots_extra[0], side0_slots_extra[1], side0_slots_extra[2]
+            )
+            side1_slots = wp.vec4i(
+                contact_get_slot2(constraints, cid), side1_slots_extra[0], side1_slots_extra[1], side1_slots_extra[2]
+            )
+            side0_counts = wp.vec4i(
+                contact_get_count1(constraints, cid),
+                side0_counts_extra[0],
+                side0_counts_extra[1],
+                side0_counts_extra[2],
+            )
+            side1_counts = wp.vec4i(
+                contact_get_count2(constraints, cid),
+                side1_counts_extra[0],
+                side1_counts_extra[1],
+                side1_counts_extra[2],
+            )
         else:
             # Mass-splitting contact columns read slot/count values stamped by
             # the graph build; no-slot endpoints are cached as ``(-1, 1)``.
@@ -835,6 +907,8 @@ def _make_contact_iterate_at(
                     copy_state,
                     num_bodies,
                     parallel_id,
+                    side0_slots,
+                    side0_counts,
                     p0_world,
                 )
                 v1_at_p = contact_endpoint_velocity_at_point(
@@ -846,6 +920,8 @@ def _make_contact_iterate_at(
                     copy_state,
                     num_bodies,
                     parallel_id,
+                    side1_slots,
+                    side1_counts,
                     p1_world,
                 )
                 vel_rel = v1_at_p - v0_at_p
@@ -954,6 +1030,8 @@ def _make_contact_iterate_at(
                     copy_state,
                     num_bodies,
                     parallel_id,
+                    side0_slots,
+                    side0_counts,
                     p0_world,
                     -imp,
                 )
@@ -966,6 +1044,8 @@ def _make_contact_iterate_at(
                     copy_state,
                     num_bodies,
                     parallel_id,
+                    side1_slots,
+                    side1_counts,
                     p1_world,
                     imp,
                 )
@@ -1190,6 +1270,22 @@ def contact_prepare_for_iteration_cloth_aware(
     contact_count = contact_get_contact_count(constraints, cid)
     side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
     side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
+    side0_slots_extra = contact_get_side0_slots_extra(constraints, cid)
+    side1_slots_extra = contact_get_side1_slots_extra(constraints, cid)
+    side0_counts_extra = contact_get_side0_counts_extra(constraints, cid)
+    side1_counts_extra = contact_get_side1_counts_extra(constraints, cid)
+    side0_slots = wp.vec4i(
+        contact_get_slot1(constraints, cid), side0_slots_extra[0], side0_slots_extra[1], side0_slots_extra[2]
+    )
+    side1_slots = wp.vec4i(
+        contact_get_slot2(constraints, cid), side1_slots_extra[0], side1_slots_extra[1], side1_slots_extra[2]
+    )
+    side0_counts = wp.vec4i(
+        contact_get_count1(constraints, cid), side0_counts_extra[0], side0_counts_extra[1], side0_counts_extra[2]
+    )
+    side1_counts = wp.vec4i(
+        contact_get_count2(constraints, cid), side1_counts_extra[0], side1_counts_extra[1], side1_counts_extra[2]
+    )
     if side0_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
         _soft_tet_endpoint_set_access_mode_for_column(
             side0_nodes,
@@ -1197,6 +1293,8 @@ def contact_prepare_for_iteration_cloth_aware(
             copy_state,
             num_bodies,
             parallel_id,
+            side0_slots,
+            side0_counts,
             ACCESS_MODE_VELOCITY_LEVEL,
             idt,
             cc,
@@ -1213,6 +1311,8 @@ def contact_prepare_for_iteration_cloth_aware(
             copy_state,
             num_bodies,
             parallel_id,
+            side0_slots,
+            side0_counts,
             ACCESS_MODE_VELOCITY_LEVEL,
             idt,
         )
@@ -1223,6 +1323,8 @@ def contact_prepare_for_iteration_cloth_aware(
             copy_state,
             num_bodies,
             parallel_id,
+            side1_slots,
+            side1_counts,
             ACCESS_MODE_VELOCITY_LEVEL,
             idt,
             cc,
@@ -1239,6 +1341,8 @@ def contact_prepare_for_iteration_cloth_aware(
             copy_state,
             num_bodies,
             parallel_id,
+            side1_slots,
+            side1_counts,
             ACCESS_MODE_VELOCITY_LEVEL,
             idt,
         )
@@ -1728,6 +1832,22 @@ def contact_iterate_cloth_aware(
     contact_count = contact_get_contact_count(constraints, cid)
     side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
     side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
+    side0_slots_extra = contact_get_side0_slots_extra(constraints, cid)
+    side1_slots_extra = contact_get_side1_slots_extra(constraints, cid)
+    side0_counts_extra = contact_get_side0_counts_extra(constraints, cid)
+    side1_counts_extra = contact_get_side1_counts_extra(constraints, cid)
+    side0_slots = wp.vec4i(
+        contact_get_slot1(constraints, cid), side0_slots_extra[0], side0_slots_extra[1], side0_slots_extra[2]
+    )
+    side1_slots = wp.vec4i(
+        contact_get_slot2(constraints, cid), side1_slots_extra[0], side1_slots_extra[1], side1_slots_extra[2]
+    )
+    side0_counts = wp.vec4i(
+        contact_get_count1(constraints, cid), side0_counts_extra[0], side0_counts_extra[1], side0_counts_extra[2]
+    )
+    side1_counts = wp.vec4i(
+        contact_get_count2(constraints, cid), side1_counts_extra[0], side1_counts_extra[1], side1_counts_extra[2]
+    )
     if side0_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
         _soft_tet_endpoint_set_access_mode_for_column(
             side0_nodes,
@@ -1735,6 +1855,8 @@ def contact_iterate_cloth_aware(
             copy_state,
             num_bodies,
             parallel_id,
+            side0_slots,
+            side0_counts,
             ACCESS_MODE_VELOCITY_LEVEL,
             idt,
             cc,
@@ -1751,6 +1873,8 @@ def contact_iterate_cloth_aware(
             copy_state,
             num_bodies,
             parallel_id,
+            side0_slots,
+            side0_counts,
             ACCESS_MODE_VELOCITY_LEVEL,
             idt,
         )
@@ -1761,6 +1885,8 @@ def contact_iterate_cloth_aware(
             copy_state,
             num_bodies,
             parallel_id,
+            side1_slots,
+            side1_counts,
             ACCESS_MODE_VELOCITY_LEVEL,
             idt,
             cc,
@@ -1777,6 +1903,8 @@ def contact_iterate_cloth_aware(
             copy_state,
             num_bodies,
             parallel_id,
+            side1_slots,
+            side1_counts,
             ACCESS_MODE_VELOCITY_LEVEL,
             idt,
         )

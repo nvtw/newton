@@ -23,8 +23,14 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     contact_get_body1,
     contact_get_body2,
+    contact_get_side0_nodes_extra,
+    contact_get_side1_nodes_extra,
     contact_set_count1,
     contact_set_count2,
+    contact_set_side0_counts_extra,
+    contact_set_side0_slots_extra,
+    contact_set_side1_counts_extra,
+    contact_set_side1_slots_extra,
     contact_set_slot1,
     contact_set_slot2,
 )
@@ -110,12 +116,24 @@ def build_slot_cache_kernel(
         if local_cid >= wp.int32(0) and local_cid < contact_cols.data.shape[1]:
             b1 = contact_get_body1(contact_cols, local_cid)
             b2 = contact_get_body2(contact_cols, local_cid)
+            extra1 = contact_get_side0_nodes_extra(contact_cols, local_cid)
+            extra2 = contact_get_side1_nodes_extra(contact_cols, local_cid)
             slot1, count1 = get_state_index(copy_state, b1, parallel_id)
             slot2, count2 = get_state_index(copy_state, b2, parallel_id)
+            slot1e0, count1e0 = get_state_index(copy_state, extra1[0], parallel_id)
+            slot1e1, count1e1 = get_state_index(copy_state, extra1[1], parallel_id)
+            slot1e2, count1e2 = get_state_index(copy_state, extra1[2], parallel_id)
+            slot2e0, count2e0 = get_state_index(copy_state, extra2[0], parallel_id)
+            slot2e1, count2e1 = get_state_index(copy_state, extra2[1], parallel_id)
+            slot2e2, count2e2 = get_state_index(copy_state, extra2[2], parallel_id)
             contact_set_slot1(contact_cols, local_cid, slot1)
             contact_set_slot2(contact_cols, local_cid, slot2)
+            contact_set_side0_slots_extra(contact_cols, local_cid, wp.vec3i(slot1e0, slot1e1, slot1e2))
+            contact_set_side1_slots_extra(contact_cols, local_cid, wp.vec3i(slot2e0, slot2e1, slot2e2))
             contact_set_count1(contact_cols, local_cid, count1)
             contact_set_count2(contact_cols, local_cid, count2)
+            contact_set_side0_counts_extra(contact_cols, local_cid, wp.vec3i(count1e0, count1e1, count1e2))
+            contact_set_side1_counts_extra(contact_cols, local_cid, wp.vec3i(count2e0, count2e1, count2e2))
         return
 
     if cid >= constraints.slot_cache.shape[0]:
