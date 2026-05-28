@@ -21,8 +21,8 @@ or directly (preferred -- this branch enables the timing report)::
 The PhoenX solver is GPU-only by design (the whole hot path is built on
 CUDA graph capture and warp kernel launches, with no functional CPU
 fallback for the big kernels). To make CI / dev failures obvious early,
-this entry point hard-fails when no CUDA device is available *before*
-loading any test modules.
+this entry point hard-fails when no CUDA graph-capture-capable device is
+available *before* loading any test modules.
 
 When invoked as a script (``python -m`` form), it also writes a per-test
 timing report to ``test_run_all_report.txt`` next to the working
@@ -53,8 +53,8 @@ _DEFAULT_REPORT_FILENAME = "test_run_all_report.txt"
 _EXAMPLE_RUNNING_TEST_MODULES: frozenset[str] = frozenset()
 
 
-def _require_cuda() -> None:
-    """Hard-fail the whole suite if no CUDA device is present.
+def _require_cuda_graph_capture() -> None:
+    """Hard-fail the whole suite if CUDA graph capture is unavailable.
 
     PhoenX kernels do compile for CPU (Warp can target any device) but
     the integration tests deliberately exercise CUDA-graph capture
@@ -72,6 +72,10 @@ def _require_cuda() -> None:
             "Install a CUDA-capable Warp build (e.g. ``uv sync --extra dev`` on a "
             "machine with an NVIDIA GPU) and re-run."
         )
+    if not wp.is_mempool_enabled(device):
+        raise unittest.SkipTest(
+            f"PhoenX tests require CUDA graph capture with Warp mempool enabled (device: {device.name!r})."
+        )
 
 
 def load_tests(loader: unittest.TestLoader, standard_tests, pattern):
@@ -85,10 +89,10 @@ def load_tests(loader: unittest.TestLoader, standard_tests, pattern):
     top-level importable package) and keeps every test reachable via
     its real dotted module name.
 
-    Hard-fails up front if no CUDA device is available -- see
-    :func:`_require_cuda`.
+    Hard-fails up front if CUDA graph capture is unavailable -- see
+    :func:`_require_cuda_graph_capture`.
     """
-    _require_cuda()
+    _require_cuda_graph_capture()
 
     here = os.path.dirname(os.path.abspath(__file__))
     # Hard-coded so the protocol hook works regardless of how this
@@ -281,7 +285,7 @@ def main() -> None:
     that path is for IDE / pre-commit integration where we don't want
     to clobber the working dir with a report file.
     """
-    _require_cuda()
+    _require_cuda_graph_capture()
 
     here = os.path.dirname(os.path.abspath(__file__))
     # When invoked via ``python -m``, ``__name__`` is ``"__main__"`` so
