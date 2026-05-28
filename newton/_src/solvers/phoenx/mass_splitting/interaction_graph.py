@@ -225,33 +225,22 @@ def record_all_interactions_kernel(
 def _zero_section_end_and_is_boundary_kernel(
     section_end: wp.array[wp.int32],
     is_boundary: wp.array[wp.int32],
+    highest_index_in_use: wp.array[wp.int32],
 ):
-    """Prep: zero per-node counts and per-slot boundary flags.
+    """Prep: zero per-node counts, boundary flags, and scalar output.
 
-    Launch ``dim = max(num_nodes, capacity)``; per-thread cheap branches
+    Launch ``dim = max(num_nodes, capacity, 1)``; cheap branches
     skip the tail. ``CopyStateContainer.section_end`` doubles as the
     per-node count buffer during build, then gets in-place scanned into
     the cumulative-end offsets.
     """
     tid = wp.tid()
+    if tid == wp.int32(0):
+        highest_index_in_use[0] = wp.int32(0)
     if tid < section_end.shape[0]:
         section_end[tid] = wp.int32(0)
     if tid < is_boundary.shape[0]:
         is_boundary[tid] = wp.int32(0)
-
-
-@wp.kernel(enable_backward=False)
-def _zero_highest_index_kernel(highest_index_in_use: wp.array[wp.int32]):
-    """One-thread reset of the build's scalar output."""
-    if wp.tid() == 0:
-        highest_index_in_use[0] = wp.int32(0)
-
-
-@wp.kernel(enable_backward=False)
-def _reset_num_pairs_kernel(num_pairs: wp.array[wp.int32]):
-    """One-thread reset of the emit counter at the start of a build."""
-    if wp.tid() == 0:
-        num_pairs[0] = wp.int32(0)
 
 
 @wp.kernel(enable_backward=False)
@@ -300,6 +289,7 @@ def _build_pid0_cache_kernel(
     highest_index_in_use: wp.array[wp.int32],
     slot_for_pid0: wp.array[wp.int32],
     count_per_node: wp.array[wp.int32],
+    num_pairs: wp.array[wp.int32],
 ):
     """Stamp per-node caches read by :func:`get_state_index` on the hot
     path. Runs after Stage 5's inclusive scan, so ``section_end`` is
@@ -321,8 +311,11 @@ def _build_pid0_cache_kernel(
     No-op when the build emitted zero pairs (``highest_index_in_use[0]
     == 0``) -- ``slot_for_pid0`` was zero-initialised to -1 and stays so,
     matching the disabled-fast-path semantics of :func:`get_state_index`.
+    Lane 0 also resets the emit counter for the next build.
     """
     node_id = wp.tid()
+    if node_id == wp.int32(0):
+        num_pairs[0] = wp.int32(0)
     if node_id >= section_end.shape[0]:
         return
     if highest_index_in_use[0] == wp.int32(0):
@@ -404,18 +397,12 @@ def build_interaction_graph(
     capacity = scratch.packed_keys.shape[0] // 2
     num_nodes = copy_state.section_end.shape[0]
 
-    # Stage 1: prep — zero per-node accumulators + per-slot boundary flags.
-    prep_dim = max(num_nodes, capacity)
+    # Stage 1: prep — zero per-node accumulators, boundary flags, and scalar output.
+    prep_dim = max(num_nodes, capacity, 1)
     wp.launch(
         _zero_section_end_and_is_boundary_kernel,
         dim=prep_dim,
-        inputs=[copy_state.section_end, scratch.is_boundary],
-        device=device,
-    )
-    wp.launch(
-        _zero_highest_index_kernel,
-        dim=1,
-        inputs=[copy_state.highest_index_in_use],
+        inputs=[copy_state.section_end, scratch.is_boundary, copy_state.highest_index_in_use],
         device=device,
     )
 
@@ -451,28 +438,20 @@ def build_interaction_graph(
     wp.utils.array_scan(copy_state.section_end, copy_state.section_end, inclusive=True)
 
     # Stage 6: stamp the per-node parallel_id=0 / count caches that
-    # :func:`get_state_index` reads on the hot path. Collapses 3
-    # dependent loads (section_end[node-1], section_end[node],
-    # partition_list[start]) to 1-2 loads per call.
+    # :func:`get_state_index` reads on the hot path, and reset the
+    # emit counter for the next build. Collapses 3 dependent loads
+    # (section_end[node-1], section_end[node], partition_list[start])
+    # to 1-2 loads per call.
     wp.launch(
         _build_pid0_cache_kernel,
-        dim=num_nodes,
+        dim=max(num_nodes, 1),
         inputs=[
             copy_state.section_end,
             copy_state.partition_list,
             copy_state.highest_index_in_use,
             copy_state.slot_for_pid0,
             copy_state.count_per_node,
+            scratch.num_pairs,
         ],
-        device=device,
-    )
-
-    # Stage 7: reset the emit counter so the next build starts clean.
-    # Done last so callers can still read num_pairs immediately after
-    # build for diagnostics.
-    wp.launch(
-        _reset_num_pairs_kernel,
-        dim=1,
-        inputs=[scratch.num_pairs],
         device=device,
     )

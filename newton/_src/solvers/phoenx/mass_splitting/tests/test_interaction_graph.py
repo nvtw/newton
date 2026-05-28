@@ -113,9 +113,8 @@ def _build_and_read(
             device=device,
         )
         scratch.num_pairs.zero_()
-        # zero_() to reset emit counter pre-capture; build's own
-        # _reset_num_pairs_kernel runs *after* the build, so we need
-        # to reset before capture so the emit lands the right values.
+        # zero_() to reset emit counter pre-capture; the build resets it
+        # after consuming emitted pairs.
 
         with wp.ScopedCapture(device=device) as capture:
             wp.launch(
