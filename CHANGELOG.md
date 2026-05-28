@@ -6,22 +6,27 @@
 
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
 - Add `ViewerGL.show_loading_splash()` / `ViewerGL.hide_loading_splash()` displaying a stylized Newton's-cradle overlay while the GL viewer waits on Warp kernel compilation; raised automatically by `newton.examples.init()` for visible GL viewers
+- Add edge-simplification options to `Mesh.build_sdf()` that drop near-coplanar internal edges from the mesh-edge set used by SDF-mesh contact generation: `edge_lower_angle_threshold_rad` (default 0.1°; pass a negative value to opt out and keep the full edge set), `edge_upper_angle_threshold_rad`, opt-in `edge_box_absorption`, and box half-extent controls `edge_box_half_{normal,lateral}` / `edge_box_half_{normal,lateral}_rel`
 - Add `cable_cross_slide_table` example demonstrating a cable-driven XY table
 - Add an optional `kernel_block_dim` argument to `SensorTiledCamera.update()` for tuning the Warp ray-tracer's `render_megakernel` launch shape.
 - Add `ArticulationView.joint_template_labels`, `link_template_labels` (aliased as `body_template_labels`), and `shape_template_labels` exposing the raw template-articulation labels alongside the existing leaf-only `*_names`, so callers can disambiguate selected entries whose leaf names collide.
+- Parse URDF `<material>` colors (inline `<color rgba>` and named material references) during import and apply them to `ModelBuilder.shape_color` for all shape types
 - Add robotics tutorial notebook covering ModelBuilder, solvers, CUDA graphs, IK, and pick-and-place
 - Add `newton.utils.OnnxRuntime`, a graph-capturable ONNX inference engine backed solely by Warp kernels (no `onnxruntime` or `torch` runtime dependency); used by `ControllerNeuralMLP` and `ControllerNeuralLSTM` to load `.onnx` policies. To migrate a TorchScript policy, run `torch.onnx.export(model, dummy_input, "policy.onnx", opset_version=17)` once and point the controllers at the resulting `.onnx` file. The `onnx` package is now an optional extra (`pip install newton[onnx]`); install it explicitly to use the ONNX runtime.
 - Add USD parsing for `NewtonSiteAPI` to mark shapes as sites.
+- Add `ViewerRTX`, a real-time ray-traced viewer powered by NVIDIA OVRTX.
 
 ### Changed
 
 - Remove the `cbor2` `<6` dependency ceiling after updating recorder deserialization to accept mapping-like decoded containers
+- Switch the SDF-mesh narrow phase to hardware-filtered SDF texture sampling with centred-difference gradients. Hydroelastic SDF sampling is unchanged. Resulting contact distances and normals shift well below typical `contact_threshold` and `shape_margin` settings, so no user action is required; pass a negative `edge_lower_angle_threshold_rad` (e.g. `-1.0`) to `Mesh.build_sdf()` to disable the new edge-simplification pass and reproduce the pre-optimisation behaviour with the full edge set
 - Require Warp 1.14 and configure Warp logging through `warp.config.log_level`; use Newton's `--quiet` flag or `--warp-config log_level=...` instead of legacy `verbose` or `quiet` config keys
 - Auto-scale `ViewerGL` contact arrows, joint axes, and COM markers by `Viewer.scene_scale`; to approximate the previous fixed sizes after `set_model()`, set `viewer.renderer.arrow_length_scale = 0.1 / viewer.scene_scale`, `viewer.renderer.joint_scale = 0.1 / viewer.scene_scale`, and `viewer.renderer.com_scale = 0.1 / viewer.scene_scale`.
 
 ### Deprecated
 
 - Deprecate loading `.pt` / `.pth` (TorchScript) checkpoints via `ControllerNeuralMLP`; the legacy TorchScript / dict-checkpoint path still works (with a `DeprecationWarning`) when PyTorch is installed but will be removed in a future release. `ControllerNeuralLSTM` requires re-exporting to ONNX with the metadata properties documented in its class docstring; pointing it at a `.pt` checkpoint now raises `NotImplementedError` with migration guidance. Convert the MLP checkpoint to ONNX once with `torch.onnx.export(model, dummy_input, "policy.onnx", opset_version=17)` and load the resulting `.onnx` file.
+- Deprecate implicit positive Dahl defaults in `SolverVBD.register_custom_attributes()`. Pass `dahl_defaults_enabled=False` and explicitly author positive `model.vbd.dahl_eps_max` and `model.vbd.dahl_tau` values when Dahl cable friction is desired, instead of relying on registered default values.
 
 ### Removed
 
@@ -38,8 +43,10 @@
 - Fix `SolverXPBD` `body_parent_f` reporting to include `Control.joint_f` contributions and accumulate multiple inbound joint contributions, matching the `SolverMuJoCo` and `SolverFeatherstone` convention.
 - Fix MJCF `xyaxes` parsing to treat the second vector as Y and derive Z from X cross Y.
 - Fix mesh-convex and heightfield-convex contacts missing when shapes are separated by margin but still within the contact envelope.
+- Fix `brick_stacking` example contact gaps to avoid oversized contact envelopes around the robot, table, and ground.
 - Fix `ModelBuilder.collapse_fixed_joints()` producing a NaN center of mass when collapsing joints between zero-mass bodies.
 - Fix `SolverMuJoCo` returning `State.joint_qd` in world frame for root `FREE` joints with non-identity `parent_xform`, violating the documented parent-frame contract and corrupting derived `body_qd`.
+- Fix `SolverVBD` custom attribute setup so `vbd:joint_is_hard` can be authored without implicitly enabling Dahl cable friction by calling `SolverVBD.register_custom_attributes(..., dahl_defaults_enabled=False)`.
 - Fix `example_softbody_gift` emitting spurious non-manifold edge warnings caused by mismatched 5-tet diagonals across adjacent cubes in the soft body mesh.
 - Fix `basic_conveyor` example emitting a spurious inertia validation warning at finalize.
 - Fix `SolverMuJoCo` generated MuJoCo joint names for multi-axis D6 joints to avoid duplicate names
