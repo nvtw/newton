@@ -84,21 +84,28 @@ class Example:
         self.poisson_ratio = float(poisson_ratio)
         self.tri_ka, self.tri_ke = cloth_lame_from_youngs_poisson_plane_stress(self.youngs_modulus, self.poisson_ratio)
         self._cube_drop_height = float(cube_drop_height)
+        self._cube_half_extent = float(cube_size)
+        self._ground_height = 0.0
 
         builder = newton.ModelBuilder()
 
         # Static ground plane at z = 0. ``add_ground_plane`` creates an
         # infinite-plane shape attached to the world body; it stops
-        # the cloth (and the cube) from falling forever.
-        builder.add_ground_plane(height=1.0)
+        # the cloth and cube from falling forever.
+        builder.add_ground_plane(height=self._ground_height)
 
         # Free rigid cube starting above the cloth so it drops onto
-        # the cloth's free corner. Mass-1 unit cube; default inertia.
+        # the cloth's free corner.
         self._cube_body = builder.add_body(
             xform=wp.transform(p=wp.vec3(-1.0, 1.0, cube_drop_height), q=wp.quat_identity()),
             mass=1.0,
         )
-        builder.add_shape_box(self._cube_body, hx=cube_size, hy=cube_size, hz=cube_size)
+        builder.add_shape_box(
+            self._cube_body,
+            hx=self._cube_half_extent,
+            hy=self._cube_half_extent,
+            hz=self._cube_half_extent,
+        )
 
         # Hanging cloth pinned along the left edge. ``edge_ke`` sets
         # the per-hinge bending stiffness (in N·m/rad) consumed by the
@@ -315,6 +322,9 @@ class Example:
             raise RuntimeError(f"cube didn't fall (z={cube_z:.4f}, started at {self._cube_drop_height:.4f})")
         if not np.isfinite(cube_z):
             raise RuntimeError(f"cube z went non-finite: {cube_z}")
+        floor_z = self._ground_height + self._cube_half_extent
+        if cube_z < floor_z - 0.15:
+            raise RuntimeError(f"cube fell through ground plane (z={cube_z:.4f}, expected >= {floor_z:.4f})")
 
     def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)

@@ -459,8 +459,17 @@ def _phoenx_pack_cloth_contact_endpoints_kernel(
     # Primary node per side (= nodes[0]) lands in the existing
     # ``body1`` / ``body2`` header dwords; extras (up to 3 for soft-tet,
     # ``-1`` for unused slots on rigid / cloth-tri) land in side*_nodes_extra.
-    contact_set_body1(contact_cols, tid, ep_a.nodes[0])
-    contact_set_body2(contact_cols, tid, ep_b.nodes[0])
+    node_a = ep_a.nodes[0]
+    node_b = ep_b.nodes[0]
+    # Rigid-rigid columns use the fast rigid path, which expects valid body slots.
+    # Mixed deformable rows keep -1 so endpoint helpers handle static anchors.
+    if ep_a.kind == wp.int32(SHAPE_ENDPOINT_KIND_RIGID) and ep_b.kind == wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
+        if node_a < wp.int32(0):
+            node_a = wp.int32(0)
+        if node_b < wp.int32(0):
+            node_b = wp.int32(0)
+    contact_set_body1(contact_cols, tid, node_a)
+    contact_set_body2(contact_cols, tid, node_b)
     contact_set_side0_kind(contact_cols, tid, ep_a.kind)
     contact_set_side1_kind(contact_cols, tid, ep_b.kind)
     contact_set_side0_nodes_extra(contact_cols, tid, wp.vec3i(ep_a.nodes[1], ep_a.nodes[2], ep_a.nodes[3]))

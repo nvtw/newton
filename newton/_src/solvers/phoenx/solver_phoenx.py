@@ -2055,6 +2055,18 @@ class PhoenXWorld:
             filter_host[S_int + i] = -(2 + i)
         self._shape_filter_id = wp.array(filter_host, dtype=wp.int32, device=self.device)
 
+        # Contact ingest operates on PhoenX body slots, not Newton body
+        # ids. The collision pipeline's ``unified_shape_body`` must stay
+        # in Newton indexing for narrow phase, so keep a separate map for
+        # warm-start/contact-column ingest. Static and virtual deformable
+        # shapes use the slot-0 world anchor until the endpoint overlay
+        # replaces deformable sides with particle nodes.
+        shape_body_phx = np.zeros(S_int + T_int + Tet_int, dtype=np.int32)
+        if S_int > 0 and getattr(model, "shape_body", None) is not None:
+            shape_body_raw = model.shape_body.numpy()
+            shape_body_phx[:S_int] = np.where(shape_body_raw < 0, 0, shape_body_raw + int(phoenx_body_offset))
+        self.set_shape_body(wp.array(shape_body_phx, dtype=wp.int32, device=self.device))
+
         # Per-shape endpoint table for cloth-aware contact ingest.
         # Allocated for the full unified shape range and populated once:
         # rigid prefix copies model.shape_body; cloth suffix decodes
@@ -2317,15 +2329,18 @@ class PhoenXWorld:
         if shape_body is None:
             shape_body = self._shape_body_internal
         # When the cloth-aware pipeline is active, contact slots can
-        # reference shape indices up to S + T -- the user-supplied
-        # shape_body (length S) doesn't cover the cloth suffix, so use
-        # the pipeline's unified_shape_body (length S + T, with cloth
-        # shapes mapped to -1) instead.
+        # reference shape indices up to S + T. Use the PhoenX-indexed
+        # full-length map stamped by setup_cloth_collision_pipeline.
+        # Fall back to the pipeline map only for legacy callers; that
+        # map remains Newton-indexed for narrow-phase contact generation.
         if (
             self._collision_pipeline is not None
             and getattr(self._collision_pipeline, "unified_shape_body", None) is not None
         ):
-            shape_body = self._collision_pipeline.unified_shape_body
+            if self._shape_body_internal is not None:
+                shape_body = self._shape_body_internal
+            else:
+                shape_body = self._collision_pipeline.unified_shape_body
         if shape_body is None:
             raise ValueError(
                 "step(contacts=...) requires shape_body. Pass model.shape_body or "
