@@ -69,10 +69,10 @@ from newton._src.solvers.phoenx.timer import print_column_timings
 # example exercises the partitioned Gauss-Seidel path, then spill the
 # remaining high-degree rows to the mass-splitting overflow bucket
 # where they are processed in deterministic Jacobi-block batches.
-# ``4`` is faster than 8/12 on the default reduced benchmark while still
-# keeping real colour partitions active.
+# ``8`` is faster than ``12`` on the default scene while still keeping
+# real colour partitions active.
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 4
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 8
 
 #: Opt-in per-column wall-clock profiling. When ``True`` the solver
 #: brackets every PGS dispatch with CUDA ``%globaltimer`` reads and
