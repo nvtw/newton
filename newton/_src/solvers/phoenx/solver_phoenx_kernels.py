@@ -2209,6 +2209,7 @@ def _make_singleworld_dispatch_func(
     cloth_support: bool,
     enable_column_timers: bool,
     soft_tet_only: bool,
+    cloth_only: bool,
     has_joints: bool,
     has_mass_splitting: bool,
     has_sleeping: bool,
@@ -2343,7 +2344,58 @@ def _make_singleworld_dispatch_func(
             if wp.static(enable_column_timers):
                 contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
         if not dispatched:
-            if wp.static(soft_tet_only):
+            if wp.static(cloth_only):
+                # ConstraintContainer only holds cloth triangle and optional
+                # bending rows, so avoid the ctype-tag load in the hot path.
+                if cid < num_cloth_triangles:
+                    if wp.static(is_prepare):
+                        cloth_triangle_prepare_for_iteration_at(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                        )
+                    else:
+                        cloth_triangle_iterate_at(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            parallel_id,
+                            idt,
+                            sor_boost,
+                        )
+                    if wp.static(enable_column_timers):
+                        constraint_accumulate_time_us(
+                            constraints,
+                            CLOTH_TRIANGLE_TIME_US_OFFSET,
+                            cid,
+                            elapsed_us(_t0, read_global_timer_ns()),
+                        )
+                else:
+                    if wp.static(is_prepare):
+                        cloth_bending_prepare_for_iteration_at(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                        )
+                    else:
+                        cloth_bending_iterate_at(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            parallel_id,
+                            idt,
+                            sor_boost,
+                        )
+                    if wp.static(enable_column_timers):
+                        constraint_accumulate_time_us(
+                            constraints,
+                            CLOTH_BENDING_TIME_US_OFFSET,
+                            cid,
+                            elapsed_us(_t0, read_global_timer_ns()),
+                        )
+            elif wp.static(soft_tet_only):
                 # Specialised path: ConstraintContainer only holds soft-tets
                 # (no joints / cloth-tri / cloth-bend rows), so the ctype
                 # read + 3-way compare is dead code. cid here is by
@@ -2562,6 +2614,7 @@ def _make_singleworld_persistent_kernel(
     cloth_support: bool,
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
+    cloth_only: bool = False,
     has_joints: bool = True,
     has_mass_splitting: bool = True,
     has_sleeping: bool = True,
@@ -2594,6 +2647,7 @@ def _make_singleworld_persistent_kernel(
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
         soft_tet_only=soft_tet_only,
+        cloth_only=cloth_only,
         has_joints=has_joints,
         has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,
@@ -2714,6 +2768,7 @@ def _make_singleworld_fused_kernel(
     cloth_support: bool,
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
+    cloth_only: bool = False,
     has_joints: bool = True,
     has_mass_splitting: bool = True,
     has_sleeping: bool = True,
@@ -2730,6 +2785,7 @@ def _make_singleworld_fused_kernel(
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
         soft_tet_only=soft_tet_only,
+        cloth_only=cloth_only,
         has_joints=has_joints,
         has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,
@@ -2848,6 +2904,7 @@ def get_singleworld_kernel(
     cloth_support: bool,
     enable_column_timers: bool = False,
     soft_tet_only: bool = False,
+    cloth_only: bool = False,
     has_joints: bool = True,
     has_mass_splitting: bool = True,
     has_sleeping: bool = True,
@@ -2862,6 +2919,7 @@ def get_singleworld_kernel(
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
         soft_tet_only=soft_tet_only,
+        cloth_only=cloth_only,
         has_joints=has_joints,
         has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,

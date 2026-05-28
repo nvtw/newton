@@ -30,6 +30,19 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
     "PhoenX cloth contacts run on CUDA only.",
 )
 class TestClothHangingGroundContact(unittest.TestCase):
+    def test_cloth_self_collision_can_be_disabled(self):
+        device = wp.get_preferred_device()
+        with wp.ScopedDevice(device):
+            scene = _GroundCubeClothScene(device, cloth_self_collision=False)
+            self.assertIsNotNone(scene.graph, "expected CUDA graph-captured stepping")
+
+            groups = scene.pipeline.unified_shape_collision_group.numpy()
+            rigid_count = int(scene.model.shape_count)
+            tri_count = int(scene.model.tri_count)
+            cloth_groups = groups[rigid_count : rigid_count + tri_count]
+
+            self.assertTrue(np.all(cloth_groups == -2))
+
     def test_cube_stays_on_ground_with_cloth_pipeline(self):
         device = wp.get_preferred_device()
         with wp.ScopedDevice(device):
@@ -71,7 +84,7 @@ class TestClothHangingGroundContact(unittest.TestCase):
 
 
 class _GroundCubeClothScene:
-    def __init__(self, device: wp.Device):
+    def __init__(self, device: wp.Device, *, cloth_self_collision: bool = True):
         self.device = device
         self.ground_height = 0.0
         self.cube_half_extent = 0.4
@@ -103,7 +116,7 @@ class _GroundCubeClothScene:
             fix_right=True,
             tri_ke=tri_ke,
             tri_ka=tri_ka,
-            particle_radius=0.04,
+            particle_radius=0.0,
         )
         self.model = builder.finalize(device=device)
 
@@ -167,6 +180,7 @@ class _GroundCubeClothScene:
             self.model,
             cloth_thickness=0.005,
             cloth_gap=0.010,
+            cloth_self_collision=cloth_self_collision,
             rigid_contact_max=1024,
         )
         self.contacts = self.pipeline.contacts()

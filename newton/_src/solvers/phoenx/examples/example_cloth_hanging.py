@@ -46,7 +46,7 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 # constraints route through the slot-aware helpers and so coexist
 # fine with mass splitting.
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 8
 
 # When ``True`` the cloth's left edge is pinned (the strip hangs).
 # When ``False`` the cloth is fully free and falls under gravity.
@@ -136,7 +136,7 @@ class Example:
             tri_ke=self.tri_ke,
             tri_ka=self.tri_ka,
             edge_ke=1.0,
-            particle_radius=0.04,
+            particle_radius=0.0,
         )
 
         self.model = builder.finalize(device=self.device)
@@ -187,6 +187,7 @@ class Example:
             num_cloth_bending=int(self.model.edge_count),
             device=self.device,
         )
+        max_thread_blocks = 8 * self.device.sm_count if self.device.is_cuda else None
         self.world = PhoenXWorld(
             bodies=bodies,
             constraints=constraints,
@@ -201,6 +202,10 @@ class Example:
             step_layout="single_world",
             mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
+            mass_splitting_unrolled=True,
+            mass_splitting_batch_size=1,
+            max_thread_blocks=max_thread_blocks,
+            partitioner_algorithm="greedy",
             device=self.device,
         )
         self.world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
@@ -214,6 +219,7 @@ class Example:
             self.model,
             cloth_thickness=cloth_thickness,
             cloth_gap=cloth_gap,
+            cloth_self_collision=False,
             rigid_contact_max=8192,
         )
         self.contacts = self.collision_pipeline.contacts()

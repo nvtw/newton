@@ -1839,6 +1839,7 @@ class PhoenXWorld:
         *,
         cloth_thickness: float = 0.005,
         cloth_gap: float = 0.010,
+        cloth_self_collision: bool = True,
         soft_body_thickness: float = 0.005,
         soft_body_gap: float = 0.010,
         broad_phase: str = "sap",
@@ -1874,6 +1875,7 @@ class PhoenXWorld:
             cloth_gap: Speculative-contact enlargement on top of the
                 thickness [m]. Default 10 mm. Total contact-detection
                 radius is ``thickness + gap``.
+            cloth_self_collision: Enable cloth triangle self-collision.
             soft_body_thickness: Per-tet skin half-thickness [m].
             soft_body_gap: Per-tet speculative-contact gap [m].
             broad_phase: ``"sap"`` (default), ``"nxn"``, or ``"explicit"``.
@@ -2016,7 +2018,8 @@ class PhoenXWorld:
             _fill_range_int(pipeline.unified_shape_type, S, S + T, triangle_type)
             _fill_range_float(pipeline.unified_shape_gap, S, S + T, float(cloth_gap))
             _fill_range_float(pipeline.unified_shape_collision_radius, S, S + T, 0.0)
-            _fill_range_int(pipeline.unified_shape_collision_group, S, S + T, 1)
+            cloth_collision_group = 1 if cloth_self_collision else -2
+            _fill_range_int(pipeline.unified_shape_collision_group, S, S + T, cloth_collision_group)
         if Tet > 0:
             _fill_range_int(pipeline.unified_shape_type, S + T, S + T + Tet, tetrahedron_type)
             _fill_range_float(pipeline.unified_shape_gap, S + T, S + T + Tet, float(soft_body_gap))
@@ -3283,8 +3286,8 @@ class PhoenXWorld:
         iterate_fused, relax_head, relax_fused)``. Specialised via
         compile-time ``revolute_only``, ``cloth_support`` (cloth /
         soft-tet / soft-hex types in the ctype dispatch) and
-        ``soft_tet_only`` (skip ctype read when the container holds
-        only soft tets)."""
+        ``soft_tet_only`` / ``cloth_only`` (skip ctype reads when the
+        container holds only one deformable row family)."""
         cloth_on = (
             self.num_cloth_triangles > 0
             or self.num_soft_tetrahedra > 0
@@ -3305,11 +3308,18 @@ class PhoenXWorld:
             and self.num_cloth_bending == 0
             and self.num_soft_hexahedra == 0
         )
+        cloth_only = (
+            self.num_cloth_triangles > 0
+            and self.num_joints == 0
+            and self.num_soft_tetrahedra == 0
+            and self.num_soft_hexahedra == 0
+        )
         kw = {
             "revolute_only": revolute_only,
             "cloth_support": cloth_on,
             "enable_column_timers": self.enable_column_timers,
             "soft_tet_only": soft_tet_only,
+            "cloth_only": cloth_only,
             "has_joints": self.num_joints > 0,
             "has_mass_splitting": self.mass_splitting_enabled,
             "has_sleeping": self._sleeping_enabled,
