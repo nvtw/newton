@@ -107,9 +107,7 @@ def build_legacy_sdf_block_arrays(
     materializes the numpy results as Warp arrays with the historical
     dtypes (``wp.vec3us`` and ``wp.vec2i``).
     """
-    block_coords_np, index2blocks_np = compute_block_coords_and_index2blocks(
-        coarse_textures, subgrid_size=subgrid_size
-    )
+    block_coords_np, index2blocks_np = compute_block_coords_and_index2blocks(coarse_textures, subgrid_size=subgrid_size)
     sdf_block_coords = wp.array(block_coords_np, dtype=wp.vec3us, device=device)
     sdf_index2blocks = wp.array(index2blocks_np, dtype=wp.vec2i, device=device)
     return sdf_block_coords, sdf_index2blocks
