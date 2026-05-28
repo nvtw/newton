@@ -29,6 +29,9 @@ from unittest import mock
 
 import warp as wp
 
+if not wp.get_preferred_device().is_cuda:
+    raise unittest.SkipTest("PhoenX tests require CUDA")
+
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     get_fast_tail_kernel,
 )
@@ -100,8 +103,8 @@ class TestPreCompileDispatchKernelsFires(unittest.TestCase):
             # device + modules + max_workers must all be threaded through.
             self.assertIs(kwargs["device"], world.device)
             self.assertEqual(kwargs["max_workers"], 4)
-            loaded_modules = set(kwargs["modules"])
-            expected_modules = {kernel.module for kernel in world._singleworld_kernels()}
+            loaded_modules = {module.get_module_identifier() for module in kwargs["modules"]}
+            expected_modules = {kernel.module.get_module_identifier() for kernel in world._singleworld_kernels()}
             # The six head/fused kernels share a module pair-wise (one
             # warp Module per ``module="unique"`` kernel) so the set
             # should contain every distinct module the factory produced.
@@ -111,7 +114,7 @@ class TestPreCompileDispatchKernelsFires(unittest.TestCase):
         with _RestoreLoadModuleMaxWorkers(4), mock.patch("warp.force_load") as force_load:
             world = _build_minimal_scene(step_layout="multi_world").world
             force_load.assert_called_once()
-            loaded_modules = set(force_load.call_args.kwargs["modules"])
+            loaded_modules = {module.get_module_identifier() for module in force_load.call_args.kwargs["modules"]}
             base_fast_tail_kw = {
                 "revolute_only": bool(world._use_revolute_specialization),
                 "has_sleeping": bool(world._sleeping_enabled),
@@ -119,9 +122,15 @@ class TestPreCompileDispatchKernelsFires(unittest.TestCase):
             }
             expected_modules = set()
             for fixed_tpw in world._fast_tail_auto_fixed_choices():
-                fast_tail_kw = {**base_fast_tail_kw, "fixed_tpw": fixed_tpw}
-                expected_modules.add(get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw).module)
-                expected_modules.add(get_fast_tail_kernel(kind="relax", **fast_tail_kw).module)
+                fast_tail_kw = {
+                    **base_fast_tail_kw,
+                    "fixed_tpw": fixed_tpw,
+                    "guard_tpw": world._tpw_auto,
+                }
+                expected_modules.add(
+                    get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw).module.get_module_identifier()
+                )
+                expected_modules.add(get_fast_tail_kernel(kind="relax", **fast_tail_kw).module.get_module_identifier())
             self.assertEqual(loaded_modules, expected_modules)
 
 

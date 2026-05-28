@@ -18,6 +18,9 @@ import unittest
 
 import warp as wp
 
+if not wp.get_preferred_device().is_cuda:
+    raise unittest.SkipTest("PhoenX tests require CUDA")
+
 from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_contact import CONTACT_DWORDS
 from newton._src.solvers.phoenx.constraints.constraint_container import (

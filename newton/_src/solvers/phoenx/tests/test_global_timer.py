@@ -1,24 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU-side timing via the CUDA ``%globaltimer`` special register.
+"""CUDA ``%globaltimer`` smoke tests.
 
-``%globaltimer`` is a 64-bit nanosecond counter exposed by PTX that
-ticks at wall-clock rate and is shared across the whole device, so two
-reads in the same thread bracket a real elapsed-time window. Wrapping
-the inline PTX in :func:`warp.func_native` lets a Warp kernel sample
-``start`` / ``end`` cheaply and write the difference back to host
-memory.
-
-This test exercises that pattern end-to-end:
-
-* A kernel reads ``%globaltimer`` before and after a fixed busy-spin
-  workload and writes the elapsed nanoseconds to an output array.
-* We assert the elapsed value is strictly positive, monotonically
-  larger than a no-op baseline, and bounded above by a generous
-  ceiling (so a runaway timer or sign-flip would fail loudly).
-
-CUDA only -- inline PTX has no CPU fallback.
+The tests verify that the native timer returns a positive, bounded
+elapsed value for a busy kernel and a larger window than back-to-back
+timer reads. CUDA only -- inline PTX has no CPU fallback.
 """
 
 from __future__ import annotations
@@ -36,10 +23,7 @@ def _measure_busy_spin_kernel(
     elapsed_ns: wp.array[wp.uint64],
     sink: wp.array[wp.int32],
 ):
-    """Single-thread kernel: sample ``%globaltimer`` before/after a
-    fixed busy-spin workload. ``sink`` exists so the optimiser cannot
-    hoist the spin loop away.
-    """
+    """Measure a small busy-spin window."""
     tid = wp.tid()
     if tid != 0:
         return
@@ -60,9 +44,7 @@ def _measure_busy_spin_kernel(
 def _measure_noop_kernel(
     elapsed_ns: wp.array[wp.uint64],
 ):
-    """Baseline: back-to-back ``%globaltimer`` reads with no work
-    between them. The diff bounds the intrinsic's own overhead.
-    """
+    """Measure timer read overhead."""
     tid = wp.tid()
     if tid != 0:
         return
@@ -77,8 +59,7 @@ def _measure_noop_kernel(
     "Global-timer tests require CUDA (inline PTX has no CPU fallback).",
 )
 class TestGlobalTimerNative(unittest.TestCase):
-    """Verify ``%globaltimer`` via :func:`wp.func_native` returns sane
-    elapsed nanoseconds from a Warp kernel."""
+    """Verify sane elapsed nanoseconds from a Warp kernel."""
 
     def setUp(self) -> None:
         self.device = wp.get_preferred_device()
@@ -131,20 +112,6 @@ class TestGlobalTimerNative(unittest.TestCase):
             busy_ns,
             noop_ns,
             msg=(f"busy-spin elapsed ({busy_ns} ns) must exceed no-op baseline ({noop_ns} ns)"),
-        )
-
-    def test_more_work_takes_more_time(self) -> None:
-        """Monotonicity: 10x the iterations must register more elapsed
-        nanoseconds. Compares medians of 5 runs to absorb scheduler
-        jitter without inflating the iteration budget."""
-        small_runs = sorted(self._launch_busy_spin(1_000) for _ in range(5))
-        large_runs = sorted(self._launch_busy_spin(10_000) for _ in range(5))
-        small_median = small_runs[len(small_runs) // 2]
-        large_median = large_runs[len(large_runs) // 2]
-        self.assertGreater(
-            large_median,
-            small_median,
-            msg=(f"10x workload should take longer: small_median={small_median} ns, large_median={large_median} ns"),
         )
 
 

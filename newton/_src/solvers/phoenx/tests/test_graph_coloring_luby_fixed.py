@@ -19,6 +19,9 @@ import unittest
 import numpy as np
 import warp as wp
 
+if not wp.get_preferred_device().is_cuda:
+    raise unittest.SkipTest("PhoenX tests require CUDA")
+
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     ElementInteractionData,
@@ -105,12 +108,12 @@ def _run_luby(
     elements = _make_elements(bodies_np, device)
     num_elements_arr = wp.array([n], dtype=wp.int32, device=device)
 
-    kwargs = dict(
-        max_num_interactions=n,
-        max_num_nodes=num_bodies,
-        device=device,
-        seed=seed,
-    )
+    kwargs = {
+        "max_num_interactions": n,
+        "max_num_nodes": num_bodies,
+        "device": device,
+        "seed": seed,
+    }
     if max_colored_partitions is not None:
         kwargs["max_colored_partitions"] = max_colored_partitions
     if max_luby_colors is not None:
@@ -158,8 +161,8 @@ class TestFixedIterationLubyPartitioner(unittest.TestCase):
             if color == overflow_color:
                 # Overflow exempt -- still record assignment for the
                 # "every element assigned exactly once" check.
-                for eid in slice_:
-                    eid = int(eid)
+                for eid_raw in slice_:
+                    eid = int(eid_raw)
                     self.assertFalse(seen[eid], msg=f"elem {eid} double-assigned")
                     seen[eid] = True
                     self.assertEqual(
@@ -178,16 +181,16 @@ class TestFixedIterationLubyPartitioner(unittest.TestCase):
                     color,
                     msg=f"elem {eid}: eid_to_color mismatch (colour {color})",
                 )
-                for b in bodies_np[eid]:
-                    b = int(b)
-                    if b < 0:
+                for body_raw in bodies_np[eid]:
+                    body = int(body_raw)
+                    if body < 0:
                         continue
                     self.assertNotIn(
-                        b,
+                        body,
                         used,
-                        msg=(f"colour {color}: node {b} shared between two elements (offender elem={eid})"),
+                        msg=(f"colour {color}: node {body} shared between two elements (offender elem={eid})"),
                     )
-                    used.add(b)
+                    used.add(body)
         self.assertTrue(seen.all(), msg="not every element was assigned a colour")
 
     # --- Tiny scripted graphs -----------------------------------------

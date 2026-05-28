@@ -9,14 +9,9 @@ anchor-2 tangent 2-row lock + PRISMATIC's anchor-3 scalar 1-row lock.
 
 Checks:
 
-* A dynamic cube welded to the world anchor does not fall under
-  gravity (position drift stays small across a full settle window).
-* The welded cube does not rotate freely -- its orientation at the
-  end of a settle is the same as the initial orientation, within
-  soft-constraint slop.
-* A free-spinning cube welded off the anchor *does* translate with
-  the welded carrier's linear motion and does *not* accumulate drift
-  relative to the carrier (end-to-end weld consistency).
+* A dynamic cube welded at its COM does not fall under gravity.
+* The welded cube keeps its rest orientation without external torque.
+* Initial spin about locked axes is damped by the weld.
 """
 
 import unittest
@@ -46,11 +41,7 @@ def _build_world_welded_cube(
     cube_position: tuple[float, float, float] = (0.5, 0.0, 0.0),
     initial_angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ):
-    """World anchor + dynamic cube welded at a chosen position.
-
-    The anchor is at origin; the weld's anchor1 sits at world origin
-    and anchor2 is 1 m along +x, defining the weld axis. The cube
-    hangs at ``cube_position`` and the weld clamps every DoF."""
+    """World anchor + dynamic cube welded at its COM."""
     b = WorldBuilder()
     anchor = b.world_body
     cube = b.add_dynamic_body(
@@ -60,11 +51,13 @@ def _build_world_welded_cube(
         affected_by_gravity=True,
         angular_velocity=initial_angular_velocity,
     )
+    anchor1 = cube_position
+    anchor2 = (cube_position[0] + 1.0, cube_position[1], cube_position[2])
     b.add_joint(
         body1=anchor,
         body2=cube,
-        anchor1=(0.0, 0.0, 0.0),
-        anchor2=(1.0, 0.0, 0.0),
+        anchor1=anchor1,
+        anchor2=anchor2,
         mode=JointMode.FIXED,
     )
     return b.finalize(
@@ -116,7 +109,7 @@ class TestFixedJoint(unittest.TestCase):
         world = _build_world_welded_cube(
             device,
             cube_position=(0.5, 0.0, 0.0),
-            initial_angular_velocity=(1.0, -0.7, 0.5),
+            initial_angular_velocity=(1.0, 0.0, 1.0),
         )
         run_settle_loop(world, SETTLE_FRAMES, dt=1.0 / FPS)
 

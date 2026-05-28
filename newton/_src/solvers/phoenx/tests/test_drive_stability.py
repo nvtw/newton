@@ -405,11 +405,11 @@ class TestLimitStability(unittest.TestCase):
             msg=f"final |qd|={abs(qd[-1]):.3f} -- limit not damping",
         )
 
-    def test_limit_across_multiple_revolutions(self) -> None:
-        """Limit window = ``[+2*pi - 0.3, +2*pi + 0.3]`` -- one full
-        rotation away from the current angle. The drive must spin
-        the joint up through the first revolution to reach the
-        window, and the soft limit must hold it there.
+    def test_upper_limit_across_multiple_revolutions(self) -> None:
+        """A multi-revolution drive must remain stable with an upper
+        limit just beyond the target. The lower limit includes the
+        initial pose; limits constrain motion, they do not actuate a
+        joint from a remote invalid configuration.
 
         Assessed on the body's physical cumulative rotation (not
         ``joint_q``) so the ``eval_ik`` branch cut doesn't obscure
@@ -423,7 +423,7 @@ class TestLimitStability(unittest.TestCase):
             target_pos=0.0,
             target_ke=50.0,
             target_kd=8.0,
-            limit_lower=2.0 * math.pi - 0.3,
+            limit_lower=-0.3,
             limit_upper=2.0 * math.pi + 0.3,
             limit_ke=200.0,
             limit_kd=20.0,
@@ -431,12 +431,12 @@ class TestLimitStability(unittest.TestCase):
         cum, _qd = _run_target_and_track_rotation(model, targets, dt)
 
         self.assertTrue(math.isfinite(cum))
-        # Physical rotation must be inside the window (or a generous
-        # soft-constraint slop outside it).
+        # Physical rotation must reach the target and stay below the
+        # upper limit, allowing soft-constraint slop.
         self.assertGreater(
             cum,
-            2.0 * math.pi - 1.0,
-            msg=f"cum rotation {cum:.3f} below multi-rev lower limit",
+            2.0 * math.pi - 0.5,
+            msg=f"cum rotation {cum:.3f} below multi-rev target",
         )
         self.assertLess(
             cum,

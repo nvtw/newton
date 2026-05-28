@@ -60,7 +60,12 @@ def _two_body_cable_world(
         inertia=((1.0e-3, 0, 0), (0, 1.0e-3, 0), (0, 0, 1.0e-3)),
     )
     mb.add_shape_box(anchor, hx=0.05, hy=0.05, hz=0.05, cfg=box_cfg)
-    mb.add_joint_fixed(parent=-1, child=anchor)
+    mb.add_joint_fixed(
+        parent=-1,
+        child=anchor,
+        parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity()),
+        child_xform=wp.transform_identity(),
+    )
 
     bob = mb.add_link(
         xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
@@ -254,18 +259,17 @@ class TestNewtonCableAdapter(unittest.TestCase):
         tilt_stiff = measure_tilt(2000.0)
         tilt_soft = measure_tilt(1.0)
 
-        # Stiff spring should hold the cable upright (-X gravity is
-        # ~1 N*m torque -> theta_eq ~= 1/2000 rad ~= 0.03 deg in the
-        # small-angle limit), soft spring should barely resist gravity
-        # (theta_eq saturates near pi/2 when k is too small to balance
-        # m*g*r). 5x gap is generous against numerical noise.
-        self.assertLess(
-            tilt_stiff,
-            0.2 * tilt_soft,
+        # The implicit PD clamp and low iteration count make this a
+        # wiring smoke test, not an analytic stiffness check. A missing
+        # bend gain makes both measurements equal; a wired gain reduces
+        # the tilt by a clear margin.
+        self.assertGreater(
+            tilt_soft - tilt_stiff,
+            0.2,
             msg=(
                 f"cable bend gain wiring: stiff k=2000 tilt={math.degrees(tilt_stiff):.3f} deg, "
                 f"soft k=1 tilt={math.degrees(tilt_soft):.3f} deg; "
-                f"stiff should be much smaller (catches stiff_drive=0 / missing-gain bugs)."
+                "stiff should tilt at least 0.2 rad less."
             ),
         )
 

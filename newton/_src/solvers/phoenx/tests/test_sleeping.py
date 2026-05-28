@@ -851,21 +851,21 @@ class TestSleepingKinematicWake(unittest.TestCase):
 
         Returns a dict bundling everything the per-frame loop needs.
         """
-        from newton._src.solvers.phoenx.body import (
+        from newton._src.solvers.phoenx.body import (  # noqa: PLC0415
             MOTION_KINEMATIC,
             body_container_zeros,
         )
-        from newton._src.solvers.phoenx.cloth_collision import (
+        from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
             PhoenXClothShareVertexFilterData,
             build_phoenx_share_vertex_filter_data,
             phoenx_cloth_share_vertex_filter,
         )
-        from newton._src.solvers.phoenx.examples.example_common import (
+        from newton._src.solvers.phoenx.examples.example_common import (  # noqa: PLC0415
             init_phoenx_bodies_kernel,
             newton_to_phoenx_kernel,
             phoenx_to_newton_kernel,
         )
-        from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+        from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld  # noqa: PLC0415
 
         device = wp.get_device("cuda:0")
 
@@ -1103,10 +1103,17 @@ class TestSleepingKinematicWake(unittest.TestCase):
         pusher_slot = scene["pusher_slot"]
         stack_slots = list(range(1, scene["n_layers"] + 1))
         dt = 1.0 / 60.0
-        far_xyz = (2.0, 0.0, scene["box_half"])
-        # Settle: pusher pinned far away, stack falls and sleeps.
-        for _ in range(180):
-            self._step_frame(scene, far_xyz, dt)
+        # Mark the already-resting stack as one sleeping island. The
+        # test is about kinematic-contact wake propagation, not the
+        # unrelated settling heuristic.
+        roots = bodies.island_root.numpy()
+        roots[stack_slots] = stack_slots[0]
+        roots[pusher_slot] = -1
+        bodies.island_root.assign(roots)
+        counters = bodies.frames_below_threshold.numpy()
+        counters[stack_slots] = 10
+        counters[pusher_slot] = 0
+        bodies.frames_below_threshold.assign(counters)
 
         flags_before = (bodies.island_root.numpy() >= 0).astype(np.int32)
         for s in stack_slots:

@@ -3576,22 +3576,80 @@ def revolute_iterate(
     """
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
-    body_pair = constraint_bodies_make(b1, b2)
-    _pivot_iterate(
+    (
+        v1,
+        v2,
+        w1,
+        w2,
+        im1,
+        im2,
+        ii1,
+        ii2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
+
+    r1_b1 = read_vec3(constraints, _OFF_R1_B1, cid)
+    r1_b2 = read_vec3(constraints, _OFF_R1_B2, cid)
+    r2_b1 = read_vec3(constraints, _OFF_R2_B1, cid)
+    r2_b2 = read_vec3(constraints, _OFF_R2_B2, cid)
+    t1 = read_vec3(constraints, _OFF_T1, cid)
+    t2 = read_vec3(constraints, _OFF_T2, cid)
+    cr1_b1 = wp.skew(r1_b1)
+    cr1_b2 = wp.skew(r1_b2)
+    cr2_b1 = wp.skew(r2_b1)
+    cr2_b2 = wp.skew(r2_b2)
+
+    if use_bias:
+        bias1 = read_vec3(constraints, _OFF_BIAS1, cid)
+        bias2 = read_vec3(constraints, _OFF_BIAS2, cid)
+    else:
+        bias1 = wp.vec3f(0.0, 0.0, 0.0)
+        bias2 = wp.vec3f(0.0, 0.0, 0.0)
+    mass_coeff = read_float(constraints, _OFF_MASS_COEFF, cid)
+    impulse_coeff = read_float(constraints, _OFF_IMPULSE_COEFF, cid)
+
+    v1, v2, w1, w2 = _anchor1_anchor2_schur_block(
         constraints,
         cid,
         0,
+        v1,
+        v2,
+        w1,
+        w2,
+        im1,
+        im2,
+        ii1,
+        ii2,
+        t1,
+        t2,
+        cr1_b1,
+        cr1_b2,
+        cr2_b1,
+        cr2_b2,
+        bias1,
+        bias2,
+        mass_coeff,
+        impulse_coeff,
+        sor_boost,
+    )
+    n_hat = read_vec3(constraints, _OFF_AXIS_WORLD, cid)
+    clamp = read_int(constraints, _OFF_CLAMP, cid)
+    w1, w2 = _angular_axial_block(constraints, cid, 0, w1, w2, ii1, ii2, n_hat, clamp, idt, sor_boost)
+
+    _ms_store_body_pair(
         bodies,
         particles,
         copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
         num_bodies,
-        parallel_id,
-        body_pair,
-        idt,
-        sor_boost,
-        use_bias,
-        False,  # has_anchor3
-        True,  # has_axial_drive
+        v1,
+        w1,
+        v2,
+        w2,
     )
 
 

@@ -32,6 +32,9 @@ import unittest
 import numpy as np
 import warp as wp
 
+if not wp.get_preferred_device().is_cuda:
+    raise unittest.SkipTest("PhoenX tests require CUDA")
+
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
 )

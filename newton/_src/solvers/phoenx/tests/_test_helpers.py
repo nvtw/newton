@@ -6,9 +6,11 @@
 This module is *not* part of the public API; it lives under
 ``newton._src`` and is imported exclusively from ``test_*.py``
 siblings. It consolidates the hot inner-loop patterns that every
-jitter test file used to open-code so bug fixes (graph-capture
-correctness, warm-up semantics, CPU fallback) land in one place.
+PhoenX test file used to open-code so graph-capture fixes land in one
+place.
 """
+
+import unittest
 
 import warp as wp
 
@@ -37,8 +39,8 @@ def run_settle_loop(world, frames: int, dt: float) -> None:
     short loops benefit -- the previous frame-count threshold was a
     legacy carve-out from when capture overhead was higher.
 
-    Falls back to plain eager stepping on CPU (``wp.ScopedCapture``
-    is a no-op there) and for ``frames < 1``.
+    Raises ``SkipTest`` on non-CUDA devices; PhoenX behavioural tests
+    are expected to exercise the graph-captured CUDA path.
 
     Args:
         world: A :class:`newton._src.solvers.phoenx.World` built via
@@ -52,9 +54,7 @@ def run_settle_loop(world, frames: int, dt: float) -> None:
 
     device = wp.get_device()
     if not device.is_cuda:
-        for _ in range(frames):
-            world.step(dt)
-        return
+        raise unittest.SkipTest("PhoenX settle loops require CUDA graph capture")
 
     # Warm-up step outside the capture: ensures all Warp modules
     # referenced by ``step(dt)`` are JIT-compiled and loaded, and
@@ -93,8 +93,7 @@ def make_graph_stepper(world, dt: float):
     those frames are carried as a "head start" -- the returned
     closure honours the requested ``n_frames`` budget exactly.
 
-    On CPU (``device.is_cuda is False``) the returned closure falls
-    back to plain eager stepping.
+    Raises ``SkipTest`` on non-CUDA devices.
 
     Args:
         world: A finalised :class:`PhoenXWorld`.
@@ -108,12 +107,7 @@ def make_graph_stepper(world, dt: float):
     """
     device = wp.get_device()
     if not device.is_cuda:
-
-        def _step_eager(n_frames: int) -> None:
-            for _ in range(int(n_frames)):
-                world.step(dt)
-
-        return _step_eager
+        raise unittest.SkipTest("PhoenX graph steppers require CUDA graph capture")
 
     state = {"graph": None, "head_start": 0}
 

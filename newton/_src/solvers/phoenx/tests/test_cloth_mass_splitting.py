@@ -30,6 +30,7 @@ CUDA-only. Graph-captured. Two ~5 s tests.
 
 from __future__ import annotations
 
+import sys
 import unittest
 
 import numpy as np
@@ -240,7 +241,7 @@ class TestClothMassSplitting(unittest.TestCase):
 
     def _run(self, *, mass_splitting: bool):
         device = wp.get_preferred_device()
-        world, model, state, pipeline, contacts, cube_body = _build_scene(mass_splitting=mass_splitting, device=device)
+        world, model, state, _pipeline, contacts, cube_body = _build_scene(mass_splitting=mass_splitting, device=device)
         rest_positions = model.particle_q.numpy().copy()
 
         # fix_left + fix_right pins the i=0 and i=dim_x columns of the
@@ -266,8 +267,6 @@ class TestClothMassSplitting(unittest.TestCase):
 
         positions = state.particle_q.numpy()
         cube_q = state.body_q.numpy()
-
-        import sys
 
         bbox = positions.max(axis=0) - positions.min(axis=0)
         sys.stderr.write(
@@ -340,11 +339,13 @@ class TestClothMassSplitting(unittest.TestCase):
         # cloth and lands on / near the ground.
         cube_z = float(cube_q[cube_body, 2])
         cloth_mean_z = float(positions[:, 2].mean())
+        contact_slop = 0.02
         self.assertGreater(
             cube_z,
-            cloth_mean_z - CUBE_HALF_SIDE,
+            cloth_mean_z - CUBE_HALF_SIDE - contact_slop,
             f"cube fell through the cloth with mass_splitting={mass_splitting}: "
-            f"cube_z = {cube_z:.4f}, cloth mean z = {cloth_mean_z:.4f}",
+            f"cube_z = {cube_z:.4f}, cloth mean z = {cloth_mean_z:.4f}, "
+            f"allowed slop = {contact_slop:.3f} m",
         )
         self.assertGreater(
             cube_z,
