@@ -29,6 +29,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.soft_body_math import (
     neohookean_constraints_from_F,
+    neohookean_is_rest_manifold,
     tet_chain_rule_gradients,
     tet_deformation_gradient,
 )
@@ -245,6 +246,7 @@ _DEV_EPS = wp.constant(wp.float32(1.0e-12))
 #: diagonal) det(A) >= alpha_tilde^H * alpha_tilde^D > 0 in exact
 #: arithmetic; the floor only guards against catastrophic FP cancellation.
 _DET_FLOOR = wp.constant(wp.float32(1.0e-30))
+_REST_MANIFOLD_EPS = wp.constant(wp.float32(1.0e-5))
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +404,9 @@ def soft_tet_neohookean_iterate_at(
     F = tet_deformation_gradient(x_a, x_b, x_c, x_d, inv_rest)
 
     c_h, c_d, dCH_dF, dCD_dF = neohookean_constraints_from_F(F, gamma_offset, _DEV_EPS)
+
+    if neohookean_is_rest_manifold(c_h, c_d, gamma_offset, _REST_MANIFOLD_EPS):
+        return
 
     g_ha, g_hb, g_hc, g_hd = tet_chain_rule_gradients(dCH_dF, inv_rest)
     g_da, g_db, g_dc, g_dd = tet_chain_rule_gradients(dCD_dF, inv_rest)

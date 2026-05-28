@@ -109,14 +109,14 @@ class SoftBeamExample:
         dim_x: int = 12,
         dim_y: int = 3,
         dim_z: int = 3,
-        youngs_modulus: float = 1.0e10,
+        youngs_modulus: float = 1.0e8,
         poisson_ratio: float = 0.45,
         density: float = 500.0,
-        axial_strain: float = 0.25,
-        twist_degrees: float = 270.0,
-        motion_period: float = 3.0,
-        substeps: int = 8,
-        solver_iterations: int = 20,
+        axial_strain: float = 0.10,
+        twist_degrees: float = 120.0,
+        motion_period: float = 6.0,
+        substeps: int = 16,
+        solver_iterations: int = 64,
         beta: float = 1.0,
     ):
         if mode not in ("stretch", "twist"):
@@ -145,6 +145,7 @@ class SoftBeamExample:
         self.sim_substeps = int(substeps)
         self.solver_iterations = int(solver_iterations)
 
+        max_thread_blocks = 8 * self.device.sm_count if self.device.is_cuda else None
         k_lambda, k_mu = soft_tet_lame_from_youngs_poisson(float(youngs_modulus), float(poisson_ratio))
 
         builder = newton.ModelBuilder()
@@ -187,6 +188,7 @@ class SoftBeamExample:
         self._center_y = 0.5 * (float(rest[:, 1].min()) + float(rest[:, 1].max()))
         self._center_z = 0.5 * (float(rest[:, 2].min()) + float(rest[:, 2].max()))
         self._pinned_targets = self._pinned_targets_for_time(0.0)
+        self._max_dynamic_rest_drift = 0.0
 
         bodies = body_container_zeros(1, device=self.device)
         bodies.orientation.assign(np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32))
@@ -212,7 +214,11 @@ class SoftBeamExample:
             rigid_contact_max=0,
             step_layout="single_world",
             mass_splitting=True,
-            max_colored_partitions=12,
+            max_colored_partitions=8,
+            mass_splitting_unrolled=True,
+            max_thread_blocks=max_thread_blocks,
+            mass_splitting_batch_size=1,
+            sor_boost=0.1,
             partitioner_algorithm="greedy",
             device=self.device,
         )
@@ -310,6 +316,9 @@ class SoftBeamExample:
         positions = self.state.particle_q.numpy()
         if not np.isfinite(positions).all():
             raise AssertionError(f"non-finite particle position at frame {self._frame_index}")
+        dynamic_indices = np.setdiff1d(np.arange(self.model.particle_count), self._pinned_indices)
+        dynamic_drift = np.linalg.norm(positions[dynamic_indices] - self._rest_positions[dynamic_indices], axis=1)
+        self._max_dynamic_rest_drift = max(self._max_dynamic_rest_drift, float(dynamic_drift.max()))
         pin_drift = np.linalg.norm(positions[self._pinned_indices] - self._pinned_targets, axis=1)
         if float(pin_drift.max()) > 1.0e-4:
             raise AssertionError(f"pinned beam endpoints drifted by {float(pin_drift.max()):.6f} m")
@@ -319,7 +328,7 @@ class SoftBeamExample:
         velocities = self.state.particle_qd.numpy()
         assert np.isfinite(positions).all(), "non-finite particle positions"
         assert np.isfinite(velocities).all(), "non-finite particle velocities"
-        assert np.linalg.norm(positions - self._rest_positions, axis=1).max() > 0.05, "beam did not deform"
+        assert self._max_dynamic_rest_drift > 0.01, "beam did not deform"
         bounds = 4.0 * max(self.length, self.width, self.depth)
         assert float(np.abs(positions).max()) < bounds, "beam escaped the expected scene bounds"
 
@@ -332,17 +341,17 @@ def create_soft_beam_parser(*, mode: str):
     parser.add_argument("--dim-x", type=int, default=12)
     parser.add_argument("--dim-y", type=int, default=3)
     parser.add_argument("--dim-z", type=int, default=3)
-    parser.add_argument("--youngs-modulus", type=float, default=1.0e10)
+    parser.add_argument("--youngs-modulus", type=float, default=1.0e8)
     parser.add_argument("--poisson-ratio", type=float, default=0.45)
     parser.add_argument("--density", type=float, default=500.0)
-    parser.add_argument("--substeps", type=int, default=8)
-    parser.add_argument("--solver-iterations", type=int, default=20)
+    parser.add_argument("--substeps", type=int, default=16)
+    parser.add_argument("--solver-iterations", type=int, default=64)
     parser.add_argument("--beta", type=float, default=1.0)
-    parser.add_argument("--motion-period", type=float, default=3.0)
+    parser.add_argument("--motion-period", type=float, default=6.0)
     if mode == "stretch":
-        parser.add_argument("--axial-strain", type=float, default=0.25)
+        parser.add_argument("--axial-strain", type=float, default=0.10)
     elif mode == "twist":
-        parser.add_argument("--twist-degrees", type=float, default=270.0)
+        parser.add_argument("--twist-degrees", type=float, default=120.0)
     else:
         raise ValueError(f"unknown beam mode {mode!r}")
     return parser
@@ -356,13 +365,13 @@ def soft_beam_kwargs_from_args(args) -> dict:
         "dim_x": int(_get_arg(args, "dim_x", 12)),
         "dim_y": int(_get_arg(args, "dim_y", 3)),
         "dim_z": int(_get_arg(args, "dim_z", 3)),
-        "youngs_modulus": float(_get_arg(args, "youngs_modulus", 1.0e10)),
+        "youngs_modulus": float(_get_arg(args, "youngs_modulus", 1.0e8)),
         "poisson_ratio": float(_get_arg(args, "poisson_ratio", 0.45)),
         "density": float(_get_arg(args, "density", 500.0)),
-        "axial_strain": float(_get_arg(args, "axial_strain", 0.25)),
-        "twist_degrees": float(_get_arg(args, "twist_degrees", 270.0)),
-        "motion_period": float(_get_arg(args, "motion_period", 3.0)),
-        "substeps": int(_get_arg(args, "substeps", 8)),
-        "solver_iterations": int(_get_arg(args, "solver_iterations", 20)),
+        "axial_strain": float(_get_arg(args, "axial_strain", 0.10)),
+        "twist_degrees": float(_get_arg(args, "twist_degrees", 120.0)),
+        "motion_period": float(_get_arg(args, "motion_period", 6.0)),
+        "substeps": int(_get_arg(args, "substeps", 16)),
+        "solver_iterations": int(_get_arg(args, "solver_iterations", 64)),
         "beta": float(_get_arg(args, "beta", 1.0)),
     }

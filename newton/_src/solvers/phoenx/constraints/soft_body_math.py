@@ -9,9 +9,23 @@ import warp as wp
 
 __all__ = [
     "neohookean_constraints_from_F",
+    "neohookean_is_rest_manifold",
     "tet_chain_rule_gradients",
     "tet_deformation_gradient",
 ]
+
+_SQRT_THREE = wp.constant(wp.float32(1.7320508075688772))
+
+
+@wp.func
+def neohookean_is_rest_manifold(
+    c_h: wp.float32,
+    c_d: wp.float32,
+    gamma_offset: wp.float32,
+    eps: wp.float32,
+) -> bool:
+    """True when the stable Neo-Hookean row pair has zero net rest force."""
+    return wp.abs(c_h + gamma_offset - wp.float32(1.0)) < eps and wp.abs(c_d - _SQRT_THREE) < eps
 
 
 @wp.func

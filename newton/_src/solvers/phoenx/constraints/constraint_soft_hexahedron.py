@@ -26,7 +26,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_int,
     write_mat33,
 )
-from newton._src.solvers.phoenx.constraints.soft_body_math import neohookean_constraints_from_F
+from newton._src.solvers.phoenx.constraints.soft_body_math import (
+    neohookean_constraints_from_F,
+    neohookean_is_rest_manifold,
+)
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
     read_position_with_slot,
@@ -247,6 +250,7 @@ _ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
 _DEV_EPS = wp.constant(wp.float32(1.0e-12))
 #: Floor for the Schur-complement determinant during the 2x2 inverse.
 _DET_FLOOR = wp.constant(wp.float32(1.0e-30))
+_REST_MANIFOLD_EPS = wp.constant(wp.float32(1.0e-5))
 
 #: 1/8 factor folded into B-vector reconstruction.
 _ONE_EIGHTH = wp.constant(wp.float32(0.125))
@@ -587,6 +591,9 @@ def soft_hexahedron_iterate_at(
     F = _compute_F_hex(x0, x1, x2, x3, x4, x5, x6, x7, inv_rest)
 
     c_h, c_d, dCH_dF, dCD_dF = neohookean_constraints_from_F(F, gamma_offset, _DEV_EPS)
+
+    if neohookean_is_rest_manifold(c_h, c_d, gamma_offset, _REST_MANIFOLD_EPS):
+        return
 
     # Per-corner gradients: g_i = dC/dF * B_i (8 mat33-vec3 each row).
     b0 = _shape_gradient(inv_rest, wp.int32(0))
