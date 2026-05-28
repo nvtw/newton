@@ -39,8 +39,8 @@ _COMPRESSION = 0.005
 _PLATEN_HALF_Z = 0.02
 _DENSITY = 200.0
 _BETA = 8.0
-_SUBSTEPS = 6
-_SOLVER_ITERATIONS = 32
+_SUBSTEPS = 10
+_SOLVER_ITERATIONS = 64
 _FRAME_DT = 1.0 / 120.0
 _SETTLE_FRAMES = 120
 _MEASURE_FRAMES = 8
@@ -181,14 +181,14 @@ class TestSoftBodyStiffness(unittest.TestCase):
         rel_err = abs(measured_force - expected_force) / expected_force
         self.assertLess(
             rel_err,
-            0.25,
+            0.10,
             f"vertical reaction {measured_force:.2f} N vs Hooke prediction "
             f"{expected_force:.2f} N (rel err {rel_err:.1%})",
         )
 
         ratio = force_high / max(force_low, 1.0e-6)
-        self.assertGreater(ratio, 7.0, f"reaction ratio too small: {ratio:.2f}")
-        self.assertLess(ratio, 13.0, f"reaction ratio too large: {ratio:.2f}")
+        self.assertGreater(ratio, 8.0, f"reaction ratio too small: {ratio:.2f}")
+        self.assertLess(ratio, 12.0, f"reaction ratio too large: {ratio:.2f}")
 
         positions = high.state.particle_q.numpy()
         velocities = high.state.particle_qd.numpy()
