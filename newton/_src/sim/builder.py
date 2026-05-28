@@ -378,7 +378,12 @@ class ModelBuilder:
                     f"sdf_max_resolution must be divisible by 8 (got {self.sdf_max_resolution}). "
                     "This is required because SDF volumes are allocated in 8x8x8 tiles."
                 )
-            hydroelastic_supported = shape_type not in (GeoType.PLANE, GeoType.HFIELD)
+            hydroelastic_supported = shape_type not in (
+                GeoType.PLANE,
+                GeoType.HFIELD,
+                GeoType.TRIANGLE,
+                GeoType.TETRAHEDRON,
+            )
             hydroelastic_requires_configured_sdf = shape_type in (
                 GeoType.SPHERE,
                 GeoType.BOX,

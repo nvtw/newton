@@ -109,6 +109,12 @@ class GeoType(enum.IntEnum):
     GAUSSIAN = 11
     """Gaussian splat."""
 
+    TRIANGLE = 12
+    """Single triangle primitive."""
+
+    TETRAHEDRON = 13
+    """Single solid tetrahedron primitive."""
+
     @property
     def is_primitive(self) -> bool:
         """Return whether this is a primitive (analytically defined) shape type."""
@@ -120,6 +126,8 @@ class GeoType(enum.IntEnum):
             GeoType.BOX,
             GeoType.ELLIPSOID,
             GeoType.PLANE,
+            GeoType.TRIANGLE,
+            GeoType.TETRAHEDRON,
         }
 
     @property
