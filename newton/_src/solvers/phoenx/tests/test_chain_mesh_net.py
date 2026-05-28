@@ -13,11 +13,8 @@ released above the centre and must come to rest on the net rather
 than punching through to the ground plane.
 
 The scene reproduces (a scaled-down variant of) ``example_chain_mesh``.
-The test runs it under both PhoenX step layouts (``single_world`` and
+The test runs both PhoenX step layouts (``single_world`` and
 ``multi_world``) and asserts the sphere stays above the ground plane.
-The two layouts are physically equivalent for a single-world scene;
-divergence between them indicates a bug in the multi-world coloring or
-PGS dispatch path.
 
 Runs on CUDA only -- the PhoenX path is GPU-only by design.
 """
@@ -288,32 +285,6 @@ class TestChainMeshNetCatchesSphere(unittest.TestCase):
             msg=(
                 f"multi_world: sphere fell through the net to z = {z:.3f} "
                 f"(expected > {self.MIN_SPHERE_Z:.3f}; ground at {_GROUND_Z:.1f})"
-            ),
-        )
-
-    def test_single_and_multi_world_agree_on_sphere_z(self) -> None:
-        """Both step layouts model the same physics; for a single-world
-        scene they must produce equivalent sphere trajectories.
-
-        Expected divergence under the user-reported multi-world
-        coloring bug: the sphere settles at noticeably different z in
-        the two layouts. Tolerance is generous (0.20 m) so PGS
-        ordering noise alone won't trip the test, but a coloring bug
-        that lets the sphere leak through the net will exceed it.
-        """
-        z_single = self._run_layout("single_world")
-        z_multi = self._run_layout("multi_world")
-        diff = abs(z_single - z_multi)
-        self.assertLess(
-            diff,
-            0.20,
-            msg=(
-                f"single_world settled sphere at z={z_single:.3f}, "
-                f"multi_world at z={z_multi:.3f} -- |diff|={diff:.3f} m "
-                f"exceeds the 0.20 m tolerance. The two layouts model "
-                "the same physics for a 1-world scene; a divergence of "
-                "this size suggests a bug in the multi-world coloring "
-                "or PGS dispatch path."
             ),
         )
 

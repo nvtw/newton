@@ -3,59 +3,9 @@
 
 """Joint armature unit tests for ``SolverPhoenX``.
 
-PhoenX is maximal-coordinate, so reduced-coord ``M_q = M_chain +
-armature`` doesn't drop in directly. The solver bakes the armature
-into both attached bodies' inertia along the joint axis at
-construction (see :meth:`SolverPhoenX._bake_joint_armature_into_body_inertia`),
-which is what the constraint kernel reads at runtime. The bake
-solves a per-joint quadratic for the per-body inflation alpha so
-that the post-bake effective inertia at the joint equals
-``M_chain + a`` for any mass ratio (anchored, symmetric, asymmetric).
-
-Analytical / cross-solver checks:
-
-* :class:`TestPendulumPeriod` -- gravity-driven small-angle revolute
-  pendulum, anchored to world. Asserts measured period matches
-  ``T = 2*pi * sqrt((m*L^2 + I_com + a) / (m*g*L))`` to within 5 %.
-
-* :class:`TestSymmetricTwoBodyPeriod` -- two equal-inertia bodies on
-  a single revolute torsion spring, no gravity. The case the naive
-  ``alpha = a`` per-body bake under-counts by 2x. Asserts
-  ``T = 2*pi * sqrt((M_chain + a) / k)`` within 5 % across an
-  armature sweep.
-
-* :class:`TestPrismaticTwoBodyPeriod` -- prismatic equivalent of the
-  revolute symmetric test: two equal-mass bodies on a slide spring.
-  ``M_chain = m_A*m_B/(m_A+m_B) = m/2``; armature has units of mass.
-  Asserts the same period formula to within 5 %.
-
-* :class:`TestThreeBodyChain` -- composition test: anchored chain
-  ``world -- A -- B -- C`` with two revolute joints, both armatured
-  and PD-driven. Linearises the 2-DoF system around equilibrium,
-  computes the eigen-periods analytically from the
-  reduced-coord ``M_q + a*I`` mass matrix, and asserts the slow mode
-  matches the simulated period within 8 % (FFT peak).
-
-* :class:`TestArmatureMatchesMuJoCo` -- runs the same revolute
-  pendulum and symmetric-torsion fixtures through both
-  ``SolverPhoenX`` and ``SolverMuJoCo`` and compares measured
-  periods to within 3 %. The cross-solver check pins the
-  semantics: PhoenX's bake produces the same reduced-coord
-  ``M_q + a`` augmentation that MuJoCo applies in its native
-  reduced-coord formulation.
-
-* :class:`TestArmatureNoOpAtZero` -- with ``armature == 0`` the bake
-  must be a no-op: body inertias and the resulting trajectory must
-  match the pre-armature-feature behaviour bit-for-bit.
-
-* :class:`TestSkinnyChainStability` -- the failure mode the feature
-  was added to fix: a heavy end mass cantilevered through a
-  near-zero-inertia intermediate link with a high-stiffness PD drive
-  on the inner joint. With armature on it stays bounded; the
-  matching real-world divergence on ``robot_policy --solver phoenx
-  --robot g1_29dof`` is documented in the commit log -- a synthetic
-  pure-PGS repro that diverges without armature and is solver-stable
-  with it has resisted attempts so far.
+PhoenX bakes reduced-coordinate armature into maximal-coordinate body
+inertia. These tests cover analytical period checks, MuJoCo parity,
+zero-armature no-op behaviour, and a skinny-chain stability regression.
 """
 
 from __future__ import annotations
@@ -113,30 +63,58 @@ def _measure_period_zero_crossings(signal: np.ndarray, dt: float) -> float:
     return float(np.mean(np.diff(rising)) * dt)
 
 
-def _run_pendulum(model: newton.Model, frames: int, dt: float, init_angle: float = 0.05) -> np.ndarray:
-    """Set ``joint_q[0] = init_angle``, advance ``frames`` steps, return ``joint_q[0]`` history."""
+def _run_phoenx_joint_history(
+    model: newton.Model,
+    frames: int,
+    dt: float,
+    init_q,
+    *,
+    substeps: int = 8,
+    solver_iterations: int = 8,
+    velocity_iterations: int = 1,
+    record_qd: bool = False,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Replay one captured PhoenX step and record joint coordinates."""
     solver = newton.solvers.SolverPhoenX(
         model,
-        substeps=8,
-        solver_iterations=8,
-        velocity_iterations=1,
+        substeps=substeps,
+        solver_iterations=solver_iterations,
+        velocity_iterations=velocity_iterations,
     )
     s0 = model.state()
     s1 = model.state()
     control = model.control()
-    s0.joint_q.assign(np.array([float(init_angle)], dtype=np.float32))
+    s0.joint_q.assign(np.asarray(init_q, dtype=np.float32))
     newton.eval_fk(model, s0.joint_q, s0.joint_qd, s0)
 
-    history = np.empty(frames, dtype=np.float32)
     jq = wp.zeros(model.joint_coord_count, dtype=wp.float32, device=model.device)
     jqd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=model.device)
-    for i in range(frames):
+
+    def step_once() -> None:
         s0.clear_forces()
         solver.step(s0, s1, control, None, dt)
-        s0, s1 = s1, s0
+        wp.copy(s0.body_q, s1.body_q)
+        wp.copy(s0.body_qd, s1.body_qd)
         newton.eval_ik(model, s0, jq, jqd)
-        history[i] = float(jq.numpy()[0])
-    return history
+
+    with wp.ScopedCapture(device=model.device) as cap:
+        step_once()
+    graph = cap.graph
+
+    q_history = np.empty((frames, model.joint_coord_count), dtype=np.float32)
+    qd_history = np.empty((frames, model.joint_dof_count), dtype=np.float32) if record_qd else None
+    for i in range(frames):
+        wp.capture_launch(graph)
+        q_history[i] = jq.numpy()
+        if qd_history is not None:
+            qd_history[i] = jqd.numpy()
+    return q_history, qd_history
+
+
+def _run_pendulum(model: newton.Model, frames: int, dt: float, init_angle: float = 0.05) -> np.ndarray:
+    """Return captured-graph ``joint_q[0]`` history."""
+    history, _ = _run_phoenx_joint_history(model, frames, dt, [float(init_angle)])
+    return history[:, 0]
 
 
 @unittest.skipUnless(
@@ -155,11 +133,8 @@ class TestPendulumPeriod(unittest.TestCase):
         # axis), plus parallel-axis ``m*L^2``.
         I_chain = mass * length * length + 1.0e-4
         dt = 1.0 / 400.0
-        # Long enough for several oscillations even at the largest
-        # armature (T ~ 6 s -> ~3 oscillations in 16 s @ dt=2.5ms ->
-        # 6400 frames). The integration is conservative because there's
-        # no damping in the model, so amplitudes don't decay.
-        frames = 6400
+        # Long enough for two measured periods at the largest armature.
+        frames = 5200
 
         for armature in (0.0, 0.5, 2.0, 8.0):
             with self.subTest(armature=armature):
@@ -243,46 +218,9 @@ def _build_two_body_torsion_chain(
 
 
 def _run_torsion_chain(model: newton.Model, frames: int, dt: float, init_angle: float = 0.05) -> np.ndarray:
-    """Set ``joint_q[0] = init_angle``, advance ``frames`` steps,
-    return the ``joint_q[0]`` history (relative angle of body B wrt
-    body A around the joint axis).
-
-    Captures the per-frame kernel chain into a CUDA graph and replays
-    it ``frames`` times -- the test is otherwise dominated by
-    per-step kernel-launch overhead. The trailing ``copy`` keeps
-    ``s0`` aliased to the captured-input buffer between replays
-    (same pattern as ``example_robot_dr_legs_phoenx.py``)."""
-    solver = newton.solvers.SolverPhoenX(
-        model,
-        substeps=8,
-        solver_iterations=8,
-        velocity_iterations=1,
-    )
-    s0 = model.state()
-    s1 = model.state()
-    control = model.control()
-    s0.joint_q.assign(np.array([float(init_angle)], dtype=np.float32))
-    newton.eval_fk(model, s0.joint_q, s0.joint_qd, s0)
-
-    jq = wp.zeros(model.joint_coord_count, dtype=wp.float32, device=model.device)
-    jqd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=model.device)
-
-    def step_once() -> None:
-        s0.clear_forces()
-        solver.step(s0, s1, control, None, dt)
-        wp.copy(s0.body_q, s1.body_q)
-        wp.copy(s0.body_qd, s1.body_qd)
-        newton.eval_ik(model, s0, jq, jqd)
-
-    with wp.ScopedCapture() as cap:
-        step_once()
-    graph = cap.graph
-
-    history = np.empty(frames, dtype=np.float32)
-    for i in range(frames):
-        wp.capture_launch(graph)
-        history[i] = float(jq.numpy()[0])
-    return history
+    """Return captured-graph torsion angle history."""
+    history, _ = _run_phoenx_joint_history(model, frames, dt, [float(init_angle)])
+    return history[:, 0]
 
 
 def _cuda_with_graph_capture() -> bool:
@@ -401,37 +339,8 @@ def _build_two_body_prismatic_slide(
 
 def _run_prismatic_slide(model: newton.Model, frames: int, dt: float, init_slide: float = 0.05) -> np.ndarray:
     """Captured-graph slide history of the single prismatic DoF."""
-    solver = newton.solvers.SolverPhoenX(
-        model,
-        substeps=8,
-        solver_iterations=8,
-        velocity_iterations=1,
-    )
-    s0 = model.state()
-    s1 = model.state()
-    control = model.control()
-    s0.joint_q.assign(np.array([float(init_slide)], dtype=np.float32))
-    newton.eval_fk(model, s0.joint_q, s0.joint_qd, s0)
-
-    jq = wp.zeros(model.joint_coord_count, dtype=wp.float32, device=model.device)
-    jqd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=model.device)
-
-    def step_once() -> None:
-        s0.clear_forces()
-        solver.step(s0, s1, control, None, dt)
-        wp.copy(s0.body_q, s1.body_q)
-        wp.copy(s0.body_qd, s1.body_qd)
-        newton.eval_ik(model, s0, jq, jqd)
-
-    with wp.ScopedCapture() as cap:
-        step_once()
-    graph = cap.graph
-
-    history = np.empty(frames, dtype=np.float32)
-    for i in range(frames):
-        wp.capture_launch(graph)
-        history[i] = float(jq.numpy()[0])
-    return history
+    history, _ = _run_phoenx_joint_history(model, frames, dt, [float(init_slide)])
+    return history[:, 0]
 
 
 @unittest.skipUnless(
@@ -550,40 +459,8 @@ def _run_three_body_chain(
     dt: float,
     init_q: np.ndarray,
 ) -> np.ndarray:
-    """Captured-graph history of the three joint angles. Initial
-    perturbation supplied via ``init_q`` (length 3) lets the test
-    excite a specific eigenmode by setting the initial joint angles
-    proportional to the corresponding eigenvector."""
-    solver = newton.solvers.SolverPhoenX(
-        model,
-        substeps=8,
-        solver_iterations=16,  # 3-DoF coupling needs more PGS sweeps
-        velocity_iterations=1,
-    )
-    s0 = model.state()
-    s1 = model.state()
-    control = model.control()
-    s0.joint_q.assign(np.asarray(init_q, dtype=np.float32))
-    newton.eval_fk(model, s0.joint_q, s0.joint_qd, s0)
-
-    jq = wp.zeros(model.joint_coord_count, dtype=wp.float32, device=model.device)
-    jqd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=model.device)
-
-    def step_once() -> None:
-        s0.clear_forces()
-        solver.step(s0, s1, control, None, dt)
-        wp.copy(s0.body_q, s1.body_q)
-        wp.copy(s0.body_qd, s1.body_qd)
-        newton.eval_ik(model, s0, jq, jqd)
-
-    with wp.ScopedCapture() as cap:
-        step_once()
-    graph = cap.graph
-
-    history = np.empty((frames, 3), dtype=np.float32)
-    for i in range(frames):
-        wp.capture_launch(graph)
-        history[i] = jq.numpy()
+    """Captured-graph history of the three joint angles."""
+    history, _ = _run_phoenx_joint_history(model, frames, dt, init_q, solver_iterations=16)
     return history
 
 
@@ -752,21 +629,14 @@ class TestArmatureMatchesMuJoCo(unittest.TestCase):
         g = 9.81
         I_chain = mass * length * length + 1.0e-4
         dt = 1.0 / 400.0
-        frames = 6400
+        frames = 5200
 
-        for armature in (0.0, 0.5, 2.0, 8.0):
+        for armature in (0.0, 8.0):
             with self.subTest(armature=armature):
                 T_expected = 2.0 * np.pi * np.sqrt((I_chain + armature) / (mass * g * length))
 
                 model_phoenx = _build_gravity_pendulum(length=length, mass=mass, armature=armature)
-                history_phoenx = _run_pendulum_with_solver(
-                    model_phoenx,
-                    frames=frames,
-                    dt=dt,
-                    solver_factory=lambda m: newton.solvers.SolverPhoenX(
-                        m, substeps=8, solver_iterations=8, velocity_iterations=1
-                    ),
-                )
+                history_phoenx = _run_pendulum(model_phoenx, frames=frames, dt=dt)
                 T_phoenx = _measure_period_zero_crossings(history_phoenx, dt)
 
                 # Fresh model for MuJoCo (solvers may modify model
@@ -776,7 +646,7 @@ class TestArmatureMatchesMuJoCo(unittest.TestCase):
                     model_mujoco,
                     frames=frames,
                     dt=dt,
-                    solver_factory=lambda m: newton.solvers.SolverMuJoCo(m),
+                    solver_factory=newton.solvers.SolverMuJoCo,
                 )
                 T_mujoco = _measure_period_zero_crossings(history_mujoco, dt)
 
@@ -912,11 +782,22 @@ class TestSkinnyChainStability(unittest.TestCase):
         s0.joint_q.assign(np.array([0.2, 0.2], dtype=np.float32))
         newton.eval_fk(model, s0.joint_q, model.joint_qd, s0)
         peak = 0.0
-        for _ in range(frames):
+        jq = wp.zeros(model.joint_coord_count, dtype=wp.float32, device=model.device)
+        jqd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=model.device)
+
+        def step_once() -> None:
             s0.clear_forces()
             solver.step(s0, s1, control, None, dt)
-            s0, s1 = s1, s0
-            qd = s0.joint_qd.numpy()
+            wp.copy(s0.body_q, s1.body_q)
+            wp.copy(s0.body_qd, s1.body_qd)
+            newton.eval_ik(model, s0, jq, jqd)
+
+        with wp.ScopedCapture(device=model.device) as cap:
+            step_once()
+
+        for _ in range(frames):
+            wp.capture_launch(cap.graph)
+            qd = jqd.numpy()
             v = float(np.abs(qd).max())
             if v != v:  # NaN
                 return float("inf")

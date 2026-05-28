@@ -131,9 +131,7 @@ def _setup_anymal_loop(model: newton.Model):
 
 
 def _step_one_frame(solver, state_0, state_1, control, contacts, model, dt):
-    """Advance ``state_0`` by one ``dt`` second with ``ANYMAL_SUBSTEPS``
-    inner substeps. Mirrors :class:`example_robot_anymal_c_walk`'s
-    ``simulate``."""
+    """Advance ``state_0`` by one ``dt`` second."""
     sub_dt = dt / ANYMAL_SUBSTEPS
     for _ in range(ANYMAL_SUBSTEPS):
         state_0.clear_forces()
@@ -142,6 +140,20 @@ def _step_one_frame(solver, state_0, state_1, control, contacts, model, dt):
         solver.step(state_0, state_1, control, contacts, sub_dt)
         state_0, state_1 = state_1, state_0
     return state_0, state_1
+
+
+def _capture_anymal_step_graph(solver, state_0, state_1, control, contacts, model, dt):
+    """Warm up and capture one ANYmal frame."""
+    device = wp.get_preferred_device()
+    if not device.is_cuda:
+        raise unittest.SkipTest("ANYmal PhoenX tests require CUDA graph capture")
+    if ANYMAL_SUBSTEPS % 2 != 0:
+        raise RuntimeError("captured ANYmal frame expects an even substep count")
+
+    _step_one_frame(solver, state_0, state_1, control, contacts, model, dt)
+    with wp.ScopedCapture(device=device) as capture:
+        _step_one_frame(solver, state_0, state_1, control, contacts, model, dt)
+    return capture.graph
 
 
 @unittest.skipUnless(
@@ -179,6 +191,9 @@ class TestAnymalRandomPositionTargets(unittest.TestCase):
         upper = model.joint_limit_upper.numpy()[leg_dof_offset:]
         lo = np.maximum(lo, lower + 0.05)
         hi = np.minimum(hi, upper - 0.05)
+        target_buf[leg_dof_offset:] = default_pose
+        control.joint_target_pos.assign(target_buf)
+        step_graph = _capture_anymal_step_graph(solver, s0, s1, control, contacts, model, ANYMAL_DT)
 
         # Sanity over the whole trajectory:
         n_frames = ANYMAL_FRAMES
@@ -188,7 +203,7 @@ class TestAnymalRandomPositionTargets(unittest.TestCase):
         for i in range(n_frames):
             target_buf[leg_dof_offset:] = rng.uniform(lo, hi).astype(np.float32)
             control.joint_target_pos.assign(target_buf)
-            s0, s1 = _step_one_frame(solver, s0, s1, control, contacts, model, ANYMAL_DT)
+            wp.capture_launch(step_graph)
             if i % 30 == 29:
                 bq = s0.body_q.numpy()
                 bqd = s0.body_qd.numpy()
@@ -269,13 +284,15 @@ class TestAnymalRandomVelocityTargets(unittest.TestCase):
         # smooth enough that a sane PD can track without diverging.
         omega_max = 8.0 / 3.0
         target_buf_vel = np.zeros_like(target_buf)
+        control.joint_target_vel.assign(target_buf_vel)
+        step_graph = _capture_anymal_step_graph(solver, s0, s1, control, contacts, model, ANYMAL_DT)
 
         n_frames = ANYMAL_FRAMES
         peak_qd = 0.0
         for i in range(n_frames):
             target_buf_vel[leg_dof_offset:] = rng.uniform(-omega_max, omega_max, size=leg_dof_count).astype(np.float32)
             control.joint_target_vel.assign(target_buf_vel)
-            s0, s1 = _step_one_frame(solver, s0, s1, control, contacts, model, ANYMAL_DT)
+            wp.capture_launch(step_graph)
             if i % 30 == 29:
                 bq = s0.body_q.numpy()
                 bqd = s0.body_qd.numpy()

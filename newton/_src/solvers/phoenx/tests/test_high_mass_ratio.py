@@ -449,9 +449,10 @@ class TestHeavyPendulum(unittest.TestCase):
                     step_layout=layout,
                 )
 
-                # Sample bob position over ~3 expected periods.
+                # Four zero-crossings need just under two periods; add
+                # a small margin instead of simulating three periods.
                 T_expected = 2.0 * math.pi * math.sqrt(_PENDULUM_LENGTH / GRAVITY)
-                n_frames = int(round(3.0 * T_expected * _PENDULUM_FPS))
+                n_frames = int(round(2.1 * T_expected * _PENDULUM_FPS))
                 dt = 1.0 / _PENDULUM_FPS
 
                 # Warm-up step + capture single step + replay.
