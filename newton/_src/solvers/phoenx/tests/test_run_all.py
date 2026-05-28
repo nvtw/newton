@@ -3,9 +3,9 @@
 
 """Convenience entry point for running every PhoenX unit test.
 
-Discovers and runs every ``test_*.py`` module in this directory (except
-this file itself) in a single ``unittest`` invocation. Intended for
-local development -- ``uv run --extra dev -m unittest
+Discovers and runs every ``test_*.py`` module in this directory plus the
+nested mass-splitting unit tests in a single ``unittest`` invocation.
+Intended for local development -- ``uv run --extra dev -m unittest
 newton._src.solvers.phoenx.tests.test_run_all`` is much faster than
 ``newton.tests`` because it skips the rest of the project's test
 suite (and the associated solver/example warm-up).
@@ -78,14 +78,37 @@ def _require_cuda_graph_capture() -> None:
         )
 
 
+def _iter_test_module_names(self_stem: str) -> list[str]:
+    """Return dotted PhoenX test module names covered by this runner."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    roots = (
+        (here, "newton._src.solvers.phoenx.tests", {self_stem}),
+        (
+            os.path.abspath(os.path.join(here, os.pardir, "mass_splitting", "tests")),
+            "newton._src.solvers.phoenx.mass_splitting.tests",
+            frozenset[str](),
+        ),
+    )
+
+    modules: list[str] = []
+    for root, package, skip_stems in roots:
+        for fname in sorted(os.listdir(root)):
+            if not fname.startswith("test_") or not fname.endswith(".py"):
+                continue
+            stem = fname[:-3]
+            if stem in skip_stems or stem in _EXAMPLE_RUNNING_TEST_MODULES:
+                continue
+            modules.append(f"{package}.{stem}")
+    return modules
+
+
 def load_tests(loader: unittest.TestLoader, standard_tests, pattern):
     """unittest protocol hook: discover sibling ``test_*.py`` modules.
 
     Picked up automatically by ``unittest`` when this module is given
     as the test target (``unittest`` calls ``load_tests`` if defined).
-    Enumerates ``test_*.py`` files in this directory and loads each as
-    ``newton._src.solvers.phoenx.<stem>``; this avoids
-    ``loader.discover`` (which insists on its start dir being a
+    Enumerates the configured PhoenX test roots explicitly instead of
+    using ``loader.discover`` (which insists on its start dir being a
     top-level importable package) and keeps every test reachable via
     its real dotted module name.
 
@@ -94,21 +117,11 @@ def load_tests(loader: unittest.TestLoader, standard_tests, pattern):
     """
     _require_cuda_graph_capture()
 
-    here = os.path.dirname(os.path.abspath(__file__))
-    # Hard-coded so the protocol hook works regardless of how this
-    # module was loaded (``python -m`` -> ``__name__ == "__main__"``;
-    # ``-m unittest <dotted>`` -> ``__name__`` is the dotted path).
-    package = "newton._src.solvers.phoenx.tests"
     self_stem = os.path.splitext(os.path.basename(__file__))[0]
 
     suite = unittest.TestSuite()
-    for fname in sorted(os.listdir(here)):
-        if not fname.startswith("test_") or not fname.endswith(".py"):
-            continue
-        stem = fname[:-3]
-        if stem == self_stem or stem in _EXAMPLE_RUNNING_TEST_MODULES:
-            continue
-        suite.addTests(loader.loadTestsFromName(f"{package}.{stem}"))
+    for module_name in _iter_test_module_names(self_stem):
+        suite.addTests(loader.loadTestsFromName(module_name))
     return suite
 
 
@@ -276,7 +289,7 @@ def _resolve_report_path() -> str:
 
 
 def main() -> None:
-    """Run all sibling ``test_*.py`` modules with :class:`_TimingTestRunner`.
+    """Run all PhoenX ``test_*.py`` modules with :class:`_TimingTestRunner`.
 
     Invoked when this module is run as a script (``python -m
     newton._src.solvers.phoenx.tests.test_run_all``). The unittest
@@ -287,24 +300,12 @@ def main() -> None:
     """
     _require_cuda_graph_capture()
 
-    here = os.path.dirname(os.path.abspath(__file__))
-    # When invoked via ``python -m``, ``__name__`` is ``"__main__"`` so
-    # we cannot derive the package from it -- hard-code the dotted path
-    # to this directory's package instead. Keeps behaviour identical
-    # whether the module was loaded as a script or as
-    # ``newton._src.solvers.phoenx.tests.test_run_all``.
-    package = "newton._src.solvers.phoenx.tests"
     self_stem = os.path.splitext(os.path.basename(__file__))[0]
 
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    for fname in sorted(os.listdir(here)):
-        if not fname.startswith("test_") or not fname.endswith(".py"):
-            continue
-        stem = fname[:-3]
-        if stem == self_stem or stem in _EXAMPLE_RUNNING_TEST_MODULES:
-            continue
-        suite.addTests(loader.loadTestsFromName(f"{package}.{stem}"))
+    for module_name in _iter_test_module_names(self_stem):
+        suite.addTests(loader.loadTestsFromName(module_name))
 
     runner = _TimingTestRunner(verbosity=2, report_path=_resolve_report_path())
     result = runner.run(suite)
