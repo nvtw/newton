@@ -100,7 +100,7 @@ class Example:
         grid_x: int = 4,
         grid_y: int = 4,
         grid_spacing: float | None = None,
-        youngs_modulus: float = 1.0e9,
+        youngs_modulus: float = 1.0e10,
         poisson_ratio: float = 0.3,
         density: float = 500.0,
         soft_body_thickness: float = 0.005,
@@ -139,7 +139,7 @@ class Example:
         # (``Playground.NumberSubsteps = 1``, ``SolverIterations = 8``)
         # at frame dt 1/60 so the user's intuition for Young's modulus
         # transfers from the C# experimental sim.
-        self.sim_substeps = 5
+        self.sim_substeps = 10
         self.solver_iterations = 4
         self.velocity_iterations = 0
 
@@ -465,7 +465,7 @@ if __name__ == "__main__":
         default=None,
         help="Distance between pile centres in x and y. Defaults to 1.5 * cube_size.",
     )
-    parser.add_argument("--youngs-modulus", type=float, default=1.0e9)
+    parser.add_argument("--youngs-modulus", type=float, default=1.0e10)
     parser.add_argument("--poisson-ratio", type=float, default=0.3)
     parser.add_argument("--density", type=float, default=500.0)
     parser.add_argument("--soft-body-thickness", type=float, default=0.005)
