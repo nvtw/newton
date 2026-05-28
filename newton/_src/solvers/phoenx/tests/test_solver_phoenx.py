@@ -46,6 +46,28 @@ def _make_box_model(*, box_z: float = 0.5, mu: float = 0.5) -> newton.Model:
     return mb.finalize()
 
 
+def _make_box_margin_stack_model(*, margin: float) -> tuple[newton.Model, int]:
+    """Static box + dynamic box with equal shape margins."""
+    mb = newton.ModelBuilder()
+    static_cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.8, margin=margin)
+    dynamic_cfg = newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.8, margin=margin)
+    mb.add_shape_box(
+        body=-1,
+        xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
+        hx=0.5,
+        hy=0.5,
+        hz=0.1,
+        cfg=static_cfg,
+    )
+    body = mb.add_body(
+        xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.55), q=wp.quat_identity()),
+        mass=1.0,
+    )
+    mb.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=dynamic_cfg)
+    mb.gravity = -GRAVITY
+    return mb.finalize(), body
+
+
 def _make_pendulum_model(*, target_angle: float = 0.0) -> newton.Model:
     """Static world body + dynamic cube + revolute joint with a PD
     drive towards ``target_angle`` (rad).
@@ -146,6 +168,31 @@ class TestSolverPhoenX(unittest.TestCase):
             msg=f"cube COM z = {com_z:.3f} m, expected ~0.1",
         )
         self.assertLess(speed, 0.1, msg=f"cube still moving: |v|={speed:.3f}")
+
+    def test_box_margins_set_rest_distance(self) -> None:
+        margin = 0.03
+        model, body = _make_box_margin_stack_model(margin=margin)
+        solver = newton.solvers.SolverPhoenX(model, substeps=8, solver_iterations=16, velocity_iterations=1)
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        collision_pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        contacts = model.contacts(collision_pipeline=collision_pipeline)
+
+        dt = 1.0 / 60.0
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=60, dt=dt)
+        model.collide(state_0, contacts=contacts, collision_pipeline=collision_pipeline)
+
+        com_z = float(state_0.body_q.numpy()[body, 2])
+        expected_z = 0.1 + 0.1 + 2.0 * margin
+        self.assertAlmostEqual(com_z, expected_z, delta=0.005)
+
+        contact_count = int(contacts.rigid_contact_count.numpy()[0])
+        self.assertGreater(contact_count, 0)
+        margin0 = contacts.rigid_contact_margin0.numpy()[:contact_count]
+        margin1 = contacts.rigid_contact_margin1.numpy()[:contact_count]
+        self.assertTrue(np.allclose(margin0, margin, atol=1.0e-6))
+        self.assertTrue(np.allclose(margin1, margin, atol=1.0e-6))
 
     def test_revolute_drive_tracks_target(self) -> None:
         """PD position drive on a revolute pendulum parks the cube at

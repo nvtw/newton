@@ -259,7 +259,7 @@ def _phoenx_update_cloth_shape_geometry_kernel(
     particles: ParticleContainer,
     tri_indices: wp.array2d[wp.int32],
     cloth_shape_offset: wp.int32,
-    cloth_thickness: wp.float32,
+    shape_margin: wp.array[wp.float32],
     cloth_gap: wp.float32,
     # outputs
     geom_xform: wp.array[wp.transform],
@@ -274,11 +274,11 @@ def _phoenx_update_cloth_shape_geometry_kernel(
 
     * ``geom_xform[S+t]`` -- world transform from the canonical
       local-frame triangle (origin at vertex A, +Z along AB).
-    * ``geom_data[S+t]`` -- ``(edge_ab, c_y, c_z, thickness)``; the
-      narrow phase treats ``thickness`` as the Minkowski skin radius
-      around the triangle.
+    * ``geom_data[S+t]`` -- ``(edge_ab, c_y, c_z, margin)``; the
+      narrow phase treats the virtual shape margin as the Minkowski
+      skin radius around the triangle.
     * ``shape_aabb_lower/upper[S+t]`` -- world AABB enlarged by
-      ``thickness + gap`` (the standard Newton speculative-contact
+      ``margin + gap`` (the standard Newton speculative-contact
       enlargement convention).
     """
     t = wp.tid()
@@ -293,14 +293,15 @@ def _phoenx_update_cloth_shape_geometry_kernel(
     xc = particles.position[pc]
 
     xform, edge_ab, c_y, c_z = canonicalize_triangle(xa, xb, xc)
+    thickness = shape_margin[s]
     geom_xform[s] = xform
-    geom_data[s] = wp.vec4f(edge_ab, c_y, c_z, cloth_thickness)
+    geom_data[s] = wp.vec4f(edge_ab, c_y, c_z, thickness)
 
-    # World AABB from the 3 vertices, enlarged by (thickness + gap)
+    # World AABB from the 3 vertices, enlarged by (margin + gap)
     # for speculative-contact detection. Tighter than the support-map
     # AABB compute_shape_aabbs uses for rigid triangles, but the broad
     # phase only requires a conservative bound -- this one is.
-    enlargement = cloth_thickness + cloth_gap
+    enlargement = thickness + cloth_gap
     enlargement_vec = wp.vec3f(enlargement, enlargement, enlargement)
     lo = wp.vec3f(
         wp.min(xa[0], wp.min(xb[0], xc[0])),
@@ -346,7 +347,7 @@ def _phoenx_update_soft_tet_shape_geometry_kernel(
     particles: ParticleContainer,
     tet_indices: wp.array2d[wp.int32],
     soft_tet_shape_offset: wp.int32,
-    soft_body_thickness: wp.float32,
+    shape_margin: wp.array[wp.float32],
     soft_body_gap: wp.float32,
     # outputs
     geom_xform: wp.array[wp.transform],
@@ -364,11 +365,11 @@ def _phoenx_update_soft_tet_shape_geometry_kernel(
 
     * ``geom_xform`` -- canonical-frame world transform (A at origin,
       AB along local +Z, ABC in local YZ plane).
-    * ``geom_data`` -- ``(edge_ab, c_y, c_z, thickness)``.
+    * ``geom_data`` -- ``(edge_ab, c_y, c_z, margin)``.
     * ``shape_source`` -- encoded vertex D in local frame
       (``encode_vec3``).
     * ``shape_aabb_lower/upper`` -- world AABB over the 4 vertices,
-      enlarged by ``thickness + gap`` for speculative-contact detection.
+      enlarged by ``margin + gap`` for speculative-contact detection.
     """
     t = wp.tid()
     s = soft_tet_shape_offset + t
@@ -384,11 +385,12 @@ def _phoenx_update_soft_tet_shape_geometry_kernel(
     xd = particles.position[pd]
 
     xform, edge_ab, c_y, c_z, d_local = canonicalize_tetrahedron(xa, xb, xc, xd)
+    thickness = shape_margin[s]
     geom_xform[s] = xform
-    geom_data[s] = wp.vec4f(edge_ab, c_y, c_z, soft_body_thickness)
+    geom_data[s] = wp.vec4f(edge_ab, c_y, c_z, thickness)
     shape_source[s] = encode_vec3(d_local)
 
-    enlargement = soft_body_thickness + soft_body_gap
+    enlargement = thickness + soft_body_gap
     enlargement_vec = wp.vec3f(enlargement, enlargement, enlargement)
     lo = wp.vec3f(
         wp.min(wp.min(xa[0], xb[0]), wp.min(xc[0], xd[0])),

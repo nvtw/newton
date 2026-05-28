@@ -518,7 +518,6 @@ class PhoenXWorld:
         # case :meth:`collide` is a no-op.
         self._collision_pipeline = None
         self._cloth_shape_offset: int = 0
-        self._cloth_thickness: float = 0.0
         self._cloth_gap: float = 0.0
         self._cloth_tri_indices = None
         # Per-shape endpoint table -- length S + T, populated alongside
@@ -2016,12 +2015,14 @@ class PhoenXWorld:
 
         if T > 0:
             _fill_range_int(pipeline.unified_shape_type, S, S + T, triangle_type)
+            _fill_range_float(pipeline.unified_shape_margin, S, S + T, float(cloth_thickness))
             _fill_range_float(pipeline.unified_shape_gap, S, S + T, float(cloth_gap))
             _fill_range_float(pipeline.unified_shape_collision_radius, S, S + T, 0.0)
             cloth_collision_group = 1 if cloth_self_collision else -2
             _fill_range_int(pipeline.unified_shape_collision_group, S, S + T, cloth_collision_group)
         if Tet > 0:
             _fill_range_int(pipeline.unified_shape_type, S + T, S + T + Tet, tetrahedron_type)
+            _fill_range_float(pipeline.unified_shape_margin, S + T, S + T + Tet, float(soft_body_thickness))
             _fill_range_float(pipeline.unified_shape_gap, S + T, S + T + Tet, float(soft_body_gap))
             _fill_range_float(pipeline.unified_shape_collision_radius, S + T, S + T + Tet, 0.0)
             _fill_range_int(pipeline.unified_shape_collision_group, S + T, S + T + Tet, 1)
@@ -2035,9 +2036,7 @@ class PhoenXWorld:
         self._collision_pipeline = pipeline
         self._cloth_shape_offset: int = S
         self._soft_tet_shape_offset: int = S + T
-        self._cloth_thickness: float = float(cloth_thickness)
         self._cloth_gap: float = float(cloth_gap)
-        self._soft_body_thickness: float = float(soft_body_thickness)
         self._soft_body_gap: float = float(soft_body_gap)
         self._cloth_tri_indices = tri_indices_for_filter if T > 0 else None
         self._soft_tet_indices = tet_indices_for_filter if Tet > 0 else None
@@ -2121,7 +2120,7 @@ class PhoenXWorld:
                     self.particles,
                     self._cloth_tri_indices,
                     wp.int32(self._cloth_shape_offset),
-                    wp.float32(self._cloth_thickness),
+                    pipeline.unified_shape_margin,
                     wp.float32(self._cloth_gap),
                 ],
                 outputs=[
@@ -2140,7 +2139,7 @@ class PhoenXWorld:
                     self.particles,
                     self._soft_tet_indices,
                     wp.int32(self._soft_tet_shape_offset),
-                    wp.float32(self._soft_body_thickness),
+                    pipeline.unified_shape_margin,
                     wp.float32(self._soft_body_gap),
                 ],
                 outputs=[

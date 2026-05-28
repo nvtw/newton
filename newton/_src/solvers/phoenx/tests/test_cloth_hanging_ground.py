@@ -43,6 +43,23 @@ class TestClothHangingGroundContact(unittest.TestCase):
 
             self.assertTrue(np.all(cloth_groups == 1))
 
+    def test_cloth_thickness_uses_virtual_shape_margin(self):
+        device = wp.get_preferred_device()
+        with wp.ScopedDevice(device):
+            scene = _GroundCubeClothScene(device, cloth_thickness=0.025)
+
+            rigid_count = int(scene.model.shape_count)
+            tri_count = int(scene.model.tri_count)
+            margins = scene.pipeline.unified_shape_margin.numpy()
+            self.assertTrue(np.allclose(margins[rigid_count : rigid_count + tri_count], 0.025))
+
+            margins[rigid_count : rigid_count + tri_count] = 0.04
+            scene.pipeline.unified_shape_margin.assign(margins)
+            scene.world.update_cloth_shape_geometry()
+            geom = scene.pipeline.geom_data.numpy()
+
+            self.assertTrue(np.allclose(geom[rigid_count : rigid_count + tri_count, 3], 0.04))
+
     def test_soft_body_self_collision_defaults_enabled(self):
         device = wp.get_preferred_device()
         with wp.ScopedDevice(device):
@@ -83,6 +100,7 @@ class TestClothHangingGroundContact(unittest.TestCase):
                 step_layout="single_world",
                 device=device,
             )
+            world.populate_soft_tetrahedra_from_model(model)
             pipeline = world.setup_cloth_collision_pipeline(model)
 
             groups = pipeline.unified_shape_collision_group.numpy()
@@ -91,6 +109,16 @@ class TestClothHangingGroundContact(unittest.TestCase):
             tet_groups = groups[rigid_count : rigid_count + tet_count]
 
             self.assertTrue(np.all(tet_groups == 1))
+
+            margins = pipeline.unified_shape_margin.numpy()
+            self.assertTrue(np.allclose(margins[rigid_count : rigid_count + tet_count], 0.005))
+
+            margins[rigid_count : rigid_count + tet_count] = 0.03
+            pipeline.unified_shape_margin.assign(margins)
+            world.update_cloth_shape_geometry()
+            geom = pipeline.geom_data.numpy()
+
+            self.assertTrue(np.allclose(geom[rigid_count : rigid_count + tet_count, 3], 0.03))
 
     def test_cloth_self_collision_can_be_disabled(self):
         device = wp.get_preferred_device()
@@ -146,7 +174,13 @@ class TestClothHangingGroundContact(unittest.TestCase):
 
 
 class _GroundCubeClothScene:
-    def __init__(self, device: wp.Device, *, cloth_self_collision: bool = True):
+    def __init__(
+        self,
+        device: wp.Device,
+        *,
+        cloth_self_collision: bool = True,
+        cloth_thickness: float = 0.005,
+    ):
         self.device = device
         self.ground_height = 0.0
         self.cube_half_extent = 0.4
@@ -240,7 +274,7 @@ class _GroundCubeClothScene:
         self.world.populate_cloth_triangles_from_model(self.model)
         self.pipeline = self.world.setup_cloth_collision_pipeline(
             self.model,
-            cloth_thickness=0.005,
+            cloth_thickness=cloth_thickness,
             cloth_gap=0.010,
             cloth_self_collision=cloth_self_collision,
             rigid_contact_max=1024,

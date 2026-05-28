@@ -1061,8 +1061,8 @@ class CollisionPipeline:
         ``shape_world`` and ``shape_flags`` are adopted from the
         caller-supplied broad-phase inputs (the broad phase has already
         captured them at construction time).  The remaining arrays
-        (``shape_type``, ``shape_gap``, ``shape_collision_group``,
-        ``shape_collision_radius``, ``shape_source_ptr``,
+        (``shape_type``, ``shape_margin``, ``shape_gap``,
+        ``shape_collision_group``, ``shape_collision_radius``, ``shape_source_ptr``,
         ``shape_sdf_index``, ``shape_heightfield_index``,
         ``shape_collision_aabb_*``) have their suffix ``[S, S+E)``
         stamped by the caller after construction.  Per-step suffix
@@ -1108,6 +1108,7 @@ class CollisionPipeline:
 
         with wp.ScopedDevice(device):
             self.unified_shape_type = _extend_int(model.shape_type, 0)
+            self.unified_shape_margin = _extend_float(model.shape_margin, 0.0)
             self.unified_shape_gap = _extend_float(model.shape_gap, 0.0)
             self.unified_shape_collision_radius = _extend_float(model.shape_collision_radius, 0.0)
             self.unified_shape_source_ptr = _extend_uint64(model.shape_source_ptr)
@@ -1580,8 +1581,8 @@ class CollisionPipeline:
         suffix ``[S, S+E)``:
 
         * **once** at solver init for static metadata
-          (``unified_shape_type``, ``unified_shape_gap``,
-          ``unified_shape_collision_group``,
+          (``unified_shape_type``, ``unified_shape_margin``,
+          ``unified_shape_gap``, ``unified_shape_collision_group``,
           ``unified_shape_collision_radius``, etc.);
         * **per step**, just before calling this method, for dynamic
           quantities (suffix of :attr:`narrow_phase.shape_aabb_lower` /
