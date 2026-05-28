@@ -106,14 +106,14 @@ class SoftBeamExample:
         dim_x: int = 12,
         dim_y: int = 3,
         dim_z: int = 3,
-        youngs_modulus: float = 1.0e8,
+        youngs_modulus: float = 1.0e9,
         poisson_ratio: float = 0.45,
         density: float = 500.0,
         axial_strain: float = 0.10,
-        twist_degrees: float = 120.0,
+        twist_degrees: float = 360.0,
         motion_period: float = 6.0,
-        substeps: int = 16,
-        solver_iterations: int = 64,
+        substeps: int = 10,
+        solver_iterations: int = 8,
         beta: float = 1.0,
     ):
         if mode not in ("stretch", "twist"):
@@ -334,20 +334,20 @@ def create_soft_beam_parser(*, mode: str):
     parser.add_argument("--length", type=float, default=1.8)
     parser.add_argument("--width", type=float, default=0.32)
     parser.add_argument("--depth", type=float, default=0.22)
-    parser.add_argument("--dim-x", type=int, default=12)
-    parser.add_argument("--dim-y", type=int, default=3)
-    parser.add_argument("--dim-z", type=int, default=3)
-    parser.add_argument("--youngs-modulus", type=float, default=1.0e8)
+    parser.add_argument("--dim-x", type=int, default=24)
+    parser.add_argument("--dim-y", type=int, default=6)
+    parser.add_argument("--dim-z", type=int, default=6)
+    parser.add_argument("--youngs-modulus", type=float, default=1.0e9)
     parser.add_argument("--poisson-ratio", type=float, default=0.45)
     parser.add_argument("--density", type=float, default=500.0)
-    parser.add_argument("--substeps", type=int, default=16)
-    parser.add_argument("--solver-iterations", type=int, default=64)
+    parser.add_argument("--substeps", type=int, default=8)
+    parser.add_argument("--solver-iterations", type=int, default=10)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--motion-period", type=float, default=6.0)
     if mode == "stretch":
-        parser.add_argument("--axial-strain", type=float, default=0.10)
+        parser.add_argument("--axial-strain", type=float, default=0.3)
     elif mode == "twist":
-        parser.add_argument("--twist-degrees", type=float, default=120.0)
+        parser.add_argument("--twist-degrees", type=float, default=360.0)
     else:
         raise ValueError(f"unknown beam mode {mode!r}")
     return parser
@@ -358,14 +358,14 @@ def soft_beam_kwargs_from_args(args) -> dict:
         "length": float(_get_arg(args, "length", 1.8)),
         "width": float(_get_arg(args, "width", 0.32)),
         "depth": float(_get_arg(args, "depth", 0.22)),
-        "dim_x": int(_get_arg(args, "dim_x", 12)),
-        "dim_y": int(_get_arg(args, "dim_y", 3)),
-        "dim_z": int(_get_arg(args, "dim_z", 3)),
+        "dim_x": int(_get_arg(args, "dim_x", 24)),
+        "dim_y": int(_get_arg(args, "dim_y", 6)),
+        "dim_z": int(_get_arg(args, "dim_z", 6)),
         "youngs_modulus": float(_get_arg(args, "youngs_modulus", 1.0e8)),
         "poisson_ratio": float(_get_arg(args, "poisson_ratio", 0.45)),
         "density": float(_get_arg(args, "density", 500.0)),
         "axial_strain": float(_get_arg(args, "axial_strain", 0.10)),
-        "twist_degrees": float(_get_arg(args, "twist_degrees", 120.0)),
+        "twist_degrees": float(_get_arg(args, "twist_degrees", 360.0)),
         "motion_period": float(_get_arg(args, "motion_period", 6.0)),
         "substeps": int(_get_arg(args, "substeps", 16)),
         "solver_iterations": int(_get_arg(args, "solver_iterations", 64)),

@@ -48,6 +48,10 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 ENABLE_MASS_SPLITTING: bool = True
 MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12
 
+# When ``True`` the cloth's left edge is pinned (the strip hangs).
+# When ``False`` the cloth is fully free and falls under gravity.
+PIN_CLOTH: bool = False
+
 
 class Example:
     """Hanging cloth + a falling rigid cube + a static ground plane."""
@@ -62,8 +66,8 @@ class Example:
         poisson_ratio: float = 0.3,
         cube_size: float = 0.4,
         cube_drop_height: float = 5.0,
-        cloth_thickness: float = 0.005,
-        cloth_gap: float = 0.010,
+        cloth_thickness: float = 0.01,
+        cloth_gap: float = 0.030,
     ):
         self.viewer = viewer
         self.device = wp.get_device()
@@ -72,8 +76,8 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
 
-        self.sim_substeps = 4
-        self.solver_iterations = 4
+        self.sim_substeps = 8
+        self.solver_iterations = 5
 
         self.dim_x = width
         self.dim_y = height
@@ -111,19 +115,27 @@ class Example:
         # the per-hinge bending stiffness (in N·m/rad) consumed by the
         # PhoenX dihedral-angle bending constraint below; ``edge_kd``
         # is reserved for damping (currently unused by the iterate).
+        # When pinned, lay the grid flat (rotated 90° about Z so the
+        # left edge runs along Y). When unpinned, stand the grid
+        # vertically (rotate 90° about Y) so it falls edge-down rather
+        # than face-down — gives a more interesting unpinned drop.
+        if PIN_CLOTH:
+            cloth_rot = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), wp.pi * 0.5)
+        else:
+            cloth_rot = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wp.pi * 0.5)
         builder.add_cloth_grid(
             pos=wp.vec3(0.0, 0.0, 4.0),
-            rot=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), wp.pi * 0.5),
+            rot=cloth_rot,
             vel=wp.vec3(0.0, 0.0, 0.0),
             dim_x=self.dim_x,
             dim_y=self.dim_y,
             cell_x=self.cell,
             cell_y=self.cell,
             mass=self.particle_mass,
-            fix_left=True,
+            fix_left=PIN_CLOTH,
             tri_ke=self.tri_ke,
             tri_ka=self.tri_ka,
-            edge_ke=1.0e-2,
+            edge_ke=1.0,
             particle_radius=0.04,
         )
 
@@ -304,15 +316,17 @@ class Example:
 
     def test_final(self) -> None:
         positions = self.state.particle_q.numpy()
-        pinned_indices = [j * (self.dim_x + 1) for j in range(self.dim_y + 1)]
 
         if not np.all(np.isfinite(positions)):
             raise RuntimeError("non-finite particle position in final state")
 
-        # Pinned particles haven't drifted (small numerical floor).
-        pinned_drift = np.linalg.norm(positions[pinned_indices] - self.model.particle_q.numpy()[pinned_indices], axis=1)
-        if pinned_drift.max() > 1.0e-3:
-            raise RuntimeError(f"pinned particle drifted: max={pinned_drift.max():.4f} m")
+        if PIN_CLOTH:
+            pinned_indices = [j * (self.dim_x + 1) for j in range(self.dim_y + 1)]
+            pinned_drift = np.linalg.norm(
+                positions[pinned_indices] - self.model.particle_q.numpy()[pinned_indices], axis=1
+            )
+            if pinned_drift.max() > 1.0e-3:
+                raise RuntimeError(f"pinned particle drifted: max={pinned_drift.max():.4f} m")
 
         # Cube fell under gravity (no constraint), so it should have
         # dropped at least a few cm from its initial height.
