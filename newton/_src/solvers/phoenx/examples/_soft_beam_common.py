@@ -13,9 +13,13 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.constraints.constraint_soft_tet_neohookean import (
+    SoftBodyConstraintType,
+)
 from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
     soft_tet_lame_from_youngs_poisson,
 )
+from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
@@ -23,31 +27,71 @@ def _get_arg(args, name: str, default):
     return default if args is None or not hasattr(args, name) else getattr(args, name)
 
 
-def _deform_stretch(rest: np.ndarray, x_min: float, length: float, poisson_ratio: float, axial_strain: float):
-    deformed = rest.copy()
-    center_y = 0.5 * (float(rest[:, 1].min()) + float(rest[:, 1].max()))
-    center_z = 0.5 * (float(rest[:, 2].min()) + float(rest[:, 2].max()))
-    t = np.clip((rest[:, 0] - x_min) / length, 0.0, 1.0)
-    lateral_scale = np.maximum(0.35, 1.0 - poisson_ratio * axial_strain * t)
-    deformed[:, 0] = rest[:, 0] + axial_strain * length * t
-    deformed[:, 1] = center_y + (rest[:, 1] - center_y) * lateral_scale
-    deformed[:, 2] = center_z + (rest[:, 2] - center_z) * lateral_scale
-    return deformed
+_TAU = 2.0 * math.pi
+_STRETCH_MODE = 0
+_TWIST_MODE = 1
 
 
-def _deform_twist(rest: np.ndarray, x_min: float, length: float, twist_radians: float):
-    deformed = rest.copy()
-    center_y = 0.5 * (float(rest[:, 1].min()) + float(rest[:, 1].max()))
-    center_z = 0.5 * (float(rest[:, 2].min()) + float(rest[:, 2].max()))
-    t = np.clip((rest[:, 0] - x_min) / length, 0.0, 1.0)
-    angle = twist_radians * t
+def _stretch_displacement(length: float, axial_strain: float, time: float, motion_period: float) -> float:
+    return axial_strain * length * math.sin(_TAU * time / motion_period)
+
+
+def _twist_angle(twist_degrees: float, time: float, motion_period: float) -> float:
+    return math.radians(twist_degrees) * math.sin(_TAU * time / motion_period)
+
+
+def _right_face_stretch_targets(rest: np.ndarray, displacement: float) -> np.ndarray:
+    target = rest.copy()
+    target[:, 0] += displacement
+    return target
+
+
+def _right_face_twist_targets(rest: np.ndarray, center_y: float, center_z: float, angle: float) -> np.ndarray:
+    target = rest.copy()
     c = np.cos(angle)
     s = np.sin(angle)
     y = rest[:, 1] - center_y
     z = rest[:, 2] - center_z
-    deformed[:, 1] = center_y + y * c - z * s
-    deformed[:, 2] = center_z + y * s + z * c
-    return deformed
+    target[:, 1] = center_y + y * c - z * s
+    target[:, 2] = center_z + y * s + z * c
+    return target
+
+
+@wp.kernel
+def _animate_right_face_kernel(
+    indices: wp.array[wp.int32],
+    rest_positions: wp.array[wp.vec3f],
+    mode: wp.int32,
+    center_y: wp.float32,
+    center_z: wp.float32,
+    stretch_displacement: wp.float32,
+    twist_angle: wp.float32,
+    inv_dt: wp.float32,
+    particles: ParticleContainer,
+    state_q: wp.array[wp.vec3f],
+    state_qd: wp.array[wp.vec3f],
+):
+    tid = wp.tid()
+    particle_id = indices[tid]
+    previous = particles.position[particle_id]
+    rest = rest_positions[tid]
+
+    target = rest
+    if mode == wp.int32(_STRETCH_MODE):
+        target = wp.vec3(rest[0] + stretch_displacement, rest[1], rest[2])
+    else:
+        s = wp.sin(twist_angle)
+        c = wp.cos(twist_angle)
+        y = rest[1] - center_y
+        z = rest[2] - center_z
+        target = wp.vec3(rest[0], center_y + y * c - z * s, center_z + y * s + z * c)
+
+    velocity = (target - previous) * inv_dt
+    particles.position[particle_id] = target
+    particles.position_prev_substep[particle_id] = previous
+    particles.velocity[particle_id] = velocity
+    state_q[particle_id] = target
+    state_qd[particle_id] = velocity
 
 
 class SoftBeamExample:
@@ -65,11 +109,12 @@ class SoftBeamExample:
         dim_x: int = 12,
         dim_y: int = 3,
         dim_z: int = 3,
-        youngs_modulus: float = 1.0e6,
+        youngs_modulus: float = 1.0e10,
         poisson_ratio: float = 0.45,
         density: float = 500.0,
         axial_strain: float = 0.25,
         twist_degrees: float = 270.0,
+        motion_period: float = 3.0,
         substeps: int = 8,
         solver_iterations: int = 20,
         beta: float = 1.0,
@@ -82,6 +127,8 @@ class SoftBeamExample:
             raise ValueError("beam dimensions must be positive")
         if min(dim_x, dim_y, dim_z) < 1:
             raise ValueError("beam grid dimensions must be at least 1")
+        if motion_period <= 0.0:
+            raise ValueError(f"motion_period must be positive, got {motion_period}")
 
         self.viewer = viewer
         self.device = wp.get_device()
@@ -91,6 +138,7 @@ class SoftBeamExample:
         self.depth = float(depth)
         self.axial_strain = float(axial_strain)
         self.twist_degrees = float(twist_degrees)
+        self.motion_period = float(motion_period)
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -130,13 +178,15 @@ class SoftBeamExample:
         self._right_indices = np.flatnonzero(rest[:, 0] >= x_max - tol).astype(np.int32)
         self._pinned_indices = np.concatenate((self._left_indices, self._right_indices)).astype(np.int32)
 
-        if mode == "stretch":
-            initial = _deform_stretch(rest, x_min, grid_length, float(poisson_ratio), self.axial_strain)
-        else:
-            initial = _deform_twist(rest, x_min, grid_length, math.radians(self.twist_degrees))
-
         self._rest_positions = rest
-        self._pinned_targets = initial[self._pinned_indices].copy()
+        self._right_rest_positions = rest[self._right_indices].copy()
+        self._right_indices_wp = wp.array(self._right_indices, dtype=wp.int32, device=self.device)
+        self._right_rest_wp = wp.array(self._right_rest_positions, dtype=wp.vec3f, device=self.device)
+        self._right_count = int(self._right_indices.shape[0])
+        self._mode_id = _STRETCH_MODE if mode == "stretch" else _TWIST_MODE
+        self._center_y = 0.5 * (float(rest[:, 1].min()) + float(rest[:, 1].max()))
+        self._center_z = 0.5 * (float(rest[:, 2].min()) + float(rest[:, 2].max()))
+        self._pinned_targets = self._pinned_targets_for_time(0.0)
 
         bodies = body_container_zeros(1, device=self.device)
         bodies.orientation.assign(np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32))
@@ -169,20 +219,61 @@ class SoftBeamExample:
         self.world.gravity.assign(np.array([[0.0, 0.0, 0.0]], dtype=np.float32))
         self.world.populate_soft_tetrahedra_from_model(
             self.model,
+            constraint_type=SoftBodyConstraintType.BLOCK_NEOHOOKEAN,
             beta_lambda=float(beta),
             beta_mu=float(beta),
         )
 
         self.state = self.model.state()
-        initial_wp = wp.array(initial, dtype=wp.vec3f, device=self.device)
-        wp.copy(self.world.particles.position, initial_wp)
-        wp.copy(self.world.particles.position_prev_substep, initial_wp)
-        wp.copy(self.state.particle_q, initial_wp)
+        rest_wp = wp.array(rest, dtype=wp.vec3f, device=self.device)
+        wp.copy(self.world.particles.position, rest_wp)
+        wp.copy(self.world.particles.position_prev_substep, rest_wp)
+        wp.copy(self.state.particle_q, rest_wp)
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(pos=wp.vec3(2.6, -3.0, 1.0), pitch=-12.0, yaw=130.0)
         self._frame_index = 0
         self._capture()
+
+    def _right_targets_for_time(self, time: float) -> np.ndarray:
+        if self.mode == "stretch":
+            displacement = _stretch_displacement(self.length, self.axial_strain, time, self.motion_period)
+            return _right_face_stretch_targets(self._right_rest_positions, displacement)
+        angle = _twist_angle(self.twist_degrees, time, self.motion_period)
+        return _right_face_twist_targets(self._right_rest_positions, self._center_y, self._center_z, angle)
+
+    def _pinned_targets_for_time(self, time: float) -> np.ndarray:
+        targets = self._rest_positions[self._pinned_indices].copy()
+        targets[self._left_indices.shape[0] :] = self._right_targets_for_time(time)
+        return targets
+
+    def _animate_right_face(self, time: float) -> None:
+        displacement = 0.0
+        angle = 0.0
+        if self.mode == "stretch":
+            displacement = _stretch_displacement(self.length, self.axial_strain, time, self.motion_period)
+        else:
+            angle = _twist_angle(self.twist_degrees, time, self.motion_period)
+
+        wp.launch(
+            _animate_right_face_kernel,
+            dim=self._right_count,
+            inputs=[
+                self._right_indices_wp,
+                self._right_rest_wp,
+                wp.int32(self._mode_id),
+                wp.float32(self._center_y),
+                wp.float32(self._center_z),
+                wp.float32(displacement),
+                wp.float32(angle),
+                wp.float32(1.0 / self.frame_dt),
+                self.world.particles,
+                self.state.particle_q,
+                self.state.particle_qd,
+            ],
+            device=self.device,
+        )
+        self._pinned_targets = self._pinned_targets_for_time(time)
 
     def _capture(self) -> None:
         if self.device.is_cuda:
@@ -199,13 +290,15 @@ class SoftBeamExample:
         wp.copy(self.state.particle_qd, self.world.particles.velocity)
 
     def step(self) -> None:
+        next_time = self.sim_time + self.frame_dt
+        self._animate_right_face(next_time)
         if self.graph is not None:
             wp.capture_launch(self.graph)
             wp.copy(self.state.particle_q, self.world.particles.position)
             wp.copy(self.state.particle_qd, self.world.particles.velocity)
         else:
             self._simulate_one_frame()
-        self.sim_time += self.frame_dt
+        self.sim_time = next_time
         self._frame_index += 1
 
     def render(self) -> None:
@@ -239,12 +332,13 @@ def create_soft_beam_parser(*, mode: str):
     parser.add_argument("--dim-x", type=int, default=12)
     parser.add_argument("--dim-y", type=int, default=3)
     parser.add_argument("--dim-z", type=int, default=3)
-    parser.add_argument("--youngs-modulus", type=float, default=1.0e6)
+    parser.add_argument("--youngs-modulus", type=float, default=1.0e10)
     parser.add_argument("--poisson-ratio", type=float, default=0.45)
     parser.add_argument("--density", type=float, default=500.0)
     parser.add_argument("--substeps", type=int, default=8)
     parser.add_argument("--solver-iterations", type=int, default=20)
     parser.add_argument("--beta", type=float, default=1.0)
+    parser.add_argument("--motion-period", type=float, default=3.0)
     if mode == "stretch":
         parser.add_argument("--axial-strain", type=float, default=0.25)
     elif mode == "twist":
@@ -262,11 +356,12 @@ def soft_beam_kwargs_from_args(args) -> dict:
         "dim_x": int(_get_arg(args, "dim_x", 12)),
         "dim_y": int(_get_arg(args, "dim_y", 3)),
         "dim_z": int(_get_arg(args, "dim_z", 3)),
-        "youngs_modulus": float(_get_arg(args, "youngs_modulus", 1.0e6)),
+        "youngs_modulus": float(_get_arg(args, "youngs_modulus", 1.0e10)),
         "poisson_ratio": float(_get_arg(args, "poisson_ratio", 0.45)),
         "density": float(_get_arg(args, "density", 500.0)),
         "axial_strain": float(_get_arg(args, "axial_strain", 0.25)),
         "twist_degrees": float(_get_arg(args, "twist_degrees", 270.0)),
+        "motion_period": float(_get_arg(args, "motion_period", 3.0)),
         "substeps": int(_get_arg(args, "substeps", 8)),
         "solver_iterations": int(_get_arg(args, "solver_iterations", 20)),
         "beta": float(_get_arg(args, "beta", 1.0)),

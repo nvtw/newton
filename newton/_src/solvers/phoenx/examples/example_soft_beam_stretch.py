@@ -3,9 +3,9 @@
 
 """PhoenX soft-beam stretch demo.
 
-A tetrahedral beam has its left face fixed and its right face held in a
-prescribed stretched pose. The default material uses a Poisson ratio of
-0.45 and the standard PhoenX ARAP tet constraint path.
+A tetrahedral beam has its left face fixed and its right face animated
+along the beam axis. The default material uses a Poisson ratio of 0.45
+and the PhoenX block Neo-Hookean tet constraint path.
 
 Run::
 
