@@ -30,6 +30,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.tests._test_helpers import make_solver_graph_stepper
 
 
 def _build_compound_scene(
@@ -137,20 +138,15 @@ def _make_solver(model):
     )
 
 
-def _step_n(model, solver, n_frames: int, dt: float) -> None:
-    """Advance ``n_frames`` steps eagerly (test runs short, capture
-    overhead not worth it). Returns final body_q for inspection."""
+def _step_n(model, solver, n_frames: int, dt: float):
+    """Advance ``n_frames`` steps and return the final state."""
     s0 = model.state()
     s1 = model.state()
     control = model.control()
     contacts = model.contacts() if model.shape_count > 0 else None
     newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
-    for _ in range(n_frames):
-        s0.clear_forces()
-        if contacts is not None:
-            model.collide(s0, contacts)
-        solver.step(s0, s1, control, contacts, dt)
-        s0, s1 = s1, s0
+    step = make_solver_graph_stepper(solver, s0, s1, control, contacts, model, dt)
+    s0, s1 = step(n_frames)
     return s0
 
 

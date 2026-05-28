@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Private test-only helpers for the jitter solver unit tests.
-
-This module is *not* part of the public API; it lives under
-``newton._src`` and is imported exclusively from ``test_*.py``
-siblings. It consolidates the hot inner-loop patterns that every
-PhoenX test file used to open-code so graph-capture fixes land in one
-place.
-"""
+"""Private helpers for PhoenX unit tests."""
 
 import unittest
 
@@ -17,118 +10,145 @@ import warp as wp
 __all__ = [
     "STEP_LAYOUTS",
     "make_graph_stepper",
+    "make_solver_graph_stepper",
+    "require_cuda_graph_capture",
     "run_settle_loop",
+    "run_solver_capture_loop",
 ]
 
-
-# Layouts every behavioural test should exercise. ``"multi_world"`` is
-# the default per-world fast-tail dispatch; ``"single_world"`` drives
-# the global JP colouring via ``wp.capture_while``. Both must produce
-# the same observable physics on any scene -- subTest the assertion
-# block over both so a regression in either path fails CI.
 STEP_LAYOUTS = ("multi_world", "single_world")
 
 
+def require_cuda_graph_capture(label: str = "PhoenX tests"):
+    device = wp.get_preferred_device()
+    if not device.is_cuda or not wp.is_mempool_enabled(device):
+        raise unittest.SkipTest(
+            f"{label} require CUDA graph capture with Warp mempool enabled (device: {device.name!r})."
+        )
+    return device
+
+
 def run_settle_loop(world, frames: int, dt: float) -> None:
-    """Advance ``world`` by ``frames`` steps of size ``dt`` seconds each.
-
-    On CUDA, *always* captures a CUDA graph (regardless of frame
-    count) and replays it for the bulk of the loop. Each
-    ``world.step(dt)`` call pays a fixed ~0.5-2 ms Python + Warp
-    launch overhead which graph replay collapses to ~10 us, so even
-    short loops benefit -- the previous frame-count threshold was a
-    legacy carve-out from when capture overhead was higher.
-
-    Raises ``SkipTest`` on non-CUDA devices; PhoenX behavioural tests
-    are expected to exercise the graph-captured CUDA path.
-
-    Args:
-        world: A :class:`newton._src.solvers.phoenx.World` built via
-            :class:`WorldBuilder`. The world must be fully finalised
-            (``b.finalize(...)`` has already been called).
-        frames: Number of ``step(dt)`` iterations to advance.
-        dt: Timestep per iteration [s].
-    """
+    """Advance a PhoenX world with one captured graph."""
     if frames < 1:
         return
 
-    device = wp.get_device()
-    if not device.is_cuda:
-        raise unittest.SkipTest("PhoenX settle loops require CUDA graph capture")
-
-    # Warm-up step outside the capture: ensures all Warp modules
-    # referenced by ``step(dt)`` are JIT-compiled and loaded, and
-    # absorbs the first-call allocation of any lazily-created scratch
-    # buffers. Capturing those would fail (or pin the wrong
-    # allocation into the graph).
+    device = require_cuda_graph_capture("PhoenX settle tests")
     world.step(dt)
     if frames == 1:
         return
 
     with wp.ScopedCapture(device=device) as capture:
         world.step(dt)
-    graph = capture.graph
 
-    # Already advanced two steps (one warm-up + one capture). Replay
-    # the remainder through the graph.
     for _ in range(frames - 2):
-        wp.capture_launch(graph)
+        wp.capture_launch(capture.graph)
 
 
 def make_graph_stepper(world, dt: float):
-    """Return a ``step(n_frames: int) -> None`` callable that advances
-    ``world`` ``n_frames`` times at fixed ``dt`` seconds per step,
-    using CUDA graph capture under the hood.
+    """Return a persistent graph-backed ``world.step`` loop."""
+    device = require_cuda_graph_capture("PhoenX graph tests")
+    graph = None
+    head_start = 0
 
-    Unlike :func:`run_settle_loop` (which captures a fresh graph each
-    call), this returns a *persistent* graph + replay closure -- ideal
-    for tests that step a single frame at a time inside a Python loop
-    (e.g. recording the pose trajectory) where the per-call capture
-    overhead of :func:`run_settle_loop` would defeat the purpose of
-    graph capture.
-
-    The graph is recorded once on first use after a warm-up step;
-    subsequent invocations replay it via ``wp.capture_launch``. Because
-    the warm-up + capture themselves advance the world by 2 frames,
-    those frames are carried as a "head start" -- the returned
-    closure honours the requested ``n_frames`` budget exactly.
-
-    Raises ``SkipTest`` on non-CUDA devices.
-
-    Args:
-        world: A finalised :class:`PhoenXWorld`.
-        dt: Fixed substep [s] used for every replay. Recording at one
-            ``dt`` and replaying at another would silently skew the
-            integrator -- always re-create the stepper if ``dt``
-            changes.
-
-    Returns:
-        A callable ``step(n_frames: int) -> None``.
-    """
-    device = wp.get_device()
-    if not device.is_cuda:
-        raise unittest.SkipTest("PhoenX graph steppers require CUDA graph capture")
-
-    state = {"graph": None, "head_start": 0}
-
-    def _step_cuda(n_frames: int) -> None:
+    def step(n_frames: int) -> None:
+        nonlocal graph, head_start
         n = int(n_frames)
         if n <= 0:
             return
-        if state["graph"] is None:
-            # First call: warm-up + capture. The two frames spent here
-            # become a head start that absorbs the next ``n`` request.
+        if graph is None:
             world.step(dt)
             with wp.ScopedCapture(device=device) as capture:
                 world.step(dt)
-            state["graph"] = capture.graph
-            state["head_start"] = 2
-        # Honour the caller's frame budget exactly: deduct the head
-        # start before replaying.
-        consumed = min(state["head_start"], n)
-        state["head_start"] -= consumed
-        remaining = n - consumed
-        for _ in range(remaining):
-            wp.capture_launch(state["graph"])
+            graph = capture.graph
+            head_start = 2
 
-    return _step_cuda
+        consumed = min(head_start, n)
+        head_start -= consumed
+        for _ in range(n - consumed):
+            wp.capture_launch(graph)
+
+    return step
+
+
+def make_solver_graph_stepper(
+    solver,
+    state_0,
+    state_1,
+    control,
+    contacts,
+    model,
+    dt: float,
+    *,
+    collide: bool = True,
+    clear_forces: bool = True,
+):
+    """Return a graph-backed stepper for SolverPhoenX ping-pong states."""
+    device = require_cuda_graph_capture("PhoenX solver tests")
+    graph = None
+    head_start = 0
+
+    def step_pair() -> None:
+        nonlocal state_0, state_1
+        for _ in range(2):
+            if clear_forces:
+                state_0.clear_forces()
+            if collide and contacts is not None:
+                model.collide(state_0, contacts)
+            solver.step(state_0, state_1, control, contacts, dt)
+            state_0, state_1 = state_1, state_0
+
+    def step(frame_count: int):
+        nonlocal graph, head_start
+        n = int(frame_count)
+        if n <= 0:
+            return state_0, state_1
+        if graph is None:
+            if n < 4:
+                raise ValueError("first captured SolverPhoenX step request must be at least four frames")
+            step_pair()
+            with wp.ScopedCapture(device=device) as capture:
+                step_pair()
+            graph = capture.graph
+            head_start = 4
+
+        consumed = min(head_start, n)
+        head_start -= consumed
+        remaining = n - consumed
+        if remaining % 2:
+            raise ValueError("captured SolverPhoenX stepper advances two frames per replay")
+
+        for _ in range(remaining // 2):
+            wp.capture_launch(graph)
+
+        return state_0, state_1
+
+    return step
+
+
+def run_solver_capture_loop(
+    solver,
+    state_0,
+    state_1,
+    control,
+    contacts,
+    model,
+    frames: int,
+    dt: float,
+    *,
+    collide: bool = True,
+    clear_forces: bool = True,
+):
+    """Advance SolverPhoenX with a captured two-step graph."""
+    step = make_solver_graph_stepper(
+        solver,
+        state_0,
+        state_1,
+        control,
+        contacts,
+        model,
+        dt,
+        collide=collide,
+        clear_forces=clear_forces,
+    )
+    return step(frames)

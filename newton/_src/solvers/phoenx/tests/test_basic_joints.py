@@ -30,6 +30,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.tests._test_helpers import make_solver_graph_stepper
 
 
 def _build_basic_joints_model() -> tuple[newton.Model, dict[str, int]]:
@@ -200,13 +201,10 @@ class TestPhoenXBasicJointsPrismaticLimit(unittest.TestCase):
         # is acting soft (the bug this test guards against -- soft PD
         # gains let the slider overshoot by 0.2 m).
         slack = 0.05
+        step = make_solver_graph_stepper(solver, s0, s1, control, contacts, model, sim_dt)
         max_slide_seen = 0.0
         for _frame in range(100):
-            for _ in range(sim_substeps):
-                s0.clear_forces()
-                model.collide(s0, contacts)
-                solver.step(s0, s1, control, contacts, sim_dt)
-                s0, s1 = s1, s0
+            s0, s1 = step(sim_substeps)
             slide = float(s0.body_q.numpy()[b_pri][2]) - z_init
             max_slide_seen = max(max_slide_seen, abs(slide))
             self.assertGreaterEqual(
@@ -252,12 +250,8 @@ class TestPhoenXBasicJointsPrismaticLimit(unittest.TestCase):
         sim_dt = 1.0 / fps / sim_substeps
         # 4 s -- well past any transient bouncing for the chosen
         # solver budget.
-        for _frame in range(400):
-            for _ in range(sim_substeps):
-                s0.clear_forces()
-                model.collide(s0, contacts)
-                solver.step(s0, s1, control, contacts, sim_dt)
-                s0, s1 = s1, s0
+        step = make_solver_graph_stepper(solver, s0, s1, control, contacts, model, sim_dt)
+        s0, s1 = step(400 * sim_substeps)
 
         body_qd = s0.body_qd.numpy()[b_pri]
         # Linear velocity must be near zero -- the slider has settled.

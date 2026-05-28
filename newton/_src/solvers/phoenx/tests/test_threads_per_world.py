@@ -29,6 +29,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.solver import SolverPhoenX
+from newton._src.solvers.phoenx.tests._test_helpers import make_solver_graph_stepper
 
 
 def _settle_pos(num_worlds: int, tpw, frames: int = 30) -> np.ndarray:
@@ -46,11 +47,8 @@ def _settle_pos(num_worlds: int, tpw, frames: int = 30) -> np.ndarray:
     contacts = model.contacts()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
     dt = 1.0 / 60.0
-    for _ in range(frames):
-        model.collide(state_0, contacts)
-        state_0.clear_forces()
-        solver.step(state_0, state_1, control, contacts, dt)
-        state_0, state_1 = state_1, state_0
+    step = make_solver_graph_stepper(solver, state_0, state_1, control, contacts, model, dt)
+    state_0, state_1 = step(frames)
     return state_0.body_q.numpy().copy()
 
 
@@ -93,11 +91,8 @@ class TestThreadsPerWorldPicker(unittest.TestCase):
         control = model.control()
         contacts = model.contacts()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
-        for _ in range(3):
-            model.collide(state_0, contacts)
-            state_0.clear_forces()
-            solver.step(state_0, state_1, control, contacts, 1.0 / 60.0)
-            state_0, state_1 = state_1, state_0
+        step = make_solver_graph_stepper(solver, state_0, state_1, control, contacts, model, 1.0 / 60.0)
+        step(4)
         return int(solver.world._tpw_choice.numpy()[0])
 
     def test_small_fleet_picks_32(self) -> None:

@@ -40,7 +40,7 @@ import sys
 import time
 import unittest
 
-import warp as wp
+from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 _REPORT_PATH_ENV = "NEWTON_PHOENX_TIMING_REPORT"
 _DEFAULT_REPORT_FILENAME = "test_run_all_report.txt"
@@ -54,28 +54,7 @@ _EXAMPLE_RUNNING_TEST_MODULES: frozenset[str] = frozenset()
 
 
 def _require_cuda_graph_capture() -> None:
-    """Hard-fail the whole suite if CUDA graph capture is unavailable.
-
-    PhoenX kernels do compile for CPU (Warp can target any device) but
-    the integration tests deliberately exercise CUDA-graph capture
-    paths and the per-test timing report assumes those are active. A
-    silent CPU fallback would still pass a few cheap tests and then
-    OOM / timeout deeper in the suite -- raising up front is friendlier.
-    """
-    try:
-        device = wp.get_device()
-    except Exception as exc:  # pragma: no cover -- warp init failure
-        raise RuntimeError("Could not query the active warp device. PhoenX tests require CUDA.") from exc
-    if not device.is_cuda:
-        raise unittest.SkipTest(
-            f"PhoenX tests require a CUDA device (active device: {device.name!r}). "
-            "Install a CUDA-capable Warp build (e.g. ``uv sync --extra dev`` on a "
-            "machine with an NVIDIA GPU) and re-run."
-        )
-    if not wp.is_mempool_enabled(device):
-        raise unittest.SkipTest(
-            f"PhoenX tests require CUDA graph capture with Warp mempool enabled (device: {device.name!r})."
-        )
+    require_cuda_graph_capture()
 
 
 def _iter_test_module_names(self_stem: str) -> list[str]:

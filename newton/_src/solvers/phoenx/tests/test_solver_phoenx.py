@@ -23,6 +23,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.flags import SolverNotifyFlags
+from newton._src.solvers.phoenx.tests._test_helpers import run_solver_capture_loop
 
 GRAVITY = 9.81
 
@@ -109,20 +110,8 @@ def _make_welded_cube_model() -> newton.Model:
 
 
 def _run_frames(solver, state_0, state_1, control, contacts, model, n: int, dt: float):
-    """Advance ``n`` frames eagerly with collision + solver step.
-
-    Eager rather than CUDA-graph captured because the state pingpong
-    (``state_0, state_1 = state_1, state_0``) between frames needs to
-    be replayed on the Python side; mixing that with graph capture
-    pins stale pointers into the graph.
-    """
-    for _ in range(n):
-        state_0.clear_forces()
-        if contacts is not None:
-            model.collide(state_0, contacts)
-        solver.step(state_0, state_1, control, contacts, dt)
-        state_0, state_1 = state_1, state_0
-    return state_0, state_1
+    """Advance an even frame count through the captured solver stepper."""
+    return run_solver_capture_loop(solver, state_0, state_1, control, contacts, model, n, dt)
 
 
 @unittest.skipUnless(
