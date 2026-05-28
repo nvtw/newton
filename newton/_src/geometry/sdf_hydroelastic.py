@@ -500,9 +500,14 @@ class HydroelasticSDF:
         ]
 
         for idx in hydroelastic_indices:
-            sdf_idx = shape_sdf_index[idx]
+            sdf_idx = int(shape_sdf_index[idx])
             if sdf_idx < 0:
                 raise ValueError(f"Hydroelastic shape {idx} requires SDF data but has no attached/generated SDF.")
+            if sdf_idx >= len(coarse_textures) or coarse_textures[sdf_idx] is None:
+                raise ValueError(
+                    f"Hydroelastic shape {idx} requires texture SDF data but its attached/generated SDF has none. "
+                    "Build the SDF with mesh.build_sdf() before using hydroelastic contacts."
+                )
             if not texture_sdf_data[sdf_idx]["scale_baked"]:
                 sx, sy, sz = shape_scale[idx]
                 if not (np.isclose(sx, 1.0) and np.isclose(sy, 1.0) and np.isclose(sz, 1.0)):

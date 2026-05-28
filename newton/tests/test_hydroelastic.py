@@ -1473,6 +1473,39 @@ add_function_test(
 )
 
 
+def test_hydroelastic_mesh_empty_sdf_raises_value_error(test, device):
+    mesh = newton.Mesh.create_box(
+        0.1,
+        0.1,
+        0.1,
+        duplicate_vertices=False,
+        compute_normals=False,
+        compute_uvs=False,
+        compute_inertia=False,
+    )
+    mesh.sdf = newton.SDF.create_from_data()
+
+    cfg = newton.ModelBuilder.ShapeConfig(is_hydroelastic=True)
+    builder = newton.ModelBuilder()
+    body_a = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()))
+    body_b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1), wp.quat_identity()))
+    builder.add_shape_mesh(body=body_a, mesh=mesh, cfg=cfg)
+    builder.add_shape_mesh(body=body_b, mesh=mesh, cfg=cfg)
+    model = builder.finalize(device=device)
+
+    with test.assertRaisesRegex(ValueError, "requires texture SDF data"):
+        newton.CollisionPipeline(model, broad_phase="explicit")
+
+
+add_function_test(
+    TestHydroelastic,
+    "test_hydroelastic_mesh_empty_sdf_raises_value_error",
+    test_hydroelastic_mesh_empty_sdf_raises_value_error,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+
 def test_deep_penetration_contact_surface_has_no_central_hole(test, device):
     """Regression test for newton-physics/newton#2611.
 
