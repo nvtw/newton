@@ -187,7 +187,6 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _reduce_contact_time_us_kernel,
     _reduce_total_colours_kernel,
     _set_kinematic_pose_batch_kernel,
-    _sync_num_active_constraints_kernel,
     _zero_constraint_time_us_kernel,
     _zero_contact_time_us_kernel,
     get_fast_tail_kernel,
@@ -2378,6 +2377,9 @@ class PhoenXWorld:
             materials=self._materials,
             enable_body_pair_grouping=self._enable_body_pair_grouping,
             shape_filter_id=self._shape_filter_id,
+            cid_of_contact=self._cid_of_contact_cur,
+            num_active_constraints=self._num_active_constraints,
+            active_constraint_base=self._contact_offset,
         )
 
         # Compound grouping: views point at PhoenX's sorted scratch.
@@ -2466,25 +2468,9 @@ class PhoenXWorld:
             )
 
         stamp_forward_contact_map(
-            rigid_contact_max=self.rigid_contact_max,
             cid_base=self._contact_offset,
             scratch=self._ingest_scratch,
             cid_of_contact=self._cid_of_contact_cur,
-            device=self.device,
-        )
-
-        self._sync_num_active_constraints()
-
-    def _sync_num_active_constraints(self) -> None:
-        """Fuse joint+cloth+bending+soft-tet+contact column count into _num_active_constraints on-device."""
-        wp.launch(
-            _sync_num_active_constraints_kernel,
-            dim=1,
-            inputs=[
-                self._ingest_scratch.num_contact_columns,
-                wp.int32(self._contact_offset),
-            ],
-            outputs=[self._num_active_constraints],
             device=self.device,
         )
 

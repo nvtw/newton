@@ -224,10 +224,12 @@ def _contact_pair_boundary_kernel(
     rigid_contact_shape1: wp.array[wp.int32],
     # out
     pair_boundary: wp.array[wp.int32],
+    cid_of_contact: wp.array[wp.int32],
 ):
     """pair_boundary[i] = 1 iff contact i starts a new (shape_a, shape_b) run.
     Tail past rigid_contact_count[0] is zeroed."""
     tid = wp.tid()
+    cid_of_contact[tid] = wp.int32(-1)
     count = _clamp_contact_count(rigid_contact_count, rigid_contact_shape0.shape[0])
     if tid >= count:
         pair_boundary[tid] = wp.int32(0)
@@ -399,6 +401,7 @@ def _body_pair_boundary_kernel(
     body_pair_keys: wp.array[wp.int64],
     # out
     pair_boundary: wp.array[wp.int32],
+    cid_of_contact: wp.array[wp.int32],
 ):
     """Body-pair-grouping variant of :func:`_contact_pair_boundary_kernel`:
     emit a 1 wherever the (already-sorted) body-pair key changes,
@@ -410,6 +413,7 @@ def _body_pair_boundary_kernel(
     contact column per body pair.
     """
     tid = wp.tid()
+    cid_of_contact[tid] = wp.int32(-1)
     n = _clamp_contact_count(rigid_contact_count, body_pair_keys.shape[0])
     if tid >= n:
         pair_boundary[tid] = wp.int32(0)
@@ -588,23 +592,25 @@ def _pair_source_idx_kernel(
     pair_columns: wp.array[wp.int32],
     num_pairs: wp.array[wp.int32],
     max_columns: wp.int32,
+    active_constraint_base: wp.int32,
     # out
     pair_source_idx: wp.array[wp.int32],
     num_contact_columns: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
 ):
-    """Publish the column count and map each output column to its pair."""
+    """Publish counts and map each output column to its pair."""
     tid = wp.tid()
     n = num_pairs[0]
     if tid == wp.int32(0):
-        if n <= wp.int32(0):
-            num_contact_columns[0] = wp.int32(0)
-        else:
+        total = wp.int32(0)
+        if n > wp.int32(0):
             total = pair_col_offset[n - 1] + pair_columns[n - 1]
             if total > max_columns:
                 total = max_columns
             if total < wp.int32(0):
                 total = wp.int32(0)
-            num_contact_columns[0] = total
+        num_contact_columns[0] = total
+        num_active_constraints[0] = active_constraint_base + total
 
     if tid >= n:
         return
@@ -885,16 +891,6 @@ def _contact_warmstart_gather_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _reset_forward_map_kernel(
-    # out
-    cid_of_contact: wp.array[wp.int32],
-):
-    """Clear the forward map to ``-1`` before every stamp pass."""
-    tid = wp.tid()
-    cid_of_contact[tid] = wp.int32(-1)
-
-
-@wp.kernel(enable_backward=False)
 def _stamp_cid_of_contact_kernel(
     pair_source_idx: wp.array[wp.int32],
     pair_first: wp.array[wp.int32],
@@ -945,6 +941,9 @@ def ingest_contacts(
     materials: wp.array | None = None,
     enable_body_pair_grouping: bool = False,
     shape_filter_id: wp.array | None = None,
+    cid_of_contact: wp.array[wp.int32] | None = None,
+    num_active_constraints: wp.array[wp.int32] | None = None,
+    active_constraint_base: int = 0,
 ) -> None:
     """Materialise contact columns for one step.
 
@@ -980,8 +979,18 @@ def ingest_contacts(
             arrays to be allocated (``IngestScratch(...,
             enable_body_pair_grouping=True)``) and a non-zero
             ``num_bodies``. See :file:`CONTACT_GROUP_COMPOUND_OPT.md`.
+        cid_of_contact: Current-frame forward map cleared during the
+            boundary pass. Defaults to scratch storage for standalone callers.
+        num_active_constraints: Optional output for
+            ``active_constraint_base + num_contact_columns``.
+        active_constraint_base: Non-contact constraint count.
     """
     rigid_contact_max = int(contacts.rigid_contact_max)
+    if cid_of_contact is None:
+        cid_of_contact = scratch.pair_id
+    if num_active_constraints is None:
+        num_active_constraints = scratch.num_contact_columns
+        active_constraint_base = 0
 
     if filter_keys is None:
         raise ValueError(
@@ -1099,7 +1108,7 @@ def ingest_contacts(
                 contacts.rigid_contact_count,
                 scratch.body_pair_keys,
             ],
-            outputs=[scratch.pair_boundary],
+            outputs=[scratch.pair_boundary, cid_of_contact],
             device=device,
         )
     else:
@@ -1111,7 +1120,7 @@ def ingest_contacts(
                 contacts.rigid_contact_shape0,
                 contacts.rigid_contact_shape1,
             ],
-            outputs=[scratch.pair_boundary],
+            outputs=[scratch.pair_boundary, cid_of_contact],
             device=device,
         )
 
@@ -1181,8 +1190,9 @@ def ingest_contacts(
             scratch.pair_columns,
             scratch.num_pairs,
             int(max_contact_columns),
+            int(active_constraint_base),
         ],
-        outputs=[scratch.pair_source_idx, scratch.num_contact_columns],
+        outputs=[scratch.pair_source_idx, scratch.num_contact_columns, num_active_constraints],
         device=device,
     )
 
@@ -1213,26 +1223,16 @@ def ingest_contacts(
 
 
 def stamp_forward_contact_map(
-    rigid_contact_max: int,
     cid_base: int,
     scratch: IngestScratch,
     cid_of_contact: wp.array,
     device: wp.DeviceLike = None,
 ) -> None:
-    """Fill the forward (sorted-index -> cid) lookup.
+    """Stamp this frame's contact-index -> cid lookup.
 
-    Called after :func:`ingest_contacts`; the output array is consumed
-    by the *next* step's warm-start gather as the "prev" side of the
-    match map. Per-pair design: one lookup per contact ``k``; no slot
-    because prev state is indexed by ``k`` directly.
+    :func:`ingest_contacts` clears the map in its boundary pass; this
+    pass only writes active contact ranges for next frame's warm start.
     """
-    wp.launch(
-        kernel=_reset_forward_map_kernel,
-        dim=rigid_contact_max,
-        inputs=[],
-        outputs=[cid_of_contact],
-        device=device,
-    )
     wp.launch(
         kernel=_stamp_cid_of_contact_kernel,
         dim=max(1, scratch.max_contact_columns),

@@ -160,7 +160,6 @@ __all__ = [
     "_reduce_contact_time_us_kernel",
     "_reduce_total_colours_kernel",
     "_set_kinematic_pose_batch_kernel",
-    "_sync_num_active_constraints_kernel",
     "_zero_constraint_time_us_kernel",
     "_zero_contact_time_us_kernel",
     "get_fast_tail_kernel",
@@ -1782,23 +1781,7 @@ def pack_body_xforms_kernel(
     xforms[i] = wp.transform(bodies.position[i], bodies.orientation[i])
 
 
-# Per-step body kernels (forces + gravity, inertia refresh, force clear) plus
-# the on-device active-constraint count fuse. Driven from PhoenXWorld.step.
-
-
-@wp.kernel(enable_backward=False)
-def _sync_num_active_constraints_kernel(
-    num_contact_columns: wp.array[wp.int32],
-    joint_constraint_count: wp.int32,
-    # out
-    num_active_constraints: wp.array[wp.int32],
-):
-    """``num_active_constraints = num_joints + num_contact_columns``,
-    on-device. Single-thread; safe inside graph capture."""
-    tid = wp.tid()
-    if tid != 0:
-        return
-    num_active_constraints[0] = joint_constraint_count + num_contact_columns[0]
+# Per-step body kernels driven from PhoenXWorld.step.
 
 
 @wp.kernel(enable_backward=False)

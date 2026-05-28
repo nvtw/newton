@@ -86,13 +86,14 @@ def _run_pair_detection(
     pair_first = wp.zeros(capacity, dtype=wp.int32, device=device)
     pair_columns = wp.zeros(capacity, dtype=wp.int32, device=device)
     pair_count = wp.zeros(capacity, dtype=wp.int32, device=device)
+    cid_of_contact = wp.full(capacity, 123, dtype=wp.int32, device=device)
     num_pairs = wp.zeros(1, dtype=wp.int32, device=device)
 
     wp.launch(
         _contact_pair_boundary_kernel,
         dim=capacity,
         inputs=[count_arr, shape0, shape1],
-        outputs=[pair_boundary],
+        outputs=[pair_boundary, cid_of_contact],
         device=device,
     )
     wp.utils.array_scan(pair_boundary, pair_id, inclusive=True)
@@ -141,6 +142,7 @@ def _run_pair_detection(
         "pair_count": pair_count.numpy()[:n],
         "pair_boundary": pair_boundary.numpy()[:count],
         "pair_id": pair_id.numpy()[:count],
+        "cid_of_contact": cid_of_contact.numpy(),
     }
 
 
@@ -222,13 +224,14 @@ class TestContactIngestLargeShapeCount(unittest.TestCase):
         pair_first = wp.zeros(capacity, dtype=wp.int32, device=device)
         pair_columns = wp.zeros(capacity, dtype=wp.int32, device=device)
         pair_count = wp.zeros(capacity, dtype=wp.int32, device=device)
+        cid_of_contact = wp.full(capacity, 123, dtype=wp.int32, device=device)
         num_pairs = wp.zeros(1, dtype=wp.int32, device=device)
 
         wp.launch(
             _contact_pair_boundary_kernel,
             dim=capacity,
             inputs=[count_arr, shape0_arr, shape1_arr],
-            outputs=[pair_boundary],
+            outputs=[pair_boundary, cid_of_contact],
             device=device,
         )
         wp.utils.array_scan(pair_boundary, pair_id, inclusive=True)
@@ -265,6 +268,7 @@ class TestContactIngestLargeShapeCount(unittest.TestCase):
         np.testing.assert_array_equal(pair_shape_b.numpy()[:2], [2, 5])
         np.testing.assert_array_equal(pair_count.numpy()[:2], [3, 2])
         np.testing.assert_array_equal(pair_first.numpy()[:2], [0, 3])
+        np.testing.assert_array_equal(cid_of_contact.numpy(), np.full(capacity, -1, dtype=np.int32))
 
 
 if __name__ == "__main__":
