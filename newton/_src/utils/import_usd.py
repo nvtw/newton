@@ -44,28 +44,6 @@ AttributeFrequency = Model.AttributeFrequency
 _NEWTON_SRC_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir)) + os.sep
 
 
-def _prim_has_applied_schema(prim, name: str) -> bool:
-    """Check whether an API schema is applied on a prim.
-
-    Reads the ``apiSchemas`` metadata directly so detection works even when
-    the schema is not registered with the USD runtime (codeless schemas
-    loaded only by plugInfo may still be unregistered in test environments).
-    """
-    op = prim.GetMetadata("apiSchemas")
-    if op is None:
-        return False
-    for items in (
-        op.explicitItems,
-        op.prependedItems,
-        op.appendedItems,
-        op.addedItems,
-        op.orderedItems,
-    ):
-        if items and name in items:
-            return True
-    return False
-
-
 def _external_stacklevel() -> int:
     """Return a ``stacklevel`` that points past all ``newton._src`` frames."""
     frame = inspect.currentframe()
@@ -2676,7 +2654,7 @@ def parse_usd(
 
                 # SDF parameters. Applying NewtonSDFCollisionAPI is the canonical
                 # signal that SDF generation is configured for this shape.
-                has_sdf_api = _prim_has_applied_schema(prim, "NewtonSDFCollisionAPI")
+                has_sdf_api = prim.HasAPI("NewtonSDFCollisionAPI")
 
                 # Resolve target_voxel_size first because it overrides
                 # sdf_max_resolution and the two are mutually exclusive in
