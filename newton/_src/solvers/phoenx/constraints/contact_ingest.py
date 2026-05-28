@@ -583,31 +583,6 @@ def _pair_counts_and_columns_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _total_contact_columns_kernel(
-    pair_col_offset: wp.array[wp.int32],
-    pair_columns: wp.array[wp.int32],
-    num_pairs: wp.array[wp.int32],
-    max_columns: wp.int32,
-    # out
-    num_contact_columns: wp.array[wp.int32],
-):
-    """Derive ``num_contact_columns = sum(pair_columns)`` on-device."""
-    tid = wp.tid()
-    if tid != 0:
-        return
-    n = num_pairs[0]
-    if n <= 0:
-        num_contact_columns[0] = wp.int32(0)
-        return
-    total = pair_col_offset[n - 1] + pair_columns[n - 1]
-    if total > max_columns:
-        total = max_columns
-    if total < wp.int32(0):
-        total = wp.int32(0)
-    num_contact_columns[0] = total
-
-
-@wp.kernel(enable_backward=False)
 def _pair_source_idx_kernel(
     pair_col_offset: wp.array[wp.int32],
     pair_columns: wp.array[wp.int32],
@@ -615,25 +590,23 @@ def _pair_source_idx_kernel(
     max_columns: wp.int32,
     # out
     pair_source_idx: wp.array[wp.int32],
+    num_contact_columns: wp.array[wp.int32],
 ):
-    """Write ``pair_source_idx[o] = p`` for every output column ``o``.
-
-    One thread per pair ``p``. With the per-pair design,
-    ``pair_columns[p]`` is either 0 (filtered) or 1, so each thread
-    makes at most one write to ``pair_source_idx[pair_col_offset[p]]``.
-    ``pair_col_offset`` is an exclusive prefix of ``pair_columns``, so
-    the destination slot is unique to that pair -- two threads never
-    race on the same output index, which makes this fully
-    deterministic (no atomics, no cross-thread data dependency).
-
-    Launched with ``dim=num_pairs_upper_bound`` (host-side cap). Threads
-    past the live ``num_pairs[0]`` early-return via the bound check.
-    Originally a single-thread kernel; profiling H1 @ 256 worlds
-    showed 247 us on one thread -- parallel over ~10k pairs drops
-    this to a rounding error.
-    """
+    """Publish the column count and map each output column to its pair."""
     tid = wp.tid()
-    if tid >= num_pairs[0]:
+    n = num_pairs[0]
+    if tid == wp.int32(0):
+        if n <= wp.int32(0):
+            num_contact_columns[0] = wp.int32(0)
+        else:
+            total = pair_col_offset[n - 1] + pair_columns[n - 1]
+            if total > max_columns:
+                total = max_columns
+            if total < wp.int32(0):
+                total = wp.int32(0)
+            num_contact_columns[0] = total
+
+    if tid >= n:
         return
     if pair_columns[tid] == 0:
         return
@@ -1198,25 +1171,8 @@ def ingest_contacts(
     # Step 3d: exclusive scan of pair_columns -> pair_col_offset.
     wp.utils.array_scan(scratch.pair_columns, scratch.pair_col_offset, inclusive=False)
 
-    # Step 3e: reduce to the total column count on-device.
-    wp.launch(
-        kernel=_total_contact_columns_kernel,
-        dim=1,
-        inputs=[
-            scratch.pair_col_offset,
-            scratch.pair_columns,
-            scratch.num_pairs,
-            int(max_contact_columns),
-        ],
-        outputs=[scratch.num_contact_columns],
-        device=device,
-    )
-
-    # Step 4: build the per-column -> pair map. One thread per
-    # candidate pair; each does at most one conditional write to a
-    # unique slot (pair_col_offset is a binary exclusive-prefix so
-    # no two pairs share the same offset). Fully deterministic --
-    # no atomics, no cross-thread data dependency.
+    # Step 4: publish the total column count and build the
+    # per-column -> pair map in one pass.
     wp.launch(
         kernel=_pair_source_idx_kernel,
         dim=scratch.pair_columns.shape[0],
@@ -1226,7 +1182,7 @@ def ingest_contacts(
             scratch.num_pairs,
             int(max_contact_columns),
         ],
-        outputs=[scratch.pair_source_idx],
+        outputs=[scratch.pair_source_idx, scratch.num_contact_columns],
         device=device,
     )
 
