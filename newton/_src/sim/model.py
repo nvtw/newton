@@ -313,19 +313,30 @@ class Model:
         self.shape_edge_range: wp.array[wp.vec2i] | None = None
         """Per-shape (start, count) into mesh_edge_indices, shape [shape_count]. (-1,0) if no edges."""
 
-        # SDF storage (compact table + per-shape index indirection)
-        self.shape_sdf_index: wp.array[wp.int32] | None = None
+        # SDF storage (compact table + per-shape index indirection).
+        # All SDF arrays are private; the public attribute names are exposed
+        # via deprecated property aliases further down for back-compat.
+        #
+        # .. note::
+        #     The SDF storage on ``Model`` is part of the **experimental** SDF
+        #     API (see :class:`~newton.SDF`) and may change without notice.
+        self._shape_sdf_index: wp.array[wp.int32] | None = None
         """Per-shape SDF index, shape [shape_count]. -1 means shape has no SDF."""
 
         # Texture SDF storage
-        self.texture_sdf_data = None
+        self._texture_sdf_data = None
         """Compact array of TextureSDFData structs, shape [num_sdfs]."""
-        self.texture_sdf_coarse_textures = []
-        """Coarse 3D textures matching texture_sdf_data by index. Kept for reference counting."""
-        self.texture_sdf_subgrid_textures = []
-        """Subgrid 3D textures matching texture_sdf_data by index. Kept for reference counting."""
-        self.texture_sdf_subgrid_start_slots = []
-        """Subgrid start slot arrays matching texture_sdf_data by index. Kept for reference counting."""
+        self._texture_sdf_coarse_textures: list = []
+        """Coarse 3D textures matching _texture_sdf_data by index. Kept for reference counting."""
+        self._texture_sdf_subgrid_textures: list = []
+        """Subgrid 3D textures matching _texture_sdf_data by index. Kept for reference counting."""
+        self._texture_sdf_subgrid_start_slots: list = []
+        """Subgrid start slot arrays matching _texture_sdf_data by index. Kept for reference counting."""
+
+        # Caches for the deprecated lazy ``sdf_block_coords`` / ``sdf_index2blocks``
+        # properties. Populated on first access; cleared when SDF storage changes.
+        self._sdf_block_coords_cache: wp.array | None = None
+        self._sdf_index2blocks_cache: wp.array | None = None
 
         # Local AABB and voxel grid for contact reduction
         # Note: These are stored in Model (not Contacts) because they are static geometry properties
@@ -821,50 +832,222 @@ class Model:
         self.actuators: list[Actuator] = []
         """List of actuator instances for this model."""
 
-    @property
-    def sdf_block_coords(self) -> None:
-        """Deprecated.  Always returns ``None``.
+    # ----- Deprecated SDF aliases -------------------------------------------
+    # The underlying SDF members on ``Model`` are now underscore-prefixed.
+    # The properties below preserve the historical attribute names for one
+    # release cycle and emit ``DeprecationWarning`` on access.
 
-        Per-SDF active-block coordinates were removed when the hydroelastic
+    @property
+    def shape_sdf_index(self) -> wp.array[wp.int32] | None:
+        """Deprecated alias for :attr:`_shape_sdf_index`.
+
+        .. deprecated:: 1.3
+            Use the underscored private member or the appropriate accessor.
+            This alias will be removed in Newton 1.5.
+        """
+        warnings.warn(
+            "Model.shape_sdf_index is deprecated; use Model._shape_sdf_index. "
+            "The public alias will be removed in Newton 1.5.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._shape_sdf_index
+
+    @shape_sdf_index.setter
+    def shape_sdf_index(self, value):
+        warnings.warn(
+            "Model.shape_sdf_index is deprecated; assign to Model._shape_sdf_index. "
+            "The public alias will be removed in Newton 1.5.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._shape_sdf_index = value
+
+    @property
+    def texture_sdf_data(self):
+        """Deprecated alias for :attr:`_texture_sdf_data`.
+
+        .. deprecated:: 1.3
+            Use the underscored private member. The alias will be removed in
+            Newton 1.5.
+        """
+        warnings.warn(
+            "Model.texture_sdf_data is deprecated; use Model._texture_sdf_data. "
+            "The public alias will be removed in Newton 1.5.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._texture_sdf_data
+
+    @texture_sdf_data.setter
+    def texture_sdf_data(self, value):
+        warnings.warn(
+            "Model.texture_sdf_data is deprecated; assign to Model._texture_sdf_data. "
+            "The public alias will be removed in Newton 1.5.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._texture_sdf_data = value
+        self._sdf_block_coords_cache = None
+        self._sdf_index2blocks_cache = None
+
+    @property
+    def texture_sdf_coarse_textures(self) -> list:
+        """Deprecated alias for :attr:`_texture_sdf_coarse_textures`.
+
+        .. deprecated:: 1.3
+            Use the underscored private member. The alias will be removed in
+            Newton 1.5.
+        """
+        warnings.warn(
+            "Model.texture_sdf_coarse_textures is deprecated; use "
+            "Model._texture_sdf_coarse_textures. The public alias will be "
+            "removed in Newton 1.5.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._texture_sdf_coarse_textures
+
+    @texture_sdf_coarse_textures.setter
+    def texture_sdf_coarse_textures(self, value):
+        warnings.warn(
+            "Model.texture_sdf_coarse_textures is deprecated; assign to "
+            "Model._texture_sdf_coarse_textures. The public alias will be "
+            "removed in Newton 1.5.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._texture_sdf_coarse_textures = value
+        self._sdf_block_coords_cache = None
+        self._sdf_index2blocks_cache = None
+
+    @property
+    def texture_sdf_subgrid_textures(self) -> list:
+        """Deprecated alias for :attr:`_texture_sdf_subgrid_textures`.
+
+        .. deprecated:: 1.3
+            Use the underscored private member. The alias will be removed in
+            Newton 1.5.
+        """
+        warnings.warn(
+            "Model.texture_sdf_subgrid_textures is deprecated; use "
+            "Model._texture_sdf_subgrid_textures. The public alias will be "
+            "removed in Newton 1.5.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._texture_sdf_subgrid_textures
+
+    @texture_sdf_subgrid_textures.setter
+    def texture_sdf_subgrid_textures(self, value):
+        warnings.warn(
+            "Model.texture_sdf_subgrid_textures is deprecated; assign to "
+            "Model._texture_sdf_subgrid_textures. The public alias will be "
+            "removed in Newton 1.5.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._texture_sdf_subgrid_textures = value
+
+    @property
+    def texture_sdf_subgrid_start_slots(self) -> list:
+        """Deprecated alias for :attr:`_texture_sdf_subgrid_start_slots`.
+
+        .. deprecated:: 1.3
+            Use the underscored private member. The alias will be removed in
+            Newton 1.5.
+        """
+        warnings.warn(
+            "Model.texture_sdf_subgrid_start_slots is deprecated; use "
+            "Model._texture_sdf_subgrid_start_slots. The public alias will be "
+            "removed in Newton 1.5.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._texture_sdf_subgrid_start_slots
+
+    @texture_sdf_subgrid_start_slots.setter
+    def texture_sdf_subgrid_start_slots(self, value):
+        warnings.warn(
+            "Model.texture_sdf_subgrid_start_slots is deprecated; assign to "
+            "Model._texture_sdf_subgrid_start_slots. The public alias will be "
+            "removed in Newton 1.5.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._texture_sdf_subgrid_start_slots = value
+
+    @property
+    def sdf_block_coords(self):
+        """Deprecated.  Lazily-computed flat ``wp.vec3us`` block coords.
+
+        Per-SDF active-block coordinates were dropped when the hydroelastic
         broadphase started deriving them arithmetically from each SDF's
-        coarse-texture dimensions.  The attribute is retained for one
-        release cycle so existing callers do not break.
+        coarse-texture dimensions. This property recomputes the legacy
+        layout on first access (and caches it) so external callers that
+        still read the attribute keep working.
 
         .. deprecated:: 1.3
             This attribute will be removed in Newton 1.5.
         """
         warnings.warn(
-            "Model.sdf_block_coords is deprecated and always returns None; "
-            "it will be removed in Newton 1.5. The hydroelastic broadphase "
-            "now derives block coordinates arithmetically from each SDF's "
-            "coarse-texture dimensions and no longer needs this attribute.",
+            "Model.sdf_block_coords is deprecated and will be removed in "
+            "Newton 1.5. The hydroelastic broadphase now derives block "
+            "coordinates arithmetically from each SDF's coarse-texture "
+            "dimensions and no longer needs this attribute.",
             DeprecationWarning,
             stacklevel=2,
         )
-        return None
+        self._ensure_legacy_sdf_block_arrays()
+        return self._sdf_block_coords_cache
 
     @property
-    def sdf_index2blocks(self) -> None:
-        """Deprecated.  Always returns ``None``.
+    def sdf_index2blocks(self):
+        """Deprecated.  Lazily-computed per-SDF ``[start, end)`` ranges.
 
         Per-SDF ``[start, end)`` indices into ``sdf_block_coords`` were
-        removed when the hydroelastic broadphase started deriving block
+        dropped when the hydroelastic broadphase started deriving block
         ranges arithmetically from each SDF's coarse-texture dimensions.
-        The attribute is retained for one release cycle so existing
-        callers do not break.
+        This property recomputes the legacy layout on first access (and
+        caches it) so external callers that still read the attribute keep
+        working.
 
         .. deprecated:: 1.3
             This attribute will be removed in Newton 1.5.
         """
         warnings.warn(
-            "Model.sdf_index2blocks is deprecated and always returns None; "
-            "it will be removed in Newton 1.5. The hydroelastic broadphase "
-            "now derives block ranges arithmetically from each SDF's "
-            "coarse-texture dimensions and no longer needs this attribute.",
+            "Model.sdf_index2blocks is deprecated and will be removed in "
+            "Newton 1.5. The hydroelastic broadphase now derives block "
+            "ranges arithmetically from each SDF's coarse-texture "
+            "dimensions and no longer needs this attribute.",
             DeprecationWarning,
             stacklevel=2,
         )
-        return None
+        self._ensure_legacy_sdf_block_arrays()
+        return self._sdf_index2blocks_cache
+
+    def _ensure_legacy_sdf_block_arrays(self) -> None:
+        """Populate the legacy SDF block-coord caches on demand."""
+        if self._sdf_block_coords_cache is not None and self._sdf_index2blocks_cache is not None:
+            return
+        # Local import keeps the deprecated module out of the normal load path.
+        from ..geometry._deprecated_sdf_block_coords import (  # noqa: PLC0415
+            build_legacy_sdf_block_arrays,
+        )
+
+        subgrid_size = 8
+        if self._texture_sdf_data is not None and len(self._texture_sdf_data) > 0:
+            try:
+                subgrid_size = int(self._texture_sdf_data.numpy()[0]["subgrid_size"])
+            except (KeyError, IndexError, ValueError, TypeError):
+                subgrid_size = 8
+        block_coords, index2blocks = build_legacy_sdf_block_arrays(
+            self._texture_sdf_coarse_textures,
+            subgrid_size=subgrid_size,
+            device=self.device,
+        )
+        self._sdf_block_coords_cache = block_coords
+        self._sdf_index2blocks_cache = index2blocks
 
     def state(self, requires_grad: bool | None = None) -> State:
         """

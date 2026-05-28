@@ -176,7 +176,15 @@ def sample_sdf_grad_extrapolated(
 
 
 class SDF:
-    """Opaque SDF container owning kernel payload and runtime references."""
+    """Opaque SDF container owning kernel payload and runtime references.
+
+    .. note::
+        The ``SDF`` API (including ``newton.SDF``, ``newton.geometry.SDF`` and
+        related helpers such as :meth:`SDF.create_from_mesh`,
+        :meth:`SDF.create_from_points`, :meth:`SDF.create_from_data` and the
+        SDF storage on :class:`~newton.Model`) is **experimental** and may
+        change without notice.
+    """
 
     def __init__(
         self,

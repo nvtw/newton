@@ -184,6 +184,10 @@ def mc_calc_face_texture(
 class HydroelasticSDF:
     """Hydroelastic contact generation with SDF-based collision detection.
 
+    .. note::
+        ``HydroelasticSDF`` and the underlying SDF storage on :class:`~newton.Model`
+        are **experimental** and may change without notice.
+
     This class implements hydroelastic contact modeling between shapes represented
     by Signed Distance Fields (SDFs). It uses an octree-based broadphase to identify
     potentially colliding regions, then applies marching cubes to extract the
@@ -483,10 +487,10 @@ class HydroelasticSDF:
         if num_hydroelastic_pairs == 0:
             return None
 
-        shape_sdf_index = model.shape_sdf_index.numpy()
-        texture_sdf_data = model.texture_sdf_data.numpy()
+        shape_sdf_index = model._shape_sdf_index.numpy()
+        texture_sdf_data = model._texture_sdf_data.numpy()
         shape_scale = model.shape_scale.numpy()
-        coarse_textures = model.texture_sdf_coarse_textures
+        coarse_textures = model._texture_sdf_coarse_textures
 
         # Get indices of shapes that can collide and are hydroelastic
         hydroelastic_indices = [
