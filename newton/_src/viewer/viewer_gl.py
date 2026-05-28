@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import collections
 import ctypes
+import logging
+import math
 import re
 import time
 from collections.abc import Callable, Sequence
 from importlib import metadata
+from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
@@ -22,9 +25,12 @@ from .camera import Camera
 from .gl.image_logger import ImageLogger
 from .gl.opengl import LinesGL, MeshGL, MeshInstancerGL, RendererGL
 from .picking import Picking
+from .recording import LiveMp4Recorder
 from .viewer import ViewerBase
 from .viewer_gui import ViewerGui
 from .wind import Wind
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_version_tuple(version: str) -> tuple[int, ...]:
@@ -269,6 +275,8 @@ class ViewerGL(ViewerBase):
             self.gui.register_ui_callback(self._ui_populate_rendering_panel, position="rendering")
             # Draw image-logger floating windows outside the sidebar window.
             self.gui.register_ui_callback(lambda _imgui: self._image_logger.draw(), position="free")
+            # Top-level Recording panel for live MP4 capture.
+            self.gui.register_ui_callback(self._ui_populate_recording_panel, position="panel")
 
         # a low resolution sphere mesh for point rendering
         self._point_mesh = None
@@ -285,6 +293,23 @@ class ViewerGL(ViewerBase):
         # Initialize PBO (Pixel Buffer Object) resources used in the `get_frame` method.
         self._pbo = None
         self._wp_pbo = None
+
+        # Optional live MP4 recording (driven from the sidebar "Recording" panel).
+        self._recorder = LiveMp4Recorder()
+        self._recorder.set_filename_prefix("gl_recording")
+        self._record_frame_gpu: wp.array | None = None
+        # Capture is driven by simulation time so the MP4's wall-clock
+        # duration matches sim time regardless of how fast the renderer
+        # produces frames. ``_record_next_sim_t`` is the next sim time at
+        # which we must emit a video frame; ``_record_last_frame_bytes``
+        # caches the most recent encoded frame so repeating it (when the
+        # sim is slower than the recording FPS) is cheap.
+        self._record_fps: float = 60.0
+        self._record_fps_text: str = "60"
+        self._record_fps_manual: bool = False
+        self._record_sim_fps: float | None = None
+        self._record_next_sim_t: float | None = None
+        self._record_last_frame_bytes: bytes | None = None
 
     @property
     def ui(self):
@@ -1530,7 +1555,14 @@ class ViewerGL(ViewerBase):
         Args:
             time: Current simulation time.
         """
+        prev_time = float(self.time)
         super().begin_frame(time)
+        sim_dt = float(time) - prev_time
+        if sim_dt > 0.0 and math.isfinite(sim_dt):
+            self._record_sim_fps = 1.0 / sim_dt
+            if not self._record_fps_manual and not self._recorder.is_recording:
+                self._record_fps = self._record_sim_fps
+                self._record_fps_text = self._format_record_fps(self._record_fps)
         self._gizmo_log = {}
 
     @override
@@ -1576,8 +1608,12 @@ class ViewerGL(ViewerBase):
         if self.wind is not None:
             self.wind.update(dt)
 
-        # If the window was closed during event processing, skip rendering
+        # If the window was closed during event processing, skip rendering.
+        # Also finalize any active recording so ffmpeg flushes a valid MP4
+        # even when the user closes the window instead of calling close().
         if self.renderer.has_exit():
+            if self._recorder.is_recording:
+                self._stop_recording()
             return
 
         # Render the scene and present it
@@ -1587,6 +1623,141 @@ class ViewerGL(ViewerBase):
             self.gui.render_frame(update_fps=True)
 
         self.renderer.present()
+
+        # Capture this frame for live MP4 recording, if active.
+        self._record_frame_if_needed()
+
+    @staticmethod
+    def _format_record_fps(fps: float) -> str:
+        """Return a compact user-facing FPS string."""
+        if not math.isfinite(fps) or fps <= 0.0:
+            return "60"
+        if abs(fps - round(fps)) < 1.0e-3:
+            return str(int(round(fps)))
+        return f"{fps:.3f}".rstrip("0").rstrip(".")
+
+    def _parse_record_fps_text(self) -> float | None:
+        """Parse the recording FPS text box, returning None while invalid."""
+        try:
+            fps = float(self._record_fps_text.strip())
+        except ValueError:
+            return None
+        if not math.isfinite(fps) or fps <= 0.0:
+            return None
+        return fps
+
+    def _sync_record_fps_from_text(self) -> bool:
+        """Update ``_record_fps`` from the UI text field if it is valid."""
+        fps = self._parse_record_fps_text()
+        if fps is None:
+            return False
+        self._record_fps = fps
+        return True
+
+    def _use_simulation_record_fps(self):
+        """Reset the recording FPS text field to the current simulation rate."""
+        if self._record_sim_fps is not None:
+            self._record_fps = self._record_sim_fps
+        self._record_fps_text = self._format_record_fps(self._record_fps)
+        self._record_fps_manual = False
+
+    def _start_recording(self, output_path: str | Path | None = None) -> bool:
+        """Start live MP4 recording at the current framebuffer size.
+
+        The MP4 is encoded at the FPS selected in the Recording panel and
+        paced by the simulator's clock (``ViewerBase.time``), so the on-disk
+        video plays back in sync with sim time regardless of render speed.
+
+        Args:
+            output_path: Optional output file path. ``None`` selects a
+                timestamped default under the recorder's output directory.
+
+        Returns:
+            ``True`` if recording started successfully.
+        """
+        if not self._sync_record_fps_from_text():
+            logger.warning("Cannot start MP4 recording: invalid recording FPS %r.", self._record_fps_text)
+            return False
+
+        # Use the renderer's cached screen size — this is what get_frame()
+        # validates against, so the preallocated capture buffer is
+        # guaranteed to match on HiDPI/scaled displays.
+        w = self.renderer._screen_width
+        h = self.renderer._screen_height
+        started = self._recorder.start(
+            width=w,
+            height=h,
+            fps=float(self._record_fps),
+            output_path=output_path,
+            flip_vertical=False,
+        )
+        if started:
+            self._record_frame_gpu = wp.empty(
+                shape=(h, w, 3),
+                dtype=wp.uint8,  # pyright: ignore[reportArgumentType]
+                device=self.device,
+            )
+            self._record_next_sim_t = float(self.time)
+            self._record_last_frame_bytes = None
+        return started
+
+    def _stop_recording(self) -> Path | None:
+        """Stop live MP4 recording and return the output path (if any)."""
+        path = self._recorder.stop()
+        self._record_frame_gpu = None
+        self._record_next_sim_t = None
+        self._record_last_frame_bytes = None
+        return path
+
+    def _record_frame_if_needed(self):
+        """Emit MP4 frames driven by simulation time.
+
+        Writes zero or more frames per render call so the video's
+        wall-clock duration matches ``self.time``. When the sim is slower
+        than the recording FPS the most recent frame is repeated; when
+        faster, intermediate render frames are simply dropped from the
+        recording (the live preview still shows them).
+        """
+        if not self._recorder.is_recording or self._record_next_sim_t is None:
+            return
+
+        record_fps = max(1.0e-6, float(self._record_fps))
+        record_dt = 1.0 / record_fps
+        # Nothing to emit yet: sim has not advanced past the next slot.
+        if self.time + 0.5 * record_dt < self._record_next_sim_t:
+            return
+
+        w = self.renderer._screen_width
+        h = self.renderer._screen_height
+        if self._record_frame_gpu is None or self._record_frame_gpu.shape != (h, w, 3):
+            # Framebuffer changed underneath us (e.g. resize during recording);
+            # cleanest behavior is to stop and let the user start a new recording.
+            prev_shape = None if self._record_frame_gpu is None else tuple(self._record_frame_gpu.shape)
+            logger.warning(
+                "Stopping MP4 recording: framebuffer size changed from %s to (%d, %d, 3) "
+                "after recording started. Start a new recording to capture at the new resolution.",
+                prev_shape,
+                h,
+                w,
+            )
+            self._stop_recording()
+            return
+
+        # Read the current framebuffer once, then emit it as many times as
+        # needed to catch up to sim time. Reuse the previous frame's bytes
+        # if the sim didn't advance enough to warrant a fresh readback.
+        frame_gpu = self.get_frame(target_image=self._record_frame_gpu, render_ui=False)
+        self._record_last_frame_bytes = frame_gpu.numpy().tobytes()
+
+        # Emit at least one frame; if the sim leapt forward, emit duplicates
+        # to keep playback wall-clock-accurate. Cap to avoid runaway loops
+        # if the sim time jumps unexpectedly (e.g. after a long pause).
+        max_emit = max(1, int(math.ceil(4.0 * record_fps)))  # at most ~4 s worth of catch-up
+        emitted = 0
+        while self.time + 0.5 * record_dt >= self._record_next_sim_t and emitted < max_emit:
+            self._recorder.write_frame_bytes(self._record_last_frame_bytes, w, h)
+            self._record_next_sim_t += record_dt
+            emitted += 1
 
     def get_frame(self, target_image: wp.array | None = None, render_ui: bool = False) -> wp.array:
         """
@@ -1718,6 +1889,8 @@ class ViewerGL(ViewerBase):
         """
         Close the viewer and clean up resources.
         """
+        if self._recorder.is_recording:
+            self._stop_recording()
         self._clear_array_textures()
         self._invalidate_pbo()
         if self._image_logger is not None:
@@ -1942,6 +2115,10 @@ class ViewerGL(ViewerBase):
         self.camera.update_screen_size(fb_w, fb_h)
         self._invalidate_pbo()
 
+        if self._recorder.is_recording:
+            # ffmpeg was started with a fixed resolution; stop cleanly on resize.
+            self._stop_recording()
+
         if self.ui:
             self.ui.resize(width, height)
 
@@ -1973,6 +2150,57 @@ class ViewerGL(ViewerBase):
         _changed, self.renderer.sky_lower = _edit_color3("Ground Color", self.renderer.sky_lower)
 
         self._image_logger.draw_controls()
+
+    def _ui_populate_recording_panel(self, imgui):
+        """Top-level Recording panel for live MP4 capture."""
+        imgui.set_next_item_open(False, imgui.Cond_.once)
+        if not imgui.collapsing_header("Recording"):
+            return
+        imgui.separator()
+
+        changed, quality = imgui.slider_float(
+            "Video Quality",
+            float(self._recorder.quality),
+            0.0,
+            100.0,
+            "%.0f",
+        )
+        if changed:
+            self._recorder.set_quality(float(quality))
+
+        if self._recorder.is_recording:
+            output_path = self._recorder.output_path
+            imgui.text("Status: recording")
+            imgui.text(f"Quality: {self._recorder.quality:.0f}/100")
+            imgui.text(f"FPS: {self._format_record_fps(self._record_fps)}")
+            if output_path is not None:
+                imgui.text_wrapped(str(output_path))
+            if imgui.button("Stop Recording"):
+                self._stop_recording()
+        else:
+            sim_fps_text = (
+                self._format_record_fps(self._record_sim_fps) if self._record_sim_fps is not None else "unknown"
+            )
+            imgui.text(f"Simulation Rate: {sim_fps_text} Hz")
+
+            changed, fps_text = imgui.input_text("Video FPS", self._record_fps_text)
+            if changed:
+                self._record_fps_text = fps_text
+                self._record_fps_manual = True
+                self._sync_record_fps_from_text()
+
+            if self._parse_record_fps_text() is None:
+                imgui.text("Enter a positive FPS value.")
+
+            if imgui.button("Use Simulation Rate"):
+                self._use_simulation_record_fps()
+            imgui.same_line()
+            imgui.text("(default)")
+
+            imgui.text("Status: idle")
+            imgui.text_wrapped(str(self._recorder.suggested_output_path()))
+            if imgui.button("Start Recording"):
+                self._start_recording()
 
     @staticmethod
     def _build_heatmap_color_lut() -> np.ndarray:

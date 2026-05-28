@@ -5,6 +5,7 @@
 ### Added
 
 - Add opt-in `validate_mesh` parameter to `ModelBuilder.add_cloth_mesh()`, `ModelBuilder.add_soft_mesh()`, and `style3d.add_cloth_mesh()` that warns on degenerate geometry; add public `newton.utils.validate_triangle_mesh()` and `newton.utils.validate_tet_mesh()` utilities
+- Add live MP4 recording panel to `ViewerGL` ("Recording" section in the sidebar) with a quality slider and start/stop controls; uses NVENC when available and falls back to QSV/AMF/libx264, with an optional `imageio-ffmpeg` dependency or system `ffmpeg`
 - Add `ViewerGL.show_loading_splash()` / `ViewerGL.hide_loading_splash()` displaying a stylized Newton's-cradle overlay while the GL viewer waits on Warp kernel compilation; raised automatically by `newton.examples.init()` for visible GL viewers
 - Add edge-simplification options to `Mesh.build_sdf()` that drop near-coplanar internal edges from the mesh-edge set used by SDF-mesh contact generation: `edge_lower_angle_threshold_rad` (default 0.1°; pass a negative value to opt out and keep the full edge set), `edge_upper_angle_threshold_rad`, opt-in `edge_box_absorption`, and box half-extent controls `edge_box_half_{normal,lateral}` / `edge_box_half_{normal,lateral}_rel`
 - Add `cable_cross_slide_table` example demonstrating a cable-driven XY table
