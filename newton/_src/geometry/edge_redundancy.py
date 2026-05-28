@@ -1,17 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Detection of redundant manifold edges via a dihedral-angle pre-filter and
-an opt-in box-line absorption pass.
+"""Redundant-edge detection: dihedral-angle pre-filter + opt-in box absorption.
 
-The dihedral-angle pre-filter always runs and gates which manifold edges
-participate (and reports them on :class:`EdgeRedundancyResult`). The
-box-absorption pass only runs when ``enable_box_absorption=True``: for
-every surviving manifold edge we build an oriented box in the edge frame
-(``dir``, ``tang``, ``normal``), run the SAP broad phase, and exactly test
-whether edge ``a``'s box fully absorbs edge ``b``'s segment. Mutual
-absorption marks both edges; :func:`resolve_edge_removals` then picks
-winners greedily. Output adjacency is CSR (absorbed edges per box).
+For each surviving manifold edge we build an oriented box in the edge frame
+(``dir``, ``tang``, ``normal``), broad-phase via SAP, and test segment-in-box
+exactly. :func:`resolve_edge_removals` then picks kept/removed greedily.
+Output adjacency is CSR (absorbed edges per box).
 """
 
 from __future__ import annotations
@@ -25,6 +20,10 @@ import warp as wp
 from .broad_phase_sap import BroadPhaseSAP
 from .flags import ShapeFlags
 
+# Vectors with length below this are treated as zero (matches
+# :mod:`raycast` / :mod:`collision_primitive`).
+MINVAL = 1.0e-15
+
 # -----------------------------------------------------------------------------
 # Result type
 # -----------------------------------------------------------------------------
@@ -34,34 +33,35 @@ from .flags import ShapeFlags
 class EdgeRedundancyResult:
     """Per-edge containment results from :func:`find_redundant_edges`.
 
-    All per-edge arrays are indexed by the manifold-edge subset
-    ``edge_indices`` (not the original :attr:`Mesh.edges` rows).
+    All per-edge arrays are indexed by ``edge_indices`` (the manifold subset),
+    not the original :attr:`Mesh.edges` rows.
+
+    Sharp edges (dihedral angle ``>= upper_angle_threshold_rad``) may act as
+    containers but are never absorbed: they never appear in ``absorbed_indices``
+    and their ``num_absorbers_per_edge`` / ``candidate_for_removal`` are zero.
 
     Attributes:
         edge_indices [-]: Manifold edge vertex pairs ``(M, 2)``.
         dihedral_angles [rad]: Per-edge dihedral angles.
-        adjacent_face_area_sum [m^2]: Sum of the two adjacent triangle areas
-            per manifold edge. Used by :func:`resolve_edge_removals` as a
-            tiebreaker (larger area wins) when sorting by absorb count.
+        adjacent_face_area_sum [m^2]: Sum of the two adjacent triangle areas.
+            Tiebreaker for :func:`resolve_edge_removals` (larger wins).
         candidate_for_removal [-]: Edges absorbed by at least one other box.
         num_absorbers_per_edge [-]: Per-edge count of absorbing boxes.
         absorb_count_per_box [-]: Per-box count of absorbed edges.
         absorbed_offsets [-]: CSR offsets, length ``M + 1``.
         absorbed_indices [-]: CSR values; edges in box ``j`` live in
             ``absorbed_indices[absorbed_offsets[j]:absorbed_offsets[j+1]]``.
-            Order within a slice is unspecified (filled by GPU atomics);
-            :func:`resolve_edge_removals` is order-insensitive so the
-            ``to_remove``/``kept`` masks it produces are still
-            bit-deterministic.
+            Intra-slice order is unspecified (GPU atomics);
+            :func:`resolve_edge_removals` is order-insensitive.
         broad_phase_pair_count [-]: AABB pairs returned by SAP.
         aabb_diagonal [m]: Mesh world-space AABB diagonal.
-        half_height [m]: Box half-extent along the edge normal.
-        half_width [m]: Box half-extent along the in-plane tangent and the
-            per-end overhang along the edge direction.
-        lower_angle_threshold_rad [rad]: Input gate that was applied. Edges
-            below this dihedral angle were dropped before the broad phase.
-        upper_angle_threshold_rad [rad]: Default absorption-eligibility
-            threshold for :func:`resolve_edge_removals`.
+        half_normal [m]: Box half-extent along the edge normal.
+        half_lateral [m]: Box half-extent in-plane (across the edge and as
+            per-end overhang along it).
+        lower_angle_threshold_rad [rad]: Edges below this were excluded
+            before the broad phase.
+        upper_angle_threshold_rad [rad]: Absorbability gate applied in the
+            kernels; also the default for :func:`resolve_edge_removals`.
     """
 
     edge_indices: np.ndarray
@@ -74,8 +74,8 @@ class EdgeRedundancyResult:
     absorbed_indices: np.ndarray
     broad_phase_pair_count: int
     aabb_diagonal: float
-    half_height: float
-    half_width: float
+    half_normal: float
+    half_lateral: float
     lower_angle_threshold_rad: float
     upper_angle_threshold_rad: float
 
@@ -90,8 +90,8 @@ def _build_edge_box_kernel(
     vertices: wp.array[wp.vec3],
     edge_indices: wp.array[wp.vec2i],
     avg_normals: wp.array[wp.vec3],
-    half_height: float,
-    half_width: float,
+    half_normal: float,
+    half_lateral: float,
     # Outputs
     box_center: wp.array[wp.vec3],
     box_axis_dir: wp.array[wp.vec3],
@@ -111,8 +111,8 @@ def _build_edge_box_kernel(
     n = avg_normals[i]
     n_len = wp.length(n)
 
-    # Degenerate edge or missing normal (NaN-filled) -> mark as no-box.
-    if edge_len <= 1.0e-12 or n_len <= 1.0e-12 or wp.isnan(n[0]):
+    # Degenerate edge or NaN-filled normal -> no box.
+    if edge_len <= wp.static(MINVAL) or n_len <= wp.static(MINVAL) or wp.isnan(n[0]):
         box_center[i] = wp.vec3(0.0, 0.0, 0.0)
         box_axis_dir[i] = wp.vec3(1.0, 0.0, 0.0)
         box_axis_tang[i] = wp.vec3(0.0, 1.0, 0.0)
@@ -126,7 +126,7 @@ def _build_edge_box_kernel(
 
     tang = wp.cross(n_unit, dir_e)
     tang_len = wp.length(tang)
-    if tang_len <= 1.0e-12:
+    if tang_len <= wp.static(MINVAL):
         box_center[i] = wp.vec3(0.0, 0.0, 0.0)
         box_axis_dir[i] = wp.vec3(1.0, 0.0, 0.0)
         box_axis_tang[i] = wp.vec3(0.0, 1.0, 0.0)
@@ -136,15 +136,14 @@ def _build_edge_box_kernel(
         return
 
     tang = tang / tang_len
-    # Re-orthogonalize the normal so the frame stays orthonormal even if
-    # avg_normal is not exactly perpendicular to dir_e.
+    # Re-orthogonalize: avg_normal isn't guaranteed perpendicular to dir_e.
     normal = wp.cross(dir_e, tang)
 
     box_center[i] = 0.5 * (v0 + v1)
     box_axis_dir[i] = dir_e
     box_axis_tang[i] = tang
     box_axis_normal[i] = normal
-    box_half_extents[i] = wp.vec3(0.5 * edge_len + half_width, half_width, half_height)
+    box_half_extents[i] = wp.vec3(0.5 * edge_len + half_lateral, half_lateral, half_normal)
     box_valid[i] = 1
 
 
@@ -163,7 +162,7 @@ def _compute_box_aabb_kernel(
     i = wp.tid()
 
     if box_valid[i] == 0:
-        # Degenerate box collapsed to a single point so it is never overlapped.
+        # Inverted AABB so SAP never overlaps it.
         aabb_lower[i] = wp.vec3(1.0e30, 1.0e30, 1.0e30)
         aabb_upper[i] = wp.vec3(-1.0e30, -1.0e30, -1.0e30)
         return
@@ -174,7 +173,7 @@ def _compute_box_aabb_kernel(
     rtan = box_axis_tang[i]
     rnor = box_axis_normal[i]
 
-    # World half-extents via |R| * h (R has axes as columns).
+    # World half-extents = |R| * h, with R = [dir | tang | normal].
     hx = wp.abs(rdir[0]) * h[0] + wp.abs(rtan[0]) * h[1] + wp.abs(rnor[0]) * h[2]
     hy = wp.abs(rdir[1]) * h[0] + wp.abs(rtan[1]) * h[1] + wp.abs(rnor[1]) * h[2]
     hz = wp.abs(rdir[2]) * h[0] + wp.abs(rtan[2]) * h[1] + wp.abs(rnor[2]) * h[2]
@@ -249,6 +248,7 @@ def _count_absorbed_per_box_kernel(
     box_axis_normal: wp.array[wp.vec3],
     box_half_extents: wp.array[wp.vec3],
     box_valid: wp.array[wp.int32],
+    is_absorbable: wp.array[wp.int32],
     eps: float,
     # In/out
     absorb_count_per_box: wp.array[wp.int32],
@@ -263,6 +263,8 @@ def _count_absorbed_per_box_kernel(
     if a == b:
         return
 
+    # Gate on the absorbee, not the absorber: sharp edges may contain
+    # others but must not be marked absorbed themselves.
     contains_a_b = _box_contains_edge(
         b,
         a,
@@ -289,10 +291,10 @@ def _count_absorbed_per_box_kernel(
         box_valid,
         eps,
     )
-    if contains_a_b == 1:
+    if contains_a_b == 1 and is_absorbable[b] == 1:
         wp.atomic_add(absorb_count_per_box, a, 1)
         wp.atomic_add(num_absorbers_per_edge, b, 1)
-    if contains_b_a == 1:
+    if contains_b_a == 1 and is_absorbable[a] == 1:
         wp.atomic_add(absorb_count_per_box, b, 1)
         wp.atomic_add(num_absorbers_per_edge, a, 1)
 
@@ -309,6 +311,7 @@ def _scatter_absorbed_per_box_kernel(
     box_axis_normal: wp.array[wp.vec3],
     box_half_extents: wp.array[wp.vec3],
     box_valid: wp.array[wp.int32],
+    is_absorbable: wp.array[wp.int32],
     absorbed_offsets: wp.array[wp.int32],
     eps: float,
     # In/out
@@ -324,6 +327,7 @@ def _scatter_absorbed_per_box_kernel(
     if a == b:
         return
 
+    # Must agree with the count kernel's gate so CSR slot counts match.
     contains_a_b = _box_contains_edge(
         b,
         a,
@@ -350,10 +354,10 @@ def _scatter_absorbed_per_box_kernel(
         box_valid,
         eps,
     )
-    if contains_a_b == 1:
+    if contains_a_b == 1 and is_absorbable[b] == 1:
         slot = wp.atomic_add(write_cursor, a, 1)
         absorbed_indices[absorbed_offsets[a] + slot] = b
-    if contains_b_a == 1:
+    if contains_b_a == 1 and is_absorbable[a] == 1:
         slot = wp.atomic_add(write_cursor, b, 1)
         absorbed_indices[absorbed_offsets[b] + slot] = a
 
@@ -379,49 +383,56 @@ def find_redundant_edges(
     mesh,
     *,
     enable_box_absorption: bool = False,
-    half_height: float | None = None,
-    half_width: float | None = None,
+    half_normal: float | None = None,
+    half_lateral: float | None = None,
     lower_angle_threshold_rad: float = math.radians(0.1),
     upper_angle_threshold_rad: float = math.radians(10.0),
     initial_pair_capacity_factor: int = 8,
     max_retries: int = 3,
     device=None,
+    precomputed_filter: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> EdgeRedundancyResult:
-    """Apply the dihedral-angle pre-filter and (optionally) the box-absorption pass.
+    """Run the dihedral-angle pre-filter and, optionally, box absorption.
 
-    The pre-filter always runs and returns the manifold-edge subset whose
-    dihedral angle is at least ``lower_angle_threshold_rad``. Box-absorption
-    only runs when ``enable_box_absorption`` is ``True``; otherwise the
-    absorption-related fields on the result are zero-initialised.
+    The pre-filter always runs. Box absorption only runs when
+    ``enable_box_absorption`` is ``True``; otherwise the absorption-related
+    fields on the result are zero-initialised.
 
     Args:
         mesh: A :class:`newton.Mesh` instance.
-        enable_box_absorption: When ``True``, build oriented edge boxes and
-            populate ``candidate_for_removal`` / CSR adjacency. When
-            ``False`` (default), only the dihedral-angle pre-filter runs.
-        half_height [m]: Box half-extent along the edge normal. Defaults to
-            ``1e-3 * D`` (``D`` = mesh AABB diagonal). Ignored when
-            ``enable_box_absorption`` is ``False``.
-        half_width [m]: Box half-extent along the in-plane tangent and the
-            per-end overhang along the edge. Defaults to ``5e-3 * D``.
-            Ignored when ``enable_box_absorption`` is ``False``.
-        lower_angle_threshold_rad [rad]: Input gate. Manifold edges with
-            dihedral angle below this value are excluded. Default
-            ``math.radians(0.1)`` (0.1 deg); set to 0 to keep every
-            manifold edge.
-        upper_angle_threshold_rad [rad]: Stored on the result as the default
-            absorption-eligibility threshold for :func:`resolve_edge_removals`.
-            Default 10 deg.
+        enable_box_absorption: Build oriented edge boxes and populate the
+            CSR adjacency. Defaults to ``False`` (pre-filter only).
+        half_normal [m]: Box half-extent along the edge normal. Defaults
+            to ``1e-3 * D`` where ``D`` is the mesh AABB diagonal.
+        half_lateral [m]: Box half-extent in-plane (across the edge and as
+            per-end overhang along it). Defaults to ``5e-3 * D``.
+        lower_angle_threshold_rad [rad]: Manifold edges below this
+            dihedral angle are excluded. Set to 0 to keep all manifold
+            edges. Default 0.1 deg.
+        upper_angle_threshold_rad [rad]: Sharp-edge cutoff. Edges at or
+            above this angle act as absorbers only; they are excluded
+            from ``absorb_count_per_box``, ``num_absorbers_per_edge``,
+            ``candidate_for_removal``, and the CSR adjacency. Default 10
+            deg. Also stored on the result as the default for
+            :func:`resolve_edge_removals`.
         initial_pair_capacity_factor: SAP pair-buffer size in multiples of
             the manifold-edge count.
         max_retries: Max grow-on-overflow attempts for the SAP pair buffer.
         device: Optional Warp device.
+        precomputed_filter: Optional ``(edges, angles, avg_normals,
+            area_sums)`` from a previous
+            :meth:`Mesh._filter_edges_by_dihedral_angle` call at the same
+            ``lower_angle_threshold_rad``. Reused verbatim to skip the
+            dihedral filter pass.
     """
-    edges_np, angles_np, normals_np, area_sums_np = mesh._filter_edges_by_dihedral_angle(
-        lower_angle_threshold_rad, return_diagnostics=True
-    )
+    if precomputed_filter is not None:
+        edges_np, angles_np, normals_np, area_sums_np = precomputed_filter
+    else:
+        edges_np, angles_np, normals_np, area_sums_np = mesh._filter_edges_by_dihedral_angle(
+            lower_angle_threshold_rad, return_diagnostics=True
+        )
 
-    # Manifold edges have finite per-edge diagnostics; non-pair edges hold NaN.
+    # Non-manifold (boundary / 3+-incident) edges carry NaN diagnostics.
     manifold_mask = np.isfinite(angles_np) & np.all(np.isfinite(normals_np), axis=1)
     edge_indices_np = edges_np[manifold_mask].astype(np.int32, copy=False)
     edge_angles_np = angles_np[manifold_mask].astype(np.float32, copy=False)
@@ -435,11 +446,11 @@ def find_redundant_edges(
     aabb_max = vertices_np.max(axis=0) if len(vertices_np) > 0 else np.zeros(3, dtype=np.float32)
     diagonal = float(np.linalg.norm(aabb_max - aabb_min))
 
-    resolved_half_height = float(half_height) if half_height is not None else 1.0e-3 * diagonal
-    resolved_half_width = float(half_width) if half_width is not None else 5.0e-3 * diagonal
+    resolved_half_normal = float(half_normal) if half_normal is not None else 1.0e-3 * diagonal
+    resolved_half_lateral = float(half_lateral) if half_lateral is not None else 5.0e-3 * diagonal
 
-    # Fast path: absorption disabled by caller, no edges, or non-positive extents.
-    boxes_disabled = resolved_half_height <= 0.0 or resolved_half_width <= 0.0
+    # Fast path: absorption disabled, no edges, or zero-extent boxes.
+    boxes_disabled = resolved_half_normal <= 0.0 or resolved_half_lateral <= 0.0
     if not enable_box_absorption or n_edges == 0 or boxes_disabled:
         return EdgeRedundancyResult(
             edge_indices=edge_indices_np.reshape(-1, 2),
@@ -452,8 +463,8 @@ def find_redundant_edges(
             absorbed_indices=np.zeros(0, dtype=np.int32),
             broad_phase_pair_count=0,
             aabb_diagonal=diagonal,
-            half_height=resolved_half_height,
-            half_width=resolved_half_width,
+            half_normal=resolved_half_normal,
+            half_lateral=resolved_half_lateral,
             lower_angle_threshold_rad=float(lower_angle_threshold_rad),
             upper_angle_threshold_rad=float(upper_angle_threshold_rad),
         )
@@ -480,8 +491,8 @@ def find_redundant_edges(
                 vertices_wp,
                 edge_indices_wp,
                 avg_normals_wp,
-                resolved_half_height,
-                resolved_half_width,
+                resolved_half_normal,
+                resolved_half_lateral,
             ],
             outputs=[
                 box_center,
@@ -512,7 +523,7 @@ def find_redundant_edges(
         shape_world_np = np.zeros(n_edges, dtype=np.int32)
         shape_collision_group_np = np.ones(n_edges, dtype=np.int32)
         shape_flags_np = np.full(n_edges, int(ShapeFlags.COLLIDE_SHAPES), dtype=np.int32)
-        # Drop COLLIDE_SHAPES on degenerate edges so SAP skips them entirely.
+        # Clear the collide flag on degenerate boxes so SAP skips them.
         valid_host = box_valid.numpy()
         shape_flags_np[valid_host == 0] = 0
 
@@ -544,7 +555,7 @@ def find_redundant_edges(
                 break
             attempts += 1
             if attempts > max_retries:
-                # SAP truncates; surface via broad_phase_pair_count == capacity.
+                # SAP truncated; report via broad_phase_pair_count == capacity.
                 actual_pair_count = capacity
                 break
             capacity = max(actual_pair_count, capacity * 2)
@@ -552,6 +563,14 @@ def find_redundant_edges(
         assert candidate_pair is not None
 
         eps = 1.0e-6 * max(diagonal, 1.0e-6)
+
+        # Sharp edges (angle >= upper threshold) act as containers only.
+        # Gating in the kernels keeps absorb counts and the CSR adjacency
+        # in sync with this rule, so the greedy resolver isn't biased by
+        # absorbed-but-unremovable sharp neighbours inflating counts.
+        upper_threshold_f = float(upper_angle_threshold_rad)
+        is_absorbable_np = (edge_angles_np < upper_threshold_f).astype(np.int32)
+        is_absorbable_wp = wp.array(is_absorbable_np, dtype=wp.int32)
 
         absorb_count_per_box = wp.zeros(n_edges, dtype=wp.int32)
         num_absorbers_per_edge = wp.zeros(n_edges, dtype=wp.int32)
@@ -571,12 +590,13 @@ def find_redundant_edges(
                     box_axis_normal,
                     box_half_extents,
                     box_valid,
+                    is_absorbable_wp,
                     eps,
                 ],
                 outputs=[absorb_count_per_box, num_absorbers_per_edge],
             )
 
-        # Exclusive scan -> CSR offsets (inclusive scan into offsets[1:]).
+        # Exclusive scan = inclusive scan written to offsets[1:].
         absorbed_offsets = wp.zeros(n_edges + 1, dtype=wp.int32)
         if n_edges > 0:
             wp.utils.array_scan(absorb_count_per_box, absorbed_offsets[1:], inclusive=True)
@@ -601,6 +621,7 @@ def find_redundant_edges(
                     box_axis_normal,
                     box_half_extents,
                     box_valid,
+                    is_absorbable_wp,
                     absorbed_offsets,
                     eps,
                 ],
@@ -631,8 +652,8 @@ def find_redundant_edges(
         absorbed_indices=absorbed_indices_host,
         broad_phase_pair_count=actual_pair_count,
         aabb_diagonal=diagonal,
-        half_height=resolved_half_height,
-        half_width=resolved_half_width,
+        half_normal=resolved_half_normal,
+        half_lateral=resolved_half_lateral,
         lower_angle_threshold_rad=float(lower_angle_threshold_rad),
         upper_angle_threshold_rad=float(upper_angle_threshold_rad),
     )
@@ -645,18 +666,17 @@ def find_redundant_edges(
 
 @dataclass
 class EdgeResolutionResult:
-    """Per-edge greedy decision returned by :func:`resolve_edge_removals`.
+    """Per-edge greedy decision from :func:`resolve_edge_removals`.
 
-    Indices are aligned with :attr:`EdgeRedundancyResult.edge_indices`.
+    Indices align with :attr:`EdgeRedundancyResult.edge_indices`.
 
     Attributes:
-        to_remove [-]: Edges scheduled for definitive removal.
-        kept [-]: Containers promoted to "definitely keep" during the greedy
-            pass. Always disjoint from :attr:`to_remove`.
+        to_remove [-]: Edges scheduled for removal.
+        kept [-]: Container edges promoted to "definitely keep". Disjoint
+            from :attr:`to_remove`.
         order [-]: Box order used by the greedy loop (descending by
-            ``absorb_count_per_box``).
-        upper_angle_threshold_rad [rad]: Absorption-eligibility threshold
-            that was applied.
+            ``absorb_count_per_box``, area-sum tiebreaker).
+        upper_angle_threshold_rad [rad]: Threshold that was applied.
     """
 
     to_remove: np.ndarray
@@ -672,17 +692,21 @@ def resolve_edge_removals(
 ) -> EdgeResolutionResult:
     """Greedy CPU resolution of edge-removal candidates.
 
-    Walks boxes from highest to lowest ``absorb_count_per_box``. For each box:
+    Walks boxes from highest to lowest ``absorb_count_per_box``. For each:
 
-    1. Skip if the container edge is already scheduled for removal.
-    2. Otherwise, promote the container edge to "definitely keep".
-    3. Mark each absorbed edge for removal iff its dihedral angle is below
-       ``upper_angle_threshold_rad`` and it is not already kept.
+    1. Skip if already scheduled for removal.
+    2. Otherwise mark the container as kept.
+    3. Mark every absorbed edge for removal, unless it has been kept or
+       its dihedral angle is above ``upper_angle_threshold_rad``.
+
+    The primary absorbability gate runs in the kernels; the angle check
+    here only matters when a caller passes a *stricter* threshold than
+    the one baked into the result. A looser threshold has no effect.
 
     Args:
         result: Output of :func:`find_redundant_edges`.
-        upper_angle_threshold_rad [rad]: Upper bound on the dihedral angle of
-            a removable edge. Defaults to
+        upper_angle_threshold_rad [rad]: Upper bound on the dihedral angle
+            of a removable edge. Defaults to
             ``result.upper_angle_threshold_rad``.
     """
     if upper_angle_threshold_rad is None:
@@ -701,11 +725,9 @@ def resolve_edge_removals(
         )
 
     absorb_count = result.absorb_count_per_box.astype(np.int64, copy=False)
-    # Stable descending sort by (absorb_count, adjacent_face_area_sum). The
-    # area sum breaks ties on absorb count: when two boxes absorb the same
-    # number of others, prefer the one adjacent to larger triangles (heuristic
-    # that favours the load-bearing geometry). np.lexsort treats the *last*
-    # key as primary, so we put -absorb_count last.
+    # Descending sort on absorb count, with adjacent area as tiebreaker
+    # (prefer load-bearing geometry). np.lexsort treats the last key as
+    # primary, so -absorb_count goes last.
     area_sum = result.adjacent_face_area_sum.astype(np.float64, copy=False)
     order = np.lexsort((-area_sum, -absorb_count)).astype(np.int32, copy=False)
 
@@ -744,30 +766,27 @@ def remove_redundant_edges(
     mesh,
     *,
     enable_box_absorption: bool = False,
-    half_height: float | None = None,
-    half_width: float | None = None,
+    half_normal: float | None = None,
+    half_lateral: float | None = None,
     lower_angle_threshold_rad: float = math.radians(0.1),
     upper_angle_threshold_rad: float = math.radians(10.0),
     initial_pair_capacity_factor: int = 8,
     max_retries: int = 3,
     device=None,
 ) -> np.ndarray:
-    """One-shot wrapper: find redundant edges and return only the kept set.
+    """Chain :func:`find_redundant_edges` and :func:`resolve_edge_removals`.
 
-    Chains :func:`find_redundant_edges` and :func:`resolve_edge_removals`.
-    Use the two-step API instead if you need the intermediate diagnostics.
-
-    All keyword arguments are forwarded to :func:`find_redundant_edges`; see
-    that function for full semantics.
+    Use the two-step API directly if you need the intermediate diagnostics.
+    Keyword arguments are forwarded verbatim to :func:`find_redundant_edges`.
 
     Returns:
-        Kept manifold-edge vertex pairs ``(M, 2)`` with dtype ``int32``.
+        Kept manifold-edge vertex pairs ``(M, 2)``, dtype ``int32``.
     """
     result = find_redundant_edges(
         mesh,
         enable_box_absorption=enable_box_absorption,
-        half_height=half_height,
-        half_width=half_width,
+        half_normal=half_normal,
+        half_lateral=half_lateral,
         lower_angle_threshold_rad=lower_angle_threshold_rad,
         upper_angle_threshold_rad=upper_angle_threshold_rad,
         initial_pair_capacity_factor=initial_pair_capacity_factor,

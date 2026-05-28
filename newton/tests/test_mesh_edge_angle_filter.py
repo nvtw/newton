@@ -5,16 +5,21 @@
 
 `Mesh._filter_edges_by_dihedral_angle` drops internal edges whose two adjacent
 triangle face normals are within an angle threshold (near-coplanar). Boundary
-edges and non-manifold edges are always kept. The filter is applied at
-`ModelBuilder.finalize()` time via `ModelBuilder.mesh_edge_lower_angle_threshold_rad`.
+edges and non-manifold edges are always kept. The filter is applied from
+`Mesh.build_sdf()` and the resulting simplified set is cached on the mesh for
+`ModelBuilder.finalize()` to consume.
 """
 
 import math
 import unittest
 
 import numpy as np
+import warp as wp
 
 import newton
+
+# ``Mesh.build_sdf`` requires CUDA because the SDF cook only runs on GPU.
+_cuda_available = wp.is_cuda_available()
 
 
 def _flat_quad_mesh() -> newton.Mesh:
@@ -33,6 +38,21 @@ def _single_triangle_mesh() -> newton.Mesh:
         dtype=np.float32,
     )
     indices = np.array([0, 1, 2], dtype=np.int32)
+    return newton.Mesh(vertices, indices, compute_inertia=False)
+
+
+def _near_antiparallel_pair_mesh() -> newton.Mesh:
+    """Two adjacent triangles whose face normals nearly cancel."""
+    vertices = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 1.0e-7],
+        ],
+        dtype=np.float32,
+    )
+    indices = np.array([0, 1, 2, 0, 1, 3], dtype=np.int32)
     return newton.Mesh(vertices, indices, compute_inertia=False)
 
 
@@ -165,6 +185,15 @@ class TestMeshEdgeAngleFilter(unittest.TestCase):
         self.assertTrue(bool(np.all(np.isnan(angles[boundary_mask]))))
         self.assertTrue(bool(np.all(np.isnan(area_sums[boundary_mask]))))
 
+    def test_diagnostics_zero_avg_normal_for_near_antiparallel_faces(self):
+        mesh = _near_antiparallel_pair_mesh()
+        edges, _angles, normals, area_sums = mesh._filter_edges_by_dihedral_angle(-1.0, return_diagnostics=True)
+        rows = [tuple(sorted((int(a), int(b)))) for a, b in edges]
+        shared = rows.index((0, 1))
+
+        np.testing.assert_allclose(normals[shared], [0.0, 0.0, 0.0], atol=0.0)
+        self.assertTrue(math.isfinite(float(area_sums[shared])))
+
     def test_filter_preserves_edges_subset_and_order(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
         full_rows = [tuple(row) for row in mesh.edges.tolist()]
@@ -180,32 +209,17 @@ class TestMeshEdgeAngleFilter(unittest.TestCase):
 
 
 class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
-    def test_default_is_point_one_degree(self):
-        builder = newton.ModelBuilder()
-        self.assertAlmostEqual(builder.mesh_edge_lower_angle_threshold_rad, math.radians(0.1))
-
-    def test_finalize_packs_filtered_edges_per_threshold(self):
+    def test_finalize_uses_full_edges_without_build_sdf(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
 
-        # Threshold 0 -> 18 unique edges packed.
-        builder0 = newton.ModelBuilder()
-        builder0.mesh_edge_lower_angle_threshold_rad = 0.0
-        body0 = builder0.add_body()
-        builder0.add_shape_mesh(body=body0, mesh=mesh)
-        model0 = builder0.finalize()
-        ranges0 = model0.shape_edge_range.numpy()
-        # First (and only) mesh shape should have count == 18.
-        self.assertEqual(int(ranges0[0][1]), 18)
-        self.assertEqual(int(model0.mesh_edge_indices.shape[0]), 18)
-
-        # Default threshold (1 degree) -> 12 silhouette edges packed.
-        builder1 = newton.ModelBuilder()
-        body1 = builder1.add_body()
-        builder1.add_shape_mesh(body=body1, mesh=mesh)
-        model1 = builder1.finalize()
-        ranges1 = model1.shape_edge_range.numpy()
-        self.assertEqual(int(ranges1[0][1]), 12)
-        self.assertEqual(int(model1.mesh_edge_indices.shape[0]), 12)
+        builder = newton.ModelBuilder()
+        body = builder.add_body()
+        builder.add_shape_mesh(body=body, mesh=mesh)
+        model = builder.finalize()
+        ranges = model.shape_edge_range.numpy()
+        # No build_sdf() -> builder packs all 18 unique cube edges.
+        self.assertEqual(int(ranges[0][1]), 18)
+        self.assertEqual(int(model.mesh_edge_indices.shape[0]), 18)
 
     def test_finalize_shares_edges_across_shapes_referencing_same_mesh(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
@@ -258,32 +272,52 @@ class TestBuildCollisionEdges(unittest.TestCase):
     Mesh.build_sdf), exercised directly so we don't pay for the SDF cook."""
 
     def _build(self, mesh: newton.Mesh, **kwargs) -> np.ndarray:
-        defaults = {
+        # Mirror the validation/build split that ``Mesh.build_sdf`` now
+        # performs: ``_validate_collision_edge_options`` resolves the
+        # half-extents (and rejects invalid combinations) before the
+        # downstream ``_build_collision_edges`` call would otherwise pay
+        # for the dihedral pass.
+        validation_keys = (
+            "half_normal_abs",
+            "half_normal_rel",
+            "half_lateral_abs",
+            "half_lateral_rel",
+        )
+        validation_defaults = dict.fromkeys(validation_keys)
+        validation_kwargs = {k: kwargs.pop(k, None) for k in validation_keys}
+        validation_defaults.update(validation_kwargs)
+        build_defaults = {
             "lower_angle_threshold_rad": math.radians(0.1),
             "upper_angle_threshold_rad": math.radians(10.0),
             "enable_box_absorption": False,
-            "half_height_abs": None,
-            "half_height_rel": None,
-            "half_width_abs": None,
-            "half_width_rel": None,
         }
-        defaults.update(kwargs)
-        mesh._build_collision_edges(**defaults)
+        build_defaults.update(kwargs)
+        half_normal, half_lateral = mesh._validate_collision_edge_options(
+            lower_angle_threshold_rad=build_defaults["lower_angle_threshold_rad"],
+            enable_box_absorption=build_defaults["enable_box_absorption"],
+            diagonal=mesh._aabb_diagonal(),
+            **validation_defaults,
+        )
+        mesh._build_collision_edges(
+            **build_defaults,
+            half_normal=half_normal,
+            half_lateral=half_lateral,
+        )
         return mesh._collision_edges
 
     def test_abs_and_rel_together_raises(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
-        with self.assertRaisesRegex(ValueError, "edge_box_half_height"):
-            self._build(mesh, half_height_abs=1.0, half_height_rel=1e-3)
-        with self.assertRaisesRegex(ValueError, "edge_box_half_width"):
-            self._build(mesh, half_width_abs=1.0, half_width_rel=5e-3)
+        with self.assertRaisesRegex(ValueError, "edge_box_half_normal"):
+            self._build(mesh, half_normal_abs=1.0, half_normal_rel=1e-3)
+        with self.assertRaisesRegex(ValueError, "edge_box_half_lateral"):
+            self._build(mesh, half_lateral_abs=1.0, half_lateral_rel=5e-3)
 
     def test_negative_value_raises(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
         with self.assertRaisesRegex(ValueError, "non-negative"):
-            self._build(mesh, half_height_abs=-1.0)
+            self._build(mesh, half_normal_abs=-1.0)
         with self.assertRaisesRegex(ValueError, "non-negative"):
-            self._build(mesh, half_width_rel=-1.0)
+            self._build(mesh, half_lateral_rel=-1.0)
 
     def test_boundary_edges_preserved_without_absorption(self):
         # Open-top box has 4 boundary edges that must survive the build_sdf
@@ -306,8 +340,8 @@ class TestBuildCollisionEdges(unittest.TestCase):
             mesh,
             lower_angle_threshold_rad=0.0,
             enable_box_absorption=True,
-            half_height_abs=2.0,
-            half_width_abs=2.0,
+            half_normal_abs=2.0,
+            half_lateral_abs=2.0,
         )
         # At most the 18 unique edges, strictly fewer than 18 (some diagonals removed).
         self.assertLess(len(kept), 18)
@@ -315,14 +349,12 @@ class TestBuildCollisionEdges(unittest.TestCase):
 
     def test_collision_edges_consumed_by_builder(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
-        # Seed _collision_edges with a hand-picked subset (e.g. 6 edges).
+        # Seed _collision_edges with a hand-picked subset (e.g. 6 edges) to
+        # simulate ``Mesh.build_sdf()`` having populated it.
         seeded = mesh.edges[:6].astype(np.int32)
         mesh._collision_edges = np.ascontiguousarray(seeded)
 
         builder = newton.ModelBuilder()
-        # Builder threshold differs from what's cached -> must still use the
-        # cached set rather than recompute.
-        builder.mesh_edge_lower_angle_threshold_rad = math.radians(45.0)
         body = builder.add_body()
         builder.add_shape_mesh(body=body, mesh=mesh)
         model = builder.finalize()
@@ -335,6 +367,97 @@ class TestBuildCollisionEdges(unittest.TestCase):
         mesh = newton.Mesh(np.zeros((0, 3), dtype=np.float32), np.zeros(0, dtype=np.int32), compute_inertia=False)
         kept = self._build(mesh, enable_box_absorption=True)
         self.assertEqual(kept.shape, (0, 2))
+
+
+class TestCollisionEdgesLifecycle(unittest.TestCase):
+    """Lifecycle invariants for the ``_collision_edges`` cache attached by
+    :meth:`Mesh.build_sdf`: clearing the SDF must also drop the cache,
+    :meth:`Mesh.copy` must carry it alongside the SDF, and a failed
+    ``build_sdf`` retry must not leave a stale SDF behind.
+    """
+
+    @staticmethod
+    def _seed_collision_edges(mesh: newton.Mesh, count: int = 4) -> np.ndarray:
+        """Populate ``_collision_edges`` without paying for an SDF cook."""
+        seeded = np.ascontiguousarray(mesh.edges[:count].astype(np.int32))
+        mesh._collision_edges = seeded
+        return seeded
+
+    def test_clear_sdf_drops_collision_edges_cache(self):
+        # Otherwise ``ModelBuilder.finalize()`` would keep using the
+        # SDF-tuned subset for a mesh that no longer has an SDF.
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        mesh.sdf = object()  # placeholder, only the lifecycle matters here
+        self._seed_collision_edges(mesh)
+
+        mesh.clear_sdf()
+
+        self.assertIsNone(mesh.sdf)
+        self.assertIsNone(mesh._collision_edges)
+
+    def test_copy_carries_collision_edges_with_sdf(self):
+        # A copy of an SDF-backed mesh must reuse the simplified contact
+        # edges; otherwise it silently falls back to the full edge set and
+        # produces different contact counts than the original.
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        mesh.sdf = object()
+        seeded = self._seed_collision_edges(mesh)
+
+        copy = mesh.copy()
+
+        self.assertIs(copy.sdf, mesh.sdf)
+        self.assertIsNotNone(copy._collision_edges)
+        np.testing.assert_array_equal(copy._collision_edges, seeded)
+        # The cache must be an independent buffer so mutating one mesh's
+        # edges does not bleed into the other.
+        self.assertIsNot(copy._collision_edges, mesh._collision_edges)
+
+    @unittest.skipUnless(_cuda_available, "Requires CUDA device")
+    def test_build_sdf_rolls_back_sdf_on_edge_option_failure(self):
+        # Negative ``edge_lower_angle_threshold_rad`` combined with box
+        # absorption is rejected by the edge-option validation that runs
+        # before the SDF cook. The mesh must remain SDF-free so a
+        # corrected retry doesn't trip the "Mesh already has an SDF"
+        # guard, and the cache it would have populated must stay empty.
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        with self.assertRaises(ValueError):
+            mesh.build_sdf(
+                max_resolution=8,
+                edge_lower_angle_threshold_rad=-1.0,
+                edge_box_absorption=True,
+            )
+
+        self.assertIsNone(mesh.sdf)
+        self.assertIsNone(mesh._collision_edges)
+
+        # Sanity check: a corrected call now succeeds without first
+        # requiring an explicit ``clear_sdf()``.
+        mesh.build_sdf(max_resolution=8, edge_lower_angle_threshold_rad=0.0)
+        self.assertIsNotNone(mesh.sdf)
+
+    def test_copy_with_topology_override_drops_collision_edges(self):
+        # ``_collision_edges`` is indexed against the original vertex
+        # array, so a geometry-replacing copy must not carry it forward
+        # — otherwise ``ModelBuilder.finalize()`` could feed stale or
+        # out-of-range indices into contact generation.
+        mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
+        mesh.sdf = object()
+        self._seed_collision_edges(mesh)
+
+        # New topology (a single triangle) -- old cached edges are bogus.
+        new_verts = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+        new_inds = np.array([0, 1, 2], dtype=np.int32)
+        copy_verts = mesh.copy(vertices=new_verts)
+        self.assertIsNone(copy_verts._collision_edges)
+        self.assertIsNone(copy_verts.sdf)
+
+        copy_inds = mesh.copy(indices=new_inds)
+        self.assertIsNone(copy_inds._collision_edges)
+        self.assertIsNone(copy_inds.sdf)
+
+        copy_both = mesh.copy(vertices=new_verts, indices=new_inds)
+        self.assertIsNone(copy_both._collision_edges)
+        self.assertIsNone(copy_both.sdf)
 
 
 if __name__ == "__main__":
