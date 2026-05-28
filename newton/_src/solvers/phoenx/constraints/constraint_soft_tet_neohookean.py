@@ -1,48 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Block stable Neo-Hookean XPBD soft-body tetrahedron.
+"""Block Neo-Hookean XPBD soft-tetrahedron constraint.
 
-Port of the coupled constraint formulation from Ton-That, Kry & Andrews
-2024 ``Parallel Block Neo-Hookean XPBD using Graph Clustering``
-(Computers & Graphics). The stable Neo-Hookean energy density
-(Smith et al. 2018, Macklin & Mueller 2021)::
-
-    Psi_neo(F) = (mu / 2) (tr(F^T F) - 3) + (lambda / 2) (det(F) - gamma)^2
-    gamma      = 1 + mu / lambda
-
-is split into two scalar constraints per element::
-
-    C^H(x) = det(F) - gamma                 (hydrostatic / volume)
-    C^D(x) = sqrt(tr(F^T F) + eps)          (deviatoric / shear)
-    alpha^H = 1 / (lambda * V_rest)
-    alpha^D = 1 / (mu * V_rest)
-
-Unlike Macklin & Mueller's decoupled solve where each multiplier is
-projected sequentially, the block formulation projects both jointly via
-a 2x2 Schur complement::
-
-    A = grad C^neo . M^{-1} . grad C^neo^T + alpha_tilde^neo
-      = [ sum_v w_v ||g^H_v||^2 + a_tilde^H        sum_v w_v g^H_v . g^D_v ]
-        [ sum_v w_v g^H_v . g^D_v                  sum_v w_v ||g^D_v||^2 + a_tilde^D ]
-
-    [d lambda^H; d lambda^D] = -A^{-1} ([C^H; C^D] + alpha_tilde^neo [lambda^H; lambda^D])
-    d x_v = w_v (g^H_v d lambda^H + g^D_v d lambda^D)
-
-The coupled solve simultaneously balances volume and shear corrections,
-yielding roughly an order of magnitude faster convergence than the
-decoupled per-row sweep at the cost of one extra 2x2 inverse per element.
-
-Per-vertex gradients re-use the standard ``inv_rest`` chain-rule
-shortcut (PhysX ``compute_dCdx``, see ``constraint_soft_tetrahedron.py``)::
-
-    dC / dx_s = (dC / dF) . inv_rest_row[s - 1]      for s in {B, C, D}
-    dC / dx_A = -(dC / dx_B + dC / dx_C + dC / dx_D)
-
-with the analytic ``dC / dF`` entries::
-
-    dC^H / dF = cof(F) = [f2 x f3 | f3 x f1 | f1 x f2]    (columns)
-    dC^D / dF = F / C^D
+Projects hydrostatic and deviatoric stable Neo-Hookean constraints
+jointly with a 2x2 Schur solve. Shared tensor helpers live in
+:mod:`soft_body_math` so the tet and hex variants stay aligned.
 """
 
 from __future__ import annotations
@@ -63,6 +26,11 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_float,
     write_int,
     write_mat33,
+)
+from newton._src.solvers.phoenx.constraints.soft_body_math import (
+    neohookean_constraints_from_F,
+    tet_chain_rule_gradients,
+    tet_deformation_gradient,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
@@ -280,54 +248,6 @@ _DET_FLOOR = wp.constant(wp.float32(1.0e-30))
 
 
 # ---------------------------------------------------------------------------
-# Deformation gradient + per-vertex gradient chain rule. Independent from
-# the ARAP module's copies so the neo-hookean kernel is self-contained.
-# ---------------------------------------------------------------------------
-
-
-@wp.func
-def _compute_F_neohookean(
-    x_a: wp.vec3f,
-    x_b: wp.vec3f,
-    x_c: wp.vec3f,
-    x_d: wp.vec3f,
-    inv_rest: wp.mat33f,
-) -> wp.mat33f:
-    """``F = D . inv_rest`` with ``D`` columns ``(xB-xA, xC-xA, xD-xA)``."""
-    eAB = x_b - x_a
-    eAC = x_c - x_a
-    eAD = x_d - x_a
-    F00 = inv_rest[0, 0] * eAB[0] + inv_rest[1, 0] * eAC[0] + inv_rest[2, 0] * eAD[0]
-    F01 = inv_rest[0, 1] * eAB[0] + inv_rest[1, 1] * eAC[0] + inv_rest[2, 1] * eAD[0]
-    F02 = inv_rest[0, 2] * eAB[0] + inv_rest[1, 2] * eAC[0] + inv_rest[2, 2] * eAD[0]
-    F10 = inv_rest[0, 0] * eAB[1] + inv_rest[1, 0] * eAC[1] + inv_rest[2, 0] * eAD[1]
-    F11 = inv_rest[0, 1] * eAB[1] + inv_rest[1, 1] * eAC[1] + inv_rest[2, 1] * eAD[1]
-    F12 = inv_rest[0, 2] * eAB[1] + inv_rest[1, 2] * eAC[1] + inv_rest[2, 2] * eAD[1]
-    F20 = inv_rest[0, 0] * eAB[2] + inv_rest[1, 0] * eAC[2] + inv_rest[2, 0] * eAD[2]
-    F21 = inv_rest[0, 1] * eAB[2] + inv_rest[1, 1] * eAC[2] + inv_rest[2, 1] * eAD[2]
-    F22 = inv_rest[0, 2] * eAB[2] + inv_rest[1, 2] * eAC[2] + inv_rest[2, 2] * eAD[2]
-    return wp.mat33f(F00, F01, F02, F10, F11, F12, F20, F21, F22)
-
-
-@wp.func
-def _per_vertex_gradients(
-    dCdF: wp.mat33f,
-    inv_rest: wp.mat33f,
-):
-    """Chain-rule per-vertex gradients ``(g_a, g_b, g_c, g_d)`` for a
-    constraint expressed via ``F``. Identical to the ARAP helper -- kept
-    local so the two soft-tet modules don't cross-import."""
-    inv_row0 = wp.vec3f(inv_rest[0, 0], inv_rest[0, 1], inv_rest[0, 2])
-    inv_row1 = wp.vec3f(inv_rest[1, 0], inv_rest[1, 1], inv_rest[1, 2])
-    inv_row2 = wp.vec3f(inv_rest[2, 0], inv_rest[2, 1], inv_rest[2, 2])
-    g_b = dCdF * inv_row0
-    g_c = dCdF * inv_row1
-    g_d = dCdF * inv_row2
-    g_a = -(g_b + g_c + g_d)
-    return g_a, g_b, g_c, g_d
-
-
-# ---------------------------------------------------------------------------
 # Prepare + iterate
 # ---------------------------------------------------------------------------
 
@@ -479,51 +399,12 @@ def soft_tet_neohookean_iterate_at(
     dx_c = x_c - particles.position_prev_substep[p_c]
     dx_d = x_d - particles.position_prev_substep[p_d]
 
-    F = _compute_F_neohookean(x_a, x_b, x_c, x_d, inv_rest)
+    F = tet_deformation_gradient(x_a, x_b, x_c, x_d, inv_rest)
 
-    # Columns of F (Warp mat33 stores row-major, so column j has entries
-    # F[0,j], F[1,j], F[2,j]).
-    f0 = wp.vec3f(F[0, 0], F[1, 0], F[2, 0])
-    f1 = wp.vec3f(F[0, 1], F[1, 1], F[2, 1])
-    f2 = wp.vec3f(F[0, 2], F[1, 2], F[2, 2])
+    c_h, c_d, dCH_dF, dCD_dF = neohookean_constraints_from_F(F, gamma_offset, _DEV_EPS)
 
-    # Hydrostatic: C^H = det(F) - gamma. d det(F) / dF has columns
-    # (f1 x f2, f2 x f0, f0 x f1) -- the cofactor matrix.
-    cof0 = wp.cross(f1, f2)
-    cof1 = wp.cross(f2, f0)
-    cof2 = wp.cross(f0, f1)
-    det_f = wp.dot(f0, cof0)
-    c_h = det_f - gamma_offset
-    dCH_dF = wp.mat33f(
-        cof0[0],
-        cof1[0],
-        cof2[0],
-        cof0[1],
-        cof1[1],
-        cof2[1],
-        cof0[2],
-        cof1[2],
-        cof2[2],
-    )
-
-    # Deviatoric: C^D = sqrt(tr(F^T F) + eps). dC^D / dF = F / C^D.
-    i_c = (
-        f0[0] * f0[0]
-        + f0[1] * f0[1]
-        + f0[2] * f0[2]
-        + f1[0] * f1[0]
-        + f1[1] * f1[1]
-        + f1[2] * f1[2]
-        + f2[0] * f2[0]
-        + f2[1] * f2[1]
-        + f2[2] * f2[2]
-    )
-    c_d = wp.sqrt(i_c + _DEV_EPS)
-    inv_cd = wp.float32(1.0) / c_d
-    dCD_dF = F * inv_cd
-
-    g_ha, g_hb, g_hc, g_hd = _per_vertex_gradients(dCH_dF, inv_rest)
-    g_da, g_db, g_dc, g_dd = _per_vertex_gradients(dCD_dF, inv_rest)
+    g_ha, g_hb, g_hc, g_hd = tet_chain_rule_gradients(dCH_dF, inv_rest)
+    g_da, g_db, g_dc, g_dd = tet_chain_rule_gradients(dCD_dF, inv_rest)
 
     # Schur-complement matrix entries.
     a_hh = (

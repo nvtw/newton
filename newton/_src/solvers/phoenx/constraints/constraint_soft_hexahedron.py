@@ -1,60 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Stable block Neo-Hookean XPBD soft-body hexahedron.
+"""Block Neo-Hookean XPBD soft-hexahedron constraint.
 
-8-node trilinear hex sibling of :mod:`constraint_soft_tet_neohookean`.
-Same Ton-That, Kry & Andrews 2024 block-coupled formulation, but the
-deformation gradient is evaluated at 1-point Gauss quadrature (hex
-center) on standard isoparametric trilinear shape functions::
-
-    Psi_neo(F) = (mu / 2) (tr(F^T F) - 3) + (lambda / 2) (det(F) - gamma)^2
-    gamma      = 1 + mu / lambda
-
-split into the two scalar XPBD rows::
-
-    C^H(x) = det(F) - gamma                 (hydrostatic / volume)
-    C^D(x) = sqrt(tr(F^T F) + eps)          (deviatoric / shear)
-    alpha^H = 1 / (lambda * V_rest)
-    alpha^D = 1 / (mu * V_rest)
-
-projected jointly via a 2x2 Schur complement -- one constraint with
-two coupled multipliers, **not** two independent rows. The combined
-solve is what makes the formulation robust on single elements with
-under-determined pin patterns: ``C^H`` directly resists the volumetric
-modes that pure ARAP can't see, ``C^D`` handles shear, and the coupling
-matrix balances them so high stiffness no longer overshoots into
-runaway deformation.
-
-ARAP's polar-decomposition warm start is gone -- the Neo-Hookean
-energy is rotation-invariant by construction (it's a function of
-``F^T F`` and ``det(F)`` only), so there's no rotation to track.
-
-Per-corner gradients use the same shape-gradient chain rule as the
-ARAP variant lived under here previously:
-
-    F        = sum_i x_i (x) B_i               (3x3, B_i world shape grad)
-    B_i      = (1/8) inv_rest * (xi_i, eta_i, zeta_i)
-    inv_rest = J^{-T} at the hex center
-    g_i      = dC/dF * B_i                     (one mat33-vec3 per corner)
-
-Storage uses one ``inv_rest`` mat33f equal to J^{-T} at the hex center;
-the 8 ``B_i`` are reconstructed in-kernel from the constant corner-sign
-table. Rest volume: ``V = 8 * det(J)`` (for an axis-aligned cube of
-side ``L``, ``J = (L/2) I`` and ``V = L^3``).
-
-Corner ordering (canonical isoparametric, matches VTK_HEXAHEDRON /
-Abaqus C3D8):
-
-    i | (xi, eta, zeta)
-    0 | (-1, -1, -1)
-    1 | (+1, -1, -1)
-    2 | (+1, +1, -1)
-    3 | (-1, +1, -1)
-    4 | (-1, -1, +1)
-    5 | (+1, -1, +1)
-    6 | (+1, +1, +1)
-    7 | (-1, +1, +1)
+Evaluates the stable Neo-Hookean hydrostatic/deviatoric pair at the
+hex center and projects both rows jointly with a 2x2 Schur solve.
+Corner gradients use the standard trilinear signs reconstructed from
+``inv_rest = J^{-T}``.
 """
 
 from __future__ import annotations
@@ -74,6 +26,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_int,
     write_mat33,
 )
+from newton._src.solvers.phoenx.constraints.soft_body_math import neohookean_constraints_from_F
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
     read_position_with_slot,
@@ -301,9 +254,7 @@ _ONE_EIGHTH = wp.constant(wp.float32(0.125))
 
 @wp.func
 def _corner_sign(i: wp.int32) -> wp.vec3f:
-    """Reference-cube corner sign triplet ``(xi_i, eta_i, zeta_i)``
-    in ``{-1, +1}^3`` for the standard isoparametric 8-node hex
-    ordering. ``(0, 0, 0)`` for out-of-range ``i``."""
+    """Reference-cube corner sign triplet for the standard hex order."""
     if i == wp.int32(0):
         return wp.vec3f(-1.0, -1.0, -1.0)
     if i == wp.int32(1):
@@ -635,45 +586,7 @@ def soft_hexahedron_iterate_at(
 
     F = _compute_F_hex(x0, x1, x2, x3, x4, x5, x6, x7, inv_rest)
 
-    # Columns of F (Warp mat33 stores row-major).
-    f0 = wp.vec3f(F[0, 0], F[1, 0], F[2, 0])
-    f1 = wp.vec3f(F[0, 1], F[1, 1], F[2, 1])
-    f2 = wp.vec3f(F[0, 2], F[1, 2], F[2, 2])
-
-    # Hydrostatic: C^H = det(F) - gamma. d det(F) / dF = cofactor matrix
-    # (columns are pairwise cross products of F's columns).
-    cof0 = wp.cross(f1, f2)
-    cof1 = wp.cross(f2, f0)
-    cof2 = wp.cross(f0, f1)
-    det_f = wp.dot(f0, cof0)
-    c_h = det_f - gamma_offset
-    dCH_dF = wp.mat33f(
-        cof0[0],
-        cof1[0],
-        cof2[0],
-        cof0[1],
-        cof1[1],
-        cof2[1],
-        cof0[2],
-        cof1[2],
-        cof2[2],
-    )
-
-    # Deviatoric: C^D = sqrt(tr(F^T F) + eps). dC^D / dF = F / C^D.
-    i_c = (
-        f0[0] * f0[0]
-        + f0[1] * f0[1]
-        + f0[2] * f0[2]
-        + f1[0] * f1[0]
-        + f1[1] * f1[1]
-        + f1[2] * f1[2]
-        + f2[0] * f2[0]
-        + f2[1] * f2[1]
-        + f2[2] * f2[2]
-    )
-    c_d = wp.sqrt(i_c + _DEV_EPS)
-    inv_cd = wp.float32(1.0) / c_d
-    dCD_dF = F * inv_cd
+    c_h, c_d, dCH_dF, dCD_dF = neohookean_constraints_from_F(F, gamma_offset, _DEV_EPS)
 
     # Per-corner gradients: g_i = dC/dF * B_i (8 mat33-vec3 each row).
     b0 = _shape_gradient(inv_rest, wp.int32(0))

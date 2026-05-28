@@ -1,42 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Position-level XPBD soft-body tetrahedron (PhysX co-rotated ARAP).
+"""Position-level XPBD soft-tetrahedron constraint.
 
-Single per-tet XPBD row per PGS sweep::
-
-    C = V_rest * ||F - R||_F
-    F = (xB-xA, xC-xA, xD-xA) * inv_rest
-    R = polar(F)               # warm-started across substeps
-
-i.e. the rest-volume-weighted Frobenius norm of the deviation
-between the deformation gradient and its closest rotation. Linear
-in strain magnitude, so stays well-conditioned for stiff materials
-(unlike a Neo-Hookean Voigt ``||F||_F^2 - 3`` which grows
-quadratically).
-
-Mirrors PhysX's ``ARAP_constraint`` (``softBodyGM.cu:722``) plus
-their ``compute_dCdx`` chain-rule shortcut (``softBodyGM.cu:536``):
-per-vertex gradients are obtained via
-``dC/dx_s = dC/dF * inv_rest_row[s-1]`` (three mat33-vec3 products
-plus a sum-rule), instead of the prior 12-coordinate hand-expansion.
-
-The XPBD compliance ``alpha_mu = 1 / k_mu`` follows the original
-PhoenX / Jitter2 convention, with the rest volume folded into the
-constraint magnitude rather than into ``alpha``. (PhysX bakes V
-into ``alpha`` instead; either choice is mathematically equivalent
-once the units of ``k`` are interpreted accordingly.)
-
-Rotation extraction schedule mirrors PhysX
-(``softBodyGM.cu:288-298``)::
-
-    prepare: ~30 Mueller polar-decomp iters (cold-start each substep)
-    iterate:  ~4 iters (refine warm-started quaternion)
-
-Drops a separate ``det(F) - 1`` volumetric row -- the ARAP constraint
-already captures volumetric deviation through the Hookean
-linearisation, matching the Jitter2 reference. For high Poisson
-ratios (near 0.5) callers can later opt in to an explicit volume row.
+Uses one co-rotated ARAP row, ``C = V_rest * ||F - R||_F``, with a
+warm-started analytical polar decomposition. The volume row is reserved
+but inactive; use the block Neo-Hookean variant when volume preservation
+matters under large deformation.
 """
 
 from __future__ import annotations
@@ -57,6 +27,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_int,
     write_mat33,
     write_quat,
+)
+from newton._src.solvers.phoenx.constraints.soft_body_math import (
+    tet_chain_rule_gradients,
+    tet_deformation_gradient,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
@@ -283,30 +257,10 @@ _APD_DETH_EPS = wp.constant(wp.float32(1.0e-9))
 
 @wp.func
 def _extract_rotation(F: wp.mat33f, q_init: wp.quatf, max_iters: wp.int32) -> wp.quatf:
-    """Closest-rotation quaternion via the Kugelstadt et al. 2018
-    analytical polar decomposition (Newton iteration with the full 3x3
-    Hessian + Cayley-map quaternion update), warm-started from
-    ``q_init``.
+    """Closest-rotation quaternion via warm-started APD Newton steps.
 
-    Reference: Kugelstadt, Bender & Müller-Fischer 2018 SCA
-    "Fast Corotated FEM Using Operator Splitting"; CPU reference at
-    https://github.com/InteractiveComputerGraphics/FastCorotatedFEM
-    (``FastCorotFEM.cpp::APD_Newton_AVX``).
-
-    Each step:
-
-        B = R^T F                              (R from quaternion)
-        gradient g = axial(B - B^T)
-        Hessian H = trace(B) I - 0.5 (B + B^T) (3x3 symmetric)
-        omega = -0.25 H^{-1} g                  (Newton step)
-        q <- q * cayley(omega)                  (no sqrt / sin / cos)
-
-    The Cayley map preserves unit length without an explicit
-    normalisation, and the full 3x3 inverse gives quadratic local
-    convergence -- typically 1-2 iterations from a warm start vs.
-    Mueller's >=15 with the scalar-denom approximation. If ``detH``
-    drops below ``_APD_DETH_EPS`` the step degenerates to gradient
-    descent (the reference's fallback).
+    Uses the Kugelstadt et al. full-Hessian/Cayley update. Degenerate
+    Hessians fall back to gradient descent.
     """
     q = q_init
     for _ in range(max_iters):
@@ -381,67 +335,6 @@ def _extract_rotation(F: wp.mat33f, q_init: wp.quatf, max_iters: wp.int32) -> wp
         dq = wp.quatf(omega_x * s_dq, omega_y * s_dq, omega_z * s_dq, w_dq)
         q = q * dq
     return q
-
-
-@wp.func
-def _compute_F(
-    x_a: wp.vec3f,
-    x_b: wp.vec3f,
-    x_c: wp.vec3f,
-    x_d: wp.vec3f,
-    inv_rest: wp.mat33f,
-) -> wp.mat33f:
-    """Deformation gradient ``F = D * inv_rest`` where ``D``'s columns
-    are the three rest-from-A edges."""
-    eAB = x_b - x_a
-    eAC = x_c - x_a
-    eAD = x_d - x_a
-    F00 = inv_rest[0, 0] * eAB[0] + inv_rest[1, 0] * eAC[0] + inv_rest[2, 0] * eAD[0]
-    F01 = inv_rest[0, 1] * eAB[0] + inv_rest[1, 1] * eAC[0] + inv_rest[2, 1] * eAD[0]
-    F02 = inv_rest[0, 2] * eAB[0] + inv_rest[1, 2] * eAC[0] + inv_rest[2, 2] * eAD[0]
-    F10 = inv_rest[0, 0] * eAB[1] + inv_rest[1, 0] * eAC[1] + inv_rest[2, 0] * eAD[1]
-    F11 = inv_rest[0, 1] * eAB[1] + inv_rest[1, 1] * eAC[1] + inv_rest[2, 1] * eAD[1]
-    F12 = inv_rest[0, 2] * eAB[1] + inv_rest[1, 2] * eAC[1] + inv_rest[2, 2] * eAD[1]
-    F20 = inv_rest[0, 0] * eAB[2] + inv_rest[1, 0] * eAC[2] + inv_rest[2, 0] * eAD[2]
-    F21 = inv_rest[0, 1] * eAB[2] + inv_rest[1, 1] * eAC[2] + inv_rest[2, 1] * eAD[2]
-    F22 = inv_rest[0, 2] * eAB[2] + inv_rest[1, 2] * eAC[2] + inv_rest[2, 2] * eAD[2]
-    return wp.mat33f(F00, F01, F02, F10, F11, F12, F20, F21, F22)
-
-
-# ---------------------------------------------------------------------------
-# Per-vertex gradient via the inv_rest chain-rule shortcut
-# (PhysX ``compute_dCdx``, ``softBodyGM.cu:536``).
-#
-# For ``F = D * inv_rest`` with ``D = [xB-xA, xC-xA, xD-xA]``, the chain
-# rule gives
-#
-#     dC/dx_s = (dC/dF) * inv_rest_row[s-1]      for s in {1, 2, 3}
-#     dC/dx_0 = -(dC/dx_1 + dC/dx_2 + dC/dx_3)
-#
-# i.e. three mat33-vec3 products and a 4-vertex sum-rule. Vastly cheaper
-# than the explicit 12-coordinate gradient expansion we used to do.
-# ---------------------------------------------------------------------------
-
-
-@wp.func
-def _per_vertex_gradients(
-    dCdF: wp.mat33f,
-    inv_rest: wp.mat33f,
-):
-    """Chain-rule per-vertex gradients for a constraint expressed via
-    ``F``. Returns ``(g_a, g_b, g_c, g_d)`` -- one 3-vector per tet
-    vertex.
-    """
-    # Rows of inv_rest as column vectors (which is the action that
-    # appears in the chain rule above).
-    inv_row0 = wp.vec3f(inv_rest[0, 0], inv_rest[0, 1], inv_rest[0, 2])
-    inv_row1 = wp.vec3f(inv_rest[1, 0], inv_rest[1, 1], inv_rest[1, 2])
-    inv_row2 = wp.vec3f(inv_rest[2, 0], inv_rest[2, 1], inv_rest[2, 2])
-    g_b = dCdF * inv_row0
-    g_c = dCdF * inv_row1
-    g_d = dCdF * inv_row2
-    g_a = -(g_b + g_c + g_d)
-    return g_a, g_b, g_c, g_d
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +414,7 @@ def soft_tetrahedron_prepare_for_iteration_at(
     x_c = read_particle_position_with_slot(particles, copy_state, p_c, slot_c)
     x_d = read_particle_position_with_slot(particles, copy_state, p_d, slot_d)
     inv_rest = read_mat33(constraints, _OFF_INV_REST, cid)
-    F = _compute_F(x_a, x_b, x_c, x_d, inv_rest)
+    F = tet_deformation_gradient(x_a, x_b, x_c, x_d, inv_rest)
     rotation = read_quat(constraints, _OFF_ROTATION, cid)
     rotation = _extract_rotation(F, rotation, _PREPARE_ROT_ITERS)
     write_quat(constraints, _OFF_ROTATION, cid, rotation)
@@ -597,7 +490,7 @@ def soft_tetrahedron_iterate_at(
     x_c = read_particle_position_with_slot(particles, copy_state, p_c, slot_c)
     x_d = read_particle_position_with_slot(particles, copy_state, p_d, slot_d)
 
-    F = _compute_F(x_a, x_b, x_c, x_d, inv_rest)
+    F = tet_deformation_gradient(x_a, x_b, x_c, x_d, inv_rest)
 
     # Cheap refine of the warm-started rotation (PhysX
     # ``softBodyGM.cu:290``: ``isFirstIteration ? 100 : 4``).
@@ -636,7 +529,7 @@ def soft_tetrahedron_iterate_at(
     inv_c = wp.float32(1.0) / c_norm
     dCdF = (rest_volume * inv_c) * S
     c_arap = rest_volume * c_norm
-    g_a, g_b, g_c, g_d = _per_vertex_gradients(dCdF, inv_rest)
+    g_a, g_b, g_c, g_d = tet_chain_rule_gradients(dCdF, inv_rest)
 
     idt_sq = idt * idt
     dt = wp.float32(1.0) / idt
