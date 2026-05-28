@@ -273,9 +273,9 @@ class Example:
             mass_splitting_unrolled=True,
             max_thread_blocks=max_thread_blocks,
             # Batch size controls the short sequential run inside each
-            # overflow worker. Keep the deterministic greedy partitioner;
-            # it still owns the bounded-colour overflow layout.
-            mass_splitting_batch_size=2,
+            # overflow worker. One-row overflow batches were faster on
+            # soft-tet columns while preserving the bounded-colour layout.
+            mass_splitting_batch_size=1,
             partitioner_algorithm="greedy",
             enable_column_timers=ENABLE_COLUMN_TIMERS,
             device=self.device,
