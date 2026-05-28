@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import warnings
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any
@@ -16,6 +17,8 @@ from ..core.types import Devicelike
 from .contacts import Contacts
 from .control import Control
 from .state import State
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..actuators.actuator import Actuator
@@ -317,9 +320,9 @@ class Model:
         # All SDF arrays are private; the public attribute names are exposed
         # via deprecated property aliases further down for back-compat.
         #
-        # .. note::
-        #     The SDF storage on ``Model`` is part of the **experimental** SDF
-        #     API (see :class:`~newton.SDF`) and may change without notice.
+        # .. experimental::
+        #     The SDF storage on ``Model`` is part of the experimental SDF API
+        #     (see :class:`~newton.SDF`) and may change without notice.
         self._shape_sdf_index: wp.array[wp.int32] | None = None
         """Per-shape SDF index, shape [shape_count]. -1 means shape has no SDF."""
 
@@ -1039,7 +1042,12 @@ class Model:
         if self._texture_sdf_data is not None and len(self._texture_sdf_data) > 0:
             try:
                 subgrid_size = int(self._texture_sdf_data.numpy()[0]["subgrid_size"])
-            except (KeyError, IndexError, ValueError, TypeError):
+            except KeyError:
+                logger.warning(
+                    "TextureSDFData is missing subgrid_size; falling back to legacy default subgrid_size=%d "
+                    "for deprecated SDF block coordinate arrays.",
+                    subgrid_size,
+                )
                 subgrid_size = 8
         block_coords, index2blocks = build_legacy_sdf_block_arrays(
             self._texture_sdf_coarse_textures,

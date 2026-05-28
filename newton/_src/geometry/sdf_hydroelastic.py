@@ -184,9 +184,10 @@ def mc_calc_face_texture(
 class HydroelasticSDF:
     """Hydroelastic contact generation with SDF-based collision detection.
 
-    .. note::
-        ``HydroelasticSDF`` and the underlying SDF storage on :class:`~newton.Model`
-        are **experimental** and may change without notice.
+    .. experimental::
+
+        ``HydroelasticSDF`` and the underlying SDF storage on
+        :class:`~newton.Model` may change without notice.
 
     This class implements hydroelastic contact modeling between shapes represented
     by Signed Distance Fields (SDFs). It uses an octree-based broadphase to identify
@@ -524,6 +525,13 @@ class HydroelasticSDF:
         max_num_blocks_per_shape = 0
         for idx in hydroelastic_indices:
             sdf_idx = int(shape_sdf_index[idx])
+            if sdf_idx < 0:
+                raise ValueError(f"Hydroelastic shape {idx} requires SDF data but has no attached/generated SDF.")
+            if sdf_idx >= len(coarse_textures) or coarse_textures[sdf_idx] is None:
+                raise ValueError(
+                    f"Hydroelastic shape {idx} requires texture SDF data but its attached/generated SDF has none. "
+                    "Build the SDF with mesh.build_sdf() before using hydroelastic contacts."
+                )
             tex = coarse_textures[sdf_idx]
             num_blocks = (tex.width - 1) * (tex.height - 1) * (tex.depth - 1)
             total_num_tiles += num_blocks
@@ -945,7 +953,8 @@ def broadphase_collision_pairs_count(
 
     does_collide = sat_box_intersection(centered_transform_a, half_extents_a, centered_transform_b, half_extents_b)
 
-    # Pick whichever SDF has the smaller voxel as shape_b (must match scatter kernel)
+    # Count only needs the smaller-voxel dims, so overwrite the local sdf_b
+    # without swapping shape indices.
     if sdf_b.voxel_radius > sdf_a.voxel_radius:
         sdf_b = sdf_a
 
@@ -1004,7 +1013,7 @@ def broadphase_collision_pairs_scatter(
 
         # Decode the (bx, by, bz) subgrid index from the linear block_in_pair.
         # Layout matches the host-side row-major layout: bz outer, by middle,
-        # bx inner — same as subgrid_start_slots indexing.
+        # bx inner, matching build_sparse_sdf_from_mesh().
         dims_b = shape_subgrid_dims(sdf_b)
         plane = dims_b[0] * dims_b[1]
         bz = block_in_pair // plane

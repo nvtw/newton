@@ -21,22 +21,8 @@ coords are dense rather than narrow-band.
 
 from __future__ import annotations
 
-import warnings
-from typing import TYPE_CHECKING
-
 import numpy as np
 import warp as wp
-
-if TYPE_CHECKING:
-    pass
-
-warnings.warn(
-    "newton._src.geometry._deprecated_sdf_block_coords is a compatibility "
-    "shim and will be removed in Newton 1.5. The hydroelastic broadphase "
-    "no longer needs precomputed block coordinates.",
-    DeprecationWarning,
-    stacklevel=2,
-)
 
 
 def compute_block_coords_and_index2blocks(
