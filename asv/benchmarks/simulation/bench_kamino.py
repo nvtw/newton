@@ -88,46 +88,48 @@ def _cholesky_warp_tile(
             wp.tile_store(l[env], l_ik, offset=(i0, k0), bounds_check=False)
 
 
-@wp.kernel(enable_backward=False)
-def _cholesky_warp_tile_matmul_transpose_update(
-    a: wp.array3d[wp.float32],
-    l: wp.array3d[wp.float32],
-):
-    env = wp.tid()
+_CHOL_KERNELS = {
+    "tile_matmul": _cholesky_warp_tile,
+}
 
-    for kb in range(WP_CHOL_N_BLOCKS):
-        k0 = kb * WP_CHOL_TILE
+if _has_warp_builtin("tile_matmul_transpose_update"):
 
-        a_kk = wp.tile_load(a[env], shape=(WP_CHOL_TILE, WP_CHOL_TILE), offset=(k0, k0), bounds_check=False)
+    @wp.kernel(enable_backward=False)
+    def _cholesky_warp_tile_matmul_transpose_update(
+        a: wp.array3d[wp.float32],
+        l: wp.array3d[wp.float32],
+    ):
+        env = wp.tid()
 
-        for jb in range(kb):
-            j0 = jb * WP_CHOL_TILE
-            l_kj = wp.tile_load(l[env], shape=(WP_CHOL_TILE, WP_CHOL_TILE), offset=(k0, j0), bounds_check=False)
-            wp.tile_matmul_transpose_update(a_kk, l_kj, l_kj, alpha=-1.0)
+        for kb in range(WP_CHOL_N_BLOCKS):
+            k0 = kb * WP_CHOL_TILE
 
-        l_kk = wp.tile_cholesky(a_kk)
-        wp.tile_store(l[env], l_kk, offset=(k0, k0), bounds_check=False)
-
-        for ib in range(kb + 1, WP_CHOL_N_BLOCKS):
-            i0 = ib * WP_CHOL_TILE
-            a_ik = wp.tile_load(a[env], shape=(WP_CHOL_TILE, WP_CHOL_TILE), offset=(i0, k0), bounds_check=False)
+            a_kk = wp.tile_load(a[env], shape=(WP_CHOL_TILE, WP_CHOL_TILE), offset=(k0, k0), bounds_check=False)
 
             for jb in range(kb):
                 j0 = jb * WP_CHOL_TILE
-                l_ij = wp.tile_load(l[env], shape=(WP_CHOL_TILE, WP_CHOL_TILE), offset=(i0, j0), bounds_check=False)
                 l_kj = wp.tile_load(l[env], shape=(WP_CHOL_TILE, WP_CHOL_TILE), offset=(k0, j0), bounds_check=False)
-                wp.tile_matmul_transpose_update(a_ik, l_ij, l_kj, alpha=-1.0)
+                wp.tile_matmul_transpose_update(a_kk, l_kj, l_kj, alpha=-1.0)
 
-            a_ik_t = wp.tile_transpose(a_ik)
-            wp.tile_lower_solve_inplace(l_kk, a_ik_t)
-            l_ik = wp.tile_transpose(a_ik_t)
-            wp.tile_store(l[env], l_ik, offset=(i0, k0), bounds_check=False)
+            l_kk = wp.tile_cholesky(a_kk)
+            wp.tile_store(l[env], l_kk, offset=(k0, k0), bounds_check=False)
 
+            for ib in range(kb + 1, WP_CHOL_N_BLOCKS):
+                i0 = ib * WP_CHOL_TILE
+                a_ik = wp.tile_load(a[env], shape=(WP_CHOL_TILE, WP_CHOL_TILE), offset=(i0, k0), bounds_check=False)
 
-_CHOL_KERNELS = {
-    "tile_matmul": _cholesky_warp_tile,
-    "tile_matmul_transpose_update": _cholesky_warp_tile_matmul_transpose_update,
-}
+                for jb in range(kb):
+                    j0 = jb * WP_CHOL_TILE
+                    l_ij = wp.tile_load(l[env], shape=(WP_CHOL_TILE, WP_CHOL_TILE), offset=(i0, j0), bounds_check=False)
+                    l_kj = wp.tile_load(l[env], shape=(WP_CHOL_TILE, WP_CHOL_TILE), offset=(k0, j0), bounds_check=False)
+                    wp.tile_matmul_transpose_update(a_ik, l_ij, l_kj, alpha=-1.0)
+
+                a_ik_t = wp.tile_transpose(a_ik)
+                wp.tile_lower_solve_inplace(l_kk, a_ik_t)
+                l_ik = wp.tile_transpose(a_ik_t)
+                wp.tile_store(l[env], l_ik, offset=(i0, k0), bounds_check=False)
+
+    _CHOL_KERNELS["tile_matmul_transpose_update"] = _cholesky_warp_tile_matmul_transpose_update
 
 
 @wp.kernel(enable_backward=False)
@@ -146,25 +148,27 @@ def _back_solve_update_tile_matmul(
     wp.tile_store(out[env], rhs_tile, bounds_check=False)
 
 
-@wp.kernel(enable_backward=False)
-def _back_solve_update_left_transpose(
-    l: wp.array3d[wp.float32],
-    x: wp.array3d[wp.float32],
-    rhs: wp.array3d[wp.float32],
-    out: wp.array3d[wp.float32],
-):
-    env = wp.tid()
-    l_tile = wp.tile_load(l[env], shape=(WP_SOLVE_TILE, WP_SOLVE_TILE), bounds_check=False)
-    x_tile = wp.tile_load(x[env], shape=(WP_SOLVE_TILE, 1), bounds_check=False)
-    rhs_tile = wp.tile_load(rhs[env], shape=(WP_SOLVE_TILE, 1), bounds_check=False)
-    wp.tile_matmul_left_transpose_update(rhs_tile, l_tile, x_tile, alpha=-1.0)
-    wp.tile_store(out[env], rhs_tile, bounds_check=False)
-
-
 _BACK_SOLVE_UPDATE_KERNELS = {
     "tile_matmul": _back_solve_update_tile_matmul,
-    "tile_matmul_left_transpose_update": _back_solve_update_left_transpose,
 }
+
+if _has_warp_builtin("tile_matmul_left_transpose_update"):
+
+    @wp.kernel(enable_backward=False)
+    def _back_solve_update_left_transpose(
+        l: wp.array3d[wp.float32],
+        x: wp.array3d[wp.float32],
+        rhs: wp.array3d[wp.float32],
+        out: wp.array3d[wp.float32],
+    ):
+        env = wp.tid()
+        l_tile = wp.tile_load(l[env], shape=(WP_SOLVE_TILE, WP_SOLVE_TILE), bounds_check=False)
+        x_tile = wp.tile_load(x[env], shape=(WP_SOLVE_TILE, 1), bounds_check=False)
+        rhs_tile = wp.tile_load(rhs[env], shape=(WP_SOLVE_TILE, 1), bounds_check=False)
+        wp.tile_matmul_left_transpose_update(rhs_tile, l_tile, x_tile, alpha=-1.0)
+        wp.tile_store(out[env], rhs_tile, bounds_check=False)
+
+    _BACK_SOLVE_UPDATE_KERNELS["tile_matmul_left_transpose_update"] = _back_solve_update_left_transpose
 
 
 def _cuda_device():
