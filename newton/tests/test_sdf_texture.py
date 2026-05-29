@@ -606,7 +606,7 @@ def test_texture_sdf_multi_resolution(test, device):
 
 
 def test_texture_sdf_in_model(test, device):
-    """Build a scene with 2 mesh shapes with SDFs and verify model.texture_sdf_data."""
+    """Build a scene with 2 mesh shapes with SDFs and verify model._texture_sdf_data."""
     builder = newton.ModelBuilder(gravity=0.0)
 
     for i in range(2):
@@ -618,21 +618,21 @@ def test_texture_sdf_in_model(test, device):
     model = builder.finalize(device=device)
 
     # Both shapes should have SDF indices
-    sdf_indices = model.shape_sdf_index.numpy()
+    sdf_indices = model._shape_sdf_index.numpy()
     test.assertEqual(sdf_indices[0], 0)
     test.assertEqual(sdf_indices[1], 1)
 
-    # texture_sdf_data should have 2 entries
-    test.assertIsNotNone(model.texture_sdf_data)
-    test.assertEqual(len(model.texture_sdf_data), 2)
+    # _texture_sdf_data should have 2 entries
+    test.assertIsNotNone(model._texture_sdf_data)
+    test.assertEqual(len(model._texture_sdf_data), 2)
 
     # Both entries should have valid coarse textures (not empty)
     for idx in range(2):
-        test.assertGreater(model.texture_sdf_coarse_textures[idx].width, 0, f"texture_sdf_data[{idx}] is empty")
+        test.assertGreater(model._texture_sdf_coarse_textures[idx].width, 0, f"_texture_sdf_data[{idx}] is empty")
 
     # Texture references should be kept alive
-    test.assertEqual(len(model.texture_sdf_coarse_textures), 2)
-    test.assertEqual(len(model.texture_sdf_subgrid_textures), 2)
+    test.assertEqual(len(model._texture_sdf_coarse_textures), 2)
+    test.assertEqual(len(model._texture_sdf_subgrid_textures), 2)
 
 
 def test_empty_texture_sdf_data(test, device):
