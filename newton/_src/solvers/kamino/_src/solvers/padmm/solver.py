@@ -11,6 +11,8 @@ See the :mod:`newton._src.solvers.kamino.solvers.padmm` module for a detailed de
 
 from __future__ import annotations
 
+import os
+
 import warp as wp
 
 from ....config import PADMMSolverConfig
@@ -47,6 +49,7 @@ from .kernels import (
     make_collect_solver_info_kernel_sparse,
     make_desaxce_correction_and_velocity_bias_kernel,
     make_initialize_solver_kernel,
+    make_project_dual_and_all_residuals,
     make_update_dual_and_all_residuals,
     make_update_dual_variables_and_compute_primal_dual_residuals,
 )
@@ -281,6 +284,7 @@ class PADMMSolver:
             make_update_dual_variables_and_compute_primal_dual_residuals(self._use_acceleration)
         )
         self._update_dual_and_all_residuals_kernel = make_update_dual_and_all_residuals(self._use_acceleration)
+        self._project_dual_and_all_residuals_kernel = make_project_dual_and_all_residuals(self._use_acceleration)
 
     def reset(self, problem: DualProblem | None = None, world_mask: wp.array | None = None):
         """
@@ -557,6 +561,7 @@ class PADMMSolver:
         - _compute_desaxce_correction_and_velocity_bias: fuses De Saxce + velocity bias
         - _compute_projection_argument_and_project: fuses projection argument + cone projection
         - _update_dual_and_all_residuals_kernel: fuses dual update + complementarity residuals
+        - _project_dual_and_all_residuals_kernel: fuses projection + dual/residual updates
         - _update_acceleration_and_cache_previous: fuses acceleration + previous state caching
 
         Args:
@@ -568,11 +573,15 @@ class PADMMSolver:
         # Compute the unconstrained solution and store in the primal variables
         self._update_unconstrained_solution(problem)
 
-        # Fused: compute projection argument and project to feasible set
-        self._update_projection_argument_and_project(problem, self._data.state.z_hat)
+        if os.environ.get("NEWTON_KAMINO_DISABLE_PROJECT_DUAL_FUSION") in {"1", "true", "True"}:
+            # Fused: compute projection argument and project to feasible set
+            self._update_projection_argument_and_project(problem, self._data.state.z_hat)
 
-        # Fused: update dual variables, compute primal/dual/complementarity residuals
-        self._update_dual_variables_and_all_residuals_accel(problem)
+            # Fused: update dual variables, compute primal/dual/complementarity residuals
+            self._update_dual_variables_and_all_residuals_accel(problem)
+        else:
+            # Fused: projection + dual update + all residuals in one launch.
+            self._update_projection_dual_variables_and_all_residuals_accel(problem)
 
         # Compute infinity-norm of all residuals and check for convergence
         self._update_convergence_check_accel(problem)
@@ -1149,6 +1158,43 @@ class PADMMSolver:
 
         # Compute complementarity residual from the current state
         self._update_complementarity_residuals(problem)
+
+    def _update_projection_dual_variables_and_all_residuals_accel(self, problem: DualProblem):
+        """Fused projection + dual variable update + all residuals."""
+        wp.launch(
+            kernel=self._project_dual_and_all_residuals_kernel,
+            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+            inputs=[
+                # Inputs:
+                problem.data.dim,
+                problem.data.nl,
+                problem.data.nc,
+                problem.data.cio,
+                problem.data.lcgo,
+                problem.data.ccgo,
+                problem.data.vio,
+                problem.data.uio,
+                problem.data.mu,
+                problem.data.P,
+                self._data.config,
+                self._data.penalty,
+                self._data.status,
+                self._data.state.x,
+                self._data.state.x_p,
+                self._data.state.y_hat,
+                self._data.state.z_hat,
+                # Outputs:
+                self._data.state.y,
+                self._data.state.z,
+                self._data.residuals.r_primal,
+                self._data.residuals.r_dual,
+                self._data.residuals.r_compl,
+                self._data.residuals.r_dx,
+                self._data.residuals.r_dy,
+                self._data.residuals.r_dz,
+            ],
+            device=self.device,
+        )
 
     def _update_dual_variables_and_all_residuals_accel(self, problem: DualProblem):
         """Fused kernel: dual variable update + primal/dual residuals + complementarity residuals."""

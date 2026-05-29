@@ -402,36 +402,22 @@ class LLTBlockedRCMSolver(DirectSolver):
             device=self._device,
         )
 
-        # Solve L L^T x_hat = b_hat.
+        # Solve L L^T x_hat = b_hat and scatter x_hat -> x.
         llt_blocked_rcm_solve(
             kernel=self._solve_kernel,
             dim=info.dim,
             mio=info.mio,
             vio=info.vio,
             tpo=self._tpo,
+            P=self._P,
             L=self._L,
             tile_pattern=self._tile_pattern,
             b=self._b_hat,
             y=self._y,
-            x=self._x_hat,
+            x_hat=self._x_hat,
+            x=x,
             num_blocks=num_blocks,
             block_dim=self._solve_block_dim,
-            device=self._device,
-        )
-
-        # Un-permute: x[P[r]] = x_hat[r]  =>  x[r] = x_hat[inv_P[r]].
-        # Our permute_vector kernel computes ``dst[r] = src[P[r]]``, so using
-        # inv_P as P and (x_hat, x) as (src, dst) yields the desired inverse
-        # permutation on x.
-        llt_blocked_rcm_permute_vector(
-            kernel=self._permute_vector_kernel,
-            dim=info.dim,
-            vio=info.vio,
-            P=self._inv_P,
-            src=self._x_hat,
-            dst=x,
-            num_blocks=num_blocks,
-            max_dim=self._max_dim,
             device=self._device,
         )
 

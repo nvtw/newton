@@ -59,6 +59,7 @@ __all__ = [
     "make_collect_solver_info_kernel_sparse",
     "make_desaxce_correction_and_velocity_bias_kernel",
     "make_initialize_solver_kernel",
+    "make_project_dual_and_all_residuals",
     "make_update_dual_and_all_residuals",
     "make_update_dual_variables_and_compute_primal_dual_residuals",
     "make_update_proximal_regularization_kernel",
@@ -1079,6 +1080,136 @@ def make_update_dual_and_all_residuals(use_acceleration: bool = False):
                 solver_r_compl[uio + nl + cid] = wp.dot(x_c, vec3f(z0, z1, z2))
 
     return _update_dual_and_all_residuals
+
+
+def make_project_dual_and_all_residuals(use_acceleration: bool = False):
+    """Creates a fused projection + dual/residual update kernel.
+
+    This combines ``_compute_projection_argument_and_project`` with
+    ``make_update_dual_and_all_residuals`` for the accelerated PADMM path.
+    Contact blocks are handled by the first component thread, which computes
+    the 3D cone projection and writes all three component residuals to avoid
+    inter-thread ordering dependencies between the projection and residual
+    updates.
+    """
+
+    @wp.kernel
+    def _project_dual_and_all_residuals(
+        # Inputs:
+        problem_dim: wp.array[int32],
+        problem_nl: wp.array[int32],
+        problem_nc: wp.array[int32],
+        problem_cio: wp.array[int32],
+        problem_lcgo: wp.array[int32],
+        problem_ccgo: wp.array[int32],
+        problem_vio: wp.array[int32],
+        problem_uio: wp.array[int32],
+        problem_mu: wp.array[float32],
+        problem_P: wp.array[float32],
+        solver_config: wp.array[PADMMConfigStruct],
+        solver_penalty: wp.array[PADMMPenalty],
+        solver_status: wp.array[PADMMStatus],
+        solver_x: wp.array[float32],
+        solver_x_p: wp.array[float32],
+        solver_y_prev: wp.array[float32],
+        solver_z_prev: wp.array[float32],
+        # Outputs:
+        solver_y: wp.array[float32],
+        solver_z: wp.array[float32],
+        solver_r_prim: wp.array[float32],
+        solver_r_dual: wp.array[float32],
+        solver_r_compl: wp.array[float32],
+        solver_r_dx: wp.array[float32],
+        solver_r_dy: wp.array[float32],
+        solver_r_dz: wp.array[float32],
+    ):
+        wid, tid = wp.tid()
+
+        ncts = problem_dim[wid]
+        status = solver_status[wid]
+
+        if tid >= ncts or status.converged > 0:
+            return
+
+        vio = problem_vio[wid]
+        nl = problem_nl[wid]
+        nc = problem_nc[wid]
+        lcgo = problem_lcgo[wid]
+        ccgo = problem_ccgo[wid]
+        rho = solver_penalty[wid].rho
+        inv_rho = 1.0 / rho
+        eta = solver_config[wid].eta
+
+        thread_offset = vio + tid
+
+        if nc > 0 and tid >= ccgo and tid < ccgo + 3 * nc:
+            local_offset = tid - ccgo
+            cid = local_offset // 3
+            component = local_offset - 3 * cid
+            if component != 0:
+                return
+
+            cio = problem_cio[wid]
+            uio = problem_uio[wid]
+            ccio_j = vio + ccgo + 3 * cid
+            y0 = solver_x[ccio_j] - inv_rho * solver_z_prev[ccio_j]
+            y1 = solver_x[ccio_j + 1] - inv_rho * solver_z_prev[ccio_j + 1]
+            y2 = solver_x[ccio_j + 2] - inv_rho * solver_z_prev[ccio_j + 2]
+            y_proj = project_to_coulomb_cone(vec3f(y0, y1, y2), problem_mu[cio + cid])
+            x_c = vec3f(solver_x[ccio_j], solver_x[ccio_j + 1], solver_x[ccio_j + 2])
+            z_c = vec3f(0.0, 0.0, 0.0)
+
+            for comp in range(3):
+                idx = ccio_j + comp
+                x = solver_x[idx]
+                y = y_proj[comp]
+                x_p = solver_x_p[idx]
+                y_p = solver_y_prev[idx]
+                z_p = solver_z_prev[idx]
+                P_i = problem_P[idx]
+
+                z = z_p + rho * (y - x)
+                z_c[comp] = z
+                solver_y[idx] = y
+                solver_z[idx] = z
+                solver_r_prim[idx] = P_i * (x - y)
+                solver_r_dual[idx] = (1.0 / P_i) * (eta * (x - x_p) + rho * (y - y_p))
+                if wp.static(use_acceleration):
+                    solver_r_dx[idx] = P_i * (x - x_p)
+                    solver_r_dy[idx] = P_i * (y - y_p)
+                    solver_r_dz[idx] = (1.0 / P_i) * (z - z_p)
+
+            solver_r_compl[uio + nl + cid] = wp.dot(x_c, z_c)
+            return
+
+        x = solver_x[thread_offset]
+        z_p = solver_z_prev[thread_offset]
+        y = x - inv_rho * z_p
+
+        if nl > 0 and tid >= lcgo and tid < lcgo + nl:
+            y = wp.max(y, 0.0)
+
+        x_p = solver_x_p[thread_offset]
+        y_p = solver_y_prev[thread_offset]
+        P_i = problem_P[thread_offset]
+        z = z_p + rho * (y - x)
+
+        solver_y[thread_offset] = y
+        solver_z[thread_offset] = z
+        solver_r_prim[thread_offset] = P_i * (x - y)
+        solver_r_dual[thread_offset] = (1.0 / P_i) * (eta * (x - x_p) + rho * (y - y_p))
+
+        if wp.static(use_acceleration):
+            solver_r_dx[thread_offset] = P_i * (x - x_p)
+            solver_r_dy[thread_offset] = P_i * (y - y_p)
+            solver_r_dz[thread_offset] = (1.0 / P_i) * (z - z_p)
+
+        if nl > 0 and tid >= lcgo and tid < lcgo + nl:
+            uio = problem_uio[wid]
+            uid = tid - lcgo
+            solver_r_compl[uio + uid] = x * z
+
+    return _project_dual_and_all_residuals
 
 
 @wp.kernel
