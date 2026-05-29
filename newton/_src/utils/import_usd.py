@@ -32,8 +32,13 @@ from ..core import quat_between_axes
 from ..core.types import Axis, Transform
 from ..geometry import GeoType, Mesh, ShapeFlags, compute_inertia_shape, compute_inertia_sphere
 from ..sim.builder import ModelBuilder
-from ..sim.enums import JointTargetMode
+from ..sim.enums import EqType, JointTargetMode
 from ..sim.model import Model
+from ..solvers.mujoco.utils import (
+    mjc_add_equality_loop_joint,
+    mjc_add_equality_mimic,
+    mjc_polycoef_has_higher_order,
+)
 from ..usd import utils as usd
 from ..usd.schema_resolver import PrimType, SchemaResolver, SchemaResolverManager
 from ..usd.schemas import SchemaResolverNewton
@@ -88,6 +93,7 @@ def parse_usd(
     mesh_maxhullvert: int | None = None,
     schema_resolvers: list[SchemaResolver] | None = None,
     force_position_velocity_actuation: bool = False,
+    convert_mjc_equality_constraints: bool = True,
     override_root_xform: bool = False,
 ) -> dict[str, Any]:
     """Parses a Universal Scene Description (USD) stage and adds rigid bodies, soft bodies, shapes, and joints to the given ModelBuilder.
@@ -196,6 +202,9 @@ def parse_usd(
             ``hide_collision_shapes=True`` still suppresses the VISIBLE flag for
             colliders on bodies with visual-only geometry. Default is False.
         parse_mujoco_options: Whether MuJoCo solver options from the PhysicsScene should be parsed. If False, solver options are not loaded and custom attributes retain their default values. Default is True.
+        convert_mjc_equality_constraints: Whether MuJoCo equality schemas should be converted to Newton loop
+            joints or mimic constraints while preserving MuJoCo equality metadata for SolverMuJoCo. If False,
+            equality constraints are stored in the legacy equality constraint arrays.
         mesh_maxhullvert: Maximum vertices for convex hull approximation of meshes. Note that an authored ``newton:maxHullVertices`` attribute on any shape with a ``NewtonMeshCollisionAPI`` will take priority over this value.
         schema_resolvers: Resolver instances in priority order. Default is to only parse Newton-specific attributes.
             Schema resolvers collect per-prim "solver-specific" attributes, see :ref:`schema_resolvers` for more information.
@@ -3192,6 +3201,51 @@ def parse_usd(
     # builder's collapse logic can remap body/joint indices and adjust anchors/relposes
     # for any bodies that get merged.
     def _parse_mjc_equality_constraints():
+        local_builder_custom_attr_eq = builder_custom_attr_eq
+        if (
+            convert_mjc_equality_constraints
+            and "mujoco:equality_constraint_target_kind" not in builder.custom_attributes
+        ):
+            from ..solvers.mujoco.solver_mujoco import SolverMuJoCo  # noqa: PLC0415
+
+            SolverMuJoCo.register_custom_attributes(builder)
+            local_builder_custom_attr_eq = builder.get_custom_attributes_by_frequency(
+                [AttributeFrequency.EQUALITY_CONSTRAINT]
+            )
+
+        def add_converted_loop_joint(
+            eq_type: EqType,
+            body1: int,
+            body2: int,
+            anchor: wp.vec3,
+            relpose: wp.transform | None,
+            torquescale: float,
+            joint_path: str,
+            enabled: bool,
+            custom_attrs: dict[str, Any],
+        ) -> None:
+            try:
+                _, joint_idx = mjc_add_equality_loop_joint(
+                    builder,
+                    eq_type,
+                    body1,
+                    body2,
+                    anchor,
+                    relpose,
+                    torquescale,
+                    joint_path,
+                    enabled,
+                    custom_attrs,
+                )
+            except ValueError:
+                warnings.warn(
+                    f"MuJoCo equality '{joint_path}' has no valid body reference; skipping.",
+                    stacklevel=2,
+                )
+                return
+
+            path_joint_map[joint_path] = joint_idx
+
         for joint_path, joint_desc in joint_descriptions.items():
             joint_prim = stage.GetPrimAtPath(joint_path)
             if not joint_prim or not joint_prim.IsValid():
@@ -3212,7 +3266,7 @@ def parse_usd(
                 R.collect_prim_attrs(joint_prim)
 
             eq_custom_attrs = usd.get_custom_attribute_values(
-                joint_prim, builder_custom_attr_eq, context={"builder": builder}
+                joint_prim, local_builder_custom_attr_eq, context={"builder": builder}
             )
             enabled = bool(joint_desc.jointEnabled)
 
@@ -3236,14 +3290,27 @@ def parse_usd(
                         if (target0 in ("", "/") or target0 in path_body_map)
                         else site0_local_pos
                     )
-                    builder.add_equality_constraint_connect(
-                        body1=body0_idx,
-                        body2=body1_idx,
-                        anchor=anchor,
-                        label=joint_path,
-                        enabled=enabled,
-                        custom_attributes=eq_custom_attrs,
-                    )
+                    if convert_mjc_equality_constraints:
+                        add_converted_loop_joint(
+                            EqType.CONNECT,
+                            body0_idx,
+                            body1_idx,
+                            anchor,
+                            None,
+                            0.0,
+                            joint_path,
+                            enabled,
+                            eq_custom_attrs,
+                        )
+                    else:
+                        builder.add_equality_constraint_connect(
+                            body1=body0_idx,
+                            body2=body1_idx,
+                            anchor=anchor,
+                            label=joint_path,
+                            enabled=enabled,
+                            custom_attributes=eq_custom_attrs,
+                        )
                 else:
                     local_rot0 = usd.value_to_warp(joint_desc.localPose0Orientation)
                     local_rot1 = usd.value_to_warp(joint_desc.localPose1Orientation)
@@ -3262,16 +3329,30 @@ def parse_usd(
                     torquescale = (
                         float(torquescale_attr.Get()) if torquescale_attr and torquescale_attr.HasValue() else 1.0
                     )
-                    builder.add_equality_constraint_weld(
-                        body1=body0_idx,
-                        body2=body1_idx,
-                        anchor=anchor,
-                        relpose=wp.transform(relpose_pos, relpose_rot),
-                        torquescale=torquescale,
-                        label=joint_path,
-                        enabled=enabled,
-                        custom_attributes=eq_custom_attrs,
-                    )
+                    relpose = wp.transform(relpose_pos, relpose_rot)
+                    if convert_mjc_equality_constraints:
+                        add_converted_loop_joint(
+                            EqType.WELD,
+                            body0_idx,
+                            body1_idx,
+                            anchor,
+                            relpose,
+                            torquescale,
+                            joint_path,
+                            enabled,
+                            eq_custom_attrs,
+                        )
+                    else:
+                        builder.add_equality_constraint_weld(
+                            body1=body0_idx,
+                            body2=body1_idx,
+                            anchor=anchor,
+                            relpose=relpose,
+                            torquescale=torquescale,
+                            label=joint_path,
+                            enabled=enabled,
+                            custom_attributes=eq_custom_attrs,
+                        )
                 continue
 
             if is_eq_joint:
@@ -3312,14 +3393,32 @@ def parse_usd(
                     attr = joint_prim.GetAttribute(attr_name)
                     polycoef.append(float(attr.Get()) if attr and attr.HasValue() else default)
 
-                builder.add_equality_constraint_joint(
-                    joint1=joint1_idx,
-                    joint2=joint2_idx,
-                    polycoef=polycoef,
-                    label=joint_path,
-                    enabled=enabled,
-                    custom_attributes=eq_custom_attrs,
-                )
+                if convert_mjc_equality_constraints:
+                    if mjc_polycoef_has_higher_order(polycoef):
+                        warnings.warn(
+                            f"Warning: Joint equality '{joint_path}' uses higher-order polycoef terms. "
+                            "They are preserved for SolverMuJoCo, but generic Newton mimic constraints use "
+                            "only coef0/coef1.",
+                            stacklevel=2,
+                        )
+                    mjc_add_equality_mimic(
+                        builder,
+                        joint1_idx,
+                        joint2_idx,
+                        polycoef,
+                        joint_path,
+                        enabled,
+                        eq_custom_attrs,
+                    )
+                else:
+                    builder.add_equality_constraint_joint(
+                        joint1=joint1_idx,
+                        joint2=joint2_idx,
+                        polycoef=polycoef,
+                        label=joint_path,
+                        enabled=enabled,
+                        custom_attributes=eq_custom_attrs,
+                    )
 
     _parse_mjc_equality_constraints()
 
