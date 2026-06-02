@@ -358,6 +358,8 @@ def parse_mjcf(
     )
     solreflimit_mode_key = "mujoco:solreflimit_mode"
     has_solreflimit_mode = solreflimit_mode_key in builder.custom_attributes
+    solref_mode_key = "mujoco:solref_mode"
+    has_solref_mode = solref_mode_key in builder.custom_attributes
     builder_custom_attr_eq: list[ModelBuilder.CustomAttribute] = builder.get_custom_attributes_by_frequency(
         [AttributeFrequency.EQUALITY_CONSTRAINT]
     )
@@ -711,8 +713,12 @@ def parse_mjcf(
                 if len(friction_values) >= 3:
                     shape_cfg.mu_rolling = float(friction_values[2])
 
-            # Parse MJCF solref for contact stiffness/damping (only if explicitly specified)
-            # Like friction, only override Newton defaults if solref is authored in MJCF
+            # MJCF solref also fills shape_material_ke/kd via the lossy
+            # conversion for back-compat with the legacy
+            # convert_solref(ke, kd, 1, 1) round-trip; raw solref is
+            # preserved in mujoco.solref by the registered
+            # mjcf_attribute_name="solref". See docs/integrations/mujoco.rst
+            # > "Shape-material contact stiffness and damping".
             if "solref" in geom_attrib:
                 solref = parse_vec(geom_attrib, "solref", (0.02, 1.0))
                 geom_ke, geom_kd = solref_to_stiffness_damping(solref)
@@ -743,6 +749,15 @@ def parse_mjcf(
                 shape_cfg.gap = mj_gap
 
             custom_attributes = parse_custom_attributes(geom_attrib, builder_custom_attr_shape, parsing_mode="mjcf")
+            if has_solref_mode:
+                # Authored solref → RAW (forwarded verbatim); unauthored →
+                # MJCF_DEFAULT (force-space scaling is strictly opt-in for
+                # shapes — no auto-promote, unlike joint limits). See
+                # docs/integrations/mujoco.rst > "Shape-material contact
+                # stiffness and damping".
+                custom_attributes[solref_mode_key] = (
+                    SOLREF_MODE_RAW if "solref" in geom_attrib else SOLREF_MODE_MJCF_DEFAULT
+                )
             shape_label = f"{label_prefix}/{geom_name}" if label_prefix else geom_name
             shape_kwargs = {
                 "label": shape_label,
