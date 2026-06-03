@@ -23,6 +23,7 @@
 - Add `newton.utils.OnnxRuntime`, a graph-capturable ONNX inference engine backed solely by Warp kernels (no `onnxruntime` or `torch` runtime dependency); used by `ControllerNeuralMLP` and `ControllerNeuralLSTM` to load `.onnx` policies. To migrate a TorchScript policy, run `torch.onnx.export(model, dummy_input, "policy.onnx", opset_version=17)` once and point the controllers at the resulting `.onnx` file. The `onnx` package is now an optional extra (`pip install newton[onnx]`); install it explicitly to use the ONNX runtime.
 - Add opt-in `collapse_massless_fixed_root` to URDF and MJCF importers to collapse massless fixed-root chains for maximal-coordinate solvers while preserving topology by default
 - Add USD parsing for `NewtonSiteAPI` to mark shapes as sites.
+- Add `joint_damping` model attribute and `JointDofConfig.damping` for velocity-proportional damping that is always active
 - Add `ViewerRTX`, a real-time ray-traced viewer powered by NVIDIA OVRTX.
 - Add edge overlay toggle (`renderer.draw_edges`) for wireframe visualization on top of solid geometry
 - Add functional `newton.intersect_ray()` shape query helper for composing custom raycast sensors
@@ -54,6 +55,7 @@
 - Deprecate `Model.joint_target_pos` / `Control.joint_target_pos` and `Model.joint_target_vel` / `Control.joint_target_vel` in favor of `joint_target_q` / `joint_target_qd`. The legacy names emit a `DeprecationWarning` and raise `AttributeError` when `newton.use_coord_layout_targets = True`. Set that flag before building a model to switch `joint_target_q` to `joint_coord_count` shape (matching `joint_q`); the default `False` keeps the legacy `joint_dof_count` layout. `ModelBuilder.joint_target_pos` / `ModelBuilder.joint_target_vel` are removed — set per-axis targets via `JointDofConfig.target_pos` / `target_vel` or write directly to `ModelBuilder.joint_target_q` / `joint_target_qd`.
 - Deprecate loading `.pt` / `.pth` (TorchScript) checkpoints via `ControllerNeuralMLP`; the legacy TorchScript / dict-checkpoint path still works (with a `DeprecationWarning`) when PyTorch is installed but will be removed in a future release. `ControllerNeuralLSTM` requires re-exporting to ONNX with the metadata properties documented in its class docstring; pointing it at a `.pt` checkpoint now raises `NotImplementedError` with migration guidance. Convert the MLP checkpoint to ONNX once with `torch.onnx.export(model, dummy_input, "policy.onnx", opset_version=17)` and load the resulting `.onnx` file.
 - Deprecate implicit positive Dahl defaults in `SolverVBD.register_custom_attributes()`. Pass `dahl_defaults_enabled=False` and explicitly author positive `model.vbd.dahl_eps_max` and `model.vbd.dahl_tau` values when Dahl cable friction is desired, instead of relying on registered default values.
+- Deprecate `Model.mujoco.dof_passive_damping` in favor of `Model.joint_damping`; MuJoCo `damping` import now populates `Model.joint_damping` and the old namespaced attribute remains a warning alias
 - Deprecate `newton:contact_ke`/`newton:contact_kd`/`newton:contact_kf`/`newton:contact_ka` custom attributes on shape prims; author `newton:contactStiffness`/`newton:contactDamping`/`newton:contactFrictionGain`/`newton:contactAdhesion` on the bound `NewtonMaterialAPI` material instead
 - Deprecate `mjc:solref` on material prims for contact stiffness/damping; author `newton:contactStiffness`/`newton:contactDamping` on the bound `NewtonMaterialAPI` material, or use per-shape `mjc:solref` (`MjcGeomAPI`) which is unchanged
 
@@ -83,6 +85,7 @@
 - Fix `SolverVBD` custom attribute setup so `vbd:joint_is_hard` can be authored without implicitly enabling Dahl cable friction by calling `SolverVBD.register_custom_attributes(..., dahl_defaults_enabled=False)`.
 - Fix `example_softbody_gift` emitting spurious non-manifold edge warnings caused by mismatched 5-tet diagonals across adjacent cubes in the soft body mesh.
 - Fix `basic_conveyor` example emitting a spurious inertia validation warning at finalize.
+- Fix MJCF joint `damping` attribute being ignored by `SolverFeatherstone`
 - Fix `SolverMuJoCo` generated MuJoCo joint names for multi-axis D6 joints to avoid duplicate names
 - Fix USD import of revolute and D6-angular joint `limit_ke` / `limit_kd` from `mjc:solreflimit` being over-scaled by ~57x
 - Fix `ViewerGL` GUI rendering at half size on HiDPI / Retina displays by scaling the ImGui style, fonts, sidebar width, and `log_image` window/tile/spacing constants with pyglet's `window.scale` (with framebuffer-to-window ratio as a fallback). DPI changes are tracked at runtime via the pyglet `on_scale` event so the GUI follows the window across displays with different scaling
