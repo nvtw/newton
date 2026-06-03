@@ -1081,15 +1081,7 @@ class Model:
 
         subgrid_size = 8
         if self._texture_sdf_data is not None and len(self._texture_sdf_data) > 0:
-            try:
-                subgrid_size = int(self._texture_sdf_data.numpy()[0]["subgrid_size"])
-            except KeyError:
-                logger.warning(
-                    "TextureSDFData is missing subgrid_size; falling back to legacy default subgrid_size=%d "
-                    "for deprecated SDF block coordinate arrays.",
-                    subgrid_size,
-                )
-                subgrid_size = 8
+            subgrid_size = int(self._texture_sdf_data.numpy()[0]["subgrid_size"])
         block_coords, index2blocks = build_legacy_sdf_block_arrays(
             self._texture_sdf_coarse_textures,
             subgrid_size=subgrid_size,
