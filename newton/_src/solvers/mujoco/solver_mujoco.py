@@ -26,6 +26,7 @@ from ...sim import (
     JointType,
     Model,
     ModelBuilder,
+    ModelFlags,
     State,
 )
 from ...sim.contacts import GENERATION_SENTINEL as _GENERATION_SENTINEL
@@ -33,7 +34,6 @@ from ...sim.graph_coloring import color_graph, plot_graph
 from ...utils import topological_sort
 from ...utils.benchmark import event_scope
 from ...utils.import_utils import string_to_warp
-from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
 from .constants import (
     DEFAULT_LIMIT_GAIN_RTOL,
@@ -3457,7 +3457,7 @@ class SolverMuJoCo(SolverBase):
 
         # One-shot dedup for ``_update_solref_from_invweight0``'s authored
         # ``mujoco.solreflimit`` domain validator. Re-armed by
-        # ``notify_model_changed(SolverNotifyFlags.JOINT_DOF_PROPERTIES)``.
+        # ``notify_model_changed(ModelFlags.JOINT_DOF_PROPERTIES)``.
         self._raw_solreflimit_validated: bool = False
 
         with wp.ScopedTimer("convert_model_to_mujoco", active=False):
@@ -3720,12 +3720,12 @@ class SolverMuJoCo(SolverBase):
         self.mj_model.dof_simplenum[:] = 0
 
     @override
-    def notify_model_changed(self, flags: int) -> None:
+    def notify_model_changed(self, flags: ModelFlags | int) -> None:
         need_const_fixed = False
         need_const_0 = False
         need_length_range = False
 
-        if flags & SolverNotifyFlags.BODY_INERTIAL_PROPERTIES:
+        if flags & ModelFlags.BODY_INERTIAL_PROPERTIES:
             self._update_model_inertial_properties()
             # set_const_fixed / set_const_0 (called below) recompute MuJoCo
             # constants that feed into contact solver parameters (invweight0,
@@ -3735,13 +3735,13 @@ class SolverMuJoCo(SolverBase):
             self._invalidate_contact_fast_path()
             need_const_fixed = True
             need_const_0 = True
-        if flags & SolverNotifyFlags.JOINT_PROPERTIES:
+        if flags & ModelFlags.JOINT_PROPERTIES:
             self._update_joint_properties()
-        if flags & SolverNotifyFlags.BODY_PROPERTIES:
+        if flags & ModelFlags.BODY_PROPERTIES:
             self._update_body_properties()
             self._invalidate_contact_fast_path()
             need_const_0 = True
-        if flags & SolverNotifyFlags.JOINT_DOF_PROPERTIES:
+        if flags & ModelFlags.JOINT_DOF_PROPERTIES:
             self._update_joint_dof_properties()
             self._invalidate_contact_fast_path()
             # Allow ``_update_solref_from_invweight0`` to re-validate authored
@@ -3749,31 +3749,31 @@ class SolverMuJoCo(SolverBase):
             self._raw_solreflimit_validated = False
             need_const_0 = True
             need_length_range = True
-        if flags & SolverNotifyFlags.SHAPE_PROPERTIES:
+        if flags & ModelFlags.SHAPE_PROPERTIES:
             self._update_geom_properties()
             self._update_pair_properties()
             self._invalidate_contact_fast_path()
-        if flags & SolverNotifyFlags.MODEL_PROPERTIES:
+        if flags & ModelFlags.MODEL_PROPERTIES:
             self._update_model_properties()
             self._invalidate_contact_fast_path()
-        if flags & SolverNotifyFlags.CONSTRAINT_PROPERTIES:
+        if flags & ModelFlags.CONSTRAINT_PROPERTIES:
             self._update_eq_properties()
             self._update_mimic_eq_properties()
-        if flags & SolverNotifyFlags.TENDON_PROPERTIES:
+        if flags & ModelFlags.TENDON_PROPERTIES:
             self._update_tendon_properties()
             need_const_0 = True
             need_length_range = True
-        if flags & SolverNotifyFlags.ACTUATOR_PROPERTIES:
+        if flags & ModelFlags.ACTUATOR_PROPERTIES:
             self._update_actuator_properties()
             need_const_0 = True
             need_length_range = True
 
         has_any_connect = self.has_connect_constraints or self.has_jnt_connect_constraints
         update_connect_constraint_anchor_rel_xform_at_ref_pose = has_any_connect and bool(
-            flags & (SolverNotifyFlags.JOINT_PROPERTIES | SolverNotifyFlags.JOINT_DOF_PROPERTIES)
+            flags & (ModelFlags.JOINT_PROPERTIES | ModelFlags.JOINT_DOF_PROPERTIES)
         )
         update_connect_constraint_anchors = self.has_connect_constraints and bool(
-            flags & SolverNotifyFlags.CONSTRAINT_PROPERTIES
+            flags & ModelFlags.CONSTRAINT_PROPERTIES
         )
 
         # ``need_const_0`` already covers every update that changes the derived
@@ -3782,12 +3782,12 @@ class SolverMuJoCo(SolverBase):
         need_solref_update = need_const_0
 
         if self.use_mujoco_cpu:
-            if flags & SolverNotifyFlags.BODY_INERTIAL_PROPERTIES:
+            if flags & ModelFlags.BODY_INERTIAL_PROPERTIES:
                 self.mj_model.body_ipos[:] = self.mjw_model.body_ipos.numpy()[0]
                 self.mj_model.body_mass[:] = self.mjw_model.body_mass.numpy()[0]
                 self.mj_model.body_gravcomp[:] = self.mjw_model.body_gravcomp.numpy()[0]
                 self._sync_mjw_inertias_to_mjc_cpu()
-            if flags & (SolverNotifyFlags.BODY_PROPERTIES | SolverNotifyFlags.JOINT_DOF_PROPERTIES):
+            if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.JOINT_DOF_PROPERTIES):
                 self.mj_model.dof_armature[:] = self.mjw_model.dof_armature.numpy()[0]
                 self.mj_model.dof_frictionloss[:] = self.mjw_model.dof_frictionloss.numpy()[0]
                 self.mj_model.dof_damping[:] = self.mjw_model.dof_damping.numpy()[0]
@@ -3795,7 +3795,7 @@ class SolverMuJoCo(SolverBase):
                 self.mj_model.dof_solref[:] = self.mjw_model.dof_solref.numpy()[0]
                 self.mj_model.qpos0[:] = self.mjw_model.qpos0.numpy()[0]
                 self.mj_model.qpos_spring[:] = self.mjw_model.qpos_spring.numpy()[0]
-            if flags & SolverNotifyFlags.JOINT_DOF_PROPERTIES:
+            if flags & ModelFlags.JOINT_DOF_PROPERTIES:
                 self.mj_model.jnt_solimp[:] = self.mjw_model.jnt_solimp.numpy()[0]
                 self.mj_model.jnt_stiffness[:] = self.mjw_model.jnt_stiffness.numpy()[0]
                 self.mj_model.jnt_margin[:] = self.mjw_model.jnt_margin.numpy()[0]
@@ -3815,7 +3815,7 @@ class SolverMuJoCo(SolverBase):
                 update_connect_constraint_anchor_rel_xform_at_ref_pose,
                 update_connect_constraint_anchors,
             )
-            if flags & SolverNotifyFlags.CONSTRAINT_PROPERTIES:
+            if flags & ModelFlags.CONSTRAINT_PROPERTIES:
                 self._sync_equality_properties_to_mujoco_cpu()
 
         else:
@@ -6266,7 +6266,7 @@ class SolverMuJoCo(SolverBase):
 
             # so far we have only defined the first world,
             # now complete the data from the Newton model
-            self.notify_model_changed(SolverNotifyFlags.ALL)
+            self.notify_model_changed(ModelFlags.ALL)
 
             if target_filename:
                 # Only persist ``solreflimit`` for ``SOLREF_MODE_RAW`` joints
@@ -7304,7 +7304,7 @@ class SolverMuJoCo(SolverBase):
                     )
             # One-shot guard: avoids warning every step for the steady-state
             # callers. The flag is re-armed only by ``notify_model_changed``
-            # under ``SolverNotifyFlags.JOINT_DOF_PROPERTIES``, which is where
+            # under ``ModelFlags.JOINT_DOF_PROPERTIES``, which is where
             # ``mujoco.solreflimit`` reassignments arrive; other
             # ``need_const_0`` notifies (BODY_INERTIAL_PROPERTIES, etc.) do
             # not reset it because they cannot change the authored solreflimit
