@@ -1,12 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Block Neo-Hookean XPBD soft-hexahedron constraint.
+"""Mixed XPBD soft-hexahedron constraint.
 
-Evaluates the stable Neo-Hookean hydrostatic/deviatoric pair at the
-hex center and projects both rows jointly with a 2x2 Schur solve.
-Corner gradients use the standard trilinear signs reconstructed from
-``inv_rest = J^{-T}``.
+Uses the same split that works well in ``xpbd-fem`` for linear hexes:
+an integrated trilinear strain energy plus a reduced center-point
+volume row. Evaluating strain at the eight Gauss points prevents the
+classic hourglass mode that a single center deformation gradient cannot
+see, while the center volume row keeps the nearly-incompressible solve
+cheap and robust.
+
+Optionally, the integrated strain row can use an ARAP residual at each
+Gauss point. This keeps the large-rotation behavior of the tetrahedral
+ARAP path without falling back to a one-point hex strain evaluation.
 """
 
 from __future__ import annotations
@@ -27,8 +33,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_mat33,
 )
 from newton._src.solvers.phoenx.constraints.soft_body_math import (
-    neohookean_constraints_from_F,
-    neohookean_is_rest_manifold,
+    deformation_gradient_determinant_cofactor,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.mass_splitting.access import (
@@ -41,6 +46,8 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
     "SOFT_HEX_DWORDS",
+    "SOFT_HEX_STRAIN_MODEL_ARAP",
+    "SOFT_HEX_STRAIN_MODEL_TRACE",
     "SOFT_HEX_TIME_US_OFFSET",
     "SoftHexahedronData",
     "soft_hex_init_rows_from_arrays_kernel",
@@ -61,11 +68,16 @@ __all__ = [
     "soft_hexahedron_set_gamma",
     "soft_hexahedron_set_inv_rest",
     "soft_hexahedron_set_rest_volume",
+    "soft_hexahedron_set_strain_model",
     "soft_hexahedron_set_type",
 ]
 
 
 _PHOENX_NEOHOOKEAN_STIFFNESS_FLOOR = wp.constant(wp.float32(1.0e-6))
+
+SOFT_HEX_STRAIN_MODEL_TRACE: int = 0
+SOFT_HEX_STRAIN_MODEL_ARAP: int = 1
+_SOFT_HEX_STRAIN_MODEL_ARAP = wp.constant(wp.int32(SOFT_HEX_STRAIN_MODEL_ARAP))
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +87,7 @@ _PHOENX_NEOHOOKEAN_STIFFNESS_FLOOR = wp.constant(wp.float32(1.0e-6))
 
 @wp.struct
 class SoftHexahedronData:
-    """Per-constraint dword layout for one block Neo-Hookean hexahedron.
+    """Per-constraint dword layout for one mixed strain/volume hexahedron.
 
     Mirrors :class:`SoftTetNeoHookeanData` field-for-field with the
     4-body endpoint set extended to 8. The mandatory 3-int32 header
@@ -91,21 +103,23 @@ class SoftHexahedronData:
     body6: wp.int32  # particle index of corner 5 (+,-,+)
     body7: wp.int32  # particle index of corner 6 (+,+,+)
     body8: wp.int32  # particle index of corner 7 (-,+,+)
+    strain_model: wp.int32  # 0: integrated trace strain, 1: integrated ARAP strain
 
     # inv_rest = J^{-T} where J is the rest Jacobian at the hex center.
-    # B_i = (1/8) inv_rest * (xi_i, eta_i, zeta_i).
+    # The volume row uses center gradients; the strain row reuses the
+    # same affine map across the eight Gauss points.
     inv_rest: wp.mat33f
     rest_volume: wp.float32  # V = 8 * det(J)
 
-    #: ``1 + mu / lambda`` -- stable Neo-Hookean offset.
+    #: ``1 + mu / lambda`` -- stable Neo-Hookean volume offset.
     gamma: wp.float32
-    #: ``1 / (lambda * V_rest)`` -- hydrostatic compliance.
+    #: ``1 / (lambda * V_rest)`` -- volume compliance.
     alpha_h: wp.float32
-    #: ``1 / (mu * V_rest)`` -- deviatoric compliance.
+    #: ``1 / (mu * V_rest)`` -- integrated strain compliance.
     alpha_d: wp.float32
-    #: Macklin XPBD damping coefficient on the hydrostatic row [1/s].
+    #: Macklin XPBD damping coefficient on the volume row [1/s].
     beta_h: wp.float32
-    #: Macklin XPBD damping coefficient on the deviatoric row [1/s].
+    #: Macklin XPBD damping coefficient on the strain row [1/s].
     beta_d: wp.float32
 
     inv_mass_a: wp.float32
@@ -137,6 +151,7 @@ _OFF_BODY5 = wp.constant(dword_offset_of(SoftHexahedronData, "body5"))
 _OFF_BODY6 = wp.constant(dword_offset_of(SoftHexahedronData, "body6"))
 _OFF_BODY7 = wp.constant(dword_offset_of(SoftHexahedronData, "body7"))
 _OFF_BODY8 = wp.constant(dword_offset_of(SoftHexahedronData, "body8"))
+_OFF_STRAIN_MODEL = wp.constant(dword_offset_of(SoftHexahedronData, "strain_model"))
 _OFF_INV_REST = wp.constant(dword_offset_of(SoftHexahedronData, "inv_rest"))
 _OFF_REST_VOLUME = wp.constant(dword_offset_of(SoftHexahedronData, "rest_volume"))
 _OFF_GAMMA = wp.constant(dword_offset_of(SoftHexahedronData, "gamma"))
@@ -205,6 +220,11 @@ def soft_hexahedron_set_body8(c: ConstraintContainer, cid: wp.int32, v: wp.int32
 
 
 @wp.func
+def soft_hexahedron_set_strain_model(c: ConstraintContainer, cid: wp.int32, v: wp.int32):
+    write_int(c, _OFF_STRAIN_MODEL, cid, v)
+
+
+@wp.func
 def soft_hexahedron_set_inv_rest(c: ConstraintContainer, cid: wp.int32, v: wp.mat33f):
     write_mat33(c, _OFF_INV_REST, cid, v)
 
@@ -245,15 +265,20 @@ def soft_hexahedron_set_beta_d(c: ConstraintContainer, cid: wp.int32, v: wp.floa
 
 
 _ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
-#: Floor for the deviatoric constraint magnitude (avoids division by zero
-#: when the element fully collapses, F -> 0).
-_DEV_EPS = wp.constant(wp.float32(1.0e-12))
+#: Floor for the energy-style XPBD strain row. The trace energy is 3 at
+#: rest for a 3-D element, so this only guards fully collapsed elements.
+_ENERGY_FLOOR = wp.constant(wp.float32(1.0e-4))
 #: Floor for the Schur-complement determinant during the 2x2 inverse.
 _DET_FLOOR = wp.constant(wp.float32(1.0e-30))
-_REST_MANIFOLD_EPS = wp.constant(wp.float32(1.0e-5))
+_ARAP_EPS = wp.constant(wp.float32(1.0e-8))
+_MUELLER_ROT_EPS = wp.constant(wp.float32(1.0e-6))
+_MUELLER_DENOM_EPS = wp.constant(wp.float32(1.0e-9))
+_MUELLER_CENTER_ROT_ITERS = wp.constant(wp.int32(32))
+_MUELLER_GAUSS_ROT_ITERS = wp.constant(wp.int32(16))
 
 #: 1/8 factor folded into B-vector reconstruction.
 _ONE_EIGHTH = wp.constant(wp.float32(0.125))
+_GAUSS_ONE_OVER_SQRT_THREE = wp.constant(wp.float32(0.5773502691896257))
 
 
 @wp.func
@@ -284,13 +309,42 @@ def _corner_sign(i: wp.int32) -> wp.vec3f:
 
 
 @wp.func
-def _shape_gradient(inv_rest: wp.mat33f, i: wp.int32) -> wp.vec3f:
-    """World-space shape-function gradient ``B_i = (1/8) inv_rest * sign_i``."""
-    return _ONE_EIGHTH * (inv_rest * _corner_sign(i))
+def _shape_gradient_ref(i: wp.int32, xi: wp.float32, eta: wp.float32, zeta: wp.float32) -> wp.vec3f:
+    """Reference-space trilinear shape-function gradient at ``(xi, eta, zeta)``."""
+    s = _corner_sign(i)
+    return _ONE_EIGHTH * wp.vec3f(
+        s[0] * (wp.float32(1.0) + s[1] * eta) * (wp.float32(1.0) + s[2] * zeta),
+        s[1] * (wp.float32(1.0) + s[0] * xi) * (wp.float32(1.0) + s[2] * zeta),
+        s[2] * (wp.float32(1.0) + s[0] * xi) * (wp.float32(1.0) + s[1] * eta),
+    )
 
 
 @wp.func
-def _compute_F_hex(
+def _shape_gradient_at(
+    inv_rest: wp.mat33f,
+    i: wp.int32,
+    xi: wp.float32,
+    eta: wp.float32,
+    zeta: wp.float32,
+) -> wp.vec3f:
+    """World-space trilinear shape-function gradient at a reference point."""
+    return inv_rest * _shape_gradient_ref(i, xi, eta, zeta)
+
+
+@wp.func
+def _shape_gradient(inv_rest: wp.mat33f, i: wp.int32) -> wp.vec3f:
+    """Center-point world-space shape-function gradient."""
+    return _shape_gradient_at(
+        inv_rest,
+        i,
+        wp.float32(0.0),
+        wp.float32(0.0),
+        wp.float32(0.0),
+    )
+
+
+@wp.func
+def _compute_F_hex_from_gradients(
     x0: wp.vec3f,
     x1: wp.vec3f,
     x2: wp.vec3f,
@@ -299,22 +353,16 @@ def _compute_F_hex(
     x5: wp.vec3f,
     x6: wp.vec3f,
     x7: wp.vec3f,
-    inv_rest: wp.mat33f,
+    b0: wp.vec3f,
+    b1: wp.vec3f,
+    b2: wp.vec3f,
+    b3: wp.vec3f,
+    b4: wp.vec3f,
+    b5: wp.vec3f,
+    b6: wp.vec3f,
+    b7: wp.vec3f,
 ) -> wp.mat33f:
-    """Deformation gradient at the hex center: ``F = sum_i x_i (x) B_i``.
-
-    Spelled out as 9 explicit accumulators so the compiler can hoist
-    ``B_i`` once per corner; each entry is the sum of 8 ``x_i[a]*B_i[b]``
-    products.
-    """
-    b0 = _shape_gradient(inv_rest, wp.int32(0))
-    b1 = _shape_gradient(inv_rest, wp.int32(1))
-    b2 = _shape_gradient(inv_rest, wp.int32(2))
-    b3 = _shape_gradient(inv_rest, wp.int32(3))
-    b4 = _shape_gradient(inv_rest, wp.int32(4))
-    b5 = _shape_gradient(inv_rest, wp.int32(5))
-    b6 = _shape_gradient(inv_rest, wp.int32(6))
-    b7 = _shape_gradient(inv_rest, wp.int32(7))
+    """Deformation gradient from precomputed world-space gradients."""
     F00 = (
         x0[0] * b0[0]
         + x1[0] * b1[0]
@@ -408,6 +456,241 @@ def _compute_F_hex(
     return wp.mat33f(F00, F01, F02, F10, F11, F12, F20, F21, F22)
 
 
+@wp.func
+def _compute_F_hex_at(
+    x0: wp.vec3f,
+    x1: wp.vec3f,
+    x2: wp.vec3f,
+    x3: wp.vec3f,
+    x4: wp.vec3f,
+    x5: wp.vec3f,
+    x6: wp.vec3f,
+    x7: wp.vec3f,
+    inv_rest: wp.mat33f,
+    xi: wp.float32,
+    eta: wp.float32,
+    zeta: wp.float32,
+) -> wp.mat33f:
+    """Deformation gradient at a reference point.
+
+    Spelled out as explicit accumulators so the compiler can hoist the
+    ``B_i`` values once per corner.
+    """
+    b0 = _shape_gradient_at(inv_rest, wp.int32(0), xi, eta, zeta)
+    b1 = _shape_gradient_at(inv_rest, wp.int32(1), xi, eta, zeta)
+    b2 = _shape_gradient_at(inv_rest, wp.int32(2), xi, eta, zeta)
+    b3 = _shape_gradient_at(inv_rest, wp.int32(3), xi, eta, zeta)
+    b4 = _shape_gradient_at(inv_rest, wp.int32(4), xi, eta, zeta)
+    b5 = _shape_gradient_at(inv_rest, wp.int32(5), xi, eta, zeta)
+    b6 = _shape_gradient_at(inv_rest, wp.int32(6), xi, eta, zeta)
+    b7 = _shape_gradient_at(inv_rest, wp.int32(7), xi, eta, zeta)
+    return _compute_F_hex_from_gradients(x0, x1, x2, x3, x4, x5, x6, x7, b0, b1, b2, b3, b4, b5, b6, b7)
+
+
+@wp.func
+def _compute_F_hex(
+    x0: wp.vec3f,
+    x1: wp.vec3f,
+    x2: wp.vec3f,
+    x3: wp.vec3f,
+    x4: wp.vec3f,
+    x5: wp.vec3f,
+    x6: wp.vec3f,
+    x7: wp.vec3f,
+    inv_rest: wp.mat33f,
+) -> wp.mat33f:
+    """Center-point deformation gradient."""
+    return _compute_F_hex_at(
+        x0,
+        x1,
+        x2,
+        x3,
+        x4,
+        x5,
+        x6,
+        x7,
+        inv_rest,
+        wp.float32(0.0),
+        wp.float32(0.0),
+        wp.float32(0.0),
+    )
+
+
+@wp.func
+def _trace_FtF(F: wp.mat33f) -> wp.float32:
+    """Return ``trace(F^T F)``."""
+    return (
+        F[0, 0] * F[0, 0]
+        + F[0, 1] * F[0, 1]
+        + F[0, 2] * F[0, 2]
+        + F[1, 0] * F[1, 0]
+        + F[1, 1] * F[1, 1]
+        + F[1, 2] * F[1, 2]
+        + F[2, 0] * F[2, 0]
+        + F[2, 1] * F[2, 1]
+        + F[2, 2] * F[2, 2]
+    )
+
+
+@wp.func
+def _integrated_strain_energy_gradients(
+    x0: wp.vec3f,
+    x1: wp.vec3f,
+    x2: wp.vec3f,
+    x3: wp.vec3f,
+    x4: wp.vec3f,
+    x5: wp.vec3f,
+    x6: wp.vec3f,
+    x7: wp.vec3f,
+    inv_rest: wp.mat33f,
+):
+    """Eight-point trilinear trace energy and particle gradients.
+
+    This is the runtime equivalent of xpbd-fem's prefactored
+    incompressible Neo-Hookean strain term for linear hexes. The center
+    ``inv_rest`` is treated as an affine map, which matches the regular
+    grids this constraint is currently built for.
+    """
+    u = wp.float32(0.0)
+    g0 = wp.vec3f(0.0, 0.0, 0.0)
+    g1 = wp.vec3f(0.0, 0.0, 0.0)
+    g2 = wp.vec3f(0.0, 0.0, 0.0)
+    g3 = wp.vec3f(0.0, 0.0, 0.0)
+    g4 = wp.vec3f(0.0, 0.0, 0.0)
+    g5 = wp.vec3f(0.0, 0.0, 0.0)
+    g6 = wp.vec3f(0.0, 0.0, 0.0)
+    g7 = wp.vec3f(0.0, 0.0, 0.0)
+
+    for p in range(8):
+        q = _GAUSS_ONE_OVER_SQRT_THREE * _corner_sign(wp.int32(p))
+        xi = q[0]
+        eta = q[1]
+        zeta = q[2]
+
+        b0 = _shape_gradient_at(inv_rest, wp.int32(0), xi, eta, zeta)
+        b1 = _shape_gradient_at(inv_rest, wp.int32(1), xi, eta, zeta)
+        b2 = _shape_gradient_at(inv_rest, wp.int32(2), xi, eta, zeta)
+        b3 = _shape_gradient_at(inv_rest, wp.int32(3), xi, eta, zeta)
+        b4 = _shape_gradient_at(inv_rest, wp.int32(4), xi, eta, zeta)
+        b5 = _shape_gradient_at(inv_rest, wp.int32(5), xi, eta, zeta)
+        b6 = _shape_gradient_at(inv_rest, wp.int32(6), xi, eta, zeta)
+        b7 = _shape_gradient_at(inv_rest, wp.int32(7), xi, eta, zeta)
+        F = _compute_F_hex_from_gradients(x0, x1, x2, x3, x4, x5, x6, x7, b0, b1, b2, b3, b4, b5, b6, b7)
+        dU_dF = F * (wp.float32(2.0) * _ONE_EIGHTH)
+        u = u + _ONE_EIGHTH * _trace_FtF(F)
+        g0 = g0 + dU_dF * b0
+        g1 = g1 + dU_dF * b1
+        g2 = g2 + dU_dF * b2
+        g3 = g3 + dU_dF * b3
+        g4 = g4 + dU_dF * b4
+        g5 = g5 + dU_dF * b5
+        g6 = g6 + dU_dF * b6
+        g7 = g7 + dU_dF * b7
+
+    if u < _ENERGY_FLOOR:
+        u = _ENERGY_FLOOR
+    return u, g0, g1, g2, g3, g4, g5, g6, g7
+
+
+@wp.func
+def _extract_rotation_mueller(F: wp.mat33f, q_init: wp.quatf, max_iters: wp.int32) -> wp.quatf:
+    """Closest-rotation quaternion via Mueller's iterative extraction."""
+    q = q_init
+    for _ in range(max_iters):
+        R = wp.quat_to_matrix(q)
+        r0 = wp.vec3f(R[0, 0], R[1, 0], R[2, 0])
+        r1 = wp.vec3f(R[0, 1], R[1, 1], R[2, 1])
+        r2 = wp.vec3f(R[0, 2], R[1, 2], R[2, 2])
+        f0 = wp.vec3f(F[0, 0], F[1, 0], F[2, 0])
+        f1 = wp.vec3f(F[0, 1], F[1, 1], F[2, 1])
+        f2 = wp.vec3f(F[0, 2], F[1, 2], F[2, 2])
+
+        omega = wp.cross(r0, f0) + wp.cross(r1, f1) + wp.cross(r2, f2)
+        denom = wp.abs(wp.dot(r0, f0) + wp.dot(r1, f1) + wp.dot(r2, f2)) + _MUELLER_DENOM_EPS
+        omega = omega * (wp.float32(1.0) / denom)
+        w = wp.length(omega)
+        if w < _MUELLER_ROT_EPS:
+            break
+        dq = wp.quat_from_axis_angle(omega * (wp.float32(1.0) / w), w)
+        q = wp.normalize(dq * q)
+    return q
+
+
+@wp.func
+def _integrated_arap_constraint_gradients(
+    x0: wp.vec3f,
+    x1: wp.vec3f,
+    x2: wp.vec3f,
+    x3: wp.vec3f,
+    x4: wp.vec3f,
+    x5: wp.vec3f,
+    x6: wp.vec3f,
+    x7: wp.vec3f,
+    inv_rest: wp.mat33f,
+    q_init: wp.quatf,
+):
+    """Eight-point ARAP residual and particle gradients.
+
+    Each Gauss point extracts its own closest rotation, so the ARAP
+    strain row remains hourglass-aware instead of collapsing to a
+    center-only deformation gradient.
+    """
+    c = wp.float32(0.0)
+    g0 = wp.vec3f(0.0, 0.0, 0.0)
+    g1 = wp.vec3f(0.0, 0.0, 0.0)
+    g2 = wp.vec3f(0.0, 0.0, 0.0)
+    g3 = wp.vec3f(0.0, 0.0, 0.0)
+    g4 = wp.vec3f(0.0, 0.0, 0.0)
+    g5 = wp.vec3f(0.0, 0.0, 0.0)
+    g6 = wp.vec3f(0.0, 0.0, 0.0)
+    g7 = wp.vec3f(0.0, 0.0, 0.0)
+
+    for p in range(8):
+        q = _GAUSS_ONE_OVER_SQRT_THREE * _corner_sign(wp.int32(p))
+        xi = q[0]
+        eta = q[1]
+        zeta = q[2]
+
+        b0 = _shape_gradient_at(inv_rest, wp.int32(0), xi, eta, zeta)
+        b1 = _shape_gradient_at(inv_rest, wp.int32(1), xi, eta, zeta)
+        b2 = _shape_gradient_at(inv_rest, wp.int32(2), xi, eta, zeta)
+        b3 = _shape_gradient_at(inv_rest, wp.int32(3), xi, eta, zeta)
+        b4 = _shape_gradient_at(inv_rest, wp.int32(4), xi, eta, zeta)
+        b5 = _shape_gradient_at(inv_rest, wp.int32(5), xi, eta, zeta)
+        b6 = _shape_gradient_at(inv_rest, wp.int32(6), xi, eta, zeta)
+        b7 = _shape_gradient_at(inv_rest, wp.int32(7), xi, eta, zeta)
+        F = _compute_F_hex_from_gradients(x0, x1, x2, x3, x4, x5, x6, x7, b0, b1, b2, b3, b4, b5, b6, b7)
+        rotation = _extract_rotation_mueller(F, q_init, _MUELLER_GAUSS_ROT_ITERS)
+        R = wp.quat_to_matrix(rotation)
+        S = F - R
+
+        s_norm_sq = (
+            S[0, 0] * S[0, 0]
+            + S[0, 1] * S[0, 1]
+            + S[0, 2] * S[0, 2]
+            + S[1, 0] * S[1, 0]
+            + S[1, 1] * S[1, 1]
+            + S[1, 2] * S[1, 2]
+            + S[2, 0] * S[2, 0]
+            + S[2, 1] * S[2, 1]
+            + S[2, 2] * S[2, 2]
+        )
+        c_gp = wp.sqrt(s_norm_sq + _ARAP_EPS)
+        dC_dF = (_ONE_EIGHTH / c_gp) * S
+        c = c + _ONE_EIGHTH * c_gp
+
+        g0 = g0 + dC_dF * b0
+        g1 = g1 + dC_dF * b1
+        g2 = g2 + dC_dF * b2
+        g3 = g3 + dC_dF * b3
+        g4 = g4 + dC_dF * b4
+        g5 = g5 + dC_dF * b5
+        g6 = g6 + dC_dF * b6
+        g7 = g7 + dC_dF * b7
+
+    return c, g0, g1, g2, g3, g4, g5, g6, g7
+
+
 # ---------------------------------------------------------------------------
 # Prepare + iterate
 # ---------------------------------------------------------------------------
@@ -426,9 +709,8 @@ def soft_hexahedron_prepare_for_iteration_at(
 ):
     """Substep-entry prepare: flip access mode to POSITION_LEVEL on all
     8 corners, cache inverse masses, reset both XPBD multipliers to
-    zero. No polar-decomposition warm start -- the Neo-Hookean
-    formulation is rotation-invariant (depends only on ``F^T F`` and
-    ``det(F)``).
+    zero. No polar-decomposition warm start is needed: both rows are
+    expressed directly in terms of ``F^T F`` / ``det(F)``.
     """
     body0 = read_int(constraints, _OFF_BODY1, cid)
     body1 = read_int(constraints, _OFF_BODY2, cid)
@@ -502,21 +784,12 @@ def soft_hexahedron_iterate_at(
     idt: wp.float32,
     sor_boost: wp.float32,
 ):
-    """One block Neo-Hookean PGS sweep on a soft-body hexahedron.
+    """One mixed strain/volume XPBD sweep on a soft-body hexahedron.
 
-    Evaluates ``(C^H, C^D)`` and the per-corner gradients of both,
-    then solves the 2x2 Schur-complement system::
-
-        A . [d lambda^H; d lambda^D] = -([C^H; C^D] + alpha_tilde [...] + damping)
-
-        A_{HH} = (1 + gamma_H) sum_v w_v ||g^H_v||^2 + alpha_tilde^H
-        A_{DD} = (1 + gamma_D) sum_v w_v ||g^D_v||^2 + alpha_tilde^D
-        A_{HD} = sum_v w_v g^H_v . g^D_v
-        gamma_i = beta_i * dt
-
-    Final position update::
-
-        d x_v = w_v (g^H_v d lambda^H + g^D_v d lambda^D)
+    The default strain row integrates ``trace(F^T F)`` at the eight
+    Gauss points. The optional ARAP row integrates ``||F - R||`` at the
+    same points. The volume row uses the reduced center determinant.
+    Both modes project strain and volume jointly with a 2x2 Schur solve.
     """
     body0 = read_int(constraints, _OFF_BODY1, cid)
     body1 = read_int(constraints, _OFF_BODY2, cid)
@@ -562,13 +835,12 @@ def soft_hexahedron_iterate_at(
     inv_mass6 = read_float(constraints, _OFF_INV_MASS_G, cid)
     inv_mass7 = read_float(constraints, _OFF_INV_MASS_H, cid)
     inv_rest = read_mat33(constraints, _OFF_INV_REST, cid)
+    strain_model = read_int(constraints, _OFF_STRAIN_MODEL, cid)
     gamma_offset = read_float(constraints, _OFF_GAMMA, cid)
     alpha_h = read_float(constraints, _OFF_ALPHA_H, cid)
     alpha_d = read_float(constraints, _OFF_ALPHA_D, cid)
     beta_h = read_float(constraints, _OFF_BETA_H, cid)
     beta_d = read_float(constraints, _OFF_BETA_D, cid)
-    lambda_h = read_float(constraints, _OFF_LAMBDA_SUM_H, cid)
-    lambda_d = read_float(constraints, _OFF_LAMBDA_SUM_D, cid)
 
     x0 = read_position_with_slot(bodies, particles, copy_state, body0, slot0, num_bodies)
     x1 = read_position_with_slot(bodies, particles, copy_state, body1, slot1, num_bodies)
@@ -588,14 +860,10 @@ def soft_hexahedron_iterate_at(
     dx6 = x6 - particles.position_prev_substep[p6]
     dx7 = x7 - particles.position_prev_substep[p7]
 
+    # Reduced volume row: center-point determinant.
     F = _compute_F_hex(x0, x1, x2, x3, x4, x5, x6, x7, inv_rest)
+    det_f, dJ_dF = deformation_gradient_determinant_cofactor(F)
 
-    c_h, c_d, dCH_dF, dCD_dF = neohookean_constraints_from_F(F, gamma_offset, _DEV_EPS)
-
-    if neohookean_is_rest_manifold(c_h, c_d, gamma_offset, _REST_MANIFOLD_EPS):
-        return
-
-    # Per-corner gradients: g_i = dC/dF * B_i (8 mat33-vec3 each row).
     b0 = _shape_gradient(inv_rest, wp.int32(0))
     b1 = _shape_gradient(inv_rest, wp.int32(1))
     b2 = _shape_gradient(inv_rest, wp.int32(2))
@@ -605,23 +873,63 @@ def soft_hexahedron_iterate_at(
     b6 = _shape_gradient(inv_rest, wp.int32(6))
     b7 = _shape_gradient(inv_rest, wp.int32(7))
 
-    g_h0 = dCH_dF * b0
-    g_h1 = dCH_dF * b1
-    g_h2 = dCH_dF * b2
-    g_h3 = dCH_dF * b3
-    g_h4 = dCH_dF * b4
-    g_h5 = dCH_dF * b5
-    g_h6 = dCH_dF * b6
-    g_h7 = dCH_dF * b7
+    if strain_model == _SOFT_HEX_STRAIN_MODEL_ARAP:
+        # ARAP uses a true volume constraint with rest target det(F)=1.
+        # The ARAP strain row is already rotation-free, so it does not
+        # need the stable Neo-Hookean gamma offset that balances the
+        # trace-energy row at rest.
+        c_h = det_f - wp.float32(1.0)
+        g_h0 = dJ_dF * b0
+        g_h1 = dJ_dF * b1
+        g_h2 = dJ_dF * b2
+        g_h3 = dJ_dF * b3
+        g_h4 = dJ_dF * b4
+        g_h5 = dJ_dF * b5
+        g_h6 = dJ_dF * b6
+        g_h7 = dJ_dF * b7
+        center_rotation = _extract_rotation_mueller(
+            F,
+            wp.quatf(0.0, 0.0, 0.0, 1.0),
+            _MUELLER_CENTER_ROT_ITERS,
+        )
+        c_d, g_d0, g_d1, g_d2, g_d3, g_d4, g_d5, g_d6, g_d7 = _integrated_arap_constraint_gradients(
+            x0,
+            x1,
+            x2,
+            x3,
+            x4,
+            x5,
+            x6,
+            x7,
+            inv_rest,
+            center_rotation,
+        )
+    else:
+        c_h = det_f - gamma_offset
+        u_h = c_h * c_h
+        dUH_dF = dJ_dF * (wp.float32(2.0) * c_h)
+        g_h0 = dUH_dF * b0
+        g_h1 = dUH_dF * b1
+        g_h2 = dUH_dF * b2
+        g_h3 = dUH_dF * b3
+        g_h4 = dUH_dF * b4
+        g_h5 = dUH_dF * b5
+        g_h6 = dUH_dF * b6
+        g_h7 = dUH_dF * b7
 
-    g_d0 = dCD_dF * b0
-    g_d1 = dCD_dF * b1
-    g_d2 = dCD_dF * b2
-    g_d3 = dCD_dF * b3
-    g_d4 = dCD_dF * b4
-    g_d5 = dCD_dF * b5
-    g_d6 = dCD_dF * b6
-    g_d7 = dCD_dF * b7
+        # Full/integrated strain row: this is the xpbd-fem ingredient
+        # that makes the 8-node hex respond to hourglass modes.
+        u_d, g_d0, g_d1, g_d2, g_d3, g_d4, g_d5, g_d6, g_d7 = _integrated_strain_energy_gradients(
+            x0,
+            x1,
+            x2,
+            x3,
+            x4,
+            x5,
+            x6,
+            x7,
+            inv_rest,
+        )
 
     # Schur-complement matrix entries.
     a_hh = (
@@ -683,20 +991,47 @@ def soft_hexahedron_iterate_at(
         + wp.dot(g_d7, dx7)
     )
 
-    A11 = (wp.float32(1.0) + gamma_h) * a_hh + bias_h
-    A22 = (wp.float32(1.0) + gamma_d) * a_dd + bias_d
+    A11 = (wp.float32(1.0) + gamma_h) * a_hh
+    A22 = (wp.float32(1.0) + gamma_d) * a_dd
     A12 = a_hd
 
-    b_h = c_h + bias_h * lambda_h + gamma_h * grad_h_dot_dx
-    b_d = c_d + bias_d * lambda_d + gamma_d * grad_d_dot_dx
+    dlam_h = wp.float32(0.0)
+    dlam_d = wp.float32(0.0)
+    lambda_h = read_float(constraints, _OFF_LAMBDA_SUM_H, cid)
+    lambda_d = read_float(constraints, _OFF_LAMBDA_SUM_D, cid)
 
-    det_a = A11 * A22 - A12 * A12
-    if det_a < _DET_FLOOR:
-        return
+    if strain_model == _SOFT_HEX_STRAIN_MODEL_ARAP:
+        A11 = A11 + bias_h
+        A22 = A22 + bias_d
+        rhs_h = c_h + bias_h * lambda_h + gamma_h * grad_h_dot_dx
+        rhs_d = c_d + bias_d * lambda_d + gamma_d * grad_d_dot_dx
 
-    inv_det = wp.float32(1.0) / det_a
-    dlam_h = -(A22 * b_h - A12 * b_d) * inv_det
-    dlam_d = -(-A12 * b_h + A11 * b_d) * inv_det
+        det_a = A11 * A22 - A12 * A12
+        if det_a > _DET_FLOOR:
+            inv_det = wp.float32(1.0) / det_a
+            dlam_h = -(A22 * rhs_h - A12 * rhs_d) * inv_det
+            dlam_d = -(-A12 * rhs_h + A11 * rhs_d) * inv_det
+        else:
+            if A11 > wp.float32(0.0):
+                dlam_h = -rhs_h / A11
+            if A22 > wp.float32(0.0):
+                dlam_d = -rhs_d / A22
+    else:
+        # Energy XPBD uses ``-2 U`` as the right-hand side and scales
+        # the compliance regulariser by the current energy. This
+        # mirrors xpbd-fem's ``EnergyXpbdConstrainSimultaneous`` for the
+        # two-row strain/volume block.
+        A11 = A11 + wp.float32(2.0) * u_h * bias_h
+        A22 = A22 + wp.float32(2.0) * u_d * bias_d
+        rhs_h = -wp.float32(2.0) * u_h - gamma_h * grad_h_dot_dx
+        rhs_d = -wp.float32(2.0) * u_d - gamma_d * grad_d_dot_dx
+
+        det_a = A11 * A22 - A12 * A12
+        if det_a < _DET_FLOOR:
+            return
+        inv_det = wp.float32(1.0) / det_a
+        dlam_h = (A22 * rhs_h - A12 * rhs_d) * inv_det
+        dlam_d = (-A12 * rhs_h + A11 * rhs_d) * inv_det
 
     dlam_h = dlam_h * sor_boost
     dlam_d = dlam_d * sor_boost
@@ -719,8 +1054,9 @@ def soft_hexahedron_iterate_at(
     write_position_unified(bodies, particles, copy_state, body6, slot6, num_bodies, x6)
     write_position_unified(bodies, particles, copy_state, body7, slot7, num_bodies, x7)
 
-    write_float(constraints, _OFF_LAMBDA_SUM_H, cid, lambda_h + dlam_h)
-    write_float(constraints, _OFF_LAMBDA_SUM_D, cid, lambda_d + dlam_d)
+    if strain_model == _SOFT_HEX_STRAIN_MODEL_ARAP:
+        write_float(constraints, _OFF_LAMBDA_SUM_H, cid, lambda_h + dlam_h)
+        write_float(constraints, _OFF_LAMBDA_SUM_D, cid, lambda_d + dlam_d)
 
 
 # ---------------------------------------------------------------------------
@@ -739,12 +1075,13 @@ def soft_hex_init_rows_from_arrays_kernel(
     particle_q: wp.array[wp.vec3f],
     # [num_hexes, 4] = (k_mu, k_lambda, beta_h, beta_d).
     hex_materials: wp.array2d[wp.float32],
+    strain_model: wp.int32,
 ):
     """Stamp one soft-hexahedron row from caller-supplied arrays.
 
     Builds ``inv_rest = J^{-T}`` and ``rest_volume = 8 det(J)`` from
     the rest particle positions of the 8 corners. Computes the
-    stable Neo-Hookean compliances::
+    mixed strain/volume compliances::
 
         gamma   = 1 + mu / lambda
         alpha^H = 1 / (lambda * V_rest)
@@ -753,7 +1090,8 @@ def soft_hex_init_rows_from_arrays_kernel(
     Body indices follow the unified convention: rigid bodies occupy
     ``[0, num_bodies)`` and particles occupy ``[num_bodies,
     num_bodies + num_particles)``. This kernel applies the
-    ``+num_bodies`` shift.
+    ``+num_bodies`` shift. ``strain_model`` selects either integrated
+    trace strain or integrated ARAP strain for all stamped hexes.
     """
     h = wp.tid()
     cid = cid_offset + h
@@ -776,6 +1114,7 @@ def soft_hex_init_rows_from_arrays_kernel(
     soft_hexahedron_set_body6(constraints, cid, num_bodies + p5)
     soft_hexahedron_set_body7(constraints, cid, num_bodies + p6)
     soft_hexahedron_set_body8(constraints, cid, num_bodies + p7)
+    soft_hexahedron_set_strain_model(constraints, cid, strain_model)
 
     X0 = particle_q[p0]
     X1 = particle_q[p1]

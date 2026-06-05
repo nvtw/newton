@@ -98,8 +98,8 @@ CONSTRAINT_TYPE_CLOTH_BENDING = wp.constant(wp.int32(12))
 #: system. Endpoints body1..body4 are particle indices. See
 #: :mod:`constraint_soft_tet_neohookean`.
 CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN = wp.constant(wp.int32(13))
-#: 8-node trilinear-hex co-rotational ARAP, single deformation gradient
-#: evaluated at the hex center (1-point Gauss). Endpoints body1..body8 are
+#: 8-node trilinear hex soft-body constraint with selectable integrated
+#: strain and reduced center volume rows. Endpoints body1..body8 are
 #: particle indices. See :mod:`constraint_soft_hexahedron`.
 CONSTRAINT_TYPE_SOFT_HEXAHEDRON = wp.constant(wp.int32(14))
 

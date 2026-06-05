@@ -69,6 +69,8 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_hexahedron import (
     SOFT_HEX_DWORDS,
+    SOFT_HEX_STRAIN_MODEL_ARAP,
+    SOFT_HEX_STRAIN_MODEL_TRACE,
     SOFT_HEX_TIME_US_OFFSET,
     soft_hex_init_rows_from_arrays_kernel,
 )
@@ -204,6 +206,28 @@ __all__ = [
 #: Default contact-detection gap [m]. 5 cm is generous so PhoenX's speculative
 #: branch decelerates closing bodies while still apart. Override for MEMS/vehicles.
 DEFAULT_SHAPE_GAP: float = 0.05
+
+
+def _soft_hex_strain_model_value(strain_model: str | int) -> int:
+    """Return the internal soft-hex strain model id."""
+    if isinstance(strain_model, str):
+        normalized = strain_model.strip().lower().replace("-", "_")
+        if normalized in {"trace", "xpbd_fem", "xpbd_fem_trace", "invariant"}:
+            return SOFT_HEX_STRAIN_MODEL_TRACE
+        if normalized in {"arap", "integrated_arap"}:
+            return SOFT_HEX_STRAIN_MODEL_ARAP
+        raise ValueError(
+            "soft hex strain_model must be 'trace'/'xpbd_fem' or 'arap' "
+            f"(got {strain_model!r})"
+        )
+    value = int(strain_model)
+    if value in (SOFT_HEX_STRAIN_MODEL_TRACE, SOFT_HEX_STRAIN_MODEL_ARAP):
+        return value
+    raise ValueError(
+        "soft hex strain_model must be SOFT_HEX_STRAIN_MODEL_TRACE "
+        f"({SOFT_HEX_STRAIN_MODEL_TRACE}) or SOFT_HEX_STRAIN_MODEL_ARAP "
+        f"({SOFT_HEX_STRAIN_MODEL_ARAP}) (got {strain_model!r})"
+    )
 
 
 def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]:
@@ -1752,6 +1776,8 @@ class PhoenXWorld:
         hex_materials: wp.array,  # wp.array2d[wp.float32], shape [num_hexahedra, 4] = (k_mu, k_lambda, beta_h, beta_d)
         particle_qd: wp.array | None = None,  # wp.array[wp.vec3f], initial particle velocities (optional)
         particle_inv_mass: wp.array | None = None,  # wp.array[wp.float32], optional inverse masses
+        *,
+        strain_model: str | int = "trace",
     ) -> None:
         """Stamp soft-hexahedron constraint rows from caller-supplied arrays.
 
@@ -1760,10 +1786,13 @@ class PhoenXWorld:
         num_soft_hexahedra)`` in the :class:`ConstraintContainer`.
         Builds ``inv_rest = J^{-T}`` and ``rest_volume = 8 det(J)``
         from the rest corner positions of each hex; converts the per-
-        element ``(k_mu, k_lambda)`` Lame pair into the stable
-        Neo-Hookean compliances ``alpha^H = 1/(k_lambda * V)``,
+        element ``(k_mu, k_lambda)`` Lame pair into mixed strain/volume
+        compliances ``alpha^H = 1/(k_lambda * V)``,
         ``alpha^D = 1/(k_mu * V)`` and the rest offset
-        ``gamma = 1 + k_mu / k_lambda``.
+        ``gamma = 1 + k_mu / k_lambda``. ``strain_model="trace"``
+        uses the xpbd-fem-style integrated trace strain. ``"arap"``
+        uses integrated per-Gauss-point ARAP strain coupled with the
+        same center volume row.
 
         Caller is responsible for stamping ``hex_indices[h, 0..7]`` in
         canonical isoparametric 8-corner order (see
@@ -1778,14 +1807,19 @@ class PhoenXWorld:
                 ``(k_mu, k_lambda, beta_h, beta_d)`` per hex.
                 ``k_mu`` / ``k_lambda`` are the second / first Lame
                 parameters [Pa]; ``beta_h`` / ``beta_d`` are Macklin
-                XPBD damping coefficients on the hydrostatic / deviatoric
-                rows [1/s] (``0`` => bare XPBD).
+                XPBD damping coefficients on the volume / strain rows
+                [1/s] (``0`` => bare XPBD).
             particle_qd: Optional initial velocities. ``None`` leaves
                 :attr:`particles.velocity` at its default (zeros from
                 container construction).
             particle_inv_mass: Optional inverse-mass array. ``None``
                 leaves :attr:`particles.inverse_mass` at its default.
                 Pin a particle by setting its inv_mass to 0.
+            strain_model: ``"trace"``/``"xpbd_fem"`` for the default
+                integrated trace strain, or ``"arap"`` for integrated
+                ARAP strain. Integer constants
+                ``SOFT_HEX_STRAIN_MODEL_TRACE`` and
+                ``SOFT_HEX_STRAIN_MODEL_ARAP`` are also accepted.
 
         Idempotent across repeated calls; safe to combine with
         :meth:`populate_soft_tetrahedra_from_model` in mixed scenes
@@ -1812,6 +1846,7 @@ class PhoenXWorld:
                 f"populate_soft_hexahedra_from_arrays: hex_materials must be "
                 f"[N, 4] = (k_mu, k_lambda, beta_h, beta_d) (got shape {tuple(hex_materials.shape)})"
             )
+        strain_model_value = _soft_hex_strain_model_value(strain_model)
         wp.copy(self.particles.position, particle_q)
         if particle_qd is not None:
             wp.copy(self.particles.velocity, particle_qd)
@@ -1827,6 +1862,7 @@ class PhoenXWorld:
                 hex_indices,
                 particle_q,
                 hex_materials,
+                wp.int32(strain_model_value),
             ],
             device=self.device,
         )

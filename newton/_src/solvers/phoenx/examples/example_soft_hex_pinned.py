@@ -6,7 +6,7 @@
 Minimal scene exercising :mod:`constraint_soft_hexahedron`. A single
 8-node trilinear hex (one constraint, eight particles) hangs from a
 pinned face under gravity. No collisions, no rigid bodies -- the test
-case for the hex co-rotational ARAP energy in isolation.
+case for the hex mixed strain/volume energy in isolation.
 
 Geometry (rest pose, axis-aligned cube of side ``cube_size`` centered
 at the origin at altitude ``base_height``):
@@ -20,12 +20,11 @@ at the origin at altitude ``base_height``):
     corner 6: (+, +, +)   <--
     corner 7: (-, +, +)   <--
 
-The hex uses the stable block Neo-Hookean energy from Smith et al.
-2018, projected as two coupled XPBD multipliers (hydrostatic +
-deviatoric) solved via a 2x2 Schur complement -- the same formulation
-the existing ``constraint_soft_tet_neohookean`` uses for tets. Volume
-preservation is built into the constraint via the hydrostatic
-``det(F) - gamma`` row.
+The default hex uses an xpbd-fem-style split: integrated trilinear
+trace strain at eight Gauss points plus a reduced center volume row,
+projected as two coupled XPBD energy rows via a 2x2 Schur complement.
+Pass ``--strain-model arap`` to use integrated per-Gauss-point ARAP
+strain, still coupled with the center volume row in the same 2x2 block.
 
 The default pins the 4 top-face corners and lets the bottom face hang
 under gravity. Pass ``--pin-mode corner`` to pin only one corner --
@@ -94,9 +93,12 @@ class Example:
         density: Particle density [kg / m^3]. Each corner gets mass =
             ``density * cube_volume / 8``.
         youngs_modulus: Stiffness [Pa]. Drives ``alpha_mu = 1 / k_mu``.
-        poisson_ratio: Poisson ratio in ``(-1, 0.5)``. Ignored by the
-            pure-ARAP variant beyond converting (E, nu) -> mu.
+        poisson_ratio: Poisson ratio in ``(-1, 0.5)``. Used to convert
+            ``(E, nu)`` to Lame parameters.
         beta_mu: Macklin XPBD damping [1/s].
+        strain_model: ``"trace"`` for the default integrated trace
+            strain or ``"arap"`` for integrated per-Gauss-point ARAP
+            strain.
         pin_mode: ``"top_face"`` (default; pins corners 4..7) or
             ``"corner"`` (pins only :attr:`pin_corner_index`). With
             ``corner`` mode the chosen corner should be on the top
@@ -119,9 +121,12 @@ class Example:
         youngs_modulus: float = 5.0e6,
         poisson_ratio: float = 0.3,
         beta_mu: float = 5.0,
+        strain_model: str = "trace",
         pin_mode: str = "top_face",
         pin_corner_index: int = 6,
     ):
+        if strain_model not in ("trace", "xpbd_fem", "arap"):
+            raise ValueError(f"strain_model must be 'trace', 'xpbd_fem', or 'arap' (got {strain_model!r})")
         if pin_mode not in ("top_face", "corner"):
             raise ValueError(f"pin_mode must be 'top_face' or 'corner' (got {pin_mode!r})")
         if not 0 <= int(pin_corner_index) < 8:
@@ -132,6 +137,7 @@ class Example:
         self.cube_size = float(cube_size)
         self.base_height = float(base_height)
         self.density = float(density)
+        self.strain_model = strain_model
         self.pin_mode = pin_mode
         self.pin_corner_index = int(pin_corner_index)
 
@@ -162,7 +168,7 @@ class Example:
             self._pinned_indices = np.array([self.pin_corner_index], dtype=np.int32)
         inv_mass[self._pinned_indices] = 0.0
         # Lame parameters from (E, nu).
-        self.k_mu, self.k_lambda = soft_tet_lame_from_youngs_poisson(
+        self.k_lambda, self.k_mu = soft_tet_lame_from_youngs_poisson(
             youngs_modulus=float(youngs_modulus), poisson_ratio=float(poisson_ratio)
         )
 
@@ -220,6 +226,7 @@ class Example:
             hex_materials=hex_materials,
             particle_qd=particle_qd,
             particle_inv_mass=particle_inv_mass,
+            strain_model=self.strain_model,
         )
         self._rest_corners = rest_corners.copy()
         self._pinned_rest = rest_corners[self._pinned_indices].copy()
@@ -365,13 +372,23 @@ if __name__ == "__main__":
     parser.add_argument("--poisson-ratio", type=float, default=0.3)
     parser.add_argument("--beta-mu", type=float, default=5.0)
     parser.add_argument(
+        "--strain-model",
+        choices=("trace", "xpbd_fem", "arap"),
+        default="trace",
+        help=(
+            "Hex strain model. 'trace' uses the default xpbd-fem-style "
+            "integrated trace strain; 'arap' uses integrated per-Gauss-point "
+            "ARAP strain coupled with the same center volume row."
+        ),
+    )
+    parser.add_argument(
         "--pin-mode",
         choices=("top_face", "corner"),
         default="top_face",
         help=(
             "How to anchor the hex. 'top_face' (default) pins the 4 top-face "
             "corners and lets the bottom face hang under gravity -- a "
-            "well-conditioned demo for the Neo-Hookean coupled solve. "
+            "well-conditioned demo for the mixed strain/volume coupled solve. "
             "'corner' pins a single corner; single-element + single-pin is "
             "degenerate for any XPBD constraint (the unsupported rigid-motion "
             "DOFs let high-stiffness PGS overshoot) so this mode is for "
@@ -399,6 +416,7 @@ if __name__ == "__main__":
         youngs_modulus=args.youngs_modulus,
         poisson_ratio=args.poisson_ratio,
         beta_mu=args.beta_mu,
+        strain_model=args.strain_model,
         pin_mode=args.pin_mode,
         pin_corner_index=args.pin_corner_index,
     )
