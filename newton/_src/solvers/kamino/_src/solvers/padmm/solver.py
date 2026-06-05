@@ -518,7 +518,7 @@ class PADMMSolver:
         Args:
             problem (DualProblem): The dual forward dynamics problem to be solved.
         """
-        # Fused: De Saxce correction + velocity bias in a single kernel
+        # Compute De Saxce correction and velocity bias in one launch.
         self._update_desaxce_and_velocity_bias(problem, self._data.state.y_p, self._data.state.z_p)
 
         # Compute the unconstrained solution and store in the primal variables
@@ -551,21 +551,21 @@ class PADMMSolver:
         """
         Performs a single PADMM solver iteration with Nesterov acceleration.
 
-        Uses fused kernels to reduce kernel launch overhead:
-        - _compute_desaxce_correction_and_velocity_bias: fuses De Saxce + velocity bias
-        - _project_dual_convergence_accel_kernel: fuses projection, dual update,
+        Uses multi-stage kernels to reduce kernel launch overhead:
+        - _compute_desaxce_correction_and_velocity_bias computes De Saxce correction and velocity bias
+        - _project_dual_convergence_accel_kernel advances projection, dual update,
           residual reduction, convergence, acceleration, and previous-state caching
 
         Args:
             problem (DualProblem): The dual forward dynamics problem to be solved.
         """
-        # Fused: De Saxce correction + velocity bias in a single kernel
+        # Compute De Saxce correction and velocity bias in one launch.
         self._update_desaxce_and_velocity_bias(problem, self._data.state.y_hat, self._data.state.z_hat)
 
         # Compute the unconstrained solution and store in the primal variables
         self._update_unconstrained_solution(problem)
 
-        # Fused: projection + dual update + residual reduction + convergence.
+        # Advance projection, dual update, residual status, and acceleration state.
         self._update_projection_dual_convergence_accel(problem)
 
         # Update sparse Delassus regularization if penalty was updated adaptively
@@ -576,7 +576,7 @@ class PADMMSolver:
         if self._collect_info:
             self._update_solver_info(problem)
 
-        # Nesterov acceleration + previous-state caching is fused above.
+        # Nesterov acceleration and previous-state caching are handled above.
 
     ###
     # Internals - Warm-starting
@@ -1074,7 +1074,7 @@ class PADMMSolver:
         self._update_complementarity_residuals(problem)
 
     def _update_projection_dual_convergence_accel(self, problem: DualProblem):
-        """Fused projection, dual update, convergence check, and acceleration cache."""
+        """Advance accelerated PADMM projection, residual status, and state cache."""
         tile_size = get_tile_size(self._size.max_of_max_total_cts)
         block_dim = get_block_dim(tile_size, ratio=2, min_size=1)
         wp.launch_tiled(
