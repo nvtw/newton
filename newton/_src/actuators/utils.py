@@ -18,7 +18,7 @@ def _require_onnx():
     except ImportError as exc:  # pragma: no cover - exercised only on missing dep
         raise ImportError(
             "Loading neural-controller checkpoints requires the optional `onnx` package. "
-            "Install it with `pip install onnx>=1.16.0` or `pip install newton[onnx]`."
+            "Install it with `pip install newton[onnx]` (includes warp-nn)."
         ) from exc
     return onnx
 
@@ -79,9 +79,9 @@ def load_checkpoint(
     if _looks_like_torch_checkpoint(path):
         return _load_torch_checkpoint(path, device=device)
     metadata = load_metadata(path)
-    # Deferred import: keeps the heavy onnx_runtime module (Warp kernels, etc.)
-    # off the import path of every newton.actuators consumer.
-    from ..utils.onnx_runtime import OnnxRuntime  # noqa: PLC0415
+    # Deferred import: keeps warp-nn's runtime off the import path of every
+    # newton.actuators consumer.
+    from warp_nn.runtime import OnnxRuntime  # noqa: PLC0415
 
     runtime = OnnxRuntime(path, device=device, batch_size=batch_size, input_batch_axes=input_batch_axes)
     return runtime, metadata

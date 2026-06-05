@@ -129,7 +129,7 @@ __all__ += [
 # ONNX inference runtime
 # ==================================================================================
 
-from ._src.utils.onnx_runtime import OnnxRuntime  # noqa: E402
+from warp_nn.runtime import OnnxRuntime  # noqa: E402
 
 __all__ += [
     "OnnxRuntime",
