@@ -89,6 +89,9 @@
 - Fix hydroelastic SDF contact surfaces dropping the central region under deep interpenetration. The broadphase used to skip subgrids whose centers were deeper than the SDF narrow band, leaving a hole in the contact patch when overlap exceeded the narrow-band thickness. Broadphase now visits every subgrid in the SDF coarse grid (block coordinates are derived arithmetically from per-shape SDF coarse-texture dimensions); sampling at far-inside locations is correct because the coarse SDF is dense and accurate everywhere. On-disk SDF caches written by earlier versions are transparently re-cooked on first load (`_sdf_cache.CACHE_FORMAT_VERSION` bumped to `2`)
 - Fix `SolverXPBD` `body_parent_f` reporting to include `Control.joint_f` contributions and accumulate multiple inbound joint contributions, matching the `SolverMuJoCo` and `SolverFeatherstone` convention.
 - Fix MJCF `xyaxes` parsing to treat the second vector as Y and derive Z from X cross Y.
+- Fix MJCF `euler` producing wrong orientations for multi-component angles (used extrinsic instead of intrinsic rotation).
+- Fix MJCF reading only the first `<compiler>` element; attributes are now merged across all elements in document order including `<include>`-expanded children.
+- Fix MJCF worldbody static geoms bypassing the visual/collider class filter, so `parse_visuals=False` now drops visual-class geoms attached directly to `<worldbody>` too (previously only filtered geoms inside `<body>` elements).
 - Fix `ViewerFile` playback dropping namespaced custom attributes (e.g. `model.mujoco.geom_solimp`) when restoring into a fresh `Model`.
 - Fix `brick_stacking` example contact gaps to avoid oversized contact envelopes around the robot, table, and ground.
 - Fix `ModelBuilder.collapse_fixed_joints()` producing a NaN center of mass when collapsing joints between zero-mass bodies.
