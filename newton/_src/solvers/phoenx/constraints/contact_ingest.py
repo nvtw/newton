@@ -1276,9 +1276,9 @@ def gather_contact_warmstart(
     """Copy prev-frame state into ``cc`` for matched contacts; initialise
     PhoenX-style for unmatched contacts.
 
-    Called after the pointer-swap (``cc.prev_lambdas`` now holds last
-    step's persistent state; ``cc.lambdas`` is scratch) but before
-    :func:`contact_prepare_for_iteration_at`.
+    Called after the pointer-swap (``cc.prev_impulses`` / ``cc.prev_lambdas``
+    now hold last step's persistent state; ``cc.impulses`` / ``cc.lambdas`` are
+    scratch) but before :func:`contact_prepare_for_iteration_at`.
     """
     wp.launch(
         kernel=_contact_warmstart_gather_kernel,

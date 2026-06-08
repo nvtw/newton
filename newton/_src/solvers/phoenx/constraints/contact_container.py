@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-contact persistent + per-substep state, keyed by sorted-buffer index k.
 
-* ``lambdas`` -- persistent warm-start (impulses, normal/tangent frame, anchors);
-  double-buffered against ``prev_lambdas`` via pointer swap.
+* ``impulses`` -- mutable accumulated normal/tangent impulse rows;
+  double-buffered against ``prev_impulses`` via pointer swap.
+* ``lambdas`` -- read-mostly persistent contact manifold data (normal, tangent,
+  anchors, barycentrics), double-buffered against ``prev_lambdas``.
 * ``derived`` -- per-substep scratch (eff masses, biases); rebuilt every prepare.
 
-Both buffers are ``[dword, k]`` with k inner for coalesced loads.
+All buffers are ``[dword, k]`` with k inner for coalesced loads.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
 __all__ = [
     "CC_DERIVED_DWORDS_PER_CONTACT",
     "CC_DWORDS_PER_CONTACT",
+    "CC_IMPULSE_DWORDS_PER_CONTACT",
     "CC_LAMBDA_DWORDS_PER_CONTACT",
     "ContactContainer",
     "cc_get_bias",
@@ -72,16 +75,16 @@ __all__ = [
 ]
 
 
-#: Dwords of persistent impulse per contact: normal + two tangent lambdas.
-CC_LAMBDA_DWORDS_PER_CONTACT: int = 3
+#: Dwords of mutable persistent impulse per contact: normal + two tangents.
+CC_IMPULSE_DWORDS_PER_CONTACT: int = 3
 
-#: 21 = lam_n + lam_t1 + lam_t2 + normal(3) + tangent1(3) + local_p0(3) + local_p1(3) +
-#: side0_bary(3) + side1_bary(3). The two ``bary`` slots are populated by the contact
-#: ingest when a side is a cloth triangle (``shape_endpoints[s].kind == 1``); rigid
-#: sides leave them at zero. Read by :func:`_read_endpoint_state` /
-#: :func:`_apply_endpoint_impulse` (Phase 5) to distribute contact impulses across
-#: the three triangle nodes via barycentric weights.
-CC_DWORDS_PER_CONTACT: int = 21
+#: Backwards-compatible alias for the mutable impulse-row count.
+CC_LAMBDA_DWORDS_PER_CONTACT: int = CC_IMPULSE_DWORDS_PER_CONTACT
+
+#: 18 = normal(3) + tangent1(3) + local_p0(3) + local_p1(3) + side0_bary(3)
+#: + side1_bary(3). The two ``bary`` slots are populated by contact ingest when
+#: a side is a cloth triangle; rigid sides leave them at zero.
+CC_DWORDS_PER_CONTACT: int = 18
 
 #: 15 = eff_n + eff_t1 + eff_t2 + bias + bias_t1 + bias_t2 + pd_gamma + pd_bias +
 #: pd_eff_soft + r0(3) + r1(3). pd_* are non-zero only for soft contacts (user
@@ -94,24 +97,24 @@ CC_DERIVED_DWORDS_PER_CONTACT: int = 15
 _CC_OFF_NORMAL_LAMBDA = wp.constant(0)
 _CC_OFF_TANGENT1_LAMBDA = wp.constant(1)
 _CC_OFF_TANGENT2_LAMBDA = wp.constant(2)
-_CC_OFF_NORMAL_X = wp.constant(3)
-_CC_OFF_NORMAL_Y = wp.constant(4)
-_CC_OFF_NORMAL_Z = wp.constant(5)
-_CC_OFF_TANGENT1_X = wp.constant(6)
-_CC_OFF_TANGENT1_Y = wp.constant(7)
-_CC_OFF_TANGENT1_Z = wp.constant(8)
-_CC_OFF_LOCAL_P0_X = wp.constant(9)
-_CC_OFF_LOCAL_P0_Y = wp.constant(10)
-_CC_OFF_LOCAL_P0_Z = wp.constant(11)
-_CC_OFF_LOCAL_P1_X = wp.constant(12)
-_CC_OFF_LOCAL_P1_Y = wp.constant(13)
-_CC_OFF_LOCAL_P1_Z = wp.constant(14)
-_CC_OFF_SIDE0_BARY_X = wp.constant(15)
-_CC_OFF_SIDE0_BARY_Y = wp.constant(16)
-_CC_OFF_SIDE0_BARY_Z = wp.constant(17)
-_CC_OFF_SIDE1_BARY_X = wp.constant(18)
-_CC_OFF_SIDE1_BARY_Y = wp.constant(19)
-_CC_OFF_SIDE1_BARY_Z = wp.constant(20)
+_CC_OFF_NORMAL_X = wp.constant(0)
+_CC_OFF_NORMAL_Y = wp.constant(1)
+_CC_OFF_NORMAL_Z = wp.constant(2)
+_CC_OFF_TANGENT1_X = wp.constant(3)
+_CC_OFF_TANGENT1_Y = wp.constant(4)
+_CC_OFF_TANGENT1_Z = wp.constant(5)
+_CC_OFF_LOCAL_P0_X = wp.constant(6)
+_CC_OFF_LOCAL_P0_Y = wp.constant(7)
+_CC_OFF_LOCAL_P0_Z = wp.constant(8)
+_CC_OFF_LOCAL_P1_X = wp.constant(9)
+_CC_OFF_LOCAL_P1_Y = wp.constant(10)
+_CC_OFF_LOCAL_P1_Z = wp.constant(11)
+_CC_OFF_SIDE0_BARY_X = wp.constant(12)
+_CC_OFF_SIDE0_BARY_Y = wp.constant(13)
+_CC_OFF_SIDE0_BARY_Z = wp.constant(14)
+_CC_OFF_SIDE1_BARY_X = wp.constant(15)
+_CC_OFF_SIDE1_BARY_Y = wp.constant(16)
+_CC_OFF_SIDE1_BARY_Z = wp.constant(17)
 
 _CC_OFF_EFF_N = wp.constant(0)
 _CC_OFF_EFF_T1 = wp.constant(1)
@@ -137,42 +140,44 @@ class ContactContainer:
     ``(dwords, rigid_contact_max)`` with k inner. k matches Newton's per-contact
     arrays."""
 
+    impulses: wp.array2d[wp.float32]
+    prev_impulses: wp.array2d[wp.float32]
     lambdas: wp.array2d[wp.float32]
     prev_lambdas: wp.array2d[wp.float32]
     derived: wp.array2d[wp.float32]
 
 
-# Persistent (lambdas) accessors keyed by contact index k.
+# Mutable impulse accessors keyed by contact index k.
 
 
 @wp.func
 def cc_get_normal_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.lambdas, _CC_OFF_NORMAL_LAMBDA, k)
+    return read2d_f32(cc.impulses, _CC_OFF_NORMAL_LAMBDA, k)
 
 
 @wp.func
 def cc_set_normal_lambda(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.lambdas, _CC_OFF_NORMAL_LAMBDA, k, v)
+    write2d_f32(cc.impulses, _CC_OFF_NORMAL_LAMBDA, k, v)
 
 
 @wp.func
 def cc_get_tangent1_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.lambdas, _CC_OFF_TANGENT1_LAMBDA, k)
+    return read2d_f32(cc.impulses, _CC_OFF_TANGENT1_LAMBDA, k)
 
 
 @wp.func
 def cc_set_tangent1_lambda(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.lambdas, _CC_OFF_TANGENT1_LAMBDA, k, v)
+    write2d_f32(cc.impulses, _CC_OFF_TANGENT1_LAMBDA, k, v)
 
 
 @wp.func
 def cc_get_tangent2_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.lambdas, _CC_OFF_TANGENT2_LAMBDA, k)
+    return read2d_f32(cc.impulses, _CC_OFF_TANGENT2_LAMBDA, k)
 
 
 @wp.func
 def cc_set_tangent2_lambda(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.lambdas, _CC_OFF_TANGENT2_LAMBDA, k, v)
+    write2d_f32(cc.impulses, _CC_OFF_TANGENT2_LAMBDA, k, v)
 
 
 @wp.func
@@ -282,17 +287,17 @@ def cc_set_side1_bary(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
 
 @wp.func
 def cc_get_prev_normal_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.prev_lambdas, _CC_OFF_NORMAL_LAMBDA, k)
+    return read2d_f32(cc.prev_impulses, _CC_OFF_NORMAL_LAMBDA, k)
 
 
 @wp.func
 def cc_get_prev_tangent1_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_LAMBDA, k)
+    return read2d_f32(cc.prev_impulses, _CC_OFF_TANGENT1_LAMBDA, k)
 
 
 @wp.func
 def cc_get_prev_tangent2_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT2_LAMBDA, k)
+    return read2d_f32(cc.prev_impulses, _CC_OFF_TANGENT2_LAMBDA, k)
 
 
 @wp.func
@@ -471,6 +476,8 @@ def contact_container_zeros(
     must match Newton's Contacts buffer."""
     n = max(1, int(rigid_contact_max))
     cc = ContactContainer()
+    cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    cc.prev_impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
@@ -478,5 +485,6 @@ def contact_container_zeros(
 
 
 def contact_container_swap_prev_current(cc: ContactContainer) -> None:
-    """Pointer-swap prev/current persistent lambdas. Derived is not swapped."""
+    """Pointer-swap prev/current persistent contact state. Derived is not swapped."""
+    cc.impulses, cc.prev_impulses = cc.prev_impulses, cc.impulses
     cc.lambdas, cc.prev_lambdas = cc.prev_lambdas, cc.lambdas

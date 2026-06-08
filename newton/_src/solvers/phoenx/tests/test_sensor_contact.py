@@ -123,15 +123,12 @@ def _make_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
     )
 
 
-# ContactContainer's ``lambdas`` layout (mirrors the constants in
-# ``contact_container.py``). We need the row indices to write known
-# impulse / frame data into the buffer from the host without
-# reaching into private API.
-_LAM_ROW_NORMAL_LAMBDA = 0
-_LAM_ROW_TANGENT1_LAMBDA = 1
-_LAM_ROW_TANGENT2_LAMBDA = 2
-_LAM_ROW_NORMAL_X = 3
-_LAM_ROW_TANGENT1_X = 6
+# ContactContainer host-side row layout mirrors ``contact_container.py``.
+_IMP_ROW_NORMAL_LAMBDA = 0
+_IMP_ROW_TANGENT1_LAMBDA = 1
+_IMP_ROW_TANGENT2_LAMBDA = 2
+_MAN_ROW_NORMAL_X = 0
+_MAN_ROW_TANGENT1_X = 3
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX contact-sensor tests require CUDA")
@@ -154,22 +151,22 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
         provided ``lam_n`` per slot.
         """
         cc = contact_container_zeros(n, device=device)
-        # Use ``cc.lambdas.numpy()`` to fetch a host-side copy, edit, then
-        # ``assign`` back -- this matches how ``_PhoenXScene`` mutates
-        # body buffers in test_stacking. Direct host write into
-        # ``cc.lambdas`` is supported because it's a 2D Warp array.
-        host = cc.lambdas.numpy()  # shape (15, n), float32
-        host[:] = 0.0
-        host[_LAM_ROW_NORMAL_LAMBDA, :] = np.asarray(lam_n, dtype=np.float32)
-        host[_LAM_ROW_TANGENT1_LAMBDA, :] = 0.0
-        host[_LAM_ROW_TANGENT2_LAMBDA, :] = 0.0
-        host[_LAM_ROW_NORMAL_X + 0, :] = 0.0  # n.x
-        host[_LAM_ROW_NORMAL_X + 1, :] = 0.0  # n.y
-        host[_LAM_ROW_NORMAL_X + 2, :] = 1.0  # n.z
-        host[_LAM_ROW_TANGENT1_X + 0, :] = 1.0  # t1.x (orthogonal to n)
-        host[_LAM_ROW_TANGENT1_X + 1, :] = 0.0
-        host[_LAM_ROW_TANGENT1_X + 2, :] = 0.0
-        cc.lambdas.assign(host)
+        impulse_host = cc.impulses.numpy()
+        impulse_host[:] = 0.0
+        impulse_host[_IMP_ROW_NORMAL_LAMBDA, :] = np.asarray(lam_n, dtype=np.float32)
+        impulse_host[_IMP_ROW_TANGENT1_LAMBDA, :] = 0.0
+        impulse_host[_IMP_ROW_TANGENT2_LAMBDA, :] = 0.0
+        cc.impulses.assign(impulse_host)
+
+        manifold_host = cc.lambdas.numpy()
+        manifold_host[:] = 0.0
+        manifold_host[_MAN_ROW_NORMAL_X + 0, :] = 0.0  # n.x
+        manifold_host[_MAN_ROW_NORMAL_X + 1, :] = 0.0  # n.y
+        manifold_host[_MAN_ROW_NORMAL_X + 2, :] = 1.0  # n.z
+        manifold_host[_MAN_ROW_TANGENT1_X + 0, :] = 1.0  # t1.x (orthogonal to n)
+        manifold_host[_MAN_ROW_TANGENT1_X + 1, :] = 0.0
+        manifold_host[_MAN_ROW_TANGENT1_X + 2, :] = 0.0
+        cc.lambdas.assign(manifold_host)
         return cc
 
     def _launch_readback(
@@ -258,15 +255,19 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
         device = wp.get_device("cuda:0")
         n = 1
         cc = contact_container_zeros(n, device=device)
-        host = cc.lambdas.numpy()
-        host[:] = 0.0
+        impulse_host = cc.impulses.numpy()
+        impulse_host[:] = 0.0
         # Distinct values per axis so a swap is observable.
-        host[_LAM_ROW_NORMAL_LAMBDA, 0] = 5.0  # lam_n
-        host[_LAM_ROW_TANGENT1_LAMBDA, 0] = 7.0  # lam_t1
-        host[_LAM_ROW_TANGENT2_LAMBDA, 0] = 11.0  # lam_t2
-        host[_LAM_ROW_NORMAL_X + 2, 0] = 1.0  # n = +Z
-        host[_LAM_ROW_TANGENT1_X + 0, 0] = 1.0  # t1 = +X
-        cc.lambdas.assign(host)
+        impulse_host[_IMP_ROW_NORMAL_LAMBDA, 0] = 5.0  # lam_n
+        impulse_host[_IMP_ROW_TANGENT1_LAMBDA, 0] = 7.0  # lam_t1
+        impulse_host[_IMP_ROW_TANGENT2_LAMBDA, 0] = 11.0  # lam_t2
+        cc.impulses.assign(impulse_host)
+
+        manifold_host = cc.lambdas.numpy()
+        manifold_host[:] = 0.0
+        manifold_host[_MAN_ROW_NORMAL_X + 2, 0] = 1.0  # n = +Z
+        manifold_host[_MAN_ROW_TANGENT1_X + 0, 0] = 1.0  # t1 = +X
+        cc.lambdas.assign(manifold_host)
 
         sort_perm = wp.array(np.array([0], dtype=np.int32), dtype=wp.int32, device=device)
         rigid_contact_count = wp.array(np.array([1], dtype=np.int32), dtype=wp.int32, device=device)

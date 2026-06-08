@@ -155,7 +155,7 @@ class _CompressedSoftBlock:
             wp.synchronize_device(self.device)
             contact_count = int(self.contacts.rigid_contact_count.numpy()[0])
             normals = self.contacts.rigid_contact_normal.numpy()[:contact_count]
-            lambdas = self.world._contact_container.lambdas.numpy()[0, :contact_count]
+            lambdas = self.world._contact_container.impulses.numpy()[0, :contact_count]
             vertical_impulse = float(np.sum(np.abs(normals[:, 2]) * lambdas))
             readings.append(vertical_impulse / substep_dt)
         return float(np.mean(readings))

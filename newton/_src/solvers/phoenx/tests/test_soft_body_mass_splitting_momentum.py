@@ -213,10 +213,10 @@ class _SoftCubeMassSplittingScene:
 
     def normal_lambda_sum(self) -> float:
         """Sum of the normal-impulse row across every active contact
-        column. ``ContactContainer.lambdas`` is keyed by contact index
+        column. ``ContactContainer.impulses`` is keyed by contact index
         ``k``; row 0 holds the normal impulse. Inactive columns hold
         ``0.0`` so the raw sum is well-defined."""
-        return float(self.world._contact_container.lambdas.numpy()[0, :].sum())
+        return float(self.world._contact_container.impulses.numpy()[0, :].sum())
 
 
 @unittest.skipUnless(

@@ -88,6 +88,7 @@ from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
 from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_DERIVED_DWORDS_PER_CONTACT,
     CC_DWORDS_PER_CONTACT,
+    CC_IMPULSE_DWORDS_PER_CONTACT,
     ContactContainer,
     contact_container_swap_prev_current,
     contact_container_zeros,
@@ -1190,6 +1191,8 @@ class PhoenXWorld:
 
         expected_cc_cols = max(1, int(self.rigid_contact_max))
         for name, expected_rows in (
+            ("impulses", CC_IMPULSE_DWORDS_PER_CONTACT),
+            ("prev_impulses", CC_IMPULSE_DWORDS_PER_CONTACT),
             ("lambdas", CC_DWORDS_PER_CONTACT),
             ("prev_lambdas", CC_DWORDS_PER_CONTACT),
             ("derived", CC_DERIVED_DWORDS_PER_CONTACT),

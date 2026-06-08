@@ -261,6 +261,8 @@ def _apply_permutation(
     if world.max_contact_columns > 0:
         ci = wp.array(contact_inv, dtype=wp.int32, device=device)
         world._contact_cols.data = _permute_2d(world._contact_cols.data, ci)
+        world._contact_container.impulses = _permute_2d(world._contact_container.impulses, ci)
+        world._contact_container.prev_impulses = _permute_2d(world._contact_container.prev_impulses, ci)
         world._contact_container.lambdas = _permute_2d(world._contact_container.lambdas, ci)
         world._contact_container.prev_lambdas = _permute_2d(world._contact_container.prev_lambdas, ci)
 
