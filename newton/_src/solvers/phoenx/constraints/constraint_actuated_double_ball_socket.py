@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
@@ -50,7 +49,9 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     assert_constraint_header,
     constraint_bodies_make,
+    constraint_read_multiplier,
     constraint_set_type,
+    constraint_write_multiplier,
     pd_coefficients,
     read_float,
     read_int,
@@ -539,27 +540,27 @@ _ADBS_MUL_ACC_FRICTION = wp.constant(wp.int32(11))
 @wp.func
 def _read_mul_vec3(constraints: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        read2d_f32(constraints.multipliers, off + wp.int32(0), cid),
-        read2d_f32(constraints.multipliers, off + wp.int32(1), cid),
-        read2d_f32(constraints.multipliers, off + wp.int32(2), cid),
+        constraint_read_multiplier(constraints, off + wp.int32(0), cid),
+        constraint_read_multiplier(constraints, off + wp.int32(1), cid),
+        constraint_read_multiplier(constraints, off + wp.int32(2), cid),
     )
 
 
 @wp.func
 def _write_mul_vec3(constraints: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.vec3f):
-    write2d_f32(constraints.multipliers, off + wp.int32(0), cid, v[0])
-    write2d_f32(constraints.multipliers, off + wp.int32(1), cid, v[1])
-    write2d_f32(constraints.multipliers, off + wp.int32(2), cid, v[2])
+    constraint_write_multiplier(constraints, off + wp.int32(0), cid, v[0])
+    constraint_write_multiplier(constraints, off + wp.int32(1), cid, v[1])
+    constraint_write_multiplier(constraints, off + wp.int32(2), cid, v[2])
 
 
 @wp.func
 def _read_mul_float(constraints: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.float32:
-    return read2d_f32(constraints.multipliers, off, cid)
+    return constraint_read_multiplier(constraints, off, cid)
 
 
 @wp.func
 def _write_mul_float(constraints: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.float32):
-    write2d_f32(constraints.multipliers, off, cid, v)
+    constraint_write_multiplier(constraints, off, cid, v)
 
 
 @wp.func
