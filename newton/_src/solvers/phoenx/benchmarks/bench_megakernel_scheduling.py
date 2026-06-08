@@ -10,7 +10,10 @@ loop on synthetic interaction graphs:
 * ``colored`` runs one captured kernel node per color and epoch. This is a
   naive launch-bound baseline, not PhoenX's production fast-tail path;
 * ``node_ready`` runs one persistent scan kernel that uses per-node epoch
-  counters and atomics to decide when each interaction may execute.
+  counters and atomics to decide when each interaction may execute;
+* ``world_ready`` uses the same dependency rule, but each fixed-size lane
+  group scans only one world's rows, matching PhoenX's multi-world fast-tail
+  layout more closely.
 
 Each work item now carries a PhoenX-like descriptor: family tag, endpoint
 count, row/block width, and projection mode. The payload is still arithmetic
