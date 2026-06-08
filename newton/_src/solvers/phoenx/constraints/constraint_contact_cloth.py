@@ -973,8 +973,8 @@ def _make_contact_iterate_at(
                         wp.float32(0.0),
                         BLOCK_LAMBDA_INF,
                     )
-                    d_lam_n = normal_projection[0]
-                    lam_n_new = normal_projection[1]
+                    d_lam_n = normal_projection.delta
+                    lam_n_new = normal_projection.lambda_new
                 else:
                     if is_speculative:
                         mass_coeff_n = wp.float32(1.0)
@@ -995,8 +995,8 @@ def _make_contact_iterate_at(
                         wp.float32(0.0),
                         BLOCK_LAMBDA_INF,
                     )
-                    d_lam_n = normal_projection[0]
-                    lam_n_new = normal_projection[1]
+                    d_lam_n = normal_projection.delta
+                    lam_n_new = normal_projection.lambda_new
             else:
                 if is_speculative:
                     mass_coeff_n = wp.float32(1.0)
@@ -1017,8 +1017,8 @@ def _make_contact_iterate_at(
                     wp.float32(0.0),
                     BLOCK_LAMBDA_INF,
                 )
-                d_lam_n = normal_projection[0]
-                lam_n_new = normal_projection[1]
+                d_lam_n = normal_projection.delta
+                lam_n_new = normal_projection.lambda_new
 
             fric_limit_static = mu_s * lam_n_new
             fric_limit_kinetic = mu_k * lam_n_new
@@ -1036,10 +1036,10 @@ def _make_contact_iterate_at(
                 fric_limit_static,
                 fric_limit_kinetic,
             )
-            d_lam_t1 = tangent_projection[0]
-            d_lam_t2 = tangent_projection[1]
-            lam_t1_new = tangent_projection[2]
-            lam_t2_new = tangent_projection[3]
+            d_lam_t1 = tangent_projection.delta[0]
+            d_lam_t2 = tangent_projection.delta[1]
+            lam_t1_new = tangent_projection.lambda_new[0]
+            lam_t2_new = tangent_projection.lambda_new[1]
 
             cc_set_normal_lambda(cc, k, lam_n_new)
             cc_set_tangent1_lambda(cc, k, lam_t1_new)

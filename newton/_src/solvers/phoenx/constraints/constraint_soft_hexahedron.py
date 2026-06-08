@@ -1008,10 +1008,10 @@ def soft_hexahedron_iterate_at(
         rhs_d = c_d + bias_d * lambda_d + gamma_d * grad_d_dot_dx
 
         update = block_solve_projected_xpbd_2(A11, A12, A22, rhs_h, rhs_d, lambda_h, lambda_d, sor_boost, _DET_FLOOR)
-        dlam_h = update[0]
-        dlam_d = update[1]
-        lambda_h = update[2]
-        lambda_d = update[3]
+        dlam_h = update.delta[0]
+        dlam_d = update.delta[1]
+        lambda_h = update.lambda_new[0]
+        lambda_d = update.lambda_new[1]
     else:
         # Energy XPBD uses ``-2 U`` as the right-hand side and scales
         # the compliance regulariser by the current energy. This

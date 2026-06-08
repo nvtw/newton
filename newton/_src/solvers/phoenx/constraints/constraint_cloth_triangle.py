@@ -537,10 +537,10 @@ def cloth_triangle_iterate_at(
         sor_boost,
         _CLOTH_BLOCK_DET_FLOOR,
     )
-    d_lam_lambda = update[0]
-    d_lam_mu = update[1]
-    lambda_sum_lambda = update[2]
-    lambda_sum_mu = update[3]
+    d_lam_lambda = update.delta[0]
+    d_lam_mu = update.delta[1]
+    lambda_sum_lambda = update.lambda_new[0]
+    lambda_sum_mu = update.lambda_new[1]
 
     h1_a_x = (-q * f11 + t * f10) * rest_area
     h1_a_y = (-t * f00 + q * f01) * rest_area

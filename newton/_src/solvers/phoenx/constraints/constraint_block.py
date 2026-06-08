@@ -17,6 +17,7 @@ import warp as wp
 
 __all__ = [
     "BLOCK_LAMBDA_INF",
+    "BlockScalarUpdate",
     "BlockVector2Update",
     "BlockVector3Update",
     "BlockVector4Update",
@@ -54,6 +55,12 @@ BLOCK_LAMBDA_INF = wp.constant(wp.float32(1.0e30))
 
 
 @wp.struct
+class BlockScalarUpdate:
+    delta: wp.float32
+    lambda_new: wp.float32
+
+
+@wp.struct
 class BlockVector2Update:
     delta: wp.vec2f
     lambda_new: wp.vec2f
@@ -77,13 +84,13 @@ def block_project_delta_1(
     d_lambda: wp.float32,
     lambda_min: wp.float32,
     lambda_max: wp.float32,
-) -> wp.vec2f:
-    """Project one accumulated multiplier into a box.
-
-    Returns ``(projected_delta, lambda_new)``.
-    """
+) -> BlockScalarUpdate:
+    """Project one accumulated multiplier into a box."""
     lambda_new = wp.clamp(lambda_old + d_lambda, lambda_min, lambda_max)
-    return wp.vec2f(lambda_new - lambda_old, lambda_new)
+    update = BlockScalarUpdate()
+    update.delta = lambda_new - lambda_old
+    update.lambda_new = lambda_new
+    return update
 
 
 @wp.func
@@ -93,22 +100,18 @@ def block_project_delta_sor_1(
     sor_boost: wp.float32,
     lambda_min: wp.float32,
     lambda_max: wp.float32,
-) -> wp.vec2f:
-    """Apply SOR, then project one accumulated multiplier into a box.
-
-    Returns (projected_delta, lambda_new).
-    """
+) -> BlockScalarUpdate:
+    """Apply SOR, then project one accumulated multiplier into a box."""
     return block_project_delta_1(lambda_old, d_lambda_unscaled * sor_boost, lambda_min, lambda_max)
 
 
 @wp.func
-def block_project_identity_delta_1(lambda_old: wp.float32, d_lambda: wp.float32) -> wp.vec2f:
-    """Identity-project one accumulated multiplier.
-
-    Returns (projected_delta, lambda_new).
-    """
-    lambda_new = lambda_old + d_lambda
-    return wp.vec2f(d_lambda, lambda_new)
+def block_project_identity_delta_1(lambda_old: wp.float32, d_lambda: wp.float32) -> BlockScalarUpdate:
+    """Identity-project one accumulated multiplier."""
+    update = BlockScalarUpdate()
+    update.delta = d_lambda
+    update.lambda_new = lambda_old + d_lambda
+    return update
 
 
 @wp.func
@@ -117,12 +120,12 @@ def block_project_identity_delta_2(
     lambda2_old: wp.float32,
     d_lambda1: wp.float32,
     d_lambda2: wp.float32,
-) -> wp.vec4f:
-    """Identity-project two accumulated multipliers.
-
-    Returns (projected_delta1, projected_delta2, lambda1_new, lambda2_new).
-    """
-    return wp.vec4f(d_lambda1, d_lambda2, lambda1_old + d_lambda1, lambda2_old + d_lambda2)
+) -> BlockVector2Update:
+    """Identity-project two accumulated multipliers."""
+    update = BlockVector2Update()
+    update.delta = wp.vec2f(d_lambda1, d_lambda2)
+    update.lambda_new = wp.vec2f(lambda1_old + d_lambda1, lambda2_old + d_lambda2)
+    return update
 
 
 @wp.func
@@ -132,7 +135,7 @@ def block_project_accumulated_1(
     mass_coeff: wp.float32,
     impulse_coeff: wp.float32,
     sor_boost: wp.float32,
-) -> wp.vec2f:
+) -> BlockScalarUpdate:
     """Apply soft-constraint coefficients, SOR, then identity-project one row."""
     d_lambda = (mass_coeff * d_lambda_unsoft - impulse_coeff * lambda_old) * sor_boost
     return block_project_identity_delta_1(lambda_old, d_lambda)
@@ -147,7 +150,7 @@ def block_project_accumulated_bounded_1(
     sor_boost: wp.float32,
     lambda_min: wp.float32,
     lambda_max: wp.float32,
-) -> wp.vec2f:
+) -> BlockScalarUpdate:
     """Apply soft-constraint coefficients, SOR, then clamp one row."""
     d_lambda = mass_coeff * d_lambda_unsoft - impulse_coeff * lambda_old
     return block_project_delta_sor_1(lambda_old, d_lambda, sor_boost, lambda_min, lambda_max)
@@ -234,16 +237,15 @@ def block_project_friction_delta_sor_2(
     sor_boost: wp.float32,
     static_limit: wp.float32,
     kinetic_limit: wp.float32,
-) -> wp.vec4f:
-    """Apply SOR, then project a two-row friction update.
-
-    Returns (projected_delta_t1, projected_delta_t2, lambda_t1_new,
-    lambda_t2_new).
-    """
+) -> BlockVector2Update:
+    """Apply SOR, then project a two-row friction update."""
     lambda_t1_raw = lambda_t1_old + d_lambda_t1_unscaled * sor_boost
     lambda_t2_raw = lambda_t2_old + d_lambda_t2_unscaled * sor_boost
     lambda_new = block_project_friction_circle_2(lambda_t1_raw, lambda_t2_raw, static_limit, kinetic_limit)
-    return wp.vec4f(lambda_new[0] - lambda_t1_old, lambda_new[1] - lambda_t2_old, lambda_new[0], lambda_new[1])
+    update = BlockVector2Update()
+    update.delta = wp.vec2f(lambda_new[0] - lambda_t1_old, lambda_new[1] - lambda_t2_old)
+    update.lambda_new = lambda_new
+    return update
 
 
 @wp.func
@@ -277,7 +279,7 @@ def block_solve_projected_xpbd_1(
     lambda_old: wp.float32,
     sor_boost: wp.float32,
     diag_floor: wp.float32,
-) -> wp.vec2f:
+) -> BlockScalarUpdate:
     """Solve one XPBD row, apply SOR, then identity-project lambda."""
     d_lambda = block_solve_xpbd_1(A11, rhs1, sor_boost, diag_floor)
     return block_project_identity_delta_1(lambda_old, d_lambda)
@@ -343,7 +345,7 @@ def block_solve_projected_xpbd_2(
     lambda2_old: wp.float32,
     sor_boost: wp.float32,
     det_floor: wp.float32,
-) -> wp.vec4f:
+) -> BlockVector2Update:
     """Solve a two-row XPBD block, apply SOR, then identity-project lambdas."""
     d = block_solve_xpbd_2(A11, A12, A22, rhs1, rhs2, sor_boost, det_floor)
     return block_project_identity_delta_2(lambda1_old, lambda2_old, d[0], d[1])
@@ -398,7 +400,7 @@ def block_solve_projected_xpbd_2_strict(
     lambda2_old: wp.float32,
     sor_boost: wp.float32,
     det_floor: wp.float32,
-) -> wp.vec4f:
+) -> BlockVector2Update:
     """Solve a strict two-row XPBD block, apply SOR, then identity-project lambdas."""
     d = block_solve_xpbd_2_strict(A11, A12, A22, rhs1, rhs2, sor_boost, det_floor)
     return block_project_identity_delta_2(lambda1_old, lambda2_old, d[0], d[1])
@@ -412,7 +414,7 @@ def block_solve_accumulated_inverse_1(
     mass_coeff: wp.float32,
     impulse_coeff: wp.float32,
     sor_boost: wp.float32,
-) -> wp.vec2f:
+) -> BlockScalarUpdate:
     """Solve a cached scalar inverse row and identity-project its accumulator."""
     d_lambda_unsoft = -(K_inv * rhs)
     return block_project_accumulated_1(d_lambda_unsoft, lambda_old, mass_coeff, impulse_coeff, sor_boost)

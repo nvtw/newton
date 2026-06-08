@@ -459,10 +459,10 @@ def soft_tet_neohookean_iterate_at(
         return
 
     update = block_solve_projected_xpbd_2_strict(A11, A12, A22, b_h, b_d, lambda_h, lambda_d, sor_boost, _DET_FLOOR)
-    dlam_h = update[0]
-    dlam_d = update[1]
-    lambda_h = update[2]
-    lambda_d = update[3]
+    dlam_h = update.delta[0]
+    dlam_d = update.delta[1]
+    lambda_h = update.lambda_new[0]
+    lambda_d = update.lambda_new[1]
 
     x_a = x_a + inv_mass_a * (dlam_h * g_ha + dlam_d * g_da)
     x_b = x_b + inv_mass_b * (dlam_h * g_hb + dlam_d * g_db)

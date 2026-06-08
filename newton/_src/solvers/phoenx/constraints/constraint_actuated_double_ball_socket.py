@@ -1008,8 +1008,8 @@ def _axial_drive_limit_iterate(
             drive_min,
             drive_max,
         )
-        lam_drive = projection[0]
-        acc_drive = projection[1]
+        lam_drive = projection.delta
+        acc_drive = projection.lambda_new
         write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
 
     # ---- Limit row ----------------------------------------------------
@@ -1069,8 +1069,8 @@ def _axial_drive_limit_iterate(
                 -BLOCK_LAMBDA_INF,
                 wp.float32(0.0),
             )
-        lam_limit = projection[0]
-        acc_limit = projection[1]
+        lam_limit = projection.delta
+        acc_limit = projection.lambda_new
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
 
     # ---- Friction row -------------------------------------------------
@@ -1099,8 +1099,8 @@ def _axial_drive_limit_iterate(
             -max_lambda_friction,
             max_lambda_friction,
         )
-        lam_friction = projection[0]
-        acc_friction = projection[1]
+        lam_friction = projection.delta
+        acc_friction = projection.lambda_new
         write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, acc_friction)
 
     return lam_drive + lam_limit + lam_friction
@@ -1308,7 +1308,7 @@ def _cable_anchor3_pd_block(
         wp.float32(0.0),
         sor_boost,
     )
-    lam3 = update3[0]
+    lam3 = update3.delta
     lam3_world = lam3 * t2
     v1 = v1 - im1 * lam3_world
     w1 = w1 - ii1 @ (cr3_b1 @ lam3_world)
@@ -1482,7 +1482,7 @@ def _anchor3_scalar_block(
     jv3_world = -v1 + cr3_b1 @ w1 + v2 - cr3_b2 @ w2
     jv3 = wp.dot(t2, jv3_world)
     update3 = block_solve_accumulated_inverse_1(s3_inv, jv3 + bias3, acc3_scalar, mass_coeff, impulse_coeff, sor_boost)
-    lam3 = update3[0]
+    lam3 = update3.delta
     lam3_world = lam3 * t2
     v1 = v1 - im1 * lam3_world
     w1 = w1 - ii1 @ (cr3_b1 @ lam3_world)
@@ -3045,8 +3045,8 @@ def _revolute_iterate_at_multi(
                 drive_min,
                 drive_max,
             )
-            lam_drive = projection[0]
-            acc_drive = projection[1]
+            lam_drive = projection.delta
+            acc_drive = projection.lambda_new
 
         lam_limit = wp.float32(0.0)
         if limit_active:
@@ -3081,8 +3081,8 @@ def _revolute_iterate_at_multi(
                     -BLOCK_LAMBDA_INF,
                     wp.float32(0.0),
                 )
-            lam_limit = projection[0]
-            acc_limit = projection[1]
+            lam_limit = projection.delta
+            acc_limit = projection.lambda_new
 
         lam_friction = wp.float32(0.0)
         if friction_active:
@@ -3096,8 +3096,8 @@ def _revolute_iterate_at_multi(
                 -max_lambda_friction,
                 max_lambda_friction,
             )
-            lam_friction = projection[0]
-            acc_friction = projection[1]
+            lam_friction = projection.delta
+            acc_friction = projection.lambda_new
 
         axial_lam = lam_drive + lam_limit + lam_friction
         angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)

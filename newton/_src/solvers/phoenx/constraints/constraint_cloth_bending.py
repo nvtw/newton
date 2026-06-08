@@ -353,8 +353,8 @@ def cloth_bending_iterate_at(
     )
     denom = grad_sq + bias
     update = block_solve_projected_xpbd_1(denom, c + bias * lambda_sum, lambda_sum, sor_boost, wp.float32(0.0))
-    d_lam = update[0]
-    lambda_sum = update[1]
+    d_lam = update.delta
+    lambda_sum = update.lambda_new
 
     x0 = x0 + (d_lam * inv_mass_a) * dCdx0
     x1 = x1 + (d_lam * inv_mass_b) * dCdx1

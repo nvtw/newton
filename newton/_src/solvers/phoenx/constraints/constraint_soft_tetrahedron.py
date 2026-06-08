@@ -571,10 +571,10 @@ def soft_tetrahedron_iterate_at(
         sor_boost,
         _ARAP_BLOCK_DET_FLOOR,
     )
-    d_lam_mu = update[0]
-    d_lam_lambda = update[1]
-    lambda_sum_mu = update[2]
-    lambda_sum_lambda = update[3]
+    d_lam_mu = update.delta[0]
+    d_lam_lambda = update.delta[1]
+    lambda_sum_mu = update.lambda_new[0]
+    lambda_sum_lambda = update.lambda_new[1]
 
     x_a = x_a + inv_mass_a * (d_lam_mu * g_mu_a + d_lam_lambda * g_lambda_a)
     x_b = x_b + inv_mass_b * (d_lam_mu * g_mu_b + d_lam_lambda * g_lambda_b)
