@@ -72,6 +72,7 @@ from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
 )
+from newton._src.solvers.phoenx.helpers.math_helpers import apply_body_spatial_impulse
 from newton._src.solvers.phoenx.mass_splitting.access import (
     get_state_index,
     read_angular_velocity_with_slot,
@@ -315,8 +316,16 @@ def contact_endpoint_apply_impulse_cached(
     inv_m = inv_m_raw * inv_f_f
     inv_i = bodies.inverse_inertia_world[b] * inv_f_f
     r = contact_point_world - bodies.position[b]
-    write_velocity_unified(bodies, particles, copy_state, b, slot, num_bodies, v_lin + impulse * inv_m)
-    write_angular_velocity_unified(bodies, copy_state, b, slot, v_ang + inv_i @ wp.cross(r, impulse))
+    v_lin_new, v_ang_new = apply_body_spatial_impulse(
+        v_lin,
+        v_ang,
+        inv_m,
+        inv_i,
+        impulse,
+        wp.cross(r, impulse),
+    )
+    write_velocity_unified(bodies, particles, copy_state, b, slot, num_bodies, v_lin_new)
+    write_angular_velocity_unified(bodies, copy_state, b, slot, v_ang_new)
 
 
 @wp.func

@@ -10,6 +10,7 @@ import math
 import warp as wp
 
 __all__ = [
+    "apply_body_spatial_impulse",
     "apply_pair_angular_impulse",
     "apply_pair_spatial_impulse",
     "apply_pair_velocity_impulse",
@@ -130,6 +131,19 @@ def revolution_tracker_update(
 
 
 @wp.func
+def apply_body_spatial_impulse(
+    v: wp.vec3f,
+    w: wp.vec3f,
+    inv_mass: wp.float32,
+    inv_inertia_world: wp.mat33f,
+    linear_impulse: wp.vec3f,
+    angular_impulse: wp.vec3f,
+):
+    """Apply already-signed linear and angular impulses to one body."""
+    return v + inv_mass * linear_impulse, w + inv_inertia_world @ angular_impulse
+
+
+@wp.func
 def apply_pair_angular_impulse(
     w1: wp.vec3f,
     w2: wp.vec3f,
@@ -164,10 +178,21 @@ def apply_pair_spatial_impulse(
     impulses are world-space r-cross-impulse terms, or pure couples,
     with matching signs before multiplying by inverse inertia.
     """
-    v1_new = v1 - inv_mass1 * linear_impulse
-    v2_new = v2 + inv_mass2 * linear_impulse
-    w1_new, w2_new = apply_pair_angular_impulse(
-        w1, w2, inv_inertia1_world, inv_inertia2_world, angular_impulse1, angular_impulse2
+    v1_new, w1_new = apply_body_spatial_impulse(
+        v1,
+        w1,
+        inv_mass1,
+        inv_inertia1_world,
+        -linear_impulse,
+        -angular_impulse1,
+    )
+    v2_new, w2_new = apply_body_spatial_impulse(
+        v2,
+        w2,
+        inv_mass2,
+        inv_inertia2_world,
+        linear_impulse,
+        angular_impulse2,
     )
     return v1_new, v2_new, w1_new, w2_new
 
