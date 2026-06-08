@@ -105,9 +105,10 @@ def _force_tpw(solver: SolverPhoenX, tpw) -> None:
     """
     if tpw == "auto":
         return
-    else:
-        solver.world._tpw_auto = False
-        solver.world._tpw_choice.assign([int(tpw)])
+    tpw_int = int(tpw)
+    solver.world._tpw_auto = False
+    solver.world._tpw_launch_bound = tpw_int
+    solver.world._tpw_choice.assign([tpw_int])
 
 
 def _build_h1(num_worlds: int, tpw, *, substeps: int, solver_iterations: int):

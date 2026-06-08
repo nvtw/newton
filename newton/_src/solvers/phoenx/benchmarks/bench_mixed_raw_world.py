@@ -89,9 +89,11 @@ def _build_one_world_builder(pairs_per_world: int = 1) -> newton.ModelBuilder:
 def _force_tpw(world: PhoenXWorld, tpw) -> None:
     if tpw == "auto":
         world._tpw_auto = True
-    else:
-        world._tpw_auto = False
-        world._tpw_choice.assign([int(tpw)])
+        return
+    tpw_int = int(tpw)
+    world._tpw_auto = False
+    world._tpw_launch_bound = tpw_int
+    world._tpw_choice.assign([tpw_int])
 
 
 def build_raw_mixed_world(
