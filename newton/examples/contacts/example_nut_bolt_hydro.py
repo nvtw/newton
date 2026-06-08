@@ -50,13 +50,15 @@ SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
 # solver. The contact patch is defined as the iso-pressure surface
 # ``p_a == p_b``; users supply a Warp ``@wp.func`` that maps a signed depth
 # to a pressure value, plus a ``@wp.struct`` carrying any per-shape state it
-# needs. The callback must be defined for any signed depth (positive or
+# needs. The callback must be finite for any signed depth (positive or
 # negative) and monotone non-increasing in ``signed_depth`` so the marching-
-# cubes interpolation stays continuous across the patch boundary.
+# cubes interpolation stays continuous across the patch boundary. Do not clip
+# the non-contact side to zero pressure; with different shape stiffnesses, the
+# iso-pressure surface can pass through that thin outside region.
 #
 # Here we re-implement the default linear law ``pressure = -kh * signed_depth``
-# explicitly so the example exercises the user pathway. Any monotone function
-# (e.g. ``-kh * signed_depth ** 3`` for a stiffer-with-depth response) works.
+# explicitly so the example exercises the user pathway. Nonlinear laws should
+# similarly extend into ``signed_depth >= 0`` instead of flattening there.
 @wp.struct
 class LinearPressureData:
     shape_kh: wp.array[wp.float32]

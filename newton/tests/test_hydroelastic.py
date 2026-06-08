@@ -642,34 +642,47 @@ def _compute_total_friction_capacity(contacts, model, state, shape_pair=None):
     return float((friction * force_mag).sum())
 
 
-def _build_cube_cube_scene(device, cube_half_lower=0.2, cube_half_upper=0.1):
+def _build_cube_cube_scene(device, cube_half_lower=0.2, cube_half_upper=0.1, kh_lower=1e9, kh_upper=1e9):
     """Build a big-cube-on-ground + small-cube-on-top scene for contact comparison tests.
 
     Returns (model, state, upper_body, rest_z).
     """
-    shape_cfg = newton.ModelBuilder.ShapeConfig(
-        sdf_max_resolution=128,
-        is_hydroelastic=True,
-        sdf_narrow_band_range=(-0.01, 0.01),
-        gap=0.01,
-        kh=1e9,
-    )
+    def shape_cfg(kh):
+        return newton.ModelBuilder.ShapeConfig(
+            sdf_max_resolution=128,
+            is_hydroelastic=True,
+            sdf_narrow_band_range=(-0.01, 0.01),
+            gap=0.01,
+            kh=kh,
+        )
+
     builder = newton.ModelBuilder()
-    builder.default_shape_cfg = shape_cfg
     builder.add_ground_plane()
 
     lower_body = builder.add_body(
         xform=wp.transform(wp.vec3(0.0, 0.0, cube_half_lower), wp.quat_identity()),
         label="lower_cube",
     )
-    builder.add_shape_box(body=lower_body, hx=cube_half_lower, hy=cube_half_lower, hz=cube_half_lower)
+    builder.add_shape_box(
+        body=lower_body,
+        hx=cube_half_lower,
+        hy=cube_half_lower,
+        hz=cube_half_lower,
+        cfg=shape_cfg(kh_lower),
+    )
 
     rest_z = 2 * cube_half_lower + cube_half_upper
     upper_body = builder.add_body(
         xform=wp.transform(wp.vec3(0.0, 0.0, rest_z), wp.quat_identity()),
         label="upper_cube",
     )
-    builder.add_shape_box(body=upper_body, hx=cube_half_upper, hy=cube_half_upper, hz=cube_half_upper)
+    builder.add_shape_box(
+        body=upper_body,
+        hx=cube_half_upper,
+        hy=cube_half_upper,
+        hz=cube_half_upper,
+        cfg=shape_cfg(kh_upper),
+    )
 
     model = builder.finalize(device=device)
     state = model.state()
@@ -782,6 +795,57 @@ def test_custom_pressure_func_matches_default_linear(test, device):
                 abs_diff / abs(f_default[2]),
                 0.01,
                 f"pen={pen}: {label} diff {abs_diff:.4f} > 1% of |Fz| {abs(f_default[2]):.4f}",
+            )
+
+
+def test_custom_pressure_func_matches_default_linear_with_stiffness_ratio(test, device):
+    """Exponent-1 custom pressure must match the default for unequal stiffnesses."""
+    model, state, upper_body, rest_z = _build_cube_cube_scene(device, kh_lower=1e9, kh_upper=1e10)
+
+    pressure_data = _LinearPressureData()
+    pressure_data.shape_kh = model.shape_material_kh
+
+    cfg_default = HydroelasticSDF.Config(
+        output_contact_surface=True,
+        reduce_contacts=False,
+        anchor_contact=False,
+    )
+    cfg_callback = HydroelasticSDF.Config(
+        output_contact_surface=True,
+        reduce_contacts=False,
+        anchor_contact=False,
+        pressure_func=_linear_pressure,
+        pressure_data=pressure_data,
+    )
+    (pipe_default, contacts_default), (pipe_callback, contacts_callback) = _make_pipelines(
+        model, [cfg_default, cfg_callback], [50000, 50000]
+    )
+
+    for pen in [1e-4, 5e-4, 1e-3]:
+        upper_z = rest_z - pen
+        wp.launch(_set_body_z_kernel, dim=1, inputs=[state.body_q, upper_body, upper_z], device=device)
+
+        pipe_default.collide(state, contacts_default)
+        pipe_callback.collide(state, contacts_callback)
+
+        f_default = _compute_net_force(contacts_default, model, state)
+        f_callback = _compute_net_force(contacts_callback, model, state)
+
+        test.assertGreater(abs(f_default[2]), 0.0, f"pen={pen}: default Fz should be nonzero")
+        rel_z = abs(f_callback[2] - f_default[2]) / abs(f_default[2])
+        test.assertLess(
+            rel_z,
+            0.01,
+            f"pen={pen}: unequal-kh Fz mismatch {rel_z * 100:.2f}% "
+            f"(callback={f_callback[2]:.4f}, default={f_default[2]:.4f})",
+        )
+
+        for axis, label in [(0, "Fx"), (1, "Fy")]:
+            abs_diff = abs(f_callback[axis] - f_default[axis])
+            test.assertLess(
+                abs_diff / abs(f_default[2]),
+                0.01,
+                f"pen={pen}: unequal-kh {label} diff {abs_diff:.4f} > 1% of |Fz| {abs(f_default[2]):.4f}",
             )
 
 
@@ -1457,6 +1521,14 @@ add_function_test(
     TestHydroelastic,
     "test_custom_pressure_func_matches_default_linear",
     test_custom_pressure_func_matches_default_linear,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_custom_pressure_func_matches_default_linear_with_stiffness_ratio",
+    test_custom_pressure_func_matches_default_linear_with_stiffness_ratio,
     devices=cuda_devices,
     check_output=False,
 )

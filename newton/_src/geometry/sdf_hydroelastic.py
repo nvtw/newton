@@ -122,8 +122,8 @@ def linear_pressure(signed_depth: wp.float32, shape_idx: wp.int32, data: LinearP
     stays continuous across the patch boundary. Returns a non-negative value
     when penetrating (``signed_depth < 0``) and a non-positive extrapolation
     otherwise; only the difference of pressures across shapes drives the
-    marching-cubes interpolation, so the extrapolation just needs to be
-    monotone non-increasing in ``signed_depth``.
+    marching-cubes interpolation, so the extrapolation must remain monotone
+    non-increasing in ``signed_depth``.
     """
     return -data.shape_kh[shape_idx] * signed_depth
 
@@ -325,17 +325,28 @@ class HydroelasticSDF:
         (``signed_depth >= 0``) — by both the iso-voxel pruning kernel
         (:func:`count_iso_voxels_block`) and the marching-cubes corner
         evaluation (:func:`mc_iterate_voxel_vertices`). The callback must
-        therefore be defined and monotone non-increasing in ``signed_depth``
-        over its full domain; returning NaN or undefined values for
-        ``signed_depth >= 0`` will corrupt the prune intervals and the
-        marching-cubes interpolation that locates the iso-pressure surface.
+        therefore be finite and monotone non-increasing in ``signed_depth``
+        over its full domain, and should extend continuously into the thin
+        non-contact region. Do not clip ``signed_depth >= 0`` to zero pressure:
+        when two shapes have different stiffnesses, the pressure-balance
+        surface can pass through that outside region, and a flat zero segment
+        can move or remove the iso-pressure crossing. Returning NaN or
+        undefined values for ``signed_depth >= 0`` will corrupt the prune
+        intervals and the marching-cubes interpolation that locates the
+        iso-pressure surface.
         When ``None`` the default :func:`linear_pressure` is used.
         """
         pressure_data: Any = None
         """Optional ``wp.struct`` instance carrying state for :attr:`pressure_func`.
 
         When ``None`` a default :class:`LinearPressureData` containing
-        ``Model.shape_material_kh`` is constructed automatically.
+        ``Model.shape_material_kh`` is constructed automatically. If a custom
+        data struct stores finalized model arrays such as
+        ``Model.shape_material_kh``, create the model first with
+        ``ModelBuilder.finalize()``, then assign those arrays to
+        ``pressure_data`` before constructing :class:`HydroelasticSDF` or
+        :class:`~newton.CollisionPipeline`. The ``shape_idx`` argument passed
+        to :attr:`pressure_func` uses the finalized model's shape indexing.
         """
         mc_edge_clamp_min: float = 0.02
         """Lower bound for the marching-cubes edge interpolation parameter
