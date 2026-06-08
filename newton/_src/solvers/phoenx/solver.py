@@ -33,7 +33,8 @@ from newton._src.solvers.phoenx.model_adapter import (
     build_adbs_init_arrays,
 )
 from newton._src.solvers.phoenx.solver_kernels import (
-    _apply_joint_control_kernel,
+    _apply_joint_drive_control_kernel,
+    _apply_joint_forces_kernel,
     _contact_impulse_to_force_wrapper_kernel,
     _export_body_qdd_kernel,
     _export_body_state_avg_kernel,
@@ -47,7 +48,6 @@ from newton._src.solvers.phoenx.solver_kernels import (
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 from newton._src.solvers.solver import SolverBase
-from newton._src.solvers.xpbd.kernels import apply_joint_forces
 
 __all__ = ["SolverPhoenX"]
 
@@ -220,6 +220,7 @@ class SolverPhoenX(SolverBase):
 
         self._adbs: AdbsInitArrays = build_adbs_init_arrays(model, device=self.device)
         num_joints = self._adbs.num_joint_columns
+        self._default_joint_gear = wp.ones(max(1, int(model.joint_dof_count)), dtype=wp.float32, device=self.device)
 
         # PhoenX's warm-start path needs contact_matching != "disabled".
         # Auto-attach a sticky pipeline so users don't have to size Contacts.
@@ -584,7 +585,7 @@ class SolverPhoenX(SolverBase):
     def _apply_joint_control(self, control: Control) -> None:
         """Rewrite ADBS drive dwords from control + model. Falls back to Model
         targets if Control doesn't supply them."""
-        if self._adbs.num_joint_columns == 0:
+        if self._adbs.num_drive_columns == 0:
             return
         model = self.model
         target_pos = (
@@ -600,17 +601,17 @@ class SolverPhoenX(SolverBase):
         if target_pos is None or target_vel is None or model.joint_target_mode is None:
             return  # no per-DOF drive configured
         wp.launch(
-            _apply_joint_control_kernel,
-            dim=int(model.joint_count),
+            _apply_joint_drive_control_kernel,
+            dim=int(self._adbs.num_drive_columns),
             inputs=[
-                self._adbs.joint_idx_to_cid,
-                self._adbs.joint_idx_to_dof_start,
-                self._adbs.joint_q_at_init,
+                self._adbs.drive_cid,
+                self._adbs.drive_dof_start,
+                self._adbs.drive_q_at_init,
                 model.joint_target_mode,
                 model.joint_target_ke,
                 model.joint_target_kd,
                 model.joint_effort_limit,
-                model.joint_gear,
+                self._joint_gear_array(),
                 target_pos,
                 target_vel,
                 wp.int32(0),  # DRIVE_MODE_OFF
@@ -630,6 +631,15 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
+    def _joint_gear_array(self) -> wp.array[wp.float32]:
+        joint_gear = getattr(self.model, "joint_gear", None)
+        if joint_gear is not None:
+            return joint_gear
+        n = max(1, int(self.model.joint_dof_count))
+        if self._default_joint_gear.shape[0] != n:
+            self._default_joint_gear = wp.ones(n, dtype=wp.float32, device=self.device)
+        return self._default_joint_gear
+
     def _accumulate_joint_forces(self, state_in: State, control: Control, dt: float) -> None:
         """Fold ``control.joint_f`` into ``state_in.body_f`` (Newton's EFFORT path)."""
         if control is None or control.joint_f is None:
@@ -640,7 +650,7 @@ class SolverPhoenX(SolverBase):
         if model.joint_count == 0:
             return
         wp.launch(
-            apply_joint_forces,
+            _apply_joint_forces_kernel,
             dim=int(model.joint_count),
             inputs=[
                 state_in.body_q,
@@ -655,11 +665,7 @@ class SolverPhoenX(SolverBase):
                 model.joint_dof_dim,
                 model.joint_axis,
                 control.joint_f,
-                dt,
-            ],
-            outputs=[
                 state_in.body_f,
-                None,  # joint_impulse: PhoenX does not populate body_parent_f
             ],
             device=self.device,
         )

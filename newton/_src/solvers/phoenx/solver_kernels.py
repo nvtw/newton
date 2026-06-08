@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.sim import JointType
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -33,6 +34,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 
 __all__ = [
     "_apply_joint_control_kernel",
+    "_apply_joint_drive_control_kernel",
+    "_apply_joint_forces_kernel",
     "_contact_impulse_to_force_wrapper_kernel",
     "_export_body_qdd_kernel",
     "_export_body_state_kernel",
@@ -336,7 +339,112 @@ def _export_body_state_fd_kernel(
 
 
 # Per-step control -> ADBS column writeback. EFFORT/NONE map to DRIVE_MODE_OFF
-# and route torque through apply_joint_forces -> body_f.
+# and route torque through _apply_joint_forces_kernel -> body_f.
+
+
+@wp.kernel(enable_backward=False)
+def _apply_joint_forces_kernel(
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    joint_type: wp.array[wp.int32],
+    joint_enabled: wp.array[wp.bool],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_X_p: wp.array[wp.transform],
+    joint_X_c: wp.array[wp.transform],
+    joint_qd_start: wp.array[wp.int32],
+    joint_dof_dim: wp.array2d[wp.int32],
+    joint_axis: wp.array[wp.vec3],
+    joint_f: wp.array[wp.float32],
+    body_f: wp.array[wp.spatial_vector],
+):
+    """Fold generalized joint forces into Newton body wrenches.
+
+    This mirrors XPBD's ``apply_joint_forces`` math, but keeps PhoenX's
+    per-step adapter path independent from XPBD's larger kernel module.
+    """
+    tid = wp.tid()
+    type = joint_type[tid]
+    if not joint_enabled[tid]:
+        return
+    if type == JointType.FIXED or type == JointType.CABLE:
+        return
+
+    id_c = joint_child[tid]
+    id_p = joint_parent[tid]
+
+    X_pj = joint_X_p[tid]
+    X_cj = joint_X_c[tid]
+
+    X_wp = X_pj
+    pose_p = X_pj
+    com_p = wp.vec3(0.0)
+    if id_p >= 0:
+        pose_p = body_q[id_p]
+        X_wp = pose_p * X_wp
+        com_p = body_com[id_p]
+    r_p = wp.transform_get_translation(X_wp) - wp.transform_point(pose_p, com_p)
+
+    pose_c = body_q[id_c]
+    X_wc = pose_c * X_cj
+    com_c = body_com[id_c]
+    r_c = wp.transform_get_translation(X_wc) - wp.transform_point(pose_c, com_c)
+
+    qd_start = joint_qd_start[tid]
+    lin_axis_count = joint_dof_dim[tid, 0]
+    ang_axis_count = joint_dof_dim[tid, 1]
+
+    t_total = wp.vec3()
+    f_total = wp.vec3()
+
+    if type == JointType.FREE or type == JointType.DISTANCE:
+        f_total = wp.vec3(joint_f[qd_start + 0], joint_f[qd_start + 1], joint_f[qd_start + 2])
+        t_total = wp.vec3(joint_f[qd_start + 3], joint_f[qd_start + 4], joint_f[qd_start + 5])
+        wp.atomic_add(body_f, id_c, wp.spatial_vector(f_total, t_total))
+        if id_p >= 0:
+            wp.atomic_sub(body_f, id_p, wp.spatial_vector(f_total, t_total))
+        return
+    elif type == JointType.BALL:
+        t_total = wp.vec3(joint_f[qd_start + 0], joint_f[qd_start + 1], joint_f[qd_start + 2])
+    elif type == JointType.REVOLUTE or type == JointType.PRISMATIC or type == JointType.D6:
+        if lin_axis_count > 0:
+            axis = joint_axis[qd_start + 0]
+            f = joint_f[qd_start + 0]
+            a_p = wp.transform_vector(X_wp, axis)
+            f_total += f * a_p
+        if lin_axis_count > 1:
+            axis = joint_axis[qd_start + 1]
+            f = joint_f[qd_start + 1]
+            a_p = wp.transform_vector(X_wp, axis)
+            f_total += f * a_p
+        if lin_axis_count > 2:
+            axis = joint_axis[qd_start + 2]
+            f = joint_f[qd_start + 2]
+            a_p = wp.transform_vector(X_wp, axis)
+            f_total += f * a_p
+
+        if ang_axis_count > 0:
+            axis = joint_axis[qd_start + lin_axis_count + 0]
+            f = joint_f[qd_start + lin_axis_count + 0]
+            a_p = wp.transform_vector(X_wp, axis)
+            t_total += f * a_p
+        if ang_axis_count > 1:
+            axis = joint_axis[qd_start + lin_axis_count + 1]
+            f = joint_f[qd_start + lin_axis_count + 1]
+            a_p = wp.transform_vector(X_wp, axis)
+            t_total += f * a_p
+        if ang_axis_count > 2:
+            axis = joint_axis[qd_start + lin_axis_count + 2]
+            f = joint_f[qd_start + lin_axis_count + 2]
+            a_p = wp.transform_vector(X_wp, axis)
+            t_total += f * a_p
+    else:
+        print("joint type not handled in _apply_joint_forces_kernel")
+
+    child_wrench_at_com = wp.spatial_vector(f_total, t_total + wp.cross(r_c, f_total))
+    if id_p >= 0:
+        wp.atomic_sub(body_f, id_p, wp.spatial_vector(f_total, t_total + wp.cross(r_p, f_total)))
+    wp.atomic_add(body_f, id_c, child_wrench_at_com)
 
 
 @wp.kernel(enable_backward=False)
@@ -405,6 +513,76 @@ def _apply_joint_control_kernel(
             drive = mode_velocity
 
     # Clamp non-finite effort (inf) to 0 = "unlimited" for POSITION drives.
+    max_force = gear * effort
+    if (max_force != max_force) or (max_force > 1.0e18) or (max_force < -1.0e18):
+        max_force = 0.0
+
+    write_int(constraints, off_drive_mode, cid, drive)
+    write_float(constraints, off_target, cid, target)
+    write_float(constraints, off_target_velocity, cid, target_vel)
+    write_float(constraints, off_stiffness_drive, cid, stiffness)
+    write_float(constraints, off_damping_drive, cid, damping)
+    write_float(constraints, off_max_force_drive, cid, max_force)
+
+
+@wp.kernel(enable_backward=False)
+def _apply_joint_drive_control_kernel(
+    drive_cid: wp.array[wp.int32],
+    drive_dof_start: wp.array[wp.int32],
+    drive_q_at_init: wp.array[wp.float32],
+    # Newton Model + Control (per-DOF).
+    joint_target_mode: wp.array[wp.int32],
+    joint_target_ke: wp.array[wp.float32],
+    joint_target_kd: wp.array[wp.float32],
+    joint_effort_limit: wp.array[wp.float32],
+    joint_gear: wp.array[wp.float32],
+    control_target_pos: wp.array[wp.float32],
+    control_target_vel: wp.array[wp.float32],
+    # Drive-mode constants.
+    mode_off: wp.int32,
+    mode_position: wp.int32,
+    mode_velocity: wp.int32,
+    target_mode_position: wp.int32,
+    target_mode_velocity: wp.int32,
+    target_mode_position_velocity: wp.int32,
+    # ADBS column offsets.
+    off_drive_mode: wp.int32,
+    off_target: wp.int32,
+    off_target_velocity: wp.int32,
+    off_stiffness_drive: wp.int32,
+    off_damping_drive: wp.int32,
+    off_max_force_drive: wp.int32,
+    # Constraint container to rewrite.
+    constraints: ConstraintContainer,
+):
+    """Uniform per-drive writeback into ADBS columns.
+
+    The compact lookup arrays contain only active scalar drive rows, so every
+    thread follows the same path and reads contiguous drive metadata.
+    """
+    i = wp.tid()
+    cid = drive_cid[i]
+    dof = drive_dof_start[i]
+
+    tm = joint_target_mode[dof]
+    stiffness = joint_target_ke[dof]
+    damping = joint_target_kd[dof]
+    target = control_target_pos[dof] - drive_q_at_init[i]
+    target_vel = control_target_vel[dof]
+    effort = joint_effort_limit[dof]
+
+    gear = joint_gear[dof]
+    if (gear != gear) or gear <= 0.0:
+        gear = 1.0
+
+    drive = mode_off
+    if tm == target_mode_position or tm == target_mode_position_velocity:
+        if stiffness > 0.0:
+            drive = mode_position
+    elif tm == target_mode_velocity:
+        if damping > 0.0:
+            drive = mode_velocity
+
     max_force = gear * effort
     if (max_force != max_force) or (max_force > 1.0e18) or (max_force < -1.0e18):
         max_force = 0.0

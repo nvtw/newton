@@ -107,7 +107,11 @@ class AdbsInitArrays:
         joint_idx_to_cid: wp.array,
         joint_idx_to_dof_start: wp.array,
         joint_q_at_init: wp.array,
+        drive_cid: wp.array,
+        drive_dof_start: wp.array,
+        drive_q_at_init: wp.array,
         num_joint_columns: int,
+        num_drive_columns: int,
     ):
         self.body1 = body1
         self.body2 = body2
@@ -136,7 +140,14 @@ class AdbsInitArrays:
         #: displacement from init, so Newton's absolute target/limit values
         #: must be offset by this before being written into the ADBS column.
         self.joint_q_at_init = joint_q_at_init
+        #: Compact per-drive lookup tables. Every entry is an active scalar
+        #: REVOLUTE/PRISMATIC-like drive row, so the control writeback kernel
+        #: can run one uniform thread per drive without per-joint skip branches.
+        self.drive_cid = drive_cid
+        self.drive_dof_start = drive_dof_start
+        self.drive_q_at_init = drive_q_at_init
         self.num_joint_columns = num_joint_columns
+        self.num_drive_columns = num_drive_columns
 
     def to_initialize_kwargs(self) -> dict:
         """Kwargs for
@@ -310,7 +321,11 @@ def build_adbs_init_arrays(
             joint_idx_to_cid=joint_idx_to_cid,
             joint_idx_to_dof_start=joint_idx_to_dof_start,
             joint_q_at_init=empty_f,
+            drive_cid=empty_i,
+            drive_dof_start=empty_i,
+            drive_q_at_init=empty_f,
             num_joint_columns=0,
+            num_drive_columns=0,
         )
 
     # ---- Pull every relevant joint array back to host ----------------
@@ -745,6 +760,15 @@ def build_adbs_init_arrays(
 
     # ---- Upload --------------------------------------------------------
     num_cols = len(descriptors)
+    drive_mask = (joint_idx_to_cid_np >= 0) & (joint_idx_to_dof_start_np >= 0)
+    drive_cid_np = joint_idx_to_cid_np[drive_mask].astype(np.int32, copy=False)
+    drive_dof_start_np = joint_idx_to_dof_start_np[drive_mask].astype(np.int32, copy=False)
+    if drive_cid_np.size:
+        drive_q_at_init_np = np.asarray(
+            [descriptors[int(cid)]["joint_q_at_init"] for cid in drive_cid_np], dtype=np.float32
+        )
+    else:
+        drive_q_at_init_np = np.zeros(0, dtype=np.float32)
 
     def _stack_i(key: str) -> wp.array:
         a = np.asarray([d[key] for d in descriptors], dtype=np.int32) if num_cols else np.zeros(0, dtype=np.int32)
@@ -787,5 +811,9 @@ def build_adbs_init_arrays(
         joint_idx_to_cid=wp.array(joint_idx_to_cid_np, dtype=wp.int32, device=device),
         joint_idx_to_dof_start=wp.array(joint_idx_to_dof_start_np, dtype=wp.int32, device=device),
         joint_q_at_init=_stack_f("joint_q_at_init"),
+        drive_cid=wp.array(drive_cid_np, dtype=wp.int32, device=device),
+        drive_dof_start=wp.array(drive_dof_start_np, dtype=wp.int32, device=device),
+        drive_q_at_init=wp.array(drive_q_at_init_np, dtype=wp.float32, device=device),
         num_joint_columns=num_cols,
+        num_drive_columns=int(drive_cid_np.size),
     )
