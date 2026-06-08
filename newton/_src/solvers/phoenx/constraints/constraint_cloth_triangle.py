@@ -27,7 +27,10 @@ from newton._src.solvers.phoenx.access_mode import (
     ACCESS_MODE_POSITION_LEVEL,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.constraints.constraint_block import block_solve_projected_xpbd_2
+from newton._src.solvers.phoenx.constraints.constraint_block import (
+    block_position_delta_2d_2,
+    block_solve_projected_xpbd_2,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     ConstraintContainer,
@@ -537,8 +540,6 @@ def cloth_triangle_iterate_at(
         sor_boost,
         _CLOTH_BLOCK_DET_FLOOR,
     )
-    d_lam_lambda = update.delta[0]
-    d_lam_mu = update.delta[1]
     lambda_sum_lambda = update.lambda_new[0]
     lambda_sum_mu = update.lambda_new[1]
 
@@ -565,17 +566,23 @@ def cloth_triangle_iterate_at(
         h2_c_x = wp.float32(2.0) * (df * inv_rest[1, 0] + dh * inv_rest[1, 1]) * shear_scale
         h2_c_y = wp.float32(2.0) * (dm * inv_rest[1, 0] + dq * inv_rest[1, 1]) * shear_scale
 
-    delta_a = wp.vec2f(
-        inv_mass_a * (h1_a_x * d_lam_lambda + h2_a_x * d_lam_mu),
-        inv_mass_a * (h1_a_y * d_lam_lambda + h2_a_y * d_lam_mu),
+    delta_a = block_position_delta_2d_2(
+        inv_mass_a,
+        update.delta,
+        wp.vec2f(h1_a_x, h1_a_y),
+        wp.vec2f(h2_a_x, h2_a_y),
     )
-    delta_b = wp.vec2f(
-        inv_mass_b * (h1_b_x * d_lam_lambda + h2_b_x * d_lam_mu),
-        inv_mass_b * (h1_b_y * d_lam_lambda + h2_b_y * d_lam_mu),
+    delta_b = block_position_delta_2d_2(
+        inv_mass_b,
+        update.delta,
+        wp.vec2f(h1_b_x, h1_b_y),
+        wp.vec2f(h2_b_x, h2_b_y),
     )
-    delta_c = wp.vec2f(
-        inv_mass_c * (h1_c_x * d_lam_lambda + h2_c_x * d_lam_mu),
-        inv_mass_c * (h1_c_y * d_lam_lambda + h2_c_y * d_lam_mu),
+    delta_c = block_position_delta_2d_2(
+        inv_mass_c,
+        update.delta,
+        wp.vec2f(h1_c_x, h1_c_y),
+        wp.vec2f(h2_c_x, h2_c_y),
     )
     x_a = x_a + _project_to_3d(x_axis, y_axis, delta_a)
     x_b = x_b + _project_to_3d(x_axis, y_axis, delta_b)
