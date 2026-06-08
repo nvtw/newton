@@ -12,6 +12,7 @@ from newton._src.solvers.phoenx.access_mode import (
     ACCESS_MODE_STATIC,
     ACCESS_MODE_VELOCITY_LEVEL,
 )
+from newton._src.solvers.phoenx.array_helper import read1d_i32
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -1208,6 +1209,7 @@ def _constraints_to_elements_kernel(
     num_soft_hexahedra: wp.int32,
     num_bodies: wp.int32,
     elements: wp.array[ElementInteractionData],
+    element_family: wp.array[wp.int32],
 ):
     """Project active constraints into ElementInteractionData. Static bodies
     collapse to -1; the dynamic body compacts to slot 0.
@@ -1225,6 +1227,7 @@ def _constraints_to_elements_kernel(
     if tid >= n:
         return
     if tid < num_joints:
+        element_family[tid] = wp.int32(0)
         b1 = constraint_get_body1(constraints, tid)
         b2 = constraint_get_body2(constraints, tid)
         if b1 >= 0 and bodies.inverse_mass[b1] == 0.0:
@@ -1238,6 +1241,7 @@ def _constraints_to_elements_kernel(
         elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles:
+        element_family[tid] = wp.int32(2)
         # Cloth-triangle: three unified-index particle endpoints already
         # stored in body1/body2/body3 (populate kernel did the +num_bodies
         # shift). Pinned particles (inverse_mass == 0) collapse to -1 so
@@ -1272,6 +1276,7 @@ def _constraints_to_elements_kernel(
         elements[tid] = element_interaction_data_make(slot0, slot1, slot2, -1, -1, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending:
+        element_family[tid] = wp.int32(3)
         # Cloth-bending: 4 unified-index particle endpoints. body1 / body2
         # are the opposite vertices; body3 / body4 are the shared edge.
         b1 = constraint_get_body1(constraints, tid)
@@ -1311,6 +1316,7 @@ def _constraints_to_elements_kernel(
         elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
+        element_family[tid] = wp.int32(4)
         # Soft-tetrahedron: four unified-index particle endpoints stored
         # in body1/body2/body3/body4 (populate kernel did the +num_bodies
         # shift). Pinned particles collapse to -1 so the partitioner
@@ -1353,6 +1359,7 @@ def _constraints_to_elements_kernel(
         elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra + num_soft_hexahedra:
+        element_family[tid] = wp.int32(5)
         # Soft-hexahedron: 8 unified-index particle endpoints in body1..body8.
         # Pinned particles collapse to -1 (same convention as tet/cloth).
         # ElementInteractionData's vec8i slots fit a full hex without
@@ -1427,6 +1434,7 @@ def _constraints_to_elements_kernel(
         elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, slot4, slot5, slot6, slot7)
         return
     local_cid = tid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra - num_soft_hexahedra
+    element_family[tid] = wp.int32(1)
     b1 = contact_get_body1(contact_cols, local_cid)
     b2 = contact_get_body2(contact_cols, local_cid)
     side0_kind = contact_get_side0_kind(contact_cols, local_cid)
@@ -2733,7 +2741,7 @@ def _make_singleworld_persistent_kernel(
                 if is_overflow_color:
                     # Batch index = partition_key stamped by emit.
                     parallel_id = t_slot / ms_batch_size
-                cid = element_ids_by_color[start + t_slot]
+                cid = read1d_i32(element_ids_by_color, start + t_slot)
                 _dispatch_one_cid(
                     constraints,
                     contact_cols,
@@ -2863,7 +2871,7 @@ def _make_singleworld_fused_kernel(
                     t_slot = t_slot_base + inner
                     if t_slot >= count:
                         break
-                    cid = element_ids_by_color[start + t_slot]
+                    cid = read1d_i32(element_ids_by_color, start + t_slot)
                     _dispatch_one_cid(
                         constraints,
                         contact_cols,

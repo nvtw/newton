@@ -25,7 +25,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
+from newton._src.solvers.phoenx.array_helper import read1d_i32, read2d_f32, write2d_f32
 
 
 @wp.kernel(enable_backward=False)
@@ -82,6 +82,18 @@ def _dword_layout_kernel(
     write2d_f32(buf, dword_offset, k, wp.float32(dword_offset) * 1000.0 + wp.float32(k))
 
 
+@wp.kernel(enable_backward=False)
+def _copy_i32_via_helper_kernel(
+    src: wp.array[wp.int32],
+    dst: wp.array[wp.int32],
+    n: wp.int32,
+):
+    tid = wp.tid()
+    if tid >= n:
+        return
+    dst[tid] = read1d_i32(src, tid)
+
+
 @unittest.skipUnless(
     wp.get_preferred_device().is_cuda,
     "array_helper tests require CUDA (wp.func_native has no CPU fallback).",
@@ -115,6 +127,21 @@ class TestArrayHelpers(unittest.TestCase):
             _copy_via_helpers_kernel,
             dim=rows * cols,
             inputs=[src, dst, rows, cols],
+            device=self.device,
+        )
+
+        np.testing.assert_array_equal(dst.numpy(), host)
+
+    def test_copy_i32_via_helper_matches_source(self) -> None:
+        n = 257
+        host = (np.arange(n, dtype=np.int32) * np.int32(17)) - np.int32(123)
+        src = wp.array(host, dtype=wp.int32, device=self.device)
+        dst = wp.zeros(n, dtype=wp.int32, device=self.device)
+
+        wp.launch(
+            _copy_i32_via_helper_kernel,
+            dim=n,
+            inputs=[src, dst, n],
             device=self.device,
         )
 

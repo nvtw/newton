@@ -78,8 +78,10 @@ def _greedy_coloring_grid_size(max_num_interactions: int, device: wp.DeviceLike)
 # at the tail (they're never read by the iterate kernel).
 _LOCALITY_TAIL_KEY: int = 0x7FFFFFFFFFFFFFFF
 
+_LOCALITY_FAMILY_BITS = wp.constant(wp.int64(4))
 _LOCALITY_BODY_MIN_BITS = wp.constant(wp.int64(24))
 _LOCALITY_EID_BITS = wp.constant(wp.int64(25))
+_LOCALITY_FAMILY_MASK = wp.constant(wp.int64((1 << 4) - 1))
 _LOCALITY_BODY_MIN_MASK = wp.constant(wp.int64((1 << 24) - 1))
 _LOCALITY_EID_MASK = wp.constant(wp.int64((1 << 25) - 1))
 
@@ -89,16 +91,21 @@ def _locality_combined_keys_kernel(
     elements: wp.array[ElementInteractionData],
     element_ids_by_color: wp.array[wp.int32],
     interaction_id_to_partition: wp.array[wp.int32],
+    element_family: wp.array[wp.int32],
+    family_sort_cutoff: wp.int32,
     num_elements: wp.array[wp.int32],
     keys: wp.array[wp.int64],
     values: wp.array[wp.int32],
 ):
-    """Pack ``(colour, body_min, eid)`` into one int64 key so a single
-    radix sort produces the (colour, body_min, eid) locality ordering.
+    """Pack ``(colour, family, body_min, eid)`` into one int64 key so a single
+    radix sort preserves colour slices while grouping same-family rows.
 
-    Bit layout: colour (bits 49..63, 15b) | body_min (25..48, 24b) |
-    eid (0..24, 25b). Slots past ``num_elements[0]`` get ``INT64_MAX``
-    and sort to the tail.
+    ``family_sort_cutoff`` disables the family bits for overflow colours,
+    preserving their original body-local solve order.
+
+    Bit layout: colour (bits 53..63) | family (49..52, 4b) |
+    body_min (25..48, 24b) | eid (0..24, 25b). Slots past
+    ``num_elements[0]`` get ``INT64_MAX`` and sort to the tail.
     """
     tid = wp.tid()
     if tid >= keys.shape[0]:
@@ -109,6 +116,9 @@ def _locality_combined_keys_kernel(
         return
     eid = element_ids_by_color[tid]
     color = interaction_id_to_partition[eid]
+    family = element_family[eid]
+    if family_sort_cutoff >= wp.int32(0) and color >= family_sort_cutoff:
+        family = wp.int32(0)
     el = elements[eid]
     body_min = wp.int32(0x7FFFFF)  # 24-bit sentinel for "no body"
     for j in range(MAX_BODIES):
@@ -118,7 +128,8 @@ def _locality_combined_keys_kernel(
         if b < body_min:
             body_min = b
     key = (
-        (wp.int64(color) << (_LOCALITY_BODY_MIN_BITS + _LOCALITY_EID_BITS))
+        (wp.int64(color) << (_LOCALITY_FAMILY_BITS + _LOCALITY_BODY_MIN_BITS + _LOCALITY_EID_BITS))
+        | ((wp.int64(family) & _LOCALITY_FAMILY_MASK) << (_LOCALITY_BODY_MIN_BITS + _LOCALITY_EID_BITS))
         | ((wp.int64(body_min) & _LOCALITY_BODY_MIN_MASK) << _LOCALITY_EID_BITS)
         | (wp.int64(eid) & _LOCALITY_EID_MASK)
     )
@@ -328,6 +339,7 @@ class IncrementalContactPartitioner:
         # the CSR colour ordering is preserved.
         self._locality_keys = wp.zeros(2 * max_num_interactions, dtype=wp.int64, device=device)
         self._locality_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
+        self._locality_family = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
         self._current_color = wp.zeros(1, dtype=wp.int32, device=device)
         self._num_remaining = wp.zeros(1, dtype=wp.int32, device=device)
@@ -414,6 +426,15 @@ class IncrementalContactPartitioner:
             ],
             device=self._packed_priorities.device,
         )
+
+    def set_locality_family(self, element_family: wp.array[wp.int32]) -> None:
+        """Install per-element family tags used only by the locality post-sort.
+
+        Generic graph-coloring tests leave the default all-zero buffer in
+        place; PhoenXWorld supplies joint/contact/cloth/soft tags so the
+        CSR stays grouped by row family within each colour.
+        """
+        self._locality_family = element_family
 
     def reset(
         self,
@@ -933,16 +954,15 @@ class IncrementalContactPartitioner:
         )
 
     def _sort_csr_by_body_locality(self) -> None:
-        """Sort each colour slice of ``element_ids_by_color`` by
-        ``min(b1, b2)`` so consecutive entries hit nearby body cache
-        lines (Kapla / kapla_arena L1/L2 hit rate). PGS correctness is
-        order-independent within a colour.
+        """Sort each colour slice of ``element_ids_by_color`` for iterate
+        locality.
 
-        Single-pass radix sort with a packed
-        ``(colour, body_min, eid)`` key (see
-        :func:`_locality_combined_keys_kernel`). Replaces the previous
-        two-pass design (eid-then-(colour, body_min)) which produced
-        the same final ordering but ran the radix sort twice.
+        Regular colours use ``(colour, family, body_min, eid)`` so rows
+        with the same dispatch path run together while retaining body
+        locality inside each family. The mass-splitting overflow colour
+        disables the family bits and preserves the previous
+        ``(colour, body_min, eid)`` order, because overflow copy-state
+        batch ids are derived from CSR position.
         """
         n = self.max_num_interactions
         wp.launch(
@@ -952,6 +972,8 @@ class IncrementalContactPartitioner:
                 self._elements,
                 self._element_ids_by_color,
                 self._interaction_id_to_partition,
+                self._locality_family,
+                wp.int32(self._max_colored_partitions_kernel_arg),
                 self._num_elements,
                 self._locality_keys,
                 self._locality_values,

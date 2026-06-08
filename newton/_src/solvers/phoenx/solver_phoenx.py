@@ -216,10 +216,7 @@ def _soft_hex_strain_model_value(strain_model: str | int) -> int:
             return SOFT_HEX_STRAIN_MODEL_TRACE
         if normalized in {"arap", "integrated_arap"}:
             return SOFT_HEX_STRAIN_MODEL_ARAP
-        raise ValueError(
-            "soft hex strain_model must be 'trace'/'xpbd_fem' or 'arap' "
-            f"(got {strain_model!r})"
-        )
+        raise ValueError(f"soft hex strain_model must be 'trace'/'xpbd_fem' or 'arap' (got {strain_model!r})")
     value = int(strain_model)
     if value in (SOFT_HEX_STRAIN_MODEL_TRACE, SOFT_HEX_STRAIN_MODEL_ARAP):
         return value
@@ -684,6 +681,9 @@ class PhoenXWorld:
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
             self._constraint_capacity, dtype=ElementInteractionData, device=self.device
         )
+        self._element_family: wp.array[wp.int32] = wp.zeros(
+            self._constraint_capacity, dtype=wp.int32, device=self.device
+        )
         # Joints + cloth tris + cloth bending + soft tets are the
         # only active cids until the first contact ingest. Bending +
         # tets are populated by their respective ``populate_*`` methods.
@@ -774,6 +774,7 @@ class PhoenXWorld:
                 max_greedy_outer_iters=max_greedy_outer_iters,
                 enable_warm_start=_warm_start_active,
             )
+            self._partitioner.set_locality_family(self._element_family)
             self._partitioner.set_symmetric_sweep(bool(symmetric_color_sweep))
             self._partitioner.set_warm_start_invalidate_period(int(warm_start_invalidate_period))
             self._partitioner.set_warm_start_rotate_skip(
@@ -2548,6 +2549,7 @@ class PhoenXWorld:
                 wp.int32(self.num_soft_hexahedra),
                 wp.int32(self.num_bodies),
                 self._elements,
+                self._element_family,
             ],
             device=self.device,
         )
