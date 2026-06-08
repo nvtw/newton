@@ -52,23 +52,34 @@ def _set_worlds_per_block(world, worlds_per_block: int | None) -> None:
     )
 
 
+def _set_family_split(world, family_split: bool | None) -> None:
+    if family_split is None:
+        return
+    world._fast_tail_family_split = types.MethodType(
+        lambda self, _family_split=family_split: _family_split,
+        world,
+    )
+
+
 def _measure_case(
     *,
     scene: str,
     num_worlds: int,
     tpw: int | str,
     worlds_per_block: int | None,
+    family_split: bool | None,
     substeps: int,
     solver_iterations: int,
     warmup: int,
     n_runs: int,
     trials: int,
-) -> tuple[float, float, int, int, int, int, float]:
+) -> tuple[float, float, int, int, bool, int, int, float]:
     handle = _build_scene(scene, num_worlds, substeps=substeps, solver_iterations=solver_iterations)
     solver = _extract_solver(handle)
     world = solver.world
     _force_tpw(solver, tpw)
     _set_worlds_per_block(world, worlds_per_block)
+    _set_family_split(world, family_split)
 
     for _ in range(warmup):
         handle.simulate_one_frame()
@@ -76,15 +87,39 @@ def _measure_case(
 
     chosen_tpw = int(world._tpw_choice.numpy()[0]) if tpw == "auto" else int(tpw)
     chosen_wpb = int(world._fast_tail_worlds_per_block())
+    chosen_family_split = bool(world._fast_tail_family_split())
     num_colors = int(world._world_num_colors.numpy().max(initial=0))
     total_cids = int(world._world_csr_offsets.numpy()[world.num_worlds])
     contacts_per_world = float(world.max_contact_columns) / float(max(1, world.num_worlds))
     min_ms, med_ms = _bench(handle.simulate_one_frame, n_runs=n_runs, warmup=0, trials=trials)
-    return min_ms, med_ms, chosen_tpw, chosen_wpb, num_colors, total_cids, contacts_per_world
+    return min_ms, med_ms, chosen_tpw, chosen_wpb, chosen_family_split, num_colors, total_cids, contacts_per_world
 
 
 def _parse_csv_ints(value: str) -> tuple[int, ...]:
     return tuple(int(v.strip()) for v in value.split(",") if v.strip())
+
+
+def _parse_family_split_values(value: str) -> tuple[bool | None, ...]:
+    out: list[bool | None] = []
+    for raw in value.split(","):
+        item = raw.strip().lower()
+        if not item:
+            continue
+        if item == "default":
+            out.append(None)
+        elif item in ("on", "true", "1"):
+            out.append(True)
+        elif item in ("off", "false", "0"):
+            out.append(False)
+        else:
+            raise ValueError(f"unknown family split value: {raw!r}")
+    return tuple(out)
+
+
+def _format_family_split(value: bool | None) -> str:
+    if value is None:
+        return "default"
+    return "on" if value else "off"
 
 
 def _parse_tpw_values(value: str) -> tuple[int | str, ...]:
@@ -109,6 +144,12 @@ def main() -> None:
     parser.add_argument("--tpw", type=_parse_tpw_values, default=("auto", 32, 16, 8))
     parser.add_argument("--wpb", type=_parse_csv_ints, default=(1, 2, 4, 8))
     parser.add_argument("--include-default", action="store_true", help="Also measure production heuristic wpb.")
+    parser.add_argument(
+        "--family-split",
+        type=_parse_family_split_values,
+        default=(None,),
+        help="Comma-separated default,on,off values for joint/contact family splitting.",
+    )
     parser.add_argument("--substeps", type=int, default=1)
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--warmup", type=int, default=5)
@@ -119,7 +160,7 @@ def main() -> None:
     wp.init()
     print(f"device={wp.get_device()} sm_count={getattr(wp.get_device(), 'sm_count', 'N/A')}")
     print(
-        "scene worlds tpw wpb chosen_tpw chosen_wpb min_ms med_ms us_per_frame "
+        "scene worlds tpw wpb family chosen_tpw chosen_wpb chosen_family min_ms med_ms us_per_frame "
         "max_colors total_cids contacts_per_world rel_best"
     )
 
@@ -133,34 +174,47 @@ def main() -> None:
                 wpb_values = args.wpb
             for tpw in args.tpw:
                 for worlds_per_block in wpb_values:
-                    min_ms, med_ms, chosen_tpw, chosen_wpb, num_colors, total_cids, contacts_per_world = _measure_case(
-                        scene=scene,
-                        num_worlds=num_worlds,
-                        tpw=tpw,
-                        worlds_per_block=worlds_per_block,
-                        substeps=args.substeps,
-                        solver_iterations=args.solver_iterations,
-                        warmup=args.warmup,
-                        n_runs=args.n_runs,
-                        trials=args.trials,
-                    )
-                    rows.append(
+                    for family_split in args.family_split:
                         (
                             min_ms,
                             med_ms,
-                            scene,
-                            num_worlds,
-                            tpw,
-                            "default" if worlds_per_block is None else worlds_per_block,
                             chosen_tpw,
                             chosen_wpb,
+                            chosen_family_split,
                             num_colors,
                             total_cids,
                             contacts_per_world,
+                        ) = _measure_case(
+                            scene=scene,
+                            num_worlds=num_worlds,
+                            tpw=tpw,
+                            worlds_per_block=worlds_per_block,
+                            family_split=family_split,
+                            substeps=args.substeps,
+                            solver_iterations=args.solver_iterations,
+                            warmup=args.warmup,
+                            n_runs=args.n_runs,
+                            trials=args.trials,
                         )
-                    )
+                        rows.append(
+                            (
+                                min_ms,
+                                med_ms,
+                                scene,
+                                num_worlds,
+                                tpw,
+                                "default" if worlds_per_block is None else worlds_per_block,
+                                _format_family_split(family_split),
+                                chosen_tpw,
+                                chosen_wpb,
+                                chosen_family_split,
+                                num_colors,
+                                total_cids,
+                                contacts_per_world,
+                            )
+                        )
             best = min(row[0] for row in rows)
-            for row in sorted(rows, key=lambda r: (str(r[4]), str(r[5]))):
+            for row in sorted(rows, key=lambda r: (str(r[4]), str(r[5]), str(r[6]))):
                 (
                     min_ms,
                     med_ms,
@@ -168,16 +222,18 @@ def main() -> None:
                     row_num_worlds,
                     row_tpw,
                     wpb,
+                    row_family_split,
                     chosen_tpw,
                     chosen_wpb,
+                    chosen_family_split,
                     num_colors,
                     total_cids,
                     contacts_per_world,
                 ) = row
                 rel_best = min_ms / best if best > 0.0 else float("nan")
                 print(
-                    f"{row_scene:5s} {row_num_worlds:6d} {row_tpw!s:>4s} {wpb!s:>7s} "
-                    f"{chosen_tpw:10d} {chosen_wpb:10d} {min_ms:8.3f} {med_ms:8.3f} "
+                    f"{row_scene:7s} {row_num_worlds:6d} {row_tpw!s:>4s} {wpb!s:>7s} {row_family_split:>7s} "
+                    f"{chosen_tpw:10d} {chosen_wpb:10d} {chosen_family_split!s:>13s} {min_ms:8.3f} {med_ms:8.3f} "
                     f"{1000.0 * min_ms / args.n_runs:12.3f} {num_colors:10d} {total_cids:10d} "
                     f"{contacts_per_world:18.1f} {rel_best:8.3f}"
                 )
