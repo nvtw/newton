@@ -78,6 +78,7 @@ def build(
     velocity_iterations: int = 1,
     *,
     step_layout: str = "multi_world",
+    prepare_refresh_stride: int = 1,
 ) -> SceneHandle:
     """Build a tower-per-world scene with ``num_worlds`` replicated
     towers driven by ``solver_name`` ('phoenx' or 'mujoco').
