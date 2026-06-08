@@ -427,10 +427,10 @@ class PhoenXWorld:
                 schedule. ``velocity_iterations=1`` enables TGS-soft
                 relax (recommended for tall stacks).
             prepare_refresh_stride: Refresh cached per-row prepare data
-                every N substeps in contact-only rigid single-world
-                scenes without mass splitting or sleeping. ``1`` preserves
-                the exact default; currently ``2`` is the only supported
-                non-default value.
+                every N substeps in rigid contact/revolute single-world
+                scenes without deformables, mass splitting, or sleeping.
+                ``1`` preserves the exact default; currently ``2`` is the
+                only supported non-default value.
             gravity: 3-tuple or iterable of ``num_worlds`` 3-tuples.
             rigid_contact_max: Sizes per-contact state. ``0`` disables
                 contacts.
@@ -612,7 +612,6 @@ class PhoenXWorld:
             if (
                 bool(mass_splitting)
                 or sleeping_requested
-                or self.num_joints > 0
                 or self.num_particles > 0
                 or self.num_cloth_triangles > 0
                 or self.num_cloth_bending > 0
@@ -620,8 +619,8 @@ class PhoenXWorld:
                 or self.num_soft_hexahedra > 0
             ):
                 raise NotImplementedError(
-                    "prepare_refresh_stride > 1 currently supports contact-only rigid worlds "
-                    "without mass splitting or sleeping"
+                    "prepare_refresh_stride > 1 currently supports rigid contact/revolute worlds "
+                    "without deformables, mass splitting, or sleeping"
                 )
         self._current_substep_index: int = 0
         # Threads-per-world. ``"auto"`` lets the GPU picker decide every
@@ -1495,6 +1494,8 @@ class PhoenXWorld:
             mode_np = None
         if mode_np is not None and mode_np.size > 0:
             self._use_revolute_specialization = bool((mode_np == int(JOINT_MODE_REVOLUTE)).all())
+            if self.prepare_refresh_stride != 1 and not self._use_revolute_specialization:
+                raise NotImplementedError("prepare_refresh_stride > 1 currently supports only revolute joints")
         wp.launch(
             actuated_double_ball_socket_initialize_kernel,
             dim=self.num_joints,
@@ -2269,7 +2270,6 @@ class PhoenXWorld:
         if (
             self.mass_splitting_enabled
             or self._sleeping_enabled
-            or self.num_joints > 0
             or self.num_particles > 0
             or self.num_cloth_triangles > 0
             or self.num_cloth_bending > 0
@@ -2277,9 +2277,11 @@ class PhoenXWorld:
             or self.num_soft_hexahedra > 0
         ):
             raise NotImplementedError(
-                "cached prepare bookkeeping currently supports contact-only rigid worlds "
-                "without mass splitting or sleeping"
+                "cached prepare bookkeeping currently supports rigid contact/revolute worlds "
+                "without deformables, mass splitting, or sleeping"
             )
+        if self.num_joints > 0 and not self._use_revolute_specialization:
+            raise NotImplementedError("cached prepare bookkeeping currently supports only revolute joints")
         cached_head, cached_fused = self._singleworld_cached_prepare_kernels()
         self._partitioner.begin_sweep()
         self._singleworld_head_plus_tail_sweep(cached_head, cached_fused, idt)
@@ -3442,9 +3444,9 @@ class PhoenXWorld:
                 enable_column_timers=self.enable_column_timers,
                 soft_tet_only=False,
                 cloth_only=False,
-                has_joints=False,
+                has_joints=self.num_joints > 0,
                 has_mass_splitting=False,
-                has_sleeping=self._sleeping_enabled,
+                has_sleeping=False,
                 has_soft_contact_pd=False,
             ),
             get_singleworld_kernel(
@@ -3455,9 +3457,9 @@ class PhoenXWorld:
                 enable_column_timers=self.enable_column_timers,
                 soft_tet_only=False,
                 cloth_only=False,
-                has_joints=False,
+                has_joints=self.num_joints > 0,
                 has_mass_splitting=False,
-                has_sleeping=self._sleeping_enabled,
+                has_sleeping=False,
                 has_soft_contact_pd=False,
             ),
         )

@@ -112,6 +112,7 @@ __all__ = [
     "actuated_double_ball_socket_world_error_at",
     "actuated_double_ball_socket_world_wrench",
     "actuated_double_ball_socket_world_wrench_at",
+    "revolute_cached_warmstart",
     "revolute_iterate",
     "revolute_iterate_multi",
     "revolute_prepare_for_iteration",
@@ -3814,6 +3815,88 @@ def revolute_iterate(
     w1, w2 = _angular_axial_block(constraints, cid, 0, w1, w2, ii1, ii2, n_hat, clamp, idt, sor_boost)
 
     _ms_store_body_pair(
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        v1,
+        w1,
+        v2,
+        w2,
+    )
+
+
+@wp.func
+def revolute_cached_warmstart(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    idt: wp.float32,
+):
+    """Apply cached revolute warm-start impulses without rebuilding J.
+
+    Intended for prepare-refresh reuse in rigid, mass-splitting-free
+    worlds where the previous prepare pass already cached r1/r2, the
+    tangent basis, soft coefficients, clamp state, and axial row data.
+    """
+    _ = idt
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
+    (
+        v1,
+        v2,
+        w1,
+        w2,
+        im1,
+        im2,
+        ii1,
+        ii2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair_lean(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
+
+    r1_b1 = read_vec3(constraints, _OFF_R1_B1, cid)
+    r1_b2 = read_vec3(constraints, _OFF_R1_B2, cid)
+    r2_b1 = read_vec3(constraints, _OFF_R2_B1, cid)
+    r2_b2 = read_vec3(constraints, _OFF_R2_B2, cid)
+    cr1_b1 = wp.skew(r1_b1)
+    cr1_b2 = wp.skew(r1_b2)
+    cr2_b1 = wp.skew(r2_b1)
+    cr2_b2 = wp.skew(r2_b2)
+
+    acc1 = read_vec3(constraints, _OFF_ACC_IMP1, cid)
+    acc2 = read_vec3(constraints, _OFF_ACC_IMP2, cid)
+    v1, v2, w1, w2 = apply_pair_spatial_impulse(
+        v1,
+        v2,
+        w1,
+        w2,
+        im1,
+        im2,
+        ii1,
+        ii2,
+        acc1 + acc2,
+        cr1_b1 @ acc1 + cr2_b1 @ acc2,
+        cr1_b2 @ acc1 + cr2_b2 @ acc2,
+    )
+
+    n_hat = read_vec3(constraints, _OFF_AXIS_WORLD, cid)
+    axial_imp = (
+        read_float(constraints, _OFF_ACC_DRIVE, cid)
+        + read_float(constraints, _OFF_ACC_LIMIT, cid)
+        + read_float(constraints, _OFF_ACC_FRICTION, cid)
+    )
+    w1, w2 = apply_pair_angular_impulse(w1, w2, ii1, ii2, -n_hat * axial_imp, -n_hat * axial_imp)
+
+    _ms_store_body_pair_lean(
         bodies,
         particles,
         copy_state,

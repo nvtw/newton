@@ -89,6 +89,8 @@ class _PendulumScene:
         substeps: int = 8,
         solver_iterations: int = 16,
         gravity: tuple[float, float, float] = (0.0, 0.0, -_G),
+        step_layout: str = "multi_world",
+        prepare_refresh_stride: int = 1,
     ) -> None:
         self.device = wp.get_device("cuda:0")
         self.fps = int(fps)
@@ -99,6 +101,8 @@ class _PendulumScene:
         self.pendulum_world = pendulum_world
         self.pendulum_mass = float(pendulum_mass)
         self.gravity = gravity
+        self.step_layout = str(step_layout)
+        self.prepare_refresh_stride = int(prepare_refresh_stride)
 
         # ---- Newton side ---------------------------------------------
         mb = newton.ModelBuilder()
@@ -209,6 +213,8 @@ class _PendulumScene:
             gravity=self.gravity,
             rigid_contact_max=rigid_contact_max,
             num_joints=self.num_joints,
+            step_layout=self.step_layout,
+            prepare_refresh_stride=self.prepare_refresh_stride,
             device=self.device,
         )
 
@@ -445,6 +451,36 @@ class TestPhoenXActuatedDoubleBallSocket(unittest.TestCase):
             0.05,
             f"revolute arm length drifted: |d|={r:.4f} m vs L={arm_len} m",
         )
+
+    def test_revolute_cached_prepare_stride_matches_default(self) -> None:
+        """Stride-2 prepare reuse stays close to per-substep prepare."""
+
+        def _run(stride: int) -> tuple[np.ndarray, np.ndarray]:
+            anchor = (0.0, 0.0, 1.0)
+            scene = _PendulumScene(
+                anchor_world=anchor,
+                pendulum_world=(0.5, 0.0, 1.0),
+                step_layout="single_world",
+                prepare_refresh_stride=stride,
+            )
+            scene.init_joint(
+                mode=JointMode.REVOLUTE,
+                anchor1=anchor,
+                anchor2=(anchor[0], anchor[1] + 1.0, anchor[2]),
+                hertz=60.0,
+                damping_ratio=1.0,
+            )
+            for _ in range(60):
+                scene.step()
+            return scene.pendulum_position(), scene.pendulum_velocity()
+
+        pos_ref, vel_ref = _run(1)
+        pos_cached, vel_cached = _run(2)
+
+        pos_delta = float(np.linalg.norm(pos_cached - pos_ref))
+        vel_delta = float(np.linalg.norm(vel_cached - vel_ref))
+        self.assertLess(pos_delta, 0.05, f"cached prepare position delta too high: {pos_delta:.4f} m")
+        self.assertLess(vel_delta, 0.25, f"cached prepare velocity delta too high: {vel_delta:.4f} m/s")
 
     def test_prismatic_slide_with_drive(self) -> None:
         """Prismatic joint with a position drive: the pendulum

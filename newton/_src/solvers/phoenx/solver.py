@@ -153,10 +153,11 @@ class SolverPhoenX(SolverBase):
             substeps: PhoenX internal substeps per :meth:`step` call.
             solver_iterations: PGS iterations per substep.
             velocity_iterations: TGS-soft relax sweeps per substep.
-            prepare_refresh_stride: Refresh cached rigid-contact prepare data
-                every N substeps. ``1`` preserves exact per-substep
-                rebuilds. ``2`` currently requires ``step_layout="single_world"``
-                with only rigid contacts, no mass splitting, and no sleeping.
+            prepare_refresh_stride: Refresh cached rigid contact/revolute
+                prepare data every N substeps. ``1`` preserves exact
+                per-substep rebuilds. ``2`` currently requires
+                ``step_layout="single_world"`` without deformables, mass
+                splitting, or sleeping; any joints must be revolute.
             default_friction: Fallback when Contacts/shapes carry no material.
             step_layout: ``"multi_world"`` (many small worlds) or
                 ``"single_world"`` (a few big worlds).
