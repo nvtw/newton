@@ -29,6 +29,8 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_HEXAHEDRON,
     ConstraintContainer,
     assert_constraint_header,
+    constraint_read_multiplier,
+    constraint_write_multiplier,
     read_float,
     read_int,
     read_mat33,
@@ -175,7 +177,30 @@ _OFF_LAMBDA_SUM_H = wp.constant(dword_offset_of(SoftHexahedronData, "lambda_sum_
 _OFF_LAMBDA_SUM_D = wp.constant(dword_offset_of(SoftHexahedronData, "lambda_sum_d"))
 SOFT_HEX_TIME_US_OFFSET = wp.constant(dword_offset_of(SoftHexahedronData, "time_us"))
 
+_MUL_LAMBDA_SUM_H = wp.constant(wp.int32(0))
+_MUL_LAMBDA_SUM_D = wp.constant(wp.int32(1))
+
 SOFT_HEX_DWORDS: int = num_dwords(SoftHexahedronData)
+
+
+@wp.func
+def _read_lambda_sum_h(constraints: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return constraint_read_multiplier(constraints, _MUL_LAMBDA_SUM_H, cid)
+
+
+@wp.func
+def _write_lambda_sum_h(constraints: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    constraint_write_multiplier(constraints, _MUL_LAMBDA_SUM_H, cid, v)
+
+
+@wp.func
+def _read_lambda_sum_d(constraints: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return constraint_read_multiplier(constraints, _MUL_LAMBDA_SUM_D, cid)
+
+
+@wp.func
+def _write_lambda_sum_d(constraints: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    constraint_write_multiplier(constraints, _MUL_LAMBDA_SUM_D, cid, v)
 
 
 @wp.func
@@ -772,8 +797,8 @@ def soft_hexahedron_prepare_for_iteration_at(
     write_float(constraints, _OFF_INV_MASS_G, cid, particles.inverse_mass[p6] * wp.float32(inv_factor6))
     write_float(constraints, _OFF_INV_MASS_H, cid, particles.inverse_mass[p7] * wp.float32(inv_factor7))
 
-    write_float(constraints, _OFF_LAMBDA_SUM_H, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_LAMBDA_SUM_D, cid, wp.float32(0.0))
+    _write_lambda_sum_h(constraints, cid, wp.float32(0.0))
+    _write_lambda_sum_d(constraints, cid, wp.float32(0.0))
 
 
 @wp.func
@@ -1001,8 +1026,8 @@ def soft_hexahedron_iterate_at(
 
     dlam_h = wp.float32(0.0)
     dlam_d = wp.float32(0.0)
-    lambda_h = read_float(constraints, _OFF_LAMBDA_SUM_H, cid)
-    lambda_d = read_float(constraints, _OFF_LAMBDA_SUM_D, cid)
+    lambda_h = _read_lambda_sum_h(constraints, cid)
+    lambda_d = _read_lambda_sum_d(constraints, cid)
 
     if strain_model == _SOFT_HEX_STRAIN_MODEL_ARAP:
         A11 = A11 + bias_h
@@ -1056,8 +1081,8 @@ def soft_hexahedron_iterate_at(
     write_position_unified(bodies, particles, copy_state, body7, slot7, num_bodies, x7)
 
     if strain_model == _SOFT_HEX_STRAIN_MODEL_ARAP:
-        write_float(constraints, _OFF_LAMBDA_SUM_H, cid, lambda_h)
-        write_float(constraints, _OFF_LAMBDA_SUM_D, cid, lambda_d)
+        _write_lambda_sum_h(constraints, cid, lambda_h)
+        _write_lambda_sum_d(constraints, cid, lambda_d)
 
 
 # ---------------------------------------------------------------------------
@@ -1257,8 +1282,8 @@ def soft_hex_init_rows_from_arrays_kernel(
     soft_hexahedron_set_beta_h(constraints, cid, hex_materials[h, 2])
     soft_hexahedron_set_beta_d(constraints, cid, hex_materials[h, 3])
 
-    write_float(constraints, _OFF_LAMBDA_SUM_H, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_LAMBDA_SUM_D, cid, wp.float32(0.0))
+    _write_lambda_sum_h(constraints, cid, wp.float32(0.0))
+    _write_lambda_sum_d(constraints, cid, wp.float32(0.0))
     write_float(constraints, _OFF_INV_MASS_A, cid, wp.float32(0.0))
     write_float(constraints, _OFF_INV_MASS_B, cid, wp.float32(0.0))
     write_float(constraints, _OFF_INV_MASS_C, cid, wp.float32(0.0))

@@ -36,6 +36,8 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     ConstraintContainer,
     assert_constraint_header,
+    constraint_read_multiplier,
+    constraint_write_multiplier,
     read_float,
     read_int,
     read_mat22,
@@ -179,7 +181,30 @@ _OFF_LAMBDA_SUM_LAMBDA = wp.constant(dword_offset_of(ClothTriangleData, "lambda_
 _OFF_LAMBDA_SUM_MU = wp.constant(dword_offset_of(ClothTriangleData, "lambda_sum_mu"))
 CLOTH_TRIANGLE_TIME_US_OFFSET = wp.constant(dword_offset_of(ClothTriangleData, "time_us"))
 
+_MUL_LAMBDA_SUM_LAMBDA = wp.constant(wp.int32(0))
+_MUL_LAMBDA_SUM_MU = wp.constant(wp.int32(1))
+
 CLOTH_TRIANGLE_DWORDS: int = num_dwords(ClothTriangleData)
+
+
+@wp.func
+def _read_lambda_sum_lambda(constraints: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return constraint_read_multiplier(constraints, _MUL_LAMBDA_SUM_LAMBDA, cid)
+
+
+@wp.func
+def _write_lambda_sum_lambda(constraints: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    constraint_write_multiplier(constraints, _MUL_LAMBDA_SUM_LAMBDA, cid, v)
+
+
+@wp.func
+def _read_lambda_sum_mu(constraints: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return constraint_read_multiplier(constraints, _MUL_LAMBDA_SUM_MU, cid)
+
+
+@wp.func
+def _write_lambda_sum_mu(constraints: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    constraint_write_multiplier(constraints, _MUL_LAMBDA_SUM_MU, cid, v)
 
 
 @wp.func
@@ -351,8 +376,8 @@ def cloth_triangle_prepare_for_iteration_at(
     write_float(constraints, _OFF_INV_MASS_B, cid, particles.inverse_mass[p_b] * wp.float32(inv_factor_b))
     write_float(constraints, _OFF_INV_MASS_C, cid, particles.inverse_mass[p_c] * wp.float32(inv_factor_c))
 
-    write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, wp.float32(0.0))
+    _write_lambda_sum_lambda(constraints, cid, wp.float32(0.0))
+    _write_lambda_sum_mu(constraints, cid, wp.float32(0.0))
 
 
 @wp.func
@@ -405,8 +430,8 @@ def cloth_triangle_iterate_at(
     beta_lambda = read_float(constraints, _OFF_BETA_LAMBDA, cid)
     beta_mu = read_float(constraints, _OFF_BETA_MU, cid)
     rotation = read_float(constraints, _OFF_ROTATION, cid)
-    lambda_sum_lambda = read_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid)
-    lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
+    lambda_sum_lambda = _read_lambda_sum_lambda(constraints, cid)
+    lambda_sum_mu = _read_lambda_sum_mu(constraints, cid)
 
     # Slot-aware position reads. Without mass splitting the helpers
     # fall through to ``particles.position[p_*]``; with mass splitting,
@@ -590,5 +615,5 @@ def cloth_triangle_iterate_at(
     write_position_unified(bodies, particles, copy_state, body_c, slot_c, num_bodies, x_c)
 
     write_float(constraints, _OFF_ROTATION, cid, rotation)
-    write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, lambda_sum_lambda)
-    write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, lambda_sum_mu)
+    _write_lambda_sum_lambda(constraints, cid, lambda_sum_lambda)
+    _write_lambda_sum_mu(constraints, cid, lambda_sum_mu)

@@ -18,6 +18,8 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
     ConstraintContainer,
     assert_constraint_header,
+    constraint_read_multiplier,
+    constraint_write_multiplier,
     read_float,
     read_int,
     read_mat33,
@@ -164,7 +166,30 @@ _OFF_LAMBDA_SUM_LAMBDA = wp.constant(dword_offset_of(SoftTetrahedronData, "lambd
 _OFF_LAMBDA_SUM_MU = wp.constant(dword_offset_of(SoftTetrahedronData, "lambda_sum_mu"))
 SOFT_TET_TIME_US_OFFSET = wp.constant(dword_offset_of(SoftTetrahedronData, "time_us"))
 
+_MUL_LAMBDA_SUM_MU = wp.constant(wp.int32(0))
+_MUL_LAMBDA_SUM_LAMBDA = wp.constant(wp.int32(1))
+
 SOFT_TET_DWORDS: int = num_dwords(SoftTetrahedronData)
+
+
+@wp.func
+def _read_lambda_sum_mu(constraints: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return constraint_read_multiplier(constraints, _MUL_LAMBDA_SUM_MU, cid)
+
+
+@wp.func
+def _write_lambda_sum_mu(constraints: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    constraint_write_multiplier(constraints, _MUL_LAMBDA_SUM_MU, cid, v)
+
+
+@wp.func
+def _read_lambda_sum_lambda(constraints: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return constraint_read_multiplier(constraints, _MUL_LAMBDA_SUM_LAMBDA, cid)
+
+
+@wp.func
+def _write_lambda_sum_lambda(constraints: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    constraint_write_multiplier(constraints, _MUL_LAMBDA_SUM_LAMBDA, cid, v)
 
 
 @wp.func
@@ -401,8 +426,8 @@ def soft_tetrahedron_prepare_for_iteration_at(
     write_float(constraints, _OFF_INV_MASS_C, cid, particles.inverse_mass[p_c] * wp.float32(inv_factor_c))
     write_float(constraints, _OFF_INV_MASS_D, cid, particles.inverse_mass[p_d] * wp.float32(inv_factor_d))
 
-    write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, wp.float32(0.0))
+    _write_lambda_sum_lambda(constraints, cid, wp.float32(0.0))
+    _write_lambda_sum_mu(constraints, cid, wp.float32(0.0))
 
     # Cold-start polar decomposition against the substep-entry pose.
     # The substep-entry refresh is correctness-load-bearing: skipping
@@ -468,8 +493,8 @@ def soft_tetrahedron_iterate_at(
     beta_lambda = read_float(constraints, _OFF_BETA_LAMBDA, cid)
     beta_mu = read_float(constraints, _OFF_BETA_MU, cid)
     rotation = read_quat(constraints, _OFF_ROTATION, cid)
-    lambda_sum_lambda = read_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid)
-    lambda_sum_mu = read_float(constraints, _OFF_LAMBDA_SUM_MU, cid)
+    lambda_sum_lambda = _read_lambda_sum_lambda(constraints, cid)
+    lambda_sum_mu = _read_lambda_sum_mu(constraints, cid)
 
     x_a = read_particle_position_with_slot(particles, copy_state, p_a, slot_a)
     x_b = read_particle_position_with_slot(particles, copy_state, p_b, slot_b)
@@ -585,8 +610,8 @@ def soft_tetrahedron_iterate_at(
     write_particle_position_with_slot(particles, copy_state, p_d, slot_d, x_d)
 
     write_quat(constraints, _OFF_ROTATION, cid, rotation)
-    write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, lambda_sum_lambda)
-    write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, lambda_sum_mu)
+    _write_lambda_sum_lambda(constraints, cid, lambda_sum_lambda)
+    _write_lambda_sum_mu(constraints, cid, lambda_sum_mu)
 
 
 @wp.kernel
@@ -662,5 +687,5 @@ def soft_tet_init_rows_kernel(
     # Identity quaternion warm-start; the iterate's polar decomposition
     # will refine on the first call.
     write_quat(constraints, _OFF_ROTATION, cid, wp.quatf(0.0, 0.0, 0.0, 1.0))
-    write_float(constraints, _OFF_LAMBDA_SUM_LAMBDA, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_LAMBDA_SUM_MU, cid, wp.float32(0.0))
+    _write_lambda_sum_lambda(constraints, cid, wp.float32(0.0))
+    _write_lambda_sum_mu(constraints, cid, wp.float32(0.0))

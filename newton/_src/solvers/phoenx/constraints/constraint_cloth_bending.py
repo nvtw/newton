@@ -56,6 +56,8 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_BENDING,
     ConstraintContainer,
     assert_constraint_header,
+    constraint_read_multiplier,
+    constraint_write_multiplier,
     read_float,
     read_int,
     write_float,
@@ -147,7 +149,19 @@ _OFF_INV_MASS_C = wp.constant(dword_offset_of(ClothBendingData, "inv_mass_c"))
 _OFF_INV_MASS_D = wp.constant(dword_offset_of(ClothBendingData, "inv_mass_d"))
 CLOTH_BENDING_TIME_US_OFFSET = wp.constant(dword_offset_of(ClothBendingData, "time_us"))
 
+_MUL_LAMBDA_SUM = wp.constant(wp.int32(0))
+
 CLOTH_BENDING_DWORDS: int = num_dwords(ClothBendingData)
+
+
+@wp.func
+def _read_lambda_sum(constraints: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return constraint_read_multiplier(constraints, _MUL_LAMBDA_SUM, cid)
+
+
+@wp.func
+def _write_lambda_sum(constraints: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    constraint_write_multiplier(constraints, _MUL_LAMBDA_SUM, cid, v)
 
 
 @wp.func
@@ -243,7 +257,7 @@ def cloth_bending_prepare_for_iteration_at(
     write_float(constraints, _OFF_INV_MASS_C, cid, particles.inverse_mass[p_c] * wp.float32(inv_factor_c))
     write_float(constraints, _OFF_INV_MASS_D, cid, particles.inverse_mass[p_d] * wp.float32(inv_factor_d))
 
-    write_float(constraints, _OFF_LAMBDA_SUM, cid, wp.float32(0.0))
+    _write_lambda_sum(constraints, cid, wp.float32(0.0))
 
 
 @wp.func
@@ -290,7 +304,7 @@ def cloth_bending_iterate_at(
 
     rest_angle = read_float(constraints, _OFF_REST_ANGLE, cid)
     alpha = read_float(constraints, _OFF_ALPHA, cid)
-    lambda_sum = read_float(constraints, _OFF_LAMBDA_SUM, cid)
+    lambda_sum = _read_lambda_sum(constraints, cid)
 
     inv_mass_a = read_float(constraints, _OFF_INV_MASS_A, cid)
     inv_mass_b = read_float(constraints, _OFF_INV_MASS_B, cid)
@@ -374,7 +388,7 @@ def cloth_bending_iterate_at(
     write_position_unified(bodies, particles, copy_state, body_c, slot_c, num_bodies, x2)
     write_position_unified(bodies, particles, copy_state, body_d, slot_d, num_bodies, x3)
 
-    write_float(constraints, _OFF_LAMBDA_SUM, cid, lambda_sum)
+    _write_lambda_sum(constraints, cid, lambda_sum)
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +460,7 @@ def cloth_bending_init_rows_kernel(
         cloth_bending_set_body4(constraints, cid, num_bodies + v2_i)
         cloth_bending_set_rest_angle(constraints, cid, wp.float32(0.0))
         cloth_bending_set_alpha(constraints, cid, wp.float32(1.0) / default_alpha_floor)
-        write_float(constraints, _OFF_LAMBDA_SUM, cid, wp.float32(0.0))
+        _write_lambda_sum(constraints, cid, wp.float32(0.0))
         return
 
     cloth_bending_set_body1(constraints, cid, num_bodies + o0)
@@ -461,4 +475,4 @@ def cloth_bending_init_rows_kernel(
         stiffness = default_alpha_floor
     cloth_bending_set_alpha(constraints, cid, wp.float32(1.0) / stiffness)
 
-    write_float(constraints, _OFF_LAMBDA_SUM, cid, wp.float32(0.0))
+    _write_lambda_sum(constraints, cid, wp.float32(0.0))

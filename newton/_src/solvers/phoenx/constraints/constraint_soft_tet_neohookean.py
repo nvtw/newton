@@ -25,6 +25,8 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN,
     ConstraintContainer,
     assert_constraint_header,
+    constraint_read_multiplier,
+    constraint_write_multiplier,
     read_float,
     read_int,
     read_mat33,
@@ -173,7 +175,30 @@ _OFF_LAMBDA_SUM_H = wp.constant(dword_offset_of(SoftTetNeoHookeanData, "lambda_s
 _OFF_LAMBDA_SUM_D = wp.constant(dword_offset_of(SoftTetNeoHookeanData, "lambda_sum_d"))
 SOFT_TET_NEOHOOKEAN_TIME_US_OFFSET = wp.constant(dword_offset_of(SoftTetNeoHookeanData, "time_us"))
 
+_MUL_LAMBDA_SUM_H = wp.constant(wp.int32(0))
+_MUL_LAMBDA_SUM_D = wp.constant(wp.int32(1))
+
 SOFT_TET_NEOHOOKEAN_DWORDS: int = num_dwords(SoftTetNeoHookeanData)
+
+
+@wp.func
+def _read_lambda_sum_h(constraints: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return constraint_read_multiplier(constraints, _MUL_LAMBDA_SUM_H, cid)
+
+
+@wp.func
+def _write_lambda_sum_h(constraints: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    constraint_write_multiplier(constraints, _MUL_LAMBDA_SUM_H, cid, v)
+
+
+@wp.func
+def _read_lambda_sum_d(constraints: ConstraintContainer, cid: wp.int32) -> wp.float32:
+    return constraint_read_multiplier(constraints, _MUL_LAMBDA_SUM_D, cid)
+
+
+@wp.func
+def _write_lambda_sum_d(constraints: ConstraintContainer, cid: wp.int32, v: wp.float32):
+    constraint_write_multiplier(constraints, _MUL_LAMBDA_SUM_D, cid, v)
 
 
 @wp.func
@@ -316,8 +341,8 @@ def soft_tet_neohookean_prepare_for_iteration_at(
     write_float(constraints, _OFF_INV_MASS_C, cid, particles.inverse_mass[p_c] * wp.float32(inv_factor_c))
     write_float(constraints, _OFF_INV_MASS_D, cid, particles.inverse_mass[p_d] * wp.float32(inv_factor_d))
 
-    write_float(constraints, _OFF_LAMBDA_SUM_H, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_LAMBDA_SUM_D, cid, wp.float32(0.0))
+    _write_lambda_sum_h(constraints, cid, wp.float32(0.0))
+    _write_lambda_sum_d(constraints, cid, wp.float32(0.0))
 
 
 @wp.func
@@ -393,8 +418,8 @@ def soft_tet_neohookean_iterate_at(
     alpha_d = read_float(constraints, _OFF_ALPHA_D, cid)
     beta_h = read_float(constraints, _OFF_BETA_H, cid)
     beta_d = read_float(constraints, _OFF_BETA_D, cid)
-    lambda_h = read_float(constraints, _OFF_LAMBDA_SUM_H, cid)
-    lambda_d = read_float(constraints, _OFF_LAMBDA_SUM_D, cid)
+    lambda_h = _read_lambda_sum_h(constraints, cid)
+    lambda_d = _read_lambda_sum_d(constraints, cid)
 
     x_a = read_position_with_slot(bodies, particles, copy_state, body_a, slot_a, num_bodies)
     x_b = read_position_with_slot(bodies, particles, copy_state, body_b, slot_b, num_bodies)
@@ -483,8 +508,8 @@ def soft_tet_neohookean_iterate_at(
     write_position_unified(bodies, particles, copy_state, body_c, slot_c, num_bodies, x_c)
     write_position_unified(bodies, particles, copy_state, body_d, slot_d, num_bodies, x_d)
 
-    write_float(constraints, _OFF_LAMBDA_SUM_H, cid, lambda_h)
-    write_float(constraints, _OFF_LAMBDA_SUM_D, cid, lambda_d)
+    _write_lambda_sum_h(constraints, cid, lambda_h)
+    _write_lambda_sum_d(constraints, cid, lambda_d)
 
 
 # ---------------------------------------------------------------------------
@@ -564,5 +589,5 @@ def soft_tet_neohookean_init_rows_kernel(
     soft_tet_neohookean_set_beta_h(constraints, cid, default_beta_h)
     soft_tet_neohookean_set_beta_d(constraints, cid, default_beta_d)
 
-    write_float(constraints, _OFF_LAMBDA_SUM_H, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_LAMBDA_SUM_D, cid, wp.float32(0.0))
+    _write_lambda_sum_h(constraints, cid, wp.float32(0.0))
+    _write_lambda_sum_d(constraints, cid, wp.float32(0.0))

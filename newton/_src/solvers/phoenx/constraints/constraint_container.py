@@ -47,9 +47,11 @@ __all__ = [
     "constraint_get_body1",
     "constraint_get_body2",
     "constraint_get_type",
+    "constraint_read_multiplier",
     "constraint_set_body1",
     "constraint_set_body2",
     "constraint_set_type",
+    "constraint_write_multiplier",
     "pd_coefficients",
     "read_float",
     "read_int",
@@ -211,6 +213,16 @@ def read_float(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.float
 @wp.func
 def write_float(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.float32):
     write2d_f32(c.data, off, cid, v)
+
+
+@wp.func
+def constraint_read_multiplier(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.float32:
+    return read2d_f32(c.multipliers, off, cid)
+
+
+@wp.func
+def constraint_write_multiplier(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.float32):
+    write2d_f32(c.multipliers, off, cid, v)
 
 
 @wp.func
