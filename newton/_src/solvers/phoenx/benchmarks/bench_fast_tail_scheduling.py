@@ -22,7 +22,7 @@ import types
 import warp as wp
 
 from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _bench, _extract_solver, _force_tpw
-from newton._src.solvers.phoenx.benchmarks.scenarios import g1_flat, h1_flat, tower
+from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
 
 
 def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iterations: int):
@@ -30,6 +30,8 @@ def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iteration
         return h1_flat.build(num_worlds, "phoenx", substeps, solver_iterations)
     if scene == "g1":
         return g1_flat.build(num_worlds, "phoenx", substeps, solver_iterations)
+    if scene == "dr_legs":
+        return dr_legs.build(num_worlds, "phoenx", substeps, solver_iterations)
     if scene == "tower":
         return tower.build(
             num_worlds,
@@ -97,7 +99,12 @@ def _parse_tpw_values(value: str) -> tuple[int | str, ...]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--scenes", nargs="+", choices=("h1", "g1", "tower"), default=["h1", "tower"])
+    parser.add_argument(
+        "--scenes",
+        nargs="+",
+        choices=("h1", "g1", "dr_legs", "tower"),
+        default=["h1", "dr_legs", "tower"],
+    )
     parser.add_argument("--worlds", type=_parse_csv_ints, default=(32, 64, 128, 512))
     parser.add_argument("--tpw", type=_parse_tpw_values, default=("auto", 32, 16, 8))
     parser.add_argument("--wpb", type=_parse_csv_ints, default=(1, 2, 4, 8))
