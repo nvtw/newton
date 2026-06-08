@@ -117,6 +117,8 @@ class TestPreCompileDispatchKernelsFires(unittest.TestCase):
             loaded_modules = {module.get_module_identifier() for module in force_load.call_args.kwargs["modules"]}
             base_fast_tail_kw = {
                 "revolute_only": bool(world._use_revolute_specialization),
+                "has_joints": world.num_joints > 0,
+                "has_contacts": world.max_contact_columns > 0,
                 "has_sleeping": bool(world._sleeping_enabled),
                 "enable_column_timers": world.enable_column_timers,
             }

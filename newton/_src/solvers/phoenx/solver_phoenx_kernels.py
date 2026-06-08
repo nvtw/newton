@@ -667,6 +667,8 @@ def _per_world_greedy_coloring_kernel(
 def _make_fast_tail_prepare_plus_iterate_kernel(
     *,
     revolute_only: bool,
+    has_joints: bool,
+    has_contacts: bool,
     has_sleeping: bool,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
@@ -742,7 +744,24 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                 _t0 = wp.uint64(0)
                 if wp.static(enable_column_timers):
                     _t0 = read_global_timer_ns()
-                if cid < num_joints:
+                if wp.static(has_joints and not has_contacts):
+                    if wp.static(cached_prepare):
+                        revolute_cached_warmstart(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
+                    elif wp.static(revolute_only):
+                        revolute_prepare_for_iteration(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
+                    else:
+                        actuated_double_ball_socket_prepare_for_iteration(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
+                    if wp.static(enable_column_timers):
+                        constraint_accumulate_time_us(
+                            constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                        )
+                elif cid < num_joints:
                     if wp.static(cached_prepare):
                         revolute_cached_warmstart(
                             constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
@@ -815,7 +834,40 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                     _t0 = wp.uint64(0)
                     if wp.static(enable_column_timers):
                         _t0 = read_global_timer_ns()
-                    if cid < num_joints:
+                    if wp.static(has_joints and not has_contacts):
+                        if wp.static(revolute_only):
+                            revolute_iterate_multi(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                sor_boost,
+                                True,
+                                inner_sweeps,
+                            )
+                        else:
+                            actuated_double_ball_socket_iterate_multi(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                sor_boost,
+                                True,
+                                inner_sweeps,
+                            )
+                        if wp.static(enable_column_timers):
+                            constraint_accumulate_time_us(
+                                constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                            )
+                    elif cid < num_joints:
                         if wp.static(revolute_only):
                             revolute_iterate_multi(
                                 constraints,
@@ -898,6 +950,8 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
 def _make_fast_tail_relax_kernel(
     *,
     revolute_only: bool,
+    has_joints: bool,
+    has_contacts: bool,
     has_sleeping: bool,
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
@@ -973,7 +1027,40 @@ def _make_fast_tail_relax_kernel(
                 _t0 = wp.uint64(0)
                 if wp.static(enable_column_timers):
                     _t0 = read_global_timer_ns()
-                if cid < num_joints:
+                if wp.static(has_joints and not has_contacts):
+                    if wp.static(revolute_only):
+                        revolute_iterate_multi(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            sor_boost,
+                            False,
+                            num_iterations,
+                        )
+                    else:
+                        actuated_double_ball_socket_iterate_multi(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            sor_boost,
+                            False,
+                            num_iterations,
+                        )
+                    if wp.static(enable_column_timers):
+                        constraint_accumulate_time_us(
+                            constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                        )
+                elif cid < num_joints:
                     if wp.static(revolute_only):
                         revolute_iterate_multi(
                             constraints,
@@ -1156,6 +1243,8 @@ def get_fast_tail_kernel(
     *,
     kind: str,
     revolute_only: bool,
+    has_joints: bool = True,
+    has_contacts: bool = True,
     has_sleeping: bool = False,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
@@ -1163,14 +1252,17 @@ def get_fast_tail_kernel(
     guard_tpw: bool = True,
 ):
     """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``
-    or ``"relax"``. Each (kind, revolute_only, has_sleeping,
-    cached_prepare, enable_column_timers, fixed_tpw, guard_tpw) tuple is cached
+    or ``"relax"``. Each (kind, revolute_only, has_joints,
+    has_contacts, has_sleeping, cached_prepare, enable_column_timers,
+    fixed_tpw, guard_tpw) tuple is cached
     after first build by the underlying factory's ``functools.cache``. ``fixed_tpw=0``
     keeps the graph-capture-safe dynamic threads-per-world buffer read;
     ``guard_tpw`` keeps fixed variants selectable in auto mode."""
     if kind == "prepare_plus_iterate":
         return _make_fast_tail_prepare_plus_iterate_kernel(
             revolute_only=revolute_only,
+            has_joints=has_joints,
+            has_contacts=has_contacts,
             has_sleeping=has_sleeping,
             cached_prepare=cached_prepare,
             enable_column_timers=enable_column_timers,
@@ -1180,6 +1272,8 @@ def get_fast_tail_kernel(
     if kind == "relax":
         return _make_fast_tail_relax_kernel(
             revolute_only=revolute_only,
+            has_joints=has_joints,
+            has_contacts=has_contacts,
             has_sleeping=has_sleeping,
             enable_column_timers=enable_column_timers,
             fixed_tpw=fixed_tpw,

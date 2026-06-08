@@ -1111,6 +1111,8 @@ class PhoenXWorld:
         else:
             base_fast_tail_kw = {
                 "revolute_only": bool(self._use_revolute_specialization),
+                "has_joints": self.num_joints > 0,
+                "has_contacts": self.max_contact_columns > 0,
                 "has_sleeping": bool(self._sleeping_enabled),
                 "enable_column_timers": self.enable_column_timers,
             }
@@ -3149,6 +3151,8 @@ class PhoenXWorld:
             kernel = get_fast_tail_kernel(
                 kind="prepare_plus_iterate",
                 revolute_only=bool(self._use_revolute_specialization),
+                has_joints=self.num_joints > 0,
+                has_contacts=self.max_contact_columns > 0,
                 has_sleeping=bool(self._sleeping_enabled),
                 cached_prepare=bool(cached_prepare),
                 enable_column_timers=self.enable_column_timers,
@@ -3192,6 +3196,8 @@ class PhoenXWorld:
             kernel = get_fast_tail_kernel(
                 kind="relax",
                 revolute_only=bool(self._use_revolute_specialization),
+                has_joints=self.num_joints > 0,
+                has_contacts=self.max_contact_columns > 0,
                 has_sleeping=bool(self._sleeping_enabled),
                 enable_column_timers=self.enable_column_timers,
                 fixed_tpw=fixed_tpw,
