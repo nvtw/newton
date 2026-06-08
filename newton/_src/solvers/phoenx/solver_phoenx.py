@@ -427,7 +427,7 @@ class PhoenXWorld:
                 schedule. ``velocity_iterations=1`` enables TGS-soft
                 relax (recommended for tall stacks).
             prepare_refresh_stride: Refresh cached per-row prepare data
-                every N substeps in rigid contact/revolute scenes without
+                every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``1`` preserves
                 the exact default; currently ``2`` is the only supported
                 non-default value.
