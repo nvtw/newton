@@ -63,6 +63,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.helpers.math_helpers import (
+    apply_pair_angular_impulse,
     apply_pair_spatial_impulse,
     create_orthonormal,
     extract_rotation_angle,
@@ -1523,8 +1524,7 @@ def _angular_axial_block(
     velocities only."""
     jv_axial = wp.dot(n_hat, w1 - w2)
     axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost)
-    w1 = w1 + ii1 @ (n_hat * axial_lam)
-    w2 = w2 - ii2 @ (n_hat * axial_lam)
+    w1, w2 = apply_pair_angular_impulse(w1, w2, ii1, ii2, -n_hat * axial_lam, -n_hat * axial_lam)
     return w1, w2
 
 
@@ -2121,10 +2121,19 @@ def _planar_prepare_at(
 
     # Apply warm-start. Linear impulse acts at the COM (no torque);
     # angular impulse is a pure couple (no force).
-    velocity1 = velocity1 - inv_mass1 * acc_imp1_world
-    angular_velocity1 = angular_velocity1 - inv_inertia1 @ acc_imp2_world
-    velocity2 = velocity2 + inv_mass2 * acc_imp1_world
-    angular_velocity2 = angular_velocity2 + inv_inertia2 @ acc_imp2_world
+    velocity1, velocity2, angular_velocity1, angular_velocity2 = apply_pair_spatial_impulse(
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        acc_imp1_world,
+        acc_imp2_world,
+        acc_imp2_world,
+    )
 
     _ms_store_body_pair(
         bodies,
@@ -2388,13 +2397,18 @@ def _cable_prepare_at(
     write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc_imp3_world)
 
     total_linear = acc_imp1 + acc_imp2_world + acc_imp3_world
-    velocity1 = velocity1 - inv_mass1 * total_linear
-    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (
-        cr1_b1 @ acc_imp1 + cr2_b1 @ acc_imp2_world + cr3_b1 @ acc_imp3_world
-    )
-    velocity2 = velocity2 + inv_mass2 * total_linear
-    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (
-        cr1_b2 @ acc_imp1 + cr2_b2 @ acc_imp2_world + cr3_b2 @ acc_imp3_world
+    velocity1, velocity2, angular_velocity1, angular_velocity2 = apply_pair_spatial_impulse(
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        total_linear,
+        cr1_b1 @ acc_imp1 + cr2_b1 @ acc_imp2_world + cr3_b1 @ acc_imp3_world,
+        cr1_b2 @ acc_imp1 + cr2_b2 @ acc_imp2_world + cr3_b2 @ acc_imp3_world,
     )
 
     _ms_store_body_pair(
@@ -2686,17 +2700,35 @@ def _box2d_pivot_slide_prepare_at(
     # ---- Warm-start application + re-projection ----------------------
     if has_anchor1_only:
         acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-        velocity1 = velocity1 - inv_mass1 * acc1
-        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc1)
-        velocity2 = velocity2 + inv_mass2 * acc1
-        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1)
+        velocity1, velocity2, angular_velocity1, angular_velocity2 = apply_pair_spatial_impulse(
+            velocity1,
+            velocity2,
+            angular_velocity1,
+            angular_velocity2,
+            inv_mass1,
+            inv_mass2,
+            inv_inertia1,
+            inv_inertia2,
+            acc1,
+            cr1_b1 @ acc1,
+            cr1_b2 @ acc1,
+        )
     if has_schur_3plus2:
         acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
         acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
-        velocity1 = velocity1 - inv_mass1 * (acc1 + acc2)
-        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc1 + cr2_b1 @ acc2)
-        velocity2 = velocity2 + inv_mass2 * (acc1 + acc2)
-        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1 + cr2_b2 @ acc2)
+        velocity1, velocity2, angular_velocity1, angular_velocity2 = apply_pair_spatial_impulse(
+            velocity1,
+            velocity2,
+            angular_velocity1,
+            angular_velocity2,
+            inv_mass1,
+            inv_mass2,
+            inv_inertia1,
+            inv_inertia2,
+            acc1 + acc2,
+            cr1_b1 @ acc1 + cr2_b1 @ acc2,
+            cr1_b2 @ acc1 + cr2_b2 @ acc2,
+        )
     if has_tangent_4row:
         # Re-project tangent acc onto the new (t1, t2) basis.
         acc_imp1_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
@@ -2710,10 +2742,19 @@ def _box2d_pivot_slide_prepare_at(
         write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc_imp1_world)
         write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc_imp2_world)
         total_linear = acc_imp1_world + acc_imp2_world
-        velocity1 = velocity1 - inv_mass1 * total_linear
-        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc_imp1_world + cr2_b1 @ acc_imp2_world)
-        velocity2 = velocity2 + inv_mass2 * total_linear
-        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc_imp1_world + cr2_b2 @ acc_imp2_world)
+        velocity1, velocity2, angular_velocity1, angular_velocity2 = apply_pair_spatial_impulse(
+            velocity1,
+            velocity2,
+            angular_velocity1,
+            angular_velocity2,
+            inv_mass1,
+            inv_mass2,
+            inv_inertia1,
+            inv_inertia2,
+            total_linear,
+            cr1_b1 @ acc_imp1_world + cr2_b1 @ acc_imp2_world,
+            cr1_b2 @ acc_imp1_world + cr2_b2 @ acc_imp2_world,
+        )
     if has_anchor3:
         # Re-project acc3 (PRISMATIC stores world-frame along t2;
         # FIXED similarly) and apply.
@@ -2721,10 +2762,19 @@ def _box2d_pivot_slide_prepare_at(
         acc3_t2 = wp.dot(t2, acc_imp3_world)
         acc_imp3_world = acc3_t2 * t2
         write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc_imp3_world)
-        velocity1 = velocity1 - inv_mass1 * acc_imp3_world
-        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr3_b1 @ acc_imp3_world)
-        velocity2 = velocity2 + inv_mass2 * acc_imp3_world
-        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr3_b2 @ acc_imp3_world)
+        velocity1, velocity2, angular_velocity1, angular_velocity2 = apply_pair_spatial_impulse(
+            velocity1,
+            velocity2,
+            angular_velocity1,
+            angular_velocity2,
+            inv_mass1,
+            inv_mass2,
+            inv_inertia1,
+            inv_inertia2,
+            acc_imp3_world,
+            cr3_b1 @ acc_imp3_world,
+            cr3_b2 @ acc_imp3_world,
+        )
 
     # ---- Axial drive / limit / friction prepare ----------------------
     # Single call to ``_axial_drive_limit_prepare_at`` with all inputs
@@ -2769,15 +2819,25 @@ def _box2d_pivot_slide_prepare_at(
         )
         if has_angular_axial:
             # Pure couple about n_hat.
-            angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
-            angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
+            angular_velocity1, angular_velocity2 = apply_pair_angular_impulse(
+                angular_velocity1, angular_velocity2, inv_inertia1, inv_inertia2, -n_hat * axial_imp, -n_hat * axial_imp
+            )
         else:
             # Linear impulse with anchor-1 lever.
             axial_world = n_hat * axial_imp
-            velocity1 = velocity1 + inv_mass1 * axial_world
-            angular_velocity1 = angular_velocity1 + inv_inertia1 @ wp.cross(r1_b1, axial_world)
-            velocity2 = velocity2 - inv_mass2 * axial_world
-            angular_velocity2 = angular_velocity2 - inv_inertia2 @ wp.cross(r1_b2, axial_world)
+            velocity1, velocity2, angular_velocity1, angular_velocity2 = apply_pair_spatial_impulse(
+                velocity1,
+                velocity2,
+                angular_velocity1,
+                angular_velocity2,
+                inv_mass1,
+                inv_mass2,
+                inv_inertia1,
+                inv_inertia2,
+                -axial_world,
+                -wp.cross(r1_b1, axial_world),
+                -wp.cross(r1_b2, axial_world),
+            )
 
     _ms_store_body_pair(
         bodies,
@@ -3130,8 +3190,9 @@ def _revolute_iterate_at_multi(
             acc_friction = projection.lambda_new
 
         axial_lam = lam_drive + lam_limit + lam_friction
-        angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
-        angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
+        angular_velocity1, angular_velocity2 = apply_pair_angular_impulse(
+            angular_velocity1, angular_velocity2, inv_inertia1, inv_inertia2, -n_hat * axial_lam, -n_hat * axial_lam
+        )
 
         it += 1
 

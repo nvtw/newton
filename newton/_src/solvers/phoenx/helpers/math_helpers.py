@@ -10,6 +10,7 @@ import math
 import warp as wp
 
 __all__ = [
+    "apply_pair_angular_impulse",
     "apply_pair_spatial_impulse",
     "apply_pair_velocity_impulse",
     "create_orthonormal",
@@ -150,6 +151,21 @@ def apply_pair_velocity_impulse(
     w1_new = w1 - inv_inertia1_world @ wp.cross(r1, imp)
     w2_new = w2 + inv_inertia2_world @ wp.cross(r2, imp)
     return v1_new, v2_new, w1_new, w2_new
+
+
+@wp.func
+def apply_pair_angular_impulse(
+    w1: wp.vec3f,
+    w2: wp.vec3f,
+    inv_inertia1_world: wp.mat33f,
+    inv_inertia2_world: wp.mat33f,
+    angular_impulse1: wp.vec3f,
+    angular_impulse2: wp.vec3f,
+):
+    """Antisymmetric body-pair angular update with precomputed impulses."""
+    w1_new = w1 - inv_inertia1_world @ angular_impulse1
+    w2_new = w2 + inv_inertia2_world @ angular_impulse2
+    return w1_new, w2_new
 
 
 @wp.func
