@@ -652,8 +652,8 @@ class PhoenXWorld:
                 self._tpw_auto = False
                 initial_tpw = 16
             elif self._tpw_auto:
-                small_joint_world = 0.0 < joints_per_world <= 40.0 and contacts_capacity_per_world <= 512.0
-                dense_joint_world = joints_per_world > 40.0
+                small_joint_world = 0.0 < joints_per_world <= 64.0 and contacts_capacity_per_world <= 512.0
+                dense_joint_world = joints_per_world > 64.0
                 dense_contact_only_world = self.num_joints == 0 and contacts_capacity_per_world > 256.0
                 if small_joint_world:
                     self._tpw_auto = False
