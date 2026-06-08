@@ -218,6 +218,67 @@ def _colored_color_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _overlap_color_kernel(
+    nodes: wp.array2d[wp.int32],
+    node_count: wp.array[wp.int32],
+    node_start: wp.array2d[wp.int32],
+    node_stride: wp.array2d[wp.int32],
+    family: wp.array[wp.int32],
+    row_size: wp.array[wp.int32],
+    projection: wp.array[wp.int32],
+    color_buffer: wp.array[wp.int32],
+    per_node_done: wp.array[wp.int32],
+    next_executable: wp.array[wp.int32],
+    total_done: wp.array[wp.int32],
+    failed: wp.array[wp.int32],
+    sink: wp.array[wp.float32],
+    color_start: wp.int32,
+    epoch: wp.int32,
+    work_iters: wp.int32,
+    max_spin_passes: wp.int32,
+    max_rows: wp.int32,
+    payload_mode: wp.int32,
+):
+    lane = wp.tid()
+    interaction_index = color_buffer[color_start + lane]
+    spin = wp.int32(0)
+    executed = wp.int32(0)
+    while executed == wp.int32(0) and spin < max_spin_passes:
+        row_epoch = wp.atomic_add(next_executable, interaction_index, wp.int32(0))
+        if row_epoch > epoch:
+            executed = wp.int32(1)
+        elif row_epoch == epoch:
+            if _nodes_ready(nodes, node_count, node_start, node_stride, per_node_done, interaction_index, epoch):
+                if _nodes_ready(nodes, node_count, node_start, node_stride, per_node_done, interaction_index, epoch):
+                    old = wp.atomic_cas(next_executable, interaction_index, epoch, epoch + wp.int32(1))
+                    if old == epoch:
+                        seed = interaction_index + epoch * wp.int32(65537)
+                        value = _descriptor_payload(
+                            work_iters,
+                            seed,
+                            family[interaction_index],
+                            row_size[interaction_index],
+                            projection[interaction_index],
+                            max_rows,
+                            payload_mode,
+                        )
+                        wp.atomic_add(sink, 0, value)
+
+                        n = node_count[interaction_index]
+                        slot = wp.int32(0)
+                        while slot < n:
+                            node_id = nodes[slot, interaction_index]
+                            wp.atomic_add(per_node_done, node_id, wp.int32(1))
+                            slot = slot + wp.int32(1)
+                        wp.atomic_add(total_done, 0, wp.int32(1))
+                        executed = wp.int32(1)
+        spin = spin + wp.int32(1)
+
+    if executed == wp.int32(0):
+        failed[0] = wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
 def _node_ready_scan_kernel(
     nodes: wp.array2d[wp.int32],
     node_count: wp.array[wp.int32],
@@ -346,6 +407,172 @@ def _world_ready_scan_kernel(
                                 slot = slot + wp.int32(1)
                             wp.atomic_add(world_done, world_id, wp.int32(1))
             interaction_index = interaction_index + threads_per_world
+        pass_count = pass_count + wp.int32(1)
+        done = wp.atomic_add(world_done, world_id, wp.int32(0))
+
+    if local_tid == wp.int32(0) and done < target_total:
+        failed[0] = wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def _reset_window_scheduler_kernel(
+    per_node_done: wp.array[wp.int32],
+    next_executable: wp.array[wp.int32],
+    world_done: wp.array[wp.int32],
+    window_phase: wp.array[wp.int32],
+    window_color: wp.array[wp.int32],
+    window_color_done: wp.array[wp.int32],
+    failed: wp.array[wp.int32],
+    sink: wp.array[wp.float32],
+    num_nodes: wp.int32,
+    num_interactions: wp.int32,
+    num_worlds: wp.int32,
+    total_color_epochs: wp.int32,
+):
+    tid = wp.tid()
+    if tid < num_nodes:
+        per_node_done[tid] = wp.int32(0)
+    if tid < num_interactions:
+        next_executable[tid] = wp.int32(0)
+    if tid < num_worlds:
+        world_done[tid] = wp.int32(0)
+        window_phase[tid] = wp.int32(0)
+        window_color[tid] = wp.int32(0)
+    if tid < total_color_epochs:
+        window_color_done[tid] = wp.int32(0)
+    if tid == wp.int32(0):
+        failed[0] = wp.int32(0)
+        sink[0] = wp.float32(0.0)
+
+
+@wp.kernel(enable_backward=False)
+def _world_window_ready_kernel(
+    nodes: wp.array2d[wp.int32],
+    node_count: wp.array[wp.int32],
+    node_start: wp.array2d[wp.int32],
+    node_stride: wp.array2d[wp.int32],
+    family: wp.array[wp.int32],
+    row_size: wp.array[wp.int32],
+    projection: wp.array[wp.int32],
+    color_buffer: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    world_color_starts: wp.array[wp.int32],
+    per_node_done: wp.array[wp.int32],
+    next_executable: wp.array[wp.int32],
+    world_done: wp.array[wp.int32],
+    window_phase: wp.array[wp.int32],
+    window_color: wp.array[wp.int32],
+    window_color_done: wp.array[wp.int32],
+    failed: wp.array[wp.int32],
+    sink: wp.array[wp.float32],
+    num_worlds: wp.int32,
+    num_colors: wp.int32,
+    num_iterations: wp.int32,
+    threads_per_world: wp.int32,
+    window_colors: wp.int32,
+    work_iters: wp.int32,
+    max_passes: wp.int32,
+    max_rows: wp.int32,
+    payload_mode: wp.int32,
+):
+    tid = wp.tid()
+    local_tid = tid % threads_per_world
+    world_id = tid / threads_per_world
+    if world_id >= num_worlds:
+        return
+
+    color_begin = world_color_starts[world_id]
+    color_end = world_color_starts[world_id + wp.int32(1)]
+    local_color_count = color_end - color_begin
+    if local_color_count <= wp.int32(0):
+        return
+
+    target_total = (color_starts[color_end] - color_starts[color_begin]) * num_iterations
+    pass_count = wp.int32(0)
+    done = wp.atomic_add(world_done, world_id, wp.int32(0))
+    while done < target_total and pass_count < max_passes:
+        if local_tid == wp.int32(0):
+            head_epoch = wp.atomic_add(window_phase, world_id, wp.int32(0))
+            head_color = wp.atomic_add(window_color, world_id, wp.int32(0))
+            keep_advancing = wp.int32(1)
+            while keep_advancing != wp.int32(0) and head_epoch < num_iterations:
+                if head_color >= local_color_count:
+                    head_epoch = head_epoch + wp.int32(1)
+                    head_color = wp.int32(0)
+                else:
+                    global_color = color_begin + head_color
+                    color_count = color_starts[global_color + wp.int32(1)] - color_starts[global_color]
+                    color_epoch = head_epoch * num_colors + global_color
+                    observed = wp.atomic_add(window_color_done, color_epoch, wp.int32(0))
+                    if observed >= color_count:
+                        head_color = head_color + wp.int32(1)
+                    else:
+                        keep_advancing = wp.int32(0)
+            window_phase[world_id] = head_epoch
+            window_color[world_id] = head_color
+
+        head_epoch = wp.atomic_add(window_phase, world_id, wp.int32(0))
+        head_color = wp.atomic_add(window_color, world_id, wp.int32(0))
+        window_offset = wp.int32(0)
+        while window_offset < window_colors:
+            local_color = head_color + window_offset
+            epoch = head_epoch
+            if local_color >= local_color_count:
+                local_color = local_color - local_color_count
+                epoch = epoch + wp.int32(1)
+            if epoch < num_iterations:
+                global_color = color_begin + local_color
+                start = color_starts[global_color]
+                end = color_starts[global_color + wp.int32(1)]
+                color_epoch = epoch * num_colors + global_color
+                cursor = start + local_tid
+                while cursor < end:
+                    interaction_index = color_buffer[cursor]
+                    row_epoch = wp.atomic_add(next_executable, interaction_index, wp.int32(0))
+                    if row_epoch == epoch:
+                        if _nodes_ready(
+                            nodes,
+                            node_count,
+                            node_start,
+                            node_stride,
+                            per_node_done,
+                            interaction_index,
+                            epoch,
+                        ):
+                            if _nodes_ready(
+                                nodes,
+                                node_count,
+                                node_start,
+                                node_stride,
+                                per_node_done,
+                                interaction_index,
+                                epoch,
+                            ):
+                                old = wp.atomic_cas(next_executable, interaction_index, epoch, epoch + wp.int32(1))
+                                if old == epoch:
+                                    seed = interaction_index + epoch * wp.int32(65537)
+                                    value = _descriptor_payload(
+                                        work_iters,
+                                        seed,
+                                        family[interaction_index],
+                                        row_size[interaction_index],
+                                        projection[interaction_index],
+                                        max_rows,
+                                        payload_mode,
+                                    )
+                                    wp.atomic_add(sink, 0, value)
+
+                                    n = node_count[interaction_index]
+                                    slot = wp.int32(0)
+                                    while slot < n:
+                                        node_id = nodes[slot, interaction_index]
+                                        wp.atomic_add(per_node_done, node_id, wp.int32(1))
+                                        slot = slot + wp.int32(1)
+                                    wp.atomic_add(window_color_done, color_epoch, wp.int32(1))
+                                    wp.atomic_add(world_done, world_id, wp.int32(1))
+                    cursor = cursor + threads_per_world
+            window_offset = window_offset + wp.int32(1)
+
         pass_count = pass_count + wp.int32(1)
         done = wp.atomic_add(world_done, world_id, wp.int32(0))
 
@@ -825,6 +1052,9 @@ class DeviceGraph:
     total_done: wp.array
     failed: wp.array
     sink: wp.array
+    window_phase: wp.array
+    window_color: wp.array
+    window_color_done: wp.array
     chunk_phase: wp.array
     chunk_color: wp.array
     chunk_next: wp.array
@@ -855,6 +1085,9 @@ def upload_graph(graph: SyntheticGraph, device: wp.context.Devicelike, *, iterat
         total_done=wp.zeros(1, dtype=wp.int32, device=device),
         failed=wp.zeros(1, dtype=wp.int32, device=device),
         sink=wp.zeros(1, dtype=wp.float32, device=device),
+        window_phase=wp.zeros(max(1, graph.world_starts.shape[0] - 1), dtype=wp.int32, device=device),
+        window_color=wp.zeros(max(1, graph.world_starts.shape[0] - 1), dtype=wp.int32, device=device),
+        window_color_done=wp.zeros(total_color_epochs, dtype=wp.int32, device=device),
         chunk_phase=wp.zeros(max(1, graph.world_starts.shape[0] - 1), dtype=wp.int32, device=device),
         chunk_color=wp.zeros(max(1, graph.world_starts.shape[0] - 1), dtype=wp.int32, device=device),
         chunk_next=wp.zeros(total_color_epochs, dtype=wp.int32, device=device),
@@ -924,6 +1157,67 @@ def make_colored_runner(
                     ],
                     device=device,
                 )
+
+    return run
+
+
+def make_overlap_colored_runner(
+    dg: DeviceGraph,
+    *,
+    iterations: int,
+    work_iters: int,
+    num_streams: int,
+    max_spin_passes: int,
+    max_rows: int,
+    payload_mode: int,
+    device: wp.context.Devicelike,
+):
+    color_starts = dg.graph.color_starts
+    streams = [wp.Stream(device) for _ in range(max(1, int(num_streams)))]
+
+    def run() -> None:
+        main_stream = wp.get_stream(device)
+        _launch_reset(dg, device)
+        for stream in streams:
+            with wp.ScopedStream(stream, sync_enter=False, sync_exit=False):
+                wp.wait_stream(main_stream)
+        for epoch in range(iterations):
+            for color_index in range(len(color_starts) - 1):
+                start = int(color_starts[color_index])
+                end = int(color_starts[color_index + 1])
+                count = end - start
+                if count <= 0:
+                    continue
+                stream = streams[color_index % len(streams)]
+                with wp.ScopedStream(stream, sync_enter=False, sync_exit=False):
+                    wp.launch(
+                        _overlap_color_kernel,
+                        dim=count,
+                        inputs=[
+                            dg.nodes,
+                            dg.node_count,
+                            dg.node_start,
+                            dg.node_stride,
+                            dg.family,
+                            dg.row_size,
+                            dg.projection,
+                            dg.color_buffer,
+                            dg.per_node_done,
+                            dg.next_executable,
+                            dg.total_done,
+                            dg.failed,
+                            dg.sink,
+                            wp.int32(start),
+                            wp.int32(epoch),
+                            wp.int32(work_iters),
+                            wp.int32(max_spin_passes),
+                            wp.int32(max_rows),
+                            wp.int32(payload_mode),
+                        ],
+                        device=device,
+                    )
+        for stream in streams:
+            wp.wait_stream(stream)
 
     return run
 
@@ -1004,6 +1298,80 @@ def make_world_ready_runner(
                 wp.int32(dg.graph.world_starts.shape[0] - 1),
                 wp.int32(iterations),
                 wp.int32(threads_per_world),
+                wp.int32(work_iters),
+                wp.int32(max_passes),
+                wp.int32(max_rows),
+                wp.int32(payload_mode),
+            ],
+            device=device,
+        )
+
+    return run
+
+
+def make_world_window_ready_runner(
+    dg: DeviceGraph,
+    *,
+    iterations: int,
+    work_iters: int,
+    threads_per_world: int,
+    window_colors: int,
+    max_passes: int,
+    max_rows: int,
+    payload_mode: int,
+    device: wp.context.Devicelike,
+):
+    num_worlds = int(dg.graph.world_starts.shape[0] - 1)
+    num_colors = len(dg.graph.color_starts) - 1
+    total_color_epochs = max(1, num_colors * max(1, int(iterations)))
+
+    def run() -> None:
+        wp.launch(
+            _reset_window_scheduler_kernel,
+            dim=max(dg.graph.num_nodes, int(dg.graph.node_count.shape[0]), num_worlds, total_color_epochs, 1),
+            inputs=[
+                dg.per_node_done,
+                dg.next_executable,
+                dg.world_done,
+                dg.window_phase,
+                dg.window_color,
+                dg.window_color_done,
+                dg.failed,
+                dg.sink,
+                wp.int32(dg.graph.num_nodes),
+                wp.int32(dg.graph.node_count.shape[0]),
+                wp.int32(num_worlds),
+                wp.int32(total_color_epochs),
+            ],
+            device=device,
+        )
+        wp.launch(
+            _world_window_ready_kernel,
+            dim=max(1, num_worlds * threads_per_world),
+            inputs=[
+                dg.nodes,
+                dg.node_count,
+                dg.node_start,
+                dg.node_stride,
+                dg.family,
+                dg.row_size,
+                dg.projection,
+                dg.color_buffer,
+                dg.color_starts,
+                dg.world_color_starts,
+                dg.per_node_done,
+                dg.next_executable,
+                dg.world_done,
+                dg.window_phase,
+                dg.window_color,
+                dg.window_color_done,
+                dg.failed,
+                dg.sink,
+                wp.int32(num_worlds),
+                wp.int32(num_colors),
+                wp.int32(iterations),
+                wp.int32(threads_per_world),
+                wp.int32(window_colors),
                 wp.int32(work_iters),
                 wp.int32(max_passes),
                 wp.int32(max_rows),
@@ -1138,6 +1506,20 @@ def run_graph_case(args: argparse.Namespace, graph: SyntheticGraph) -> None:
         validate_runner(f"colored/{payload_label}", colored, colored_runner, expected_total)
         colored_min, colored_med = _bench(colored_runner, args.n_runs, args.warmup, args.trials)
 
+        overlap_colored = upload_graph(graph, device, iterations=args.iterations)
+        overlap_colored_runner = make_overlap_colored_runner(
+            overlap_colored,
+            iterations=args.iterations,
+            work_iters=args.work_iters,
+            num_streams=args.overlap_streams,
+            max_spin_passes=args.overlap_spin_passes,
+            max_rows=max_rows,
+            payload_mode=payload_mode,
+            device=device,
+        )
+        validate_runner(f"overlap/{payload_label}", overlap_colored, overlap_colored_runner, expected_total)
+        overlap_min, overlap_med = _bench(overlap_colored_runner, args.n_runs, args.warmup, args.trials)
+
         node_ready = upload_graph(graph, device, iterations=args.iterations)
         node_ready_runner = make_node_ready_runner(
             node_ready,
@@ -1168,6 +1550,23 @@ def run_graph_case(args: argparse.Namespace, graph: SyntheticGraph) -> None:
         )
         world_min, world_med = _bench(world_ready_runner, args.n_runs, args.warmup, args.trials)
 
+        window_ready = upload_graph(graph, device, iterations=args.iterations)
+        window_ready_runner = make_world_window_ready_runner(
+            window_ready,
+            iterations=args.iterations,
+            work_iters=args.work_iters,
+            threads_per_world=args.world_tpw,
+            window_colors=args.window_colors,
+            max_passes=args.max_passes,
+            max_rows=max_rows,
+            payload_mode=payload_mode,
+            device=device,
+        )
+        validate_runner(
+            f"window_ready/{payload_label}", window_ready, window_ready_runner, expected_total, use_world_done=True
+        )
+        window_min, window_med = _bench(window_ready_runner, args.n_runs, args.warmup, args.trials)
+
         color_chunk = upload_graph(graph, device, iterations=args.iterations)
         color_chunk_runner = make_world_color_chunk_runner(
             color_chunk,
@@ -1188,18 +1587,30 @@ def run_graph_case(args: argparse.Namespace, graph: SyntheticGraph) -> None:
             f"kernel_nodes/frame={colored_kernel_nodes}"
         )
         print(
+            f"{payload_label:11s} overlap   min={overlap_min:9.3f} ms  med={overlap_med:9.3f} ms  "
+            f"streams={args.overlap_streams}"
+        )
+        print(
             f"{payload_label:11s} node_ready min={node_min:9.3f} ms  med={node_med:9.3f} ms  "
             f"threads={args.total_threads}"
         )
         print(f"{payload_label:11s} world_ready min={world_min:8.3f} ms  med={world_med:9.3f} ms  tpw={args.world_tpw}")
         print(
+            f"{payload_label:11s} window     min={window_min:8.3f} ms  "
+            f"med={window_med:9.3f} ms  tpw={args.world_tpw} window={args.window_colors}"
+        )
+        print(
             f"{payload_label:11s} color_chunk min={color_chunk_min:8.3f} ms  "
             f"med={color_chunk_med:9.3f} ms  threads={args.total_threads} rows/chunk={args.rows_per_chunk}"
         )
+        overlap_speed = colored_min / overlap_min if overlap_min > 0.0 else 0.0
+        print(f"{payload_label:11s} overlap relative to colored: {overlap_speed:6.3f}x")
         speed = colored_min / node_min if node_min > 0.0 else 0.0
         print(f"{payload_label:11s} node_ready relative to colored: {speed:6.3f}x")
         world_speed = colored_min / world_min if world_min > 0.0 else 0.0
         print(f"{payload_label:11s} world_ready relative to colored: {world_speed:6.3f}x")
+        window_speed = colored_min / window_min if window_min > 0.0 else 0.0
+        print(f"{payload_label:11s} window relative to colored: {window_speed:6.3f}x")
         color_chunk_speed = colored_min / color_chunk_min if color_chunk_min > 0.0 else 0.0
         print(f"{payload_label:11s} color_chunk relative to colored: {color_chunk_speed:6.3f}x")
 
@@ -1234,7 +1645,10 @@ def parse_args() -> argparse.Namespace:
         help="Compare divergent specialized payload, fixed-shape unified payload, or both.",
     )
     parser.add_argument("--total-threads", type=int, default=1024)
+    parser.add_argument("--overlap-streams", type=int, default=4)
+    parser.add_argument("--overlap-spin-passes", type=int, default=65536)
     parser.add_argument("--world-tpw", type=int, default=32)
+    parser.add_argument("--window-colors", type=int, default=4)
     parser.add_argument("--rows-per-chunk", type=int, default=4)
     parser.add_argument("--max-passes", type=int, default=65536)
     parser.add_argument("--n-runs", type=int, default=20)
