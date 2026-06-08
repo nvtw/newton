@@ -25,6 +25,13 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_block import (
+    BLOCK_LAMBDA_INF,
+    block_project_delta_sor_1,
+    block_solve_inverse_2,
+    block_solve_inverse_3,
+    block_solve_inverse_4,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     _PD_NYQUIST_HEADROOM_MAX,
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
@@ -982,12 +989,14 @@ def _axial_drive_limit_iterate(
         # Jitter2 ``jv = n . (v2 - v1)`` convention):
         #   lam = -M_eff_soft * (jv - bias + gamma * acc)
         lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
-        lam_drive = lam_drive * sor_boost
-        old_acc = acc_drive
-        acc_drive = acc_drive + lam_drive
+        drive_min = -BLOCK_LAMBDA_INF
+        drive_max = BLOCK_LAMBDA_INF
         if max_force_drive > 0.0:
-            acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
-        lam_drive = acc_drive - old_acc
+            drive_min = -max_lambda_drive
+            drive_max = max_lambda_drive
+        projection = block_project_delta_sor_1(acc_drive, lam_drive, sor_boost, drive_min, drive_max)
+        lam_drive = projection[0]
+        acc_drive = projection[1]
         write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
 
     # ---- Limit row ----------------------------------------------------
@@ -1019,18 +1028,16 @@ def _axial_drive_limit_iterate(
                 eff_axial = 1.0 / eff_inv
                 lam_unsoft = -eff_axial * (jv_axial + bias_box)
                 lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
-        lam_limit = lam_limit * sor_boost
-        old_acc = acc_limit
-        acc_limit = acc_limit + lam_limit
         # Unilateral clamp: the limit only pushes back toward the
         # allowed range. Positive ``acc`` reduces the cumulative
         # position (right thing at max stop); negative ``acc``
         # increases it (right thing at min stop).
         if clamp == _CLAMP_MAX:
-            acc_limit = wp.max(0.0, acc_limit)
+            projection = block_project_delta_sor_1(acc_limit, lam_limit, sor_boost, wp.float32(0.0), BLOCK_LAMBDA_INF)
         else:
-            acc_limit = wp.min(0.0, acc_limit)
-        lam_limit = acc_limit - old_acc
+            projection = block_project_delta_sor_1(acc_limit, lam_limit, sor_boost, -BLOCK_LAMBDA_INF, wp.float32(0.0))
+        lam_limit = projection[0]
+        acc_limit = projection[1]
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
 
     # ---- Friction row -------------------------------------------------
@@ -1050,10 +1057,11 @@ def _axial_drive_limit_iterate(
         acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
         max_lambda_friction = friction_coefficient * (wp.float32(1.0) / idt)
         lam_friction = -friction_eff_mass * (jv_axial + friction_gamma * acc_friction)
-        lam_friction = lam_friction * sor_boost
-        old_acc_f = acc_friction
-        acc_friction = wp.clamp(acc_friction + lam_friction, -max_lambda_friction, max_lambda_friction)
-        lam_friction = acc_friction - old_acc_f
+        projection = block_project_delta_sor_1(
+            acc_friction, lam_friction, sor_boost, -max_lambda_friction, max_lambda_friction
+        )
+        lam_friction = projection[0]
+        acc_friction = projection[1]
         write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, acc_friction)
 
     return lam_drive + lam_limit + lam_friction
@@ -1122,7 +1130,7 @@ def _planar_3row_block(
     w_rel = w2 - w1
     jv3 = wp.vec3f(wp.dot(n_hat, v_rel), wp.dot(t1, w_rel), wp.dot(t2, w_rel))
     rhs3 = jv3 + bias_packed
-    lam_us = -(a3_inv @ rhs3)
+    lam_us = block_solve_inverse_3(a3_inv, rhs3)
     lam3 = mass_coeff * lam_us - impulse_coeff * acc3
     lam3 = lam3 * sor_boost
     lin_imp_world = lam3[0] * n_hat
@@ -1165,7 +1173,7 @@ def _anchor1_standalone_block(
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
     jv1 = -v1 + cr1_b1 @ w1 + v2 - cr1_b2 @ w2
     rhs1 = jv1 + bias1
-    lam1_us = -(a1_inv @ rhs1)
+    lam1_us = block_solve_inverse_3(a1_inv, rhs1)
     lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
     lam1 = lam1 * sor_boost
     v1 = v1 - im1 * lam1
@@ -1315,7 +1323,7 @@ def _anchor1_anchor2_schur_block(
     ut_ai_rhs1_3 = ut_ai @ rhs1
     ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
 
-    lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
+    lam2_us = block_solve_inverse_2(s_inv_22, rhs2 - ut_ai_rhs1)
     lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
     lam2 = lam2 * sor_boost
     lam2_world = lam2[0] * t1 + lam2[1] * t2
@@ -1325,7 +1333,7 @@ def _anchor1_anchor2_schur_block(
     u_lam2_us = u_lam2_us + cr1_b1 @ (ii1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
     u_lam2_us = u_lam2_us + cr1_b2 @ (ii2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
 
-    lam1_us = -(a1_inv @ (rhs1 + u_lam2_us))
+    lam1_us = block_solve_inverse_3(a1_inv, rhs1 + u_lam2_us)
     lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
     lam1 = lam1 * sor_boost
     total_lin = lam1 + lam2_world
@@ -1384,7 +1392,7 @@ def _anchor1_anchor2_tangent_4row_block(
     bias4 = wp.vec4f(bias1[0], bias1[1], bias2[0], bias2[1])
     rhs4 = jv4 + bias4
 
-    lam4_us = -(a4_inv @ rhs4)
+    lam4_us = block_solve_inverse_4(a4_inv, rhs4)
     lam4 = mass_coeff * lam4_us - impulse_coeff * acc4
     lam4 = lam4 * sor_boost
     lam1_world = lam4[0] * t1 + lam4[1] * t2
@@ -2950,7 +2958,7 @@ def _revolute_iterate_at_multi(
         ut_ai_rhs1_3 = ut_ai @ rhs1
         ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
 
-        lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
+        lam2_us = block_solve_inverse_2(s_inv_22, rhs2 - ut_ai_rhs1)
         lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
         lam2 = lam2 * sor_boost
 
@@ -2961,7 +2969,7 @@ def _revolute_iterate_at_multi(
         u_lam2_us = u_lam2_us + cr1_b1 @ (inv_inertia1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
         u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
 
-        lam1_us = -(a1_inv @ (rhs1 + u_lam2_us))
+        lam1_us = block_solve_inverse_3(a1_inv, rhs1 + u_lam2_us)
         lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
         lam1 = lam1 * sor_boost
 
@@ -2981,12 +2989,14 @@ def _revolute_iterate_at_multi(
         lam_drive = wp.float32(0.0)
         if drive_active:
             lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
-            lam_drive = lam_drive * sor_boost
-            old_acc = acc_drive
-            acc_drive = acc_drive + lam_drive
+            drive_min = -BLOCK_LAMBDA_INF
+            drive_max = BLOCK_LAMBDA_INF
             if max_force_drive > wp.float32(0.0):
-                acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
-            lam_drive = acc_drive - old_acc
+                drive_min = -max_lambda_drive
+                drive_max = max_lambda_drive
+            projection = block_project_delta_sor_1(acc_drive, lam_drive, sor_boost, drive_min, drive_max)
+            lam_drive = projection[0]
+            acc_drive = projection[1]
 
         lam_limit = wp.float32(0.0)
         if limit_active:
@@ -2997,22 +3007,25 @@ def _revolute_iterate_at_multi(
                 if eff_axial > wp.float32(0.0):
                     lam_unsoft = -eff_axial * (jv_axial + bias_box)
                     lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
-            lam_limit = lam_limit * sor_boost
-            old_acc_l = acc_limit
-            acc_limit = acc_limit + lam_limit
             if clamp == _CLAMP_MAX:
-                acc_limit = wp.max(wp.float32(0.0), acc_limit)
+                projection = block_project_delta_sor_1(
+                    acc_limit, lam_limit, sor_boost, wp.float32(0.0), BLOCK_LAMBDA_INF
+                )
             else:
-                acc_limit = wp.min(wp.float32(0.0), acc_limit)
-            lam_limit = acc_limit - old_acc_l
+                projection = block_project_delta_sor_1(
+                    acc_limit, lam_limit, sor_boost, -BLOCK_LAMBDA_INF, wp.float32(0.0)
+                )
+            lam_limit = projection[0]
+            acc_limit = projection[1]
 
         lam_friction = wp.float32(0.0)
         if friction_active:
             lam_friction = -friction_eff_mass * (jv_axial + friction_gamma * acc_friction)
-            lam_friction = lam_friction * sor_boost
-            old_acc_f = acc_friction
-            acc_friction = wp.clamp(acc_friction + lam_friction, -max_lambda_friction, max_lambda_friction)
-            lam_friction = acc_friction - old_acc_f
+            projection = block_project_delta_sor_1(
+                acc_friction, lam_friction, sor_boost, -max_lambda_friction, max_lambda_friction
+            )
+            lam_friction = projection[0]
+            acc_friction = projection[1]
 
         axial_lam = lam_drive + lam_limit + lam_friction
         angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)

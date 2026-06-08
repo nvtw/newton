@@ -9,6 +9,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_block import block_solve_projected_xpbd_2
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
     ConstraintContainer,
@@ -559,30 +560,26 @@ def soft_tetrahedron_iterate_at(
     b_mu = c_mu + bias_mu * lambda_sum_mu + gamma_mu * grad_mu_dot_dx
     b_lambda = c_lambda + bias_lambda * lambda_sum_lambda + gamma_lambda * grad_lambda_dot_dx
 
-    det_a = A11 * A22 - A12 * A12
-    d_lam_mu = wp.float32(0.0)
-    d_lam_lambda = wp.float32(0.0)
-
-    if det_a > _ARAP_BLOCK_DET_FLOOR:
-        inv_det = wp.float32(1.0) / det_a
-        d_lam_mu = -(A22 * b_mu - A12 * b_lambda) * inv_det
-        d_lam_lambda = -(-A12 * b_mu + A11 * b_lambda) * inv_det
-    else:
-        if A11 > wp.float32(0.0):
-            d_lam_mu = -b_mu / A11
-        if A22 > wp.float32(0.0):
-            d_lam_lambda = -b_lambda / A22
-
-    d_lam_mu = d_lam_mu * sor_boost
-    d_lam_lambda = d_lam_lambda * sor_boost
+    update = block_solve_projected_xpbd_2(
+        A11,
+        A12,
+        A22,
+        b_mu,
+        b_lambda,
+        lambda_sum_mu,
+        lambda_sum_lambda,
+        sor_boost,
+        _ARAP_BLOCK_DET_FLOOR,
+    )
+    d_lam_mu = update[0]
+    d_lam_lambda = update[1]
+    lambda_sum_mu = update[2]
+    lambda_sum_lambda = update[3]
 
     x_a = x_a + inv_mass_a * (d_lam_mu * g_mu_a + d_lam_lambda * g_lambda_a)
     x_b = x_b + inv_mass_b * (d_lam_mu * g_mu_b + d_lam_lambda * g_lambda_b)
     x_c = x_c + inv_mass_c * (d_lam_mu * g_mu_c + d_lam_lambda * g_lambda_c)
     x_d = x_d + inv_mass_d * (d_lam_mu * g_mu_d + d_lam_lambda * g_lambda_d)
-    lambda_sum_mu = lambda_sum_mu + d_lam_mu
-    lambda_sum_lambda = lambda_sum_lambda + d_lam_lambda
-
     write_particle_position_with_slot(particles, copy_state, p_a, slot_a, x_a)
     write_particle_position_with_slot(particles, copy_state, p_b, slot_b, x_b)
     write_particle_position_with_slot(particles, copy_state, p_c, slot_c, x_c)

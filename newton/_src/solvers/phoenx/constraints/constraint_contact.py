@@ -17,6 +17,11 @@ import warp as wp
 
 from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_block import (
+    BLOCK_LAMBDA_INF,
+    block_project_delta_sor_1,
+    block_project_friction_delta_sor_2,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
@@ -675,9 +680,11 @@ def contact_iterate_at_multi(
                 pd_gamma_n = cc_get_pd_gamma(cc, k)
                 pd_bias_n = cc_get_pd_bias(cc, k)
                 d_lam_n_us = -pd_eff_soft_n * (jv_n - pd_bias_n + pd_gamma_n * lam_n_old)
-                d_lam_n_us = d_lam_n_us * sor_boost
-                lam_n_new = wp.max(lam_n_old + d_lam_n_us, wp.float32(0.0))
-                d_lam_n = lam_n_new - lam_n_old
+                normal_projection = block_project_delta_sor_1(
+                    lam_n_old, d_lam_n_us, sor_boost, wp.float32(0.0), BLOCK_LAMBDA_INF
+                )
+                d_lam_n = normal_projection[0]
+                lam_n_new = normal_projection[1]
             else:
                 if is_speculative:
                     mass_coeff_n = wp.float32(1.0)
@@ -690,31 +697,32 @@ def contact_iterate_at_multi(
                     impulse_coeff_n = wp.float32(0.0)
                 d_lam_n_us = -eff_n * (jv_n + bias_val)
                 d_lam_n = mass_coeff_n * d_lam_n_us - impulse_coeff_n * lam_n_old
-                d_lam_n = d_lam_n * sor_boost
-                lam_n_new = wp.max(lam_n_old + d_lam_n, wp.float32(0.0))
-                d_lam_n = lam_n_new - lam_n_old
+                normal_projection = block_project_delta_sor_1(
+                    lam_n_old, d_lam_n, sor_boost, wp.float32(0.0), BLOCK_LAMBDA_INF
+                )
+                d_lam_n = normal_projection[0]
+                lam_n_new = normal_projection[1]
 
             fric_limit_static = mu_s * lam_n_new
             fric_limit_kinetic = mu_k * lam_n_new
 
-            d_lam_t1 = -eff_t1 * (jv_t1 + bias_t1_val) * sor_boost
-            d_lam_t2 = -eff_t2 * (jv_t2 + bias_t2_val) * sor_boost
+            d_lam_t1_us = -eff_t1 * (jv_t1 + bias_t1_val)
+            d_lam_t2_us = -eff_t2 * (jv_t2 + bias_t2_val)
             lam_t1_old = cc_get_tangent1_lambda(cc, k)
             lam_t2_old = cc_get_tangent2_lambda(cc, k)
-            lam_t1_raw = lam_t1_old + d_lam_t1
-            lam_t2_raw = lam_t2_old + d_lam_t2
-
-            lam_t_sq = lam_t1_raw * lam_t1_raw + lam_t2_raw * lam_t2_raw
-            static_limit_sq = fric_limit_static * fric_limit_static
-            if lam_t_sq > static_limit_sq and lam_t_sq > wp.float32(1.0e-30):
-                inv_mag = fric_limit_kinetic / wp.sqrt(lam_t_sq)
-                lam_t1_new = lam_t1_raw * inv_mag
-                lam_t2_new = lam_t2_raw * inv_mag
-            else:
-                lam_t1_new = lam_t1_raw
-                lam_t2_new = lam_t2_raw
-            d_lam_t1 = lam_t1_new - lam_t1_old
-            d_lam_t2 = lam_t2_new - lam_t2_old
+            tangent_projection = block_project_friction_delta_sor_2(
+                lam_t1_old,
+                lam_t2_old,
+                d_lam_t1_us,
+                d_lam_t2_us,
+                sor_boost,
+                fric_limit_static,
+                fric_limit_kinetic,
+            )
+            d_lam_t1 = tangent_projection[0]
+            d_lam_t2 = tangent_projection[1]
+            lam_t1_new = tangent_projection[2]
+            lam_t2_new = tangent_projection[3]
 
             cc_set_normal_lambda(cc, k, lam_n_new)
             cc_set_tangent1_lambda(cc, k, lam_t1_new)

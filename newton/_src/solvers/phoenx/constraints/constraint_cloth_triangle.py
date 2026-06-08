@@ -27,6 +27,7 @@ from newton._src.solvers.phoenx.access_mode import (
     ACCESS_MODE_POSITION_LEVEL,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_block import block_solve_projected_xpbd_2
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_TRIANGLE,
     ConstraintContainer,
@@ -525,22 +526,21 @@ def cloth_triangle_iterate_at(
     b_lambda = c_lambda + bias_lambda * lambda_sum_lambda + gamma_lambda * grad_lambda_dot_dx
     b_mu = c_mu + bias_mu * lambda_sum_mu + gamma_mu * grad_mu_dot_dx
 
-    det_a = A11 * A22 - A12 * A12
-    d_lam_lambda = wp.float32(0.0)
-    d_lam_mu = wp.float32(0.0)
-
-    if det_a > _CLOTH_BLOCK_DET_FLOOR:
-        inv_det = wp.float32(1.0) / det_a
-        d_lam_lambda = -(A22 * b_lambda - A12 * b_mu) * inv_det
-        d_lam_mu = -(-A12 * b_lambda + A11 * b_mu) * inv_det
-    else:
-        if A11 > wp.float32(0.0):
-            d_lam_lambda = -b_lambda / A11
-        if A22 > wp.float32(0.0):
-            d_lam_mu = -b_mu / A22
-
-    d_lam_lambda = d_lam_lambda * sor_boost
-    d_lam_mu = d_lam_mu * sor_boost
+    update = block_solve_projected_xpbd_2(
+        A11,
+        A12,
+        A22,
+        b_lambda,
+        b_mu,
+        lambda_sum_lambda,
+        lambda_sum_mu,
+        sor_boost,
+        _CLOTH_BLOCK_DET_FLOOR,
+    )
+    d_lam_lambda = update[0]
+    d_lam_mu = update[1]
+    lambda_sum_lambda = update[2]
+    lambda_sum_mu = update[3]
 
     h1_a_x = (-q * f11 + t * f10) * rest_area
     h1_a_y = (-t * f00 + q * f01) * rest_area
@@ -580,9 +580,6 @@ def cloth_triangle_iterate_at(
     x_a = x_a + _project_to_3d(x_axis, y_axis, delta_a)
     x_b = x_b + _project_to_3d(x_axis, y_axis, delta_b)
     x_c = x_c + _project_to_3d(x_axis, y_axis, delta_c)
-    lambda_sum_lambda = lambda_sum_lambda + d_lam_lambda
-    lambda_sum_mu = lambda_sum_mu + d_lam_mu
-
     write_position_unified(bodies, particles, copy_state, body_a, slot_a, num_bodies, x_a)
     write_position_unified(bodies, particles, copy_state, body_b, slot_b, num_bodies, x_b)
     write_position_unified(bodies, particles, copy_state, body_c, slot_c, num_bodies, x_c)

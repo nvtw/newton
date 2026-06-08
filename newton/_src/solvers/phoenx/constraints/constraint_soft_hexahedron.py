@@ -21,6 +21,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_block import block_solve_projected_xpbd_2
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_HEXAHEDRON,
     ConstraintContainer,
@@ -1006,16 +1007,11 @@ def soft_hexahedron_iterate_at(
         rhs_h = c_h + bias_h * lambda_h + gamma_h * grad_h_dot_dx
         rhs_d = c_d + bias_d * lambda_d + gamma_d * grad_d_dot_dx
 
-        det_a = A11 * A22 - A12 * A12
-        if det_a > _DET_FLOOR:
-            inv_det = wp.float32(1.0) / det_a
-            dlam_h = -(A22 * rhs_h - A12 * rhs_d) * inv_det
-            dlam_d = -(-A12 * rhs_h + A11 * rhs_d) * inv_det
-        else:
-            if A11 > wp.float32(0.0):
-                dlam_h = -rhs_h / A11
-            if A22 > wp.float32(0.0):
-                dlam_d = -rhs_d / A22
+        update = block_solve_projected_xpbd_2(A11, A12, A22, rhs_h, rhs_d, lambda_h, lambda_d, sor_boost, _DET_FLOOR)
+        dlam_h = update[0]
+        dlam_d = update[1]
+        lambda_h = update[2]
+        lambda_d = update[3]
     else:
         # Energy XPBD uses ``-2 U`` as the right-hand side and scales
         # the compliance regulariser by the current energy. This
@@ -1033,8 +1029,9 @@ def soft_hexahedron_iterate_at(
         dlam_h = (A22 * rhs_h - A12 * rhs_d) * inv_det
         dlam_d = (-A12 * rhs_h + A11 * rhs_d) * inv_det
 
-    dlam_h = dlam_h * sor_boost
-    dlam_d = dlam_d * sor_boost
+    if strain_model != _SOFT_HEX_STRAIN_MODEL_ARAP:
+        dlam_h = dlam_h * sor_boost
+        dlam_d = dlam_d * sor_boost
 
     x0 = x0 + inv_mass0 * (dlam_h * g_h0 + dlam_d * g_d0)
     x1 = x1 + inv_mass1 * (dlam_h * g_h1 + dlam_d * g_d1)
@@ -1055,8 +1052,8 @@ def soft_hexahedron_iterate_at(
     write_position_unified(bodies, particles, copy_state, body7, slot7, num_bodies, x7)
 
     if strain_model == _SOFT_HEX_STRAIN_MODEL_ARAP:
-        write_float(constraints, _OFF_LAMBDA_SUM_H, cid, lambda_h + dlam_h)
-        write_float(constraints, _OFF_LAMBDA_SUM_D, cid, lambda_d + dlam_d)
+        write_float(constraints, _OFF_LAMBDA_SUM_H, cid, lambda_h)
+        write_float(constraints, _OFF_LAMBDA_SUM_D, cid, lambda_d)
 
 
 # ---------------------------------------------------------------------------

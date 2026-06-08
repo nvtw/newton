@@ -16,6 +16,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_block import block_solve_projected_xpbd_2_strict
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN,
     ConstraintContainer,
@@ -457,13 +458,11 @@ def soft_tet_neohookean_iterate_at(
         # subsequent sweeps will revisit once gradients have moved.
         return
 
-    inv_det = wp.float32(1.0) / det_a
-    # A^{-1} for symmetric 2x2: [A22, -A12; -A12, A11] / det.
-    dlam_h = -(A22 * b_h - A12 * b_d) * inv_det
-    dlam_d = -(-A12 * b_h + A11 * b_d) * inv_det
-
-    dlam_h = dlam_h * sor_boost
-    dlam_d = dlam_d * sor_boost
+    update = block_solve_projected_xpbd_2_strict(A11, A12, A22, b_h, b_d, lambda_h, lambda_d, sor_boost, _DET_FLOOR)
+    dlam_h = update[0]
+    dlam_d = update[1]
+    lambda_h = update[2]
+    lambda_d = update[3]
 
     x_a = x_a + inv_mass_a * (dlam_h * g_ha + dlam_d * g_da)
     x_b = x_b + inv_mass_b * (dlam_h * g_hb + dlam_d * g_db)
@@ -475,8 +474,8 @@ def soft_tet_neohookean_iterate_at(
     write_position_unified(bodies, particles, copy_state, body_c, slot_c, num_bodies, x_c)
     write_position_unified(bodies, particles, copy_state, body_d, slot_d, num_bodies, x_d)
 
-    write_float(constraints, _OFF_LAMBDA_SUM_H, cid, lambda_h + dlam_h)
-    write_float(constraints, _OFF_LAMBDA_SUM_D, cid, lambda_d + dlam_d)
+    write_float(constraints, _OFF_LAMBDA_SUM_H, cid, lambda_h)
+    write_float(constraints, _OFF_LAMBDA_SUM_D, cid, lambda_d)
 
 
 # ---------------------------------------------------------------------------

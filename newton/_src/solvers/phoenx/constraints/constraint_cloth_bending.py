@@ -18,8 +18,8 @@ formulation), and the ±π/2 clamp prevents the gradient blow-up at
 Per-vertex gradients (PhysX derivation)::
 
     e23 = x3 - x2
-    n0 = (x2 - x0) × (x3 - x0)         (unnormalised, scaled by 2*A_T1)
-    n1 = (x3 - x1) × (x2 - x1)         (unnormalised, scaled by 2*A_T2)
+    n0 = (x2 - x0) x (x3 - x0)         (unnormalised, scaled by 2*A_T1)
+    n1 = (x3 - x1) x (x2 - x1)         (unnormalised, scaled by 2*A_T2)
     s0 = n0 / |n0|^2                   (n0 with inverse magnitude folded in)
     s1 = n1 / |n1|^2
     dC/dx0 = -|e23| * s0
@@ -47,6 +47,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_block import block_solve_projected_xpbd_1
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_BENDING,
     ConstraintContainer,
@@ -351,11 +352,9 @@ def cloth_bending_iterate_at(
         + inv_mass_d * wp.dot(dCdx3, dCdx3)
     )
     denom = grad_sq + bias
-    if denom <= wp.float32(0.0):
-        return
-
-    d_lam = -(c + bias * lambda_sum) / denom
-    d_lam = d_lam * sor_boost
+    update = block_solve_projected_xpbd_1(denom, c + bias * lambda_sum, lambda_sum, sor_boost, wp.float32(0.0))
+    d_lam = update[0]
+    lambda_sum = update[1]
 
     x0 = x0 + (d_lam * inv_mass_a) * dCdx0
     x1 = x1 + (d_lam * inv_mass_b) * dCdx1
@@ -367,7 +366,7 @@ def cloth_bending_iterate_at(
     write_position_unified(bodies, particles, copy_state, body_c, slot_c, num_bodies, x2)
     write_position_unified(bodies, particles, copy_state, body_d, slot_d, num_bodies, x3)
 
-    write_float(constraints, _OFF_LAMBDA_SUM, cid, lambda_sum + d_lam)
+    write_float(constraints, _OFF_LAMBDA_SUM, cid, lambda_sum)
 
 
 # ---------------------------------------------------------------------------
