@@ -22,6 +22,7 @@ from newton._src.solvers.phoenx.body import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     ADBS_TIME_US_OFFSET,
+    actuated_double_ball_socket_cached_warmstart,
     actuated_double_ball_socket_iterate,
     actuated_double_ball_socket_iterate_multi,
     actuated_double_ball_socket_prepare_for_iteration,
@@ -746,9 +747,14 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                     _t0 = read_global_timer_ns()
                 if wp.static(has_joints and not has_contacts):
                     if wp.static(cached_prepare):
-                        revolute_cached_warmstart(
-                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
-                        )
+                        if wp.static(revolute_only):
+                            revolute_cached_warmstart(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                            )
+                        else:
+                            actuated_double_ball_socket_cached_warmstart(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                            )
                     elif wp.static(revolute_only):
                         revolute_prepare_for_iteration(
                             constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
@@ -763,9 +769,14 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                         )
                 elif cid < num_joints:
                     if wp.static(cached_prepare):
-                        revolute_cached_warmstart(
-                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
-                        )
+                        if wp.static(revolute_only):
+                            revolute_cached_warmstart(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                            )
+                        else:
+                            actuated_double_ball_socket_cached_warmstart(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                            )
                     elif wp.static(revolute_only):
                         revolute_prepare_for_iteration(
                             constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
@@ -2704,9 +2715,14 @@ def _make_singleworld_dispatch_func(
                             body_set_access_mode(bodies, _b1_flip, ACCESS_MODE_VELOCITY_LEVEL, idt)
                             body_set_access_mode(bodies, _b2_flip, ACCESS_MODE_VELOCITY_LEVEL, idt)
                         if wp.static(is_cached_prepare):
-                            revolute_cached_warmstart(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                            )
+                            if wp.static(revolute_only):
+                                revolute_cached_warmstart(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
+                            else:
+                                actuated_double_ball_socket_cached_warmstart(
+                                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+                                )
                         elif wp.static(is_prepare):
                             if wp.static(revolute_only):
                                 revolute_prepare_for_iteration(

@@ -161,14 +161,14 @@ class TestPrepareRefreshStride(unittest.TestCase):
         self.assertFalse(w._refresh_prepare_this_substep())
 
     def test_rejects_deformable_stride(self) -> None:
-        with self.assertRaisesRegex(NotImplementedError, "rigid contact/revolute worlds"):
+        with self.assertRaisesRegex(NotImplementedError, "rigid contact/joint worlds"):
             PhoenXWorld(
                 **_make_kwargs(num_bodies=2, rigid_contact_max=1, num_particles=4, num_cloth_triangles=1),
                 step_layout="single_world",
                 prepare_refresh_stride=2,
             )
 
-    def test_rejects_non_revolute_joint_stride(self) -> None:
+    def test_accepts_non_revolute_joint_stride(self) -> None:
         w = PhoenXWorld(
             **_make_kwargs(num_bodies=2, num_joints=1, rigid_contact_max=1),
             step_layout="single_world",
@@ -185,28 +185,28 @@ class TestPrepareRefreshStride(unittest.TestCase):
         def _v(v: tuple[float, float, float]) -> wp.array:
             return wp.array([v], dtype=wp.vec3f, device=device)
 
-        with self.assertRaisesRegex(NotImplementedError, "only revolute joints"):
-            w.initialize_actuated_double_ball_socket_joints(
-                body1=_i(0),
-                body2=_i(1),
-                anchor1=_v((0.0, 0.0, 0.0)),
-                anchor2=_v((1.0, 0.0, 0.0)),
-                hertz=_f(60.0),
-                damping_ratio=_f(1.0),
-                joint_mode=_i(int(JointMode.PRISMATIC)),
-                drive_mode=_i(int(DriveMode.OFF)),
-                target=_f(0.0),
-                target_velocity=_f(0.0),
-                max_force_drive=_f(0.0),
-                stiffness_drive=_f(0.0),
-                damping_drive=_f(0.0),
-                min_value=_f(1.0),
-                max_value=_f(-1.0),
-                hertz_limit=_f(60.0),
-                damping_ratio_limit=_f(1.0),
-                stiffness_limit=_f(0.0),
-                damping_limit=_f(0.0),
-            )
+        w.initialize_actuated_double_ball_socket_joints(
+            body1=_i(0),
+            body2=_i(1),
+            anchor1=_v((0.0, 0.0, 0.0)),
+            anchor2=_v((1.0, 0.0, 0.0)),
+            hertz=_f(60.0),
+            damping_ratio=_f(1.0),
+            joint_mode=_i(int(JointMode.PRISMATIC)),
+            drive_mode=_i(int(DriveMode.OFF)),
+            target=_f(0.0),
+            target_velocity=_f(0.0),
+            max_force_drive=_f(0.0),
+            stiffness_drive=_f(0.0),
+            damping_drive=_f(0.0),
+            min_value=_f(1.0),
+            max_value=_f(-1.0),
+            hertz_limit=_f(60.0),
+            damping_ratio_limit=_f(1.0),
+            stiffness_limit=_f(0.0),
+            damping_limit=_f(0.0),
+        )
+        self.assertFalse(w._use_revolute_specialization)
 
     def test_rejects_mass_splitting_stride(self) -> None:
         with self.assertRaisesRegex(NotImplementedError, "deformables, mass splitting, or sleeping"):

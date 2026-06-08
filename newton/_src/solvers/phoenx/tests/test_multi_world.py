@@ -46,6 +46,7 @@ def _build_n_pendulums(
     num_worlds: int,
     angular_velocities: list[tuple[float, float, float]] | None = None,
     gravity: tuple[float, float, float] | list[tuple[float, float, float]] = (0.0, -9.81, 0.0),
+    prepare_refresh_stride: int = 1,
     device: wp.context.Devicelike = None,
 ) -> tuple[PhoenXWorld, list[int]]:
     """Build ``num_worlds`` identical pendulum scenes sharing one
@@ -112,6 +113,7 @@ def _build_n_pendulums(
         rigid_contact_max=0,
         num_joints=num_joints,
         num_worlds=num_worlds,
+        prepare_refresh_stride=prepare_refresh_stride,
         device=device,
     )
 
@@ -198,6 +200,23 @@ class TestPhoenXMultiWorld(unittest.TestCase):
                 ref,
                 atol=1.0e-4,
                 err_msg=f"world {w} cube diverged from world 0",
+            )
+
+    def test_ball_socket_prepare_refresh_stride_two(self) -> None:
+        """Ball-socket joints can reuse cached prepare data on alternate substeps."""
+        device = wp.get_device("cuda:0")
+        num_worlds = 8
+        world, cube_slots = _build_n_pendulums(num_worlds=num_worlds, prepare_refresh_stride=2, device=device)
+        _run_frames(world, 30)
+        positions = world.bodies.position.numpy()
+        self.assertTrue(np.all(np.isfinite(positions[cube_slots])), "non-finite ball-socket positions")
+        ref = positions[cube_slots[0]]
+        for w in range(1, num_worlds):
+            np.testing.assert_allclose(
+                positions[cube_slots[w]],
+                ref,
+                atol=1.0e-4,
+                err_msg=f"world {w} stride-2 cube diverged from world 0",
             )
 
     def test_world_independence(self) -> None:

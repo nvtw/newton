@@ -102,6 +102,7 @@ __all__ = [
     "JOINT_MODE_REVOLUTE",
     "JOINT_MODE_UNIVERSAL",
     "ActuatedDoubleBallSocketData",
+    "actuated_double_ball_socket_cached_warmstart",
     "actuated_double_ball_socket_initialize_kernel",
     "actuated_double_ball_socket_iterate",
     "actuated_double_ball_socket_iterate_at",
@@ -3910,6 +3911,95 @@ def revolute_cached_warmstart(
         v2,
         w2,
     )
+
+
+@wp.func
+def _ball_socket_cached_warmstart(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+):
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
+    (
+        v1,
+        v2,
+        w1,
+        w2,
+        im1,
+        im2,
+        ii1,
+        ii2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair_lean(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
+
+    r1_b1 = read_vec3(constraints, _OFF_R1_B1, cid)
+    r1_b2 = read_vec3(constraints, _OFF_R1_B2, cid)
+    cr1_b1 = wp.skew(r1_b1)
+    cr1_b2 = wp.skew(r1_b2)
+    acc1 = read_vec3(constraints, _OFF_ACC_IMP1, cid)
+    v1, v2, w1, w2 = apply_pair_spatial_impulse(
+        v1,
+        v2,
+        w1,
+        w2,
+        im1,
+        im2,
+        ii1,
+        ii2,
+        acc1,
+        cr1_b1 @ acc1,
+        cr1_b2 @ acc1,
+    )
+
+    _ms_store_body_pair_lean(
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        v1,
+        w1,
+        v2,
+        w2,
+    )
+
+
+@wp.func
+def actuated_double_ball_socket_cached_warmstart(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    idt: wp.float32,
+):
+    """Apply cached joint warm-start when a prepare pass is reused.
+
+    Revolute keeps the existing 5-row cached path. Ball-socket can reuse
+    cached anchor-1 lever arms directly. Other ADBS modes still need fresh
+    tangent/axis projection, so they intentionally fall back to full prepare
+    on skipped-refresh substeps.
+    """
+    joint_mode = read_int(constraints, _OFF_JOINT_MODE, cid)
+    if joint_mode == JOINT_MODE_REVOLUTE:
+        revolute_cached_warmstart(constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt)
+    elif joint_mode == JOINT_MODE_BALL_SOCKET:
+        _ball_socket_cached_warmstart(constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id)
+    else:
+        actuated_double_ball_socket_prepare_for_iteration(
+            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+        )
 
 
 @wp.func

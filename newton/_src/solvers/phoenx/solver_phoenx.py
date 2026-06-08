@@ -617,7 +617,7 @@ class PhoenXWorld:
                 or self.num_soft_hexahedra > 0
             ):
                 raise NotImplementedError(
-                    "prepare_refresh_stride > 1 currently supports rigid contact/revolute worlds "
+                    "prepare_refresh_stride > 1 currently supports rigid contact/joint worlds "
                     "without deformables, mass splitting, or sleeping"
                 )
         self._current_substep_index: int = 0
@@ -1500,8 +1500,6 @@ class PhoenXWorld:
             mode_np = None
         if mode_np is not None and mode_np.size > 0:
             self._use_revolute_specialization = bool((mode_np == int(JOINT_MODE_REVOLUTE)).all())
-            if self.prepare_refresh_stride != 1 and not self._use_revolute_specialization:
-                raise NotImplementedError("prepare_refresh_stride > 1 currently supports only revolute joints")
         wp.launch(
             actuated_double_ball_socket_initialize_kernel,
             dim=self.num_joints,
@@ -2283,11 +2281,9 @@ class PhoenXWorld:
             or self.num_soft_hexahedra > 0
         ):
             raise NotImplementedError(
-                "cached prepare bookkeeping currently supports rigid contact/revolute worlds "
+                "cached prepare bookkeeping currently supports rigid contact/joint worlds "
                 "without deformables, mass splitting, or sleeping"
             )
-        if self.num_joints > 0 and not self._use_revolute_specialization:
-            raise NotImplementedError("cached prepare bookkeeping currently supports only revolute joints")
         cached_head, cached_fused = self._singleworld_cached_prepare_kernels()
         self._partitioner.begin_sweep()
         self._singleworld_head_plus_tail_sweep(cached_head, cached_fused, idt)
