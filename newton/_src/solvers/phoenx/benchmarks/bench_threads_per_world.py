@@ -97,13 +97,14 @@ def _force_tpw(solver: SolverPhoenX, tpw) -> None:
     """Apply ``tpw`` to a freshly-built solver after construction.
 
     The scenarios don't expose the ``threads_per_world`` constructor
-    argument; we mutate the underlying state directly. ``"auto"``
-    re-enables the per-step picker; an integer pins the value. The
-    fast-tail kernels read ``_tpw_choice`` every launch, so this
-    takes effect on the next ``solver.step()``.
+    argument; we mutate the underlying state directly for integer
+    values. ``"auto"`` leaves the constructor's production auto
+    decision intact, including host-side pinning of obvious topology
+    cases. The fast-tail kernels read ``_tpw_choice`` every launch, so
+    integer overrides take effect on the next ``solver.step()``.
     """
     if tpw == "auto":
-        solver.world._tpw_auto = True
+        return
     else:
         solver.world._tpw_auto = False
         solver.world._tpw_choice.assign([int(tpw)])
