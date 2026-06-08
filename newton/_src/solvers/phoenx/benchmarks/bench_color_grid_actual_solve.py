@@ -6,9 +6,11 @@
 The production multi-world fast-tail solver assigns a small lane group to each
 world and loops colors inside one kernel. That has low launch overhead, but few
 worlds can leave many SMs idle. This benchmark keeps the same color ordering and
-PGS safety, but launches each color as one global grid over all worlds' rows.
-It is aimed at single/few-world scenes with enough rows per color to fill the
-GPU.
+PGS safety, but tests schedulers that expose each color as global work across
+worlds. ``flat`` and ``direct`` use one launch per color; ``mega`` keeps the
+color loop inside one persistent kernel with a software grid barrier. The
+benchmark is aimed at single/few-world scenes with enough rows per color to
+fill the GPU.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import ContactCont
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
-from newton._src.solvers.phoenx.solver_phoenx_kernels import _FUSED_INNER_SWEEPS
+from newton._src.solvers.phoenx.solver_phoenx_kernels import _FUSED_INNER_SWEEPS, _sync_threads
 
 
 @dataclass
@@ -59,11 +61,50 @@ class ColorGridDevice:
     eids: wp.array
     color_starts: wp.array
     processed: wp.array
+    barrier_count: wp.array
+    barrier_sense: wp.array
 
 
 @wp.kernel(enable_backward=False)
 def _color_grid_reset_kernel(processed: wp.array[wp.int32]):
     processed[0] = wp.int32(0)
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__threadfence();
+#endif
+""")
+def _thread_fence(): ...
+
+
+@wp.func
+def _grid_barrier(
+    barrier_count: wp.array[wp.int32],
+    barrier_sense: wp.array[wp.int32],
+    tid: wp.int32,
+    num_blocks: wp.int32,
+    block_dim: wp.int32,
+):
+    local_tid = tid - (tid / block_dim) * block_dim
+    sense = wp.atomic_add(barrier_sense, 0, wp.int32(0))
+    _sync_threads()
+    if local_tid == wp.int32(0):
+        old = wp.atomic_add(barrier_count, 0, wp.int32(1))
+        if old == num_blocks - wp.int32(1):
+            barrier_count[0] = wp.int32(0)
+            _thread_fence()
+            wp.atomic_add(barrier_sense, 0, wp.int32(1))
+        else:
+            while wp.atomic_add(barrier_sense, 0, wp.int32(0)) == sense:
+                pass
+    _sync_threads()
+
+
+@wp.kernel(enable_backward=False)
+def _color_grid_barrier_reset_kernel(barrier_count: wp.array[wp.int32], barrier_sense: wp.array[wp.int32]):
+    barrier_count[0] = wp.int32(0)
+    barrier_sense[0] = wp.int32(0)
 
 
 @wp.kernel(enable_backward=False)
@@ -179,6 +220,125 @@ def _color_grid_iterate_kernel(
                 wp.int32(0),
                 sor_boost,
             )
+
+
+@wp.kernel(enable_backward=False)
+def _color_grid_mega_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    eids: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.int32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+    num_bodies: wp.int32,
+    revolute_only: wp.int32,
+    outer_iters: wp.int32,
+    inner_sweeps: wp.int32,
+    barrier_count: wp.array[wp.int32],
+    barrier_sense: wp.array[wp.int32],
+    total_threads: wp.int32,
+    num_blocks: wp.int32,
+    block_dim_value: wp.int32,
+    copy_state: CopyStateContainer,
+):
+    tid = wp.tid()
+    color = wp.int32(0)
+    while color < num_colors:
+        start = color_starts[color]
+        end = color_starts[color + wp.int32(1)]
+        cursor = start + tid
+        while cursor < end:
+            cid = eids[cursor]
+            if cid < num_joints:
+                if revolute_only != wp.int32(0):
+                    revolute_prepare_for_iteration(
+                        constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                    )
+                else:
+                    actuated_double_ball_socket_prepare_for_iteration(
+                        constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                    )
+            else:
+                contact_prepare_for_iteration_lean_no_soft_pd(
+                    contact_cols,
+                    cid - num_joints,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    idt,
+                    cc,
+                    contacts,
+                    copy_state,
+                    wp.int32(0),
+                )
+            cursor = cursor + total_threads
+        _grid_barrier(barrier_count, barrier_sense, tid, num_blocks, block_dim_value)
+        color = color + wp.int32(1)
+
+    outer = wp.int32(0)
+    while outer < outer_iters:
+        color = wp.int32(0)
+        while color < num_colors:
+            start = color_starts[color]
+            end = color_starts[color + wp.int32(1)]
+            cursor = start + tid
+            while cursor < end:
+                cid = eids[cursor]
+                if cid < num_joints:
+                    if revolute_only != wp.int32(0):
+                        revolute_iterate_multi(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            sor_boost,
+                            True,
+                            inner_sweeps,
+                        )
+                    else:
+                        actuated_double_ball_socket_iterate_multi(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            sor_boost,
+                            True,
+                            inner_sweeps,
+                        )
+                else:
+                    contact_iterate_multi_no_soft_pd(
+                        contact_cols,
+                        cid - num_joints,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        True,
+                        inner_sweeps,
+                        copy_state,
+                        wp.int32(0),
+                        sor_boost,
+                    )
+                cursor = cursor + total_threads
+            _grid_barrier(barrier_count, barrier_sense, tid, num_blocks, block_dim_value)
+            color = color + wp.int32(1)
+        outer = outer + wp.int32(1)
 
 
 @wp.kernel(enable_backward=False)
@@ -356,6 +516,8 @@ def _upload_color_grid(graph: ColorGridHost, device: wp.context.Devicelike) -> C
         eids=wp.array(graph.eids, dtype=wp.int32, device=device),
         color_starts=wp.array(graph.color_starts, dtype=wp.int32, device=device),
         processed=wp.zeros(1, dtype=wp.int32, device=device),
+        barrier_count=wp.zeros(1, dtype=wp.int32, device=device),
+        barrier_sense=wp.zeros(1, dtype=wp.int32, device=device),
     )
 
 
@@ -426,6 +588,56 @@ def _color_grid_runner(world: PhoenXWorld, graph: ColorGridDevice, *, block_dim:
                     ],
                     device=device,
                 )
+
+    return run
+
+
+def _color_grid_mega_runner(world: PhoenXWorld, graph: ColorGridDevice, *, block_dim: int, worker_blocks: int):
+    device = world.device
+    contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
+    idt = wp.float32(1.0 / world.substep_dt)
+    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    outer_iters = int(world.solver_iterations) // inner_sweeps
+    revolute_only = 1 if bool(world._use_revolute_specialization) else 0
+    total_threads = max(1, int(block_dim) * int(worker_blocks))
+
+    def run() -> None:
+        wp.launch(
+            _color_grid_barrier_reset_kernel,
+            dim=1,
+            inputs=[graph.barrier_count, graph.barrier_sense],
+            device=device,
+        )
+        wp.launch(
+            _color_grid_mega_kernel,
+            dim=total_threads,
+            block_dim=block_dim,
+            inputs=[
+                world.constraints,
+                world._contact_cols,
+                world.bodies,
+                world._particles_or_sentinel(),
+                idt,
+                wp.float32(world.sor_boost),
+                graph.eids,
+                graph.color_starts,
+                wp.int32(graph.host.num_colors),
+                world._contact_container,
+                contact_views,
+                wp.int32(world.num_joints),
+                wp.int32(world.num_bodies),
+                wp.int32(revolute_only),
+                wp.int32(outer_iters),
+                wp.int32(inner_sweeps),
+                graph.barrier_count,
+                graph.barrier_sense,
+                wp.int32(total_threads),
+                wp.int32(worker_blocks),
+                wp.int32(block_dim),
+                world._copy_state,
+            ],
+            device=device,
+        )
 
     return run
 
@@ -544,10 +756,17 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
     expected = int(host_graph.color_starts[-1]) * (1 + outer_iters)
 
     runs: list[tuple[str, object]] = []
-    if args.mode in ("flat", "both"):
+    if args.mode in ("flat", "both", "all"):
         runs.append(("flat", _color_grid_runner(world, grid_graph, block_dim=args.block_dim)))
-    if args.mode in ("direct", "both"):
+    if args.mode in ("direct", "both", "all"):
         runs.append(("direct", _color_grid_direct_runner(world, grid_graph, block_dim=args.block_dim)))
+    if args.mode in ("mega", "all"):
+        runs.append(
+            (
+                "mega",
+                _color_grid_mega_runner(world, grid_graph, block_dim=args.block_dim, worker_blocks=args.mega_blocks),
+            )
+        )
 
     for _label, run in runs:
         run()
@@ -580,7 +799,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--prime-frames", type=int, default=3)
     parser.add_argument("--block-dim", type=int, default=128)
-    parser.add_argument("--mode", choices=("flat", "direct", "both"), default="flat")
+    parser.add_argument("--mode", choices=("flat", "direct", "mega", "both", "all"), default="flat")
+    parser.add_argument("--mega-blocks", type=int, default=128)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--n-runs", type=int, default=10)
     parser.add_argument("--trials", type=int, default=1)
@@ -592,7 +812,10 @@ def main() -> None:
     args = parse_args()
     wp.init()
     worlds = [int(raw.strip()) for raw in args.worlds.split(",") if raw.strip()]
-    print(f"device={wp.get_device()} block_dim={args.block_dim} n_runs={args.n_runs} mode={args.mode}")
+    print(
+        f"device={wp.get_device()} block_dim={args.block_dim} mega_blocks={args.mega_blocks} "
+        f"n_runs={args.n_runs} mode={args.mode}"
+    )
     for scene in args.scenes:
         for num_worlds in worlds:
             run_case(args, scene, num_worlds)
