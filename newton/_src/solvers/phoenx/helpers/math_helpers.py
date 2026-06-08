@@ -10,6 +10,7 @@ import math
 import warp as wp
 
 __all__ = [
+    "apply_pair_spatial_impulse",
     "apply_pair_velocity_impulse",
     "create_orthonormal",
     "effective_mass_scalar",
@@ -148,6 +149,33 @@ def apply_pair_velocity_impulse(
     v2_new = v2 + inv_mass2 * imp
     w1_new = w1 - inv_inertia1_world @ wp.cross(r1, imp)
     w2_new = w2 + inv_inertia2_world @ wp.cross(r2, imp)
+    return v1_new, v2_new, w1_new, w2_new
+
+
+@wp.func
+def apply_pair_spatial_impulse(
+    v1: wp.vec3f,
+    v2: wp.vec3f,
+    w1: wp.vec3f,
+    w2: wp.vec3f,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_inertia1_world: wp.mat33f,
+    inv_inertia2_world: wp.mat33f,
+    linear_impulse: wp.vec3f,
+    angular_impulse1: wp.vec3f,
+    angular_impulse2: wp.vec3f,
+):
+    """Antisymmetric body-pair update with precomputed angular impulses.
+
+    The linear impulse acts from body 1 onto body 2. The two angular
+    impulses are world-space r-cross-impulse terms, or pure couples,
+    with matching signs before multiplying by inverse inertia.
+    """
+    v1_new = v1 - inv_mass1 * linear_impulse
+    v2_new = v2 + inv_mass2 * linear_impulse
+    w1_new = w1 - inv_inertia1_world @ angular_impulse1
+    w2_new = w2 + inv_inertia2_world @ angular_impulse2
     return v1_new, v2_new, w1_new, w2_new
 
 

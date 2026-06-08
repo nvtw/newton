@@ -63,6 +63,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.helpers.math_helpers import (
+    apply_pair_spatial_impulse,
     create_orthonormal,
     extract_rotation_angle,
     revolution_tracker_angle,
@@ -1173,10 +1174,9 @@ def _planar_3row_block(
     lam3 = update3.delta
     lin_imp_world = lam3[0] * n_hat
     ang_imp_world = lam3[1] * t1 + lam3[2] * t2
-    v1 = v1 - im1 * lin_imp_world
-    w1 = w1 - ii1 @ ang_imp_world
-    v2 = v2 + im2 * lin_imp_world
-    w2 = w2 + ii2 @ ang_imp_world
+    v1, v2, w1, w2 = apply_pair_spatial_impulse(
+        v1, v2, w1, w2, im1, im2, ii1, ii2, lin_imp_world, ang_imp_world, ang_imp_world
+    )
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc_imp1_world + lin_imp_world)
     write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc_imp2_world + ang_imp_world)
     return v1, v2, w1, w2
@@ -1213,10 +1213,7 @@ def _anchor1_standalone_block(
     rhs1 = jv1 + bias1
     update1 = block_solve_accumulated_inverse_3(a1_inv, rhs1, acc1, mass_coeff, impulse_coeff, sor_boost)
     lam1 = update1.delta
-    v1 = v1 - im1 * lam1
-    w1 = w1 - ii1 @ (cr1_b1 @ lam1)
-    v2 = v2 + im2 * lam1
-    w2 = w2 + ii2 @ (cr1_b2 @ lam1)
+    v1, v2, w1, w2 = apply_pair_spatial_impulse(v1, v2, w1, w2, im1, im2, ii1, ii2, lam1, cr1_b1 @ lam1, cr1_b2 @ lam1)
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, update1.lambda_new)
     return v1, v2, w1, w2
 
@@ -1265,10 +1262,9 @@ def _cable_anchor2_pd_block(
     lam2_t1 = update2.delta[0]
     lam2_t2 = update2.delta[1]
     lam2_world = lam2_t1 * t1 + lam2_t2 * t2
-    v1 = v1 - im1 * lam2_world
-    w1 = w1 - ii1 @ (cr2_b1 @ lam2_world)
-    v2 = v2 + im2 * lam2_world
-    w2 = w2 + ii2 @ (cr2_b2 @ lam2_world)
+    v1, v2, w1, w2 = apply_pair_spatial_impulse(
+        v1, v2, w1, w2, im1, im2, ii1, ii2, lam2_world, cr2_b1 @ lam2_world, cr2_b2 @ lam2_world
+    )
     write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world + lam2_world)
     return v1, v2, w1, w2
 
@@ -1310,10 +1306,9 @@ def _cable_anchor3_pd_block(
     )
     lam3 = update3.delta
     lam3_world = lam3 * t2
-    v1 = v1 - im1 * lam3_world
-    w1 = w1 - ii1 @ (cr3_b1 @ lam3_world)
-    v2 = v2 + im2 * lam3_world
-    w2 = w2 + ii2 @ (cr3_b2 @ lam3_world)
+    v1, v2, w1, w2 = apply_pair_spatial_impulse(
+        v1, v2, w1, w2, im1, im2, ii1, ii2, lam3_world, cr3_b1 @ lam3_world, cr3_b2 @ lam3_world
+    )
     write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3_world + lam3_world)
     return v1, v2, w1, w2
 
@@ -1381,10 +1376,19 @@ def _anchor1_anchor2_schur_block(
     update1 = block_project_accumulated_3(lam1_us, acc1, mass_coeff, impulse_coeff, sor_boost)
     lam1 = update1.delta
     total_lin = lam1 + lam2_world
-    v1 = v1 - im1 * total_lin
-    w1 = w1 - ii1 @ (cr1_b1 @ lam1 + cr2_b1 @ lam2_world)
-    v2 = v2 + im2 * total_lin
-    w2 = w2 + ii2 @ (cr1_b2 @ lam1 + cr2_b2 @ lam2_world)
+    v1, v2, w1, w2 = apply_pair_spatial_impulse(
+        v1,
+        v2,
+        w1,
+        w2,
+        im1,
+        im2,
+        ii1,
+        ii2,
+        total_lin,
+        cr1_b1 @ lam1 + cr2_b1 @ lam2_world,
+        cr1_b2 @ lam1 + cr2_b2 @ lam2_world,
+    )
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, update1.lambda_new)
     write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world + lam2_world)
 
@@ -1442,10 +1446,19 @@ def _anchor1_anchor2_tangent_4row_block(
     lam2_world = lam4[2] * t1 + lam4[3] * t2
 
     total_linear = lam1_world + lam2_world
-    v1 = v1 - im1 * total_linear
-    w1 = w1 - ii1 @ (cr1_b1 @ lam1_world + cr2_b1 @ lam2_world)
-    v2 = v2 + im2 * total_linear
-    w2 = w2 + ii2 @ (cr1_b2 @ lam1_world + cr2_b2 @ lam2_world)
+    v1, v2, w1, w2 = apply_pair_spatial_impulse(
+        v1,
+        v2,
+        w1,
+        w2,
+        im1,
+        im2,
+        ii1,
+        ii2,
+        total_linear,
+        cr1_b1 @ lam1_world + cr2_b1 @ lam2_world,
+        cr1_b2 @ lam1_world + cr2_b2 @ lam2_world,
+    )
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc_imp1_world + lam1_world)
     write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc_imp2_world + lam2_world)
 
@@ -1484,10 +1497,9 @@ def _anchor3_scalar_block(
     update3 = block_solve_accumulated_inverse_1(s3_inv, jv3 + bias3, acc3_scalar, mass_coeff, impulse_coeff, sor_boost)
     lam3 = update3.delta
     lam3_world = lam3 * t2
-    v1 = v1 - im1 * lam3_world
-    w1 = w1 - ii1 @ (cr3_b1 @ lam3_world)
-    v2 = v2 + im2 * lam3_world
-    w2 = w2 + ii2 @ (cr3_b2 @ lam3_world)
+    v1, v2, w1, w2 = apply_pair_spatial_impulse(
+        v1, v2, w1, w2, im1, im2, ii1, ii2, lam3_world, cr3_b1 @ lam3_world, cr3_b2 @ lam3_world
+    )
     write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3_world + lam3_world)
     return v1, v2, w1, w2
 
@@ -1545,10 +1557,19 @@ def _linear_axial_block(
     jv_axial = wp.dot(n_hat, v1_anchor - v2_anchor)
     axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost)
     axial_imp = n_hat * axial_lam
-    v1 = v1 + im1 * axial_imp
-    w1 = w1 + ii1 @ wp.cross(r1_b1, axial_imp)
-    v2 = v2 - im2 * axial_imp
-    w2 = w2 - ii2 @ wp.cross(r1_b2, axial_imp)
+    v1, v2, w1, w2 = apply_pair_spatial_impulse(
+        v1,
+        v2,
+        w1,
+        w2,
+        im1,
+        im2,
+        ii1,
+        ii2,
+        -axial_imp,
+        -wp.cross(r1_b1, axial_imp),
+        -wp.cross(r1_b2, axial_imp),
+    )
     return v1, v2, w1, w2
 
 
@@ -3017,10 +3038,19 @@ def _revolute_iterate_at_multi(
 
         total_lin = lam1 + lam2_world
 
-        velocity1 = velocity1 - inv_mass1 * total_lin
-        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1 + cr2_b1 @ lam2_world)
-        velocity2 = velocity2 + inv_mass2 * total_lin
-        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1 + cr2_b2 @ lam2_world)
+        velocity1, velocity2, angular_velocity1, angular_velocity2 = apply_pair_spatial_impulse(
+            velocity1,
+            velocity2,
+            angular_velocity1,
+            angular_velocity2,
+            inv_mass1,
+            inv_mass2,
+            inv_inertia1,
+            inv_inertia2,
+            total_lin,
+            cr1_b1 @ lam1 + cr2_b1 @ lam2_world,
+            cr1_b2 @ lam1 + cr2_b2 @ lam2_world,
+        )
 
         acc1 = update1.lambda_new
         acc2_tan = update2.lambda_new
