@@ -3527,12 +3527,21 @@ class PhoenXWorld:
     def _fast_tail_worlds_per_block(self) -> int:
         """Choose fast-tail block packing from topology known at finalize time."""
         wpb = _choose_fast_tail_worlds_per_block(self.num_worlds)
-        if self.step_layout != "single_world" and self._tpw_launch_bound <= 16 and self.num_worlds >= 512:
+        if self.step_layout != "single_world":
             inv_worlds = 1.0 / float(max(1, self.num_worlds))
             joints_per_world = float(self.num_joints) * inv_worlds
             contacts_per_world = float(self.max_contact_columns) * inv_worlds
-            if joints_per_world <= 48.0 and contacts_per_world <= 64.0:
-                wpb = min(wpb, 2)
+
+            # Dense contact-only worlds have long per-world colour loops.
+            # Packing several worlds into one block made the contact-heavy
+            # tower fleet slower because short lane groups kept block
+            # resources resident behind the longest world.
+            if joints_per_world == 0.0 and contacts_per_world >= 512.0:
+                return 1
+
+            if self._tpw_launch_bound <= 16 and self.num_worlds >= 512:
+                if joints_per_world <= 48.0 and contacts_per_world <= 64.0:
+                    wpb = min(wpb, 2)
         return wpb
 
     def _fast_tail_block_dim(self) -> int:
