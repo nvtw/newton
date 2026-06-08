@@ -630,18 +630,24 @@ class PhoenXWorld:
         if isinstance(threads_per_world, str):
             if threads_per_world != "auto":
                 raise ValueError(f"threads_per_world must be 'auto' or one of (8, 16, 32) (got {threads_per_world!r})")
-            # Host-side fast path: below the saturation point the picker
-            # would always emit 32, so pin and skip the per-step picker.
-            # Saturated small joint worlds consistently prefer tpw=16;
-            # dense contact-only worlds prefer tpw=8 once enough worlds are
-            # resident to keep the GPU full. Pick those at construction so
+            # Host-side fast path: pin obvious topology/occupancy cases so
             # graph capture does not need guarded no-op fast-tail variants.
+            # Small joint-only worlds prefer fewer lanes once there are enough
+            # worlds to keep the GPU occupied; small fleets still prefer 32.
+            # Dense contact-only worlds prefer tpw=8 once saturated.
             _sm = getattr(self.device, "sm_count", 0) or 1
             self._tpw_auto: bool = self.num_worlds >= 8 * _sm
             initial_tpw = _STRAGGLER_BLOCK_DIM
-            if self._tpw_auto:
-                joints_per_world = self.num_joints / max(1, self.num_worlds)
-                contacts_capacity_per_world = self.max_contact_columns / max(1, self.num_worlds)
+            joints_per_world = self.num_joints / max(1, self.num_worlds)
+            contacts_capacity_per_world = self.max_contact_columns / max(1, self.num_worlds)
+            sparse_joint_only_world = 0.0 < joints_per_world <= 40.0 and self.max_contact_columns == 0
+            if sparse_joint_only_world and self.num_worlds >= 4 * _sm:
+                self._tpw_auto = False
+                initial_tpw = 8
+            elif sparse_joint_only_world and self.num_worlds >= 2 * _sm:
+                self._tpw_auto = False
+                initial_tpw = 16
+            elif self._tpw_auto:
                 small_joint_world = 0.0 < joints_per_world <= 40.0 and contacts_capacity_per_world <= 512.0
                 dense_joint_world = joints_per_world > 40.0
                 dense_contact_only_world = self.num_joints == 0 and contacts_capacity_per_world > 256.0

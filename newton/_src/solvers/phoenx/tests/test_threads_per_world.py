@@ -13,8 +13,9 @@ the picker every step. These tests verify three properties:
      each other after a settle. The kernels' adaptive lane-count is
      a SIMT layout knob, not a math change, so results must match.
   2. **Picker decisions**: the heuristic picks tpw=32 on
-     small-fleet / dense-colour scenes and tpw=16 on big sparse-fleet
-     scenes. Catches regressions in the threshold tuning.
+     small-fleet / dense-colour scenes and uses lower lane counts on
+     sparse joint-only fleets once enough worlds are resident. Catches
+     regressions in the threshold tuning.
   3. **Construction validation**: invalid ``threads_per_world``
      values raise ``ValueError`` at construction time, before any
      kernel runs.
@@ -30,6 +31,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.solver import SolverPhoenX
 from newton._src.solvers.phoenx.tests._test_helpers import make_solver_graph_stepper
+from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums
 
 
 def _settle_pos(num_worlds: int, tpw, frames: int = 30) -> np.ndarray:
@@ -74,7 +76,7 @@ class TestThreadsPerWorldCorrectness(unittest.TestCase):
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX adaptive-tpw tests require CUDA")
 class TestThreadsPerWorldPicker(unittest.TestCase):
-    """Picker chooses tpw=32 on small/dense scenes, tpw=16 on sparse big fleets."""
+    """Picker chooses tpw from scene topology and occupancy."""
 
     def _settle_and_read_pick(self, num_worlds: int) -> int:
         # Auto mode + a few real steps so the picker has populated
@@ -100,6 +102,21 @@ class TestThreadsPerWorldPicker(unittest.TestCase):
         host-side fast-path also disables the per-step picker launch
         in this case -- both paths land on the same value."""
         self.assertEqual(self._settle_and_read_pick(num_worlds=64), 32)
+
+    def test_sparse_joint_only_fleets_use_lower_lane_counts(self) -> None:
+        """Sparse joint-only worlds are pinned at construction time.
+
+        The cutoffs scale with SM count: 32 lanes for small fleets, 16
+        once there are at least 2 worlds/SM, and 8 once there are at
+        least 4 worlds/SM.
+        """
+        device = wp.get_device("cuda:0")
+        sm_count = getattr(device, "sm_count", 0) or 1
+        for num_worlds, expected_tpw in ((2 * sm_count, 16), (4 * sm_count, 8)):
+            with self.subTest(num_worlds=num_worlds):
+                world, _ = _build_n_pendulums(num_worlds=int(num_worlds), device=device)
+                self.assertFalse(world._tpw_auto)
+                self.assertEqual(int(world._tpw_choice.numpy()[0]), expected_tpw)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX adaptive-tpw tests require CUDA")
