@@ -17,12 +17,23 @@ import warp as wp
 
 __all__ = [
     "BLOCK_LAMBDA_INF",
+    "BlockVector2Update",
+    "BlockVector3Update",
+    "BlockVector4Update",
+    "block_project_accumulated_1",
+    "block_project_accumulated_2",
+    "block_project_accumulated_3",
+    "block_project_accumulated_4",
     "block_project_delta_1",
     "block_project_delta_sor_1",
     "block_project_friction_circle_2",
     "block_project_friction_delta_sor_2",
     "block_project_identity_delta_1",
     "block_project_identity_delta_2",
+    "block_solve_accumulated_inverse_1",
+    "block_solve_accumulated_inverse_2",
+    "block_solve_accumulated_inverse_3",
+    "block_solve_accumulated_inverse_4",
     "block_solve_inverse_2",
     "block_solve_inverse_3",
     "block_solve_inverse_4",
@@ -39,6 +50,24 @@ __all__ = [
 
 
 BLOCK_LAMBDA_INF = wp.constant(wp.float32(1.0e30))
+
+
+@wp.struct
+class BlockVector2Update:
+    delta: wp.vec2f
+    lambda_new: wp.vec2f
+
+
+@wp.struct
+class BlockVector3Update:
+    delta: wp.vec3f
+    lambda_new: wp.vec3f
+
+
+@wp.struct
+class BlockVector4Update:
+    delta: wp.vec4f
+    lambda_new: wp.vec4f
 
 
 @wp.func
@@ -93,6 +122,67 @@ def block_project_identity_delta_2(
     Returns (projected_delta1, projected_delta2, lambda1_new, lambda2_new).
     """
     return wp.vec4f(d_lambda1, d_lambda2, lambda1_old + d_lambda1, lambda2_old + d_lambda2)
+
+
+@wp.func
+def block_project_accumulated_1(
+    d_lambda_unsoft: wp.float32,
+    lambda_old: wp.float32,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+) -> wp.vec2f:
+    """Apply soft-constraint coefficients, SOR, then identity-project one row."""
+    d_lambda = (mass_coeff * d_lambda_unsoft - impulse_coeff * lambda_old) * sor_boost
+    return block_project_identity_delta_1(lambda_old, d_lambda)
+
+
+@wp.func
+def block_project_accumulated_2(
+    d_lambda_unsoft: wp.vec2f,
+    lambda_old: wp.vec2f,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+) -> BlockVector2Update:
+    """Apply soft-constraint coefficients, SOR, then identity-project two rows."""
+    d_lambda = (mass_coeff * d_lambda_unsoft - impulse_coeff * lambda_old) * sor_boost
+    update = BlockVector2Update()
+    update.delta = d_lambda
+    update.lambda_new = lambda_old + d_lambda
+    return update
+
+
+@wp.func
+def block_project_accumulated_3(
+    d_lambda_unsoft: wp.vec3f,
+    lambda_old: wp.vec3f,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+) -> BlockVector3Update:
+    """Apply soft-constraint coefficients, SOR, then identity-project three rows."""
+    d_lambda = (mass_coeff * d_lambda_unsoft - impulse_coeff * lambda_old) * sor_boost
+    update = BlockVector3Update()
+    update.delta = d_lambda
+    update.lambda_new = lambda_old + d_lambda
+    return update
+
+
+@wp.func
+def block_project_accumulated_4(
+    d_lambda_unsoft: wp.vec4f,
+    lambda_old: wp.vec4f,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+) -> BlockVector4Update:
+    """Apply soft-constraint coefficients, SOR, then identity-project four rows."""
+    d_lambda = (mass_coeff * d_lambda_unsoft - impulse_coeff * lambda_old) * sor_boost
+    update = BlockVector4Update()
+    update.delta = d_lambda
+    update.lambda_new = lambda_old + d_lambda
+    return update
 
 
 @wp.func
@@ -296,6 +386,62 @@ def block_solve_projected_xpbd_2_strict(
     """Solve a strict two-row XPBD block, apply SOR, then identity-project lambdas."""
     d = block_solve_xpbd_2_strict(A11, A12, A22, rhs1, rhs2, sor_boost, det_floor)
     return block_project_identity_delta_2(lambda1_old, lambda2_old, d[0], d[1])
+
+
+@wp.func
+def block_solve_accumulated_inverse_1(
+    K_inv: wp.float32,
+    rhs: wp.float32,
+    lambda_old: wp.float32,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+) -> wp.vec2f:
+    """Solve a cached scalar inverse row and identity-project its accumulator."""
+    d_lambda_unsoft = -(K_inv * rhs)
+    return block_project_accumulated_1(d_lambda_unsoft, lambda_old, mass_coeff, impulse_coeff, sor_boost)
+
+
+@wp.func
+def block_solve_accumulated_inverse_2(
+    K_inv: wp.mat22f,
+    rhs: wp.vec2f,
+    lambda_old: wp.vec2f,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+) -> BlockVector2Update:
+    """Solve a cached 2x2 inverse block and identity-project its accumulator."""
+    d_lambda_unsoft = block_solve_inverse_2(K_inv, rhs)
+    return block_project_accumulated_2(d_lambda_unsoft, lambda_old, mass_coeff, impulse_coeff, sor_boost)
+
+
+@wp.func
+def block_solve_accumulated_inverse_3(
+    K_inv: wp.mat33f,
+    rhs: wp.vec3f,
+    lambda_old: wp.vec3f,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+) -> BlockVector3Update:
+    """Solve a cached 3x3 inverse block and identity-project its accumulator."""
+    d_lambda_unsoft = block_solve_inverse_3(K_inv, rhs)
+    return block_project_accumulated_3(d_lambda_unsoft, lambda_old, mass_coeff, impulse_coeff, sor_boost)
+
+
+@wp.func
+def block_solve_accumulated_inverse_4(
+    K_inv: wp.mat44f,
+    rhs: wp.vec4f,
+    lambda_old: wp.vec4f,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+) -> BlockVector4Update:
+    """Solve a cached 4x4 inverse block and identity-project its accumulator."""
+    d_lambda_unsoft = block_solve_inverse_4(K_inv, rhs)
+    return block_project_accumulated_4(d_lambda_unsoft, lambda_old, mass_coeff, impulse_coeff, sor_boost)
 
 
 @wp.func

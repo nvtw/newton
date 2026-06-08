@@ -27,10 +27,15 @@ import warp as wp
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
+    block_project_accumulated_2,
+    block_project_accumulated_3,
     block_project_delta_sor_1,
+    block_solve_accumulated_inverse_1,
+    block_solve_accumulated_inverse_2,
+    block_solve_accumulated_inverse_3,
+    block_solve_accumulated_inverse_4,
     block_solve_inverse_2,
     block_solve_inverse_3,
-    block_solve_inverse_4,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     _PD_NYQUIST_HEADROOM_MAX,
@@ -1130,9 +1135,8 @@ def _planar_3row_block(
     w_rel = w2 - w1
     jv3 = wp.vec3f(wp.dot(n_hat, v_rel), wp.dot(t1, w_rel), wp.dot(t2, w_rel))
     rhs3 = jv3 + bias_packed
-    lam_us = block_solve_inverse_3(a3_inv, rhs3)
-    lam3 = mass_coeff * lam_us - impulse_coeff * acc3
-    lam3 = lam3 * sor_boost
+    update3 = block_solve_accumulated_inverse_3(a3_inv, rhs3, acc3, mass_coeff, impulse_coeff, sor_boost)
+    lam3 = update3.delta
     lin_imp_world = lam3[0] * n_hat
     ang_imp_world = lam3[1] * t1 + lam3[2] * t2
     v1 = v1 - im1 * lin_imp_world
@@ -1173,14 +1177,13 @@ def _anchor1_standalone_block(
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
     jv1 = -v1 + cr1_b1 @ w1 + v2 - cr1_b2 @ w2
     rhs1 = jv1 + bias1
-    lam1_us = block_solve_inverse_3(a1_inv, rhs1)
-    lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
-    lam1 = lam1 * sor_boost
+    update1 = block_solve_accumulated_inverse_3(a1_inv, rhs1, acc1, mass_coeff, impulse_coeff, sor_boost)
+    lam1 = update1.delta
     v1 = v1 - im1 * lam1
     w1 = w1 - ii1 @ (cr1_b1 @ lam1)
     v2 = v2 + im2 * lam1
     w2 = w2 + ii2 @ (cr1_b2 @ lam1)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, update1.lambda_new)
     return v1, v2, w1, w2
 
 
@@ -1221,12 +1224,12 @@ def _cable_anchor2_pd_block(
     jv2_world = -v1 + cr2_b1 @ w1 + v2 - cr2_b2 @ w2
     jv2_t1 = wp.dot(t1, jv2_world)
     jv2_t2 = wp.dot(t2, jv2_world)
-    rhs2_t1 = jv2_t1 + bias2[0] + gamma_bend * acc2_t1
-    rhs2_t2 = jv2_t2 + bias2[1] + gamma_bend * acc2_t2
-    lam2_t1 = -(k22_inv_00 * rhs2_t1 + k22_inv_01 * rhs2_t2)
-    lam2_t2 = -(k22_inv_10 * rhs2_t1 + k22_inv_11 * rhs2_t2)
-    lam2_t1 = lam2_t1 * sor_boost
-    lam2_t2 = lam2_t2 * sor_boost
+    rhs2 = wp.vec2f(jv2_t1 + bias2[0] + gamma_bend * acc2_t1, jv2_t2 + bias2[1] + gamma_bend * acc2_t2)
+    k22_inv = wp.mat22f(k22_inv_00, k22_inv_01, k22_inv_10, k22_inv_11)
+    acc2 = wp.vec2f(acc2_t1, acc2_t2)
+    update2 = block_solve_accumulated_inverse_2(k22_inv, rhs2, acc2, wp.float32(1.0), wp.float32(0.0), sor_boost)
+    lam2_t1 = update2.delta[0]
+    lam2_t2 = update2.delta[1]
     lam2_world = lam2_t1 * t1 + lam2_t2 * t2
     v1 = v1 - im1 * lam2_world
     w1 = w1 - ii1 @ (cr2_b1 @ lam2_world)
@@ -1263,8 +1266,15 @@ def _cable_anchor3_pd_block(
     acc3_t2 = wp.dot(t2, acc3_world)
     jv3_world = -v1 + cr3_b1 @ w1 + v2 - cr3_b2 @ w2
     jv3_t2 = wp.dot(t2, jv3_world)
-    lam3 = -m_twist_soft * (jv3_t2 + bias3 + gamma_twist * acc3_t2)
-    lam3 = lam3 * sor_boost
+    update3 = block_solve_accumulated_inverse_1(
+        m_twist_soft,
+        jv3_t2 + bias3 + gamma_twist * acc3_t2,
+        acc3_t2,
+        wp.float32(1.0),
+        wp.float32(0.0),
+        sor_boost,
+    )
+    lam3 = update3[0]
     lam3_world = lam3 * t2
     v1 = v1 - im1 * lam3_world
     w1 = w1 - ii1 @ (cr3_b1 @ lam3_world)
@@ -1324,8 +1334,8 @@ def _anchor1_anchor2_schur_block(
     ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
 
     lam2_us = block_solve_inverse_2(s_inv_22, rhs2 - ut_ai_rhs1)
-    lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
-    lam2 = lam2 * sor_boost
+    update2 = block_project_accumulated_2(lam2_us, acc2_tan, mass_coeff, impulse_coeff, sor_boost)
+    lam2 = update2.delta
     lam2_world = lam2[0] * t1 + lam2[1] * t2
     lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
 
@@ -1334,14 +1344,14 @@ def _anchor1_anchor2_schur_block(
     u_lam2_us = u_lam2_us + cr1_b2 @ (ii2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
 
     lam1_us = block_solve_inverse_3(a1_inv, rhs1 + u_lam2_us)
-    lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
-    lam1 = lam1 * sor_boost
+    update1 = block_project_accumulated_3(lam1_us, acc1, mass_coeff, impulse_coeff, sor_boost)
+    lam1 = update1.delta
     total_lin = lam1 + lam2_world
     v1 = v1 - im1 * total_lin
     w1 = w1 - ii1 @ (cr1_b1 @ lam1 + cr2_b1 @ lam2_world)
     v2 = v2 + im2 * total_lin
     w2 = w2 + ii2 @ (cr1_b2 @ lam1 + cr2_b2 @ lam2_world)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, update1.lambda_new)
     write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world + lam2_world)
 
     return v1, v2, w1, w2
@@ -1392,9 +1402,8 @@ def _anchor1_anchor2_tangent_4row_block(
     bias4 = wp.vec4f(bias1[0], bias1[1], bias2[0], bias2[1])
     rhs4 = jv4 + bias4
 
-    lam4_us = block_solve_inverse_4(a4_inv, rhs4)
-    lam4 = mass_coeff * lam4_us - impulse_coeff * acc4
-    lam4 = lam4 * sor_boost
+    update4 = block_solve_accumulated_inverse_4(a4_inv, rhs4, acc4, mass_coeff, impulse_coeff, sor_boost)
+    lam4 = update4.delta
     lam1_world = lam4[0] * t1 + lam4[1] * t2
     lam2_world = lam4[2] * t1 + lam4[3] * t2
 
@@ -1438,9 +1447,8 @@ def _anchor3_scalar_block(
     acc3_scalar = wp.dot(t2, acc3_world)
     jv3_world = -v1 + cr3_b1 @ w1 + v2 - cr3_b2 @ w2
     jv3 = wp.dot(t2, jv3_world)
-    lam3_us = -(s3_inv * (jv3 + bias3))
-    lam3 = mass_coeff * lam3_us - impulse_coeff * acc3_scalar
-    lam3 = lam3 * sor_boost
+    update3 = block_solve_accumulated_inverse_1(s3_inv, jv3 + bias3, acc3_scalar, mass_coeff, impulse_coeff, sor_boost)
+    lam3 = update3[0]
     lam3_world = lam3 * t2
     v1 = v1 - im1 * lam3_world
     w1 = w1 - ii1 @ (cr3_b1 @ lam3_world)
@@ -2959,8 +2967,8 @@ def _revolute_iterate_at_multi(
         ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
 
         lam2_us = block_solve_inverse_2(s_inv_22, rhs2 - ut_ai_rhs1)
-        lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
-        lam2 = lam2 * sor_boost
+        update2 = block_project_accumulated_2(lam2_us, acc2_tan, mass_coeff, impulse_coeff, sor_boost)
+        lam2 = update2.delta
 
         lam2_world = lam2[0] * t1 + lam2[1] * t2
         lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
@@ -2970,8 +2978,8 @@ def _revolute_iterate_at_multi(
         u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
 
         lam1_us = block_solve_inverse_3(a1_inv, rhs1 + u_lam2_us)
-        lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
-        lam1 = lam1 * sor_boost
+        update1 = block_project_accumulated_3(lam1_us, acc1, mass_coeff, impulse_coeff, sor_boost)
+        lam1 = update1.delta
 
         total_lin = lam1 + lam2_world
 
@@ -2980,8 +2988,8 @@ def _revolute_iterate_at_multi(
         velocity2 = velocity2 + inv_mass2 * total_lin
         angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1 + cr2_b2 @ lam2_world)
 
-        acc1 = acc1 + lam1
-        acc2_tan = acc2_tan + lam2
+        acc1 = update1.lambda_new
+        acc2_tan = update2.lambda_new
 
         # Axial drive + limit scalar PGS
         jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
