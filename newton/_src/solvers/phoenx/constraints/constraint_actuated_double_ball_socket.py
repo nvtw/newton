@@ -29,7 +29,7 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
     block_project_accumulated_2,
     block_project_accumulated_3,
-    block_project_delta_sor_1,
+    block_project_accumulated_bounded_1,
     block_solve_accumulated_inverse_1,
     block_solve_accumulated_inverse_2,
     block_solve_accumulated_inverse_3,
@@ -999,7 +999,15 @@ def _axial_drive_limit_iterate(
         if max_force_drive > 0.0:
             drive_min = -max_lambda_drive
             drive_max = max_lambda_drive
-        projection = block_project_delta_sor_1(acc_drive, lam_drive, sor_boost, drive_min, drive_max)
+        projection = block_project_accumulated_bounded_1(
+            lam_drive,
+            acc_drive,
+            wp.float32(1.0),
+            wp.float32(0.0),
+            sor_boost,
+            drive_min,
+            drive_max,
+        )
         lam_drive = projection[0]
         acc_drive = projection[1]
         write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
@@ -1011,6 +1019,9 @@ def _axial_drive_limit_iterate(
         damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
         acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
         pd_mode_limit = stiffness_limit > 0.0 or damping_limit > 0.0
+        lam_limit_us = wp.float32(0.0)
+        limit_mass_coeff = wp.float32(1.0)
+        limit_impulse_coeff = wp.float32(0.0)
         if pd_mode_limit:
             # Jitter2 PD: same iterate form as the drive row. ``beta``
             # is stored *positive* (``pd_coefficients`` returns it with
@@ -1020,7 +1031,7 @@ def _axial_drive_limit_iterate(
             pd_gamma = read_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid)
             pd_beta = read_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid)
             if pd_mass > 0.0:
-                lam_limit = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
+                lam_limit_us = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
         else:
             # Box2D soft-constraint path. ``bias_limit_box2d`` is
             # prefolded as ``-C * bias_rate`` so the PGS step targets
@@ -1031,16 +1042,33 @@ def _axial_drive_limit_iterate(
             ic_limit = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
             if eff_inv > 0.0:
                 eff_axial = 1.0 / eff_inv
-                lam_unsoft = -eff_axial * (jv_axial + bias_box)
-                lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
+                lam_limit_us = -eff_axial * (jv_axial + bias_box)
+                limit_mass_coeff = mc_limit
+                limit_impulse_coeff = ic_limit
         # Unilateral clamp: the limit only pushes back toward the
         # allowed range. Positive ``acc`` reduces the cumulative
         # position (right thing at max stop); negative ``acc``
         # increases it (right thing at min stop).
         if clamp == _CLAMP_MAX:
-            projection = block_project_delta_sor_1(acc_limit, lam_limit, sor_boost, wp.float32(0.0), BLOCK_LAMBDA_INF)
+            projection = block_project_accumulated_bounded_1(
+                lam_limit_us,
+                acc_limit,
+                limit_mass_coeff,
+                limit_impulse_coeff,
+                sor_boost,
+                wp.float32(0.0),
+                BLOCK_LAMBDA_INF,
+            )
         else:
-            projection = block_project_delta_sor_1(acc_limit, lam_limit, sor_boost, -BLOCK_LAMBDA_INF, wp.float32(0.0))
+            projection = block_project_accumulated_bounded_1(
+                lam_limit_us,
+                acc_limit,
+                limit_mass_coeff,
+                limit_impulse_coeff,
+                sor_boost,
+                -BLOCK_LAMBDA_INF,
+                wp.float32(0.0),
+            )
         lam_limit = projection[0]
         acc_limit = projection[1]
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
@@ -1062,8 +1090,14 @@ def _axial_drive_limit_iterate(
         acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
         max_lambda_friction = friction_coefficient * (wp.float32(1.0) / idt)
         lam_friction = -friction_eff_mass * (jv_axial + friction_gamma * acc_friction)
-        projection = block_project_delta_sor_1(
-            acc_friction, lam_friction, sor_boost, -max_lambda_friction, max_lambda_friction
+        projection = block_project_accumulated_bounded_1(
+            lam_friction,
+            acc_friction,
+            wp.float32(1.0),
+            wp.float32(0.0),
+            sor_boost,
+            -max_lambda_friction,
+            max_lambda_friction,
         )
         lam_friction = projection[0]
         acc_friction = projection[1]
@@ -3002,26 +3036,50 @@ def _revolute_iterate_at_multi(
             if max_force_drive > wp.float32(0.0):
                 drive_min = -max_lambda_drive
                 drive_max = max_lambda_drive
-            projection = block_project_delta_sor_1(acc_drive, lam_drive, sor_boost, drive_min, drive_max)
+            projection = block_project_accumulated_bounded_1(
+                lam_drive,
+                acc_drive,
+                wp.float32(1.0),
+                wp.float32(0.0),
+                sor_boost,
+                drive_min,
+                drive_max,
+            )
             lam_drive = projection[0]
             acc_drive = projection[1]
 
         lam_limit = wp.float32(0.0)
         if limit_active:
+            lam_limit_us = wp.float32(0.0)
+            limit_mass_coeff = wp.float32(1.0)
+            limit_impulse_coeff = wp.float32(0.0)
             if pd_mode_limit:
                 if pd_mass > wp.float32(0.0):
-                    lam_limit = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
+                    lam_limit_us = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
             else:
                 if eff_axial > wp.float32(0.0):
-                    lam_unsoft = -eff_axial * (jv_axial + bias_box)
-                    lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
+                    lam_limit_us = -eff_axial * (jv_axial + bias_box)
+                    limit_mass_coeff = mc_limit
+                    limit_impulse_coeff = ic_limit
             if clamp == _CLAMP_MAX:
-                projection = block_project_delta_sor_1(
-                    acc_limit, lam_limit, sor_boost, wp.float32(0.0), BLOCK_LAMBDA_INF
+                projection = block_project_accumulated_bounded_1(
+                    lam_limit_us,
+                    acc_limit,
+                    limit_mass_coeff,
+                    limit_impulse_coeff,
+                    sor_boost,
+                    wp.float32(0.0),
+                    BLOCK_LAMBDA_INF,
                 )
             else:
-                projection = block_project_delta_sor_1(
-                    acc_limit, lam_limit, sor_boost, -BLOCK_LAMBDA_INF, wp.float32(0.0)
+                projection = block_project_accumulated_bounded_1(
+                    lam_limit_us,
+                    acc_limit,
+                    limit_mass_coeff,
+                    limit_impulse_coeff,
+                    sor_boost,
+                    -BLOCK_LAMBDA_INF,
+                    wp.float32(0.0),
                 )
             lam_limit = projection[0]
             acc_limit = projection[1]
@@ -3029,8 +3087,14 @@ def _revolute_iterate_at_multi(
         lam_friction = wp.float32(0.0)
         if friction_active:
             lam_friction = -friction_eff_mass * (jv_axial + friction_gamma * acc_friction)
-            projection = block_project_delta_sor_1(
-                acc_friction, lam_friction, sor_boost, -max_lambda_friction, max_lambda_friction
+            projection = block_project_accumulated_bounded_1(
+                lam_friction,
+                acc_friction,
+                wp.float32(1.0),
+                wp.float32(0.0),
+                sor_boost,
+                -max_lambda_friction,
+                max_lambda_friction,
             )
             lam_friction = projection[0]
             acc_friction = projection[1]

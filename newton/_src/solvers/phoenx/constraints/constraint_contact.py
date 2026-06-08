@@ -19,7 +19,7 @@ from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
-    block_project_delta_sor_1,
+    block_project_accumulated_bounded_1,
     block_project_friction_delta_sor_2,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -680,8 +680,14 @@ def contact_iterate_at_multi(
                 pd_gamma_n = cc_get_pd_gamma(cc, k)
                 pd_bias_n = cc_get_pd_bias(cc, k)
                 d_lam_n_us = -pd_eff_soft_n * (jv_n - pd_bias_n + pd_gamma_n * lam_n_old)
-                normal_projection = block_project_delta_sor_1(
-                    lam_n_old, d_lam_n_us, sor_boost, wp.float32(0.0), BLOCK_LAMBDA_INF
+                normal_projection = block_project_accumulated_bounded_1(
+                    d_lam_n_us,
+                    lam_n_old,
+                    wp.float32(1.0),
+                    wp.float32(0.0),
+                    sor_boost,
+                    wp.float32(0.0),
+                    BLOCK_LAMBDA_INF,
                 )
                 d_lam_n = normal_projection[0]
                 lam_n_new = normal_projection[1]
@@ -696,9 +702,14 @@ def contact_iterate_at_multi(
                     mass_coeff_n = wp.float32(1.0)
                     impulse_coeff_n = wp.float32(0.0)
                 d_lam_n_us = -eff_n * (jv_n + bias_val)
-                d_lam_n = mass_coeff_n * d_lam_n_us - impulse_coeff_n * lam_n_old
-                normal_projection = block_project_delta_sor_1(
-                    lam_n_old, d_lam_n, sor_boost, wp.float32(0.0), BLOCK_LAMBDA_INF
+                normal_projection = block_project_accumulated_bounded_1(
+                    d_lam_n_us,
+                    lam_n_old,
+                    mass_coeff_n,
+                    impulse_coeff_n,
+                    sor_boost,
+                    wp.float32(0.0),
+                    BLOCK_LAMBDA_INF,
                 )
                 d_lam_n = normal_projection[0]
                 lam_n_new = normal_projection[1]

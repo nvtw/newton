@@ -24,6 +24,7 @@ __all__ = [
     "block_project_accumulated_2",
     "block_project_accumulated_3",
     "block_project_accumulated_4",
+    "block_project_accumulated_bounded_1",
     "block_project_delta_1",
     "block_project_delta_sor_1",
     "block_project_friction_circle_2",
@@ -135,6 +136,21 @@ def block_project_accumulated_1(
     """Apply soft-constraint coefficients, SOR, then identity-project one row."""
     d_lambda = (mass_coeff * d_lambda_unsoft - impulse_coeff * lambda_old) * sor_boost
     return block_project_identity_delta_1(lambda_old, d_lambda)
+
+
+@wp.func
+def block_project_accumulated_bounded_1(
+    d_lambda_unsoft: wp.float32,
+    lambda_old: wp.float32,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+    lambda_min: wp.float32,
+    lambda_max: wp.float32,
+) -> wp.vec2f:
+    """Apply soft-constraint coefficients, SOR, then clamp one row."""
+    d_lambda = mass_coeff * d_lambda_unsoft - impulse_coeff * lambda_old
+    return block_project_delta_sor_1(lambda_old, d_lambda, sor_boost, lambda_min, lambda_max)
 
 
 @wp.func
