@@ -56,6 +56,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_side1_kind,
     contact_get_side1_nodes_extra,
     contact_iterate_multi,
+    contact_iterate_multi_no_soft_pd,
     contact_world_error,
     contact_world_wrench,
 )
@@ -707,6 +708,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
     has_joints: bool,
     has_contacts: bool,
     has_sleeping: bool,
+    has_soft_contact_pd: bool = False,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
@@ -846,18 +848,32 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                         # Multi-world fast-tail: mass splitting is rejected at
                         # construction, so call the lean variant to keep the
                         # slot lookup out of the kernel binary.
-                        contact_prepare_for_iteration_lean(
-                            contact_cols,
-                            local_cid,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            copy_state,
-                            wp.int32(0),
-                        )
+                        if wp.static(has_soft_contact_pd):
+                            contact_prepare_for_iteration_lean(
+                                contact_cols,
+                                local_cid,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                copy_state,
+                                wp.int32(0),
+                            )
+                        else:
+                            contact_prepare_for_iteration_lean_no_soft_pd(
+                                contact_cols,
+                                local_cid,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                copy_state,
+                                wp.int32(0),
+                            )
                     if wp.static(enable_column_timers):
                         contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                 base += tpw
@@ -945,21 +961,38 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 if fr1 and fr2:
                                     skip_frozen = True
                         if not skip_frozen:
-                            contact_iterate_multi(
-                                contact_cols,
-                                local_cid,
-                                bodies,
-                                particles,
-                                num_bodies,
-                                idt,
-                                cc,
-                                contacts,
-                                True,
-                                inner_sweeps,
-                                copy_state,
-                                wp.int32(0),
-                                sor_boost,
-                            )
+                            if wp.static(has_soft_contact_pd):
+                                contact_iterate_multi(
+                                    contact_cols,
+                                    local_cid,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    True,
+                                    inner_sweeps,
+                                    copy_state,
+                                    wp.int32(0),
+                                    sor_boost,
+                                )
+                            else:
+                                contact_iterate_multi_no_soft_pd(
+                                    contact_cols,
+                                    local_cid,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    True,
+                                    inner_sweeps,
+                                    copy_state,
+                                    wp.int32(0),
+                                    sor_boost,
+                                )
                         if wp.static(enable_column_timers):
                             contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                         base += tpw
@@ -1055,21 +1088,38 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                     if fr1 and fr2:
                                         skip_frozen = True
                             if not skip_frozen:
-                                contact_iterate_multi(
-                                    contact_cols,
-                                    local_cid,
-                                    bodies,
-                                    particles,
-                                    num_bodies,
-                                    idt,
-                                    cc,
-                                    contacts,
-                                    True,
-                                    inner_sweeps,
-                                    copy_state,
-                                    wp.int32(0),
-                                    sor_boost,
-                                )
+                                if wp.static(has_soft_contact_pd):
+                                    contact_iterate_multi(
+                                        contact_cols,
+                                        local_cid,
+                                        bodies,
+                                        particles,
+                                        num_bodies,
+                                        idt,
+                                        cc,
+                                        contacts,
+                                        True,
+                                        inner_sweeps,
+                                        copy_state,
+                                        wp.int32(0),
+                                        sor_boost,
+                                    )
+                                else:
+                                    contact_iterate_multi_no_soft_pd(
+                                        contact_cols,
+                                        local_cid,
+                                        bodies,
+                                        particles,
+                                        num_bodies,
+                                        idt,
+                                        cc,
+                                        contacts,
+                                        True,
+                                        inner_sweeps,
+                                        copy_state,
+                                        wp.int32(0),
+                                        sor_boost,
+                                    )
                             if wp.static(enable_column_timers):
                                 contact_accumulate_time_us(
                                     contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns())
@@ -1091,6 +1141,7 @@ def _make_fast_tail_relax_kernel(
     has_joints: bool,
     has_contacts: bool,
     has_sleeping: bool,
+    has_soft_contact_pd: bool = False,
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
@@ -1248,21 +1299,38 @@ def _make_fast_tail_relax_kernel(
                             if fr1 and fr2:
                                 skip_frozen = True
                     if not skip_frozen:
-                        contact_iterate_multi(
-                            contact_cols,
-                            local_cid,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            False,
-                            num_iterations,
-                            copy_state,
-                            wp.int32(0),
-                            sor_boost,
-                        )
+                        if wp.static(has_soft_contact_pd):
+                            contact_iterate_multi(
+                                contact_cols,
+                                local_cid,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                False,
+                                num_iterations,
+                                copy_state,
+                                wp.int32(0),
+                                sor_boost,
+                            )
+                        else:
+                            contact_iterate_multi_no_soft_pd(
+                                contact_cols,
+                                local_cid,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                False,
+                                num_iterations,
+                                copy_state,
+                                wp.int32(0),
+                                sor_boost,
+                            )
                     if wp.static(enable_column_timers):
                         contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                 base += tpw
@@ -1384,6 +1452,7 @@ def get_fast_tail_kernel(
     has_joints: bool = True,
     has_contacts: bool = True,
     has_sleeping: bool = False,
+    has_soft_contact_pd: bool = False,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
@@ -1403,6 +1472,7 @@ def get_fast_tail_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             has_sleeping=has_sleeping,
+            has_soft_contact_pd=has_soft_contact_pd,
             cached_prepare=cached_prepare,
             enable_column_timers=enable_column_timers,
             fixed_tpw=fixed_tpw,
@@ -1415,6 +1485,7 @@ def get_fast_tail_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             has_sleeping=has_sleeping,
+            has_soft_contact_pd=has_soft_contact_pd,
             enable_column_timers=enable_column_timers,
             fixed_tpw=fixed_tpw,
             guard_tpw=guard_tpw,

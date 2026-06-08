@@ -44,7 +44,10 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
 )
-from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_velocity_update
+from newton._src.solvers.phoenx.constraints.contact_projection import (
+    contact_project_velocity_update,
+    contact_project_velocity_update_no_soft_pd,
+)
 from newton._src.solvers.phoenx.helpers.data_packing import (
     dword_offset_of,
     num_dwords,
@@ -84,7 +87,9 @@ __all__ = [
     "contact_get_slot1",
     "contact_get_slot2",
     "contact_iterate_at_multi",
+    "contact_iterate_at_multi_no_soft_pd",
     "contact_iterate_multi",
+    "contact_iterate_multi_no_soft_pd",
     "contact_pair_wrench_kernel",
     "contact_per_contact_error_kernel",
     "contact_per_contact_wrench_kernel",
@@ -577,155 +582,190 @@ def contact_set_side1_counts_extra(c: ContactColumnContainer, local_cid: wp.int3
 # ---------------------------------------------------------------------------
 
 
-@wp.func
-def contact_iterate_at_multi(
-    constraints: ContactColumnContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    num_bodies: wp.int32,
-    body_pair: ConstraintBodies,
-    idt: wp.float32,
-    cc: ContactContainer,
-    contacts: ContactViews,
-    use_bias: wp.bool,
-    num_sweeps: wp.int32,
-    copy_state: CopyStateContainer,
-    parallel_id: wp.int32,
-    sor_boost: wp.float32,
-):
-    """``num_sweeps`` PGS sweeps on one column with hoisted body
-    velocity/inertia registers. Same-colour cids share no bodies, so
-    inner sweeps before moving on are equivalent to round-robin; the
-    caller's outer loop runs ``num_iterations / num_sweeps`` rounds.
-    """
-    b1 = body_pair.b1
-    b2 = body_pair.b2
+def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
+    @wp.func
+    def impl(
+        constraints: ContactColumnContainer,
+        cid: wp.int32,
+        base_offset: wp.int32,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        num_bodies: wp.int32,
+        body_pair: ConstraintBodies,
+        idt: wp.float32,
+        cc: ContactContainer,
+        contacts: ContactViews,
+        use_bias: wp.bool,
+        num_sweeps: wp.int32,
+        copy_state: CopyStateContainer,
+        parallel_id: wp.int32,
+        sor_boost: wp.float32,
+    ):
+        """``num_sweeps`` PGS sweeps on one column with hoisted body
+        velocity/inertia registers. Same-colour cids share no bodies, so
+        inner sweeps before moving on are equivalent to round-robin; the
+        caller's outer loop runs ``num_iterations / num_sweeps`` rounds.
+        """
+        b1 = body_pair.b1
+        b2 = body_pair.b2
 
-    contact_first = contact_get_contact_first(constraints, cid)
-    contact_count = contact_get_contact_count(constraints, cid)
-    if contact_count == 0:
-        return
+        contact_first = contact_get_contact_first(constraints, cid)
+        contact_count = contact_get_contact_count(constraints, cid)
+        if contact_count == 0:
+            return
 
-    mu_s = contact_get_friction(constraints, cid)
-    mu_k = contact_get_friction_dynamic(constraints, cid)
+        mu_s = contact_get_friction(constraints, cid)
+        mu_k = contact_get_friction_dynamic(constraints, cid)
 
-    dt_substep = wp.float32(1.0) / idt
-    _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
-    )
+        dt_substep = wp.float32(1.0) / idt
+        _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+        )
 
-    # ``contact_iterate_at_multi`` is only invoked from the multi-world
-    # fast-tail kernel, where mass splitting is rejected at construction
-    # time. Use direct SoA reads (no slot lookup) so NVRTC doesn't compile
-    # the unreachable ``read_*_unified`` slow path into the kernel binary.
-    v1 = bodies.velocity[b1]
-    v2 = bodies.velocity[b2]
-    w1 = bodies.angular_velocity[b1]
-    w2 = bodies.angular_velocity[b2]
-    inv_mass1 = bodies.inverse_mass[b1]
-    inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+        # ``contact_iterate_at_multi`` is only invoked from the multi-world
+        # fast-tail kernel, where mass splitting is rejected at construction
+        # time. Use direct SoA reads (no slot lookup) so NVRTC doesn't compile
+        # the unreachable ``read_*_unified`` slow path into the kernel binary.
+        v1 = bodies.velocity[b1]
+        v2 = bodies.velocity[b2]
+        w1 = bodies.angular_velocity[b1]
+        w2 = bodies.angular_velocity[b2]
+        inv_mass1 = bodies.inverse_mass[b1]
+        inv_mass2 = bodies.inverse_mass[b2]
+        inv_inertia1 = bodies.inverse_inertia_world[b1]
+        inv_inertia2 = bodies.inverse_inertia_world[b2]
 
-    # Body pose for per-contact lever-arm recompute.
-    orientation1 = bodies.orientation[b1]
-    orientation2 = bodies.orientation[b2]
-    body_com1 = bodies.body_com[b1]
-    body_com2 = bodies.body_com[b2]
+        # Body pose for per-contact lever-arm recompute.
+        orientation1 = bodies.orientation[b1]
+        orientation2 = bodies.orientation[b2]
+        body_com1 = bodies.body_com[b1]
+        body_com2 = bodies.body_com[b2]
 
-    it = wp.int32(0)
-    while it < num_sweeps:
-        for i in range(contact_count):
-            k = contact_first + i
+        it = wp.int32(0)
+        while it < num_sweeps:
+            for i in range(contact_count):
+                k = contact_first + i
 
-            n = cc_get_normal(cc, k)
-            t1_dir = cc_get_tangent1(cc, k)
-            t2_dir = wp.cross(n, t1_dir)
-            local_p0 = cc_get_local_p0(cc, k)
-            local_p1 = cc_get_local_p1(cc, k)
-            margin0 = contacts.rigid_contact_margin0[k]
-            margin1 = contacts.rigid_contact_margin1[k]
-            r1 = wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
-            r2 = wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
-            eff_n = cc_get_eff_n(cc, k)
-            eff_t1 = cc_get_eff_t1(cc, k)
-            eff_t2 = cc_get_eff_t2(cc, k)
-            bias_val = cc_get_bias(cc, k)
-            bias_t1_val = cc_get_bias_t1(cc, k)
-            bias_t2_val = cc_get_bias_t2(cc, k)
-            is_speculative = bias_val > wp.float32(0.0)
-            if not use_bias:
-                if not is_speculative:
-                    bias_val = wp.float32(0.0)
-                bias_t1_val = wp.float32(0.0)
-                bias_t2_val = wp.float32(0.0)
+                n = cc_get_normal(cc, k)
+                t1_dir = cc_get_tangent1(cc, k)
+                t2_dir = wp.cross(n, t1_dir)
+                local_p0 = cc_get_local_p0(cc, k)
+                local_p1 = cc_get_local_p1(cc, k)
+                margin0 = contacts.rigid_contact_margin0[k]
+                margin1 = contacts.rigid_contact_margin1[k]
+                r1 = wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
+                r2 = wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
+                eff_n = cc_get_eff_n(cc, k)
+                eff_t1 = cc_get_eff_t1(cc, k)
+                eff_t2 = cc_get_eff_t2(cc, k)
+                bias_val = cc_get_bias(cc, k)
+                bias_t1_val = cc_get_bias_t1(cc, k)
+                bias_t2_val = cc_get_bias_t2(cc, k)
+                is_speculative = bias_val > wp.float32(0.0)
+                if not use_bias:
+                    if not is_speculative:
+                        bias_val = wp.float32(0.0)
+                    bias_t1_val = wp.float32(0.0)
+                    bias_t2_val = wp.float32(0.0)
 
-            vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
-            jv_n = wp.dot(vel_rel, n)
-            jv_t1 = wp.dot(vel_rel, t1_dir)
-            jv_t2 = wp.dot(vel_rel, t2_dir)
+                vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
+                jv_n = wp.dot(vel_rel, n)
+                jv_t1 = wp.dot(vel_rel, t1_dir)
+                jv_t2 = wp.dot(vel_rel, t2_dir)
 
-            pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
-            pd_gamma_n = wp.float32(0.0)
-            pd_bias_n = wp.float32(0.0)
-            if pd_eff_soft_n > wp.float32(0.0):
-                pd_gamma_n = cc_get_pd_gamma(cc, k)
-                pd_bias_n = cc_get_pd_bias(cc, k)
-            if is_speculative:
-                mass_coeff_n = wp.float32(1.0)
-                impulse_coeff_n = wp.float32(0.0)
-            elif use_bias:
-                mass_coeff_n = mass_coeff
-                impulse_coeff_n = impulse_coeff
-            else:
-                mass_coeff_n = wp.float32(1.0)
-                impulse_coeff_n = wp.float32(0.0)
-            imp = contact_project_velocity_update(
-                cc,
-                k,
-                n,
-                t1_dir,
-                t2_dir,
-                jv_n,
-                jv_t1,
-                jv_t2,
-                eff_n,
-                eff_t1,
-                eff_t2,
-                bias_val,
-                bias_t1_val,
-                bias_t2_val,
-                mu_s,
-                mu_k,
-                mass_coeff_n,
-                impulse_coeff_n,
-                sor_boost,
-                pd_eff_soft_n,
-                pd_gamma_n,
-                pd_bias_n,
-            )
-            v1, v2, w1, w2 = apply_pair_velocity_impulse(
-                v1,
-                v2,
-                w1,
-                w2,
-                inv_mass1,
-                inv_mass2,
-                inv_inertia1,
-                inv_inertia2,
-                r1,
-                r2,
-                imp,
-            )
-        it += 1
+                pd_eff_soft_n = wp.float32(0.0)
+                pd_gamma_n = wp.float32(0.0)
+                pd_bias_n = wp.float32(0.0)
+                if wp.static(has_soft_contact_pd):
+                    pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
+                    if pd_eff_soft_n > wp.float32(0.0):
+                        pd_gamma_n = cc_get_pd_gamma(cc, k)
+                        pd_bias_n = cc_get_pd_bias(cc, k)
+                if is_speculative:
+                    mass_coeff_n = wp.float32(1.0)
+                    impulse_coeff_n = wp.float32(0.0)
+                elif use_bias:
+                    mass_coeff_n = mass_coeff
+                    impulse_coeff_n = impulse_coeff
+                else:
+                    mass_coeff_n = wp.float32(1.0)
+                    impulse_coeff_n = wp.float32(0.0)
+                if wp.static(has_soft_contact_pd):
+                    imp = contact_project_velocity_update(
+                        cc,
+                        k,
+                        n,
+                        t1_dir,
+                        t2_dir,
+                        jv_n,
+                        jv_t1,
+                        jv_t2,
+                        eff_n,
+                        eff_t1,
+                        eff_t2,
+                        bias_val,
+                        bias_t1_val,
+                        bias_t2_val,
+                        mu_s,
+                        mu_k,
+                        mass_coeff_n,
+                        impulse_coeff_n,
+                        sor_boost,
+                        pd_eff_soft_n,
+                        pd_gamma_n,
+                        pd_bias_n,
+                    )
+                else:
+                    imp = contact_project_velocity_update_no_soft_pd(
+                        cc,
+                        k,
+                        n,
+                        t1_dir,
+                        t2_dir,
+                        jv_n,
+                        jv_t1,
+                        jv_t2,
+                        eff_n,
+                        eff_t1,
+                        eff_t2,
+                        bias_val,
+                        bias_t1_val,
+                        bias_t2_val,
+                        mu_s,
+                        mu_k,
+                        mass_coeff_n,
+                        impulse_coeff_n,
+                        sor_boost,
+                        wp.float32(0.0),
+                        wp.float32(0.0),
+                        wp.float32(0.0),
+                    )
+                v1, v2, w1, w2 = apply_pair_velocity_impulse(
+                    v1,
+                    v2,
+                    w1,
+                    w2,
+                    inv_mass1,
+                    inv_mass2,
+                    inv_inertia1,
+                    inv_inertia2,
+                    r1,
+                    r2,
+                    imp,
+                )
+            it += 1
 
-    # Direct SoA writes -- fast-tail-only function (no mass splitting).
-    bodies.velocity[b1] = v1
-    bodies.velocity[b2] = v2
-    bodies.angular_velocity[b1] = w1
-    bodies.angular_velocity[b2] = w2
+        # Direct SoA writes -- fast-tail-only function (no mass splitting).
+        bodies.velocity[b1] = v1
+        bodies.velocity[b2] = v2
+        bodies.angular_velocity[b1] = w1
+        bodies.angular_velocity[b2] = w2
+
+    return impl
+
+
+contact_iterate_at_multi = _make_contact_iterate_at_multi(has_soft_contact_pd=True)
+contact_iterate_at_multi_no_soft_pd = _make_contact_iterate_at_multi(has_soft_contact_pd=False)
 
 
 @wp.func
@@ -758,7 +798,45 @@ def contact_iterate_multi(
     contact_iterate_at_multi(
         constraints,
         cid,
-        0,
+        wp.int32(0),
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        use_bias,
+        num_sweeps,
+        copy_state,
+        parallel_id,
+        sor_boost,
+    )
+
+
+@wp.func
+def contact_iterate_multi_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    num_sweeps: wp.int32,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_iterate_at_multi_no_soft_pd(
+        constraints,
+        cid,
+        wp.int32(0),
         bodies,
         particles,
         num_bodies,

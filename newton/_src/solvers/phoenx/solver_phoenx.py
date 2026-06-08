@@ -1139,6 +1139,7 @@ class PhoenXWorld:
                 "has_joints": self.num_joints > 0,
                 "has_contacts": self.max_contact_columns > 0,
                 "has_sleeping": bool(self._sleeping_enabled),
+                "has_soft_contact_pd": bool(self._has_soft_contact_pd),
                 "enable_column_timers": self.enable_column_timers,
             }
             for fixed_tpw in self._fast_tail_auto_fixed_choices():
@@ -3192,6 +3193,7 @@ class PhoenXWorld:
                 has_joints=self.num_joints > 0,
                 has_contacts=self.max_contact_columns > 0,
                 has_sleeping=bool(self._sleeping_enabled),
+                has_soft_contact_pd=bool(self._has_soft_contact_pd),
                 cached_prepare=bool(cached_prepare),
                 enable_column_timers=self.enable_column_timers,
                 fixed_tpw=fixed_tpw,
@@ -3239,6 +3241,7 @@ class PhoenXWorld:
                 has_joints=self.num_joints > 0,
                 has_contacts=self.max_contact_columns > 0,
                 has_sleeping=bool(self._sleeping_enabled),
+                has_soft_contact_pd=bool(self._has_soft_contact_pd),
                 enable_column_timers=self.enable_column_timers,
                 fixed_tpw=fixed_tpw,
                 guard_tpw=self._tpw_auto,
