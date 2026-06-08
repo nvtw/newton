@@ -14,7 +14,7 @@ import warp as wp
 
 # Newton imports
 from ....core.types import override
-from ....sim import Contacts, State
+from ....sim import Contacts, ModelFlags, State
 from ...solver import SolverBase
 
 # Kamino imports
@@ -26,7 +26,7 @@ from .core.joints import JointCorrectionMode
 from .core.model import ModelKamino
 from .core.state import StateKamino
 from .core.time import advance_time
-from .core.types import float32, int32, transformf, vec6f
+from .core.types import float32, transformf, vec6f
 from .dynamics.dual import DualProblem
 from .dynamics.wrenches import (
     compute_constraint_body_wrenches,
@@ -54,6 +54,7 @@ from .kinematics.resets import (
     reset_state_from_bodies_state,
     reset_state_to_model_default,
     reset_time,
+    set_joint_state_masked,
 )
 from .linalg import ConjugateResidualSolver, IterativeSolver, LinearSolverNameToType
 from .solvers.fk import ForwardKinematicsSolver
@@ -254,7 +255,7 @@ class SolverKaminoImpl(SolverBase):
 
         # Allocate additional internal data for reset operations
         with wp.ScopedDevice(self._model.device):
-            self._all_worlds_mask = wp.ones(shape=(self._model.size.num_worlds,), dtype=int32)
+            self._all_worlds_mask = wp.ones(shape=(self._model.size.num_worlds,), dtype=wp.bool)
             self._base_q = wp.zeros(shape=(self._model.size.num_worlds,), dtype=transformf)
             self._base_u = wp.zeros(shape=(self._model.size.num_worlds,), dtype=vec6f)
             self._bodies_u_zeros = wp.zeros(shape=(self._model.size.sum_of_num_bodies,), dtype=vec6f)
@@ -404,7 +405,7 @@ class SolverKaminoImpl(SolverBase):
                 The output state container to which the reset state data is written.
             world_mask (wp.array, optional):
                 Optional array of per-world masks indicating which worlds should be reset.\n
-                Shape of `(num_worlds,)` and type :class:`wp.int8 | wp.bool`
+                Shape of `(num_worlds,)` and type :class:`wp.bool`
             actuator_q (wp.array, optional):
                 Optional array of target actuated joint coordinates.\n
                 Shape of `(num_actuated_joint_coords,)` and type :class:`wp.float32`
@@ -589,7 +590,7 @@ class SolverKaminoImpl(SolverBase):
         self._write_step_output(state_out=state_out)
 
     @override
-    def notify_model_changed(self, flags: int) -> None:
+    def notify_model_changed(self, flags: ModelFlags | int) -> None:
         pass  # TODO: Migrate implementation when we fully integrate with Newton
 
     @override
@@ -854,14 +855,20 @@ class SolverKaminoImpl(SolverBase):
         reset_body_net_wrenches(model=self._model, body_w=state_out.w_i, world_mask=world_mask)
         reset_joint_constraint_reactions(model=self._model, lambda_j=state_out.lambda_j, world_mask=world_mask)
 
-        # If joint targets were provided, copy them to the output state
+        # If joint targets were provided, write them to the output state. The mask-aware
+        # write ensures worlds outside `world_mask` keep their previous values (notably
+        # `q_j_p`, the TWOPI angle-correction reference).
         if with_joint_targets:
-            # Copy the joint states to the output state
-            wp.copy(state_out.q_j_p, joint_q)
-            wp.copy(state_out.q_j, joint_q)
-            if joint_u is not None:
-                wp.copy(state_out.dq_j, joint_u)
-        # Otherwise, extract the joint states from the actuators
+            set_joint_state_masked(
+                model=self._model,
+                world_mask=world_mask,
+                src_q=joint_q,
+                src_u=joint_u,
+                dst_q=state_out.q_j,
+                dst_q_p=state_out.q_j_p,
+                dst_dq=state_out.dq_j,
+            )
+        # Otherwise, extract the joint states from the actuators and synchronize `q_j_p`
         else:
             extract_joints_state_from_actuators(
                 model=self._model,
@@ -871,7 +878,15 @@ class SolverKaminoImpl(SolverBase):
                 joint_q=state_out.q_j,
                 joint_u=state_out.dq_j,
             )
-            wp.copy(state_out.q_j_p, state_out.q_j)
+            set_joint_state_masked(
+                model=self._model,
+                world_mask=world_mask,
+                src_q=state_out.q_j,
+                src_u=None,
+                dst_q=state_out.q_j,
+                dst_q_p=state_out.q_j_p,
+                dst_dq=None,
+            )
 
     def _reset_post_process(self, world_mask: wp.array | None = None):
         """

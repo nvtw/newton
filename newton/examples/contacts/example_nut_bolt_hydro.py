@@ -19,6 +19,7 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton.geometry import HydroelasticSDF
 
 # Assembly type for the nut and bolt
 ASSEMBLY_STR = "m20_loose"
@@ -26,7 +27,7 @@ ASSEMBLY_STR = "m20_loose"
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 
-SDF_MAX_RESOLUTION = 256
+SDF_MAX_RESOLUTION = 128
 SDF_NARROW_BAND_RANGE = (-0.005, 0.005)
 # Persist cooked SDFs across runs so the (slow) cook only happens once.
 # Entries are content-addressed, so leftovers from older runs are harmless.
@@ -143,7 +144,8 @@ class Example:
         self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 5
+        self.sim_substeps = 4
+        self.collide_every = 2 if args.solver == "mujoco" else 1  # re-collide every K substeps
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.world_count = args.world_count
@@ -167,7 +169,7 @@ class Example:
 
         # Maximum number of rigid contacts to allocate (limits memory usage)
         # None = auto-calculate (can be very large), or set explicit limit (e.g., 1_000_000)
-        self.rigid_contact_max = 100000
+        self.rigid_contact_max = 40_000
 
         # Broad phase mode: NXN (O(N²)), SAP (O(N log N)), EXPLICIT (precomputed pairs)
         self.broad_phase_mode = "sap"
@@ -191,14 +193,15 @@ class Example:
 
         # Configure the hydroelastic pipeline with our custom (still linear)
         # pressure callback. ``shape_kh`` reuses the per-shape stiffness already
-        # stored on the model, so the resulting contact patches are identical
-        # to the built-in default; the example just demonstrates the user-
-        # facing API.
+        # stored on the model. Disable the marching-cubes edge clamp because
+        # threading dynamics on the M20 helix are sensitive to the contact-
+        # surface vertex bias the clamp introduces.
         pressure_data = LinearPressureData()
         pressure_data.shape_kh = self.model.shape_material_kh
-        sdf_hydroelastic_config = newton.geometry.HydroelasticSDF.Config(
+        sdf_hydroelastic_config = HydroelasticSDF.Config(
             pressure_func=linear_pressure,
             pressure_data=pressure_data,
+            mc_edge_clamp_min=0.0,
         )
 
         self.collision_pipeline = newton.CollisionPipeline(
@@ -239,7 +242,8 @@ class Example:
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.collision_pipeline.contacts()
+        self.collision_pipeline.collide(self.state_0, self.contacts)
 
         self.viewer.set_model(self.model)
 
@@ -324,8 +328,11 @@ class Example:
             self.graph = None
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
-        for _ in range(self.sim_substeps):
+        for sub in range(self.sim_substeps):
+            # Refresh contacts every K substeps so contact normals stay
+            # aligned with the threading rotation.
+            if sub % self.collide_every == 0:
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             self.state_0.clear_forces()
 
             self.viewer.apply_forces(self.state_0)

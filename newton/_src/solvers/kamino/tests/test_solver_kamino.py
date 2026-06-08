@@ -15,7 +15,7 @@ from newton._src.solvers.kamino._src.core.data import DataKamino
 from newton._src.solvers.kamino._src.core.joints import JointActuationType
 from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.core.state import StateKamino
-from newton._src.solvers.kamino._src.core.types import float32, int32, transformf, vec6f
+from newton._src.solvers.kamino._src.core.types import float32, transformf, vec6f
 from newton._src.solvers.kamino._src.dynamics import DualProblem
 from newton._src.solvers.kamino._src.geometry.contacts import ContactsKamino
 from newton._src.solvers.kamino._src.kinematics.jacobians import DenseSystemJacobians, SparseSystemJacobians
@@ -416,7 +416,7 @@ class TestSolverKaminoImpl(unittest.TestCase):
         state_p = model.state()
         state_n = model.state()
         control = model.control()
-        world_mask = wp.array([0, 1, 0], dtype=int32, device=self.default_device)
+        world_mask = wp.array([False, True, False], dtype=wp.bool, device=self.default_device)
 
         # Step the solver a few times to change the state
         step_solver(
@@ -481,7 +481,7 @@ class TestSolverKaminoImpl(unittest.TestCase):
         state_p = model.state()
         state_n = model.state()
         control = model.control()
-        world_mask = wp.array([1, 1, 0], dtype=int32, device=self.default_device)
+        world_mask = wp.array([True, True, False], dtype=wp.bool, device=self.default_device)
 
         # Define the reset base pose
         base_q_0_np = [0.1, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0]
@@ -638,7 +638,7 @@ class TestSolverKaminoImpl(unittest.TestCase):
         state_p = model.state()
         state_n = model.state()
         control = model.control()
-        world_mask = wp.array([1, 0, 1], dtype=int32, device=self.default_device)
+        world_mask = wp.array([True, False, True], dtype=wp.bool, device=self.default_device)
 
         # Set default default reset joint coordinates
         joint_q_0_np = [0.1, 0.1, 0.1, 0.1]
@@ -767,6 +767,11 @@ class TestSolverKaminoImpl(unittest.TestCase):
             show_progress=self.progress or self.verbose,
         )
 
+        # Snapshot pre-reset state to verify masked-out worlds are preserved
+        pre_reset_q_j = state_n.q_j.numpy().copy()
+        pre_reset_q_j_p = state_n.q_j_p.numpy().copy()
+        pre_reset_dq_j = state_n.dq_j.numpy().copy()
+
         # Reset selected worlds to the specified joint states
         solver.reset(
             state_out=state_n,
@@ -813,6 +818,23 @@ class TestSolverKaminoImpl(unittest.TestCase):
                     atol=atol,
                     err_msg="\n`state_out.dq_j` does not match joint_u target\n",
                 )
+            else:
+                # Worlds outside the mask must keep their pre-reset values
+                np.testing.assert_array_equal(
+                    state_n.q_j.numpy()[coords_start : coords_start + num_world_coords],
+                    pre_reset_q_j[coords_start : coords_start + num_world_coords],
+                    err_msg="\n`state_out.q_j` was modified for an unmasked world\n",
+                )
+                np.testing.assert_array_equal(
+                    state_n.q_j_p.numpy()[coords_start : coords_start + num_world_coords],
+                    pre_reset_q_j_p[coords_start : coords_start + num_world_coords],
+                    err_msg="\n`state_out.q_j_p` was modified for an unmasked world\n",
+                )
+                np.testing.assert_array_equal(
+                    state_n.dq_j.numpy()[dofs_start : dofs_start + num_world_dofs],
+                    pre_reset_dq_j[dofs_start : dofs_start + num_world_dofs],
+                    err_msg="\n`state_out.dq_j` was modified for an unmasked world\n",
+                )
             coords_start += num_world_coords
             dofs_start += num_world_dofs
         self.assertTrue(
@@ -842,7 +864,7 @@ class TestSolverKaminoImpl(unittest.TestCase):
         state_p = model.state()
         state_n = model.state()
         control = model.control()
-        world_mask = wp.array([1, 0, 1], dtype=int32, device=self.default_device)
+        world_mask = wp.array([True, False, True], dtype=wp.bool, device=self.default_device)
 
         # Set default default reset joint coordinates
         actuator_q_0_np = [0.25, 0.25]
@@ -1010,6 +1032,11 @@ class TestSolverKaminoImpl(unittest.TestCase):
             show_progress=self.progress or self.verbose,
         )
 
+        # Snapshot pre-reset state to verify masked-out worlds are preserved
+        pre_reset_q_j = state_n.q_j.numpy().copy()
+        pre_reset_q_j_p = state_n.q_j_p.numpy().copy()
+        pre_reset_dq_j = state_n.dq_j.numpy().copy()
+
         # Reset all worlds to the specified joint states
         solver.reset(
             state_out=state_n,
@@ -1076,6 +1103,23 @@ class TestSolverKaminoImpl(unittest.TestCase):
                     rtol=rtol,
                     atol=atol,
                     err_msg="\n`state_out.dq_j` does not match joint_u target\n",
+                )
+            else:
+                # Worlds outside the mask must keep their pre-reset values
+                np.testing.assert_array_equal(
+                    state_n.q_j.numpy()[coords_start : coords_start + num_world_coords],
+                    pre_reset_q_j[coords_start : coords_start + num_world_coords],
+                    err_msg="\n`state_out.q_j` was modified for an unmasked world\n",
+                )
+                np.testing.assert_array_equal(
+                    state_n.q_j_p.numpy()[coords_start : coords_start + num_world_coords],
+                    pre_reset_q_j_p[coords_start : coords_start + num_world_coords],
+                    err_msg="\n`state_out.q_j_p` was modified for an unmasked world\n",
+                )
+                np.testing.assert_array_equal(
+                    state_n.dq_j.numpy()[dofs_start : dofs_start + num_world_dofs],
+                    pre_reset_dq_j[dofs_start : dofs_start + num_world_dofs],
+                    err_msg="\n`state_out.dq_j` was modified for an unmasked world\n",
                 )
             coords_start += num_world_coords
             dofs_start += num_world_dofs
