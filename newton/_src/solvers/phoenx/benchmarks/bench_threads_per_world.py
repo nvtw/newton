@@ -67,7 +67,7 @@ from collections.abc import Callable
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.benchmarks.scenarios import h1_flat, tower
+from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
 from newton._src.solvers.phoenx.solver import SolverPhoenX
 
 
@@ -114,6 +114,32 @@ def _force_tpw(solver: SolverPhoenX, tpw) -> None:
 def _build_h1(num_worlds: int, tpw, *, substeps: int, solver_iterations: int):
     """h1_flat fleet builder. Returns ``(solver, simulate_one_frame)``."""
     handle = h1_flat.build(
+        num_worlds=num_worlds,
+        solver_name="phoenx",
+        substeps=substeps,
+        solver_iterations=solver_iterations,
+    )
+    solver = _extract_solver(handle)
+    _force_tpw(solver, tpw)
+    return solver, handle.simulate_one_frame
+
+
+def _build_g1(num_worlds: int, tpw, *, substeps: int, solver_iterations: int):
+    """g1_flat fleet builder. Returns ``(solver, simulate_one_frame)``."""
+    handle = g1_flat.build(
+        num_worlds=num_worlds,
+        solver_name="phoenx",
+        substeps=substeps,
+        solver_iterations=solver_iterations,
+    )
+    solver = _extract_solver(handle)
+    _force_tpw(solver, tpw)
+    return solver, handle.simulate_one_frame
+
+
+def _build_dr_legs(num_worlds: int, tpw, *, substeps: int, solver_iterations: int):
+    """DR Legs fleet builder. Returns ``(solver, simulate_one_frame)``."""
+    handle = dr_legs.build(
         num_worlds=num_worlds,
         solver_name="phoenx",
         substeps=substeps,
@@ -215,6 +241,11 @@ _SCENE_REGISTRY: dict[str, tuple[Callable, str, int]] = {
     "h1_2048": (_build_h1, "h1_flat", 2048),
     "h1_4096": (_build_h1, "h1_flat", 4096),
     "h1_8192": (_build_h1, "h1_flat", 8192),
+    "g1_512": (_build_g1, "g1_flat", 512),
+    "g1_2048": (_build_g1, "g1_flat", 2048),
+    "dr_legs_128": (_build_dr_legs, "dr_legs", 128),
+    "dr_legs_512": (_build_dr_legs, "dr_legs", 512),
+    "dr_legs_2048": (_build_dr_legs, "dr_legs", 2048),
     "tower_32": (_build_tower, "tower", 32),
 }
 

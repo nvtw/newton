@@ -13,6 +13,7 @@ can be varied for sweeps.
 
 from newton._src.solvers.phoenx.benchmarks.scenarios import (
     big_box_grid,
+    dr_legs,
     g1_flat,
     h1_flat,
     tower_grid,
@@ -20,9 +21,10 @@ from newton._src.solvers.phoenx.benchmarks.scenarios import (
 
 SCENARIOS = {
     "big_box_grid": big_box_grid,
+    "dr_legs": dr_legs,
     "g1_flat": g1_flat,
     "h1_flat": h1_flat,
     "tower_grid": tower_grid,
 }
 
-__all__ = ["SCENARIOS", "big_box_grid", "g1_flat", "h1_flat", "tower_grid"]
+__all__ = ["SCENARIOS", "big_box_grid", "dr_legs", "g1_flat", "h1_flat", "tower_grid"]

@@ -23,7 +23,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extract_solver
-from newton._src.solvers.phoenx.benchmarks.scenarios import g1_flat, h1_flat, tower
+from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     actuated_double_ball_socket_iterate_multi,
@@ -342,6 +342,144 @@ def _color_grid_mega_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _color_grid_mega_direct_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    world_element_ids_by_color: wp.array[wp.int32],
+    world_color_starts: wp.array2d[wp.int32],
+    world_csr_offsets: wp.array[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+    num_colors: wp.int32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+    num_bodies: wp.int32,
+    revolute_only: wp.int32,
+    outer_iters: wp.int32,
+    inner_sweeps: wp.int32,
+    num_worlds: wp.int32,
+    row_bound: wp.int32,
+    barrier_count: wp.array[wp.int32],
+    barrier_sense: wp.array[wp.int32],
+    total_threads: wp.int32,
+    num_blocks: wp.int32,
+    block_dim_value: wp.int32,
+    copy_state: CopyStateContainer,
+):
+    tid = wp.tid()
+    total_slots = num_worlds * row_bound
+    color = wp.int32(0)
+    while color < num_colors:
+        slot = tid
+        while slot < total_slots:
+            world_id = slot / row_bound
+            local_row_base = slot - world_id * row_bound
+            if color < world_num_colors[world_id]:
+                world_base = world_csr_offsets[world_id]
+                start = world_base + world_color_starts[world_id, color]
+                end = world_base + world_color_starts[world_id, color + wp.int32(1)]
+                row = local_row_base
+                while row < end - start:
+                    cid = world_element_ids_by_color[start + row]
+                    if cid < num_joints:
+                        if revolute_only != wp.int32(0):
+                            revolute_prepare_for_iteration(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                            )
+                        else:
+                            actuated_double_ball_socket_prepare_for_iteration(
+                                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                            )
+                    else:
+                        contact_prepare_for_iteration_lean_no_soft_pd(
+                            contact_cols,
+                            cid - num_joints,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            copy_state,
+                            wp.int32(0),
+                        )
+                    row = row + row_bound
+            slot = slot + total_threads
+        _grid_barrier(barrier_count, barrier_sense, tid, num_blocks, block_dim_value)
+        color = color + wp.int32(1)
+
+    outer = wp.int32(0)
+    while outer < outer_iters:
+        color = wp.int32(0)
+        while color < num_colors:
+            slot = tid
+            while slot < total_slots:
+                world_id = slot / row_bound
+                local_row_base = slot - world_id * row_bound
+                if color < world_num_colors[world_id]:
+                    world_base = world_csr_offsets[world_id]
+                    start = world_base + world_color_starts[world_id, color]
+                    end = world_base + world_color_starts[world_id, color + wp.int32(1)]
+                    row = local_row_base
+                    while row < end - start:
+                        cid = world_element_ids_by_color[start + row]
+                        if cid < num_joints:
+                            if revolute_only != wp.int32(0):
+                                revolute_iterate_multi(
+                                    constraints,
+                                    cid,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    wp.int32(0),
+                                    idt,
+                                    sor_boost,
+                                    True,
+                                    inner_sweeps,
+                                )
+                            else:
+                                actuated_double_ball_socket_iterate_multi(
+                                    constraints,
+                                    cid,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    wp.int32(0),
+                                    idt,
+                                    sor_boost,
+                                    True,
+                                    inner_sweeps,
+                                )
+                        else:
+                            contact_iterate_multi_no_soft_pd(
+                                contact_cols,
+                                cid - num_joints,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                True,
+                                inner_sweeps,
+                                copy_state,
+                                wp.int32(0),
+                                sor_boost,
+                            )
+                        row = row + row_bound
+                slot = slot + total_threads
+            _grid_barrier(barrier_count, barrier_sense, tid, num_blocks, block_dim_value)
+            color = color + wp.int32(1)
+        outer = outer + wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
 def _color_grid_prepare_direct_kernel(
     constraints: ConstraintContainer,
     contact_cols: ContactColumnContainer,
@@ -473,6 +611,8 @@ def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iteration
         return g1_flat.build(num_worlds, "phoenx", substeps, solver_iterations)
     if scene == "tower":
         return tower.build(num_worlds, "phoenx", substeps, solver_iterations, step_layout="multi_world")
+    if scene == "dr_legs":
+        return dr_legs.build(num_worlds, "phoenx", substeps, solver_iterations)
     raise ValueError(f"unknown scene: {scene}")
 
 
@@ -642,6 +782,67 @@ def _color_grid_mega_runner(world: PhoenXWorld, graph: ColorGridDevice, *, block
     return run
 
 
+def _color_grid_mega_direct_runner(
+    world: PhoenXWorld,
+    graph: ColorGridDevice,
+    *,
+    block_dim: int,
+    worker_blocks: int,
+    row_bound: int,
+):
+    device = world.device
+    contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
+    idt = wp.float32(1.0 / world.substep_dt)
+    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    outer_iters = int(world.solver_iterations) // inner_sweeps
+    revolute_only = 1 if bool(world._use_revolute_specialization) else 0
+    total_threads = max(1, int(block_dim) * int(worker_blocks))
+
+    def run() -> None:
+        wp.launch(
+            _color_grid_barrier_reset_kernel,
+            dim=1,
+            inputs=[graph.barrier_count, graph.barrier_sense],
+            device=device,
+        )
+        wp.launch(
+            _color_grid_mega_direct_kernel,
+            dim=total_threads,
+            block_dim=block_dim,
+            inputs=[
+                world.constraints,
+                world._contact_cols,
+                world.bodies,
+                world._particles_or_sentinel(),
+                idt,
+                wp.float32(world.sor_boost),
+                world._world_element_ids_by_color,
+                world._world_color_starts,
+                world._world_csr_offsets,
+                world._world_num_colors,
+                wp.int32(graph.host.num_colors),
+                world._contact_container,
+                contact_views,
+                wp.int32(world.num_joints),
+                wp.int32(world.num_bodies),
+                wp.int32(revolute_only),
+                wp.int32(outer_iters),
+                wp.int32(inner_sweeps),
+                wp.int32(world.num_worlds),
+                wp.int32(row_bound),
+                graph.barrier_count,
+                graph.barrier_sense,
+                wp.int32(total_threads),
+                wp.int32(worker_blocks),
+                wp.int32(block_dim),
+                world._copy_state,
+            ],
+            device=device,
+        )
+
+    return run
+
+
 def _color_grid_direct_runner(world: PhoenXWorld, graph: ColorGridDevice, *, block_dim: int):
     device = world.device
     contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
@@ -767,6 +968,19 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
                 _color_grid_mega_runner(world, grid_graph, block_dim=args.block_dim, worker_blocks=args.mega_blocks),
             )
         )
+    if args.mode in ("mega_direct", "all"):
+        runs.append(
+            (
+                "mega_direct",
+                _color_grid_mega_direct_runner(
+                    world,
+                    grid_graph,
+                    block_dim=args.block_dim,
+                    worker_blocks=args.mega_blocks,
+                    row_bound=args.row_bound,
+                ),
+            )
+        )
 
     for _label, run in runs:
         run()
@@ -793,14 +1007,15 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--scenes", nargs="+", choices=("h1", "g1", "tower"), default=["h1", "g1", "tower"])
+    parser.add_argument("--scenes", nargs="+", choices=("h1", "g1", "tower", "dr_legs"), default=["h1", "g1", "tower"])
     parser.add_argument("--worlds", default="32", help="Comma-separated world counts.")
     parser.add_argument("--substeps", type=int, default=1)
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--prime-frames", type=int, default=3)
     parser.add_argument("--block-dim", type=int, default=128)
-    parser.add_argument("--mode", choices=("flat", "direct", "mega", "both", "all"), default="flat")
+    parser.add_argument("--mode", choices=("flat", "direct", "mega", "mega_direct", "both", "all"), default="flat")
     parser.add_argument("--mega-blocks", type=int, default=128)
+    parser.add_argument("--row-bound", type=int, default=64)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--n-runs", type=int, default=10)
     parser.add_argument("--trials", type=int, default=1)
@@ -814,7 +1029,7 @@ def main() -> None:
     worlds = [int(raw.strip()) for raw in args.worlds.split(",") if raw.strip()]
     print(
         f"device={wp.get_device()} block_dim={args.block_dim} mega_blocks={args.mega_blocks} "
-        f"n_runs={args.n_runs} mode={args.mode}"
+        f"row_bound={args.row_bound} n_runs={args.n_runs} mode={args.mode}"
     )
     for scene in args.scenes:
         for num_worlds in worlds:
