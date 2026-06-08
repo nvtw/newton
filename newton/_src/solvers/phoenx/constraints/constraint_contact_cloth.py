@@ -118,6 +118,7 @@ from newton._src.solvers.phoenx.constraints.contact_endpoint import (
     contact_endpoint_velocity_at_point_cached as contact_endpoint_velocity_at_point,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import (
+    apply_pair_spatial_impulse,
     apply_pair_velocity_impulse,
     effective_mass_scalar,
 )
@@ -704,10 +705,19 @@ def _make_contact_prepare_for_iteration_at(
                 v2_cur = bodies.velocity[b2]
                 w1_cur = bodies.angular_velocity[b1]
                 w2_cur = bodies.angular_velocity[b2]
-                v1_new = v1_cur - inv_mass1 * total_lin_imp_on_b2
-                v2_new = v2_cur + inv_mass2 * total_lin_imp_on_b2
-                w1_new = w1_cur - inv_inertia1 @ total_ang_imp_on_b1
-                w2_new = w2_cur + inv_inertia2 @ total_ang_imp_on_b2
+                v1_new, v2_new, w1_new, w2_new = apply_pair_spatial_impulse(
+                    v1_cur,
+                    v2_cur,
+                    w1_cur,
+                    w2_cur,
+                    inv_mass1,
+                    inv_mass2,
+                    inv_inertia1,
+                    inv_inertia2,
+                    total_lin_imp_on_b2,
+                    total_ang_imp_on_b1,
+                    total_ang_imp_on_b2,
+                )
                 bodies.velocity[b1] = v1_new
                 bodies.velocity[b2] = v2_new
                 bodies.angular_velocity[b1] = w1_new
@@ -717,10 +727,19 @@ def _make_contact_prepare_for_iteration_at(
                 v2_cur = bodies.velocity[b2]
                 w1_cur = bodies.angular_velocity[b1]
                 w2_cur = bodies.angular_velocity[b2]
-                v1_new = v1_cur - inv_mass1 * total_lin_imp_on_b2
-                v2_new = v2_cur + inv_mass2 * total_lin_imp_on_b2
-                w1_new = w1_cur - inv_inertia1 @ total_ang_imp_on_b1
-                w2_new = w2_cur + inv_inertia2 @ total_ang_imp_on_b2
+                v1_new, v2_new, w1_new, w2_new = apply_pair_spatial_impulse(
+                    v1_cur,
+                    v2_cur,
+                    w1_cur,
+                    w2_cur,
+                    inv_mass1,
+                    inv_mass2,
+                    inv_inertia1,
+                    inv_inertia2,
+                    total_lin_imp_on_b2,
+                    total_ang_imp_on_b1,
+                    total_ang_imp_on_b2,
+                )
                 bodies.velocity[b1] = v1_new
                 bodies.velocity[b2] = v2_new
                 bodies.angular_velocity[b1] = w1_new
@@ -738,10 +757,19 @@ def _make_contact_prepare_for_iteration_at(
                 else:
                     v2_cur = copy_state.velocity[slot2]
                     w2_cur = copy_state.angular_velocity[slot2]
-                v1_new = v1_cur - inv_mass1 * total_lin_imp_on_b2
-                v2_new = v2_cur + inv_mass2 * total_lin_imp_on_b2
-                w1_new = w1_cur - inv_inertia1 @ total_ang_imp_on_b1
-                w2_new = w2_cur + inv_inertia2 @ total_ang_imp_on_b2
+                v1_new, v2_new, w1_new, w2_new = apply_pair_spatial_impulse(
+                    v1_cur,
+                    v2_cur,
+                    w1_cur,
+                    w2_cur,
+                    inv_mass1,
+                    inv_mass2,
+                    inv_inertia1,
+                    inv_inertia2,
+                    total_lin_imp_on_b2,
+                    total_ang_imp_on_b1,
+                    total_ang_imp_on_b2,
+                )
                 write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1_new)
                 write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2_new)
                 write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1_new)
