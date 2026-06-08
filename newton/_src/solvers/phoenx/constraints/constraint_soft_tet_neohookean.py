@@ -16,7 +16,10 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.constraints.constraint_block import block_solve_projected_xpbd_2_strict
+from newton._src.solvers.phoenx.constraints.constraint_block import (
+    block_position_delta_2,
+    block_solve_projected_xpbd_2_strict,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN,
     ConstraintContainer,
@@ -459,15 +462,13 @@ def soft_tet_neohookean_iterate_at(
         return
 
     update = block_solve_projected_xpbd_2_strict(A11, A12, A22, b_h, b_d, lambda_h, lambda_d, sor_boost, _DET_FLOOR)
-    dlam_h = update.delta[0]
-    dlam_d = update.delta[1]
     lambda_h = update.lambda_new[0]
     lambda_d = update.lambda_new[1]
 
-    x_a = x_a + inv_mass_a * (dlam_h * g_ha + dlam_d * g_da)
-    x_b = x_b + inv_mass_b * (dlam_h * g_hb + dlam_d * g_db)
-    x_c = x_c + inv_mass_c * (dlam_h * g_hc + dlam_d * g_dc)
-    x_d = x_d + inv_mass_d * (dlam_h * g_hd + dlam_d * g_dd)
+    x_a = x_a + block_position_delta_2(inv_mass_a, update.delta, g_ha, g_da)
+    x_b = x_b + block_position_delta_2(inv_mass_b, update.delta, g_hb, g_db)
+    x_c = x_c + block_position_delta_2(inv_mass_c, update.delta, g_hc, g_dc)
+    x_d = x_d + block_position_delta_2(inv_mass_d, update.delta, g_hd, g_dd)
 
     write_position_unified(bodies, particles, copy_state, body_a, slot_a, num_bodies, x_a)
     write_position_unified(bodies, particles, copy_state, body_b, slot_b, num_bodies, x_b)

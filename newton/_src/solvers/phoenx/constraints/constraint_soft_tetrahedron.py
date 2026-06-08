@@ -9,7 +9,10 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.constraints.constraint_block import block_solve_projected_xpbd_2
+from newton._src.solvers.phoenx.constraints.constraint_block import (
+    block_position_delta_2,
+    block_solve_projected_xpbd_2,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
     ConstraintContainer,
@@ -571,15 +574,13 @@ def soft_tetrahedron_iterate_at(
         sor_boost,
         _ARAP_BLOCK_DET_FLOOR,
     )
-    d_lam_mu = update.delta[0]
-    d_lam_lambda = update.delta[1]
     lambda_sum_mu = update.lambda_new[0]
     lambda_sum_lambda = update.lambda_new[1]
 
-    x_a = x_a + inv_mass_a * (d_lam_mu * g_mu_a + d_lam_lambda * g_lambda_a)
-    x_b = x_b + inv_mass_b * (d_lam_mu * g_mu_b + d_lam_lambda * g_lambda_b)
-    x_c = x_c + inv_mass_c * (d_lam_mu * g_mu_c + d_lam_lambda * g_lambda_c)
-    x_d = x_d + inv_mass_d * (d_lam_mu * g_mu_d + d_lam_lambda * g_lambda_d)
+    x_a = x_a + block_position_delta_2(inv_mass_a, update.delta, g_mu_a, g_lambda_a)
+    x_b = x_b + block_position_delta_2(inv_mass_b, update.delta, g_mu_b, g_lambda_b)
+    x_c = x_c + block_position_delta_2(inv_mass_c, update.delta, g_mu_c, g_lambda_c)
+    x_d = x_d + block_position_delta_2(inv_mass_d, update.delta, g_mu_d, g_lambda_d)
     write_particle_position_with_slot(particles, copy_state, p_a, slot_a, x_a)
     write_particle_position_with_slot(particles, copy_state, p_b, slot_b, x_b)
     write_particle_position_with_slot(particles, copy_state, p_c, slot_c, x_c)

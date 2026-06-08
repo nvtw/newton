@@ -21,6 +21,8 @@ __all__ = [
     "BlockVector2Update",
     "BlockVector3Update",
     "BlockVector4Update",
+    "block_position_delta_1",
+    "block_position_delta_2",
     "block_project_accumulated_1",
     "block_project_accumulated_2",
     "block_project_accumulated_3",
@@ -246,6 +248,27 @@ def block_project_friction_delta_sor_2(
     update.delta = wp.vec2f(lambda_new[0] - lambda_t1_old, lambda_new[1] - lambda_t2_old)
     update.lambda_new = lambda_new
     return update
+
+
+@wp.func
+def block_position_delta_1(
+    inv_mass: wp.float32,
+    d_lambda: wp.float32,
+    grad: wp.vec3f,
+) -> wp.vec3f:
+    """Mass-weighted position delta for one XPBD row."""
+    return inv_mass * d_lambda * grad
+
+
+@wp.func
+def block_position_delta_2(
+    inv_mass: wp.float32,
+    d_lambda: wp.vec2f,
+    grad1: wp.vec3f,
+    grad2: wp.vec3f,
+) -> wp.vec3f:
+    """Mass-weighted position delta for a two-row XPBD block."""
+    return inv_mass * (d_lambda[0] * grad1 + d_lambda[1] * grad2)
 
 
 @wp.func

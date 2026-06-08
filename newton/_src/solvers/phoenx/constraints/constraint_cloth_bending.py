@@ -47,7 +47,10 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.constraints.constraint_block import block_solve_projected_xpbd_1
+from newton._src.solvers.phoenx.constraints.constraint_block import (
+    block_position_delta_1,
+    block_solve_projected_xpbd_1,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_BENDING,
     ConstraintContainer,
@@ -356,10 +359,10 @@ def cloth_bending_iterate_at(
     d_lam = update.delta
     lambda_sum = update.lambda_new
 
-    x0 = x0 + (d_lam * inv_mass_a) * dCdx0
-    x1 = x1 + (d_lam * inv_mass_b) * dCdx1
-    x2 = x2 + (d_lam * inv_mass_c) * dCdx2
-    x3 = x3 + (d_lam * inv_mass_d) * dCdx3
+    x0 = x0 + block_position_delta_1(inv_mass_a, d_lam, dCdx0)
+    x1 = x1 + block_position_delta_1(inv_mass_b, d_lam, dCdx1)
+    x2 = x2 + block_position_delta_1(inv_mass_c, d_lam, dCdx2)
+    x3 = x3 + block_position_delta_1(inv_mass_d, d_lam, dCdx3)
 
     write_position_unified(bodies, particles, copy_state, body_a, slot_a, num_bodies, x0)
     write_position_unified(bodies, particles, copy_state, body_b, slot_b, num_bodies, x1)

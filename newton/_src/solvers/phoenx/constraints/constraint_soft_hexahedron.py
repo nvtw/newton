@@ -21,7 +21,10 @@ import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.constraints.constraint_block import block_solve_projected_xpbd_2
+from newton._src.solvers.phoenx.constraints.constraint_block import (
+    block_position_delta_2,
+    block_solve_projected_xpbd_2,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_HEXAHEDRON,
     ConstraintContainer,
@@ -1033,14 +1036,15 @@ def soft_hexahedron_iterate_at(
         dlam_h = dlam_h * sor_boost
         dlam_d = dlam_d * sor_boost
 
-    x0 = x0 + inv_mass0 * (dlam_h * g_h0 + dlam_d * g_d0)
-    x1 = x1 + inv_mass1 * (dlam_h * g_h1 + dlam_d * g_d1)
-    x2 = x2 + inv_mass2 * (dlam_h * g_h2 + dlam_d * g_d2)
-    x3 = x3 + inv_mass3 * (dlam_h * g_h3 + dlam_d * g_d3)
-    x4 = x4 + inv_mass4 * (dlam_h * g_h4 + dlam_d * g_d4)
-    x5 = x5 + inv_mass5 * (dlam_h * g_h5 + dlam_d * g_d5)
-    x6 = x6 + inv_mass6 * (dlam_h * g_h6 + dlam_d * g_d6)
-    x7 = x7 + inv_mass7 * (dlam_h * g_h7 + dlam_d * g_d7)
+    dlam = wp.vec2f(dlam_h, dlam_d)
+    x0 = x0 + block_position_delta_2(inv_mass0, dlam, g_h0, g_d0)
+    x1 = x1 + block_position_delta_2(inv_mass1, dlam, g_h1, g_d1)
+    x2 = x2 + block_position_delta_2(inv_mass2, dlam, g_h2, g_d2)
+    x3 = x3 + block_position_delta_2(inv_mass3, dlam, g_h3, g_d3)
+    x4 = x4 + block_position_delta_2(inv_mass4, dlam, g_h4, g_d4)
+    x5 = x5 + block_position_delta_2(inv_mass5, dlam, g_h5, g_d5)
+    x6 = x6 + block_position_delta_2(inv_mass6, dlam, g_h6, g_d6)
+    x7 = x7 + block_position_delta_2(inv_mass7, dlam, g_h7, g_d7)
 
     write_position_unified(bodies, particles, copy_state, body0, slot0, num_bodies, x0)
     write_position_unified(bodies, particles, copy_state, body1, slot1, num_bodies, x1)
