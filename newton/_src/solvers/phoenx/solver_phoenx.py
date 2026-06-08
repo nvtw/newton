@@ -415,6 +415,7 @@ class PhoenXWorld:
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
+        prepare_refresh_stride: int = 1,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -425,6 +426,11 @@ class PhoenXWorld:
             substeps, solver_iterations, velocity_iterations: PGS
                 schedule. ``velocity_iterations=1`` enables TGS-soft
                 relax (recommended for tall stacks).
+            prepare_refresh_stride: Refresh cached per-row prepare data
+                every N substeps in contact-only rigid single-world
+                scenes without mass splitting or sleeping. ``1`` preserves
+                the exact default; currently ``2`` is the only supported
+                non-default value.
             gravity: 3-tuple or iterable of ``num_worlds`` 3-tuples.
             rigid_contact_max: Sizes per-contact state. ``0`` disables
                 contacts.
@@ -561,6 +567,13 @@ class PhoenXWorld:
         self.velocity_iterations = int(velocity_iterations)
         if self.velocity_iterations < 0:
             raise ValueError(f"velocity_iterations must be >= 0 (got {self.velocity_iterations})")
+        self.prepare_refresh_stride: int = int(prepare_refresh_stride)
+        if self.prepare_refresh_stride < 1:
+            raise ValueError(f"prepare_refresh_stride must be >= 1 (got {self.prepare_refresh_stride})")
+        if self.prepare_refresh_stride > 2:
+            raise NotImplementedError(
+                f"prepare_refresh_stride > 2 is currently unsupported (got {self.prepare_refresh_stride})"
+            )
 
         # SOR boost (successive over-relaxation): every iterate
         # multiplies its computed delta lambda by this factor before
@@ -592,6 +605,25 @@ class PhoenXWorld:
         if step_layout not in ("multi_world", "single_world"):
             raise ValueError(f"step_layout must be 'multi_world' or 'single_world' (got {step_layout!r})")
         self.step_layout: str = step_layout
+        if self.prepare_refresh_stride != 1:
+            sleeping_requested = float(sleeping_velocity_threshold) > 0.0
+            if self.step_layout != "single_world":
+                raise NotImplementedError("prepare_refresh_stride > 1 currently requires step_layout='single_world'")
+            if (
+                bool(mass_splitting)
+                or sleeping_requested
+                or self.num_joints > 0
+                or self.num_particles > 0
+                or self.num_cloth_triangles > 0
+                or self.num_cloth_bending > 0
+                or self.num_soft_tetrahedra > 0
+                or self.num_soft_hexahedra > 0
+            ):
+                raise NotImplementedError(
+                    "prepare_refresh_stride > 1 currently supports contact-only rigid worlds "
+                    "without mass splitting or sleeping"
+                )
+        self._current_substep_index: int = 0
         # Threads-per-world. ``"auto"`` lets the GPU picker decide every
         # step from colour stats; an int forces a fixed value (validated
         # against the {8, 16, 32} set the kernels have been tuned for).
@@ -2228,6 +2260,30 @@ class PhoenXWorld:
             rigid_contact_friction=sentinel_float,
         )
 
+    def _refresh_prepare_this_substep(self) -> bool:
+        """Return whether this substep should refresh cached row data."""
+        return self.prepare_refresh_stride <= 1 or self._current_substep_index % self.prepare_refresh_stride == 0
+
+    def _run_cached_prepare_bookkeeping(self, idt: wp.float32) -> None:
+        """Apply cached contact warm-start when prepare data is reused."""
+        if (
+            self.mass_splitting_enabled
+            or self._sleeping_enabled
+            or self.num_joints > 0
+            or self.num_particles > 0
+            or self.num_cloth_triangles > 0
+            or self.num_cloth_bending > 0
+            or self.num_soft_tetrahedra > 0
+            or self.num_soft_hexahedra > 0
+        ):
+            raise NotImplementedError(
+                "cached prepare bookkeeping currently supports contact-only rigid worlds "
+                "without mass splitting or sleeping"
+            )
+        cached_head, cached_fused = self._singleworld_cached_prepare_kernels()
+        self._partitioner.begin_sweep()
+        self._singleworld_head_plus_tail_sweep(cached_head, cached_fused, idt)
+
     def step(
         self,
         dt: float,
@@ -2310,6 +2366,7 @@ class PhoenXWorld:
         # would discard the positional bias's penetration recovery.
         inv_n = 1.0 / float(self.substeps)
         for k in range(self.substeps):
+            self._current_substep_index = k
             if picking is not None:
                 picking.apply_force()
             self._integrate_forces_and_gravity()
@@ -3292,13 +3349,16 @@ class PhoenXWorld:
 
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = self._singleworld_kernels()
 
-        self._partitioner.begin_sweep()
-        self._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
-        if self.mass_splitting_enabled:
-            # Prepare applies the warm-start impulse to each body's
-            # slots. Average it so the iterate phase starts from
-            # converged slot values.
-            self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
+        if self._refresh_prepare_this_substep():
+            self._partitioner.begin_sweep()
+            self._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
+            if self.mass_splitting_enabled:
+                # Prepare applies the warm-start impulse to each body's
+                # slots. Average it so the iterate phase starts from
+                # converged slot values.
+                self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
+        else:
+            self._run_cached_prepare_bookkeeping(idt)
 
         for _ in range(self.solver_iterations):
             self._partitioner.begin_sweep()
@@ -3369,6 +3429,37 @@ class PhoenXWorld:
             get_singleworld_kernel(phase="iterate", fused=True, **kw),
             get_singleworld_kernel(phase="relax", fused=False, **kw),
             get_singleworld_kernel(phase="relax", fused=True, **kw),
+        )
+
+    def _singleworld_cached_prepare_kernels(self):
+        """Return cached-contact-warm-start head/fused kernels."""
+        return (
+            get_singleworld_kernel(
+                phase="cached_prepare",
+                fused=False,
+                revolute_only=True,
+                cloth_support=False,
+                enable_column_timers=self.enable_column_timers,
+                soft_tet_only=False,
+                cloth_only=False,
+                has_joints=False,
+                has_mass_splitting=False,
+                has_sleeping=self._sleeping_enabled,
+                has_soft_contact_pd=False,
+            ),
+            get_singleworld_kernel(
+                phase="cached_prepare",
+                fused=True,
+                revolute_only=True,
+                cloth_support=False,
+                enable_column_timers=self.enable_column_timers,
+                soft_tet_only=False,
+                cloth_only=False,
+                has_joints=False,
+                has_mass_splitting=False,
+                has_sleeping=self._sleeping_enabled,
+                has_soft_contact_pd=False,
+            ),
         )
 
     def _fast_tail_worlds_per_block(self) -> int:

@@ -118,6 +118,78 @@ class TestInvariants(unittest.TestCase):
             PhoenXWorld(**kw)
 
 
+class TestPrepareRefreshStride(unittest.TestCase):
+    """Construction-time checks for cached prepare-data refresh."""
+
+    def test_single_world_stride_schedule(self) -> None:
+        w = PhoenXWorld(
+            **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
+            step_layout="single_world",
+            prepare_refresh_stride=2,
+        )
+        self.assertEqual(w.prepare_refresh_stride, 2)
+        w._current_substep_index = 0
+        self.assertTrue(w._refresh_prepare_this_substep())
+        w._current_substep_index = 1
+        self.assertFalse(w._refresh_prepare_this_substep())
+        w._current_substep_index = 2
+        self.assertTrue(w._refresh_prepare_this_substep())
+
+    def test_rejects_non_positive_stride(self) -> None:
+        with self.assertRaisesRegex(ValueError, "prepare_refresh_stride must be >= 1"):
+            PhoenXWorld(**_make_kwargs(num_bodies=2, rigid_contact_max=1), prepare_refresh_stride=0)
+
+    def test_rejects_stride_above_two(self) -> None:
+        with self.assertRaisesRegex(NotImplementedError, "prepare_refresh_stride > 2"):
+            PhoenXWorld(
+                **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
+                step_layout="single_world",
+                prepare_refresh_stride=3,
+            )
+
+    def test_rejects_multi_world_stride(self) -> None:
+        with self.assertRaisesRegex(NotImplementedError, "step_layout='single_world'"):
+            PhoenXWorld(
+                **_make_kwargs(num_bodies=2, rigid_contact_max=1),
+                step_layout="multi_world",
+                prepare_refresh_stride=2,
+            )
+
+    def test_rejects_deformable_stride(self) -> None:
+        with self.assertRaisesRegex(NotImplementedError, "contact-only rigid"):
+            PhoenXWorld(
+                **_make_kwargs(num_bodies=2, rigid_contact_max=1, num_particles=4, num_cloth_triangles=1),
+                step_layout="single_world",
+                prepare_refresh_stride=2,
+            )
+
+    def test_rejects_joint_stride(self) -> None:
+        with self.assertRaisesRegex(NotImplementedError, "contact-only rigid"):
+            PhoenXWorld(
+                **_make_kwargs(num_bodies=2, num_joints=1, rigid_contact_max=1),
+                step_layout="single_world",
+                prepare_refresh_stride=2,
+            )
+
+    def test_rejects_mass_splitting_stride(self) -> None:
+        with self.assertRaisesRegex(NotImplementedError, "without mass splitting or sleeping"):
+            PhoenXWorld(
+                **_make_kwargs(num_bodies=2, rigid_contact_max=1),
+                step_layout="single_world",
+                mass_splitting=True,
+                prepare_refresh_stride=2,
+            )
+
+    def test_rejects_sleeping_stride(self) -> None:
+        with self.assertRaisesRegex(NotImplementedError, "without mass splitting or sleeping"):
+            PhoenXWorld(
+                **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
+                step_layout="single_world",
+                sleeping_velocity_threshold=0.1,
+                prepare_refresh_stride=2,
+            )
+
+
 class TestMassSplittingConfig(unittest.TestCase):
     """Mass-splitting config plumbs through to the partitioner and
     allocates the copy-state / interaction-graph scratch."""

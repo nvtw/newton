@@ -94,9 +94,12 @@ class SingleWorldMassSplittingUnrolledDispatcher:
 
         inv_dt = 1.0 / w.substep_dt
         prepare_head, _, iterate_head, _, _, _ = w._singleworld_kernels()
-        w._partitioner.begin_sweep()
-        self._unrolled_sweep(prepare_head, idt)
-        w._mass_splitting_average_and_broadcast(inv_dt)
+        if w._refresh_prepare_this_substep():
+            w._partitioner.begin_sweep()
+            self._unrolled_sweep(prepare_head, idt)
+            w._mass_splitting_average_and_broadcast(inv_dt)
+        else:
+            w._run_cached_prepare_bookkeeping(idt)
 
         for _ in range(w.solver_iterations):
             w._partitioner.begin_sweep()

@@ -58,6 +58,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_world_wrench,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
+    contact_cached_warmstart_lean,
     contact_iterate,
     contact_iterate_cloth_aware,
     contact_iterate_lean,
@@ -2008,6 +2009,7 @@ def _make_singleworld_rigid_contact_dispatch_func(
     has_sleeping: bool,
     has_soft_contact_pd: bool,
     is_prepare: bool,
+    is_cached_prepare: bool,
     use_bias: bool,
 ):
     @wp.func
@@ -2079,6 +2081,19 @@ def _make_singleworld_rigid_contact_dispatch_func(
                         copy_state,
                         parallel_id,
                     )
+        elif wp.static(is_cached_prepare):
+            contact_cached_warmstart_lean(
+                contact_cols,
+                local_cid,
+                bodies,
+                particles,
+                num_bodies,
+                idt,
+                cc,
+                contacts,
+                copy_state,
+                parallel_id,
+            )
         else:
             if wp.static(has_mass_splitting):
                 if wp.static(has_sleeping):
@@ -2223,6 +2238,7 @@ def _make_singleworld_dispatch_func(
     has_sleeping: bool,
     has_soft_contact_pd: bool,
     is_prepare: bool,
+    is_cached_prepare: bool,
     use_bias: bool,
 ):
     """Per-cid dispatch helper used by both head and fused PGS kernels.
@@ -2242,6 +2258,7 @@ def _make_singleworld_dispatch_func(
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         is_prepare=is_prepare,
+        is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
     )
 
@@ -2647,6 +2664,7 @@ def _make_singleworld_persistent_kernel(
     microseconds are atomic-added to the column's ``time_us`` slot.
     """
     is_prepare = phase == "prepare"
+    is_cached_prepare = phase == "cached_prepare"
     is_iterate = phase == "iterate"
     use_bias = is_iterate  # iterate ON, relax OFF (prepare ignores)
 
@@ -2661,6 +2679,7 @@ def _make_singleworld_persistent_kernel(
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         is_prepare=is_prepare,
+        is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
     )
 
@@ -2785,6 +2804,7 @@ def _make_singleworld_fused_kernel(
     """Single-block tail-fused PGS kernel; same axes as
     :func:`_make_singleworld_persistent_kernel`."""
     is_prepare = phase == "prepare"
+    is_cached_prepare = phase == "cached_prepare"
     is_iterate = phase == "iterate"
     use_bias = is_iterate
 
@@ -2799,6 +2819,7 @@ def _make_singleworld_fused_kernel(
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         is_prepare=is_prepare,
+        is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
     )
 

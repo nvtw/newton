@@ -132,6 +132,7 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
 
 __all__ = [
+    "contact_cached_warmstart_lean",
     "contact_iterate",
     "contact_iterate_at",
     "contact_iterate_at_cloth_aware",
@@ -776,6 +777,73 @@ def _make_contact_prepare_for_iteration_at(
                 write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2_new)
 
     return impl
+
+
+@wp.func
+def contact_cached_warmstart_lean(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    """Apply cached rigid contact warm-start impulses without rebuilding J."""
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    contact_first = contact_get_contact_first(constraints, cid)
+    contact_count = contact_get_contact_count(constraints, cid)
+    if contact_count == 0:
+        return
+
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    inv_inertia1 = bodies.inverse_inertia_world[b1]
+    inv_inertia2 = bodies.inverse_inertia_world[b2]
+
+    total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
+    total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
+    total_ang_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
+    for i in range(contact_count):
+        k = contact_first + i
+        n = cc_get_normal(cc, k)
+        t1_dir = cc_get_tangent1(cc, k)
+        t2_dir = wp.cross(n, t1_dir)
+        r1 = cc_get_r0(cc, k)
+        r2 = cc_get_r1(cc, k)
+        lam_n = cc_get_normal_lambda(cc, k)
+        lam_t1 = cc_get_tangent1_lambda(cc, k)
+        lam_t2 = cc_get_tangent2_lambda(cc, k)
+        imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
+        total_lin_imp_on_b2 += imp
+        total_ang_imp_on_b1 += wp.cross(r1, imp)
+        total_ang_imp_on_b2 += wp.cross(r2, imp)
+
+    v1_cur = bodies.velocity[b1]
+    v2_cur = bodies.velocity[b2]
+    w1_cur = bodies.angular_velocity[b1]
+    w2_cur = bodies.angular_velocity[b2]
+    v1_new, v2_new, w1_new, w2_new = apply_pair_spatial_impulse(
+        v1_cur,
+        v2_cur,
+        w1_cur,
+        w2_cur,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        total_lin_imp_on_b2,
+        total_ang_imp_on_b1,
+        total_ang_imp_on_b2,
+    )
+    bodies.velocity[b1] = v1_new
+    bodies.velocity[b2] = v2_new
+    bodies.angular_velocity[b1] = w1_new
+    bodies.angular_velocity[b2] = w2_new
 
 
 def _make_contact_iterate_at(

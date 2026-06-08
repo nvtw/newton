@@ -82,12 +82,13 @@ class TestPhoenXContactForce(unittest.TestCase):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _make_scene(self, step_layout: str = "multi_world") -> _PhoenXScene:
+    def _make_scene(self, step_layout: str = "multi_world", prepare_refresh_stride: int = 1) -> _PhoenXScene:
         return _PhoenXScene(
             fps=self.FPS,
             substeps=self.SUBSTEPS,
             solver_iterations=self.SOLVER_ITERATIONS,
             step_layout=step_layout,
+            prepare_refresh_stride=prepare_refresh_stride,
         )
 
     def _settle(self, scene: _PhoenXScene, bodies: list[int]) -> None:
@@ -164,6 +165,25 @@ class TestPhoenXContactForce(unittest.TestCase):
                     0.05 * expected,
                     f"lateral force should be ~0, got ({F[0]:.3f}, {F[1]:.3f}) N",
                 )
+
+    def test_static_sphere_weight_cached_prepare_stride(self) -> None:
+        """Sphere contact force remains correct when prepare rows are cached."""
+        scene = self._make_scene(step_layout="single_world", prepare_refresh_stride=2)
+        scene.add_ground_plane()
+        sphere = scene.add_sphere(
+            position=(0.0, 0.0, self.SPHERE_RADIUS + 0.05),
+            radius=self.SPHERE_RADIUS,
+            mass=self.MASS,
+        )
+        scene.finalize()
+        self._settle(scene, [sphere])
+
+        F, npairs, npoints = scene.gather_contact_wrench_on_body(sphere)
+        self.assertEqual(npairs, 1)
+        self.assertEqual(npoints, 1)
+        expected = self.MASS * _G
+        rel_err = abs(float(F[2]) - expected) / expected
+        self.assertLess(rel_err, 0.05)
 
     def test_static_cube_weight(self) -> None:
         """Cube on a plane: Fz == m*g within 1 %.

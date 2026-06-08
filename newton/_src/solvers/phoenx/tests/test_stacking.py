@@ -82,6 +82,7 @@ class _PhoenXScene:
         velocity_iterations: int = 1,
         friction: float = 0.5,
         step_layout: str = "multi_world",
+        prepare_refresh_stride: int = 1,
     ) -> None:
         self.device = wp.get_device("cuda:0")
         self.fps = int(fps)
@@ -91,6 +92,7 @@ class _PhoenXScene:
         self.velocity_iterations = int(velocity_iterations)
         self.friction = float(friction)
         self.step_layout = step_layout
+        self.prepare_refresh_stride = int(prepare_refresh_stride)
 
         self.mb = newton.ModelBuilder()
         # Pick up the PhoenX contact-ahead-of-impact default so every
@@ -327,6 +329,7 @@ class _PhoenXScene:
             rigid_contact_max=rigid_contact_max,
             default_friction=self.friction,
             step_layout=self.step_layout,
+            prepare_refresh_stride=self.prepare_refresh_stride,
             device=self.device,
         )
 

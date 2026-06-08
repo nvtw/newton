@@ -33,8 +33,11 @@ class SingleWorldDispatcher:
         if w._constraint_capacity == 0:
             return
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
-        w._partitioner.begin_sweep()
-        w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
+        if w._refresh_prepare_this_substep():
+            w._partitioner.begin_sweep()
+            w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
+        else:
+            w._run_cached_prepare_bookkeeping(idt)
         for _ in range(w.solver_iterations):
             w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)

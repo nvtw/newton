@@ -52,9 +52,12 @@ class SingleWorldMassSplittingDispatcher:
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
         # Prepare applies the warm-start impulse to each body's slots;
         # average so the iterate phase starts from converged slot values.
-        w._partitioner.begin_sweep()
-        w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
-        w._mass_splitting_average_and_broadcast(inv_dt)
+        if w._refresh_prepare_this_substep():
+            w._partitioner.begin_sweep()
+            w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
+            w._mass_splitting_average_and_broadcast(inv_dt)
+        else:
+            w._run_cached_prepare_bookkeeping(idt)
 
         for _ in range(w.solver_iterations):
             w._partitioner.begin_sweep()
