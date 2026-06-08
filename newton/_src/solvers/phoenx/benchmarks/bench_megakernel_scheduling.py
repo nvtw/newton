@@ -50,6 +50,7 @@ class SyntheticGraph:
     node_count: np.ndarray
     node_start: np.ndarray
     node_stride: np.ndarray
+    world_starts: np.ndarray
     family: np.ndarray
     row_size: np.ndarray
     projection: np.ndarray
@@ -152,17 +153,21 @@ def _nodes_ready(
 def _reset_scheduler_kernel(
     per_node_done: wp.array[wp.int32],
     next_executable: wp.array[wp.int32],
+    world_done: wp.array[wp.int32],
     total_done: wp.array[wp.int32],
     failed: wp.array[wp.int32],
     sink: wp.array[wp.float32],
     num_nodes: wp.int32,
     num_interactions: wp.int32,
+    num_worlds: wp.int32,
 ):
     tid = wp.tid()
     if tid < num_nodes:
         per_node_done[tid] = wp.int32(0)
     if tid < num_interactions:
         next_executable[tid] = wp.int32(0)
+    if tid < num_worlds:
+        world_done[tid] = wp.int32(0)
     if tid == wp.int32(0):
         total_done[0] = wp.int32(0)
         failed[0] = wp.int32(0)
@@ -269,6 +274,78 @@ def _node_ready_scan_kernel(
         done = wp.atomic_add(total_done, 0, wp.int32(0))
 
     if tid == wp.int32(0) and done < target_total:
+        failed[0] = wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def _world_ready_scan_kernel(
+    nodes: wp.array2d[wp.int32],
+    node_count: wp.array[wp.int32],
+    node_start: wp.array2d[wp.int32],
+    node_stride: wp.array2d[wp.int32],
+    family: wp.array[wp.int32],
+    row_size: wp.array[wp.int32],
+    projection: wp.array[wp.int32],
+    world_starts: wp.array[wp.int32],
+    per_node_done: wp.array[wp.int32],
+    next_executable: wp.array[wp.int32],
+    world_done: wp.array[wp.int32],
+    failed: wp.array[wp.int32],
+    sink: wp.array[wp.float32],
+    num_worlds: wp.int32,
+    num_iterations: wp.int32,
+    threads_per_world: wp.int32,
+    work_iters: wp.int32,
+    max_passes: wp.int32,
+    max_rows: wp.int32,
+    payload_mode: wp.int32,
+):
+    tid = wp.tid()
+    local_tid = tid % threads_per_world
+    world_id = tid / threads_per_world
+    if world_id >= num_worlds:
+        return
+
+    begin = world_starts[world_id]
+    end = world_starts[world_id + wp.int32(1)]
+    target_total = (end - begin) * num_iterations
+    pass_count = wp.int32(0)
+    done = wp.atomic_add(world_done, world_id, wp.int32(0))
+    while done < target_total and pass_count < max_passes:
+        interaction_index = begin + local_tid
+        while interaction_index < end:
+            epoch = next_executable[interaction_index]
+            if epoch < num_iterations:
+                if _nodes_ready(nodes, node_count, node_start, node_stride, per_node_done, interaction_index, epoch):
+                    if _nodes_ready(
+                        nodes, node_count, node_start, node_stride, per_node_done, interaction_index, epoch
+                    ):
+                        old = wp.atomic_cas(next_executable, interaction_index, epoch, epoch + wp.int32(1))
+                        if old == epoch:
+                            seed = interaction_index + epoch * wp.int32(65537)
+                            value = _descriptor_payload(
+                                work_iters,
+                                seed,
+                                family[interaction_index],
+                                row_size[interaction_index],
+                                projection[interaction_index],
+                                max_rows,
+                                payload_mode,
+                            )
+                            wp.atomic_add(sink, 0, value)
+
+                            n = node_count[interaction_index]
+                            slot = wp.int32(0)
+                            while slot < n:
+                                node_id = nodes[slot, interaction_index]
+                                wp.atomic_add(per_node_done, node_id, wp.int32(1))
+                                slot = slot + wp.int32(1)
+                            wp.atomic_add(world_done, world_id, wp.int32(1))
+            interaction_index = interaction_index + threads_per_world
+        pass_count = pass_count + wp.int32(1)
+        done = wp.atomic_add(world_done, world_id, wp.int32(0))
+
+    if local_tid == wp.int32(0) and done < target_total:
         failed[0] = wp.int32(1)
 
 
@@ -392,6 +469,7 @@ def _build_graph(
     color_ends: list[int],
     num_nodes: int,
     family_override: np.ndarray | None = None,
+    world_starts_override: np.ndarray | None = None,
 ) -> SyntheticGraph:
     num_interactions = len(interactions)
     nodes = np.full((MAX_NODES_PER_INTERACTION, num_interactions), -1, dtype=np.int32)
@@ -407,6 +485,10 @@ def _build_graph(
     color_buffer = np.arange(num_interactions, dtype=np.int32)
     color_starts = np.zeros(len(color_ends) + 1, dtype=np.int32)
     color_starts[1:] = np.asarray(color_ends, dtype=np.int32)
+    if world_starts_override is None:
+        world_starts = np.asarray([0, num_interactions], dtype=np.int32)
+    else:
+        world_starts = world_starts_override.astype(np.int32, copy=False)
 
     color_begin = 0
     for color_end in color_ends:
@@ -435,6 +517,7 @@ def _build_graph(
         node_count=node_count,
         node_start=node_start,
         node_stride=node_stride,
+        world_starts=world_starts,
         family=family,
         row_size=row_size,
         projection=projection,
@@ -478,25 +561,44 @@ def make_graph_from_world(world, name: str) -> SyntheticGraph:
     interactions: list[list[int]] = []
     families: list[int] = []
     color_ends: list[int] = []
+    world_starts: list[int] = [0]
     max_node = -1
-    for start, end in _color_ranges_from_world(world):
-        for cursor in range(start, end):
-            eid = int(eids[cursor])
-            if eid < 0 or eid >= active:
-                continue
-            bodies = elements[eid]["bodies"]
-            nodes = [int(node) for node in bodies if int(node) >= 0]
-            if not nodes:
-                continue
-            interactions.append(_make_interaction(nodes))
-            families.append(int(element_family[eid]))
-            max_node = max(max_node, *nodes)
-        color_ends.append(len(interactions))
+
+    if world.step_layout == "single_world":
+        color_ranges = [_color_ranges_from_world(world)]
+    else:
+        starts = world._world_color_starts.numpy()
+        csr = world._world_csr_offsets.numpy()
+        num_colors_per_world = world._world_num_colors.numpy()
+        color_ranges = []
+        for world_id in range(world.num_worlds):
+            base = int(csr[world_id])
+            ranges: list[tuple[int, int]] = []
+            for color in range(int(num_colors_per_world[world_id])):
+                ranges.append((base + int(starts[world_id, color]), base + int(starts[world_id, color + 1])))
+            color_ranges.append(ranges)
+
+    for ranges in color_ranges:
+        for start, end in ranges:
+            for cursor in range(start, end):
+                eid = int(eids[cursor])
+                if eid < 0 or eid >= active:
+                    continue
+                bodies = elements[eid]["bodies"]
+                nodes = [int(node) for node in bodies if int(node) >= 0]
+                if not nodes:
+                    continue
+                interactions.append(_make_interaction(nodes))
+                families.append(int(element_family[eid]))
+                max_node = max(max_node, *nodes)
+            color_ends.append(len(interactions))
+        world_starts.append(len(interactions))
 
     if not interactions:
         interactions = [_make_interaction([0])]
         families = [0]
         color_ends = [1]
+        world_starts = [0, 1]
         max_node = 0
 
     return _build_graph(
@@ -505,6 +607,7 @@ def make_graph_from_world(world, name: str) -> SyntheticGraph:
         color_ends,
         max_node + 1,
         family_override=np.asarray(families, dtype=np.int32),
+        world_starts_override=np.asarray(world_starts, dtype=np.int32),
     )
 
 
@@ -558,12 +661,14 @@ class DeviceGraph:
     node_count: wp.array
     node_start: wp.array
     node_stride: wp.array
+    world_starts: wp.array
     family: wp.array
     row_size: wp.array
     projection: wp.array
     color_buffer: wp.array
     per_node_done: wp.array
     next_executable: wp.array
+    world_done: wp.array
     total_done: wp.array
     failed: wp.array
     sink: wp.array
@@ -577,12 +682,14 @@ def upload_graph(graph: SyntheticGraph, device: wp.context.Devicelike) -> Device
         node_count=wp.array(graph.node_count, dtype=wp.int32, device=device),
         node_start=wp.array(graph.node_start, dtype=wp.int32, device=device),
         node_stride=wp.array(graph.node_stride, dtype=wp.int32, device=device),
+        world_starts=wp.array(graph.world_starts, dtype=wp.int32, device=device),
         family=wp.array(graph.family, dtype=wp.int32, device=device),
         row_size=wp.array(graph.row_size, dtype=wp.int32, device=device),
         projection=wp.array(graph.projection, dtype=wp.int32, device=device),
         color_buffer=wp.array(graph.color_buffer, dtype=wp.int32, device=device),
         per_node_done=wp.zeros(max(1, graph.num_nodes), dtype=wp.int32, device=device),
         next_executable=wp.zeros(max(1, num_interactions), dtype=wp.int32, device=device),
+        world_done=wp.zeros(max(1, graph.world_starts.shape[0] - 1), dtype=wp.int32, device=device),
         total_done=wp.zeros(1, dtype=wp.int32, device=device),
         failed=wp.zeros(1, dtype=wp.int32, device=device),
         sink=wp.zeros(1, dtype=wp.float32, device=device),
@@ -590,18 +697,20 @@ def upload_graph(graph: SyntheticGraph, device: wp.context.Devicelike) -> Device
 
 
 def _launch_reset(dg: DeviceGraph, device: wp.context.Devicelike) -> None:
-    dim = max(dg.graph.num_nodes, int(dg.graph.node_count.shape[0]), 1)
+    dim = max(dg.graph.num_nodes, int(dg.graph.node_count.shape[0]), int(dg.graph.world_starts.shape[0] - 1), 1)
     wp.launch(
         _reset_scheduler_kernel,
         dim=dim,
         inputs=[
             dg.per_node_done,
             dg.next_executable,
+            dg.world_done,
             dg.total_done,
             dg.failed,
             dg.sink,
             wp.int32(dg.graph.num_nodes),
             wp.int32(dg.graph.node_count.shape[0]),
+            wp.int32(dg.graph.world_starts.shape[0] - 1),
         ],
         device=device,
     )
@@ -694,10 +803,57 @@ def make_node_ready_runner(
     return run
 
 
-def validate_runner(label: str, dg: DeviceGraph, run, expected_total: int) -> None:
+def make_world_ready_runner(
+    dg: DeviceGraph,
+    *,
+    iterations: int,
+    work_iters: int,
+    threads_per_world: int,
+    max_passes: int,
+    max_rows: int,
+    payload_mode: int,
+    device: wp.context.Devicelike,
+):
+    def run() -> None:
+        _launch_reset(dg, device)
+        wp.launch(
+            _world_ready_scan_kernel,
+            dim=max(1, (dg.graph.world_starts.shape[0] - 1) * threads_per_world),
+            inputs=[
+                dg.nodes,
+                dg.node_count,
+                dg.node_start,
+                dg.node_stride,
+                dg.family,
+                dg.row_size,
+                dg.projection,
+                dg.world_starts,
+                dg.per_node_done,
+                dg.next_executable,
+                dg.world_done,
+                dg.failed,
+                dg.sink,
+                wp.int32(dg.graph.world_starts.shape[0] - 1),
+                wp.int32(iterations),
+                wp.int32(threads_per_world),
+                wp.int32(work_iters),
+                wp.int32(max_passes),
+                wp.int32(max_rows),
+                wp.int32(payload_mode),
+            ],
+            device=device,
+        )
+
+    return run
+
+
+def validate_runner(label: str, dg: DeviceGraph, run, expected_total: int, *, use_world_done: bool = False) -> None:
     run()
     wp.synchronize_device()
-    total = int(dg.total_done.numpy()[0])
+    if use_world_done:
+        total = int(np.sum(dg.world_done.numpy()))
+    else:
+        total = int(dg.total_done.numpy()[0])
     failed = int(dg.failed.numpy()[0])
     if total != expected_total:
         raise RuntimeError(f"{label} failed: total_done={total}, failed={failed}, expected={expected_total}")
@@ -717,7 +873,7 @@ def _print_graph_stats(graph: SyntheticGraph) -> None:
     color_counts = np.diff(graph.color_starts)
     print(
         f"\n=== {graph.name}: {graph.node_count.shape[0]} interactions, "
-        f"{len(graph.color_starts) - 1} colors, {graph.num_nodes} nodes ==="
+        f"{len(graph.color_starts) - 1} colors, {graph.world_starts.shape[0] - 1} worlds, {graph.num_nodes} nodes ==="
     )
     print(
         f"families={{{fam_text}}} row_size[min/median/max]="
@@ -760,6 +916,22 @@ def run_graph_case(args: argparse.Namespace, graph: SyntheticGraph) -> None:
         validate_runner(f"node_ready/{payload_label}", node_ready, node_ready_runner, expected_total)
         node_min, node_med = _bench(node_ready_runner, args.n_runs, args.warmup, args.trials)
 
+        world_ready = upload_graph(graph, device)
+        world_ready_runner = make_world_ready_runner(
+            world_ready,
+            iterations=args.iterations,
+            work_iters=args.work_iters,
+            threads_per_world=args.world_tpw,
+            max_passes=args.max_passes,
+            max_rows=max_rows,
+            payload_mode=payload_mode,
+            device=device,
+        )
+        validate_runner(
+            f"world_ready/{payload_label}", world_ready, world_ready_runner, expected_total, use_world_done=True
+        )
+        world_min, world_med = _bench(world_ready_runner, args.n_runs, args.warmup, args.trials)
+
         print(
             f"{payload_label:11s} colored    min={colored_min:9.3f} ms  med={colored_med:9.3f} ms  "
             f"kernel_nodes/frame={colored_kernel_nodes}"
@@ -768,8 +940,11 @@ def run_graph_case(args: argparse.Namespace, graph: SyntheticGraph) -> None:
             f"{payload_label:11s} node_ready min={node_min:9.3f} ms  med={node_med:9.3f} ms  "
             f"threads={args.total_threads}"
         )
+        print(f"{payload_label:11s} world_ready min={world_min:8.3f} ms  med={world_med:9.3f} ms  tpw={args.world_tpw}")
         speed = colored_min / node_min if node_min > 0.0 else 0.0
         print(f"{payload_label:11s} node_ready relative to colored: {speed:6.3f}x")
+        world_speed = colored_min / world_min if world_min > 0.0 else 0.0
+        print(f"{payload_label:11s} world_ready relative to colored: {world_speed:6.3f}x")
 
 
 def run_case(args: argparse.Namespace, graph_name: str) -> None:
@@ -802,6 +977,7 @@ def parse_args() -> argparse.Namespace:
         help="Compare divergent specialized payload, fixed-shape unified payload, or both.",
     )
     parser.add_argument("--total-threads", type=int, default=1024)
+    parser.add_argument("--world-tpw", type=int, default=32)
     parser.add_argument("--max-passes", type=int, default=65536)
     parser.add_argument("--n-runs", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=2)
