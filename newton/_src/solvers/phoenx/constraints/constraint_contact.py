@@ -17,11 +17,6 @@ import warp as wp
 
 from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
 from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.constraints.constraint_block import (
-    BLOCK_LAMBDA_INF,
-    block_project_accumulated_bounded_1,
-    block_project_friction_delta_sor_2,
-)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
@@ -48,10 +43,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
-    cc_set_normal_lambda,
-    cc_set_tangent1_lambda,
-    cc_set_tangent2_lambda,
 )
+from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_velocity_update
 from newton._src.solvers.phoenx.helpers.data_packing import (
     dword_offset_of,
     num_dwords,
@@ -675,71 +668,44 @@ def contact_iterate_at_multi(
             jv_t2 = wp.dot(vel_rel, t2_dir)
 
             pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
-            lam_n_old = cc_get_normal_lambda(cc, k)
+            pd_gamma_n = wp.float32(0.0)
+            pd_bias_n = wp.float32(0.0)
             if pd_eff_soft_n > wp.float32(0.0):
                 pd_gamma_n = cc_get_pd_gamma(cc, k)
                 pd_bias_n = cc_get_pd_bias(cc, k)
-                d_lam_n_us = -pd_eff_soft_n * (jv_n - pd_bias_n + pd_gamma_n * lam_n_old)
-                normal_projection = block_project_accumulated_bounded_1(
-                    d_lam_n_us,
-                    lam_n_old,
-                    wp.float32(1.0),
-                    wp.float32(0.0),
-                    sor_boost,
-                    wp.float32(0.0),
-                    BLOCK_LAMBDA_INF,
-                )
-                d_lam_n = normal_projection.delta
-                lam_n_new = normal_projection.lambda_new
+            if is_speculative:
+                mass_coeff_n = wp.float32(1.0)
+                impulse_coeff_n = wp.float32(0.0)
+            elif use_bias:
+                mass_coeff_n = mass_coeff
+                impulse_coeff_n = impulse_coeff
             else:
-                if is_speculative:
-                    mass_coeff_n = wp.float32(1.0)
-                    impulse_coeff_n = wp.float32(0.0)
-                elif use_bias:
-                    mass_coeff_n = mass_coeff
-                    impulse_coeff_n = impulse_coeff
-                else:
-                    mass_coeff_n = wp.float32(1.0)
-                    impulse_coeff_n = wp.float32(0.0)
-                d_lam_n_us = -eff_n * (jv_n + bias_val)
-                normal_projection = block_project_accumulated_bounded_1(
-                    d_lam_n_us,
-                    lam_n_old,
-                    mass_coeff_n,
-                    impulse_coeff_n,
-                    sor_boost,
-                    wp.float32(0.0),
-                    BLOCK_LAMBDA_INF,
-                )
-                d_lam_n = normal_projection.delta
-                lam_n_new = normal_projection.lambda_new
-
-            fric_limit_static = mu_s * lam_n_new
-            fric_limit_kinetic = mu_k * lam_n_new
-
-            d_lam_t1_us = -eff_t1 * (jv_t1 + bias_t1_val)
-            d_lam_t2_us = -eff_t2 * (jv_t2 + bias_t2_val)
-            lam_t1_old = cc_get_tangent1_lambda(cc, k)
-            lam_t2_old = cc_get_tangent2_lambda(cc, k)
-            tangent_projection = block_project_friction_delta_sor_2(
-                lam_t1_old,
-                lam_t2_old,
-                d_lam_t1_us,
-                d_lam_t2_us,
+                mass_coeff_n = wp.float32(1.0)
+                impulse_coeff_n = wp.float32(0.0)
+            imp = contact_project_velocity_update(
+                cc,
+                k,
+                n,
+                t1_dir,
+                t2_dir,
+                jv_n,
+                jv_t1,
+                jv_t2,
+                eff_n,
+                eff_t1,
+                eff_t2,
+                bias_val,
+                bias_t1_val,
+                bias_t2_val,
+                mu_s,
+                mu_k,
+                mass_coeff_n,
+                impulse_coeff_n,
                 sor_boost,
-                fric_limit_static,
-                fric_limit_kinetic,
+                pd_eff_soft_n,
+                pd_gamma_n,
+                pd_bias_n,
             )
-            d_lam_t1 = tangent_projection.delta[0]
-            d_lam_t2 = tangent_projection.delta[1]
-            lam_t1_new = tangent_projection.lambda_new[0]
-            lam_t2_new = tangent_projection.lambda_new[1]
-
-            cc_set_normal_lambda(cc, k, lam_n_new)
-            cc_set_tangent1_lambda(cc, k, lam_t1_new)
-            cc_set_tangent2_lambda(cc, k, lam_t2_new)
-
-            imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
             v1, v2, w1, w2 = apply_pair_velocity_impulse(
                 v1,
                 v2,

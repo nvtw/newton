@@ -31,11 +31,6 @@ from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
 )
-from newton._src.solvers.phoenx.constraints.constraint_block import (
-    BLOCK_LAMBDA_INF,
-    block_project_accumulated_bounded_1,
-    block_project_friction_delta_sor_2,
-)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -96,7 +91,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_eff_t2,
     cc_set_local_p0,
     cc_set_local_p1,
-    cc_set_normal_lambda,
     cc_set_pd_bias,
     cc_set_pd_eff_soft,
     cc_set_pd_gamma,
@@ -116,6 +110,10 @@ from newton._src.solvers.phoenx.constraints.contact_endpoint import (
 )
 from newton._src.solvers.phoenx.constraints.contact_endpoint import (
     contact_endpoint_velocity_at_point_cached as contact_endpoint_velocity_at_point,
+)
+from newton._src.solvers.phoenx.constraints.contact_projection import (
+    contact_project_velocity_update,
+    contact_project_velocity_update_no_soft_pd,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     apply_pair_spatial_impulse,
@@ -1051,97 +1049,77 @@ def _make_contact_iterate_at(
                 if not is_speculative:
                     bias_val = wp.float32(0.0)
 
-            # Normal row: optional soft-contact PD, speculative rigid,
-            # soft penetrating main, or rigid relax.
-            lam_n_old = cc_get_normal_lambda(cc, k)
+            # Normal/friction rows: optional soft-contact PD,
+            # speculative rigid, soft penetrating main, or rigid relax.
+            pd_eff_soft_n = wp.float32(0.0)
+            pd_gamma_n = wp.float32(0.0)
+            pd_bias_n = wp.float32(0.0)
             if wp.static(has_soft_contact_pd):
                 pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
                 if pd_eff_soft_n > wp.float32(0.0):
                     pd_gamma_n = cc_get_pd_gamma(cc, k)
                     pd_bias_n = cc_get_pd_bias(cc, k)
-                    d_lam_n_us = -pd_eff_soft_n * (jv_n - pd_bias_n + pd_gamma_n * lam_n_old)
-                    normal_projection = block_project_accumulated_bounded_1(
-                        d_lam_n_us,
-                        lam_n_old,
-                        wp.float32(1.0),
-                        wp.float32(0.0),
-                        sor_boost,
-                        wp.float32(0.0),
-                        BLOCK_LAMBDA_INF,
-                    )
-                    d_lam_n = normal_projection.delta
-                    lam_n_new = normal_projection.lambda_new
-                else:
-                    if is_speculative:
-                        mass_coeff_n = wp.float32(1.0)
-                        impulse_coeff_n = wp.float32(0.0)
-                    elif wp.static(use_bias):
-                        mass_coeff_n = mass_coeff
-                        impulse_coeff_n = impulse_coeff
-                    else:
-                        mass_coeff_n = wp.float32(1.0)
-                        impulse_coeff_n = wp.float32(0.0)
-                    d_lam_n_us = -eff_n * (jv_n + bias_val)
-                    normal_projection = block_project_accumulated_bounded_1(
-                        d_lam_n_us,
-                        lam_n_old,
-                        mass_coeff_n,
-                        impulse_coeff_n,
-                        sor_boost,
-                        wp.float32(0.0),
-                        BLOCK_LAMBDA_INF,
-                    )
-                    d_lam_n = normal_projection.delta
-                    lam_n_new = normal_projection.lambda_new
+
+            if is_speculative:
+                mass_coeff_n = wp.float32(1.0)
+                impulse_coeff_n = wp.float32(0.0)
+            elif wp.static(use_bias):
+                mass_coeff_n = mass_coeff
+                impulse_coeff_n = impulse_coeff
             else:
-                if is_speculative:
-                    mass_coeff_n = wp.float32(1.0)
-                    impulse_coeff_n = wp.float32(0.0)
-                elif wp.static(use_bias):
-                    mass_coeff_n = mass_coeff
-                    impulse_coeff_n = impulse_coeff
-                else:
-                    mass_coeff_n = wp.float32(1.0)
-                    impulse_coeff_n = wp.float32(0.0)
-                d_lam_n_us = -eff_n * (jv_n + bias_val)
-                normal_projection = block_project_accumulated_bounded_1(
-                    d_lam_n_us,
-                    lam_n_old,
+                mass_coeff_n = wp.float32(1.0)
+                impulse_coeff_n = wp.float32(0.0)
+
+            if wp.static(has_soft_contact_pd):
+                imp = contact_project_velocity_update(
+                    cc,
+                    k,
+                    n,
+                    t1_dir,
+                    t2_dir,
+                    jv_n,
+                    jv_t1,
+                    jv_t2,
+                    eff_n,
+                    eff_t1,
+                    eff_t2,
+                    bias_val,
+                    bias_t1_val,
+                    bias_t2_val,
+                    mu_s,
+                    mu_k,
+                    mass_coeff_n,
+                    impulse_coeff_n,
+                    sor_boost,
+                    pd_eff_soft_n,
+                    pd_gamma_n,
+                    pd_bias_n,
+                )
+            else:
+                imp = contact_project_velocity_update_no_soft_pd(
+                    cc,
+                    k,
+                    n,
+                    t1_dir,
+                    t2_dir,
+                    jv_n,
+                    jv_t1,
+                    jv_t2,
+                    eff_n,
+                    eff_t1,
+                    eff_t2,
+                    bias_val,
+                    bias_t1_val,
+                    bias_t2_val,
+                    mu_s,
+                    mu_k,
                     mass_coeff_n,
                     impulse_coeff_n,
                     sor_boost,
                     wp.float32(0.0),
-                    BLOCK_LAMBDA_INF,
+                    wp.float32(0.0),
+                    wp.float32(0.0),
                 )
-                d_lam_n = normal_projection.delta
-                lam_n_new = normal_projection.lambda_new
-
-            fric_limit_static = mu_s * lam_n_new
-            fric_limit_kinetic = mu_k * lam_n_new
-
-            d_lam_t1_us = -eff_t1 * (jv_t1 + bias_t1_val)
-            d_lam_t2_us = -eff_t2 * (jv_t2 + bias_t2_val)
-            lam_t1_old = cc_get_tangent1_lambda(cc, k)
-            lam_t2_old = cc_get_tangent2_lambda(cc, k)
-            tangent_projection = block_project_friction_delta_sor_2(
-                lam_t1_old,
-                lam_t2_old,
-                d_lam_t1_us,
-                d_lam_t2_us,
-                sor_boost,
-                fric_limit_static,
-                fric_limit_kinetic,
-            )
-            d_lam_t1 = tangent_projection.delta[0]
-            d_lam_t2 = tangent_projection.delta[1]
-            lam_t1_new = tangent_projection.lambda_new[0]
-            lam_t2_new = tangent_projection.lambda_new[1]
-
-            cc_set_normal_lambda(cc, k, lam_n_new)
-            cc_set_tangent1_lambda(cc, k, lam_t1_new)
-            cc_set_tangent2_lambda(cc, k, lam_t2_new)
-
-            imp = d_lam_n * n + d_lam_t1 * t1_dir + d_lam_t2 * t2_dir
             if wp.static(cloth_support):
                 contact_endpoint_apply_impulse(
                     side0_kind,
