@@ -26,6 +26,10 @@ Examples::
     python -m newton._src.solvers.phoenx.benchmarks.bench_phoenx_kapla \\
         --mass-splitting on --frames 240 --warmup 60
 
+    # Sweep cached contact prepare every second substep.
+    python -m newton._src.solvers.phoenx.benchmarks.bench_phoenx_kapla \\
+        --mass-splitting off --prepare-refresh-stride 2
+
     # Refresh the recorded baseline (after a verified improvement).
     python -m newton._src.solvers.phoenx.benchmarks.bench_phoenx_kapla \\
         --write-baseline
@@ -68,6 +72,7 @@ class BenchResult:
     mass_splitting: bool
     substeps: int
     solver_iterations: int
+    prepare_refresh_stride: int
     warmup_frames: int
     measured_frames: int
     fps: float
@@ -114,6 +119,7 @@ def _run_one(
     mass_splitting: bool,
     substeps: int,
     solver_iterations: int,
+    prepare_refresh_stride: int,
     warmup_frames: int,
     measured_frames: int,
     grid_dims: tuple[int, int],
@@ -125,9 +131,13 @@ def _run_one(
     ek.TOWER_GRID_DIMS = grid_dims
     ek.ENABLE_MASS_SPLITTING = mass_splitting
 
+    if mass_splitting and prepare_refresh_stride != 1:
+        raise ValueError("prepare_refresh_stride > 1 is only supported with --mass-splitting off")
+
     ex = ek.Example(_HeadlessViewer(), _HeadlessArgs())
     ex.world.solver_iterations = solver_iterations
     ex.world.substeps = substeps
+    ex.world.prepare_refresh_stride = prepare_refresh_stride
     # Re-capture the per-frame graph so the solver-config change takes
     # effect.
     ex.graph = None
@@ -154,6 +164,7 @@ def _run_one(
         mass_splitting=mass_splitting,
         substeps=substeps,
         solver_iterations=solver_iterations,
+        prepare_refresh_stride=prepare_refresh_stride,
         warmup_frames=warmup_frames,
         measured_frames=measured_frames,
         fps=float(fps),
@@ -166,7 +177,7 @@ def _run_one(
 
 
 def _format_row(r: BenchResult) -> str:
-    label = f"ms={r.mass_splitting!s:<5} sub={r.substeps} it={r.solver_iterations}"
+    label = f"ms={r.mass_splitting!s:<5} sub={r.substeps} it={r.solver_iterations} prep={r.prepare_refresh_stride}"
     return (
         f"  {label:<24} fps={r.fps:6.2f}  drift mean={r.mean_drift_m:.4f}m "
         f"max={r.max_drift_m:.4f}m  z=[{r.min_z:.3f}, {r.max_z:.3f}]  "
@@ -189,6 +200,14 @@ def _default_sweep() -> list[dict]:
     ]
 
 
+def _baseline_key(r: BenchResult) -> tuple[str, ...]:
+    """Baseline key. Preserve legacy stride-1 keys for checked-in data."""
+    key = (str(r.mass_splitting), str(r.substeps), str(r.solver_iterations))
+    if r.prepare_refresh_stride == 1:
+        return key
+    return (*key, str(r.prepare_refresh_stride))
+
+
 def _check_against_baseline(results: list[BenchResult]) -> int:
     """Return 0 if every config is within tolerance of the recorded
     baseline; non-zero on any regression."""
@@ -199,7 +218,7 @@ def _check_against_baseline(results: list[BenchResult]) -> int:
         baseline = {tuple(map(str, r["key"])): r["result"] for r in json.load(f)}
     rc = 0
     for r in results:
-        key = (str(r.mass_splitting), str(r.substeps), str(r.solver_iterations))
+        key = _baseline_key(r)
         if key not in baseline:
             print(f"[bench_phoenx_kapla] {key} not in baseline", file=sys.stderr)
             continue
@@ -211,6 +230,7 @@ def _check_against_baseline(results: list[BenchResult]) -> int:
         verdict = "OK" if (ok_fps and ok_drift) else "REGRESS"
         print(
             f"  [{verdict}] ms={r.mass_splitting!s:<5} sub={r.substeps} it={r.solver_iterations} "
+            f"prep={r.prepare_refresh_stride} "
             f"fps Δ {fps_delta:+.1%} (now {r.fps:.2f}, base {b['fps']:.2f})  "
             f"drift Δ {drift_delta:+.1%} (now {r.mean_drift_m:.4f}, base {b['mean_drift_m']:.4f})"
         )
@@ -222,7 +242,7 @@ def _check_against_baseline(results: list[BenchResult]) -> int:
 def _write_baseline(results: list[BenchResult]) -> None:
     payload = [
         {
-            "key": [str(r.mass_splitting), str(r.substeps), str(r.solver_iterations)],
+            "key": list(_baseline_key(r)),
             "result": asdict(r),
         }
         for r in results
@@ -255,11 +275,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--warmup", type=int, default=60, help="Warmup frames (default 60).")
     p.add_argument("--frames", type=int, default=120, help="Measured frames (default 120).")
+    p.add_argument(
+        "--prepare-refresh-stride",
+        type=int,
+        default=1,
+        help=(
+            "Refresh cached rigid-contact prepare data every N substeps (default 1). "
+            "Only 2 is supported for contact-only non-mass-splitting runs."
+        ),
+    )
     p.add_argument("--grid", type=int, default=1, help="Tower grid edge length (default 1 = 1x1).")
     p.add_argument("--write-baseline", action="store_true", help="Persist results as the new baseline.")
     p.add_argument("--check", action="store_true", help="Compare to baseline; exit nonzero on regression.")
     p.add_argument("--json", action="store_true", help="Print results as JSON instead of a table.")
     args = p.parse_args(argv)
+
+    if args.prepare_refresh_stride != 1 and args.mass_splitting != "off":
+        p.error("--prepare-refresh-stride > 1 requires --mass-splitting off")
 
     if args.mass_splitting == "both" and args.substeps is None and args.iters is None:
         configs = _default_sweep()
@@ -278,6 +310,7 @@ def main(argv: list[str] | None = None) -> int:
             mass_splitting=cfg["mass_splitting"],
             substeps=cfg["substeps"],
             solver_iterations=cfg["solver_iterations"],
+            prepare_refresh_stride=args.prepare_refresh_stride,
             warmup_frames=args.warmup,
             measured_frames=args.frames,
             grid_dims=grid_dims,
