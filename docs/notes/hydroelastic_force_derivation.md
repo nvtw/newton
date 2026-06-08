@@ -101,7 +101,7 @@ $$
 $$
 
 So `pen_total = 2 · |φ_B|` **iff** $k_A = k_B$ (symmetric). For any
-asymmetric pair, `area · k_eff` mis-scales force by
+asymmetric pair, `area · k_eff` scales force incorrectly by
 
 $$
 \frac{F_{\text{old}}}{F_{\text{correct}}}

@@ -647,6 +647,7 @@ def _build_cube_cube_scene(device, cube_half_lower=0.2, cube_half_upper=0.1, kh_
 
     Returns (model, state, upper_body, rest_z).
     """
+
     def shape_cfg(kh):
         return newton.ModelBuilder.ShapeConfig(
             sdf_max_resolution=128,
@@ -748,6 +749,22 @@ def _linear_pressure(signed_depth: wp.float32, shape_idx: wp.int32, data: _Linea
     return -data.shape_kh[shape_idx] * signed_depth
 
 
+@wp.struct
+class _PowerPressureData:
+    shape_kh: wp.array[wp.float32]
+    depth_ref_m: wp.float32
+    exponent: wp.float32
+
+
+@wp.func
+def _power_pressure(signed_depth: wp.float32, shape_idx: wp.int32, data: _PowerPressureData) -> wp.float32:
+    kh = data.shape_kh[shape_idx]
+    if signed_depth >= 0.0:
+        return -kh * signed_depth
+    depth = -signed_depth
+    return kh * data.depth_ref_m * wp.pow(depth / data.depth_ref_m, data.exponent)
+
+
 def test_custom_pressure_func_matches_default_linear(test, device):
     """User-supplied linear ``pressure_func`` must match the built-in default within 1%."""
     model, state, upper_body, rest_z = _build_cube_cube_scene(device)
@@ -799,11 +816,13 @@ def test_custom_pressure_func_matches_default_linear(test, device):
 
 
 def test_custom_pressure_func_matches_default_linear_with_stiffness_ratio(test, device):
-    """Exponent-1 custom pressure must match the default for unequal stiffnesses."""
+    """Exponent-1 power pressure must match the default for unequal stiffnesses."""
     model, state, upper_body, rest_z = _build_cube_cube_scene(device, kh_lower=1e9, kh_upper=1e10)
 
-    pressure_data = _LinearPressureData()
+    pressure_data = _PowerPressureData()
     pressure_data.shape_kh = model.shape_material_kh
+    pressure_data.depth_ref_m = 1.0e-3
+    pressure_data.exponent = 1.0
 
     cfg_default = HydroelasticSDF.Config(
         output_contact_surface=True,
@@ -814,7 +833,7 @@ def test_custom_pressure_func_matches_default_linear_with_stiffness_ratio(test, 
         output_contact_surface=True,
         reduce_contacts=False,
         anchor_contact=False,
-        pressure_func=_linear_pressure,
+        pressure_func=_power_pressure,
         pressure_data=pressure_data,
     )
     (pipe_default, contacts_default), (pipe_callback, contacts_callback) = _make_pipelines(

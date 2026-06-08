@@ -339,10 +339,13 @@ class HydroelasticSDF:
         pressure_data: Any = None
         """Optional ``wp.struct`` instance carrying state for :attr:`pressure_func`.
 
-        When ``None`` a default :class:`LinearPressureData` containing
+        When both :attr:`pressure_func` and :attr:`pressure_data` are ``None``,
+        a default :class:`LinearPressureData` containing
         ``Model.shape_material_kh`` is constructed automatically. If a custom
-        data struct stores finalized model arrays such as
-        ``Model.shape_material_kh``, create the model first with
+        :attr:`pressure_func` is provided, a matching ``wp.struct`` instance
+        must also be supplied here; otherwise construction raises
+        ``ValueError``. If a custom data struct stores finalized model arrays
+        such as ``Model.shape_material_kh``, create the model first with
         ``ModelBuilder.finalize()``, then assign those arrays to
         ``pressure_data`` before constructing :class:`HydroelasticSDF` or
         :class:`~newton.CollisionPipeline`. The ``shape_idx`` argument passed
@@ -1218,6 +1221,8 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any):
                         vb = texture_sample_sdf(sdf_data_b, local_pos_b)
                         va = texture_sample_sdf(sdf_data_a, point_a)
                         is_valid = not (wp.isnan(vb) or wp.isnan(va))
+                        if not is_valid or va > r + gap_a or vb > r + gap_b:
+                            continue
 
                         # Bound p_a, p_b across the subblock using monotonicity of
                         # pressure_func in signed_depth (assumed non-increasing) and
@@ -1235,8 +1240,7 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any):
                         pb_hi = pressure_func(vb - r, shape_b, pressure_data)
                         skip = pa_hi < pb_lo or pb_hi < pa_lo
 
-                        # check that subblock is within contact gap on both sides
-                        if skip or va > r + gap_a or vb > r + gap_b or not is_valid:
+                        if skip:
                             continue
                         num_iso_subblocks += 1
                         subblock_idx |= encode_coords_8(x_local, y_local, z_local)
