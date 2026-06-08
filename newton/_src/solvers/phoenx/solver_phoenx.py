@@ -168,6 +168,7 @@ from newton._src.solvers.phoenx.solver_kernels import (
 )
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
+    _PER_WORLD_FAST_FAMILIES,
     _STRAGGLER_BLOCK_DIM,
     _build_scatter_keys_kernel,
     _choose_fast_tail_worlds_per_block,
@@ -886,6 +887,11 @@ class PhoenXWorld:
         self._world_color_starts: wp.array2d[wp.int32] = wp.zeros(
             (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
         )
+        self._world_color_family_starts: wp.array2d[wp.int32] = wp.zeros(
+            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
+            dtype=wp.int32,
+            device=self.device,
+        )
         self._world_csr_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         # Sized nw+1 so the inclusive scan output lands in world_csr_offsets.
         self._world_totals_shifted: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
@@ -906,6 +912,16 @@ class PhoenXWorld:
         )
         self._per_world_greedy_color_offsets: wp.array2d[wp.int32] = wp.zeros(
             (nw, int(GREEDY_MAX_COLORS)), dtype=wp.int32, device=self.device
+        )
+        self._per_world_greedy_color_family_count: wp.array2d[wp.int32] = wp.zeros(
+            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
+            dtype=wp.int32,
+            device=self.device,
+        )
+        self._per_world_greedy_color_family_offsets: wp.array2d[wp.int32] = wp.zeros(
+            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
+            dtype=wp.int32,
+            device=self.device,
         )
         self._per_world_greedy_overflow: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
 
@@ -1123,7 +1139,12 @@ class PhoenXWorld:
                 "enable_column_timers": self.enable_column_timers,
             }
             for fixed_tpw in self._fast_tail_auto_fixed_choices():
-                fast_tail_kw = {**base_fast_tail_kw, "fixed_tpw": fixed_tpw, "guard_tpw": self._tpw_auto}
+                fast_tail_kw = {
+                    **base_fast_tail_kw,
+                    "fixed_tpw": fixed_tpw,
+                    "guard_tpw": self._tpw_auto,
+                    "family_split": self._fast_tail_family_split(),
+                }
                 kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw))
                 kernels.append(get_fast_tail_kernel(kind="relax", **fast_tail_kw))
 
@@ -3062,6 +3083,7 @@ class PhoenXWorld:
                     self._per_world_element_count,
                     self._per_world_elements,
                     self._elements,
+                    self._element_family,
                     self._partitioner._adjacency_section_end_indices,
                     self._partitioner._vertex_to_adjacent_elements,
                     self._partitioner._packed_priorities,
@@ -3071,8 +3093,11 @@ class PhoenXWorld:
                     self._per_world_assigned,
                     self._per_world_greedy_color_count,
                     self._per_world_greedy_color_offsets,
+                    self._per_world_greedy_color_family_count,
+                    self._per_world_greedy_color_family_offsets,
                     self._world_element_ids_by_color,
                     self._world_color_starts,
+                    self._world_color_family_starts,
                     self._world_num_colors,
                     self._per_world_greedy_overflow,
                 ],
@@ -3160,6 +3185,7 @@ class PhoenXWorld:
                 enable_column_timers=self.enable_column_timers,
                 fixed_tpw=fixed_tpw,
                 guard_tpw=self._tpw_auto,
+                family_split=self._fast_tail_family_split(),
             )
             wp.launch(
                 kernel,
@@ -3174,6 +3200,7 @@ class PhoenXWorld:
                     wp.float32(self.sor_boost),
                     self._world_element_ids_by_color,
                     self._world_color_starts,
+                    self._world_color_family_starts,
                     self._world_csr_offsets,
                     self._world_num_colors,
                     self._contact_container,
@@ -3470,6 +3497,16 @@ class PhoenXWorld:
                 has_sleeping=False,
                 has_soft_contact_pd=False,
             ),
+        )
+
+    def _fast_tail_family_split(self) -> bool:
+        """Use rigid joint/contact family subranges in multi-world fast-tail."""
+        return bool(
+            self.step_layout != "single_world"
+            and self._use_greedy_coloring
+            and self.num_joints > 0
+            and self.max_contact_columns > 0
+            and self._contact_offset == self.num_joints
         )
 
     def _fast_tail_worlds_per_block(self) -> int:

@@ -143,6 +143,7 @@ _SOFT_HEX_OFF_BODY8 = wp.constant(wp.int32(8))
 
 __all__ = [
     "_PER_WORLD_COLORING_BLOCK_DIM",
+    "_PER_WORLD_FAST_FAMILIES",
     "_STRAGGLER_BLOCK_DIM",
     "_build_scatter_keys_kernel",
     "_choose_fast_tail_worlds_per_block",
@@ -291,6 +292,7 @@ def _pick_threads_per_world_kernel(
 
 
 _PER_WORLD_COLORING_BLOCK_DIM: int = 64
+_PER_WORLD_FAST_FAMILIES: int = 2
 
 
 @wp.kernel(enable_backward=False)
@@ -505,6 +507,7 @@ def _per_world_greedy_coloring_kernel(
     world_elements: wp.array[wp.int32],  # [total] flat cid stream, sorted by world
     # graph data
     elements: wp.array[ElementInteractionData],
+    element_family: wp.array[wp.int32],
     adjacency_end: wp.array[wp.int32],  # [num_bodies]
     vertex_to_elements: wp.array[wp.int32],  # [cap * MAX_BODIES]
     packed_priorities: wp.array[wp.int32],  # [capacity] (cost << 24) | (random & 0xFFFFFF)
@@ -513,9 +516,12 @@ def _per_world_greedy_coloring_kernel(
     assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
     color_count: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS] histogram bucket
     color_offsets: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS] live cursor for scatter
+    color_family_count: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
+    color_family_offsets: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
     # outputs
     world_element_ids_by_color: wp.array[wp.int32],  # [total] sorted-by-colour per world
     world_color_starts: wp.array2d[wp.int32],  # [nw, MAX_COLORS+1] per-world prefix
+    world_color_family_starts: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
     world_num_colors: wp.array[wp.int32],  # [nw]
     overflow_flag: wp.array[wp.int32],  # [1] set if any world exceeds GREEDY_MAX_COLORS
 ):
@@ -550,6 +556,16 @@ def _per_world_greedy_coloring_kernel(
         if slot < GREEDY_MAX_COLORS:
             color_count[w, slot] = wp.int32(0)
             color_offsets[w, slot] = wp.int32(0)
+        offset = offset + stride
+
+    family_slots = wp.int32(GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES)
+    offset = wp.int32(0)
+    while offset < family_slots:
+        slot = offset + lane
+        if slot < family_slots:
+            color_family_count[w, slot] = wp.int32(0)
+            color_family_offsets[w, slot] = wp.int32(0)
+            world_color_family_starts[w, slot] = wp.int32(0)
         offset = offset + stride
 
     if lane == wp.int32(0):
@@ -610,6 +626,15 @@ def _per_world_greedy_coloring_kernel(
                         else:
                             assigned[eid] = c + wp.int32(1)
                             wp.atomic_add(color_count, w, c, wp.int32(1))
+                            family = element_family[eid]
+                            if family != wp.int32(0):
+                                family = wp.int32(1)
+                            wp.atomic_add(
+                                color_family_count,
+                                w,
+                                c * wp.int32(_PER_WORLD_FAST_FAMILIES) + family,
+                                wp.int32(1),
+                            )
                             committed_here = wp.int32(1)
 
             committed_tile = wp.tile(committed_here)
@@ -629,20 +654,28 @@ def _per_world_greedy_coloring_kernel(
         overflow_flag[0] = wp.int32(1)
 
     # CSR build: exclusive prefix on color_count[w, :] (lane 0; 64 entries).
+    # Each colour is also split into rigid joint/contact subranges so the
+    # fast-tail iterate can route the repeated solve with static dispatch.
     if lane == wp.int32(0):
         running = wp.int32(0)
         last_used = wp.int32(-1)
         for c in range(GREEDY_MAX_COLORS):
             world_color_starts[w, c] = running
-            cnt = color_count[w, c]
-            if cnt > wp.int32(0):
+            family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
+            family_running = wp.int32(0)
+            for f in range(_PER_WORLD_FAST_FAMILIES):
+                slot = family_base + wp.int32(f)
+                color_family_offsets[w, slot] = running + family_running
+                world_color_family_starts[w, slot] = running + family_running
+                family_running = family_running + color_family_count[w, slot]
+            if family_running > wp.int32(0):
                 last_used = c
-            running = running + cnt
+            running = running + family_running
         world_color_starts[w, GREEDY_MAX_COLORS] = running
         world_num_colors[w] = last_used + wp.int32(1)
     _sync_threads()
 
-    # Scatter ids into per-world CSR slices via atomic_add(color_offsets[w, c]).
+    # Scatter ids into per-world CSR slices via per-family cursors.
     offset = wp.int32(0)
     while offset < count:
         slot = offset + lane
@@ -651,9 +684,12 @@ def _per_world_greedy_coloring_kernel(
             a = assigned[eid]
             if a > wp.int32(0):
                 c = a - wp.int32(1)
-                local_slot = wp.atomic_add(color_offsets, w, c, wp.int32(1))
-                start = world_color_starts[w, c]
-                world_element_ids_by_color[base + start + local_slot] = eid
+                family = element_family[eid]
+                if family != wp.int32(0):
+                    family = wp.int32(1)
+                family_slot = c * wp.int32(_PER_WORLD_FAST_FAMILIES) + family
+                local_slot = wp.atomic_add(color_family_offsets, w, family_slot, wp.int32(1))
+                world_element_ids_by_color[base + local_slot] = eid
         offset = offset + stride
 
 
@@ -675,6 +711,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
+    family_split: bool = False,
 ):
     """Build the multi-world fused prepare + iterate fast-tail kernel."""
 
@@ -688,6 +725,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         sor_boost: wp.float32,
         world_element_ids_by_color: wp.array[wp.int32],
         world_color_starts: wp.array2d[wp.int32],
+        world_color_family_starts: wp.array2d[wp.int32],
         world_csr_offsets: wp.array[wp.int32],
         world_num_colors: wp.array[wp.int32],
         cc: ContactContainer,
@@ -839,13 +877,18 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                 end = world_base + world_color_starts[world_id, c + 1]
                 count = end - start
 
-                base = local_tid
-                while base < count:
-                    cid = world_element_ids_by_color[start + base]
-                    _t0 = wp.uint64(0)
-                    if wp.static(enable_column_timers):
-                        _t0 = read_global_timer_ns()
-                    if wp.static(has_joints and not has_contacts):
+                if wp.static(family_split):
+                    family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
+                    joint_start = world_base + world_color_family_starts[world_id, family_base]
+                    contact_start = world_base + world_color_family_starts[world_id, family_base + wp.int32(1)]
+                    count_joints = contact_start - joint_start
+
+                    base = local_tid
+                    while base < count_joints:
+                        cid = world_element_ids_by_color[joint_start + base]
+                        _t0 = wp.uint64(0)
+                        if wp.static(enable_column_timers):
+                            _t0 = read_global_timer_ns()
                         if wp.static(revolute_only):
                             revolute_iterate_multi(
                                 constraints,
@@ -878,44 +921,16 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             constraint_accumulate_time_us(
                                 constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
                             )
-                    elif cid < num_joints:
-                        if wp.static(revolute_only):
-                            revolute_iterate_multi(
-                                constraints,
-                                cid,
-                                bodies,
-                                particles,
-                                copy_state,
-                                num_bodies,
-                                wp.int32(0),
-                                idt,
-                                sor_boost,
-                                True,
-                                inner_sweeps,
-                            )
-                        else:
-                            actuated_double_ball_socket_iterate_multi(
-                                constraints,
-                                cid,
-                                bodies,
-                                particles,
-                                copy_state,
-                                num_bodies,
-                                wp.int32(0),
-                                idt,
-                                sor_boost,
-                                True,
-                                inner_sweeps,
-                            )
-                        if wp.static(enable_column_timers):
-                            constraint_accumulate_time_us(
-                                constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
-                            )
-                    else:
+                        base += tpw
+
+                    count_contacts = end - contact_start
+                    base = local_tid
+                    while base < count_contacts:
+                        cid = world_element_ids_by_color[contact_start + base]
                         local_cid = cid - num_joints
-                        # Sleep-transition guard: drop contacts where both endpoints
-                        # are frozen (sleeping or non-dynamic). DCE'd when no
-                        # sleeping body could exist in the scene.
+                        _t0 = wp.uint64(0)
+                        if wp.static(enable_column_timers):
+                            _t0 = read_global_timer_ns()
                         skip_frozen = False
                         if wp.static(has_sleeping):
                             cb1 = contact_get_body1(contact_cols, local_cid)
@@ -947,7 +962,119 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             )
                         if wp.static(enable_column_timers):
                             contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
-                    base += tpw
+                        base += tpw
+                else:
+                    base = local_tid
+                    while base < count:
+                        cid = world_element_ids_by_color[start + base]
+                        _t0 = wp.uint64(0)
+                        if wp.static(enable_column_timers):
+                            _t0 = read_global_timer_ns()
+                        if wp.static(has_joints and not has_contacts):
+                            if wp.static(revolute_only):
+                                revolute_iterate_multi(
+                                    constraints,
+                                    cid,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    wp.int32(0),
+                                    idt,
+                                    sor_boost,
+                                    True,
+                                    inner_sweeps,
+                                )
+                            else:
+                                actuated_double_ball_socket_iterate_multi(
+                                    constraints,
+                                    cid,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    wp.int32(0),
+                                    idt,
+                                    sor_boost,
+                                    True,
+                                    inner_sweeps,
+                                )
+                            if wp.static(enable_column_timers):
+                                constraint_accumulate_time_us(
+                                    constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                )
+                        elif cid < num_joints:
+                            if wp.static(revolute_only):
+                                revolute_iterate_multi(
+                                    constraints,
+                                    cid,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    wp.int32(0),
+                                    idt,
+                                    sor_boost,
+                                    True,
+                                    inner_sweeps,
+                                )
+                            else:
+                                actuated_double_ball_socket_iterate_multi(
+                                    constraints,
+                                    cid,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    wp.int32(0),
+                                    idt,
+                                    sor_boost,
+                                    True,
+                                    inner_sweeps,
+                                )
+                            if wp.static(enable_column_timers):
+                                constraint_accumulate_time_us(
+                                    constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                                )
+                        else:
+                            local_cid = cid - num_joints
+                            # Sleep-transition guard: drop contacts where both endpoints
+                            # are frozen (sleeping or non-dynamic). DCE'd when no
+                            # sleeping body could exist in the scene.
+                            skip_frozen = False
+                            if wp.static(has_sleeping):
+                                cb1 = contact_get_body1(contact_cols, local_cid)
+                                cb2 = contact_get_body2(contact_cols, local_cid)
+                                if cb1 >= 0 and cb1 < num_bodies and cb2 >= 0 and cb2 < num_bodies:
+                                    fr1 = (bodies.motion_type[cb1] != MOTION_DYNAMIC) or (
+                                        bodies.island_root[cb1] >= wp.int32(0)
+                                    )
+                                    fr2 = (bodies.motion_type[cb2] != MOTION_DYNAMIC) or (
+                                        bodies.island_root[cb2] >= wp.int32(0)
+                                    )
+                                    if fr1 and fr2:
+                                        skip_frozen = True
+                            if not skip_frozen:
+                                contact_iterate_multi(
+                                    contact_cols,
+                                    local_cid,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    True,
+                                    inner_sweeps,
+                                    copy_state,
+                                    wp.int32(0),
+                                    sor_boost,
+                                )
+                            if wp.static(enable_column_timers):
+                                contact_accumulate_time_us(
+                                    contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns())
+                                )
+                        base += tpw
 
                 _sync_warp_mask(sync_mask)
                 c += 1
@@ -1261,6 +1388,7 @@ def get_fast_tail_kernel(
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
+    family_split: bool = False,
 ):
     """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``
     or ``"relax"``. Each (kind, revolute_only, has_joints,
@@ -1279,6 +1407,7 @@ def get_fast_tail_kernel(
             enable_column_timers=enable_column_timers,
             fixed_tpw=fixed_tpw,
             guard_tpw=guard_tpw,
+            family_split=family_split,
         )
     if kind == "relax":
         return _make_fast_tail_relax_kernel(
