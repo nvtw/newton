@@ -147,12 +147,12 @@ class TestSolverPhoenX(unittest.TestCase):
         model = _make_box_model(box_z=0.2)
         solver = newton.solvers.SolverPhoenX(
             model,
-            substeps=2,
+            substeps=4,
             solver_iterations=1,
             step_layout="single_world",
-            prepare_refresh_stride=2,
+            prepare_refresh_stride=3,
         )
-        self.assertEqual(solver.world.prepare_refresh_stride, 2)
+        self.assertEqual(solver.world.prepare_refresh_stride, 3)
 
     def test_box_settles_on_plane(self) -> None:
         """Dynamic cube on a plane -- after 1 s the COM z must be

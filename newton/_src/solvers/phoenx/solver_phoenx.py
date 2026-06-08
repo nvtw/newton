@@ -430,8 +430,8 @@ class PhoenXWorld:
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``1`` preserves
-                the exact default; currently ``2`` is the only supported
-                non-default value.
+                the exact default. Contact worlds currently support up
+                to ``3``; joint-only worlds may use larger values.
             gravity: 3-tuple or iterable of ``num_worlds`` 3-tuples.
             rigid_contact_max: Sizes per-contact state. ``0`` disables
                 contacts.
@@ -571,11 +571,12 @@ class PhoenXWorld:
         self.prepare_refresh_stride: int = int(prepare_refresh_stride)
         if self.prepare_refresh_stride < 1:
             raise ValueError(f"prepare_refresh_stride must be >= 1 (got {self.prepare_refresh_stride})")
-        if self.prepare_refresh_stride > 2:
+        contact_capacity_hint = int(max_contact_columns if max_contact_columns is not None else rigid_contact_max)
+        if self.prepare_refresh_stride > 3 and contact_capacity_hint > 0:
             raise NotImplementedError(
-                f"prepare_refresh_stride > 2 is currently unsupported (got {self.prepare_refresh_stride})"
+                "prepare_refresh_stride > 3 currently supports joint-only rigid worlds; "
+                "contact worlds should refresh at least every third substep"
             )
-
         # SOR boost (successive over-relaxation): every iterate
         # multiplies its computed delta lambda by this factor before
         # clamp/apply. 1.0 = vanilla PGS. Values in (1.0, 2.0) trade

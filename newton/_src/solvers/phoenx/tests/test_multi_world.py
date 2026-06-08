@@ -202,11 +202,11 @@ class TestPhoenXMultiWorld(unittest.TestCase):
                 err_msg=f"world {w} cube diverged from world 0",
             )
 
-    def test_ball_socket_prepare_refresh_stride_two(self) -> None:
-        """Ball-socket joints can reuse cached prepare data on alternate substeps."""
+    def test_ball_socket_prepare_refresh_stride_four(self) -> None:
+        """Ball-socket joints can reuse cached prepare data for a full 4-substep frame."""
         device = wp.get_device("cuda:0")
         num_worlds = 8
-        world, cube_slots = _build_n_pendulums(num_worlds=num_worlds, prepare_refresh_stride=2, device=device)
+        world, cube_slots = _build_n_pendulums(num_worlds=num_worlds, prepare_refresh_stride=4, device=device)
         _run_frames(world, 30)
         positions = world.bodies.position.numpy()
         self.assertTrue(np.all(np.isfinite(positions[cube_slots])), "non-finite ball-socket positions")
@@ -216,7 +216,7 @@ class TestPhoenXMultiWorld(unittest.TestCase):
                 positions[cube_slots[w]],
                 ref,
                 atol=1.0e-4,
-                err_msg=f"world {w} stride-2 cube diverged from world 0",
+                err_msg=f"world {w} stride-4 cube diverged from world 0",
             )
 
     def test_world_independence(self) -> None:

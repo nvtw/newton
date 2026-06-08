@@ -140,13 +140,37 @@ class TestPrepareRefreshStride(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "prepare_refresh_stride must be >= 1"):
             PhoenXWorld(**_make_kwargs(num_bodies=2, rigid_contact_max=1), prepare_refresh_stride=0)
 
-    def test_rejects_stride_above_two(self) -> None:
-        with self.assertRaisesRegex(NotImplementedError, "prepare_refresh_stride > 2"):
+    def test_accepts_contact_stride_three(self) -> None:
+        w = PhoenXWorld(
+            **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
+            step_layout="single_world",
+            prepare_refresh_stride=3,
+        )
+        self.assertEqual(w.prepare_refresh_stride, 3)
+        for substep, expected in ((0, True), (1, False), (2, False), (3, True)):
+            with self.subTest(substep=substep):
+                w._current_substep_index = substep
+                self.assertEqual(w._refresh_prepare_this_substep(), expected)
+
+    def test_rejects_contact_stride_above_three(self) -> None:
+        with self.assertRaisesRegex(NotImplementedError, "contact worlds"):
             PhoenXWorld(
                 **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
                 step_layout="single_world",
-                prepare_refresh_stride=3,
+                prepare_refresh_stride=4,
             )
+
+    def test_accepts_joint_only_stride_four(self) -> None:
+        w = PhoenXWorld(
+            **_make_kwargs(num_bodies=2, num_joints=1, rigid_contact_max=0),
+            step_layout="single_world",
+            prepare_refresh_stride=4,
+        )
+        self.assertEqual(w.prepare_refresh_stride, 4)
+        for substep, expected in ((0, True), (1, False), (2, False), (3, False), (4, True)):
+            with self.subTest(substep=substep):
+                w._current_substep_index = substep
+                self.assertEqual(w._refresh_prepare_this_substep(), expected)
 
     def test_multi_world_stride_schedule(self) -> None:
         w = PhoenXWorld(

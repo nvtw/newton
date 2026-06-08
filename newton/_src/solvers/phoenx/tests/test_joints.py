@@ -453,7 +453,7 @@ class TestPhoenXActuatedDoubleBallSocket(unittest.TestCase):
         )
 
     def test_revolute_cached_prepare_stride_matches_default(self) -> None:
-        """Stride-2 prepare reuse stays close to per-substep prepare."""
+        """Cached prepare reuse stays close to per-substep prepare."""
 
         def _run(stride: int, step_layout: str) -> tuple[np.ndarray, np.ndarray]:
             anchor = (0.0, 0.0, 1.0)
@@ -477,12 +477,22 @@ class TestPhoenXActuatedDoubleBallSocket(unittest.TestCase):
         for step_layout in ("multi_world", "single_world"):
             with self.subTest(step_layout=step_layout):
                 pos_ref, vel_ref = _run(1, step_layout)
-                pos_cached, vel_cached = _run(2, step_layout)
+                for stride in (2, 3):
+                    with self.subTest(step_layout=step_layout, stride=stride):
+                        pos_cached, vel_cached = _run(stride, step_layout)
 
-                pos_delta = float(np.linalg.norm(pos_cached - pos_ref))
-                vel_delta = float(np.linalg.norm(vel_cached - vel_ref))
-                self.assertLess(pos_delta, 0.05, f"cached prepare position delta too high: {pos_delta:.4f} m")
-                self.assertLess(vel_delta, 0.25, f"cached prepare velocity delta too high: {vel_delta:.4f} m/s")
+                        pos_delta = float(np.linalg.norm(pos_cached - pos_ref))
+                        vel_delta = float(np.linalg.norm(vel_cached - vel_ref))
+                        self.assertLess(
+                            pos_delta,
+                            0.05,
+                            f"cached prepare stride {stride} position delta too high: {pos_delta:.4f} m",
+                        )
+                        self.assertLess(
+                            vel_delta,
+                            0.25,
+                            f"cached prepare stride {stride} velocity delta too high: {vel_delta:.4f} m/s",
+                        )
 
     def test_prismatic_slide_with_drive(self) -> None:
         """Prismatic joint with a position drive: the pendulum

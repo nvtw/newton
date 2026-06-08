@@ -666,13 +666,13 @@ class TestPhoenXSolverStacking(unittest.TestCase):
         # signals the contact row isn't holding.
         self.assertLess(float(np.linalg.norm(vel)), 0.05)
 
-    def test_multi_world_cached_prepare_stride_rests_on_plane(self) -> None:
-        """Stride-2 cached prepare works on the multi-world fast-tail path."""
+    def test_multi_world_cached_prepare_stride_three_rests_on_plane(self) -> None:
+        """Stride-3 cached prepare works on the multi-world fast-tail path."""
         scene = _PhoenXScene(
             substeps=4,
             solver_iterations=8,
             step_layout="multi_world",
-            prepare_refresh_stride=2,
+            prepare_refresh_stride=3,
         )
         scene.add_ground_plane()
         box = scene.add_box(
