@@ -45,7 +45,7 @@ def _filled_int(value: int, count: int, device: wp.context.Devicelike) -> wp.arr
     return wp.array(np.full(count, value, dtype=np.int32), dtype=wp.int32, device=device)
 
 
-def _build_one_world_builder() -> newton.ModelBuilder:
+def _build_one_world_builder(pairs_per_world: int = 1) -> newton.ModelBuilder:
     builder = newton.ModelBuilder()
     builder.default_shape_cfg.ke = 1.0e4
     builder.default_shape_cfg.kd = 5.0e2
@@ -54,26 +54,34 @@ def _build_one_world_builder() -> newton.ModelBuilder:
     builder.add_ground_plane()
 
     sphere_cfg = newton.ModelBuilder.ShapeConfig(density=1000.0, gap=0.01)
-    anchor = builder.add_body(
-        xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity()),
-    )
-    builder.add_shape_sphere(anchor, radius=0.08, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+    pairs = max(1, int(pairs_per_world))
+    side = int(np.ceil(np.sqrt(pairs)))
+    for pair in range(pairs):
+        row = pair // side
+        col = pair - row * side
+        dx = 1.35 * float(col)
+        dy = 0.45 * float(row)
 
-    pendulum = builder.add_body(
-        xform=wp.transform(p=wp.vec3(0.25, 0.0, 0.78), q=wp.quat_identity()),
-    )
-    builder.add_shape_sphere(pendulum, radius=0.10, cfg=sphere_cfg)
+        anchor = builder.add_body(
+            xform=wp.transform(p=wp.vec3(dx, dy, 1.0), q=wp.quat_identity()),
+        )
+        builder.add_shape_sphere(anchor, radius=0.08, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
 
-    box = builder.add_body(
-        xform=wp.transform(p=wp.vec3(0.75, 0.0, 0.10), q=wp.quat_identity()),
-    )
-    builder.add_shape_box(
-        box,
-        hx=0.10,
-        hy=0.10,
-        hz=0.10,
-        cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, gap=0.01),
-    )
+        pendulum = builder.add_body(
+            xform=wp.transform(p=wp.vec3(dx + 0.25, dy, 0.78), q=wp.quat_identity()),
+        )
+        builder.add_shape_sphere(pendulum, radius=0.10, cfg=sphere_cfg)
+
+        box = builder.add_body(
+            xform=wp.transform(p=wp.vec3(dx + 0.75, dy, 0.10), q=wp.quat_identity()),
+        )
+        builder.add_shape_box(
+            box,
+            hx=0.10,
+            hy=0.10,
+            hz=0.10,
+            cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, gap=0.01),
+        )
 
     return builder
 
@@ -92,13 +100,15 @@ def build_raw_mixed_world(
     substeps: int,
     solver_iterations: int,
     prepare_refresh_stride: int,
+    pairs_per_world: int = 1,
     tpw="auto",
     device: wp.context.Devicelike = None,
 ) -> tuple[PhoenXWorld, Callable[[], None]]:
     if device is None:
         device = wp.get_device("cuda:0")
 
-    one_world = _build_one_world_builder()
+    pairs_per_world = max(1, int(pairs_per_world))
+    one_world = _build_one_world_builder(pairs_per_world)
     builder = newton.ModelBuilder()
     builder.replicate(one_world, num_worlds)
     model = builder.finalize(skip_shape_contact_pairs=True)
@@ -147,7 +157,7 @@ def build_raw_mixed_world(
     shape_body_np = model.shape_body.numpy()
     shape_body = wp.array(np.where(shape_body_np < 0, 0, shape_body_np + 1), dtype=wp.int32, device=device)
 
-    num_joints = num_worlds
+    num_joints = num_worlds * pairs_per_world
     constraints = PhoenXWorld.make_constraint_container(num_joints=num_joints, device=device)
     world = PhoenXWorld(
         bodies=bodies,
@@ -165,16 +175,24 @@ def build_raw_mixed_world(
     )
     _force_tpw(world, tpw)
 
-    # The replicated builder lays out each world as anchor, pendulum, contact box.
+    # The replicated builder lays out each pair as anchor, pendulum, contact box.
     body1 = np.empty(num_joints, dtype=np.int32)
     body2 = np.empty(num_joints, dtype=np.int32)
     anchor1 = np.zeros((num_joints, 3), dtype=np.float32)
     anchor2 = np.zeros((num_joints, 3), dtype=np.float32)
+    side = int(np.ceil(np.sqrt(pairs_per_world)))
     for w in range(num_worlds):
-        body_base = 3 * w
-        body1[w] = body_base + 1
-        body2[w] = body_base + 2
-        anchor1[w] = (0.0, 0.0, 1.0)
+        world_body_base = 3 * pairs_per_world * w
+        for pair in range(pairs_per_world):
+            row = pair // side
+            col = pair - row * side
+            dx = 1.35 * float(col)
+            dy = 0.45 * float(row)
+            jid = w * pairs_per_world + pair
+            body_base = world_body_base + 3 * pair
+            body1[jid] = body_base + 1
+            body2[jid] = body_base + 2
+            anchor1[jid] = (dx, dy, 1.0)
 
     world.initialize_actuated_double_ball_socket_joints(
         body1=wp.array(body1, dtype=wp.int32, device=device),
@@ -234,6 +252,7 @@ def _run_case(
     substeps: int,
     solver_iterations: int,
     prepare_refresh_stride: int,
+    pairs_per_world: int,
     n_runs: int,
     warmup: int,
     trials: int,
@@ -243,6 +262,7 @@ def _run_case(
         substeps=substeps,
         solver_iterations=solver_iterations,
         prepare_refresh_stride=prepare_refresh_stride,
+        pairs_per_world=pairs_per_world,
         tpw=tpw,
     )
     for _ in range(5):
@@ -262,6 +282,7 @@ def main() -> None:
     parser.add_argument("--substeps", type=int, default=1)
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--prepare-refresh-stride", type=int, default=1)
+    parser.add_argument("--pairs-per-world", type=int, default=1)
     args = parser.parse_args()
 
     wp.init()
@@ -275,6 +296,7 @@ def main() -> None:
             substeps=args.substeps,
             solver_iterations=args.solver_iterations,
             prepare_refresh_stride=args.prepare_refresh_stride,
+            pairs_per_world=args.pairs_per_world,
             n_runs=args.n_runs,
             warmup=args.warmup,
             trials=args.trials,
