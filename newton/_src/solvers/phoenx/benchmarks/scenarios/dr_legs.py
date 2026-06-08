@@ -63,6 +63,7 @@ def build(
     animation: bool = True,
     animation_speed: float = 1.0,
     armature: float = 0.001,
+    step_layout: str = "multi_world",
 ) -> SceneHandle:
     """Build a DR-Legs-on-ground PhoenX scene."""
     if solver_name != "phoenx":
@@ -122,6 +123,7 @@ def build(
         substeps=substeps,
         solver_iterations=solver_iterations,
         velocity_iterations=velocity_iterations,
+        step_layout=step_layout,
     )
 
     state_0 = model.state()

@@ -29,6 +29,8 @@ def build(
     substeps: int,
     solver_iterations: int,
     velocity_iterations: int = 1,
+    *,
+    step_layout: str = "multi_world",
 ) -> SceneHandle:
     """Build a G1-on-ground scene with ``num_worlds`` replicated
     humanoids driven by ``solver_name`` ('phoenx' or 'mujoco')."""
@@ -78,6 +80,7 @@ def build(
             substeps=substeps,
             solver_iterations=solver_iterations,
             velocity_iterations=velocity_iterations,
+            step_layout=step_layout,
         )
         outer_steps = 1
         call_dt = frame_dt
