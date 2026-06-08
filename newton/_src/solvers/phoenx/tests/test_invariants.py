@@ -148,13 +148,17 @@ class TestPrepareRefreshStride(unittest.TestCase):
                 prepare_refresh_stride=3,
             )
 
-    def test_rejects_multi_world_stride(self) -> None:
-        with self.assertRaisesRegex(NotImplementedError, "step_layout='single_world'"):
-            PhoenXWorld(
-                **_make_kwargs(num_bodies=2, rigid_contact_max=1),
-                step_layout="multi_world",
-                prepare_refresh_stride=2,
-            )
+    def test_multi_world_stride_schedule(self) -> None:
+        w = PhoenXWorld(
+            **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
+            step_layout="multi_world",
+            prepare_refresh_stride=2,
+        )
+        self.assertEqual(w.prepare_refresh_stride, 2)
+        w._current_substep_index = 0
+        self.assertTrue(w._refresh_prepare_this_substep())
+        w._current_substep_index = 1
+        self.assertFalse(w._refresh_prepare_this_substep())
 
     def test_rejects_deformable_stride(self) -> None:
         with self.assertRaisesRegex(NotImplementedError, "rigid contact/revolute worlds"):

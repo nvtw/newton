@@ -668,6 +668,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
     *,
     revolute_only: bool,
     has_sleeping: bool,
+    cached_prepare: bool = False,
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
@@ -742,7 +743,11 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                 if wp.static(enable_column_timers):
                     _t0 = read_global_timer_ns()
                 if cid < num_joints:
-                    if wp.static(revolute_only):
+                    if wp.static(cached_prepare):
+                        revolute_cached_warmstart(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
+                    elif wp.static(revolute_only):
                         revolute_prepare_for_iteration(
                             constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
                         )
@@ -756,21 +761,35 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                         )
                 else:
                     local_cid = cid - num_joints
-                    # Multi-world fast-tail: mass splitting is rejected at
-                    # construction, so call the lean variant to keep the
-                    # slot lookup out of the kernel binary.
-                    contact_prepare_for_iteration_lean(
-                        contact_cols,
-                        local_cid,
-                        bodies,
-                        particles,
-                        num_bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        copy_state,
-                        wp.int32(0),
-                    )
+                    if wp.static(cached_prepare):
+                        contact_cached_warmstart_lean(
+                            contact_cols,
+                            local_cid,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            copy_state,
+                            wp.int32(0),
+                        )
+                    else:
+                        # Multi-world fast-tail: mass splitting is rejected at
+                        # construction, so call the lean variant to keep the
+                        # slot lookup out of the kernel binary.
+                        contact_prepare_for_iteration_lean(
+                            contact_cols,
+                            local_cid,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            copy_state,
+                            wp.int32(0),
+                        )
                     if wp.static(enable_column_timers):
                         contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
                 base += tpw
@@ -1138,20 +1157,22 @@ def get_fast_tail_kernel(
     kind: str,
     revolute_only: bool,
     has_sleeping: bool = False,
+    cached_prepare: bool = False,
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
 ):
     """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``
     or ``"relax"``. Each (kind, revolute_only, has_sleeping,
-    enable_column_timers, fixed_tpw, guard_tpw) tuple is cached after first
-    build by the underlying factory's ``functools.cache``. ``fixed_tpw=0``
+    cached_prepare, enable_column_timers, fixed_tpw, guard_tpw) tuple is cached
+    after first build by the underlying factory's ``functools.cache``. ``fixed_tpw=0``
     keeps the graph-capture-safe dynamic threads-per-world buffer read;
     ``guard_tpw`` keeps fixed variants selectable in auto mode."""
     if kind == "prepare_plus_iterate":
         return _make_fast_tail_prepare_plus_iterate_kernel(
             revolute_only=revolute_only,
             has_sleeping=has_sleeping,
+            cached_prepare=cached_prepare,
             enable_column_timers=enable_column_timers,
             fixed_tpw=fixed_tpw,
             guard_tpw=guard_tpw,

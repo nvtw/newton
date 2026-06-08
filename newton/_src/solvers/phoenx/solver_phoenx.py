@@ -427,10 +427,10 @@ class PhoenXWorld:
                 schedule. ``velocity_iterations=1`` enables TGS-soft
                 relax (recommended for tall stacks).
             prepare_refresh_stride: Refresh cached per-row prepare data
-                every N substeps in rigid contact/revolute single-world
-                scenes without deformables, mass splitting, or sleeping.
-                ``1`` preserves the exact default; currently ``2`` is the
-                only supported non-default value.
+                every N substeps in rigid contact/revolute scenes without
+                deformables, mass splitting, or sleeping. ``1`` preserves
+                the exact default; currently ``2`` is the only supported
+                non-default value.
             gravity: 3-tuple or iterable of ``num_worlds`` 3-tuples.
             rigid_contact_max: Sizes per-contact state. ``0`` disables
                 contacts.
@@ -607,8 +607,6 @@ class PhoenXWorld:
         self.step_layout: str = step_layout
         if self.prepare_refresh_stride != 1:
             sleeping_requested = float(sleeping_velocity_threshold) > 0.0
-            if self.step_layout != "single_world":
-                raise NotImplementedError("prepare_refresh_stride > 1 currently requires step_layout='single_world'")
             if (
                 bool(mass_splitting)
                 or sleeping_requested
@@ -3146,11 +3144,13 @@ class PhoenXWorld:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        cached_prepare = not self._refresh_prepare_this_substep()
         for fixed_tpw in self._fast_tail_auto_fixed_choices():
             kernel = get_fast_tail_kernel(
                 kind="prepare_plus_iterate",
                 revolute_only=bool(self._use_revolute_specialization),
                 has_sleeping=bool(self._sleeping_enabled),
+                cached_prepare=bool(cached_prepare),
                 enable_column_timers=self.enable_column_timers,
                 fixed_tpw=fixed_tpw,
                 guard_tpw=self._tpw_auto,
