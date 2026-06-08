@@ -1602,6 +1602,9 @@ The ``shape_idx`` argument passed to the callback indexes those finalized model
 shape arrays directly. For simple power laws, avoid fitting both ``kh`` and an
 additional gain unless you intentionally want a redundant parameterization: only
 their product affects the resulting pressure.
+When contact reduction is enabled, Newton reduces contacts after evaluating the
+same pressure law on the hydroelastic faces; no separate linear stiffness law is
+applied to reduced penetrating contacts.
 
 See :github:`newton/examples/contacts/example_nut_bolt_hydro.py` for a worked example.
 
