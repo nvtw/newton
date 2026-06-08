@@ -932,75 +932,49 @@ def _ms_store_body_pair_lean(
 # ---------------------------------------------------------------------------
 
 
+@wp.struct
+class AxialProjectionUpdate:
+    delta: wp.float32
+    acc_drive: wp.float32
+    acc_limit: wp.float32
+    acc_friction: wp.float32
+
+
 @wp.func
-def _axial_drive_limit_iterate(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
+def _axial_project_scalar_rows(
     jv_axial: wp.float32,
     clamp: wp.int32,
-    idt: wp.float32,
     sor_boost: wp.float32,
-) -> wp.float32:
-    """Scalar drive+limit PGS step for revolute/prismatic mode.
-
-    Both modes apply a single scalar impulse ``axial_lam`` along the
-    free DoF axis. Revolute applies it as an angular impulse about
-    ``n_hat``; prismatic as a linear impulse along ``n_hat``. The
-    actuator cache (drive PD scalars, limit Box2D *or* PD scalars, the
-    warm-started accumulated impulses) is identical across both modes,
-    so the iterate math collapses to a shared helper that returns the
-    net ``lam_drive + lam_limit`` and lets the caller spread it onto
-    the body velocities in the per-mode way.
-
-    Args:
-        constraints: Shared column-major constraint storage.
-        cid: Constraint id.
-        base_offset: Dword offset of the constraint within its column.
-        jv_axial: Pre-step axial velocity residual. Revolute passes
-            ``n . (w1 - w2)``; prismatic passes ``n . (v1_anchor -
-            v2_anchor)``. See the per-mode callers for the sign
-            conventions.
-        clamp: Pre-computed limit clamp state (``_CLAMP_NONE`` / ``_CLAMP_MIN``
-            / ``_CLAMP_MAX``) from prepare.
-
-    Returns:
-        Net per-iteration axial impulse ``lam_drive + lam_limit``.
-    """
-    # Single-fetch of every actuator scalar; the compiler hoists the
-    # reads ahead of the branches so we don't pay for the ones that
-    # aren't consumed by the active path.
-    drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
-    max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
-    # ``max_lambda_drive`` was a stored ``max_force_drive * dt``; recompute
-    # inline since both inputs are already in registers (saves 1 dword/joint).
-    max_lambda_drive = max_force_drive * (wp.float32(1.0) / idt)
-    bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
-    gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
-    eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
-    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
-
-    # ---- Drive row ----------------------------------------------------
-    # The drive row is a PD spring-damper only; prepare writes
-    # ``eff_mass_drive_soft == 0`` whenever both gains are zero (OFF
-    # mode, POSITION mode with zero gains, or VELOCITY mode with
-    # ``damping_drive == 0``), so the rigid pure-velocity-motor
-    # fallback never reaches the iterate. The ``eff_mass_drive_soft ==
-    # 0`` short-circuit below is the single disable gate.
-    drive_active = drive_mode != DRIVE_MODE_OFF
-    if eff_mass_drive_soft <= 0.0:
-        drive_active = False
-
-    lam_drive = float(0.0)
+    drive_active: wp.bool,
+    max_force_drive: wp.float32,
+    max_lambda_drive: wp.float32,
+    bias_drive: wp.float32,
+    gamma_drive: wp.float32,
+    eff_mass_drive_soft: wp.float32,
+    acc_drive: wp.float32,
+    limit_active: wp.bool,
+    pd_mode_limit: wp.bool,
+    pd_mass: wp.float32,
+    pd_gamma: wp.float32,
+    pd_beta: wp.float32,
+    eff_axial: wp.float32,
+    bias_box: wp.float32,
+    mc_limit: wp.float32,
+    ic_limit: wp.float32,
+    acc_limit: wp.float32,
+    friction_active: wp.bool,
+    friction_eff_mass: wp.float32,
+    friction_gamma: wp.float32,
+    max_lambda_friction: wp.float32,
+    acc_friction: wp.float32,
+) -> AxialProjectionUpdate:
+    """Project the scalar drive, limit, and friction rows for one axial DoF."""
+    lam_drive = wp.float32(0.0)
     if drive_active:
-        # Jitter2 SpringConstraint iterate (negated once to match our
-        # ``jv = n . (w1 - w2)`` convention, which is -1 * the
-        # Jitter2 ``jv = n . (v2 - v1)`` convention):
-        #   lam = -M_eff_soft * (jv - bias + gamma * acc)
         lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
         drive_min = -BLOCK_LAMBDA_INF
         drive_max = BLOCK_LAMBDA_INF
-        if max_force_drive > 0.0:
+        if max_force_drive > wp.float32(0.0):
             drive_min = -max_lambda_drive
             drive_max = max_lambda_drive
         projection = block_project_accumulated_bounded_1(
@@ -1014,45 +988,20 @@ def _axial_drive_limit_iterate(
         )
         lam_drive = projection.delta
         acc_drive = projection.lambda_new
-        write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
 
-    # ---- Limit row ----------------------------------------------------
-    lam_limit = float(0.0)
-    if clamp != _CLAMP_NONE:
-        stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
-        damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
-        acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
-        pd_mode_limit = stiffness_limit > 0.0 or damping_limit > 0.0
+    lam_limit = wp.float32(0.0)
+    if limit_active:
         lam_limit_us = wp.float32(0.0)
         limit_mass_coeff = wp.float32(1.0)
         limit_impulse_coeff = wp.float32(0.0)
         if pd_mode_limit:
-            # Jitter2 PD: same iterate form as the drive row. ``beta``
-            # is stored *positive* (``pd_coefficients`` returns it with
-            # the Jitter2 sign); iterate subtracts it from ``jv`` so
-            # we get ``lam = -M * (jv - bias_pd + gamma * acc)``.
-            pd_mass = read_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid)
-            pd_gamma = read_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid)
-            pd_beta = read_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid)
-            if pd_mass > 0.0:
+            if pd_mass > wp.float32(0.0):
                 lam_limit_us = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
         else:
-            # Box2D soft-constraint path. ``bias_limit_box2d`` is
-            # prefolded as ``-C * bias_rate`` so the PGS step targets
-            # ``jv = -bias``.
-            eff_inv = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
-            bias_box = read_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid)
-            mc_limit = read_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid)
-            ic_limit = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
-            if eff_inv > 0.0:
-                eff_axial = 1.0 / eff_inv
+            if eff_axial > wp.float32(0.0):
                 lam_limit_us = -eff_axial * (jv_axial + bias_box)
                 limit_mass_coeff = mc_limit
                 limit_impulse_coeff = ic_limit
-        # Unilateral clamp: the limit only pushes back toward the
-        # allowed range. Positive ``acc`` reduces the cumulative
-        # position (right thing at max stop); negative ``acc``
-        # increases it (right thing at min stop).
         if clamp == _CLAMP_MAX:
             projection = block_project_accumulated_bounded_1(
                 lam_limit_us,
@@ -1075,24 +1024,9 @@ def _axial_drive_limit_iterate(
             )
         lam_limit = projection.delta
         acc_limit = projection.lambda_new
-        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
 
-    # ---- Friction row -------------------------------------------------
-    # Coulomb friction as a regularized saturated soft constraint
-    # targeting ``jv_axial = 0`` (no relative velocity at the joint).
-    # Identical iterate form as the drive PD row, but with
-    # ``bias = 0`` (no position term, no velocity target) and
-    # ``|acc| <= μ * dt``. Independent of the drive: the two
-    # accumulators saturate independently and their impulses sum.
-    # ``friction_eff_mass <= 0`` (prepare's signal when μ == 0 or
-    # ``eff_inv == 0``) disables the row entirely.
-    lam_friction = float(0.0)
-    friction_eff_mass = read_float(constraints, base_offset + _OFF_FRICTION_EFF_MASS, cid)
-    if friction_eff_mass > 0.0:
-        friction_coefficient = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
-        friction_gamma = read_float(constraints, base_offset + _OFF_FRICTION_GAMMA, cid)
-        acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
-        max_lambda_friction = friction_coefficient * (wp.float32(1.0) / idt)
+    lam_friction = wp.float32(0.0)
+    if friction_active:
         lam_friction = -friction_eff_mass * (jv_axial + friction_gamma * acc_friction)
         projection = block_project_accumulated_bounded_1(
             lam_friction,
@@ -1105,9 +1039,120 @@ def _axial_drive_limit_iterate(
         )
         lam_friction = projection.delta
         acc_friction = projection.lambda_new
-        write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, acc_friction)
 
-    return lam_drive + lam_limit + lam_friction
+    update = AxialProjectionUpdate()
+    update.delta = lam_drive + lam_limit + lam_friction
+    update.acc_drive = acc_drive
+    update.acc_limit = acc_limit
+    update.acc_friction = acc_friction
+    return update
+
+
+@wp.func
+def _axial_drive_limit_iterate(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    jv_axial: wp.float32,
+    clamp: wp.int32,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+) -> wp.float32:
+    """Scalar drive+limit PGS step for revolute/prismatic mode.
+
+    Both modes apply a single scalar impulse ``axial_lam`` along the
+    free DoF axis. Revolute applies it as an angular impulse about
+    ``n_hat``; prismatic as a linear impulse along ``n_hat``. The
+    actuator cache (drive PD scalars, limit Box2D *or* PD scalars, the
+    warm-started accumulated impulses) is identical across both modes,
+    so the iterate math collapses to a shared helper that returns the
+    net drive + limit + friction impulse and lets the caller spread it
+    onto the body velocities in the per-mode way.
+    """
+    drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
+    max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
+    max_lambda_drive = max_force_drive * (wp.float32(1.0) / idt)
+    bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
+    gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
+    eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
+    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
+
+    drive_active = drive_mode != DRIVE_MODE_OFF
+    if eff_mass_drive_soft <= wp.float32(0.0):
+        drive_active = False
+
+    acc_limit = wp.float32(0.0)
+    pd_mode_limit = False
+    pd_mass = wp.float32(0.0)
+    pd_gamma = wp.float32(0.0)
+    pd_beta = wp.float32(0.0)
+    eff_axial = wp.float32(0.0)
+    bias_box = wp.float32(0.0)
+    mc_limit = wp.float32(0.0)
+    ic_limit = wp.float32(0.0)
+    limit_active = clamp != _CLAMP_NONE
+    if limit_active:
+        stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
+        damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
+        acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
+        pd_mode_limit = stiffness_limit > wp.float32(0.0) or damping_limit > wp.float32(0.0)
+        if pd_mode_limit:
+            pd_mass = read_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid)
+            pd_gamma = read_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid)
+            pd_beta = read_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid)
+        else:
+            eff_inv = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
+            if eff_inv > wp.float32(0.0):
+                eff_axial = wp.float32(1.0) / eff_inv
+            bias_box = read_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid)
+            mc_limit = read_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid)
+            ic_limit = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
+
+    friction_eff_mass = read_float(constraints, base_offset + _OFF_FRICTION_EFF_MASS, cid)
+    friction_active = friction_eff_mass > wp.float32(0.0)
+    friction_gamma = wp.float32(0.0)
+    acc_friction = wp.float32(0.0)
+    max_lambda_friction = wp.float32(0.0)
+    if friction_active:
+        friction_coefficient = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
+        friction_gamma = read_float(constraints, base_offset + _OFF_FRICTION_GAMMA, cid)
+        acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
+        max_lambda_friction = friction_coefficient * (wp.float32(1.0) / idt)
+
+    update = _axial_project_scalar_rows(
+        jv_axial,
+        clamp,
+        sor_boost,
+        drive_active,
+        max_force_drive,
+        max_lambda_drive,
+        bias_drive,
+        gamma_drive,
+        eff_mass_drive_soft,
+        acc_drive,
+        limit_active,
+        pd_mode_limit,
+        pd_mass,
+        pd_gamma,
+        pd_beta,
+        eff_axial,
+        bias_box,
+        mc_limit,
+        ic_limit,
+        acc_limit,
+        friction_active,
+        friction_eff_mass,
+        friction_gamma,
+        max_lambda_friction,
+        acc_friction,
+    )
+    if drive_active:
+        write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, update.acc_drive)
+    if limit_active:
+        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, update.acc_limit)
+    if friction_active:
+        write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, update.acc_friction)
+    return update.delta
 
 
 # ---------------------------------------------------------------------------
@@ -3117,81 +3162,39 @@ def _revolute_iterate_at_multi(
         acc1 = update1.lambda_new
         acc2_tan = update2.lambda_new
 
-        # Axial drive + limit scalar PGS
+        # Axial drive + limit + friction scalar PGS.
         jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-
-        lam_drive = wp.float32(0.0)
-        if drive_active:
-            lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
-            drive_min = -BLOCK_LAMBDA_INF
-            drive_max = BLOCK_LAMBDA_INF
-            if max_force_drive > wp.float32(0.0):
-                drive_min = -max_lambda_drive
-                drive_max = max_lambda_drive
-            projection = block_project_accumulated_bounded_1(
-                lam_drive,
-                acc_drive,
-                wp.float32(1.0),
-                wp.float32(0.0),
-                sor_boost,
-                drive_min,
-                drive_max,
-            )
-            lam_drive = projection.delta
-            acc_drive = projection.lambda_new
-
-        lam_limit = wp.float32(0.0)
-        if limit_active:
-            lam_limit_us = wp.float32(0.0)
-            limit_mass_coeff = wp.float32(1.0)
-            limit_impulse_coeff = wp.float32(0.0)
-            if pd_mode_limit:
-                if pd_mass > wp.float32(0.0):
-                    lam_limit_us = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
-            else:
-                if eff_axial > wp.float32(0.0):
-                    lam_limit_us = -eff_axial * (jv_axial + bias_box)
-                    limit_mass_coeff = mc_limit
-                    limit_impulse_coeff = ic_limit
-            if clamp == _CLAMP_MAX:
-                projection = block_project_accumulated_bounded_1(
-                    lam_limit_us,
-                    acc_limit,
-                    limit_mass_coeff,
-                    limit_impulse_coeff,
-                    sor_boost,
-                    wp.float32(0.0),
-                    BLOCK_LAMBDA_INF,
-                )
-            else:
-                projection = block_project_accumulated_bounded_1(
-                    lam_limit_us,
-                    acc_limit,
-                    limit_mass_coeff,
-                    limit_impulse_coeff,
-                    sor_boost,
-                    -BLOCK_LAMBDA_INF,
-                    wp.float32(0.0),
-                )
-            lam_limit = projection.delta
-            acc_limit = projection.lambda_new
-
-        lam_friction = wp.float32(0.0)
-        if friction_active:
-            lam_friction = -friction_eff_mass * (jv_axial + friction_gamma * acc_friction)
-            projection = block_project_accumulated_bounded_1(
-                lam_friction,
-                acc_friction,
-                wp.float32(1.0),
-                wp.float32(0.0),
-                sor_boost,
-                -max_lambda_friction,
-                max_lambda_friction,
-            )
-            lam_friction = projection.delta
-            acc_friction = projection.lambda_new
-
-        axial_lam = lam_drive + lam_limit + lam_friction
+        axial_update = _axial_project_scalar_rows(
+            jv_axial,
+            clamp,
+            sor_boost,
+            drive_active,
+            max_force_drive,
+            max_lambda_drive,
+            bias_drive,
+            gamma_drive,
+            eff_mass_drive_soft,
+            acc_drive,
+            limit_active,
+            pd_mode_limit,
+            pd_mass,
+            pd_gamma,
+            pd_beta,
+            eff_axial,
+            bias_box,
+            mc_limit,
+            ic_limit,
+            acc_limit,
+            friction_active,
+            friction_eff_mass,
+            friction_gamma,
+            max_lambda_friction,
+            acc_friction,
+        )
+        axial_lam = axial_update.delta
+        acc_drive = axial_update.acc_drive
+        acc_limit = axial_update.acc_limit
+        acc_friction = axial_update.acc_friction
         angular_velocity1, angular_velocity2 = apply_pair_angular_impulse(
             angular_velocity1, angular_velocity2, inv_inertia1, inv_inertia2, -n_hat * axial_lam, -n_hat * axial_lam
         )
