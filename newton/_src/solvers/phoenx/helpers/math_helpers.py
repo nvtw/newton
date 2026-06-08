@@ -130,30 +130,6 @@ def revolution_tracker_update(
 
 
 @wp.func
-def apply_pair_velocity_impulse(
-    v1: wp.vec3f,
-    v2: wp.vec3f,
-    w1: wp.vec3f,
-    w2: wp.vec3f,
-    inv_mass1: wp.float32,
-    inv_mass2: wp.float32,
-    inv_inertia1_world: wp.mat33f,
-    inv_inertia2_world: wp.mat33f,
-    r1: wp.vec3f,
-    r2: wp.vec3f,
-    imp: wp.vec3f,
-):
-    """Antisymmetric body-pair velocity update for a point-applied impulse.
-    ``imp`` acts from body 1 onto body 2 at world-frame lever arms r1, r2.
-    Returns updated (v1, v2, w1, w2)."""
-    v1_new = v1 - inv_mass1 * imp
-    v2_new = v2 + inv_mass2 * imp
-    w1_new = w1 - inv_inertia1_world @ wp.cross(r1, imp)
-    w2_new = w2 + inv_inertia2_world @ wp.cross(r2, imp)
-    return v1_new, v2_new, w1_new, w2_new
-
-
-@wp.func
 def apply_pair_angular_impulse(
     w1: wp.vec3f,
     w2: wp.vec3f,
@@ -190,9 +166,40 @@ def apply_pair_spatial_impulse(
     """
     v1_new = v1 - inv_mass1 * linear_impulse
     v2_new = v2 + inv_mass2 * linear_impulse
-    w1_new = w1 - inv_inertia1_world @ angular_impulse1
-    w2_new = w2 + inv_inertia2_world @ angular_impulse2
+    w1_new, w2_new = apply_pair_angular_impulse(
+        w1, w2, inv_inertia1_world, inv_inertia2_world, angular_impulse1, angular_impulse2
+    )
     return v1_new, v2_new, w1_new, w2_new
+
+
+@wp.func
+def apply_pair_velocity_impulse(
+    v1: wp.vec3f,
+    v2: wp.vec3f,
+    w1: wp.vec3f,
+    w2: wp.vec3f,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_inertia1_world: wp.mat33f,
+    inv_inertia2_world: wp.mat33f,
+    r1: wp.vec3f,
+    r2: wp.vec3f,
+    imp: wp.vec3f,
+):
+    """Antisymmetric body-pair velocity update for a point-applied impulse."""
+    return apply_pair_spatial_impulse(
+        v1,
+        v2,
+        w1,
+        w2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1_world,
+        inv_inertia2_world,
+        imp,
+        wp.cross(r1, imp),
+        wp.cross(r2, imp),
+    )
 
 
 @wp.func
