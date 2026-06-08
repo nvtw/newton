@@ -145,6 +145,7 @@ class SolverPhoenX(SolverBase):
         sor_boost: float = 1.0,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
+        prepare_refresh_stride: int = 1,
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -152,6 +153,10 @@ class SolverPhoenX(SolverBase):
             substeps: PhoenX internal substeps per :meth:`step` call.
             solver_iterations: PGS iterations per substep.
             velocity_iterations: TGS-soft relax sweeps per substep.
+            prepare_refresh_stride: Refresh cached rigid-contact prepare data
+                every N substeps. ``1`` preserves exact per-substep
+                rebuilds. ``2`` currently requires ``step_layout="single_world"``
+                with only rigid contacts, no mass splitting, and no sleeping.
             default_friction: Fallback when Contacts/shapes carry no material.
             step_layout: ``"multi_world"`` (many small worlds) or
                 ``"single_world"`` (a few big worlds).
@@ -229,7 +234,7 @@ class SolverPhoenX(SolverBase):
                 if existing_filter is None:
                     needs_new_cp = True
             if needs_new_cp:
-                import newton as _newton
+                import newton as _newton  # noqa: PLC0415
 
                 # PhoenX-tight rigid_contact_max from shape_contact_pair_count;
                 # Newton's default ignores COLLIDE_SHAPES filter and overshoots
@@ -237,11 +242,11 @@ class SolverPhoenX(SolverBase):
                 tight_rcm = _estimate_rigid_contact_max_phoenx(model)
                 if tight_rcm is not None:
                     model.rigid_contact_max = 0  # bypass "already sized" short-circuit
-                from newton._src.solvers.phoenx.cloth_collision import (
+                from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
                     PhoenXClothShareVertexFilterData,
                     phoenx_cloth_share_vertex_filter,
                 )
-                from newton._src.solvers.phoenx.solver_config import (
+                from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
                     PHOENX_CONTACT_MATCHING,
                 )
 
@@ -304,6 +309,7 @@ class SolverPhoenX(SolverBase):
             sor_boost=sor_boost,
             sleeping_velocity_threshold=float(sleeping_velocity_threshold),
             sleeping_frames_required=int(sleeping_frames_required),
+            prepare_refresh_stride=int(prepare_refresh_stride),
             device=self.device,
         )
 
@@ -314,7 +320,7 @@ class SolverPhoenX(SolverBase):
         # call ``build_phoenx_share_vertex_filter_data`` themselves and
         # overwrite this binding without losing the sleeping fields.
         if self._sleeping_enabled and int(model.shape_count) > 0:
-            from newton._src.solvers.phoenx.cloth_collision import (
+            from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
                 build_phoenx_share_vertex_filter_data,
             )
 
@@ -544,7 +550,7 @@ class SolverPhoenX(SolverBase):
     def _install_shape_materials(self) -> None:
         """Stream Model's per-shape (mu_static, mu_dynamic, restitution) into
         PhoenX's material table; each shape gets its own material index."""
-        from newton._src.solvers.phoenx.materials import (
+        from newton._src.solvers.phoenx.materials import (  # noqa: PLC0415
             CombineMode,
             Material,
             material_table_from_list,
