@@ -21,6 +21,8 @@ __all__ = [
     "BlockVector2Update",
     "BlockVector3Update",
     "BlockVector4Update",
+    "PositionRows1",
+    "PositionRows2",
     "VelocityRows3",
     "VelocityRows3Update",
     "block_position_delta_1",
@@ -45,6 +47,9 @@ __all__ = [
     "block_solve_inverse_2",
     "block_solve_inverse_3",
     "block_solve_inverse_4",
+    "block_solve_position_rows1",
+    "block_solve_position_rows2",
+    "block_solve_position_rows2_strict",
     "block_solve_projected_xpbd_1",
     "block_solve_projected_xpbd_2",
     "block_solve_projected_xpbd_2_strict",
@@ -84,6 +89,28 @@ class BlockVector3Update:
 class BlockVector4Update:
     delta: wp.vec4f
     lambda_new: wp.vec4f
+
+
+@wp.struct
+class PositionRows1:
+    """Prepared one-row position/XPBD block for shared PGS updates."""
+
+    A11: wp.float32
+    residual: wp.float32
+    lambda_old: wp.float32
+    diag_floor: wp.float32
+
+
+@wp.struct
+class PositionRows2:
+    """Prepared two-row position/XPBD block for shared PGS updates."""
+
+    A11: wp.float32
+    A12: wp.float32
+    A22: wp.float32
+    residual: wp.vec2f
+    lambda_old: wp.vec2f
+    det_floor: wp.float32
 
 
 @wp.struct
@@ -466,6 +493,44 @@ def block_solve_projected_xpbd_2_strict(
     """Solve a strict two-row XPBD block, apply SOR, then identity-project lambdas."""
     d = block_solve_xpbd_2_strict(A11, A12, A22, rhs1, rhs2, sor_boost, det_floor)
     return block_project_identity_delta_2(lambda1_old, lambda2_old, d[0], d[1])
+
+
+@wp.func
+def block_solve_position_rows1(rows: PositionRows1, sor_boost: wp.float32) -> BlockScalarUpdate:
+    """Solve/project one prepared position-level XPBD row."""
+    return block_solve_projected_xpbd_1(rows.A11, rows.residual, rows.lambda_old, sor_boost, rows.diag_floor)
+
+
+@wp.func
+def block_solve_position_rows2(rows: PositionRows2, sor_boost: wp.float32) -> BlockVector2Update:
+    """Solve/project two prepared position-level XPBD rows."""
+    return block_solve_projected_xpbd_2(
+        rows.A11,
+        rows.A12,
+        rows.A22,
+        rows.residual[0],
+        rows.residual[1],
+        rows.lambda_old[0],
+        rows.lambda_old[1],
+        sor_boost,
+        rows.det_floor,
+    )
+
+
+@wp.func
+def block_solve_position_rows2_strict(rows: PositionRows2, sor_boost: wp.float32) -> BlockVector2Update:
+    """Solve/project two strict prepared position-level XPBD rows."""
+    return block_solve_projected_xpbd_2_strict(
+        rows.A11,
+        rows.A12,
+        rows.A22,
+        rows.residual[0],
+        rows.residual[1],
+        rows.lambda_old[0],
+        rows.lambda_old[1],
+        sor_boost,
+        rows.det_floor,
+    )
 
 
 @wp.func

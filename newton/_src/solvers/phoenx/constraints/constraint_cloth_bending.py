@@ -48,8 +48,9 @@ import warp as wp
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import (
+    PositionRows1,
     block_position_delta_1,
-    block_solve_projected_xpbd_1,
+    block_solve_position_rows1,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_CLOTH_BENDING,
@@ -354,8 +355,12 @@ def cloth_bending_iterate_at(
         + inv_mass_c * wp.dot(dCdx2, dCdx2)
         + inv_mass_d * wp.dot(dCdx3, dCdx3)
     )
-    denom = grad_sq + bias
-    update = block_solve_projected_xpbd_1(denom, c + bias * lambda_sum, lambda_sum, sor_boost, wp.float32(0.0))
+    rows = PositionRows1()
+    rows.A11 = grad_sq + bias
+    rows.residual = c + bias * lambda_sum
+    rows.lambda_old = lambda_sum
+    rows.diag_floor = wp.float32(0.0)
+    update = block_solve_position_rows1(rows, sor_boost)
     d_lam = update.delta
     lambda_sum = update.lambda_new
 

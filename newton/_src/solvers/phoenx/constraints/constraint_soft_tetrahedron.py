@@ -10,8 +10,9 @@ import warp as wp
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import (
+    PositionRows2,
     block_position_delta_2,
-    block_solve_projected_xpbd_2,
+    block_solve_position_rows2,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON,
@@ -563,17 +564,14 @@ def soft_tetrahedron_iterate_at(
     b_mu = c_mu + bias_mu * lambda_sum_mu + gamma_mu * grad_mu_dot_dx
     b_lambda = c_lambda + bias_lambda * lambda_sum_lambda + gamma_lambda * grad_lambda_dot_dx
 
-    update = block_solve_projected_xpbd_2(
-        A11,
-        A12,
-        A22,
-        b_mu,
-        b_lambda,
-        lambda_sum_mu,
-        lambda_sum_lambda,
-        sor_boost,
-        _ARAP_BLOCK_DET_FLOOR,
-    )
+    rows = PositionRows2()
+    rows.A11 = A11
+    rows.A12 = A12
+    rows.A22 = A22
+    rows.residual = wp.vec2f(b_mu, b_lambda)
+    rows.lambda_old = wp.vec2f(lambda_sum_mu, lambda_sum_lambda)
+    rows.det_floor = _ARAP_BLOCK_DET_FLOOR
+    update = block_solve_position_rows2(rows, sor_boost)
     lambda_sum_mu = update.lambda_new[0]
     lambda_sum_lambda = update.lambda_new[1]
 

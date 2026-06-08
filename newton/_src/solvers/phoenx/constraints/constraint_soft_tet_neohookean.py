@@ -17,8 +17,9 @@ import warp as wp
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import (
+    PositionRows2,
     block_position_delta_2,
-    block_solve_projected_xpbd_2_strict,
+    block_solve_position_rows2_strict,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_TETRAHEDRON_NEOHOOKEAN,
@@ -461,7 +462,14 @@ def soft_tet_neohookean_iterate_at(
         # subsequent sweeps will revisit once gradients have moved.
         return
 
-    update = block_solve_projected_xpbd_2_strict(A11, A12, A22, b_h, b_d, lambda_h, lambda_d, sor_boost, _DET_FLOOR)
+    rows = PositionRows2()
+    rows.A11 = A11
+    rows.A12 = A12
+    rows.A22 = A22
+    rows.residual = wp.vec2f(b_h, b_d)
+    rows.lambda_old = wp.vec2f(lambda_h, lambda_d)
+    rows.det_floor = _DET_FLOOR
+    update = block_solve_position_rows2_strict(rows, sor_boost)
     lambda_h = update.lambda_new[0]
     lambda_d = update.lambda_new[1]
 
