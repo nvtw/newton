@@ -21,6 +21,8 @@ __all__ = [
     "BlockVector2Update",
     "BlockVector3Update",
     "BlockVector4Update",
+    "VelocityRows3",
+    "VelocityRows3Update",
     "block_position_delta_1",
     "block_position_delta_2",
     "block_position_delta_2d_2",
@@ -39,6 +41,7 @@ __all__ = [
     "block_solve_accumulated_inverse_2",
     "block_solve_accumulated_inverse_3",
     "block_solve_accumulated_inverse_4",
+    "block_solve_accumulated_inverse_bounded_1",
     "block_solve_inverse_2",
     "block_solve_inverse_3",
     "block_solve_inverse_4",
@@ -48,6 +51,8 @@ __all__ = [
     "block_solve_symmetric_1",
     "block_solve_symmetric_2",
     "block_solve_symmetric_2_strict",
+    "block_solve_velocity_rows3_bounded",
+    "block_solve_velocity_rows3_contact_cone",
     "block_solve_xpbd_1",
     "block_solve_xpbd_2",
     "block_solve_xpbd_2_strict",
@@ -79,6 +84,25 @@ class BlockVector3Update:
 class BlockVector4Update:
     delta: wp.vec4f
     lambda_new: wp.vec4f
+
+
+@wp.struct
+class VelocityRows3:
+    """Prepared three-row velocity block for shared PGS updates."""
+
+    k_inv: wp.vec3f
+    residual: wp.vec3f
+    lambda_old: wp.vec3f
+    mass_coeff: wp.vec3f
+    impulse_coeff: wp.vec3f
+    lambda_min: wp.vec3f
+    lambda_max: wp.vec3f
+
+
+@wp.struct
+class VelocityRows3Update:
+    delta: wp.vec3f
+    lambda_new: wp.vec3f
 
 
 @wp.func
@@ -456,6 +480,108 @@ def block_solve_accumulated_inverse_1(
     """Solve a cached scalar inverse row and identity-project its accumulator."""
     d_lambda_unsoft = -(K_inv * rhs)
     return block_project_accumulated_1(d_lambda_unsoft, lambda_old, mass_coeff, impulse_coeff, sor_boost)
+
+
+@wp.func
+def block_solve_accumulated_inverse_bounded_1(
+    K_inv: wp.float32,
+    rhs: wp.float32,
+    lambda_old: wp.float32,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+    lambda_min: wp.float32,
+    lambda_max: wp.float32,
+) -> BlockScalarUpdate:
+    """Solve a cached scalar inverse row and clamp its accumulator."""
+    d_lambda_unsoft = -(K_inv * rhs)
+    return block_project_accumulated_bounded_1(
+        d_lambda_unsoft,
+        lambda_old,
+        mass_coeff,
+        impulse_coeff,
+        sor_boost,
+        lambda_min,
+        lambda_max,
+    )
+
+
+@wp.func
+def block_solve_velocity_rows3_bounded(rows: VelocityRows3, sor_boost: wp.float32) -> VelocityRows3Update:
+    """Solve/project three independent bounded velocity rows."""
+    row0 = block_solve_accumulated_inverse_bounded_1(
+        rows.k_inv[0],
+        rows.residual[0],
+        rows.lambda_old[0],
+        rows.mass_coeff[0],
+        rows.impulse_coeff[0],
+        sor_boost,
+        rows.lambda_min[0],
+        rows.lambda_max[0],
+    )
+    row1 = block_solve_accumulated_inverse_bounded_1(
+        rows.k_inv[1],
+        rows.residual[1],
+        rows.lambda_old[1],
+        rows.mass_coeff[1],
+        rows.impulse_coeff[1],
+        sor_boost,
+        rows.lambda_min[1],
+        rows.lambda_max[1],
+    )
+    row2 = block_solve_accumulated_inverse_bounded_1(
+        rows.k_inv[2],
+        rows.residual[2],
+        rows.lambda_old[2],
+        rows.mass_coeff[2],
+        rows.impulse_coeff[2],
+        sor_boost,
+        rows.lambda_min[2],
+        rows.lambda_max[2],
+    )
+    update = VelocityRows3Update()
+    update.delta = wp.vec3f(row0.delta, row1.delta, row2.delta)
+    update.lambda_new = wp.vec3f(row0.lambda_new, row1.lambda_new, row2.lambda_new)
+    return update
+
+
+@wp.func
+def block_solve_velocity_rows3_contact_cone(
+    rows: VelocityRows3,
+    sor_boost: wp.float32,
+    friction_static: wp.float32,
+    friction_kinetic: wp.float32,
+) -> VelocityRows3Update:
+    """Solve/project a contact block: normal row plus two tangent rows."""
+    row0 = block_solve_accumulated_inverse_bounded_1(
+        rows.k_inv[0],
+        rows.residual[0],
+        rows.lambda_old[0],
+        rows.mass_coeff[0],
+        rows.impulse_coeff[0],
+        sor_boost,
+        rows.lambda_min[0],
+        rows.lambda_max[0],
+    )
+    d_lambda_t1 = (
+        rows.mass_coeff[1] * (-(rows.k_inv[1] * rows.residual[1])) - rows.impulse_coeff[1] * rows.lambda_old[1]
+    )
+    d_lambda_t2 = (
+        rows.mass_coeff[2] * (-(rows.k_inv[2] * rows.residual[2])) - rows.impulse_coeff[2] * rows.lambda_old[2]
+    )
+    tangents = block_project_friction_delta_sor_2(
+        rows.lambda_old[1],
+        rows.lambda_old[2],
+        d_lambda_t1,
+        d_lambda_t2,
+        sor_boost,
+        friction_static * row0.lambda_new,
+        friction_kinetic * row0.lambda_new,
+    )
+    update = VelocityRows3Update()
+    update.delta = wp.vec3f(row0.delta, tangents.delta[0], tangents.delta[1])
+    update.lambda_new = wp.vec3f(row0.lambda_new, tangents.lambda_new[0], tangents.lambda_new[1])
+    return update
 
 
 @wp.func

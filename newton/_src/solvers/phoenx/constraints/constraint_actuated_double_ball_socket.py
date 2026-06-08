@@ -27,15 +27,16 @@ import warp as wp
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
+    VelocityRows3,
     block_project_accumulated_2,
     block_project_accumulated_3,
-    block_project_accumulated_bounded_1,
     block_solve_accumulated_inverse_1,
     block_solve_accumulated_inverse_2,
     block_solve_accumulated_inverse_3,
     block_solve_accumulated_inverse_4,
     block_solve_inverse_2,
     block_solve_inverse_3,
+    block_solve_velocity_rows3_bounded,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     _PD_NYQUIST_HEADROOM_MAX,
@@ -968,83 +969,70 @@ def _axial_project_scalar_rows(
     max_lambda_friction: wp.float32,
     acc_friction: wp.float32,
 ) -> AxialProjectionUpdate:
-    """Project the scalar drive, limit, and friction rows for one axial DoF."""
-    lam_drive = wp.float32(0.0)
+    """Project drive, limit, and friction as one shared 3-row block."""
+    drive_k_inv = wp.float32(0.0)
+    drive_rhs = wp.float32(0.0)
+    drive_min = acc_drive
+    drive_max = acc_drive
     if drive_active:
-        lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
+        drive_k_inv = eff_mass_drive_soft
+        drive_rhs = jv_axial - bias_drive + gamma_drive * acc_drive
         drive_min = -BLOCK_LAMBDA_INF
         drive_max = BLOCK_LAMBDA_INF
         if max_force_drive > wp.float32(0.0):
             drive_min = -max_lambda_drive
             drive_max = max_lambda_drive
-        projection = block_project_accumulated_bounded_1(
-            lam_drive,
-            acc_drive,
-            wp.float32(1.0),
-            wp.float32(0.0),
-            sor_boost,
-            drive_min,
-            drive_max,
-        )
-        lam_drive = projection.delta
-        acc_drive = projection.lambda_new
 
-    lam_limit = wp.float32(0.0)
+    limit_k_inv = wp.float32(0.0)
+    limit_rhs = wp.float32(0.0)
+    limit_mass_coeff = wp.float32(1.0)
+    limit_impulse_coeff = wp.float32(0.0)
+    limit_min = acc_limit
+    limit_max = acc_limit
     if limit_active:
-        lam_limit_us = wp.float32(0.0)
-        limit_mass_coeff = wp.float32(1.0)
-        limit_impulse_coeff = wp.float32(0.0)
+        if clamp == _CLAMP_MAX:
+            limit_min = wp.float32(0.0)
+            limit_max = BLOCK_LAMBDA_INF
+        else:
+            limit_min = -BLOCK_LAMBDA_INF
+            limit_max = wp.float32(0.0)
         if pd_mode_limit:
             if pd_mass > wp.float32(0.0):
-                lam_limit_us = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
+                limit_k_inv = pd_mass
+                limit_rhs = jv_axial - pd_beta + pd_gamma * acc_limit
         else:
             if eff_axial > wp.float32(0.0):
-                lam_limit_us = -eff_axial * (jv_axial + bias_box)
+                limit_k_inv = eff_axial
+                limit_rhs = jv_axial + bias_box
                 limit_mass_coeff = mc_limit
                 limit_impulse_coeff = ic_limit
-        if clamp == _CLAMP_MAX:
-            projection = block_project_accumulated_bounded_1(
-                lam_limit_us,
-                acc_limit,
-                limit_mass_coeff,
-                limit_impulse_coeff,
-                sor_boost,
-                wp.float32(0.0),
-                BLOCK_LAMBDA_INF,
-            )
-        else:
-            projection = block_project_accumulated_bounded_1(
-                lam_limit_us,
-                acc_limit,
-                limit_mass_coeff,
-                limit_impulse_coeff,
-                sor_boost,
-                -BLOCK_LAMBDA_INF,
-                wp.float32(0.0),
-            )
-        lam_limit = projection.delta
-        acc_limit = projection.lambda_new
 
-    lam_friction = wp.float32(0.0)
+    friction_k_inv = wp.float32(0.0)
+    friction_rhs = wp.float32(0.0)
+    friction_min = acc_friction
+    friction_max = acc_friction
     if friction_active:
-        lam_friction = -friction_eff_mass * (jv_axial + friction_gamma * acc_friction)
-        projection = block_project_accumulated_bounded_1(
-            lam_friction,
-            acc_friction,
-            wp.float32(1.0),
-            wp.float32(0.0),
-            sor_boost,
-            -max_lambda_friction,
-            max_lambda_friction,
-        )
-        lam_friction = projection.delta
-        acc_friction = projection.lambda_new
+        friction_k_inv = friction_eff_mass
+        friction_rhs = jv_axial + friction_gamma * acc_friction
+        friction_min = -max_lambda_friction
+        friction_max = max_lambda_friction
+
+    rows = VelocityRows3()
+    rows.k_inv = wp.vec3f(drive_k_inv, limit_k_inv, friction_k_inv)
+    rows.residual = wp.vec3f(drive_rhs, limit_rhs, friction_rhs)
+    rows.lambda_old = wp.vec3f(acc_drive, acc_limit, acc_friction)
+    rows.mass_coeff = wp.vec3f(wp.float32(1.0), limit_mass_coeff, wp.float32(1.0))
+    rows.impulse_coeff = wp.vec3f(wp.float32(0.0), limit_impulse_coeff, wp.float32(0.0))
+    rows.lambda_min = wp.vec3f(drive_min, limit_min, friction_min)
+    rows.lambda_max = wp.vec3f(drive_max, limit_max, friction_max)
+
+    projection = block_solve_velocity_rows3_bounded(rows, sor_boost)
 
     update = AxialProjectionUpdate()
-    update.delta = lam_drive + lam_limit + lam_friction
-    update.acc_drive = acc_drive
-    update.acc_limit = acc_limit
-    update.acc_friction = acc_friction
+    update.delta = projection.delta[0] + projection.delta[1] + projection.delta[2]
+    update.acc_drive = projection.lambda_new[0]
+    update.acc_limit = projection.lambda_new[1]
+    update.acc_friction = projection.lambda_new[2]
     return update
 
 

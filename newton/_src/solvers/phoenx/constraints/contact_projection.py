@@ -8,8 +8,8 @@ import warp as wp
 
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
-    block_project_accumulated_bounded_1,
-    block_project_friction_delta_sor_2,
+    VelocityRows3,
+    block_solve_velocity_rows3_contact_cone,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -58,66 +58,36 @@ def _make_contact_project_velocity_update(has_soft_contact_pd: bool):
         The returned vector is the incremental impulse applied on side 2.
         """
         lam_n_old = cc_get_normal_lambda(cc, k)
-        if wp.static(has_soft_contact_pd):
-            if pd_eff_soft_n > wp.float32(0.0):
-                d_lam_n_us = -pd_eff_soft_n * (jv_n - pd_bias_n + pd_gamma_n * lam_n_old)
-                normal_projection = block_project_accumulated_bounded_1(
-                    d_lam_n_us,
-                    lam_n_old,
-                    wp.float32(1.0),
-                    wp.float32(0.0),
-                    sor_boost,
-                    wp.float32(0.0),
-                    BLOCK_LAMBDA_INF,
-                )
-            else:
-                d_lam_n_us = -eff_n * (jv_n + bias_n)
-                normal_projection = block_project_accumulated_bounded_1(
-                    d_lam_n_us,
-                    lam_n_old,
-                    mass_coeff_n,
-                    impulse_coeff_n,
-                    sor_boost,
-                    wp.float32(0.0),
-                    BLOCK_LAMBDA_INF,
-                )
-        else:
-            d_lam_n_us = -eff_n * (jv_n + bias_n)
-            normal_projection = block_project_accumulated_bounded_1(
-                d_lam_n_us,
-                lam_n_old,
-                mass_coeff_n,
-                impulse_coeff_n,
-                sor_boost,
-                wp.float32(0.0),
-                BLOCK_LAMBDA_INF,
-            )
-
-        d_lam_n = normal_projection.delta
-        lam_n_new = normal_projection.lambda_new
-
-        fric_limit_static = mu_s * lam_n_new
-        fric_limit_kinetic = mu_k * lam_n_new
         lam_t1_old = cc_get_tangent1_lambda(cc, k)
         lam_t2_old = cc_get_tangent2_lambda(cc, k)
-        tangent_projection = block_project_friction_delta_sor_2(
-            lam_t1_old,
-            lam_t2_old,
-            -eff_t1 * (jv_t1 + bias_t1),
-            -eff_t2 * (jv_t2 + bias_t2),
-            sor_boost,
-            fric_limit_static,
-            fric_limit_kinetic,
-        )
 
-        d_lam_t1 = tangent_projection.delta[0]
-        d_lam_t2 = tangent_projection.delta[1]
+        k_inv_n = eff_n
+        rhs_n = jv_n + bias_n
+        normal_mass_coeff = mass_coeff_n
+        normal_impulse_coeff = impulse_coeff_n
+        if wp.static(has_soft_contact_pd):
+            if pd_eff_soft_n > wp.float32(0.0):
+                k_inv_n = pd_eff_soft_n
+                rhs_n = jv_n - pd_bias_n + pd_gamma_n * lam_n_old
+                normal_mass_coeff = wp.float32(1.0)
+                normal_impulse_coeff = wp.float32(0.0)
 
-        cc_set_normal_lambda(cc, k, lam_n_new)
-        cc_set_tangent1_lambda(cc, k, tangent_projection.lambda_new[0])
-        cc_set_tangent2_lambda(cc, k, tangent_projection.lambda_new[1])
+        rows = VelocityRows3()
+        rows.k_inv = wp.vec3f(k_inv_n, eff_t1, eff_t2)
+        rows.residual = wp.vec3f(rhs_n, jv_t1 + bias_t1, jv_t2 + bias_t2)
+        rows.lambda_old = wp.vec3f(lam_n_old, lam_t1_old, lam_t2_old)
+        rows.mass_coeff = wp.vec3f(normal_mass_coeff, wp.float32(1.0), wp.float32(1.0))
+        rows.impulse_coeff = wp.vec3f(normal_impulse_coeff, wp.float32(0.0), wp.float32(0.0))
+        rows.lambda_min = wp.vec3f(wp.float32(0.0), -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
+        rows.lambda_max = wp.vec3f(BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF)
 
-        return d_lam_n * normal + d_lam_t1 * tangent1 + d_lam_t2 * tangent2
+        projection = block_solve_velocity_rows3_contact_cone(rows, sor_boost, mu_s, mu_k)
+
+        cc_set_normal_lambda(cc, k, projection.lambda_new[0])
+        cc_set_tangent1_lambda(cc, k, projection.lambda_new[1])
+        cc_set_tangent2_lambda(cc, k, projection.lambda_new[2])
+
+        return projection.delta[0] * normal + projection.delta[1] * tangent1 + projection.delta[2] * tangent2
 
     return impl
 
