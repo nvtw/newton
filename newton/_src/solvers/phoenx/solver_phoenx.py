@@ -3244,6 +3244,7 @@ class PhoenXWorld:
                 has_soft_contact_pd=bool(self._has_soft_contact_pd),
                 enable_column_timers=self.enable_column_timers,
                 fixed_tpw=fixed_tpw,
+                family_split=self._fast_tail_family_split(),
                 guard_tpw=self._tpw_auto,
             )
             self._launch_fast_iter(
@@ -3596,6 +3597,7 @@ class PhoenXWorld:
                 wp.float32(self.sor_boost),
                 self._world_element_ids_by_color,
                 self._world_color_starts,
+                self._world_color_family_starts,
                 self._world_csr_offsets,
                 self._world_num_colors,
                 self._contact_container,

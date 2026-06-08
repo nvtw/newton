@@ -1145,6 +1145,7 @@ def _make_fast_tail_relax_kernel(
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
+    family_split: bool = False,
 ):
     """Multi-world relax fast-tail kernel (use_bias=False, num_sweeps=num_iterations)."""
 
@@ -1159,6 +1160,7 @@ def _make_fast_tail_relax_kernel(
         sor_boost: wp.float32,
         world_element_ids_by_color: wp.array[wp.int32],
         world_color_starts: wp.array2d[wp.int32],
+        world_color_family_starts: wp.array2d[wp.int32],
         world_csr_offsets: wp.array[wp.int32],
         world_num_colors: wp.array[wp.int32],
         cc: ContactContainer,
@@ -1206,17 +1208,19 @@ def _make_fast_tail_relax_kernel(
         # into one register-cached call (velocity_iterations is typically 1).
         c = wp.int32(0)
         while c < n_colors:
-            start = world_base + world_color_starts[world_id, c]
-            end = world_base + world_color_starts[world_id, c + 1]
-            count = end - start
+            if wp.static(family_split):
+                family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
+                joint_start = world_base + world_color_family_starts[world_id, family_base]
+                contact_start = world_base + world_color_family_starts[world_id, family_base + wp.int32(1)]
+                end = world_base + world_color_starts[world_id, c + 1]
+                count_joints = contact_start - joint_start
 
-            base = local_tid
-            while base < count:
-                cid = world_element_ids_by_color[start + base]
-                _t0 = wp.uint64(0)
-                if wp.static(enable_column_timers):
-                    _t0 = read_global_timer_ns()
-                if wp.static(has_joints and not has_contacts):
+                base = local_tid
+                while base < count_joints:
+                    cid = world_element_ids_by_color[joint_start + base]
+                    _t0 = wp.uint64(0)
+                    if wp.static(enable_column_timers):
+                        _t0 = read_global_timer_ns()
                     if wp.static(revolute_only):
                         revolute_iterate_multi(
                             constraints,
@@ -1249,42 +1253,16 @@ def _make_fast_tail_relax_kernel(
                         constraint_accumulate_time_us(
                             constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
                         )
-                elif cid < num_joints:
-                    if wp.static(revolute_only):
-                        revolute_iterate_multi(
-                            constraints,
-                            cid,
-                            bodies,
-                            particles,
-                            copy_state,
-                            num_bodies,
-                            wp.int32(0),
-                            idt,
-                            sor_boost,
-                            False,
-                            num_iterations,
-                        )
-                    else:
-                        actuated_double_ball_socket_iterate_multi(
-                            constraints,
-                            cid,
-                            bodies,
-                            particles,
-                            copy_state,
-                            num_bodies,
-                            wp.int32(0),
-                            idt,
-                            sor_boost,
-                            False,
-                            num_iterations,
-                        )
-                    if wp.static(enable_column_timers):
-                        constraint_accumulate_time_us(
-                            constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
-                        )
-                else:
+                    base += tpw
+
+                count_contacts = end - contact_start
+                base = local_tid
+                while base < count_contacts:
+                    cid = world_element_ids_by_color[contact_start + base]
                     local_cid = cid - num_joints
-                    # Sleep-transition guard (DCE'd when has_sleeping=False).
+                    _t0 = wp.uint64(0)
+                    if wp.static(enable_column_timers):
+                        _t0 = read_global_timer_ns()
                     skip_frozen = False
                     if wp.static(has_sleeping):
                         cb1 = contact_get_body1(contact_cols, local_cid)
@@ -1333,7 +1311,136 @@ def _make_fast_tail_relax_kernel(
                             )
                     if wp.static(enable_column_timers):
                         contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
-                base += tpw
+                    base += tpw
+            else:
+                start = world_base + world_color_starts[world_id, c]
+                end = world_base + world_color_starts[world_id, c + 1]
+                count = end - start
+
+                base = local_tid
+                while base < count:
+                    cid = world_element_ids_by_color[start + base]
+                    _t0 = wp.uint64(0)
+                    if wp.static(enable_column_timers):
+                        _t0 = read_global_timer_ns()
+                    if wp.static(has_joints and not has_contacts):
+                        if wp.static(revolute_only):
+                            revolute_iterate_multi(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                sor_boost,
+                                False,
+                                num_iterations,
+                            )
+                        else:
+                            actuated_double_ball_socket_iterate_multi(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                sor_boost,
+                                False,
+                                num_iterations,
+                            )
+                        if wp.static(enable_column_timers):
+                            constraint_accumulate_time_us(
+                                constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                            )
+                    elif cid < num_joints:
+                        if wp.static(revolute_only):
+                            revolute_iterate_multi(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                sor_boost,
+                                False,
+                                num_iterations,
+                            )
+                        else:
+                            actuated_double_ball_socket_iterate_multi(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                sor_boost,
+                                False,
+                                num_iterations,
+                            )
+                        if wp.static(enable_column_timers):
+                            constraint_accumulate_time_us(
+                                constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(_t0, read_global_timer_ns())
+                            )
+                    else:
+                        local_cid = cid - num_joints
+                        # Sleep-transition guard (DCE'd when has_sleeping=False).
+                        skip_frozen = False
+                        if wp.static(has_sleeping):
+                            cb1 = contact_get_body1(contact_cols, local_cid)
+                            cb2 = contact_get_body2(contact_cols, local_cid)
+                            if cb1 >= 0 and cb1 < num_bodies and cb2 >= 0 and cb2 < num_bodies:
+                                fr1 = (bodies.motion_type[cb1] != MOTION_DYNAMIC) or (
+                                    bodies.island_root[cb1] >= wp.int32(0)
+                                )
+                                fr2 = (bodies.motion_type[cb2] != MOTION_DYNAMIC) or (
+                                    bodies.island_root[cb2] >= wp.int32(0)
+                                )
+                                if fr1 and fr2:
+                                    skip_frozen = True
+                        if not skip_frozen:
+                            if wp.static(has_soft_contact_pd):
+                                contact_iterate_multi(
+                                    contact_cols,
+                                    local_cid,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    False,
+                                    num_iterations,
+                                    copy_state,
+                                    wp.int32(0),
+                                    sor_boost,
+                                )
+                            else:
+                                contact_iterate_multi_no_soft_pd(
+                                    contact_cols,
+                                    local_cid,
+                                    bodies,
+                                    particles,
+                                    num_bodies,
+                                    idt,
+                                    cc,
+                                    contacts,
+                                    False,
+                                    num_iterations,
+                                    copy_state,
+                                    wp.int32(0),
+                                    sor_boost,
+                                )
+                        if wp.static(enable_column_timers):
+                            contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(_t0, read_global_timer_ns()))
+                    base += tpw
 
             _sync_warp_mask(sync_mask)
             c += 1
@@ -1489,6 +1596,7 @@ def get_fast_tail_kernel(
             enable_column_timers=enable_column_timers,
             fixed_tpw=fixed_tpw,
             guard_tpw=guard_tpw,
+            family_split=family_split,
         )
     raise ValueError(f"unknown fast-tail kernel kind: {kind!r}")
 
