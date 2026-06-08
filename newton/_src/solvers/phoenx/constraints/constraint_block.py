@@ -23,6 +23,10 @@ __all__ = [
     "BlockVector4Update",
     "PositionRows1",
     "PositionRows2",
+    "VelocityBlock1",
+    "VelocityBlock2",
+    "VelocityBlock3",
+    "VelocityBlock4",
     "VelocityRows3",
     "VelocityRows3Update",
     "block_position_delta_1",
@@ -56,6 +60,10 @@ __all__ = [
     "block_solve_symmetric_1",
     "block_solve_symmetric_2",
     "block_solve_symmetric_2_strict",
+    "block_solve_velocity_block1",
+    "block_solve_velocity_block2",
+    "block_solve_velocity_block3",
+    "block_solve_velocity_block4",
     "block_solve_velocity_rows3_bounded",
     "block_solve_velocity_rows3_contact_cone",
     "block_solve_xpbd_1",
@@ -114,8 +122,52 @@ class PositionRows2:
 
 
 @wp.struct
+class VelocityBlock1:
+    """Prepared one-row dense velocity block with cached inverse mass."""
+
+    k_inv: wp.float32
+    residual: wp.float32
+    lambda_old: wp.float32
+    mass_coeff: wp.float32
+    impulse_coeff: wp.float32
+
+
+@wp.struct
+class VelocityBlock2:
+    """Prepared two-row dense velocity block with cached inverse mass."""
+
+    k_inv: wp.mat22f
+    residual: wp.vec2f
+    lambda_old: wp.vec2f
+    mass_coeff: wp.float32
+    impulse_coeff: wp.float32
+
+
+@wp.struct
+class VelocityBlock3:
+    """Prepared three-row dense velocity block with cached inverse mass."""
+
+    k_inv: wp.mat33f
+    residual: wp.vec3f
+    lambda_old: wp.vec3f
+    mass_coeff: wp.float32
+    impulse_coeff: wp.float32
+
+
+@wp.struct
+class VelocityBlock4:
+    """Prepared four-row dense velocity block with cached inverse mass."""
+
+    k_inv: wp.mat44f
+    residual: wp.vec4f
+    lambda_old: wp.vec4f
+    mass_coeff: wp.float32
+    impulse_coeff: wp.float32
+
+
+@wp.struct
 class VelocityRows3:
-    """Prepared three-row velocity block for shared PGS updates."""
+    """Prepared three scalar velocity rows for shared PGS updates."""
 
     k_inv: wp.vec3f
     residual: wp.vec3f
@@ -689,6 +741,58 @@ def block_solve_accumulated_inverse_4(
     """Solve a cached 4x4 inverse block and identity-project its accumulator."""
     d_lambda_unsoft = block_solve_inverse_4(K_inv, rhs)
     return block_project_accumulated_4(d_lambda_unsoft, lambda_old, mass_coeff, impulse_coeff, sor_boost)
+
+
+@wp.func
+def block_solve_velocity_block1(block: VelocityBlock1, sor_boost: wp.float32) -> BlockScalarUpdate:
+    """Solve/project one prepared dense velocity block."""
+    return block_solve_accumulated_inverse_1(
+        block.k_inv,
+        block.residual,
+        block.lambda_old,
+        block.mass_coeff,
+        block.impulse_coeff,
+        sor_boost,
+    )
+
+
+@wp.func
+def block_solve_velocity_block2(block: VelocityBlock2, sor_boost: wp.float32) -> BlockVector2Update:
+    """Solve/project two prepared dense velocity rows."""
+    return block_solve_accumulated_inverse_2(
+        block.k_inv,
+        block.residual,
+        block.lambda_old,
+        block.mass_coeff,
+        block.impulse_coeff,
+        sor_boost,
+    )
+
+
+@wp.func
+def block_solve_velocity_block3(block: VelocityBlock3, sor_boost: wp.float32) -> BlockVector3Update:
+    """Solve/project three prepared dense velocity rows."""
+    return block_solve_accumulated_inverse_3(
+        block.k_inv,
+        block.residual,
+        block.lambda_old,
+        block.mass_coeff,
+        block.impulse_coeff,
+        sor_boost,
+    )
+
+
+@wp.func
+def block_solve_velocity_block4(block: VelocityBlock4, sor_boost: wp.float32) -> BlockVector4Update:
+    """Solve/project four prepared dense velocity rows."""
+    return block_solve_accumulated_inverse_4(
+        block.k_inv,
+        block.residual,
+        block.lambda_old,
+        block.mass_coeff,
+        block.impulse_coeff,
+        sor_boost,
+    )
 
 
 @wp.func
