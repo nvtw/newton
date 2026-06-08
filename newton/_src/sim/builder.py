@@ -9833,6 +9833,7 @@ class ModelBuilder:
         skip_validation_shapes: bool = False,
         skip_validation_structure: bool = False,
         skip_validation_joint_ordering: bool = True,
+        skip_shape_contact_pairs: bool = False,
     ) -> Model:
         """
         Finalize the builder and create a concrete :class:`~newton.Model` for simulation.
@@ -9853,6 +9854,9 @@ class ModelBuilder:
                 array lengths, monotonicity). Default is False.
             skip_validation_joint_ordering: If True, skips validation of DFS topological joint ordering within
                 articulations. Default is True (opt-in) because this check has O(n log n) complexity.
+            skip_shape_contact_pairs: If True, skips the O(n^2) precomputed explicit shape-contact pair list.
+                Use only with collision pipelines that do not consume ``Model.shape_contact_pairs``, such as SAP
+                or NXN broad phases. Default is False.
 
         Returns:
             A fully constructed Model object containing all simulation data on the specified device.
@@ -10792,7 +10796,11 @@ class ModelBuilder:
             m.equality_constraint_count = len(self.equality_constraint_type)
             m.constraint_mimic_count = len(self.constraint_mimic_joint0)
 
-            self.find_shape_contact_pairs(m)
+            if skip_shape_contact_pairs:
+                m.shape_contact_pairs = wp.empty(0, dtype=wp.vec2i, device=m.device)
+                m.shape_contact_pair_count = 0
+            else:
+                self.find_shape_contact_pairs(m)
 
             # enable ground plane
             m.up_axis = self.up_axis

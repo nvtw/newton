@@ -59,6 +59,7 @@
 ### Fixed
 
 - Refresh PhoenX's baked-in armature on `SolverNotifyFlags.JOINT_DOF_PROPERTIES`: `SolverPhoenX.notify_model_changed` now resets body inertia to `Model.body_inv_inertia` and re-bakes `model.joint_armature` whenever joint-DOF properties change, so domain-randomization edits to armature between episodes actually take effect
+- Fix `ModelBuilder.finalize(skip_shape_contact_pairs=True)` so large SAP/NXN benchmark scenes can skip O(n^2) explicit shape-pair precomputation.
 - Fix `SolverMuJoCo` returning `State.joint_qd` in world frame for root `FREE` joints with non-identity `parent_xform`, violating the documented parent-frame contract and corrupting derived `body_qd`.
 - Fix `SolverPhoenX` infinite loop in `IncrementalContactPartitioner.build_csr_greedy_with_jp_fallback()` when `speculative_coloring=True`, `capture_while_greedy_coloring=True`, and `max_colored_partitions=0` (the all-overflow mass-splitting configuration used by `example_soft_body_drop`). `speculative_validate_commit_kernel` now exempts the overflow colour from neighbour conflict checks — mass splitting resolves intra-bucket conflicts via copy states, so multiple neighbouring elements are allowed to share that colour. Previously the first iteration coloured one element per neighbourhood and every subsequent iteration rejected the rest forever, hanging the partitioner inside `wp.capture_while`
 - Fix `eval_fk()` overwriting VBD-simulated `JointType.CABLE` body poses.
