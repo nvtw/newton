@@ -67,7 +67,7 @@ class LLTBlockedRCMSolver(DirectSolver):
 
     1. ``compute(A)`` / ``_factorize_impl``:
 
-       a. Runs GPU-native batched RCM to compute per-block permutations
+       a. Runs batched GPU RCM to compute per-block permutations
           ``P_i`` (concatenated in ``self._P``) in a single set of launches.
        b. Builds ``inv_P`` from ``P``.
        c. Permutes ``A -> A_hat`` (``A_hat_i = P_i A_i P_i^T``).
@@ -93,7 +93,7 @@ class LLTBlockedRCMSolver(DirectSolver):
         self,
         operator: DenseLinearOperatorData | None = None,
         block_size: int = 32,
-        solve_block_dim: int = 128,
+        solve_block_dim: int = 256,
         factorize_block_dim: int = 128,
         atol: float | None = None,
         rtol: float | None = None,
