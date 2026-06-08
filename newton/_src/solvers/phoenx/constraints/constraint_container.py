@@ -22,6 +22,7 @@ from newton._src.solvers.phoenx.helpers.data_packing import (
 __all__ = [
     "CONSTRAINT_BODY1_OFFSET",
     "CONSTRAINT_BODY2_OFFSET",
+    "CONSTRAINT_MULTIPLIER_DWORDS",
     "CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET",
     "CONSTRAINT_TYPE_CLOTH_BENDING",
     "CONSTRAINT_TYPE_CLOTH_TRIANGLE",
@@ -137,6 +138,10 @@ def assert_constraint_header(struct_type: object) -> None:
 #: every constraint type that uses mass-splitting slot routing.
 SLOT_CACHE_MAX_BODIES: int = 8
 
+#: Width of the per-cid mutable multiplier sidecar. This is intentionally
+#: generic storage: constraint-family modules define their own row mapping.
+CONSTRAINT_MULTIPLIER_DWORDS: int = 12
+
 
 @wp.struct
 class ConstraintContainer:
@@ -152,6 +157,8 @@ class ConstraintContainer:
     """
 
     data: wp.array2d[wp.float32]
+    #: Mutable accumulated multipliers, separated from read-mostly prepared data.
+    multipliers: wp.array2d[wp.float32]
     #: Per-cid slot cache: ``slot_cache[cid, v]`` is the slot index for
     #: vertex ``v`` of constraint ``cid`` under the parallel-id that
     #: vertex's iterate will see (parallel_id = 0 for regular colours,
@@ -173,6 +180,7 @@ def constraint_container_zeros(
     """Allocate a zero-initialised :class:`ConstraintContainer`."""
     c = ConstraintContainer()
     c.data = wp.zeros((num_dwords, num_constraints), dtype=wp.float32, device=device)
+    c.multipliers = wp.zeros((CONSTRAINT_MULTIPLIER_DWORDS, max(num_constraints, 1)), dtype=wp.float32, device=device)
     # Cache starts at the no-slot fallback so reads before the first
     # build hit the same direct-storage path as ``get_state_index``'s
     # mass-splitting-disabled fast path.
