@@ -20,6 +20,8 @@ lambda bounds. Contact projection still needs its cone projection, but the
 velocity fetch and ``M^-1 J^T`` apply are shape-agnostic. ``grouped_split``
 keeps compact typed math but shape-buckets block IDs inside each color, testing
 whether lower branch divergence can beat the extra indirection / locality cost.
+``hybrid`` uses a setup-time per-color policy to pick compact split or sidecar4,
+which models a graph-capture-safe topology scheduler.
 """
 
 from __future__ import annotations
@@ -47,6 +49,20 @@ _OP_ANGULAR3 = wp.constant(wp.int32(3))
 _OP_TANGENT4 = wp.constant(wp.int32(4))
 _OP_SCALAR_LINEAR = wp.constant(wp.int32(5))
 _OP_SCALAR_ANGULAR = wp.constant(wp.int32(6))
+
+_OP_CONTACT3_HOST = 1
+_OP_POINT3_HOST = 2
+_OP_ANGULAR3_HOST = 3
+_OP_TANGENT4_HOST = 4
+_OP_SCALAR_LINEAR_HOST = 5
+_OP_SCALAR_ANGULAR_HOST = 6
+
+_COLOR_POLICY_SPLIT = wp.constant(wp.int32(0))
+_COLOR_POLICY_SIDECAR4 = wp.constant(wp.int32(1))
+
+_COLOR_POLICY_SPLIT_HOST = 0
+_COLOR_POLICY_SIDECAR4_HOST = 1
+_MIXED_SCENE = "mixed_h1_tower"
 
 
 @dataclass(frozen=True)
@@ -237,6 +253,7 @@ def _make_contact_projection(
 @wp.kernel
 def _init_blocks_kernel(
     op_kind: wp.array[wp.int32],
+    op_kind_seed: wp.array[wp.int32],
     v_a: wp.array[wp.vec3f],
     w_a: wp.array[wp.vec3f],
     v_b: wp.array[wp.vec3f],
@@ -285,7 +302,6 @@ def _init_blocks_kernel(
     scalar_slots: wp.int32,
 ):
     tid = wp.tid()
-    lane = tid % period
     phase = wp.float32((tid * wp.int32(29)) & wp.int32(255)) * wp.float32(0.00390625)
 
     va = wp.vec3f(phase, wp.float32(0.2) - phase, wp.float32(0.1) + wp.float32(0.5) * phase)
@@ -337,19 +353,12 @@ def _init_blocks_kernel(
     r2[tid] = rr2
     r3[tid] = rr3
 
-    kind = _OP_POINT3
-    scalar_end = contact_slots + tangent4_slots + angular3_slots + scalar_slots
-    if lane < contact_slots:
-        kind = _OP_CONTACT3
-    elif lane < contact_slots + tangent4_slots:
-        kind = _OP_TANGENT4
-    elif lane < contact_slots + tangent4_slots + angular3_slots:
-        kind = _OP_ANGULAR3
-    elif lane < scalar_end:
-        if (lane & wp.int32(1)) == wp.int32(0):
-            kind = _OP_SCALAR_LINEAR
-        else:
-            kind = _OP_SCALAR_ANGULAR
+    _ = period
+    _ = contact_slots
+    _ = tangent4_slots
+    _ = angular3_slots
+    _ = scalar_slots
+    kind = op_kind_seed[tid]
     op_kind[tid] = kind
 
     k = wp.mat44f(
@@ -702,6 +711,284 @@ def _solve_sidecar4_world_loop_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _solve_hybrid_world_loop_kernel(
+    block_ids: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    world_color_starts: wp.array[wp.int32],
+    color_policy: wp.array[wp.int32],
+    op_kind: wp.array[wp.int32],
+    v_a: wp.array[wp.vec3f],
+    w_a: wp.array[wp.vec3f],
+    v_b: wp.array[wp.vec3f],
+    w_b: wp.array[wp.vec3f],
+    inv_m_a: wp.array[wp.float32],
+    inv_m_b: wp.array[wp.float32],
+    inv_i_a: wp.array[wp.mat33f],
+    inv_i_b: wp.array[wp.mat33f],
+    axis0: wp.array[wp.vec3f],
+    axis1: wp.array[wp.vec3f],
+    axis2: wp.array[wp.vec3f],
+    r0: wp.array[wp.vec3f],
+    r1: wp.array[wp.vec3f],
+    r2: wp.array[wp.vec3f],
+    r3: wp.array[wp.vec3f],
+    jla0: wp.array[wp.vec3f],
+    jla1: wp.array[wp.vec3f],
+    jla2: wp.array[wp.vec3f],
+    jla3: wp.array[wp.vec3f],
+    jaa0: wp.array[wp.vec3f],
+    jaa1: wp.array[wp.vec3f],
+    jaa2: wp.array[wp.vec3f],
+    jaa3: wp.array[wp.vec3f],
+    jlb0: wp.array[wp.vec3f],
+    jlb1: wp.array[wp.vec3f],
+    jlb2: wp.array[wp.vec3f],
+    jlb3: wp.array[wp.vec3f],
+    jab0: wp.array[wp.vec3f],
+    jab1: wp.array[wp.vec3f],
+    jab2: wp.array[wp.vec3f],
+    jab3: wp.array[wp.vec3f],
+    k_inv: wp.array[wp.mat44f],
+    bias: wp.array[wp.vec4f],
+    lambda_old: wp.array[wp.vec4f],
+    mass_coeff: wp.array[wp.vec4f],
+    impulse_coeff: wp.array[wp.vec4f],
+    lambda_min: wp.array[wp.vec4f],
+    lambda_max: wp.array[wp.vec4f],
+    friction_static: wp.array[wp.float32],
+    friction_kinetic: wp.array[wp.float32],
+    out_va: wp.array[wp.vec3f],
+    out_wa: wp.array[wp.vec3f],
+    out_vb: wp.array[wp.vec3f],
+    out_wb: wp.array[wp.vec3f],
+    out_lambda: wp.array[wp.vec4f],
+    num_worlds: wp.int32,
+    iterations: wp.int32,
+    threads_per_world: wp.int32,
+):
+    tid = wp.tid()
+    local_tid = tid % threads_per_world
+    world_id = tid / threads_per_world
+    if world_id >= num_worlds:
+        return
+
+    color_begin = world_color_starts[world_id]
+    color_end = world_color_starts[world_id + wp.int32(1)]
+    epoch = wp.int32(0)
+    while epoch < iterations:
+        color = color_begin
+        while color < color_end:
+            start = color_starts[color]
+            end = color_starts[color + wp.int32(1)]
+            use_sidecar = color_policy[color] == _COLOR_POLICY_SIDECAR4
+            cursor = start + local_tid
+            while cursor < end:
+                block = block_ids[cursor]
+                va = v_a[block]
+                wa = w_a[block]
+                vb = v_b[block]
+                wb = w_b[block]
+                lam_old = lambda_old[block]
+                lam_new = lam_old
+                va_out = va
+                wa_out = wa
+                vb_out = vb
+                wb_out = wb
+                if use_sidecar:
+                    residual4_side = (
+                        _rows4_dot(jla0[block], jla1[block], jla2[block], jla3[block], va)
+                        + _rows4_dot(jaa0[block], jaa1[block], jaa2[block], jaa3[block], wa)
+                        + _rows4_dot(jlb0[block], jlb1[block], jlb2[block], jlb3[block], vb)
+                        + _rows4_dot(jab0[block], jab1[block], jab2[block], jab3[block], wb)
+                        + bias[block]
+                    )
+                    lam_new = _solve_bounded4(
+                        k_inv[block],
+                        residual4_side,
+                        lam_old,
+                        mass_coeff[block],
+                        impulse_coeff[block],
+                        lambda_min[block],
+                        lambda_max[block],
+                    )
+                    if op_kind[block] == _OP_CONTACT3:
+                        contact_lambda = _make_contact_projection(
+                            _diag3_from44(k_inv[block]),
+                            _vec3_from4(residual4_side),
+                            _vec3_from4(lam_old),
+                            _vec3_from4(mass_coeff[block]),
+                            _vec3_from4(impulse_coeff[block]),
+                            _vec3_from4(lambda_min[block]),
+                            _vec3_from4(lambda_max[block]),
+                            friction_static[block],
+                            friction_kinetic[block],
+                        )
+                        lam_new = wp.vec4f(contact_lambda[0], contact_lambda[1], contact_lambda[2], lam_old[3])
+                    delta_side = lam_new - lam_old
+                    va_out = va + inv_m_a[block] * _rows4_t_mul(
+                        jla0[block], jla1[block], jla2[block], jla3[block], delta_side
+                    )
+                    wa_out = wa + inv_i_a[block] @ _rows4_t_mul(
+                        jaa0[block], jaa1[block], jaa2[block], jaa3[block], delta_side
+                    )
+                    vb_out = vb + inv_m_b[block] * _rows4_t_mul(
+                        jlb0[block], jlb1[block], jlb2[block], jlb3[block], delta_side
+                    )
+                    wb_out = wb + inv_i_b[block] @ _rows4_t_mul(
+                        jab0[block], jab1[block], jab2[block], jab3[block], delta_side
+                    )
+                else:
+                    kind = op_kind[block]
+                    if kind == _OP_CONTACT3:
+                        n = axis0[block]
+                        t1 = axis1[block]
+                        t2 = axis2[block]
+                        rr0 = r0[block]
+                        rr1 = r1[block]
+                        rel = vb + wp.cross(wb, rr1) - va - wp.cross(wa, rr0)
+                        residual3_contact = wp.vec3f(wp.dot(n, rel), wp.dot(t1, rel), wp.dot(t2, rel)) + _vec3_from4(
+                            bias[block]
+                        )
+                        contact_lambda = _make_contact_projection(
+                            _diag3_from44(k_inv[block]),
+                            residual3_contact,
+                            _vec3_from4(lam_old),
+                            _vec3_from4(mass_coeff[block]),
+                            _vec3_from4(impulse_coeff[block]),
+                            _vec3_from4(lambda_min[block]),
+                            _vec3_from4(lambda_max[block]),
+                            friction_static[block],
+                            friction_kinetic[block],
+                        )
+                        delta3_contact = contact_lambda - _vec3_from4(lam_old)
+                        impulse_contact = delta3_contact[0] * n + delta3_contact[1] * t1 + delta3_contact[2] * t2
+                        va_out = va - inv_m_a[block] * impulse_contact
+                        wa_out = wa - inv_i_a[block] @ wp.cross(rr0, impulse_contact)
+                        vb_out = vb + inv_m_b[block] * impulse_contact
+                        wb_out = wb + inv_i_b[block] @ wp.cross(rr1, impulse_contact)
+                        lam_new = wp.vec4f(contact_lambda[0], contact_lambda[1], contact_lambda[2], lam_old[3])
+                    elif kind == _OP_TANGENT4:
+                        t1 = axis0[block]
+                        t2 = axis1[block]
+                        rr0 = r0[block]
+                        rr1 = r1[block]
+                        rr2 = r2[block]
+                        rr3 = r3[block]
+                        jv1 = -va + wp.cross(rr0, wa) + vb - wp.cross(rr1, wb)
+                        jv2 = -va + wp.cross(rr2, wa) + vb - wp.cross(rr3, wb)
+                        residual4_tangent = (
+                            wp.vec4f(wp.dot(t1, jv1), wp.dot(t2, jv1), wp.dot(t1, jv2), wp.dot(t2, jv2)) + bias[block]
+                        )
+                        lam_new = _solve_bounded4(
+                            k_inv[block],
+                            residual4_tangent,
+                            lam_old,
+                            mass_coeff[block],
+                            impulse_coeff[block],
+                            lambda_min[block],
+                            lambda_max[block],
+                        )
+                        d4 = lam_new - lam_old
+                        imp1 = d4[0] * t1 + d4[1] * t2
+                        imp2 = d4[2] * t1 + d4[3] * t2
+                        total = imp1 + imp2
+                        va_out = va - inv_m_a[block] * total
+                        wa_out = wa - inv_i_a[block] @ (wp.cross(rr0, imp1) + wp.cross(rr2, imp2))
+                        vb_out = vb + inv_m_b[block] * total
+                        wb_out = wb + inv_i_b[block] @ (wp.cross(rr1, imp1) + wp.cross(rr3, imp2))
+                    elif kind == _OP_SCALAR_LINEAR:
+                        n = axis0[block]
+                        rr0 = r0[block]
+                        rr1 = r1[block]
+                        rel = vb + wp.cross(wb, rr1) - va - wp.cross(wa, rr0)
+                        residual_scalar = wp.dot(n, rel) + bias[block][0]
+                        l0 = _solve_scalar_bounded(
+                            k_inv[block][0, 0],
+                            residual_scalar,
+                            lam_old[0],
+                            mass_coeff[block][0],
+                            impulse_coeff[block][0],
+                            lambda_min[block][0],
+                            lambda_max[block][0],
+                        )
+                        d = l0 - lam_old[0]
+                        impulse = d * n
+                        va_out = va - inv_m_a[block] * impulse
+                        wa_out = wa - inv_i_a[block] @ wp.cross(rr0, impulse)
+                        vb_out = vb + inv_m_b[block] * impulse
+                        wb_out = wb + inv_i_b[block] @ wp.cross(rr1, impulse)
+                        lam_new = wp.vec4f(l0, lam_old[1], lam_old[2], lam_old[3])
+                    elif kind == _OP_SCALAR_ANGULAR:
+                        n = axis0[block]
+                        residual_scalar_ang = wp.dot(n, wb - wa) + bias[block][0]
+                        l0 = _solve_scalar_bounded(
+                            k_inv[block][0, 0],
+                            residual_scalar_ang,
+                            lam_old[0],
+                            mass_coeff[block][0],
+                            impulse_coeff[block][0],
+                            lambda_min[block][0],
+                            lambda_max[block][0],
+                        )
+                        d = l0 - lam_old[0]
+                        impulse = d * n
+                        wa_out = wa - inv_i_a[block] @ impulse
+                        wb_out = wb + inv_i_b[block] @ impulse
+                        lam_new = wp.vec4f(l0, lam_old[1], lam_old[2], lam_old[3])
+                    else:
+                        a0 = axis0[block]
+                        a1 = axis1[block]
+                        a2 = axis2[block]
+                        if kind == _OP_ANGULAR3:
+                            residual3_ang = wp.vec3f(wp.dot(a0, wb - wa), wp.dot(a1, wb - wa), wp.dot(a2, wb - wa))
+                            residual3_ang = residual3_ang + _vec3_from4(bias[block])
+                            lambda3 = _solve_bounded3(
+                                _mat33_from44(k_inv[block]),
+                                residual3_ang,
+                                _vec3_from4(lam_old),
+                                _vec3_from4(mass_coeff[block]),
+                                _vec3_from4(impulse_coeff[block]),
+                                _vec3_from4(lambda_min[block]),
+                                _vec3_from4(lambda_max[block]),
+                            )
+                            d3 = lambda3 - _vec3_from4(lam_old)
+                            impulse_ang = d3[0] * a0 + d3[1] * a1 + d3[2] * a2
+                            wa_out = wa - inv_i_a[block] @ impulse_ang
+                            wb_out = wb + inv_i_b[block] @ impulse_ang
+                            lam_new = wp.vec4f(lambda3[0], lambda3[1], lambda3[2], lam_old[3])
+                        else:
+                            rr0 = r0[block]
+                            rr1 = r1[block]
+                            rel = -va + wp.cross(rr0, wa) + vb - wp.cross(rr1, wb)
+                            residual3_point = rel + _vec3_from4(bias[block])
+                            lambda3 = _solve_bounded3(
+                                _mat33_from44(k_inv[block]),
+                                residual3_point,
+                                _vec3_from4(lam_old),
+                                _vec3_from4(mass_coeff[block]),
+                                _vec3_from4(impulse_coeff[block]),
+                                _vec3_from4(lambda_min[block]),
+                                _vec3_from4(lambda_max[block]),
+                            )
+                            d3 = lambda3 - _vec3_from4(lam_old)
+                            impulse_point = d3[0] * a0 + d3[1] * a1 + d3[2] * a2
+                            va_out = va - inv_m_a[block] * impulse_point
+                            wa_out = wa - inv_i_a[block] @ wp.cross(rr0, impulse_point)
+                            vb_out = vb + inv_m_b[block] * impulse_point
+                            wb_out = wb + inv_i_b[block] @ wp.cross(rr1, impulse_point)
+                            lam_new = wp.vec4f(lambda3[0], lambda3[1], lambda3[2], lam_old[3])
+
+                out_va[block] = va_out
+                out_wa[block] = wa_out
+                out_vb[block] = vb_out
+                out_wb[block] = wb_out
+                out_lambda[block] = lam_new
+                cursor = cursor + threads_per_world
+            color = color + wp.int32(1)
+        epoch = epoch + wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
 def _solve_split_world_loop_kernel(
     block_ids: wp.array[wp.int32],
     color_starts: wp.array[wp.int32],
@@ -935,9 +1222,10 @@ def _alloc_mat44(count: int, device: wp.context.Devicelike):
 
 def _parse_scenes(value: str) -> tuple[str, ...]:
     scenes = tuple(raw.strip() for raw in value.split(",") if raw.strip())
+    choices = (*tuple(_SCENE_PRESETS), _MIXED_SCENE)
     for scene in scenes:
-        if scene not in _SCENE_PRESETS:
-            raise ValueError(f"unknown scene {scene!r}; choices={tuple(_SCENE_PRESETS)}")
+        if scene not in _SCENE_PRESETS and scene != _MIXED_SCENE:
+            raise ValueError(f"unknown scene {scene!r}; choices={choices}")
     return scenes
 
 
@@ -950,6 +1238,97 @@ def _slot_counts(preset: ScenePreset, period: int) -> tuple[int, int, int, int]:
     if total > period:
         scalar = max(0, scalar - (total - period))
     return contact, tangent4, angular3, scalar
+
+
+def _kind_from_lane(
+    lane: int,
+    contact_slots: int,
+    tangent4_slots: int,
+    angular3_slots: int,
+    scalar_slots: int,
+) -> int:
+    if lane < contact_slots:
+        return _OP_CONTACT3_HOST
+    if lane < contact_slots + tangent4_slots:
+        return _OP_TANGENT4_HOST
+    if lane < contact_slots + tangent4_slots + angular3_slots:
+        return _OP_ANGULAR3_HOST
+    if lane < contact_slots + tangent4_slots + angular3_slots + scalar_slots:
+        return _OP_SCALAR_LINEAR_HOST if (lane & 1) == 0 else _OP_SCALAR_ANGULAR_HOST
+    return _OP_POINT3_HOST
+
+
+def _seed_op_kinds_for_schedule(
+    schedule: ScheduleHost,
+    period: int,
+    contact_slots: int,
+    tangent4_slots: int,
+    angular3_slots: int,
+    scalar_slots: int,
+) -> np.ndarray:
+    op_kind = np.empty(schedule.blocks, dtype=np.int32)
+    for block_id in range(schedule.blocks):
+        op_kind[block_id] = _kind_from_lane(
+            block_id % period, contact_slots, tangent4_slots, angular3_slots, scalar_slots
+        )
+    return op_kind
+
+
+def _color_policy_from_contact_slots(contact_slots: int, period: int) -> int:
+    return _COLOR_POLICY_SPLIT_HOST if contact_slots * 2 >= period else _COLOR_POLICY_SIDECAR4_HOST
+
+
+def _uniform_color_policy(schedule: ScheduleHost, contact_slots: int, period: int) -> np.ndarray:
+    policy = _color_policy_from_contact_slots(contact_slots, period)
+    return np.full(schedule.colors, policy, dtype=np.int32)
+
+
+def _build_mixed_schedule_and_metadata(worlds: int, period: int) -> tuple[ScheduleHost, np.ndarray, np.ndarray, str]:
+    h1 = _SCENE_PRESETS["h1"]
+    tower = _SCENE_PRESETS["tower"]
+    h1_slots = _slot_counts(h1, period)
+    tower_slots = _slot_counts(tower, period)
+    block_ids: list[int] = []
+    color_starts: list[int] = [0]
+    world_color_starts: list[int] = [0]
+    color_slots: list[tuple[int, int, int, int]] = []
+    color_policy: list[int] = []
+    block = 0
+    for _world in range(worlds):
+        for count in h1.blocks_per_color:
+            for _ in range(count):
+                block_ids.append(block)
+                block += 1
+            color_starts.append(len(block_ids))
+            color_slots.append(h1_slots)
+            color_policy.append(_color_policy_from_contact_slots(h1_slots[0], period))
+        for count in tower.blocks_per_color:
+            for _ in range(count):
+                block_ids.append(block)
+                block += 1
+            color_starts.append(len(block_ids))
+            color_slots.append(tower_slots)
+            color_policy.append(_color_policy_from_contact_slots(tower_slots[0], period))
+        world_color_starts.append(len(color_starts) - 1)
+
+    schedule = ScheduleHost(
+        block_ids=np.asarray(block_ids, dtype=np.int32),
+        color_starts=np.asarray(color_starts, dtype=np.int32),
+        world_color_starts=np.asarray(world_color_starts, dtype=np.int32),
+        blocks=block,
+        colors=len(color_starts) - 1,
+    )
+    op_kind = np.empty(schedule.blocks, dtype=np.int32)
+    for color, slots in enumerate(color_slots):
+        start = int(schedule.color_starts[color])
+        end = int(schedule.color_starts[color + 1])
+        contact_slots, tangent4_slots, angular3_slots, scalar_slots = slots
+        for local, block_id in enumerate(schedule.block_ids[start:end]):
+            op_kind[int(block_id)] = _kind_from_lane(
+                local % period, contact_slots, tangent4_slots, angular3_slots, scalar_slots
+            )
+    label = f"mixed[h1={h1_slots},tower={tower_slots}]"
+    return schedule, op_kind, np.asarray(color_policy, dtype=np.int32), label
 
 
 def _block_kind_rank(
@@ -1002,13 +1381,26 @@ def _build_shape_grouped_schedule(
 
 
 def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Devicelike) -> None:
-    preset = _SCENE_PRESETS[scene]
-    schedule = _build_schedule(preset, int(args.worlds))
+    period = int(args.period)
+    if scene == _MIXED_SCENE:
+        schedule, op_kind_seed_host, color_policy_host, slot_label = _build_mixed_schedule_and_metadata(
+            int(args.worlds), period
+        )
+        contact_slots, tangent4_slots, angular3_slots, scalar_slots = (0, 0, 0, 0)
+    else:
+        preset = _SCENE_PRESETS[scene]
+        schedule = _build_schedule(preset, int(args.worlds))
+        contact_slots, tangent4_slots, angular3_slots, scalar_slots = _slot_counts(preset, period)
+        op_kind_seed_host = _seed_op_kinds_for_schedule(
+            schedule, period, contact_slots, tangent4_slots, angular3_slots, scalar_slots
+        )
+        color_policy_host = _uniform_color_policy(schedule, contact_slots, period)
+        slot_label = f"slots=(c{contact_slots},t4{tangent4_slots},a3{angular3_slots},s{scalar_slots})"
+
     blocks = schedule.blocks
-    contact_slots, tangent4_slots, angular3_slots, scalar_slots = _slot_counts(preset, int(args.period))
     grouped_schedule = _build_shape_grouped_schedule(
         schedule,
-        int(args.period),
+        period,
         contact_slots,
         tangent4_slots,
         angular3_slots,
@@ -1019,6 +1411,8 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     grouped_block_ids = wp.array(grouped_schedule.block_ids, dtype=wp.int32, device=device)
     color_starts = wp.array(schedule.color_starts, dtype=wp.int32, device=device)
     world_color_starts = wp.array(schedule.world_color_starts, dtype=wp.int32, device=device)
+    op_kind_seed = wp.array(op_kind_seed_host, dtype=wp.int32, device=device)
+    color_policy = wp.array(color_policy_host, dtype=wp.int32, device=device)
 
     op_kind = wp.empty(blocks, dtype=wp.int32, device=device)
     v_a = _alloc_vec(blocks, device)
@@ -1078,12 +1472,18 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     grouped_vb = _alloc_vec(blocks, device)
     grouped_wb = _alloc_vec(blocks, device)
     grouped_lambda = _alloc_vec4(blocks, device)
+    hybrid_va = _alloc_vec(blocks, device)
+    hybrid_wa = _alloc_vec(blocks, device)
+    hybrid_vb = _alloc_vec(blocks, device)
+    hybrid_wb = _alloc_vec(blocks, device)
+    hybrid_lambda = _alloc_vec4(blocks, device)
 
     wp.launch(
         _init_blocks_kernel,
         dim=blocks,
         inputs=[
             op_kind,
+            op_kind_seed,
             v_a,
             w_a,
             v_b,
@@ -1257,6 +1657,61 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         int(args.iterations),
         int(args.threads_per_world),
     ]
+    hybrid_inputs = [
+        block_ids,
+        color_starts,
+        world_color_starts,
+        color_policy,
+        op_kind,
+        v_a,
+        w_a,
+        v_b,
+        w_b,
+        inv_m_a,
+        inv_m_b,
+        inv_i_a,
+        inv_i_b,
+        axis0,
+        axis1,
+        axis2,
+        r0,
+        r1,
+        r2,
+        r3,
+        jla0,
+        jla1,
+        jla2,
+        jla3,
+        jaa0,
+        jaa1,
+        jaa2,
+        jaa3,
+        jlb0,
+        jlb1,
+        jlb2,
+        jlb3,
+        jab0,
+        jab1,
+        jab2,
+        jab3,
+        k_inv,
+        bias,
+        lambda_old,
+        mass_coeff,
+        impulse_coeff,
+        lambda_min,
+        lambda_max,
+        friction_static,
+        friction_kinetic,
+        hybrid_va,
+        hybrid_wa,
+        hybrid_vb,
+        hybrid_wb,
+        hybrid_lambda,
+        int(args.worlds),
+        int(args.iterations),
+        int(args.threads_per_world),
+    ]
 
     def split_run() -> None:
         wp.launch(
@@ -1285,9 +1740,19 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
             block_dim=int(args.block_dim),
         )
 
+    def hybrid_run() -> None:
+        wp.launch(
+            _solve_hybrid_world_loop_kernel,
+            dim=max(1, int(args.worlds) * int(args.threads_per_world)),
+            inputs=hybrid_inputs,
+            device=device,
+            block_dim=int(args.block_dim),
+        )
+
     split_run()
     side_run()
     grouped_run()
+    hybrid_run()
     side_err = _max_err(
         (side_va, split_va),
         (side_wa, split_wa),
@@ -1302,24 +1767,36 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         (grouped_wb, split_wb),
         (grouped_lambda, split_lambda),
     )
+    hybrid_err = _max_err(
+        (hybrid_va, split_va),
+        (hybrid_wa, split_wa),
+        (hybrid_vb, split_vb),
+        (hybrid_wb, split_wb),
+        (hybrid_lambda, split_lambda),
+    )
     split_ms, _ = _bench(split_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
     side_ms, _ = _bench(side_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
     grouped_ms, _ = _bench(grouped_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
+    hybrid_ms, _ = _bench(hybrid_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
     side_speedup = split_ms / side_ms if side_ms > 0.0 else float("nan")
     grouped_speedup = split_ms / grouped_ms if grouped_ms > 0.0 else float("nan")
+    hybrid_speedup = split_ms / hybrid_ms if hybrid_ms > 0.0 else float("nan")
+    side_colors = int(np.count_nonzero(color_policy_host == _COLOR_POLICY_SIDECAR4_HOST))
+    split_colors = int(color_policy_host.size - side_colors)
     print(
-        f"{scene:8s} worlds={int(args.worlds):5d} blocks={blocks:7d} colors={schedule.colors:5d} "
-        f"slots=(c{contact_slots},t4{tangent4_slots},a3{angular3_slots},s{scalar_slots}) "
-        f"split={split_ms:8.4f}ms grouped={grouped_ms:8.4f}ms sidecar4={side_ms:8.4f}ms "
+        f"{scene:14s} worlds={int(args.worlds):5d} blocks={blocks:7d} colors={schedule.colors:5d} "
+        f"policy=(side{side_colors},split{split_colors}) {slot_label} "
+        f"split={split_ms:8.4f}ms grouped={grouped_ms:8.4f}ms sidecar4={side_ms:8.4f}ms hybrid={hybrid_ms:8.4f}ms "
         f"grouped_speedup={grouped_speedup:6.3f}x sidecar4_speedup={side_speedup:6.3f}x "
-        f"grouped_err={grouped_err:.6g} sidecar4_err={side_err:.6g}"
+        f"hybrid_speedup={hybrid_speedup:6.3f}x grouped_err={grouped_err:.6g} "
+        f"sidecar4_err={side_err:.6g} hybrid_err={hybrid_err:.6g}"
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--scenes", default="h1,g1,dr_legs,tower")
+    parser.add_argument("--scenes", default="h1,g1,dr_legs,tower,mixed_h1_tower")
     parser.add_argument("--worlds", type=int, default=2048)
     parser.add_argument("--iterations", type=int, default=4)
     parser.add_argument("--threads-per-world", type=int, default=32)
