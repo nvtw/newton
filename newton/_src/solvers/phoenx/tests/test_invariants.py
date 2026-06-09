@@ -169,6 +169,15 @@ class TestPrepareRefreshStride(unittest.TestCase):
         self.assertEqual(high.prepare_refresh_stride, 3)
         self.assertEqual(high._prepare_refresh_stride_policy, "auto")
 
+    def test_auto_stride_uses_exact_prepare_for_joint_only(self) -> None:
+        w = PhoenXWorld(
+            **_make_kwargs(num_bodies=2, num_joints=1, rigid_contact_max=0),
+            substeps=20,
+            prepare_refresh_stride="auto",
+        )
+        self.assertEqual(w.prepare_refresh_stride, 1)
+        self.assertEqual(w._prepare_refresh_stride_policy, "auto")
+
     def test_auto_stride_falls_back_when_unsupported(self) -> None:
         w = PhoenXWorld(
             **_make_kwargs(num_bodies=2, rigid_contact_max=1, num_particles=4, num_cloth_triangles=1),

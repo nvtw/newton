@@ -179,11 +179,11 @@ __all__ = [
 #: Dynamic auto launches keep this upper bound; fixed launches may use less.
 _STRAGGLER_BLOCK_DIM: int = 32
 
-# PGS sweeps per *_iterate_multi call. Must evenly divide solver_iterations.
-# 2 amortises body/constraint reloads at +17-21% on g1_flat/h1_flat without
-# breaking stacking/articulation tests; 4 halves outer rounds further but
-# breaks test_slam_ball_into_stack.
-_FUSED_INNER_SWEEPS: int = 2
+# Maximum PGS sweeps per *_iterate_multi call in fused multi-world kernels.
+# Runtime selection keeps the old 2-sweep path for low or non-divisible
+# iteration counts; 4 is used for default 8/12-iteration RL workloads,
+# where the extra register reuse has held up in stack/articulation tests.
+_FUSED_INNER_SWEEPS: int = 4
 
 _PRIORITY_COST_SHIFT = wp.constant(wp.int64(32))
 _PRIORITY_JITTER_MASK = wp.constant(wp.int64((1 << 32) - 1))
@@ -1271,7 +1271,11 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
 
         # Iterate phase: outer = num_iterations / _FUSED_INNER_SWEEPS, each
         # outer round runs *_iterate_multi to hold state in registers.
-        inner_sweeps = wp.int32(_FUSED_INNER_SWEEPS)
+        inner_sweeps = wp.int32(2)
+        if num_iterations >= wp.int32(8):
+            q4 = num_iterations / wp.int32(_FUSED_INNER_SWEEPS)
+            if q4 * wp.int32(_FUSED_INNER_SWEEPS) == num_iterations:
+                inner_sweeps = wp.int32(_FUSED_INNER_SWEEPS)
         outer_iters = num_iterations / inner_sweeps
         it_outer = wp.int32(0)
         while it_outer < outer_iters:
@@ -1751,7 +1755,11 @@ def _make_block_world_prepare_plus_iterate_kernel(
             _sync_threads()
             c += wp.int32(1)
 
-        inner_sweeps = wp.int32(_FUSED_INNER_SWEEPS)
+        inner_sweeps = wp.int32(2)
+        if num_iterations >= wp.int32(8):
+            q4 = num_iterations / wp.int32(_FUSED_INNER_SWEEPS)
+            if q4 * wp.int32(_FUSED_INNER_SWEEPS) == num_iterations:
+                inner_sweeps = wp.int32(_FUSED_INNER_SWEEPS)
         outer_iters = num_iterations / inner_sweeps
         it_outer = wp.int32(0)
         while it_outer < outer_iters:

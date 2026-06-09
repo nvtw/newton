@@ -2427,10 +2427,9 @@ class PhoenXWorld:
         """Choose a graph-capture-stable cached-prepare refresh cadence."""
         if cached_prepare_unsupported or substeps < 8:
             return 1
-        stride = 3
-        if contact_capacity_hint > 0:
-            return min(stride, 3)
-        return stride
+        if contact_capacity_hint <= 0:
+            return 1
+        return 3
 
     def _refresh_prepare_this_substep(self) -> bool:
         """Return whether this substep should refresh cached row data."""
