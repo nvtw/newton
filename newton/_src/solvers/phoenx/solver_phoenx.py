@@ -3851,7 +3851,7 @@ class PhoenXWorld:
                 return 1
 
             if self._tpw_launch_bound <= 16 and self.num_worlds >= 512:
-                if joints_per_world <= 48.0 and contacts_per_world <= 64.0:
+                if joints_per_world <= 48.0 and contacts_per_world <= 512.0:
                     wpb = min(wpb, 2)
         return wpb
 

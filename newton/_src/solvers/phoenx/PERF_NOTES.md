@@ -197,7 +197,7 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 | ----------------------------------- | ------------------------------------------------- | ------------------------------------------------ |
 | `_FUSED_INNER_SWEEPS`               | `solver_phoenx_kernels.py`                        | Multi-world per-cid sweep count (currently `2`)  |
 | `_STRAGGLER_BLOCK_DIM`              | `solver_phoenx_kernels.py`                        | Multi-world fast-tail warp size (= 32)           |
-| `_choose_fast_tail_worlds_per_block`| `solver_phoenx_kernels.py`                        | wpb tier (2/4/8) by `num_worlds`                 |
+| `_choose_fast_tail_worlds_per_block`| `solver_phoenx_kernels.py` / `solver_phoenx.py`   | wpb tier plus robot-fleet cap in `_fast_tail_worlds_per_block` |
 | `PHOENX_USE_GREEDY_COLORING`        | `solver_config.py`                                | Greedy vs round-based JP                         |
 | `FUSE_TAIL_MAX_COLOR_SIZE`          | `solver_config.py`                                | Single-world fused-tail hand-off threshold       |
 | `FUSE_TAIL_BLOCK_DIM`               | `solver_config.py`                                | Single-world fused-tail block size               |
