@@ -956,15 +956,35 @@ def _block_world_subfamily(eid: int, family: np.ndarray, joint_modes: np.ndarray
     return _BLOCK_WORLD_SUBFAMILIES - 1
 
 
-def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iterations: int):
+def _build_scene(
+    scene: str,
+    num_worlds: int,
+    *,
+    substeps: int,
+    solver_iterations: int,
+    prepare_refresh_stride: int | str,
+):
     if scene == "h1":
-        return h1_flat.build(num_worlds, "phoenx", substeps, solver_iterations)
+        return h1_flat.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
     if scene == "g1":
-        return g1_flat.build(num_worlds, "phoenx", substeps, solver_iterations)
+        return g1_flat.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
     if scene == "tower":
-        return tower.build(num_worlds, "phoenx", substeps, solver_iterations, step_layout="multi_world")
+        return tower.build(
+            num_worlds,
+            "phoenx",
+            substeps,
+            solver_iterations,
+            step_layout="multi_world",
+            prepare_refresh_stride=prepare_refresh_stride,
+        )
     if scene == "dr_legs":
-        return dr_legs.build(num_worlds, "phoenx", substeps, solver_iterations)
+        return dr_legs.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
     raise ValueError(f"unknown scene: {scene}")
 
 
@@ -1426,6 +1446,11 @@ def _parse_csv_ints(value: str) -> tuple[int, ...]:
     return tuple(int(raw.strip()) for raw in value.split(",") if raw.strip())
 
 
+def _parse_stride_value(value: str) -> int | str:
+    item = value.strip().lower()
+    return "auto" if item == "auto" else int(item)
+
+
 def _bench(fn, *, n_runs: int, warmup: int, trials: int, device: wp.context.Devicelike) -> tuple[float, float]:
     for _ in range(warmup):
         fn()
@@ -1654,7 +1679,13 @@ def _run_adaptive(
 
 
 def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
-    handle = _build_scene(scene, num_worlds, substeps=args.substeps, solver_iterations=args.solver_iterations)
+    handle = _build_scene(
+        scene,
+        num_worlds,
+        substeps=args.substeps,
+        solver_iterations=args.solver_iterations,
+        prepare_refresh_stride=args.prepare_refresh_stride,
+    )
     solver = _extract_solver(handle)
     world = solver.world
     if world.step_layout == "single_world" or world.mass_splitting_enabled or world.num_particles > 0:
@@ -1768,6 +1799,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenes", nargs="+", choices=("h1", "g1", "tower", "dr_legs"), default=["h1", "g1", "tower"])
     parser.add_argument("--worlds", default="32", help="Comma-separated world counts.")
     parser.add_argument("--substeps", type=int, default=1)
+    parser.add_argument("--prepare-refresh-stride", type=_parse_stride_value, default="auto")
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--prime-frames", type=int, default=3)
     parser.add_argument("--block-dim", type=int, default=128)
@@ -1818,7 +1850,7 @@ def main() -> None:
     worlds = [int(raw.strip()) for raw in args.worlds.split(",") if raw.strip()]
     print(
         f"device={wp.get_device()} block_dim={args.block_dim} block_world_dim={args.block_world_dim} "
-        f"mega_blocks={args.mega_blocks} "
+        f"prepare_refresh_stride={args.prepare_refresh_stride} mega_blocks={args.mega_blocks} "
         f"row_bound={args.row_bound} n_runs={args.n_runs} mode={args.mode}"
     )
     for scene in args.scenes:
