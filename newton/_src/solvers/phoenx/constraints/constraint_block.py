@@ -26,6 +26,7 @@ __all__ = [
     "BlockVector4Update",
     "PositionRows1",
     "PositionRows2",
+    "RigidFrameBlock3",
     "RigidFrameRows3",
     "RigidFrameRows3State",
     "RigidFrameRows3Update",
@@ -68,6 +69,7 @@ __all__ = [
     "block_solve_projected_xpbd_1",
     "block_solve_projected_xpbd_2",
     "block_solve_projected_xpbd_2_strict",
+    "block_solve_rigid_frame_block3",
     "block_solve_rigid_frame_rows3",
     "block_solve_rigid_frame_rows3_angular",
     "block_solve_rigid_frame_rows3_contact",
@@ -244,6 +246,34 @@ class VelocityRows3Op:
 class VelocityRows3Update:
     delta: wp.vec3f
     lambda_new: wp.vec3f
+
+
+@wp.struct
+class RigidFrameBlock3:
+    """Compact rigid three-row frame descriptor with a dense 3x3 solve.
+
+    This is the block-coupled counterpart to :class:`RigidFrameRows3`.
+    Contact rows can populate ``k_inv`` as a diagonal matrix, while joint
+    point-lock rows can use the full inverse effective mass block. The residual,
+    projection, and rigid body apply sequence stay identical.
+    """
+
+    axis0: wp.vec3f
+    axis1: wp.vec3f
+    axis2: wp.vec3f
+    r0: wp.vec3f
+    r1: wp.vec3f
+    mode: wp.vec3f
+    k_inv: wp.mat33f
+    bias: wp.vec3f
+    lambda_old: wp.vec3f
+    mass_coeff: wp.vec3f
+    impulse_coeff: wp.vec3f
+    lambda_min: wp.vec3f
+    lambda_max: wp.vec3f
+    projection_mode: wp.int32
+    friction_static: wp.float32
+    friction_kinetic: wp.float32
 
 
 @wp.struct
@@ -1066,6 +1096,93 @@ def block_solve_rigid_frame_rows3_uniform_projection(
     residual = _rows3_dot(rows.axis0, rows.axis1, rows.axis2, rel) + rows.bias
 
     projection = _rigid_frame_rows3_projection_uniform(rows, residual, sor_boost)
+    d = projection.delta
+    impulse = d[0] * rows.axis0 + d[1] * rows.axis1 + d[2] * rows.axis2
+
+    update = RigidFrameRows3Update()
+    update.v_a = state.v_a - linear_scale * state.inv_m_a * impulse
+    update.v_b = state.v_b + linear_scale * state.inv_m_b * impulse
+    update.w_a = state.w_a + state.inv_i_a @ (-cross_scale * wp.cross(rows.r0, impulse) - angular_scale * impulse)
+    update.w_b = state.w_b + state.inv_i_b @ (cross_scale * wp.cross(rows.r1, impulse) + angular_scale * impulse)
+    update.lambda_new = projection.lambda_new
+    update.delta = d
+    return update
+
+
+@wp.func
+def _dense_velocity_rows3_projection_uniform(
+    k_inv: wp.mat33f,
+    residual: wp.vec3f,
+    lambda_old: wp.vec3f,
+    mass_coeff: wp.vec3f,
+    impulse_coeff: wp.vec3f,
+    lambda_min: wp.vec3f,
+    lambda_max: wp.vec3f,
+    projection_mode: wp.int32,
+    friction_static: wp.float32,
+    friction_kinetic: wp.float32,
+    sor_boost: wp.float32,
+) -> VelocityRows3Update:
+    d_lambda_unsoft = -(k_inv @ residual)
+    d_lambda = wp.vec3f(
+        (mass_coeff[0] * d_lambda_unsoft[0] - impulse_coeff[0] * lambda_old[0]) * sor_boost,
+        (mass_coeff[1] * d_lambda_unsoft[1] - impulse_coeff[1] * lambda_old[1]) * sor_boost,
+        (mass_coeff[2] * d_lambda_unsoft[2] - impulse_coeff[2] * lambda_old[2]) * sor_boost,
+    )
+    lambda_raw = lambda_old + d_lambda
+
+    lambda0_new = wp.clamp(lambda_raw[0], lambda_min[0], lambda_max[0])
+    lambda1_box = wp.clamp(lambda_raw[1], lambda_min[1], lambda_max[1])
+    lambda2_box = wp.clamp(lambda_raw[2], lambda_min[2], lambda_max[2])
+    lambda_friction = block_project_friction_circle_2(
+        lambda_raw[1],
+        lambda_raw[2],
+        friction_static * lambda0_new,
+        friction_kinetic * lambda0_new,
+    )
+
+    is_contact = projection_mode == VELOCITY_ROWS3_PROJECT_CONTACT_CONE
+    lambda1_new = wp.where(is_contact, lambda_friction[0], lambda1_box)
+    lambda2_new = wp.where(is_contact, lambda_friction[1], lambda2_box)
+    lambda_new = wp.vec3f(lambda0_new, lambda1_new, lambda2_new)
+
+    update = VelocityRows3Update()
+    update.lambda_new = lambda_new
+    update.delta = lambda_new - lambda_old
+    return update
+
+
+@wp.func
+def block_solve_rigid_frame_block3(
+    rows: RigidFrameBlock3,
+    state: RigidFrameRows3State,
+    sor_boost: wp.float32,
+) -> RigidFrameRows3Update:
+    """Solve/project/apply one rigid three-row frame op with a dense 3x3 block."""
+    linear_scale = rows.mode[0]
+    cross_scale = rows.mode[1]
+    angular_scale = rows.mode[2]
+
+    rel = (
+        linear_scale * (state.v_b - state.v_a)
+        + cross_scale * (wp.cross(state.w_b, rows.r1) - wp.cross(state.w_a, rows.r0))
+        + angular_scale * (state.w_b - state.w_a)
+    )
+    residual = _rows3_dot(rows.axis0, rows.axis1, rows.axis2, rel) + rows.bias
+
+    projection = _dense_velocity_rows3_projection_uniform(
+        rows.k_inv,
+        residual,
+        rows.lambda_old,
+        rows.mass_coeff,
+        rows.impulse_coeff,
+        rows.lambda_min,
+        rows.lambda_max,
+        rows.projection_mode,
+        rows.friction_static,
+        rows.friction_kinetic,
+        sor_boost,
+    )
     d = projection.delta
     impulse = d[0] * rows.axis0 + d[1] * rows.axis1 + d[2] * rows.axis2
 
