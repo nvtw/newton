@@ -3786,14 +3786,24 @@ class PhoenXWorld:
         )
 
     def _fast_tail_family_split(self) -> bool:
-        """Use rigid joint/contact family subranges in multi-world fast-tail."""
-        return bool(
-            self.step_layout != "single_world"
-            and self._use_greedy_coloring
-            and self.num_joints > 0
-            and self.max_contact_columns > 0
-            and self._contact_offset == self.num_joints
-        )
+        """Use solver-family subranges in multi-world fast-tail."""
+        if self.step_layout == "single_world" or not self._use_greedy_coloring:
+            return False
+
+        family_count = 0
+        if self.num_joints > 0:
+            family_count += 1
+        if self.max_contact_columns > 0:
+            family_count += 1
+        if self.num_cloth_triangles > 0:
+            family_count += 1
+        if self.num_cloth_bending > 0:
+            family_count += 1
+        if self.num_soft_tetrahedra > 0:
+            family_count += 1
+        if self.num_soft_hexahedra > 0:
+            family_count += 1
+        return family_count > 1
 
     def _fast_tail_worlds_per_block(self) -> int:
         """Choose fast-tail block packing from topology known at finalize time."""
