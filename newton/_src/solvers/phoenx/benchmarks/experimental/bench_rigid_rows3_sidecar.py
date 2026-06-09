@@ -31,7 +31,10 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
     VELOCITY_ROWS3_PROJECT_BOUNDS,
     VELOCITY_ROWS3_PROJECT_CONTACT_CONE,
+    RigidFrameRows3,
+    RigidFrameRows3State,
     VelocityRows3Op,
+    block_solve_rigid_frame_rows3,
     block_solve_velocity_rows3_op,
 )
 
@@ -332,41 +335,38 @@ def _solve_frame_kernel(
     out_lambda: wp.array[wp.vec3f],
 ):
     tid = wp.tid()
-    va = v_a[tid]
-    wa = w_a[tid]
-    vb = v_b[tid]
-    wb = w_b[tid]
-    a0 = axis0[tid]
-    a1 = axis1[tid]
-    a2 = axis2[tid]
-    rr0 = r0[tid]
-    rr1 = r1[tid]
-    mode = frame_mode[tid]
-    linear_scale = mode[0]
-    cross_scale = mode[1]
-    angular_scale = mode[2]
 
-    rel = linear_scale * (vb - va) + cross_scale * (wp.cross(wb, rr1) - wp.cross(wa, rr0)) + angular_scale * (wb - wa)
-    residual = _rows3_dot(a0, a1, a2, rel) + bias[tid]
+    rows = RigidFrameRows3()
+    rows.axis0 = axis0[tid]
+    rows.axis1 = axis1[tid]
+    rows.axis2 = axis2[tid]
+    rows.r0 = r0[tid]
+    rows.r1 = r1[tid]
+    rows.mode = frame_mode[tid]
+    rows.k_inv = k_inv[tid]
+    rows.bias = bias[tid]
+    rows.lambda_old = lambda_old[tid]
+    rows.lambda_min = lambda_min[tid]
+    rows.lambda_max = lambda_max[tid]
+    rows.projection_mode = projection_mode[tid]
+    rows.friction_static = friction_static[tid]
+    rows.friction_kinetic = friction_kinetic[tid]
 
-    op = _make_projection_op(
-        k_inv[tid],
-        residual,
-        lambda_old[tid],
-        lambda_min[tid],
-        lambda_max[tid],
-        projection_mode[tid],
-        friction_static[tid],
-        friction_kinetic[tid],
-    )
-    update = block_solve_velocity_rows3_op(op, wp.float32(1.0))
-    d = update.delta
-    impulse = d[0] * a0 + d[1] * a1 + d[2] * a2
+    state = RigidFrameRows3State()
+    state.v_a = v_a[tid]
+    state.w_a = w_a[tid]
+    state.v_b = v_b[tid]
+    state.w_b = w_b[tid]
+    state.inv_m_a = inv_m_a[tid]
+    state.inv_m_b = inv_m_b[tid]
+    state.inv_i_a = inv_i_a[tid]
+    state.inv_i_b = inv_i_b[tid]
 
-    out_va[tid] = va - linear_scale * inv_m_a[tid] * impulse
-    out_vb[tid] = vb + linear_scale * inv_m_b[tid] * impulse
-    out_wa[tid] = wa + _mul_diag(inv_i_a[tid], -cross_scale * wp.cross(rr0, impulse) - angular_scale * impulse)
-    out_wb[tid] = wb + _mul_diag(inv_i_b[tid], cross_scale * wp.cross(rr1, impulse) + angular_scale * impulse)
+    update = block_solve_rigid_frame_rows3(rows, state, wp.float32(1.0))
+    out_va[tid] = update.v_a
+    out_wa[tid] = update.w_a
+    out_vb[tid] = update.v_b
+    out_wb[tid] = update.w_b
     out_lambda[tid] = update.lambda_new
 
 

@@ -26,6 +26,9 @@ __all__ = [
     "BlockVector4Update",
     "PositionRows1",
     "PositionRows2",
+    "RigidFrameRows3",
+    "RigidFrameRows3State",
+    "RigidFrameRows3Update",
     "VelocityBlock1",
     "VelocityBlock2",
     "VelocityBlock3",
@@ -65,6 +68,7 @@ __all__ = [
     "block_solve_projected_xpbd_1",
     "block_solve_projected_xpbd_2",
     "block_solve_projected_xpbd_2_strict",
+    "block_solve_rigid_frame_rows3",
     "block_solve_symmetric_1",
     "block_solve_symmetric_2",
     "block_solve_symmetric_2_strict",
@@ -237,6 +241,68 @@ class VelocityRows3Op:
 class VelocityRows3Update:
     delta: wp.vec3f
     lambda_new: wp.vec3f
+
+
+@wp.struct
+class RigidFrameRows3:
+    """Compact prepared rigid three-row frame descriptor.
+
+    ``axis0..2`` define the row frame. ``r0``/``r1`` are offsets from body A/B
+    centers to the row point. ``mode`` gates the branchless residual/apply
+    shape: ``(linear, cross, angular)``. Contact rows use ``(1, 1, 0)`` and
+    angular-direct joint rows use ``(0, 0, 1)``. Projection fields mirror
+    :class:`VelocityRows3Op` so the same PGS projection code handles contacts,
+    drives, motors, and bounded rows.
+    """
+
+    axis0: wp.vec3f
+    axis1: wp.vec3f
+    axis2: wp.vec3f
+    r0: wp.vec3f
+    r1: wp.vec3f
+    mode: wp.vec3f
+    k_inv: wp.vec3f
+    bias: wp.vec3f
+    lambda_old: wp.vec3f
+    lambda_min: wp.vec3f
+    lambda_max: wp.vec3f
+    projection_mode: wp.int32
+    friction_static: wp.float32
+    friction_kinetic: wp.float32
+
+
+@wp.struct
+class RigidFrameRows3State:
+    """Body-pair state consumed by :func:`block_solve_rigid_frame_rows3`."""
+
+    v_a: wp.vec3f
+    w_a: wp.vec3f
+    v_b: wp.vec3f
+    w_b: wp.vec3f
+    inv_m_a: wp.float32
+    inv_m_b: wp.float32
+    inv_i_a: wp.vec3f
+    inv_i_b: wp.vec3f
+
+
+@wp.struct
+class RigidFrameRows3Update:
+    v_a: wp.vec3f
+    w_a: wp.vec3f
+    v_b: wp.vec3f
+    w_b: wp.vec3f
+    lambda_new: wp.vec3f
+    delta: wp.vec3f
+
+
+@wp.func
+def _vec3_mul_diag(diag: wp.vec3f, x: wp.vec3f) -> wp.vec3f:
+    return wp.vec3f(diag[0] * x[0], diag[1] * x[1], diag[2] * x[2])
+
+
+@wp.func
+def _rows3_dot(row0: wp.vec3f, row1: wp.vec3f, row2: wp.vec3f, x: wp.vec3f) -> wp.vec3f:
+    return wp.vec3f(wp.dot(row0, x), wp.dot(row1, x), wp.dot(row2, x))
 
 
 @wp.func
@@ -842,6 +908,60 @@ def block_solve_velocity_rows3_op_uniform_projection(
         lambda2_new - op.lambda_old[2],
     )
     update.lambda_new = wp.vec3f(row0.lambda_new, lambda1_new, lambda2_new)
+    return update
+
+
+@wp.func
+def block_solve_rigid_frame_rows3(
+    rows: RigidFrameRows3,
+    state: RigidFrameRows3State,
+    sor_boost: wp.float32,
+) -> RigidFrameRows3Update:
+    """Solve/project/apply one compact rigid three-row frame operation.
+
+    This is a branchless local PGS row-block shape for contact-like rows and
+    angular-direct joint rows. It deliberately uses compact axes/offsets instead
+    of a dense max-J sidecar, keeping memory traffic closer to typed kernels
+    while still sharing the same residual/projection/apply sequence.
+    """
+    linear_scale = rows.mode[0]
+    cross_scale = rows.mode[1]
+    angular_scale = rows.mode[2]
+
+    rel = (
+        linear_scale * (state.v_b - state.v_a)
+        + cross_scale * (wp.cross(state.w_b, rows.r1) - wp.cross(state.w_a, rows.r0))
+        + angular_scale * (state.w_b - state.w_a)
+    )
+    residual = _rows3_dot(rows.axis0, rows.axis1, rows.axis2, rel) + rows.bias
+
+    op = VelocityRows3Op()
+    op.k_inv = rows.k_inv
+    op.residual = residual
+    op.lambda_old = rows.lambda_old
+    op.mass_coeff = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(1.0))
+    op.impulse_coeff = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    op.lambda_min = rows.lambda_min
+    op.lambda_max = rows.lambda_max
+    op.projection_mode = rows.projection_mode
+    op.friction_static = rows.friction_static
+    op.friction_kinetic = rows.friction_kinetic
+
+    projection = block_solve_velocity_rows3_op(op, sor_boost)
+    d = projection.delta
+    impulse = d[0] * rows.axis0 + d[1] * rows.axis1 + d[2] * rows.axis2
+
+    update = RigidFrameRows3Update()
+    update.v_a = state.v_a - linear_scale * state.inv_m_a * impulse
+    update.v_b = state.v_b + linear_scale * state.inv_m_b * impulse
+    update.w_a = state.w_a + _vec3_mul_diag(
+        state.inv_i_a, -cross_scale * wp.cross(rows.r0, impulse) - angular_scale * impulse
+    )
+    update.w_b = state.w_b + _vec3_mul_diag(
+        state.inv_i_b, cross_scale * wp.cross(rows.r1, impulse) + angular_scale * impulse
+    )
+    update.lambda_new = projection.lambda_new
+    update.delta = d
     return update
 
 
