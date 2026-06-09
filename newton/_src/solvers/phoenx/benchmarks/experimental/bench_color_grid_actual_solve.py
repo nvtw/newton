@@ -30,6 +30,15 @@ from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extra
 from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
+    _OFF_JOINT_MODE,
+    JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_CABLE,
+    JOINT_MODE_CYLINDRICAL,
+    JOINT_MODE_FIXED,
+    JOINT_MODE_PLANAR,
+    JOINT_MODE_PRISMATIC,
+    JOINT_MODE_REVOLUTE,
+    JOINT_MODE_UNIVERSAL,
     actuated_double_ball_socket_iterate_multi,
     actuated_double_ball_socket_prepare_for_iteration,
     revolute_iterate_multi,
@@ -51,6 +60,16 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 from newton._src.solvers.phoenx.solver_phoenx_kernels import _FUSED_INNER_SWEEPS, _sync_threads
 
 _DEFAULT_BLOCK_WORLD_DIM = 128
+
+_JOINT_MODE_REVOLUTE_HOST = int(JOINT_MODE_REVOLUTE)
+_JOINT_MODE_PRISMATIC_HOST = int(JOINT_MODE_PRISMATIC)
+_JOINT_MODE_BALL_SOCKET_HOST = int(JOINT_MODE_BALL_SOCKET)
+_JOINT_MODE_FIXED_HOST = int(JOINT_MODE_FIXED)
+_JOINT_MODE_CABLE_HOST = int(JOINT_MODE_CABLE)
+_JOINT_MODE_UNIVERSAL_HOST = int(JOINT_MODE_UNIVERSAL)
+_JOINT_MODE_CYLINDRICAL_HOST = int(JOINT_MODE_CYLINDRICAL)
+_JOINT_MODE_PLANAR_HOST = int(JOINT_MODE_PLANAR)
+_JOINT_MODE_OFFSET_HOST = int(_OFF_JOINT_MODE)
 
 
 @dataclass
@@ -737,6 +756,44 @@ def _block_world_prepare_iterate_kernel(
         outer = outer + wp.int32(1)
 
 
+def _joint_mode_rank(mode: int) -> int:
+    if mode == _JOINT_MODE_REVOLUTE_HOST:
+        return 0
+    if mode == _JOINT_MODE_PRISMATIC_HOST:
+        return 1
+    if mode == _JOINT_MODE_BALL_SOCKET_HOST:
+        return 2
+    if mode == _JOINT_MODE_FIXED_HOST:
+        return 3
+    if mode == _JOINT_MODE_CABLE_HOST:
+        return 4
+    if mode == _JOINT_MODE_UNIVERSAL_HOST:
+        return 5
+    if mode == _JOINT_MODE_CYLINDRICAL_HOST:
+        return 6
+    if mode == _JOINT_MODE_PLANAR_HOST:
+        return 7
+    return 8
+
+
+def _extract_joint_modes(world: PhoenXWorld) -> np.ndarray:
+    if int(world.num_joints) <= 0:
+        return np.empty(0, dtype=np.int32)
+    constraint_words = world.constraints.data.numpy()
+    return np.ascontiguousarray(
+        constraint_words[_JOINT_MODE_OFFSET_HOST, : int(world.num_joints)],
+        dtype=np.float32,
+    ).view(np.int32)
+
+
+def _row_kind_sort_key(eid: int, family: np.ndarray, joint_modes: np.ndarray, num_joints: int) -> tuple[int, int, int]:
+    if 0 <= eid < num_joints:
+        return (0, _joint_mode_rank(int(joint_modes[eid])), eid)
+    if 0 <= eid < int(family.shape[0]) and int(family[eid]) == 1:
+        return (1, 0, eid)
+    return (2, 0, eid)
+
+
 def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iterations: int):
     if scene == "h1":
         return h1_flat.build(num_worlds, "phoenx", substeps, solver_iterations)
@@ -749,18 +806,21 @@ def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iteration
     raise ValueError(f"unknown scene: {scene}")
 
 
-def _extract_color_grid(world: PhoenXWorld) -> ColorGridHost:
+def _extract_color_grid(world: PhoenXWorld, *, group_by_kind: bool = False) -> ColorGridHost:
     active = int(world._num_active_constraints.numpy()[0])
     eids_by_color = world._world_element_ids_by_color.numpy()
     starts = world._world_color_starts.numpy()
     csr = world._world_csr_offsets.numpy()
     num_colors_per_world = world._world_num_colors.numpy().astype(np.int32, copy=False)
     num_colors = int(num_colors_per_world.max(initial=0))
+    family = world._element_family.numpy() if group_by_kind else np.empty(0, dtype=np.int32)
+    joint_modes = _extract_joint_modes(world) if group_by_kind else np.empty(0, dtype=np.int32)
     eids: list[int] = []
     color_starts = np.zeros(num_colors + 1, dtype=np.int32)
     color_max_counts = np.zeros(num_colors, dtype=np.int32)
     for color in range(num_colors):
         color_starts[color] = len(eids)
+        color_eids: list[int] = []
         for world_id in range(world.num_worlds):
             if color >= int(num_colors_per_world[world_id]):
                 continue
@@ -771,7 +831,10 @@ def _extract_color_grid(world: PhoenXWorld) -> ColorGridHost:
             for cursor in range(start, end):
                 eid = int(eids_by_color[cursor])
                 if 0 <= eid < active:
-                    eids.append(eid)
+                    color_eids.append(eid)
+        if group_by_kind:
+            color_eids.sort(key=lambda eid: _row_kind_sort_key(eid, family, joint_modes, int(world.num_joints)))
+        eids.extend(color_eids)
     color_starts[num_colors] = len(eids)
     if not eids:
         eids.append(0)
@@ -1121,12 +1184,16 @@ def _scheduler_candidates(
     args: argparse.Namespace,
     world: PhoenXWorld,
     grid_graph: ColorGridDevice,
+    grouped_grid_graph: ColorGridDevice,
     *,
     include_launch_heavy: bool,
 ) -> list[SchedulerCandidate]:
     candidates = [SchedulerCandidate("baseline", world._solve_main)]
     if include_launch_heavy:
         candidates.append(SchedulerCandidate("flat", _color_grid_runner(world, grid_graph, block_dim=args.block_dim)))
+        candidates.append(
+            SchedulerCandidate("flat_grouped", _color_grid_runner(world, grouped_grid_graph, block_dim=args.block_dim))
+        )
         candidates.append(
             SchedulerCandidate("direct", _color_grid_direct_runner(world, grid_graph, block_dim=args.block_dim))
         )
@@ -1186,11 +1253,12 @@ def _run_autotune(
     args: argparse.Namespace,
     world: PhoenXWorld,
     grid_graph: ColorGridDevice,
+    grouped_grid_graph: ColorGridDevice,
     scene: str,
     num_worlds: int,
     row_count: int,
 ) -> None:
-    candidates = _scheduler_candidates(args, world, grid_graph, include_launch_heavy=True)
+    candidates = _scheduler_candidates(args, world, grid_graph, grouped_grid_graph, include_launch_heavy=True)
     results: list[tuple[SchedulerCandidate, float, float]] = []
     for candidate in candidates:
         min_ms, med_ms = _time_candidate(
@@ -1215,6 +1283,7 @@ def _run_adaptive(
     args: argparse.Namespace,
     world: PhoenXWorld,
     grid_graph: ColorGridDevice,
+    grouped_grid_graph: ColorGridDevice,
     scene: str,
     num_worlds: int,
     row_count: int,
@@ -1223,6 +1292,7 @@ def _run_adaptive(
         args,
         world,
         grid_graph,
+        grouped_grid_graph,
         include_launch_heavy=args.adapt_include_launch_heavy,
     )
     candidate_by_label = {candidate.label: candidate for candidate in candidates}
@@ -1313,20 +1383,26 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
     wp.synchronize_device()
 
     host_graph = _extract_color_grid(world)
+    grouped_host_graph = _extract_color_grid(world, group_by_kind=True)
+    if int(grouped_host_graph.color_starts[-1]) != int(host_graph.color_starts[-1]):
+        raise RuntimeError("grouped color grid changed row count")
     grid_graph = _upload_color_grid(host_graph, world.device)
+    grouped_grid_graph = _upload_color_grid(grouped_host_graph, world.device)
     outer_iters = int(world.solver_iterations) // int(_FUSED_INNER_SWEEPS)
     expected = int(host_graph.color_starts[-1]) * (1 + outer_iters)
 
     if args.mode == "autotune":
-        _run_autotune(args, world, grid_graph, scene, num_worlds, int(host_graph.color_starts[-1]))
+        _run_autotune(args, world, grid_graph, grouped_grid_graph, scene, num_worlds, int(host_graph.color_starts[-1]))
         return
     if args.mode == "adaptive":
-        _run_adaptive(args, world, grid_graph, scene, num_worlds, int(host_graph.color_starts[-1]))
+        _run_adaptive(args, world, grid_graph, grouped_grid_graph, scene, num_worlds, int(host_graph.color_starts[-1]))
         return
 
     runs: list[tuple[str, object]] = []
     if args.mode in ("flat", "both", "all"):
         runs.append(("flat", _color_grid_runner(world, grid_graph, block_dim=args.block_dim)))
+    if args.mode in ("flat_grouped", "grouped", "both", "all"):
+        runs.append(("flat_grouped", _color_grid_runner(world, grouped_grid_graph, block_dim=args.block_dim)))
     if args.mode in ("direct", "both", "all"):
         runs.append(("direct", _color_grid_direct_runner(world, grid_graph, block_dim=args.block_dim)))
     if args.mode in ("block_world", "all"):
@@ -1386,7 +1462,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--block-world-dim", type=int, default=_DEFAULT_BLOCK_WORLD_DIM)
     parser.add_argument(
         "--mode",
-        choices=("flat", "direct", "block_world", "autotune", "adaptive", "mega", "mega_direct", "both", "all"),
+        choices=(
+            "flat",
+            "flat_grouped",
+            "grouped",
+            "direct",
+            "block_world",
+            "autotune",
+            "adaptive",
+            "mega",
+            "mega_direct",
+            "both",
+            "all",
+        ),
         default="flat",
     )
     parser.add_argument("--mega-blocks", type=int, default=128)
