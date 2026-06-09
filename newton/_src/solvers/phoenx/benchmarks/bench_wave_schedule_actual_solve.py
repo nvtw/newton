@@ -3,9 +3,10 @@
 
 # Experimental PhoenX dependency-wave solve benchmark.
 # CPU builds an ASAP schedule from colored rows and touched body nodes.
-# The GPU runs the waves in one persistent megakernel with a software
-# barrier between waves. Rows that touch the same dynamic body keep PGS
-# order; independent later-color rows can move into earlier waves.
+# The flat mode runs the resulting waves as captured per-wave kernels;
+# mega mode keeps the older persistent-kernel software barrier path.
+# Rows that touch the same dynamic body keep PGS order; independent
+# later-color rows can move into earlier waves when the graph permits it.
 
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from newton._src.solvers.phoenx.benchmarks.bench_color_grid_actual_solve import 
     _bench,
     _build_scene,
     _color_grid_mega_runner,
+    _color_grid_runner,
     _extract_color_grid,
     _upload_color_grid,
 )
@@ -240,24 +242,19 @@ def _run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
     color_graph = _upload_color_grid(color_host, world.device)
     wave_graph = _upload_color_grid(wave_host, world.device)
     tail_graph = _upload_color_grid(tail_host, world.device)
-    color_run = _color_grid_mega_runner(
-        world,
-        color_graph,
-        block_dim=args.block_dim,
-        worker_blocks=args.worker_blocks,
-    )
-    wave_run = _color_grid_mega_runner(
-        world,
-        wave_graph,
-        block_dim=args.block_dim,
-        worker_blocks=args.worker_blocks,
-    )
-    tail_run = _color_grid_mega_runner(
-        world,
-        tail_graph,
-        block_dim=args.block_dim,
-        worker_blocks=args.worker_blocks,
-    )
+    def make_run(graph):
+        if args.mode == "mega":
+            return _color_grid_mega_runner(
+                world,
+                graph,
+                block_dim=args.block_dim,
+                worker_blocks=args.worker_blocks,
+            )
+        return _color_grid_runner(world, graph, block_dim=args.block_dim)
+
+    color_run = make_run(color_graph)
+    wave_run = make_run(wave_graph)
+    tail_run = make_run(tail_graph)
 
     color_run()
     wave_run()
@@ -296,14 +293,15 @@ def _run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
     color_speed = base_min / color_min if color_min > 0.0 else float("nan")
     wave_speed = base_min / wave_min if wave_min > 0.0 else float("nan")
     tail_speed = base_min / tail_min if tail_min > 0.0 else float("nan")
+    suffix = "mega" if args.mode == "mega" else "flat"
     print(
         f"{scene:7s} worlds={num_worlds:5d} rows={stats.rows:7d} colors={stats.colors:4d} "
         f"waves={stats.waves:4d} tail_waves={tail_stats.waves:4d} "
         f"max_color={stats.max_color_rows:5d} max_wave={stats.max_wave_rows:5d} "
         f"max_tail={tail_stats.max_wave_rows:5d} baseline={base_min:8.3f}ms "
-        f"color_mega={color_min:8.3f}ms({color_speed:5.3f}x) "
-        f"wave_mega={wave_min:8.3f}ms({wave_speed:5.3f}x) "
-        f"tail_mega={tail_min:8.3f}ms({tail_speed:5.3f}x) "
+        f"color_{suffix}={color_min:8.3f}ms({color_speed:5.3f}x) "
+        f"wave_{suffix}={wave_min:8.3f}ms({wave_speed:5.3f}x) "
+        f"tail_{suffix}={tail_min:8.3f}ms({tail_speed:5.3f}x) "
         f"base_us={1000.0 * base_min / args.n_runs:8.3f}"
     )
 
@@ -317,6 +315,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--substeps", type=int, default=1)
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--prime-frames", type=int, default=3)
+    parser.add_argument("--mode", choices=("flat", "mega"), default="flat")
     parser.add_argument("--block-dim", type=int, default=128)
     parser.add_argument("--worker-blocks", type=int, default=128)
     parser.add_argument("--tail-fraction", type=float, default=0.25)
@@ -330,7 +329,7 @@ def main() -> None:
     args = parse_args()
     wp.init()
     print(
-        f"device={wp.get_device()} block_dim={args.block_dim} worker_blocks={args.worker_blocks} "
+        f"device={wp.get_device()} mode={args.mode} block_dim={args.block_dim} worker_blocks={args.worker_blocks} "
         f"n_runs={args.n_runs} trials={args.trials}"
     )
     for scene in args.scenes:
