@@ -26,7 +26,9 @@ megakernel scheduling and unified descriptor fetch are plausible before we wire
 them into real joint/contact rows.
 
 The ``--real-scenes`` option extracts the active colored interaction graph from
-small PhoenX benchmark scenes and converts it into the same descriptor stream.
+PhoenX benchmark scenes and converts it into the same descriptor stream. It
+accepts legacy names such as ``h1_64`` and configurable specs such as
+``h1:512``, ``dr_legs:2048``, or ``tower:1:single``.
 
 Usage::
 
@@ -64,6 +66,14 @@ class SyntheticGraph:
     color_buffer: np.ndarray
     color_starts: np.ndarray
     num_nodes: int
+
+
+@dataclass(frozen=True)
+class RealSceneSpec:
+    label: str
+    scene: str
+    worlds: int
+    step_layout: str
 
 
 @wp.func
@@ -1048,30 +1058,120 @@ def make_graph_from_world(world, name: str) -> SyntheticGraph:
     )
 
 
+_REAL_SCENE_ALIASES = {
+    "h1": "h1",
+    "h1_flat": "h1",
+    "g1": "g1",
+    "g1_flat": "g1",
+    "dr_legs": "dr_legs",
+    "drlegs": "dr_legs",
+    "tower": "tower",
+}
+
+_LEGACY_REAL_SCENES: dict[str, tuple[str, int, str]] = {
+    "h1_1": ("h1", 1, "multi_world"),
+    "h1_64": ("h1", 64, "multi_world"),
+    "g1_64": ("g1", 64, "multi_world"),
+    "dr_legs_64": ("dr_legs", 64, "multi_world"),
+    "tower_1": ("tower", 1, "single_world"),
+    "tower_32": ("tower", 32, "multi_world"),
+}
+
+
+def _parse_step_layout(raw: str, *, scene: str, worlds: int) -> str:
+    normalized = raw.strip().lower().replace("-", "_")
+    if not normalized:
+        return "single_world" if scene == "tower" and worlds == 1 else "multi_world"
+    if normalized in ("single", "single_world"):
+        return "single_world"
+    if normalized in ("multi", "multi_world"):
+        return "multi_world"
+    raise ValueError(f"unknown real-scene layout {raw!r}; use single or multi")
+
+
+def _parse_scene_world_suffix(value: str) -> tuple[str, int] | None:
+    for prefix in ("dr_legs", "h1_flat", "g1_flat", "tower", "h1", "g1", "drlegs"):
+        marker = f"{prefix}_"
+        if value.startswith(marker):
+            suffix = value[len(marker) :]
+            if suffix.isdigit():
+                scene = _REAL_SCENE_ALIASES[prefix]
+                return scene, int(suffix)
+    return None
+
+
+def _parse_real_scene_spec(value: str) -> RealSceneSpec:
+    normalized = value.strip().lower().replace("-", "_")
+    if not normalized:
+        raise ValueError("real scene spec must not be empty")
+
+    if normalized in _LEGACY_REAL_SCENES:
+        scene, worlds, step_layout = _LEGACY_REAL_SCENES[normalized]
+        return RealSceneSpec(normalized, scene, worlds, step_layout)
+
+    if ":" in normalized:
+        parts = normalized.split(":")
+        if len(parts) > 3:
+            raise ValueError(f"real scene spec {value!r} has too many ':' fields")
+        scene_key = parts[0]
+        if scene_key not in _REAL_SCENE_ALIASES:
+            choices = ", ".join(sorted(_REAL_SCENE_ALIASES))
+            raise ValueError(f"unknown real scene {scene_key!r}; choices={choices}")
+        scene = _REAL_SCENE_ALIASES[scene_key]
+        default_worlds = 1 if scene == "tower" else 64
+        worlds = int(parts[1]) if len(parts) >= 2 and parts[1] else default_worlds
+        step_layout = _parse_step_layout(parts[2] if len(parts) == 3 else "", scene=scene, worlds=worlds)
+    else:
+        suffixed = _parse_scene_world_suffix(normalized)
+        if suffixed is None:
+            if normalized not in _REAL_SCENE_ALIASES:
+                choices = ", ".join(sorted((*_REAL_SCENE_ALIASES, *_LEGACY_REAL_SCENES)))
+                raise ValueError(f"unknown real scene spec {value!r}; choices include {choices}")
+            scene = _REAL_SCENE_ALIASES[normalized]
+            worlds = 1 if scene == "tower" else 64
+        else:
+            scene, worlds = suffixed
+        step_layout = _parse_step_layout("", scene=scene, worlds=worlds)
+
+    if worlds <= 0:
+        raise ValueError(f"real scene worlds must be positive, got {worlds}")
+    layout_label = "single" if step_layout == "single_world" else "multi"
+    return RealSceneSpec(f"{scene}_{worlds}_{layout_label}", scene, worlds, step_layout)
+
+
 def build_real_scene_graph(scene: str, args: argparse.Namespace) -> SyntheticGraph:
-    if scene == "h1_1":
-        handle = h1_flat.build(1, "phoenx", args.substeps, args.solver_iterations)
-    elif scene == "h1_64":
-        handle = h1_flat.build(64, "phoenx", args.substeps, args.solver_iterations)
-    elif scene == "g1_64":
-        handle = g1_flat.build(64, "phoenx", args.substeps, args.solver_iterations)
-    elif scene == "dr_legs_64":
-        handle = dr_legs.build(64, "phoenx", args.substeps, args.solver_iterations)
-    elif scene == "tower_1":
-        handle = tower.build(
-            num_worlds=1,
-            solver_name="phoenx",
-            substeps=args.substeps,
-            solver_iterations=args.solver_iterations,
-            step_layout="single_world",
+    spec = _parse_real_scene_spec(scene)
+    if spec.scene == "h1":
+        handle = h1_flat.build(
+            spec.worlds,
+            "phoenx",
+            args.substeps,
+            args.solver_iterations,
+            step_layout=spec.step_layout,
         )
-    elif scene == "tower_32":
+    elif spec.scene == "g1":
+        handle = g1_flat.build(
+            spec.worlds,
+            "phoenx",
+            args.substeps,
+            args.solver_iterations,
+            step_layout=spec.step_layout,
+        )
+    elif spec.scene == "dr_legs":
+        handle = dr_legs.build(
+            spec.worlds,
+            "phoenx",
+            args.substeps,
+            args.solver_iterations,
+            step_layout=spec.step_layout,
+        )
+    elif spec.scene == "tower":
         handle = tower.build(
-            num_worlds=32,
+            num_worlds=spec.worlds,
             solver_name="phoenx",
             substeps=args.substeps,
             solver_iterations=args.solver_iterations,
-            step_layout="multi_world",
+            step_layout=spec.step_layout,
         )
     else:
         raise ValueError(f"unknown real scene: {scene}")
@@ -1080,7 +1180,7 @@ def build_real_scene_graph(scene: str, args: argparse.Namespace) -> SyntheticGra
         handle.simulate_one_frame()
     wp.synchronize_device()
     world = _extract_solver(handle).world
-    return make_graph_from_world(world, scene)
+    return make_graph_from_world(world, spec.label)
 
 
 def make_graph(name: str, num_colors: int, head_colors: int, head_batch: int) -> SyntheticGraph:
@@ -1741,6 +1841,22 @@ def run_graph_case(args: argparse.Namespace, graph: SyntheticGraph) -> None:
         print(f"{payload_label:11s} node_ready relative to world_loop: {node_loop_speed:6.3f}x")
         print(f"{payload_label:11s} world_ready relative to world_loop: {world_loop_speed:6.3f}x")
         print(f"{payload_label:11s} color_chunk relative to world_loop: {chunk_loop_speed:6.3f}x")
+        scheduler_times = (
+            ("world_loop", world_loop_min),
+            ("colored", colored_min),
+            ("overlap", overlap_min),
+            ("node_ready", node_min),
+            ("world_ready", world_min),
+            ("window", window_min),
+            ("color_chunk", color_chunk_min),
+        )
+        best_label, best_min = min(scheduler_times, key=lambda item: item[1])
+        best_vs_world = world_loop_min / best_min if best_min > 0.0 else 0.0
+        best_vs_colored = colored_min / best_min if best_min > 0.0 else 0.0
+        print(
+            f"{payload_label:11s} auto_best scheduler={best_label:11s} min={best_min:9.3f} ms "
+            f"vs_world_loop={best_vs_world:6.3f}x vs_colored={best_vs_colored:6.3f}x"
+        )
 
 
 def run_case(args: argparse.Namespace, graph_name: str) -> None:
@@ -1755,8 +1871,11 @@ def parse_args() -> argparse.Namespace:
         "--real-scenes",
         nargs="*",
         default=[],
-        choices=("h1_1", "h1_64", "g1_64", "dr_legs_64", "tower_1", "tower_32"),
-        help="Optional real PhoenX scenes to extract into descriptor graphs.",
+        help=(
+            "Optional real PhoenX scenes to extract into descriptor graphs. "
+            "Accepts legacy presets h1_1, h1_64, g1_64, dr_legs_64, tower_1, tower_32 "
+            "or configurable specs like h1:512, g1:512, dr_legs:2048, tower:1:single."
+        ),
     )
     parser.add_argument("--colors", type=int, default=50)
     parser.add_argument("--head-colors", type=int, default=10)
