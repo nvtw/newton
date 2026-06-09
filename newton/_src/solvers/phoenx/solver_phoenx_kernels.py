@@ -294,7 +294,20 @@ def _pick_threads_per_world_kernel(
 
 
 _PER_WORLD_COLORING_BLOCK_DIM: int = 64
-_PER_WORLD_FAST_FAMILIES: int = 2
+# Per-world color CSR subranges used to keep rows with the same solver
+# dispatcher adjacent. Slot 0/1 must stay joint/contact for the rigid
+# family-split fast path; slots 2..5 preserve cloth/soft family order for
+# mixed scenes even when the solve loop consumes the full color range.
+_PER_WORLD_FAST_FAMILIES: int = 6
+
+
+@wp.func
+def _element_fast_family(family: wp.int32) -> wp.int32:
+    if family < wp.int32(0):
+        return wp.int32(1)
+    if family >= wp.int32(_PER_WORLD_FAST_FAMILIES):
+        return wp.int32(_PER_WORLD_FAST_FAMILIES - 1)
+    return family
 
 
 @wp.func
@@ -666,9 +679,7 @@ def _per_world_greedy_coloring_kernel(
                         else:
                             assigned[eid] = c + wp.int32(1)
                             wp.atomic_add(color_count, w, c, wp.int32(1))
-                            family = element_family[eid]
-                            if family != wp.int32(0):
-                                family = wp.int32(1)
+                            family = _element_fast_family(element_family[eid])
                             wp.atomic_add(
                                 color_family_count,
                                 w,
@@ -694,8 +705,9 @@ def _per_world_greedy_coloring_kernel(
         overflow_flag[0] = wp.int32(1)
 
     # CSR build: exclusive prefix on color_count[w, :] (lane 0; 64 entries).
-    # Each colour is also split into rigid joint/contact subranges so the
-    # fast-tail iterate can route the repeated solve with static dispatch.
+    # Each colour is also split into solver-family subranges. The rigid
+    # fast-tail path consumes joint/contact slots directly; mixed scenes still
+    # benefit because same-family rows stay adjacent inside the color.
     if lane == wp.int32(0):
         running = wp.int32(0)
         last_used = wp.int32(-1)
@@ -724,9 +736,7 @@ def _per_world_greedy_coloring_kernel(
             a = assigned[eid]
             if a > wp.int32(0):
                 c = a - wp.int32(1)
-                family = element_family[eid]
-                if family != wp.int32(0):
-                    family = wp.int32(1)
+                family = _element_fast_family(element_family[eid])
                 family_slot = c * wp.int32(_PER_WORLD_FAST_FAMILIES) + family
                 local_slot = wp.atomic_add(color_family_offsets, w, family_slot, wp.int32(1))
                 world_element_ids_by_color[base + local_slot] = eid
