@@ -64,6 +64,12 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 ### Inertia + force-clear fusion
 - Damping + rotated-inertia refresh + force/torque zeroing were three back-to-back per-body kernels with the same dim/gate. Fused into `_phoenx_update_inertia_and_clear_forces_kernel`. Saves ~3 launches per step.
 
+### Unified local-block pipeline prototype
+- `benchmarks/experimental/bench_unified_block_pipeline.py` extracts real PhoenX coloured graphs and maps rigid contacts / ADBS joint modes into a shared local-block operation set: contact3, point3, angular3, tangent4, scalar-linear, scalar-angular. It compares compact typed math (`split`), shape-grouped compact math, fully uniform 4-row sidecar descriptors, and a graph-capture-safe hybrid dispatcher.
+- Real 2048-world RL scenes, 20 substeps, `prepare_refresh_stride=auto`, `tpw=16`: hybrid is consistently best on the local-block proxy (`h1`: 0.0616 ms vs split 0.0738, +19.8%; `g1`: 0.1015 vs 0.1413, +39.2%; `dr_legs`: 0.1005 vs 0.1121, +11.6%).
+- Real 4096-world guardrails split by production lane count: H1 at `tpw=8` stays on compact split policy inside the hybrid dispatcher and wins over split (+18.6% in the proxy); G1/DR-Legs at `tpw=16` prefer shape-grouped compact math (+8-10%).
+- Conclusion: do not promote a full sidecar4 path as-is; it loses on all measured robot schedules. The promising production direction is a unified dispatcher / scheduling shape with per-colour policy (`split`, `grouped`, or sidecar descriptor) selected from topology or a setup-time tournament.
+
 ### Soft-tet contact interaction-element: drop 4th tet vertex from coloring adjacency
 - 2026-05-12: ``_constraints_to_elements_kernel`` (``solver_phoenx_kernels.py``) emits only the first 2 of the 3 ``side*_nodes_extra`` particles for ``SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON`` sides — i.e. 3 nodes (``b1 + e0a + e0b``) per soft-tet contact side instead of 4. The 4th tet vertex is opposite the contact face, so its barycentric weight is zero on a true face contact (and small on edge/vertex contacts); excluding it from the coloring adjacency lets the greedy MIS commit contacts on the same tet (sharing only the dropped apex) into the same colour.
 - **Single-world soft_body_drop steady contact: −19.5% total GPU/frame** (12.98 → 10.45 ms, median over 3 nsys runs; per-run spread 0.2-0.5% baseline, 1-4% optE — clear signal). Per-launch breakdown: greedy coloring −12.7%, fused PGS iterate −22.2%, mass-splitting broadcast −16.1%, persistent kernel unchanged.

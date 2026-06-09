@@ -1274,6 +1274,11 @@ def _parse_scenes(value: str) -> tuple[str, ...]:
     return scenes
 
 
+def _parse_stride_value(value: str) -> int | str:
+    item = value.strip().lower()
+    return "auto" if item == "auto" else int(item)
+
+
 def _slot_counts(preset: ScenePreset, period: int) -> tuple[int, int, int, int]:
     contact = int(round(max(0.0, min(1.0, preset.contact_ratio)) * float(period)))
     tangent4 = int(round(max(0.0, min(1.0, preset.tangent4_ratio)) * float(period)))
@@ -1319,12 +1324,16 @@ def _seed_op_kinds_for_schedule(
     return op_kind
 
 
-def _color_policy_from_contact_slots(contact_slots: int, period: int) -> int:
+def _color_policy_from_contact_slots(contact_slots: int, period: int, threads_per_world: int) -> int:
+    if threads_per_world <= 8:
+        return _COLOR_POLICY_SPLIT_HOST
     return _COLOR_POLICY_SPLIT_HOST if contact_slots * 2 >= period else _COLOR_POLICY_SIDECAR4_HOST
 
 
-def _uniform_color_policy(schedule: ScheduleHost, contact_slots: int, period: int) -> np.ndarray:
-    policy = _color_policy_from_contact_slots(contact_slots, period)
+def _uniform_color_policy(
+    schedule: ScheduleHost, contact_slots: int, period: int, threads_per_world: int
+) -> np.ndarray:
+    policy = _color_policy_from_contact_slots(contact_slots, period, threads_per_world)
     return np.full(schedule.colors, policy, dtype=np.int32)
 
 
@@ -1398,10 +1407,12 @@ def _op_kind_rank(kind: int) -> int:
     return 5
 
 
-def _color_policy_from_ops(ops: list[int]) -> int:
-    if not ops:
+def _color_policy_from_ops(ops: list[int], threads_per_world: int) -> int:
+    if not ops or threads_per_world <= 8:
         return _COLOR_POLICY_SPLIT_HOST
     contacts = sum(1 for op in ops if op == _OP_CONTACT3_HOST)
+    if contacts == 0:
+        return _COLOR_POLICY_SPLIT_HOST
     return _COLOR_POLICY_SPLIT_HOST if contacts * 2 >= len(ops) else _COLOR_POLICY_SIDECAR4_HOST
 
 
@@ -1447,6 +1458,7 @@ def _build_real_scene(spec: RealSceneSpec, args: argparse.Namespace):
             args.real_substeps,
             args.real_solver_iterations,
             step_layout=spec.step_layout,
+            prepare_refresh_stride=args.real_prepare_refresh_stride,
         )
     if spec.scene == "g1":
         return g1_flat.build(
@@ -1455,6 +1467,7 @@ def _build_real_scene(spec: RealSceneSpec, args: argparse.Namespace):
             args.real_substeps,
             args.real_solver_iterations,
             step_layout=spec.step_layout,
+            prepare_refresh_stride=args.real_prepare_refresh_stride,
         )
     if spec.scene == "dr_legs":
         return dr_legs.build(
@@ -1463,6 +1476,7 @@ def _build_real_scene(spec: RealSceneSpec, args: argparse.Namespace):
             args.real_substeps,
             args.real_solver_iterations,
             step_layout=spec.step_layout,
+            prepare_refresh_stride=args.real_prepare_refresh_stride,
         )
     if spec.scene == "tower":
         return tower.build(
@@ -1471,6 +1485,7 @@ def _build_real_scene(spec: RealSceneSpec, args: argparse.Namespace):
             substeps=args.real_substeps,
             solver_iterations=args.real_solver_iterations,
             step_layout=spec.step_layout,
+            prepare_refresh_stride=args.real_prepare_refresh_stride,
         )
     raise ValueError(f"unknown real scene {spec.scene!r}")
 
@@ -1520,7 +1535,7 @@ def _build_real_schedule_and_metadata(
                     color_ops.append(op)
                     block += 1
             color_starts.append(len(block_ids))
-            color_policy.append(_color_policy_from_ops(color_ops))
+            color_policy.append(_color_policy_from_ops(color_ops, int(args.threads_per_world)))
         world_color_starts.append(len(color_starts) - 1)
 
     if not block_ids:
@@ -1543,7 +1558,9 @@ def _build_real_schedule_and_metadata(
     return schedule, op_kind_host, np.asarray(color_policy, dtype=np.int32), label
 
 
-def _build_mixed_schedule_and_metadata(worlds: int, period: int) -> tuple[ScheduleHost, np.ndarray, np.ndarray, str]:
+def _build_mixed_schedule_and_metadata(
+    worlds: int, period: int, threads_per_world: int
+) -> tuple[ScheduleHost, np.ndarray, np.ndarray, str]:
     h1 = _SCENE_PRESETS["h1"]
     tower = _SCENE_PRESETS["tower"]
     h1_slots = _slot_counts(h1, period)
@@ -1561,14 +1578,14 @@ def _build_mixed_schedule_and_metadata(worlds: int, period: int) -> tuple[Schedu
                 block += 1
             color_starts.append(len(block_ids))
             color_slots.append(h1_slots)
-            color_policy.append(_color_policy_from_contact_slots(h1_slots[0], period))
+            color_policy.append(_color_policy_from_contact_slots(h1_slots[0], period, threads_per_world))
         for count in tower.blocks_per_color:
             for _ in range(count):
                 block_ids.append(block)
                 block += 1
             color_starts.append(len(block_ids))
             color_slots.append(tower_slots)
-            color_policy.append(_color_policy_from_contact_slots(tower_slots[0], period))
+            color_policy.append(_color_policy_from_contact_slots(tower_slots[0], period, threads_per_world))
         world_color_starts.append(len(color_starts) - 1)
 
     schedule = ScheduleHost(
@@ -1622,7 +1639,7 @@ def _run_scene(
         scene_label = real_spec.label
     elif scene == _MIXED_SCENE:
         schedule, op_kind_seed_host, color_policy_host, slot_label = _build_mixed_schedule_and_metadata(
-            int(args.worlds), period
+            int(args.worlds), period, int(args.threads_per_world)
         )
         contact_slots, tangent4_slots, angular3_slots, scalar_slots = (0, 0, 0, 0)
         scene_label = scene
@@ -1633,7 +1650,7 @@ def _run_scene(
         op_kind_seed_host = _seed_op_kinds_for_schedule(
             schedule, period, contact_slots, tangent4_slots, angular3_slots, scalar_slots
         )
-        color_policy_host = _uniform_color_policy(schedule, contact_slots, period)
+        color_policy_host = _uniform_color_policy(schedule, contact_slots, period, int(args.threads_per_world))
         slot_label = f"slots=(c{contact_slots},t4{tangent4_slots},a3{angular3_slots},s{scalar_slots})"
         scene_label = scene
 
@@ -2052,6 +2069,7 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=4)
     parser.add_argument("--real-substeps", type=int, default=1)
     parser.add_argument("--real-solver-iterations", type=int, default=8)
+    parser.add_argument("--real-prepare-refresh-stride", type=_parse_stride_value, default="auto")
     parser.add_argument("--real-prime-frames", type=int, default=1)
     parser.add_argument("--threads-per-world", type=int, default=32)
     parser.add_argument("--period", type=int, default=32)
@@ -2065,7 +2083,8 @@ def main() -> None:
     device = wp.get_device(args.device)
     print(
         f"device={device} synthetic_worlds={args.worlds} real_scenes={args.real_scenes or '-'} "
-        f"iterations={args.iterations} tpw={args.threads_per_world} n_runs={args.n_runs} trials={args.trials}"
+        f"real_prepare={args.real_prepare_refresh_stride} iterations={args.iterations} "
+        f"tpw={args.threads_per_world} n_runs={args.n_runs} trials={args.trials}"
     )
     for scene in _parse_scenes(args.scenes):
         _run_scene(args, scene, device)
