@@ -23,6 +23,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
@@ -158,6 +159,26 @@ class TestPhoenXFastTailLaunchGeometry(unittest.TestCase):
             expected.issubset(kernels_seen),
             msg=("fused prepare+iterate and relax kernels should both run when constraints are active"),
         )
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX block-world capture tests require CUDA")
+class TestPhoenXBlockWorldGraphCapture(unittest.TestCase):
+    """The opt-in block-world scheduler must be fixed before capture."""
+
+    def test_forced_block_world_capture_replay(self) -> None:
+        world, _ = _build_n_pendulums(num_worlds=4)
+        world._multi_world_scheduler = "block_world"
+        world._multi_world_block_dim = 64
+
+        world.step(dt=1.0 / 60.0, contacts=None, shape_body=None)
+        wp.synchronize_device(world.device)
+
+        with wp.ScopedCapture(device=world.device) as capture:
+            world.step(dt=1.0 / 60.0, contacts=None, shape_body=None)
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(world.device)
+
+        self.assertTrue(np.isfinite(world.bodies.position.numpy()).all())
 
 
 if __name__ == "__main__":
