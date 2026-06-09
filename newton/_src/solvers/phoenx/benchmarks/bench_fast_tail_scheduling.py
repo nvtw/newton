@@ -201,7 +201,7 @@ def main() -> None:
         help="Comma-separated default,on,off values for joint/contact family splitting.",
     )
     parser.add_argument("--substeps", type=int, default=1)
-    parser.add_argument("--prepare-refresh-stride", type=_parse_stride_value, default=1)
+    parser.add_argument("--prepare-refresh-stride", type=_parse_stride_value, default="auto")
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--n-runs", type=int, default=40)

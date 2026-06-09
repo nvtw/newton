@@ -94,6 +94,12 @@ def load_tests(loader: unittest.TestLoader, standard_tests, pattern):
     Hard-fails up front if CUDA graph capture is unavailable -- see
     :func:`_require_cuda_graph_capture`.
     """
+    if pattern is not None:
+        # Directory discovery already imports sibling test modules directly.
+        # Expanding this aggregate runner there would re-import scene-decorated
+        # tests and duplicate global scene registrations.
+        return standard_tests
+
     _require_cuda_graph_capture()
 
     self_stem = os.path.splitext(os.path.basename(__file__))[0]

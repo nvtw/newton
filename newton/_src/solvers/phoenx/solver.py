@@ -146,7 +146,7 @@ class SolverPhoenX(SolverBase):
         sor_boost: float = 1.0,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
-        prepare_refresh_stride: int | str = 1,
+        prepare_refresh_stride: int | str = "auto",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -155,10 +155,10 @@ class SolverPhoenX(SolverBase):
             solver_iterations: PGS iterations per substep.
             velocity_iterations: TGS-soft relax sweeps per substep.
             prepare_refresh_stride: Refresh cached rigid contact/joint
-                prepare data every N substeps. ``1`` preserves exact
-                per-substep rebuilds. ``"auto"`` chooses a conservative
-                stride from the substep count and falls back to ``1`` when
-                cached prepare is unsupported.
+                prepare data every N substeps. ``"auto"`` chooses a
+                conservative stride from the substep count and falls back
+                to ``1`` when cached prepare is unsupported. Pass ``1``
+                to force exact per-substep rebuilds.
             default_friction: Fallback when Contacts/shapes carry no material.
             step_layout: ``"multi_world"`` (many small worlds) or
                 ``"single_world"`` (a few big worlds).

@@ -31,9 +31,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.solver import SolverPhoenX
-from newton._src.solvers.phoenx.solver_config import (
-    PHOENX_CONTACT_MATCHING,
-)
+from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 from newton.geometry import HydroelasticSDF
 
 # Same scene parameters as test_hydroelastic.py for parity.
@@ -56,8 +54,9 @@ def _build_stacked_cubes_scene(device):
     on a ground plane. Returns everything needed to step.
 
     Mirrors :func:`test_hydroelastic.build_stacked_cubes_scene` for
-    ``ShapeType.PRIMITIVE``, but wires PhoenX with sticky contact
-    matching (needed for its per-pair warm-start).
+    ``ShapeType.PRIMITIVE`` but routes through PhoenX's sticky contact
+    matching so the solver sees the same contact persistence used by the
+    production path.
     """
     narrow_band = CUBE_HALF * 0.2
     contact_gap = CUBE_HALF * 0.2
@@ -86,7 +85,7 @@ def _build_stacked_cubes_scene(device):
 
     collision_pipeline = newton.CollisionPipeline(
         model,
-        rigid_contact_max=100,
+        rigid_contact_max=512,
         broad_phase="explicit",
         contact_matching=PHOENX_CONTACT_MATCHING,
         sdf_hydroelastic_config=HydroelasticSDF.Config(
@@ -109,7 +108,7 @@ def _build_stacked_cubes_scene(device):
     # pipeline instead of attaching a fresh non-matching one.
     solver = SolverPhoenX(
         model,
-        substeps=SIM_SUBSTEPS,
+        substeps=1,
         solver_iterations=8,
         velocity_iterations=1,
     )
@@ -146,11 +145,12 @@ class TestPhoenXHydroelasticStack(unittest.TestCase):
 
         num_frames = int(SIM_TIME_S / SIM_DT)
         for _ in range(num_frames):
-            collision_pipeline.collide(state_0, contacts)
-            # PhoenX's own substep loop runs inside ``step``; we stay
-            # with one collide + one step per frame.
-            solver.step(state_0, state_1, None, contacts, SIM_DT)
-            state_0, state_1 = state_1, state_0
+            # Reduced hydroelastic contacts are geometry-derived surfaces; refresh
+            # them at the same small-step cadence used by the reference tests.
+            for _ in range(SIM_SUBSTEPS):
+                collision_pipeline.collide(state_0, contacts)
+                solver.step(state_0, state_1, None, contacts, SIM_DT / SIM_SUBSTEPS)
+                state_0, state_1 = state_1, state_0
 
         body_q = state_0.body_q.numpy()
         position_threshold = POSITION_THRESHOLD_FACTOR * CUBE_HALF

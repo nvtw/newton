@@ -299,7 +299,7 @@ def main() -> None:
     parser.add_argument("--fast-tail-wpb", type=_parse_csv_ints, default=(1, 2, 4))
     parser.add_argument("--block-world-dims", type=_parse_csv_ints, default=(32, 64, 128))
     parser.add_argument("--substeps", type=int, default=1)
-    parser.add_argument("--prepare-refresh-stride", type=_parse_stride_value, default=1)
+    parser.add_argument("--prepare-refresh-stride", type=_parse_stride_value, default="auto")
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--prime-frames", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=2)

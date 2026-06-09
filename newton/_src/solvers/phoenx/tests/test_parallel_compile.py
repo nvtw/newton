@@ -16,7 +16,7 @@ These tests cover three properties the implementation could break:
 2. When ``load_module_max_workers > 1`` the hook calls
    :func:`wp.force_load` exactly once with the modules backing every
    kernel the active ``step_layout`` will launch (six for
-   ``single_world``, two for ``multi_world``).
+   ``single_world``, and the active multi-world scheduler kernels for ``multi_world``).
 3. End-to-end the solver still produces correct rest-state output when
    parallel compile is enabled (a small box-on-ground sim settles to
    ``z = 0``).
@@ -33,6 +33,7 @@ if not wp.get_preferred_device().is_cuda:
     raise unittest.SkipTest("PhoenX tests require CUDA")
 
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
+    get_block_world_kernel,
     get_fast_tail_kernel,
 )
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
@@ -110,29 +111,48 @@ class TestPreCompileDispatchKernelsFires(unittest.TestCase):
             # should contain every distinct module the factory produced.
             self.assertEqual(loaded_modules, expected_modules)
 
-    def test_multi_world_loads_two_fast_tail_kernels(self):
+    def test_multi_world_loads_active_scheduler_kernels(self):
         with _RestoreLoadModuleMaxWorkers(4), mock.patch("warp.force_load") as force_load:
             world = _build_minimal_scene(step_layout="multi_world").world
             force_load.assert_called_once()
             loaded_modules = {module.get_module_identifier() for module in force_load.call_args.kwargs["modules"]}
-            base_fast_tail_kw = {
-                "revolute_only": bool(world._use_revolute_specialization),
-                "has_joints": world.num_joints > 0,
-                "has_contacts": world.max_contact_columns > 0,
-                "has_sleeping": bool(world._sleeping_enabled),
-                "enable_column_timers": world.enable_column_timers,
-            }
+            dispatch_kw = world._dispatch_specialization_flags()
             expected_modules = set()
-            for fixed_tpw in world._fast_tail_auto_fixed_choices():
-                fast_tail_kw = {
-                    **base_fast_tail_kw,
-                    "fixed_tpw": fixed_tpw,
-                    "guard_tpw": world._tpw_auto,
+            if world._multi_world_scheduler == "block_world" and world._block_world_supported():
+                block_world_kw = {
+                    "revolute_only": dispatch_kw["revolute_only"],
+                    "has_joints": dispatch_kw["has_joints"],
+                    "has_contacts": world.max_contact_columns > 0,
+                    "has_sleeping": dispatch_kw["has_sleeping"],
+                    "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
+                    "enable_column_timers": dispatch_kw["enable_column_timers"],
+                    "family_split": world._fast_tail_family_split(),
+                    "block_dim": world._multi_world_block_dim,
                 }
                 expected_modules.add(
-                    get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw).module.get_module_identifier()
+                    get_block_world_kernel(kind="prepare_plus_iterate", **block_world_kw).module.get_module_identifier()
                 )
-                expected_modules.add(get_fast_tail_kernel(kind="relax", **fast_tail_kw).module.get_module_identifier())
+                expected_modules.add(
+                    get_block_world_kernel(kind="relax", **block_world_kw).module.get_module_identifier()
+                )
+            else:
+                base_fast_tail_kw = {
+                    **dispatch_kw,
+                    "has_contacts": world.max_contact_columns > 0,
+                }
+                for fixed_tpw in world._fast_tail_auto_fixed_choices():
+                    fast_tail_kw = {
+                        **base_fast_tail_kw,
+                        "fixed_tpw": fixed_tpw,
+                        "guard_tpw": world._tpw_auto,
+                        "family_split": world._fast_tail_family_split(),
+                    }
+                    expected_modules.add(
+                        get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw).module.get_module_identifier()
+                    )
+                    expected_modules.add(
+                        get_fast_tail_kernel(kind="relax", **fast_tail_kw).module.get_module_identifier()
+                    )
             self.assertEqual(loaded_modules, expected_modules)
 
 

@@ -305,7 +305,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=16, help="Frames stepped before capture so contacts settle.")
     parser.add_argument("--trials", type=int, default=3, help="Independent trials per (scene, tpw) -- min taken.")
     parser.add_argument("--substeps", type=int, default=1)
-    parser.add_argument("--prepare-refresh-stride", type=_parse_stride_value, default=1)
+    parser.add_argument("--prepare-refresh-stride", type=_parse_stride_value, default="auto")
     parser.add_argument("--solver_iterations", type=int, default=8)
     args = parser.parse_args()
 

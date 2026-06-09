@@ -115,6 +115,15 @@ _ANIMATION_JOINT_PATHS = (
 _ANIMATION_CHANNEL_SIGN = np.array([+1, +1, -1, +1, +1, +1, +1, +1, -1, +1, +1, +1], dtype=np.float32)
 
 
+def _parse_prepare_refresh_stride(value: str) -> int | str:
+    if value.strip().lower() == "auto":
+        return "auto"
+    stride = int(value)
+    if stride < 1:
+        raise argparse.ArgumentTypeError("prepare refresh stride must be >= 1 or 'auto'")
+    return stride
+
+
 def _swap_attr_pair(prim, name_a: str, name_b: str) -> None:
     a = prim.GetAttribute(name_a)
     b = prim.GetAttribute(name_b)
@@ -267,6 +276,7 @@ class Example:
             substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
+            prepare_refresh_stride=args.prepare_refresh_stride,
         )
 
         self.state_0 = self.model.state()
@@ -527,6 +537,16 @@ class Example:
             type=int,
             default=1,
             help="PhoenX TGS-soft velocity-relaxation sweeps per substep.",
+        )
+        parser.add_argument(
+            "--prepare-refresh-stride",
+            type=_parse_prepare_refresh_stride,
+            default="auto",
+            help=(
+                "Refresh PhoenX prepared row data every N internal substeps,"
+                " or 'auto' for the benchmark-tuned default. Use 1 to match"
+                " the conservative legacy path."
+            ),
         )
         parser.add_argument(
             "--armature",

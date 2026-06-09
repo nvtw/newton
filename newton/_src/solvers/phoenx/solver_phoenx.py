@@ -466,7 +466,7 @@ class PhoenXWorld:
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
-        prepare_refresh_stride: int | str = 1,
+        prepare_refresh_stride: int | str = "auto",
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -479,11 +479,12 @@ class PhoenXWorld:
                 relax (recommended for tall stacks).
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
-                deformables, mass splitting, or sleeping. ``1`` preserves
-                the exact default. ``"auto"`` chooses a conservative stride
-                from the substep count and falls back to ``1`` when cached
-                prepare is unsupported. Contact worlds currently support up
-                to ``3``; joint-only worlds may use larger values.
+                deformables, mass splitting, or sleeping. ``"auto"``
+                chooses a conservative stride from the substep count and
+                falls back to ``1`` when cached prepare is unsupported.
+                Pass ``1`` to force exact per-substep rebuilds. Contact
+                worlds currently support up to ``3``; joint-only worlds
+                may use larger values.
             gravity: 3-tuple or iterable of ``num_worlds`` 3-tuples.
             rigid_contact_max: Sizes per-contact state. ``0`` disables
                 contacts.

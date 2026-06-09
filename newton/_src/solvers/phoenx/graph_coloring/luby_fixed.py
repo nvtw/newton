@@ -292,6 +292,8 @@ class FixedIterationLubyPartitioner:
         self._color_count = wp.zeros(int(GREEDY_MAX_COLORS), dtype=wp.int32, device=device)
         self._color_offsets = wp.zeros(int(GREEDY_MAX_COLORS), dtype=wp.int32, device=device)
         # Locality sort ping-pong (matches IncrementalContactPartitioner).
+        # Luby has no row-family grouping, so every element uses family 0.
+        self._locality_family = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
         self._locality_keys = wp.zeros(2 * max_num_interactions, dtype=wp.int64, device=device)
         self._locality_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
 
@@ -511,6 +513,8 @@ class FixedIterationLubyPartitioner:
                 self._elements,
                 self._element_ids_by_color,
                 self._interaction_id_to_partition,
+                self._locality_family,
+                wp.int32(-1),
                 self._num_elements,
                 self._locality_keys,
                 self._locality_values,

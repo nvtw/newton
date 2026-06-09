@@ -474,6 +474,7 @@ class ModelBuilder:
             target_ke: float = 0.0,
             target_kd: float = 0.0,
             armature: float = 0.0,
+            gear_ratio: float = 1.0,
             effort_limit: float = 1e6,
             velocity_limit: float = 1e6,
             friction: float = 0.0,
@@ -501,6 +502,8 @@ class ModelBuilder:
             """The derivative gain of the target drive PD controller. Defaults to 0.0."""
             self.armature = armature
             """Artificial inertia added around the joint axis [kg·m² or kg]. Defaults to 0."""
+            self.gear_ratio = gear_ratio
+            """Gear ratio between motor and joint. Defaults to 1.0."""
             self.effort_limit = effort_limit
             """Maximum effort (force or torque) the joint axis can exert. Defaults to 1e6."""
             self.velocity_limit = velocity_limit
@@ -1108,6 +1111,8 @@ class ModelBuilder:
         """Joint labels accumulated for :attr:`Model.joint_label`."""
         self.joint_armature: list[float] = []
         """Joint armature values accumulated for :attr:`Model.joint_armature`."""
+        self.joint_gear: list[float] = []
+        """Joint gear ratios accumulated for :attr:`Model.joint_gear`."""
         self.joint_target_mode: list[int] = []
         """Joint target modes accumulated for :attr:`Model.joint_target_mode`."""
         self.joint_target_ke: list[float] = []
@@ -3270,6 +3275,7 @@ class ModelBuilder:
             "joint_collision_filter_parent",
             "joint_X_c",
             "joint_armature",
+            "joint_gear",
             "joint_axis",
             "joint_dof_dim",
             "joint_qd",
@@ -3857,6 +3863,7 @@ class ModelBuilder:
             self.joint_limit_ke.append(dim.limit_ke)
             self.joint_limit_kd.append(dim.limit_kd)
             self.joint_armature.append(dim.armature)
+            self.joint_gear.append(dim.gear_ratio)
             self.joint_effort_limit.append(dim.effort_limit)
             self.joint_velocity_limit.append(dim.velocity_limit)
             self.joint_friction.append(dim.friction)
@@ -3934,6 +3941,7 @@ class ModelBuilder:
         limit_ke: float | None = None,
         limit_kd: float | None = None,
         armature: float | None = None,
+        gear_ratio: float | None = None,
         effort_limit: float | None = None,
         velocity_limit: float | None = None,
         friction: float | None = None,
@@ -3963,6 +3971,7 @@ class ModelBuilder:
             limit_ke: The stiffness of the joint limit. If None, the default value from ``ModelBuilder.default_joint_cfg.limit_ke`` is used.
             limit_kd: The damping of the joint limit. If None, the default value from ``ModelBuilder.default_joint_cfg.limit_kd`` is used.
             armature: Artificial inertia added around the joint axis. If None, the default value from ``ModelBuilder.default_joint_cfg.armature`` is used.
+            gear_ratio: Gear ratio between motor and joint. If None, the default value from ``ModelBuilder.default_joint_cfg.gear_ratio`` is used.
             effort_limit: Maximum effort (force/torque) the joint axis can exert. If None, the default value from ``ModelBuilder.default_joint_cfg.effort_limit`` is used.
             velocity_limit: Maximum velocity the joint axis can achieve. If None, the default value from ``ModelBuilder.default_joint_cfg.velocity_limit`` is used.
             friction: Friction coefficient for the joint axis. If None, the default value from ``ModelBuilder.default_joint_cfg.friction`` is used.
@@ -3992,6 +4001,7 @@ class ModelBuilder:
                 limit_ke=limit_ke if limit_ke is not None else self.default_joint_cfg.limit_ke,
                 limit_kd=limit_kd if limit_kd is not None else self.default_joint_cfg.limit_kd,
                 armature=armature if armature is not None else self.default_joint_cfg.armature,
+                gear_ratio=gear_ratio if gear_ratio is not None else self.default_joint_cfg.gear_ratio,
                 effort_limit=effort_limit if effort_limit is not None else self.default_joint_cfg.effort_limit,
                 velocity_limit=velocity_limit if velocity_limit is not None else self.default_joint_cfg.velocity_limit,
                 friction=friction if friction is not None else self.default_joint_cfg.friction,
@@ -4027,6 +4037,7 @@ class ModelBuilder:
         limit_ke: float | None = None,
         limit_kd: float | None = None,
         armature: float | None = None,
+        gear_ratio: float | None = None,
         effort_limit: float | None = None,
         velocity_limit: float | None = None,
         friction: float | None = None,
@@ -4055,6 +4066,7 @@ class ModelBuilder:
             limit_ke: The stiffness of the joint limit. If None, the default value from ``ModelBuilder.default_joint_cfg.limit_ke`` is used.
             limit_kd: The damping of the joint limit. If None, the default value from ``ModelBuilder.default_joint_cfg.limit_kd`` is used.
             armature: Artificial inertia added around the joint axis. If None, the default value from ``ModelBuilder.default_joint_cfg.armature`` is used.
+            gear_ratio: Gear ratio between motor and joint. If None, the default value from ``ModelBuilder.default_joint_cfg.gear_ratio`` is used.
             effort_limit: Maximum effort (force) the joint axis can exert. If None, the default value from ``ModelBuilder.default_joint_cfg.effort_limit`` is used.
             velocity_limit: Maximum velocity the joint axis can achieve. If None, the default value from ``ModelBuilder.default_joint_cfg.velocity_limit`` is used.
             friction: Friction coefficient for the joint axis. If None, the default value from ``ModelBuilder.default_joint_cfg.friction`` is used.
@@ -4084,6 +4096,7 @@ class ModelBuilder:
                 limit_ke=limit_ke if limit_ke is not None else self.default_joint_cfg.limit_ke,
                 limit_kd=limit_kd if limit_kd is not None else self.default_joint_cfg.limit_kd,
                 armature=armature if armature is not None else self.default_joint_cfg.armature,
+                gear_ratio=gear_ratio if gear_ratio is not None else self.default_joint_cfg.gear_ratio,
                 effort_limit=effort_limit if effort_limit is not None else self.default_joint_cfg.effort_limit,
                 velocity_limit=velocity_limit if velocity_limit is not None else self.default_joint_cfg.velocity_limit,
                 friction=friction if friction is not None else self.default_joint_cfg.friction,
@@ -4909,6 +4922,7 @@ class ModelBuilder:
                 "qd": self.joint_qd[qd_start : qd_start + qd_dim],
                 "cts": self.joint_cts[cts_start : cts_start + cts_dim],
                 "armature": self.joint_armature[qd_start : qd_start + qd_dim],
+                "gear": self.joint_gear[qd_start : qd_start + qd_dim],
                 "q_start": q_start,
                 "qd_start": qd_start,
                 "cts_start": cts_start,
@@ -4938,6 +4952,8 @@ class ModelBuilder:
                         "target_pos": self.joint_target_pos[j],
                         "target_vel": self.joint_target_vel[j],
                         "effort_limit": self.joint_effort_limit[j],
+                        "velocity_limit": self.joint_velocity_limit[j],
+                        "friction": self.joint_friction[j],
                     }
                 )
 
@@ -5265,6 +5281,7 @@ class ModelBuilder:
         self.joint_enabled.clear()
         self.joint_collision_filter_parent.clear()
         self.joint_armature.clear()
+        self.joint_gear.clear()
         self.joint_X_p.clear()
         self.joint_X_c.clear()
         self.joint_axis.clear()
@@ -5275,6 +5292,8 @@ class ModelBuilder:
         self.joint_limit_upper.clear()
         self.joint_limit_ke.clear()
         self.joint_effort_limit.clear()
+        self.joint_velocity_limit.clear()
+        self.joint_friction.clear()
         self.joint_limit_kd.clear()
         self.joint_dof_dim.clear()
         self.joint_target_pos.clear()
@@ -5293,6 +5312,7 @@ class ModelBuilder:
             self.joint_qd.extend(joint["qd"])
             self.joint_cts.extend(joint["cts"])
             self.joint_armature.extend(joint["armature"])
+            self.joint_gear.extend(joint["gear"])
             self.joint_enabled.append(joint["enabled"])
             self.joint_collision_filter_parent.append(joint["collision_filter_parent"])
             self.joint_X_p.append(joint["parent_xform"])
@@ -5322,16 +5342,12 @@ class ModelBuilder:
                 self.joint_target_pos.append(axis["target_pos"])
                 self.joint_target_vel.append(axis["target_vel"])
                 self.joint_effort_limit.append(axis["effort_limit"])
+                self.joint_velocity_limit.append(axis["velocity_limit"])
+                self.joint_friction.append(axis["friction"])
 
         # Update DOF and coordinate counts to match the rebuilt arrays
         self.joint_dof_count = len(self.joint_qd)
         self.joint_coord_count = len(self.joint_q)
-
-        # Trim per-DOF arrays that were not cleared/rebuilt above
-        for attr_name in ("joint_velocity_limit", "joint_friction"):
-            arr = getattr(self, attr_name)
-            if len(arr) > self.joint_dof_count:
-                setattr(self, attr_name, arr[: self.joint_dof_count])
 
         # Reset the constraint count based on the retained joints
         self.joint_constraint_count = len(self.joint_cts)
@@ -9506,6 +9522,7 @@ class ModelBuilder:
             dof_arrays = [
                 ("joint_axis", self.joint_axis),
                 ("joint_armature", self.joint_armature),
+                ("joint_gear", self.joint_gear),
                 ("joint_target_ke", self.joint_target_ke),
                 ("joint_target_kd", self.joint_target_kd),
                 ("joint_limit_lower", self.joint_limit_lower),
@@ -10693,6 +10710,7 @@ class ModelBuilder:
 
             # dynamics properties
             m.joint_armature = wp.array(self.joint_armature, dtype=wp.float32, requires_grad=requires_grad)
+            m.joint_gear = wp.array(self.joint_gear, dtype=wp.float32, requires_grad=requires_grad)
             m.joint_target_mode = wp.array(self.joint_target_mode, dtype=wp.int32)
             m.joint_target_ke = wp.array(self.joint_target_ke, dtype=wp.float32, requires_grad=requires_grad)
             m.joint_target_kd = wp.array(self.joint_target_kd, dtype=wp.float32, requires_grad=requires_grad)

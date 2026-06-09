@@ -64,7 +64,7 @@ def build(
     animation_speed: float = 1.0,
     armature: float = 0.001,
     step_layout: str = "multi_world",
-    prepare_refresh_stride: int | str = 1,
+    prepare_refresh_stride: int | str = "auto",
 ) -> SceneHandle:
     """Build a DR-Legs-on-ground PhoenX scene."""
     if solver_name != "phoenx":

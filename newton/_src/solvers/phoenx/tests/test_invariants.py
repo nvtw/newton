@@ -140,6 +140,14 @@ class TestPrepareRefreshStride(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "prepare_refresh_stride must be >= 1"):
             PhoenXWorld(**_make_kwargs(num_bodies=2, rigid_contact_max=1), prepare_refresh_stride=0)
 
+    def test_default_stride_uses_auto_policy(self) -> None:
+        w = PhoenXWorld(
+            **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
+            substeps=8,
+        )
+        self.assertEqual(w.prepare_refresh_stride, 3)
+        self.assertEqual(w._prepare_refresh_stride_policy, "auto")
+
     def test_auto_stride_uses_substep_count(self) -> None:
         low = PhoenXWorld(
             **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
