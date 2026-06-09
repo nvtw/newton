@@ -34,6 +34,7 @@ struct DeviceGraph {
     int rows = 0;
     int chunks = 0;
     int epochs = 0;
+    int active_color_tasks = 0;
     int queue_capacity = 0;
 
     int* world_color_row_starts = nullptr;
@@ -142,6 +143,9 @@ static DeviceGraph make_graph(const SceneConfig& scene, int worlds, int chunk_ro
             row_starts[w * (graph.colors + 1) + c] = row_cursor;
             chunk_starts[w * (graph.colors + 1) + c] = chunk_cursor;
             int rows = varied_rows(scene.rows_per_color[c], w, c, imbalance_percent);
+            if (rows > 0) {
+                ++graph.active_color_tasks;
+            }
             for (int off = 0; off < rows; off += chunk_rows) {
                 int count = std::min(chunk_rows, rows - off);
                 chunk_row_start.push_back(row_cursor + off);
@@ -158,7 +162,7 @@ static DeviceGraph make_graph(const SceneConfig& scene, int worlds, int chunk_ro
 
     graph.rows = row_cursor;
     graph.chunks = chunk_cursor;
-    graph.queue_capacity = std::max(1, graph.chunks * epochs);
+    graph.queue_capacity = std::max(1, std::max(graph.chunks, graph.active_color_tasks) * epochs);
 
     copy_to_device(graph.world_color_row_starts, row_starts);
     copy_to_device(graph.world_color_chunk_starts, chunk_starts);
@@ -333,6 +337,164 @@ __global__ void seed_queue_kernel(
             }
             return;
         }
+    }
+}
+
+__global__ void seed_color_queue_kernel(
+    const int* __restrict__ row_starts,
+    int* __restrict__ queue,
+    int* __restrict__ queue_ready,
+    int* __restrict__ queue_tail,
+    int* __restrict__ failed,
+    int worlds,
+    int colors,
+    int queue_capacity) {
+    int world = blockIdx.x * blockDim.x + threadIdx.x;
+    if (world >= worlds) {
+        return;
+    }
+    for (int color = 0; color < colors; ++color) {
+        int start = row_starts[world * (colors + 1) + color];
+        int end = row_starts[world * (colors + 1) + color + 1];
+        if (start < end) {
+            publish_task(queue, queue_ready, queue_tail, failed, queue_capacity, world * colors + color);
+            return;
+        }
+    }
+}
+
+__device__ __forceinline__ void notify_next_color(
+    const int* __restrict__ row_starts,
+    int* __restrict__ queue,
+    int* __restrict__ queue_ready,
+    int* __restrict__ queue_tail,
+    int* __restrict__ done,
+    int* __restrict__ failed,
+    int worlds,
+    int colors,
+    int epochs,
+    int queue_capacity,
+    int task) {
+    int world_color = task % (worlds * colors);
+    int epoch = task / (worlds * colors);
+    int world = world_color / colors;
+    int color = world_color - world * colors;
+
+    int next_color = color + 1;
+    int next_epoch = epoch;
+    while (next_epoch < epochs) {
+        if (next_color >= colors) {
+            next_color = 0;
+            ++next_epoch;
+            continue;
+        }
+        int start = row_starts[world * (colors + 1) + next_color];
+        int end = row_starts[world * (colors + 1) + next_color + 1];
+        if (start < end) {
+            publish_task(
+                queue,
+                queue_ready,
+                queue_tail,
+                failed,
+                queue_capacity,
+                (next_epoch * worlds + world) * colors + next_color);
+            break;
+        }
+        ++next_color;
+    }
+    atomicAdd(done, 1);
+}
+
+__global__ void color_chain_kernel(
+    const int* __restrict__ row_starts,
+    int* __restrict__ queue,
+    int* __restrict__ queue_ready,
+    int* __restrict__ queue_head,
+    int* __restrict__ queue_tail,
+    int* __restrict__ done,
+    int* __restrict__ failed,
+    int worlds,
+    int colors,
+    int rows,
+    int epochs,
+    int active_color_tasks,
+    int queue_capacity,
+    int work_iters,
+    int max_spins,
+    float* __restrict__ out) {
+    __shared__ int shared_task;
+    __shared__ int shared_stop;
+    int local = threadIdx.x;
+    int target = active_color_tasks * epochs;
+
+    while (true) {
+        if (local == 0) {
+            shared_task = -1;
+            shared_stop = 0;
+            int spins = 0;
+            while (shared_task < 0) {
+                int observed_done = atomicAdd(done, 0);
+                if (observed_done >= target) {
+                    shared_stop = 1;
+                    break;
+                }
+                int head = atomicAdd(queue_head, 0);
+                int tail = atomicAdd(queue_tail, 0);
+                if (head >= tail) {
+                    if (++spins > max_spins) {
+                        *failed = 1;
+                        shared_stop = 1;
+                        break;
+                    }
+                    continue;
+                }
+                int old = atomicCAS(queue_head, head, head + 1);
+                if (old != head) {
+                    continue;
+                }
+                while (atomicAdd(&queue_ready[head], 0) == 0) {
+                    if (++spins > max_spins) {
+                        *failed = 3;
+                        shared_stop = 1;
+                        break;
+                    }
+                }
+                if (shared_stop == 0) {
+                    shared_task = queue[head];
+                }
+            }
+        }
+        __syncthreads();
+        if (shared_stop != 0) {
+            return;
+        }
+
+        int task = shared_task;
+        int world_color = task % (worlds * colors);
+        int epoch = task / (worlds * colors);
+        int world = world_color / colors;
+        int color = world_color - world * colors;
+        int start = row_starts[world * (colors + 1) + color];
+        int end = row_starts[world * (colors + 1) + color + 1];
+        for (int row = start + local; row < end; row += blockDim.x) {
+            out[epoch * rows + row] = payload(row, epoch, work_iters);
+        }
+        __syncthreads();
+        if (local == 0) {
+            notify_next_color(
+                row_starts,
+                queue,
+                queue_ready,
+                queue_tail,
+                done,
+                failed,
+                worlds,
+                colors,
+                epochs,
+                queue_capacity,
+                task);
+        }
+        __syncthreads();
     }
 }
 
@@ -511,6 +673,24 @@ static void reset_chain(const DeviceGraph& graph) {
     CUDA_CHECK(cudaGetLastError());
 }
 
+static void reset_color_chain(const DeviceGraph& graph) {
+    CUDA_CHECK(cudaMemset(graph.queue_ready, 0, sizeof(int) * graph.queue_capacity));
+    CUDA_CHECK(cudaMemset(graph.queue_head, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemset(graph.queue_tail, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemset(graph.done, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemset(graph.failed, 0, sizeof(int)));
+    seed_color_queue_kernel<<<(graph.worlds + 127) / 128, 128>>>(
+        graph.world_color_row_starts,
+        graph.queue,
+        graph.queue_ready,
+        graph.queue_tail,
+        graph.failed,
+        graph.worlds,
+        graph.colors,
+        graph.queue_capacity);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 static float time_world_tile(
     const DeviceGraph& graph,
     int repeats,
@@ -678,6 +858,84 @@ static float time_chunk_chain(
     return best;
 }
 
+static float time_color_chain(
+    const DeviceGraph& graph,
+    int repeats,
+    int warmup,
+    int worker_blocks,
+    int block_dim,
+    int work_iters,
+    int max_spins) {
+    for (int i = 0; i < warmup; ++i) {
+        reset_color_chain(graph);
+        color_chain_kernel<<<worker_blocks, block_dim>>>(
+            graph.world_color_row_starts,
+            graph.queue,
+            graph.queue_ready,
+            graph.queue_head,
+            graph.queue_tail,
+            graph.done,
+            graph.failed,
+            graph.worlds,
+            graph.colors,
+            graph.rows,
+            graph.epochs,
+            graph.active_color_tasks,
+            graph.queue_capacity,
+            work_iters,
+            max_spins,
+            graph.out);
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaGetLastError());
+
+    float best = std::numeric_limits<float>::max();
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    int expected = graph.active_color_tasks * graph.epochs;
+    for (int i = 0; i < repeats; ++i) {
+        reset_color_chain(graph);
+        CUDA_CHECK(cudaEventRecord(start));
+        color_chain_kernel<<<worker_blocks, block_dim>>>(
+            graph.world_color_row_starts,
+            graph.queue,
+            graph.queue_ready,
+            graph.queue_head,
+            graph.queue_tail,
+            graph.done,
+            graph.failed,
+            graph.worlds,
+            graph.colors,
+            graph.rows,
+            graph.epochs,
+            graph.active_color_tasks,
+            graph.queue_capacity,
+            work_iters,
+            max_spins,
+            graph.out);
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        CUDA_CHECK(cudaGetLastError());
+        int done = 0;
+        int failed = 0;
+        CUDA_CHECK(cudaMemcpy(&done, graph.done, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&failed, graph.failed, sizeof(int), cudaMemcpyDeviceToHost));
+        if (done != expected || failed != 0) {
+            std::fprintf(stderr, "color_chain failed: done=%d expected=%d failed=%d\n", done, expected, failed);
+            CUDA_CHECK(cudaEventDestroy(start));
+            CUDA_CHECK(cudaEventDestroy(stop));
+            return std::numeric_limits<float>::quiet_NaN();
+        }
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        best = std::min(best, ms);
+    }
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    return best;
+}
+
 int main(int argc, char** argv) {
     int worlds = parse_int_arg(argc, argv, "--worlds", 32);
     int epochs = parse_int_arg(argc, argv, "--epochs", 4);
@@ -693,6 +951,7 @@ int main(int argc, char** argv) {
     int warmup = parse_int_arg(argc, argv, "--warmup", 3);
     int max_spins = parse_int_arg(argc, argv, "--max-spins", 100000000);
     int run_chain = parse_int_arg(argc, argv, "--run-chain", 1);
+    int run_color_chain = parse_int_arg(argc, argv, "--run-color-chain", 1);
     std::string scenes_arg = parse_string_arg(argc, argv, "--scenes", "h1,g1,dr_legs,tower");
 
     int device = 0;
@@ -712,23 +971,28 @@ int main(int argc, char** argv) {
         worker_blocks,
         work_iters,
         imbalance);
-    std::printf("scene rows chunks colors fast_tail_ms tile_ms tile_speedup chunk_chain_ms chain_speedup rows_per_world chunks_per_world_color\n");
+    std::printf("scene rows chunks colors fast_tail_ms tile_ms tile_speedup color_chain_ms color_speedup chunk_chain_ms chain_speedup rows_per_world chunks_per_world_color\n");
 
     for (const std::string& scene_name : split_csv(scenes_arg)) {
         SceneConfig scene = scene_config(scene_name);
         DeviceGraph graph = make_graph(scene, worlds, chunk_rows, epochs, imbalance);
         float fast_ms = time_fast_tail(graph, repeats, warmup, tpw, block_dim, work_iters);
         float tile_ms = time_world_tile(graph, repeats, warmup, worlds_per_block, block_dim, work_iters);
+        float color_chain_ms = std::numeric_limits<float>::quiet_NaN();
+        if (run_color_chain != 0) {
+            color_chain_ms = time_color_chain(graph, repeats, warmup, worker_blocks, block_dim, work_iters, max_spins);
+        }
         float chain_ms = std::numeric_limits<float>::quiet_NaN();
         if (run_chain != 0) {
             chain_ms = time_chunk_chain(graph, repeats, warmup, worker_blocks, chunk_threads, work_iters, max_spins);
         }
         float tile_speedup = fast_ms / tile_ms;
+        float color_speedup = fast_ms / color_chain_ms;
         float chain_speedup = fast_ms / chain_ms;
         float rows_per_world = static_cast<float>(graph.rows) / static_cast<float>(worlds);
         float chunks_per_world_color = static_cast<float>(graph.chunks) / static_cast<float>(worlds * graph.colors);
         std::printf(
-            "%8s %7d %6d %6d %12.4f %8.4f %11.3fx %14.4f %12.3fx %14.1f %22.2f\n",
+            "%8s %7d %6d %6d %12.4f %8.4f %11.3fx %14.4f %12.3fx %14.4f %12.3fx %14.1f %22.2f\n",
             scene.name,
             graph.rows,
             graph.chunks,
@@ -736,6 +1000,8 @@ int main(int argc, char** argv) {
             fast_ms,
             tile_ms,
             tile_speedup,
+            color_chain_ms,
+            color_speedup,
             chain_ms,
             chain_speedup,
             rows_per_world,
