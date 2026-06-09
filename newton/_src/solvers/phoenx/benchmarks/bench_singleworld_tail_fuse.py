@@ -23,7 +23,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extract_solver
-from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
+from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower, tower_grid
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
@@ -31,7 +31,14 @@ def _parse_csv_ints(value: str) -> tuple[int, ...]:
     return tuple(int(raw.strip()) for raw in value.split(",") if raw.strip())
 
 
-def _build_scene(scene: str, *, substeps: int, solver_iterations: int):
+def _build_scene(
+    scene: str,
+    *,
+    substeps: int,
+    solver_iterations: int,
+    tower_grid_side: int,
+    tower_grid_layers: int,
+):
     kwargs = {
         "num_worlds": 1,
         "solver_name": "phoenx",
@@ -47,6 +54,8 @@ def _build_scene(scene: str, *, substeps: int, solver_iterations: int):
         return dr_legs.build(**kwargs)
     if scene == "tower":
         return tower.build(**kwargs)
+    if scene == "tower_grid":
+        return tower_grid.build(**kwargs, grid_side=tower_grid_side, layers=tower_grid_layers)
     raise ValueError(f"unknown scene: {scene}")
 
 
@@ -99,12 +108,20 @@ def _run_case(
     block_dim: int,
     substeps: int,
     solver_iterations: int,
+    tower_grid_side: int,
+    tower_grid_layers: int,
     prime_frames: int,
     warmup: int,
     n_runs: int,
     trials: int,
 ) -> tuple[float, float, int, int, int, int]:
-    handle = _build_scene(scene, substeps=substeps, solver_iterations=solver_iterations)
+    handle = _build_scene(
+        scene,
+        substeps=substeps,
+        solver_iterations=solver_iterations,
+        tower_grid_side=tower_grid_side,
+        tower_grid_layers=tower_grid_layers,
+    )
     solver = _extract_solver(handle)
     world = solver.world
     if world.step_layout != "single_world":
@@ -125,11 +142,13 @@ def main() -> None:
     parser.add_argument(
         "--scenes",
         nargs="+",
-        choices=("h1", "g1", "dr_legs", "tower"),
+        choices=("h1", "g1", "dr_legs", "tower", "tower_grid"),
         default=["h1", "g1", "dr_legs", "tower"],
     )
     parser.add_argument("--thresholds", type=_parse_csv_ints, default=(0, 64, 128, 256))
     parser.add_argument("--block-dim", type=int, default=256)
+    parser.add_argument("--tower-grid-side", type=int, default=2)
+    parser.add_argument("--tower-grid-layers", type=int, default=16)
     parser.add_argument("--substeps", type=int, default=1)
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--prime-frames", type=int, default=3)
@@ -141,6 +160,7 @@ def main() -> None:
     wp.init()
     print(
         f"device={wp.get_device()} thresholds={args.thresholds} block_dim={args.block_dim} "
+        f"tower_grid={args.tower_grid_side}x{args.tower_grid_side}x{args.tower_grid_layers} "
         f"n_runs={args.n_runs} trials={args.trials}"
     )
     print("scene threshold min_ms med_ms us_per_solve colors max_color tail_colors tail_rows rel_best")
@@ -154,6 +174,8 @@ def main() -> None:
                 block_dim=args.block_dim,
                 substeps=args.substeps,
                 solver_iterations=args.solver_iterations,
+                tower_grid_side=args.tower_grid_side,
+                tower_grid_layers=args.tower_grid_layers,
                 prime_frames=args.prime_frames,
                 warmup=args.warmup,
                 n_runs=args.n_runs,
