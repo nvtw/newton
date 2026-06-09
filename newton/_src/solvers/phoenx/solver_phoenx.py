@@ -194,6 +194,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _set_kinematic_pose_batch_kernel,
     _zero_constraint_time_us_kernel,
     _zero_contact_time_us_kernel,
+    get_block_world_kernel,
     get_fast_tail_kernel,
     get_singleworld_kernel,
     pack_body_xforms_kernel,
@@ -579,6 +580,9 @@ class PhoenXWorld:
                 "prepare_refresh_stride > 3 currently supports joint-only rigid worlds; "
                 "contact worlds should refresh at least every third substep"
             )
+        self._multi_world_scheduler: str = "fast_tail"
+        self._multi_world_block_dim: int = 128
+
         # SOR boost (successive over-relaxation): every iterate
         # multiplies its computed delta lambda by this factor before
         # clamp/apply. 1.0 = vanilla PGS. Values in (1.0, 2.0) trade
@@ -3254,6 +3258,123 @@ class PhoenXWorld:
                 contact_views,
                 launch_tpw_bound=fixed_tpw if fixed_tpw > 0 else self._tpw_launch_bound,
             )
+
+    def _block_world_supported(self) -> bool:
+        """Return whether the private block-world scheduler can run this scene."""
+        return bool(
+            self.step_layout != "single_world"
+            and not self.mass_splitting_enabled
+            and self.num_particles == 0
+            and self.num_cloth_triangles == 0
+            and self.num_cloth_bending == 0
+            and self.num_soft_tetrahedra == 0
+            and self.num_soft_hexahedra == 0
+            and self._contact_offset == self.num_joints
+        )
+
+    def _block_world_launch_dim(self, block_dim: int) -> int:
+        """Launch one physical block per world for the block-world scheduler."""
+        return max(1, int(self.num_worlds) * int(block_dim))
+
+    def _validate_block_world_dim(self, block_dim: int) -> int:
+        block_dim = int(block_dim)
+        if block_dim not in (32, 64, 128):
+            raise ValueError(f"block_world block_dim must be one of (32, 64, 128), got {block_dim}")
+        return block_dim
+
+    def _solve_main_block_world(self, block_dim: int | None = None) -> None:
+        """Private multi-world PGS solve using one physical block per world."""
+        if self._constraint_capacity == 0:
+            return
+        if not self._block_world_supported():
+            raise NotImplementedError("block-world scheduler currently supports rigid multi-world scenes only")
+        block_dim = self._validate_block_world_dim(self._multi_world_block_dim if block_dim is None else block_dim)
+        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        cached_prepare = not self._refresh_prepare_this_substep()
+        kernel = get_block_world_kernel(
+            kind="prepare_plus_iterate",
+            revolute_only=bool(self._use_revolute_specialization),
+            has_joints=self.num_joints > 0,
+            has_contacts=self.max_contact_columns > 0,
+            has_sleeping=bool(self._sleeping_enabled),
+            has_soft_contact_pd=bool(self._has_soft_contact_pd),
+            cached_prepare=bool(cached_prepare),
+            enable_column_timers=self.enable_column_timers,
+            family_split=self._fast_tail_family_split(),
+            block_dim=block_dim,
+        )
+        wp.launch(
+            kernel,
+            dim=self._block_world_launch_dim(block_dim),
+            block_dim=block_dim,
+            inputs=[
+                self.constraints,
+                self._contact_cols,
+                self.bodies,
+                self._particles_or_sentinel(),
+                wp.float32(1.0 / self.substep_dt),
+                wp.float32(self.sor_boost),
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_color_family_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
+                self._contact_container,
+                contact_views,
+                wp.int32(self.solver_iterations),
+                wp.int32(self.num_worlds),
+                wp.int32(self.num_joints),
+                wp.int32(self.num_bodies),
+                self._copy_state,
+            ],
+            device=self.device,
+        )
+
+    def _relax_velocities_block_world(self, block_dim: int | None = None) -> None:
+        """Private multi-world TGS-soft relax using one physical block per world."""
+        if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
+            return
+        if not self._block_world_supported():
+            raise NotImplementedError("block-world scheduler currently supports rigid multi-world scenes only")
+        block_dim = self._validate_block_world_dim(self._multi_world_block_dim if block_dim is None else block_dim)
+        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        kernel = get_block_world_kernel(
+            kind="relax",
+            revolute_only=bool(self._use_revolute_specialization),
+            has_joints=self.num_joints > 0,
+            has_contacts=self.max_contact_columns > 0,
+            has_sleeping=bool(self._sleeping_enabled),
+            has_soft_contact_pd=bool(self._has_soft_contact_pd),
+            enable_column_timers=self.enable_column_timers,
+            family_split=self._fast_tail_family_split(),
+            block_dim=block_dim,
+        )
+        wp.launch(
+            kernel,
+            dim=self._block_world_launch_dim(block_dim),
+            block_dim=block_dim,
+            inputs=[
+                self.constraints,
+                self._contact_cols,
+                self.bodies,
+                self._particles_or_sentinel(),
+                wp.int32(self.num_bodies),
+                wp.float32(1.0 / self.substep_dt),
+                wp.float32(self.sor_boost),
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_color_family_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
+                self._contact_container,
+                contact_views,
+                wp.int32(self.velocity_iterations),
+                wp.int32(self.num_worlds),
+                wp.int32(self.num_joints),
+                self._copy_state,
+            ],
+            device=self.device,
+        )
 
     # Single-world dispatch (wp.capture_while over the global colour CSR).
 

@@ -30,11 +30,17 @@ class MultiWorldFastTailDispatcher:
         pass
 
     def solve(self, idt: wp.float32) -> None:
-        # Bundles prepare + every iterate into one fast-tail launch.
-        self._world._solve_main()
+        # Bundles prepare + every iterate into one scheduler launch.
+        if self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported():
+            self._world._solve_main_block_world()
+        else:
+            self._world._solve_main()
 
     def relax(self, idt: wp.float32) -> None:
-        self._world._relax_velocities()
+        if self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported():
+            self._world._relax_velocities_block_world()
+        else:
+            self._world._relax_velocities()
 
 
 __all__ = ["MultiWorldFastTailDispatcher"]
