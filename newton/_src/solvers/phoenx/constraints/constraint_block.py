@@ -48,6 +48,8 @@ __all__ = [
     "block_project_friction_delta_sor_2",
     "block_project_identity_delta_1",
     "block_project_identity_delta_2",
+    "block_project_velocity_block2_unsoft",
+    "block_project_velocity_block3_unsoft",
     "block_solve_accumulated_inverse_1",
     "block_solve_accumulated_inverse_2",
     "block_solve_accumulated_inverse_3",
@@ -787,6 +789,40 @@ def block_solve_accumulated_inverse_4(
     """Solve a cached 4x4 inverse block and identity-project its accumulator."""
     d_lambda_unsoft = block_solve_inverse_4(K_inv, rhs)
     return block_project_accumulated_4(d_lambda_unsoft, lambda_old, mass_coeff, impulse_coeff, sor_boost)
+
+
+@wp.func
+def block_project_velocity_block2_unsoft(
+    block: VelocityBlock2,
+    d_lambda_unsoft: wp.vec2f,
+    projection: VelocityBlockProjection,
+    sor_boost: wp.float32,
+) -> BlockVector2Update:
+    """Project a prepared two-row dense velocity block from a precomputed solve."""
+    return block_project_accumulated_2(
+        d_lambda_unsoft,
+        block.lambda_old,
+        block.mass_coeff,
+        block.impulse_coeff,
+        sor_boost,
+    )
+
+
+@wp.func
+def block_project_velocity_block3_unsoft(
+    block: VelocityBlock3,
+    d_lambda_unsoft: wp.vec3f,
+    projection: VelocityBlockProjection,
+    sor_boost: wp.float32,
+) -> BlockVector3Update:
+    """Project a prepared three-row dense velocity block from a precomputed solve."""
+    return block_project_accumulated_3(
+        d_lambda_unsoft,
+        block.lambda_old,
+        block.mass_coeff,
+        block.impulse_coeff,
+        sor_boost,
+    )
 
 
 @wp.func

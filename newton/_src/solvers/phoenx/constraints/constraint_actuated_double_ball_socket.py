@@ -36,8 +36,8 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
     VelocityBlockProjection,
     VelocityRows3,
     VelocityRows3Projection,
-    block_project_accumulated_2,
-    block_project_accumulated_3,
+    block_project_velocity_block2_unsoft,
+    block_project_velocity_block3_unsoft,
     block_solve_inverse_2,
     block_solve_inverse_3,
     block_solve_velocity_block1_projected,
@@ -1531,7 +1531,13 @@ def _anchor1_anchor2_schur_block(
     ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
 
     lam2_us = block_solve_inverse_2(s_inv_22, rhs2 - ut_ai_rhs1)
-    update2 = block_project_accumulated_2(lam2_us, acc2_tan, mass_coeff, impulse_coeff, sor_boost)
+    block2 = VelocityBlock2()
+    block2.k_inv = s_inv_22
+    block2.residual = rhs2 - ut_ai_rhs1
+    block2.lambda_old = acc2_tan
+    block2.mass_coeff = mass_coeff
+    block2.impulse_coeff = impulse_coeff
+    update2 = block_project_velocity_block2_unsoft(block2, lam2_us, _identity_velocity_block_projection(), sor_boost)
     lam2 = update2.delta
     lam2_world = lam2[0] * t1 + lam2[1] * t2
     lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
@@ -1541,7 +1547,13 @@ def _anchor1_anchor2_schur_block(
     u_lam2_us = u_lam2_us + cr1_b2 @ (ii2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
 
     lam1_us = block_solve_inverse_3(a1_inv, rhs1 + u_lam2_us)
-    update1 = block_project_accumulated_3(lam1_us, acc1, mass_coeff, impulse_coeff, sor_boost)
+    block1 = VelocityBlock3()
+    block1.k_inv = a1_inv
+    block1.residual = rhs1 + u_lam2_us
+    block1.lambda_old = acc1
+    block1.mass_coeff = mass_coeff
+    block1.impulse_coeff = impulse_coeff
+    update1 = block_project_velocity_block3_unsoft(block1, lam1_us, _identity_velocity_block_projection(), sor_boost)
     lam1 = update1.delta
     total_lin = lam1 + lam2_world
     v1, v2, w1, w2 = apply_pair_spatial_impulse(
@@ -3259,7 +3271,15 @@ def _revolute_iterate_at_multi(
         ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
 
         lam2_us = block_solve_inverse_2(s_inv_22, rhs2 - ut_ai_rhs1)
-        update2 = block_project_accumulated_2(lam2_us, acc2_tan, mass_coeff, impulse_coeff, sor_boost)
+        block2 = VelocityBlock2()
+        block2.k_inv = s_inv_22
+        block2.residual = rhs2 - ut_ai_rhs1
+        block2.lambda_old = acc2_tan
+        block2.mass_coeff = mass_coeff
+        block2.impulse_coeff = impulse_coeff
+        update2 = block_project_velocity_block2_unsoft(
+            block2, lam2_us, _identity_velocity_block_projection(), sor_boost
+        )
         lam2 = update2.delta
 
         lam2_world = lam2[0] * t1 + lam2[1] * t2
@@ -3270,7 +3290,15 @@ def _revolute_iterate_at_multi(
         u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
 
         lam1_us = block_solve_inverse_3(a1_inv, rhs1 + u_lam2_us)
-        update1 = block_project_accumulated_3(lam1_us, acc1, mass_coeff, impulse_coeff, sor_boost)
+        block1 = VelocityBlock3()
+        block1.k_inv = a1_inv
+        block1.residual = rhs1 + u_lam2_us
+        block1.lambda_old = acc1
+        block1.mass_coeff = mass_coeff
+        block1.impulse_coeff = impulse_coeff
+        update1 = block_project_velocity_block3_unsoft(
+            block1, lam1_us, _identity_velocity_block_projection(), sor_boost
+        )
         lam1 = update1.delta
 
         total_lin = lam1 + lam2_world
