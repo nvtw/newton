@@ -29,6 +29,8 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
     VELOCITY_BLOCK_PROJECT_IDENTITY,
     VELOCITY_ROWS3_PROJECT_BOUNDS,
+    RigidFrameBlock3,
+    RigidFrameRows3State,
     VelocityBlock1,
     VelocityBlock2,
     VelocityBlock3,
@@ -39,9 +41,10 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
     block_project_velocity_block3_unsoft,
     block_solve_inverse_2,
     block_solve_inverse_3,
+    block_solve_rigid_frame_block3_bounded,
+    block_solve_rigid_frame_block3_planar_bounded,
     block_solve_velocity_block1_projected,
     block_solve_velocity_block2_projected,
-    block_solve_velocity_block3_projected,
     block_solve_velocity_block4_projected,
     block_solve_velocity_rows3_op,
 )
@@ -1318,25 +1321,39 @@ def _planar_3row_block(
         wp.dot(t2, acc_imp2_world),
     )
 
-    v_rel = v2 - v1
-    w_rel = w2 - w1
-    jv3 = wp.vec3f(wp.dot(n_hat, v_rel), wp.dot(t1, w_rel), wp.dot(t2, w_rel))
-    block3 = VelocityBlock3()
-    block3.k_inv = a3_inv
-    block3.residual = jv3 + bias_packed
-    block3.lambda_old = acc3
-    block3.mass_coeff = mass_coeff
-    block3.impulse_coeff = impulse_coeff
-    update3 = block_solve_velocity_block3_projected(block3, _identity_velocity_block_projection(), sor_boost)
+    rows = RigidFrameBlock3()
+    rows.axis0 = n_hat
+    rows.axis1 = t1
+    rows.axis2 = t2
+    rows.r0 = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    rows.r1 = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    rows.mode = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    rows.k_inv = a3_inv
+    rows.bias = bias_packed
+    rows.lambda_old = acc3
+    rows.mass_coeff = wp.vec3f(mass_coeff, mass_coeff, mass_coeff)
+    rows.impulse_coeff = wp.vec3f(impulse_coeff, impulse_coeff, impulse_coeff)
+    rows.lambda_min = wp.vec3f(-BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
+    rows.lambda_max = wp.vec3f(BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF)
+    rows.projection_mode = VELOCITY_ROWS3_PROJECT_BOUNDS
+    rows.friction_static = wp.float32(0.0)
+    rows.friction_kinetic = wp.float32(0.0)
+
+    state = RigidFrameRows3State()
+    state.v_a = v1
+    state.w_a = w1
+    state.v_b = v2
+    state.w_b = w2
+    state.inv_m_a = im1
+    state.inv_m_b = im2
+    state.inv_i_a = ii1
+    state.inv_i_b = ii2
+
+    update3 = block_solve_rigid_frame_block3_planar_bounded(rows, state, sor_boost)
     lam3 = update3.delta
-    lin_imp_world = lam3[0] * n_hat
-    ang_imp_world = lam3[1] * t1 + lam3[2] * t2
-    v1, v2, w1, w2 = apply_pair_spatial_impulse(
-        v1, v2, w1, w2, im1, im2, ii1, ii2, lin_imp_world, ang_imp_world, ang_imp_world
-    )
-    _write_acc_imp1(constraints, cid, acc_imp1_world + lin_imp_world)
-    _write_acc_imp2(constraints, cid, acc_imp2_world + ang_imp_world)
-    return v1, v2, w1, w2
+    _write_acc_imp1(constraints, cid, acc_imp1_world + lam3[0] * n_hat)
+    _write_acc_imp2(constraints, cid, acc_imp2_world + lam3[1] * t1 + lam3[2] * t2)
+    return update3.v_a, update3.v_b, update3.w_a, update3.w_b
 
 
 @wp.func
@@ -1364,20 +1381,37 @@ def _anchor1_standalone_block(
     point-lock block. Reads ``A1_INV`` / ``ACC_IMP1`` from the
     constraint; updates body velocities and writes the accumulator
     back."""
-    a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
-    acc1 = _read_acc_imp1(constraints, cid)
-    jv1 = -v1 + cr1_b1 @ w1 + v2 - cr1_b2 @ w2
-    block1 = VelocityBlock3()
-    block1.k_inv = a1_inv
-    block1.residual = jv1 + bias1
-    block1.lambda_old = acc1
-    block1.mass_coeff = mass_coeff
-    block1.impulse_coeff = impulse_coeff
-    update1 = block_solve_velocity_block3_projected(block1, _identity_velocity_block_projection(), sor_boost)
-    lam1 = update1.delta
-    v1, v2, w1, w2 = apply_pair_spatial_impulse(v1, v2, w1, w2, im1, im2, ii1, ii2, lam1, cr1_b1 @ lam1, cr1_b2 @ lam1)
+    rows = RigidFrameBlock3()
+    rows.axis0 = wp.vec3f(wp.float32(1.0), wp.float32(0.0), wp.float32(0.0))
+    rows.axis1 = wp.vec3f(wp.float32(0.0), wp.float32(1.0), wp.float32(0.0))
+    rows.axis2 = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
+    rows.r0 = wp.vec3f(cr1_b1[2, 1], cr1_b1[0, 2], cr1_b1[1, 0])
+    rows.r1 = wp.vec3f(cr1_b2[2, 1], cr1_b2[0, 2], cr1_b2[1, 0])
+    rows.mode = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(0.0))
+    rows.k_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
+    rows.bias = bias1
+    rows.lambda_old = _read_acc_imp1(constraints, cid)
+    rows.mass_coeff = wp.vec3f(mass_coeff, mass_coeff, mass_coeff)
+    rows.impulse_coeff = wp.vec3f(impulse_coeff, impulse_coeff, impulse_coeff)
+    rows.lambda_min = wp.vec3f(-BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
+    rows.lambda_max = wp.vec3f(BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF)
+    rows.projection_mode = VELOCITY_ROWS3_PROJECT_BOUNDS
+    rows.friction_static = wp.float32(0.0)
+    rows.friction_kinetic = wp.float32(0.0)
+
+    state = RigidFrameRows3State()
+    state.v_a = v1
+    state.w_a = w1
+    state.v_b = v2
+    state.w_b = w2
+    state.inv_m_a = im1
+    state.inv_m_b = im2
+    state.inv_i_a = ii1
+    state.inv_i_b = ii2
+
+    update1 = block_solve_rigid_frame_block3_bounded(rows, state, sor_boost)
     _write_acc_imp1(constraints, cid, update1.lambda_new)
-    return v1, v2, w1, w2
+    return update1.v_a, update1.v_b, update1.w_a, update1.w_b
 
 
 @wp.func

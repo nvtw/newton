@@ -73,6 +73,7 @@ __all__ = [
     "block_solve_rigid_frame_block3",
     "block_solve_rigid_frame_block3_bounded",
     "block_solve_rigid_frame_block3_mixed",
+    "block_solve_rigid_frame_block3_planar_bounded",
     "block_solve_rigid_frame_rows3",
     "block_solve_rigid_frame_rows3_angular",
     "block_solve_rigid_frame_rows3_contact",
@@ -1361,6 +1362,54 @@ def block_solve_rigid_frame_block3_mixed(
     update.v_b = state.v_b + state.inv_m_b * linear_impulse
     update.w_a = state.w_a + state.inv_i_a @ (-wp.cross(rows.r0, cross_impulse) - angular_impulse)
     update.w_b = state.w_b + state.inv_i_b @ (wp.cross(rows.r1, cross_impulse) + angular_impulse)
+    update.lambda_new = projection.lambda_new
+    update.delta = d
+    return update
+
+
+@wp.func
+def block_solve_rigid_frame_block3_planar_bounded(
+    rows: RigidFrameBlock3,
+    state: RigidFrameRows3State,
+    sor_boost: wp.float32,
+) -> RigidFrameRows3Update:
+    """Solve/project/apply a planar dense frame op with bounded rows.
+
+    The row shape is fixed to one linear row along axis0 plus two angular
+    rows along axis1 and axis2. It keeps planar joints on the same
+    dense frame-block solve/projection path without carrying row-wise mode
+    vectors through the hot iterate path.
+    """
+    rel_linear = state.v_b - state.v_a
+    rel_angular = state.w_b - state.w_a
+    residual = (
+        wp.vec3f(
+            wp.dot(rows.axis0, rel_linear),
+            wp.dot(rows.axis1, rel_angular),
+            wp.dot(rows.axis2, rel_angular),
+        )
+        + rows.bias
+    )
+
+    projection = _dense_velocity_rows3_projection_bounded(
+        rows.k_inv,
+        residual,
+        rows.lambda_old,
+        rows.mass_coeff,
+        rows.impulse_coeff,
+        rows.lambda_min,
+        rows.lambda_max,
+        sor_boost,
+    )
+    d = projection.delta
+    linear_impulse = d[0] * rows.axis0
+    angular_impulse = d[1] * rows.axis1 + d[2] * rows.axis2
+
+    update = RigidFrameRows3Update()
+    update.v_a = state.v_a - state.inv_m_a * linear_impulse
+    update.v_b = state.v_b + state.inv_m_b * linear_impulse
+    update.w_a = state.w_a - state.inv_i_a @ angular_impulse
+    update.w_b = state.w_b + state.inv_i_b @ angular_impulse
     update.lambda_new = projection.lambda_new
     update.delta = d
     return update
