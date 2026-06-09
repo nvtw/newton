@@ -45,17 +45,14 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent2_lambda,
 )
 from newton._src.solvers.phoenx.constraints.contact_projection import (
-    contact_project_velocity_update,
-    contact_project_velocity_update_no_soft_pd,
+    contact_frame_velocity_update,
+    contact_frame_velocity_update_no_soft_pd,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import (
     dword_offset_of,
     num_dwords,
     reinterpret_float_as_int,
     reinterpret_int_as_float,
-)
-from newton._src.solvers.phoenx.helpers.math_helpers import (
-    apply_pair_velocity_impulse,
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
@@ -668,11 +665,6 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
                     bias_t1_val = wp.float32(0.0)
                     bias_t2_val = wp.float32(0.0)
 
-                vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
-                jv_n = wp.dot(vel_rel, n)
-                jv_t1 = wp.dot(vel_rel, t1_dir)
-                jv_t2 = wp.dot(vel_rel, t2_dir)
-
                 pd_eff_soft_n = wp.float32(0.0)
                 pd_gamma_n = wp.float32(0.0)
                 pd_bias_n = wp.float32(0.0)
@@ -691,15 +683,22 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
                     mass_coeff_n = wp.float32(1.0)
                     impulse_coeff_n = wp.float32(0.0)
                 if wp.static(has_soft_contact_pd):
-                    imp = contact_project_velocity_update(
+                    update = contact_frame_velocity_update(
                         cc,
                         k,
                         n,
                         t1_dir,
                         t2_dir,
-                        jv_n,
-                        jv_t1,
-                        jv_t2,
+                        r1,
+                        r2,
+                        v1,
+                        w1,
+                        v2,
+                        w2,
+                        inv_mass1,
+                        inv_mass2,
+                        inv_inertia1,
+                        inv_inertia2,
                         eff_n,
                         eff_t1,
                         eff_t2,
@@ -716,15 +715,22 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
                         pd_bias_n,
                     )
                 else:
-                    imp = contact_project_velocity_update_no_soft_pd(
+                    update = contact_frame_velocity_update_no_soft_pd(
                         cc,
                         k,
                         n,
                         t1_dir,
                         t2_dir,
-                        jv_n,
-                        jv_t1,
-                        jv_t2,
+                        r1,
+                        r2,
+                        v1,
+                        w1,
+                        v2,
+                        w2,
+                        inv_mass1,
+                        inv_mass2,
+                        inv_inertia1,
+                        inv_inertia2,
                         eff_n,
                         eff_t1,
                         eff_t2,
@@ -740,19 +746,10 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
                         wp.float32(0.0),
                         wp.float32(0.0),
                     )
-                v1, v2, w1, w2 = apply_pair_velocity_impulse(
-                    v1,
-                    v2,
-                    w1,
-                    w2,
-                    inv_mass1,
-                    inv_mass2,
-                    inv_inertia1,
-                    inv_inertia2,
-                    r1,
-                    r2,
-                    imp,
-                )
+                v1 = update.v_a
+                w1 = update.w_a
+                v2 = update.v_b
+                w2 = update.w_b
             it += 1
 
         # Direct SoA writes -- fast-tail-only function (no mass splitting).
