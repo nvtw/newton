@@ -80,6 +80,7 @@ __all__ = [
     "block_solve_velocity_rows3_bounded",
     "block_solve_velocity_rows3_contact_cone",
     "block_solve_velocity_rows3_op",
+    "block_solve_velocity_rows3_op_uniform_projection",
     "block_solve_xpbd_1",
     "block_solve_xpbd_2",
     "block_solve_xpbd_2_strict",
@@ -789,6 +790,59 @@ def block_solve_velocity_rows3_op(op: VelocityRows3Op, sor_boost: wp.float32) ->
     projection.friction_static = op.friction_static
     projection.friction_kinetic = op.friction_kinetic
     return block_solve_velocity_rows3(rows, projection, sor_boost)
+
+
+@wp.func
+def block_solve_velocity_rows3_op_uniform_projection(
+    op: VelocityRows3Op,
+    sor_boost: wp.float32,
+) -> VelocityRows3Update:
+    """Solve/project one three-row op with branchless projection-mode selection.
+
+    Rows 0-2 are always solved as scalar bounded rows. Rows 1-2 are also
+    projected as a contact friction disk, then ``projection_mode`` selects the
+    bounded or cone result with ``wp.where``. This is intentionally a separate
+    entry point from :func:`block_solve_velocity_rows3_op`: it is useful for
+    mixed-family megakernel experiments, but it does extra arithmetic for pure
+    bounded joint rows.
+    """
+    row0 = block_solve_accumulated_inverse_bounded_1(
+        op.k_inv[0],
+        op.residual[0],
+        op.lambda_old[0],
+        op.mass_coeff[0],
+        op.impulse_coeff[0],
+        sor_boost,
+        op.lambda_min[0],
+        op.lambda_max[0],
+    )
+
+    d_lambda1 = op.mass_coeff[1] * (-(op.k_inv[1] * op.residual[1])) - op.impulse_coeff[1] * op.lambda_old[1]
+    d_lambda2 = op.mass_coeff[2] * (-(op.k_inv[2] * op.residual[2])) - op.impulse_coeff[2] * op.lambda_old[2]
+    lambda1_raw = op.lambda_old[1] + d_lambda1 * sor_boost
+    lambda2_raw = op.lambda_old[2] + d_lambda2 * sor_boost
+
+    lambda1_box = wp.clamp(lambda1_raw, op.lambda_min[1], op.lambda_max[1])
+    lambda2_box = wp.clamp(lambda2_raw, op.lambda_min[2], op.lambda_max[2])
+    lambda_friction = block_project_friction_circle_2(
+        lambda1_raw,
+        lambda2_raw,
+        op.friction_static * row0.lambda_new,
+        op.friction_kinetic * row0.lambda_new,
+    )
+
+    is_contact = op.projection_mode == VELOCITY_ROWS3_PROJECT_CONTACT_CONE
+    lambda1_new = wp.where(is_contact, lambda_friction[0], lambda1_box)
+    lambda2_new = wp.where(is_contact, lambda_friction[1], lambda2_box)
+
+    update = VelocityRows3Update()
+    update.delta = wp.vec3f(
+        row0.delta,
+        lambda1_new - op.lambda_old[1],
+        lambda2_new - op.lambda_old[2],
+    )
+    update.lambda_new = wp.vec3f(row0.lambda_new, lambda1_new, lambda2_new)
+    return update
 
 
 @wp.func
