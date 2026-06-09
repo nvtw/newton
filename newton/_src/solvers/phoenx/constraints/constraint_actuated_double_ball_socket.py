@@ -27,21 +27,23 @@ import warp as wp
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
+    VELOCITY_BLOCK_PROJECT_IDENTITY,
     VELOCITY_ROWS3_PROJECT_BOUNDS,
     VelocityBlock1,
     VelocityBlock2,
     VelocityBlock3,
     VelocityBlock4,
+    VelocityBlockProjection,
     VelocityRows3,
     VelocityRows3Projection,
     block_project_accumulated_2,
     block_project_accumulated_3,
     block_solve_inverse_2,
     block_solve_inverse_3,
-    block_solve_velocity_block1,
-    block_solve_velocity_block2,
-    block_solve_velocity_block3,
-    block_solve_velocity_block4,
+    block_solve_velocity_block1_projected,
+    block_solve_velocity_block2_projected,
+    block_solve_velocity_block3_projected,
+    block_solve_velocity_block4_projected,
     block_solve_velocity_rows3,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -1253,6 +1255,13 @@ def _axial_drive_limit_iterate(
     return update.delta
 
 
+@wp.func
+def _identity_velocity_block_projection() -> VelocityBlockProjection:
+    projection = VelocityBlockProjection()
+    projection.mode = VELOCITY_BLOCK_PROJECT_IDENTITY
+    return projection
+
+
 # ---------------------------------------------------------------------------
 # Compound family iterates
 #
@@ -1321,7 +1330,7 @@ def _planar_3row_block(
     block3.lambda_old = acc3
     block3.mass_coeff = mass_coeff
     block3.impulse_coeff = impulse_coeff
-    update3 = block_solve_velocity_block3(block3, sor_boost)
+    update3 = block_solve_velocity_block3_projected(block3, _identity_velocity_block_projection(), sor_boost)
     lam3 = update3.delta
     lin_imp_world = lam3[0] * n_hat
     ang_imp_world = lam3[1] * t1 + lam3[2] * t2
@@ -1367,7 +1376,7 @@ def _anchor1_standalone_block(
     block1.lambda_old = acc1
     block1.mass_coeff = mass_coeff
     block1.impulse_coeff = impulse_coeff
-    update1 = block_solve_velocity_block3(block1, sor_boost)
+    update1 = block_solve_velocity_block3_projected(block1, _identity_velocity_block_projection(), sor_boost)
     lam1 = update1.delta
     v1, v2, w1, w2 = apply_pair_spatial_impulse(v1, v2, w1, w2, im1, im2, ii1, ii2, lam1, cr1_b1 @ lam1, cr1_b2 @ lam1)
     _write_acc_imp1(constraints, cid, update1.lambda_new)
@@ -1418,7 +1427,7 @@ def _cable_anchor2_pd_block(
     block2.lambda_old = wp.vec2f(acc2_t1, acc2_t2)
     block2.mass_coeff = wp.float32(1.0)
     block2.impulse_coeff = wp.float32(0.0)
-    update2 = block_solve_velocity_block2(block2, sor_boost)
+    update2 = block_solve_velocity_block2_projected(block2, _identity_velocity_block_projection(), sor_boost)
     lam2_t1 = update2.delta[0]
     lam2_t2 = update2.delta[1]
     lam2_world = lam2_t1 * t1 + lam2_t2 * t2
@@ -1462,7 +1471,7 @@ def _cable_anchor3_pd_block(
     block3.lambda_old = acc3_t2
     block3.mass_coeff = wp.float32(1.0)
     block3.impulse_coeff = wp.float32(0.0)
-    update3 = block_solve_velocity_block1(block3, sor_boost)
+    update3 = block_solve_velocity_block1_projected(block3, _identity_velocity_block_projection(), sor_boost)
     lam3 = update3.delta
     lam3_world = lam3 * t2
     v1, v2, w1, w2 = apply_pair_spatial_impulse(
@@ -1603,7 +1612,7 @@ def _anchor1_anchor2_tangent_4row_block(
     block4.lambda_old = acc4
     block4.mass_coeff = mass_coeff
     block4.impulse_coeff = impulse_coeff
-    update4 = block_solve_velocity_block4(block4, sor_boost)
+    update4 = block_solve_velocity_block4_projected(block4, _identity_velocity_block_projection(), sor_boost)
     lam4 = update4.delta
     lam1_world = lam4[0] * t1 + lam4[1] * t2
     lam2_world = lam4[2] * t1 + lam4[3] * t2
@@ -1663,7 +1672,7 @@ def _anchor3_scalar_block(
     block3.lambda_old = acc3_scalar
     block3.mass_coeff = mass_coeff
     block3.impulse_coeff = impulse_coeff
-    update3 = block_solve_velocity_block1(block3, sor_boost)
+    update3 = block_solve_velocity_block1_projected(block3, _identity_velocity_block_projection(), sor_boost)
     lam3 = update3.delta
     lam3_world = lam3 * t2
     v1, v2, w1, w2 = apply_pair_spatial_impulse(

@@ -17,6 +17,7 @@ import warp as wp
 
 __all__ = [
     "BLOCK_LAMBDA_INF",
+    "VELOCITY_BLOCK_PROJECT_IDENTITY",
     "VELOCITY_ROWS3_PROJECT_BOUNDS",
     "VELOCITY_ROWS3_PROJECT_CONTACT_CONE",
     "BlockScalarUpdate",
@@ -29,6 +30,7 @@ __all__ = [
     "VelocityBlock2",
     "VelocityBlock3",
     "VelocityBlock4",
+    "VelocityBlockProjection",
     "VelocityRows3",
     "VelocityRows3Projection",
     "VelocityRows3Update",
@@ -64,9 +66,13 @@ __all__ = [
     "block_solve_symmetric_2",
     "block_solve_symmetric_2_strict",
     "block_solve_velocity_block1",
+    "block_solve_velocity_block1_projected",
     "block_solve_velocity_block2",
+    "block_solve_velocity_block2_projected",
     "block_solve_velocity_block3",
+    "block_solve_velocity_block3_projected",
     "block_solve_velocity_block4",
+    "block_solve_velocity_block4_projected",
     "block_solve_velocity_rows3",
     "block_solve_velocity_rows3_bounded",
     "block_solve_velocity_rows3_contact_cone",
@@ -79,6 +85,7 @@ __all__ = [
 BLOCK_LAMBDA_INF = wp.constant(wp.float32(1.0e30))
 VELOCITY_ROWS3_PROJECT_BOUNDS = wp.constant(wp.int32(0))
 VELOCITY_ROWS3_PROJECT_CONTACT_CONE = wp.constant(wp.int32(1))
+VELOCITY_BLOCK_PROJECT_IDENTITY = wp.constant(wp.int32(0))
 
 
 @wp.struct
@@ -169,6 +176,13 @@ class VelocityBlock4:
     lambda_old: wp.vec4f
     mass_coeff: wp.float32
     impulse_coeff: wp.float32
+
+
+@wp.struct
+class VelocityBlockProjection:
+    """Projection parameters for prepared dense velocity blocks."""
+
+    mode: wp.int32
 
 
 @wp.struct
@@ -776,9 +790,40 @@ def block_solve_accumulated_inverse_4(
 
 
 @wp.func
+def block_solve_velocity_block1_projected(
+    block: VelocityBlock1,
+    projection: VelocityBlockProjection,
+    sor_boost: wp.float32,
+) -> BlockScalarUpdate:
+    """Solve/project one prepared dense velocity block from an explicit projection descriptor."""
+    # Dense joint blocks currently use identity projection; the explicit
+    # descriptor keeps their call shape aligned with contact/row blocks.
+    return block_solve_accumulated_inverse_1(
+        block.k_inv,
+        block.residual,
+        block.lambda_old,
+        block.mass_coeff,
+        block.impulse_coeff,
+        sor_boost,
+    )
+
+
+@wp.func
 def block_solve_velocity_block1(block: VelocityBlock1, sor_boost: wp.float32) -> BlockScalarUpdate:
     """Solve/project one prepared dense velocity block."""
-    return block_solve_accumulated_inverse_1(
+    projection = VelocityBlockProjection()
+    projection.mode = VELOCITY_BLOCK_PROJECT_IDENTITY
+    return block_solve_velocity_block1_projected(block, projection, sor_boost)
+
+
+@wp.func
+def block_solve_velocity_block2_projected(
+    block: VelocityBlock2,
+    projection: VelocityBlockProjection,
+    sor_boost: wp.float32,
+) -> BlockVector2Update:
+    """Solve/project two prepared dense velocity rows from an explicit projection descriptor."""
+    return block_solve_accumulated_inverse_2(
         block.k_inv,
         block.residual,
         block.lambda_old,
@@ -791,7 +836,19 @@ def block_solve_velocity_block1(block: VelocityBlock1, sor_boost: wp.float32) ->
 @wp.func
 def block_solve_velocity_block2(block: VelocityBlock2, sor_boost: wp.float32) -> BlockVector2Update:
     """Solve/project two prepared dense velocity rows."""
-    return block_solve_accumulated_inverse_2(
+    projection = VelocityBlockProjection()
+    projection.mode = VELOCITY_BLOCK_PROJECT_IDENTITY
+    return block_solve_velocity_block2_projected(block, projection, sor_boost)
+
+
+@wp.func
+def block_solve_velocity_block3_projected(
+    block: VelocityBlock3,
+    projection: VelocityBlockProjection,
+    sor_boost: wp.float32,
+) -> BlockVector3Update:
+    """Solve/project three prepared dense velocity rows from an explicit projection descriptor."""
+    return block_solve_accumulated_inverse_3(
         block.k_inv,
         block.residual,
         block.lambda_old,
@@ -804,7 +861,19 @@ def block_solve_velocity_block2(block: VelocityBlock2, sor_boost: wp.float32) ->
 @wp.func
 def block_solve_velocity_block3(block: VelocityBlock3, sor_boost: wp.float32) -> BlockVector3Update:
     """Solve/project three prepared dense velocity rows."""
-    return block_solve_accumulated_inverse_3(
+    projection = VelocityBlockProjection()
+    projection.mode = VELOCITY_BLOCK_PROJECT_IDENTITY
+    return block_solve_velocity_block3_projected(block, projection, sor_boost)
+
+
+@wp.func
+def block_solve_velocity_block4_projected(
+    block: VelocityBlock4,
+    projection: VelocityBlockProjection,
+    sor_boost: wp.float32,
+) -> BlockVector4Update:
+    """Solve/project four prepared dense velocity rows from an explicit projection descriptor."""
+    return block_solve_accumulated_inverse_4(
         block.k_inv,
         block.residual,
         block.lambda_old,
@@ -817,14 +886,9 @@ def block_solve_velocity_block3(block: VelocityBlock3, sor_boost: wp.float32) ->
 @wp.func
 def block_solve_velocity_block4(block: VelocityBlock4, sor_boost: wp.float32) -> BlockVector4Update:
     """Solve/project four prepared dense velocity rows."""
-    return block_solve_accumulated_inverse_4(
-        block.k_inv,
-        block.residual,
-        block.lambda_old,
-        block.mass_coeff,
-        block.impulse_coeff,
-        sor_boost,
-    )
+    projection = VelocityBlockProjection()
+    projection.mode = VELOCITY_BLOCK_PROJECT_IDENTITY
+    return block_solve_velocity_block4_projected(block, projection, sor_boost)
 
 
 @wp.func
