@@ -13,8 +13,10 @@ rather than write conflicts. It compares:
 
 * ``split``: a mixed typed kernel with a family branch for contact vs angular
   joint rows.
-* ``sidecar``: a generic packed-Jacobian kernel with no contact/joint fetch or
+* ``dense``: a generic packed-Jacobian kernel with no contact/joint fetch or
   apply branch. Projection still uses the current ``VelocityRows3Op`` path.
+* ``frame``: a compact branchless descriptor using three axes, two offsets,
+  and mode coefficients for contact-style and angular-direct rows.
 """
 
 from __future__ import annotations
@@ -126,6 +128,7 @@ def _init_rows_kernel(
     projection_mode: wp.array[wp.int32],
     friction_static: wp.array[wp.float32],
     friction_kinetic: wp.array[wp.float32],
+    frame_mode: wp.array[wp.vec3f],
     period: wp.int32,
     contacts_per_period: wp.int32,
 ):
@@ -183,6 +186,10 @@ def _init_rows_kernel(
 
     if is_contact:
         family[tid] = _FAMILY_CONTACT
+        axis0[tid] = n
+        axis1[tid] = t1
+        axis2[tid] = t2
+        frame_mode[tid] = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(0.0))
         projection_mode[tid] = VELOCITY_ROWS3_PROJECT_CONTACT_CONE
         lambda_min[tid] = wp.vec3f(wp.float32(0.0), -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
         lambda_max[tid] = wp.vec3f(BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF)
@@ -203,6 +210,7 @@ def _init_rows_kernel(
         jab2[tid] = wp.cross(rr1, t2)
     else:
         family[tid] = _FAMILY_ANGULAR
+        frame_mode[tid] = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
         projection_mode[tid] = VELOCITY_ROWS3_PROJECT_BOUNDS
         lambda_min[tid] = wp.vec3f(-wp.float32(0.6), wp.float32(0.0), -wp.float32(0.25))
         lambda_max[tid] = wp.vec3f(wp.float32(0.6), BLOCK_LAMBDA_INF, wp.float32(0.25))
@@ -290,6 +298,75 @@ def _solve_sidecar_kernel(
     out_wa[tid] = wa + _mul_diag(inv_i_a[tid], _rows3_t_mul(jaa0[tid], jaa1[tid], jaa2[tid], d))
     out_vb[tid] = vb + inv_m_b[tid] * _rows3_t_mul(jlb0[tid], jlb1[tid], jlb2[tid], d)
     out_wb[tid] = wb + _mul_diag(inv_i_b[tid], _rows3_t_mul(jab0[tid], jab1[tid], jab2[tid], d))
+    out_lambda[tid] = update.lambda_new
+
+
+@wp.kernel
+def _solve_frame_kernel(
+    v_a: wp.array[wp.vec3f],
+    w_a: wp.array[wp.vec3f],
+    v_b: wp.array[wp.vec3f],
+    w_b: wp.array[wp.vec3f],
+    inv_m_a: wp.array[wp.float32],
+    inv_m_b: wp.array[wp.float32],
+    inv_i_a: wp.array[wp.vec3f],
+    inv_i_b: wp.array[wp.vec3f],
+    axis0: wp.array[wp.vec3f],
+    axis1: wp.array[wp.vec3f],
+    axis2: wp.array[wp.vec3f],
+    r0: wp.array[wp.vec3f],
+    r1: wp.array[wp.vec3f],
+    frame_mode: wp.array[wp.vec3f],
+    k_inv: wp.array[wp.vec3f],
+    bias: wp.array[wp.vec3f],
+    lambda_old: wp.array[wp.vec3f],
+    lambda_min: wp.array[wp.vec3f],
+    lambda_max: wp.array[wp.vec3f],
+    projection_mode: wp.array[wp.int32],
+    friction_static: wp.array[wp.float32],
+    friction_kinetic: wp.array[wp.float32],
+    out_va: wp.array[wp.vec3f],
+    out_wa: wp.array[wp.vec3f],
+    out_vb: wp.array[wp.vec3f],
+    out_wb: wp.array[wp.vec3f],
+    out_lambda: wp.array[wp.vec3f],
+):
+    tid = wp.tid()
+    va = v_a[tid]
+    wa = w_a[tid]
+    vb = v_b[tid]
+    wb = w_b[tid]
+    a0 = axis0[tid]
+    a1 = axis1[tid]
+    a2 = axis2[tid]
+    rr0 = r0[tid]
+    rr1 = r1[tid]
+    mode = frame_mode[tid]
+    linear_scale = mode[0]
+    cross_scale = mode[1]
+    angular_scale = mode[2]
+
+    rel = linear_scale * (vb - va) + cross_scale * (wp.cross(wb, rr1) - wp.cross(wa, rr0)) + angular_scale * (wb - wa)
+    residual = _rows3_dot(a0, a1, a2, rel) + bias[tid]
+
+    op = _make_projection_op(
+        k_inv[tid],
+        residual,
+        lambda_old[tid],
+        lambda_min[tid],
+        lambda_max[tid],
+        projection_mode[tid],
+        friction_static[tid],
+        friction_kinetic[tid],
+    )
+    update = block_solve_velocity_rows3_op(op, wp.float32(1.0))
+    d = update.delta
+    impulse = d[0] * a0 + d[1] * a1 + d[2] * a2
+
+    out_va[tid] = va - linear_scale * inv_m_a[tid] * impulse
+    out_vb[tid] = vb + linear_scale * inv_m_b[tid] * impulse
+    out_wa[tid] = wa + _mul_diag(inv_i_a[tid], -cross_scale * wp.cross(rr0, impulse) - angular_scale * impulse)
+    out_wb[tid] = wb + _mul_diag(inv_i_b[tid], cross_scale * wp.cross(rr1, impulse) + angular_scale * impulse)
     out_lambda[tid] = update.lambda_new
 
 
@@ -470,6 +547,7 @@ def main() -> None:
     projection_mode = wp.empty(rows, dtype=wp.int32, device=device)
     friction_static = wp.empty(rows, dtype=wp.float32, device=device)
     friction_kinetic = wp.empty(rows, dtype=wp.float32, device=device)
+    frame_mode = _alloc_vec(rows, device)
 
     side_va = _alloc_vec(rows, device)
     side_wa = _alloc_vec(rows, device)
@@ -481,6 +559,11 @@ def main() -> None:
     split_vb = _alloc_vec(rows, device)
     split_wb = _alloc_vec(rows, device)
     split_lambda = _alloc_vec(rows, device)
+    frame_va = _alloc_vec(rows, device)
+    frame_wa = _alloc_vec(rows, device)
+    frame_vb = _alloc_vec(rows, device)
+    frame_wb = _alloc_vec(rows, device)
+    frame_lambda = _alloc_vec(rows, device)
 
     init_inputs = [
         family,
@@ -520,6 +603,7 @@ def main() -> None:
         projection_mode,
         friction_static,
         friction_kinetic,
+        frame_mode,
     ]
     sidecar_inputs = [
         v_a,
@@ -555,6 +639,35 @@ def main() -> None:
         side_vb,
         side_wb,
         side_lambda,
+    ]
+    frame_inputs = [
+        v_a,
+        w_a,
+        v_b,
+        w_b,
+        inv_m_a,
+        inv_m_b,
+        inv_i_a,
+        inv_i_b,
+        axis0,
+        axis1,
+        axis2,
+        r0,
+        r1,
+        frame_mode,
+        k_inv,
+        bias,
+        lambda_old,
+        lambda_min,
+        lambda_max,
+        projection_mode,
+        friction_static,
+        friction_kinetic,
+        frame_va,
+        frame_wa,
+        frame_vb,
+        frame_wb,
+        frame_lambda,
     ]
     split_inputs = [
         family,
@@ -598,6 +711,15 @@ def main() -> None:
             block_dim=int(args.block_dim),
         )
 
+    def frame_run():
+        wp.launch(
+            _solve_frame_kernel,
+            dim=rows,
+            inputs=frame_inputs,
+            device=device,
+            block_dim=int(args.block_dim),
+        )
+
     def split_run():
         wp.launch(
             _solve_split_kernel,
@@ -607,7 +729,7 @@ def main() -> None:
             block_dim=int(args.block_dim),
         )
 
-    print("contact_ratio,split_ms,sidecar_ms,sidecar_speedup,max_abs_err")
+    print("contact_ratio,split_ms,dense_ms,frame_ms,dense_speedup,frame_speedup,dense_err,frame_err")
     for ratio in _parse_csv_floats(args.ratios):
         contacts_per_period = int(round(max(0.0, min(1.0, ratio)) * float(args.period)))
         wp.launch(
@@ -618,17 +740,30 @@ def main() -> None:
         )
         split_run()
         sidecar_run()
-        max_err = _max_err(
+        frame_run()
+        dense_err = _max_err(
             (side_va, split_va),
             (side_wa, split_wa),
             (side_vb, split_vb),
             (side_wb, split_wb),
             (side_lambda, split_lambda),
         )
+        frame_err = _max_err(
+            (frame_va, split_va),
+            (frame_wa, split_wa),
+            (frame_vb, split_vb),
+            (frame_wb, split_wb),
+            (frame_lambda, split_lambda),
+        )
         split_ms, _ = _bench(split_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
         side_ms, _ = _bench(sidecar_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
-        speedup = split_ms / side_ms if side_ms > 0.0 else float("nan")
-        print(f"{ratio:.2f},{split_ms:.6f},{side_ms:.6f},{speedup:.3f},{max_err:.6g}")
+        frame_ms, _ = _bench(frame_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
+        dense_speedup = split_ms / side_ms if side_ms > 0.0 else float("nan")
+        frame_speedup = split_ms / frame_ms if frame_ms > 0.0 else float("nan")
+        print(
+            f"{ratio:.2f},{split_ms:.6f},{side_ms:.6f},{frame_ms:.6f},"
+            f"{dense_speedup:.3f},{frame_speedup:.3f},{dense_err:.6g},{frame_err:.6g}"
+        )
 
 
 if __name__ == "__main__":
