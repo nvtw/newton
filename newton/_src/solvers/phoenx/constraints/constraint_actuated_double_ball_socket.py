@@ -27,26 +27,20 @@ import warp as wp
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
-    VELOCITY_BLOCK_PROJECT_IDENTITY,
     VELOCITY_ROWS3_PROJECT_BOUNDS,
     RigidFrameBlock1,
     RigidFrameBlock2,
     RigidFrameBlock3,
     RigidFrameBlock4,
     RigidFrameRows3State,
-    VelocityBlock2,
-    VelocityBlock3,
-    VelocityBlockProjection,
+    RigidFrameSchur32,
     VelocityRows3Op,
-    block_project_velocity_block2_unsoft,
-    block_project_velocity_block3_unsoft,
-    block_solve_inverse_2,
-    block_solve_inverse_3,
     block_solve_rigid_frame_block1,
     block_solve_rigid_frame_block2,
     block_solve_rigid_frame_block3_bounded,
     block_solve_rigid_frame_block3_planar_bounded,
     block_solve_rigid_frame_block4,
+    block_solve_rigid_frame_schur32,
     block_solve_velocity_rows3_op,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -1256,13 +1250,6 @@ def _axial_drive_limit_iterate(
     return update.delta
 
 
-@wp.func
-def _identity_velocity_block_projection() -> VelocityBlockProjection:
-    projection = VelocityBlockProjection()
-    projection.mode = VELOCITY_BLOCK_PROJECT_IDENTITY
-    return projection
-
-
 # ---------------------------------------------------------------------------
 # Compound family iterates
 #
@@ -1570,58 +1557,38 @@ def _anchor1_anchor2_schur_block(
     acc2_world = _read_acc_imp2(constraints, cid)
     acc2_tan = wp.vec2f(wp.dot(t1, acc2_world), wp.dot(t2, acc2_world))
 
-    jv1 = -v1 + cr1_b1 @ w1 + v2 - cr1_b2 @ w2
-    jv2_world = -v1 + cr2_b1 @ w1 + v2 - cr2_b2 @ w2
-    jv2 = wp.vec2f(wp.dot(t1, jv2_world), wp.dot(t2, jv2_world))
+    rows = RigidFrameSchur32()
+    rows.tangent0 = t1
+    rows.tangent1 = t2
+    rows.cr1_a = cr1_b1
+    rows.cr1_b = cr1_b2
+    rows.cr2_a = cr2_b1
+    rows.cr2_b = cr2_b2
+    rows.a1_inv = a1_inv
+    rows.ut_ai = ut_ai
+    rows.s2_inv = s_inv_22
+    rows.bias1 = bias1
+    rows.bias2 = wp.vec2f(bias2[0], bias2[1])
+    rows.lambda1_old = acc1
+    rows.lambda2_old = acc2_tan
+    rows.mass_coeff = mass_coeff
+    rows.impulse_coeff = impulse_coeff
 
-    rhs1 = jv1 + bias1
-    rhs2 = jv2 + wp.vec2f(bias2[0], bias2[1])
-    ut_ai_rhs1_3 = ut_ai @ rhs1
-    ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
+    state = RigidFrameRows3State()
+    state.v_a = v1
+    state.w_a = w1
+    state.v_b = v2
+    state.w_b = w2
+    state.inv_m_a = im1
+    state.inv_m_b = im2
+    state.inv_i_a = ii1
+    state.inv_i_b = ii2
 
-    lam2_us = block_solve_inverse_2(s_inv_22, rhs2 - ut_ai_rhs1)
-    block2 = VelocityBlock2()
-    block2.k_inv = s_inv_22
-    block2.residual = rhs2 - ut_ai_rhs1
-    block2.lambda_old = acc2_tan
-    block2.mass_coeff = mass_coeff
-    block2.impulse_coeff = impulse_coeff
-    update2 = block_project_velocity_block2_unsoft(block2, lam2_us, _identity_velocity_block_projection(), sor_boost)
-    lam2 = update2.delta
-    lam2_world = lam2[0] * t1 + lam2[1] * t2
-    lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
+    update = block_solve_rigid_frame_schur32(rows, state, sor_boost)
+    _write_acc_imp1(constraints, cid, update.lambda1_new)
+    _write_acc_imp2(constraints, cid, acc2_world + update.delta2[0] * t1 + update.delta2[1] * t2)
 
-    u_lam2_us = (im1 + im2) * lam2_us_world
-    u_lam2_us = u_lam2_us + cr1_b1 @ (ii1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
-    u_lam2_us = u_lam2_us + cr1_b2 @ (ii2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
-
-    lam1_us = block_solve_inverse_3(a1_inv, rhs1 + u_lam2_us)
-    block1 = VelocityBlock3()
-    block1.k_inv = a1_inv
-    block1.residual = rhs1 + u_lam2_us
-    block1.lambda_old = acc1
-    block1.mass_coeff = mass_coeff
-    block1.impulse_coeff = impulse_coeff
-    update1 = block_project_velocity_block3_unsoft(block1, lam1_us, _identity_velocity_block_projection(), sor_boost)
-    lam1 = update1.delta
-    total_lin = lam1 + lam2_world
-    v1, v2, w1, w2 = apply_pair_spatial_impulse(
-        v1,
-        v2,
-        w1,
-        w2,
-        im1,
-        im2,
-        ii1,
-        ii2,
-        total_lin,
-        cr1_b1 @ lam1 + cr2_b1 @ lam2_world,
-        cr1_b2 @ lam1 + cr2_b2 @ lam2_world,
-    )
-    _write_acc_imp1(constraints, cid, update1.lambda_new)
-    _write_acc_imp2(constraints, cid, acc2_world + lam2_world)
-
-    return v1, v2, w1, w2
+    return update.v_a, update.v_b, update.w_a, update.w_b
 
 
 @wp.func
@@ -3313,67 +3280,40 @@ def _revolute_iterate_at_multi(
     it = wp.int32(0)
     while it < num_sweeps:
         # Positional PGS: anchor-1 (3 rows) + anchor-2 tangent (2 rows)
-        jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
-        jv2_world = -velocity1 + cr2_b1 @ angular_velocity1 + velocity2 - cr2_b2 @ angular_velocity2
-        jv2_t1 = wp.dot(t1, jv2_world)
-        jv2_t2 = wp.dot(t2, jv2_world)
-        jv2 = wp.vec2f(jv2_t1, jv2_t2)
+        rows = RigidFrameSchur32()
+        rows.tangent0 = t1
+        rows.tangent1 = t2
+        rows.cr1_a = cr1_b1
+        rows.cr1_b = cr1_b2
+        rows.cr2_a = cr2_b1
+        rows.cr2_b = cr2_b2
+        rows.a1_inv = a1_inv
+        rows.ut_ai = ut_ai
+        rows.s2_inv = s_inv_22
+        rows.bias1 = bias1
+        rows.bias2 = bias2_tan
+        rows.lambda1_old = acc1
+        rows.lambda2_old = acc2_tan
+        rows.mass_coeff = mass_coeff
+        rows.impulse_coeff = impulse_coeff
 
-        rhs1 = jv1 + bias1
-        rhs2 = jv2 + bias2_tan
+        state = RigidFrameRows3State()
+        state.v_a = velocity1
+        state.w_a = angular_velocity1
+        state.v_b = velocity2
+        state.w_b = angular_velocity2
+        state.inv_m_a = inv_mass1
+        state.inv_m_b = inv_mass2
+        state.inv_i_a = inv_inertia1
+        state.inv_i_b = inv_inertia2
 
-        ut_ai_rhs1_3 = ut_ai @ rhs1
-        ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
-
-        lam2_us = block_solve_inverse_2(s_inv_22, rhs2 - ut_ai_rhs1)
-        block2 = VelocityBlock2()
-        block2.k_inv = s_inv_22
-        block2.residual = rhs2 - ut_ai_rhs1
-        block2.lambda_old = acc2_tan
-        block2.mass_coeff = mass_coeff
-        block2.impulse_coeff = impulse_coeff
-        update2 = block_project_velocity_block2_unsoft(
-            block2, lam2_us, _identity_velocity_block_projection(), sor_boost
-        )
-        lam2 = update2.delta
-
-        lam2_world = lam2[0] * t1 + lam2[1] * t2
-        lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
-
-        u_lam2_us = (inv_mass1 + inv_mass2) * lam2_us_world
-        u_lam2_us = u_lam2_us + cr1_b1 @ (inv_inertia1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
-        u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
-
-        lam1_us = block_solve_inverse_3(a1_inv, rhs1 + u_lam2_us)
-        block1 = VelocityBlock3()
-        block1.k_inv = a1_inv
-        block1.residual = rhs1 + u_lam2_us
-        block1.lambda_old = acc1
-        block1.mass_coeff = mass_coeff
-        block1.impulse_coeff = impulse_coeff
-        update1 = block_project_velocity_block3_unsoft(
-            block1, lam1_us, _identity_velocity_block_projection(), sor_boost
-        )
-        lam1 = update1.delta
-
-        total_lin = lam1 + lam2_world
-
-        velocity1, velocity2, angular_velocity1, angular_velocity2 = apply_pair_spatial_impulse(
-            velocity1,
-            velocity2,
-            angular_velocity1,
-            angular_velocity2,
-            inv_mass1,
-            inv_mass2,
-            inv_inertia1,
-            inv_inertia2,
-            total_lin,
-            cr1_b1 @ lam1 + cr2_b1 @ lam2_world,
-            cr1_b2 @ lam1 + cr2_b2 @ lam2_world,
-        )
-
-        acc1 = update1.lambda_new
-        acc2_tan = update2.lambda_new
+        schur_update = block_solve_rigid_frame_schur32(rows, state, sor_boost)
+        velocity1 = schur_update.v_a
+        angular_velocity1 = schur_update.w_a
+        velocity2 = schur_update.v_b
+        angular_velocity2 = schur_update.w_b
+        acc1 = schur_update.lambda1_new
+        acc2_tan = schur_update.lambda2_new
 
         # Axial drive + limit + friction scalar PGS.
         jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)

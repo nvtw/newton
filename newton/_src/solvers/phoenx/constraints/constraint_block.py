@@ -37,6 +37,8 @@ __all__ = [
     "RigidFrameRows3State",
     "RigidFrameRows3Update",
     "RigidFrameRows4Update",
+    "RigidFrameSchur32",
+    "RigidFrameSchur32Update",
     "VelocityBlock1",
     "VelocityBlock2",
     "VelocityBlock3",
@@ -87,6 +89,7 @@ __all__ = [
     "block_solve_rigid_frame_rows3_angular",
     "block_solve_rigid_frame_rows3_contact",
     "block_solve_rigid_frame_rows3_uniform_projection",
+    "block_solve_rigid_frame_schur32",
     "block_solve_symmetric_1",
     "block_solve_symmetric_2",
     "block_solve_symmetric_2_strict",
@@ -384,6 +387,33 @@ class RigidFrameBlock4:
 
 
 @wp.struct
+class RigidFrameSchur32:
+    """Prepared rigid 3+2 Schur frame block.
+
+    The first block is a 3D point lock using world XYZ rows. The second block
+    is a two-row tangent lock at another point. This covers the revolute,
+    fixed, universal, and ball-socket Schur path while keeping the local solve
+    as a descriptor-driven residual/project/apply operation.
+    """
+
+    tangent0: wp.vec3f
+    tangent1: wp.vec3f
+    cr1_a: wp.mat33f
+    cr1_b: wp.mat33f
+    cr2_a: wp.mat33f
+    cr2_b: wp.mat33f
+    a1_inv: wp.mat33f
+    ut_ai: wp.mat33f
+    s2_inv: wp.mat22f
+    bias1: wp.vec3f
+    bias2: wp.vec2f
+    lambda1_old: wp.vec3f
+    lambda2_old: wp.vec2f
+    mass_coeff: wp.float32
+    impulse_coeff: wp.float32
+
+
+@wp.struct
 class RigidFrameRows3:
     """Compact prepared rigid three-row frame descriptor.
 
@@ -465,6 +495,18 @@ class RigidFrameRows4Update:
     w_b: wp.vec3f
     lambda_new: wp.vec4f
     delta: wp.vec4f
+
+
+@wp.struct
+class RigidFrameSchur32Update:
+    v_a: wp.vec3f
+    w_a: wp.vec3f
+    v_b: wp.vec3f
+    w_b: wp.vec3f
+    lambda1_new: wp.vec3f
+    lambda2_new: wp.vec2f
+    delta1: wp.vec3f
+    delta2: wp.vec2f
 
 
 @wp.func
@@ -1636,6 +1678,49 @@ def block_solve_rigid_frame_block3(
     update.w_b = state.w_b + state.inv_i_b @ (cross_scale * wp.cross(rows.r1, impulse) + angular_scale * impulse)
     update.lambda_new = projection.lambda_new
     update.delta = d
+    return update
+
+
+@wp.func
+def block_solve_rigid_frame_schur32(
+    rows: RigidFrameSchur32,
+    state: RigidFrameRows3State,
+    sor_boost: wp.float32,
+) -> RigidFrameSchur32Update:
+    """Solve/project/apply one rigid 3+2 Schur frame block."""
+    jv1 = -state.v_a + rows.cr1_a @ state.w_a + state.v_b - rows.cr1_b @ state.w_b
+    jv2_world = -state.v_a + rows.cr2_a @ state.w_a + state.v_b - rows.cr2_b @ state.w_b
+    jv2 = wp.vec2f(wp.dot(rows.tangent0, jv2_world), wp.dot(rows.tangent1, jv2_world))
+
+    rhs1 = jv1 + rows.bias1
+    rhs2 = jv2 + rows.bias2
+    ut_ai_rhs1_3 = rows.ut_ai @ rhs1
+    ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
+
+    lam2_us = block_solve_inverse_2(rows.s2_inv, rhs2 - ut_ai_rhs1)
+    update2 = block_project_accumulated_2(lam2_us, rows.lambda2_old, rows.mass_coeff, rows.impulse_coeff, sor_boost)
+    lam2 = update2.delta
+    lam2_world = lam2[0] * rows.tangent0 + lam2[1] * rows.tangent1
+    lam2_us_world = lam2_us[0] * rows.tangent0 + lam2_us[1] * rows.tangent1
+
+    u_lam2_us = (state.inv_m_a + state.inv_m_b) * lam2_us_world
+    u_lam2_us = u_lam2_us + rows.cr1_a @ (state.inv_i_a @ (wp.transpose(rows.cr2_a) @ lam2_us_world))
+    u_lam2_us = u_lam2_us + rows.cr1_b @ (state.inv_i_b @ (wp.transpose(rows.cr2_b) @ lam2_us_world))
+
+    lam1_us = block_solve_inverse_3(rows.a1_inv, rhs1 + u_lam2_us)
+    update1 = block_project_accumulated_3(lam1_us, rows.lambda1_old, rows.mass_coeff, rows.impulse_coeff, sor_boost)
+    lam1 = update1.delta
+    total_linear = lam1 + lam2_world
+
+    update = RigidFrameSchur32Update()
+    update.v_a = state.v_a - state.inv_m_a * total_linear
+    update.v_b = state.v_b + state.inv_m_b * total_linear
+    update.w_a = state.w_a - state.inv_i_a @ (rows.cr1_a @ lam1 + rows.cr2_a @ lam2_world)
+    update.w_b = state.w_b + state.inv_i_b @ (rows.cr1_b @ lam1 + rows.cr2_b @ lam2_world)
+    update.lambda1_new = update1.lambda_new
+    update.lambda2_new = update2.lambda_new
+    update.delta1 = lam1
+    update.delta2 = lam2
     return update
 
 
