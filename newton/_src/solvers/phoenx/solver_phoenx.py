@@ -420,7 +420,7 @@ class PhoenXWorld:
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
-        prepare_refresh_stride: int = 1,
+        prepare_refresh_stride: int | str = 1,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -434,7 +434,9 @@ class PhoenXWorld:
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``1`` preserves
-                the exact default. Contact worlds currently support up
+                the exact default. ``"auto"`` chooses a conservative stride
+                from the substep count and falls back to ``1`` when cached
+                prepare is unsupported. Contact worlds currently support up
                 to ``3``; joint-only worlds may use larger values.
             gravity: 3-tuple or iterable of ``num_worlds`` 3-tuples.
             rigid_contact_max: Sizes per-contact state. ``0`` disables
@@ -586,10 +588,33 @@ class PhoenXWorld:
         self.velocity_iterations = int(velocity_iterations)
         if self.velocity_iterations < 0:
             raise ValueError(f"velocity_iterations must be >= 0 (got {self.velocity_iterations})")
-        self.prepare_refresh_stride: int = int(prepare_refresh_stride)
+        sleeping_requested = float(sleeping_velocity_threshold) > 0.0
+        cached_prepare_unsupported = (
+            bool(mass_splitting)
+            or sleeping_requested
+            or self.num_particles > 0
+            or self.num_cloth_triangles > 0
+            or self.num_cloth_bending > 0
+            or self.num_soft_tetrahedra > 0
+            or self.num_soft_hexahedra > 0
+        )
+        contact_capacity_hint = int(max_contact_columns if max_contact_columns is not None else rigid_contact_max)
+        self._prepare_refresh_stride_policy: str = "fixed"
+        if isinstance(prepare_refresh_stride, str):
+            if prepare_refresh_stride != "auto":
+                raise ValueError(
+                    f"prepare_refresh_stride must be an integer >= 1 or 'auto' (got {prepare_refresh_stride!r})"
+                )
+            self._prepare_refresh_stride_policy = "auto"
+            self.prepare_refresh_stride = self._choose_auto_prepare_refresh_stride(
+                substeps=self.substeps,
+                contact_capacity_hint=contact_capacity_hint,
+                cached_prepare_unsupported=cached_prepare_unsupported,
+            )
+        else:
+            self.prepare_refresh_stride = int(prepare_refresh_stride)
         if self.prepare_refresh_stride < 1:
             raise ValueError(f"prepare_refresh_stride must be >= 1 (got {self.prepare_refresh_stride})")
-        contact_capacity_hint = int(max_contact_columns if max_contact_columns is not None else rigid_contact_max)
         if self.prepare_refresh_stride > 3 and contact_capacity_hint > 0:
             raise NotImplementedError(
                 "prepare_refresh_stride > 3 currently supports joint-only rigid worlds; "
@@ -629,21 +654,11 @@ class PhoenXWorld:
         if step_layout not in ("multi_world", "single_world"):
             raise ValueError(f"step_layout must be 'multi_world' or 'single_world' (got {step_layout!r})")
         self.step_layout: str = step_layout
-        if self.prepare_refresh_stride != 1:
-            sleeping_requested = float(sleeping_velocity_threshold) > 0.0
-            if (
-                bool(mass_splitting)
-                or sleeping_requested
-                or self.num_particles > 0
-                or self.num_cloth_triangles > 0
-                or self.num_cloth_bending > 0
-                or self.num_soft_tetrahedra > 0
-                or self.num_soft_hexahedra > 0
-            ):
-                raise NotImplementedError(
-                    "prepare_refresh_stride > 1 currently supports rigid contact/joint worlds "
-                    "without deformables, mass splitting, or sleeping"
-                )
+        if self.prepare_refresh_stride != 1 and cached_prepare_unsupported:
+            raise NotImplementedError(
+                "prepare_refresh_stride > 1 currently supports rigid contact/joint worlds "
+                "without deformables, mass splitting, or sleeping"
+            )
         self._current_substep_index: int = 0
         # Threads-per-world. ``"auto"`` lets the GPU picker decide every
         # step from colour stats; an int forces a fixed value (validated
@@ -2373,6 +2388,21 @@ class PhoenXWorld:
             rigid_contact_damping=sentinel_float,
             rigid_contact_friction=sentinel_float,
         )
+
+    @staticmethod
+    def _choose_auto_prepare_refresh_stride(
+        *,
+        substeps: int,
+        contact_capacity_hint: int,
+        cached_prepare_unsupported: bool,
+    ) -> int:
+        """Choose a graph-capture-stable cached-prepare refresh cadence."""
+        if cached_prepare_unsupported or substeps < 8:
+            return 1
+        stride = 3
+        if contact_capacity_hint > 0:
+            return min(stride, 3)
+        return stride
 
     def _refresh_prepare_this_substep(self) -> bool:
         """Return whether this substep should refresh cached row data."""

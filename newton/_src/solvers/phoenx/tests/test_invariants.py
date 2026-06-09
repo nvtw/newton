@@ -140,6 +140,39 @@ class TestPrepareRefreshStride(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "prepare_refresh_stride must be >= 1"):
             PhoenXWorld(**_make_kwargs(num_bodies=2, rigid_contact_max=1), prepare_refresh_stride=0)
 
+    def test_auto_stride_uses_substep_count(self) -> None:
+        low = PhoenXWorld(
+            **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
+            substeps=3,
+            prepare_refresh_stride="auto",
+        )
+        moderate = PhoenXWorld(
+            **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
+            substeps=4,
+            prepare_refresh_stride="auto",
+        )
+        high = PhoenXWorld(
+            **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
+            substeps=8,
+            prepare_refresh_stride="auto",
+        )
+        self.assertEqual(low.prepare_refresh_stride, 1)
+        self.assertEqual(moderate.prepare_refresh_stride, 1)
+        self.assertEqual(high.prepare_refresh_stride, 3)
+        self.assertEqual(high._prepare_refresh_stride_policy, "auto")
+
+    def test_auto_stride_falls_back_when_unsupported(self) -> None:
+        w = PhoenXWorld(
+            **_make_kwargs(num_bodies=2, rigid_contact_max=1, num_particles=4, num_cloth_triangles=1),
+            substeps=20,
+            prepare_refresh_stride="auto",
+        )
+        self.assertEqual(w.prepare_refresh_stride, 1)
+
+    def test_rejects_unknown_stride_policy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "prepare_refresh_stride"):
+            PhoenXWorld(**_make_kwargs(num_bodies=2, rigid_contact_max=1), prepare_refresh_stride="sometimes")
+
     def test_accepts_contact_stride_three(self) -> None:
         w = PhoenXWorld(
             **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),

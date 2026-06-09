@@ -28,13 +28,23 @@ def _parse_csv_ints(value: str) -> tuple[int, ...]:
     return tuple(int(raw.strip()) for raw in value.split(",") if raw.strip())
 
 
+def _parse_stride_values(value: str) -> tuple[int | str, ...]:
+    strides: list[int | str] = []
+    for raw in value.split(","):
+        item = raw.strip().lower()
+        if not item:
+            continue
+        strides.append("auto" if item == "auto" else int(item))
+    return tuple(strides)
+
+
 def _build_scene(
     scene: str,
     *,
     num_worlds: int,
     substeps: int,
     solver_iterations: int,
-    prepare_refresh_stride: int,
+    prepare_refresh_stride: int | str,
 ):
     kwargs = {
         "num_worlds": num_worlds,
@@ -57,13 +67,13 @@ def _build_scene(
 def _default_worlds(scene: str) -> int:
     if scene == "tower":
         return 32
-    return 128
+    return 2048
 
 
 def _run_case(
     scene: str,
     num_worlds: int,
-    stride: int,
+    stride: int | str,
     *,
     substeps: int,
     solver_iterations: int,
@@ -98,7 +108,7 @@ def main() -> None:
         default=["h1", "g1", "dr_legs"],
     )
     parser.add_argument("--worlds", type=_parse_csv_ints, default=())
-    parser.add_argument("--strides", type=_parse_csv_ints, default=(1, 2, 3))
+    parser.add_argument("--strides", type=_parse_stride_values, default=(1, 2, 3, "auto"))
     parser.add_argument("--substeps", type=int, default=20)
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--prime-frames", type=int, default=2)
@@ -123,7 +133,7 @@ def main() -> None:
                 min_ms, med_ms, chosen, joints, contacts = _run_case(
                     scene,
                     int(num_worlds),
-                    int(stride),
+                    stride,
                     substeps=args.substeps,
                     solver_iterations=args.solver_iterations,
                     prime_frames=args.prime_frames,
@@ -131,14 +141,14 @@ def main() -> None:
                     n_runs=args.n_runs,
                     trials=args.trials,
                 )
-                rows.append((int(stride), chosen, min_ms, med_ms, joints, contacts))
+                rows.append((str(stride), chosen, min_ms, med_ms, joints, contacts))
             best = min(row[2] for row in rows)
-            stride1 = next((row[2] for row in rows if row[0] == 1), rows[0][2])
+            stride1 = next((row[2] for row in rows if row[0] == "1"), rows[0][2])
             for stride, chosen, min_ms, med_ms, joints, contacts in rows:
                 rel_stride1 = stride1 / min_ms if min_ms > 0.0 else float("nan")
                 rel_best = min_ms / best if best > 0.0 else float("nan")
                 print(
-                    f"{scene:7s} {int(num_worlds):6d} {stride:6d} {chosen:6d} {min_ms:8.3f} {med_ms:8.3f} "
+                    f"{scene:7s} {int(num_worlds):6d} {stride:>6s} {chosen:6d} {min_ms:8.3f} {med_ms:8.3f} "
                     f"{1000.0 * min_ms / args.n_runs:12.3f} {joints:6d} {contacts:8d} "
                     f"{rel_stride1:11.3f} {rel_best:8.3f}"
                 )
