@@ -665,7 +665,9 @@ static float time_chunk_chain(
         CUDA_CHECK(cudaMemcpy(&failed, graph.failed, sizeof(int), cudaMemcpyDeviceToHost));
         if (done != graph.chunks * graph.epochs || failed != 0) {
             std::fprintf(stderr, "chunk_chain failed: done=%d expected=%d failed=%d\n", done, graph.chunks * graph.epochs, failed);
-            std::exit(3);
+            CUDA_CHECK(cudaEventDestroy(start));
+            CUDA_CHECK(cudaEventDestroy(stop));
+            return std::numeric_limits<float>::quiet_NaN();
         }
         float ms = 0.0f;
         CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
@@ -690,6 +692,7 @@ int main(int argc, char** argv) {
     int repeats = parse_int_arg(argc, argv, "--repeats", 20);
     int warmup = parse_int_arg(argc, argv, "--warmup", 3);
     int max_spins = parse_int_arg(argc, argv, "--max-spins", 100000000);
+    int run_chain = parse_int_arg(argc, argv, "--run-chain", 1);
     std::string scenes_arg = parse_string_arg(argc, argv, "--scenes", "h1,g1,dr_legs,tower");
 
     int device = 0;
@@ -716,7 +719,10 @@ int main(int argc, char** argv) {
         DeviceGraph graph = make_graph(scene, worlds, chunk_rows, epochs, imbalance);
         float fast_ms = time_fast_tail(graph, repeats, warmup, tpw, block_dim, work_iters);
         float tile_ms = time_world_tile(graph, repeats, warmup, worlds_per_block, block_dim, work_iters);
-        float chain_ms = time_chunk_chain(graph, repeats, warmup, worker_blocks, chunk_threads, work_iters, max_spins);
+        float chain_ms = std::numeric_limits<float>::quiet_NaN();
+        if (run_chain != 0) {
+            chain_ms = time_chunk_chain(graph, repeats, warmup, worker_blocks, chunk_threads, work_iters, max_spins);
+        }
         float tile_speedup = fast_ms / tile_ms;
         float chain_speedup = fast_ms / chain_ms;
         float rows_per_world = static_cast<float>(graph.rows) / static_cast<float>(worlds);
