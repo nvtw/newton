@@ -7,7 +7,9 @@ This benchmark complements ``bench_threads_per_world`` by sweeping both
 ``threads_per_world`` and fast-tail ``worlds_per_block`` packing. It is
 research tooling: production still chooses these values heuristically, while
 this script measures the sensitivity on representative scenes before we tune
-those heuristics.
+those heuristics. By default it forces the fast-tail scheduler so the table
+does not silently mix block-world and fast-tail results; pass
+``--scheduler auto`` to measure the production scheduler selection.
 
 Usage::
 
@@ -68,16 +70,18 @@ def _measure_case(
     tpw: int | str,
     worlds_per_block: int | None,
     family_split: bool | None,
+    scheduler: str,
     substeps: int,
     solver_iterations: int,
     warmup: int,
     n_runs: int,
     trials: int,
-) -> tuple[float, float, int, int, bool, int, int, float]:
+) -> tuple[float, float, int, int, bool, str, int, int, int, float]:
     handle = _build_scene(scene, num_worlds, substeps=substeps, solver_iterations=solver_iterations)
     solver = _extract_solver(handle)
     world = solver.world
     _force_tpw(solver, tpw)
+    world._configure_multi_world_scheduler(scheduler)
     _set_worlds_per_block(world, worlds_per_block)
     _set_family_split(world, family_split)
 
@@ -88,11 +92,24 @@ def _measure_case(
     chosen_tpw = int(world._tpw_choice.numpy()[0]) if tpw == "auto" else int(tpw)
     chosen_wpb = int(world._fast_tail_worlds_per_block())
     chosen_family_split = bool(world._fast_tail_family_split())
+    chosen_scheduler = str(world._multi_world_scheduler)
+    chosen_block_dim = int(world._multi_world_block_dim)
     num_colors = int(world._world_num_colors.numpy().max(initial=0))
     total_cids = int(world._world_csr_offsets.numpy()[world.num_worlds])
     contacts_per_world = float(world.max_contact_columns) / float(max(1, world.num_worlds))
     min_ms, med_ms = _bench(handle.simulate_one_frame, n_runs=n_runs, warmup=0, trials=trials)
-    return min_ms, med_ms, chosen_tpw, chosen_wpb, chosen_family_split, num_colors, total_cids, contacts_per_world
+    return (
+        min_ms,
+        med_ms,
+        chosen_tpw,
+        chosen_wpb,
+        chosen_family_split,
+        chosen_scheduler,
+        chosen_block_dim,
+        num_colors,
+        total_cids,
+        contacts_per_world,
+    )
 
 
 def _parse_csv_ints(value: str) -> tuple[int, ...]:
@@ -143,6 +160,12 @@ def main() -> None:
     parser.add_argument("--worlds", type=_parse_csv_ints, default=(32, 64, 128, 512))
     parser.add_argument("--tpw", type=_parse_tpw_values, default=("auto", 32, 16, 8))
     parser.add_argument("--wpb", type=_parse_csv_ints, default=(1, 2, 4, 8))
+    parser.add_argument(
+        "--scheduler",
+        choices=("auto", "fast_tail", "block_world"),
+        default="fast_tail",
+        help="Static multi-world scheduler to measure; use auto for production policy.",
+    )
     parser.add_argument("--include-default", action="store_true", help="Also measure production heuristic wpb.")
     parser.add_argument(
         "--family-split",
@@ -160,8 +183,8 @@ def main() -> None:
     wp.init()
     print(f"device={wp.get_device()} sm_count={getattr(wp.get_device(), 'sm_count', 'N/A')}")
     print(
-        "scene worlds tpw wpb family chosen_tpw chosen_wpb chosen_family min_ms med_ms us_per_frame "
-        "max_colors total_cids contacts_per_world rel_best"
+        "scene worlds scheduler tpw wpb family chosen_scheduler chosen_tpw chosen_wpb block_dim chosen_family "
+        "min_ms med_ms us_per_frame max_colors total_cids contacts_per_world rel_best"
     )
 
     for scene in args.scenes:
@@ -181,6 +204,8 @@ def main() -> None:
                             chosen_tpw,
                             chosen_wpb,
                             chosen_family_split,
+                            chosen_scheduler,
+                            chosen_block_dim,
                             num_colors,
                             total_cids,
                             contacts_per_world,
@@ -190,6 +215,7 @@ def main() -> None:
                             tpw=tpw,
                             worlds_per_block=worlds_per_block,
                             family_split=family_split,
+                            scheduler=args.scheduler,
                             substeps=args.substeps,
                             solver_iterations=args.solver_iterations,
                             warmup=args.warmup,
@@ -208,6 +234,8 @@ def main() -> None:
                                 chosen_tpw,
                                 chosen_wpb,
                                 chosen_family_split,
+                                chosen_scheduler,
+                                chosen_block_dim,
                                 num_colors,
                                 total_cids,
                                 contacts_per_world,
@@ -226,14 +254,17 @@ def main() -> None:
                     chosen_tpw,
                     chosen_wpb,
                     chosen_family_split,
+                    chosen_scheduler,
+                    chosen_block_dim,
                     num_colors,
                     total_cids,
                     contacts_per_world,
                 ) = row
                 rel_best = min_ms / best if best > 0.0 else float("nan")
                 print(
-                    f"{row_scene:7s} {row_num_worlds:6d} {row_tpw!s:>4s} {wpb!s:>7s} {row_family_split:>7s} "
-                    f"{chosen_tpw:10d} {chosen_wpb:10d} {chosen_family_split!s:>13s} {min_ms:8.3f} {med_ms:8.3f} "
+                    f"{row_scene:7s} {row_num_worlds:6d} {args.scheduler:>9s} {row_tpw!s:>4s} {wpb!s:>7s} "
+                    f"{row_family_split:>7s} {chosen_scheduler:>16s} {chosen_tpw:10d} {chosen_wpb:10d} "
+                    f"{chosen_block_dim:9d} {chosen_family_split!s:>13s} {min_ms:8.3f} {med_ms:8.3f} "
                     f"{1000.0 * min_ms / args.n_runs:12.3f} {num_colors:10d} {total_cids:10d} "
                     f"{contacts_per_world:18.1f} {rel_best:8.3f}"
                 )
