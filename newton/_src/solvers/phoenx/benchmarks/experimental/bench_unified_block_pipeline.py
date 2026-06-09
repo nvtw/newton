@@ -23,7 +23,9 @@ whether lower branch divergence can beat the extra indirection / locality cost.
 ``hybrid`` uses a setup-time per-color policy to pick compact split or sidecar4.
 ``auto_best`` reports the host-side tournament winner across graph-capture-safe
 kernel choices, modeling the setup-time selector we would want in production
-instead of hard-coding a semantic policy.
+instead of hard-coding a semantic policy. ``--real-scenes`` extracts current
+PhoenX colored graphs and joint modes so the same local-block candidates can be
+measured against real H1 / DR-Legs / tower operation mixes.
 """
 
 from __future__ import annotations
@@ -34,9 +36,22 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extract_solver
 from newton._src.solvers.phoenx.benchmarks.experimental.bench_rigid_rows3_sidecar import (
     _bench,
     _max_err,
+)
+from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
+from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
+    _OFF_JOINT_MODE,
+    JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_CABLE,
+    JOINT_MODE_CYLINDRICAL,
+    JOINT_MODE_FIXED,
+    JOINT_MODE_PLANAR,
+    JOINT_MODE_PRISMATIC,
+    JOINT_MODE_REVOLUTE,
+    JOINT_MODE_UNIVERSAL,
 )
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
@@ -66,6 +81,26 @@ _COLOR_POLICY_SPLIT_HOST = 0
 _COLOR_POLICY_SIDECAR4_HOST = 1
 _MIXED_SCENE = "mixed_h1_tower"
 
+_JOINT_MODE_REVOLUTE_HOST = int(JOINT_MODE_REVOLUTE)
+_JOINT_MODE_PRISMATIC_HOST = int(JOINT_MODE_PRISMATIC)
+_JOINT_MODE_BALL_SOCKET_HOST = int(JOINT_MODE_BALL_SOCKET)
+_JOINT_MODE_FIXED_HOST = int(JOINT_MODE_FIXED)
+_JOINT_MODE_CABLE_HOST = int(JOINT_MODE_CABLE)
+_JOINT_MODE_UNIVERSAL_HOST = int(JOINT_MODE_UNIVERSAL)
+_JOINT_MODE_CYLINDRICAL_HOST = int(JOINT_MODE_CYLINDRICAL)
+_JOINT_MODE_PLANAR_HOST = int(JOINT_MODE_PLANAR)
+_JOINT_MODE_OFFSET_HOST = int(_OFF_JOINT_MODE)
+
+_REAL_SCENE_ALIASES = {
+    "h1": "h1",
+    "h1_flat": "h1",
+    "g1": "g1",
+    "g1_flat": "g1",
+    "dr_legs": "dr_legs",
+    "drlegs": "dr_legs",
+    "tower": "tower",
+}
+
 
 @dataclass(frozen=True)
 class ScenePreset:
@@ -93,6 +128,14 @@ class ScheduleHost:
     world_color_starts: np.ndarray
     blocks: int
     colors: int
+
+
+@dataclass(frozen=True)
+class RealSceneSpec:
+    label: str
+    scene: str
+    worlds: int
+    step_layout: str
 
 
 def _build_schedule(preset: ScenePreset, worlds: int) -> ScheduleHost:
@@ -1285,6 +1328,221 @@ def _uniform_color_policy(schedule: ScheduleHost, contact_slots: int, period: in
     return np.full(schedule.colors, policy, dtype=np.int32)
 
 
+def _parse_step_layout(raw: str, *, scene: str, worlds: int) -> str:
+    normalized = raw.strip().lower().replace("-", "_")
+    if not normalized:
+        return "single_world" if scene == "tower" and worlds == 1 else "multi_world"
+    if normalized in ("single", "single_world"):
+        return "single_world"
+    if normalized in ("multi", "multi_world"):
+        return "multi_world"
+    raise ValueError(f"unknown real-scene layout {raw!r}; use single or multi")
+
+
+def _parse_real_scene_spec(value: str) -> RealSceneSpec:
+    normalized = value.strip().lower().replace("-", "_")
+    if not normalized:
+        raise ValueError("real scene spec must not be empty")
+    parts = normalized.split(":")
+    if len(parts) > 3:
+        raise ValueError(f"real scene spec {value!r} has too many ':' fields")
+    scene_key = parts[0]
+    if scene_key not in _REAL_SCENE_ALIASES:
+        choices = ", ".join(sorted(_REAL_SCENE_ALIASES))
+        raise ValueError(f"unknown real scene {scene_key!r}; choices={choices}")
+    scene = _REAL_SCENE_ALIASES[scene_key]
+    default_worlds = 1 if scene == "tower" else 64
+    worlds = int(parts[1]) if len(parts) >= 2 and parts[1] else default_worlds
+    if worlds <= 0:
+        raise ValueError(f"real scene worlds must be positive, got {worlds}")
+    step_layout = _parse_step_layout(parts[2] if len(parts) == 3 else "", scene=scene, worlds=worlds)
+    layout_label = "single" if step_layout == "single_world" else "multi"
+    return RealSceneSpec(f"real_{scene}_{worlds}_{layout_label}", scene, worlds, step_layout)
+
+
+def _parse_real_scenes(value: str) -> tuple[RealSceneSpec, ...]:
+    return tuple(_parse_real_scene_spec(raw.strip()) for raw in value.split(",") if raw.strip())
+
+
+def _ops_for_joint_mode(mode: int) -> tuple[int, ...]:
+    if mode == _JOINT_MODE_REVOLUTE_HOST:
+        return (_OP_POINT3_HOST, _OP_ANGULAR3_HOST, _OP_SCALAR_ANGULAR_HOST)
+    if mode == _JOINT_MODE_PRISMATIC_HOST:
+        return (_OP_TANGENT4_HOST, _OP_SCALAR_LINEAR_HOST)
+    if mode == _JOINT_MODE_BALL_SOCKET_HOST:
+        return (_OP_POINT3_HOST,)
+    if mode == _JOINT_MODE_FIXED_HOST:
+        return (_OP_POINT3_HOST, _OP_ANGULAR3_HOST, _OP_SCALAR_LINEAR_HOST)
+    if mode == _JOINT_MODE_CABLE_HOST:
+        return (_OP_POINT3_HOST, _OP_ANGULAR3_HOST, _OP_SCALAR_ANGULAR_HOST)
+    if mode == _JOINT_MODE_UNIVERSAL_HOST:
+        return (_OP_POINT3_HOST, _OP_SCALAR_ANGULAR_HOST)
+    if mode == _JOINT_MODE_CYLINDRICAL_HOST:
+        return (_OP_TANGENT4_HOST, _OP_SCALAR_LINEAR_HOST)
+    if mode == _JOINT_MODE_PLANAR_HOST:
+        return (_OP_SCALAR_LINEAR_HOST, _OP_ANGULAR3_HOST)
+    return (_OP_POINT3_HOST,)
+
+
+def _op_kind_rank(kind: int) -> int:
+    if kind == _OP_CONTACT3_HOST:
+        return 0
+    if kind == _OP_TANGENT4_HOST:
+        return 1
+    if kind == _OP_ANGULAR3_HOST:
+        return 2
+    if kind == _OP_SCALAR_LINEAR_HOST:
+        return 3
+    if kind == _OP_SCALAR_ANGULAR_HOST:
+        return 4
+    return 5
+
+
+def _color_policy_from_ops(ops: list[int]) -> int:
+    if not ops:
+        return _COLOR_POLICY_SPLIT_HOST
+    contacts = sum(1 for op in ops if op == _OP_CONTACT3_HOST)
+    return _COLOR_POLICY_SPLIT_HOST if contacts * 2 >= len(ops) else _COLOR_POLICY_SIDECAR4_HOST
+
+
+def _kind_counts_text(op_kind: np.ndarray) -> str:
+    labels = {
+        _OP_CONTACT3_HOST: "contact3",
+        _OP_POINT3_HOST: "point3",
+        _OP_ANGULAR3_HOST: "angular3",
+        _OP_TANGENT4_HOST: "tangent4",
+        _OP_SCALAR_LINEAR_HOST: "scalar_lin",
+        _OP_SCALAR_ANGULAR_HOST: "scalar_ang",
+    }
+    values, counts = np.unique(op_kind, return_counts=True)
+    return ",".join(f"{labels.get(int(v), str(int(v)))}:{int(c)}" for v, c in zip(values, counts, strict=True))
+
+
+def _real_world_color_ranges(world) -> tuple[np.ndarray, list[list[tuple[int, int]]]]:
+    if world.step_layout == "single_world":
+        eids = world._partitioner.element_ids_by_color.numpy()
+        starts = world._partitioner.color_starts.numpy()
+        num_colors = int(world._partitioner.num_colors.numpy()[0])
+        return eids, [[(int(starts[color]), int(starts[color + 1])) for color in range(num_colors)]]
+
+    eids = world._world_element_ids_by_color.numpy()
+    starts = world._world_color_starts.numpy()
+    csr = world._world_csr_offsets.numpy()
+    num_colors_per_world = world._world_num_colors.numpy()
+    ranges_by_world: list[list[tuple[int, int]]] = []
+    for world_id in range(world.num_worlds):
+        base = int(csr[world_id])
+        ranges: list[tuple[int, int]] = []
+        for color in range(int(num_colors_per_world[world_id])):
+            ranges.append((base + int(starts[world_id, color]), base + int(starts[world_id, color + 1])))
+        ranges_by_world.append(ranges)
+    return eids, ranges_by_world
+
+
+def _build_real_scene(spec: RealSceneSpec, args: argparse.Namespace):
+    if spec.scene == "h1":
+        return h1_flat.build(
+            spec.worlds,
+            "phoenx",
+            args.real_substeps,
+            args.real_solver_iterations,
+            step_layout=spec.step_layout,
+        )
+    if spec.scene == "g1":
+        return g1_flat.build(
+            spec.worlds,
+            "phoenx",
+            args.real_substeps,
+            args.real_solver_iterations,
+            step_layout=spec.step_layout,
+        )
+    if spec.scene == "dr_legs":
+        return dr_legs.build(
+            spec.worlds,
+            "phoenx",
+            args.real_substeps,
+            args.real_solver_iterations,
+            step_layout=spec.step_layout,
+        )
+    if spec.scene == "tower":
+        return tower.build(
+            num_worlds=spec.worlds,
+            solver_name="phoenx",
+            substeps=args.real_substeps,
+            solver_iterations=args.real_solver_iterations,
+            step_layout=spec.step_layout,
+        )
+    raise ValueError(f"unknown real scene {spec.scene!r}")
+
+
+def _build_real_schedule_and_metadata(
+    spec: RealSceneSpec, args: argparse.Namespace
+) -> tuple[ScheduleHost, np.ndarray, np.ndarray, str]:
+    handle = _build_real_scene(spec, args)
+    for _ in range(args.real_prime_frames):
+        handle.simulate_one_frame()
+    wp.synchronize_device()
+    world = _extract_solver(handle).world
+    active = int(world._num_active_constraints.numpy()[0])
+    family = world._element_family.numpy()
+    eids, ranges_by_world = _real_world_color_ranges(world)
+    constraint_words = world.constraints.data.numpy()
+    joint_mode_words = np.ascontiguousarray(
+        constraint_words[_JOINT_MODE_OFFSET_HOST, : max(1, int(world.num_joints))],
+        dtype=np.float32,
+    ).view(np.int32)
+
+    block_ids: list[int] = []
+    op_kind: list[int] = []
+    color_starts: list[int] = [0]
+    world_color_starts: list[int] = [0]
+    color_policy: list[int] = []
+    unsupported = 0
+    block = 0
+    for ranges in ranges_by_world:
+        for start, end in ranges:
+            color_ops: list[int] = []
+            for cursor in range(start, end):
+                eid = int(eids[cursor])
+                if eid < 0 or eid >= active:
+                    continue
+                fam = int(family[eid])
+                if fam == 1:
+                    ops = (_OP_CONTACT3_HOST,)
+                elif fam == 0 and eid < int(world.num_joints):
+                    ops = _ops_for_joint_mode(int(joint_mode_words[eid]))
+                else:
+                    unsupported += 1
+                    continue
+                for op in ops:
+                    block_ids.append(block)
+                    op_kind.append(op)
+                    color_ops.append(op)
+                    block += 1
+            color_starts.append(len(block_ids))
+            color_policy.append(_color_policy_from_ops(color_ops))
+        world_color_starts.append(len(color_starts) - 1)
+
+    if not block_ids:
+        block_ids = [0]
+        op_kind = [_OP_POINT3_HOST]
+        color_starts = [0, 1]
+        world_color_starts = [0, 1]
+        color_policy = [_COLOR_POLICY_SIDECAR4_HOST]
+        block = 1
+
+    schedule = ScheduleHost(
+        block_ids=np.asarray(block_ids, dtype=np.int32),
+        color_starts=np.asarray(color_starts, dtype=np.int32),
+        world_color_starts=np.asarray(world_color_starts, dtype=np.int32),
+        blocks=block,
+        colors=len(color_starts) - 1,
+    )
+    op_kind_host = np.asarray(op_kind, dtype=np.int32)
+    label = f"real_ops={{{_kind_counts_text(op_kind_host)}}},unsupported={unsupported}"
+    return schedule, op_kind_host, np.asarray(color_policy, dtype=np.int32), label
+
+
 def _build_mixed_schedule_and_metadata(worlds: int, period: int) -> tuple[ScheduleHost, np.ndarray, np.ndarray, str]:
     h1 = _SCENE_PRESETS["h1"]
     tower = _SCENE_PRESETS["tower"]
@@ -1333,45 +1591,13 @@ def _build_mixed_schedule_and_metadata(worlds: int, period: int) -> tuple[Schedu
     return schedule, op_kind, np.asarray(color_policy, dtype=np.int32), label
 
 
-def _block_kind_rank(
-    block_id: int,
-    period: int,
-    contact_slots: int,
-    tangent4_slots: int,
-    angular3_slots: int,
-    scalar_slots: int,
-) -> int:
-    lane = block_id % period
-    if lane < contact_slots:
-        return 0
-    if lane < contact_slots + tangent4_slots:
-        return 1
-    if lane < contact_slots + tangent4_slots + angular3_slots:
-        return 2
-    if lane < contact_slots + tangent4_slots + angular3_slots + scalar_slots:
-        return 3 if (lane & 1) == 0 else 4
-    return 5
-
-
-def _build_shape_grouped_schedule(
-    schedule: ScheduleHost,
-    period: int,
-    contact_slots: int,
-    tangent4_slots: int,
-    angular3_slots: int,
-    scalar_slots: int,
-) -> ScheduleHost:
+def _build_shape_grouped_schedule(schedule: ScheduleHost, op_kind_host: np.ndarray) -> ScheduleHost:
     block_ids: list[int] = []
     for color in range(schedule.colors):
         start = int(schedule.color_starts[color])
         end = int(schedule.color_starts[color + 1])
         color_blocks = schedule.block_ids[start:end].tolist()
-        color_blocks.sort(
-            key=lambda block_id: (
-                _block_kind_rank(block_id, period, contact_slots, tangent4_slots, angular3_slots, scalar_slots),
-                block_id,
-            )
-        )
+        color_blocks.sort(key=lambda block_id: (_op_kind_rank(int(op_kind_host[int(block_id)])), int(block_id)))
         block_ids.extend(int(block_id) for block_id in color_blocks)
     return ScheduleHost(
         block_ids=np.asarray(block_ids, dtype=np.int32),
@@ -1382,13 +1608,24 @@ def _build_shape_grouped_schedule(
     )
 
 
-def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Devicelike) -> None:
+def _run_scene(
+    args: argparse.Namespace,
+    scene: str,
+    device: wp.context.Devicelike,
+    *,
+    real_spec: RealSceneSpec | None = None,
+) -> None:
     period = int(args.period)
-    if scene == _MIXED_SCENE:
+    if real_spec is not None:
+        schedule, op_kind_seed_host, color_policy_host, slot_label = _build_real_schedule_and_metadata(real_spec, args)
+        contact_slots, tangent4_slots, angular3_slots, scalar_slots = (0, 0, 0, 0)
+        scene_label = real_spec.label
+    elif scene == _MIXED_SCENE:
         schedule, op_kind_seed_host, color_policy_host, slot_label = _build_mixed_schedule_and_metadata(
             int(args.worlds), period
         )
         contact_slots, tangent4_slots, angular3_slots, scalar_slots = (0, 0, 0, 0)
+        scene_label = scene
     else:
         preset = _SCENE_PRESETS[scene]
         schedule = _build_schedule(preset, int(args.worlds))
@@ -1398,16 +1635,11 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         )
         color_policy_host = _uniform_color_policy(schedule, contact_slots, period)
         slot_label = f"slots=(c{contact_slots},t4{tangent4_slots},a3{angular3_slots},s{scalar_slots})"
+        scene_label = scene
 
     blocks = schedule.blocks
-    grouped_schedule = _build_shape_grouped_schedule(
-        schedule,
-        period,
-        contact_slots,
-        tangent4_slots,
-        angular3_slots,
-        scalar_slots,
-    )
+    num_worlds = int(schedule.world_color_starts.shape[0] - 1)
+    grouped_schedule = _build_shape_grouped_schedule(schedule, op_kind_seed_host)
 
     block_ids = wp.array(schedule.block_ids, dtype=wp.int32, device=device)
     grouped_block_ids = wp.array(grouped_schedule.block_ids, dtype=wp.int32, device=device)
@@ -1570,7 +1802,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         split_vb,
         split_wb,
         split_lambda,
-        int(args.worlds),
+        num_worlds,
         int(args.iterations),
         int(args.threads_per_world),
     ]
@@ -1617,7 +1849,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         side_vb,
         side_wb,
         side_lambda,
-        int(args.worlds),
+        num_worlds,
         int(args.iterations),
         int(args.threads_per_world),
     ]
@@ -1655,7 +1887,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         grouped_vb,
         grouped_wb,
         grouped_lambda,
-        int(args.worlds),
+        num_worlds,
         int(args.iterations),
         int(args.threads_per_world),
     ]
@@ -1710,7 +1942,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         hybrid_vb,
         hybrid_wb,
         hybrid_lambda,
-        int(args.worlds),
+        num_worlds,
         int(args.iterations),
         int(args.threads_per_world),
     ]
@@ -1718,7 +1950,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     def split_run() -> None:
         wp.launch(
             _solve_split_world_loop_kernel,
-            dim=max(1, int(args.worlds) * int(args.threads_per_world)),
+            dim=max(1, num_worlds * int(args.threads_per_world)),
             inputs=split_inputs,
             device=device,
             block_dim=int(args.block_dim),
@@ -1727,7 +1959,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     def side_run() -> None:
         wp.launch(
             _solve_sidecar4_world_loop_kernel,
-            dim=max(1, int(args.worlds) * int(args.threads_per_world)),
+            dim=max(1, num_worlds * int(args.threads_per_world)),
             inputs=side_inputs,
             device=device,
             block_dim=int(args.block_dim),
@@ -1736,7 +1968,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     def grouped_run() -> None:
         wp.launch(
             _solve_split_world_loop_kernel,
-            dim=max(1, int(args.worlds) * int(args.threads_per_world)),
+            dim=max(1, num_worlds * int(args.threads_per_world)),
             inputs=grouped_inputs,
             device=device,
             block_dim=int(args.block_dim),
@@ -1745,7 +1977,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     def hybrid_run() -> None:
         wp.launch(
             _solve_hybrid_world_loop_kernel,
-            dim=max(1, int(args.worlds) * int(args.threads_per_world)),
+            dim=max(1, num_worlds * int(args.threads_per_world)),
             inputs=hybrid_inputs,
             device=device,
             block_dim=int(args.block_dim),
@@ -1797,7 +2029,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     hybrid_speedup = split_ms / hybrid_ms if hybrid_ms > 0.0 else float("nan")
     auto_speedup = split_ms / auto_ms if auto_ms > 0.0 else float("nan")
     print(
-        f"{scene:14s} worlds={int(args.worlds):5d} blocks={blocks:7d} colors={schedule.colors:5d} "
+        f"{scene_label:18s} worlds={num_worlds:5d} blocks={blocks:7d} colors={schedule.colors:5d} "
         f"policy=(side{side_colors},split{split_colors}) {slot_label} "
         f"split={split_ms:8.4f}ms grouped={grouped_ms:8.4f}ms sidecar4={side_ms:8.4f}ms "
         f"hybrid={hybrid_ms:8.4f}ms auto_best={auto_label}:{auto_ms:8.4f}ms "
@@ -1811,8 +2043,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--scenes", default="h1,g1,dr_legs,tower,mixed_h1_tower")
+    parser.add_argument(
+        "--real-scenes",
+        default="",
+        help="Comma-separated real PhoenX scene specs such as h1:64, dr_legs:64, or tower:1:single.",
+    )
     parser.add_argument("--worlds", type=int, default=2048)
     parser.add_argument("--iterations", type=int, default=4)
+    parser.add_argument("--real-substeps", type=int, default=1)
+    parser.add_argument("--real-solver-iterations", type=int, default=8)
+    parser.add_argument("--real-prime-frames", type=int, default=1)
     parser.add_argument("--threads-per-world", type=int, default=32)
     parser.add_argument("--period", type=int, default=32)
     parser.add_argument("--block-dim", type=int, default=256)
@@ -1824,11 +2064,13 @@ def main() -> None:
     wp.init()
     device = wp.get_device(args.device)
     print(
-        f"device={device} worlds={args.worlds} iterations={args.iterations} "
-        f"tpw={args.threads_per_world} n_runs={args.n_runs} trials={args.trials}"
+        f"device={device} synthetic_worlds={args.worlds} real_scenes={args.real_scenes or '-'} "
+        f"iterations={args.iterations} tpw={args.threads_per_world} n_runs={args.n_runs} trials={args.trials}"
     )
     for scene in _parse_scenes(args.scenes):
         _run_scene(args, scene, device)
+    for spec in _parse_real_scenes(args.real_scenes):
+        _run_scene(args, spec.label, device, real_spec=spec)
 
 
 if __name__ == "__main__":
