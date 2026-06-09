@@ -116,6 +116,13 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - **Wall-clock comparable, not faster.** Per-round work is roughly 3x JP-MIS (3 kernels with neighbour scans on both ``color_tags`` and ``tentative_color``), so the fewer-rounds win cancels out. Cold-start Kapla 100-frame nsys: 1.37 ms speculative vs 1.65 ms MIS+capture_while -- 17 % faster on raw kernel time but within noise on end-to-end FPS.
 - Default OFF. Useful as a building block for: dense graphs that exceed ``MAX_GREEDY_OUTER_ITERS`` on MIS, or future tuning (shared-mem ``tentative_color`` caching, warp-level forbidden-mask reductions) that closes the per-round cost gap.
 
+## Experimental-only code
+
+### Actual-solve color-grid scheduler prototypes
+- `benchmarks/experimental/bench_color_grid_actual_solve.py` keeps the flat/global-colour, block-per-world, grouped-subfamily, autotune/adaptive, and software-barrier mega-kernel scheduler prototypes in one place. They are useful research scaffolding, not production evidence.
+- Current state: some prototype timing paths have been observed to hang (`flat_grouped` and `block_world` on small H1 smoke runs), while the production `world._solve_main` path with the same scene setup completes. The benchmark now defaults to `--mode baseline`, which only times the production solve path; all prototype modes require `--allow-unsafe-prototypes`.
+- Use the production benchmark suite and the unified-block proxy benchmark for decisions that affect defaults. Re-enable actual-solve prototype modes only for isolated scheduler debugging with short timeouts.
+
 ## Tried and reverted
 
 ### Substep mega-kernel (one block per world, all substeps in one launch)

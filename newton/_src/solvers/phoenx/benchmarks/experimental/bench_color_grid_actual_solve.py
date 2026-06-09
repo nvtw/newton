@@ -16,6 +16,11 @@ scheduler portfolio, while ``adaptive`` uses a time-budgeted tournament that
 keeps only the measured winners. The benchmark is aimed at finding scheduling
 rules that can eventually be moved into production instead of hard-coding one
 distribution.
+
+This file contains scheduler prototypes that can hang on some scenes and Warp
+versions. The default ``baseline`` mode only times the production solve kernel.
+Prototype modes require ``--allow-unsafe-prototypes`` so accidental benchmark
+runs do not treat this file as production evidence.
 """
 
 from __future__ import annotations
@@ -1470,6 +1475,20 @@ def _bench(fn, *, n_runs: int, warmup: int, trials: int, device: wp.context.Devi
     return float(arr.min()), float(np.median(arr))
 
 
+def _run_baseline(args: argparse.Namespace, world: PhoenXWorld, scene: str, num_worlds: int) -> None:
+    active = int(world._num_active_constraints.numpy()[0])
+    num_colors = int(world._world_num_colors.numpy().max(initial=0))
+    base_min, base_med = _bench(
+        world._solve_main, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=world.device
+    )
+    print(
+        f"{scene:5s} worlds={num_worlds:5d} rows={active:6d} colors={num_colors:4d} "
+        f"baseline={base_min:8.3f}ms base_us={1000.0 * base_min / args.n_runs:8.3f}"
+    )
+    if args.verbose:
+        print(f"  baseline min={base_min:.3f} ms med={base_med:.3f} ms")
+
+
 def _validate(graph: ColorGridDevice, expected: int) -> None:
     # The timed kernels intentionally avoid per-row validation atomics.
     # Successful kernel completion is enough for this isolated scheduler bench.
@@ -1696,6 +1715,10 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
         handle.simulate_one_frame()
     wp.synchronize_device()
 
+    if args.mode == "baseline":
+        _run_baseline(args, world, scene, num_worlds)
+        return
+
     host_graph = _extract_color_grid(world)
     grouped_host_graph = _extract_color_grid(world, group_by_kind=True)
     subfamily_host_graph = _extract_block_world_subfamily_grid(world)
@@ -1807,6 +1830,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         choices=(
+            "baseline",
             "flat",
             "flat_grouped",
             "grouped",
@@ -1821,7 +1845,12 @@ def parse_args() -> argparse.Namespace:
             "both",
             "all",
         ),
-        default="flat",
+        default="baseline",
+    )
+    parser.add_argument(
+        "--allow-unsafe-prototypes",
+        action="store_true",
+        help="Run prototype scheduler kernels; some modes are known to hang and are not production evidence.",
     )
     parser.add_argument("--mega-blocks", type=int, default=128)
     parser.add_argument("--row-bound", type=int, default=64)
@@ -1841,7 +1870,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapt-include-launch-heavy", action="store_true")
     parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--verbose", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.mode != "baseline" and not args.allow_unsafe_prototypes:
+        parser.error("prototype scheduler modes require --allow-unsafe-prototypes; use --mode baseline for production")
+    return args
 
 
 def main() -> None:
@@ -1851,7 +1883,8 @@ def main() -> None:
     print(
         f"device={wp.get_device()} block_dim={args.block_dim} block_world_dim={args.block_world_dim} "
         f"prepare_refresh_stride={args.prepare_refresh_stride} mega_blocks={args.mega_blocks} "
-        f"row_bound={args.row_bound} n_runs={args.n_runs} mode={args.mode}"
+        f"row_bound={args.row_bound} n_runs={args.n_runs} mode={args.mode} "
+        f"unsafe_prototypes={args.allow_unsafe_prototypes}"
     )
     for scene in args.scenes:
         for num_worlds in worlds:
