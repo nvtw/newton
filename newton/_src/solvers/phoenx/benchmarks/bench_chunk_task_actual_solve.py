@@ -1204,7 +1204,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prime-frames", type=int, default=3)
     parser.add_argument("--chunk-rows", type=int, default=32)
     parser.add_argument("--chunk-threads", type=int, default=32)
-    parser.add_argument("--worker-blocks", type=int, default=256)
+    parser.add_argument("--worker-blocks", type=int, default=64)
     parser.add_argument("--max-spins", type=int, default=1048576)
     parser.add_argument("--hybrid-min-rows-per-world", type=float, default=256.0)
     parser.add_argument("--hybrid-min-contact-fraction", type=float, default=0.5)
