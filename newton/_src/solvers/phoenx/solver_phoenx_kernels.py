@@ -297,11 +297,48 @@ _PER_WORLD_COLORING_BLOCK_DIM: int = 64
 _PER_WORLD_FAST_FAMILIES: int = 2
 
 
+@wp.func
+def _node_world_id(
+    node: wp.int32,
+    bodies: BodyContainer,
+    particle_world_id: wp.array[wp.int32],
+    num_bodies: wp.int32,
+) -> wp.int32:
+    if node < wp.int32(0):
+        return wp.int32(-1)
+    if node < num_bodies:
+        return bodies.world_id[node]
+    return particle_world_id[node - num_bodies]
+
+
+@wp.func
+def _element_world_id(
+    element: ElementInteractionData,
+    bodies: BodyContainer,
+    particle_world_id: wp.array[wp.int32],
+    num_bodies: wp.int32,
+) -> wp.int32:
+    seen_node = wp.int32(0)
+    for i in range(MAX_BODIES):
+        node = element.bodies[i]
+        if node < wp.int32(0):
+            break
+        seen_node = wp.int32(1)
+        world_id = _node_world_id(node, bodies, particle_world_id, num_bodies)
+        if world_id >= wp.int32(0):
+            return world_id
+    if seen_node != wp.int32(0):
+        return wp.int32(0)
+    return wp.int32(-1)
+
+
 @wp.kernel(enable_backward=False)
 def _count_elements_per_world_kernel(
     elements: wp.array[ElementInteractionData],
     num_elements: wp.array[wp.int32],
     bodies: BodyContainer,
+    particle_world_id: wp.array[wp.int32],
+    num_bodies: wp.int32,
     # out
     world_element_count: wp.array[wp.int32],  # [nw]
     world_element_offsets_shifted: wp.array[wp.int32],  # [nw+1], will be inclusive-scanned
@@ -314,10 +351,9 @@ def _count_elements_per_world_kernel(
         world_element_offsets_shifted[0] = wp.int32(0)
     if tid >= n:
         return
-    b = elements[tid].bodies[0]
-    if b < 0:
+    w = _element_world_id(elements[tid], bodies, particle_world_id, num_bodies)
+    if w < wp.int32(0):
         return
-    w = bodies.world_id[b]
     wp.atomic_add(world_element_count, w, wp.int32(1))
     wp.atomic_add(world_element_offsets_shifted, w + wp.int32(1), wp.int32(1))
 
@@ -327,6 +363,8 @@ def _build_scatter_keys_kernel(
     elements: wp.array[ElementInteractionData],
     num_elements: wp.array[wp.int32],
     bodies: BodyContainer,
+    particle_world_id: wp.array[wp.int32],
+    num_bodies: wp.int32,
     cap: wp.int32,
     # out (size ``2 * cap`` -- ping-pong buffer for ``radix_sort_pairs``)
     keys: wp.array[wp.int32],
@@ -342,12 +380,12 @@ def _build_scatter_keys_kernel(
         keys[tid] = wp.int32(2147483647)
         values[tid] = wp.int32(-1)
         return
-    b = elements[tid].bodies[0]
-    if b < 0:
+    w = _element_world_id(elements[tid], bodies, particle_world_id, num_bodies)
+    if w < wp.int32(0):
         keys[tid] = wp.int32(2147483647)
         values[tid] = wp.int32(-1)
         return
-    keys[tid] = bodies.world_id[b]
+    keys[tid] = w
     values[tid] = tid
 
 
@@ -1013,6 +1051,9 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
     has_contacts: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
+    cloth_support: bool = False,
+    soft_tet_only: bool = False,
+    cloth_only: bool = False,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
@@ -1041,6 +1082,37 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         enable_column_timers=enable_column_timers,
         use_bias=True,
     )
+    _dispatch_prepare_any_cid = None
+    _dispatch_iterate_any_cid = None
+    if cloth_support:
+        _dispatch_prepare_any_cid = _make_singleworld_dispatch_func(
+            revolute_only=revolute_only,
+            cloth_support=cloth_support,
+            enable_column_timers=enable_column_timers,
+            soft_tet_only=soft_tet_only,
+            cloth_only=cloth_only,
+            has_joints=has_joints,
+            has_mass_splitting=False,
+            has_sleeping=has_sleeping,
+            has_soft_contact_pd=has_soft_contact_pd,
+            is_prepare=True,
+            is_cached_prepare=False,
+            use_bias=True,
+        )
+        _dispatch_iterate_any_cid = _make_singleworld_dispatch_func(
+            revolute_only=revolute_only,
+            cloth_support=cloth_support,
+            enable_column_timers=enable_column_timers,
+            soft_tet_only=soft_tet_only,
+            cloth_only=cloth_only,
+            has_joints=has_joints,
+            has_mass_splitting=False,
+            has_sleeping=has_sleeping,
+            has_soft_contact_pd=has_soft_contact_pd,
+            is_prepare=False,
+            is_cached_prepare=False,
+            use_bias=True,
+        )
 
     @wp.kernel(enable_backward=False, module="unique")
     def kernel(
@@ -1060,6 +1132,10 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         num_iterations: wp.int32,
         num_worlds: wp.int32,
         num_joints: wp.int32,
+        num_cloth_triangles: wp.int32,
+        num_cloth_bending: wp.int32,
+        num_soft_tetrahedra: wp.int32,
+        num_soft_hexahedra: wp.int32,
         num_bodies: wp.int32,
         tpw_buf: wp.array[wp.int32],
         copy_state: CopyStateContainer,
@@ -1107,19 +1183,40 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
             base = local_tid
             while base < count:
                 cid = world_element_ids_by_color[start + base]
-                _dispatch_prepare_cid(
-                    constraints,
-                    contact_cols,
-                    bodies,
-                    particles,
-                    cc,
-                    contacts,
-                    copy_state,
-                    num_bodies,
-                    idt,
-                    cid,
-                    num_joints,
-                )
+                if wp.static(cloth_support):
+                    _dispatch_prepare_any_cid(
+                        constraints,
+                        contact_cols,
+                        bodies,
+                        particles,
+                        cc,
+                        contacts,
+                        copy_state,
+                        num_joints,
+                        num_cloth_triangles,
+                        num_cloth_bending,
+                        num_soft_tetrahedra,
+                        num_soft_hexahedra,
+                        num_bodies,
+                        idt,
+                        sor_boost,
+                        cid,
+                        wp.int32(0),
+                    )
+                else:
+                    _dispatch_prepare_cid(
+                        constraints,
+                        contact_cols,
+                        bodies,
+                        particles,
+                        cc,
+                        contacts,
+                        copy_state,
+                        num_bodies,
+                        idt,
+                        cid,
+                        num_joints,
+                    )
                 base += tpw
 
             _sync_warp_mask(sync_mask)
@@ -1137,7 +1234,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                 end = world_base + world_color_starts[world_id, c + 1]
                 count = end - start
 
-                if wp.static(family_split):
+                if wp.static(family_split and not cloth_support):
                     family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
                     joint_start = world_base + world_color_family_starts[world_id, family_base]
                     contact_start = world_base + world_color_family_starts[world_id, family_base + wp.int32(1)]
@@ -1182,21 +1279,45 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                     base = local_tid
                     while base < count:
                         cid = world_element_ids_by_color[start + base]
-                        _dispatch_iterate_cid(
-                            constraints,
-                            contact_cols,
-                            bodies,
-                            particles,
-                            cc,
-                            contacts,
-                            copy_state,
-                            num_bodies,
-                            idt,
-                            sor_boost,
-                            cid,
-                            num_joints,
-                            inner_sweeps,
-                        )
+                        if wp.static(cloth_support):
+                            sweep = wp.int32(0)
+                            while sweep < inner_sweeps:
+                                _dispatch_iterate_any_cid(
+                                    constraints,
+                                    contact_cols,
+                                    bodies,
+                                    particles,
+                                    cc,
+                                    contacts,
+                                    copy_state,
+                                    num_joints,
+                                    num_cloth_triangles,
+                                    num_cloth_bending,
+                                    num_soft_tetrahedra,
+                                    num_soft_hexahedra,
+                                    num_bodies,
+                                    idt,
+                                    sor_boost,
+                                    cid,
+                                    wp.int32(0),
+                                )
+                                sweep += wp.int32(1)
+                        else:
+                            _dispatch_iterate_cid(
+                                constraints,
+                                contact_cols,
+                                bodies,
+                                particles,
+                                cc,
+                                contacts,
+                                copy_state,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                cid,
+                                num_joints,
+                                inner_sweeps,
+                            )
                         base += tpw
 
                 _sync_warp_mask(sync_mask)
@@ -1215,6 +1336,9 @@ def _make_fast_tail_relax_kernel(
     has_contacts: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
+    cloth_support: bool = False,
+    soft_tet_only: bool = False,
+    cloth_only: bool = False,
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
@@ -1234,6 +1358,22 @@ def _make_fast_tail_relax_kernel(
         enable_column_timers=enable_column_timers,
         use_bias=False,
     )
+    _dispatch_relax_any_cid = None
+    if cloth_support:
+        _dispatch_relax_any_cid = _make_singleworld_dispatch_func(
+            revolute_only=revolute_only,
+            cloth_support=cloth_support,
+            enable_column_timers=enable_column_timers,
+            soft_tet_only=soft_tet_only,
+            cloth_only=cloth_only,
+            has_joints=has_joints,
+            has_mass_splitting=False,
+            has_sleeping=has_sleeping,
+            has_soft_contact_pd=has_soft_contact_pd,
+            is_prepare=False,
+            is_cached_prepare=False,
+            use_bias=False,
+        )
 
     @wp.kernel(enable_backward=False, module="unique")
     def kernel(
@@ -1254,6 +1394,10 @@ def _make_fast_tail_relax_kernel(
         num_iterations: wp.int32,
         num_worlds: wp.int32,
         num_joints: wp.int32,
+        num_cloth_triangles: wp.int32,
+        num_cloth_bending: wp.int32,
+        num_soft_tetrahedra: wp.int32,
+        num_soft_hexahedra: wp.int32,
         tpw_buf: wp.array[wp.int32],
         copy_state: CopyStateContainer,
     ):
@@ -1294,7 +1438,7 @@ def _make_fast_tail_relax_kernel(
         # into one register-cached call (velocity_iterations is typically 1).
         c = wp.int32(0)
         while c < n_colors:
-            if wp.static(family_split):
+            if wp.static(family_split and not cloth_support):
                 family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
                 joint_start = world_base + world_color_family_starts[world_id, family_base]
                 contact_start = world_base + world_color_family_starts[world_id, family_base + wp.int32(1)]
@@ -1344,21 +1488,45 @@ def _make_fast_tail_relax_kernel(
                 base = local_tid
                 while base < count:
                     cid = world_element_ids_by_color[start + base]
-                    _dispatch_iterate_cid(
-                        constraints,
-                        contact_cols,
-                        bodies,
-                        particles,
-                        cc,
-                        contacts,
-                        copy_state,
-                        num_bodies,
-                        idt,
-                        sor_boost,
-                        cid,
-                        num_joints,
-                        num_iterations,
-                    )
+                    if wp.static(cloth_support):
+                        sweep = wp.int32(0)
+                        while sweep < num_iterations:
+                            _dispatch_relax_any_cid(
+                                constraints,
+                                contact_cols,
+                                bodies,
+                                particles,
+                                cc,
+                                contacts,
+                                copy_state,
+                                num_joints,
+                                num_cloth_triangles,
+                                num_cloth_bending,
+                                num_soft_tetrahedra,
+                                num_soft_hexahedra,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                cid,
+                                wp.int32(0),
+                            )
+                            sweep += wp.int32(1)
+                    else:
+                        _dispatch_iterate_cid(
+                            constraints,
+                            contact_cols,
+                            bodies,
+                            particles,
+                            cc,
+                            contacts,
+                            copy_state,
+                            num_bodies,
+                            idt,
+                            sor_boost,
+                            cid,
+                            num_joints,
+                            num_iterations,
+                        )
                     base += tpw
 
             _sync_warp_mask(sync_mask)
@@ -1826,6 +1994,9 @@ def get_fast_tail_kernel(
     has_contacts: bool = True,
     has_sleeping: bool = False,
     has_soft_contact_pd: bool = False,
+    cloth_support: bool = False,
+    soft_tet_only: bool = False,
+    cloth_only: bool = False,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
     fixed_tpw: int = 0,
@@ -1846,6 +2017,9 @@ def get_fast_tail_kernel(
             has_contacts=has_contacts,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
+            cloth_support=cloth_support,
+            soft_tet_only=soft_tet_only,
+            cloth_only=cloth_only,
             cached_prepare=cached_prepare,
             enable_column_timers=enable_column_timers,
             fixed_tpw=fixed_tpw,
@@ -1859,6 +2033,9 @@ def get_fast_tail_kernel(
             has_contacts=has_contacts,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
+            cloth_support=cloth_support,
+            soft_tet_only=soft_tet_only,
+            cloth_only=cloth_only,
             enable_column_timers=enable_column_timers,
             fixed_tpw=fixed_tpw,
             guard_tpw=guard_tpw,

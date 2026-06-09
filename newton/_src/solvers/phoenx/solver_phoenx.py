@@ -546,6 +546,13 @@ class PhoenXWorld:
         self.particles: ParticleContainer | None = None
         if self.num_particles > 0:
             self.particles = particle_container_zeros(self.num_particles, device=self.device)
+        # Scheduler-only particle world metadata. Keep it separate from
+        # ParticleContainer so the hot particle SoA stays compact;
+        # multi-world coloring uses it to resolve unified node ids
+        # ``num_bodies + particle`` to a world.
+        self._particle_world_id: wp.array[wp.int32] = wp.zeros(
+            max(1, self.num_particles), dtype=wp.int32, device=self.device
+        )
         # Length-1 sentinel :class:`ParticleContainer` for rigid-only
         # scenes -- kernels that take a particle parameter (cloth
         # element-emission, type-tag dispatch) need a non-empty SoA to
@@ -1148,17 +1155,22 @@ class PhoenXWorld:
             # current cloth / soft-tet / joint specialisation.
             kernels.extend(self._singleworld_kernels())
         else:
+            dispatch_kw = self._dispatch_specialization_flags()
             base_fast_tail_kw = {
-                "revolute_only": bool(self._use_revolute_specialization),
-                "has_joints": self.num_joints > 0,
+                **dispatch_kw,
                 "has_contacts": self.max_contact_columns > 0,
-                "has_sleeping": bool(self._sleeping_enabled),
-                "has_soft_contact_pd": bool(self._has_soft_contact_pd),
-                "enable_column_timers": self.enable_column_timers,
+            }
+            base_block_world_kw = {
+                "revolute_only": dispatch_kw["revolute_only"],
+                "has_joints": dispatch_kw["has_joints"],
+                "has_contacts": self.max_contact_columns > 0,
+                "has_sleeping": dispatch_kw["has_sleeping"],
+                "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
+                "enable_column_timers": dispatch_kw["enable_column_timers"],
             }
             if self._multi_world_scheduler == "block_world" and self._block_world_supported():
                 block_world_kw = {
-                    **base_fast_tail_kw,
+                    **base_block_world_kw,
                     "family_split": self._fast_tail_family_split(),
                     "block_dim": self._multi_world_block_dim,
                 }
@@ -1632,6 +1644,39 @@ class PhoenXWorld:
             self._particle_sentinel = particle_container_zeros(1, device=self.device)
         return self._particle_sentinel
 
+    def _copy_particle_world_ids_from_model(self, model) -> None:
+        """Copy model particle world ids into the scheduler metadata buffer."""
+        if self.num_particles == 0:
+            return
+        particle_world = getattr(model, "particle_world", None)
+        if particle_world is None:
+            if self.num_worlds > 1:
+                raise RuntimeError("multi-world PhoenX deformable scheduling requires model.particle_world")
+            self._particle_world_id.fill_(0)
+            return
+        if int(particle_world.shape[0]) != self.num_particles:
+            raise ValueError(
+                f"model.particle_world length ({particle_world.shape[0]}) != world.num_particles ({self.num_particles})"
+            )
+        wp.copy(self._particle_world_id, particle_world)
+
+    def _copy_particle_world_ids_from_array(self, particle_world: wp.array[wp.int32] | None) -> None:
+        """Copy caller-supplied particle world ids for array-backed soft rows."""
+        if self.num_particles == 0:
+            return
+        if particle_world is None:
+            if self.num_worlds > 1:
+                raise RuntimeError(
+                    "multi-world PhoenX deformable scheduling requires particle_world for array-backed particles"
+                )
+            self._particle_world_id.fill_(0)
+            return
+        if int(particle_world.shape[0]) != self.num_particles:
+            raise ValueError(
+                f"particle_world length ({particle_world.shape[0]}) != world.num_particles ({self.num_particles})"
+            )
+        wp.copy(self._particle_world_id, particle_world)
+
     def _refresh_has_position_level_writers(self) -> None:
         """Stamp :attr:`BodyContainer.has_position_level_writers` from
         the current cloth-triangle / cloth-bending / soft-tet counts.
@@ -1686,6 +1731,7 @@ class PhoenXWorld:
         wp.copy(self.particles.position, model.particle_q)
         wp.copy(self.particles.velocity, model.particle_qd)
         wp.copy(self.particles.inverse_mass, model.particle_inv_mass)
+        self._copy_particle_world_ids_from_model(model)
         wp.launch(
             cloth_init_triangle_rows_kernel,
             dim=self.num_cloth_triangles,
@@ -1741,6 +1787,7 @@ class PhoenXWorld:
         wp.copy(self.particles.position, model.particle_q)
         wp.copy(self.particles.velocity, model.particle_qd)
         wp.copy(self.particles.inverse_mass, model.particle_inv_mass)
+        self._copy_particle_world_ids_from_model(model)
         wp.launch(
             cloth_bending_init_rows_kernel,
             dim=self.num_cloth_bending,
@@ -1825,6 +1872,7 @@ class PhoenXWorld:
         wp.copy(self.particles.position, model.particle_q)
         wp.copy(self.particles.velocity, model.particle_qd)
         wp.copy(self.particles.inverse_mass, model.particle_inv_mass)
+        self._copy_particle_world_ids_from_model(model)
         if constraint_type == SoftBodyConstraintType.BLOCK_NEOHOOKEAN:
             wp.launch(
                 soft_tet_neohookean_init_rows_kernel,
@@ -1870,6 +1918,7 @@ class PhoenXWorld:
         hex_materials: wp.array,  # wp.array2d[wp.float32], shape [num_hexahedra, 4] = (k_mu, k_lambda, beta_h, beta_d)
         particle_qd: wp.array | None = None,  # wp.array[wp.vec3f], initial particle velocities (optional)
         particle_inv_mass: wp.array | None = None,  # wp.array[wp.float32], optional inverse masses
+        particle_world: wp.array[wp.int32] | None = None,  # Optional particle world ids
         *,
         strain_model: str | int = "trace",
     ) -> None:
@@ -1909,6 +1958,9 @@ class PhoenXWorld:
             particle_inv_mass: Optional inverse-mass array. ``None``
                 leaves :attr:`particles.inverse_mass` at its default.
                 Pin a particle by setting its inv_mass to 0.
+            particle_world: Optional particle world ids for multi-world
+                scheduling. ``None`` maps particles to world 0 when
+                ``num_worlds == 1``.
             strain_model: ``"trace"``/``"xpbd_fem"`` for the default
                 integrated trace strain, or ``"arap"`` for integrated
                 ARAP strain. Integer constants
@@ -1946,6 +1998,7 @@ class PhoenXWorld:
             wp.copy(self.particles.velocity, particle_qd)
         if particle_inv_mass is not None:
             wp.copy(self.particles.inverse_mass, particle_inv_mass)
+        self._copy_particle_world_ids_from_array(particle_world)
         wp.launch(
             soft_hex_init_rows_from_arrays_kernel,
             dim=self.num_soft_hexahedra,
@@ -3085,7 +3138,13 @@ class PhoenXWorld:
         wp.launch(
             _count_elements_per_world_kernel,
             dim=cap,
-            inputs=[self._elements, self._num_active_constraints, self.bodies],
+            inputs=[
+                self._elements,
+                self._num_active_constraints,
+                self.bodies,
+                self._particle_world_id,
+                wp.int32(self.num_bodies),
+            ],
             outputs=[self._per_world_element_count, self._world_totals_shifted],
             device=self.device,
         )
@@ -3096,7 +3155,14 @@ class PhoenXWorld:
         wp.launch(
             _build_scatter_keys_kernel,
             dim=cap,
-            inputs=[self._elements, self._num_active_constraints, self.bodies, wp.int32(cap)],
+            inputs=[
+                self._elements,
+                self._num_active_constraints,
+                self.bodies,
+                self._particle_world_id,
+                wp.int32(self.num_bodies),
+                wp.int32(cap),
+            ],
             outputs=[self._per_world_scatter_keys, self._per_world_elements],
             device=self.device,
         )
@@ -3185,7 +3251,7 @@ class PhoenXWorld:
             wp.launch(
                 cloth_predict_kernel,
                 dim=self.num_particles,
-                inputs=[self.particles, self.gravity, wp.float32(self.substep_dt)],
+                inputs=[self.particles, self._particle_world_id, self.gravity, wp.float32(self.substep_dt)],
                 device=self.device,
             )
 
@@ -3212,13 +3278,9 @@ class PhoenXWorld:
         for fixed_tpw in self._fast_tail_auto_fixed_choices():
             kernel = get_fast_tail_kernel(
                 kind="prepare_plus_iterate",
-                revolute_only=bool(self._use_revolute_specialization),
-                has_joints=self.num_joints > 0,
+                **self._dispatch_specialization_flags(),
                 has_contacts=self.max_contact_columns > 0,
-                has_sleeping=bool(self._sleeping_enabled),
-                has_soft_contact_pd=bool(self._has_soft_contact_pd),
                 cached_prepare=bool(cached_prepare),
-                enable_column_timers=self.enable_column_timers,
                 fixed_tpw=fixed_tpw,
                 guard_tpw=self._tpw_auto,
                 family_split=self._fast_tail_family_split(),
@@ -3244,6 +3306,10 @@ class PhoenXWorld:
                     wp.int32(self.solver_iterations),
                     wp.int32(self.num_worlds),
                     wp.int32(self.num_joints),
+                    wp.int32(self.num_cloth_triangles),
+                    wp.int32(self.num_cloth_bending),
+                    wp.int32(self.num_soft_tetrahedra),
+                    wp.int32(self.num_soft_hexahedra),
                     wp.int32(self.num_bodies),
                     self._tpw_choice,
                     self._copy_state,
@@ -3260,12 +3326,8 @@ class PhoenXWorld:
         for fixed_tpw in self._fast_tail_auto_fixed_choices():
             kernel = get_fast_tail_kernel(
                 kind="relax",
-                revolute_only=bool(self._use_revolute_specialization),
-                has_joints=self.num_joints > 0,
+                **self._dispatch_specialization_flags(),
                 has_contacts=self.max_contact_columns > 0,
-                has_sleeping=bool(self._sleeping_enabled),
-                has_soft_contact_pd=bool(self._has_soft_contact_pd),
-                enable_column_timers=self.enable_column_timers,
                 fixed_tpw=fixed_tpw,
                 family_split=self._fast_tail_family_split(),
                 guard_tpw=self._tpw_auto,
@@ -3639,25 +3701,14 @@ class PhoenXWorld:
             if self.mass_splitting_enabled:
                 self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
 
-    def _singleworld_kernels(self):
-        """Return ``(prepare_head, prepare_fused, iterate_head,
-        iterate_fused, relax_head, relax_fused)``. Specialised via
-        compile-time ``revolute_only``, ``cloth_support`` (cloth /
-        soft-tet / soft-hex types in the ctype dispatch) and
-        ``soft_tet_only`` / ``cloth_only`` (skip ctype reads when the
-        container holds only one deformable row family)."""
+    def _dispatch_specialization_flags(self) -> dict[str, bool]:
+        """Static dispatch axes shared by single-world and fast-tail kernels."""
         cloth_on = (
             self.num_cloth_triangles > 0
             or self.num_soft_tetrahedra > 0
             or self.num_cloth_bending > 0
             or self.num_soft_hexahedra > 0
         )
-        revolute_only = bool(self._use_revolute_specialization)
-        # ``soft_tet_only`` is an ARAP-specific specialisation: skip the
-        # ctype-tag read and route every non-contact cid straight to
-        # ``soft_tetrahedron_iterate_at``. Disable it when the block
-        # Neo-Hookean variant is in use, or when soft hexes are present
-        # (they need the ctype tree to route to the hex iterate).
         soft_tet_only = (
             self.num_soft_tetrahedra > 0
             and not self._soft_tet_uses_neohookean
@@ -3672,16 +3723,27 @@ class PhoenXWorld:
             and self.num_soft_tetrahedra == 0
             and self.num_soft_hexahedra == 0
         )
-        kw = {
-            "revolute_only": revolute_only,
+        return {
+            "revolute_only": bool(self._use_revolute_specialization),
             "cloth_support": cloth_on,
             "enable_column_timers": self.enable_column_timers,
             "soft_tet_only": soft_tet_only,
             "cloth_only": cloth_only,
             "has_joints": self.num_joints > 0,
-            "has_mass_splitting": self.mass_splitting_enabled,
             "has_sleeping": self._sleeping_enabled,
             "has_soft_contact_pd": bool(self._has_soft_contact_pd),
+        }
+
+    def _singleworld_kernels(self):
+        """Return ``(prepare_head, prepare_fused, iterate_head,
+        iterate_fused, relax_head, relax_fused)``. Specialised via
+        compile-time ``revolute_only``, ``cloth_support`` (cloth /
+        soft-tet / soft-hex types in the ctype dispatch) and
+        ``soft_tet_only`` / ``cloth_only`` (skip ctype reads when the
+        container holds only one deformable row family)."""
+        kw = {
+            **self._dispatch_specialization_flags(),
+            "has_mass_splitting": self.mass_splitting_enabled,
         }
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),
@@ -3823,6 +3885,10 @@ class PhoenXWorld:
                 wp.int32(num_iterations),
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
+                wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_cloth_bending),
+                wp.int32(self.num_soft_tetrahedra),
+                wp.int32(self.num_soft_hexahedra),
                 self._tpw_choice,
                 self._copy_state,
             ],

@@ -55,6 +55,7 @@ _PHOENX_CLOTH_STIFFNESS_FLOOR = wp.constant(wp.float32(1.0e-6))
 @wp.kernel
 def cloth_predict_kernel(
     particles: ParticleContainer,
+    particle_world_id: wp.array[wp.int32],
     gravity: wp.array[wp.vec3f],
     substep_dt: wp.float32,
 ):
@@ -78,7 +79,10 @@ def cloth_predict_kernel(
         particles.position[i] = p + substep_dt * particles.velocity[i]
         return
     particles.access_mode[i] = ACCESS_MODE_VELOCITY_LEVEL
-    v = particles.velocity[i] + gravity[0] * substep_dt
+    world_id = particle_world_id[i]
+    if world_id < wp.int32(0):
+        world_id = wp.int32(0)
+    v = particles.velocity[i] + gravity[world_id] * substep_dt
     particles.velocity[i] = v
     particles.position[i] = p + substep_dt * v
 

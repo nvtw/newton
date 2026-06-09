@@ -24,10 +24,14 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_STATIC,
     body_container_zeros,
+)
+from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+    cloth_lame_from_youngs_poisson_plane_stress,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -171,6 +175,59 @@ def _build_n_pendulums(
     return world, cube_slots
 
 
+def _build_multi_world_cloth(
+    *,
+    num_worlds: int,
+    device: wp.context.Devicelike,
+) -> tuple[PhoenXWorld, object]:
+    """Build tiny independent cloth patches assigned to separate worlds."""
+    builder = newton.ModelBuilder()
+    tri_ka, tri_ke = cloth_lame_from_youngs_poisson_plane_stress(1.0e5, 0.3)
+    for world_id in range(num_worlds):
+        builder.begin_world()
+        builder.add_cloth_grid(
+            pos=wp.vec3(0.0, float(world_id), 0.5),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=1,
+            dim_y=1,
+            cell_x=0.1,
+            cell_y=0.1,
+            mass=0.05,
+            fix_left=True,
+            tri_ke=tri_ke,
+            tri_ka=tri_ka,
+            particle_radius=0.02,
+        )
+        builder.end_world()
+    model = builder.finalize(device=device)
+
+    bodies = body_container_zeros(max(1, int(model.body_count)), device=device)
+    constraints = PhoenXWorld.make_constraint_container(
+        num_joints=0,
+        num_cloth_triangles=int(model.tri_count),
+        device=device,
+    )
+    world = PhoenXWorld(
+        bodies=bodies,
+        constraints=constraints,
+        num_joints=0,
+        num_particles=int(model.particle_count),
+        num_cloth_triangles=int(model.tri_count),
+        rigid_contact_max=0,
+        num_worlds=num_worlds,
+        substeps=1,
+        solver_iterations=4,
+        velocity_iterations=0,
+        step_layout="multi_world",
+        multi_world_scheduler="fast_tail",
+        gravity=[(0.0, 0.0, -9.81), (0.0, 0.0, 0.0)],
+        device=device,
+    )
+    world.populate_cloth_triangles_from_model(model)
+    return world, model
+
+
 def _run_frames(world: PhoenXWorld, n_frames: int) -> None:
     """Advance ``world`` by ``n_frames`` joint-only steps, CUDA-graph
     captured on the first call so each additional frame is one graph
@@ -199,6 +256,27 @@ class TestPhoenXMultiWorld(unittest.TestCase):
     except we use :data:`JointMode.BALL_SOCKET` on the unified joint
     in place of ``add_ball_socket``.
     """
+
+    def test_multi_world_cloth_rows_use_particle_worlds(self) -> None:
+        """Particle-only rows bucket per world and use per-world gravity."""
+        device = wp.get_device("cuda:0")
+        world, model = _build_multi_world_cloth(num_worlds=2, device=device)
+        world.step(dt=1.0 / _FPS, contacts=None, shape_body=None)
+
+        report = world.step_report()
+        self.assertIsNotNone(report.per_world_color_sizes)
+        triangles_per_world = int(model.tri_count) // 2
+        for sizes in report.per_world_color_sizes:
+            self.assertEqual(sum(sizes), triangles_per_world)
+
+        particle_world = model.particle_world.numpy()
+        inv_mass = model.particle_inv_mass.numpy()
+        velocity = world.particles.velocity.numpy()
+        dynamic = inv_mass > 0.0
+        world0_vz = velocity[(particle_world == 0) & dynamic, 2]
+        world1_vz = velocity[(particle_world == 1) & dynamic, 2]
+        self.assertLess(float(world0_vz.mean()), -1.0e-3)
+        self.assertLess(abs(float(world1_vz.mean())), 1.0e-5)
 
     def test_single_pendulum_per_world(self) -> None:
         """``N`` identical pendulums -> every world's cube ends at
