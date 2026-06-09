@@ -20,8 +20,10 @@ lambda bounds. Contact projection still needs its cone projection, but the
 velocity fetch and ``M^-1 J^T`` apply are shape-agnostic. ``grouped_split``
 keeps compact typed math but shape-buckets block IDs inside each color, testing
 whether lower branch divergence can beat the extra indirection / locality cost.
-``hybrid`` uses a setup-time per-color policy to pick compact split or sidecar4,
-which models a graph-capture-safe topology scheduler.
+``hybrid`` uses a setup-time per-color policy to pick compact split or sidecar4.
+``auto_best`` reports the host-side tournament winner across graph-capture-safe
+kernel choices, modeling the setup-time selector we would want in production
+instead of hard-coding a semantic policy.
 """
 
 from __future__ import annotations
@@ -1749,6 +1751,9 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
             block_dim=int(args.block_dim),
         )
 
+    side_colors = int(np.count_nonzero(color_policy_host == _COLOR_POLICY_SIDECAR4_HOST))
+    split_colors = int(color_policy_host.size - side_colors)
+
     split_run()
     side_run()
     grouped_run()
@@ -1778,17 +1783,26 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     side_ms, _ = _bench(side_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
     grouped_ms, _ = _bench(grouped_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
     hybrid_ms, _ = _bench(hybrid_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
+    auto_label, auto_ms = min(
+        (
+            ("split", split_ms),
+            ("grouped", grouped_ms),
+            ("sidecar4", side_ms),
+            ("hybrid", hybrid_ms),
+        ),
+        key=lambda item: item[1],
+    )
     side_speedup = split_ms / side_ms if side_ms > 0.0 else float("nan")
     grouped_speedup = split_ms / grouped_ms if grouped_ms > 0.0 else float("nan")
     hybrid_speedup = split_ms / hybrid_ms if hybrid_ms > 0.0 else float("nan")
-    side_colors = int(np.count_nonzero(color_policy_host == _COLOR_POLICY_SIDECAR4_HOST))
-    split_colors = int(color_policy_host.size - side_colors)
+    auto_speedup = split_ms / auto_ms if auto_ms > 0.0 else float("nan")
     print(
         f"{scene:14s} worlds={int(args.worlds):5d} blocks={blocks:7d} colors={schedule.colors:5d} "
         f"policy=(side{side_colors},split{split_colors}) {slot_label} "
-        f"split={split_ms:8.4f}ms grouped={grouped_ms:8.4f}ms sidecar4={side_ms:8.4f}ms hybrid={hybrid_ms:8.4f}ms "
+        f"split={split_ms:8.4f}ms grouped={grouped_ms:8.4f}ms sidecar4={side_ms:8.4f}ms "
+        f"hybrid={hybrid_ms:8.4f}ms auto_best={auto_label}:{auto_ms:8.4f}ms "
         f"grouped_speedup={grouped_speedup:6.3f}x sidecar4_speedup={side_speedup:6.3f}x "
-        f"hybrid_speedup={hybrid_speedup:6.3f}x grouped_err={grouped_err:.6g} "
+        f"hybrid_speedup={hybrid_speedup:6.3f}x auto_speedup={auto_speedup:6.3f}x grouped_err={grouped_err:.6g} "
         f"sidecar4_err={side_err:.6g} hybrid_err={hybrid_err:.6g}"
     )
 
