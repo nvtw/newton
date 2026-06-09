@@ -8,8 +8,10 @@ world and loops colors inside one kernel. That has low launch overhead, but few
 worlds can leave many SMs idle. This benchmark keeps the same color ordering and
 PGS safety, but tests schedulers that expose each color as global work across
 worlds. ``flat`` and ``direct`` use one launch per color, ``block_world`` gives
-one physical block to a world, and ``mega`` keeps the color loop inside one
-persistent kernel with a software grid barrier. ``autotune`` evaluates the whole
+one physical block to a world, ``block_world_grouped`` serializes joint-mode /
+contact subfamilies inside each color to test lower branch divergence, and
+``mega`` keeps the color loop inside one persistent kernel with a software grid
+barrier. ``autotune`` evaluates the whole
 scheduler portfolio, while ``adaptive`` uses a time-budgeted tournament that
 keeps only the measured winners. The benchmark is aimed at finding scheduling
 rules that can eventually be moved into production instead of hard-coding one
@@ -60,6 +62,8 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 from newton._src.solvers.phoenx.solver_phoenx_kernels import _FUSED_INNER_SWEEPS, _sync_threads
 
 _DEFAULT_BLOCK_WORLD_DIM = 128
+_BLOCK_WORLD_SUBFAMILIES = 10
+_BLOCK_WORLD_SUBFAMILY_STRIDE = _BLOCK_WORLD_SUBFAMILIES + 1
 
 _JOINT_MODE_REVOLUTE_HOST = int(JOINT_MODE_REVOLUTE)
 _JOINT_MODE_PRISMATIC_HOST = int(JOINT_MODE_PRISMATIC)
@@ -88,6 +92,27 @@ class ColorGridDevice:
     processed: wp.array
     barrier_count: wp.array
     barrier_sense: wp.array
+
+
+@dataclass
+class BlockWorldSubfamilyHost:
+    eids: np.ndarray
+    world_color_starts: np.ndarray
+    world_subfamily_starts: np.ndarray
+    world_csr_offsets: np.ndarray
+    world_num_colors: np.ndarray
+    row_count: int
+    num_colors: int
+
+
+@dataclass
+class BlockWorldSubfamilyDevice:
+    host: BlockWorldSubfamilyHost
+    eids: wp.array
+    world_color_starts: wp.array
+    world_subfamily_starts: wp.array
+    world_csr_offsets: wp.array
+    world_num_colors: wp.array
 
 
 @dataclass(frozen=True)
@@ -756,6 +781,135 @@ def _block_world_prepare_iterate_kernel(
         outer = outer + wp.int32(1)
 
 
+@wp.kernel(enable_backward=False)
+def _block_world_subfamily_prepare_iterate_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    world_element_ids_by_color: wp.array[wp.int32],
+    world_subfamily_starts: wp.array2d[wp.int32],
+    world_csr_offsets: wp.array[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+    num_bodies: wp.int32,
+    revolute_only: wp.int32,
+    outer_iters: wp.int32,
+    inner_sweeps: wp.int32,
+    copy_state: CopyStateContainer,
+    block_dim_value: wp.int32,
+):
+    tid = wp.tid()
+    local_tid = tid - (tid / block_dim_value) * block_dim_value
+    world_id = tid / block_dim_value
+    n_colors = world_num_colors[world_id]
+    world_base = world_csr_offsets[world_id]
+
+    color = wp.int32(0)
+    while color < n_colors:
+        family_base = color * wp.int32(_BLOCK_WORLD_SUBFAMILY_STRIDE)
+        family = wp.int32(0)
+        while family < wp.int32(_BLOCK_WORLD_SUBFAMILIES):
+            start = world_base + world_subfamily_starts[world_id, family_base + family]
+            end = world_base + world_subfamily_starts[world_id, family_base + family + wp.int32(1)]
+            cursor = local_tid
+            while cursor < end - start:
+                cid = world_element_ids_by_color[start + cursor]
+                if cid < num_joints:
+                    if revolute_only != wp.int32(0):
+                        revolute_prepare_for_iteration(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
+                    else:
+                        actuated_double_ball_socket_prepare_for_iteration(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
+                else:
+                    contact_prepare_for_iteration_lean_no_soft_pd(
+                        contact_cols,
+                        cid - num_joints,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        copy_state,
+                        wp.int32(0),
+                    )
+                cursor = cursor + block_dim_value
+            family = family + wp.int32(1)
+        _sync_threads()
+        color = color + wp.int32(1)
+
+    outer = wp.int32(0)
+    while outer < outer_iters:
+        color = wp.int32(0)
+        while color < n_colors:
+            family_base = color * wp.int32(_BLOCK_WORLD_SUBFAMILY_STRIDE)
+            family = wp.int32(0)
+            while family < wp.int32(_BLOCK_WORLD_SUBFAMILIES):
+                start = world_base + world_subfamily_starts[world_id, family_base + family]
+                end = world_base + world_subfamily_starts[world_id, family_base + family + wp.int32(1)]
+                cursor = local_tid
+                while cursor < end - start:
+                    cid = world_element_ids_by_color[start + cursor]
+                    if cid < num_joints:
+                        if revolute_only != wp.int32(0):
+                            revolute_iterate_multi(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                sor_boost,
+                                True,
+                                inner_sweeps,
+                            )
+                        else:
+                            actuated_double_ball_socket_iterate_multi(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                wp.int32(0),
+                                idt,
+                                sor_boost,
+                                True,
+                                inner_sweeps,
+                            )
+                    else:
+                        contact_iterate_multi_no_soft_pd(
+                            contact_cols,
+                            cid - num_joints,
+                            bodies,
+                            particles,
+                            num_bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            True,
+                            inner_sweeps,
+                            copy_state,
+                            wp.int32(0),
+                            sor_boost,
+                        )
+                    cursor = cursor + block_dim_value
+                family = family + wp.int32(1)
+            _sync_threads()
+            color = color + wp.int32(1)
+        outer = outer + wp.int32(1)
+
+
 def _joint_mode_rank(mode: int) -> int:
     if mode == _JOINT_MODE_REVOLUTE_HOST:
         return 0
@@ -792,6 +946,14 @@ def _row_kind_sort_key(eid: int, family: np.ndarray, joint_modes: np.ndarray, nu
     if 0 <= eid < int(family.shape[0]) and int(family[eid]) == 1:
         return (1, 0, eid)
     return (2, 0, eid)
+
+
+def _block_world_subfamily(eid: int, family: np.ndarray, joint_modes: np.ndarray, num_joints: int) -> int:
+    if 0 <= eid < num_joints:
+        return min(_joint_mode_rank(int(joint_modes[eid])), _BLOCK_WORLD_SUBFAMILIES - 2)
+    if 0 <= eid < int(family.shape[0]) and int(family[eid]) == 1:
+        return _BLOCK_WORLD_SUBFAMILIES - 1
+    return _BLOCK_WORLD_SUBFAMILIES - 1
 
 
 def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iterations: int):
@@ -846,6 +1008,61 @@ def _extract_color_grid(world: PhoenXWorld, *, group_by_kind: bool = False) -> C
     )
 
 
+def _extract_block_world_subfamily_grid(world: PhoenXWorld) -> BlockWorldSubfamilyHost:
+    active = int(world._num_active_constraints.numpy()[0])
+    source_eids = world._world_element_ids_by_color.numpy()
+    starts = world._world_color_starts.numpy()
+    csr = world._world_csr_offsets.numpy()
+    num_colors_per_world = world._world_num_colors.numpy().astype(np.int32, copy=False)
+    num_colors = int(num_colors_per_world.max(initial=0))
+    family = world._element_family.numpy()
+    joint_modes = _extract_joint_modes(world)
+    world_color_starts = np.zeros((world.num_worlds, num_colors + 1), dtype=np.int32)
+    world_subfamily_starts = np.zeros(
+        (world.num_worlds, max(1, num_colors * _BLOCK_WORLD_SUBFAMILY_STRIDE)),
+        dtype=np.int32,
+    )
+    world_csr_offsets = np.zeros(world.num_worlds + 1, dtype=np.int32)
+    eids: list[int] = []
+
+    for world_id in range(world.num_worlds):
+        world_base = len(eids)
+        world_csr_offsets[world_id] = world_base
+        for color in range(num_colors):
+            world_color_starts[world_id, color] = len(eids) - world_base
+            buckets: list[list[int]] = [[] for _ in range(_BLOCK_WORLD_SUBFAMILIES)]
+            if color < int(num_colors_per_world[world_id]):
+                source_base = int(csr[world_id])
+                start = source_base + int(starts[world_id, color])
+                end = source_base + int(starts[world_id, color + 1])
+                for cursor in range(start, end):
+                    eid = int(source_eids[cursor])
+                    if 0 <= eid < active:
+                        buckets[_block_world_subfamily(eid, family, joint_modes, int(world.num_joints))].append(eid)
+
+            subfamily_base = color * _BLOCK_WORLD_SUBFAMILY_STRIDE
+            for subfamily, bucket in enumerate(buckets):
+                world_subfamily_starts[world_id, subfamily_base + subfamily] = len(eids) - world_base
+                bucket.sort()
+                eids.extend(bucket)
+            world_subfamily_starts[world_id, subfamily_base + _BLOCK_WORLD_SUBFAMILIES] = len(eids) - world_base
+        world_color_starts[world_id, num_colors] = len(eids) - world_base
+    world_csr_offsets[world.num_worlds] = len(eids)
+
+    row_count = len(eids)
+    if not eids:
+        eids.append(0)
+    return BlockWorldSubfamilyHost(
+        eids=np.asarray(eids, dtype=np.int32),
+        world_color_starts=world_color_starts,
+        world_subfamily_starts=world_subfamily_starts,
+        world_csr_offsets=world_csr_offsets,
+        world_num_colors=num_colors_per_world.copy(),
+        row_count=row_count,
+        num_colors=num_colors,
+    )
+
+
 def _upload_color_grid(graph: ColorGridHost, device: wp.context.Devicelike) -> ColorGridDevice:
     return ColorGridDevice(
         host=graph,
@@ -854,6 +1071,19 @@ def _upload_color_grid(graph: ColorGridHost, device: wp.context.Devicelike) -> C
         processed=wp.zeros(1, dtype=wp.int32, device=device),
         barrier_count=wp.zeros(1, dtype=wp.int32, device=device),
         barrier_sense=wp.zeros(1, dtype=wp.int32, device=device),
+    )
+
+
+def _upload_block_world_subfamily_grid(
+    graph: BlockWorldSubfamilyHost, device: wp.context.Devicelike
+) -> BlockWorldSubfamilyDevice:
+    return BlockWorldSubfamilyDevice(
+        host=graph,
+        eids=wp.array(graph.eids, dtype=wp.int32, device=device),
+        world_color_starts=wp.array(graph.world_color_starts, dtype=wp.int32, device=device),
+        world_subfamily_starts=wp.array(graph.world_subfamily_starts, dtype=wp.int32, device=device),
+        world_csr_offsets=wp.array(graph.world_csr_offsets, dtype=wp.int32, device=device),
+        world_num_colors=wp.array(graph.world_num_colors, dtype=wp.int32, device=device),
     )
 
 
@@ -1080,6 +1310,47 @@ def _block_world_runner(world: PhoenXWorld, *, block_dim: int):
     return run
 
 
+def _block_world_subfamily_runner(world: PhoenXWorld, graph: BlockWorldSubfamilyDevice, *, block_dim: int):
+    device = world.device
+    contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
+    idt = wp.float32(1.0 / world.substep_dt)
+    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    outer_iters = int(world.solver_iterations) // inner_sweeps
+    revolute_only = 1 if bool(world._use_revolute_specialization) else 0
+    dim = max(1, int(world.num_worlds) * int(block_dim))
+
+    def run() -> None:
+        wp.launch(
+            _block_world_subfamily_prepare_iterate_kernel,
+            dim=dim,
+            block_dim=block_dim,
+            inputs=[
+                world.constraints,
+                world._contact_cols,
+                world.bodies,
+                world._particles_or_sentinel(),
+                idt,
+                wp.float32(world.sor_boost),
+                graph.eids,
+                graph.world_subfamily_starts,
+                graph.world_csr_offsets,
+                graph.world_num_colors,
+                world._contact_container,
+                contact_views,
+                wp.int32(world.num_joints),
+                wp.int32(world.num_bodies),
+                wp.int32(revolute_only),
+                wp.int32(outer_iters),
+                wp.int32(inner_sweeps),
+                world._copy_state,
+                wp.int32(block_dim),
+            ],
+            device=device,
+        )
+
+    return run
+
+
 def _color_grid_direct_runner(world: PhoenXWorld, graph: ColorGridDevice, *, block_dim: int):
     device = world.device
     contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
@@ -1185,6 +1456,7 @@ def _scheduler_candidates(
     world: PhoenXWorld,
     grid_graph: ColorGridDevice,
     grouped_grid_graph: ColorGridDevice,
+    subfamily_graph: BlockWorldSubfamilyDevice,
     *,
     include_launch_heavy: bool,
 ) -> list[SchedulerCandidate]:
@@ -1200,6 +1472,12 @@ def _scheduler_candidates(
     for block_dim in _parse_csv_ints(args.tune_block_world_dims):
         candidates.append(
             SchedulerCandidate(f"block_world_{block_dim}", _block_world_runner(world, block_dim=block_dim))
+        )
+        candidates.append(
+            SchedulerCandidate(
+                f"block_world_grouped_{block_dim}",
+                _block_world_subfamily_runner(world, subfamily_graph, block_dim=block_dim),
+            )
         )
     return candidates
 
@@ -1254,11 +1532,14 @@ def _run_autotune(
     world: PhoenXWorld,
     grid_graph: ColorGridDevice,
     grouped_grid_graph: ColorGridDevice,
+    subfamily_graph: BlockWorldSubfamilyDevice,
     scene: str,
     num_worlds: int,
     row_count: int,
 ) -> None:
-    candidates = _scheduler_candidates(args, world, grid_graph, grouped_grid_graph, include_launch_heavy=True)
+    candidates = _scheduler_candidates(
+        args, world, grid_graph, grouped_grid_graph, subfamily_graph, include_launch_heavy=True
+    )
     results: list[tuple[SchedulerCandidate, float, float]] = []
     for candidate in candidates:
         min_ms, med_ms = _time_candidate(
@@ -1284,6 +1565,7 @@ def _run_adaptive(
     world: PhoenXWorld,
     grid_graph: ColorGridDevice,
     grouped_grid_graph: ColorGridDevice,
+    subfamily_graph: BlockWorldSubfamilyDevice,
     scene: str,
     num_worlds: int,
     row_count: int,
@@ -1293,6 +1575,7 @@ def _run_adaptive(
         world,
         grid_graph,
         grouped_grid_graph,
+        subfamily_graph,
         include_launch_heavy=args.adapt_include_launch_heavy,
     )
     candidate_by_label = {candidate.label: candidate for candidate in candidates}
@@ -1384,18 +1667,40 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
 
     host_graph = _extract_color_grid(world)
     grouped_host_graph = _extract_color_grid(world, group_by_kind=True)
+    subfamily_host_graph = _extract_block_world_subfamily_grid(world)
     if int(grouped_host_graph.color_starts[-1]) != int(host_graph.color_starts[-1]):
         raise RuntimeError("grouped color grid changed row count")
+    if int(subfamily_host_graph.row_count) != int(host_graph.color_starts[-1]):
+        raise RuntimeError("subfamily color grid changed row count")
     grid_graph = _upload_color_grid(host_graph, world.device)
     grouped_grid_graph = _upload_color_grid(grouped_host_graph, world.device)
+    subfamily_graph = _upload_block_world_subfamily_grid(subfamily_host_graph, world.device)
     outer_iters = int(world.solver_iterations) // int(_FUSED_INNER_SWEEPS)
     expected = int(host_graph.color_starts[-1]) * (1 + outer_iters)
 
     if args.mode == "autotune":
-        _run_autotune(args, world, grid_graph, grouped_grid_graph, scene, num_worlds, int(host_graph.color_starts[-1]))
+        _run_autotune(
+            args,
+            world,
+            grid_graph,
+            grouped_grid_graph,
+            subfamily_graph,
+            scene,
+            num_worlds,
+            int(host_graph.color_starts[-1]),
+        )
         return
     if args.mode == "adaptive":
-        _run_adaptive(args, world, grid_graph, grouped_grid_graph, scene, num_worlds, int(host_graph.color_starts[-1]))
+        _run_adaptive(
+            args,
+            world,
+            grid_graph,
+            grouped_grid_graph,
+            subfamily_graph,
+            scene,
+            num_worlds,
+            int(host_graph.color_starts[-1]),
+        )
         return
 
     runs: list[tuple[str, object]] = []
@@ -1407,6 +1712,13 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
         runs.append(("direct", _color_grid_direct_runner(world, grid_graph, block_dim=args.block_dim)))
     if args.mode in ("block_world", "all"):
         runs.append(("block_world", _block_world_runner(world, block_dim=args.block_world_dim)))
+    if args.mode in ("block_world_grouped", "subfamily", "all"):
+        runs.append(
+            (
+                "block_world_grouped",
+                _block_world_subfamily_runner(world, subfamily_graph, block_dim=args.block_world_dim),
+            )
+        )
     if args.mode in ("mega", "all"):
         runs.append(
             (
@@ -1468,6 +1780,8 @@ def parse_args() -> argparse.Namespace:
             "grouped",
             "direct",
             "block_world",
+            "block_world_grouped",
+            "subfamily",
             "autotune",
             "adaptive",
             "mega",
