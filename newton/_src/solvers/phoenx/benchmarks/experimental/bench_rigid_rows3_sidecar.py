@@ -43,11 +43,6 @@ _FAMILY_ANGULAR = wp.constant(wp.int32(2))
 
 
 @wp.func
-def _mul_diag(diag: wp.vec3f, x: wp.vec3f) -> wp.vec3f:
-    return wp.vec3f(diag[0] * x[0], diag[1] * x[1], diag[2] * x[2])
-
-
-@wp.func
 def _rows3_dot(
     row0: wp.vec3f,
     row1: wp.vec3f,
@@ -103,8 +98,8 @@ def _init_rows_kernel(
     w_b: wp.array[wp.vec3f],
     inv_m_a: wp.array[wp.float32],
     inv_m_b: wp.array[wp.float32],
-    inv_i_a: wp.array[wp.vec3f],
-    inv_i_b: wp.array[wp.vec3f],
+    inv_i_a: wp.array[wp.mat33f],
+    inv_i_b: wp.array[wp.mat33f],
     normal: wp.array[wp.vec3f],
     tangent1: wp.array[wp.vec3f],
     tangent2: wp.array[wp.vec3f],
@@ -154,8 +149,28 @@ def _init_rows_kernel(
     w_b[tid] = wb
     inv_m_a[tid] = wp.float32(0.8) + wp.float32(0.1) * phase
     inv_m_b[tid] = wp.float32(0.7) + wp.float32(0.2) * phase
-    inv_i_a[tid] = wp.vec3f(wp.float32(0.6), wp.float32(0.7), wp.float32(0.8))
-    inv_i_b[tid] = wp.vec3f(wp.float32(0.9), wp.float32(0.65), wp.float32(0.75))
+    inv_i_a[tid] = wp.mat33f(
+        wp.float32(0.60),
+        wp.float32(0.02),
+        wp.float32(0.00),
+        wp.float32(0.02),
+        wp.float32(0.70),
+        wp.float32(0.01),
+        wp.float32(0.00),
+        wp.float32(0.01),
+        wp.float32(0.80),
+    )
+    inv_i_b[tid] = wp.mat33f(
+        wp.float32(0.90),
+        -wp.float32(0.01),
+        wp.float32(0.02),
+        -wp.float32(0.01),
+        wp.float32(0.65),
+        wp.float32(0.00),
+        wp.float32(0.02),
+        wp.float32(0.00),
+        wp.float32(0.75),
+    )
 
     n = wp.normalize(wp.vec3f(wp.float32(1.0), wp.float32(0.2), wp.float32(0.1)))
     t1 = wp.normalize(wp.vec3f(-wp.float32(0.2), wp.float32(1.0), wp.float32(0.0)))
@@ -251,8 +266,8 @@ def _solve_sidecar_kernel(
     w_b: wp.array[wp.vec3f],
     inv_m_a: wp.array[wp.float32],
     inv_m_b: wp.array[wp.float32],
-    inv_i_a: wp.array[wp.vec3f],
-    inv_i_b: wp.array[wp.vec3f],
+    inv_i_a: wp.array[wp.mat33f],
+    inv_i_b: wp.array[wp.mat33f],
     jla0: wp.array[wp.vec3f],
     jla1: wp.array[wp.vec3f],
     jla2: wp.array[wp.vec3f],
@@ -310,9 +325,9 @@ def _solve_sidecar_kernel(
     d = update.delta
 
     out_va[tid] = va + inv_m_a[tid] * _rows3_t_mul(jla0[tid], jla1[tid], jla2[tid], d)
-    out_wa[tid] = wa + _mul_diag(inv_i_a[tid], _rows3_t_mul(jaa0[tid], jaa1[tid], jaa2[tid], d))
+    out_wa[tid] = wa + inv_i_a[tid] @ _rows3_t_mul(jaa0[tid], jaa1[tid], jaa2[tid], d)
     out_vb[tid] = vb + inv_m_b[tid] * _rows3_t_mul(jlb0[tid], jlb1[tid], jlb2[tid], d)
-    out_wb[tid] = wb + _mul_diag(inv_i_b[tid], _rows3_t_mul(jab0[tid], jab1[tid], jab2[tid], d))
+    out_wb[tid] = wb + inv_i_b[tid] @ _rows3_t_mul(jab0[tid], jab1[tid], jab2[tid], d)
     out_lambda[tid] = update.lambda_new
 
 
@@ -324,8 +339,8 @@ def _solve_frame_kernel(
     w_b: wp.array[wp.vec3f],
     inv_m_a: wp.array[wp.float32],
     inv_m_b: wp.array[wp.float32],
-    inv_i_a: wp.array[wp.vec3f],
-    inv_i_b: wp.array[wp.vec3f],
+    inv_i_a: wp.array[wp.mat33f],
+    inv_i_b: wp.array[wp.mat33f],
     axis0: wp.array[wp.vec3f],
     axis1: wp.array[wp.vec3f],
     axis2: wp.array[wp.vec3f],
@@ -395,8 +410,8 @@ def _solve_split_kernel(
     w_b: wp.array[wp.vec3f],
     inv_m_a: wp.array[wp.float32],
     inv_m_b: wp.array[wp.float32],
-    inv_i_a: wp.array[wp.vec3f],
-    inv_i_b: wp.array[wp.vec3f],
+    inv_i_a: wp.array[wp.mat33f],
+    inv_i_b: wp.array[wp.mat33f],
     normal: wp.array[wp.vec3f],
     tangent1: wp.array[wp.vec3f],
     tangent2: wp.array[wp.vec3f],
@@ -450,9 +465,9 @@ def _solve_split_kernel(
         update = block_solve_velocity_rows3_op(op, wp.float32(1.0))
         impulse = update.delta[0] * n + update.delta[1] * t1 + update.delta[2] * t2
         out_va[tid] = va - inv_m_a[tid] * impulse
-        out_wa[tid] = wa - _mul_diag(inv_i_a[tid], wp.cross(rr0, impulse))
+        out_wa[tid] = wa - inv_i_a[tid] @ wp.cross(rr0, impulse)
         out_vb[tid] = vb + inv_m_b[tid] * impulse
-        out_wb[tid] = wb + _mul_diag(inv_i_b[tid], wp.cross(rr1, impulse))
+        out_wb[tid] = wb + inv_i_b[tid] @ wp.cross(rr1, impulse)
         out_lambda[tid] = update.lambda_new
     else:
         a0 = axis0[tid]
@@ -475,9 +490,9 @@ def _solve_split_kernel(
         update = block_solve_velocity_rows3_op(op, wp.float32(1.0))
         angular_impulse = update.delta[0] * a0 + update.delta[1] * a1 + update.delta[2] * a2
         out_va[tid] = va
-        out_wa[tid] = wa - _mul_diag(inv_i_a[tid], angular_impulse)
+        out_wa[tid] = wa - inv_i_a[tid] @ angular_impulse
         out_vb[tid] = vb
-        out_wb[tid] = wb + _mul_diag(inv_i_b[tid], angular_impulse)
+        out_wb[tid] = wb + inv_i_b[tid] @ angular_impulse
         out_lambda[tid] = update.lambda_new
 
 
@@ -507,6 +522,10 @@ def _bench(fn, *, n_runs: int, warmup: int, trials: int, device: wp.context.Devi
 
 def _alloc_vec(rows: int, device: wp.context.Devicelike):
     return wp.empty(rows, dtype=wp.vec3f, device=device)
+
+
+def _alloc_mat(rows: int, device: wp.context.Devicelike):
+    return wp.empty(rows, dtype=wp.mat33f, device=device)
 
 
 def _max_err(*pairs) -> float:
@@ -539,8 +558,8 @@ def main() -> None:
     w_b = _alloc_vec(rows, device)
     inv_m_a = wp.empty(rows, dtype=wp.float32, device=device)
     inv_m_b = wp.empty(rows, dtype=wp.float32, device=device)
-    inv_i_a = _alloc_vec(rows, device)
-    inv_i_b = _alloc_vec(rows, device)
+    inv_i_a = _alloc_mat(rows, device)
+    inv_i_b = _alloc_mat(rows, device)
     normal = _alloc_vec(rows, device)
     tangent1 = _alloc_vec(rows, device)
     tangent2 = _alloc_vec(rows, device)

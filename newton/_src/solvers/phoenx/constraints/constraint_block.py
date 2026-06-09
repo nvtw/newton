@@ -283,8 +283,8 @@ class RigidFrameRows3State:
     w_b: wp.vec3f
     inv_m_a: wp.float32
     inv_m_b: wp.float32
-    inv_i_a: wp.vec3f
-    inv_i_b: wp.vec3f
+    inv_i_a: wp.mat33f
+    inv_i_b: wp.mat33f
 
 
 @wp.struct
@@ -295,11 +295,6 @@ class RigidFrameRows3Update:
     w_b: wp.vec3f
     lambda_new: wp.vec3f
     delta: wp.vec3f
-
-
-@wp.func
-def _vec3_mul_diag(diag: wp.vec3f, x: wp.vec3f) -> wp.vec3f:
-    return wp.vec3f(diag[0] * x[0], diag[1] * x[1], diag[2] * x[2])
 
 
 @wp.func
@@ -956,12 +951,8 @@ def block_solve_rigid_frame_rows3(
     update = RigidFrameRows3Update()
     update.v_a = state.v_a - linear_scale * state.inv_m_a * impulse
     update.v_b = state.v_b + linear_scale * state.inv_m_b * impulse
-    update.w_a = state.w_a + _vec3_mul_diag(
-        state.inv_i_a, -cross_scale * wp.cross(rows.r0, impulse) - angular_scale * impulse
-    )
-    update.w_b = state.w_b + _vec3_mul_diag(
-        state.inv_i_b, cross_scale * wp.cross(rows.r1, impulse) + angular_scale * impulse
-    )
+    update.w_a = state.w_a + state.inv_i_a @ (-cross_scale * wp.cross(rows.r0, impulse) - angular_scale * impulse)
+    update.w_b = state.w_b + state.inv_i_b @ (cross_scale * wp.cross(rows.r1, impulse) + angular_scale * impulse)
     update.lambda_new = projection.lambda_new
     update.delta = d
     return update
