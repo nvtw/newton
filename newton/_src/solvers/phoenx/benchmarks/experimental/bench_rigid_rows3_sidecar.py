@@ -346,6 +346,8 @@ def _solve_frame_kernel(
     rows.k_inv = k_inv[tid]
     rows.bias = bias[tid]
     rows.lambda_old = lambda_old[tid]
+    rows.mass_coeff = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(1.0))
+    rows.impulse_coeff = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
     rows.lambda_min = lambda_min[tid]
     rows.lambda_max = lambda_max[tid]
     rows.projection_mode = projection_mode[tid]

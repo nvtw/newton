@@ -250,9 +250,9 @@ class RigidFrameRows3:
     ``axis0..2`` define the row frame. ``r0``/``r1`` are offsets from body A/B
     centers to the row point. ``mode`` gates the branchless residual/apply
     shape: ``(linear, cross, angular)``. Contact rows use ``(1, 1, 0)`` and
-    angular-direct joint rows use ``(0, 0, 1)``. Projection fields mirror
-    :class:`VelocityRows3Op` so the same PGS projection code handles contacts,
-    drives, motors, and bounded rows.
+    angular-direct joint rows use ``(0, 0, 1)``. Projection and soft-row
+    coefficient fields mirror :class:`VelocityRows3Op` so the same PGS
+    projection code handles contacts, drives, motors, and bounded rows.
     """
 
     axis0: wp.vec3f
@@ -264,6 +264,8 @@ class RigidFrameRows3:
     k_inv: wp.vec3f
     bias: wp.vec3f
     lambda_old: wp.vec3f
+    mass_coeff: wp.vec3f
+    impulse_coeff: wp.vec3f
     lambda_min: wp.vec3f
     lambda_max: wp.vec3f
     projection_mode: wp.int32
@@ -939,8 +941,8 @@ def block_solve_rigid_frame_rows3(
     op.k_inv = rows.k_inv
     op.residual = residual
     op.lambda_old = rows.lambda_old
-    op.mass_coeff = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(1.0))
-    op.impulse_coeff = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    op.mass_coeff = rows.mass_coeff
+    op.impulse_coeff = rows.impulse_coeff
     op.lambda_min = rows.lambda_min
     op.lambda_max = rows.lambda_max
     op.projection_mode = rows.projection_mode
