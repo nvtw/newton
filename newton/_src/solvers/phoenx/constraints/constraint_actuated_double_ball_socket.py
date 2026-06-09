@@ -34,8 +34,7 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
     VelocityBlock3,
     VelocityBlock4,
     VelocityBlockProjection,
-    VelocityRows3,
-    VelocityRows3Projection,
+    VelocityRows3Op,
     block_project_velocity_block2_unsoft,
     block_project_velocity_block3_unsoft,
     block_solve_inverse_2,
@@ -44,7 +43,7 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
     block_solve_velocity_block2_projected,
     block_solve_velocity_block3_projected,
     block_solve_velocity_block4_projected,
-    block_solve_velocity_rows3,
+    block_solve_velocity_rows3_op,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     _PD_NYQUIST_HEADROOM_MAX,
@@ -1124,21 +1123,19 @@ def _axial_project_scalar_rows(
         friction_min = -max_lambda_friction
         friction_max = max_lambda_friction
 
-    rows = VelocityRows3()
-    rows.k_inv = wp.vec3f(drive_k_inv, limit_k_inv, friction_k_inv)
-    rows.residual = wp.vec3f(drive_rhs, limit_rhs, friction_rhs)
-    rows.lambda_old = wp.vec3f(acc_drive, acc_limit, acc_friction)
-    rows.mass_coeff = wp.vec3f(wp.float32(1.0), limit_mass_coeff, wp.float32(1.0))
-    rows.impulse_coeff = wp.vec3f(wp.float32(0.0), limit_impulse_coeff, wp.float32(0.0))
-    rows.lambda_min = wp.vec3f(drive_min, limit_min, friction_min)
-    rows.lambda_max = wp.vec3f(drive_max, limit_max, friction_max)
+    op = VelocityRows3Op()
+    op.k_inv = wp.vec3f(drive_k_inv, limit_k_inv, friction_k_inv)
+    op.residual = wp.vec3f(drive_rhs, limit_rhs, friction_rhs)
+    op.lambda_old = wp.vec3f(acc_drive, acc_limit, acc_friction)
+    op.mass_coeff = wp.vec3f(wp.float32(1.0), limit_mass_coeff, wp.float32(1.0))
+    op.impulse_coeff = wp.vec3f(wp.float32(0.0), limit_impulse_coeff, wp.float32(0.0))
+    op.lambda_min = wp.vec3f(drive_min, limit_min, friction_min)
+    op.lambda_max = wp.vec3f(drive_max, limit_max, friction_max)
+    op.projection_mode = VELOCITY_ROWS3_PROJECT_BOUNDS
+    op.friction_static = wp.float32(0.0)
+    op.friction_kinetic = wp.float32(0.0)
 
-    projection_desc = VelocityRows3Projection()
-    projection_desc.mode = VELOCITY_ROWS3_PROJECT_BOUNDS
-    projection_desc.friction_static = wp.float32(0.0)
-    projection_desc.friction_kinetic = wp.float32(0.0)
-
-    projection = block_solve_velocity_rows3(rows, projection_desc, sor_boost)
+    projection = block_solve_velocity_rows3_op(op, sor_boost)
 
     update = AxialProjectionUpdate()
     update.delta = projection.delta[0] + projection.delta[1] + projection.delta[2]

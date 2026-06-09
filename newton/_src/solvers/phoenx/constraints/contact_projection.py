@@ -9,9 +9,8 @@ import warp as wp
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
     VELOCITY_ROWS3_PROJECT_CONTACT_CONE,
-    VelocityRows3,
-    VelocityRows3Projection,
-    block_solve_velocity_rows3,
+    VelocityRows3Op,
+    block_solve_velocity_rows3_op,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -74,21 +73,19 @@ def _make_contact_project_velocity_update(has_soft_contact_pd: bool):
                 normal_mass_coeff = wp.float32(1.0)
                 normal_impulse_coeff = wp.float32(0.0)
 
-        rows = VelocityRows3()
-        rows.k_inv = wp.vec3f(k_inv_n, eff_t1, eff_t2)
-        rows.residual = wp.vec3f(rhs_n, jv_t1 + bias_t1, jv_t2 + bias_t2)
-        rows.lambda_old = wp.vec3f(lam_n_old, lam_t1_old, lam_t2_old)
-        rows.mass_coeff = wp.vec3f(normal_mass_coeff, wp.float32(1.0), wp.float32(1.0))
-        rows.impulse_coeff = wp.vec3f(normal_impulse_coeff, wp.float32(0.0), wp.float32(0.0))
-        rows.lambda_min = wp.vec3f(wp.float32(0.0), -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
-        rows.lambda_max = wp.vec3f(BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF)
+        op = VelocityRows3Op()
+        op.k_inv = wp.vec3f(k_inv_n, eff_t1, eff_t2)
+        op.residual = wp.vec3f(rhs_n, jv_t1 + bias_t1, jv_t2 + bias_t2)
+        op.lambda_old = wp.vec3f(lam_n_old, lam_t1_old, lam_t2_old)
+        op.mass_coeff = wp.vec3f(normal_mass_coeff, wp.float32(1.0), wp.float32(1.0))
+        op.impulse_coeff = wp.vec3f(normal_impulse_coeff, wp.float32(0.0), wp.float32(0.0))
+        op.lambda_min = wp.vec3f(wp.float32(0.0), -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
+        op.lambda_max = wp.vec3f(BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF)
+        op.projection_mode = VELOCITY_ROWS3_PROJECT_CONTACT_CONE
+        op.friction_static = mu_s
+        op.friction_kinetic = mu_k
 
-        projection_desc = VelocityRows3Projection()
-        projection_desc.mode = VELOCITY_ROWS3_PROJECT_CONTACT_CONE
-        projection_desc.friction_static = mu_s
-        projection_desc.friction_kinetic = mu_k
-
-        projection = block_solve_velocity_rows3(rows, projection_desc, sor_boost)
+        projection = block_solve_velocity_rows3_op(op, sor_boost)
 
         cc_set_normal_lambda(cc, k, projection.lambda_new[0])
         cc_set_tangent1_lambda(cc, k, projection.lambda_new[1])

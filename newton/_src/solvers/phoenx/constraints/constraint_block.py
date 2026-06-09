@@ -32,6 +32,7 @@ __all__ = [
     "VelocityBlock4",
     "VelocityBlockProjection",
     "VelocityRows3",
+    "VelocityRows3Op",
     "VelocityRows3Projection",
     "VelocityRows3Update",
     "block_position_delta_1",
@@ -78,6 +79,7 @@ __all__ = [
     "block_solve_velocity_rows3",
     "block_solve_velocity_rows3_bounded",
     "block_solve_velocity_rows3_contact_cone",
+    "block_solve_velocity_rows3_op",
     "block_solve_xpbd_1",
     "block_solve_xpbd_2",
     "block_solve_xpbd_2_strict",
@@ -205,6 +207,27 @@ class VelocityRows3Projection:
     """Projection parameters for prepared three-row velocity blocks."""
 
     mode: wp.int32
+    friction_static: wp.float32
+    friction_kinetic: wp.float32
+
+
+@wp.struct
+class VelocityRows3Op:
+    """Flattened descriptor for three scalar velocity rows plus projection.
+
+    This is the sidecar-friendly form of ``(rows, projection)``: prepare code
+    can populate these fields, and iterate code can solve/project without
+    knowing whether the source was a contact, drive, motor, or limit row.
+    """
+
+    k_inv: wp.vec3f
+    residual: wp.vec3f
+    lambda_old: wp.vec3f
+    mass_coeff: wp.vec3f
+    impulse_coeff: wp.vec3f
+    lambda_min: wp.vec3f
+    lambda_max: wp.vec3f
+    projection_mode: wp.int32
     friction_static: wp.float32
     friction_kinetic: wp.float32
 
@@ -747,6 +770,25 @@ def block_solve_velocity_rows3(
             projection.friction_kinetic,
         )
     return block_solve_velocity_rows3_bounded(rows, sor_boost)
+
+
+@wp.func
+def block_solve_velocity_rows3_op(op: VelocityRows3Op, sor_boost: wp.float32) -> VelocityRows3Update:
+    """Solve/project one flattened three-row velocity operation."""
+    rows = VelocityRows3()
+    rows.k_inv = op.k_inv
+    rows.residual = op.residual
+    rows.lambda_old = op.lambda_old
+    rows.mass_coeff = op.mass_coeff
+    rows.impulse_coeff = op.impulse_coeff
+    rows.lambda_min = op.lambda_min
+    rows.lambda_max = op.lambda_max
+
+    projection = VelocityRows3Projection()
+    projection.mode = op.projection_mode
+    projection.friction_static = op.friction_static
+    projection.friction_kinetic = op.friction_kinetic
+    return block_solve_velocity_rows3(rows, projection, sor_boost)
 
 
 @wp.func
