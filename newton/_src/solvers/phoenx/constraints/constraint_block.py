@@ -26,8 +26,12 @@ __all__ = [
     "BlockVector4Update",
     "PositionRows1",
     "PositionRows2",
+    "RigidFrameBlock1",
+    "RigidFrameBlock2",
     "RigidFrameBlock3",
     "RigidFrameBlock3Mixed",
+    "RigidFrameRows1Update",
+    "RigidFrameRows2Update",
     "RigidFrameRows3",
     "RigidFrameRows3State",
     "RigidFrameRows3Update",
@@ -70,6 +74,8 @@ __all__ = [
     "block_solve_projected_xpbd_1",
     "block_solve_projected_xpbd_2",
     "block_solve_projected_xpbd_2_strict",
+    "block_solve_rigid_frame_block1",
+    "block_solve_rigid_frame_block2",
     "block_solve_rigid_frame_block3",
     "block_solve_rigid_frame_block3_bounded",
     "block_solve_rigid_frame_block3_mixed",
@@ -253,6 +259,41 @@ class VelocityRows3Update:
 
 
 @wp.struct
+class RigidFrameBlock1:
+    """Compact rigid one-row frame descriptor with a scalar solve.
+
+    mode gates the row shape as (linear, cross, angular) so point,
+    angular-direct, and COM-linear rows share the same local update form.
+    """
+
+    axis: wp.vec3f
+    r0: wp.vec3f
+    r1: wp.vec3f
+    mode: wp.vec3f
+    k_inv: wp.float32
+    bias: wp.float32
+    lambda_old: wp.float32
+    mass_coeff: wp.float32
+    impulse_coeff: wp.float32
+
+
+@wp.struct
+class RigidFrameBlock2:
+    """Compact rigid two-row frame descriptor with a dense 2x2 solve."""
+
+    axis0: wp.vec3f
+    axis1: wp.vec3f
+    r0: wp.vec3f
+    r1: wp.vec3f
+    mode: wp.vec3f
+    k_inv: wp.mat22f
+    bias: wp.vec2f
+    lambda_old: wp.vec2f
+    mass_coeff: wp.float32
+    impulse_coeff: wp.float32
+
+
+@wp.struct
 class RigidFrameBlock3:
     """Compact rigid three-row frame descriptor with a dense 3x3 solve.
 
@@ -352,6 +393,26 @@ class RigidFrameRows3State:
     inv_m_b: wp.float32
     inv_i_a: wp.mat33f
     inv_i_b: wp.mat33f
+
+
+@wp.struct
+class RigidFrameRows1Update:
+    v_a: wp.vec3f
+    w_a: wp.vec3f
+    v_b: wp.vec3f
+    w_b: wp.vec3f
+    lambda_new: wp.float32
+    delta: wp.float32
+
+
+@wp.struct
+class RigidFrameRows2Update:
+    v_a: wp.vec3f
+    w_a: wp.vec3f
+    v_b: wp.vec3f
+    w_b: wp.vec3f
+    lambda_new: wp.vec2f
+    delta: wp.vec2f
 
 
 @wp.struct
@@ -972,6 +1033,83 @@ def block_solve_velocity_rows3_op_uniform_projection(
         lambda2_new - op.lambda_old[2],
     )
     update.lambda_new = wp.vec3f(row0.lambda_new, lambda1_new, lambda2_new)
+    return update
+
+
+@wp.func
+def block_solve_rigid_frame_block1(
+    rows: RigidFrameBlock1,
+    state: RigidFrameRows3State,
+    sor_boost: wp.float32,
+) -> RigidFrameRows1Update:
+    """Solve/project/apply one compact rigid frame row."""
+    linear_scale = rows.mode[0]
+    cross_scale = rows.mode[1]
+    angular_scale = rows.mode[2]
+
+    rel = (
+        linear_scale * (state.v_b - state.v_a)
+        + cross_scale * (wp.cross(state.w_b, rows.r1) - wp.cross(state.w_a, rows.r0))
+        + angular_scale * (state.w_b - state.w_a)
+    )
+    residual = wp.dot(rows.axis, rel) + rows.bias
+
+    projection = block_solve_accumulated_inverse_1(
+        rows.k_inv,
+        residual,
+        rows.lambda_old,
+        rows.mass_coeff,
+        rows.impulse_coeff,
+        sor_boost,
+    )
+    impulse = projection.delta * rows.axis
+
+    update = RigidFrameRows1Update()
+    update.v_a = state.v_a - linear_scale * state.inv_m_a * impulse
+    update.v_b = state.v_b + linear_scale * state.inv_m_b * impulse
+    update.w_a = state.w_a + state.inv_i_a @ (-cross_scale * wp.cross(rows.r0, impulse) - angular_scale * impulse)
+    update.w_b = state.w_b + state.inv_i_b @ (cross_scale * wp.cross(rows.r1, impulse) + angular_scale * impulse)
+    update.lambda_new = projection.lambda_new
+    update.delta = projection.delta
+    return update
+
+
+@wp.func
+def block_solve_rigid_frame_block2(
+    rows: RigidFrameBlock2,
+    state: RigidFrameRows3State,
+    sor_boost: wp.float32,
+) -> RigidFrameRows2Update:
+    """Solve/project/apply one compact rigid two-row frame block."""
+    linear_scale = rows.mode[0]
+    cross_scale = rows.mode[1]
+    angular_scale = rows.mode[2]
+
+    rel = (
+        linear_scale * (state.v_b - state.v_a)
+        + cross_scale * (wp.cross(state.w_b, rows.r1) - wp.cross(state.w_a, rows.r0))
+        + angular_scale * (state.w_b - state.w_a)
+    )
+    residual = wp.vec2f(wp.dot(rows.axis0, rel), wp.dot(rows.axis1, rel)) + rows.bias
+
+    projection = block_solve_accumulated_inverse_2(
+        rows.k_inv,
+        residual,
+        rows.lambda_old,
+        rows.mass_coeff,
+        rows.impulse_coeff,
+        sor_boost,
+    )
+    d = projection.delta
+    impulse = d[0] * rows.axis0 + d[1] * rows.axis1
+
+    update = RigidFrameRows2Update()
+    update.v_a = state.v_a - linear_scale * state.inv_m_a * impulse
+    update.v_b = state.v_b + linear_scale * state.inv_m_b * impulse
+    update.w_a = state.w_a + state.inv_i_a @ (-cross_scale * wp.cross(rows.r0, impulse) - angular_scale * impulse)
+    update.w_b = state.w_b + state.inv_i_b @ (cross_scale * wp.cross(rows.r1, impulse) + angular_scale * impulse)
+    update.lambda_new = projection.lambda_new
+    update.delta = d
     return update
 
 
