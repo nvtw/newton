@@ -395,6 +395,7 @@ class PhoenXWorld:
         num_worlds: int = 1,
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
+        multi_world_scheduler: str = "auto",
         max_thread_blocks: int | None = None,
         enable_body_pair_grouping: bool = False,
         mass_splitting: bool = False,
@@ -446,6 +447,13 @@ class PhoenXWorld:
                 past ~256 worlds) or ``"single_world"`` (global JP
                 colouring; wins for a few big worlds).
             threads_per_world: ``"auto"`` (default), 32, 16, or 8.
+            multi_world_scheduler: Static multi-world solver scheduler.
+                ``"auto"`` resolves once at construction from scene
+                topology; ``"fast_tail"`` preserves the legacy path;
+                ``"block_world"``/``"block_world_32"``/``"block_world_64"``
+                /``"block_world_128"`` force one physical CUDA block per
+                world. The resolved choice must be stable before graph
+                capture.
             max_thread_blocks: Cap on the single-world PGS persistent
                 grid; ``None`` auto-sizes. No effect on multi-world.
             mass_splitting: Enable Tonge mass splitting -- coloring caps
@@ -580,6 +588,7 @@ class PhoenXWorld:
                 "prepare_refresh_stride > 3 currently supports joint-only rigid worlds; "
                 "contact worlds should refresh at least every third substep"
             )
+        self._multi_world_scheduler_policy: str = str(multi_world_scheduler)
         self._multi_world_scheduler: str = "fast_tail"
         self._multi_world_block_dim: int = 128
 
@@ -762,6 +771,7 @@ class PhoenXWorld:
         # ``max_colored_partitions + 1`` unroll. Trade-off discussion in
         # :mod:`dispatch.single_world_mass_splitting_unrolled`.
         self.mass_splitting_unrolled: bool = bool(mass_splitting_unrolled) and self.mass_splitting_enabled
+        self._configure_multi_world_scheduler(self._multi_world_scheduler_policy)
         # Unified body-or-particle node space for the partitioner:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
         # num_bodies + num_particles)`` are particles.
@@ -1146,15 +1156,24 @@ class PhoenXWorld:
                 "has_soft_contact_pd": bool(self._has_soft_contact_pd),
                 "enable_column_timers": self.enable_column_timers,
             }
-            for fixed_tpw in self._fast_tail_auto_fixed_choices():
-                fast_tail_kw = {
+            if self._multi_world_scheduler == "block_world" and self._block_world_supported():
+                block_world_kw = {
                     **base_fast_tail_kw,
-                    "fixed_tpw": fixed_tpw,
-                    "guard_tpw": self._tpw_auto,
                     "family_split": self._fast_tail_family_split(),
+                    "block_dim": self._multi_world_block_dim,
                 }
-                kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw))
-                kernels.append(get_fast_tail_kernel(kind="relax", **fast_tail_kw))
+                kernels.append(get_block_world_kernel(kind="prepare_plus_iterate", **block_world_kw))
+                kernels.append(get_block_world_kernel(kind="relax", **block_world_kw))
+            else:
+                for fixed_tpw in self._fast_tail_auto_fixed_choices():
+                    fast_tail_kw = {
+                        **base_fast_tail_kw,
+                        "fixed_tpw": fixed_tpw,
+                        "guard_tpw": self._tpw_auto,
+                        "family_split": self._fast_tail_family_split(),
+                    }
+                    kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw))
+                    kernels.append(get_fast_tail_kernel(kind="relax", **fast_tail_kw))
 
         # De-duplicate by module; ``functools.cache`` already collapses
         # identical (axes-tuple) factory calls but cheap to be defensive.
@@ -3258,6 +3277,75 @@ class PhoenXWorld:
                 contact_views,
                 launch_tpw_bound=fixed_tpw if fixed_tpw > 0 else self._tpw_launch_bound,
             )
+
+    def _parse_multi_world_scheduler_policy(self, policy: str) -> tuple[str, int]:
+        """Normalize a construction-time multi-world scheduler policy."""
+        normalized = str(policy).strip().lower().replace("-", "_")
+        if normalized in ("auto", "fast_tail"):
+            return normalized, 128
+        if normalized == "fasttail":
+            return "fast_tail", 128
+        if normalized == "block_world":
+            return "block_world", 128
+
+        prefix = "block_world_"
+        if normalized.startswith(prefix):
+            block_dim = self._validate_block_world_dim(int(normalized[len(prefix) :]))
+            return "block_world", block_dim
+
+        raise ValueError(
+            "multi_world_scheduler must be 'auto', 'fast_tail', 'block_world', "
+            "'block_world_32', 'block_world_64', or 'block_world_128' "
+            f"(got {policy!r})"
+        )
+
+    def _auto_multi_world_scheduler(self) -> tuple[str, int]:
+        """Choose a fixed scheduler from construction-time topology.
+
+        This intentionally does not time kernels or inspect per-step state;
+        the resolved scheduler is a stable host value before CUDA graph
+        capture. The thresholds come from full-frame captured sweeps across
+        H1/G1/DR-Legs robot fleets plus dense tower contacts.
+        """
+        if not self._block_world_supported():
+            return "fast_tail", 128
+
+        inv_worlds = 1.0 / float(max(1, self.num_worlds))
+        joints_per_world = float(self.num_joints) * inv_worlds
+        contacts_per_world = float(self.max_contact_columns) * inv_worlds
+        rows_per_world = joints_per_world + contacts_per_world
+
+        # Sparse toy worlds are better packed by fast-tail; one physical
+        # block per world only starts to pay once each world has enough
+        # rows to keep the block occupied.
+        if rows_per_world < 16.0:
+            return "fast_tail", 128
+
+        # Dense contact-only fleets are consistently limited by fast-
+        # tail's per-world tail work; one full block per world keeps more
+        # lanes useful on tower-like contact stacks even at larger world
+        # counts.
+        if joints_per_world == 0.0 and contacts_per_world >= 512.0:
+            return "block_world", 128
+
+        # Robot fleets are currently too mixed for a static topology-only
+        # block-world rule: solve-only sweeps can improve, but full-frame
+        # graph replay regresses on DR-style scenes. Keep fast-tail as the
+        # robot default until the scheduler is selected by measured
+        # autotuning or a more predictive topology model.
+        return "fast_tail", 128
+
+    def _configure_multi_world_scheduler(self, policy: str) -> None:
+        """Resolve the multi-world scheduler once before any graph capture."""
+        kind, block_dim = self._parse_multi_world_scheduler_policy(policy)
+        if kind == "auto":
+            kind, block_dim = self._auto_multi_world_scheduler()
+        elif kind == "block_world" and not self._block_world_supported():
+            raise NotImplementedError("block-world scheduler currently supports rigid multi-world scenes only")
+
+        self._multi_world_scheduler_policy = str(policy)
+        self._multi_world_scheduler = kind
+        self._multi_world_block_dim = self._validate_block_world_dim(block_dim)
 
     def _block_world_supported(self) -> bool:
         """Return whether the private block-world scheduler can run this scene."""

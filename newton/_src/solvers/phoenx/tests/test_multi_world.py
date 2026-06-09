@@ -47,6 +47,8 @@ def _build_n_pendulums(
     angular_velocities: list[tuple[float, float, float]] | None = None,
     gravity: tuple[float, float, float] | list[tuple[float, float, float]] = (0.0, -9.81, 0.0),
     prepare_refresh_stride: int = 1,
+    pendulums_per_world: int = 1,
+    multi_world_scheduler: str = "auto",
     device: wp.context.Devicelike = None,
 ) -> tuple[PhoenXWorld, list[int]]:
     """Build ``num_worlds`` identical pendulum scenes sharing one
@@ -64,7 +66,10 @@ def _build_n_pendulums(
     """
     if device is None:
         device = wp.get_device("cuda:0")
-    num_bodies = 2 * num_worlds  # anchor + cube per world
+    pendulums_per_world = int(pendulums_per_world)
+    if pendulums_per_world < 1:
+        raise ValueError(f"pendulums_per_world must be >= 1, got {pendulums_per_world}")
+    num_bodies = 2 * num_worlds * pendulums_per_world  # anchor + cube per pendulum
     bodies = body_container_zeros(num_bodies, device=device)
 
     pos = np.zeros((num_bodies, 3), dtype=np.float32)
@@ -77,19 +82,23 @@ def _build_n_pendulums(
 
     cube_slots: list[int] = []
     for w in range(num_worlds):
-        anchor_slot = 2 * w
-        cube_slot = 2 * w + 1
-        # Anchor is static (default).
-        world_id[anchor_slot] = w
-        # Cube dangles 1 m below the anchor.
-        pos[cube_slot] = (0.0, -1.0, 0.0)
-        inv_m[cube_slot] = 1.0
-        inv_I[cube_slot] = np.eye(3, dtype=np.float32)
-        motion[cube_slot] = int(MOTION_DYNAMIC)
-        world_id[cube_slot] = w
-        if angular_velocities is not None:
-            ang_v[cube_slot] = angular_velocities[w]
-        cube_slots.append(cube_slot)
+        for p in range(pendulums_per_world):
+            base_slot = 2 * (w * pendulums_per_world + p)
+            anchor_slot = base_slot
+            cube_slot = base_slot + 1
+            x_offset = 0.05 * float(p)
+            # Anchor is static (default).
+            pos[anchor_slot] = (x_offset, 0.0, 0.0)
+            world_id[anchor_slot] = w
+            # Cube dangles 1 m below the anchor.
+            pos[cube_slot] = (x_offset, -1.0, 0.0)
+            inv_m[cube_slot] = 1.0
+            inv_I[cube_slot] = np.eye(3, dtype=np.float32)
+            motion[cube_slot] = int(MOTION_DYNAMIC)
+            world_id[cube_slot] = w
+            if angular_velocities is not None:
+                ang_v[cube_slot] = angular_velocities[w]
+            cube_slots.append(cube_slot)
 
     bodies.position.assign(pos)
     bodies.orientation.assign(ori)
@@ -101,7 +110,7 @@ def _build_n_pendulums(
     bodies.angular_velocity.assign(ang_v)
 
     # One joint per world.
-    num_joints = num_worlds
+    num_joints = num_worlds * pendulums_per_world
     constraints = PhoenXWorld.make_constraint_container(num_joints=num_joints, device=device)
     world = PhoenXWorld(
         bodies=bodies,
@@ -114,14 +123,22 @@ def _build_n_pendulums(
         num_joints=num_joints,
         num_worlds=num_worlds,
         prepare_refresh_stride=prepare_refresh_stride,
+        multi_world_scheduler=multi_world_scheduler,
         device=device,
     )
 
     # Init one BALL_SOCKET joint per world.
-    body1 = np.array([2 * w for w in range(num_joints)], dtype=np.int32)
-    body2 = np.array([2 * w + 1 for w in range(num_joints)], dtype=np.int32)
-    anchor1 = np.zeros((num_joints, 3), dtype=np.float32)  # world origin for each world
+    body1 = np.empty(num_joints, dtype=np.int32)
+    body2 = np.empty(num_joints, dtype=np.int32)
+    anchor1 = np.zeros((num_joints, 3), dtype=np.float32)
     anchor2 = np.zeros((num_joints, 3), dtype=np.float32)  # ignored for BALL_SOCKET
+    for j in range(num_joints):
+        w = j // pendulums_per_world
+        p = j % pendulums_per_world
+        base_slot = 2 * (w * pendulums_per_world + p)
+        body1[j] = base_slot
+        body2[j] = base_slot + 1
+        anchor1[j] = pos[base_slot]
 
     def _f(v: float) -> wp.array:
         return wp.array(np.full(num_joints, v, dtype=np.float32), dtype=wp.float32, device=device)

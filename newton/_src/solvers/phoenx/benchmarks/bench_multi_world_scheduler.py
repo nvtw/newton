@@ -50,13 +50,16 @@ def _parse_worlds(value: str) -> tuple[int, ...]:
 
 
 def _scheduler_labels(block_dims: str) -> tuple[str, ...]:
-    labels = ["fast_tail"]
+    labels = ["auto", "fast_tail"]
     labels.extend(f"block_world_{dim}" for dim in _parse_worlds(block_dims))
     return tuple(labels)
 
 
 def _apply_scheduler(solver: SolverPhoenX, label: str) -> None:
     world = solver.world
+    if label == "auto":
+        world._configure_multi_world_scheduler("auto")
+        return
     if label == "fast_tail":
         world._multi_world_scheduler = "fast_tail"
         return
@@ -195,7 +198,9 @@ def _run_adaptive_case(args: argparse.Namespace, scene: str, num_worlds: int) ->
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--scenes", nargs="+", choices=("h1", "g1", "dr_legs", "tower"), default=["h1", "g1", "dr_legs", "tower"])
+    parser.add_argument(
+        "--scenes", nargs="+", choices=("h1", "g1", "dr_legs", "tower"), default=["h1", "g1", "dr_legs", "tower"]
+    )
     parser.add_argument("--mode", choices=("sweep", "adaptive"), default="sweep")
     parser.add_argument("--worlds", default="64,512")
     parser.add_argument("--block-world-dims", default="32,64,128")

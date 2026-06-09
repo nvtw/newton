@@ -135,6 +135,7 @@ class SolverPhoenX(SolverBase):
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
+        multi_world_scheduler: str = "auto",
         max_thread_blocks: int | None = None,
         velocity_readout: str = "substep_end",
         mass_splitting: bool = False,
@@ -162,6 +163,11 @@ class SolverPhoenX(SolverBase):
             step_layout: ``"multi_world"`` (many small worlds) or
                 ``"single_world"`` (a few big worlds).
             threads_per_world: ``"auto"`` / 32 / 16 / 8 (multi-world).
+            multi_world_scheduler: Static multi-world scheduler policy.
+                ``"auto"`` is the default performance policy and resolves
+                before graph capture; ``"fast_tail"`` and
+                ``"block_world[_32|_64|_128]"`` force a path for
+                benchmarking.
             max_thread_blocks: Optional cap on the single-world PGS grid.
             velocity_readout: ``"substep_end"`` (default, bit-faithful),
                 ``"finite_difference"``, or ``"substep_average"``.
@@ -301,6 +307,7 @@ class SolverPhoenX(SolverBase):
             num_worlds=num_worlds,
             step_layout=step_layout,
             threads_per_world=threads_per_world,
+            multi_world_scheduler=multi_world_scheduler,
             max_thread_blocks=max_thread_blocks,
             enable_body_pair_grouping=has_compound_bodies,
             mass_splitting=mass_splitting,
