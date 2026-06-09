@@ -3,14 +3,20 @@
 
 """Experimental PhoenX persistent chunk-task solve benchmark.
 
-This benchmark explores a scheduler between the production per-world fast-tail
+This benchmark explores schedulers between the production per-world fast-tail
 kernel and expensive per-row readiness. Work is split into chunks of rows from
-a single world/color. Persistent worker blocks reserve monotonically increasing
-queue slots; when the final chunk of a
-color completes, that worker publishes chunks for the next color. Safety is
-still color-level, but work distribution is global and can keep more SMs busy
-when the number of worlds is small. The queue is intentionally reservation-based
-instead of CAS/pop based so idle workers do not repeatedly poll an empty head.
+a single world/color, preserving PGS color safety while exposing more global
+work for low-world-count scenes.
+
+Two prototypes are available:
+
+* ``queue``: persistent worker blocks reserve monotonically increasing global
+  queue slots; when the final chunk of a color completes, that worker publishes
+  chunks for the next color.
+* ``scan``: workers scan worlds and claim chunks from each world's current
+  color using per-color counters. This avoids a hot global queue head and the
+  future-slot reservation issue, at the cost of scanning overhead on sparse
+  worlds.
 """
 
 from __future__ import annotations
@@ -90,6 +96,12 @@ class ChunkGraphDevice:
     failed: wp.array
     worker_chunk: wp.array
     worker_epoch: wp.array
+    scan_phase: wp.array
+    scan_color: wp.array
+    scan_next: wp.array
+    scan_done: wp.array
+    scan_busy: wp.array
+    scan_done_worlds: wp.array
     queue_capacity: int
     worker_blocks: int
 
@@ -270,6 +282,443 @@ def _chunk_seed_kernel(
                     cursor = cursor + wp.int32(1)
                 seeded = wp.int32(1)
             color = color + wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def _scan_clear_kernel(
+    scan_phase: wp.array[wp.int32],
+    scan_color: wp.array[wp.int32],
+    scan_next: wp.array[wp.int32],
+    scan_done: wp.array[wp.int32],
+    scan_busy: wp.array[wp.int32],
+    scan_done_worlds: wp.array[wp.int32],
+    total_done: wp.array[wp.int32],
+    failed: wp.array[wp.int32],
+    num_worlds: wp.int32,
+    total_color_epochs: wp.int32,
+):
+    tid = wp.tid()
+    if tid < num_worlds:
+        scan_phase[tid] = wp.int32(0)
+        scan_color[tid] = wp.int32(0)
+    if tid < total_color_epochs:
+        scan_next[tid] = wp.int32(0)
+        scan_done[tid] = wp.int32(0)
+        scan_busy[tid] = wp.int32(0)
+    if tid == wp.int32(0):
+        scan_done_worlds[0] = wp.int32(0)
+        total_done[0] = wp.int32(0)
+        failed[0] = wp.int32(0)
+
+
+@wp.func
+def _scan_advance_world(
+    world_color_chunk_starts: wp.array2d[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+    scan_phase: wp.array[wp.int32],
+    scan_color: wp.array[wp.int32],
+    scan_done_worlds: wp.array[wp.int32],
+    world_id: wp.int32,
+    phase: wp.int32,
+    color: wp.int32,
+    num_epochs: wp.int32,
+):
+    next_phase = phase
+    next_color = color + wp.int32(1)
+    searching = wp.int32(1)
+    while next_phase < num_epochs and searching != wp.int32(0):
+        if next_color >= world_num_colors[world_id]:
+            next_color = wp.int32(0)
+            next_phase = next_phase + wp.int32(1)
+        else:
+            start = world_color_chunk_starts[world_id, next_color]
+            end = world_color_chunk_starts[world_id, next_color + wp.int32(1)]
+            if start < end:
+                searching = wp.int32(0)
+            else:
+                next_color = next_color + wp.int32(1)
+
+    if next_phase >= num_epochs:
+        scan_color[world_id] = wp.int32(0)
+        _thread_fence()
+        scan_phase[world_id] = num_epochs
+        wp.atomic_add(scan_done_worlds, 0, wp.int32(1))
+    else:
+        scan_color[world_id] = next_color
+        _thread_fence()
+        scan_phase[world_id] = next_phase
+
+
+@wp.func
+def _scan_claim_chunk(
+    world_color_chunk_starts: wp.array2d[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+    scan_phase: wp.array[wp.int32],
+    scan_color: wp.array[wp.int32],
+    scan_next: wp.array[wp.int32],
+    scan_busy: wp.array[wp.int32],
+    scan_done_worlds: wp.array[wp.int32],
+    worker_chunk: wp.array[wp.int32],
+    worker_epoch: wp.array[wp.int32],
+    num_worlds: wp.int32,
+    max_colors: wp.int32,
+    num_epochs: wp.int32,
+    worker: wp.int32,
+    pass_count: wp.int32,
+):
+    claimed = wp.int32(-1)
+    claimed_epoch = wp.int32(0)
+    scan = wp.int32(0)
+    while scan < num_worlds and claimed < wp.int32(0):
+        world_id = (worker + pass_count + scan) % num_worlds
+        phase = wp.atomic_add(scan_phase, world_id, wp.int32(0))
+        if phase < num_epochs:
+            color = wp.atomic_add(scan_color, world_id, wp.int32(0))
+            if color < world_num_colors[world_id]:
+                start = world_color_chunk_starts[world_id, color]
+                end = world_color_chunk_starts[world_id, color + wp.int32(1)]
+                chunks = end - start
+                color_epoch = (phase * num_worlds + world_id) * max_colors + color
+                if chunks <= wp.int32(0):
+                    old_busy = wp.atomic_cas(scan_busy, color_epoch, wp.int32(0), wp.int32(1))
+                    if old_busy == wp.int32(0):
+                        _scan_advance_world(
+                            world_color_chunk_starts,
+                            world_num_colors,
+                            scan_phase,
+                            scan_color,
+                            scan_done_worlds,
+                            world_id,
+                            phase,
+                            color,
+                            num_epochs,
+                        )
+                else:
+                    local_chunk = wp.atomic_add(scan_next, color_epoch, wp.int32(1))
+                    if local_chunk < chunks:
+                        claimed = start + local_chunk
+                        claimed_epoch = phase
+        scan = scan + wp.int32(1)
+
+    worker_chunk[worker] = claimed
+    worker_epoch[worker] = claimed_epoch
+
+
+@wp.func
+def _scan_finish_chunk(
+    chunk_world: wp.array[wp.int32],
+    chunk_color: wp.array[wp.int32],
+    world_color_chunk_starts: wp.array2d[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+    scan_phase: wp.array[wp.int32],
+    scan_color: wp.array[wp.int32],
+    scan_done: wp.array[wp.int32],
+    scan_busy: wp.array[wp.int32],
+    scan_done_worlds: wp.array[wp.int32],
+    total_done: wp.array[wp.int32],
+    chunk: wp.int32,
+    epoch: wp.int32,
+    num_worlds: wp.int32,
+    max_colors: wp.int32,
+    num_epochs: wp.int32,
+):
+    world_id = chunk_world[chunk]
+    color = chunk_color[chunk]
+    start = world_color_chunk_starts[world_id, color]
+    end = world_color_chunk_starts[world_id, color + wp.int32(1)]
+    chunks = end - start
+    color_epoch = (epoch * num_worlds + world_id) * max_colors + color
+    old_done = wp.atomic_add(scan_done, color_epoch, wp.int32(1))
+    if old_done + wp.int32(1) == chunks:
+        old_busy = wp.atomic_cas(scan_busy, color_epoch, wp.int32(0), wp.int32(1))
+        if old_busy == wp.int32(0):
+            _scan_advance_world(
+                world_color_chunk_starts,
+                world_num_colors,
+                scan_phase,
+                scan_color,
+                scan_done_worlds,
+                world_id,
+                epoch,
+                color,
+                num_epochs,
+            )
+    wp.atomic_add(total_done, 0, wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def _scan_prepare_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    idt: wp.float32,
+    world_element_ids_by_color: wp.array[wp.int32],
+    chunk_start: wp.array[wp.int32],
+    chunk_count: wp.array[wp.int32],
+    chunk_world: wp.array[wp.int32],
+    chunk_color: wp.array[wp.int32],
+    world_color_chunk_starts: wp.array2d[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+    scan_phase: wp.array[wp.int32],
+    scan_color: wp.array[wp.int32],
+    scan_next: wp.array[wp.int32],
+    scan_done: wp.array[wp.int32],
+    scan_busy: wp.array[wp.int32],
+    scan_done_worlds: wp.array[wp.int32],
+    total_done: wp.array[wp.int32],
+    failed: wp.array[wp.int32],
+    worker_chunk: wp.array[wp.int32],
+    worker_epoch: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_chunks: wp.int32,
+    num_worlds: wp.int32,
+    max_colors: wp.int32,
+    worker_blocks: wp.int32,
+    chunk_threads: wp.int32,
+    max_spins: wp.int32,
+    num_joints: wp.int32,
+    num_bodies: wp.int32,
+    revolute_only: wp.int32,
+    copy_state: CopyStateContainer,
+):
+    tid = wp.tid()
+    local_tid = tid - (tid / chunk_threads) * chunk_threads
+    worker = tid / chunk_threads
+    spin = wp.int32(0)
+    pass_count = wp.int32(0)
+    done = wp.atomic_add(total_done, 0, wp.int32(0))
+    done_worlds = wp.atomic_add(scan_done_worlds, 0, wp.int32(0))
+    while done < num_chunks and done_worlds < num_worlds and spin < max_spins:
+        if local_tid == wp.int32(0):
+            _scan_claim_chunk(
+                world_color_chunk_starts,
+                world_num_colors,
+                scan_phase,
+                scan_color,
+                scan_next,
+                scan_busy,
+                scan_done_worlds,
+                worker_chunk,
+                worker_epoch,
+                num_worlds,
+                max_colors,
+                wp.int32(1),
+                worker,
+                pass_count,
+            )
+        _sync_threads()
+        chunk = worker_chunk[worker]
+        epoch = worker_epoch[worker]
+        if chunk >= wp.int32(0):
+            start = chunk_start[chunk]
+            count = chunk_count[chunk]
+            cursor = local_tid
+            while cursor < count:
+                cid = world_element_ids_by_color[start + cursor]
+                if cid < num_joints:
+                    if revolute_only != wp.int32(0):
+                        revolute_prepare_for_iteration(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
+                    else:
+                        actuated_double_ball_socket_prepare_for_iteration(
+                            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                        )
+                else:
+                    contact_prepare_for_iteration_lean_no_soft_pd(
+                        contact_cols,
+                        cid - num_joints,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        copy_state,
+                        wp.int32(0),
+                    )
+                cursor = cursor + chunk_threads
+            _sync_threads()
+            if local_tid == wp.int32(0):
+                _scan_finish_chunk(
+                    chunk_world,
+                    chunk_color,
+                    world_color_chunk_starts,
+                    world_num_colors,
+                    scan_phase,
+                    scan_color,
+                    scan_done,
+                    scan_busy,
+                    scan_done_worlds,
+                    total_done,
+                    chunk,
+                    epoch,
+                    num_worlds,
+                    max_colors,
+                    wp.int32(1),
+                )
+            spin = wp.int32(0)
+        else:
+            spin = spin + wp.int32(1)
+        pass_count = pass_count + wp.int32(1)
+        _sync_threads()
+        done = wp.atomic_add(total_done, 0, wp.int32(0))
+        done_worlds = wp.atomic_add(scan_done_worlds, 0, wp.int32(0))
+    if tid == wp.int32(0) and done < num_chunks:
+        failed[0] = wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def _scan_iterate_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    world_element_ids_by_color: wp.array[wp.int32],
+    chunk_start: wp.array[wp.int32],
+    chunk_count: wp.array[wp.int32],
+    chunk_world: wp.array[wp.int32],
+    chunk_color: wp.array[wp.int32],
+    world_color_chunk_starts: wp.array2d[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+    scan_phase: wp.array[wp.int32],
+    scan_color: wp.array[wp.int32],
+    scan_next: wp.array[wp.int32],
+    scan_done: wp.array[wp.int32],
+    scan_busy: wp.array[wp.int32],
+    scan_done_worlds: wp.array[wp.int32],
+    total_done: wp.array[wp.int32],
+    failed: wp.array[wp.int32],
+    worker_chunk: wp.array[wp.int32],
+    worker_epoch: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_chunks: wp.int32,
+    num_worlds: wp.int32,
+    max_colors: wp.int32,
+    num_epochs: wp.int32,
+    worker_blocks: wp.int32,
+    chunk_threads: wp.int32,
+    max_spins: wp.int32,
+    num_joints: wp.int32,
+    num_bodies: wp.int32,
+    revolute_only: wp.int32,
+    inner_sweeps: wp.int32,
+    copy_state: CopyStateContainer,
+):
+    tid = wp.tid()
+    local_tid = tid - (tid / chunk_threads) * chunk_threads
+    worker = tid / chunk_threads
+    target_total = num_chunks * num_epochs
+    spin = wp.int32(0)
+    pass_count = wp.int32(0)
+    done = wp.atomic_add(total_done, 0, wp.int32(0))
+    done_worlds = wp.atomic_add(scan_done_worlds, 0, wp.int32(0))
+    while done < target_total and done_worlds < num_worlds and spin < max_spins:
+        if local_tid == wp.int32(0):
+            _scan_claim_chunk(
+                world_color_chunk_starts,
+                world_num_colors,
+                scan_phase,
+                scan_color,
+                scan_next,
+                scan_busy,
+                scan_done_worlds,
+                worker_chunk,
+                worker_epoch,
+                num_worlds,
+                max_colors,
+                num_epochs,
+                worker,
+                pass_count,
+            )
+        _sync_threads()
+        chunk = worker_chunk[worker]
+        epoch = worker_epoch[worker]
+        if chunk >= wp.int32(0):
+            start = chunk_start[chunk]
+            count = chunk_count[chunk]
+            cursor = local_tid
+            while cursor < count:
+                cid = world_element_ids_by_color[start + cursor]
+                if cid < num_joints:
+                    if revolute_only != wp.int32(0):
+                        revolute_iterate_multi(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            sor_boost,
+                            True,
+                            inner_sweeps,
+                        )
+                    else:
+                        actuated_double_ball_socket_iterate_multi(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            sor_boost,
+                            True,
+                            inner_sweeps,
+                        )
+                else:
+                    contact_iterate_multi_no_soft_pd(
+                        contact_cols,
+                        cid - num_joints,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        True,
+                        inner_sweeps,
+                        copy_state,
+                        wp.int32(0),
+                        sor_boost,
+                    )
+                cursor = cursor + chunk_threads
+            _sync_threads()
+            if local_tid == wp.int32(0):
+                _scan_finish_chunk(
+                    chunk_world,
+                    chunk_color,
+                    world_color_chunk_starts,
+                    world_num_colors,
+                    scan_phase,
+                    scan_color,
+                    scan_done,
+                    scan_busy,
+                    scan_done_worlds,
+                    total_done,
+                    chunk,
+                    epoch,
+                    num_worlds,
+                    max_colors,
+                    num_epochs,
+                )
+            spin = wp.int32(0)
+        else:
+            spin = spin + wp.int32(1)
+        pass_count = pass_count + wp.int32(1)
+        _sync_threads()
+        done = wp.atomic_add(total_done, 0, wp.int32(0))
+        done_worlds = wp.atomic_add(scan_done_worlds, 0, wp.int32(0))
+    if tid == wp.int32(0) and done < target_total:
+        failed[0] = wp.int32(1)
 
 
 @wp.kernel(enable_backward=False)
@@ -836,6 +1285,8 @@ def _upload_chunk_graph(
     worker_blocks: int,
 ) -> ChunkGraphDevice:
     num_chunks = max(1, int(graph.chunk_start.shape[0]))
+    num_worlds = int(graph.world_num_colors.shape[0])
+    total_color_epochs = max(1, max_epochs * num_worlds * graph.max_colors)
     queue_capacity = max(1, num_chunks * max(1, int(max_epochs)))
     return ChunkGraphDevice(
         host=graph,
@@ -845,9 +1296,7 @@ def _upload_chunk_graph(
         chunk_color=wp.array(graph.chunk_color, dtype=wp.int32, device=device),
         world_color_chunk_starts=wp.array(graph.world_color_chunk_starts, dtype=wp.int32, device=device),
         world_num_colors=wp.array(graph.world_num_colors, dtype=wp.int32, device=device),
-        remaining_chunks=wp.zeros(
-            max(1, max_epochs * graph.world_num_colors.shape[0] * graph.max_colors), dtype=wp.int32, device=device
-        ),
+        remaining_chunks=wp.zeros(total_color_epochs, dtype=wp.int32, device=device),
         queue_chunks=wp.zeros(queue_capacity, dtype=wp.int32, device=device),
         queue_epochs=wp.zeros(queue_capacity, dtype=wp.int32, device=device),
         queue_ready=wp.zeros(queue_capacity, dtype=wp.int32, device=device),
@@ -857,6 +1306,12 @@ def _upload_chunk_graph(
         failed=wp.zeros(1, dtype=wp.int32, device=device),
         worker_chunk=wp.zeros(max(1, worker_blocks), dtype=wp.int32, device=device),
         worker_epoch=wp.zeros(max(1, worker_blocks), dtype=wp.int32, device=device),
+        scan_phase=wp.zeros(max(1, num_worlds), dtype=wp.int32, device=device),
+        scan_color=wp.zeros(max(1, num_worlds), dtype=wp.int32, device=device),
+        scan_next=wp.zeros(total_color_epochs, dtype=wp.int32, device=device),
+        scan_done=wp.zeros(total_color_epochs, dtype=wp.int32, device=device),
+        scan_busy=wp.zeros(total_color_epochs, dtype=wp.int32, device=device),
+        scan_done_worlds=wp.zeros(1, dtype=wp.int32, device=device),
         queue_capacity=queue_capacity,
         worker_blocks=worker_blocks,
     )
@@ -1091,6 +1546,130 @@ def _chunk_runner(world: PhoenXWorld, graph: ChunkGraphDevice, *, chunk_threads:
     return run
 
 
+def _reset_scan_graph(graph: ChunkGraphDevice, device: wp.context.Devicelike, *, num_epochs: int) -> None:
+    total_color_epochs = max(1, int(num_epochs) * graph.host.world_num_colors.shape[0] * graph.host.max_colors)
+    wp.launch(
+        _scan_clear_kernel,
+        dim=max(1, total_color_epochs, graph.host.world_num_colors.shape[0]),
+        inputs=[
+            graph.scan_phase,
+            graph.scan_color,
+            graph.scan_next,
+            graph.scan_done,
+            graph.scan_busy,
+            graph.scan_done_worlds,
+            graph.total_done,
+            graph.failed,
+            wp.int32(graph.host.world_num_colors.shape[0]),
+            wp.int32(total_color_epochs),
+        ],
+        device=device,
+    )
+
+
+def _scan_runner(world: PhoenXWorld, graph: ChunkGraphDevice, *, chunk_threads: int, max_spins: int):
+    device = world.device
+    contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
+    idt = wp.float32(1.0 / world.substep_dt)
+    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    outer_iters = int(world.solver_iterations) // inner_sweeps
+    revolute_only = 1 if bool(world._use_revolute_specialization) else 0
+    dim = max(1, graph.worker_blocks * int(chunk_threads))
+
+    def run() -> None:
+        _reset_scan_graph(graph, device, num_epochs=1)
+        wp.launch(
+            _scan_prepare_kernel,
+            dim=dim,
+            block_dim=chunk_threads,
+            inputs=[
+                world.constraints,
+                world._contact_cols,
+                world.bodies,
+                world._particles_or_sentinel(),
+                idt,
+                world._world_element_ids_by_color,
+                graph.chunk_start,
+                graph.chunk_count,
+                graph.chunk_world,
+                graph.chunk_color,
+                graph.world_color_chunk_starts,
+                graph.world_num_colors,
+                graph.scan_phase,
+                graph.scan_color,
+                graph.scan_next,
+                graph.scan_done,
+                graph.scan_busy,
+                graph.scan_done_worlds,
+                graph.total_done,
+                graph.failed,
+                graph.worker_chunk,
+                graph.worker_epoch,
+                world._contact_container,
+                contact_views,
+                wp.int32(graph.host.chunk_start.shape[0]),
+                wp.int32(world.num_worlds),
+                wp.int32(graph.host.max_colors),
+                wp.int32(graph.worker_blocks),
+                wp.int32(chunk_threads),
+                wp.int32(max_spins),
+                wp.int32(world.num_joints),
+                wp.int32(world.num_bodies),
+                wp.int32(revolute_only),
+                world._copy_state,
+            ],
+            device=device,
+        )
+        _reset_scan_graph(graph, device, num_epochs=outer_iters)
+        wp.launch(
+            _scan_iterate_kernel,
+            dim=dim,
+            block_dim=chunk_threads,
+            inputs=[
+                world.constraints,
+                world._contact_cols,
+                world.bodies,
+                world._particles_or_sentinel(),
+                idt,
+                wp.float32(world.sor_boost),
+                world._world_element_ids_by_color,
+                graph.chunk_start,
+                graph.chunk_count,
+                graph.chunk_world,
+                graph.chunk_color,
+                graph.world_color_chunk_starts,
+                graph.world_num_colors,
+                graph.scan_phase,
+                graph.scan_color,
+                graph.scan_next,
+                graph.scan_done,
+                graph.scan_busy,
+                graph.scan_done_worlds,
+                graph.total_done,
+                graph.failed,
+                graph.worker_chunk,
+                graph.worker_epoch,
+                world._contact_container,
+                contact_views,
+                wp.int32(graph.host.chunk_start.shape[0]),
+                wp.int32(world.num_worlds),
+                wp.int32(graph.host.max_colors),
+                wp.int32(outer_iters),
+                wp.int32(graph.worker_blocks),
+                wp.int32(chunk_threads),
+                wp.int32(max_spins),
+                wp.int32(world.num_joints),
+                wp.int32(world.num_bodies),
+                wp.int32(revolute_only),
+                wp.int32(inner_sweeps),
+                world._copy_state,
+            ],
+            device=device,
+        )
+
+    return run
+
+
 def _bench(fn, *, n_runs: int, warmup: int, trials: int, device: wp.context.Devicelike) -> tuple[float, float]:
     for _ in range(warmup):
         fn()
@@ -1163,34 +1742,57 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
         host_graph, world.device, max_epochs=max(1, outer_iters), worker_blocks=args.worker_blocks
     )
     chunk_run = _chunk_runner(world, chunk_graph, chunk_threads=args.chunk_threads, max_spins=args.max_spins)
+    scan_run = _scan_runner(world, chunk_graph, chunk_threads=args.chunk_threads, max_spins=args.scan_max_spins)
 
-    chunk_run()
-    wp.synchronize_device()
-    _validate(chunk_graph, int(host_graph.chunk_start.shape[0]) * outer_iters, "chunk iterate")
+    measure_queue = args.scheduler_mode in ("queue", "both")
+    measure_scan = args.scheduler_mode in ("scan", "both")
+
+    if measure_queue:
+        chunk_run()
+        wp.synchronize_device()
+        _validate(chunk_graph, int(host_graph.chunk_start.shape[0]) * outer_iters, "queue iterate")
+    if measure_scan:
+        scan_run()
+        wp.synchronize_device()
+        _validate(chunk_graph, int(host_graph.chunk_start.shape[0]) * outer_iters, "scan iterate")
 
     base_min, base_med = _bench(
         world._solve_main, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=world.device
     )
-    chunk_min, chunk_med = _bench(
-        chunk_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=world.device
-    )
+    chunk_min = float("nan")
+    chunk_med = float("nan")
+    scan_min = float("nan")
+    scan_med = float("nan")
+    if measure_queue:
+        chunk_min, chunk_med = _bench(
+            chunk_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=world.device
+        )
+    if measure_scan:
+        scan_min, scan_med = _bench(
+            scan_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=world.device
+        )
     speed = base_min / chunk_min if chunk_min > 0.0 else float("nan")
+    scan_speed = base_min / scan_min if scan_min > 0.0 else float("nan")
     rows_per_world = float(host_graph.total_rows) / float(max(1, num_worlds))
     contact_fraction = float(host_graph.contact_rows) / float(max(1, host_graph.total_rows))
     chunks_per_world_color = float(host_graph.chunk_start.shape[0]) / float(max(1, num_worlds * host_graph.max_colors))
     use_chain = _select_chunk_chain(args, host_graph, num_worlds)
-    hybrid_min = chunk_min if use_chain else base_min
+    candidates = [("base", base_min)]
+    if measure_queue and use_chain:
+        candidates.append(("queue", chunk_min))
+    if measure_scan and use_chain:
+        candidates.append(("scan", scan_min))
+    hybrid_choice, hybrid_min = min(candidates, key=lambda item: item[1] if item[1] == item[1] else float("inf"))
     hybrid_speed = base_min / hybrid_min if hybrid_min > 0.0 else float("nan")
-    hybrid_choice = "chain" if use_chain else "base"
     print(
         f"{scene:7s} worlds={num_worlds:5d} rows={host_graph.total_rows:6d} chunks={host_graph.chunk_start.shape[0]:6d} "
         f"colors={host_graph.max_colors:3d} rowpw={rows_per_world:7.1f} contact_frac={contact_fraction:5.2f} "
-        f"chunkpc={chunks_per_world_color:5.2f} baseline={base_min:8.3f}ms chain={chunk_min:8.3f}ms "
-        f"speedup={speed:6.3f}x hybrid={hybrid_choice:5s} hybrid_speedup={hybrid_speed:6.3f}x "
-        f"base_us={1000.0 * base_min / args.n_runs:8.3f} chain_us={1000.0 * chunk_min / args.n_runs:8.3f}"
+        f"chunkpc={chunks_per_world_color:5.2f} baseline={base_min:8.3f}ms queue={chunk_min:8.3f}ms({speed:6.3f}x) "
+        f"scan={scan_min:8.3f}ms({scan_speed:6.3f}x) hybrid={hybrid_choice:5s} "
+        f"hybrid_speedup={hybrid_speed:6.3f}x base_us={1000.0 * base_min / args.n_runs:8.3f}"
     )
     if args.verbose:
-        print(f"  med baseline={base_med:.3f} ms chain={chunk_med:.3f} ms")
+        print(f"  med baseline={base_med:.3f} ms queue={chunk_med:.3f} ms scan={scan_med:.3f} ms")
 
 
 def parse_args() -> argparse.Namespace:
@@ -1206,6 +1808,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-threads", type=int, default=32)
     parser.add_argument("--worker-blocks", type=int, default=64)
     parser.add_argument("--max-spins", type=int, default=1048576)
+    parser.add_argument("--scan-max-spins", type=int, default=65536)
+    parser.add_argument("--scheduler-mode", choices=("queue", "scan", "both"), default="both")
     parser.add_argument("--hybrid-min-rows-per-world", type=float, default=256.0)
     parser.add_argument("--hybrid-min-contact-fraction", type=float, default=0.5)
     parser.add_argument("--hybrid-min-chunks-per-world-color", type=float, default=1.5)
@@ -1221,8 +1825,8 @@ def main() -> None:
     wp.init()
     worlds = [int(raw.strip()) for raw in args.worlds.split(",") if raw.strip()]
     print(
-        f"device={wp.get_device()} chunk_rows={args.chunk_rows} chunk_threads={args.chunk_threads} "
-        f"worker_blocks={args.worker_blocks} n_runs={args.n_runs}"
+        f"device={wp.get_device()} mode={args.scheduler_mode} chunk_rows={args.chunk_rows} "
+        f"chunk_threads={args.chunk_threads} worker_blocks={args.worker_blocks} n_runs={args.n_runs}"
     )
     for scene in args.scenes:
         for num_worlds in worlds:
