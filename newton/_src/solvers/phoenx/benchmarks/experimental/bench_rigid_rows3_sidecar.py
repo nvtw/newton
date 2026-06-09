@@ -72,6 +72,8 @@ def _make_projection_op(
     k_inv: wp.vec3f,
     residual: wp.vec3f,
     lambda_old: wp.vec3f,
+    mass_coeff: wp.vec3f,
+    impulse_coeff: wp.vec3f,
     lambda_min: wp.vec3f,
     lambda_max: wp.vec3f,
     projection_mode: wp.int32,
@@ -82,8 +84,8 @@ def _make_projection_op(
     op.k_inv = k_inv
     op.residual = residual
     op.lambda_old = lambda_old
-    op.mass_coeff = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(1.0))
-    op.impulse_coeff = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    op.mass_coeff = mass_coeff
+    op.impulse_coeff = impulse_coeff
     op.lambda_min = lambda_min
     op.lambda_max = lambda_max
     op.projection_mode = projection_mode
@@ -126,6 +128,8 @@ def _init_rows_kernel(
     k_inv: wp.array[wp.vec3f],
     bias: wp.array[wp.vec3f],
     lambda_old: wp.array[wp.vec3f],
+    mass_coeff: wp.array[wp.vec3f],
+    impulse_coeff: wp.array[wp.vec3f],
     lambda_min: wp.array[wp.vec3f],
     lambda_max: wp.array[wp.vec3f],
     projection_mode: wp.array[wp.int32],
@@ -193,6 +197,8 @@ def _init_rows_kernel(
         axis1[tid] = t1
         axis2[tid] = t2
         frame_mode[tid] = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(0.0))
+        mass_coeff[tid] = wp.vec3f(wp.float32(0.82), wp.float32(1.0), wp.float32(1.0))
+        impulse_coeff[tid] = wp.vec3f(wp.float32(0.11), wp.float32(0.0), wp.float32(0.0))
         projection_mode[tid] = VELOCITY_ROWS3_PROJECT_CONTACT_CONE
         lambda_min[tid] = wp.vec3f(wp.float32(0.0), -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
         lambda_max[tid] = wp.vec3f(BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF)
@@ -214,6 +220,8 @@ def _init_rows_kernel(
     else:
         family[tid] = _FAMILY_ANGULAR
         frame_mode[tid] = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
+        mass_coeff[tid] = wp.vec3f(wp.float32(0.90), wp.float32(0.95), wp.float32(1.0))
+        impulse_coeff[tid] = wp.vec3f(wp.float32(0.08), wp.float32(0.04), wp.float32(0.0))
         projection_mode[tid] = VELOCITY_ROWS3_PROJECT_BOUNDS
         lambda_min[tid] = wp.vec3f(-wp.float32(0.6), wp.float32(0.0), -wp.float32(0.25))
         lambda_max[tid] = wp.vec3f(wp.float32(0.6), BLOCK_LAMBDA_INF, wp.float32(0.25))
@@ -260,6 +268,8 @@ def _solve_sidecar_kernel(
     k_inv: wp.array[wp.vec3f],
     bias: wp.array[wp.vec3f],
     lambda_old: wp.array[wp.vec3f],
+    mass_coeff: wp.array[wp.vec3f],
+    impulse_coeff: wp.array[wp.vec3f],
     lambda_min: wp.array[wp.vec3f],
     lambda_max: wp.array[wp.vec3f],
     projection_mode: wp.array[wp.int32],
@@ -288,6 +298,8 @@ def _solve_sidecar_kernel(
         k_inv[tid],
         residual,
         lambda_old[tid],
+        mass_coeff[tid],
+        impulse_coeff[tid],
         lambda_min[tid],
         lambda_max[tid],
         projection_mode[tid],
@@ -323,6 +335,8 @@ def _solve_frame_kernel(
     k_inv: wp.array[wp.vec3f],
     bias: wp.array[wp.vec3f],
     lambda_old: wp.array[wp.vec3f],
+    mass_coeff: wp.array[wp.vec3f],
+    impulse_coeff: wp.array[wp.vec3f],
     lambda_min: wp.array[wp.vec3f],
     lambda_max: wp.array[wp.vec3f],
     projection_mode: wp.array[wp.int32],
@@ -346,8 +360,8 @@ def _solve_frame_kernel(
     rows.k_inv = k_inv[tid]
     rows.bias = bias[tid]
     rows.lambda_old = lambda_old[tid]
-    rows.mass_coeff = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(1.0))
-    rows.impulse_coeff = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    rows.mass_coeff = mass_coeff[tid]
+    rows.impulse_coeff = impulse_coeff[tid]
     rows.lambda_min = lambda_min[tid]
     rows.lambda_max = lambda_max[tid]
     rows.projection_mode = projection_mode[tid]
@@ -394,6 +408,8 @@ def _solve_split_kernel(
     k_inv: wp.array[wp.vec3f],
     bias: wp.array[wp.vec3f],
     lambda_old: wp.array[wp.vec3f],
+    mass_coeff: wp.array[wp.vec3f],
+    impulse_coeff: wp.array[wp.vec3f],
     lambda_min: wp.array[wp.vec3f],
     lambda_max: wp.array[wp.vec3f],
     projection_mode: wp.array[wp.int32],
@@ -423,6 +439,8 @@ def _solve_split_kernel(
             k_inv[tid],
             residual,
             lambda_old[tid],
+            mass_coeff[tid],
+            impulse_coeff[tid],
             lambda_min[tid],
             lambda_max[tid],
             projection_mode[tid],
@@ -446,6 +464,8 @@ def _solve_split_kernel(
             k_inv[tid],
             residual,
             lambda_old[tid],
+            mass_coeff[tid],
+            impulse_coeff[tid],
             lambda_min[tid],
             lambda_max[tid],
             projection_mode[tid],
@@ -544,6 +564,8 @@ def main() -> None:
     k_inv = _alloc_vec(rows, device)
     bias = _alloc_vec(rows, device)
     lambda_old = _alloc_vec(rows, device)
+    mass_coeff = _alloc_vec(rows, device)
+    impulse_coeff = _alloc_vec(rows, device)
     lambda_min = _alloc_vec(rows, device)
     lambda_max = _alloc_vec(rows, device)
     projection_mode = wp.empty(rows, dtype=wp.int32, device=device)
@@ -600,6 +622,8 @@ def main() -> None:
         k_inv,
         bias,
         lambda_old,
+        mass_coeff,
+        impulse_coeff,
         lambda_min,
         lambda_max,
         projection_mode,
@@ -631,6 +655,8 @@ def main() -> None:
         k_inv,
         bias,
         lambda_old,
+        mass_coeff,
+        impulse_coeff,
         lambda_min,
         lambda_max,
         projection_mode,
@@ -660,6 +686,8 @@ def main() -> None:
         k_inv,
         bias,
         lambda_old,
+        mass_coeff,
+        impulse_coeff,
         lambda_min,
         lambda_max,
         projection_mode,
@@ -692,6 +720,8 @@ def main() -> None:
         k_inv,
         bias,
         lambda_old,
+        mass_coeff,
+        impulse_coeff,
         lambda_min,
         lambda_max,
         projection_mode,
