@@ -253,6 +253,52 @@ def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]
     return wp.array(arr_np, dtype=wp.vec3f, device=device)
 
 
+def _choose_initial_threads_per_world(
+    *,
+    num_worlds: int,
+    num_joints: int,
+    max_contact_columns: int,
+    sm_count: int,
+) -> tuple[bool, int]:
+    """Choose the graph-capture-stable initial fast-tail lane count.
+
+    Returns ``(tpw_auto, initial_tpw)``. ``tpw_auto=True`` keeps the
+    per-step GPU picker active; otherwise ``initial_tpw`` is the fixed
+    fast-tail specialization used by captured graphs.
+    """
+    worlds = max(1, int(num_worlds))
+    sm = max(1, int(sm_count) or 1)
+    joints_per_world = float(num_joints) / float(worlds)
+    contacts_capacity_per_world = float(max_contact_columns) / float(worlds)
+
+    tpw_auto = worlds >= 8 * sm
+    initial_tpw = _STRAGGLER_BLOCK_DIM
+
+    sparse_joint_only_world = 0.0 < joints_per_world <= 40.0 and max_contact_columns == 0
+    if sparse_joint_only_world and worlds >= 4 * sm:
+        return False, 8
+    if sparse_joint_only_world and worlds >= 2 * sm:
+        return False, 16
+
+    if tpw_auto:
+        small_joint_world = 0.0 < joints_per_world <= 64.0 and contacts_capacity_per_world <= 512.0
+        dense_joint_world = joints_per_world > 64.0
+        dense_contact_only_world = num_joints == 0 and contacts_capacity_per_world > 256.0
+        simple_saturated_joint_contact_world = (
+            worlds >= 16 * sm and 0.0 < joints_per_world <= 32.0 and 128.0 <= contacts_capacity_per_world <= 384.0
+        )
+        if simple_saturated_joint_contact_world:
+            return False, 8
+        if small_joint_world:
+            return False, 16
+        if dense_contact_only_world:
+            return False, 8
+        if dense_joint_world:
+            return False, _STRAGGLER_BLOCK_DIM
+
+    return tpw_auto, initial_tpw
+
+
 def _mass_splitting_copy_capacity(
     *,
     num_joints: int,
@@ -671,33 +717,14 @@ class PhoenXWorld:
                 raise ValueError(f"threads_per_world must be 'auto' or one of (8, 16, 32) (got {threads_per_world!r})")
             # Host-side fast path: pin obvious topology/occupancy cases so
             # graph capture does not need guarded no-op fast-tail variants.
-            # Small joint-only worlds prefer fewer lanes once there are enough
-            # worlds to keep the GPU occupied; small fleets still prefer 32.
-            # Dense contact-only worlds prefer tpw=8 once saturated.
-            _sm = getattr(self.device, "sm_count", 0) or 1
-            self._tpw_auto: bool = self.num_worlds >= 8 * _sm
-            initial_tpw = _STRAGGLER_BLOCK_DIM
-            joints_per_world = self.num_joints / max(1, self.num_worlds)
-            contacts_capacity_per_world = self.max_contact_columns / max(1, self.num_worlds)
-            sparse_joint_only_world = 0.0 < joints_per_world <= 40.0 and self.max_contact_columns == 0
-            if sparse_joint_only_world and self.num_worlds >= 4 * _sm:
-                self._tpw_auto = False
-                initial_tpw = 8
-            elif sparse_joint_only_world and self.num_worlds >= 2 * _sm:
-                self._tpw_auto = False
-                initial_tpw = 16
-            elif self._tpw_auto:
-                small_joint_world = 0.0 < joints_per_world <= 64.0 and contacts_capacity_per_world <= 512.0
-                dense_joint_world = joints_per_world > 64.0
-                dense_contact_only_world = self.num_joints == 0 and contacts_capacity_per_world > 256.0
-                if small_joint_world:
-                    self._tpw_auto = False
-                    initial_tpw = 16
-                elif dense_contact_only_world:
-                    self._tpw_auto = False
-                    initial_tpw = 8
-                elif dense_joint_world:
-                    self._tpw_auto = False
+            # Small fleets still prefer 32; saturated simple robot fleets can
+            # profit from 16 or 8 lanes per world depending on topology.
+            self._tpw_auto, initial_tpw = _choose_initial_threads_per_world(
+                num_worlds=self.num_worlds,
+                num_joints=self.num_joints,
+                max_contact_columns=self.max_contact_columns,
+                sm_count=getattr(self.device, "sm_count", 0) or 1,
+            )
         else:
             tpw_int = int(threads_per_world)
             if tpw_int not in (8, 16, 32):

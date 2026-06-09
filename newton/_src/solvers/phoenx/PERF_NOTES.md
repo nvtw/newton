@@ -57,6 +57,7 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ### Adaptive threads-per-world (multi-world fast-tail)
 - The fast-tail launch grid is fixed at `num_worlds * _STRAGGLER_BLOCK_DIM` (= warp), but the active lane count per world (`tpw`) is picked per step from the colour histogram. `_pick_threads_per_world_kernel` reads `_world_num_colors` and `_world_csr_offsets` and writes `_tpw_choice[0]`.
+- Host-side `threads_per_world="auto"` pins obvious graph-capture-stable topologies before capture. On RTX PRO 6000, 4096-world H1-like fleets (`~23` joint rows/world, `~320` contact capacity/world) are faster at `tpw=8`, while 2048-world H1 and 4096-world G1/DR-Legs remain faster at `tpw=16`; `_choose_initial_threads_per_world` encodes that split.
 - Pinned to 32 below `8 * sm_count` worlds (picker overhead would never pay off). Captured-graph safe (no host sync).
 - User opt-out: `threads_per_world={8,16,32}` in the solver constructor.
 

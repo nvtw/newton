@@ -30,6 +30,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.solver import SolverPhoenX
+from newton._src.solvers.phoenx.solver_phoenx import _choose_initial_threads_per_world
 from newton._src.solvers.phoenx.tests._test_helpers import make_solver_graph_stepper
 from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums
 
@@ -117,6 +118,53 @@ class TestThreadsPerWorldPicker(unittest.TestCase):
                 world, _ = _build_n_pendulums(num_worlds=int(num_worlds), device=device)
                 self.assertFalse(world._tpw_auto)
                 self.assertEqual(int(world._tpw_choice.numpy()[0]), expected_tpw)
+
+    def test_saturated_simple_joint_contact_fleets_use_8(self) -> None:
+        """Deeply saturated simple robot fleets use narrower lane groups.
+
+        The topology rule targets low joint-count worlds with moderate
+        contact capacity. It should not pull larger G1-like robots or
+        low-contact DR-Legs-like robots away from tpw=16.
+        """
+        sm_count = 188
+        saturated_worlds = 16 * sm_count
+
+        self.assertEqual(
+            _choose_initial_threads_per_world(
+                num_worlds=saturated_worlds,
+                num_joints=23 * saturated_worlds,
+                max_contact_columns=320 * saturated_worlds,
+                sm_count=sm_count,
+            ),
+            (False, 8),
+        )
+        self.assertEqual(
+            _choose_initial_threads_per_world(
+                num_worlds=8 * sm_count,
+                num_joints=23 * 8 * sm_count,
+                max_contact_columns=320 * 8 * sm_count,
+                sm_count=sm_count,
+            ),
+            (False, 16),
+        )
+        self.assertEqual(
+            _choose_initial_threads_per_world(
+                num_worlds=saturated_worlds,
+                num_joints=43 * saturated_worlds,
+                max_contact_columns=510 * saturated_worlds,
+                sm_count=sm_count,
+            ),
+            (False, 16),
+        )
+        self.assertEqual(
+            _choose_initial_threads_per_world(
+                num_worlds=saturated_worlds,
+                num_joints=38 * saturated_worlds,
+                max_contact_columns=30 * saturated_worlds,
+                sm_count=sm_count,
+            ),
+            (False, 16),
+        )
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX adaptive-tpw tests require CUDA")
