@@ -16,7 +16,8 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.benchmarks.bench_color_grid_actual_solve import (
+from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extract_solver
+from newton._src.solvers.phoenx.benchmarks.experimental.bench_color_grid_actual_solve import (
     ColorGridHost,
     _bench,
     _build_scene,
@@ -25,7 +26,6 @@ from newton._src.solvers.phoenx.benchmarks.bench_color_grid_actual_solve import 
     _extract_color_grid,
     _upload_color_grid,
 )
-from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extract_solver
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 MAX_NODES_PER_ROW = 8
@@ -242,6 +242,7 @@ def _run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
     color_graph = _upload_color_grid(color_host, world.device)
     wave_graph = _upload_color_grid(wave_host, world.device)
     tail_graph = _upload_color_grid(tail_host, world.device)
+
     def make_run(graph):
         if args.mode == "mega":
             return _color_grid_mega_runner(

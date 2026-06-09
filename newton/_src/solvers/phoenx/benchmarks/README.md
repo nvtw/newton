@@ -87,6 +87,21 @@ env_fps / ms_per_step, and linear for gpu_used_gb. Needs
 `matplotlib` (not in Newton's core deps; install with
 `uv add matplotlib` or `pip install matplotlib`).
 
+## Experimental Scheduler Research
+
+Scheduler prototypes that are not production policy live under
+`benchmarks/experimental/`. They are useful for validating ideas like
+megakernels, dependency waves, color grids, and chunk queues, but the
+main `benchmarks/` package is reserved for repeatable production-facing
+measurements and profiles.
+
+```bash
+python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_megakernel_scheduling
+python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_color_grid_actual_solve
+python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_wave_schedule_actual_solve
+python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_chunk_task_actual_solve
+```
+
 ## Share an artefact
 
 To show someone the results, grab:

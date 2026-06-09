@@ -27,7 +27,7 @@ small PhoenX benchmark scenes and converts it into the same descriptor stream.
 
 Usage::
 
-    python -m newton._src.solvers.phoenx.benchmarks.bench_megakernel_scheduling
+    python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_megakernel_scheduling
 """
 
 from __future__ import annotations

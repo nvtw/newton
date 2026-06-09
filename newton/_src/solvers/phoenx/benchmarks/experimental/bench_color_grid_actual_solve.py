@@ -616,7 +616,6 @@ def _color_grid_iterate_direct_kernel(
                 )
 
 
-
 @wp.kernel(enable_backward=False)
 def _block_world_prepare_iterate_kernel(
     constraints: ConstraintContainer,
@@ -736,6 +735,7 @@ def _block_world_prepare_iterate_kernel(
             _sync_threads()
             color = color + wp.int32(1)
         outer = outer + wp.int32(1)
+
 
 def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iterations: int):
     if scene == "h1":
@@ -1207,8 +1207,7 @@ def _run_autotune(
     best_speed = baseline / best_min if best_min > 0.0 else float("nan")
     print(
         f"{scene:5s} worlds={num_worlds:5d} rows={row_count:6d} colors={grid_graph.host.num_colors:4d} "
-        f"best={best_candidate.label} best_speedup={best_speed:5.3f}x "
-        + _format_candidate_results(results, baseline)
+        f"best={best_candidate.label} best_speedup={best_speed:5.3f}x " + _format_candidate_results(results, baseline)
     )
 
 
