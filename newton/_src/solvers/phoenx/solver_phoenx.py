@@ -100,7 +100,7 @@ from newton._src.solvers.phoenx.constraints.contact_ingest import (
     ingest_contacts,
     stamp_forward_contact_map,
 )
-from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldFastTailDispatcher
+from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import (
     SingleWorldMassSplittingDispatcher,
@@ -1150,7 +1150,7 @@ class PhoenXWorld:
         else:
             # mass_splitting + multi_world is rejected by the earlier
             # validation in this ctor.
-            self._dispatcher = MultiWorldFastTailDispatcher(self)
+            self._dispatcher = MultiWorldDispatcher(self)
 
         self._assert_invariants()
 

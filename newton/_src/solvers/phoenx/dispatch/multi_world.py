@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Multi-world dispatcher (mass splitting OFF). One block per world;
-the fast-tail kernel runs prepare + every iterate sweep in a single
-launch. Per-world coloring is built upstream in
-:meth:`PhoenXWorld._build_per_world_coloring`. Mass splitting is not
-supported on this path (per-world CSR layout)."""
+"""Multi-world dispatcher (mass splitting OFF).
+
+Per-world coloring is built upstream in
+:meth:`PhoenXWorld._build_per_world_coloring`. The selected scheduler may be
+fast-tail or block-per-world, but it is fixed before CUDA graph capture. Mass
+splitting is not supported on this path (per-world CSR layout).
+"""
 
 from __future__ import annotations
 
@@ -17,8 +19,8 @@ if TYPE_CHECKING:
     from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
-class MultiWorldFastTailDispatcher:
-    """Per-world fast-tail PGS dispatcher (mass splitting OFF)."""
+class MultiWorldDispatcher:
+    """Per-world multi-world PGS dispatcher (mass splitting OFF)."""
 
     __slots__ = ("_world",)
 
@@ -43,4 +45,4 @@ class MultiWorldFastTailDispatcher:
             self._world._relax_velocities()
 
 
-__all__ = ["MultiWorldFastTailDispatcher"]
+__all__ = ["MultiWorldDispatcher"]
