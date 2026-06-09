@@ -111,46 +111,77 @@ def _force_tpw(solver: SolverPhoenX, tpw) -> None:
     solver.world._tpw_choice.assign([tpw_int])
 
 
-def _build_h1(num_worlds: int, tpw, *, substeps: int, solver_iterations: int):
+def _build_h1(
+    num_worlds: int,
+    tpw,
+    *,
+    substeps: int,
+    solver_iterations: int,
+    prepare_refresh_stride: int | str,
+) -> tuple[SolverPhoenX, Callable[[], None]]:
     """h1_flat fleet builder. Returns ``(solver, simulate_one_frame)``."""
     handle = h1_flat.build(
         num_worlds=num_worlds,
         solver_name="phoenx",
         substeps=substeps,
         solver_iterations=solver_iterations,
+        prepare_refresh_stride=prepare_refresh_stride,
     )
     solver = _extract_solver(handle)
     _force_tpw(solver, tpw)
     return solver, handle.simulate_one_frame
 
 
-def _build_g1(num_worlds: int, tpw, *, substeps: int, solver_iterations: int):
+def _build_g1(
+    num_worlds: int,
+    tpw,
+    *,
+    substeps: int,
+    solver_iterations: int,
+    prepare_refresh_stride: int | str,
+) -> tuple[SolverPhoenX, Callable[[], None]]:
     """g1_flat fleet builder. Returns ``(solver, simulate_one_frame)``."""
     handle = g1_flat.build(
         num_worlds=num_worlds,
         solver_name="phoenx",
         substeps=substeps,
         solver_iterations=solver_iterations,
+        prepare_refresh_stride=prepare_refresh_stride,
     )
     solver = _extract_solver(handle)
     _force_tpw(solver, tpw)
     return solver, handle.simulate_one_frame
 
 
-def _build_dr_legs(num_worlds: int, tpw, *, substeps: int, solver_iterations: int):
+def _build_dr_legs(
+    num_worlds: int,
+    tpw,
+    *,
+    substeps: int,
+    solver_iterations: int,
+    prepare_refresh_stride: int | str,
+) -> tuple[SolverPhoenX, Callable[[], None]]:
     """DR Legs fleet builder. Returns ``(solver, simulate_one_frame)``."""
     handle = dr_legs.build(
         num_worlds=num_worlds,
         solver_name="phoenx",
         substeps=substeps,
         solver_iterations=solver_iterations,
+        prepare_refresh_stride=prepare_refresh_stride,
     )
     solver = _extract_solver(handle)
     _force_tpw(solver, tpw)
     return solver, handle.simulate_one_frame
 
 
-def _build_tower(num_worlds: int, tpw, *, substeps: int, solver_iterations: int):
+def _build_tower(
+    num_worlds: int,
+    tpw,
+    *,
+    substeps: int,
+    solver_iterations: int,
+    prepare_refresh_stride: int | str,
+) -> tuple[SolverPhoenX, Callable[[], None]]:
     """tower (multi_world layout) builder. Returns ``(solver, simulate_one_frame)``."""
     handle = tower.build(
         num_worlds=num_worlds,
@@ -158,6 +189,7 @@ def _build_tower(num_worlds: int, tpw, *, substeps: int, solver_iterations: int)
         substeps=substeps,
         solver_iterations=solver_iterations,
         step_layout="multi_world",
+        prepare_refresh_stride=prepare_refresh_stride,
     )
     solver = _extract_solver(handle)
     _force_tpw(solver, tpw)
@@ -201,6 +233,7 @@ def _run_scene(
     trials: int,
     substeps: int,
     solver_iterations: int,
+    prepare_refresh_stride: int | str,
 ) -> None:
     print(f"\n=== {label} (num_worlds={num_worlds}, n_runs={n_runs}, trials={trials}) ===")
     results: dict[str, tuple[float, float, int]] = {}
@@ -210,6 +243,7 @@ def _run_scene(
             tpw=tpw,
             substeps=substeps,
             solver_iterations=solver_iterations,
+            prepare_refresh_stride=prepare_refresh_stride,
         )
         # A few real frames so contacts populate and the picker has a
         # current colour-stat snapshot to react to.
@@ -217,11 +251,12 @@ def _run_scene(
             simulate()
         wp.synchronize_device()
         chosen = int(solver.world._tpw_choice.numpy()[0]) if tpw == "auto" else int(tpw)
+        chosen_prepare_refresh_stride = int(solver.world.prepare_refresh_stride)
         min_ms, med_ms = _bench(simulate, n_runs=n_runs, warmup=warmup, trials=trials)
         results[str(tpw)] = (min_ms, med_ms, chosen)
         per_frame_us = 1000.0 * min_ms / n_runs
         print(
-            f"  tpw={tpw!s:>5s}  chosen={chosen:>2d}  "
+            f"  tpw={tpw!s:>5s}  chosen={chosen:>2d}  prep={chosen_prepare_refresh_stride:>2d}  "
             f"min={min_ms:8.2f} ms  med={med_ms:8.2f} ms  "
             f"({per_frame_us:7.2f} us/frame @min)"
         )
@@ -250,6 +285,11 @@ _SCENE_REGISTRY: dict[str, tuple[Callable, str, int]] = {
 }
 
 
+def _parse_stride_value(value: str) -> int | str:
+    item = value.strip().lower()
+    return "auto" if item == "auto" else int(item)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
@@ -265,6 +305,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=16, help="Frames stepped before capture so contacts settle.")
     parser.add_argument("--trials", type=int, default=3, help="Independent trials per (scene, tpw) -- min taken.")
     parser.add_argument("--substeps", type=int, default=1)
+    parser.add_argument("--prepare-refresh-stride", type=_parse_stride_value, default=1)
     parser.add_argument("--solver_iterations", type=int, default=8)
     args = parser.parse_args()
 
@@ -284,6 +325,7 @@ def main() -> None:
             trials=args.trials,
             substeps=args.substeps,
             solver_iterations=args.solver_iterations,
+            prepare_refresh_stride=args.prepare_refresh_stride,
         )
 
 

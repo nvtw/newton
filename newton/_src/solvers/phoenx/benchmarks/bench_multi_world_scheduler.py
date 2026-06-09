@@ -30,20 +30,45 @@ from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1
 from newton._src.solvers.phoenx.solver import SolverPhoenX
 
 
-def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iterations: int):
+def _build_scene(
+    scene: str,
+    num_worlds: int,
+    *,
+    substeps: int,
+    solver_iterations: int,
+    prepare_refresh_stride: int | str,
+):
     if scene == "h1":
-        return h1_flat.build(num_worlds, "phoenx", substeps, solver_iterations)
+        return h1_flat.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
     if scene == "g1":
-        return g1_flat.build(num_worlds, "phoenx", substeps, solver_iterations)
+        return g1_flat.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
     if scene == "dr_legs":
-        return dr_legs.build(num_worlds, "phoenx", substeps, solver_iterations)
+        return dr_legs.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
     if scene == "tower":
-        return tower.build(num_worlds, "phoenx", substeps, solver_iterations, step_layout="multi_world")
+        return tower.build(
+            num_worlds,
+            "phoenx",
+            substeps,
+            solver_iterations,
+            step_layout="multi_world",
+            prepare_refresh_stride=prepare_refresh_stride,
+        )
     raise ValueError(f"unknown scene {scene!r}")
 
 
 def _parse_csv_ints(value: str) -> tuple[int, ...]:
     return tuple(int(raw.strip()) for raw in value.split(",") if raw.strip())
+
+
+def _parse_stride_value(value: str) -> int | str:
+    item = value.strip().lower()
+    return "auto" if item == "auto" else int(item)
 
 
 def _parse_tpw_values(value: str) -> tuple[int | str, ...]:
@@ -154,6 +179,7 @@ def _measure_scheduler(
         num_worlds,
         substeps=args.substeps,
         solver_iterations=args.solver_iterations,
+        prepare_refresh_stride=args.prepare_refresh_stride,
     )
     solver = _extract_solver(handle)
     _apply_scheduler(solver, scheduler)
@@ -171,6 +197,7 @@ def _measure_scheduler(
         f",wpb={int(world._fast_tail_worlds_per_block())}"
         f",block_dim={int(world._multi_world_block_dim)}"
         f",family={bool(world._fast_tail_family_split())}"
+        f",prep={int(world.prepare_refresh_stride)}"
     )
     min_ms, med_ms = _bench(handle.simulate_one_frame, n_runs=n_runs, warmup=warmup, trials=args.trials)
     return scheduler, min_ms, med_ms, resolved
@@ -272,6 +299,7 @@ def main() -> None:
     parser.add_argument("--fast-tail-wpb", type=_parse_csv_ints, default=(1, 2, 4))
     parser.add_argument("--block-world-dims", type=_parse_csv_ints, default=(32, 64, 128))
     parser.add_argument("--substeps", type=int, default=1)
+    parser.add_argument("--prepare-refresh-stride", type=_parse_stride_value, default=1)
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--prime-frames", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=2)
@@ -285,6 +313,7 @@ def main() -> None:
     wp.init()
     print(
         f"device={wp.get_device()} mode={args.mode} n_runs={args.n_runs} adapt_runs={args.adapt_runs} "
+        f"prepare_refresh_stride={args.prepare_refresh_stride} "
         f"fast_tail_tpw={args.fast_tail_tpw} fast_tail_wpb={args.fast_tail_wpb} "
         f"block_world_dims={args.block_world_dims}"
     )

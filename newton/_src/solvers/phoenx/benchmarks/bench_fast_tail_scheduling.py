@@ -27,13 +27,26 @@ from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _bench
 from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
 
 
-def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iterations: int):
+def _build_scene(
+    scene: str,
+    num_worlds: int,
+    *,
+    substeps: int,
+    solver_iterations: int,
+    prepare_refresh_stride: int | str,
+):
     if scene == "h1":
-        return h1_flat.build(num_worlds, "phoenx", substeps, solver_iterations)
+        return h1_flat.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
     if scene == "g1":
-        return g1_flat.build(num_worlds, "phoenx", substeps, solver_iterations)
+        return g1_flat.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
     if scene == "dr_legs":
-        return dr_legs.build(num_worlds, "phoenx", substeps, solver_iterations)
+        return dr_legs.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
     if scene == "tower":
         return tower.build(
             num_worlds,
@@ -41,6 +54,7 @@ def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iteration
             substeps,
             solver_iterations,
             step_layout="multi_world",
+            prepare_refresh_stride=prepare_refresh_stride,
         )
     raise ValueError(f"unknown scene: {scene}")
 
@@ -73,11 +87,18 @@ def _measure_case(
     scheduler: str,
     substeps: int,
     solver_iterations: int,
+    prepare_refresh_stride: int | str,
     warmup: int,
     n_runs: int,
     trials: int,
-) -> tuple[float, float, int, int, bool, str, int, int, int, float]:
-    handle = _build_scene(scene, num_worlds, substeps=substeps, solver_iterations=solver_iterations)
+) -> tuple[float, float, int, int, bool, str, int, int, int, float, int]:
+    handle = _build_scene(
+        scene,
+        num_worlds,
+        substeps=substeps,
+        solver_iterations=solver_iterations,
+        prepare_refresh_stride=prepare_refresh_stride,
+    )
     solver = _extract_solver(handle)
     world = solver.world
     _force_tpw(solver, tpw)
@@ -109,7 +130,13 @@ def _measure_case(
         num_colors,
         total_cids,
         contacts_per_world,
+        int(world.prepare_refresh_stride),
     )
+
+
+def _parse_stride_value(value: str) -> int | str:
+    item = value.strip().lower()
+    return "auto" if item == "auto" else int(item)
 
 
 def _parse_csv_ints(value: str) -> tuple[int, ...]:
@@ -174,6 +201,7 @@ def main() -> None:
         help="Comma-separated default,on,off values for joint/contact family splitting.",
     )
     parser.add_argument("--substeps", type=int, default=1)
+    parser.add_argument("--prepare-refresh-stride", type=_parse_stride_value, default=1)
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--n-runs", type=int, default=40)
@@ -184,7 +212,7 @@ def main() -> None:
     print(f"device={wp.get_device()} sm_count={getattr(wp.get_device(), 'sm_count', 'N/A')}")
     print(
         "scene worlds scheduler tpw wpb family chosen_scheduler chosen_tpw chosen_wpb block_dim chosen_family "
-        "min_ms med_ms us_per_frame max_colors total_cids contacts_per_world rel_best"
+        "prep min_ms med_ms us_per_frame max_colors total_cids contacts_per_world rel_best"
     )
 
     for scene in args.scenes:
@@ -209,6 +237,7 @@ def main() -> None:
                             num_colors,
                             total_cids,
                             contacts_per_world,
+                            chosen_prepare_refresh_stride,
                         ) = _measure_case(
                             scene=scene,
                             num_worlds=num_worlds,
@@ -218,6 +247,7 @@ def main() -> None:
                             scheduler=args.scheduler,
                             substeps=args.substeps,
                             solver_iterations=args.solver_iterations,
+                            prepare_refresh_stride=args.prepare_refresh_stride,
                             warmup=args.warmup,
                             n_runs=args.n_runs,
                             trials=args.trials,
@@ -239,6 +269,7 @@ def main() -> None:
                                 num_colors,
                                 total_cids,
                                 contacts_per_world,
+                                chosen_prepare_refresh_stride,
                             )
                         )
             best = min(row[0] for row in rows)
@@ -259,12 +290,14 @@ def main() -> None:
                     num_colors,
                     total_cids,
                     contacts_per_world,
+                    chosen_prepare_refresh_stride,
                 ) = row
                 rel_best = min_ms / best if best > 0.0 else float("nan")
                 print(
                     f"{row_scene:7s} {row_num_worlds:6d} {args.scheduler:>9s} {row_tpw!s:>4s} {wpb!s:>7s} "
                     f"{row_family_split:>7s} {chosen_scheduler:>16s} {chosen_tpw:10d} {chosen_wpb:10d} "
-                    f"{chosen_block_dim:9d} {chosen_family_split!s:>13s} {min_ms:8.3f} {med_ms:8.3f} "
+                    f"{chosen_block_dim:9d} {chosen_family_split!s:>13s} {chosen_prepare_refresh_stride:4d} "
+                    f"{min_ms:8.3f} {med_ms:8.3f} "
                     f"{1000.0 * min_ms / args.n_runs:12.3f} {num_colors:10d} {total_cids:10d} "
                     f"{contacts_per_world:18.1f} {rel_best:8.3f}"
                 )
