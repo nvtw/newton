@@ -642,6 +642,148 @@ def _solve_mixed_tagged_kernel(
         epoch = epoch + wp.int32(1)
 
 
+@wp.kernel(enable_backward=False)
+def _solve_hybrid_contact_mixed_kernel(
+    row_ids: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    world_color_starts: wp.array[wp.int32],
+    family: wp.array[wp.int32],
+    v_a: wp.array[wp.vec3f],
+    w_a: wp.array[wp.vec3f],
+    v_b: wp.array[wp.vec3f],
+    w_b: wp.array[wp.vec3f],
+    inv_m_a: wp.array[wp.float32],
+    inv_m_b: wp.array[wp.float32],
+    inv_i_a: wp.array[wp.mat33f],
+    inv_i_b: wp.array[wp.mat33f],
+    axis0: wp.array[wp.vec3f],
+    axis1: wp.array[wp.vec3f],
+    axis2: wp.array[wp.vec3f],
+    r0: wp.array[wp.vec3f],
+    r1: wp.array[wp.vec3f],
+    k_inv_diag: wp.array[wp.vec3f],
+    k_inv_block: wp.array[wp.mat33f],
+    bias: wp.array[wp.vec3f],
+    lambda_old: wp.array[wp.vec3f],
+    mass_coeff: wp.array[wp.vec3f],
+    impulse_coeff: wp.array[wp.vec3f],
+    lambda_min: wp.array[wp.vec3f],
+    lambda_max: wp.array[wp.vec3f],
+    projection_mode: wp.array[wp.int32],
+    friction_static: wp.array[wp.float32],
+    friction_kinetic: wp.array[wp.float32],
+    out_va: wp.array[wp.vec3f],
+    out_wa: wp.array[wp.vec3f],
+    out_vb: wp.array[wp.vec3f],
+    out_wb: wp.array[wp.vec3f],
+    out_lambda: wp.array[wp.vec3f],
+    num_worlds: wp.int32,
+    iterations: wp.int32,
+    threads_per_world: wp.int32,
+):
+    tid = wp.tid()
+    local_tid = tid % threads_per_world
+    world_id = tid / threads_per_world
+    if world_id >= num_worlds:
+        return
+
+    color_begin = world_color_starts[world_id]
+    color_end = world_color_starts[world_id + wp.int32(1)]
+    epoch = wp.int32(0)
+    while epoch < iterations:
+        color = color_begin
+        while color < color_end:
+            start = color_starts[color]
+            end = color_starts[color + wp.int32(1)]
+            cursor = start + local_tid
+            while cursor < end:
+                row = row_ids[cursor]
+                fam = family[row]
+                va = v_a[row]
+                wa = w_a[row]
+                vb = v_b[row]
+                wb = w_b[row]
+                a0 = axis0[row]
+                a1 = axis1[row]
+                a2 = axis2[row]
+                rr0 = r0[row]
+                rr1 = r1[row]
+
+                if fam == _FAMILY_CONTACT:
+                    rel = vb + wp.cross(wb, rr1) - va - wp.cross(wa, rr0)
+                    residual = wp.vec3f(wp.dot(a0, rel), wp.dot(a1, rel), wp.dot(a2, rel)) + bias[row]
+                    op = VelocityRows3Op()
+                    op.k_inv = k_inv_diag[row]
+                    op.residual = residual
+                    op.lambda_old = lambda_old[row]
+                    op.mass_coeff = mass_coeff[row]
+                    op.impulse_coeff = impulse_coeff[row]
+                    op.lambda_min = lambda_min[row]
+                    op.lambda_max = lambda_max[row]
+                    op.projection_mode = projection_mode[row]
+                    op.friction_static = friction_static[row]
+                    op.friction_kinetic = friction_kinetic[row]
+                    contact_update = block_solve_velocity_rows3_op(op, wp.float32(1.0))
+                    impulse = contact_update.delta[0] * a0 + contact_update.delta[1] * a1 + contact_update.delta[2] * a2
+                    out_va[row] = va - inv_m_a[row] * impulse
+                    out_vb[row] = vb + inv_m_b[row] * impulse
+                    out_wa[row] = wa - inv_i_a[row] @ wp.cross(rr0, impulse)
+                    out_wb[row] = wb + inv_i_b[row] @ wp.cross(rr1, impulse)
+                    out_lambda[row] = contact_update.lambda_new
+                else:
+                    linear = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+                    cross = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+                    angular = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+                    if fam == _FAMILY_POINT:
+                        linear = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(1.0))
+                        cross = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(1.0))
+                    elif fam == _FAMILY_ANGULAR:
+                        angular = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(1.0))
+                    else:
+                        linear = wp.vec3f(wp.float32(1.0), wp.float32(0.0), wp.float32(0.0))
+                        angular = wp.vec3f(wp.float32(0.0), wp.float32(1.0), wp.float32(1.0))
+
+                    rows = RigidFrameBlock3Mixed()
+                    rows.axis0 = a0
+                    rows.axis1 = a1
+                    rows.axis2 = a2
+                    rows.r0 = rr0
+                    rows.r1 = rr1
+                    rows.linear_mode = linear
+                    rows.cross_mode = cross
+                    rows.angular_mode = angular
+                    rows.k_inv = k_inv_block[row]
+                    rows.bias = bias[row]
+                    rows.lambda_old = lambda_old[row]
+                    rows.mass_coeff = mass_coeff[row]
+                    rows.impulse_coeff = impulse_coeff[row]
+                    rows.lambda_min = lambda_min[row]
+                    rows.lambda_max = lambda_max[row]
+                    rows.projection_mode = projection_mode[row]
+                    rows.friction_static = friction_static[row]
+                    rows.friction_kinetic = friction_kinetic[row]
+
+                    state = RigidFrameRows3State()
+                    state.v_a = va
+                    state.w_a = wa
+                    state.v_b = vb
+                    state.w_b = wb
+                    state.inv_m_a = inv_m_a[row]
+                    state.inv_m_b = inv_m_b[row]
+                    state.inv_i_a = inv_i_a[row]
+                    state.inv_i_b = inv_i_b[row]
+
+                    mixed_update = block_solve_rigid_frame_block3_mixed(rows, state, wp.float32(1.0))
+                    out_va[row] = mixed_update.v_a
+                    out_wa[row] = mixed_update.w_a
+                    out_vb[row] = mixed_update.v_b
+                    out_wb[row] = mixed_update.w_b
+                    out_lambda[row] = mixed_update.lambda_new
+                cursor = cursor + threads_per_world
+            color = color + wp.int32(1)
+        epoch = epoch + wp.int32(1)
+
+
 def _parse_scenes(value: str) -> tuple[str, ...]:
     scenes = tuple(raw.strip() for raw in value.split(",") if raw.strip())
     for scene in scenes:
@@ -719,6 +861,11 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     tagged_vb = _alloc_vec(rows, device)
     tagged_wb = _alloc_vec(rows, device)
     tagged_lambda = _alloc_vec(rows, device)
+    hybrid_va = _alloc_vec(rows, device)
+    hybrid_wa = _alloc_vec(rows, device)
+    hybrid_vb = _alloc_vec(rows, device)
+    hybrid_wb = _alloc_vec(rows, device)
+    hybrid_lambda = _alloc_vec(rows, device)
 
     wp.launch(
         _init_mixed_frame_kernel,
@@ -874,6 +1021,44 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         int(args.iterations),
         int(args.threads_per_world),
     ]
+    hybrid_inputs = [
+        row_ids,
+        color_starts,
+        world_color_starts,
+        family,
+        v_a,
+        w_a,
+        v_b,
+        w_b,
+        inv_m_a,
+        inv_m_b,
+        inv_i_a,
+        inv_i_b,
+        axis0,
+        axis1,
+        axis2,
+        r0,
+        r1,
+        k_inv_diag,
+        k_inv_block,
+        bias,
+        lambda_old,
+        mass_coeff,
+        impulse_coeff,
+        lambda_min,
+        lambda_max,
+        projection_mode,
+        friction_static,
+        friction_kinetic,
+        hybrid_va,
+        hybrid_wa,
+        hybrid_vb,
+        hybrid_wb,
+        hybrid_lambda,
+        int(args.worlds),
+        int(args.iterations),
+        int(args.threads_per_world),
+    ]
 
     def split_run() -> None:
         wp.launch(
@@ -902,9 +1087,19 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
             block_dim=int(args.block_dim),
         )
 
+    def hybrid_run() -> None:
+        wp.launch(
+            _solve_hybrid_contact_mixed_kernel,
+            dim=max(1, int(args.worlds) * int(args.threads_per_world)),
+            inputs=hybrid_inputs,
+            device=device,
+            block_dim=int(args.block_dim),
+        )
+
     split_run()
     mixed_run()
     tagged_run()
+    hybrid_run()
     mixed_err = _max_err(
         (mixed_va, split_va),
         (mixed_wa, split_wa),
@@ -919,17 +1114,26 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         (tagged_wb, split_wb),
         (tagged_lambda, split_lambda),
     )
+    hybrid_err = _max_err(
+        (hybrid_va, split_va),
+        (hybrid_wa, split_wa),
+        (hybrid_vb, split_vb),
+        (hybrid_wb, split_wb),
+        (hybrid_lambda, split_lambda),
+    )
     split_ms, _ = _bench(split_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
     mixed_ms, _ = _bench(mixed_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
     tagged_ms, _ = _bench(tagged_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
+    hybrid_ms, _ = _bench(hybrid_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
     mixed_speedup = split_ms / mixed_ms if mixed_ms > 0.0 else float("nan")
     tagged_speedup = split_ms / tagged_ms if tagged_ms > 0.0 else float("nan")
+    hybrid_speedup = split_ms / hybrid_ms if hybrid_ms > 0.0 else float("nan")
     print(
         f"{scene:8s} worlds={int(args.worlds):5d} rows={rows:7d} colors={schedule.colors:5d} "
         f"slots=(c{contact_slots},p{point_slots},a{angular_slots},m{planar_slots}) "
         f"split={split_ms:8.4f}ms mixed={mixed_ms:8.4f}ms tagged={tagged_ms:8.4f}ms "
-        f"speedups=({mixed_speedup:6.3f}x,{tagged_speedup:6.3f}x) "
-        f"errs=({mixed_err:.6g},{tagged_err:.6g})"
+        f"hybrid={hybrid_ms:8.4f}ms speedups=({mixed_speedup:6.3f}x,{tagged_speedup:6.3f}x,{hybrid_speedup:6.3f}x) "
+        f"errs=({mixed_err:.6g},{tagged_err:.6g},{hybrid_err:.6g})"
     )
 
 
