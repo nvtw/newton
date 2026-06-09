@@ -6,7 +6,7 @@
 #
 # FR3/Panda arm teleoperation baseline using IK target control and the
 # MuJoCo solver.  The target can be moved with the viewer gizmo, keyboard, or
-# an optional 3Dconnexion SpaceMouse via pyspacemouse when installed.
+# an Xbox-style gamepad through pyglet's controller API.
 #
 # Command: python -m newton.examples robot_teleop_mujoco
 #
@@ -18,6 +18,7 @@ import argparse
 import copy
 import math
 import time
+import warnings
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any
@@ -47,13 +48,27 @@ def _np_to_vec3(v: np.ndarray) -> wp.vec3:
 @wp.kernel
 def _write_robot_targets_kernel(
     joint_q_ik: wp.array2d[wp.float32],
+    previous_joint_target_q: wp.array[wp.float32],
     gripper_value: wp.float32,
+    dt: wp.float32,
+    velocity_feedforward: wp.float32,
+    max_target_velocity: wp.float32,
     joint_target_q: wp.array[wp.float32],
+    joint_target_qd: wp.array[wp.float32],
 ):
     for i in range(7):
-        joint_target_q[i] = joint_q_ik[0, i]
-    joint_target_q[7] = gripper_value
-    joint_target_q[8] = gripper_value
+        q = joint_q_ik[0, i]
+        qd = velocity_feedforward * (q - previous_joint_target_q[i]) / dt
+        joint_target_q[i] = q
+        joint_target_qd[i] = wp.clamp(qd, -max_target_velocity, max_target_velocity)
+        previous_joint_target_q[i] = q
+
+    for i in range(7, 9):
+        q = gripper_value
+        qd = velocity_feedforward * (q - previous_joint_target_q[i]) / dt
+        joint_target_q[i] = q
+        joint_target_qd[i] = wp.clamp(qd, -max_target_velocity, max_target_velocity)
+        previous_joint_target_q[i] = q
 
 
 class WindowStats:
@@ -86,71 +101,89 @@ class TeleopCommand:
     source: str = "scripted"
 
 
-class SpaceMouseInput:
+class GamepadInput:
     def __init__(self):
         self.enabled = False
         self.status = "disabled"
-        self._module: Any | None = None
+        self._controller: Any | None = None
 
-    def open(self) -> bool:
+    def open(self, window: Any | None = None) -> bool:
         try:
-            import pyspacemouse  # noqa: PLC0415
+            import pyglet  # noqa: PLC0415
         except Exception as exc:
-            self.status = f"pyspacemouse unavailable ({type(exc).__name__})"
+            self.status = f"pyglet controller API unavailable ({type(exc).__name__})"
             return False
 
         try:
-            device = pyspacemouse.open()
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*has no controller mappings.*")
+                controllers = pyglet.input.get_controllers()
         except Exception as exc:
-            self.status = f"SpaceMouse open failed ({type(exc).__name__})"
+            self.status = f"gamepad scan failed ({type(exc).__name__})"
             return False
 
-        if not device:
-            self.status = "SpaceMouse not found"
+        if not controllers:
+            self.status = "gamepad not found"
             return False
 
-        self._module = pyspacemouse
+        controller = controllers[0]
+        try:
+            controller.open(window=window)
+        except Exception as exc:
+            self.status = f"gamepad open failed ({type(exc).__name__})"
+            return False
+
+        self._controller = controller
         self.enabled = True
-        self.status = "SpaceMouse connected"
+        name = getattr(controller, "name", None) or "gamepad"
+        self.status = f"{name} connected"
         return True
 
+    @staticmethod
+    def _axis(value: float, deadzone: float = 0.15) -> float:
+        value = max(-1.0, min(1.0, float(value)))
+        if abs(value) <= deadzone:
+            return 0.0
+        return math.copysign((abs(value) - deadzone) / (1.0 - deadzone), value)
+
     def read(self) -> TeleopCommand:
-        if not self.enabled or self._module is None:
-            return TeleopCommand(np.zeros(3, dtype=np.float32), np.zeros(3, dtype=np.float32), source="spacemouse")
+        if not self.enabled or self._controller is None:
+            return TeleopCommand(np.zeros(3, dtype=np.float32), np.zeros(3, dtype=np.float32), source="gamepad")
 
-        try:
-            state = self._module.read()
-        except Exception as exc:
-            self.enabled = False
-            self.status = f"SpaceMouse read failed ({type(exc).__name__})"
-            return TeleopCommand(np.zeros(3, dtype=np.float32), np.zeros(3, dtype=np.float32), source="spacemouse")
+        controller = self._controller
+        left_x = self._axis(getattr(controller, "leftx", 0.0))
+        left_y = self._axis(getattr(controller, "lefty", 0.0))
+        right_x = self._axis(getattr(controller, "rightx", 0.0))
+        right_y = self._axis(getattr(controller, "righty", 0.0))
+        left_trigger = self._axis(getattr(controller, "lefttrigger", 0.0), deadzone=0.05)
+        right_trigger = self._axis(getattr(controller, "righttrigger", 0.0), deadzone=0.05)
 
-        if state is None:
-            return TeleopCommand(np.zeros(3, dtype=np.float32), np.zeros(3, dtype=np.float32), source="spacemouse")
-
-        def axis(name: str) -> float:
-            value = float(getattr(state, name, 0.0))
-            return max(-1.0, min(1.0, value))
-
-        translation = np.array([axis("x"), axis("y"), axis("z")], dtype=np.float32)
-        rotation = np.array([axis("roll"), axis("pitch"), axis("yaw")], dtype=np.float32)
-
-        gripper_delta = 0.0
-        buttons = getattr(state, "buttons", None)
-        try:
-            button_count = len(buttons) if buttons is not None else 0
-        except TypeError:
-            button_count = 0
-        if button_count >= 2:
-            gripper_delta = float(bool(buttons[1])) - float(bool(buttons[0]))
+        translation = np.array(
+            [
+                -left_y,
+                left_x,
+                right_trigger - left_trigger,
+            ],
+            dtype=np.float32,
+        )
+        rotation = np.array(
+            [
+                float(bool(getattr(controller, "rightshoulder", False)))
+                - float(bool(getattr(controller, "leftshoulder", False))),
+                -right_y,
+                right_x,
+            ],
+            dtype=np.float32,
+        )
+        gripper_delta = float(bool(getattr(controller, "b", False))) - float(bool(getattr(controller, "a", False)))
 
         active = bool(np.linalg.norm(translation) > 1.0e-4 or np.linalg.norm(rotation) > 1.0e-4 or gripper_delta)
-        return TeleopCommand(translation, rotation, gripper_delta, active=active, source="spacemouse")
+        return TeleopCommand(translation, rotation, gripper_delta, active=active, source="gamepad")
 
     def close(self) -> None:
-        if self._module is not None and hasattr(self._module, "close"):
+        if self._controller is not None:
             try:
-                self._module.close()
+                self._controller.close()
             except Exception:
                 pass
 
@@ -172,10 +205,21 @@ class Example:
         self.input_mode = "scripted" if args.test or args.viewer == "null" else args.input
         self.linear_speed = args.linear_speed
         self.angular_speed = args.angular_speed
+        self.gripper_speed = args.gripper_speed
+        self.ik_iterations = max(1, int(args.ik_iterations))
+        self.velocity_feedforward = float(args.velocity_feedforward)
+        self.max_target_velocity = float(args.max_target_velocity)
+        self.arm_stiffness = float(args.arm_stiffness)
+        self.arm_damping = float(args.arm_damping)
+        self.arm_effort_limit = float(args.arm_effort_limit)
+        self.gripper_stiffness = float(args.gripper_stiffness)
+        self.gripper_damping = float(args.gripper_damping)
+        self.gripper_effort_limit = float(args.gripper_effort_limit)
         self.metrics_interval = max(0, args.metrics_interval)
         self.metrics_warmup_frames = max(0, int(args.metrics_warmup_frames))
         self.sync_latency = args.sync_latency
         self.use_mujoco_cpu = args.mujoco_backend == "cpu"
+        self.render_shadows = bool(args.render_shadows)
         self.print_metrics_on_close = bool(args.print_metrics) or args.benchmark is not False
         self._printed_metrics = False
 
@@ -216,9 +260,11 @@ class Example:
         self.gripper_open = 0.04
         self.gripper_closed = 0.0
         self.gripper_target = self.gripper_open
+        self.previous_joint_target_q = wp.empty(9, dtype=wp.float32, device=self.device)
 
         self._setup_ik()
         wp.copy(self.control.joint_target_q[:9], self.model.joint_q[:9])
+        wp.copy(self.previous_joint_target_q, self.control.joint_target_q[:9])
         self._write_robot_targets()
 
         self.solver = newton.solvers.SolverMuJoCo(
@@ -233,21 +279,22 @@ class Example:
             nconmax=100,
         )
 
-        self.spacemouse = SpaceMouseInput()
+        self.gamepad = GamepadInput()
         self.active_input_source = self.input_mode
-        if self.input_mode in ("auto", "spacemouse"):
-            opened = self.spacemouse.open()
+        if self.input_mode in ("auto", "gamepad"):
+            window = getattr(getattr(self.viewer, "renderer", None), "window", None)
+            opened = self.gamepad.open(window=window)
             if opened:
-                self.active_input_source = "spacemouse"
-            elif self.input_mode == "spacemouse":
+                self.active_input_source = "gamepad"
+            elif self.input_mode == "gamepad":
                 self.active_input_source = "keyboard"
             else:
                 self.active_input_source = "keyboard"
 
         self.viewer.set_model(self.model)
         self.viewer.picking_enabled = False
-        if hasattr(self.viewer, "set_camera"):
-            self.viewer.set_camera(pos=wp.vec3(1.0, -1.5, 0.8), pitch=-18.0, yaw=52.0)
+        self._configure_viewer_performance()
+        self._set_initial_camera()
         if hasattr(self.viewer, "register_ui_callback"):
             self.viewer.register_ui_callback(self.render_ui, position="side")
 
@@ -277,14 +324,37 @@ class Example:
         robot.joint_q[:9] = init_q
         robot.joint_target_q[:9] = init_q
 
-        for i in range(9):
-            robot.joint_target_ke[i] = 650.0
-            robot.joint_target_kd[i] = 80.0
-            robot.joint_target_mode[i] = int(JointTargetMode.POSITION)
-            robot.joint_armature[i] = 0.05 if i < 7 else 0.2
-        robot.joint_effort_limit[:7] = [90.0] * 7
-        robot.joint_effort_limit[7:9] = [20.0] * 2
+        for i in range(7):
+            robot.joint_target_ke[i] = self.arm_stiffness
+            robot.joint_target_kd[i] = self.arm_damping
+            robot.joint_target_mode[i] = int(JointTargetMode.POSITION_VELOCITY)
+            robot.joint_armature[i] = 0.05
+
+        for i in range(7, 9):
+            robot.joint_target_ke[i] = self.gripper_stiffness
+            robot.joint_target_kd[i] = self.gripper_damping
+            robot.joint_target_mode[i] = int(JointTargetMode.POSITION_VELOCITY)
+            robot.joint_armature[i] = 0.2
+
+        robot.joint_effort_limit[:7] = [self.arm_effort_limit] * 7
+        robot.joint_effort_limit[7:9] = [self.gripper_effort_limit] * 2
         return robot
+
+    def _set_initial_camera(self) -> None:
+        if not hasattr(self.viewer, "set_camera"):
+            return
+
+        camera_pos = wp.vec3(1.0, -1.25, 0.75)
+        look_at = wp.vec3(0.45, 0.0, 0.35)
+        self.viewer.set_camera(pos=camera_pos, pitch=-18.0, yaw=115.0)
+        camera = getattr(self.viewer, "camera", None)
+        if camera is not None and hasattr(camera, "look_at"):
+            camera.look_at(look_at)
+
+    def _configure_viewer_performance(self) -> None:
+        renderer = getattr(self.viewer, "renderer", None)
+        if renderer is not None and hasattr(renderer, "draw_shadows"):
+            renderer.draw_shadows = self.render_shadows
 
     def _add_manipulation_scene(self, builder: newton.ModelBuilder) -> None:
         table_cfg = newton.ModelBuilder.ShapeConfig(mu=0.8, kd=50.0)
@@ -341,7 +411,7 @@ class Example:
             weight=10.0,
         )
         self.joint_q_ik = wp.array(self.model_ik.joint_q, shape=(1, self.model_ik.joint_coord_count))
-        self.ik_iters = 24
+        self.ik_iters = self.ik_iterations
         self.ik_solver = ik.IKSolver(
             model=self.model_ik,
             n_problems=1,
@@ -412,8 +482,8 @@ class Example:
     def _read_command(self) -> TeleopCommand:
         if self.input_mode == "scripted":
             return self._scripted_command()
-        if self.active_input_source == "spacemouse" and self.spacemouse.enabled:
-            command = self.spacemouse.read()
+        if self.active_input_source == "gamepad" and self.gamepad.enabled:
+            command = self.gamepad.read()
             if command.active:
                 return command
         return self._keyboard_command()
@@ -430,7 +500,7 @@ class Example:
             self._apply_pose_delta(command.translation, command.rotation)
 
         if command.gripper_delta:
-            self.gripper_target += float(command.gripper_delta) * self.frame_dt * 0.08
+            self.gripper_target += float(command.gripper_delta) * self.frame_dt * self.gripper_speed
             self.gripper_target = min(self.gripper_open, max(self.gripper_closed, self.gripper_target))
 
     def _apply_pose_delta(self, translation: np.ndarray, rotation: np.ndarray) -> None:
@@ -478,8 +548,15 @@ class Example:
         wp.launch(
             _write_robot_targets_kernel,
             dim=1,
-            inputs=[self.joint_q_ik, float(self.gripper_target)],
-            outputs=[self.control.joint_target_q],
+            inputs=[
+                self.joint_q_ik,
+                self.previous_joint_target_q,
+                float(self.gripper_target),
+                float(self.frame_dt),
+                self.velocity_feedforward,
+                self.max_target_velocity,
+            ],
+            outputs=[self.control.joint_target_q, self.control.joint_target_qd],
             device=self.device,
         )
 
@@ -560,16 +637,14 @@ class Example:
         )
 
         if hasattr(self.viewer, "log_gizmo") and self.input_mode != "scripted":
-            body_q_np = self.state_0.body_q.numpy()
-            snap_to = wp.transform(*body_q_np[self.ee_index])
-            self.viewer.log_gizmo("target_tcp", self.target_tf, snap_to=snap_to)
+            self.viewer.log_gizmo("target_tcp", self.target_tf, snap_to=self.target_tf)
 
         self.viewer.end_frame()
 
     def render_ui(self, imgui) -> None:
         imgui.text(f"Input: {self.active_input_source}")
-        if self.input_mode in ("auto", "spacemouse"):
-            imgui.text(self.spacemouse.status)
+        if self.input_mode in ("auto", "gamepad"):
+            imgui.text(self.gamepad.status)
         for label, key in (
             ("Loop", "local_loop_ms"),
             ("Input", "input_ms"),
@@ -622,7 +697,7 @@ class Example:
     def close(self) -> None:
         if self.print_metrics_on_close and self.stats.summary("local_loop_ms") is not None:
             self.print_latency_summary()
-        self.spacemouse.close()
+        self.gamepad.close()
 
     @staticmethod
     def create_parser():
@@ -630,9 +705,9 @@ class Example:
         parser.set_defaults(num_frames=240)
         parser.add_argument(
             "--input",
-            choices=("auto", "keyboard", "spacemouse", "scripted"),
+            choices=("auto", "keyboard", "gamepad", "scripted"),
             default="auto",
-            help="Target pose input source.",
+            help="Target pose input source. Gamepad uses Xbox-style controls.",
         )
         parser.add_argument(
             "--mujoco-backend",
@@ -640,16 +715,41 @@ class Example:
             default="warp",
             help="MuJoCo backend to use for the rigid solve.",
         )
-        parser.add_argument("--sim-substeps", type=int, default=4, help="Simulation substeps per rendered frame.")
-        parser.add_argument("--linear-speed", type=float, default=0.35, help="Target translation speed [m/s].")
-        parser.add_argument("--angular-speed", type=float, default=1.2, help="Target angular speed [rad/s].")
-        parser.add_argument("--solver-iterations", type=int, default=25, help="MuJoCo solver iterations.")
-        parser.add_argument("--solver-ls-iterations", type=int, default=10, help="MuJoCo line-search iterations.")
+        parser.add_argument("--sim-substeps", type=int, default=2, help="Simulation substeps per rendered frame.")
+        parser.add_argument("--linear-speed", type=float, default=0.50, help="Target translation speed [m/s].")
+        parser.add_argument("--angular-speed", type=float, default=1.6, help="Target angular speed [rad/s].")
+        parser.add_argument("--gripper-speed", type=float, default=0.12, help="Gripper open/close speed [m/s].")
+        parser.add_argument("--ik-iterations", type=int, default=16, help="IK solver iterations per frame.")
+        parser.add_argument(
+            "--velocity-feedforward",
+            type=float,
+            default=1.5,
+            help="Scale applied to joint target velocity feed-forward.",
+        )
+        parser.add_argument(
+            "--max-target-velocity",
+            type=float,
+            default=20.0,
+            help="Clamp for joint target velocity feed-forward [rad/s or m/s].",
+        )
+        parser.add_argument("--solver-iterations", type=int, default=20, help="MuJoCo solver iterations.")
+        parser.add_argument("--solver-ls-iterations", type=int, default=8, help="MuJoCo line-search iterations.")
+        parser.add_argument("--arm-stiffness", type=float, default=3500.0, help="Arm joint target stiffness.")
+        parser.add_argument("--arm-damping", type=float, default=220.0, help="Arm joint target damping.")
+        parser.add_argument("--arm-effort-limit", type=float, default=500.0, help="Arm joint effort limit [N*m].")
+        parser.add_argument("--gripper-stiffness", type=float, default=900.0, help="Gripper joint target stiffness.")
+        parser.add_argument("--gripper-damping", type=float, default=80.0, help="Gripper joint target damping.")
+        parser.add_argument(
+            "--gripper-effort-limit",
+            type=float,
+            default=60.0,
+            help="Gripper joint effort limit [N].",
+        )
         parser.add_argument(
             "--metrics-interval",
             type=int,
-            default=1,
-            help="Frames between tracking-error samples; set 0 to disable tracking readback.",
+            default=15,
+            help="Frames between tracking-error samples; set 0 to disable tracking readback for lowest latency.",
         )
         parser.add_argument(
             "--metrics-warmup-frames",
@@ -669,6 +769,12 @@ class Example:
             action=argparse.BooleanOptionalAction,
             default=False,
             help="Synchronize after timed sections so GPU timings include completion latency.",
+        )
+        parser.add_argument(
+            "--render-shadows",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Render GL shadows. Disabled by default for higher interactive FPS.",
         )
         return parser
 
