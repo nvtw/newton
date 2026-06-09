@@ -27,11 +27,13 @@ import warp as wp
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
+    VELOCITY_ROWS3_PROJECT_BOUNDS,
     VelocityBlock1,
     VelocityBlock2,
     VelocityBlock3,
     VelocityBlock4,
     VelocityRows3,
+    VelocityRows3Projection,
     block_project_accumulated_2,
     block_project_accumulated_3,
     block_solve_inverse_2,
@@ -40,7 +42,7 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
     block_solve_velocity_block2,
     block_solve_velocity_block3,
     block_solve_velocity_block4,
-    block_solve_velocity_rows3_bounded,
+    block_solve_velocity_rows3,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     _PD_NYQUIST_HEADROOM_MAX,
@@ -1129,7 +1131,12 @@ def _axial_project_scalar_rows(
     rows.lambda_min = wp.vec3f(drive_min, limit_min, friction_min)
     rows.lambda_max = wp.vec3f(drive_max, limit_max, friction_max)
 
-    projection = block_solve_velocity_rows3_bounded(rows, sor_boost)
+    projection_desc = VelocityRows3Projection()
+    projection_desc.mode = VELOCITY_ROWS3_PROJECT_BOUNDS
+    projection_desc.friction_static = wp.float32(0.0)
+    projection_desc.friction_kinetic = wp.float32(0.0)
+
+    projection = block_solve_velocity_rows3(rows, projection_desc, sor_boost)
 
     update = AxialProjectionUpdate()
     update.delta = projection.delta[0] + projection.delta[1] + projection.delta[2]

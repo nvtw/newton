@@ -8,8 +8,10 @@ import warp as wp
 
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
+    VELOCITY_ROWS3_PROJECT_CONTACT_CONE,
     VelocityRows3,
-    block_solve_velocity_rows3_contact_cone,
+    VelocityRows3Projection,
+    block_solve_velocity_rows3,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -81,7 +83,12 @@ def _make_contact_project_velocity_update(has_soft_contact_pd: bool):
         rows.lambda_min = wp.vec3f(wp.float32(0.0), -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
         rows.lambda_max = wp.vec3f(BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF)
 
-        projection = block_solve_velocity_rows3_contact_cone(rows, sor_boost, mu_s, mu_k)
+        projection_desc = VelocityRows3Projection()
+        projection_desc.mode = VELOCITY_ROWS3_PROJECT_CONTACT_CONE
+        projection_desc.friction_static = mu_s
+        projection_desc.friction_kinetic = mu_k
+
+        projection = block_solve_velocity_rows3(rows, projection_desc, sor_boost)
 
         cc_set_normal_lambda(cc, k, projection.lambda_new[0])
         cc_set_tangent1_lambda(cc, k, projection.lambda_new[1])

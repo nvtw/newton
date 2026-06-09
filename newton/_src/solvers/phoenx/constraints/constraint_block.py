@@ -17,6 +17,8 @@ import warp as wp
 
 __all__ = [
     "BLOCK_LAMBDA_INF",
+    "VELOCITY_ROWS3_PROJECT_BOUNDS",
+    "VELOCITY_ROWS3_PROJECT_CONTACT_CONE",
     "BlockScalarUpdate",
     "BlockVector2Update",
     "BlockVector3Update",
@@ -28,6 +30,7 @@ __all__ = [
     "VelocityBlock3",
     "VelocityBlock4",
     "VelocityRows3",
+    "VelocityRows3Projection",
     "VelocityRows3Update",
     "block_position_delta_1",
     "block_position_delta_2",
@@ -64,6 +67,7 @@ __all__ = [
     "block_solve_velocity_block2",
     "block_solve_velocity_block3",
     "block_solve_velocity_block4",
+    "block_solve_velocity_rows3",
     "block_solve_velocity_rows3_bounded",
     "block_solve_velocity_rows3_contact_cone",
     "block_solve_xpbd_1",
@@ -73,6 +77,8 @@ __all__ = [
 
 
 BLOCK_LAMBDA_INF = wp.constant(wp.float32(1.0e30))
+VELOCITY_ROWS3_PROJECT_BOUNDS = wp.constant(wp.int32(0))
+VELOCITY_ROWS3_PROJECT_CONTACT_CONE = wp.constant(wp.int32(1))
 
 
 @wp.struct
@@ -176,6 +182,15 @@ class VelocityRows3:
     impulse_coeff: wp.vec3f
     lambda_min: wp.vec3f
     lambda_max: wp.vec3f
+
+
+@wp.struct
+class VelocityRows3Projection:
+    """Projection parameters for prepared three-row velocity blocks."""
+
+    mode: wp.int32
+    friction_static: wp.float32
+    friction_kinetic: wp.float32
 
 
 @wp.struct
@@ -699,6 +714,23 @@ def block_solve_velocity_rows3_contact_cone(
     update.delta = wp.vec3f(row0.delta, tangents.delta[0], tangents.delta[1])
     update.lambda_new = wp.vec3f(row0.lambda_new, tangents.lambda_new[0], tangents.lambda_new[1])
     return update
+
+
+@wp.func
+def block_solve_velocity_rows3(
+    rows: VelocityRows3,
+    projection: VelocityRows3Projection,
+    sor_boost: wp.float32,
+) -> VelocityRows3Update:
+    """Solve/project three prepared velocity rows from an explicit projection descriptor."""
+    if projection.mode == VELOCITY_ROWS3_PROJECT_CONTACT_CONE:
+        return block_solve_velocity_rows3_contact_cone(
+            rows,
+            sor_boost,
+            projection.friction_static,
+            projection.friction_kinetic,
+        )
+    return block_solve_velocity_rows3_bounded(rows, sor_boost)
 
 
 @wp.func
