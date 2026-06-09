@@ -69,6 +69,8 @@ __all__ = [
     "block_solve_projected_xpbd_2",
     "block_solve_projected_xpbd_2_strict",
     "block_solve_rigid_frame_rows3",
+    "block_solve_rigid_frame_rows3_angular",
+    "block_solve_rigid_frame_rows3_contact",
     "block_solve_symmetric_1",
     "block_solve_symmetric_2",
     "block_solve_symmetric_2_strict",
@@ -905,6 +907,72 @@ def block_solve_velocity_rows3_op_uniform_projection(
         lambda2_new - op.lambda_old[2],
     )
     update.lambda_new = wp.vec3f(row0.lambda_new, lambda1_new, lambda2_new)
+    return update
+
+
+@wp.func
+def _rigid_frame_rows3_projection(
+    rows: RigidFrameRows3,
+    residual: wp.vec3f,
+    sor_boost: wp.float32,
+) -> VelocityRows3Update:
+    op = VelocityRows3Op()
+    op.k_inv = rows.k_inv
+    op.residual = residual
+    op.lambda_old = rows.lambda_old
+    op.mass_coeff = rows.mass_coeff
+    op.impulse_coeff = rows.impulse_coeff
+    op.lambda_min = rows.lambda_min
+    op.lambda_max = rows.lambda_max
+    op.projection_mode = rows.projection_mode
+    op.friction_static = rows.friction_static
+    op.friction_kinetic = rows.friction_kinetic
+    return block_solve_velocity_rows3_op(op, sor_boost)
+
+
+@wp.func
+def block_solve_rigid_frame_rows3_contact(
+    rows: RigidFrameRows3,
+    state: RigidFrameRows3State,
+    sor_boost: wp.float32,
+) -> RigidFrameRows3Update:
+    """Solve/project/apply a compact contact-point three-row operation."""
+    rel = state.v_b - state.v_a + wp.cross(state.w_b, rows.r1) - wp.cross(state.w_a, rows.r0)
+    residual = _rows3_dot(rows.axis0, rows.axis1, rows.axis2, rel) + rows.bias
+    projection = _rigid_frame_rows3_projection(rows, residual, sor_boost)
+    d = projection.delta
+    impulse = d[0] * rows.axis0 + d[1] * rows.axis1 + d[2] * rows.axis2
+
+    update = RigidFrameRows3Update()
+    update.v_a = state.v_a - state.inv_m_a * impulse
+    update.v_b = state.v_b + state.inv_m_b * impulse
+    update.w_a = state.w_a - state.inv_i_a @ wp.cross(rows.r0, impulse)
+    update.w_b = state.w_b + state.inv_i_b @ wp.cross(rows.r1, impulse)
+    update.lambda_new = projection.lambda_new
+    update.delta = d
+    return update
+
+
+@wp.func
+def block_solve_rigid_frame_rows3_angular(
+    rows: RigidFrameRows3,
+    state: RigidFrameRows3State,
+    sor_boost: wp.float32,
+) -> RigidFrameRows3Update:
+    """Solve/project/apply a compact angular-direct three-row operation."""
+    rel = state.w_b - state.w_a
+    residual = _rows3_dot(rows.axis0, rows.axis1, rows.axis2, rel) + rows.bias
+    projection = _rigid_frame_rows3_projection(rows, residual, sor_boost)
+    d = projection.delta
+    impulse = d[0] * rows.axis0 + d[1] * rows.axis1 + d[2] * rows.axis2
+
+    update = RigidFrameRows3Update()
+    update.v_a = state.v_a
+    update.v_b = state.v_b
+    update.w_a = state.w_a - state.inv_i_a @ impulse
+    update.w_b = state.w_b + state.inv_i_b @ impulse
+    update.lambda_new = projection.lambda_new
+    update.delta = d
     return update
 
 
