@@ -17,7 +17,9 @@ The ``sidecar4`` path is the full-unification stress test: every block fetches
 four prepacked Jacobian rows and runs the same residual / projection / apply
 sequence. Smaller blocks disable unused rows through zero Jacobians and fixed
 lambda bounds. Contact projection still needs its cone projection, but the
-velocity fetch and ``M^-1 J^T`` apply are shape-agnostic.
+velocity fetch and ``M^-1 J^T`` apply are shape-agnostic. ``grouped_split``
+keeps compact typed math but shape-buckets block IDs inside each color, testing
+whether lower branch divergence can beat the extra indirection / locality cost.
 """
 
 from __future__ import annotations
@@ -950,13 +952,71 @@ def _slot_counts(preset: ScenePreset, period: int) -> tuple[int, int, int, int]:
     return contact, tangent4, angular3, scalar
 
 
+def _block_kind_rank(
+    block_id: int,
+    period: int,
+    contact_slots: int,
+    tangent4_slots: int,
+    angular3_slots: int,
+    scalar_slots: int,
+) -> int:
+    lane = block_id % period
+    if lane < contact_slots:
+        return 0
+    if lane < contact_slots + tangent4_slots:
+        return 1
+    if lane < contact_slots + tangent4_slots + angular3_slots:
+        return 2
+    if lane < contact_slots + tangent4_slots + angular3_slots + scalar_slots:
+        return 3 if (lane & 1) == 0 else 4
+    return 5
+
+
+def _build_shape_grouped_schedule(
+    schedule: ScheduleHost,
+    period: int,
+    contact_slots: int,
+    tangent4_slots: int,
+    angular3_slots: int,
+    scalar_slots: int,
+) -> ScheduleHost:
+    block_ids: list[int] = []
+    for color in range(schedule.colors):
+        start = int(schedule.color_starts[color])
+        end = int(schedule.color_starts[color + 1])
+        color_blocks = schedule.block_ids[start:end].tolist()
+        color_blocks.sort(
+            key=lambda block_id: (
+                _block_kind_rank(block_id, period, contact_slots, tangent4_slots, angular3_slots, scalar_slots),
+                block_id,
+            )
+        )
+        block_ids.extend(int(block_id) for block_id in color_blocks)
+    return ScheduleHost(
+        block_ids=np.asarray(block_ids, dtype=np.int32),
+        color_starts=schedule.color_starts.copy(),
+        world_color_starts=schedule.world_color_starts.copy(),
+        blocks=schedule.blocks,
+        colors=schedule.colors,
+    )
+
+
 def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Devicelike) -> None:
     preset = _SCENE_PRESETS[scene]
     schedule = _build_schedule(preset, int(args.worlds))
     blocks = schedule.blocks
     contact_slots, tangent4_slots, angular3_slots, scalar_slots = _slot_counts(preset, int(args.period))
+    grouped_schedule = _build_shape_grouped_schedule(
+        schedule,
+        int(args.period),
+        contact_slots,
+        tangent4_slots,
+        angular3_slots,
+        scalar_slots,
+    )
 
     block_ids = wp.array(schedule.block_ids, dtype=wp.int32, device=device)
+    grouped_block_ids = wp.array(grouped_schedule.block_ids, dtype=wp.int32, device=device)
     color_starts = wp.array(schedule.color_starts, dtype=wp.int32, device=device)
     world_color_starts = wp.array(schedule.world_color_starts, dtype=wp.int32, device=device)
 
@@ -1013,6 +1073,11 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     side_vb = _alloc_vec(blocks, device)
     side_wb = _alloc_vec(blocks, device)
     side_lambda = _alloc_vec4(blocks, device)
+    grouped_va = _alloc_vec(blocks, device)
+    grouped_wa = _alloc_vec(blocks, device)
+    grouped_vb = _alloc_vec(blocks, device)
+    grouped_wb = _alloc_vec(blocks, device)
+    grouped_lambda = _alloc_vec4(blocks, device)
 
     wp.launch(
         _init_blocks_kernel,
@@ -1154,6 +1219,44 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         int(args.iterations),
         int(args.threads_per_world),
     ]
+    grouped_inputs = [
+        grouped_block_ids,
+        color_starts,
+        world_color_starts,
+        op_kind,
+        v_a,
+        w_a,
+        v_b,
+        w_b,
+        inv_m_a,
+        inv_m_b,
+        inv_i_a,
+        inv_i_b,
+        axis0,
+        axis1,
+        axis2,
+        r0,
+        r1,
+        r2,
+        r3,
+        k_inv,
+        bias,
+        lambda_old,
+        mass_coeff,
+        impulse_coeff,
+        lambda_min,
+        lambda_max,
+        friction_static,
+        friction_kinetic,
+        grouped_va,
+        grouped_wa,
+        grouped_vb,
+        grouped_wb,
+        grouped_lambda,
+        int(args.worlds),
+        int(args.iterations),
+        int(args.threads_per_world),
+    ]
 
     def split_run() -> None:
         wp.launch(
@@ -1173,22 +1276,43 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
             block_dim=int(args.block_dim),
         )
 
+    def grouped_run() -> None:
+        wp.launch(
+            _solve_split_world_loop_kernel,
+            dim=max(1, int(args.worlds) * int(args.threads_per_world)),
+            inputs=grouped_inputs,
+            device=device,
+            block_dim=int(args.block_dim),
+        )
+
     split_run()
     side_run()
-    err = _max_err(
+    grouped_run()
+    side_err = _max_err(
         (side_va, split_va),
         (side_wa, split_wa),
         (side_vb, split_vb),
         (side_wb, split_wb),
         (side_lambda, split_lambda),
     )
+    grouped_err = _max_err(
+        (grouped_va, split_va),
+        (grouped_wa, split_wa),
+        (grouped_vb, split_vb),
+        (grouped_wb, split_wb),
+        (grouped_lambda, split_lambda),
+    )
     split_ms, _ = _bench(split_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
     side_ms, _ = _bench(side_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
-    speedup = split_ms / side_ms if side_ms > 0.0 else float("nan")
+    grouped_ms, _ = _bench(grouped_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
+    side_speedup = split_ms / side_ms if side_ms > 0.0 else float("nan")
+    grouped_speedup = split_ms / grouped_ms if grouped_ms > 0.0 else float("nan")
     print(
         f"{scene:8s} worlds={int(args.worlds):5d} blocks={blocks:7d} colors={schedule.colors:5d} "
         f"slots=(c{contact_slots},t4{tangent4_slots},a3{angular3_slots},s{scalar_slots}) "
-        f"split={split_ms:8.4f}ms sidecar4={side_ms:8.4f}ms speedup={speedup:6.3f}x err={err:.6g}"
+        f"split={split_ms:8.4f}ms grouped={grouped_ms:8.4f}ms sidecar4={side_ms:8.4f}ms "
+        f"grouped_speedup={grouped_speedup:6.3f}x sidecar4_speedup={side_speedup:6.3f}x "
+        f"grouped_err={grouped_err:.6g} sidecar4_err={side_err:.6g}"
     )
 
 
