@@ -7,16 +7,20 @@ The production multi-world fast-tail solver assigns a small lane group to each
 world and loops colors inside one kernel. That has low launch overhead, but few
 worlds can leave many SMs idle. This benchmark keeps the same color ordering and
 PGS safety, but tests schedulers that expose each color as global work across
-worlds. ``flat`` and ``direct`` use one launch per color; ``mega`` keeps the
-color loop inside one persistent kernel with a software grid barrier. The
-benchmark is aimed at single/few-world scenes with enough rows per color to
-fill the GPU.
+worlds. ``flat`` and ``direct`` use one launch per color, ``block_world`` gives
+one physical block to a world, and ``mega`` keeps the color loop inside one
+persistent kernel with a software grid barrier. ``autotune`` evaluates the whole
+scheduler portfolio, while ``adaptive`` uses a time-budgeted tournament that
+keeps only the measured winners. The benchmark is aimed at finding scheduling
+rules that can eventually be moved into production instead of hard-coding one
+distribution.
 """
 
 from __future__ import annotations
 
 import argparse
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -46,6 +50,8 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 from newton._src.solvers.phoenx.solver_phoenx_kernels import _FUSED_INNER_SWEEPS, _sync_threads
 
+_DEFAULT_BLOCK_WORLD_DIM = 128
+
 
 @dataclass
 class ColorGridHost:
@@ -63,6 +69,12 @@ class ColorGridDevice:
     processed: wp.array
     barrier_count: wp.array
     barrier_sense: wp.array
+
+
+@dataclass(frozen=True)
+class SchedulerCandidate:
+    label: str
+    run: Callable[[], None]
 
 
 @wp.kernel(enable_backward=False)
@@ -604,6 +616,127 @@ def _color_grid_iterate_direct_kernel(
                 )
 
 
+
+@wp.kernel(enable_backward=False)
+def _block_world_prepare_iterate_kernel(
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    world_element_ids_by_color: wp.array[wp.int32],
+    world_color_starts: wp.array2d[wp.int32],
+    world_csr_offsets: wp.array[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+    cc: ContactContainer,
+    contacts: ContactViews,
+    num_joints: wp.int32,
+    num_bodies: wp.int32,
+    revolute_only: wp.int32,
+    outer_iters: wp.int32,
+    inner_sweeps: wp.int32,
+    copy_state: CopyStateContainer,
+    block_dim_value: wp.int32,
+):
+    tid = wp.tid()
+    local_tid = tid - (tid / block_dim_value) * block_dim_value
+    world_id = tid / block_dim_value
+    n_colors = world_num_colors[world_id]
+    world_base = world_csr_offsets[world_id]
+
+    color = wp.int32(0)
+    while color < n_colors:
+        start = world_base + world_color_starts[world_id, color]
+        end = world_base + world_color_starts[world_id, color + wp.int32(1)]
+        cursor = local_tid
+        while cursor < end - start:
+            cid = world_element_ids_by_color[start + cursor]
+            if cid < num_joints:
+                if revolute_only != wp.int32(0):
+                    revolute_prepare_for_iteration(
+                        constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                    )
+                else:
+                    actuated_double_ball_socket_prepare_for_iteration(
+                        constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+                    )
+            else:
+                contact_prepare_for_iteration_lean_no_soft_pd(
+                    contact_cols,
+                    cid - num_joints,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    idt,
+                    cc,
+                    contacts,
+                    copy_state,
+                    wp.int32(0),
+                )
+            cursor = cursor + block_dim_value
+        _sync_threads()
+        color = color + wp.int32(1)
+
+    outer = wp.int32(0)
+    while outer < outer_iters:
+        color = wp.int32(0)
+        while color < n_colors:
+            start = world_base + world_color_starts[world_id, color]
+            end = world_base + world_color_starts[world_id, color + wp.int32(1)]
+            cursor = local_tid
+            while cursor < end - start:
+                cid = world_element_ids_by_color[start + cursor]
+                if cid < num_joints:
+                    if revolute_only != wp.int32(0):
+                        revolute_iterate_multi(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            sor_boost,
+                            True,
+                            inner_sweeps,
+                        )
+                    else:
+                        actuated_double_ball_socket_iterate_multi(
+                            constraints,
+                            cid,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            wp.int32(0),
+                            idt,
+                            sor_boost,
+                            True,
+                            inner_sweeps,
+                        )
+                else:
+                    contact_iterate_multi_no_soft_pd(
+                        contact_cols,
+                        cid - num_joints,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        idt,
+                        cc,
+                        contacts,
+                        True,
+                        inner_sweeps,
+                        copy_state,
+                        wp.int32(0),
+                        sor_boost,
+                    )
+                cursor = cursor + block_dim_value
+            _sync_threads()
+            color = color + wp.int32(1)
+        outer = outer + wp.int32(1)
+
 def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iterations: int):
     if scene == "h1":
         return h1_flat.build(num_worlds, "phoenx", substeps, solver_iterations)
@@ -843,6 +976,47 @@ def _color_grid_mega_direct_runner(
     return run
 
 
+def _block_world_runner(world: PhoenXWorld, *, block_dim: int):
+    device = world.device
+    contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
+    idt = wp.float32(1.0 / world.substep_dt)
+    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    outer_iters = int(world.solver_iterations) // inner_sweeps
+    revolute_only = 1 if bool(world._use_revolute_specialization) else 0
+    dim = max(1, int(world.num_worlds) * int(block_dim))
+
+    def run() -> None:
+        wp.launch(
+            _block_world_prepare_iterate_kernel,
+            dim=dim,
+            block_dim=block_dim,
+            inputs=[
+                world.constraints,
+                world._contact_cols,
+                world.bodies,
+                world._particles_or_sentinel(),
+                idt,
+                wp.float32(world.sor_boost),
+                world._world_element_ids_by_color,
+                world._world_color_starts,
+                world._world_csr_offsets,
+                world._world_num_colors,
+                world._contact_container,
+                contact_views,
+                wp.int32(world.num_joints),
+                wp.int32(world.num_bodies),
+                wp.int32(revolute_only),
+                wp.int32(outer_iters),
+                wp.int32(inner_sweeps),
+                world._copy_state,
+                wp.int32(block_dim),
+            ],
+            device=device,
+        )
+
+    return run
+
+
 def _color_grid_direct_runner(world: PhoenXWorld, graph: ColorGridDevice, *, block_dim: int):
     device = world.device
     contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
@@ -914,6 +1088,10 @@ def _color_grid_direct_runner(world: PhoenXWorld, graph: ColorGridDevice, *, blo
     return run
 
 
+def _parse_csv_ints(value: str) -> tuple[int, ...]:
+    return tuple(int(raw.strip()) for raw in value.split(",") if raw.strip())
+
+
 def _bench(fn, *, n_runs: int, warmup: int, trials: int, device: wp.context.Devicelike) -> tuple[float, float]:
     for _ in range(warmup):
         fn()
@@ -939,6 +1117,190 @@ def _validate(graph: ColorGridDevice, expected: int) -> None:
     _ = graph, expected
 
 
+def _scheduler_candidates(
+    args: argparse.Namespace,
+    world: PhoenXWorld,
+    grid_graph: ColorGridDevice,
+    *,
+    include_launch_heavy: bool,
+) -> list[SchedulerCandidate]:
+    candidates = [SchedulerCandidate("baseline", world._solve_main)]
+    if include_launch_heavy:
+        candidates.append(SchedulerCandidate("flat", _color_grid_runner(world, grid_graph, block_dim=args.block_dim)))
+        candidates.append(
+            SchedulerCandidate("direct", _color_grid_direct_runner(world, grid_graph, block_dim=args.block_dim))
+        )
+    for block_dim in _parse_csv_ints(args.tune_block_world_dims):
+        candidates.append(
+            SchedulerCandidate(f"block_world_{block_dim}", _block_world_runner(world, block_dim=block_dim))
+        )
+    return candidates
+
+
+def _time_candidate(
+    candidate: SchedulerCandidate,
+    *,
+    n_runs: int,
+    warmup: int,
+    trials: int,
+    device: wp.context.Devicelike,
+) -> tuple[float, float]:
+    return _bench(candidate.run, n_runs=n_runs, warmup=warmup, trials=trials, device=device)
+
+
+def _time_candidate_budgeted(
+    candidate: SchedulerCandidate,
+    *,
+    initial_runs: int,
+    max_runs: int,
+    target_ms: float,
+    warmup: int,
+    trials: int,
+    device: wp.context.Devicelike,
+) -> tuple[float, float, int]:
+    runs = max(1, int(initial_runs))
+    max_runs = max(runs, int(max_runs))
+    while True:
+        total_min_ms, total_med_ms = _time_candidate(
+            candidate,
+            n_runs=runs,
+            warmup=warmup,
+            trials=trials,
+            device=device,
+        )
+        if total_min_ms >= target_ms or runs >= max_runs:
+            return total_min_ms / float(runs), total_med_ms / float(runs), runs
+        runs = min(max_runs, runs * 2)
+        warmup = 0
+
+
+def _format_candidate_results(results: list[tuple[SchedulerCandidate, float, float]], baseline_ms: float) -> str:
+    pieces = []
+    for candidate, min_ms, _med_ms in results:
+        speed = baseline_ms / min_ms if min_ms > 0.0 else float("nan")
+        pieces.append(f"{candidate.label}={min_ms:8.3f}ms({speed:5.3f}x)")
+    return " ".join(pieces)
+
+
+def _run_autotune(
+    args: argparse.Namespace,
+    world: PhoenXWorld,
+    grid_graph: ColorGridDevice,
+    scene: str,
+    num_worlds: int,
+    row_count: int,
+) -> None:
+    candidates = _scheduler_candidates(args, world, grid_graph, include_launch_heavy=True)
+    results: list[tuple[SchedulerCandidate, float, float]] = []
+    for candidate in candidates:
+        min_ms, med_ms = _time_candidate(
+            candidate,
+            n_runs=args.tune_runs,
+            warmup=args.tune_warmup,
+            trials=args.trials,
+            device=world.device,
+        )
+        results.append((candidate, min_ms, med_ms))
+
+    baseline = next(min_ms for candidate, min_ms, _med_ms in results if candidate.label == "baseline")
+    best_candidate, best_min, _best_med = min(results, key=lambda item: item[1])
+    best_speed = baseline / best_min if best_min > 0.0 else float("nan")
+    print(
+        f"{scene:5s} worlds={num_worlds:5d} rows={row_count:6d} colors={grid_graph.host.num_colors:4d} "
+        f"best={best_candidate.label} best_speedup={best_speed:5.3f}x "
+        + _format_candidate_results(results, baseline)
+    )
+
+
+def _run_adaptive(
+    args: argparse.Namespace,
+    world: PhoenXWorld,
+    grid_graph: ColorGridDevice,
+    scene: str,
+    num_worlds: int,
+    row_count: int,
+) -> None:
+    candidates = _scheduler_candidates(
+        args,
+        world,
+        grid_graph,
+        include_launch_heavy=args.adapt_include_launch_heavy,
+    )
+    candidate_by_label = {candidate.label: candidate for candidate in candidates}
+    observed: dict[str, list[float]] = {candidate.label: [] for candidate in candidates}
+    active = candidates
+    keep_fraction = min(1.0, max(0.1, float(args.adapt_keep_fraction)))
+    max_window_runs = max(int(args.adapt_window_runs), int(args.adapt_max_window_runs))
+
+    for round_index in range(max(1, int(args.adapt_rounds))):
+        round_results: list[tuple[SchedulerCandidate, float, float]] = []
+        for candidate in active:
+            min_ms, med_ms, _runs = _time_candidate_budgeted(
+                candidate,
+                initial_runs=args.adapt_window_runs,
+                max_runs=max_window_runs,
+                target_ms=args.adapt_target_ms,
+                warmup=args.adapt_warmup if round_index == 0 else 0,
+                trials=args.trials,
+                device=world.device,
+            )
+            observed[candidate.label].append(min_ms)
+            round_results.append((candidate, min_ms, med_ms))
+        round_results.sort(key=lambda item: item[1])
+        if len(active) <= 1:
+            break
+        keep_count = max(1, int(np.ceil(len(active) * keep_fraction)))
+        active = [candidate for candidate, _min_ms, _med_ms in round_results[:keep_count]]
+
+    scores: list[tuple[SchedulerCandidate, float]] = []
+    for candidate in candidates:
+        samples = observed[candidate.label]
+        if samples:
+            scores.append((candidate, float(np.median(np.asarray(samples, dtype=np.float64)))))
+    baseline_score = next(score for candidate, score in scores if candidate.label == "baseline")
+    active_labels = {candidate.label for candidate in active}
+    selectable = [(candidate, score) for candidate, score in scores if candidate.label in active_labels]
+    best_candidate, best_score = min(selectable, key=lambda item: item[1])
+    selected = best_candidate
+    predicted_speed = baseline_score / best_score if best_score > 0.0 else float("nan")
+    if selected.label != "baseline" and predicted_speed < float(args.adapt_min_speedup):
+        selected = candidate_by_label["baseline"]
+
+    verify_runs = max(int(args.n_runs), int(args.adapt_max_window_runs))
+    base_min, _base_med, base_runs = _time_candidate_budgeted(
+        candidate_by_label["baseline"],
+        initial_runs=args.n_runs,
+        max_runs=verify_runs,
+        target_ms=args.adapt_verify_target_ms,
+        warmup=args.warmup,
+        trials=args.trials,
+        device=world.device,
+    )
+    if selected.label == "baseline":
+        selected_min = base_min
+        selected_runs = base_runs
+    else:
+        selected_min, _selected_med, selected_runs = _time_candidate_budgeted(
+            selected,
+            initial_runs=args.n_runs,
+            max_runs=verify_runs,
+            target_ms=args.adapt_verify_target_ms,
+            warmup=args.warmup,
+            trials=args.trials,
+            device=world.device,
+        )
+    selected_speed = base_min / selected_min if selected_min > 0.0 else float("nan")
+    score_pieces = " ".join(
+        f"{candidate.label}:{score * 1000.0:0.2f}us" for candidate, score in sorted(scores, key=lambda item: item[1])
+    )
+    print(
+        f"{scene:5s} worlds={num_worlds:5d} rows={row_count:6d} colors={grid_graph.host.num_colors:4d} "
+        f"policy=adaptive selected={selected.label} predicted={predicted_speed:5.3f}x "
+        f"verified={selected_speed:5.3f}x baseline={base_min * 1000.0:8.3f}us "
+        f"selected={selected_min * 1000.0:8.3f}us runs={base_runs}/{selected_runs} scores={score_pieces}"
+    )
+
+
 def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
     handle = _build_scene(scene, num_worlds, substeps=args.substeps, solver_iterations=args.solver_iterations)
     solver = _extract_solver(handle)
@@ -956,11 +1318,20 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
     outer_iters = int(world.solver_iterations) // int(_FUSED_INNER_SWEEPS)
     expected = int(host_graph.color_starts[-1]) * (1 + outer_iters)
 
+    if args.mode == "autotune":
+        _run_autotune(args, world, grid_graph, scene, num_worlds, int(host_graph.color_starts[-1]))
+        return
+    if args.mode == "adaptive":
+        _run_adaptive(args, world, grid_graph, scene, num_worlds, int(host_graph.color_starts[-1]))
+        return
+
     runs: list[tuple[str, object]] = []
     if args.mode in ("flat", "both", "all"):
         runs.append(("flat", _color_grid_runner(world, grid_graph, block_dim=args.block_dim)))
     if args.mode in ("direct", "both", "all"):
         runs.append(("direct", _color_grid_direct_runner(world, grid_graph, block_dim=args.block_dim)))
+    if args.mode in ("block_world", "all"):
+        runs.append(("block_world", _block_world_runner(world, block_dim=args.block_world_dim)))
     if args.mode in ("mega", "all"):
         runs.append(
             (
@@ -1013,11 +1384,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--prime-frames", type=int, default=3)
     parser.add_argument("--block-dim", type=int, default=128)
-    parser.add_argument("--mode", choices=("flat", "direct", "mega", "mega_direct", "both", "all"), default="flat")
+    parser.add_argument("--block-world-dim", type=int, default=_DEFAULT_BLOCK_WORLD_DIM)
+    parser.add_argument(
+        "--mode",
+        choices=("flat", "direct", "block_world", "autotune", "adaptive", "mega", "mega_direct", "both", "all"),
+        default="flat",
+    )
     parser.add_argument("--mega-blocks", type=int, default=128)
     parser.add_argument("--row-bound", type=int, default=64)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--n-runs", type=int, default=10)
+    parser.add_argument("--tune-block-world-dims", default="32,64,128")
+    parser.add_argument("--tune-warmup", type=int, default=1)
+    parser.add_argument("--tune-runs", type=int, default=3)
+    parser.add_argument("--adapt-rounds", type=int, default=2)
+    parser.add_argument("--adapt-window-runs", type=int, default=2)
+    parser.add_argument("--adapt-max-window-runs", type=int, default=64)
+    parser.add_argument("--adapt-target-ms", type=float, default=1.0)
+    parser.add_argument("--adapt-verify-target-ms", type=float, default=2.0)
+    parser.add_argument("--adapt-warmup", type=int, default=1)
+    parser.add_argument("--adapt-keep-fraction", type=float, default=0.5)
+    parser.add_argument("--adapt-min-speedup", type=float, default=1.08)
+    parser.add_argument("--adapt-include-launch-heavy", action="store_true")
     parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
@@ -1028,7 +1416,8 @@ def main() -> None:
     wp.init()
     worlds = [int(raw.strip()) for raw in args.worlds.split(",") if raw.strip()]
     print(
-        f"device={wp.get_device()} block_dim={args.block_dim} mega_blocks={args.mega_blocks} "
+        f"device={wp.get_device()} block_dim={args.block_dim} block_world_dim={args.block_world_dim} "
+        f"mega_blocks={args.mega_blocks} "
         f"row_bound={args.row_bound} n_runs={args.n_runs} mode={args.mode}"
     )
     for scene in args.scenes:
