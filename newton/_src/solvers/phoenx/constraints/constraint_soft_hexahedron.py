@@ -22,8 +22,9 @@ import warp as wp
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_POSITION_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import (
+    PositionRows2,
     block_position_delta_2,
-    block_solve_projected_xpbd_2,
+    block_solve_position_rows2,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_SOFT_HEXAHEDRON,
@@ -1035,7 +1036,14 @@ def soft_hexahedron_iterate_at(
         rhs_h = c_h + bias_h * lambda_h + gamma_h * grad_h_dot_dx
         rhs_d = c_d + bias_d * lambda_d + gamma_d * grad_d_dot_dx
 
-        update = block_solve_projected_xpbd_2(A11, A12, A22, rhs_h, rhs_d, lambda_h, lambda_d, sor_boost, _DET_FLOOR)
+        rows = PositionRows2()
+        rows.A11 = A11
+        rows.A12 = A12
+        rows.A22 = A22
+        rows.residual = wp.vec2f(rhs_h, rhs_d)
+        rows.lambda_old = wp.vec2f(lambda_h, lambda_d)
+        rows.det_floor = _DET_FLOOR
+        update = block_solve_position_rows2(rows, sor_boost)
         dlam_h = update.delta[0]
         dlam_d = update.delta[1]
         lambda_h = update.lambda_new[0]
