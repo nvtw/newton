@@ -7,13 +7,16 @@ This is intentionally not a solver dispatch path. It compares the scheduling
 shape from ``SchedulingExperiments.Cuda`` against a conventional colored PGS
 loop on synthetic interaction graphs:
 
+* ``world_loop`` runs one fixed-size lane group per world and loops colors
+  locally, modelling PhoenX's production multi-world fast-tail shape;
 * ``colored`` runs one captured kernel node per color and epoch. This is a
   naive launch-bound baseline, not PhoenX's production fast-tail path;
 * ``node_ready`` runs one persistent scan kernel that uses per-node epoch
   counters and atomics to decide when each interaction may execute;
 * ``world_ready`` uses the same dependency rule, but each fixed-size lane
-  group scans only one world's rows, matching PhoenX's multi-world fast-tail
-  layout more closely.
+  group scans only one world's rows;
+* ``window`` and ``color_chunk`` try more granular local work overlap with
+  bounded per-world color windows or global chunks.
 
 Each work item now carries a PhoenX-like descriptor: family tag, endpoint
 count, row/block width, and projection mode. The payload is still arithmetic
@@ -39,7 +42,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _bench, _extract_solver
-from newton._src.solvers.phoenx.benchmarks.scenarios import g1_flat, h1_flat, tower
+from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
 
 MAX_NODES_PER_INTERACTION = 8
 PAYLOAD_SPECIALIZED = 0
@@ -176,6 +179,64 @@ def _reset_scheduler_kernel(
         total_done[0] = wp.int32(0)
         failed[0] = wp.int32(0)
         sink[0] = wp.float32(0.0)
+
+
+@wp.kernel(enable_backward=False)
+def _world_color_loop_kernel(
+    family: wp.array[wp.int32],
+    row_size: wp.array[wp.int32],
+    projection: wp.array[wp.int32],
+    color_buffer: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    world_color_starts: wp.array[wp.int32],
+    total_done: wp.array[wp.int32],
+    failed: wp.array[wp.int32],
+    sink: wp.array[wp.float32],
+    num_worlds: wp.int32,
+    num_iterations: wp.int32,
+    threads_per_world: wp.int32,
+    work_iters: wp.int32,
+    max_rows: wp.int32,
+    payload_mode: wp.int32,
+):
+    tid = wp.tid()
+    local_tid = tid % threads_per_world
+    world_id = tid / threads_per_world
+    if world_id >= num_worlds:
+        return
+
+    color_begin = world_color_starts[world_id]
+    color_end = world_color_starts[world_id + wp.int32(1)]
+    if color_begin >= color_end:
+        return
+
+    epoch = wp.int32(0)
+    while epoch < num_iterations:
+        global_color = color_begin
+        while global_color < color_end:
+            start = color_starts[global_color]
+            end = color_starts[global_color + wp.int32(1)]
+            cursor = start + local_tid
+            while cursor < end:
+                interaction_index = color_buffer[cursor]
+                seed = interaction_index + epoch * wp.int32(65537)
+                value = _descriptor_payload(
+                    work_iters,
+                    seed,
+                    family[interaction_index],
+                    row_size[interaction_index],
+                    projection[interaction_index],
+                    max_rows,
+                    payload_mode,
+                )
+                wp.atomic_add(sink, 0, value)
+                wp.atomic_add(total_done, 0, wp.int32(1))
+                cursor = cursor + threads_per_world
+            global_color = global_color + wp.int32(1)
+        epoch = epoch + wp.int32(1)
+
+    if tid == wp.int32(0):
+        failed[0] = wp.int32(0)
 
 
 @wp.kernel(enable_backward=False)
@@ -994,6 +1055,8 @@ def build_real_scene_graph(scene: str, args: argparse.Namespace) -> SyntheticGra
         handle = h1_flat.build(64, "phoenx", args.substeps, args.solver_iterations)
     elif scene == "g1_64":
         handle = g1_flat.build(64, "phoenx", args.substeps, args.solver_iterations)
+    elif scene == "dr_legs_64":
+        handle = dr_legs.build(64, "phoenx", args.substeps, args.solver_iterations)
     elif scene == "tower_1":
         handle = tower.build(
             num_worlds=1,
@@ -1115,6 +1178,46 @@ def _launch_reset(dg: DeviceGraph, device: wp.context.Devicelike) -> None:
         ],
         device=device,
     )
+
+
+def make_world_color_loop_runner(
+    dg: DeviceGraph,
+    *,
+    iterations: int,
+    work_iters: int,
+    threads_per_world: int,
+    max_rows: int,
+    payload_mode: int,
+    device: wp.context.Devicelike,
+):
+    num_worlds = int(dg.graph.world_starts.shape[0] - 1)
+
+    def run() -> None:
+        _launch_reset(dg, device)
+        wp.launch(
+            _world_color_loop_kernel,
+            dim=max(1, num_worlds * threads_per_world),
+            inputs=[
+                dg.family,
+                dg.row_size,
+                dg.projection,
+                dg.color_buffer,
+                dg.color_starts,
+                dg.world_color_starts,
+                dg.total_done,
+                dg.failed,
+                dg.sink,
+                wp.int32(num_worlds),
+                wp.int32(iterations),
+                wp.int32(threads_per_world),
+                wp.int32(work_iters),
+                wp.int32(max_rows),
+                wp.int32(payload_mode),
+            ],
+            device=device,
+        )
+
+    return run
 
 
 def make_colored_runner(
@@ -1494,6 +1597,19 @@ def run_graph_case(args: argparse.Namespace, graph: SyntheticGraph) -> None:
 
     colored_kernel_nodes = int(args.iterations) * (len(graph.color_starts) - 1)
     for payload_label, payload_mode in _payload_modes(args.payload_mode):
+        world_loop = upload_graph(graph, device, iterations=args.iterations)
+        world_loop_runner = make_world_color_loop_runner(
+            world_loop,
+            iterations=args.iterations,
+            work_iters=args.work_iters,
+            threads_per_world=args.world_tpw,
+            max_rows=max_rows,
+            payload_mode=payload_mode,
+            device=device,
+        )
+        validate_runner(f"world_loop/{payload_label}", world_loop, world_loop_runner, expected_total)
+        world_loop_min, world_loop_med = _bench(world_loop_runner, args.n_runs, args.warmup, args.trials)
+
         colored = upload_graph(graph, device, iterations=args.iterations)
         colored_runner = make_colored_runner(
             colored,
@@ -1583,6 +1699,10 @@ def run_graph_case(args: argparse.Namespace, graph: SyntheticGraph) -> None:
         color_chunk_min, color_chunk_med = _bench(color_chunk_runner, args.n_runs, args.warmup, args.trials)
 
         print(
+            f"{payload_label:11s} world_loop min={world_loop_min:8.3f} ms  "
+            f"med={world_loop_med:9.3f} ms  tpw={args.world_tpw}"
+        )
+        print(
             f"{payload_label:11s} colored    min={colored_min:9.3f} ms  med={colored_med:9.3f} ms  "
             f"kernel_nodes/frame={colored_kernel_nodes}"
         )
@@ -1603,6 +1723,8 @@ def run_graph_case(args: argparse.Namespace, graph: SyntheticGraph) -> None:
             f"{payload_label:11s} color_chunk min={color_chunk_min:8.3f} ms  "
             f"med={color_chunk_med:9.3f} ms  threads={args.total_threads} rows/chunk={args.rows_per_chunk}"
         )
+        loop_vs_colored = colored_min / world_loop_min if world_loop_min > 0.0 else 0.0
+        print(f"{payload_label:11s} world_loop relative to colored: {loop_vs_colored:6.3f}x")
         overlap_speed = colored_min / overlap_min if overlap_min > 0.0 else 0.0
         print(f"{payload_label:11s} overlap relative to colored: {overlap_speed:6.3f}x")
         speed = colored_min / node_min if node_min > 0.0 else 0.0
@@ -1613,6 +1735,12 @@ def run_graph_case(args: argparse.Namespace, graph: SyntheticGraph) -> None:
         print(f"{payload_label:11s} window relative to colored: {window_speed:6.3f}x")
         color_chunk_speed = colored_min / color_chunk_min if color_chunk_min > 0.0 else 0.0
         print(f"{payload_label:11s} color_chunk relative to colored: {color_chunk_speed:6.3f}x")
+        node_loop_speed = world_loop_min / node_min if node_min > 0.0 else 0.0
+        world_loop_speed = world_loop_min / world_min if world_min > 0.0 else 0.0
+        chunk_loop_speed = world_loop_min / color_chunk_min if color_chunk_min > 0.0 else 0.0
+        print(f"{payload_label:11s} node_ready relative to world_loop: {node_loop_speed:6.3f}x")
+        print(f"{payload_label:11s} world_ready relative to world_loop: {world_loop_speed:6.3f}x")
+        print(f"{payload_label:11s} color_chunk relative to world_loop: {chunk_loop_speed:6.3f}x")
 
 
 def run_case(args: argparse.Namespace, graph_name: str) -> None:
@@ -1627,7 +1755,7 @@ def parse_args() -> argparse.Namespace:
         "--real-scenes",
         nargs="*",
         default=[],
-        choices=("h1_1", "h1_64", "g1_64", "tower_1", "tower_32"),
+        choices=("h1_1", "h1_64", "g1_64", "dr_legs_64", "tower_1", "tower_32"),
         help="Optional real PhoenX scenes to extract into descriptor graphs.",
     )
     parser.add_argument("--colors", type=int, default=50)
