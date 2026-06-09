@@ -70,6 +70,7 @@ __all__ = [
     "block_solve_projected_xpbd_2",
     "block_solve_projected_xpbd_2_strict",
     "block_solve_rigid_frame_block3",
+    "block_solve_rigid_frame_block3_bounded",
     "block_solve_rigid_frame_rows3",
     "block_solve_rigid_frame_rows3_angular",
     "block_solve_rigid_frame_rows3_contact",
@@ -1110,6 +1111,36 @@ def block_solve_rigid_frame_rows3_uniform_projection(
 
 
 @wp.func
+def _dense_velocity_rows3_projection_bounded(
+    k_inv: wp.mat33f,
+    residual: wp.vec3f,
+    lambda_old: wp.vec3f,
+    mass_coeff: wp.vec3f,
+    impulse_coeff: wp.vec3f,
+    lambda_min: wp.vec3f,
+    lambda_max: wp.vec3f,
+    sor_boost: wp.float32,
+) -> VelocityRows3Update:
+    d_lambda_unsoft = -(k_inv @ residual)
+    d_lambda = wp.vec3f(
+        (mass_coeff[0] * d_lambda_unsoft[0] - impulse_coeff[0] * lambda_old[0]) * sor_boost,
+        (mass_coeff[1] * d_lambda_unsoft[1] - impulse_coeff[1] * lambda_old[1]) * sor_boost,
+        (mass_coeff[2] * d_lambda_unsoft[2] - impulse_coeff[2] * lambda_old[2]) * sor_boost,
+    )
+    lambda_raw = lambda_old + d_lambda
+    lambda_new = wp.vec3f(
+        wp.clamp(lambda_raw[0], lambda_min[0], lambda_max[0]),
+        wp.clamp(lambda_raw[1], lambda_min[1], lambda_max[1]),
+        wp.clamp(lambda_raw[2], lambda_min[2], lambda_max[2]),
+    )
+
+    update = VelocityRows3Update()
+    update.lambda_new = lambda_new
+    update.delta = lambda_new - lambda_old
+    return update
+
+
+@wp.func
 def _dense_velocity_rows3_projection_uniform(
     k_inv: wp.mat33f,
     residual: wp.vec3f,
@@ -1149,6 +1180,47 @@ def _dense_velocity_rows3_projection_uniform(
     update = VelocityRows3Update()
     update.lambda_new = lambda_new
     update.delta = lambda_new - lambda_old
+    return update
+
+
+@wp.func
+def block_solve_rigid_frame_block3_bounded(
+    rows: RigidFrameBlock3,
+    state: RigidFrameRows3State,
+    sor_boost: wp.float32,
+) -> RigidFrameRows3Update:
+    """Solve/project/apply one dense frame op with independent bounded rows."""
+    linear_scale = rows.mode[0]
+    cross_scale = rows.mode[1]
+    angular_scale = rows.mode[2]
+
+    rel = (
+        linear_scale * (state.v_b - state.v_a)
+        + cross_scale * (wp.cross(state.w_b, rows.r1) - wp.cross(state.w_a, rows.r0))
+        + angular_scale * (state.w_b - state.w_a)
+    )
+    residual = _rows3_dot(rows.axis0, rows.axis1, rows.axis2, rel) + rows.bias
+
+    projection = _dense_velocity_rows3_projection_bounded(
+        rows.k_inv,
+        residual,
+        rows.lambda_old,
+        rows.mass_coeff,
+        rows.impulse_coeff,
+        rows.lambda_min,
+        rows.lambda_max,
+        sor_boost,
+    )
+    d = projection.delta
+    impulse = d[0] * rows.axis0 + d[1] * rows.axis1 + d[2] * rows.axis2
+
+    update = RigidFrameRows3Update()
+    update.v_a = state.v_a - linear_scale * state.inv_m_a * impulse
+    update.v_b = state.v_b + linear_scale * state.inv_m_b * impulse
+    update.w_a = state.w_a + state.inv_i_a @ (-cross_scale * wp.cross(rows.r0, impulse) - angular_scale * impulse)
+    update.w_b = state.w_b + state.inv_i_b @ (cross_scale * wp.cross(rows.r1, impulse) + angular_scale * impulse)
+    update.lambda_new = projection.lambda_new
+    update.delta = d
     return update
 
 

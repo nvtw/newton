@@ -5,12 +5,13 @@
 
 This tests the next local-solve representation beyond ``RigidFrameRows3``.
 Contacts can still populate a diagonal inverse effective mass, while joint
-point-lock rows can populate a full 3x3 inverse block. The iterate path then
-uses one frame descriptor and one residual/project/apply sequence for both.
+point-lock and angular rows can populate full 3x3 inverse blocks. The iterate
+path then uses one frame descriptor and one residual/project/apply sequence for
+all three rigid shapes.
 
 The split baseline mirrors the current type split: contact point rows use the
-scalar three-row cone projection, while joint point-lock rows use a dense
-``VelocityBlock3`` identity projection and their own apply code.
+scalar three-row cone projection, while joint point-lock and angular rows use
+dense ``VelocityBlock3`` identity projections and their own apply code.
 """
 
 from __future__ import annotations
@@ -42,11 +43,31 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
     VelocityBlockProjection,
     VelocityRows3Op,
     block_solve_rigid_frame_block3,
+    block_solve_rigid_frame_block3_bounded,
     block_solve_velocity_block3_projected,
     block_solve_velocity_rows3_op,
 )
 
 _FAMILY_JOINT_POINT = wp.constant(wp.int32(2))
+_FAMILY_JOINT_ANGULAR = wp.constant(wp.int32(3))
+
+_FRAME_MIX_RATIOS: dict[str, tuple[float, float, float]] = {
+    "h1": (0.12, 0.18, 0.22),
+    "g1": (0.00, 0.18, 0.24),
+    "dr_legs": (0.08, 0.18, 0.22),
+    "tower": (1.0, 0.0, 0.0),
+}
+
+
+def _frame_mix_slots(scene: str, period: int) -> tuple[int, int, int]:
+    contact_ratio, point_ratio, angular_ratio = _FRAME_MIX_RATIOS[scene]
+    total = max(1.0e-6, contact_ratio + point_ratio + angular_ratio)
+    contact = int(round(contact_ratio / total * float(period)))
+    point = int(round(point_ratio / total * float(period)))
+    if contact + point > period:
+        point = max(0, period - contact)
+    angular = max(0, period - contact - point)
+    return contact, point, angular
 
 
 @wp.func
@@ -87,6 +108,7 @@ def _init_frame_block3_kernel(
     axis2: wp.array[wp.vec3f],
     r0: wp.array[wp.vec3f],
     r1: wp.array[wp.vec3f],
+    frame_mode: wp.array[wp.vec3f],
     k_inv_diag: wp.array[wp.vec3f],
     k_inv_block: wp.array[wp.mat33f],
     bias: wp.array[wp.vec3f],
@@ -100,10 +122,13 @@ def _init_frame_block3_kernel(
     friction_kinetic: wp.array[wp.float32],
     period: wp.int32,
     contacts_per_period: wp.int32,
+    point_rows_per_period: wp.int32,
 ):
     tid = wp.tid()
     lane = tid % period
+    point_limit = contacts_per_period + point_rows_per_period
     is_contact = lane < contacts_per_period
+    is_point = lane >= contacts_per_period and lane < point_limit
     phase = wp.float32((tid * wp.int32(37)) & wp.int32(255)) * wp.float32(0.00390625)
 
     v_a[tid] = wp.vec3f(phase, wp.float32(0.2) - phase, wp.float32(0.1) + wp.float32(0.5) * phase)
@@ -157,6 +182,7 @@ def _init_frame_block3_kernel(
         )
         k_inv_diag[tid] = kd
         k_inv_block[tid] = _diag33(kd)
+        frame_mode[tid] = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(0.0))
         mass_coeff[tid] = wp.vec3f(wp.float32(0.82), wp.float32(1.0), wp.float32(1.0))
         impulse_coeff[tid] = wp.vec3f(wp.float32(0.11), wp.float32(0.0), wp.float32(0.0))
         lambda_min[tid] = wp.vec3f(wp.float32(0.0), -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
@@ -164,7 +190,7 @@ def _init_frame_block3_kernel(
         projection_mode[tid] = VELOCITY_ROWS3_PROJECT_CONTACT_CONE
         friction_static[tid] = wp.float32(0.8)
         friction_kinetic[tid] = wp.float32(0.6)
-    else:
+    elif is_point:
         family[tid] = _FAMILY_JOINT_POINT
         axis0[tid] = wp.vec3f(wp.float32(1.0), wp.float32(0.0), wp.float32(0.0))
         axis1[tid] = wp.vec3f(wp.float32(0.0), wp.float32(1.0), wp.float32(0.0))
@@ -181,6 +207,34 @@ def _init_frame_block3_kernel(
             wp.float32(0.03),
             wp.float32(0.72) + wp.float32(0.01) * phase,
         )
+        frame_mode[tid] = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(0.0))
+        mass_coeff[tid] = wp.vec3f(wp.float32(0.86), wp.float32(0.86), wp.float32(0.86))
+        impulse_coeff[tid] = wp.vec3f(wp.float32(0.08), wp.float32(0.08), wp.float32(0.08))
+        lambda_min[tid] = wp.vec3f(-BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
+        lambda_max[tid] = wp.vec3f(BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF)
+        projection_mode[tid] = VELOCITY_ROWS3_PROJECT_BOUNDS
+        friction_static[tid] = wp.float32(0.0)
+        friction_kinetic[tid] = wp.float32(0.0)
+    else:
+        family[tid] = _FAMILY_JOINT_ANGULAR
+        axis0[tid] = wp.normalize(wp.vec3f(wp.float32(1.0), wp.float32(0.1), -wp.float32(0.1)))
+        axis1[tid] = wp.normalize(wp.vec3f(-wp.float32(0.1), wp.float32(1.0), wp.float32(0.2)))
+        axis2[tid] = wp.normalize(wp.cross(axis0[tid], axis1[tid]))
+        r0[tid] = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+        r1[tid] = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+        k_inv_diag[tid] = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+        k_inv_block[tid] = wp.mat33f(
+            wp.float32(0.44) + wp.float32(0.02) * phase,
+            -wp.float32(0.03),
+            wp.float32(0.01),
+            -wp.float32(0.03),
+            wp.float32(0.58) + wp.float32(0.02) * phase,
+            wp.float32(0.02),
+            wp.float32(0.01),
+            wp.float32(0.02),
+            wp.float32(0.67) + wp.float32(0.01) * phase,
+        )
+        frame_mode[tid] = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(1.0))
         mass_coeff[tid] = wp.vec3f(wp.float32(0.86), wp.float32(0.86), wp.float32(0.86))
         impulse_coeff[tid] = wp.vec3f(wp.float32(0.08), wp.float32(0.08), wp.float32(0.08))
         lambda_min[tid] = wp.vec3f(-BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
@@ -255,12 +309,10 @@ def _solve_split_kernel(
                 a2 = axis2[row]
                 rr0 = r0[row]
                 rr1 = r1[row]
-                rel = vb + wp.cross(wb, rr1) - va - wp.cross(wa, rr0)
-                residual = wp.vec3f(wp.dot(a0, rel), wp.dot(a1, rel), wp.dot(a2, rel)) + bias[row]
 
-                delta = wp.vec3f(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
-                lambda_new = lambda_old[row]
                 if family[row] == _FAMILY_CONTACT:
+                    rel = vb + wp.cross(wb, rr1) - va - wp.cross(wa, rr0)
+                    residual = wp.vec3f(wp.dot(a0, rel), wp.dot(a1, rel), wp.dot(a2, rel)) + bias[row]
                     op = VelocityRows3Op()
                     op.k_inv = k_inv_diag[row]
                     op.residual = residual
@@ -273,9 +325,15 @@ def _solve_split_kernel(
                     op.friction_static = friction_static[row]
                     op.friction_kinetic = friction_kinetic[row]
                     contact_update = block_solve_velocity_rows3_op(op, wp.float32(1.0))
-                    delta = contact_update.delta
-                    lambda_new = contact_update.lambda_new
-                else:
+                    impulse = contact_update.delta[0] * a0 + contact_update.delta[1] * a1 + contact_update.delta[2] * a2
+                    out_va[row] = va - inv_m_a[row] * impulse
+                    out_vb[row] = vb + inv_m_b[row] * impulse
+                    out_wa[row] = wa - inv_i_a[row] @ wp.cross(rr0, impulse)
+                    out_wb[row] = wb + inv_i_b[row] @ wp.cross(rr1, impulse)
+                    out_lambda[row] = contact_update.lambda_new
+                elif family[row] == _FAMILY_JOINT_POINT:
+                    rel = vb + wp.cross(wb, rr1) - va - wp.cross(wa, rr0)
+                    residual = wp.vec3f(wp.dot(a0, rel), wp.dot(a1, rel), wp.dot(a2, rel)) + bias[row]
                     block = VelocityBlock3()
                     block.k_inv = k_inv_block[row]
                     block.residual = residual
@@ -285,15 +343,32 @@ def _solve_split_kernel(
                     block_update = block_solve_velocity_block3_projected(
                         block, _identity_block_projection(), wp.float32(1.0)
                     )
-                    delta = block_update.delta
-                    lambda_new = block_update.lambda_new
-
-                impulse = delta[0] * a0 + delta[1] * a1 + delta[2] * a2
-                out_va[row] = va - inv_m_a[row] * impulse
-                out_vb[row] = vb + inv_m_b[row] * impulse
-                out_wa[row] = wa - inv_i_a[row] @ wp.cross(rr0, impulse)
-                out_wb[row] = wb + inv_i_b[row] @ wp.cross(rr1, impulse)
-                out_lambda[row] = lambda_new
+                    impulse = block_update.delta[0] * a0 + block_update.delta[1] * a1 + block_update.delta[2] * a2
+                    out_va[row] = va - inv_m_a[row] * impulse
+                    out_vb[row] = vb + inv_m_b[row] * impulse
+                    out_wa[row] = wa - inv_i_a[row] @ wp.cross(rr0, impulse)
+                    out_wb[row] = wb + inv_i_b[row] @ wp.cross(rr1, impulse)
+                    out_lambda[row] = block_update.lambda_new
+                else:
+                    rel_w = wb - wa
+                    residual = wp.vec3f(wp.dot(a0, rel_w), wp.dot(a1, rel_w), wp.dot(a2, rel_w)) + bias[row]
+                    block = VelocityBlock3()
+                    block.k_inv = k_inv_block[row]
+                    block.residual = residual
+                    block.lambda_old = lambda_old[row]
+                    block.mass_coeff = mass_coeff[row][0]
+                    block.impulse_coeff = impulse_coeff[row][0]
+                    block_update = block_solve_velocity_block3_projected(
+                        block, _identity_block_projection(), wp.float32(1.0)
+                    )
+                    angular_impulse = (
+                        block_update.delta[0] * a0 + block_update.delta[1] * a1 + block_update.delta[2] * a2
+                    )
+                    out_va[row] = va
+                    out_vb[row] = vb
+                    out_wa[row] = wa - inv_i_a[row] @ angular_impulse
+                    out_wb[row] = wb + inv_i_b[row] @ angular_impulse
+                    out_lambda[row] = block_update.lambda_new
                 cursor = cursor + threads_per_world
             color = color + wp.int32(1)
         epoch = epoch + wp.int32(1)
@@ -317,6 +392,7 @@ def _solve_unified_kernel(
     axis2: wp.array[wp.vec3f],
     r0: wp.array[wp.vec3f],
     r1: wp.array[wp.vec3f],
+    frame_mode: wp.array[wp.vec3f],
     k_inv_block: wp.array[wp.mat33f],
     bias: wp.array[wp.vec3f],
     lambda_old: wp.array[wp.vec3f],
@@ -359,7 +435,7 @@ def _solve_unified_kernel(
                 rows.axis2 = axis2[row]
                 rows.r0 = r0[row]
                 rows.r1 = r1[row]
-                rows.mode = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(0.0))
+                rows.mode = frame_mode[row]
                 rows.k_inv = k_inv_block[row]
                 rows.bias = bias[row]
                 rows.lambda_old = lambda_old[row]
@@ -392,11 +468,108 @@ def _solve_unified_kernel(
         epoch = epoch + wp.int32(1)
 
 
+@wp.kernel(enable_backward=False)
+def _solve_unified_projected_kernel(
+    row_ids: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    world_color_starts: wp.array[wp.int32],
+    v_a: wp.array[wp.vec3f],
+    w_a: wp.array[wp.vec3f],
+    v_b: wp.array[wp.vec3f],
+    w_b: wp.array[wp.vec3f],
+    inv_m_a: wp.array[wp.float32],
+    inv_m_b: wp.array[wp.float32],
+    inv_i_a: wp.array[wp.mat33f],
+    inv_i_b: wp.array[wp.mat33f],
+    axis0: wp.array[wp.vec3f],
+    axis1: wp.array[wp.vec3f],
+    axis2: wp.array[wp.vec3f],
+    r0: wp.array[wp.vec3f],
+    r1: wp.array[wp.vec3f],
+    frame_mode: wp.array[wp.vec3f],
+    k_inv_block: wp.array[wp.mat33f],
+    bias: wp.array[wp.vec3f],
+    lambda_old: wp.array[wp.vec3f],
+    mass_coeff: wp.array[wp.vec3f],
+    impulse_coeff: wp.array[wp.vec3f],
+    lambda_min: wp.array[wp.vec3f],
+    lambda_max: wp.array[wp.vec3f],
+    projection_mode: wp.array[wp.int32],
+    friction_static: wp.array[wp.float32],
+    friction_kinetic: wp.array[wp.float32],
+    out_va: wp.array[wp.vec3f],
+    out_wa: wp.array[wp.vec3f],
+    out_vb: wp.array[wp.vec3f],
+    out_wb: wp.array[wp.vec3f],
+    out_lambda: wp.array[wp.vec3f],
+    num_worlds: wp.int32,
+    iterations: wp.int32,
+    threads_per_world: wp.int32,
+):
+    tid = wp.tid()
+    local_tid = tid % threads_per_world
+    world_id = tid / threads_per_world
+    if world_id >= num_worlds:
+        return
+
+    color_begin = world_color_starts[world_id]
+    color_end = world_color_starts[world_id + wp.int32(1)]
+    epoch = wp.int32(0)
+    while epoch < iterations:
+        color = color_begin
+        while color < color_end:
+            start = color_starts[color]
+            end = color_starts[color + wp.int32(1)]
+            cursor = start + local_tid
+            while cursor < end:
+                row = row_ids[cursor]
+                rows = RigidFrameBlock3()
+                rows.axis0 = axis0[row]
+                rows.axis1 = axis1[row]
+                rows.axis2 = axis2[row]
+                rows.r0 = r0[row]
+                rows.r1 = r1[row]
+                rows.mode = frame_mode[row]
+                rows.k_inv = k_inv_block[row]
+                rows.bias = bias[row]
+                rows.lambda_old = lambda_old[row]
+                rows.mass_coeff = mass_coeff[row]
+                rows.impulse_coeff = impulse_coeff[row]
+                rows.lambda_min = lambda_min[row]
+                rows.lambda_max = lambda_max[row]
+                rows.projection_mode = projection_mode[row]
+                rows.friction_static = friction_static[row]
+                rows.friction_kinetic = friction_kinetic[row]
+
+                state = RigidFrameRows3State()
+                state.v_a = v_a[row]
+                state.w_a = w_a[row]
+                state.v_b = v_b[row]
+                state.w_b = w_b[row]
+                state.inv_m_a = inv_m_a[row]
+                state.inv_m_b = inv_m_b[row]
+                state.inv_i_a = inv_i_a[row]
+                state.inv_i_b = inv_i_b[row]
+
+                if rows.projection_mode == VELOCITY_ROWS3_PROJECT_CONTACT_CONE:
+                    update = block_solve_rigid_frame_block3(rows, state, wp.float32(1.0))
+                else:
+                    update = block_solve_rigid_frame_block3_bounded(rows, state, wp.float32(1.0))
+                out_va[row] = update.v_a
+                out_wa[row] = update.w_a
+                out_vb[row] = update.v_b
+                out_wb[row] = update.w_b
+                out_lambda[row] = update.lambda_new
+                cursor = cursor + threads_per_world
+            color = color + wp.int32(1)
+        epoch = epoch + wp.int32(1)
+
+
 def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Devicelike) -> None:
     preset = _SCENE_PRESETS[scene]
     schedule = _build_schedule(preset, int(args.worlds))
     rows = int(schedule.rows)
-    contacts_per_period = int(round(preset.contact_ratio * float(args.period)))
+    contacts_per_period, point_rows_per_period, angular_rows_per_period = _frame_mix_slots(scene, int(args.period))
 
     row_ids = wp.array(schedule.row_ids, dtype=wp.int32, device=device)
     color_starts = wp.array(schedule.color_starts, dtype=wp.int32, device=device)
@@ -416,6 +589,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     axis2 = _alloc_vec(rows, device)
     r0 = _alloc_vec(rows, device)
     r1 = _alloc_vec(rows, device)
+    frame_mode = _alloc_vec(rows, device)
     k_inv_diag = _alloc_vec(rows, device)
     k_inv_block = _alloc_mat(rows, device)
     bias = _alloc_vec(rows, device)
@@ -438,6 +612,11 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
     unified_vb = _alloc_vec(rows, device)
     unified_wb = _alloc_vec(rows, device)
     unified_lambda = _alloc_vec(rows, device)
+    projected_va = _alloc_vec(rows, device)
+    projected_wa = _alloc_vec(rows, device)
+    projected_vb = _alloc_vec(rows, device)
+    projected_wb = _alloc_vec(rows, device)
+    projected_lambda = _alloc_vec(rows, device)
 
     wp.launch(
         _init_frame_block3_kernel,
@@ -457,6 +636,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
             axis2,
             r0,
             r1,
+            frame_mode,
             k_inv_diag,
             k_inv_block,
             bias,
@@ -470,6 +650,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
             friction_kinetic,
             int(args.period),
             contacts_per_period,
+            point_rows_per_period,
         ],
         device=device,
     )
@@ -529,6 +710,7 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         axis2,
         r0,
         r1,
+        frame_mode,
         k_inv_block,
         bias,
         lambda_old,
@@ -548,6 +730,12 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
         int(args.iterations),
         int(args.threads_per_world),
     ]
+    projected_inputs = list(unified_inputs)
+    projected_inputs[-8] = projected_va
+    projected_inputs[-7] = projected_wa
+    projected_inputs[-6] = projected_vb
+    projected_inputs[-5] = projected_wb
+    projected_inputs[-4] = projected_lambda
 
     def split_run() -> None:
         wp.launch(
@@ -567,22 +755,43 @@ def _run_scene(args: argparse.Namespace, scene: str, device: wp.context.Deviceli
             block_dim=int(args.block_dim),
         )
 
+    def projected_run() -> None:
+        wp.launch(
+            _solve_unified_projected_kernel,
+            dim=max(1, int(args.worlds) * int(args.threads_per_world)),
+            inputs=projected_inputs,
+            device=device,
+            block_dim=int(args.block_dim),
+        )
+
     split_run()
     unified_run()
-    err = _max_err(
+    projected_run()
+    uniform_err = _max_err(
         (unified_va, split_va),
         (unified_wa, split_wa),
         (unified_vb, split_vb),
         (unified_wb, split_wb),
         (unified_lambda, split_lambda),
     )
+    projected_err = _max_err(
+        (projected_va, split_va),
+        (projected_wa, split_wa),
+        (projected_vb, split_vb),
+        (projected_wb, split_wb),
+        (projected_lambda, split_lambda),
+    )
     split_ms, _ = _bench(split_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
     unified_ms, _ = _bench(unified_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
-    speedup = split_ms / unified_ms if unified_ms > 0.0 else float("nan")
+    projected_ms, _ = _bench(projected_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=device)
+    uniform_speedup = split_ms / unified_ms if unified_ms > 0.0 else float("nan")
+    projected_speedup = split_ms / projected_ms if projected_ms > 0.0 else float("nan")
     print(
         f"{scene:8s} worlds={int(args.worlds):5d} rows={rows:7d} colors={schedule.colors:5d} "
-        f"contact_ratio={preset.contact_ratio:5.3f} split={split_ms:8.4f}ms "
-        f"unified_block3={unified_ms:8.4f}ms speedup={speedup:6.3f}x err={err:.6g}"
+        f"slots=(c{contacts_per_period},p{point_rows_per_period},a{angular_rows_per_period}) "
+        f"split={split_ms:8.4f}ms uniform={unified_ms:8.4f}ms "
+        f"projected={projected_ms:8.4f}ms speedups=({uniform_speedup:6.3f}x,{projected_speedup:6.3f}x) "
+        f"errs=({uniform_err:.6g},{projected_err:.6g})"
     )
 
 
