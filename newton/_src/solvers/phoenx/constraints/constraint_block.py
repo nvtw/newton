@@ -30,11 +30,13 @@ __all__ = [
     "RigidFrameBlock2",
     "RigidFrameBlock3",
     "RigidFrameBlock3Mixed",
+    "RigidFrameBlock4",
     "RigidFrameRows1Update",
     "RigidFrameRows2Update",
     "RigidFrameRows3",
     "RigidFrameRows3State",
     "RigidFrameRows3Update",
+    "RigidFrameRows4Update",
     "VelocityBlock1",
     "VelocityBlock2",
     "VelocityBlock3",
@@ -80,6 +82,7 @@ __all__ = [
     "block_solve_rigid_frame_block3_bounded",
     "block_solve_rigid_frame_block3_mixed",
     "block_solve_rigid_frame_block3_planar_bounded",
+    "block_solve_rigid_frame_block4",
     "block_solve_rigid_frame_rows3",
     "block_solve_rigid_frame_rows3_angular",
     "block_solve_rigid_frame_rows3_contact",
@@ -352,6 +355,35 @@ class RigidFrameBlock3Mixed:
 
 
 @wp.struct
+class RigidFrameBlock4:
+    """Explicit four-row rigid frame descriptor.
+
+    Each row carries its own axis and body-A/body-B lever arms. This is the
+    compact production counterpart to the experimental sidecar4 path: callers
+    populate a descriptor, while residual, dense solve, projection, and
+    ``M^-1 J^T`` apply use one shared operation.
+    """
+
+    axis0: wp.vec3f
+    axis1: wp.vec3f
+    axis2: wp.vec3f
+    axis3: wp.vec3f
+    r_a0: wp.vec3f
+    r_a1: wp.vec3f
+    r_a2: wp.vec3f
+    r_a3: wp.vec3f
+    r_b0: wp.vec3f
+    r_b1: wp.vec3f
+    r_b2: wp.vec3f
+    r_b3: wp.vec3f
+    k_inv: wp.mat44f
+    bias: wp.vec4f
+    lambda_old: wp.vec4f
+    mass_coeff: wp.float32
+    impulse_coeff: wp.float32
+
+
+@wp.struct
 class RigidFrameRows3:
     """Compact prepared rigid three-row frame descriptor.
 
@@ -423,6 +455,16 @@ class RigidFrameRows3Update:
     w_b: wp.vec3f
     lambda_new: wp.vec3f
     delta: wp.vec3f
+
+
+@wp.struct
+class RigidFrameRows4Update:
+    v_a: wp.vec3f
+    w_a: wp.vec3f
+    v_b: wp.vec3f
+    w_b: wp.vec3f
+    lambda_new: wp.vec4f
+    delta: wp.vec4f
 
 
 @wp.func
@@ -1592,6 +1634,71 @@ def block_solve_rigid_frame_block3(
     update.v_b = state.v_b + linear_scale * state.inv_m_b * impulse
     update.w_a = state.w_a + state.inv_i_a @ (-cross_scale * wp.cross(rows.r0, impulse) - angular_scale * impulse)
     update.w_b = state.w_b + state.inv_i_b @ (cross_scale * wp.cross(rows.r1, impulse) + angular_scale * impulse)
+    update.lambda_new = projection.lambda_new
+    update.delta = d
+    return update
+
+
+@wp.func
+def _rigid_frame_block4_row_residual(
+    axis: wp.vec3f,
+    r_a: wp.vec3f,
+    r_b: wp.vec3f,
+    state: RigidFrameRows3State,
+) -> wp.float32:
+    rel = state.v_b - state.v_a + wp.cross(state.w_b, r_b) - wp.cross(state.w_a, r_a)
+    return wp.dot(axis, rel)
+
+
+@wp.func
+def block_solve_rigid_frame_block4(
+    rows: RigidFrameBlock4,
+    state: RigidFrameRows3State,
+    sor_boost: wp.float32,
+) -> RigidFrameRows4Update:
+    """Solve/project/apply one explicit four-row rigid frame block."""
+    residual = (
+        wp.vec4f(
+            _rigid_frame_block4_row_residual(rows.axis0, rows.r_a0, rows.r_b0, state),
+            _rigid_frame_block4_row_residual(rows.axis1, rows.r_a1, rows.r_b1, state),
+            _rigid_frame_block4_row_residual(rows.axis2, rows.r_a2, rows.r_b2, state),
+            _rigid_frame_block4_row_residual(rows.axis3, rows.r_a3, rows.r_b3, state),
+        )
+        + rows.bias
+    )
+
+    projection = block_solve_accumulated_inverse_4(
+        rows.k_inv,
+        residual,
+        rows.lambda_old,
+        rows.mass_coeff,
+        rows.impulse_coeff,
+        sor_boost,
+    )
+    d = projection.delta
+    impulse0 = d[0] * rows.axis0
+    impulse1 = d[1] * rows.axis1
+    impulse2 = d[2] * rows.axis2
+    impulse3 = d[3] * rows.axis3
+    linear_impulse = impulse0 + impulse1 + impulse2 + impulse3
+    torque_a = (
+        wp.cross(rows.r_a0, impulse0)
+        + wp.cross(rows.r_a1, impulse1)
+        + wp.cross(rows.r_a2, impulse2)
+        + wp.cross(rows.r_a3, impulse3)
+    )
+    torque_b = (
+        wp.cross(rows.r_b0, impulse0)
+        + wp.cross(rows.r_b1, impulse1)
+        + wp.cross(rows.r_b2, impulse2)
+        + wp.cross(rows.r_b3, impulse3)
+    )
+
+    update = RigidFrameRows4Update()
+    update.v_a = state.v_a - state.inv_m_a * linear_impulse
+    update.v_b = state.v_b + state.inv_m_b * linear_impulse
+    update.w_a = state.w_a - state.inv_i_a @ torque_a
+    update.w_b = state.w_b + state.inv_i_b @ torque_b
     update.lambda_new = projection.lambda_new
     update.delta = d
     return update

@@ -32,10 +32,10 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
     RigidFrameBlock1,
     RigidFrameBlock2,
     RigidFrameBlock3,
+    RigidFrameBlock4,
     RigidFrameRows3State,
     VelocityBlock2,
     VelocityBlock3,
-    VelocityBlock4,
     VelocityBlockProjection,
     VelocityRows3Op,
     block_project_velocity_block2_unsoft,
@@ -46,7 +46,7 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
     block_solve_rigid_frame_block2,
     block_solve_rigid_frame_block3_bounded,
     block_solve_rigid_frame_block3_planar_bounded,
-    block_solve_velocity_block4_projected,
+    block_solve_rigid_frame_block4,
     block_solve_velocity_rows3_op,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -1658,44 +1658,41 @@ def _anchor1_anchor2_tangent_4row_block(
     acc2_tan = wp.vec2f(wp.dot(t1, acc_imp2_world), wp.dot(t2, acc_imp2_world))
     acc4 = wp.vec4f(acc1_tan[0], acc1_tan[1], acc2_tan[0], acc2_tan[1])
 
-    jv1_world = v2 - cr1_b2 @ w2 - v1 + cr1_b1 @ w1
-    jv2_world = v2 - cr2_b2 @ w2 - v1 + cr2_b1 @ w1
-    jv4 = wp.vec4f(
-        wp.dot(t1, jv1_world),
-        wp.dot(t2, jv1_world),
-        wp.dot(t1, jv2_world),
-        wp.dot(t2, jv2_world),
-    )
-    bias4 = wp.vec4f(bias1[0], bias1[1], bias2[0], bias2[1])
-    block4 = VelocityBlock4()
-    block4.k_inv = a4_inv
-    block4.residual = jv4 + bias4
-    block4.lambda_old = acc4
-    block4.mass_coeff = mass_coeff
-    block4.impulse_coeff = impulse_coeff
-    update4 = block_solve_velocity_block4_projected(block4, _identity_velocity_block_projection(), sor_boost)
+    rows = RigidFrameBlock4()
+    rows.axis0 = t1
+    rows.axis1 = t2
+    rows.axis2 = t1
+    rows.axis3 = t2
+    rows.r_a0 = wp.vec3f(cr1_b1[2, 1], cr1_b1[0, 2], cr1_b1[1, 0])
+    rows.r_a1 = rows.r_a0
+    rows.r_a2 = wp.vec3f(cr2_b1[2, 1], cr2_b1[0, 2], cr2_b1[1, 0])
+    rows.r_a3 = rows.r_a2
+    rows.r_b0 = wp.vec3f(cr1_b2[2, 1], cr1_b2[0, 2], cr1_b2[1, 0])
+    rows.r_b1 = rows.r_b0
+    rows.r_b2 = wp.vec3f(cr2_b2[2, 1], cr2_b2[0, 2], cr2_b2[1, 0])
+    rows.r_b3 = rows.r_b2
+    rows.k_inv = a4_inv
+    rows.bias = wp.vec4f(bias1[0], bias1[1], bias2[0], bias2[1])
+    rows.lambda_old = acc4
+    rows.mass_coeff = mass_coeff
+    rows.impulse_coeff = impulse_coeff
+
+    state = RigidFrameRows3State()
+    state.v_a = v1
+    state.w_a = w1
+    state.v_b = v2
+    state.w_b = w2
+    state.inv_m_a = im1
+    state.inv_m_b = im2
+    state.inv_i_a = ii1
+    state.inv_i_b = ii2
+
+    update4 = block_solve_rigid_frame_block4(rows, state, sor_boost)
     lam4 = update4.delta
-    lam1_world = lam4[0] * t1 + lam4[1] * t2
-    lam2_world = lam4[2] * t1 + lam4[3] * t2
+    _write_acc_imp1(constraints, cid, acc_imp1_world + lam4[0] * t1 + lam4[1] * t2)
+    _write_acc_imp2(constraints, cid, acc_imp2_world + lam4[2] * t1 + lam4[3] * t2)
 
-    total_linear = lam1_world + lam2_world
-    v1, v2, w1, w2 = apply_pair_spatial_impulse(
-        v1,
-        v2,
-        w1,
-        w2,
-        im1,
-        im2,
-        ii1,
-        ii2,
-        total_linear,
-        cr1_b1 @ lam1_world + cr2_b1 @ lam2_world,
-        cr1_b2 @ lam1_world + cr2_b2 @ lam2_world,
-    )
-    _write_acc_imp1(constraints, cid, acc_imp1_world + lam1_world)
-    _write_acc_imp2(constraints, cid, acc_imp2_world + lam2_world)
-
-    return v1, v2, w1, w2
+    return update4.v_a, update4.v_b, update4.w_a, update4.w_b
 
 
 @wp.func
