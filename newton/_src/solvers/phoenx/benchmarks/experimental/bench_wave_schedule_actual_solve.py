@@ -45,6 +45,28 @@ def _parse_csv_ints(value: str) -> tuple[int, ...]:
     return tuple(int(raw.strip()) for raw in value.split(",") if raw.strip())
 
 
+def _parse_csv_floats(value: str) -> tuple[float, ...]:
+    return tuple(float(raw.strip()) for raw in value.split(",") if raw.strip())
+
+
+def _tail_fractions(args: argparse.Namespace) -> tuple[float, ...]:
+    raw_values = _parse_csv_floats(args.tail_fractions) if args.tail_fractions.strip() else (float(args.tail_fraction),)
+    values: list[float] = []
+    seen: set[int] = set()
+    for raw in raw_values:
+        value = max(0.0, min(0.95, float(raw)))
+        key = int(round(value * 1.0e6))
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(value)
+    return tuple(values) if values else (0.0,)
+
+
+def _format_fraction(value: float) -> str:
+    return f"{value:g}"
+
+
 def _unique_row_nodes(elements: np.ndarray, eid: int) -> list[int]:
     nodes: list[int] = []
     seen: set[int] = set()
@@ -238,10 +260,13 @@ def _run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
 
     color_host = _extract_color_grid(world)
     wave_host, stats = _extract_dependency_wave_grid(world)
-    tail_host, tail_stats = _extract_tail_overlap_wave_grid(world, args.tail_fraction)
+    tail_cases = [(fraction, *_extract_tail_overlap_wave_grid(world, fraction)) for fraction in _tail_fractions(args)]
     color_graph = _upload_color_grid(color_host, world.device)
     wave_graph = _upload_color_grid(wave_host, world.device)
-    tail_graph = _upload_color_grid(tail_host, world.device)
+    tail_graphs = [
+        (fraction, tail_stats, _upload_color_grid(tail_host, world.device))
+        for fraction, tail_host, tail_stats in tail_cases
+    ]
 
     def make_run(graph):
         if args.mode == "mega":
@@ -255,11 +280,12 @@ def _run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
 
     color_run = make_run(color_graph)
     wave_run = make_run(wave_graph)
-    tail_run = make_run(tail_graph)
+    tail_runs = [(fraction, tail_stats, make_run(tail_graph)) for fraction, tail_stats, tail_graph in tail_graphs]
 
     color_run()
     wave_run()
-    tail_run()
+    for _fraction, _tail_stats, tail_run in tail_runs:
+        tail_run()
     wp.synchronize_device()
 
     base_min, _base_med = _bench(
@@ -283,26 +309,43 @@ def _run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
         trials=args.trials,
         device=world.device,
     )
-    tail_min, _tail_med = _bench(
-        tail_run,
-        n_runs=args.n_runs,
-        warmup=args.warmup,
-        trials=args.trials,
-        device=world.device,
-    )
+    tail_results: list[tuple[float, WaveStats, float]] = []
+    for fraction, tail_stats, tail_run in tail_runs:
+        tail_min, _tail_med = _bench(
+            tail_run,
+            n_runs=args.n_runs,
+            warmup=args.warmup,
+            trials=args.trials,
+            device=world.device,
+        )
+        tail_results.append((fraction, tail_stats, tail_min))
 
     color_speed = base_min / color_min if color_min > 0.0 else float("nan")
     wave_speed = base_min / wave_min if wave_min > 0.0 else float("nan")
-    tail_speed = base_min / tail_min if tail_min > 0.0 else float("nan")
     suffix = "mega" if args.mode == "mega" else "flat"
+    candidates: list[tuple[str, float]] = [
+        ("baseline", base_min),
+        (f"color_{suffix}", color_min),
+        (f"wave_{suffix}", wave_min),
+    ]
+    tail_pieces: list[str] = []
+    tail_stat_pieces: list[str] = []
+    for fraction, tail_stats, tail_min in tail_results:
+        label = f"tail{_format_fraction(fraction)}_{suffix}"
+        tail_speed = base_min / tail_min if tail_min > 0.0 else float("nan")
+        candidates.append((label, tail_min))
+        tail_pieces.append(f"{label}={tail_min:8.3f}ms({tail_speed:5.3f}x)")
+        tail_stat_pieces.append(f"{_format_fraction(fraction)}:waves={tail_stats.waves},max={tail_stats.max_wave_rows}")
+    best_label, best_min = min(candidates, key=lambda item: item[1])
+    best_speed = base_min / best_min if best_min > 0.0 else float("nan")
     print(
         f"{scene:7s} worlds={num_worlds:5d} rows={stats.rows:7d} colors={stats.colors:4d} "
-        f"waves={stats.waves:4d} tail_waves={tail_stats.waves:4d} "
-        f"max_color={stats.max_color_rows:5d} max_wave={stats.max_wave_rows:5d} "
-        f"max_tail={tail_stats.max_wave_rows:5d} baseline={base_min:8.3f}ms "
+        f"waves={stats.waves:4d} max_color={stats.max_color_rows:5d} max_wave={stats.max_wave_rows:5d} "
+        f"tails=[{';'.join(tail_stat_pieces)}] baseline={base_min:8.3f}ms "
         f"color_{suffix}={color_min:8.3f}ms({color_speed:5.3f}x) "
         f"wave_{suffix}={wave_min:8.3f}ms({wave_speed:5.3f}x) "
-        f"tail_{suffix}={tail_min:8.3f}ms({tail_speed:5.3f}x) "
+        + " ".join(tail_pieces)
+        + f" auto_best={best_label}:{best_min:8.3f}ms({best_speed:5.3f}x) "
         f"base_us={1000.0 * base_min / args.n_runs:8.3f}"
     )
 
@@ -319,7 +362,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=("flat", "mega"), default="flat")
     parser.add_argument("--block-dim", type=int, default=128)
     parser.add_argument("--worker-blocks", type=int, default=128)
-    parser.add_argument("--tail-fraction", type=float, default=0.25)
+    parser.add_argument(
+        "--tail-fractions",
+        default="0,0.125,0.25,0.5",
+        help="Comma-separated tail-overlap fractions to build and time for auto-best reporting.",
+    )
+    parser.add_argument("--tail-fraction", type=float, default=0.25, help="Fallback when --tail-fractions is empty.")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--n-runs", type=int, default=8)
     parser.add_argument("--trials", type=int, default=1)
@@ -331,7 +379,7 @@ def main() -> None:
     wp.init()
     print(
         f"device={wp.get_device()} mode={args.mode} block_dim={args.block_dim} worker_blocks={args.worker_blocks} "
-        f"n_runs={args.n_runs} trials={args.trials}"
+        f"tail_fractions={_tail_fractions(args)} n_runs={args.n_runs} trials={args.trials}"
     )
     for scene in args.scenes:
         for num_worlds in args.worlds:
