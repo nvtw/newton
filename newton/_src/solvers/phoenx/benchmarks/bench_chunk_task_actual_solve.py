@@ -65,6 +65,10 @@ class ChunkGraphHost:
     world_num_colors: np.ndarray
     max_colors: int
     total_rows: int
+    joint_rows: int
+    contact_rows: int
+    max_color_rows: int
+    mean_color_rows: float
 
 
 @dataclass
@@ -773,6 +777,9 @@ def _extract_chunk_graph(world: PhoenXWorld, *, chunk_rows: int) -> ChunkGraphHo
     chunk_world: list[int] = []
     chunk_color: list[int] = []
     total_rows = 0
+    joint_rows = 0
+    contact_rows = 0
+    color_row_counts: list[int] = []
     for world_id in range(world.num_worlds):
         base = int(csr[world_id])
         for color in range(max_colors):
@@ -783,6 +790,12 @@ def _extract_chunk_graph(world: PhoenXWorld, *, chunk_rows: int) -> ChunkGraphHo
             end = base + int(starts[world_id, color + 1])
             rows = [idx for idx in range(start, end) if 0 <= int(eids_by_color[idx]) < active]
             total_rows += len(rows)
+            color_row_counts.append(len(rows))
+            for row in rows:
+                if int(eids_by_color[row]) < int(world.num_joints):
+                    joint_rows += 1
+                else:
+                    contact_rows += 1
             for offset in range(0, len(rows), chunk_rows):
                 # The source rows are contiguous after filtering in the rigid scenes this
                 # benchmark targets. Keep the assertion here so the chunk kernel can use
@@ -808,6 +821,10 @@ def _extract_chunk_graph(world: PhoenXWorld, *, chunk_rows: int) -> ChunkGraphHo
         world_num_colors=np.asarray(num_colors, dtype=np.int32),
         max_colors=max_colors,
         total_rows=total_rows,
+        joint_rows=joint_rows,
+        contact_rows=contact_rows,
+        max_color_rows=max(color_row_counts, default=0),
+        mean_color_rows=float(np.mean(np.asarray(color_row_counts, dtype=np.float32))) if color_row_counts else 0.0,
     )
 
 
@@ -1117,6 +1134,17 @@ def _validate(graph: ChunkGraphDevice, expected: int, label: str) -> None:
         )
 
 
+def _select_chunk_chain(args: argparse.Namespace, graph: ChunkGraphHost, num_worlds: int) -> bool:
+    rows_per_world = float(graph.total_rows) / float(max(1, num_worlds))
+    contact_fraction = float(graph.contact_rows) / float(max(1, graph.total_rows))
+    chunks_per_world_color = float(graph.chunk_start.shape[0]) / float(max(1, num_worlds * graph.max_colors))
+    return (
+        rows_per_world >= args.hybrid_min_rows_per_world
+        and contact_fraction >= args.hybrid_min_contact_fraction
+        and chunks_per_world_color >= args.hybrid_min_chunks_per_world_color
+    )
+
+
 def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
     handle = _build_scene(scene, num_worlds, substeps=args.substeps, solver_iterations=args.solver_iterations)
     solver = _extract_solver(handle)
@@ -1147,11 +1175,19 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
         chunk_run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=world.device
     )
     speed = base_min / chunk_min if chunk_min > 0.0 else float("nan")
+    rows_per_world = float(host_graph.total_rows) / float(max(1, num_worlds))
+    contact_fraction = float(host_graph.contact_rows) / float(max(1, host_graph.total_rows))
+    chunks_per_world_color = float(host_graph.chunk_start.shape[0]) / float(max(1, num_worlds * host_graph.max_colors))
+    use_chain = _select_chunk_chain(args, host_graph, num_worlds)
+    hybrid_min = chunk_min if use_chain else base_min
+    hybrid_speed = base_min / hybrid_min if hybrid_min > 0.0 else float("nan")
+    hybrid_choice = "chain" if use_chain else "base"
     print(
         f"{scene:7s} worlds={num_worlds:5d} rows={host_graph.total_rows:6d} chunks={host_graph.chunk_start.shape[0]:6d} "
-        f"colors={host_graph.max_colors:3d} baseline={base_min:8.3f}ms chain={chunk_min:8.3f}ms "
-        f"speedup={speed:6.3f}x base_us={1000.0 * base_min / args.n_runs:8.3f} "
-        f"chain_us={1000.0 * chunk_min / args.n_runs:8.3f}"
+        f"colors={host_graph.max_colors:3d} rowpw={rows_per_world:7.1f} contact_frac={contact_fraction:5.2f} "
+        f"chunkpc={chunks_per_world_color:5.2f} baseline={base_min:8.3f}ms chain={chunk_min:8.3f}ms "
+        f"speedup={speed:6.3f}x hybrid={hybrid_choice:5s} hybrid_speedup={hybrid_speed:6.3f}x "
+        f"base_us={1000.0 * base_min / args.n_runs:8.3f} chain_us={1000.0 * chunk_min / args.n_runs:8.3f}"
     )
     if args.verbose:
         print(f"  med baseline={base_med:.3f} ms chain={chunk_med:.3f} ms")
@@ -1170,6 +1206,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-threads", type=int, default=32)
     parser.add_argument("--worker-blocks", type=int, default=256)
     parser.add_argument("--max-spins", type=int, default=1048576)
+    parser.add_argument("--hybrid-min-rows-per-world", type=float, default=256.0)
+    parser.add_argument("--hybrid-min-contact-fraction", type=float, default=0.5)
+    parser.add_argument("--hybrid-min-chunks-per-world-color", type=float, default=1.5)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--n-runs", type=int, default=10)
     parser.add_argument("--trials", type=int, default=1)
