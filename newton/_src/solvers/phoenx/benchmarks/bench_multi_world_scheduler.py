@@ -1,34 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Full-frame PhoenX multi-world scheduler benchmark.
+"""Full-frame PhoenX multi-world scheduler tournament.
 
-Compares the production fast-tail dispatcher with the private block-per-world
-scheduler candidate. Unlike the isolated color-grid scheduler benches, this
-captures an entire ``simulate_one_frame`` call, so the number includes contact
-ingest, coloring, solve, relax, integration, and graph replay overhead.
-
-``--mode adaptive`` is intentionally graph-capture friendly: it measures
-candidates by building and capturing fixed-scheduler graphs, then accepts a
-candidate only if a second fixed-graph verification also beats fast-tail. It
-does not switch schedulers inside a captured PhoenX step.
+Compares production auto against explicit graph-capture-safe scheduler
+shapes: fast-tail threads_per_world / worlds_per_block variants and
+the private block-per-world scheduler candidates. Every candidate is measured
+by building a fresh solver, resolving a fixed scheduler before capture, then
+replaying a captured simulate_one_frame graph. No candidate switches
+scheduler inside a captured graph.
 
 Usage::
 
-    python -m newton._src.solvers.phoenx.benchmarks.bench_multi_world_scheduler \
-        --scenes h1 g1 dr_legs tower --worlds 64,512
+    python -m newton._src.solvers.phoenx.benchmarks.bench_multi_world_scheduler --mode adaptive --scenes h1 g1 dr_legs tower --worlds 64,512
 """
 
 from __future__ import annotations
 
 import argparse
 import time
+import types
 from collections.abc import Callable
 
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extract_solver
+from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extract_solver, _force_tpw
 from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
 from newton._src.solvers.phoenx.solver import SolverPhoenX
 
@@ -45,14 +42,53 @@ def _build_scene(scene: str, num_worlds: int, *, substeps: int, solver_iteration
     raise ValueError(f"unknown scene {scene!r}")
 
 
-def _parse_worlds(value: str) -> tuple[int, ...]:
+def _parse_csv_ints(value: str) -> tuple[int, ...]:
     return tuple(int(raw.strip()) for raw in value.split(",") if raw.strip())
 
 
-def _scheduler_labels(block_dims: str) -> tuple[str, ...]:
-    labels = ["auto", "fast_tail"]
-    labels.extend(f"block_world_{dim}" for dim in _parse_worlds(block_dims))
-    return tuple(labels)
+def _parse_tpw_values(value: str) -> tuple[int | str, ...]:
+    out: list[int | str] = []
+    for raw in value.split(","):
+        item = raw.strip().lower()
+        if not item:
+            continue
+        out.append("auto" if item == "auto" else int(item))
+    return tuple(out)
+
+
+def _format_tpw(tpw: int | str) -> str:
+    return "auto" if tpw == "auto" else str(int(tpw))
+
+
+def _scheduler_labels(args: argparse.Namespace) -> tuple[str, ...]:
+    labels: list[str] = []
+    if args.include_auto:
+        labels.append("auto")
+    if args.include_fast_tail_default:
+        labels.append("fast_tail")
+
+    for tpw in args.fast_tail_tpw:
+        for wpb in args.fast_tail_wpb:
+            labels.append(f"fast_tail_tpw{_format_tpw(tpw)}_wpb{int(wpb)}")
+
+    labels.extend(f"block_world_{dim}" for dim in args.block_world_dims)
+
+    # Keep first occurrence so users may include an explicit candidate that
+    # matches the default without measuring it twice.
+    unique: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        if label not in seen:
+            unique.append(label)
+            seen.add(label)
+    return tuple(unique)
+
+
+def _set_worlds_per_block(world, worlds_per_block: int) -> None:
+    world._fast_tail_worlds_per_block = types.MethodType(
+        lambda self, _worlds_per_block=int(worlds_per_block): _worlds_per_block,
+        world,
+    )
 
 
 def _apply_scheduler(solver: SolverPhoenX, label: str) -> None:
@@ -61,13 +97,25 @@ def _apply_scheduler(solver: SolverPhoenX, label: str) -> None:
         world._configure_multi_world_scheduler("auto")
         return
     if label == "fast_tail":
-        world._multi_world_scheduler = "fast_tail"
+        world._configure_multi_world_scheduler("fast_tail")
         return
+
+    prefix = "fast_tail_tpw"
+    if label.startswith(prefix):
+        rest = label[len(prefix) :]
+        tpw_raw, wpb_raw = rest.split("_wpb", 1)
+        world._configure_multi_world_scheduler("fast_tail")
+        _force_tpw(solver, "auto" if tpw_raw == "auto" else int(tpw_raw))
+        _set_worlds_per_block(world, int(wpb_raw))
+        return
+
     prefix = "block_world_"
-    if not label.startswith(prefix):
-        raise ValueError(f"unknown scheduler {label!r}")
-    world._multi_world_scheduler = "block_world"
-    world._multi_world_block_dim = int(label[len(prefix) :])
+    if label.startswith(prefix):
+        world._multi_world_scheduler = "block_world"
+        world._multi_world_block_dim = int(label[len(prefix) :])
+        return
+
+    raise ValueError(f"unknown scheduler candidate {label!r}")
 
 
 def _bench(simulate: Callable[[], None], *, n_runs: int, warmup: int, trials: int) -> tuple[float, float]:
@@ -100,7 +148,7 @@ def _measure_scheduler(
     n_runs: int,
     warmup: int,
     prime_frames: int,
-) -> tuple[str, float, float] | None:
+) -> tuple[str, float, float, str] | None:
     handle = _build_scene(
         scene,
         num_worlds,
@@ -109,34 +157,49 @@ def _measure_scheduler(
     )
     solver = _extract_solver(handle)
     _apply_scheduler(solver, scheduler)
-    if scheduler != "fast_tail" and not solver.world._block_world_supported():
+    if scheduler.startswith("block_world") and not solver.world._block_world_supported():
         return None
 
-    # Prime with the selected scheduler so contacts, coloring, and kernel
-    # modules are warm before capture. The graph captured by _bench contains
-    # a fixed scheduler path; no runtime scheduler switching is recorded.
     for _ in range(prime_frames):
         handle.simulate_one_frame()
     wp.synchronize_device()
 
+    world = solver.world
+    resolved = (
+        f"kind={world._multi_world_scheduler}"
+        f",tpw={int(world._tpw_choice.numpy()[0])}"
+        f",wpb={int(world._fast_tail_worlds_per_block())}"
+        f",block_dim={int(world._multi_world_block_dim)}"
+        f",family={bool(world._fast_tail_family_split())}"
+    )
     min_ms, med_ms = _bench(handle.simulate_one_frame, n_runs=n_runs, warmup=warmup, trials=args.trials)
-    return scheduler, min_ms, med_ms
+    return scheduler, min_ms, med_ms, resolved
 
 
-def _format_results(results: list[tuple[str, float, float]]) -> tuple[str, float, str]:
-    baseline = next(min_ms for label, min_ms, _med_ms in results if label == "fast_tail")
+def _baseline_label(results: list[tuple[str, float, float, str]]) -> str:
+    labels = {label for label, _min_ms, _med_ms, _resolved in results}
+    if "auto" in labels:
+        return "auto"
+    if "fast_tail" in labels:
+        return "fast_tail"
+    return results[0][0]
+
+
+def _format_results(results: list[tuple[str, float, float, str]]) -> tuple[str, float, str]:
+    baseline_name = _baseline_label(results)
+    baseline = next(min_ms for label, min_ms, _med_ms, _resolved in results if label == baseline_name)
     pieces = []
-    for label, min_ms, _med_ms in results:
+    for label, min_ms, _med_ms, resolved in results:
         speed = baseline / min_ms if min_ms > 0.0 else float("nan")
-        pieces.append(f"{label}={min_ms:8.3f}ms({speed:5.3f}x)")
-    best_label, best_min, _best_med = min(results, key=lambda item: item[1])
+        pieces.append(f"{label}={min_ms:8.3f}ms({speed:5.3f}x,{resolved})")
+    best_label, best_min, _best_med, _best_resolved = min(results, key=lambda item: item[1])
     best_speed = baseline / best_min if best_min > 0.0 else float("nan")
     return best_label, best_speed, " ".join(pieces)
 
 
 def _run_sweep_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
-    results: list[tuple[str, float, float]] = []
-    for scheduler in _scheduler_labels(args.block_world_dims):
+    results: list[tuple[str, float, float, str]] = []
+    for scheduler in _scheduler_labels(args):
         measured = _measure_scheduler(
             args,
             scene,
@@ -156,8 +219,8 @@ def _run_sweep_case(args: argparse.Namespace, scene: str, num_worlds: int) -> No
 
 
 def _run_adaptive_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
-    tournament: list[tuple[str, float, float]] = []
-    for scheduler in _scheduler_labels(args.block_world_dims):
+    tournament: list[tuple[str, float, float, str]] = []
+    for scheduler in _scheduler_labels(args):
         measured = _measure_scheduler(
             args,
             scene,
@@ -171,10 +234,10 @@ def _run_adaptive_case(args: argparse.Namespace, scene: str, num_worlds: int) ->
             tournament.append(measured)
 
     best_label, predicted_speed, tournament_pieces = _format_results(tournament)
-    selected = best_label if predicted_speed >= args.adapt_min_speedup else "fast_tail"
+    selected = best_label if predicted_speed >= args.adapt_min_speedup else "auto"
 
-    verify_labels = ["fast_tail"] if selected == "fast_tail" else ["fast_tail", selected]
-    verified: list[tuple[str, float, float]] = []
+    verify_labels = ["auto"] if selected == "auto" else ["auto", selected]
+    verified: list[tuple[str, float, float, str]] = []
     for scheduler in verify_labels:
         measured = _measure_scheduler(
             args,
@@ -188,7 +251,7 @@ def _run_adaptive_case(args: argparse.Namespace, scene: str, num_worlds: int) ->
         if measured is not None:
             verified.append(measured)
     _best_verified, verified_speed, verified_pieces = _format_results(verified)
-    accepted = selected if selected != "fast_tail" and verified_speed >= args.adapt_min_speedup else "fast_tail"
+    accepted = selected if selected != "auto" and verified_speed >= args.adapt_min_speedup else "auto"
     print(
         f"{scene:7s} worlds={num_worlds:5d} mode=adaptive candidate={selected} accepted={accepted} "
         f"predicted={predicted_speed:5.3f}x verified={verified_speed:5.3f}x "
@@ -202,8 +265,12 @@ def main() -> None:
         "--scenes", nargs="+", choices=("h1", "g1", "dr_legs", "tower"), default=["h1", "g1", "dr_legs", "tower"]
     )
     parser.add_argument("--mode", choices=("sweep", "adaptive"), default="sweep")
-    parser.add_argument("--worlds", default="64,512")
-    parser.add_argument("--block-world-dims", default="32,64,128")
+    parser.add_argument("--worlds", type=_parse_csv_ints, default=(64, 512))
+    parser.add_argument("--include-auto", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--include-fast-tail-default", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--fast-tail-tpw", type=_parse_tpw_values, default=(32, 16))
+    parser.add_argument("--fast-tail-wpb", type=_parse_csv_ints, default=(1, 2, 4))
+    parser.add_argument("--block-world-dims", type=_parse_csv_ints, default=(32, 64, 128))
     parser.add_argument("--substeps", type=int, default=1)
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--prime-frames", type=int, default=3)
@@ -217,11 +284,12 @@ def main() -> None:
 
     wp.init()
     print(
-        f"device={wp.get_device()} mode={args.mode} n_runs={args.n_runs} "
-        f"adapt_runs={args.adapt_runs} block_world_dims={args.block_world_dims}"
+        f"device={wp.get_device()} mode={args.mode} n_runs={args.n_runs} adapt_runs={args.adapt_runs} "
+        f"fast_tail_tpw={args.fast_tail_tpw} fast_tail_wpb={args.fast_tail_wpb} "
+        f"block_world_dims={args.block_world_dims}"
     )
     for scene in args.scenes:
-        for num_worlds in _parse_worlds(args.worlds):
+        for num_worlds in args.worlds:
             if args.mode == "adaptive":
                 _run_adaptive_case(args, scene, num_worlds)
             else:
