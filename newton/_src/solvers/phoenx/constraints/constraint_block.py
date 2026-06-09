@@ -27,6 +27,7 @@ __all__ = [
     "PositionRows1",
     "PositionRows2",
     "RigidFrameBlock3",
+    "RigidFrameBlock3Mixed",
     "RigidFrameRows3",
     "RigidFrameRows3State",
     "RigidFrameRows3Update",
@@ -71,6 +72,7 @@ __all__ = [
     "block_solve_projected_xpbd_2_strict",
     "block_solve_rigid_frame_block3",
     "block_solve_rigid_frame_block3_bounded",
+    "block_solve_rigid_frame_block3_mixed",
     "block_solve_rigid_frame_rows3",
     "block_solve_rigid_frame_rows3_angular",
     "block_solve_rigid_frame_rows3_contact",
@@ -265,6 +267,36 @@ class RigidFrameBlock3:
     r0: wp.vec3f
     r1: wp.vec3f
     mode: wp.vec3f
+    k_inv: wp.mat33f
+    bias: wp.vec3f
+    lambda_old: wp.vec3f
+    mass_coeff: wp.vec3f
+    impulse_coeff: wp.vec3f
+    lambda_min: wp.vec3f
+    lambda_max: wp.vec3f
+    projection_mode: wp.int32
+    friction_static: wp.float32
+    friction_kinetic: wp.float32
+
+
+@wp.struct
+class RigidFrameBlock3Mixed:
+    """Dense 3-row frame descriptor with per-row residual/apply modes.
+
+    ``linear_mode``, ``cross_mode``, and ``angular_mode`` gate each row
+    independently. This covers point/contact rows ``(1, 1, 0)``, angular rows
+    ``(0, 0, 1)``, and mixed blocks such as planar constraints where one row
+    is linear and two rows are angular.
+    """
+
+    axis0: wp.vec3f
+    axis1: wp.vec3f
+    axis2: wp.vec3f
+    r0: wp.vec3f
+    r1: wp.vec3f
+    linear_mode: wp.vec3f
+    cross_mode: wp.vec3f
+    angular_mode: wp.vec3f
     k_inv: wp.mat33f
     bias: wp.vec3f
     lambda_old: wp.vec3f
@@ -1219,6 +1251,116 @@ def block_solve_rigid_frame_block3_bounded(
     update.v_b = state.v_b + linear_scale * state.inv_m_b * impulse
     update.w_a = state.w_a + state.inv_i_a @ (-cross_scale * wp.cross(rows.r0, impulse) - angular_scale * impulse)
     update.w_b = state.w_b + state.inv_i_b @ (cross_scale * wp.cross(rows.r1, impulse) + angular_scale * impulse)
+    update.lambda_new = projection.lambda_new
+    update.delta = d
+    return update
+
+
+@wp.func
+def _mixed_frame_row_residual(
+    axis: wp.vec3f,
+    linear_mode: wp.float32,
+    cross_mode: wp.float32,
+    angular_mode: wp.float32,
+    rel_linear: wp.vec3f,
+    rel_cross: wp.vec3f,
+    rel_angular: wp.vec3f,
+) -> wp.float32:
+    return wp.dot(axis, linear_mode * rel_linear + cross_mode * rel_cross + angular_mode * rel_angular)
+
+
+@wp.func
+def block_solve_rigid_frame_block3_mixed(
+    rows: RigidFrameBlock3Mixed,
+    state: RigidFrameRows3State,
+    sor_boost: wp.float32,
+) -> RigidFrameRows3Update:
+    """Solve/project/apply one dense frame op with row-wise modes."""
+    rel_linear = state.v_b - state.v_a
+    rel_cross = wp.cross(state.w_b, rows.r1) - wp.cross(state.w_a, rows.r0)
+    rel_angular = state.w_b - state.w_a
+    residual = (
+        wp.vec3f(
+            _mixed_frame_row_residual(
+                rows.axis0,
+                rows.linear_mode[0],
+                rows.cross_mode[0],
+                rows.angular_mode[0],
+                rel_linear,
+                rel_cross,
+                rel_angular,
+            ),
+            _mixed_frame_row_residual(
+                rows.axis1,
+                rows.linear_mode[1],
+                rows.cross_mode[1],
+                rows.angular_mode[1],
+                rel_linear,
+                rel_cross,
+                rel_angular,
+            ),
+            _mixed_frame_row_residual(
+                rows.axis2,
+                rows.linear_mode[2],
+                rows.cross_mode[2],
+                rows.angular_mode[2],
+                rel_linear,
+                rel_cross,
+                rel_angular,
+            ),
+        )
+        + rows.bias
+    )
+
+    projection = VelocityRows3Update()
+    if rows.projection_mode == VELOCITY_ROWS3_PROJECT_CONTACT_CONE:
+        projection = _dense_velocity_rows3_projection_uniform(
+            rows.k_inv,
+            residual,
+            rows.lambda_old,
+            rows.mass_coeff,
+            rows.impulse_coeff,
+            rows.lambda_min,
+            rows.lambda_max,
+            rows.projection_mode,
+            rows.friction_static,
+            rows.friction_kinetic,
+            sor_boost,
+        )
+    else:
+        projection = _dense_velocity_rows3_projection_bounded(
+            rows.k_inv,
+            residual,
+            rows.lambda_old,
+            rows.mass_coeff,
+            rows.impulse_coeff,
+            rows.lambda_min,
+            rows.lambda_max,
+            sor_boost,
+        )
+
+    d = projection.delta
+    linear_impulse = (
+        rows.linear_mode[0] * d[0] * rows.axis0
+        + rows.linear_mode[1] * d[1] * rows.axis1
+        + rows.linear_mode[2] * d[2] * rows.axis2
+    )
+    cross_impulse = (
+        rows.cross_mode[0] * d[0] * rows.axis0
+        + rows.cross_mode[1] * d[1] * rows.axis1
+        + rows.cross_mode[2] * d[2] * rows.axis2
+    )
+    angular_impulse = (
+        rows.angular_mode[0] * d[0] * rows.axis0
+        + rows.angular_mode[1] * d[1] * rows.axis1
+        + rows.angular_mode[2] * d[2] * rows.axis2
+    )
+
+    update = RigidFrameRows3Update()
+    update.v_a = state.v_a - state.inv_m_a * linear_impulse
+    update.v_b = state.v_b + state.inv_m_b * linear_impulse
+    update.w_a = state.w_a + state.inv_i_a @ (-wp.cross(rows.r0, cross_impulse) - angular_impulse)
+    update.w_b = state.w_b + state.inv_i_b @ (wp.cross(rows.r1, cross_impulse) + angular_impulse)
     update.lambda_new = projection.lambda_new
     update.delta = d
     return update
