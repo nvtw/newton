@@ -266,7 +266,7 @@ class _PhoenXScene:
         self.model.body_q.assign(self.state.body_q)
 
         self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=PHOENX_CONTACT_MATCHING)
-        self.contacts = self.collision_pipeline.contacts()
+        self.contacts = self.model.contacts(collision_pipeline=self.collision_pipeline)
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
 
         # PhoenX body container: slot 0 = static world anchor.
@@ -395,11 +395,7 @@ class _PhoenXScene:
 
     def _simulate(self) -> None:
         self._sync_newton_to_phoenx()
-        self.model.collide(
-            self.state,
-            contacts=self.contacts,
-            collision_pipeline=self.collision_pipeline,
-        )
+        self.model.collide(self.state, self.contacts)
         self.world.step(
             dt=self.frame_dt,
             contacts=self.contacts,

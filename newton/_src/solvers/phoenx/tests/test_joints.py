@@ -188,7 +188,7 @@ class _PendulumScene:
 
         # ---- Collision pipeline (joint-only scene -> no contacts) ----
         self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=PHOENX_CONTACT_MATCHING)
-        self.contacts = self.collision_pipeline.contacts()
+        self.contacts = self.model.contacts(collision_pipeline=self.collision_pipeline)
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
 
         shape_body_np = self.model.shape_body.numpy()
@@ -318,11 +318,7 @@ class _PendulumScene:
             ],
             device=self.device,
         )
-        self.model.collide(
-            self.state,
-            contacts=self.contacts,
-            collision_pipeline=self.collision_pipeline,
-        )
+        self.model.collide(self.state, self.contacts)
         self.world.step(
             dt=self.frame_dt,
             contacts=self.contacts,
