@@ -97,7 +97,7 @@ def _hourglass_x_amplitude(positions: np.ndarray, rest: np.ndarray) -> float:
 def _center_jacobian(corners: np.ndarray) -> np.ndarray:
     """Return the center Jacobian for a canonical 8-node hex."""
     jac = np.zeros((3, 3), dtype=np.float64)
-    for corner, sign in zip(corners.astype(np.float64), _CORNER_SIGNS.astype(np.float64)):
+    for corner, sign in zip(corners.astype(np.float64), _CORNER_SIGNS.astype(np.float64), strict=True):
         jac += np.outer(corner, sign)
     return 0.125 * jac
 

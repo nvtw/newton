@@ -96,7 +96,7 @@ def _subdivide(verts: np.ndarray, tris: np.ndarray) -> tuple[np.ndarray, np.ndar
     """4-to-1 triangle subdivision: each face becomes 4 by splitting its 3 edges
     at their midpoints. Edges are deduplicated by ``(min(a,b), max(a,b))``."""
     midpoint_cache: dict[tuple[int, int], int] = {}
-    verts_list = [v for v in verts]
+    verts_list = list(verts)
 
     def midpoint(a: int, b: int) -> int:
         key = (min(a, b), max(a, b))

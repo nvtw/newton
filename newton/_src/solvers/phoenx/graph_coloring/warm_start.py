@@ -47,7 +47,7 @@ class WarmStartCache:
     kernel's binary search is well-defined.
     """
 
-    #: Packed body-pair keys: ``(body_2nd_min << 32) | body_min``.
+    #: Packed body-pair keys: ``(body_second_min << 32) | body_min``.
     keys: wp.array[wp.int64]
     #: Per-key cached colour, encoded ``c + 1`` to match ``color_tags``.
     colors: wp.array[wp.int32]
@@ -76,21 +76,21 @@ _BODY_INF = wp.constant(wp.int32(0x7FFFFFFF))
 
 @wp.func
 def warm_start_key_func(el: ElementInteractionData) -> wp.int64:
-    """Pack ``(body_2nd_min << 32) | body_min`` from the two smallest
+    """Pack ``(body_second_min << 32) | body_min`` from the two smallest
     non-negative body endpoints. Missing slots use ``INT32_MAX`` so
     the key stays unique per body-pair signature."""
     b_min = _BODY_INF
-    b_2nd = _BODY_INF
+    b_second = _BODY_INF
     for j in range(MAX_BODIES):
         b = element_interaction_data_get(el, j)
         if b < wp.int32(0):
             break
         if b < b_min:
-            b_2nd = b_min
+            b_second = b_min
             b_min = b
-        elif b < b_2nd:
-            b_2nd = b
-    return (wp.int64(b_2nd) << wp.int64(32)) | (wp.int64(b_min) & wp.int64(0xFFFFFFFF))
+        elif b < b_second:
+            b_second = b
+    return (wp.int64(b_second) << wp.int64(32)) | (wp.int64(b_min) & wp.int64(0xFFFFFFFF))
 
 
 @wp.func

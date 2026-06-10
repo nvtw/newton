@@ -189,7 +189,7 @@ def build_arena_ring(
 
     Returns the flat list of body ids in (layer, slot) order.
     """
-    hx, hy, hz = half_extents
+    _, _, hz = half_extents
     layer_height = 2.0 * hz + layer_gap
 
     body_ids: list[int] = []
