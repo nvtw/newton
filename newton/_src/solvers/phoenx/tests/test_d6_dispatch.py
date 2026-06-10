@@ -33,6 +33,8 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
+    DRIVE_MODE_OFF,
+    DRIVE_MODE_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
@@ -63,6 +65,7 @@ def _build_d6_pendulum_revolute_equivalent(
     init_angle: float = 0.0,
     axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
     free_angular_index: int = 1,
+    free_damping: float = 0.0,
 ) -> newton.Model:
     """D6 joint with the revolute pattern: 3 linear locked, 2 angular
     locked, 1 angular free along ``axis``.
@@ -96,7 +99,14 @@ def _build_d6_pendulum_revolute_equivalent(
     ang_axes = []
     for k in range(3):
         if k == free_angular_index:
-            ang_axes.append(newton.ModelBuilder.JointDofConfig(axis=axis, limit_lower=-1.0e6, limit_upper=1.0e6))
+            ang_axes.append(
+                newton.ModelBuilder.JointDofConfig(
+                    axis=axis,
+                    limit_lower=-1.0e6,
+                    limit_upper=1.0e6,
+                    damping=free_damping,
+                )
+            )
         else:
             ang_axes.append(newton.ModelBuilder.JointDofConfig(axis=(1.0, 0.0, 0.0), limit_lower=1.0, limit_upper=-1.0))
 
@@ -261,6 +271,36 @@ class TestD6Detection(unittest.TestCase):
         model = builder.finalize()
         self.assertEqual(self._adbs_mode_for(model), int(JOINT_MODE_BALL_SOCKET))
 
+    def test_d6_ball_passive_damping_is_packed(self) -> None:
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
+        builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+        lin = [
+            newton.ModelBuilder.JointDofConfig(axis=(1, 0, 0), limit_lower=1.0, limit_upper=-1.0),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 1, 0), limit_lower=1.0, limit_upper=-1.0),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 0, 1), limit_lower=1.0, limit_upper=-1.0),
+        ]
+        ang = [
+            newton.ModelBuilder.JointDofConfig(axis=(1, 0, 0), limit_lower=-1.0e6, limit_upper=1.0e6, damping=1.0),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 1, 0), limit_lower=-1.0e6, limit_upper=1.0e6, damping=3.0),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 0, 1), limit_lower=-1.0e6, limit_upper=1.0e6, damping=2.0),
+        ]
+        j = builder.add_joint_d6(parent=-1, child=body, linear_axes=lin, angular_axes=ang)
+        builder.add_articulation([j])
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_BALL_SOCKET))
+        self.assertEqual(int(solver._adbs.drive_mode.numpy()[0]), int(DRIVE_MODE_OFF))
+        self.assertAlmostEqual(float(solver._adbs.damping_drive.numpy()[0]), 3.0)
+
+    def test_d6_revolute_passive_damping_uses_velocity_row(self) -> None:
+        model = _build_d6_pendulum_revolute_equivalent(free_angular_index=1, free_damping=4.0)
+        solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_REVOLUTE))
+        self.assertEqual(int(solver._adbs.drive_mode.numpy()[0]), int(DRIVE_MODE_VELOCITY))
+        self.assertAlmostEqual(float(solver._adbs.damping_drive.numpy()[0]), 4.0)
+
     def test_d6_angular_only_universal_dispatches_to_universal(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
@@ -274,6 +314,22 @@ class TestD6Detection(unittest.TestCase):
         builder.add_articulation([j])
         model = builder.finalize()
         self.assertEqual(self._adbs_mode_for(model), int(JOINT_MODE_UNIVERSAL))
+
+    def test_d6_universal_passive_damping_is_packed(self) -> None:
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
+        builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+        ang = [
+            newton.ModelBuilder.JointDofConfig(axis=(1, 0, 0), limit_lower=-1.0e6, limit_upper=1.0e6, damping=2.0),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 1, 0), limit_lower=-1.0e6, limit_upper=1.0e6, damping=4.0),
+        ]
+        j = builder.add_joint_d6(parent=-1, child=body, angular_axes=ang)
+        builder.add_articulation([j])
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
+        self.assertAlmostEqual(float(solver._adbs.damping_drive.numpy()[0]), 4.0)
 
     def test_d6_revolute_pattern_dispatches_to_revolute(self) -> None:
         model = _build_d6_pendulum_revolute_equivalent(free_angular_index=1)

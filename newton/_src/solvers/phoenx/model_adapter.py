@@ -364,6 +364,7 @@ def build_adbs_init_arrays(
     target_ke = _pull_dof_f(model.joint_target_ke)
     target_kd = _pull_dof_f(model.joint_target_kd)
     joint_armature = _pull_dof_f(model.joint_armature)
+    joint_damping = _pull_dof_f(model.joint_damping) if hasattr(model, "joint_damping") else None
     joint_friction = _pull_dof_f(model.joint_friction) if hasattr(model, "joint_friction") else None
     joint_gear = _pull_dof_f(model.joint_gear) if hasattr(model, "joint_gear") else None
     effort_limit = _pull_dof_f(model.joint_effort_limit)
@@ -513,6 +514,17 @@ def build_adbs_init_arrays(
         # Coulomb friction on the axial DoF (revolute / prismatic only).
         friction_val = 0.0
 
+        def _max_joint_damping(dof_indices):
+            if joint_damping is None:
+                return 0.0
+            damping = 0.0
+            for qd in dof_indices:
+                if 0 <= qd < len(joint_damping):
+                    raw = float(joint_damping[qd])
+                    if raw > damping and np.isfinite(raw):
+                        damping = raw
+            return damping
+
         # D6 dispatched modes share the per-mode setup with their native
         # counterparts -- the existing branches now fire for both. Routing
         # is determined by ``d6_mode_tag`` for D6 joints, ``jtype`` otherwise.
@@ -528,6 +540,11 @@ def build_adbs_init_arrays(
 
         if is_ball:
             phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
+            if jtype is newton.JointType.D6:
+                damp_drive = _max_joint_damping(range(qd_start + n_lin, qd_start + n_lin + n_ang))
+            else:
+                n_ang_native = int(joint_dof_dim[j, 1]) if joint_dof_dim.shape[0] > j else 3
+                damp_drive = _max_joint_damping(range(qd_start, qd_start + max(1, n_ang_native)))
         elif jtype is newton.JointType.CABLE:
             phoenx_mode = int(JOINT_MODE_CABLE)
             # Newton CABLE has 2 DoFs (linear stretch + isotropic angular bend/twist).
@@ -600,6 +617,12 @@ def build_adbs_init_arrays(
             min_val = 0.0
             max_val = 0.0
             hertz_limit_val = float(DEFAULT_HERTZ_LIMIT)
+            if n_ang == 2 and d6_free_dof_offset < 0:
+                damp_drive = _max_joint_damping(range(qd_start, qd_start + 2))
+            else:
+                damp_drive = _max_joint_damping(
+                    qd_start + n_lin + i for i, locked in enumerate(locked_ang) if not locked
+                )
         elif is_cylindrical:
             # Cylindrical: 2 lin locked + 1 lin free + 2 ang locked + 1 ang
             # free, with the two free axes parallel (verified above). The
@@ -687,6 +710,12 @@ def build_adbs_init_arrays(
                 drive_mode = _newton_target_mode_to_adbs_drive_mode(
                     int(target_mode[effective_qd]), stiff_drive, damp_drive
                 )
+            if drive_mode == int(DRIVE_MODE_OFF) and joint_damping is not None and effective_qd < len(joint_damping):
+                raw_damping = float(joint_damping[effective_qd])
+                if raw_damping > 0.0 and np.isfinite(raw_damping):
+                    damp_drive = raw_damping
+                    target_vel_val = 0.0
+                    drive_mode = int(DRIVE_MODE_VELOCITY)
             # Limits are hard stops via DEFAULT_HERTZ_LIMIT (matches SolverXPBD's
             # rigid-limit contract; Newton's limit_ke/limit_kd are XPBD-only soft
             # penalties that don't map to PhoenX's absolute SI PD path). Users who

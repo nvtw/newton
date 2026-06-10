@@ -496,6 +496,8 @@ _OFF_TARGET_VELOCITY = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData,
 _OFF_MAX_FORCE_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_force_drive"))
 _OFF_STIFFNESS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_drive"))
 _OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_drive"))
+# BALL_SOCKET / UNIVERSAL reuse this scalar for passive angular damping.
+_OFF_PASSIVE_ANGULAR_DAMPING = _OFF_DAMPING_DRIVE
 _OFF_ARMATURE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "armature"))
 _OFF_MIN_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "min_value"))
 _OFF_MAX_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_value"))
@@ -2713,6 +2715,7 @@ def _box2d_pivot_slide_prepare_at(
     has_anchor3 = joint_mode == JOINT_MODE_FIXED or joint_mode == JOINT_MODE_PRISMATIC
     has_angular_axial = joint_mode == JOINT_MODE_REVOLUTE or joint_mode == JOINT_MODE_UNIVERSAL
     has_linear_axial = joint_mode == JOINT_MODE_PRISMATIC or joint_mode == JOINT_MODE_CYLINDRICAL
+    has_passive_angular_damping = joint_mode == JOINT_MODE_BALL_SOCKET or joint_mode == JOINT_MODE_UNIVERSAL
     use_tangent_from_anchor3 = joint_mode == JOINT_MODE_PRISMATIC or joint_mode == JOINT_MODE_FIXED
     use_axis_from_anchors = (
         joint_mode == JOINT_MODE_REVOLUTE
@@ -2986,6 +2989,15 @@ def _box2d_pivot_slide_prepare_at(
             cr3_b1 @ acc_imp3_world,
             cr3_b2 @ acc_imp3_world,
         )
+
+    # ---- Passive angular damping -------------------------------------
+    if has_passive_angular_damping:
+        _write_acc_imp2(constraints, cid, wp.vec3f(0.0, 0.0, 0.0))
+        damping_ang = read_float(constraints, base_offset + _OFF_PASSIVE_ANGULAR_DAMPING, cid)
+        if damping_ang > wp.float32(0.0):
+            gamma_ang = wp.float32(1.0) / (damping_ang * dt)
+            k_ang = inv_inertia1 + inv_inertia2 + gamma_ang * wp.identity(3, dtype=wp.float32)
+            write_mat33(constraints, base_offset + _OFF_UT_AI, cid, wp.inverse(k_ang))
 
     # ---- Axial drive / limit / friction prepare ----------------------
     # Single call to ``_axial_drive_limit_prepare_at`` with all inputs
@@ -3513,6 +3525,7 @@ def actuated_double_ball_socket_iterate_at(
     has_cable_anchor3 = joint_mode == JOINT_MODE_CABLE
     has_angular_axial = joint_mode == JOINT_MODE_REVOLUTE or joint_mode == JOINT_MODE_UNIVERSAL
     has_linear_axial = joint_mode == JOINT_MODE_PRISMATIC or joint_mode == JOINT_MODE_CYLINDRICAL
+    has_passive_angular_damping = joint_mode == JOINT_MODE_BALL_SOCKET or joint_mode == JOINT_MODE_UNIVERSAL
     has_planar = joint_mode == JOINT_MODE_PLANAR
 
     b1 = body_pair.b1
@@ -3574,6 +3587,17 @@ def actuated_double_ball_socket_iterate_at(
             impulse_coeff,
             sor_boost,
         )
+    if has_passive_angular_damping:
+        damping_ang = read_float(constraints, base_offset + _OFF_PASSIVE_ANGULAR_DAMPING, cid)
+        if damping_ang > wp.float32(0.0):
+            dt = wp.float32(1.0) / idt
+            gamma_ang = wp.float32(1.0) / (damping_ang * dt)
+            acc_ang = _read_acc_imp2(constraints, cid)
+            impulse_ang = -(read_mat33(constraints, base_offset + _OFF_UT_AI, cid) @ ((w2 - w1) + gamma_ang * acc_ang))
+            impulse_ang = impulse_ang * sor_boost
+            _write_acc_imp2(constraints, cid, acc_ang + impulse_ang)
+            w1, w2 = apply_pair_angular_impulse(w1, w2, ii1, ii2, impulse_ang, impulse_ang)
+
     if has_schur_3plus2:
         v1, v2, w1, w2 = _anchor1_anchor2_schur_block(
             constraints,
