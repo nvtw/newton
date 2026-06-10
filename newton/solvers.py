@@ -49,7 +49,7 @@ Supported Features
      - Soft bodies
      - Differentiable
    * - :class:`~newton.solvers.SolverFeatherstone`
-     - Explicit
+     - Semi-implicit
      - ✅
      - ✅ generalized coordinates
      - ✅
@@ -73,7 +73,7 @@ Supported Features
      - ❌
      - ❌
    * - :class:`~newton.solvers.SolverMuJoCo`
-     - Explicit, Semi-implicit, Implicit
+     - Explicit, Semi-implicit, Implicit-in-velocity
      - ✅ :sup:`1`
      - ✅ generalized coordinates
      - ❌
@@ -128,6 +128,12 @@ Supported Features
 | :sup:`3` :class:`~newton.solvers.SolverPhoenX` implements cloth, soft tetrahedra, and particle
   containers internally, but they are not yet exposed via the public ``SolverPhoenX`` constructor
   -- callers currently have to drop into ``newton._src.solvers.phoenx`` to use them.
+
+.. experimental::
+    :class:`~newton.solvers.SolverKamino`'s public API and behavior may change without prior notice.
+
+.. experimental::
+    :class:`~newton.solvers.SolverVBD`'s public API and behavior may change without prior notice.
 
 .. _Joint feature support:
 

@@ -33,6 +33,7 @@ from ..geometry.collision_primitive import (
 )
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, ContactData, contact_passes_gap_check, make_contact_sort_key
 from ..geometry.contact_reduction_global import (
+    HASHTABLE_WARN_LOAD_PERCENT,
     GlobalContactReducer,
     create_export_reduced_contacts_kernel,
     mesh_triangle_contacts_to_reducer_kernel,
@@ -1361,6 +1362,10 @@ def verify_narrow_phase_buffers(
     max_contacts: int,
     reducer_count: wp.array[int],
     max_reducer: int,
+    reduction_ht_active_slots: wp.array[int],
+    reduction_ht_capacity: int,
+    reduction_ht_insert_failures: wp.array[int],
+    reduction_ht_warn_load_percent: int,
 ):
     """Check for buffer overflows in the collision pipeline."""
     if broad_phase_count[0] > max_broad_phase:
@@ -1428,6 +1433,22 @@ def verify_narrow_phase_buffers(
                 reducer_count[0],
                 max_reducer,
             )
+    if reduction_ht_capacity > 0:
+        reduction_ht_active_count = reduction_ht_active_slots[reduction_ht_capacity]
+        if reduction_ht_active_count * 100 >= reduction_ht_capacity * reduction_ht_warn_load_percent:
+            wp.printf(
+                "Warning: Contact reduction hashtable fill ratio exceeded %d%% (%d / %d). "
+                "Increase contact_reduction_hashtable_size_factor or max_triangle_pairs.\n",
+                reduction_ht_warn_load_percent,
+                reduction_ht_active_count,
+                reduction_ht_capacity,
+            )
+        if reduction_ht_insert_failures[0] > 0:
+            wp.printf(
+                "Warning: Contact reduction hashtable insert failures %d. "
+                "Increase contact_reduction_hashtable_size_factor or max_triangle_pairs.\n",
+                reduction_ht_insert_failures[0],
+            )
 
 
 class NarrowPhase:
@@ -1459,6 +1480,7 @@ class NarrowPhase:
         deterministic: bool = False,
         contact_max: int | None = None,
         verify_buffers: bool = True,
+        contact_reduction_hashtable_size_factor: float = 0.25,
     ) -> None:
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -1500,13 +1522,19 @@ class NarrowPhase:
                 ``triangle_pairs_count``, ``shape_pairs_mesh_plane_count``,
                 ``shape_pairs_mesh_mesh_count``, ``shape_pairs_sdf_sdf_count``)
                 and the output ``contact_count`` against the capacity of its
-                backing array, printing ``wp.printf`` warnings on overflow.
+                backing array, and checks the global contact reducer hashtable
+                fill/failure counters when reduction is enabled, printing
+                ``wp.printf`` warnings on overflow or critical hashtable load.
                 Users who want a programmatic overflow hook can disable this and
                 read those counters themselves.  Overhead is one extra kernel
                 launch per collision pass (roughly a few µs of launch latency on
                 CUDA; the kernel body is a handful of scalar comparisons on one
                 thread).  Disable in hot loops or CUDA graph capture once buffer
                 sizes are known to be adequate.
+            contact_reduction_hashtable_size_factor: Multiplier applied to
+                ``max_triangle_pairs`` when allocating the global contact
+                reduction hashtable. Increase this if hashtable fill/failure
+                warnings appear. Defaults to ``0.25`` for memory compatibility.
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
@@ -1630,7 +1658,10 @@ class NarrowPhase:
             self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(writer_func)
             # Global contact reducer for all mesh contact types
             self.global_contact_reducer = GlobalContactReducer(
-                max_triangle_pairs, device=device, deterministic=deterministic
+                max_triangle_pairs,
+                device=device,
+                deterministic=deterministic,
+                hashtable_size_factor=contact_reduction_hashtable_size_factor,
             )
         else:
             self.export_reduced_contacts_kernel = None
@@ -2182,14 +2213,19 @@ class NarrowPhase:
         if self.verify_buffers:
             # Reducer is optional (heightfield-only / non-reduce scenes
             # leave ``global_contact_reducer = None``); pass a sentinel
-            # in that case so the kernel's ``max_reducer > 0`` guard
-            # skips the check cleanly.
+            # in that case so the kernel guards skip the checks cleanly.
             if self.global_contact_reducer is not None:
                 reducer_count_arr = self.global_contact_reducer.contact_count
                 reducer_capacity = int(self.global_contact_reducer.capacity)
+                reduction_ht_active_slots = self.global_contact_reducer.hashtable.active_slots
+                reduction_ht_capacity = self.global_contact_reducer.hashtable.capacity
+                reduction_ht_insert_failures = self.global_contact_reducer.ht_insert_failures
             else:
-                reducer_count_arr = candidate_pair_count  # any int32 array, value gated by max_reducer=0
+                reducer_count_arr = candidate_pair_count
                 reducer_capacity = 0
+                reduction_ht_active_slots = candidate_pair_count
+                reduction_ht_capacity = 0
+                reduction_ht_insert_failures = candidate_pair_count
             wp.launch(
                 kernel=verify_narrow_phase_buffers,
                 dim=[1],
@@ -2212,6 +2248,10 @@ class NarrowPhase:
                     writer_data.contact_max,
                     reducer_count_arr,
                     reducer_capacity,
+                    reduction_ht_active_slots,
+                    reduction_ht_capacity,
+                    reduction_ht_insert_failures,
+                    HASHTABLE_WARN_LOAD_PERCENT,
                 ],
                 device=device,
                 record_tape=False,

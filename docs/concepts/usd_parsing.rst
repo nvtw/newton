@@ -70,18 +70,28 @@ For rigid bodies with ``UsdPhysics.MassAPI`` applied, Newton resolves each inert
 (mass, inertia, center of mass) independently.  Authored attributes take precedence;
 ``UsdPhysics.RigidBodyAPI.ComputeMassProperties(...)`` provides baseline values for the rest.
 
-1. Authored ``physics:mass``, ``physics:diagonalInertia``, and ``physics:centerOfMass`` are
+1. ``newton:inertia`` (from ``NewtonMassAPI``) is a compact 6-element symmetric tensor
+   ``[Ixx, Iyy, Izz, Ixy, Ixz, Iyz]`` already in the body frame.  When authored, it
+   overrides ``physics:diagonalInertia`` and ``physics:principalAxes``.
+2. Authored ``physics:mass``, ``physics:diagonalInertia``, and ``physics:centerOfMass`` are
    applied directly when present.  If ``physics:principalAxes`` is missing, identity rotation
    is used.
-2. When ``physics:mass`` is authored but ``physics:diagonalInertia`` is not, the inertia
+3. When ``physics:mass`` is authored but inertia is not, the inertia
    accumulated from collision shapes is scaled by ``authored_mass / accumulated_mass``.
-3. For any remaining unresolved properties, Newton falls back to
+   Shell colliders (``newton:massModel = "shell"``) contribute shell-derived inertia to the
+   accumulation before this scaling is applied.
+4. For any remaining unresolved properties, Newton falls back to
    ``UsdPhysics.RigidBodyAPI.ComputeMassProperties(...)``.
    In this fallback path, collider contributions use a two-level precedence:
 
    a. If collider ``UsdPhysics.MassAPI`` has authored ``mass`` and ``diagonalInertia``, those
       authored values are converted to unit-density collider mass information.
-   b. Otherwise, Newton derives unit-density collider mass information from collider geometry.
+   b. Otherwise, Newton derives unit-density collider mass information from collider
+      geometry.  When ``NewtonMassAPI`` is applied to the collider, ``newton:massModel``
+      controls whether inertia is derived from the full volume (``"solid"``, default) or a
+      thin shell at the surface (``"shell"``).  For shell shapes,
+      ``newton:shellThickness`` sets the wall thickness [m] measured inward from the outer
+      surface; the sentinel ``-inf`` (default) falls back to ``newton:contactMargin``.
 
    A collider is skipped (with warning) only if neither path provides usable collider mass
    information.
@@ -578,6 +588,15 @@ schema covers two related but distinct concerns:
 Collision margin and gap are inherited from ``NewtonCollisionAPI`` and
 covered alongside the SDF mapping below.
 
+.. note::
+
+   ``NewtonSDFCollisionAPI`` and ``NewtonMeshCollisionAPI`` are **independent
+   collision representations** and should not be applied to the same prim. If
+   both are present, the importer emits a warning and uses the SDF
+   configuration. Because ``physics:approximation`` is inherited from
+   ``PhysicsMeshCollisionAPI``, it is a mesh-collider concept and is ignored
+   (with a warning) on prims that apply ``NewtonSDFCollisionAPI``.
+
 Newton's USD importer reads only the ``newton:*`` attributes. ``physx*:*``
 attributes are collected by the schema resolver (see :ref:`schema_resolvers`)
 but not applied. To make a PhysX-authored asset work in Newton, author the
@@ -844,16 +863,10 @@ doubles as an end-to-end regression against Newton's importer.
                                               op.orderedItems) if items)
 
    def _bbox_diag(prim) -> float | None:
-       """Compute the local-space AABB diagonal [m] of a USD prim, applying
-       ``physics:meshScale`` (and ``physxSDFMeshCollision:meshScale`` as a
-       fallback) component-wise when authored. PhysX's fractional SDF
-       distances are fractions of the scaled collision shape's diagonal,
-       not the unscaled mesh diagonal — ``UsdGeom.BBoxCache`` does not see
-       physics scaling attributes, so we apply them here. Returns ``None``
-       if the bbox is empty."""
+       """World-space scaled AABB diagonal [m] of ``prim``, or ``None`` if empty."""
        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
                                  includedPurposes=[UsdGeom.Tokens.default_])
-       rng = cache.ComputeLocalBound(prim).ComputeAlignedRange()
+       rng = cache.ComputeWorldBound(prim).ComputeAlignedRange()
        if rng.IsEmpty():
            return None
        size = rng.GetSize()
@@ -1014,11 +1027,13 @@ doubles as an end-to-end regression against Newton's importer.
    assert _get(p3, "newton:sdfPadding") is None
    assert _has_applied_schema(p3, "NewtonSDFCollisionAPI")
 
-   # physics:meshScale demo: PhysX applies the mesh scale to the collision
-   # shape, so its fractional SDF distances are fractions of the SCALED
-   # diagonal. The helper picks up physics:meshScale and applies it
-   # component-wise before converting to absolute distances.
+   # Scale demo: PhysX fractional SDF distances are fractions of the scaled
+   # collision shape AABB. ``ComputeWorldBound`` captures ancestor xformOps;
+   # the helper also applies authored physics:meshScale component-wise.
+   import pxr.Gf as _Gf  # noqa: PLC0415
    stage4 = Usd.Stage.CreateInMemory()
+   parent = UsdGeom.Xform.Define(stage4, "/Body")
+   parent.AddScaleOp().Set(_Gf.Vec3f(2.0, 3.0, 1.0))
    mesh4 = UsdGeom.Mesh.Define(stage4, "/Body/CollisionMesh")
    mesh4.CreatePointsAttr([(-0.5, -0.5, -0.5), (0.5, -0.5, -0.5), (0.5, 0.5, -0.5),
                            (-0.5, 0.5, -0.5), (-0.5, -0.5, 0.5), (0.5, -0.5, 0.5),
@@ -1028,10 +1043,9 @@ doubles as an end-to-end regression against Newton's importer.
                                       2, 3, 7, 6, 0, 3, 7, 4, 1, 2, 6, 5])
    p4 = mesh4.GetPrim()
    p4.AddAppliedSchema("PhysxSDFMeshCollisionAPI")
-   p4.CreateAttribute("physics:meshScale", Sdf.ValueTypeNames.Float3).Set((2.0, 3.0, 1.0))
    p4.CreateAttribute("physxSDFMeshCollision:sdfMargin", Sdf.ValueTypeNames.Float).Set(0.01)
    assert port_physx_sdf_to_newton(stage4) == 1
-   # Scaled diagonal: sqrt((1*2)^2 + (1*3)^2 + (1*1)^2) = sqrt(14)
+   # Scaled world-space diagonal: sqrt((1*2)^2 + (1*3)^2 + (1*1)^2) = sqrt(14)
    _scaled_diag = math.sqrt(14.0)
    assert _close(_get(p4, "newton:sdfPadding"), 0.01 * _scaled_diag, tol=1e-5)
 

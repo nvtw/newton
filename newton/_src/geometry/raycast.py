@@ -3,13 +3,21 @@
 
 # Some ray intersection functions are adapted from https://iquilezles.org/articles/intersectors/
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import warp as wp
 
+from ..core import MAXVAL
 from ..utils.heightfield import HeightfieldData, ray_intersect_heightfield_local
 from .support_function import decode_vec3
 from .types import (
     GeoType,
 )
+
+if TYPE_CHECKING:
+    from ..sim import Model
 
 # A small constant to avoid division by zero and other numerical issues
 MINVAL = 1e-15
@@ -1248,6 +1256,156 @@ def _make_raycast_funcs(enable_heightfields: bool):
 # Launch sites pick the kernel pair based on ``Model.has_heightfields``.
 ray_intersect_geom, raycast_kernel, sensor_raycast_kernel = _make_raycast_funcs(enable_heightfields=True)
 _, raycast_kernel_no_hfield, sensor_raycast_kernel_no_hfield = _make_raycast_funcs(enable_heightfields=False)
+
+
+def intersect_ray(
+    model: Model,
+    *,
+    ray_origins: wp.array[wp.vec3],
+    ray_directions: wp.array[wp.vec3],
+    ray_worlds: wp.array[wp.int32],
+    enable_global_world: bool = True,
+    out_dist: wp.array[float] | None = None,
+    out_shape_id: wp.array[wp.int32] | None = None,
+    out_normal: wp.array[wp.vec3] | None = None,
+):
+    """Intersect rays with model shapes.
+
+    :meth:`~newton.ModelBuilder.finalize` builds the model shape BVH for the
+    initial model state. If the queried state changes shape transforms, refit
+    the BVH with :meth:`~newton.Model.bvh_refit_shapes` before raycasting
+    again. Manually populated models must build the BVH with
+    :meth:`~newton.Model.bvh_build_shapes` before first use.
+
+    Each ray is cast against the shapes of its own world (given by
+    ``ray_worlds``) and against the shapes of the global world (index ``-1``),
+    which are accessible from every world. A ray whose world is ``-1`` is cast
+    against the global world only.
+
+    ``out_dist``, ``out_shape_id`` and ``out_normal`` are optional outputs.
+    Pass ``None`` to skip writing a channel.
+
+    Args:
+        model: Model containing the shapes to query.
+        ray_origins: Ray origins in world space [m], shape [ray_count, 3].
+        ray_directions: Ray directions in world space, shape [ray_count, 3].
+            Values must be normalized and nonzero.
+        ray_worlds: Per-ray world index, shape [ray_count]. Use ``-1`` for the
+            global world.
+        enable_global_world: Whether to enable global world raycasting.
+        out_dist: Optional output hit distances [m], shape [ray_count]. ``-1`` on miss.
+        out_shape_id: Optional output hit shape indices, shape [ray_count]. ``-1`` on miss.
+        out_normal: Optional output hit normals, shape [ray_count, 3].
+    """
+
+    if model.bvh_shapes is None:
+        raise RuntimeError(
+            "BVH raycasting requires a shape BVH built for the queried state. "
+            "ModelBuilder.finalize() builds one for the initial state; call "
+            "model.bvh_build_shapes(state) for manually populated models and "
+            "model.bvh_refit_shapes(state) after state changes."
+        )
+
+    write_dist = out_dist is not None
+    write_shape_id = out_shape_id is not None
+    write_normal = out_normal is not None
+
+    @wp.kernel
+    def _intersect_ray_kernel(
+        bvh_id: wp.uint64,
+        bvh_shapes_group_roots: wp.array[wp.int32],
+        bvh_shape_enabled: wp.array[wp.uint32],
+        shape_transform_world: wp.array[wp.transform],
+        shape_type: wp.array[int],
+        shape_scale: wp.array[wp.vec3],
+        shape_source_ptr: wp.array[wp.uint64],
+        shape_heightfield_index: wp.array[wp.int32],
+        heightfield_data: wp.array[HeightfieldData],
+        heightfield_elevations: wp.array[wp.float32],
+        ray_origin: wp.array[wp.vec3],
+        ray_direction: wp.array[wp.vec3],
+        ray_world: wp.array[wp.int32],
+        out_dist: wp.array[float],
+        out_shape_id: wp.array[wp.int32],
+        out_normal: wp.array[wp.vec3],
+    ):
+        rayid = wp.tid()
+
+        origin = ray_origin[rayid]
+        direction = ray_direction[rayid]
+
+        min_dist = float(MAXVAL)
+        min_shape_id = wp.int32(-1)
+        min_normal = wp.vec3(0.0)
+
+        # Pass 0 queries the ray's own world; pass 1 the global world shared by all.
+        for i in range(wp.static(2 if enable_global_world else 1)):
+            groupid = ray_world[rayid] if i == 0 else bvh_shapes_group_roots.shape[0] - 1
+
+            bvh_root = bvh_shapes_group_roots[groupid]
+            if bvh_root < 0:
+                continue
+
+            query = wp.bvh_query_ray(bvh_id, origin, direction, bvh_root)
+            bvh_shape_id = wp.int32(0)
+
+            while wp.bvh_query_next(query, bvh_shape_id, min_dist):
+                shape_id = wp.int32(bvh_shape_enabled[bvh_shape_id])
+                geom_type = shape_type[shape_id]
+
+                mesh_id = wp.uint64(0)
+                if geom_type == GeoType.MESH or geom_type == GeoType.CONVEX_MESH or geom_type == GeoType.TETRAHEDRON:
+                    mesh_id = shape_source_ptr[shape_id]
+
+                hit_dist, hit_normal = ray_intersect_geom(
+                    shape_transform_world[shape_id],
+                    shape_scale[shape_id],
+                    geom_type,
+                    origin,
+                    direction,
+                    mesh_id,
+                    shape_id,
+                    shape_heightfield_index,
+                    heightfield_data,
+                    heightfield_elevations,
+                )
+                if hit_dist >= 0.0 and hit_dist < min_dist:
+                    min_dist = hit_dist
+                    min_shape_id = shape_id
+                    min_normal = hit_normal
+
+        if wp.static(write_dist):
+            out_dist[rayid] = wp.where(min_shape_id < 0, -1.0, min_dist)
+        if wp.static(write_shape_id):
+            out_shape_id[rayid] = min_shape_id
+        if wp.static(write_normal):
+            out_normal[rayid] = min_normal
+
+    wp.launch(
+        kernel=_intersect_ray_kernel,
+        dim=ray_origins.shape[0],
+        inputs=[
+            model.bvh_shapes.id,
+            model.bvh_shapes_group_roots,
+            model.bvh_shape_enabled,
+            model.bvh_shape_world_transforms,
+            model.shape_type,
+            model.shape_scale,
+            model.shape_source_ptr,
+            model.shape_heightfield_index,
+            model.heightfield_data,
+            model.heightfield_elevations,
+            ray_origins,
+            ray_directions,
+            ray_worlds,
+        ],
+        outputs=[
+            out_dist,
+            out_shape_id,
+            out_normal,
+        ],
+        device=model.device,
+    )
 
 
 @wp.kernel

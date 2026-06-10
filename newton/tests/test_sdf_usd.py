@@ -22,7 +22,6 @@ from pathlib import Path
 import warp as wp
 
 import newton
-from newton._src.utils.import_usd import parse_usd
 from newton.tests.unittest_utils import add_function_test, get_selected_cuda_test_devices
 
 CUBE_POINTS = [
@@ -116,7 +115,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             stage.Save()
 
             builder = newton.ModelBuilder()
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             psm = result["path_shape_map"]
 
             s1 = psm["/World/Body1/CollisionMesh"]
@@ -134,7 +133,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             # shared Mesh — finalize() must not mutate user-owned geometry).
             model = builder.finalize(device=device)
             self.assertGreaterEqual(
-                int(model.shape_sdf_index.numpy()[s1]),
+                int(model._shape_sdf_index.numpy()[s1]),
                 0,
                 "Expected an SDF entry for shape s1 in the finalized model.",
             )
@@ -160,7 +159,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             self.assertIsNone(builder.default_shape_cfg.sdf_max_resolution)
             self.assertIsNone(builder.default_shape_cfg.sdf_target_voxel_size)
 
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
 
             # Mesh should not have SDF built
@@ -186,7 +185,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             builder = newton.ModelBuilder()
             builder.default_shape_cfg.sdf_max_resolution = 64
 
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
 
             # SDF params stored, deferred to finalize
@@ -194,7 +193,7 @@ class TestSDFUSDParsing(unittest.TestCase):
 
             model = builder.finalize(device=device)
             self.assertGreaterEqual(
-                int(model.shape_sdf_index.numpy()[s1]),
+                int(model._shape_sdf_index.numpy()[s1]),
                 0,
                 "Expected SDF built from default_shape_cfg during finalize.",
             )
@@ -227,7 +226,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             stage.Save()
 
             builder = newton.ModelBuilder()
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             psm = result["path_shape_map"]
 
             s1 = psm["/World/Body1/CollisionMesh"]
@@ -261,14 +260,14 @@ class TestSDFUSDParsing(unittest.TestCase):
             stage.Save()
 
             builder = newton.ModelBuilder()
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
 
             # SDF deferred to finalize; result lands in the model, not on the
             # shared Mesh.
             model = builder.finalize(device=device)
             self.assertGreaterEqual(
-                int(model.shape_sdf_index.numpy()[s1]),
+                int(model._shape_sdf_index.numpy()[s1]),
                 0,
                 "Expected SDF built with sdfPadding during finalize.",
             )
@@ -295,7 +294,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             stage.Save()
 
             builder = newton.ModelBuilder()
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
 
             # SDF should still be built (sdfEnabled not false), but hydroelastic should be off
@@ -328,7 +327,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             stage.Save()
 
             builder = newton.ModelBuilder()
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionSphere"]
 
             self.assertTrue(builder.shape_flags[s1] & newton.ShapeFlags.HYDROELASTIC)
@@ -362,7 +361,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             stage.Save()
 
             builder = newton.ModelBuilder()
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionSphere"]
 
             self.assertAlmostEqual(builder.shape_sdf_padding[s1], 0.03, places=5)
@@ -390,20 +389,20 @@ class TestSDFUSDParsing(unittest.TestCase):
             stage.Save()
 
             builder = newton.ModelBuilder()
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
 
             self.assertEqual(builder.shape_sdf_max_resolution[s1], 64)
 
             model = builder.finalize(device=device)
             self.assertGreaterEqual(
-                int(model.shape_sdf_index.numpy()[s1]),
+                int(model._shape_sdf_index.numpy()[s1]),
                 0,
                 "Applied SDF API should land an SDF entry on the finalized model.",
             )
 
-    def test_usd_mesh_invalid_sdf_max_resolution_raises(self):
-        """USD mesh path must validate sdf_max_resolution divisible-by-8 before stripping cfg."""
+    def test_usd_mesh_invalid_sdf_max_resolution_warns_and_clears(self):
+        """An sdfMaxResolution not divisible by 8 must warn and fall back to default rather than aborting the import."""
         from pxr import Sdf, Usd, UsdPhysics
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -414,16 +413,65 @@ class TestSDFUSDParsing(unittest.TestCase):
             _add_rigid_body(stage, "/World/Body1")
             m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
             p1 = m1.GetPrim()
-            # 63 is not divisible by 8 — ShapeConfig.validate would reject it,
-            # but the importer strips SDF fields before add_shape_mesh, so the
-            # validation must fire explicitly in the USD mesh path.
             p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(63)
 
             stage.Save()
 
             builder = newton.ModelBuilder()
-            with self.assertRaisesRegex(ValueError, "sdf_max_resolution must be divisible by 8"):
-                parse_usd(builder, str(usd_path))
+            with self.assertWarnsRegex(UserWarning, "must be divisible by 8"):
+                result = builder.add_usd(str(usd_path))
+            s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
+            # Invalid resolution should be dropped — builder default (None) wins.
+            self.assertIsNone(builder.shape_sdf_max_resolution[s1])
+
+    def test_usd_mesh_invalid_sdf_texture_format_warns_and_clears(self):
+        """An unknown sdfTextureFormat must warn and fall back to default rather than aborting the import."""
+        from pxr import Sdf, Usd, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            usd_path = Path(tmpdir) / "test_mesh_invalid_sdf_tex.usda"
+            stage = Usd.Stage.CreateNew(str(usd_path))
+            UsdPhysics.Scene.Define(stage, "/PhysicsScene")
+
+            _add_rigid_body(stage, "/World/Body1")
+            m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
+            p1 = m1.GetPrim()
+            p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(64)
+            p1.CreateAttribute("newton:sdfTextureFormat", Sdf.ValueTypeNames.Token, custom=True).Set("bogus")
+
+            stage.Save()
+
+            builder = newton.ModelBuilder()
+            with self.assertWarnsRegex(UserWarning, "newton:sdfTextureFormat.*invalid"):
+                result = builder.add_usd(str(usd_path))
+            s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
+            # Bad texture format dropped — builder default ("uint16") wins.
+            self.assertEqual(builder.shape_sdf_texture_format[s1], "uint16")
+
+    def test_usd_mesh_both_sdf_resolution_and_voxel_size_warns(self):
+        """Authoring both sdfMaxResolution and sdfTargetVoxelSize must warn; target voxel size takes precedence."""
+        from pxr import Sdf, Usd, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            usd_path = Path(tmpdir) / "test_mesh_both_sdf_knobs.usda"
+            stage = Usd.Stage.CreateNew(str(usd_path))
+            UsdPhysics.Scene.Define(stage, "/PhysicsScene")
+
+            _add_rigid_body(stage, "/World/Body1")
+            m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
+            p1 = m1.GetPrim()
+            p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(64)
+            p1.CreateAttribute("newton:sdfTargetVoxelSize", Sdf.ValueTypeNames.Float, custom=True).Set(0.01)
+
+            stage.Save()
+
+            builder = newton.ModelBuilder()
+            with self.assertWarnsRegex(UserWarning, "both.*sdfTargetVoxelSize.*sdfMaxResolution"):
+                result = builder.add_usd(str(usd_path))
+            s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
+            # Target voxel size wins; max_resolution is cleared.
+            self.assertIsNone(builder.shape_sdf_max_resolution[s1])
+            self.assertAlmostEqual(builder.shape_sdf_target_voxel_size[s1], 0.01, places=4)
 
     def test_deferred_sdf_distinguishes_shape_scales(self, device=None):
         """Two shapes sharing the same Mesh at different scales must produce distinct SDF entries."""
@@ -445,8 +493,8 @@ class TestSDFUSDParsing(unittest.TestCase):
         builder.shape_sdf_max_resolution[s1] = 32
 
         model = builder.finalize(device=device)
-        idx0 = int(model.shape_sdf_index.numpy()[s0])
-        idx1 = int(model.shape_sdf_index.numpy()[s1])
+        idx0 = int(model._shape_sdf_index.numpy()[s0])
+        idx1 = int(model._shape_sdf_index.numpy()[s1])
 
         self.assertGreaterEqual(idx0, 0)
         self.assertGreaterEqual(idx1, 0)
@@ -464,6 +512,108 @@ class TestSDFUSDParsing(unittest.TestCase):
         cfg = newton.ModelBuilder.ShapeConfig(is_hydroelastic=True)
         with self.assertRaisesRegex(ValueError, "Hydroelastic is not supported on GeoType.CONVEX_MESH"):
             builder.add_shape_convex_hull(body, mesh=mesh, cfg=cfg)
+
+    def test_approximate_meshes_rejects_sdf_state(self):
+        """approximate_meshes must raise on mesh-replacing methods when a shape carries deferred SDF or hydroelastic state."""
+        builder = newton.ModelBuilder()
+        body = builder.add_body()
+        mesh = newton.Mesh(
+            vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)],
+            indices=[0, 1, 2, 0, 1, 3, 0, 2, 3, 1, 2, 3],
+        )
+        shape_id = builder.add_shape_mesh(body, mesh=mesh)
+        # Simulate the deferred-SDF state the USD importer writes directly to the builder.
+        builder.shape_sdf_max_resolution[shape_id] = 64
+        with self.assertRaisesRegex(ValueError, "SDF / hydroelastic configuration cannot be preserved"):
+            builder.approximate_meshes(method="convex_hull", shape_indices=[shape_id])
+
+    def test_usd_sdf_mesh_uses_simplified_collision_edges(self, device=None):
+        """Deferred-built SDF on a USD mesh must surface its simplified collision edges to finalize."""
+        if device is None or not wp.get_device(device).is_cuda:
+            self.skipTest("SDF tests require CUDA device")
+
+        from pxr import Sdf, Usd, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            usd_path = Path(tmpdir) / "test_sdf_edges.usda"
+            stage = Usd.Stage.CreateNew(str(usd_path))
+            UsdPhysics.Scene.Define(stage, "/PhysicsScene")
+            _add_rigid_body(stage, "/World/Body1")
+            m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
+            m1.GetPrim().CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(64)
+            stage.Save()
+
+            builder = newton.ModelBuilder()
+            result = builder.add_usd(str(usd_path))
+            s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
+            # shape_source still has no collision edges before finalize (the
+            # deferred build runs inside finalize on a Mesh clone).
+            self.assertIsNone(builder.shape_source[s1]._collision_edges)
+            full_edge_count = len(builder.shape_source[s1].edges)
+
+            model = builder.finalize(device=device)
+            # The simplified edges land in model.shape_edge_range / model.mesh_edge_indices
+            # (rigid collision edges), not model.edge_count (cloth bending edges).
+            _, simplified_edge_count = model.shape_edge_range.numpy()[s1]
+            simplified_edge_count = int(simplified_edge_count)
+            # The simplified set is strictly smaller than the full edge list on
+            # a typical cube (default 0.1° threshold drops co-planar edges).
+            self.assertLess(
+                simplified_edge_count,
+                full_edge_count,
+                f"Expected simplified edges < full edges, got {simplified_edge_count} >= {full_edge_count}",
+            )
+
+    def test_usd_sdf_with_physics_approximation_warns_and_ignores(self):
+        """physics:approximation on an SDF prim is ignored at parse time with a warning; SDF configuration survives."""
+        from pxr import Sdf, Usd, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            usd_path = Path(tmpdir) / "test_sdf_with_approximation.usda"
+            stage = Usd.Stage.CreateNew(str(usd_path))
+            UsdPhysics.Scene.Define(stage, "/PhysicsScene")
+
+            _add_rigid_body(stage, "/World/Body1")
+            m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
+            p1 = m1.GetPrim()
+            p1.AddAppliedSchema("NewtonSDFCollisionAPI")
+            p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(64)
+            p1.CreateAttribute("newton:hydroelasticEnabled", Sdf.ValueTypeNames.Bool, custom=True).Set(True)
+            p1.CreateAttribute("physics:approximation", Sdf.ValueTypeNames.Token, custom=True).Set("convexHull")
+
+            stage.Save()
+
+            builder = newton.ModelBuilder()
+            with self.assertWarnsRegex(UserWarning, "physics:approximation.*ignored"):
+                result = builder.add_usd(str(usd_path))
+            s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
+            # SDF configuration must survive the ignored approximation.
+            self.assertEqual(builder.shape_sdf_max_resolution[s1], 64)
+            self.assertTrue(builder.shape_flags[s1] & newton.ShapeFlags.HYDROELASTIC)
+
+    def test_usd_sibling_collision_apis_warn_and_sdf_wins(self):
+        """Co-applying NewtonSDFCollisionAPI and NewtonMeshCollisionAPI emits a warning and uses SDF configuration."""
+        from pxr import Sdf, Usd, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            usd_path = Path(tmpdir) / "test_sibling_apis.usda"
+            stage = Usd.Stage.CreateNew(str(usd_path))
+            UsdPhysics.Scene.Define(stage, "/PhysicsScene")
+
+            _add_rigid_body(stage, "/World/Body1")
+            m1 = _add_collision_mesh(stage, "/World/Body1/CollisionMesh")
+            p1 = m1.GetPrim()
+            p1.AddAppliedSchema("NewtonSDFCollisionAPI")
+            p1.AddAppliedSchema("NewtonMeshCollisionAPI")
+            p1.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(64)
+
+            stage.Save()
+
+            builder = newton.ModelBuilder()
+            with self.assertWarnsRegex(UserWarning, "independent collision representations"):
+                result = builder.add_usd(str(usd_path))
+            s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
+            self.assertEqual(builder.shape_sdf_max_resolution[s1], 64)
 
     def test_usd_sdf_api_applied_hydroelastic_schema_default_wins(self, device=None):
         """When NewtonSDFCollisionAPI is applied and hydroelasticEnabled is unauthored, the schema default (False) wins over a True builder default."""
@@ -488,7 +638,7 @@ class TestSDFUSDParsing(unittest.TestCase):
 
             builder = newton.ModelBuilder()
             builder.default_shape_cfg.is_hydroelastic = True
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionSphere"]
 
             self.assertFalse(builder.shape_flags[s1] & newton.ShapeFlags.HYDROELASTIC)
@@ -514,7 +664,7 @@ class TestSDFUSDParsing(unittest.TestCase):
 
             builder = newton.ModelBuilder()
             # Must not raise: target_voxel_size and max_resolution are mutually exclusive.
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionSphere"]
 
             self.assertIsNone(builder.shape_sdf_max_resolution[s1])
@@ -544,7 +694,7 @@ class TestSDFUSDParsing(unittest.TestCase):
             stage.Save()
 
             builder = newton.ModelBuilder()
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionSphere"]
 
             self.assertFalse(builder.shape_flags[s1] & newton.ShapeFlags.HYDROELASTIC)
@@ -573,13 +723,13 @@ class TestSDFUSDParsing(unittest.TestCase):
             stage.Save()
 
             builder = newton.ModelBuilder()
-            result = parse_usd(builder, str(usd_path))
+            result = builder.add_usd(str(usd_path))
             s1 = result["path_shape_map"]["/World/Body1/CollisionSphere"]
 
             self.assertFalse(builder.shape_flags[s1] & newton.ShapeFlags.HYDROELASTIC)
 
-    def test_usd_hydroelastic_mesh_without_sdf_config_raises(self, device=None):
-        """Hydroelastic mesh without SDF resolution or voxel size raises at import."""
+    def test_usd_hydroelastic_mesh_without_sdf_config_warns_and_disables(self, device=None):
+        """Hydroelastic mesh without SDF resolution or voxel size warns and falls back to plain mesh collider."""
         del device  # validation is host-side and independent of device
 
         from pxr import Sdf, Usd, UsdPhysics
@@ -594,18 +744,19 @@ class TestSDFUSDParsing(unittest.TestCase):
             p1 = m1.GetPrim()
             # hydroelasticEnabled=true opts into hydro explicitly, but the API is
             # not applied so the importer does not fill in a default
-            # sdfMaxResolution. The mesh has no attached SDF — validation should
-            # fail at parse time.
+            # sdfMaxResolution. Importer should warn and disable hydro on this shape.
             p1.CreateAttribute("newton:hydroelasticEnabled", Sdf.ValueTypeNames.Bool, custom=True).Set(True)
 
             stage.Save()
 
             builder = newton.ModelBuilder()
-            with self.assertRaisesRegex(ValueError, "hydroelastic mesh requires"):
-                parse_usd(builder, str(usd_path))
+            with self.assertWarnsRegex(UserWarning, "hydroelastic mesh requires"):
+                result = builder.add_usd(str(usd_path))
+            s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
+            self.assertFalse(builder.shape_flags[s1] & newton.ShapeFlags.HYDROELASTIC)
 
-    def test_usd_hydroelastic_mesh_with_kh_without_sdf_config_raises(self, device=None):
-        """Authoring newton:hydroelasticStiffness must not bypass the hydroelastic-mesh SDF-source validation."""
+    def test_usd_hydroelastic_mesh_with_kh_without_sdf_config_warns_and_disables(self, device=None):
+        """Authoring newton:hydroelasticStiffness must not bypass the hydroelastic-mesh SDF-source check."""
         del device  # validation is host-side and independent of device
 
         from pxr import Sdf, Usd, UsdPhysics
@@ -624,13 +775,21 @@ class TestSDFUSDParsing(unittest.TestCase):
             stage.Save()
 
             builder = newton.ModelBuilder()
-            with self.assertRaisesRegex(ValueError, "hydroelastic mesh requires"):
-                parse_usd(builder, str(usd_path))
+            with self.assertWarnsRegex(UserWarning, "hydroelastic mesh requires"):
+                result = builder.add_usd(str(usd_path))
+            s1 = result["path_shape_map"]["/World/Body1/CollisionMesh"]
+            self.assertFalse(builder.shape_flags[s1] & newton.ShapeFlags.HYDROELASTIC)
 
 
 devices = get_selected_cuda_test_devices()
 add_function_test(
     TestSDFUSDParsing, "test_usd_sdf_mesh_attributes", TestSDFUSDParsing.test_usd_sdf_mesh_attributes, devices=devices
+)
+add_function_test(
+    TestSDFUSDParsing,
+    "test_usd_sdf_mesh_uses_simplified_collision_edges",
+    TestSDFUSDParsing.test_usd_sdf_mesh_uses_simplified_collision_edges,
+    devices=devices,
 )
 add_function_test(TestSDFUSDParsing, "test_usd_sdf_defaults", TestSDFUSDParsing.test_usd_sdf_defaults, devices=devices)
 add_function_test(
@@ -699,9 +858,8 @@ add_function_test(
     TestSDFUSDParsing.test_deferred_sdf_distinguishes_shape_scales,
     devices=devices,
 )
-# The two test_usd_hydroelastic_mesh_*_raises methods validate parse-time
-# ValueErrors on the host; they do not call wp.launch and need no CUDA
-# device, so they are registered as plain unittest methods.
+# The hydroelastic-mesh warn-and-degrade tests run host-side (no wp.launch / CUDA),
+# so they're registered as plain unittest methods.
 
 
 if __name__ == "__main__":

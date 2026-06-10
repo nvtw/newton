@@ -529,6 +529,7 @@ class CollisionPipeline:
         unified_shape_world: wp.array[int] | None = None,
         unified_shape_flags: wp.array[int] | None = None,
         broad_phase_filter: tuple[Any, Any] | None = None,
+        contact_reduction_hashtable_size_factor: float = 0.25,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -546,6 +547,10 @@ class CollisionPipeline:
                 for mesh and heightfield collisions.  Increase this when
                 scenes with large/complex meshes or heightfields report
                 triangle-pair overflow warnings.
+            contact_reduction_hashtable_size_factor: Multiplier applied to
+                ``max_triangle_pairs`` when allocating the global contact
+                reduction hashtable. Increase this if hashtable fill/failure
+                warnings appear. Defaults to ``0.25`` for memory compatibility.
             soft_contact_max: Maximum number of soft contacts to allocate.
                 If None, computed as shape_count * particle_count.
             soft_contact_margin: Margin for soft contact generation. Defaults to 0.01.
@@ -583,6 +588,10 @@ class CollisionPipeline:
                 non-disabled mode implies ``deterministic=True`` and
                 populates :attr:`Contacts.rigid_contact_match_index`.
                 Defaults to ``"disabled"``.
+
+                .. experimental::
+
+                    The ``"sticky"`` mode may change without prior notice.
             contact_matching_pos_threshold: World-space distance threshold [m]
                 between the previous and current contact midpoints
                 ``0.5 * (world(point0) + world(point1))``.  Contacts whose
@@ -758,6 +767,11 @@ class CollisionPipeline:
                     "broad_phase_filter is ignored when broad_phase is a pre-built instance; "
                     "construct that instance with filter_func=... directly."
                 )
+            if contact_reduction_hashtable_size_factor != 0.25:
+                raise ValueError(
+                    "contact_reduction_hashtable_size_factor cannot be used when narrow_phase is provided; "
+                    "construct the NarrowPhase with that value instead"
+                )
 
             inferred_mode = _infer_broad_phase_mode_from_instance(broad_phase_instance)
             self.broad_phase_mode = inferred_mode
@@ -855,12 +869,11 @@ class CollisionPipeline:
             # Keep mesh and heightfield flags independent: heightfield-only scenes
             # should not trigger mesh-only kernel setup/launches.
             has_meshes = False
-            has_heightfields = False
+            has_heightfields = model.heightfield_count > 0
             use_lean_gjk_mpr = False
             mesh_sdf_uses_texture = False
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
-                has_heightfields = bool((shape_types == int(GeoType.HFIELD)).any())
                 has_meshes = bool((shape_types == int(GeoType.MESH)).any())
                 if has_meshes and not has_heightfields and model.shape_sdf_index is not None:
                     mesh_shape_indices = np.flatnonzero(shape_types == int(GeoType.MESH))
@@ -913,6 +926,7 @@ class CollisionPipeline:
                 deterministic=deterministic,
                 contact_max=rigid_contact_max,
                 verify_buffers=verify_buffers,
+                contact_reduction_hashtable_size_factor=contact_reduction_hashtable_size_factor,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
@@ -1238,7 +1252,7 @@ class CollisionPipeline:
             contacts=contacts,
             shape_type=model.shape_type,
             shape_source_ptr=model.shape_source_ptr,
-            shape_sdf_index=model.shape_sdf_index,
+            shape_sdf_index=model._shape_sdf_index,
             shape_gap=model.shape_gap,
             shape_collision_radius=model.shape_collision_radius,
             shape_flags=model.shape_flags,
@@ -1386,7 +1400,7 @@ class CollisionPipeline:
             shape_transform=self.geom_transform,
             shape_source=shape_source_ptr,
             shape_sdf_index=shape_sdf_index,
-            texture_sdf_data=model.texture_sdf_data,
+            texture_sdf_data=model._texture_sdf_data,
             shape_gap=shape_gap,
             shape_collision_radius=shape_collision_radius,
             shape_flags=shape_flags,
