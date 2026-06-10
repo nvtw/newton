@@ -32,8 +32,7 @@ class Example:
 
         self.world_count = args.world_count
         self.show_contacts = args.show_contacts
-        self.frame_substeps = args.frame_substeps
-        self.sim_dt = self.frame_dt / self.frame_substeps
+        self.sim_dt = self.frame_dt
 
         rng = np.random.default_rng(args.seed)
         root_rot = wp.quat_identity()
@@ -81,7 +80,6 @@ class Example:
         self.contacts = self.model.contacts()
 
         self.state_0 = self.model.state()
-        self.state_1 = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
         self.viewer.set_model(self.model)
@@ -96,12 +94,10 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        for _ in range(self.frame_substeps):
-            self.model.collide(self.state_0, self.contacts)
-            self.state_0.clear_forces()
-            self.viewer.apply_forces(self.state_0)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-            self.state_0, self.state_1 = self.state_1, self.state_0
+        self.model.collide(self.state_0, self.contacts)
+        self.state_0.clear_forces()
+        self.viewer.apply_forces(self.state_0)
+        self.solver.step(self.state_0, self.state_0, self.control, self.contacts, self.sim_dt)
 
     def step(self):
         if self.graph is not None:
@@ -117,29 +113,37 @@ class Example:
             self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
-    def test_final(self):
+    def test_post_step(self):
         newton.examples.test_body_state(
             self.model,
             self.state_0,
-            "all bodies have finite state",
+            "all bodies have bounded finite state",
             lambda q, qd: (
-                not (
-                    wp.isnan(q[0])
-                    or wp.isnan(q[1])
-                    or wp.isnan(q[2])
-                    or wp.isnan(q[3])
-                    or wp.isnan(q[4])
-                    or wp.isnan(q[5])
-                    or wp.isnan(q[6])
-                    or wp.isnan(qd[0])
-                    or wp.isnan(qd[1])
-                    or wp.isnan(qd[2])
-                    or wp.isnan(qd[3])
-                    or wp.isnan(qd[4])
-                    or wp.isnan(qd[5])
+                (
+                    not (
+                        wp.isnan(q[0])
+                        or wp.isnan(q[1])
+                        or wp.isnan(q[2])
+                        or wp.isnan(q[3])
+                        or wp.isnan(q[4])
+                        or wp.isnan(q[5])
+                        or wp.isnan(q[6])
+                        or wp.isnan(qd[0])
+                        or wp.isnan(qd[1])
+                        or wp.isnan(qd[2])
+                        or wp.isnan(qd[3])
+                        or wp.isnan(qd[4])
+                        or wp.isnan(qd[5])
+                    )
                 )
+                and q[2] > -1.0
+                and q[2] < 5.0
+                and max(abs(qd)) < 200.0
             ),
         )
+
+    def test_final(self):
+        self.test_post_step()
 
     @staticmethod
     def create_parser():
@@ -148,15 +152,9 @@ class Example:
         parser.add_argument("--seed", type=int, default=123, help="Random seed for stress poses.")
         parser.add_argument("--stress-random-poses", action="store_true", help="Use randomized tilted ragdoll starts.")
         parser.add_argument("--joint-random-range", type=float, default=1.0, help="Stress joint angle range [rad].")
-        parser.add_argument("--root-height", type=float, default=1.5, help="Root start height [m].")
+        parser.add_argument("--root-height", type=float, default=1.4, help="Root start height [m].")
         parser.add_argument("--self-collisions", action="store_true", help="Enable MJCF self-collisions.")
         parser.add_argument("--show-contacts", action="store_true", help="Draw contact arrows.")
-        parser.add_argument(
-            "--frame-substeps",
-            type=int,
-            default=2,
-            help="Outer collision/solver steps per rendered frame.",
-        )
         parser.add_argument(
             "--solver-substeps",
             type=int,
