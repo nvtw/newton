@@ -582,6 +582,12 @@ class ViewerBase(ABC):
             ViewerBase.SDFMarginMode, dict[int, tuple[np.ndarray, int, np.ndarray, int]]
         ] = {}
 
+        self._init_extra_layer_state()
+
+    def _init_extra_layer_state(self) -> None:
+        """Hook for backends to initialize attributes from `_extra_layer_state_attrs()`."""
+        return
+
     def set_model(self, model: newton.Model | None, max_worlds: int | None = None):
         """Set the model to be visualized.
 
