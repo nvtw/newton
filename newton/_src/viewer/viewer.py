@@ -31,63 +31,6 @@ from .kernels import (
 #: examples, tests, and viewer backends keep working unchanged.
 _DEFAULT_LAYER_ID = "__default__"
 
-#: Per-model attribute names that are part of "layer state". Used by
-#: :meth:`ViewerBase.activate` to snapshot/restore everything that belongs
-#: to one model when switching layers. These are exactly the attributes
-#: initialized by :meth:`ViewerBase.clear_model`.
-_LAYER_STATE_ATTRS: tuple[str, ...] = (
-    "model",
-    "model_changed",
-    "_shape_instances",
-    "_inertia_box_points0",
-    "_inertia_box_points1",
-    "_inertia_box_colors",
-    "_geometry_cache",
-    "_contact_points0",
-    "_contact_points1",
-    "_joint_points0",
-    "_joint_points1",
-    "_joint_colors",
-    "_com_positions",
-    "_com_colors",
-    "_com_radii",
-    "world_offsets",
-    "_user_spacing",
-    "_visible_worlds",
-    "_visible_worlds_mask",
-    "scene_scale",
-    "show_joints",
-    "show_com",
-    "show_particles",
-    "show_contacts",
-    "show_springs",
-    "show_triangles",
-    "show_gaussians",
-    "show_collision",
-    "show_visual",
-    "show_static",
-    "show_inertia_boxes",
-    "show_hydro_contact_surface",
-    "sdf_margin_mode",
-    "gaussians_max_points",
-    "_hydro_surface_line_starts",
-    "_hydro_surface_line_ends",
-    "_hydro_surface_line_colors",
-    "model_shape_color",
-    "_shape_to_slot",
-    "_slot_to_shape",
-    "_slot_to_shape_wp",
-    "_shape_to_batch",
-    "_isomesh_cache",
-    "_gaussian_instances",
-    "_sdf_isomesh_instances",
-    "_sdf_isomesh_populated",
-    "_shape_sdf_index_host",
-    "_sdf_margin_mesh_cache",
-    "_sdf_margin_vdata_cache",
-    "_sdf_margin_edge_caches",
-)
-
 
 class Layer:
     """Container holding per-model viewer state for one layer.
@@ -122,7 +65,6 @@ class Layer:
         self.layer_id = layer_id
         self.visible = True
         self.xform: wp.transform = wp.transform_identity()
-        self.state: dict[str, Any] = {}
 
     @property
     def name_prefix(self) -> str:
@@ -172,6 +114,30 @@ class ViewerBase(ABC):
         # All model-dependent state is initialized by clear_model()
         self.clear_model()
 
+    def __getattribute__(self, name: str) -> Any:
+        if not name.startswith("__"):
+            try:
+                layers = object.__getattribute__(self, "__dict__").get("_layers")
+                active_layer_id = object.__getattribute__(self, "__dict__").get("_active_layer_id")
+            except AttributeError:
+                layers = None
+                active_layer_id = None
+            if layers is not None and active_layer_id in layers:
+                layer = layers[active_layer_id]
+                if hasattr(layer, name):
+                    return getattr(layer, name)
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        layers = self.__dict__.get("_layers")
+        active_layer_id = self.__dict__.get("_active_layer_id")
+        if layers is not None and active_layer_id in layers:
+            layer = layers[active_layer_id]
+            if hasattr(layer, name):
+                setattr(layer, name, value)
+                return
+        object.__setattr__(self, name, value)
+
     # ------------------------------------------------------------------
     # Layer management
     # ------------------------------------------------------------------
@@ -209,9 +175,9 @@ class ViewerBase(ABC):
         to backends are automatically prefixed with ``/layers/<layer_id>``
         so multiple layers can render simultaneously without name clashes.
 
-        The state of the previously active layer (model, shape batches,
-        caches, visibility toggles) is preserved and restored when the
-        layer is activated again.
+        The state of each layer (model, shape batches, caches, visibility
+        toggles) lives on the :class:`Layer` object and remains available
+        when the layer is activated again.
 
         Args:
             layer_id: Stable identifier for the layer. Re-activates an
@@ -225,21 +191,12 @@ class ViewerBase(ABC):
         if layer_id == self._active_layer_id and layer_id in self._layers:
             return self._layers[layer_id]
 
-        # Snapshot the current layer state from self.
-        self._snapshot_layer(self._layers[self._active_layer_id])
-
-        # Create the target layer if needed.
         if layer_id not in self._layers:
-            self._layers[layer_id] = Layer(layer_id)
-            # Initialize default per-model state directly on ``self`` (without
-            # invoking subclass ``clear_model`` overrides, which would destroy
-            # backend resources owned by other live layers).
-            self._init_layer_state()
-            self._snapshot_layer(self._layers[layer_id])
+            layer = Layer(layer_id)
+            self._init_layer_state(layer)
+            self._layers[layer_id] = layer
 
-        # Restore the target layer's state onto self.
         self._active_layer_id = layer_id
-        self._restore_layer(self._layers[layer_id])
         return self._layers[layer_id]
 
     def remove_layer(self, layer_id: str) -> None:
@@ -259,9 +216,6 @@ class ViewerBase(ABC):
         if layer_id not in self._layers:
             return
 
-        # Snapshot the active layer so we can restore it after destroying
-        # the target layer's backend state. When the active layer is the
-        # one being removed, fall back to the default layer.
         prev_active = self._active_layer_id
         if prev_active == layer_id:
             prev_active = _DEFAULT_LAYER_ID
@@ -275,10 +229,6 @@ class ViewerBase(ABC):
         # owns" entry point and is overridden by backends (e.g. ViewerGL)
         # to destroy GL handles for meshes/instancers/lines/wireframes.
         self.clear_model()
-
-        # Re-snapshot the now-empty layer state into the registry entry so
-        # the upcoming activate() doesn't try to read a stale snapshot.
-        self._snapshot_layer(self._layers[layer_id])
 
         # Move off the removed layer before deleting its registry entry.
         self.activate(prev_active)
@@ -346,37 +296,6 @@ class ViewerBase(ABC):
         elif not isinstance(xform, wp.transform):
             xform = wp.transform(*xform)
         self._layers[layer_id].xform = xform
-
-    def _snapshot_layer(self, layer: Layer) -> None:
-        """Copy all per-model attributes from ``self`` into ``layer.state``."""
-        for attr in _LAYER_STATE_ATTRS:
-            if hasattr(self, attr):
-                layer.state[attr] = getattr(self, attr)
-        for attr in self._extra_layer_state_attrs():
-            if hasattr(self, attr):
-                layer.state[attr] = getattr(self, attr)
-
-    def _restore_layer(self, layer: Layer) -> None:
-        """Copy all per-model attributes from ``layer.state`` onto ``self``."""
-        for attr in _LAYER_STATE_ATTRS:
-            if attr in layer.state:
-                object.__setattr__(self, attr, layer.state[attr])
-        for attr in self._extra_layer_state_attrs():
-            if attr in layer.state:
-                object.__setattr__(self, attr, layer.state[attr])
-
-    def _extra_layer_state_attrs(self) -> tuple[str, ...]:
-        """Hook for backends to declare additional per-layer attributes.
-
-        Backends that maintain per-model caches outside of the base class
-        attribute set declared in :data:`_LAYER_STATE_ATTRS` override this
-        method to include those attribute names. They will be included in
-        the snapshot/restore cycle so each layer keeps an independent copy.
-
-        Returns:
-            tuple[str, ...]: Names of additional ``self``-attributes to track.
-        """
-        return ()
 
     def _qualify(self, name: str | None) -> str | None:
         """Prefix a backend object name with the active layer's namespace.
@@ -458,7 +377,7 @@ class ViewerBase(ABC):
         When more than one layer is active, only resources owned by the
         currently active layer are released — other layers remain intact.
         """
-        self._init_layer_state()
+        self._init_layer_state(self.layer)
 
     def _is_layer_owned_path(self, name: str) -> bool:
         """Return True when ``name`` was generated by the active layer.
@@ -481,93 +400,93 @@ class ViewerBase(ABC):
         # Default layer: own everything that is NOT inside a "/layers/" namespace.
         return not name.startswith("/layers/")
 
-    def _init_layer_state(self) -> None:
-        """Initialize all per-model (layer) attributes to defaults on ``self``.
+    def _init_layer_state(self, layer: Layer) -> None:
+        """Initialize all per-model attributes to defaults on ``layer``.
 
         Split out from :meth:`clear_model` so :meth:`activate` can spin up a
         fresh layer's state without invoking backend-specific overrides of
-        ``clear_model`` (which destroy GL resources that belong to other,
+        ``clear_model`` (which destroy resources that belong to other,
         still-live layers).
         """
-        self.model = None
-        self.model_changed = True
+        layer.model = None
+        layer.model_changed = True
 
         # Shape instance batches (shape hash -> ShapeInstances)
-        self._shape_instances = {}
+        layer._shape_instances = {}
         # Inertia box wireframe line vertices (12 lines per body)
-        self._inertia_box_points0 = None
-        self._inertia_box_points1 = None
-        self._inertia_box_colors = None
+        layer._inertia_box_points0 = None
+        layer._inertia_box_points1 = None
+        layer._inertia_box_colors = None
 
         # Geometry mesh cache (geometry hash -> mesh path)
-        self._geometry_cache: dict[int, str] = {}
+        layer._geometry_cache: dict[int, str] = {}
 
         # Contact line vertices
-        self._contact_points0 = None
-        self._contact_points1 = None
+        layer._contact_points0 = None
+        layer._contact_points1 = None
 
         # Joint basis line vertices (3 lines per joint)
-        self._joint_points0 = None
-        self._joint_points1 = None
-        self._joint_colors = None
+        layer._joint_points0 = None
+        layer._joint_points1 = None
+        layer._joint_colors = None
 
         # Center-of-mass visualization
-        self._com_positions = None
-        self._com_colors = None
+        layer._com_positions = None
+        layer._com_colors = None
 
         # World offset support
-        self.world_offsets = None
-        self._user_spacing: tuple[float, float, float] | None = None
-        self._visible_worlds: set[int] | None = None
-        self._visible_worlds_mask: wp.array | None = None
+        layer.world_offsets = None
+        layer._user_spacing: tuple[float, float, float] | None = None
+        layer._visible_worlds: set[int] | None = None
+        layer._visible_worlds_mask: wp.array | None = None
 
         # Characteristic body size in world units, used to auto-scale
         # visualization helpers (contact arrows, joint axes, COM markers).
         # Set in :meth:`set_model` from :meth:`_estimate_scene_scale`; falls
         # back to 1.0 when no dynamic shapes are present.
-        self.scene_scale: float = 1.0
+        layer.scene_scale: float = 1.0
 
         # Picking
         self.picking_enabled = True
 
         # Display options
-        self.show_joints = False
-        self.show_com = False
-        self.show_particles = False
-        self.show_contacts = False
-        self.show_springs = False
-        self.show_triangles = True
-        self.show_gaussians = False
-        self.show_collision = False
-        self.show_visual = True
-        self.show_static = False
-        self.show_inertia_boxes = False
-        self.show_hydro_contact_surface = False
-        self.sdf_margin_mode: ViewerBase.SDFMarginMode = ViewerBase.SDFMarginMode.OFF
+        layer.show_joints = False
+        layer.show_com = False
+        layer.show_particles = False
+        layer.show_contacts = False
+        layer.show_springs = False
+        layer.show_triangles = True
+        layer.show_gaussians = False
+        layer.show_collision = False
+        layer.show_visual = True
+        layer.show_static = False
+        layer.show_inertia_boxes = False
+        layer.show_hydro_contact_surface = False
+        layer.sdf_margin_mode: ViewerBase.SDFMarginMode = ViewerBase.SDFMarginMode.OFF
 
-        self.gaussians_max_points = 100_000  # Max number of points to visualize per gaussian
+        layer.gaussians_max_points = 100_000  # Max number of points to visualize per gaussian
 
         # Hydroelastic contact surface line cache
-        self._hydro_surface_line_starts: wp.array | None = None
-        self._hydro_surface_line_ends: wp.array | None = None
-        self._hydro_surface_line_colors: wp.array | None = None
+        layer._hydro_surface_line_starts: wp.array | None = None
+        layer._hydro_surface_line_ends: wp.array | None = None
+        layer._hydro_surface_line_colors: wp.array | None = None
 
         # Per-shape color buffer and indexing
-        self.model_shape_color: wp.array[wp.vec3] = None
-        self._shape_to_slot: np.ndarray | None = None
-        self._slot_to_shape: np.ndarray | None = None
-        self._slot_to_shape_wp: wp.array | None = None
-        self._shape_to_batch: list[ViewerBase.ShapeInstances | None] | None = None
+        layer.model_shape_color: wp.array[wp.vec3] = None
+        layer._shape_to_slot: np.ndarray | None = None
+        layer._slot_to_shape: np.ndarray | None = None
+        layer._slot_to_shape_wp: wp.array | None = None
+        layer._shape_to_batch: list[ViewerBase.ShapeInstances | None] | None = None
 
         # Isomesh cache for SDF collision visualization
-        self._isomesh_cache: dict[int, newton.Mesh | None] = {}
+        layer._isomesh_cache: dict[int, newton.Mesh | None] = {}
 
         # Gaussian shapes rendered as point clouds (skipped by the mesh instancing pipeline).
         # Each entry is (name, gaussian, parent_body, shape_xform, world_index, flags, is_static).
-        self._gaussian_instances: list[tuple[str, newton.Gaussian, int, wp.transform, int, int, bool]] = []
-        self._sdf_isomesh_instances: dict[int, ViewerBase.ShapeInstances] = {}
-        self._sdf_isomesh_populated: bool = False
-        self._shape_sdf_index_host: np.ndarray | None = None
+        layer._gaussian_instances: list[tuple[str, newton.Gaussian, int, wp.transform, int, int, bool]] = []
+        layer._sdf_isomesh_instances: dict[int, ViewerBase.ShapeInstances] = {}
+        layer._sdf_isomesh_populated: bool = False
+        layer._shape_sdf_index_host: np.ndarray | None = None
 
         # SDF margin visualization (wireframe edges).
         # Mesh cache: keyed by (geo_type, geo_scale, geo_src_id, offset).
@@ -576,16 +495,16 @@ class ViewerBase(ABC):
         # Edge caches: per-mode dict of
         #   {shape_idx: (vertex_data, body_idx, shape_xf, world_idx)}.
         # Keeping separate per-mode caches lets mode toggling reuse GPU VBOs.
-        self._sdf_margin_mesh_cache: dict[tuple, newton.Mesh | None] = {}
-        self._sdf_margin_vdata_cache: dict[tuple, np.ndarray] = {}
-        self._sdf_margin_edge_caches: dict[
+        layer._sdf_margin_mesh_cache: dict[tuple, newton.Mesh | None] = {}
+        layer._sdf_margin_vdata_cache: dict[tuple, np.ndarray] = {}
+        layer._sdf_margin_edge_caches: dict[
             ViewerBase.SDFMarginMode, dict[int, tuple[np.ndarray, int, np.ndarray, int]]
         ] = {}
 
-        self._init_extra_layer_state()
+        self._init_extra_layer_state(layer)
 
-    def _init_extra_layer_state(self) -> None:
-        """Hook for backends to initialize attributes from `_extra_layer_state_attrs()`."""
+    def _init_extra_layer_state(self, layer: Layer) -> None:
+        """Hook for backends to initialize additional per-layer attributes."""
         return
 
     def set_model(self, model: newton.Model | None, max_worlds: int | None = None):

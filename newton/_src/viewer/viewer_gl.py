@@ -301,25 +301,16 @@ class ViewerGL(ViewerBase):
         self._wp_pbo = None
 
     @override
-    def _extra_layer_state_attrs(self) -> tuple[str, ...]:
-        """Per-layer attributes specific to the OpenGL backend.
-
-        These are caches that are tied to a single model: the packed VBO
-        transform arrays, the capsule key set, and the picking/wind
-        helpers. Including them in the snapshot lets each layer keep its
-        own model + packed buffers without overwriting other layers'
-        state when the active layer is switched.
-        """
-        return (
-            "_packed_groups",
-            "_capsule_keys",
-            "_packed_write_indices",
-            "_packed_world_xforms",
-            "_packed_vbo_xforms",
-            "_packed_vbo_xforms_host",
-            "picking",
-            "wind",
-        )
+    def _init_extra_layer_state(self, layer):
+        super()._init_extra_layer_state(layer)
+        layer._packed_groups = []
+        layer._capsule_keys = set()
+        layer._packed_write_indices = None
+        layer._packed_world_xforms = None
+        layer._packed_vbo_xforms = None
+        layer._packed_vbo_xforms_host = None
+        layer.picking = None
+        layer.wind = None
 
     @property
     def ui(self):

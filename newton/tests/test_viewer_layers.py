@@ -124,6 +124,28 @@ class TestViewerLayers(unittest.TestCase):
         self.assertIs(viewer.model, model_a)
         self.assertIs(viewer._shape_instances, batches_a)
 
+    def test_layer_owns_custom_state_without_registry(self):
+        """Layer fields route through the viewer without a snapshot registry."""
+
+        class _CustomLayerStateViewer(_RecordingViewer):
+            def _init_extra_layer_state(self, layer):
+                super()._init_extra_layer_state(layer)
+                layer.custom_cache = {}
+
+        viewer = _CustomLayerStateViewer()
+
+        viewer.activate("A")
+        viewer.custom_cache["value"] = "A"
+        cache_a = viewer.layer.custom_cache
+
+        viewer.activate("B")
+        viewer.custom_cache["value"] = "B"
+        self.assertIsNot(viewer.custom_cache, cache_a)
+
+        viewer.activate("A")
+        self.assertIs(viewer.custom_cache, cache_a)
+        self.assertEqual(viewer.custom_cache["value"], "A")
+
     def test_set_layer_visible_hides_instances(self):
         """Hiding the active layer causes log_state to emit hidden=True for shapes."""
         viewer = _RecordingViewer()

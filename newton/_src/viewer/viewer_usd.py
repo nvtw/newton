@@ -144,24 +144,13 @@ class ViewerUSD(ViewerBase):
         self.set_model(None)
 
     @override
-    def _extra_layer_state_attrs(self) -> tuple[str, ...]:
-        return (
-            *super()._extra_layer_state_attrs(),
-            "_meshes",
-            "_instance_groups",
-            "_instancers",
-            "_points",
-            "_texture_materials",
-        )
-
-    @override
-    def _init_extra_layer_state(self) -> None:
-        super()._init_extra_layer_state()
-        self._meshes = {}  # mesh_name -> prototype path
-        self._instance_groups = {}  # instance_name -> group prim for individually referenced meshes
-        self._instancers = {}  # instancer_name -> UsdGeom.PointInstancer
-        self._points = {}  # point_name -> UsdGeom.Points
-        self._texture_materials: dict[str, Any] = {}  # mesh_name -> UsdShade.Material
+    def _init_extra_layer_state(self, layer) -> None:
+        super()._init_extra_layer_state(layer)
+        layer._meshes = {}  # mesh_name -> prototype path
+        layer._instance_groups = {}  # instance_name -> group prim for individually referenced meshes
+        layer._instancers = {}  # instancer_name -> UsdGeom.PointInstancer
+        layer._points = {}  # point_name -> UsdGeom.Points
+        layer._texture_materials: dict[str, Any] = {}  # mesh_name -> UsdShade.Material
 
     def _reset_stage(self):
         self.stage.GetRootLayer().Clear()
