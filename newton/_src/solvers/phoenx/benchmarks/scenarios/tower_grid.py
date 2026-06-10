@@ -195,8 +195,7 @@ def build(
         # within reach during compression).
         rigid_contact_max=max(50_000, 32 * n_bricks),
     )
-    model._collision_pipeline = pipeline
-    contacts = pipeline.contacts()
+    contacts = model.contacts(collision_pipeline=pipeline)
 
     box = {"state_0": state_0, "state_1": state_1}
 
