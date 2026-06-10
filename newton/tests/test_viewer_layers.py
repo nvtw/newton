@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import unittest
+from unittest.mock import Mock, patch
 
 import warp as wp
 
 import newton
+from newton._src.viewer.viewer_viser import ViewerViser
 from newton.viewer import ViewerNull
 
 
@@ -19,10 +21,13 @@ class _RecordingViewer(ViewerNull):
     def __init__(self):
         super().__init__(num_frames=1)
         self.instance_calls: list[tuple[str, bool]] = []
+        self.instance_xforms: list[tuple[str, object]] = []
         self.mesh_calls: list[tuple[str, bool]] = []
 
     def log_instances(self, name, mesh, xforms, scales, colors, materials, hidden=False):
         self.instance_calls.append((name, hidden))
+        if xforms is not None:
+            self.instance_xforms.append((name, xforms.numpy().copy()))
 
     def log_mesh(
         self,
@@ -140,6 +145,21 @@ class TestViewerLayers(unittest.TestCase):
         self.assertTrue(after_hidden, "hidden layer should still emit log_instances")
         self.assertTrue(all(after_hidden), "all shape instance calls must be hidden=True")
 
+    def test_layer_transform_offsets_logged_state_instances(self):
+        """Layer transforms are applied before instance transforms reach a backend."""
+        viewer = _RecordingViewer()
+        viewer.activate("solverA")
+        viewer.set_model(_build_box_model())
+        viewer.set_layer_transform("solverA", (2.0, 3.0, 4.0))
+
+        viewer.begin_frame(0.0)
+        viewer.log_state(viewer.model.state())
+        viewer.end_frame()
+
+        shape_xforms = [xforms for name, xforms in viewer.instance_xforms if "/model/shapes/" in name]
+        self.assertTrue(shape_xforms, "expected at least one shape instance transform")
+        self.assertEqual(tuple(shape_xforms[0][0][:3]), (2.0, 3.0, 5.0))
+
     def test_remove_layer(self):
         """Removing a layer drops it and falls back to the default."""
         viewer = _RecordingViewer()
@@ -208,6 +228,104 @@ class TestViewerLayers(unittest.TestCase):
         names = [n for n, _ in viewer.instance_calls]
         self.assertIn("/layers/A/user/probe", names)
         self.assertIn("/layers/B/user/probe", names)
+
+
+class TestViewerLayerBackends(unittest.TestCase):
+    def _make_viser_viewer(self):
+        captured_calls = {}
+
+        def add_mesh_simple(name, vertices, faces, color, wireframe, side):
+            captured_calls["add_mesh_simple"] = {
+                "name": name,
+                "vertices": vertices,
+                "faces": faces,
+                "color": color,
+                "wireframe": wireframe,
+                "side": side,
+            }
+            return Mock()
+
+        def add_batched_meshes_simple(
+            name,
+            vertices,
+            faces,
+            batched_positions,
+            batched_wxyzs,
+            batched_scales,
+            batched_colors,
+            lod,
+        ):
+            captured_calls["add_batched_meshes_simple"] = {
+                "name": name,
+                "vertices": vertices,
+                "faces": faces,
+                "batched_positions": batched_positions,
+                "batched_wxyzs": batched_wxyzs,
+                "batched_scales": batched_scales,
+                "batched_colors": batched_colors,
+                "lod": lod,
+            }
+            return Mock()
+
+        scene = Mock()
+        scene.captured_calls = captured_calls
+        scene.add_mesh_simple = add_mesh_simple
+        scene.add_batched_meshes_simple = add_batched_meshes_simple
+        scene.add_light_ambient = Mock()
+        scene.configure_environment_map = Mock()
+
+        server = Mock()
+        server.scene = scene
+        server.on_client_connect = Mock()
+        server.on_client_disconnect = Mock()
+        server.get_scene_serializer = Mock(return_value=None)
+        server.stop = Mock()
+
+        fake_viser = Mock()
+        fake_viser.ViserServer = Mock(return_value=server)
+
+        patches = [
+            patch.object(ViewerViser, "_get_viser", return_value=fake_viser),
+            patch("newton._src.viewer.viewer_viser.is_jupyter_notebook", return_value=False),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+        viewer = ViewerViser(verbose=False)
+        self.addCleanup(viewer.close)
+        return viewer, scene
+
+    def test_viser_log_mesh_uses_layer_namespace(self):
+        viewer, scene = self._make_viser_viewer()
+        viewer.activate("solverA")
+
+        points = wp.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=wp.vec3)
+        indices = wp.array([0, 1, 2], dtype=wp.uint32)
+
+        viewer.log_mesh("mesh", points, indices)
+
+        self.assertIn("/layers/solverA/mesh", viewer._meshes)
+        self.assertEqual(scene.captured_calls["add_mesh_simple"]["name"], "/layers/solverA/mesh")
+
+    def test_viser_log_instances_uses_layer_namespace(self):
+        viewer, scene = self._make_viser_viewer()
+        viewer.activate("solverA")
+
+        points = wp.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=wp.vec3)
+        indices = wp.array([0, 1, 2], dtype=wp.uint32)
+        viewer.log_mesh("mesh", points, indices)
+
+        xforms = wp.array([wp.transform(wp.vec3(1.0, 2.0, 3.0), wp.quat_identity())], dtype=wp.transform)
+        scales = wp.array([[1.0, 1.0, 1.0]], dtype=wp.vec3)
+
+        viewer.log_instances("instances", "mesh", xforms, scales, colors=None, materials=None)
+
+        self.assertIn("/layers/solverA/instances", viewer._instances)
+        self.assertEqual(
+            scene.captured_calls["add_batched_meshes_simple"]["name"],
+            "/layers/solverA/instances",
+        )
 
 
 if __name__ == "__main__":
