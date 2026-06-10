@@ -155,7 +155,7 @@ def build(
                     wp.int32(animation_n_frames),
                     animation_data_wp,
                     animation_indices_wp,
-                    control.joint_target_pos,
+                    control.joint_target_q,
                 ],
             )
         model.collide(state_0, contacts)

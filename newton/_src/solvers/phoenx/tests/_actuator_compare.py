@@ -93,7 +93,7 @@ def _build_pendulum(
     ``_MASS`` kg. Gravity -Z creates the constant external load.
 
     ``init_q`` is BOTH the initial joint angle and the PD target
-    written into ``joint_target_pos``. With the body starting at
+    written into ``joint_target_q``. With the body starting at
     the target there's no transient "snap"; gravity slowly tips
     the body away from target until the PD spring balances it.
     """
@@ -176,10 +176,10 @@ def _step(
     s1 = model.state()
     newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
     control = model.control()
-    if control.joint_target_pos is not None:
+    if control.joint_target_q is not None:
         tgt = np.zeros(int(model.joint_dof_count), dtype=np.float32)
         tgt[0] = target_pos
-        control.joint_target_pos.assign(tgt)
+        control.joint_target_q.assign(tgt)
 
     jq_buf = wp.zeros(int(model.joint_coord_count), dtype=wp.float32, device=model.device)
     jqd_buf = wp.zeros(int(model.joint_dof_count), dtype=wp.float32, device=model.device)
@@ -561,7 +561,7 @@ def sweep_three_link_leg(with_foot_contact: bool = False):
             tgt[0] = hip_q
             tgt[1] = knee_q
             tgt[2] = ankle_q
-            ctl.joint_target_pos.assign(tgt)
+            ctl.joint_target_q.assign(tgt)
             jq = wp.zeros(int(model.joint_coord_count), dtype=wp.float32, device=model.device)
             jqd = wp.zeros(int(model.joint_dof_count), dtype=wp.float32, device=model.device)
             traj = np.empty((n_frames, 3), dtype=np.float32)

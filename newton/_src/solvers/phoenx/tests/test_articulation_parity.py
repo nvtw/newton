@@ -70,7 +70,7 @@ def _run_joint_state(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Step ``n_frames`` and return ``(body_q[n_frames], joint_q[n_frames])``.
 
-    ``target_pos`` (if provided) is written into ``control.joint_target_pos``
+    ``target_pos`` (if provided) is written into ``control.joint_target_q``
     every frame so PD drives track toward it.
     """
     model = model_factory()
@@ -80,7 +80,7 @@ def _run_joint_state(
     newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
     control = model.control()
     if target_pos is not None:
-        control.joint_target_pos.assign(target_pos.astype(np.float32))
+        control.joint_target_q.assign(target_pos.astype(np.float32))
     jq = wp.zeros(model.joint_coord_count, dtype=wp.float32, device=model.device)
     jqd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=model.device)
     body_q_traj = np.empty((n_frames, model.body_count, 7), dtype=np.float32)
@@ -391,7 +391,7 @@ class TestAnymalArticulationParity(unittest.TestCase):
         )
 
     def test_initial_configuration_holds(self) -> None:
-        """Step Anymal for 20 frames with ``control.joint_target_pos``
+        """Step Anymal for 20 frames with ``control.joint_target_q``
         held at the default joint_q. The robot must not fall through
         the floor or drift catastrophically. Per-body position
         divergence between MuJoCo and PhoenX must stay small.
@@ -405,9 +405,9 @@ class TestAnymalArticulationParity(unittest.TestCase):
         n = 20  # 0.1 s -- the policy hasn't even kicked in yet
 
         # ``joint_q`` has 7 FREE coords + 12 leg angles = 19.
-        # ``joint_target_pos`` has 6 FREE DOFs + 12 leg DOFs = 18.
+        # ``joint_target_q`` has 6 FREE DOFs + 12 leg DOFs = 18.
         # Leg q values start at joint_q[7] and leg target starts at
-        # joint_target_pos[6], both length 12.
+        # joint_target_q[6], both length 12.
         model = _anymal_model()
         q = model.joint_q.numpy()
         target = np.zeros(int(model.joint_dof_count), dtype=np.float32)
@@ -496,8 +496,8 @@ def _step_one_and_read_qd(solver_factory, model_factory, dt: float) -> float:
     newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
     control = model.control()
     target = np.zeros(int(model.joint_dof_count), dtype=np.float32)
-    target[0] = float(model.joint_target_pos.numpy()[0])
-    control.joint_target_pos.assign(target)
+    target[0] = float(model.joint_target_q.numpy()[0])
+    control.joint_target_q.assign(target)
     s0.clear_forces()
     solver.step(s0, s1, control, None, dt)
     jq = wp.zeros(int(model.joint_coord_count), dtype=wp.float32, device=model.device)

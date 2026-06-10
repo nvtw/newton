@@ -126,7 +126,7 @@ def _run_with_contacts(
     ``(vx, vy, vz, wx, wy, wz)`` -- Newton's FREE-joint convention is
     (linear, angular) per ``ModelBuilder.add_body``.
 
-    ``target_pos`` is broadcast to ``control.joint_target_pos`` once.
+    ``target_pos`` is broadcast to ``control.joint_target_q`` once.
 
     When ``record_joint_q`` is set we run :func:`newton.eval_ik` after
     every step so per-joint angles can be compared between solvers
@@ -150,8 +150,8 @@ def _run_with_contacts(
     newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
 
     control = model.control()
-    if target_pos is not None and control.joint_target_pos is not None:
-        control.joint_target_pos.assign(target_pos.astype(np.float32))
+    if target_pos is not None and control.joint_target_q is not None:
+        control.joint_target_q.assign(target_pos.astype(np.float32))
 
     is_phoenx = isinstance(solver, newton.solvers.SolverPhoenX)
     contacts = model.contacts() if is_phoenx else None
@@ -485,7 +485,7 @@ class TestG1HoldPoseParity(unittest.TestCase):
     @unittest.expectedFailure
     def test_standing_pose_held_two_seconds(self) -> None:
         """Body z and per-DoF joint angles must track between solvers
-        when ``control.joint_target_pos`` holds the standing pose.
+        when ``control.joint_target_q`` holds the standing pose.
 
         Marked ``expectedFailure``: PhoenX's PD-drive restoring torque
         does not match MuJoCo's at the YAML's nominal target_ke, so

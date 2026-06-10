@@ -101,7 +101,7 @@ def _setup_anymal_loop(model: newton.Model):
 
     ``target_buf`` is a host-resident ``np.float32`` view shaped to
     ``(joint_dof_count,)``; callers mutate ``target_buf[leg_dof_offset:]``
-    every frame and call ``control.joint_target_pos.assign(target_buf)``
+    every frame and call ``control.joint_target_q.assign(target_buf)``
     -- this is the canonical Newton pattern for graph-captured
     per-frame target updates and matches what the Anymal walk example
     does.
@@ -192,7 +192,7 @@ class TestAnymalRandomPositionTargets(unittest.TestCase):
         lo = np.maximum(lo, lower + 0.05)
         hi = np.minimum(hi, upper - 0.05)
         target_buf[leg_dof_offset:] = default_pose
-        control.joint_target_pos.assign(target_buf)
+        control.joint_target_q.assign(target_buf)
         step_graph = _capture_anymal_step_graph(solver, s0, s1, control, contacts, model, ANYMAL_DT)
 
         # Sanity over the whole trajectory:
@@ -202,7 +202,7 @@ class TestAnymalRandomPositionTargets(unittest.TestCase):
         min_base_z = float("inf")
         for i in range(n_frames):
             target_buf[leg_dof_offset:] = rng.uniform(lo, hi).astype(np.float32)
-            control.joint_target_pos.assign(target_buf)
+            control.joint_target_q.assign(target_buf)
             wp.capture_launch(step_graph)
             if i % 30 == 29:
                 bq = s0.body_q.numpy()
@@ -284,14 +284,14 @@ class TestAnymalRandomVelocityTargets(unittest.TestCase):
         # smooth enough that a sane PD can track without diverging.
         omega_max = 8.0 / 3.0
         target_buf_vel = np.zeros_like(target_buf)
-        control.joint_target_vel.assign(target_buf_vel)
+        control.joint_target_qd.assign(target_buf_vel)
         step_graph = _capture_anymal_step_graph(solver, s0, s1, control, contacts, model, ANYMAL_DT)
 
         n_frames = ANYMAL_FRAMES
         peak_qd = 0.0
         for i in range(n_frames):
             target_buf_vel[leg_dof_offset:] = rng.uniform(-omega_max, omega_max, size=leg_dof_count).astype(np.float32)
-            control.joint_target_vel.assign(target_buf_vel)
+            control.joint_target_qd.assign(target_buf_vel)
             wp.capture_launch(step_graph)
             if i % 30 == 29:
                 bq = s0.body_q.numpy()

@@ -98,7 +98,7 @@ def _run_with_target_schedule(
     dt: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Run ``len(targets_per_frame)`` frames and rewrite
-    ``control.joint_target_pos`` each frame. Returns the ``joint_q``
+    ``control.joint_target_q`` each frame. Returns the ``joint_q``
     + ``joint_qd`` trajectory."""
     solver = _solver(model)
     s0 = model.state()
@@ -112,7 +112,7 @@ def _run_with_target_schedule(
     qd_traj = np.empty(n, dtype=np.float32)
     for i in range(n):
         t = np.asarray([targets_per_frame[i]], dtype=np.float32)
-        control.joint_target_pos.assign(t)
+        control.joint_target_q.assign(t)
         s0.clear_forces()
         solver.step(s0, s1, control, None, dt)
         s0, s1 = s1, s0
@@ -292,7 +292,7 @@ def _run_target_and_track_rotation(
     cum = last_branch
     for i in range(targets_per_frame.shape[0]):
         t = np.asarray([targets_per_frame[i]], dtype=np.float32)
-        control.joint_target_pos.assign(t)
+        control.joint_target_q.assign(t)
         s0.clear_forces()
         solver.step(s0, s1, control, None, dt)
         s0, s1 = s1, s0

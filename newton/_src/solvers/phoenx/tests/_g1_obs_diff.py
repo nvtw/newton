@@ -97,7 +97,7 @@ def _step_n(solver_factory, n_frames: int) -> tuple[newton.Model, newton.State]:
     ctl = model.control()
     target = np.zeros(int(model.joint_dof_count), dtype=np.float32)
     target[6:] = model.joint_q.numpy()[7:]
-    ctl.joint_target_pos.assign(target)
+    ctl.joint_target_q.assign(target)
 
     is_phoenx = isinstance(solver, newton.solvers.SolverPhoenX)
     contacts = model.contacts() if is_phoenx else None
