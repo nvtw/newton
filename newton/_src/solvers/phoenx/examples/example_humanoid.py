@@ -4,9 +4,9 @@
 ###########################################################################
 # PhoenX humanoid MJCF demo.
 #
-# Recreates the randomized nv_humanoid.xml batch from
-# ``newton.examples.basic.example_recording``, but runs it directly in the
-# OpenGL viewer instead of writing a ViewerFile recording.
+# Runs nv_humanoid.xml directly in the OpenGL viewer. The default is a
+# neutral batch; use --stress-random-poses for the old randomized ragdoll
+# stress scene.
 #
 # Run:
 #   python -m newton._src.solvers.phoenx.examples.example_humanoid
@@ -31,11 +31,17 @@ class Example:
         self.sim_time = 0.0
 
         self.world_count = args.world_count
+        self.show_contacts = args.show_contacts
         self.frame_substeps = args.frame_substeps
         self.sim_dt = self.frame_dt / self.frame_substeps
 
         rng = np.random.default_rng(args.seed)
-        start_rot = wp.quat_from_axis_angle(wp.normalize(wp.vec3(*rng.uniform(-1.0, 1.0, size=3))), -wp.pi * 0.5)
+        root_rot = wp.quat_identity()
+        if args.stress_random_poses:
+            axis_np = rng.uniform(-1.0, 1.0, size=3)
+            axis_len = np.linalg.norm(axis_np)
+            if axis_len > 1.0e-6:
+                root_rot = wp.quat_from_axis_angle(wp.vec3(*(axis_np / axis_len)), -wp.pi * 0.5)
 
         articulation_builder = newton.ModelBuilder()
         articulation_builder.add_mjcf(
@@ -46,15 +52,19 @@ class Example:
             enable_self_collisions=args.self_collisions,
         )
 
-        # Joint initial positions: free-root translation/orientation plus
-        # randomized internal joint angles for each world.
-        articulation_builder.joint_q[:7] = [0.0, 0.0, 1.5, *start_rot]
+        neutral_q = list(articulation_builder.joint_q)
+        articulation_builder.joint_q[:7] = [0.0, 0.0, args.root_height, *root_rot]
 
         builder = newton.ModelBuilder()
         for _ in range(self.world_count):
-            articulation_builder.joint_q[7:] = rng.uniform(
-                -1.0, 1.0, size=(len(articulation_builder.joint_q) - 7,)
-            ).tolist()
+            if args.stress_random_poses:
+                articulation_builder.joint_q[7:] = rng.uniform(
+                    -args.joint_random_range,
+                    args.joint_random_range,
+                    size=(len(articulation_builder.joint_q) - 7,),
+                ).tolist()
+            else:
+                articulation_builder.joint_q[7:] = neutral_q[7:]
             builder.add_world(articulation_builder)
         builder.add_ground_plane()
 
@@ -75,6 +85,8 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
         self.viewer.set_model(self.model)
+        if self.world_count > 1:
+            self.viewer.set_world_offsets((3.0, 3.0, 0.0))
         self.viewer.set_camera(pos=wp.vec3(8.0, -10.0, 5.0), pitch=-18.0, yaw=140.0)
 
         self.graph = None
@@ -101,7 +113,8 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_contacts(self.contacts, self.state_0)
+        if self.show_contacts:
+            self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
     def test_final(self):
@@ -132,8 +145,12 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
-        parser.add_argument("--seed", type=int, default=123, help="Random seed for initial humanoid poses.")
+        parser.add_argument("--seed", type=int, default=123, help="Random seed for stress poses.")
+        parser.add_argument("--stress-random-poses", action="store_true", help="Use randomized tilted ragdoll starts.")
+        parser.add_argument("--joint-random-range", type=float, default=1.0, help="Stress joint angle range [rad].")
+        parser.add_argument("--root-height", type=float, default=1.5, help="Root start height [m].")
         parser.add_argument("--self-collisions", action="store_true", help="Enable MJCF self-collisions.")
+        parser.add_argument("--show-contacts", action="store_true", help="Draw contact arrows.")
         parser.add_argument(
             "--frame-substeps",
             type=int,

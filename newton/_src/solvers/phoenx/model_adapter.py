@@ -107,6 +107,7 @@ class AdbsInitArrays:
         joint_q_at_init: wp.array,
         drive_cid: wp.array,
         drive_dof_start: wp.array,
+        drive_target_q_index: wp.array,
         drive_q_at_init: wp.array,
         num_joint_columns: int,
         num_drive_columns: int,
@@ -143,6 +144,7 @@ class AdbsInitArrays:
         #: can run one uniform thread per drive without per-joint skip branches.
         self.drive_cid = drive_cid
         self.drive_dof_start = drive_dof_start
+        self.drive_target_q_index = drive_target_q_index
         self.drive_q_at_init = drive_q_at_init
         self.num_joint_columns = num_joint_columns
         self.num_drive_columns = num_drive_columns
@@ -329,6 +331,7 @@ def build_adbs_init_arrays(
             joint_q_at_init=empty_f,
             drive_cid=empty_i,
             drive_dof_start=empty_i,
+            drive_target_q_index=empty_i,
             drive_q_at_init=empty_f,
             num_joint_columns=0,
             num_drive_columns=0,
@@ -342,6 +345,7 @@ def build_adbs_init_arrays(
     joint_X_c = model.joint_X_c.numpy()  # (N, 7) float32 -- child attachment
     joint_q_start = model.joint_q_start.numpy()
     joint_qd_start = model.joint_qd_start.numpy()
+    joint_target_q_start = model.joint_target_q_start.numpy()
     joint_axis = model.joint_axis.numpy() if model.joint_axis is not None else np.zeros((0, 3), dtype=np.float32)
     # joint_dof_dim shape [joint_count, 2]: (n_linear, n_angular) per joint.
     # Used by D6 dispatch to count locked / free DOFs per axis kind.
@@ -359,8 +363,8 @@ def build_adbs_init_arrays(
         return arr.numpy() if arr is not None else None
 
     target_mode = _pull_dof_i(model.joint_target_mode)
-    target_pos = _pull_dof_f(model.joint_target_pos)
-    target_vel = _pull_dof_f(model.joint_target_vel)
+    target_pos = _pull_dof_f(model.joint_target_q)
+    target_vel = _pull_dof_f(model.joint_target_qd)
     target_ke = _pull_dof_f(model.joint_target_ke)
     target_kd = _pull_dof_f(model.joint_target_kd)
     joint_armature = _pull_dof_f(model.joint_armature)
@@ -376,6 +380,7 @@ def build_adbs_init_arrays(
     descriptors: list[dict] = []
     joint_idx_to_cid_np = np.full(n_joints, -1, dtype=np.int32)
     joint_idx_to_dof_start_np = np.full(n_joints, -1, dtype=np.int32)
+    joint_idx_to_target_q_index_np = np.full(n_joints, -1, dtype=np.int32)
 
     for j in range(n_joints):
         jtype = newton.JointType(int(joint_type[j]))
@@ -493,7 +498,11 @@ def build_adbs_init_arrays(
             jtype is newton.JointType.D6 and d6_mode_tag in ("REVOLUTE", "PRISMATIC")
         )
         dof_start_for_control = effective_qd if is_axis_joint else -1
+        target_q_index_for_control = -1
+        if is_axis_joint:
+            target_q_index_for_control = int(joint_target_q_start[j]) + (effective_qd - qd_start)
         joint_idx_to_dof_start_np[j] = dof_start_for_control
+        joint_idx_to_target_q_index_np[j] = target_q_index_for_control
 
         # Per-mode anchor2 and drive/limit defaults.
         anchor2_world = anchor1_world.copy()
@@ -687,8 +696,8 @@ def build_adbs_init_arrays(
                 stiff_drive = float(target_ke[effective_qd])
             if target_kd is not None:
                 damp_drive = float(target_kd[effective_qd])
-            if target_pos is not None:
-                target_val = float(target_pos[effective_qd])
+            if target_pos is not None and target_q_index_for_control < len(target_pos):
+                target_val = float(target_pos[target_q_index_for_control])
             if target_vel is not None:
                 target_vel_val = float(target_vel[effective_qd])
             # Gear-ratio scaling: motor-side effort and rotor inertia are
@@ -803,6 +812,7 @@ def build_adbs_init_arrays(
     drive_mask = (joint_idx_to_cid_np >= 0) & (joint_idx_to_dof_start_np >= 0)
     drive_cid_np = joint_idx_to_cid_np[drive_mask].astype(np.int32, copy=False)
     drive_dof_start_np = joint_idx_to_dof_start_np[drive_mask].astype(np.int32, copy=False)
+    drive_target_q_index_np = joint_idx_to_target_q_index_np[drive_mask].astype(np.int32, copy=False)
     if drive_cid_np.size:
         drive_q_at_init_np = np.asarray(
             [descriptors[int(cid)]["joint_q_at_init"] for cid in drive_cid_np], dtype=np.float32
@@ -853,6 +863,7 @@ def build_adbs_init_arrays(
         joint_q_at_init=_stack_f("joint_q_at_init"),
         drive_cid=wp.array(drive_cid_np, dtype=wp.int32, device=device),
         drive_dof_start=wp.array(drive_dof_start_np, dtype=wp.int32, device=device),
+        drive_target_q_index=wp.array(drive_target_q_index_np, dtype=wp.int32, device=device),
         drive_q_at_init=wp.array(drive_q_at_init_np, dtype=wp.float32, device=device),
         num_joint_columns=num_cols,
         num_drive_columns=int(drive_cid_np.size),

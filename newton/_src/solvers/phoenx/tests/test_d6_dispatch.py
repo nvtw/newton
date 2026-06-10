@@ -350,6 +350,35 @@ class TestD6Detection(unittest.TestCase):
                 expected_dof_start = 3 + free_idx
                 self.assertEqual(int(solver._adbs.joint_idx_to_dof_start.numpy()[0]), expected_dof_start)
 
+    def test_coord_layout_drive_uses_target_q_index(self) -> None:
+        prev = newton.use_coord_layout_targets
+        try:
+            newton.use_coord_layout_targets = True
+            builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+            newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+            root = builder.add_link(xform=wp.transform_identity(), mass=1.0)
+            child = builder.add_link(xform=wp.transform(p=wp.vec3(0.0, 0.0, -0.5), q=wp.quat_identity()), mass=1.0)
+            free = builder.add_joint_free(child=root)
+            revolute = builder.add_joint_revolute(
+                parent=root,
+                child=child,
+                axis=(0.0, 1.0, 0.0),
+                child_xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.5), q=wp.quat_identity()),
+                target_pos=0.7,
+                target_ke=10.0,
+                target_kd=1.0,
+                actuator_mode=newton.JointTargetMode.POSITION,
+            )
+            builder.add_articulation([free, revolute])
+            model = builder.finalize()
+        finally:
+            newton.use_coord_layout_targets = prev
+
+        solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        self.assertEqual(int(solver._adbs.drive_dof_start.numpy()[0]), 6)
+        self.assertEqual(int(solver._adbs.drive_target_q_index.numpy()[0]), 7)
+        self.assertAlmostEqual(float(solver._adbs.target.numpy()[0]), 0.7, places=6)
+
     def test_d6_prismatic_pattern_dispatches_to_prismatic(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)

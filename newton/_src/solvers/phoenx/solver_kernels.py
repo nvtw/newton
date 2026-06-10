@@ -454,7 +454,7 @@ def _apply_joint_control_kernel(
     joint_idx_to_dof_start: wp.array[wp.int32],
     # PhoenX is init-relative; subtract joint_q_at_init from absolute target.
     joint_q_at_init_per_cid: wp.array[wp.float32],
-    # Newton Model + Control (per-DOF).
+    # Newton Model + Control.
     joint_target_mode: wp.array[wp.int32],
     joint_target_ke: wp.array[wp.float32],
     joint_target_kd: wp.array[wp.float32],
@@ -529,8 +529,9 @@ def _apply_joint_control_kernel(
 def _apply_joint_drive_control_kernel(
     drive_cid: wp.array[wp.int32],
     drive_dof_start: wp.array[wp.int32],
+    drive_target_q_index: wp.array[wp.int32],
     drive_q_at_init: wp.array[wp.float32],
-    # Newton Model + Control (per-DOF).
+    # Newton Model + Control. Position targets may use coord layout.
     joint_target_mode: wp.array[wp.int32],
     joint_target_ke: wp.array[wp.float32],
     joint_target_kd: wp.array[wp.float32],
@@ -563,11 +564,12 @@ def _apply_joint_drive_control_kernel(
     i = wp.tid()
     cid = drive_cid[i]
     dof = drive_dof_start[i]
+    target_q = drive_target_q_index[i]
 
     tm = joint_target_mode[dof]
     stiffness = joint_target_ke[dof]
     damping = joint_target_kd[dof]
-    target = control_target_pos[dof] - drive_q_at_init[i]
+    target = control_target_pos[target_q] - drive_q_at_init[i]
     target_vel = control_target_vel[dof]
     effort = joint_effort_limit[dof]
 

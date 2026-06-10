@@ -6,7 +6,7 @@
 Every ported demo plugs into the same per-frame pipeline:
 
 1. :class:`newton.ModelBuilder` -> :class:`newton.Model`
-2. :class:`newton.CollisionPipeline` for contacts
+2. ``model.contacts()`` / ``model.collide()`` for contacts
 3. PhoenX :class:`BodyContainer` seeded from the model
 4. :class:`PhoenXWorld` step loop captured into a CUDA graph
 
@@ -268,7 +268,7 @@ class PortedExample:
                 contact_matching=PHOENX_CONTACT_MATCHING,
                 broad_phase=self.broad_phase,
             )
-        self.contacts = self.collision_pipeline.contacts()
+        self.contacts = self.model.contacts(collision_pipeline=self.collision_pipeline)
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
 
         self.state = self.model.state()
@@ -390,7 +390,7 @@ class PortedExample:
 
     def simulate(self) -> None:
         self._sync_newton_to_phoenx()
-        self.model.collide(self.state, contacts=self.contacts, collision_pipeline=self.collision_pipeline)
+        self.model.collide(self.state, contacts=self.contacts)
         self.picking.apply_force()
         self.world.step(dt=self.frame_dt, contacts=self.contacts, shape_body=self._shape_body)
         self._sync_phoenx_to_newton()

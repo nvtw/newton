@@ -114,6 +114,7 @@
 
 ### Fixed
 
+- Fix `SolverPhoenX` drive target handling to use `Model.joint_target_q` / `Control.joint_target_q`, including coord-layout target indices after free joints.
 - Fix `SolverPhoenX` ignoring `Model.joint_damping` on revolute/prismatic and D6 ball/universal joints, which destabilized damped MJCF humanoids.
 - Refresh PhoenX's baked-in armature on `SolverNotifyFlags.JOINT_DOF_PROPERTIES`: `SolverPhoenX.notify_model_changed` now resets body inertia to `Model.body_inv_inertia` and re-bakes `model.joint_armature` whenever joint-DOF properties change, so domain-randomization edits to armature between episodes actually take effect
 - Fix `ModelBuilder.finalize(skip_shape_contact_pairs=True)` so large SAP/NXN benchmark scenes can skip O(n^2) explicit shape-pair precomputation.

@@ -642,14 +642,14 @@ class SolverPhoenX(SolverBase):
             return
         model = self.model
         target_pos = (
-            control.joint_target_pos
-            if control is not None and control.joint_target_pos is not None
-            else model.joint_target_pos
+            control.joint_target_q
+            if control is not None and control.joint_target_q is not None
+            else model.joint_target_q
         )
         target_vel = (
-            control.joint_target_vel
-            if control is not None and control.joint_target_vel is not None
-            else model.joint_target_vel
+            control.joint_target_qd
+            if control is not None and control.joint_target_qd is not None
+            else model.joint_target_qd
         )
         if target_pos is None or target_vel is None or model.joint_target_mode is None:
             return  # no per-DOF drive configured
@@ -659,6 +659,7 @@ class SolverPhoenX(SolverBase):
             inputs=[
                 self._adbs.drive_cid,
                 self._adbs.drive_dof_start,
+                self._adbs.drive_target_q_index,
                 self._adbs.drive_q_at_init,
                 model.joint_target_mode,
                 model.joint_target_ke,
