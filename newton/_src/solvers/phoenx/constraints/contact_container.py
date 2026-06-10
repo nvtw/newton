@@ -2,10 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-contact persistent + per-substep state, keyed by sorted-buffer index k.
 
-* ``impulses`` -- mutable accumulated normal/tangent impulse rows;
-  double-buffered against ``prev_impulses`` via pointer swap.
+* ``impulses`` -- mutable accumulated normal/tangent impulse rows.
 * ``lambdas`` -- read-mostly persistent contact manifold data (normal, tangent,
-  anchors, barycentrics), double-buffered against ``prev_lambdas``.
+  anchors, barycentrics).
 * ``derived`` -- per-substep scratch (eff masses, biases); rebuilt every prepare.
 
 All buffers are ``[dword, k]`` with k inner for coalesced loads.
@@ -69,7 +68,7 @@ __all__ = [
     "cc_set_tangent1",
     "cc_set_tangent1_lambda",
     "cc_set_tangent2_lambda",
-    "contact_container_swap_prev_current",
+    "contact_container_copy_current_to_prev",
     "contact_container_zeros",
 ]
 
@@ -141,6 +140,15 @@ class ContactContainer:
     lambdas: wp.array2d[wp.float32]
     prev_lambdas: wp.array2d[wp.float32]
     derived: wp.array2d[wp.float32]
+
+
+@wp.kernel(enable_backward=False)
+def _contact_container_copy_current_to_prev_kernel(cc: ContactContainer):
+    k = wp.tid()
+    for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
+        cc.prev_impulses[row, k] = cc.impulses[row, k]
+    for row in range(CC_DWORDS_PER_CONTACT):
+        cc.prev_lambdas[row, k] = cc.lambdas[row, k]
 
 
 # Mutable impulse accessors keyed by contact index k.
@@ -480,7 +488,11 @@ def contact_container_zeros(
     return cc
 
 
-def contact_container_swap_prev_current(cc: ContactContainer) -> None:
-    """Pointer-swap prev/current persistent contact state. Derived is not swapped."""
-    cc.impulses, cc.prev_impulses = cc.prev_impulses, cc.impulses
-    cc.lambdas, cc.prev_lambdas = cc.prev_lambdas, cc.lambdas
+def contact_container_copy_current_to_prev(cc: ContactContainer, device: wp.DeviceLike = None) -> None:
+    """Copy current persistent contact state into prev buffers."""
+    wp.launch(
+        _contact_container_copy_current_to_prev_kernel,
+        dim=int(cc.impulses.shape[1]),
+        outputs=[cc],
+        device=device,
+    )

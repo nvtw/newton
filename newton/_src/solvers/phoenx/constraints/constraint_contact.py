@@ -660,8 +660,9 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
                 bias_t2_val = cc_get_bias_t2(cc, k)
                 is_speculative = bias_val > wp.float32(0.0)
                 if not use_bias:
-                    if not is_speculative:
-                        bias_val = wp.float32(0.0)
+                    if is_speculative and contact_count == wp.int32(1):
+                        continue
+                    bias_val = wp.float32(0.0)
                     bias_t1_val = wp.float32(0.0)
                     bias_t2_val = wp.float32(0.0)
 
@@ -676,12 +677,18 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
                 if is_speculative:
                     mass_coeff_n = wp.float32(1.0)
                     impulse_coeff_n = wp.float32(0.0)
+                    mu_s_eff = wp.float32(0.0)
+                    mu_k_eff = wp.float32(0.0)
                 elif use_bias:
                     mass_coeff_n = mass_coeff
                     impulse_coeff_n = impulse_coeff
+                    mu_s_eff = mu_s
+                    mu_k_eff = mu_k
                 else:
                     mass_coeff_n = wp.float32(1.0)
                     impulse_coeff_n = wp.float32(0.0)
+                    mu_s_eff = mu_s
+                    mu_k_eff = mu_k
                 if wp.static(has_soft_contact_pd):
                     update = contact_frame_velocity_update(
                         cc,
@@ -705,8 +712,8 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
                         bias_val,
                         bias_t1_val,
                         bias_t2_val,
-                        mu_s,
-                        mu_k,
+                        mu_s_eff,
+                        mu_k_eff,
                         mass_coeff_n,
                         impulse_coeff_n,
                         sor_boost,
@@ -737,8 +744,8 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
                         bias_val,
                         bias_t1_val,
                         bias_t2_val,
-                        mu_s,
-                        mu_k,
+                        mu_s_eff,
+                        mu_k_eff,
                         mass_coeff_n,
                         impulse_coeff_n,
                         sor_boost,

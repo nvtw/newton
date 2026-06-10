@@ -77,6 +77,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_eff_t2,
     cc_set_local_p0,
     cc_set_local_p1,
+    cc_set_normal_lambda,
     cc_set_pd_bias,
     cc_set_pd_eff_soft,
     cc_set_pd_gamma,
@@ -595,10 +596,18 @@ def _make_contact_prepare_for_iteration_at(
                     drift_t1_raw = wp.dot(p_diff, t1_dir)
                     drift_t2_raw = wp.dot(p_diff, t2_dir)
 
-            drift_t1 = wp.clamp(drift_t1_raw, -friction_slop, friction_slop)
-            drift_t2 = wp.clamp(drift_t2_raw, -friction_slop, friction_slop)
-            bias_t1_val = friction_bias_factor * drift_t1 * idt * load_boost
-            bias_t2_val = friction_bias_factor * drift_t2 * idt * load_boost
+            if effective_gap > wp.float32(0.0):
+                # Speculative contacts are one-step normal velocity caps, not persistent manifolds.
+                cc_set_normal_lambda(cc, k, wp.float32(0.0))
+                cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+                cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+                bias_t1_val = wp.float32(0.0)
+                bias_t2_val = wp.float32(0.0)
+            else:
+                drift_t1 = wp.clamp(drift_t1_raw, -friction_slop, friction_slop)
+                drift_t2 = wp.clamp(drift_t2_raw, -friction_slop, friction_slop)
+                bias_t1_val = friction_bias_factor * drift_t1 * idt * load_boost
+                bias_t2_val = friction_bias_factor * drift_t2 * idt * load_boost
 
             cc_set_eff_n(cc, k, eff_n)
             cc_set_eff_t1(cc, k, eff_t1)
@@ -1028,12 +1037,11 @@ def _make_contact_iterate_at(
             if wp.static(use_bias):
                 bias_t1_val = cc_get_bias_t1(cc, k)
                 bias_t2_val = cc_get_bias_t2(cc, k)
-            # Speculative rows always keep their gap bias (incl. relax)
-            # to avoid the "honey" artefact at the speculative shell.
             is_speculative = bias_val > wp.float32(0.0)
             if wp.static(not use_bias):
-                if not is_speculative:
-                    bias_val = wp.float32(0.0)
+                if is_speculative and contact_count == wp.int32(1):
+                    continue
+                bias_val = wp.float32(0.0)
 
             # Normal/friction rows: optional soft-contact PD,
             # speculative rigid, soft penetrating main, or rigid relax.
@@ -1049,12 +1057,18 @@ def _make_contact_iterate_at(
             if is_speculative:
                 mass_coeff_n = wp.float32(1.0)
                 impulse_coeff_n = wp.float32(0.0)
+                mu_s_eff = wp.float32(0.0)
+                mu_k_eff = wp.float32(0.0)
             elif wp.static(use_bias):
                 mass_coeff_n = mass_coeff
                 impulse_coeff_n = impulse_coeff
+                mu_s_eff = mu_s
+                mu_k_eff = mu_k
             else:
                 mass_coeff_n = wp.float32(1.0)
                 impulse_coeff_n = wp.float32(0.0)
+                mu_s_eff = mu_s
+                mu_k_eff = mu_k
 
             if wp.static(has_soft_contact_pd):
                 imp = contact_project_velocity_update(
@@ -1072,8 +1086,8 @@ def _make_contact_iterate_at(
                     bias_val,
                     bias_t1_val,
                     bias_t2_val,
-                    mu_s,
-                    mu_k,
+                    mu_s_eff,
+                    mu_k_eff,
                     mass_coeff_n,
                     impulse_coeff_n,
                     sor_boost,
@@ -1097,8 +1111,8 @@ def _make_contact_iterate_at(
                     bias_val,
                     bias_t1_val,
                     bias_t2_val,
-                    mu_s,
-                    mu_k,
+                    mu_s_eff,
+                    mu_k_eff,
                     mass_coeff_n,
                     impulse_coeff_n,
                     sor_boost,

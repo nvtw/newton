@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.examples.example_rabbit_pile import (
@@ -179,6 +180,39 @@ class TestPhoenXSpeculativeContactNoDrag(unittest.TestCase):
             f"(tolerance {tolerance:.6f} m/s). "
             f"Samples (t, v_z, n, delta_v): {speculative_samples[:10]}",
         )
+
+    def test_speculative_contact_is_normal_only_until_touch(self) -> None:
+        scene = _PhoenXScene(
+            fps=60,
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+            friction=1.0,
+            prepare_refresh_stride=1,
+        )
+        scene.add_ground_plane()
+        radius = 0.1
+        body = scene.add_sphere(
+            position=(0.0, 0.0, radius + 0.5 * DEFAULT_SHAPE_GAP),
+            radius=radius,
+            mass=1.0,
+        )
+        scene.finalize()
+        scene.set_body_velocity(body, (2.0, 0.0, -3.0))
+
+        scene._simulate()
+
+        self.assertGreater(int(scene.contacts.rigid_contact_count.numpy()[0]), 0)
+        impulses = scene.world._contact_container.impulses.numpy()
+        derived = scene.world._contact_container.derived.numpy()
+        speculative = derived[3] > 0.0
+        self.assertTrue(np.any(speculative), "expected a positive-gap contact")
+        max_tangent_lambda = float(np.max(np.abs(impulses[1:3, speculative])))
+        self.assertLess(max_tangent_lambda, 1.0e-6)
+
+        velocity = scene.body_velocity(body)
+        self.assertAlmostEqual(float(velocity[0]), 2.0, delta=1.0e-5)
+        self.assertAlmostEqual(float(velocity[1]), 0.0, delta=1.0e-5)
 
 
 if __name__ == "__main__":

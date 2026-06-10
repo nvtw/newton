@@ -873,9 +873,17 @@ def _contact_warmstart_gather_kernel(
                 dv = (v2 + wp.cross(w2, fresh_r2)) - (v1 + wp.cross(w1, fresh_r1))
                 fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
 
+                prev_t1 = cc_get_prev_tangent1(cc, prev_k)
+                prev_t2 = wp.cross(prev_n, prev_t1)
+                fresh_t2 = wp.cross(fresh_n, fresh_t1)
+                prev_friction_imp = (
+                    cc_get_prev_tangent1_lambda(cc, prev_k) * prev_t1
+                    + cc_get_prev_tangent2_lambda(cc, prev_k) * prev_t2
+                )
+
                 cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
-                cc_set_tangent1_lambda(cc, k, cc_get_prev_tangent1_lambda(cc, prev_k))
-                cc_set_tangent2_lambda(cc, k, cc_get_prev_tangent2_lambda(cc, prev_k))
+                cc_set_tangent1_lambda(cc, k, wp.dot(prev_friction_imp, fresh_t1))
+                cc_set_tangent2_lambda(cc, k, wp.dot(prev_friction_imp, fresh_t2))
                 cc_set_normal(cc, k, fresh_n)
                 cc_set_tangent1(cc, k, fresh_t1)
                 cc_set_local_p0(cc, k, fresh_local_p0)

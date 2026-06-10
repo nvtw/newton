@@ -85,7 +85,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_DWORDS_PER_CONTACT,
     CC_IMPULSE_DWORDS_PER_CONTACT,
     ContactContainer,
-    contact_container_swap_prev_current,
+    contact_container_copy_current_to_prev,
     contact_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.contact_ingest import (
@@ -2629,17 +2629,18 @@ class PhoenXWorld:
             else self._soft_contact_sentinel
         )
 
-        # Pointer-swap prev/current. With grouping on, also swap inv_sort_perm
-        # so next frame's gather can translate match indices through prev's perm.
-        contact_container_swap_prev_current(self._contact_container)
-        self._cid_of_contact_cur, self._cid_of_contact_prev = (
+        # Keep history pointers stable so one-step CUDA graphs replay correctly.
+        contact_container_copy_current_to_prev(self._contact_container, device=self.device)
+        wp.copy(
             self._cid_of_contact_prev,
             self._cid_of_contact_cur,
+            count=int(self.rigid_contact_max),
         )
         if self._enable_body_pair_grouping and self._ingest_scratch.inv_sort_perm is not None:
-            self._ingest_scratch.inv_sort_perm, self._ingest_scratch.prev_inv_sort_perm = (
+            wp.copy(
                 self._ingest_scratch.prev_inv_sort_perm,
                 self._ingest_scratch.inv_sort_perm,
+                count=int(self.rigid_contact_max),
             )
 
         ingest_contacts(
