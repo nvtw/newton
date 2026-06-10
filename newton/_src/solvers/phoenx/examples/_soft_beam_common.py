@@ -31,13 +31,22 @@ _TAU = 2.0 * math.pi
 _STRETCH_MODE = 0
 _TWIST_MODE = 1
 
+# Default amplitudes for the prescribed right-face motion. Shared by the
+# constructor signature, the argparse defaults, and the `_get_arg` fallbacks
+# so the three stay in sync.
+DEFAULT_AXIAL_STRAIN: float = 0.10
+DEFAULT_TWIST_DEGREES: float = 360.0
+
 
 def _stretch_displacement(length: float, axial_strain: float, time: float, motion_period: float) -> float:
     return axial_strain * length * math.sin(_TAU * time / motion_period)
 
 
 def _twist_angle(twist_degrees: float, time: float, motion_period: float) -> float:
-    return math.radians(twist_degrees) * math.sin(_TAU * time / motion_period)
+    # Monotonic rotation: sweep `twist_degrees` per `motion_period` seconds.
+    # A sinusoid with amplitude `twist_degrees` would return to identity at the peak
+    # whenever `twist_degrees` is a multiple of 360°, hiding the motion.
+    return math.radians(twist_degrees) * (time / motion_period)
 
 
 def _right_face_stretch_targets(rest: np.ndarray, displacement: float) -> np.ndarray:
@@ -109,8 +118,8 @@ class SoftBeamExample:
         youngs_modulus: float = 1.0e9,
         poisson_ratio: float = 0.45,
         density: float = 500.0,
-        axial_strain: float = 0.10,
-        twist_degrees: float = 360.0,
+        axial_strain: float = DEFAULT_AXIAL_STRAIN,
+        twist_degrees: float = DEFAULT_TWIST_DEGREES,
         motion_period: float = 6.0,
         substeps: int = 10,
         solver_iterations: int = 8,
@@ -345,9 +354,9 @@ def create_soft_beam_parser(*, mode: str):
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--motion-period", type=float, default=6.0)
     if mode == "stretch":
-        parser.add_argument("--axial-strain", type=float, default=0.3)
+        parser.add_argument("--axial-strain", type=float, default=DEFAULT_AXIAL_STRAIN)
     elif mode == "twist":
-        parser.add_argument("--twist-degrees", type=float, default=360.0)
+        parser.add_argument("--twist-degrees", type=float, default=DEFAULT_TWIST_DEGREES)
     else:
         raise ValueError(f"unknown beam mode {mode!r}")
     return parser
@@ -364,8 +373,8 @@ def soft_beam_kwargs_from_args(args) -> dict:
         "youngs_modulus": float(_get_arg(args, "youngs_modulus", 1.0e8)),
         "poisson_ratio": float(_get_arg(args, "poisson_ratio", 0.45)),
         "density": float(_get_arg(args, "density", 500.0)),
-        "axial_strain": float(_get_arg(args, "axial_strain", 0.10)),
-        "twist_degrees": float(_get_arg(args, "twist_degrees", 360.0)),
+        "axial_strain": float(_get_arg(args, "axial_strain", DEFAULT_AXIAL_STRAIN)),
+        "twist_degrees": float(_get_arg(args, "twist_degrees", DEFAULT_TWIST_DEGREES)),
         "motion_period": float(_get_arg(args, "motion_period", 6.0)),
         "substeps": int(_get_arg(args, "substeps", 16)),
         "solver_iterations": int(_get_arg(args, "solver_iterations", 64)),

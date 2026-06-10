@@ -152,7 +152,7 @@ def _load_mesh_with_sdf(mesh_file: str, gap: float) -> tuple[newton.Mesh, wp.vec
         # bolt 22 560 -> 15 359 (-32 %), nut 12 773 -> 6 483 (-49 %),
         # total 35 333 -> 21 842 (-38 %).
         edge_box_absorption=True,
-        edge_box_half_width_rel=2e-2,
+        edge_box_half_lateral_rel=2e-2,
     )
     return mesh, center_vec
 

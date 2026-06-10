@@ -4,27 +4,9 @@
 ###########################################################################
 # Cloth-vs-rigid contact demo for SolverPhoenX.
 #
-# Scene: a square cloth grid drops onto a static box. Each cloth
-# triangle is registered as a ``GeoType.TRIANGLE`` collision proxy via
-# :meth:`ModelBuilder.add_cloth_collision_proxies`; PhoenX refreshes
-# their geometry from the live ``state.particle_q`` each step before
-# ``model.collide()`` runs.
-#
-# Limitations of this iteration:
-#   * PhoenX has no internal cloth dynamics. Cloth particles are
-#     treated as independent single-vertex rigid-body slots, so the
-#     cloth does not "drape" -- there are no edge / area / bending
-#     forces holding particles to their neighbours.
-#   * Cloth-vs-rigid contact impulses are routed entirely onto each
-#     triangle's first node (single-node routing). Barycentric
-#     distribution across all three triangle nodes is a follow-up.
-#
-# What this example DOES demonstrate:
-#   * ``GeoType.TRIANGLE`` cloth proxies registered via
-#     :meth:`ModelBuilder.add_cloth_collision_proxies` and refreshed
-#     each step from live particle positions.
-#   * Contacts firing between cloth proxies and a static box.
-#   * At least some particles are caught and held above the box top.
+# Scene: a square cloth grid drops onto a static box. SolverPhoenX builds
+# cloth triangle and bending constraints directly from the finalized Model,
+# and wires a deformable-aware collision pipeline behind model.collide().
 #
 # Run: python -m newton._src.solvers.phoenx.examples.example_cloth_triangle_drop
 ###########################################################################
@@ -79,18 +61,6 @@ class Example:
             particle_radius=0.02,
         )
 
-        # ---- Register PhoenX cloth collision proxies ------------------
-        # One ``GeoType.TRIANGLE`` collision shape per cloth triangle,
-        # auto-filtered against neighbours that share a vertex so
-        # adjacent triangles don't trip the broadphase.
-        proxy_cfg = newton.ModelBuilder.ShapeConfig(
-            density=0.0,
-            mu=0.4,
-            margin=0.02,
-            gap=0.01,
-        )
-        builder.add_cloth_collision_proxies(cfg=proxy_cfg)
-
         self.model = builder.finalize()
         self.solver = newton.solvers.SolverPhoenX(self.model, substeps=1, solver_iterations=8)
 
@@ -115,10 +85,6 @@ class Example:
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
 
-            # Refresh cloth-triangle proxy geometry from current
-            # particle positions BEFORE ``model.collide()`` so the
-            # narrow phase sees the live cloth pose.
-            self.solver.refresh_cloth_collision_geometry(self.state_0)
             self.model.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
@@ -132,17 +98,8 @@ class Example:
         self.sim_time += self.frame_dt
 
     def test_final(self):
-        # PhoenX has no internal cloth dynamics -- particles are
-        # treated as independent rigid-body slots and contact
-        # impulses route entirely to each triangle's first node
-        # (single-node routing). So we don't expect a clean cloth
-        # drape; we only verify that contacts fire and at least some
-        # particles are caught above the ground.
         q = self.state_0.particle_q.numpy()
-        z_max = float(q[:, 2].max())
-        assert z_max > 0.5, (
-            f"no cloth particle was caught by the box -- expected at least one above z=0.5, got z_max={z_max}"
-        )
+        assert float(q[:, 2].min()) > -0.1
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)

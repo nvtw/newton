@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add public `SolverPhoenX` construction for model particles, cloth triangles and bending edges, and soft tetrahedra; deformable contacts use the same `model.contacts()` / `model.collide()` flow as rigid PhoenX scenes.
 - Add `body_qdd` extended state attribute support to `SolverPhoenX`, populated as a finite difference of pre-step and post-step COM-frame velocity over the outer `dt`. Enables `newton.sensors.SensorIMU` on top of PhoenX (accelerometer reports specific force; gyroscope reports body angular velocity)
 - Add `prepare_refresh_stride="auto"` to `SolverPhoenX` for graph-capture-safe reuse of cached rigid contact/joint prepare data in high-substep rigid scenes. Fixed integer strides remain available; the default `1` still rebuilds prepare data every substep, while `"auto"` falls back to `1` for unsupported deformable, mass-splitting, or sleeping scenes.
 - Add `multi_world_scheduler` to `SolverPhoenX` for graph-capture-safe selection between the default fast-tail multi-world solver and the block-world scheduler; `"auto"` keeps fast-tail for robot-style fleets and selects block-world for dense contact-only multi-world stacks.

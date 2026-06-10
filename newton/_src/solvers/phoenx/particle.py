@@ -1,12 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Minimal particle SoA storage for PhoenX cloth.
+"""Particle SoA storage for PhoenX deformables.
 
-Slim 4-field container sized for the standalone cloth pipeline -- no
-access-mode tag, no world id, no force accumulator. Pinning is encoded
-as ``inverse_mass == 0`` (the iterate's particle-mass-weighted projection
-naturally leaves zero-inverse-mass nodes alone).
+World ids live outside the hot SoA; pinning is ``inverse_mass == 0``.
 """
 
 from __future__ import annotations

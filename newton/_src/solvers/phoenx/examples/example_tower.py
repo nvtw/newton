@@ -146,9 +146,8 @@ class Example:
         ``ModelBuilder`` populates the Newton side (ground plane + the
         tower of planks); :func:`_init_phoenx_bodies_kernel` then
         mirrors the resulting body state into a fresh PhoenX
-        :class:`BodyContainer`. A contacts-only
-        :class:`ConstraintContainer` of width :data:`CONTACT_DWORDS`
-        rounds out the solver state.
+        :class:`BodyContainer`. Contact columns use separate storage,
+        so the contact-only :class:`ConstraintContainer` is a placeholder.
         """
         builder = newton.ModelBuilder()
 

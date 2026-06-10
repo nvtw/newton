@@ -21,7 +21,6 @@ __all__ = [
     "CC_DERIVED_DWORDS_PER_CONTACT",
     "CC_DWORDS_PER_CONTACT",
     "CC_IMPULSE_DWORDS_PER_CONTACT",
-    "CC_LAMBDA_DWORDS_PER_CONTACT",
     "ContactContainer",
     "cc_get_bias",
     "cc_get_bias_t1",
@@ -77,9 +76,6 @@ __all__ = [
 
 #: Dwords of mutable persistent impulse per contact: normal + two tangents.
 CC_IMPULSE_DWORDS_PER_CONTACT: int = 3
-
-#: Backwards-compatible alias for the mutable impulse-row count.
-CC_LAMBDA_DWORDS_PER_CONTACT: int = CC_IMPULSE_DWORDS_PER_CONTACT
 
 #: 18 = normal(3) + tangent1(3) + local_p0(3) + local_p1(3) + side0_bary(3)
 #: + side1_bary(3). The two ``bary`` slots are populated by contact ingest when

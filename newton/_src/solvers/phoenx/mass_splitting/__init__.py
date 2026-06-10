@@ -17,14 +17,8 @@ self-contained building blocks that compose with the PhoenX PGS pipeline:
   ``section_end`` / ``partition_list`` arrays. Sorted + deduplicated
   inside a captured CUDA graph.
 
-* :func:`launch_broadcast_rigid_to_copy_states`,
-  :func:`launch_average_and_broadcast`,
-  :func:`launch_copy_state_into_rigids` — the substep-loop kernels that
-  fan body / particle state into copies, average copies after a PGS
-  sweep, and write the averaged result back.
-
-This first milestone exposes the data plane only; the solver loop in
-``solver_phoenx.py`` is unchanged. Step 6 will wire these primitives in.
+* :func:`build_constraint_slot_cache` plus the broadcast / average /
+  writeback launches used by the single-world mass-splitting dispatchers.
 """
 
 from __future__ import annotations

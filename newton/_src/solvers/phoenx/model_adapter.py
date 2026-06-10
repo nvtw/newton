@@ -4,12 +4,10 @@
 
 Mapping: REVOLUTE/PRISMATIC/BALL/FIXED/CABLE -> ADBS joint modes;
 FREE -> no column; DISTANCE unsupported. D6 joints are auto-dispatched
-to FIXED / BALL / REVOLUTE / PRISMATIC when the per-DoF lock pattern
-matches (see :func:`_classify_d6_pattern`); cylindrical / universal /
-planar / generic D6 configurations are tracked as Phase 2+ work and
-currently raise. PhoenX slot 0 is the static world anchor, so Newton
-body ``i`` maps to PhoenX slot ``i + 1`` and ``joint_parent == -1`` maps
-to slot 0.
+to specialized modes when the per-DoF lock pattern matches (see
+:func:`_classify_d6_pattern`); generic D6 configurations raise. PhoenX
+slot 0 is the static world anchor, so Newton body ``i`` maps to PhoenX
+slot ``i + 1`` and ``joint_parent == -1`` maps to slot 0.
 """
 
 from __future__ import annotations
@@ -187,9 +185,9 @@ def _classify_d6_pattern(
     PhoenX mode where possible. Returns ``(mode_tag, free_dof_offset)``:
 
     * ``mode_tag``: ``"REVOLUTE"`` / ``"PRISMATIC"`` / ``"BALL"`` / ``"FIXED"``
-      if the pattern matches a specialized mode, or ``None`` if the joint
-      needs a Phase 2+ implementation (cylindrical, universal, planar,
-      generic).
+      if the pattern matches a specialized mode, a ``*_CANDIDATE`` tag if
+      the caller still needs an axis-parallelism check, or ``None`` if the
+      joint needs generic D6 support.
     * ``free_dof_offset``: index (within the joint's DoF range starting at
       ``qd_start``) of the single free DoF for REVOLUTE / PRISMATIC. Set to
       ``-1`` for BALL / FIXED (no single free DoF to drive).
@@ -209,10 +207,12 @@ def _classify_d6_pattern(
     if n_lin == 3 and n_ang == 3 and n_lin_locked == 3 and n_ang_locked == 3:
         return ("FIXED", -1)
 
-    # BALL: 3 linear locked, 3 angular free. Drives on the angular DoFs are
-    # silently dropped (PhoenX's BALL mode is a pure 3-row positional lock);
-    # Phase 2 may add a "BALL with angular drives" variant if needed.
+    # BALL: 3 linear locked, 3 angular free. Some MJCF-imported D6s omit
+    # explicit linear lock axes; for angular-only D6s, absent linear axes
+    # still imply locked translation.
     if n_lin == 3 and n_ang == 3 and n_lin_locked == 3 and n_ang_free == 3:
+        return ("BALL", -1)
+    if n_lin == 0 and n_ang == 3 and n_ang_free == 3:
         return ("BALL", -1)
 
     # REVOLUTE: 3 linear locked, 2 angular locked, 1 angular free/limited.
@@ -235,6 +235,11 @@ def _classify_d6_pattern(
     if n_lin == 3 and n_ang == 3 and n_lin_locked == 3 and n_ang_locked == 1 and n_ang_free == 2:
         ang_locked_idx = next(i for i, lk in enumerate(locked_ang) if lk)
         return ("UNIVERSAL", n_lin + ang_locked_idx)
+    if n_lin == 0 and n_ang == 2 and n_ang_free == 2:
+        # MJCF often represents a universal joint as two hinge axes on
+        # one body. Translation is implicitly locked; the missing twist
+        # axis is derived from the two free angular axes by the caller.
+        return ("UNIVERSAL", -1)
 
     # CYLINDRICAL candidate: 2 linear locked + 1 linear free + 2 angular
     # locked + 1 angular free. The free axes must be parallel for this to
@@ -284,7 +289,8 @@ def build_adbs_init_arrays(
     """Convert ``model``'s joints to ADBS init arrays on ``device``.
 
     Raises:
-        NotImplementedError: If any joint is DISTANCE or D6.
+        NotImplementedError: If any joint is DISTANCE or an unsupported
+            D6 configuration.
     """
     if device is None:
         device = model.device
@@ -384,12 +390,8 @@ def build_adbs_init_arrays(
                 "Supported: REVOLUTE, PRISMATIC, BALL, FIXED, CABLE, D6, FREE (no column)."
             )
 
-        # D6 auto-dispatch: detect FIXED / BALL / REVOLUTE / PRISMATIC
-        # patterns from per-DoF lock state and route to the existing
-        # specialized modes. Configurations that don't match a known
-        # pattern (cylindrical, universal, planar, generic) raise a
-        # descriptive error pointing at the Phase 2+ work that will
-        # implement them.
+        # D6 auto-dispatch: route supported lock patterns to specialized
+        # PhoenX modes; reject generic D6.
         d6_mode_tag: str | None = None
         d6_free_dof_offset = -1
         if jtype is newton.JointType.D6:
@@ -569,17 +571,26 @@ def build_adbs_init_arrays(
             # rigid ``hertz_limit``) so it always clamps the cumulative
             # twist back to zero.
             phoenx_mode = int(JOINT_MODE_UNIVERSAL)
-            locked_qd = qd_start + d6_free_dof_offset  # offset points at the LOCKED axis
-            axis_local = (
-                np.asarray(joint_axis[locked_qd], dtype=np.float32)
-                if len(joint_axis)
-                else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
-            )
+            if d6_free_dof_offset >= 0:
+                locked_qd = qd_start + d6_free_dof_offset  # offset points at the LOCKED axis
+                axis_local = (
+                    np.asarray(joint_axis[locked_qd], dtype=np.float32)
+                    if len(joint_axis)
+                    else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+                )
+            else:
+                # Angular-only MJCF D6: derive the missing locked twist
+                # axis from the two free angular axes.
+                axis_a = np.asarray(joint_axis[qd_start], dtype=np.float32)
+                axis_b = np.asarray(joint_axis[qd_start + 1], dtype=np.float32)
+                axis_local = np.cross(axis_a, axis_b).astype(np.float32)
             axis_len = float(np.linalg.norm(axis_local))
             if axis_len > 1e-12:
                 axis_local = axis_local / axis_len
             else:
-                axis_local = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+                raise NotImplementedError(
+                    f"D6 joint {j} has two angular axes that cannot define a universal locked twist axis."
+                )
             axis_world = _quat_rotate_np(X_w_p[3:], axis_local)
             anchor2_world = anchor1_world + axis_world
             # Rigid hard lock at zero twist. The shared axial prepare /

@@ -22,7 +22,6 @@ if not wp.get_preferred_device().is_cuda:
     raise unittest.SkipTest("PhoenX tests require CUDA")
 
 from newton._src.solvers.phoenx.body import body_container_zeros
-from newton._src.solvers.phoenx.constraints.constraint_contact import CONTACT_DWORDS
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_container_zeros,
 )
@@ -98,9 +97,7 @@ class TestInvariants(unittest.TestCase):
         kw = _make_kwargs(num_bodies=1, num_joints=2)
         # ``num_joints=2`` -> factory would emit (ADBS_DWORDS, 2). Pass
         # a too-small container instead.
-        kw["constraints"] = constraint_container_zeros(
-            num_constraints=1, num_dwords=CONTACT_DWORDS, device=wp.get_device()
-        )
+        kw["constraints"] = constraint_container_zeros(num_constraints=1, num_dwords=1, device=wp.get_device())
         with self.assertRaisesRegex(AssertionError, r"ConstraintContainer\.data has shape"):
             PhoenXWorld(**kw)
 
@@ -109,13 +106,9 @@ class TestInvariants(unittest.TestCase):
         a ``rigid_contact_max``-sized constraint container instead of
         the correct 1-row placeholder."""
         kw = _make_kwargs(num_bodies=1, num_joints=0, rigid_contact_max=4200)
-        # Mimic the pre-fix _PhoenXScene allocation.
-        kw["constraints"] = constraint_container_zeros(
-            num_constraints=4200, num_dwords=CONTACT_DWORDS, device=wp.get_device()
-        )
-        with self.assertRaisesRegex(
-            AssertionError, rf"ConstraintContainer\.data has shape \({int(CONTACT_DWORDS)}, 4200\)"
-        ):
+        # Mimic the pre-fix _PhoenXScene column allocation.
+        kw["constraints"] = constraint_container_zeros(num_constraints=4200, num_dwords=1, device=wp.get_device())
+        with self.assertRaisesRegex(AssertionError, r"ConstraintContainer\.data has shape \(1, 4200\)"):
             PhoenXWorld(**kw)
 
 

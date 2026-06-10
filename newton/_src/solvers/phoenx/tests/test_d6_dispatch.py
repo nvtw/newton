@@ -246,6 +246,35 @@ class TestD6Detection(unittest.TestCase):
         model = builder.finalize()
         self.assertEqual(self._adbs_mode_for(model), int(JOINT_MODE_BALL_SOCKET))
 
+    def test_d6_angular_only_ball_dispatches_to_ball_socket(self) -> None:
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
+        builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+        ang = [
+            newton.ModelBuilder.JointDofConfig(axis=(1, 0, 0), limit_lower=-1.0e6, limit_upper=1.0e6),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 1, 0), limit_lower=-1.0e6, limit_upper=1.0e6),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 0, 1), limit_lower=-1.0e6, limit_upper=1.0e6),
+        ]
+        j = builder.add_joint_d6(parent=-1, child=body, angular_axes=ang)
+        builder.add_articulation([j])
+        model = builder.finalize()
+        self.assertEqual(self._adbs_mode_for(model), int(JOINT_MODE_BALL_SOCKET))
+
+    def test_d6_angular_only_universal_dispatches_to_universal(self) -> None:
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
+        builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+        ang = [
+            newton.ModelBuilder.JointDofConfig(axis=(1, 0, 0), limit_lower=-1.0e6, limit_upper=1.0e6),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 1, 0), limit_lower=-1.0e6, limit_upper=1.0e6),
+        ]
+        j = builder.add_joint_d6(parent=-1, child=body, angular_axes=ang)
+        builder.add_articulation([j])
+        model = builder.finalize()
+        self.assertEqual(self._adbs_mode_for(model), int(JOINT_MODE_UNIVERSAL))
+
     def test_d6_revolute_pattern_dispatches_to_revolute(self) -> None:
         model = _build_d6_pendulum_revolute_equivalent(free_angular_index=1)
         self.assertEqual(self._adbs_mode_for(model), int(JOINT_MODE_REVOLUTE))

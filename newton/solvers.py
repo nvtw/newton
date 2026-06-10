@@ -125,9 +125,9 @@ Supported Features
   unless ``use_mujoco_contacts`` is set to ``False``.
 | :sup:`2` ``basic`` means Newton includes several examples that use these solvers in diffsim workflows,
   see :ref:`Differentiability` for further details.
-| :sup:`3` :class:`~newton.solvers.SolverPhoenX` implements cloth, soft tetrahedra, and particle
-  containers internally, but they are not yet exposed via the public ``SolverPhoenX`` constructor
-  -- callers currently have to drop into ``newton._src.solvers.phoenx`` to use them.
+| :sup:`3` :class:`~newton.solvers.SolverPhoenX` exposes model particles, cloth triangles
+  and bending edges, and soft tetrahedra through the public constructor. These paths remain
+  experimental; soft hexahedra are still array-backed via the internal PhoenX world API.
 
 .. experimental::
     :class:`~newton.solvers.SolverKamino`'s public API and behavior may change without prior notice.

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Warp kernels for :class:`PhoenXWorld`. Dispatches only ADBS and CONTACT."""
+"""Warp kernels and dispatch factories for :class:`PhoenXWorld`."""
 
 from __future__ import annotations
 
@@ -1959,10 +1959,8 @@ def _make_block_world_relax_kernel(
     return kernel
 
 
-# Fast-tail kernels are no longer eagerly built at module import. Callers
-# should use :func:`get_fast_tail_kernel` (or hit module ``__getattr__`` for
-# the legacy names) so only the revolute variant the scene actually needs
-# gets compiled.
+# Fast-tail kernels are built lazily so only the scene-specific
+# revolute/generic variant gets compiled.
 
 
 @wp.kernel(enable_backward=False, module="unique")

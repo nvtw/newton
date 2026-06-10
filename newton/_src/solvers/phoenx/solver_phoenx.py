@@ -1,12 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Warp port of PhoenX's ``Scene.Step``: contacts + actuated double-ball-socket
-joints (ball/revolute/prismatic/fixed/cable). Newton's CollisionPipeline
-produces contacts; this solver consumes them.
-
-Per-step: ingest contacts -> JP colouring -> substep loop (forces+gravity,
-main PGS, integrate, relax) -> damping + inertia refresh -> clear forces.
-"""
+"""PhoenX world driver: unified joint, deformable, and contact PGS."""
 
 from __future__ import annotations
 
@@ -361,9 +355,10 @@ def _singleworld_total_threads(
 
 
 class PhoenXWorld:
-    """PhoenX solver driver. Joint cids in [0, num_joints); contact cids in
-    [num_joints, num_joints + max_contact_columns). Only ADBS joints supported
-    (populate via :meth:`initialize_actuated_double_ball_socket_joints`).
+    """PhoenX solver driver.
+
+    Cids are joints, deformables, then contact columns. Contacts use
+    :class:`ContactColumnContainer`; the rest use :class:`ConstraintContainer`.
     """
 
     @dataclass
@@ -1472,8 +1467,8 @@ class PhoenXWorld:
         num_cloth_bending: int = 0,
         num_soft_hexahedra: int = 0,
     ) -> int:
-        """Dword width = max over active types."""
-        widths = [int(CONTACT_DWORDS)]
+        """Dword width for joint/cloth/soft rows; contacts use separate storage."""
+        widths = [1]
         if int(num_joints) > 0:
             widths.append(int(ADBS_DWORDS))
         if int(num_cloth_triangles) > 0:
@@ -2417,6 +2412,10 @@ class PhoenXWorld:
             rigid_contact_friction=sentinel_float,
         )
 
+    def _active_contact_views(self) -> ContactViews:
+        """Current contacts or the graph-stable placeholder."""
+        return self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+
     @staticmethod
     def _choose_auto_prepare_refresh_stride(
         *,
@@ -3330,7 +3329,7 @@ class PhoenXWorld:
         if self._constraint_capacity == 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
-        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        contact_views = self._active_contact_views()
         cached_prepare = not self._refresh_prepare_this_substep()
         for fixed_tpw in self._fast_tail_auto_fixed_choices():
             kernel = get_fast_tail_kernel(
@@ -3379,7 +3378,7 @@ class PhoenXWorld:
         if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
-        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        contact_views = self._active_contact_views()
         for fixed_tpw in self._fast_tail_auto_fixed_choices():
             kernel = get_fast_tail_kernel(
                 kind="relax",
@@ -3496,7 +3495,7 @@ class PhoenXWorld:
         if not self._block_world_supported():
             raise NotImplementedError("block-world scheduler currently supports rigid multi-world scenes only")
         block_dim = self._validate_block_world_dim(self._multi_world_block_dim if block_dim is None else block_dim)
-        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        contact_views = self._active_contact_views()
         cached_prepare = not self._refresh_prepare_this_substep()
         kernel = get_block_world_kernel(
             kind="prepare_plus_iterate",
@@ -3544,7 +3543,7 @@ class PhoenXWorld:
         if not self._block_world_supported():
             raise NotImplementedError("block-world scheduler currently supports rigid multi-world scenes only")
         block_dim = self._validate_block_world_dim(self._multi_world_block_dim if block_dim is None else block_dim)
-        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        contact_views = self._active_contact_views()
         kernel = get_block_world_kernel(
             kind="relax",
             revolute_only=bool(self._use_revolute_specialization),
@@ -3589,7 +3588,7 @@ class PhoenXWorld:
         """capture_while body: head-path sweep on the persistent grid, unrolled
         NUM_INNER_WHILE_ITERATIONS times. Tail launches no-op once head_active
         clears within the same outer iter."""
-        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        contact_views = self._active_contact_views()
         idt = kw.get("idt", wp.float32(0.0))
         ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
         ms_batch = wp.int32(int(self.mass_splitting_batch_size))
@@ -3631,7 +3630,7 @@ class PhoenXWorld:
     def _capture_singleworld_tail_sweep(self, kernel, **kw) -> None:
         """capture_while body: drain remaining small colours in one block via
         wp.launch_tiled. Hands back to the head path on a colour > fuse_threshold."""
-        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        contact_views = self._active_contact_views()
         idt = kw.get("idt", wp.float32(0.0))
         ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
         ms_batch = wp.int32(int(self.mass_splitting_batch_size))
@@ -4186,7 +4185,7 @@ class PhoenXWorld:
         out.zero_()
         if self.substep_dt <= 0.0:
             return
-        contact_views = self._contact_views if self._contact_views is not None else self._contact_views_placeholder
+        contact_views = self._active_contact_views()
         idt = wp.float32(1.0 / self.substep_dt)
         wp.launch(
             _constraint_gather_wrenches_kernel,

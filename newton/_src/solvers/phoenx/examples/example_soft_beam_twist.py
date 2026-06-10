@@ -3,8 +3,10 @@
 
 """PhoenX soft-beam twist demo.
 
-A tetrahedral beam has its left face fixed and its right face animated
-around the beam axis. The default material uses a Poisson ratio of 0.45
+A tetrahedral beam has its left face fixed and its right face rotated
+continuously around the beam axis. The right face sweeps ``--twist-degrees``
+per ``--motion-period`` seconds (default: 360° per 6 s, i.e. one full
+revolution per period). The default material uses a Poisson ratio of 0.45
 and the PhoenX block Neo-Hookean tet constraint path.
 
 Run::

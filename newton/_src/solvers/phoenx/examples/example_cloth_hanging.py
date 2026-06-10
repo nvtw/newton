@@ -66,17 +66,17 @@ class Example:
         poisson_ratio: float = 0.3,
         cube_size: float = 0.4,
         cube_drop_height: float = 5.0,
-        cloth_thickness: float = 0.01,
+        cloth_thickness: float = 0.05,
         cloth_gap: float = 0.030,
     ):
         self.viewer = viewer
         self.device = wp.get_device()
 
-        self.fps = 60
+        self.fps = 120
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
 
-        self.sim_substeps = 8
+        self.sim_substeps = 4
         self.solver_iterations = 5
 
         self.dim_x = width

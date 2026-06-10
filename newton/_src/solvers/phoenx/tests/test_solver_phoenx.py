@@ -310,6 +310,83 @@ class TestSolverPhoenX(unittest.TestCase):
             msg=f"external body_f did not propagate: v_x={v_x:.6f}, expected ~{expected:.6f}",
         )
 
+    def test_public_cloth_step_exports_particles(self) -> None:
+        mb = newton.ModelBuilder()
+        mb.gravity = 0.0
+        body = mb.add_body(xform=wp.transform(p=wp.vec3(2.0, 0.0, 0.0), q=wp.quat_identity()), mass=0.0)
+        mb.add_shape_box(
+            body,
+            hx=0.1,
+            hy=0.1,
+            hz=0.1,
+            cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
+        )
+        mb.add_cloth_grid(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.2),
+            dim_x=1,
+            dim_y=1,
+            cell_x=0.1,
+            cell_y=0.1,
+            mass=0.01,
+            tri_ke=1.0e4,
+            tri_ka=1.0e4,
+            particle_radius=0.005,
+        )
+        model = mb.finalize()
+        solver = newton.solvers.SolverPhoenX(model, substeps=1, solver_iterations=2, step_layout="single_world")
+        self.assertEqual(solver.world.num_cloth_triangles, int(model.tri_count))
+        self.assertIsNotNone(solver.world.particles)
+
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        z0 = state_0.particle_q.numpy()[:, 2].copy()
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, 1.0 / 60.0)
+        z1 = state_1.particle_q.numpy()[:, 2]
+
+        self.assertTrue(np.all(np.isfinite(z1)))
+        self.assertGreater(float(z1.mean()), float(z0.mean()))
+
+    def test_public_soft_tet_step_exports_particles(self) -> None:
+        mb = newton.ModelBuilder()
+        mb.gravity = 0.0
+        mb.add_soft_grid(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.2),
+            dim_x=1,
+            dim_y=1,
+            dim_z=1,
+            cell_x=0.1,
+            cell_y=0.1,
+            cell_z=0.1,
+            density=100.0,
+            k_mu=1.0e4,
+            k_lambda=1.0e4,
+            k_damp=0.0,
+            add_surface_mesh_edges=False,
+        )
+        model = mb.finalize()
+        solver = newton.solvers.SolverPhoenX(model, substeps=1, solver_iterations=2, step_layout="single_world")
+        self.assertEqual(solver.world.num_soft_tetrahedra, int(model.tet_count))
+        self.assertIsNotNone(solver.world.particles)
+
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        z0 = state_0.particle_q.numpy()[:, 2].copy()
+
+        solver.step(state_0, state_1, control, None, 1.0 / 60.0)
+        z1 = state_1.particle_q.numpy()[:, 2]
+
+        self.assertTrue(np.all(np.isfinite(z1)))
+        self.assertGreater(float(z1.mean()), float(z0.mean()))
+
     def test_notify_model_changed_body_inertial_properties(self) -> None:
         """Regression: ``notify_model_changed`` with
         ``BODY_INERTIAL_PROPERTIES`` (or ``BODY_PROPERTIES``) must launch

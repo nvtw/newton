@@ -1,24 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unified contact prepare/iterate factories (rigid + cloth-aware).
+"""Contact prepare/iterate factories for rigid and deformable endpoints.
 
-One source produces both the rigid-only and cloth-aware ``@wp.func``
-variants via ``wp.static(cloth_support)`` dead-code elimination, so
-rigid-only kernels keep their hand-rolled body-register caching while
-cloth-supporting kernels go through the endpoint helpers in
-:mod:`contact_endpoint`.
-
-Naming convention preserved for back-compat:
-
-* ``contact_prepare_for_iteration_at`` / ``contact_iterate_at`` --
-  rigid-only; ``cloth_support=False`` factory output.
-* ``contact_prepare_for_iteration_at_cloth_aware`` /
-  ``contact_iterate_at_cloth_aware`` -- ``cloth_support=True`` output;
-  dispatches per side via :mod:`contact_endpoint` helpers.
-* ``contact_prepare_for_iteration`` / ``contact_iterate`` -- entry
-  wrappers (read body1/body2 from the column header, flip access
-  modes, then call the ``*_at`` variant).
+``wp.static`` keeps rigid-only kernels on the body-register path and routes
+deformable contacts through endpoint helpers.
 """
 
 from __future__ import annotations

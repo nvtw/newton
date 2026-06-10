@@ -103,6 +103,23 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     return max(1000, pair_count * PRIMITIVE_CPP * SAFETY)
 
 
+class _PhoenXCollisionPipelineAdapter:
+    """Route model.collide() through PhoenX deformable geometry refresh."""
+
+    def __init__(self, solver: SolverPhoenX, pipeline):
+        self._solver = solver
+        self._pipeline = pipeline
+
+    def __getattr__(self, name: str):
+        return getattr(self._pipeline, name)
+
+    def contacts(self):
+        return self._pipeline.contacts()
+
+    def collide(self, state: State, contacts: Contacts, *, soft_contact_margin: float | None = None) -> None:
+        self._solver.collide(state, contacts)
+
+
 class SolverPhoenX(SolverBase):
     """Newton :class:`SolverBase` wrapper around :class:`PhoenXWorld`.
 
@@ -226,12 +243,19 @@ class SolverPhoenX(SolverBase):
 
         self._adbs: AdbsInitArrays = build_adbs_init_arrays(model, device=self.device)
         num_joints = self._adbs.num_joint_columns
+        num_particles = int(getattr(model, "particle_count", 0) or 0)
+        num_cloth_triangles = int(getattr(model, "tri_count", 0) or 0)
+        num_cloth_bending = int(getattr(model, "edge_count", 0) or 0)
+        num_soft_tetrahedra = int(getattr(model, "tet_count", 0) or 0)
+        self._has_particles = num_particles > 0
+        self._has_deformable_collision = num_cloth_triangles > 0 or num_soft_tetrahedra > 0
+        self._particle_state_imported: State | None = None
         self._default_joint_gear = wp.ones(max(1, int(model.joint_dof_count)), dtype=wp.float32, device=self.device)
 
         # PhoenX's warm-start path needs contact_matching != "disabled".
         # Auto-attach a sticky pipeline so users don't have to size Contacts.
         self._sleeping_enabled: bool = float(sleeping_velocity_threshold) > 0.0
-        if int(model.shape_count) > 0:
+        if int(model.shape_count) > 0 and not self._has_deformable_collision:
             existing_cp = getattr(model, "_collision_pipeline", None)
             needs_new_cp = existing_cp is None or not getattr(existing_cp, "contact_matching", False)
             # When sleeping is on we need a broad-phase filter func wired
@@ -269,6 +293,9 @@ class SolverPhoenX(SolverBase):
                     )
                 model._collision_pipeline = _newton.CollisionPipeline(model, **cp_kwargs)
                 model._collision_pipeline.contacts()  # forces buffer sizing
+        if self._has_deformable_collision and int(model.rigid_contact_max) <= 0:
+            deformable_shapes = num_cloth_triangles + num_soft_tetrahedra
+            model.rigid_contact_max = max(1000, 8 * (int(model.shape_count) + deformable_shapes))
         rigid_contact_max = int(model.rigid_contact_max)
 
         gravity_np = self._read_model_gravity_np(model)
@@ -281,6 +308,9 @@ class SolverPhoenX(SolverBase):
 
         self._constraints: ConstraintContainer = PhoenXWorld.make_constraint_container(
             num_joints=num_joints,
+            num_cloth_triangles=num_cloth_triangles,
+            num_cloth_bending=num_cloth_bending,
+            num_soft_tetrahedra=num_soft_tetrahedra,
             device=self.device,
         )
 
@@ -303,6 +333,10 @@ class SolverPhoenX(SolverBase):
             gravity=gravity_arg,
             rigid_contact_max=rigid_contact_max,
             num_joints=num_joints,
+            num_particles=num_particles,
+            num_cloth_triangles=num_cloth_triangles,
+            num_cloth_bending=num_cloth_bending,
+            num_soft_tetrahedra=num_soft_tetrahedra,
             default_friction=float(default_friction),
             num_worlds=num_worlds,
             step_layout=step_layout,
@@ -328,7 +362,7 @@ class SolverPhoenX(SolverBase):
         # filter func is shared with cloth setups; cloth setup paths
         # call ``build_phoenx_share_vertex_filter_data`` themselves and
         # overwrite this binding without losing the sleeping fields.
-        if self._sleeping_enabled and int(model.shape_count) > 0:
+        if self._sleeping_enabled and int(model.shape_count) > 0 and not self._has_deformable_collision:
             from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
                 build_phoenx_share_vertex_filter_data,
             )
@@ -377,11 +411,23 @@ class SolverPhoenX(SolverBase):
         if num_joints > 0:
             self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
 
+        if num_cloth_triangles > 0:
+            self.world.populate_cloth_triangles_from_model(model)
+        if num_cloth_bending > 0:
+            self.world.populate_cloth_bending_from_model(model)
+        if num_soft_tetrahedra > 0:
+            self.world.populate_soft_tetrahedra_from_model(model)
+        if self._has_deformable_collision:
+            pipeline = self.world.setup_cloth_collision_pipeline(model, rigid_contact_max=rigid_contact_max)
+            model._collision_pipeline = _PhoenXCollisionPipelineAdapter(self, pipeline)
+
         if model.shape_material_mu is not None and model.shape_count > 0:
             self._install_shape_materials()
 
         # Newton shape_body uses -1 for world; PhoenX slot 0 is the world anchor.
-        if model.shape_body is not None and model.shape_count > 0:
+        if self._has_deformable_collision and self.world._shape_body_internal is not None:
+            self._shape_body = self.world._shape_body_internal
+        elif model.shape_body is not None and model.shape_count > 0:
             shape_body_np = model.shape_body.numpy()
             shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
             self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
@@ -696,6 +742,41 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
+    def _import_particle_state(self, state_in: State, *, force: bool = False) -> None:
+        """Pull Newton particle state into PhoenX."""
+        if not self._has_particles:
+            return
+        particles = self.world.particles
+        if particles is None:
+            return
+        if not force and state_in is self._particle_state_imported:
+            return
+        if state_in.particle_q is None or state_in.particle_qd is None:
+            raise ValueError("SolverPhoenX requires particle_q and particle_qd for particle models.")
+        wp.copy(particles.position, state_in.particle_q)
+        wp.copy(particles.velocity, state_in.particle_qd)
+        self._particle_state_imported = state_in
+
+    def _export_particle_state(self, state_out: State) -> None:
+        """Push PhoenX particle state to Newton."""
+        if not self._has_particles:
+            return
+        particles = self.world.particles
+        if particles is None:
+            return
+        if state_out.particle_q is None or state_out.particle_qd is None:
+            raise ValueError("SolverPhoenX requires particle_q and particle_qd for particle models.")
+        wp.copy(state_out.particle_q, particles.position)
+        wp.copy(state_out.particle_qd, particles.velocity)
+
+    def collide(self, state: State, contacts: Contacts) -> None:
+        """Run PhoenX deformable-aware collision."""
+        if not self._has_deformable_collision:
+            self.model.collide(state, contacts)
+            return
+        self._import_particle_state(state, force=True)
+        self.world.collide(state, contacts)
+
     def _snapshot_pre_step_pose(self) -> None:
         """Snapshot pre-step COM-in-world pose for the FD readout."""
         n = int(self.model.body_count)
@@ -848,6 +929,7 @@ class SolverPhoenX(SolverBase):
         self._apply_joint_control(control)
         self._accumulate_joint_forces(state_in, control, dt)
         self._import_body_state(state_in)
+        self._import_particle_state(state_in)
 
         # FD readout snapshots the imported (state_in-aligned) pose so the
         # post-step delta covers the full outer dt.
@@ -896,6 +978,8 @@ class SolverPhoenX(SolverBase):
         self._last_dt = float(dt) / max(1, self.world.substeps)
 
         self._export_body_state(state_out, dt=float(dt))
+        self._export_particle_state(state_out)
+        self._particle_state_imported = None
         if want_body_qdd:
             self._export_body_qdd(state_out, dt=float(dt))
         # Sync joint_q/joint_qd via eval_ik for policies that read them.
