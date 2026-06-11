@@ -848,7 +848,7 @@ class WorldBuilder:
             device=device,
         )
 
-        # Detect compound bodies (>1 shape) for body-pair grouping in ingest.
+        # Auto body-pair grouping only for single-world compound scenes.
         has_compound_bodies = False
         if self._shapes:
             shape_bodies = np.asarray([int(s.body) for s in self._shapes], dtype=np.int32)
@@ -870,7 +870,7 @@ class WorldBuilder:
             default_friction=default_friction,
             num_worlds=self._num_worlds,
             step_layout=step_layout,
-            enable_body_pair_grouping=has_compound_bodies,
+            enable_body_pair_grouping=has_compound_bodies and step_layout == "single_world",
             mass_splitting=mass_splitting,
             max_colored_partitions=max_colored_partitions,
             mass_splitting_batch_size=mass_splitting_batch_size,

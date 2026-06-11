@@ -114,12 +114,13 @@ def _step_with_sensor_graph(
         wp.capture_launch(graph)
 
 
-def _make_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
+def _make_solver(model: newton.Model, *, step_layout: str = "multi_world") -> newton.solvers.SolverPhoenX:
     return newton.solvers.SolverPhoenX(
         model,
         substeps=4,
         solver_iterations=20,
         velocity_iterations=2,
+        step_layout=step_layout,
     )
 
 
@@ -453,7 +454,7 @@ class TestSensorContactPhoenX(unittest.TestCase):
         # (including ones from both shapes), exposing any
         # newton-order-vs-sorted-order mismatch.
         sensor = SensorContact(model, sensing_obj_bodies=[body], verbose=False)
-        solver = _make_solver(model)
+        solver = _make_solver(model, step_layout="single_world")
 
         # The compound body must have triggered grouping; if not, this
         # test isn't actually exercising the regression path.

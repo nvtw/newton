@@ -129,12 +129,13 @@ def _build_single_shape_scene():
     return model
 
 
-def _make_solver(model):
+def _make_solver(model, *, step_layout: str = "multi_world"):
     return newton.solvers.SolverPhoenX(
         model,
         substeps=4,
         solver_iterations=8,
         velocity_iterations=1,
+        step_layout=step_layout,
     )
 
 
@@ -157,19 +158,30 @@ def _step_n(model, solver, n_frames: int, dt: float):
 class TestCompoundContactGrouping(unittest.TestCase):
     """Compound-body contact grouping correctness + colour-count check."""
 
-    def test_compound_scene_opts_in(self) -> None:
-        """Multi-shape body layout must trigger compound detection in
-        ``SolverPhoenX``, which routes ingest through the body-pair
-        grouping path."""
+    def test_compound_scene_opts_in_for_single_world(self) -> None:
+        """Single-world compound scenes route through body-pair grouping."""
         model = _build_compound_scene()
-        solver = _make_solver(model)
+        solver = _make_solver(model, step_layout="single_world")
         self.assertTrue(
             solver.world._enable_body_pair_grouping,
-            "compound-body scene should opt into body-pair grouping",
+            "single-world compound scene should opt into body-pair grouping",
         )
         self.assertIsNotNone(
             solver.world._ingest_scratch.body_pair_keys,
             "ingest scratch should have allocated body-pair sort buffers",
+        )
+
+    def test_compound_scene_opts_out_for_multi_world(self) -> None:
+        """Multi-world defaults keep robot-style compound scenes on shape-pair ingest."""
+        model = _build_compound_scene()
+        solver = _make_solver(model)
+        self.assertFalse(
+            solver.world._enable_body_pair_grouping,
+            "multi-world compound scene should not auto-enable body-pair grouping",
+        )
+        self.assertIsNone(
+            solver.world._ingest_scratch.body_pair_keys,
+            "multi-world default should not allocate body-pair sort buffers",
         )
 
     def test_single_shape_scene_opts_out(self) -> None:
@@ -212,7 +224,7 @@ class TestCompoundContactGrouping(unittest.TestCase):
         bound (a handful of colours)."""
         compound_model = _build_compound_scene()
         single_model = _build_single_shape_scene()
-        compound_solver = _make_solver(compound_model)
+        compound_solver = _make_solver(compound_model, step_layout="single_world")
         single_solver = _make_solver(single_model)
 
         _step_n(compound_model, compound_solver, n_frames=60, dt=1.0 / 240.0)
