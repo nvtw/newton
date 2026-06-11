@@ -16,15 +16,15 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.graph_coloring.graph_coloring import (
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import (
+    MAX_COLORS,
+    IncrementalContactPartitioner,
+)
+from newton._src.solvers.phoenx.tests.graph_coloring_batch import (
     MAX_BODIES,
     ContactPartitioner,
     ElementInteractionData,
     maximal_independent_set_partitioning,
-)
-from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import (
-    MAX_COLORS,
-    IncrementalContactPartitioner,
 )
 
 

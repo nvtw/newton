@@ -24,10 +24,9 @@ To add a new implementation:
 2. Reuse the adjacency-build kernels from
    :mod:`graph_coloring_common` if helpful; the coloring step itself
    is the lever.
-3. Register it in :func:`make_partitioner` and add a tag to
-   :data:`PHOENX_PARTITIONER_ALGORITHM` in ``solver_config.py``.
-4. Bench head-to-head via
-   :mod:`benchmarks.bench_graph_coloring_algorithms`.
+3. Add a ``partitioner_algorithm`` branch in
+   :class:`newton._src.solvers.phoenx.solver_phoenx.PhoenXWorld`.
+4. Bench head-to-head via :mod:`benchmarks.bench_graph_coloring`.
 """
 
 from __future__ import annotations

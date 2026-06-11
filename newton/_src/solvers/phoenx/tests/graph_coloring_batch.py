@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Batch graph-coloring reference used by tests."""
+
 import warp as wp
 
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
