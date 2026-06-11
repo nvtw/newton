@@ -316,8 +316,8 @@ class Example:
         """Override Newton picking's per-body effective-mass with the
         true connected-component sum.
 
-        :func:`newton._src.viewer.picking.Picking._compute_effective_mass`
-        builds ``body_art`` by writing ``body_art[child] = joint_art[j]``
+        Newton viewer picking derives per-body effective mass by writing
+        ``body_art[child] = joint_art[j]``
         for every joint touching ``child`` -- last write wins. In the
         DR Legs asset six bodies (the two feet plus the four
         parallel-rods) are the *child* of both a tree-edge joint

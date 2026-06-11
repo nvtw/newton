@@ -536,7 +536,7 @@ Constructor reference
 Tuning constants
 ----------------
 
-Module-level knobs in :mod:`newton._src.solvers.phoenx.solver_config`:
+Low-level defaults used by the solver:
 
 .. list-table::
     :header-rows: 1
@@ -545,9 +545,11 @@ Module-level knobs in :mod:`newton._src.solvers.phoenx.solver_config`:
     * - Constant
       - Default
       - Notes
-    * - ``PHOENX_CONTACT_MATCHING``
-      - ``"latest"``
-      - ``"sticky"`` for stable stacking; ``"disabled"`` forbidden.
+    * - Contact matching
+      - ``"sticky"``
+      - Public equivalent: pass ``contact_matching="sticky"`` to
+        :class:`newton.CollisionPipeline` when constructing contacts
+        outside :class:`newton.solvers.SolverPhoenX`.
     * - ``NUM_INNER_WHILE_ITERATIONS``
       - ``8``
       - ``wp.capture_while`` body unroll; amortises edge-traversal cost.

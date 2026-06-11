@@ -170,12 +170,8 @@ class Example:
             mc_edge_clamp_min=0.0,
         )
 
-        # PhoenX needs contact matching for its per-pair warm-start.
+        # PhoenX needs sticky contact matching for per-pair warm-start.
         # XPBD and MuJoCo are happy with the default latest-only matching.
-        from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
-            PHOENX_CONTACT_MATCHING,
-        )
-
         cp_kwargs = {
             "reduce_contacts": True,
             "rigid_contact_max": self.rigid_contact_max,
@@ -183,7 +179,7 @@ class Example:
             "sdf_hydroelastic_config": sdf_hydroelastic_config,
         }
         if self.solver_type == "phoenx":
-            cp_kwargs["contact_matching"] = PHOENX_CONTACT_MATCHING
+            cp_kwargs["contact_matching"] = "sticky"
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
             **cp_kwargs,
