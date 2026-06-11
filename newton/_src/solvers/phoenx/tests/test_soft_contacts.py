@@ -79,7 +79,7 @@ def _finalize_phoenx(
     end.
     """
     model = mb.finalize()
-    model._collision_pipeline = newton.CollisionPipeline(
+    collision_pipeline = newton.CollisionPipeline(
         model,
         contact_matching=PHOENX_CONTACT_MATCHING,
     )
@@ -88,8 +88,8 @@ def _finalize_phoenx(
     # For soft-contact tests we want the per-contact arrays present
     # regardless of hydroelastic, so we manually construct the buffer
     # and attach it to the model.
-    cp = model._collision_pipeline
-    model._collision_pipeline.contacts()  # forces internal sizing
+    cp = collision_pipeline
+    model.contacts(collision_pipeline=cp)  # forces internal sizing
 
     state_in = model.state()
     state_out = model.state()

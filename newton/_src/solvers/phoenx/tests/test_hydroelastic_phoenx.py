@@ -95,8 +95,7 @@ def _build_stacked_cubes_scene(device):
             buffer_fraction=1.0,
         ),
     )
-    model._collision_pipeline = collision_pipeline
-    contacts = collision_pipeline.contacts()
+    contacts = model.contacts(collision_pipeline=collision_pipeline)
 
     state_0 = model.state()
     state_1 = model.state()
@@ -133,13 +132,13 @@ class TestPhoenXHydroelasticStack(unittest.TestCase):
     def test_stacked_primitive_cubes(self) -> None:
         device = wp.get_preferred_device()
         (
-            _model,
+            model,
             solver,
             state_0,
             state_1,
             _control,
             contacts,
-            collision_pipeline,
+            _collision_pipeline,
             initial_positions,
         ) = _build_stacked_cubes_scene(device)
 
@@ -148,7 +147,7 @@ class TestPhoenXHydroelasticStack(unittest.TestCase):
             # Reduced hydroelastic contacts are geometry-derived surfaces; refresh
             # them at the same small-step cadence used by the reference tests.
             for _ in range(SIM_SUBSTEPS):
-                collision_pipeline.collide(state_0, contacts)
+                model.collide(state_0, contacts)
                 solver.step(state_0, state_1, None, contacts, SIM_DT / SIM_SUBSTEPS)
                 state_0, state_1 = state_1, state_0
 

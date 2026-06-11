@@ -303,7 +303,7 @@ class TestKinematicNewtonCollisionPipeline(unittest.TestCase):
 
         model = builder.finalize()
         collision_pipeline = newton.CollisionPipeline(model, contact_matching="latest")
-        contacts = collision_pipeline.contacts()
+        contacts = model.contacts(collision_pipeline=collision_pipeline)
         rigid_contact_max = int(contacts.rigid_contact_point0.shape[0])
         state = model.state()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state)
@@ -435,7 +435,7 @@ class TestKinematicNewtonCollisionPipeline(unittest.TestCase):
             model,
             state,
             contacts,
-            collision_pipeline,
+            _collision_pipeline,
             world,
             bodies,
             shape_body,
@@ -470,7 +470,7 @@ class TestKinematicNewtonCollisionPipeline(unittest.TestCase):
                 bq[kine_id] = (x, 0.0, radius, 0.0, 0.0, 0.0, 1.0)
                 state.body_q.assign(bq)
             sync_dynamic_to_phx()
-            model.collide(state, contacts=contacts, collision_pipeline=collision_pipeline)
+            model.collide(state, contacts)
             world.step(dt=dt, contacts=contacts, shape_body=shape_body)
             # Pull the dynamic body's pose back to host for assertions
             # via the PhoenX-side container (which the solver wrote).
