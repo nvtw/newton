@@ -528,6 +528,26 @@ _OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axi
 _OFF_ACC_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_drive"))
 _OFF_ACC_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_limit"))
 
+# Hard-joint bias is a drift-recovery velocity. Cap it so a disturbed
+# articulation cannot turn large drift into unbounded solver energy.
+_MAX_LINEAR_BIAS = wp.constant(wp.float32(50.0))
+_MAX_ANGULAR_BIAS = wp.constant(wp.float32(100.0))
+
+
+@wp.func
+def _clamp_scalar_bias(v: wp.float32, max_abs: wp.float32) -> wp.float32:
+    return wp.clamp(v, -max_abs, max_abs)
+
+
+@wp.func
+def _clamp_vec_bias(v: wp.vec3f, max_len: wp.float32) -> wp.vec3f:
+    len_sq = wp.dot(v, v)
+    max_sq = max_len * max_len
+    if len_sq > max_sq:
+        return v * (max_len / wp.sqrt(len_sq))
+    return v
+
+
 # Mutable ADBS accumulated impulses live in ConstraintContainer.multipliers.
 # The packed dword fields above remain compatibility padding for now; keeping
 # the sidecar lets iterate write lambdas without touching read-mostly prepared
@@ -1942,6 +1962,7 @@ def _axial_drive_limit_prepare_at(
     dt: wp.float32,
     drive_boost: wp.float32,
     limit_boost: wp.float32,
+    max_bias: wp.float32,
 ) -> wp.float32:
     """Shared drive + limit prepare for the axial scalar row.
 
@@ -1994,7 +2015,7 @@ def _axial_drive_limit_prepare_at(
         gamma_drive = wp.float32(0.0)
         bias_drive = wp.float32(0.0)
         eff_mass_drive_soft = wp.float32(0.0)
-    bias_drive = bias_drive - target_velocity
+    bias_drive = _clamp_scalar_bias(bias_drive, max_bias) - target_velocity
     write_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid, gamma_drive)
     write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, eff_mass_drive_soft)
     write_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid, bias_drive)
@@ -2020,11 +2041,12 @@ def _axial_drive_limit_prepare_at(
             stiffness_limit, damping_limit, limit_C, eff_inv, dt, limit_boost
         )
         write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
-        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
+        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, _clamp_scalar_bias(pd_beta_limit, max_bias))
         write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
     else:
         br_limit, mc_limit, ic_limit = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
-        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
+        limit_bias = _clamp_scalar_bias(-limit_C * br_limit, max_bias)
+        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, limit_bias)
         write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
         write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
 
@@ -2304,7 +2326,7 @@ def _planar_prepare_at(
     # t1, t2 (the angular constraint axes). At init the relative
     # orientation is identity so this term starts at zero.
     drift1 = p1_b2 - p1_b1
-    bias_lin_n = wp.dot(n_hat, drift1) * bias_rate
+    bias_lin_n = _clamp_scalar_bias(wp.dot(n_hat, drift1) * bias_rate, _MAX_LINEAR_BIAS)
     # n_hat in body 2's frame (after rotation drift).
     n_hat_body2 = la2_b2 - la1_b2
     n_hat_body2_len2 = wp.dot(n_hat_body2, n_hat_body2)
@@ -2316,8 +2338,8 @@ def _planar_prepare_at(
     # body 2's n_hat to body 1's n_hat. Projected onto t1, t2 it is the
     # small-angle "pitch / roll" drift.
     ang_drift = wp.cross(n_hat_2_world, n_hat)
-    bias_ang_t1 = wp.dot(t1, ang_drift) * bias_rate
-    bias_ang_t2 = wp.dot(t2, ang_drift) * bias_rate
+    bias_ang_t1 = _clamp_scalar_bias(wp.dot(t1, ang_drift) * bias_rate, _MAX_ANGULAR_BIAS)
+    bias_ang_t2 = _clamp_scalar_bias(wp.dot(t2, ang_drift) * bias_rate, _MAX_ANGULAR_BIAS)
     write_vec3(constraints, base_offset + _OFF_BIAS1, cid, wp.vec3f(bias_lin_n, bias_ang_t1, bias_ang_t2))
 
     # Warm-start: ``acc_imp1`` stores the linear impulse along n_hat,
@@ -2489,7 +2511,7 @@ def _cable_prepare_at(
     bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
-    bias1 = (p1_b2 - p1_b1) * bias_rate
+    bias1 = _clamp_vec_bias((p1_b2 - p1_b1) * bias_rate, _MAX_LINEAR_BIAS)
     write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
 
     # ---- Anchor-2 tangent 2-row PD-soft block (bend, k_bend, d_bend) -
@@ -2890,25 +2912,37 @@ def _box2d_pivot_slide_prepare_at(
     # ---- Biases (drift correction) -----------------------------------
     if has_anchor1_only:
         # 3-vec drift correction at anchor-1.
-        bias1 = (p1_b2 - p1_b1) * bias_rate
+        bias1 = _clamp_vec_bias((p1_b2 - p1_b1) * bias_rate, _MAX_LINEAR_BIAS)
         write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
     if has_schur_3plus2:
-        bias1 = (p1_b2 - p1_b1) * bias_rate
+        bias1 = _clamp_vec_bias((p1_b2 - p1_b1) * bias_rate, _MAX_LINEAR_BIAS)
         drift2 = p2_b2 - p2_b1
-        bias2 = wp.vec3f(wp.dot(t1, drift2) * bias_rate, wp.dot(t2, drift2) * bias_rate, 0.0)
+        bias2 = wp.vec3f(
+            _clamp_scalar_bias(wp.dot(t1, drift2) * bias_rate, _MAX_LINEAR_BIAS),
+            _clamp_scalar_bias(wp.dot(t2, drift2) * bias_rate, _MAX_LINEAR_BIAS),
+            0.0,
+        )
         write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
         write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias2)
     if has_tangent_4row:
         # PRISMATIC / CYLINDRICAL: tangent drift at both anchors.
         drift1 = p1_b2 - p1_b1
         drift2 = p2_b2 - p2_b1
-        bias1 = wp.vec3f(wp.dot(t1, drift1) * bias_rate, wp.dot(t2, drift1) * bias_rate, 0.0)
-        bias2 = wp.vec3f(wp.dot(t1, drift2) * bias_rate, wp.dot(t2, drift2) * bias_rate, 0.0)
+        bias1 = wp.vec3f(
+            _clamp_scalar_bias(wp.dot(t1, drift1) * bias_rate, _MAX_LINEAR_BIAS),
+            _clamp_scalar_bias(wp.dot(t2, drift1) * bias_rate, _MAX_LINEAR_BIAS),
+            0.0,
+        )
+        bias2 = wp.vec3f(
+            _clamp_scalar_bias(wp.dot(t1, drift2) * bias_rate, _MAX_LINEAR_BIAS),
+            _clamp_scalar_bias(wp.dot(t2, drift2) * bias_rate, _MAX_LINEAR_BIAS),
+            0.0,
+        )
         write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
         write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias2)
     if has_anchor3:
         drift3 = p3_b2 - p3_b1
-        bias3 = wp.dot(t2, drift3) * bias_rate
+        bias3 = _clamp_scalar_bias(wp.dot(t2, drift3) * bias_rate, _MAX_LINEAR_BIAS)
         write_float(constraints, base_offset + _OFF_BIAS3, cid, bias3)
 
     # ---- Warm-start application + re-projection ----------------------
@@ -3039,6 +3073,7 @@ def _box2d_pivot_slide_prepare_at(
             dt,
             drive_boost,
             limit_boost,
+            _MAX_ANGULAR_BIAS if has_angular_axial else _MAX_LINEAR_BIAS,
         )
         if has_angular_axial:
             # Pure couple about n_hat.
