@@ -1040,7 +1040,7 @@ def _make_contact_iterate_at(
                 bias_t2_val = cc_get_bias_t2(cc, k)
             is_speculative = speculative_bias > wp.float32(0.0)
             if wp.static(not use_bias):
-                if is_speculative and contact_count == wp.int32(1):
+                if is_speculative:
                     continue
                 bias_val = wp.float32(0.0)
 

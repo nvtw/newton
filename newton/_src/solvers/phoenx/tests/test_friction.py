@@ -228,7 +228,7 @@ class TestStaticFrictionThreshold(unittest.TestCase):
         x, _vx = self._run_mu(0.1)
         self.assertGreater(x, 1.0, f"mu=0.1 cube only reached x={x:.4f} m")
 
-    def test_positive_gap_static_friction_holds_loaded_contact(self) -> None:
+    def test_static_friction_holds_with_default_detection_gap(self) -> None:
         for layout in STEP_LAYOUTS:
             with self.subTest(step_layout=layout):
                 scene = _PhoenXScene(
@@ -254,12 +254,11 @@ class TestStaticFrictionThreshold(unittest.TestCase):
 
                 n = int(scene.contacts.rigid_contact_count.numpy()[0])
                 self.assertGreater(n, 0)
-                bias = scene.world._contact_container.derived.numpy()[3, :n]
-                self.assertTrue(np.any(bias > 0.0), "expected positive-gap contact rows")
-                x = float(scene.body_position(box)[0])
+                pos = scene.body_position(box)
                 vx = float(scene.body_velocity(box)[0])
-                self.assertLess(abs(x), 0.003, f"positive-gap static contact slipped to x={x:.4f} m")
-                self.assertLess(abs(vx), 0.02, f"positive-gap static contact has vx={vx:.4f} m/s")
+                self.assertAlmostEqual(float(pos[2]), he, delta=0.01)
+                self.assertLess(abs(float(pos[0])), 0.003, f"static contact slipped to x={pos[0]:.4f} m")
+                self.assertLess(abs(vx), 0.02, f"static contact has vx={vx:.4f} m/s")
 
 
 # ---------------------------------------------------------------------------

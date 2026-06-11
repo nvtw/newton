@@ -28,9 +28,11 @@ from newton._src.solvers.phoenx.tests._test_helpers import run_solver_capture_lo
 GRAVITY = 9.81
 
 
-def _make_box_model(*, box_z: float = 0.5, mu: float = 0.5) -> newton.Model:
+def _make_box_model(*, box_z: float = 0.5, mu: float = 0.5, rigid_gap: float | None = None) -> newton.Model:
     """Dynamic unit-mass cube + ground plane. No joints."""
     mb = newton.ModelBuilder()
+    if rigid_gap is not None:
+        mb.rigid_gap = rigid_gap
     mb.add_ground_plane()
     body = mb.add_body(
         xform=wp.transform(p=wp.vec3(0.0, 0.0, box_z), q=wp.quat_identity()),
@@ -191,6 +193,39 @@ class TestSolverPhoenX(unittest.TestCase):
             msg=f"cube COM z = {com_z:.3f} m, expected ~0.1",
         )
         self.assertLess(speed, 0.1, msg=f"cube still moving: |v|={speed:.3f}")
+
+    def test_contact_gap_is_detection_only(self) -> None:
+        heights: dict[float, float] = {}
+        for rigid_gap in (0.0, 0.1):
+            with self.subTest(rigid_gap=rigid_gap):
+                model = _make_box_model(box_z=0.5, mu=0.5, rigid_gap=rigid_gap)
+                self.assertTrue(np.allclose(model.shape_gap.numpy(), rigid_gap))
+
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    substeps=8,
+                    solver_iterations=16,
+                    velocity_iterations=1,
+                    prepare_refresh_stride=1,
+                )
+                state_0 = model.state()
+                state_1 = model.state()
+                control = model.control()
+                collision_pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+                contacts = model.contacts(collision_pipeline=collision_pipeline)
+
+                dt = 1.0 / 60.0
+                state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
+
+                body_q = state_0.body_q.numpy()
+                body_qd = state_0.body_qd.numpy()
+                com_z = float(body_q[0, 2])
+                speed = float(np.linalg.norm(body_qd[0, :3]))
+                heights[rigid_gap] = com_z
+                self.assertAlmostEqual(com_z, 0.1, delta=0.005)
+                self.assertLess(speed, 0.02)
+
+        self.assertLess(abs(heights[0.1] - heights[0.0]), 0.002)
 
     def test_box_margins_set_rest_distance(self) -> None:
         margin = 0.03
