@@ -20,6 +20,11 @@ from newton._src.solvers.phoenx.body import (
     BodyContainer,
     body_set_access_mode,
 )
+from newton._src.solvers.phoenx.cloth_collision import (
+    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
+    SHAPE_ENDPOINT_KIND_RIGID,
+    SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
+)
 from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
     ADBS_TIME_US_OFFSET,
     actuated_double_ball_socket_cached_warmstart,
@@ -2128,6 +2133,195 @@ def _contact_soft_tet_active_nodes(
     return use0, use1, use2, use3
 
 
+@wp.func
+def _rigid_graph_node(node: wp.int32, bodies: BodyContainer):
+    if node >= 0 and bodies.inverse_mass[node] == 0.0:
+        node = -1
+    return node
+
+
+@wp.func
+def _particle_graph_node(node: wp.int32, particles: ParticleContainer, num_bodies: wp.int32):
+    if node >= num_bodies and particles.inverse_mass[node - num_bodies] == 0.0:
+        node = -1
+    return node
+
+
+@wp.func
+def _contact_primary_graph_node(
+    node: wp.int32,
+    side_kind: wp.int32,
+    use_node: wp.bool,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+):
+    if node >= 0:
+        if side_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON) and not use_node:
+            node = -1
+        elif side_kind == wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
+            if bodies.inverse_mass[node] == 0.0 and bodies.motion_type[node] != MOTION_KINEMATIC:
+                node = -1
+        else:
+            if particles.inverse_mass[node - num_bodies] == 0.0:
+                node = -1
+    return node
+
+
+@wp.func
+def _contact_extra_graph_nodes(
+    side_kind: wp.int32,
+    extra: wp.vec3i,
+    use1: wp.bool,
+    use2: wp.bool,
+    use3: wp.bool,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+):
+    e0 = wp.int32(-1)
+    e1 = wp.int32(-1)
+    e2 = wp.int32(-1)
+    if side_kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
+        e0 = _particle_graph_node(extra[0], particles, num_bodies)
+        e1 = _particle_graph_node(extra[1], particles, num_bodies)
+    elif side_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        if use1:
+            e0 = extra[0]
+        if use2:
+            e1 = extra[1]
+        if use3:
+            e2 = extra[2]
+        e0 = _particle_graph_node(e0, particles, num_bodies)
+        e1 = _particle_graph_node(e1, particles, num_bodies)
+        e2 = _particle_graph_node(e2, particles, num_bodies)
+    return e0, e1, e2
+
+
+@wp.func
+def _element_data_compact2(v0: wp.int32, v1: wp.int32):
+    s0 = wp.int32(-1)
+    s1 = wp.int32(-1)
+    if v0 >= 0:
+        s0 = v0
+    if v1 >= 0:
+        if s0 < 0:
+            s0 = v1
+        else:
+            s1 = v1
+    return element_interaction_data_make(s0, s1, -1, -1, -1, -1, -1, -1)
+
+
+@wp.func
+def _element_data_compact3(v0: wp.int32, v1: wp.int32, v2: wp.int32):
+    s0 = wp.int32(-1)
+    s1 = wp.int32(-1)
+    s2 = wp.int32(-1)
+    cnt = wp.int32(0)
+    for cand in range(3):
+        v = v0
+        if cand == 1:
+            v = v1
+        elif cand == 2:
+            v = v2
+        if v < 0:
+            continue
+        if cnt == 0:
+            s0 = v
+        elif cnt == 1:
+            s1 = v
+        else:
+            s2 = v
+        cnt = cnt + 1
+    return element_interaction_data_make(s0, s1, s2, -1, -1, -1, -1, -1)
+
+
+@wp.func
+def _element_data_compact4(v0: wp.int32, v1: wp.int32, v2: wp.int32, v3: wp.int32):
+    s0 = wp.int32(-1)
+    s1 = wp.int32(-1)
+    s2 = wp.int32(-1)
+    s3 = wp.int32(-1)
+    cnt = wp.int32(0)
+    for cand in range(4):
+        v = v0
+        if cand == 1:
+            v = v1
+        elif cand == 2:
+            v = v2
+        elif cand == 3:
+            v = v3
+        if v < 0:
+            continue
+        if cnt == 0:
+            s0 = v
+        elif cnt == 1:
+            s1 = v
+        elif cnt == 2:
+            s2 = v
+        else:
+            s3 = v
+        cnt = cnt + 1
+    return element_interaction_data_make(s0, s1, s2, s3, -1, -1, -1, -1)
+
+
+@wp.func
+def _element_data_compact8(
+    v0: wp.int32,
+    v1: wp.int32,
+    v2: wp.int32,
+    v3: wp.int32,
+    v4: wp.int32,
+    v5: wp.int32,
+    v6: wp.int32,
+    v7: wp.int32,
+):
+    s0 = wp.int32(-1)
+    s1 = wp.int32(-1)
+    s2 = wp.int32(-1)
+    s3 = wp.int32(-1)
+    s4 = wp.int32(-1)
+    s5 = wp.int32(-1)
+    s6 = wp.int32(-1)
+    s7 = wp.int32(-1)
+    cnt = wp.int32(0)
+    for cand in range(8):
+        v = v0
+        if cand == 1:
+            v = v1
+        elif cand == 2:
+            v = v2
+        elif cand == 3:
+            v = v3
+        elif cand == 4:
+            v = v4
+        elif cand == 5:
+            v = v5
+        elif cand == 6:
+            v = v6
+        elif cand == 7:
+            v = v7
+        if v < 0:
+            continue
+        if cnt == 0:
+            s0 = v
+        elif cnt == 1:
+            s1 = v
+        elif cnt == 2:
+            s2 = v
+        elif cnt == 3:
+            s3 = v
+        elif cnt == 4:
+            s4 = v
+        elif cnt == 5:
+            s5 = v
+        elif cnt == 6:
+            s6 = v
+        else:
+            s7 = v
+        cnt = cnt + 1
+    return element_interaction_data_make(s0, s1, s2, s3, s4, s5, s6, s7)
+
+
 @wp.kernel(enable_backward=False, module="unique")
 def _constraints_to_elements_kernel(
     constraints: ConstraintContainer,
@@ -2164,15 +2358,9 @@ def _constraints_to_elements_kernel(
         element_family[tid] = wp.int32(0)
         b1 = constraint_get_body1(constraints, tid)
         b2 = constraint_get_body2(constraints, tid)
-        if b1 >= 0 and bodies.inverse_mass[b1] == 0.0:
-            b1 = -1
-        if b2 >= 0 and bodies.inverse_mass[b2] == 0.0:
-            b2 = -1
-        # Adjacency loop stops on the first -1, so compact non-negative ids first.
-        if b1 < 0 and b2 >= 0:
-            b1 = b2
-            b2 = -1
-        elements[tid] = element_interaction_data_make(b1, b2, -1, -1, -1, -1, -1, -1)
+        b1 = _rigid_graph_node(b1, bodies)
+        b2 = _rigid_graph_node(b2, bodies)
+        elements[tid] = _element_data_compact2(b1, b2)
         return
     if tid < num_joints + num_cloth_triangles:
         element_family[tid] = wp.int32(2)
@@ -2183,31 +2371,10 @@ def _constraints_to_elements_kernel(
         b1 = constraint_get_body1(constraints, tid)
         b2 = constraint_get_body2(constraints, tid)
         b3 = read_int(constraints, _CLOTH_TRIANGLE_OFF_BODY3, tid)
-        if b1 >= num_bodies and particles.inverse_mass[b1 - num_bodies] == 0.0:
-            b1 = -1
-        if b2 >= num_bodies and particles.inverse_mass[b2 - num_bodies] == 0.0:
-            b2 = -1
-        if b3 >= num_bodies and particles.inverse_mass[b3 - num_bodies] == 0.0:
-            b3 = -1
-        # Compact: drop -1s so the adjacency loop sees a contiguous prefix.
-        slot0 = wp.int32(-1)
-        slot1 = wp.int32(-1)
-        slot2 = wp.int32(-1)
-        if b1 >= 0:
-            slot0 = b1
-        for cand in range(2):
-            v = b2
-            if cand == 1:
-                v = b3
-            if v < 0:
-                continue
-            if slot0 < 0:
-                slot0 = v
-            elif slot1 < 0:
-                slot1 = v
-            else:
-                slot2 = v
-        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, -1, -1, -1, -1, -1)
+        b1 = _particle_graph_node(b1, particles, num_bodies)
+        b2 = _particle_graph_node(b2, particles, num_bodies)
+        b3 = _particle_graph_node(b3, particles, num_bodies)
+        elements[tid] = _element_data_compact3(b1, b2, b3)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending:
         element_family[tid] = wp.int32(3)
@@ -2217,37 +2384,11 @@ def _constraints_to_elements_kernel(
         b2 = constraint_get_body2(constraints, tid)
         b3 = read_int(constraints, _CLOTH_BENDING_OFF_BODY3, tid)
         b4 = read_int(constraints, _CLOTH_BENDING_OFF_BODY4, tid)
-        if b1 >= num_bodies and particles.inverse_mass[b1 - num_bodies] == 0.0:
-            b1 = -1
-        if b2 >= num_bodies and particles.inverse_mass[b2 - num_bodies] == 0.0:
-            b2 = -1
-        if b3 >= num_bodies and particles.inverse_mass[b3 - num_bodies] == 0.0:
-            b3 = -1
-        if b4 >= num_bodies and particles.inverse_mass[b4 - num_bodies] == 0.0:
-            b4 = -1
-        slot0 = wp.int32(-1)
-        slot1 = wp.int32(-1)
-        slot2 = wp.int32(-1)
-        slot3 = wp.int32(-1)
-        if b1 >= 0:
-            slot0 = b1
-        for cand in range(3):
-            v = b2
-            if cand == 1:
-                v = b3
-            elif cand == 2:
-                v = b4
-            if v < 0:
-                continue
-            if slot0 < 0:
-                slot0 = v
-            elif slot1 < 0:
-                slot1 = v
-            elif slot2 < 0:
-                slot2 = v
-            else:
-                slot3 = v
-        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
+        b1 = _particle_graph_node(b1, particles, num_bodies)
+        b2 = _particle_graph_node(b2, particles, num_bodies)
+        b3 = _particle_graph_node(b3, particles, num_bodies)
+        b4 = _particle_graph_node(b4, particles, num_bodies)
+        elements[tid] = _element_data_compact4(b1, b2, b3, b4)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra:
         element_family[tid] = wp.int32(4)
@@ -2259,38 +2400,11 @@ def _constraints_to_elements_kernel(
         b2 = constraint_get_body2(constraints, tid)
         b3 = read_int(constraints, _SOFT_TET_OFF_BODY3, tid)
         b4 = read_int(constraints, _SOFT_TET_OFF_BODY4, tid)
-        if b1 >= num_bodies and particles.inverse_mass[b1 - num_bodies] == 0.0:
-            b1 = -1
-        if b2 >= num_bodies and particles.inverse_mass[b2 - num_bodies] == 0.0:
-            b2 = -1
-        if b3 >= num_bodies and particles.inverse_mass[b3 - num_bodies] == 0.0:
-            b3 = -1
-        if b4 >= num_bodies and particles.inverse_mass[b4 - num_bodies] == 0.0:
-            b4 = -1
-        # Compact: drop -1s so the adjacency loop sees a contiguous prefix.
-        slot0 = wp.int32(-1)
-        slot1 = wp.int32(-1)
-        slot2 = wp.int32(-1)
-        slot3 = wp.int32(-1)
-        if b1 >= 0:
-            slot0 = b1
-        for cand in range(3):
-            v = b2
-            if cand == 1:
-                v = b3
-            elif cand == 2:
-                v = b4
-            if v < 0:
-                continue
-            if slot0 < 0:
-                slot0 = v
-            elif slot1 < 0:
-                slot1 = v
-            elif slot2 < 0:
-                slot2 = v
-            else:
-                slot3 = v
-        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, -1, -1, -1, -1)
+        b1 = _particle_graph_node(b1, particles, num_bodies)
+        b2 = _particle_graph_node(b2, particles, num_bodies)
+        b3 = _particle_graph_node(b3, particles, num_bodies)
+        b4 = _particle_graph_node(b4, particles, num_bodies)
+        elements[tid] = _element_data_compact4(b1, b2, b3, b4)
         return
     if tid < num_joints + num_cloth_triangles + num_cloth_bending + num_soft_tetrahedra + num_soft_hexahedra:
         element_family[tid] = wp.int32(5)
@@ -2307,65 +2421,15 @@ def _constraints_to_elements_kernel(
         h5 = read_int(constraints, _SOFT_HEX_OFF_BODY6, tid)
         h6 = read_int(constraints, _SOFT_HEX_OFF_BODY7, tid)
         h7 = read_int(constraints, _SOFT_HEX_OFF_BODY8, tid)
-        if h0 >= num_bodies and particles.inverse_mass[h0 - num_bodies] == 0.0:
-            h0 = -1
-        if h1 >= num_bodies and particles.inverse_mass[h1 - num_bodies] == 0.0:
-            h1 = -1
-        if h2 >= num_bodies and particles.inverse_mass[h2 - num_bodies] == 0.0:
-            h2 = -1
-        if h3 >= num_bodies and particles.inverse_mass[h3 - num_bodies] == 0.0:
-            h3 = -1
-        if h4 >= num_bodies and particles.inverse_mass[h4 - num_bodies] == 0.0:
-            h4 = -1
-        if h5 >= num_bodies and particles.inverse_mass[h5 - num_bodies] == 0.0:
-            h5 = -1
-        if h6 >= num_bodies and particles.inverse_mass[h6 - num_bodies] == 0.0:
-            h6 = -1
-        if h7 >= num_bodies and particles.inverse_mass[h7 - num_bodies] == 0.0:
-            h7 = -1
-        slot0 = wp.int32(-1)
-        slot1 = wp.int32(-1)
-        slot2 = wp.int32(-1)
-        slot3 = wp.int32(-1)
-        slot4 = wp.int32(-1)
-        slot5 = wp.int32(-1)
-        slot6 = wp.int32(-1)
-        slot7 = wp.int32(-1)
-        if h0 >= 0:
-            slot0 = h0
-        for cand in range(7):
-            v = h1
-            if cand == 1:
-                v = h2
-            elif cand == 2:
-                v = h3
-            elif cand == 3:
-                v = h4
-            elif cand == 4:
-                v = h5
-            elif cand == 5:
-                v = h6
-            elif cand == 6:
-                v = h7
-            if v < 0:
-                continue
-            if slot0 < 0:
-                slot0 = v
-            elif slot1 < 0:
-                slot1 = v
-            elif slot2 < 0:
-                slot2 = v
-            elif slot3 < 0:
-                slot3 = v
-            elif slot4 < 0:
-                slot4 = v
-            elif slot5 < 0:
-                slot5 = v
-            elif slot6 < 0:
-                slot6 = v
-            else:
-                slot7 = v
-        elements[tid] = element_interaction_data_make(slot0, slot1, slot2, slot3, slot4, slot5, slot6, slot7)
+        h0 = _particle_graph_node(h0, particles, num_bodies)
+        h1 = _particle_graph_node(h1, particles, num_bodies)
+        h2 = _particle_graph_node(h2, particles, num_bodies)
+        h3 = _particle_graph_node(h3, particles, num_bodies)
+        h4 = _particle_graph_node(h4, particles, num_bodies)
+        h5 = _particle_graph_node(h5, particles, num_bodies)
+        h6 = _particle_graph_node(h6, particles, num_bodies)
+        h7 = _particle_graph_node(h7, particles, num_bodies)
+        elements[tid] = _element_data_compact8(h0, h1, h2, h3, h4, h5, h6, h7)
         return
     local_cid = tid - num_joints - num_cloth_triangles - num_cloth_bending - num_soft_tetrahedra - num_soft_hexahedra
     element_family[tid] = wp.int32(1)
@@ -2407,126 +2471,24 @@ def _constraints_to_elements_kernel(
     # contacts and wake the impacted island (e.g. a camera collider
     # moving into a sleeping stack). Pure STATIC bodies still
     # collapse to -1.
-    if b1 >= 0:
-        if side0_kind == wp.int32(2) and not side0_use0:
-            b1 = -1
-        elif side0_kind == wp.int32(0):
-            if bodies.inverse_mass[b1] == 0.0 and bodies.motion_type[b1] != MOTION_KINEMATIC:
-                b1 = -1
-        else:
-            if particles.inverse_mass[b1 - num_bodies] == 0.0:
-                b1 = -1
-    if b2 >= 0:
-        if side1_kind == wp.int32(2) and not side1_use0:
-            b2 = -1
-        elif side1_kind == wp.int32(0):
-            if bodies.inverse_mass[b2] == 0.0 and bodies.motion_type[b2] != MOTION_KINEMATIC:
-                b2 = -1
-        else:
-            if particles.inverse_mass[b2 - num_bodies] == 0.0:
-                b2 = -1
+    b1 = _contact_primary_graph_node(b1, side0_kind, side0_use0, bodies, particles, num_bodies)
+    b2 = _contact_primary_graph_node(b2, side1_kind, side1_use0, bodies, particles, num_bodies)
 
     # Resolve up to three extra nodes per side. Rigid sides leave all
     # extras at -1; cloth-tri sides populate two; soft-tet sides populate
     # only the nonzero-barycentric nodes the iterate can read or write.
-    e0a = wp.int32(-1)
-    e0b = wp.int32(-1)
-    e0c = wp.int32(-1)
-    if side0_kind == wp.int32(1):  # CLOTH_TRIANGLE
-        e0a = side0_extra[0]
-        e0b = side0_extra[1]
-        if e0a >= 0 and particles.inverse_mass[e0a - num_bodies] == 0.0:
-            e0a = -1
-        if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
-            e0b = -1
-    elif side0_kind == wp.int32(2):  # SOFT_TETRAHEDRON
-        if side0_use1:
-            e0a = side0_extra[0]
-        if side0_use2:
-            e0b = side0_extra[1]
-        if side0_use3:
-            e0c = side0_extra[2]
-        if e0a >= 0 and particles.inverse_mass[e0a - num_bodies] == 0.0:
-            e0a = -1
-        if e0b >= 0 and particles.inverse_mass[e0b - num_bodies] == 0.0:
-            e0b = -1
-        if e0c >= 0 and particles.inverse_mass[e0c - num_bodies] == 0.0:
-            e0c = -1
-    e1a = wp.int32(-1)
-    e1b = wp.int32(-1)
-    e1c = wp.int32(-1)
-    if side1_kind == wp.int32(1):  # CLOTH_TRIANGLE
-        e1a = side1_extra[0]
-        e1b = side1_extra[1]
-        if e1a >= 0 and particles.inverse_mass[e1a - num_bodies] == 0.0:
-            e1a = -1
-        if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
-            e1b = -1
-    elif side1_kind == wp.int32(2):  # SOFT_TETRAHEDRON
-        if side1_use1:
-            e1a = side1_extra[0]
-        if side1_use2:
-            e1b = side1_extra[1]
-        if side1_use3:
-            e1c = side1_extra[2]
-        if e1a >= 0 and particles.inverse_mass[e1a - num_bodies] == 0.0:
-            e1a = -1
-        if e1b >= 0 and particles.inverse_mass[e1b - num_bodies] == 0.0:
-            e1b = -1
-        if e1c >= 0 and particles.inverse_mass[e1c - num_bodies] == 0.0:
-            e1c = -1
+    e0a, e0b, e0c = _contact_extra_graph_nodes(
+        side0_kind, side0_extra, side0_use1, side0_use2, side0_use3, particles, num_bodies
+    )
+    e1a, e1b, e1c = _contact_extra_graph_nodes(
+        side1_kind, side1_extra, side1_use1, side1_use2, side1_use3, particles, num_bodies
+    )
 
     # Compact: drop -1s into a contiguous prefix (the partitioner's
     # adjacency loop stops on the first -1). Up to 8 nodes per contact:
     # tet-tet = 4+4; tet-cloth = 4+3; tet-rigid = 4+1; cloth-cloth =
     # 3+3; cloth-rigid = 3+1; rigid-rigid = 1+1.
-    s0 = wp.int32(-1)
-    s1 = wp.int32(-1)
-    s2 = wp.int32(-1)
-    s3 = wp.int32(-1)
-    s4 = wp.int32(-1)
-    s5 = wp.int32(-1)
-    s6 = wp.int32(-1)
-    s7 = wp.int32(-1)
-    cnt = wp.int32(0)
-    for cand in range(8):
-        v = wp.int32(-1)
-        if cand == 0:
-            v = b1
-        elif cand == 1:
-            v = b2
-        elif cand == 2:
-            v = e0a
-        elif cand == 3:
-            v = e0b
-        elif cand == 4:
-            v = e0c
-        elif cand == 5:
-            v = e1a
-        elif cand == 6:
-            v = e1b
-        else:
-            v = e1c
-        if v < 0:
-            continue
-        if cnt == 0:
-            s0 = v
-        elif cnt == 1:
-            s1 = v
-        elif cnt == 2:
-            s2 = v
-        elif cnt == 3:
-            s3 = v
-        elif cnt == 4:
-            s4 = v
-        elif cnt == 5:
-            s5 = v
-        elif cnt == 6:
-            s6 = v
-        else:
-            s7 = v
-        cnt = cnt + 1
-    elements[tid] = element_interaction_data_make(s0, s1, s2, s3, s4, s5, s6, s7)
+    elements[tid] = _element_data_compact8(b1, b2, e0a, e0b, e0c, e1a, e1b, e1c)
 
 
 @wp.kernel(enable_backward=False)
