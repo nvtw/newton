@@ -102,6 +102,12 @@ class AdbsInitArrays:
         damping_limit: wp.array,
         armature: wp.array,
         friction_coefficient: wp.array,
+        d6_limit_axis0: wp.array,
+        d6_limit_axis1: wp.array,
+        d6_limit_axis2: wp.array,
+        d6_limit_lower: wp.array,
+        d6_limit_upper: wp.array,
+        d6_limit_count: wp.array,
         joint_idx_to_cid: wp.array,
         joint_idx_to_dof_start: wp.array,
         joint_q_at_init: wp.array,
@@ -133,6 +139,12 @@ class AdbsInitArrays:
         self.damping_limit = damping_limit
         self.armature = armature
         self.friction_coefficient = friction_coefficient
+        self.d6_limit_axis0 = d6_limit_axis0
+        self.d6_limit_axis1 = d6_limit_axis1
+        self.d6_limit_axis2 = d6_limit_axis2
+        self.d6_limit_lower = d6_limit_lower
+        self.d6_limit_upper = d6_limit_upper
+        self.d6_limit_count = d6_limit_count
         self.joint_idx_to_cid = joint_idx_to_cid
         self.joint_idx_to_dof_start = joint_idx_to_dof_start
         #: Per-ADBS-column initial Newton joint coordinate. PhoenX measures
@@ -174,6 +186,12 @@ class AdbsInitArrays:
             "damping_limit": self.damping_limit,
             "armature": self.armature,
             "friction_coefficient": self.friction_coefficient,
+            "d6_limit_axis0": self.d6_limit_axis0,
+            "d6_limit_axis1": self.d6_limit_axis1,
+            "d6_limit_axis2": self.d6_limit_axis2,
+            "d6_limit_lower": self.d6_limit_lower,
+            "d6_limit_upper": self.d6_limit_upper,
+            "d6_limit_count": self.d6_limit_count,
         }
 
 
@@ -326,6 +344,12 @@ def build_adbs_init_arrays(
             damping_limit=empty_f,
             armature=empty_f,
             friction_coefficient=empty_f,
+            d6_limit_axis0=empty_v,
+            d6_limit_axis1=empty_v,
+            d6_limit_axis2=empty_v,
+            d6_limit_lower=empty_v,
+            d6_limit_upper=empty_v,
+            d6_limit_count=empty_i,
             joint_idx_to_cid=joint_idx_to_cid,
             joint_idx_to_dof_start=joint_idx_to_dof_start,
             joint_q_at_init=empty_f,
@@ -522,6 +546,10 @@ def build_adbs_init_arrays(
         armature_val = 0.0
         # Coulomb friction on the axial DoF (revolute / prismatic only).
         friction_val = 0.0
+        d6_limit_axes = [np.zeros(3, dtype=np.float32) for _ in range(3)]
+        d6_limit_lower = np.zeros(3, dtype=np.float32)
+        d6_limit_upper = np.zeros(3, dtype=np.float32)
+        d6_limit_count = 0
 
         def _max_joint_damping(dof_indices):
             if joint_damping is None:
@@ -533,6 +561,43 @@ def build_adbs_init_arrays(
                     if raw > damping and np.isfinite(raw):
                         damping = raw
             return damping
+
+        def _append_d6_angular_limit(
+            qd: int,
+            coord_offset: int,
+            *,
+            x_w_p=X_w_p,
+            joint_index=j,
+            axes=d6_limit_axes,
+            lower_out=d6_limit_lower,
+            upper_out=d6_limit_upper,
+        ) -> None:
+            nonlocal d6_limit_count
+            if d6_limit_count >= 3 or limit_lower is None or limit_upper is None:
+                return
+            if qd < 0 or qd >= len(limit_lower) or qd >= len(limit_upper):
+                return
+            lo = float(limit_lower[qd])
+            hi = float(limit_upper[qd])
+            if not (np.isfinite(lo) and np.isfinite(hi) and lo <= hi):
+                return
+            if lo <= -2.0 * np.pi and hi >= 2.0 * np.pi:
+                return
+            axis_local = (
+                np.asarray(joint_axis[qd], dtype=np.float32)
+                if len(joint_axis)
+                else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+            )
+            axis_len = float(np.linalg.norm(axis_local))
+            if axis_len <= 1.0e-12:
+                return
+            axis_world = _quat_rotate_np(x_w_p[3:], axis_local / axis_len)
+            q_idx = int(joint_q_start[joint_index]) + coord_offset
+            init_axis_q = float(joint_q_arr[q_idx]) if len(joint_q_arr) > q_idx else 0.0
+            axes[d6_limit_count] = axis_world
+            lower_out[d6_limit_count] = lo - init_axis_q
+            upper_out[d6_limit_count] = hi - init_axis_q
+            d6_limit_count += 1
 
         # D6 dispatched modes share the per-mode setup with their native
         # counterparts -- the existing branches now fire for both. Routing
@@ -551,6 +616,9 @@ def build_adbs_init_arrays(
             phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
             if jtype is newton.JointType.D6:
                 damp_drive = _max_joint_damping(range(qd_start + n_lin, qd_start + n_lin + n_ang))
+                for ai in range(n_ang):
+                    if not locked_ang[ai]:
+                        _append_d6_angular_limit(qd_start + n_lin + ai, n_lin + ai)
             else:
                 n_ang_native = int(joint_dof_dim[j, 1]) if joint_dof_dim.shape[0] > j else 3
                 damp_drive = _max_joint_damping(range(qd_start, qd_start + max(1, n_ang_native)))
@@ -627,8 +695,13 @@ def build_adbs_init_arrays(
             max_val = 0.0
             hertz_limit_val = float(DEFAULT_HERTZ_LIMIT)
             if n_ang == 2 and d6_free_dof_offset < 0:
+                for ai in range(2):
+                    _append_d6_angular_limit(qd_start + ai, ai)
                 damp_drive = _max_joint_damping(range(qd_start, qd_start + 2))
             else:
+                for ai, locked in enumerate(locked_ang):
+                    if not locked:
+                        _append_d6_angular_limit(qd_start + n_lin + ai, n_lin + ai)
                 damp_drive = _max_joint_damping(
                     qd_start + n_lin + i for i, locked in enumerate(locked_ang) if not locked
                 )
@@ -802,6 +875,12 @@ def build_adbs_init_arrays(
                 "damping_limit": damp_limit,
                 "armature": armature_val,
                 "friction_coefficient": friction_val,
+                "d6_limit_axis0": d6_limit_axes[0],
+                "d6_limit_axis1": d6_limit_axes[1],
+                "d6_limit_axis2": d6_limit_axes[2],
+                "d6_limit_lower": d6_limit_lower,
+                "d6_limit_upper": d6_limit_upper,
+                "d6_limit_count": d6_limit_count,
                 "joint_q_at_init": init_q,
             }
         )
@@ -858,6 +937,12 @@ def build_adbs_init_arrays(
         damping_limit=_stack_f("damping_limit"),
         armature=_stack_f("armature"),
         friction_coefficient=_stack_f("friction_coefficient"),
+        d6_limit_axis0=_stack_v("d6_limit_axis0"),
+        d6_limit_axis1=_stack_v("d6_limit_axis1"),
+        d6_limit_axis2=_stack_v("d6_limit_axis2"),
+        d6_limit_lower=_stack_v("d6_limit_lower"),
+        d6_limit_upper=_stack_v("d6_limit_upper"),
+        d6_limit_count=_stack_i("d6_limit_count"),
         joint_idx_to_cid=wp.array(joint_idx_to_cid_np, dtype=wp.int32, device=device),
         joint_idx_to_dof_start=wp.array(joint_idx_to_dof_start_np, dtype=wp.int32, device=device),
         joint_q_at_init=_stack_f("joint_q_at_init"),

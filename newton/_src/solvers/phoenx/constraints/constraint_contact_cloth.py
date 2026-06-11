@@ -596,8 +596,8 @@ def _make_contact_prepare_for_iteration_at(
                     drift_t1_raw = wp.dot(p_diff, t1_dir)
                     drift_t2_raw = wp.dot(p_diff, t2_dir)
 
-            if effective_gap > wp.float32(0.0):
-                # Speculative contacts are one-step normal velocity caps, not persistent manifolds.
+            if effective_gap > wp.float32(0.002):
+                # Far speculative rows are normal velocity caps, not manifolds.
                 cc_set_normal_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
@@ -1032,12 +1032,13 @@ def _make_contact_iterate_at(
             eff_t1 = cc_get_eff_t1(cc, k)
             eff_t2 = cc_get_eff_t2(cc, k)
             bias_val = cc_get_bias(cc, k)
+            speculative_bias = bias_val
             bias_t1_val = wp.float32(0.0)
             bias_t2_val = wp.float32(0.0)
             if wp.static(use_bias):
                 bias_t1_val = cc_get_bias_t1(cc, k)
                 bias_t2_val = cc_get_bias_t2(cc, k)
-            is_speculative = bias_val > wp.float32(0.0)
+            is_speculative = speculative_bias > wp.float32(0.0)
             if wp.static(not use_bias):
                 if is_speculative and contact_count == wp.int32(1):
                     continue
@@ -1057,8 +1058,12 @@ def _make_contact_iterate_at(
             if is_speculative:
                 mass_coeff_n = wp.float32(1.0)
                 impulse_coeff_n = wp.float32(0.0)
-                mu_s_eff = wp.float32(0.0)
-                mu_k_eff = wp.float32(0.0)
+                if speculative_bias <= idt * wp.float32(0.002):
+                    mu_s_eff = mu_s
+                    mu_k_eff = mu_k
+                else:
+                    mu_s_eff = wp.float32(0.0)
+                    mu_k_eff = wp.float32(0.0)
             elif wp.static(use_bias):
                 mass_coeff_n = mass_coeff
                 impulse_coeff_n = impulse_coeff

@@ -331,6 +331,24 @@ class TestD6Detection(unittest.TestCase):
         self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
         self.assertAlmostEqual(float(solver._adbs.damping_drive.numpy()[0]), 4.0)
 
+    def test_d6_universal_free_axis_limits_are_packed(self) -> None:
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
+        builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+        ang = [
+            newton.ModelBuilder.JointDofConfig(axis=(1, 0, 0), limit_lower=-0.25, limit_upper=0.30),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 1, 0), limit_lower=-1.0e6, limit_upper=1.0e6),
+        ]
+        j = builder.add_joint_d6(parent=-1, child=body, angular_axes=ang)
+        builder.add_articulation([j])
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
+        self.assertEqual(int(solver._adbs.d6_limit_count.numpy()[0]), 1)
+        np.testing.assert_allclose(solver._adbs.d6_limit_lower.numpy()[0], [-0.25, 0.0, 0.0], atol=1.0e-6)
+        np.testing.assert_allclose(solver._adbs.d6_limit_upper.numpy()[0], [0.30, 0.0, 0.0], atol=1.0e-6)
+
     def test_d6_revolute_pattern_dispatches_to_revolute(self) -> None:
         model = _build_d6_pendulum_revolute_equivalent(free_angular_index=1)
         self.assertEqual(self._adbs_mode_for(model), int(JOINT_MODE_REVOLUTE))
@@ -743,6 +761,53 @@ class TestD6Universal(unittest.TestCase):
             0.05,
             msg=f"twist about locked axis = {twist_angle:.4f} rad; should be ~0 (universal joint locks twist)",
         )
+
+    def test_universal_free_axis_limit_stops_rotation(self) -> None:
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        body = builder.add_link(
+            xform=wp.transform_identity(),
+            mass=1.0,
+            inertia=((1.0e-2, 0, 0), (0, 1.0e-2, 0), (0, 0, 1.0e-2)),
+        )
+        builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+        ang = [
+            newton.ModelBuilder.JointDofConfig(axis=(1, 0, 0), limit_lower=-0.25, limit_upper=0.25),
+            newton.ModelBuilder.JointDofConfig(axis=(0, 1, 0), limit_lower=-1.0e6, limit_upper=1.0e6),
+        ]
+        j = builder.add_joint_d6(parent=-1, child=body, angular_axes=ang)
+        builder.add_articulation([j])
+        model = builder.finalize()
+        model.set_gravity((0.0, 0.0, 0.0))
+
+        device = wp.get_device()
+        solver = newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=20)
+        s0 = model.state()
+        s1 = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+        body_qd = np.zeros((1, 6), dtype=np.float32)
+        body_qd[0, 3] = 4.0
+        s0.body_qd.assign(body_qd)
+        jq = wp.zeros(model.joint_coord_count, dtype=wp.float32, device=device)
+        jqd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=device)
+
+        def _frame() -> None:
+            s0.clear_forces()
+            solver.step(s0, s1, model.control(), None, _DT)
+            wp.copy(s0.body_q, s1.body_q)
+            wp.copy(s0.body_qd, s1.body_qd)
+
+        _frame()
+        with wp.ScopedCapture(device=device) as capture:
+            _frame()
+        graph = capture.graph
+        for _ in range(119):
+            wp.capture_launch(graph)
+
+        newton.eval_ik(model, s0, jq, jqd)
+        q = jq.numpy()
+        self.assertTrue(np.all(np.isfinite(q)))
+        self.assertLess(abs(float(q[0])), 0.40)
 
 
 def _build_d6_planar_puck(

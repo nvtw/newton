@@ -1548,6 +1548,12 @@ class PhoenXWorld:
         damping_limit: wp.array,
         armature: wp.array | None = None,
         friction_coefficient: wp.array | None = None,
+        d6_limit_axis0: wp.array | None = None,
+        d6_limit_axis1: wp.array | None = None,
+        d6_limit_axis2: wp.array | None = None,
+        d6_limit_lower: wp.array | None = None,
+        d6_limit_upper: wp.array | None = None,
+        d6_limit_count: wp.array | None = None,
     ) -> None:
         """Pack ``num_joints`` actuated-DBS joint columns. Call once after
         :meth:`__init__`, before the first :meth:`step`. All input arrays must
@@ -1588,6 +1594,11 @@ class PhoenXWorld:
                 total axial impulse is the sum of the clamped drive PD
                 term and the clamped friction term, matching MuJoCo's
                 ``dof_frictionloss + actuator`` decomposition.
+            d6_limit_axis0, d6_limit_axis1, d6_limit_axis2: Optional
+                world-frame angular limit axes for D6 BALL/UNIVERSAL.
+            d6_limit_lower, d6_limit_upper: Optional per-axis limit
+                windows [rad].
+            d6_limit_count: Optional number of D6 angular limit axes.
         """
         if self.num_joints <= 0:
             return
@@ -1595,6 +1606,18 @@ class PhoenXWorld:
             armature = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
         if friction_coefficient is None:
             friction_coefficient = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
+        if d6_limit_axis0 is None:
+            d6_limit_axis0 = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
+        if d6_limit_axis1 is None:
+            d6_limit_axis1 = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
+        if d6_limit_axis2 is None:
+            d6_limit_axis2 = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
+        if d6_limit_lower is None:
+            d6_limit_lower = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
+        if d6_limit_upper is None:
+            d6_limit_upper = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
+        if d6_limit_count is None:
+            d6_limit_count = wp.zeros(self.num_joints, dtype=wp.int32, device=self.device)
         # Detect whether the single-world solve can use the revolute-
         # only iterate kernels. ``joint_mode`` is a host-readable
         # ``wp.array[int32]`` of length ``num_joints``; one D2H copy
@@ -1634,6 +1657,12 @@ class PhoenXWorld:
                 damping_limit,
                 armature,
                 friction_coefficient,
+                d6_limit_axis0,
+                d6_limit_axis1,
+                d6_limit_axis2,
+                d6_limit_lower,
+                d6_limit_upper,
+                d6_limit_count,
             ],
             device=self.device,
         )

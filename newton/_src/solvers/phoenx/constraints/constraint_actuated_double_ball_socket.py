@@ -139,7 +139,8 @@ JOINT_MODE_REVOLUTE = wp.constant(wp.int32(0))
 #: The free DoF is translation along ``n_hat``.
 JOINT_MODE_PRISMATIC = wp.constant(wp.int32(1))
 #: Ball-socket joint: locks 3 translational DoF at ``anchor1``; all
-#: 3 rotational DoF are free. No ``anchor2``, no drive, no limit.
+#: 3 rotational DoF are free. Native BALL has no drive or limit;
+#: D6-dispatched BALL may carry angular limit rows in alias slots.
 JOINT_MODE_BALL_SOCKET = wp.constant(wp.int32(2))
 #: Fixed (weld) joint: locks all 6 relative DoFs. Implemented as
 #: REVOLUTE's anchor-1 3-row point lock + anchor-2 tangent 2-row lock
@@ -178,8 +179,8 @@ JOINT_MODE_CABLE = wp.constant(wp.int32(4))
 #:
 #: This is the D6 universal pattern (3 lin locked + 2 ang locked + 1 ang
 #: free → REVOLUTE; 3 lin locked + 1 ang locked + 2 ang free → UNIVERSAL).
-#: Drives / friction on the two free angular DoFs are not yet stored in
-#: the schema -- a Phase 2 follow-up may add them.
+#: D6-dispatched UNIVERSAL may carry limits on its two free axes in
+#: alias slots. Drives / friction on those axes are not stored yet.
 JOINT_MODE_UNIVERSAL = wp.constant(wp.int32(5))
 #: Cylindrical joint: 1 linear free + 1 rotational free, both along the
 #: same axis. The other 4 DoFs (2 linear + 2 rotational, all
@@ -469,6 +470,11 @@ _OFF_BIAS3 = wp.constant(int(_OFF_MODE_EXTRAS) + 15)
 _OFF_INV_INITIAL_ORIENTATION = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
 _OFF_REVOLUTION_COUNTER = wp.constant(int(_OFF_MODE_EXTRAS) + 4)
 _OFF_PREVIOUS_QUATERNION_ANGLE = wp.constant(int(_OFF_MODE_EXTRAS) + 5)
+# BALL / UNIVERSAL D6 angular limit aliases, dwords 6..15 of mode_extras.
+_OFF_D6_LIMIT_LOWER = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
+_OFF_D6_LIMIT_UPPER = wp.constant(int(_OFF_MODE_EXTRAS) + 9)
+_OFF_D6_LIMIT_COUNT = wp.constant(int(_OFF_MODE_EXTRAS) + 12)
+_OFF_D6_LIMIT_EFF_INV = wp.constant(int(_OFF_MODE_EXTRAS) + 13)
 # Cable-only PD soft-cache aliases over the existing ``s_inv`` mat33 slot
 # (9 dwords). Cable never uses the 3+2 Schur, so the revolute / fixed
 # layout for these dwords is free to reinterpret here.
@@ -530,8 +536,8 @@ _OFF_ACC_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accu
 
 # Hard-joint bias is a drift-recovery velocity. Cap it so a disturbed
 # articulation cannot turn large drift into unbounded solver energy.
-_MAX_LINEAR_BIAS = wp.constant(wp.float32(50.0))
-_MAX_ANGULAR_BIAS = wp.constant(wp.float32(100.0))
+_MAX_LINEAR_BIAS = wp.constant(wp.float32(20.0))
+_MAX_ANGULAR_BIAS = wp.constant(wp.float32(50.0))
 
 
 @wp.func
@@ -705,6 +711,12 @@ def actuated_double_ball_socket_initialize_kernel(
     damping_limit: wp.array[wp.float32],
     armature: wp.array[wp.float32],
     friction_coefficient: wp.array[wp.float32],
+    d6_limit_axis0: wp.array[wp.vec3f],
+    d6_limit_axis1: wp.array[wp.vec3f],
+    d6_limit_axis2: wp.array[wp.vec3f],
+    d6_limit_lower: wp.array[wp.vec3f],
+    d6_limit_upper: wp.array[wp.vec3f],
+    d6_limit_count: wp.array[wp.int32],
 ):
     """Pack one batch of unified joint descriptors.
 
@@ -749,6 +761,10 @@ def actuated_double_ball_socket_initialize_kernel(
             clamped drive PD term and the clamped friction term
             (matches MuJoCo's ``dof_frictionloss + actuator``
             decomposition). ``0`` disables friction on that joint.
+        d6_limit_axis0, d6_limit_axis1, d6_limit_axis2: World-frame
+            angular limit axes for D6-dispatched BALL / UNIVERSAL.
+        d6_limit_lower, d6_limit_upper: Per-axis limit windows [rad].
+        d6_limit_count: Number of active D6 angular limit axes.
     """
     tid = wp.tid()
     cid = cid_offset + tid
@@ -837,6 +853,28 @@ def actuated_double_ball_socket_initialize_kernel(
         write_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid, inv_initial_orientation)
         write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, 0)
         write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, 0.0)
+        _write_acc_imp3(constraints, cid, zero3)
+
+    if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
+        count = d6_limit_count[tid]
+        write_vec3(constraints, _OFF_D6_LIMIT_LOWER, cid, d6_limit_lower[tid])
+        write_vec3(constraints, _OFF_D6_LIMIT_UPPER, cid, d6_limit_upper[tid])
+        write_int(constraints, _OFF_D6_LIMIT_COUNT, cid, count)
+        write_vec3(constraints, _OFF_D6_LIMIT_EFF_INV, cid, zero3)
+        if mode == JOINT_MODE_BALL_SOCKET:
+            if count > wp.int32(0):
+                write_vec3(constraints, _OFF_AXIS_LOCAL1, cid, wp.quat_rotate_inv(orient1, d6_limit_axis0[tid]))
+            if count > wp.int32(1):
+                write_vec3(constraints, _OFF_LA2_B1, cid, wp.quat_rotate_inv(orient1, d6_limit_axis1[tid]))
+            if count > wp.int32(2):
+                write_vec3(constraints, _OFF_LA2_B2, cid, wp.quat_rotate_inv(orient1, d6_limit_axis2[tid]))
+        else:
+            if count > wp.int32(0):
+                write_vec3(constraints, _OFF_LA2_B1, cid, wp.quat_rotate_inv(orient1, d6_limit_axis0[tid]))
+            if count > wp.int32(1):
+                write_vec3(constraints, _OFF_LA2_B2, cid, wp.quat_rotate_inv(orient1, d6_limit_axis1[tid]))
+    else:
+        write_int(constraints, _OFF_D6_LIMIT_COUNT, cid, 0)
 
     write_float(constraints, _OFF_HERTZ, cid, hertz[tid])
     write_float(constraints, _OFF_DAMPING_RATIO, cid, damping_ratio[tid])
@@ -856,7 +894,8 @@ def actuated_double_ball_socket_initialize_kernel(
     # revolution_counter + previous_quaternion_angle) ran in the
     # mode-conditional block above since those fields share dwords
     # with the prismatic anchor-3 snapshot.
-    write_vec3(constraints, _OFF_AXIS_LOCAL1, cid, axis_local1)
+    if not (mode == JOINT_MODE_BALL_SOCKET and d6_limit_count[tid] > wp.int32(0)):
+        write_vec3(constraints, _OFF_AXIS_LOCAL1, cid, axis_local1)
     write_float(constraints, _OFF_REST_LENGTH, cid, rest_length)
     write_int(constraints, _OFF_DRIVE_MODE, cid, drive_mode[tid])
     write_float(constraints, _OFF_TARGET, cid, target[tid])
@@ -1736,6 +1775,206 @@ def _anchor3_scalar_block(
     lam3_world = update3.delta * t2
     _write_acc_imp3(constraints, cid, acc3_world + lam3_world)
     return update3.v_a, update3.v_b, update3.w_a, update3.w_b
+
+
+@wp.func
+def _d6_limit_axis_local(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    joint_mode: wp.int32,
+    slot: wp.int32,
+) -> wp.vec3f:
+    if joint_mode == JOINT_MODE_BALL_SOCKET:
+        if slot == wp.int32(0):
+            return read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
+        if slot == wp.int32(1):
+            return read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
+        return read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
+    if slot == wp.int32(0):
+        return read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
+    if slot == wp.int32(1):
+        return read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
+    return wp.vec3f(0.0, 0.0, 0.0)
+
+
+@wp.func
+def _d6_angular_limits_prepare_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    joint_mode: wp.int32,
+    orientation1: wp.quatf,
+    orientation2: wp.quatf,
+    inv_inertia1: wp.mat33f,
+    inv_inertia2: wp.mat33f,
+    angular_velocity1: wp.vec3f,
+    angular_velocity2: wp.vec3f,
+    dt: wp.float32,
+):
+    count = read_int(constraints, base_offset + _OFF_D6_LIMIT_COUNT, cid)
+    if count <= wp.int32(0):
+        return angular_velocity1, angular_velocity2
+
+    lower = read_vec3(constraints, base_offset + _OFF_D6_LIMIT_LOWER, cid)
+    upper = read_vec3(constraints, base_offset + _OFF_D6_LIMIT_UPPER, cid)
+    hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
+    damping_ratio_limit = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LIMIT, cid)
+    bias_rate, _mc, _ic = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
+    inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
+    diff = orientation2 * inv_init * wp.quat_inverse(orientation1)
+
+    axis0 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(0)))
+    axis1 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(1)))
+    axis2 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(2)))
+
+    bias0 = wp.float32(0.0)
+    bias1 = wp.float32(0.0)
+    bias2 = wp.float32(0.0)
+    eff0 = wp.float32(0.0)
+    eff1 = wp.float32(0.0)
+    eff2 = wp.float32(0.0)
+
+    if count > wp.int32(0) and lower[0] <= upper[0]:
+        angle0 = extract_rotation_angle(diff, axis0)
+        if angle0 > upper[0]:
+            bias0 = _clamp_scalar_bias(-(angle0 - upper[0]) * bias_rate, _MAX_ANGULAR_BIAS)
+        elif angle0 < lower[0]:
+            bias0 = _clamp_scalar_bias(-(angle0 - lower[0]) * bias_rate, _MAX_ANGULAR_BIAS)
+        eff0 = wp.dot(axis0, inv_inertia1 @ axis0) + wp.dot(axis0, inv_inertia2 @ axis0)
+    if count > wp.int32(1) and lower[1] <= upper[1]:
+        angle1 = extract_rotation_angle(diff, axis1)
+        if angle1 > upper[1]:
+            bias1 = _clamp_scalar_bias(-(angle1 - upper[1]) * bias_rate, _MAX_ANGULAR_BIAS)
+        elif angle1 < lower[1]:
+            bias1 = _clamp_scalar_bias(-(angle1 - lower[1]) * bias_rate, _MAX_ANGULAR_BIAS)
+        eff1 = wp.dot(axis1, inv_inertia1 @ axis1) + wp.dot(axis1, inv_inertia2 @ axis1)
+    if count > wp.int32(2) and lower[2] <= upper[2]:
+        angle2 = extract_rotation_angle(diff, axis2)
+        if angle2 > upper[2]:
+            bias2 = _clamp_scalar_bias(-(angle2 - upper[2]) * bias_rate, _MAX_ANGULAR_BIAS)
+        elif angle2 < lower[2]:
+            bias2 = _clamp_scalar_bias(-(angle2 - lower[2]) * bias_rate, _MAX_ANGULAR_BIAS)
+        eff2 = wp.dot(axis2, inv_inertia1 @ axis2) + wp.dot(axis2, inv_inertia2 @ axis2)
+
+    bias = wp.vec3f(bias0, bias1, bias2)
+    write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias)
+    write_vec3(constraints, base_offset + _OFF_D6_LIMIT_EFF_INV, cid, wp.vec3f(eff0, eff1, eff2))
+
+    old_acc = _read_acc_imp3(constraints, cid)
+    lam0 = wp.float32(0.0)
+    lam1 = wp.float32(0.0)
+    lam2 = wp.float32(0.0)
+    if bias0 != wp.float32(0.0):
+        lam0 = wp.dot(axis0, old_acc)
+    if bias1 != wp.float32(0.0):
+        lam1 = wp.dot(axis1, old_acc)
+    if bias2 != wp.float32(0.0):
+        lam2 = wp.dot(axis2, old_acc)
+    acc = lam0 * axis0 + lam1 * axis1 + lam2 * axis2
+    _write_acc_imp3(constraints, cid, acc)
+    angular_velocity1, angular_velocity2 = apply_pair_angular_impulse(
+        angular_velocity1, angular_velocity2, inv_inertia1, inv_inertia2, -acc, -acc
+    )
+    return angular_velocity1, angular_velocity2
+
+
+@wp.func
+def _d6_angular_limits_block(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    b1: wp.int32,
+    joint_mode: wp.int32,
+    w1: wp.vec3f,
+    w2: wp.vec3f,
+    ii1: wp.mat33f,
+    ii2: wp.mat33f,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+):
+    count = read_int(constraints, base_offset + _OFF_D6_LIMIT_COUNT, cid)
+    if count <= wp.int32(0):
+        return w1, w2
+
+    orientation1 = bodies.orientation[b1]
+    axis0 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(0)))
+    axis1 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(1)))
+    axis2 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(2)))
+
+    bias = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
+    eff_inv = read_vec3(constraints, base_offset + _OFF_D6_LIMIT_EFF_INV, cid)
+    acc = _read_acc_imp3(constraints, cid)
+    old0 = wp.float32(0.0)
+    old1 = wp.float32(0.0)
+    old2 = wp.float32(0.0)
+    if count > wp.int32(0):
+        old0 = wp.dot(axis0, acc)
+    if count > wp.int32(1):
+        old1 = wp.dot(axis1, acc)
+    if count > wp.int32(2):
+        old2 = wp.dot(axis2, acc)
+
+    k0 = wp.float32(0.0)
+    k1 = wp.float32(0.0)
+    k2 = wp.float32(0.0)
+    min0 = old0
+    max0 = old0
+    min1 = old1
+    max1 = old1
+    min2 = old2
+    max2 = old2
+    if bias[0] != wp.float32(0.0) and eff_inv[0] > wp.float32(0.0):
+        k0 = wp.float32(1.0) / eff_inv[0]
+        if bias[0] < wp.float32(0.0):
+            min0 = wp.float32(0.0)
+            max0 = BLOCK_LAMBDA_INF
+        else:
+            min0 = -BLOCK_LAMBDA_INF
+            max0 = wp.float32(0.0)
+    if bias[1] != wp.float32(0.0) and eff_inv[1] > wp.float32(0.0):
+        k1 = wp.float32(1.0) / eff_inv[1]
+        if bias[1] < wp.float32(0.0):
+            min1 = wp.float32(0.0)
+            max1 = BLOCK_LAMBDA_INF
+        else:
+            min1 = -BLOCK_LAMBDA_INF
+            max1 = wp.float32(0.0)
+    if bias[2] != wp.float32(0.0) and eff_inv[2] > wp.float32(0.0):
+        k2 = wp.float32(1.0) / eff_inv[2]
+        if bias[2] < wp.float32(0.0):
+            min2 = wp.float32(0.0)
+            max2 = BLOCK_LAMBDA_INF
+        else:
+            min2 = -BLOCK_LAMBDA_INF
+            max2 = wp.float32(0.0)
+
+    dt = wp.float32(1.0) / idt
+    hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
+    damping_ratio_limit = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LIMIT, cid)
+    _br, mc, ic = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
+
+    op = VelocityRows3Op()
+    op.k_inv = wp.vec3f(k0, k1, k2)
+    op.residual = wp.vec3f(
+        wp.dot(axis0, w1 - w2) + bias[0], wp.dot(axis1, w1 - w2) + bias[1], wp.dot(axis2, w1 - w2) + bias[2]
+    )
+    op.lambda_old = wp.vec3f(old0, old1, old2)
+    op.mass_coeff = wp.vec3f(mc, mc, mc)
+    op.impulse_coeff = wp.vec3f(ic, ic, ic)
+    op.lambda_min = wp.vec3f(min0, min1, min2)
+    op.lambda_max = wp.vec3f(max0, max1, max2)
+    op.projection_mode = VELOCITY_ROWS3_PROJECT_BOUNDS
+    op.friction_static = wp.float32(0.0)
+    op.friction_kinetic = wp.float32(0.0)
+
+    projection = block_solve_velocity_rows3_op(op, sor_boost)
+    delta = projection.delta[0] * axis0 + projection.delta[1] * axis1 + projection.delta[2] * axis2
+    new_acc = projection.lambda_new[0] * axis0 + projection.lambda_new[1] * axis1 + projection.lambda_new[2] * axis2
+    _write_acc_imp3(constraints, cid, new_acc)
+    w1, w2 = apply_pair_angular_impulse(w1, w2, ii1, ii2, -delta, -delta)
+    return w1, w2
 
 
 @wp.func
@@ -3033,6 +3272,21 @@ def _box2d_pivot_slide_prepare_at(
             k_ang = inv_inertia1 + inv_inertia2 + gamma_ang * wp.identity(3, dtype=wp.float32)
             write_mat33(constraints, base_offset + _OFF_UT_AI, cid, wp.inverse(k_ang))
 
+    if has_passive_angular_damping:
+        angular_velocity1, angular_velocity2 = _d6_angular_limits_prepare_at(
+            constraints,
+            cid,
+            base_offset,
+            joint_mode,
+            orientation1,
+            orientation2,
+            inv_inertia1,
+            inv_inertia2,
+            angular_velocity1,
+            angular_velocity2,
+            dt,
+        )
+
     # ---- Axial drive / limit / friction prepare ----------------------
     # Single call to ``_axial_drive_limit_prepare_at`` with all inputs
     # computed conditionally above the call. The post-call impulse
@@ -3632,6 +3886,11 @@ def actuated_double_ball_socket_iterate_at(
             impulse_ang = impulse_ang * sor_boost
             _write_acc_imp2(constraints, cid, acc_ang + impulse_ang)
             w1, w2 = apply_pair_angular_impulse(w1, w2, ii1, ii2, impulse_ang, impulse_ang)
+
+    if has_passive_angular_damping:
+        w1, w2 = _d6_angular_limits_block(
+            constraints, cid, base_offset, bodies, b1, joint_mode, w1, w2, ii1, ii2, idt, sor_boost
+        )
 
     if has_schur_3plus2:
         v1, v2, w1, w2 = _anchor1_anchor2_schur_block(
