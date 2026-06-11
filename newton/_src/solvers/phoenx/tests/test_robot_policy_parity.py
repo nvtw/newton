@@ -39,9 +39,9 @@ Tests:
      dip while the other holds it).
    * **Ankle-pitch angle divergence** -- the smoking gun for the
      toes-down bug. ``targets`` for the ankle pitch are init = -0.2
-     rad; if PhoenX drifts these toward +0.2 / 0.0 / etc. while
-     MuJoCo holds them at -0.2, the foot rolls forward and the toes
-     punch into the floor.
+     rad; if the solvers settle to different ankle equilibria under
+     the same standing-pose control, the foot contact response differs
+     qualitatively.
 
 The tests are deliberately tolerant: PhoenX and MuJoCo Warp use
 different stabilisation schemes (Baumgarte vs solref/solimp) and
@@ -487,10 +487,10 @@ class TestG1HoldPoseParity(unittest.TestCase):
         """Body z and per-DoF joint angles must track between solvers
         when ``control.joint_target_q`` holds the standing pose.
 
-        Marked ``expectedFailure``: PhoenX's PD-drive restoring torque
-        does not match MuJoCo's at the YAML's nominal target_ke, so
-        the ankle-pitch DoFs diverge by ~30 deg over 2 s. Will flip
-        to "unexpected success" once that mismatch is closed."""
+        Marked ``expectedFailure``: the G1 contact + PD stack still
+        settles to different ankle-pitch equilibria in PhoenX and
+        MuJoCo. Will flip to "unexpected success" once that parity
+        gap is closed."""
         target = self._make_target()
         sample = _g1_robot_model()
         foot_indices = _g1_foot_body_indices(sample)
@@ -554,10 +554,10 @@ class TestG1HoldPoseParity(unittest.TestCase):
     def test_ankle_pitch_does_not_drift(self) -> None:
         """The smoking-gun test for the toes-down bug.
 
-        Marked ``expectedFailure`` (see commit ``e6ca9048``): PhoenX's
-        steady-state ankle pitch sits ~7 deg from the commanded
-        target while MuJoCo holds it. Will flip to "unexpected
-        success" once the PD-drive restoring torque matches.
+        Marked ``expectedFailure`` (see commit ``e6ca9048``): the
+        G1 ankle pitch still fails the target/parity tolerance under
+        standing-pose contact. Will flip to "unexpected success" once
+        the contact/drive equilibrium matches between solvers.
 
         ``left_ankle_pitch_joint`` and ``right_ankle_pitch_joint`` start
         at -0.2 rad (rotated to keep the foot flat under the +0.3 rad
