@@ -3059,6 +3059,55 @@ def _make_singleworld_rigid_contact_dispatch_func(
 
 
 @functools.cache
+def _make_singleworld_rigid_joint_dispatch_func(
+    *,
+    revolute_only: bool,
+    is_prepare: bool,
+    is_cached_prepare: bool,
+    use_bias: bool,
+    enable_column_timers: bool,
+):
+    """Generated rigid-joint dispatch for single-world kernels."""
+
+    if is_cached_prepare:
+        joint_func = revolute_cached_warmstart if revolute_only else actuated_double_ball_socket_cached_warmstart
+    elif is_prepare:
+        joint_func = (
+            revolute_prepare_for_iteration if revolute_only else actuated_double_ball_socket_prepare_for_iteration
+        )
+    else:
+        joint_func = revolute_iterate if revolute_only else actuated_double_ball_socket_iterate
+
+    @wp.func
+    def _dispatch_rigid_joint(
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        copy_state: CopyStateContainer,
+        num_bodies: wp.int32,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        cid: wp.int32,
+        parallel_id: wp.int32,
+    ):
+        t0 = wp.uint64(0)
+        if wp.static(enable_column_timers):
+            t0 = read_global_timer_ns()
+
+        if wp.static(is_prepare or is_cached_prepare):
+            joint_func(constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt)
+        else:
+            joint_func(
+                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost, use_bias
+            )
+
+        if wp.static(enable_column_timers):
+            constraint_accumulate_time_us(constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns()))
+
+    return _dispatch_rigid_joint
+
+
+@functools.cache
 def _make_singleworld_dispatch_func(
     *,
     revolute_only: bool,
@@ -3086,6 +3135,13 @@ def _make_singleworld_dispatch_func(
         is_prepare=is_prepare,
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
+    )
+    _dispatch_rigid_joint = _make_singleworld_rigid_joint_dispatch_func(
+        revolute_only=revolute_only,
+        is_prepare=is_prepare,
+        is_cached_prepare=is_cached_prepare,
+        use_bias=use_bias,
+        enable_column_timers=enable_column_timers,
     )
 
     @wp.func
@@ -3192,56 +3248,10 @@ def _make_singleworld_dispatch_func(
                         b2 = constraint_get_body2(constraints, cid)
                         body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
                         body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
-                    if wp.static(is_cached_prepare):
-                        if wp.static(revolute_only):
-                            revolute_cached_warmstart(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                            )
-                        else:
-                            actuated_double_ball_socket_cached_warmstart(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                            )
-                    elif wp.static(is_prepare):
-                        if wp.static(revolute_only):
-                            revolute_prepare_for_iteration(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                            )
-                        else:
-                            actuated_double_ball_socket_prepare_for_iteration(
-                                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
-                            )
-                    else:
-                        if wp.static(revolute_only):
-                            revolute_iterate(
-                                constraints,
-                                cid,
-                                bodies,
-                                particles,
-                                copy_state,
-                                num_bodies,
-                                parallel_id,
-                                idt,
-                                sor_boost,
-                                use_bias,
-                            )
-                        else:
-                            actuated_double_ball_socket_iterate(
-                                constraints,
-                                cid,
-                                bodies,
-                                particles,
-                                copy_state,
-                                num_bodies,
-                                parallel_id,
-                                idt,
-                                sor_boost,
-                                use_bias,
-                            )
+                    _dispatch_rigid_joint(
+                        constraints, bodies, particles, copy_state, num_bodies, idt, sor_boost, cid, parallel_id
+                    )
                     dispatched = True
-                    if wp.static(enable_column_timers):
-                        constraint_accumulate_time_us(
-                            constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns())
-                        )
 
         if not dispatched:
             if wp.static(cloth_support):
