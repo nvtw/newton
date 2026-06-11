@@ -3565,49 +3565,59 @@ class PhoenXWorld:
 
     # Single-world dispatch (wp.capture_while over the global colour CSR).
 
+    def _launch_singleworld_head(
+        self,
+        kernel,
+        idt: wp.float32,
+        fuse_threshold: wp.int32,
+    ) -> None:
+        """Launch the persistent-grid single-world head kernel."""
+        contact_views = self._active_contact_views()
+        ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
+        ms_batch = wp.int32(int(self.mass_splitting_batch_size))
+        wp.launch(
+            kernel,
+            dim=self._singleworld_total_threads,
+            inputs=[
+                self.constraints,
+                self._contact_cols,
+                self.bodies,
+                self._particles_or_sentinel(),
+                idt,
+                wp.float32(self.sor_boost),
+                self._partitioner.element_ids_by_color,
+                self._partitioner.color_starts,
+                self._partitioner.color_family_starts,
+                self._partitioner.num_colors,
+                self._partitioner.color_cursor,
+                self._contact_container,
+                contact_views,
+                wp.int32(self.num_joints),
+                wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_cloth_bending),
+                wp.int32(self.num_soft_tetrahedra),
+                wp.int32(self.num_soft_hexahedra),
+                wp.int32(self.num_bodies),
+                wp.int32(self._singleworld_total_threads),
+                fuse_threshold,
+                self._head_active,
+                self._copy_state,
+                ms_cap,
+                ms_batch,
+                self._partitioner.sweep_direction,
+            ],
+            block_dim=_SINGLEWORLD_BLOCK_DIM,
+            device=self.device,
+        )
+
     def _capture_singleworld_sweep(self, kernel, **kw) -> None:
         """capture_while body: head-path sweep on the persistent grid, unrolled
         NUM_INNER_WHILE_ITERATIONS times. Tail launches no-op once head_active
         clears within the same outer iter."""
-        contact_views = self._active_contact_views()
         idt = kw.get("idt", wp.float32(0.0))
-        ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
-        ms_batch = wp.int32(int(self.mass_splitting_batch_size))
+        fuse_threshold = wp.int32(self._fuse_threshold)
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
-            wp.launch(
-                kernel,
-                dim=self._singleworld_total_threads,
-                inputs=[
-                    self.constraints,
-                    self._contact_cols,
-                    self.bodies,
-                    self._particles_or_sentinel(),
-                    idt,
-                    wp.float32(self.sor_boost),
-                    self._partitioner.element_ids_by_color,
-                    self._partitioner.color_starts,
-                    self._partitioner.color_family_starts,
-                    self._partitioner.num_colors,
-                    self._partitioner.color_cursor,
-                    self._contact_container,
-                    contact_views,
-                    wp.int32(self.num_joints),
-                    wp.int32(self.num_cloth_triangles),
-                    wp.int32(self.num_cloth_bending),
-                    wp.int32(self.num_soft_tetrahedra),
-                    wp.int32(self.num_soft_hexahedra),
-                    wp.int32(self.num_bodies),
-                    wp.int32(self._singleworld_total_threads),
-                    wp.int32(self._fuse_threshold),
-                    self._head_active,
-                    self._copy_state,
-                    ms_cap,
-                    ms_batch,
-                    self._partitioner.sweep_direction,
-                ],
-                block_dim=_SINGLEWORLD_BLOCK_DIM,
-                device=self.device,
-            )
+            self._launch_singleworld_head(kernel, idt, fuse_threshold)
 
     def _capture_singleworld_tail_sweep(self, kernel, **kw) -> None:
         """capture_while body: drain remaining small colours in one block via

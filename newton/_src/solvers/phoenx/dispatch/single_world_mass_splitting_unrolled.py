@@ -18,10 +18,6 @@ from typing import TYPE_CHECKING
 
 import warp as wp
 
-# Mirror of ``solver_phoenx._SINGLEWORLD_BLOCK_DIM``; redeclared to
-# avoid circular import. Keep in sync.
-_SINGLEWORLD_BLOCK_DIM: int = 32
-
 if TYPE_CHECKING:
     from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
@@ -42,49 +38,11 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         self._world._rebuild_mass_splitting_graph()
 
     def _unrolled_sweep(self, head_kernel, idt: wp.float32) -> None:
-        """Head-only fixed-count colour drain. ``fuse_threshold=-1``
-        keeps head from bailing on small partitions. Empty colour
-        slots are cheap no-op launches; overflow at index K is the
-        heavy work."""
+        """Head-only fixed-count colour drain."""
         w = self._world
-        contact_views = w._contact_views if w._contact_views is not None else w._contact_views_placeholder
-        ms_cap = wp.int32(int(w.max_colored_partitions))
-        ms_batch = wp.int32(int(w.mass_splitting_batch_size))
+        fuse_threshold = wp.int32(-1)
         for _ in range(self._launch_bound):
-            wp.launch(
-                head_kernel,
-                dim=w._singleworld_total_threads,
-                inputs=[
-                    w.constraints,
-                    w._contact_cols,
-                    w.bodies,
-                    w._particles_or_sentinel(),
-                    idt,
-                    wp.float32(w.sor_boost),
-                    w._partitioner.element_ids_by_color,
-                    w._partitioner.color_starts,
-                    w._partitioner.color_family_starts,
-                    w._partitioner.num_colors,
-                    w._partitioner.color_cursor,
-                    w._contact_container,
-                    contact_views,
-                    wp.int32(w.num_joints),
-                    wp.int32(w.num_cloth_triangles),
-                    wp.int32(w.num_cloth_bending),
-                    wp.int32(w.num_soft_tetrahedra),
-                    wp.int32(w.num_soft_hexahedra),
-                    wp.int32(w.num_bodies),
-                    wp.int32(w._singleworld_total_threads),
-                    wp.int32(-1),  # fuse_threshold disabled -> head handles all sizes
-                    w._head_active,
-                    w._copy_state,
-                    ms_cap,
-                    ms_batch,
-                    w._partitioner.sweep_direction,
-                ],
-                block_dim=_SINGLEWORLD_BLOCK_DIM,
-                device=w.device,
-            )
+            w._launch_singleworld_head(head_kernel, idt, fuse_threshold)
 
     def solve(self, idt: wp.float32) -> None:
         w = self._world
