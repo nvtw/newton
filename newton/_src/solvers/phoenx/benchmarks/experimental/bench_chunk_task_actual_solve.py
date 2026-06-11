@@ -50,7 +50,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import ContactCont
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
-from newton._src.solvers.phoenx.solver_phoenx_kernels import _FUSED_INNER_SWEEPS, _sync_threads
+from newton._src.solvers.phoenx.solver_phoenx_kernels import _sync_threads
+
+_EXPERIMENTAL_INNER_SWEEPS = 1
 
 
 @wp.func_native("""
@@ -1362,7 +1364,7 @@ def _chunk_runner(world: PhoenXWorld, graph: ChunkGraphDevice, *, chunk_threads:
     device = world.device
     contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
     idt = wp.float32(1.0 / world.substep_dt)
-    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    inner_sweeps = int(_EXPERIMENTAL_INNER_SWEEPS)
     outer_iters = int(world.solver_iterations) // inner_sweeps
     revolute_only = 1 if bool(world._use_revolute_specialization) else 0
     dim = max(1, graph.worker_blocks * int(chunk_threads))
@@ -1571,7 +1573,7 @@ def _scan_runner(world: PhoenXWorld, graph: ChunkGraphDevice, *, chunk_threads: 
     device = world.device
     contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
     idt = wp.float32(1.0 / world.substep_dt)
-    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    inner_sweeps = int(_EXPERIMENTAL_INNER_SWEEPS)
     outer_iters = int(world.solver_iterations) // inner_sweeps
     revolute_only = 1 if bool(world._use_revolute_specialization) else 0
     dim = max(1, graph.worker_blocks * int(chunk_threads))
@@ -1736,7 +1738,7 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
         handle.simulate_one_frame()
     wp.synchronize_device()
 
-    outer_iters = int(world.solver_iterations) // int(_FUSED_INNER_SWEEPS)
+    outer_iters = int(world.solver_iterations) // int(_EXPERIMENTAL_INNER_SWEEPS)
     host_graph = _extract_chunk_graph(world, chunk_rows=args.chunk_rows)
     chunk_graph = _upload_chunk_graph(
         host_graph, world.device, max_epochs=max(1, outer_iters), worker_blocks=args.worker_blocks

@@ -30,17 +30,15 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Persistent-grid single-world iterate/prepare/relax kernels have an internal `count <= fuse_threshold` hand-off that clears `head_active`. A single-block tail kernel (`*_singleworld_fused_kernel`) then drains the small colours back-to-back with `__syncthreads` between, avoiding per-colour kernel-launch boundaries.
 - Threshold: `FUSE_TAIL_MAX_COLOR_SIZE` in `solver_config.py`. Currently small (drains the trailing 0.7% of work).
 
-### `_FUSED_INNER_SWEEPS = 2` (multi-world fast-tail)
-- Wires up the per-cid register cache that `*_iterate_multi` already builds. At `1` the multi-sweep helper still loaded body state every sweep; at `2` each cid does two PGS sweeps from registers before writing back.
-- Trade-off: cross-colour PGS feedback drops from `solver_iterations` rounds to `solver_iterations / FUSED_INNER_SWEEPS`. Tested `4` and it breaks `test_slam_ball_into_stack` — heavy ball into a tower needs the finer feedback.
-- Multi-world g1_flat / h1_flat: **+15-22% env_fps** at 1024-16384 worlds.
-- Constant lives in `solver_phoenx_kernels.py`. **Do not bump above 2 without re-running the impact-stack tests.**
+### Multi-world global color order
+- Multi-world PGS keeps single-world iteration semantics: each solver iteration visits all colors once before any color repeats.
+- There is no production knob for local multi-sweeps; they were faster, but changed the fixed point for coupled contact/joint scenes such as G1 standing contact-drive.
 
 ### Revolute-only kernel specialisation (single + multi world)
 - When every joint is `JointMode.REVOLUTE` (or there are no joints at all), the iterate kernels skip the per-cid `read_int(_OFF_JOINT_MODE)` and the four-way `joint_mode` branch in `actuated_double_ball_socket_iterate{,_multi}`. They call `revolute_iterate{,_multi}` / `revolute_prepare_for_iteration` directly.
 - Detection: `PhoenXWorld._use_revolute_specialization`, set by scanning the `joint_mode` array once during `initialize_actuated_double_ball_socket_joints`. Default `True` for `num_joints == 0`.
 - Single-world kernels are factory-generated with a `wp.static` `revolute_only` axis (`_make_singleworld_persistent_kernel` / `_make_singleworld_fused_kernel`). Multi-world fast-tail kernels likewise (`_make_fast_tail_*`).
-- Wins are modest standalone (the contribution is mostly subsumed under `_FUSED_INNER_SWEEPS = 2` for multi-world); main value is keeping the iterate kernel binary smaller for the common all-revolute case.
+- Wins are modest standalone; main value is keeping the iterate kernel binary smaller for the common all-revolute case.
 
 ### Cable joint: combined pd_coefficients + Nyquist clamp + full log-map
 - **Combined PD softness (Jitter2 / Box2D-v3 implicit-Euler).** Cable bend/twist rows route through ``pd_coefficients`` (same helper BEAM uses). The earlier branch used the spring/damping split (``pd_coefficients_split``) under the assumption that splitting would converge faster at high damping; in practice the split's relax-pass damping was an unsoftened ``lam = -damp_mass * Jv`` that drove ``Jv -> 0`` rather than to the implicit-Euler steady state ``Jv = J v_init / (1 + dt*c*M_inv)``, so multiple PGS applications overshot the analytical answer. Long cables with the split formulation also under-propagated through the chain because damping ran only in the relax pass (``velocity_iterations`` sweeps, default 1) instead of every iterate sweep (``solver_iterations``, default 4-8). Combined ``pd_coefficients`` has positive ``gamma`` softness so PGS converges to the implicit-Euler answer in ~2 iterations and ``gamma * acc`` brakes against overshoot; damping naturally lives in the iterate loop and gets the full ``solver_iterations`` propagation budget. Cable's high-damping settle test now lands at ~14% residual (analytical ``exp(-2) = 13.5%``) -- the split's "10%" was overdamping past the analytical answer.
@@ -135,9 +133,10 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - **Don't redo without a fundamentally different design** (e.g. splitting body work and constraint work into two mega-kernels, or moving body state into a packed struct).
 - Reverted in commits `2566ef65 / 3216a44a / cb4dfcef`.
 
-### `_FUSED_INNER_SWEEPS = 4`
-- Doubles the per-cid register-cache benefit again (8 sweeps from one body load). Breaks `test_slam_ball_into_stack`: a heavy ball into a tower needs the finer cross-colour PGS feedback to dissipate the impulse without driving bodies through neighbours.
-- Settled on `2`. Don't push past without re-running impact-stack scenes.
+### `_FUSED_INNER_SWEEPS > 1`
+- Local multi-sweeps repeat a color before later colors see the new impulses. This is not equivalent to global PGS order on coupled contact/joint graphs.
+- `_FUSED_INNER_SWEEPS = 2` was +15-22% env_fps on multi-world G1/H1, but made G1 contact-drive multi_world diverge from single_world for the same `solver_iterations`.
+- `_FUSED_INNER_SWEEPS = 4` also broke `test_slam_ball_into_stack`; heavy impacts need fine cross-color feedback to dissipate without driving bodies through neighbours.
 
 ### Body-hot AoS pack (``BodyHot`` struct + per-substep sync)
 - Added a packed ``BodyHot`` ``wp.struct`` holding the four iterate-time read-only fields (``inverse_mass``, ``body_com``, ``orientation``, ``inverse_inertia_world``) and a parallel ``bodies.hot`` AoS array. ``_sync_body_hot_kernel`` snapshotted the SoA fields into the AoS mirror once per substep before the constraint solve. Iterate / prepare / relax read the four fields with one wide gather per body instead of four separate SoA gathers.
@@ -164,7 +163,7 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Kept the change for clarity; PR-reviewable as a one-line refactor that removes the open ``__ffsll`` TODO.
 
 ### Single-world multi-sweep iterate
-- Tried wiring `_FUSED_INNER_SWEEPS` into the single-world iterate path (call `*_iterate_multi(num_sweeps)` instead of `*_iterate`) and halving the outer `solver_iterations` loop.
+- Tried wiring local multi-sweeps into the single-world iterate path (call `*_iterate_multi(num_sweeps)` instead of `*_iterate`) and halving the outer `solver_iterations` loop.
 - ~3% kapla regression (single-world contact-heavy scene). The body-load saving exists but the per-launch cost grows ~2x and you lose half the cross-colour feedback granularity.
 - Multi-world wins because the entire substep runs in one launch, so launch-overhead saving stacks with body-load saving. Single-world has many head+tail launches per sweep, so the launch-overhead saving doesn't materialise.
 - **Keep single-world on `num_sweeps = 1`.**
@@ -209,7 +208,6 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 | Constant / flag                     | File                                              | Effect                                           |
 | ----------------------------------- | ------------------------------------------------- | ------------------------------------------------ |
-| `_FUSED_INNER_SWEEPS`               | `solver_phoenx_kernels.py`                        | Multi-world per-cid sweep count (currently `2`)  |
 | `_STRAGGLER_BLOCK_DIM`              | `solver_phoenx_kernels.py`                        | Multi-world fast-tail warp size (= 32)           |
 | `_choose_fast_tail_worlds_per_block`| `solver_phoenx_kernels.py` / `solver_phoenx.py`   | wpb tier plus robot-fleet cap in `_fast_tail_worlds_per_block` |
 | `PHOENX_USE_GREEDY_COLORING`        | `solver_config.py`                                | Greedy vs round-based JP                         |
@@ -267,10 +265,8 @@ If you ever see a graph-captured PhoenX scene where bodies appear to be on rails
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.
-- **Per-instance configurable `_FUSED_INNER_SWEEPS`** — let scenes opt into `4` (or even `8`) when they don't have impact-driven stacks.
 - **Drive / limit PD spring/damping split** — same XPBD-style split that cable now does, applied to ``_axial_drive_limit_iterate`` (revolute drive PD, prismatic drive PD, PD limit rows). Blocked on column layout: prismatic mode_extras is fully consumed by anchor-3 state, so a ``damp_mass_drive`` / ``damp_mass_limit`` slot needs new dwords on the constraint struct. Worth it whenever users start hitting "high damping kills convergence" on drive PD too.
 - **Reduce greedy kernel launch count** — ~82 MIS rounds per step on kapla = ~82 launches × ~5µs overhead. A persistent kernel running all rounds with global atomics + sync flags could collapse that. Cross-block sync is the main hurdle.
-- **Specialise `*_iterate_multi` for revolute-only** — saves the (already cheap) joint-mode branch in the multi-sweep helper. Marginal vs. specialising the kernel-level dispatch.
 
 ## Profiling tips
 

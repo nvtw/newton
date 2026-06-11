@@ -178,10 +178,6 @@ __all__ = [
 #: Dynamic auto launches keep this upper bound; fixed launches may use less.
 _STRAGGLER_BLOCK_DIM: int = 32
 
-# PGS sweeps per *_iterate_multi call. Keeping this at 2 preserves
-# cross-colour PGS feedback on articulated/contact scenes such as DR-Legs.
-_FUSED_INNER_SWEEPS: int = 2
-
 _PRIORITY_COST_SHIFT = wp.constant(wp.int64(32))
 _PRIORITY_JITTER_MASK = wp.constant(wp.int64((1 << 32) - 1))
 
@@ -1299,12 +1295,8 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
             _sync_warp_mask(sync_mask)
             c += 1
 
-        # Iterate phase: outer = num_iterations / _FUSED_INNER_SWEEPS, each
-        # outer round runs *_iterate_multi to hold state in registers.
-        inner_sweeps = wp.int32(_FUSED_INNER_SWEEPS)
-        outer_iters = num_iterations / inner_sweeps
         it_outer = wp.int32(0)
-        while it_outer < outer_iters:
+        while it_outer < num_iterations:
             c = wp.int32(0)
             while c < n_colors:
                 start = world_base + world_color_starts[world_id, c]
@@ -1327,77 +1319,6 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             base = local_tid
                             while base < family_count:
                                 cid = world_element_ids_by_color[family_start + base]
-                                sweep = wp.int32(0)
-                                while sweep < inner_sweeps:
-                                    _dispatch_iterate_any_cid(
-                                        constraints,
-                                        contact_cols,
-                                        bodies,
-                                        particles,
-                                        cc,
-                                        contacts,
-                                        copy_state,
-                                        num_joints,
-                                        num_cloth_triangles,
-                                        num_cloth_bending,
-                                        num_soft_tetrahedra,
-                                        num_soft_hexahedra,
-                                        num_bodies,
-                                        idt,
-                                        sor_boost,
-                                        cid,
-                                        wp.int32(0),
-                                    )
-                                    sweep += wp.int32(1)
-                                base += tpw
-                            family += wp.int32(1)
-                    else:
-                        joint_start = world_base + world_color_family_starts[world_id, family_base]
-                        contact_start = world_base + world_color_family_starts[world_id, family_base + wp.int32(1)]
-                        count_joints = contact_start - joint_start
-
-                        base = local_tid
-                        while base < count_joints:
-                            cid = world_element_ids_by_color[joint_start + base]
-                            _dispatch_iterate_joint(
-                                constraints,
-                                bodies,
-                                particles,
-                                copy_state,
-                                num_bodies,
-                                idt,
-                                sor_boost,
-                                cid,
-                                inner_sweeps,
-                            )
-                            base += tpw
-
-                        count_contacts = end - contact_start
-                        base = local_tid
-                        while base < count_contacts:
-                            cid = world_element_ids_by_color[contact_start + base]
-                            local_cid = cid - num_joints
-                            _dispatch_iterate_contact(
-                                contact_cols,
-                                bodies,
-                                particles,
-                                cc,
-                                contacts,
-                                copy_state,
-                                num_bodies,
-                                idt,
-                                sor_boost,
-                                local_cid,
-                                inner_sweeps,
-                            )
-                            base += tpw
-                else:
-                    base = local_tid
-                    while base < count:
-                        cid = world_element_ids_by_color[start + base]
-                        if wp.static(cloth_support):
-                            sweep = wp.int32(0)
-                            while sweep < inner_sweeps:
                                 _dispatch_iterate_any_cid(
                                     constraints,
                                     contact_cols,
@@ -1417,7 +1338,72 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                     cid,
                                     wp.int32(0),
                                 )
-                                sweep += wp.int32(1)
+                                base += tpw
+                            family += wp.int32(1)
+                    else:
+                        joint_start = world_base + world_color_family_starts[world_id, family_base]
+                        contact_start = world_base + world_color_family_starts[world_id, family_base + wp.int32(1)]
+                        count_joints = contact_start - joint_start
+
+                        base = local_tid
+                        while base < count_joints:
+                            cid = world_element_ids_by_color[joint_start + base]
+                            _dispatch_iterate_joint(
+                                constraints,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                cid,
+                                wp.int32(1),
+                            )
+                            base += tpw
+
+                        count_contacts = end - contact_start
+                        base = local_tid
+                        while base < count_contacts:
+                            cid = world_element_ids_by_color[contact_start + base]
+                            local_cid = cid - num_joints
+                            _dispatch_iterate_contact(
+                                contact_cols,
+                                bodies,
+                                particles,
+                                cc,
+                                contacts,
+                                copy_state,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                local_cid,
+                                wp.int32(1),
+                            )
+                            base += tpw
+                else:
+                    base = local_tid
+                    while base < count:
+                        cid = world_element_ids_by_color[start + base]
+                        if wp.static(cloth_support):
+                            _dispatch_iterate_any_cid(
+                                constraints,
+                                contact_cols,
+                                bodies,
+                                particles,
+                                cc,
+                                contacts,
+                                copy_state,
+                                num_joints,
+                                num_cloth_triangles,
+                                num_cloth_bending,
+                                num_soft_tetrahedra,
+                                num_soft_hexahedra,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                cid,
+                                wp.int32(0),
+                            )
                         else:
                             _dispatch_iterate_cid(
                                 constraints,
@@ -1432,7 +1418,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 sor_boost,
                                 cid,
                                 num_joints,
-                                inner_sweeps,
+                                wp.int32(1),
                             )
                         base += tpw
 
@@ -1459,7 +1445,7 @@ def _make_fast_tail_relax_kernel(
     guard_tpw: bool = True,
     family_split: bool = False,
 ):
-    """Multi-world relax fast-tail kernel (use_bias=False, num_sweeps=num_iterations)."""
+    """Multi-world relax fast-tail kernel with global color sweep order."""
     (
         _dispatch_iterate_cid,
         _dispatch_iterate_joint,
@@ -1548,30 +1534,30 @@ def _make_fast_tail_relax_kernel(
         n_colors = world_num_colors[world_id]
         world_base = world_csr_offsets[world_id]
 
-        # *_iterate_multi with num_sweeps=num_iterations folds the whole relax
-        # into one register-cached call (velocity_iterations is typically 1).
-        c = wp.int32(0)
-        while c < n_colors:
-            start = world_base + world_color_starts[world_id, c]
-            end = world_base + world_color_starts[world_id, c + 1]
-            if wp.static(family_split):
-                family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
-                if wp.static(cloth_support):
-                    family = wp.int32(0)
-                    while family < wp.int32(_PER_WORLD_FAST_FAMILIES):
-                        family_start = world_base + world_color_family_starts[world_id, family_base + family]
-                        family_end = end
-                        if family + wp.int32(1) < wp.int32(_PER_WORLD_FAST_FAMILIES):
-                            family_end = (
-                                world_base + world_color_family_starts[world_id, family_base + family + wp.int32(1)]
-                            )
-                        family_count = family_end - family_start
+        # Preserve global PGS order: each relax iteration visits all colors
+        # once before any color repeats.
+        it = wp.int32(0)
+        while it < num_iterations:
+            c = wp.int32(0)
+            while c < n_colors:
+                start = world_base + world_color_starts[world_id, c]
+                end = world_base + world_color_starts[world_id, c + 1]
+                if wp.static(family_split):
+                    family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
+                    if wp.static(cloth_support):
+                        family = wp.int32(0)
+                        while family < wp.int32(_PER_WORLD_FAST_FAMILIES):
+                            family_start = world_base + world_color_family_starts[world_id, family_base + family]
+                            family_end = end
+                            if family + wp.int32(1) < wp.int32(_PER_WORLD_FAST_FAMILIES):
+                                family_end = (
+                                    world_base + world_color_family_starts[world_id, family_base + family + wp.int32(1)]
+                                )
+                            family_count = family_end - family_start
 
-                        base = local_tid
-                        while base < family_count:
-                            cid = world_element_ids_by_color[family_start + base]
-                            sweep = wp.int32(0)
-                            while sweep < num_iterations:
+                            base = local_tid
+                            while base < family_count:
+                                cid = world_element_ids_by_color[family_start + base]
                                 _dispatch_relax_any_cid(
                                     constraints,
                                     contact_cols,
@@ -1591,58 +1577,55 @@ def _make_fast_tail_relax_kernel(
                                     cid,
                                     wp.int32(0),
                                 )
-                                sweep += wp.int32(1)
+                                base += tpw
+                            family += wp.int32(1)
+                    else:
+                        joint_start = world_base + world_color_family_starts[world_id, family_base]
+                        contact_start = world_base + world_color_family_starts[world_id, family_base + wp.int32(1)]
+                        count_joints = contact_start - joint_start
+
+                        base = local_tid
+                        while base < count_joints:
+                            cid = world_element_ids_by_color[joint_start + base]
+                            _dispatch_iterate_joint(
+                                constraints,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                cid,
+                                wp.int32(1),
+                            )
                             base += tpw
-                        family += wp.int32(1)
+
+                        count_contacts = end - contact_start
+                        base = local_tid
+                        while base < count_contacts:
+                            cid = world_element_ids_by_color[contact_start + base]
+                            local_cid = cid - num_joints
+                            _dispatch_iterate_contact(
+                                contact_cols,
+                                bodies,
+                                particles,
+                                cc,
+                                contacts,
+                                copy_state,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                local_cid,
+                                wp.int32(1),
+                            )
+                            base += tpw
                 else:
-                    joint_start = world_base + world_color_family_starts[world_id, family_base]
-                    contact_start = world_base + world_color_family_starts[world_id, family_base + wp.int32(1)]
-                    count_joints = contact_start - joint_start
+                    count = end - start
 
                     base = local_tid
-                    while base < count_joints:
-                        cid = world_element_ids_by_color[joint_start + base]
-                        _dispatch_iterate_joint(
-                            constraints,
-                            bodies,
-                            particles,
-                            copy_state,
-                            num_bodies,
-                            idt,
-                            sor_boost,
-                            cid,
-                            num_iterations,
-                        )
-                        base += tpw
-
-                    count_contacts = end - contact_start
-                    base = local_tid
-                    while base < count_contacts:
-                        cid = world_element_ids_by_color[contact_start + base]
-                        local_cid = cid - num_joints
-                        _dispatch_iterate_contact(
-                            contact_cols,
-                            bodies,
-                            particles,
-                            cc,
-                            contacts,
-                            copy_state,
-                            num_bodies,
-                            idt,
-                            sor_boost,
-                            local_cid,
-                            num_iterations,
-                        )
-                        base += tpw
-            else:
-                count = end - start
-
-                base = local_tid
-                while base < count:
-                    cid = world_element_ids_by_color[start + base]
-                    if wp.static(cloth_support):
-                        sweep = wp.int32(0)
-                        while sweep < num_iterations:
+                    while base < count:
+                        cid = world_element_ids_by_color[start + base]
+                        if wp.static(cloth_support):
                             _dispatch_relax_any_cid(
                                 constraints,
                                 contact_cols,
@@ -1662,27 +1645,27 @@ def _make_fast_tail_relax_kernel(
                                 cid,
                                 wp.int32(0),
                             )
-                            sweep += wp.int32(1)
-                    else:
-                        _dispatch_iterate_cid(
-                            constraints,
-                            contact_cols,
-                            bodies,
-                            particles,
-                            cc,
-                            contacts,
-                            copy_state,
-                            num_bodies,
-                            idt,
-                            sor_boost,
-                            cid,
-                            num_joints,
-                            num_iterations,
-                        )
-                    base += tpw
+                        else:
+                            _dispatch_iterate_cid(
+                                constraints,
+                                contact_cols,
+                                bodies,
+                                particles,
+                                cc,
+                                contacts,
+                                copy_state,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                cid,
+                                num_joints,
+                                wp.int32(1),
+                            )
+                        base += tpw
 
-            _sync_warp_mask(sync_mask)
-            c += 1
+                _sync_warp_mask(sync_mask)
+                c += 1
+            it += wp.int32(1)
 
     return kernel
 
@@ -1781,10 +1764,8 @@ def _make_block_world_prepare_plus_iterate_kernel(
             _sync_threads()
             c += wp.int32(1)
 
-        inner_sweeps = wp.int32(_FUSED_INNER_SWEEPS)
-        outer_iters = num_iterations / inner_sweeps
         it_outer = wp.int32(0)
-        while it_outer < outer_iters:
+        while it_outer < num_iterations:
             c = wp.int32(0)
             while c < n_colors:
                 start = world_base + world_color_starts[world_id, c]
@@ -1807,7 +1788,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
                         sor_boost,
                         cid,
                         num_joints,
-                        inner_sweeps,
+                        wp.int32(1),
                     )
                     base += wp.int32(block_dim)
 
@@ -1873,34 +1854,38 @@ def _make_block_world_relax_kernel(
         n_colors = world_num_colors[world_id]
         world_base = world_csr_offsets[world_id]
 
-        c = wp.int32(0)
-        while c < n_colors:
-            start = world_base + world_color_starts[world_id, c]
-            end = world_base + world_color_starts[world_id, c + wp.int32(1)]
+        # Preserve global PGS order for multi-color worlds.
+        it = wp.int32(0)
+        while it < num_iterations:
+            c = wp.int32(0)
+            while c < n_colors:
+                start = world_base + world_color_starts[world_id, c]
+                end = world_base + world_color_starts[world_id, c + wp.int32(1)]
 
-            count = end - start
-            base = local_tid
-            while base < count:
-                cid = world_element_ids_by_color[start + base]
-                _dispatch_iterate_cid(
-                    constraints,
-                    contact_cols,
-                    bodies,
-                    particles,
-                    cc,
-                    contacts,
-                    copy_state,
-                    num_bodies,
-                    idt,
-                    sor_boost,
-                    cid,
-                    num_joints,
-                    num_iterations,
-                )
-                base += wp.int32(block_dim)
+                count = end - start
+                base = local_tid
+                while base < count:
+                    cid = world_element_ids_by_color[start + base]
+                    _dispatch_iterate_cid(
+                        constraints,
+                        contact_cols,
+                        bodies,
+                        particles,
+                        cc,
+                        contacts,
+                        copy_state,
+                        num_bodies,
+                        idt,
+                        sor_boost,
+                        cid,
+                        num_joints,
+                        wp.int32(1),
+                    )
+                    base += wp.int32(block_dim)
 
-            _sync_threads()
-            c += wp.int32(1)
+                _sync_threads()
+                c += wp.int32(1)
+            it += wp.int32(1)
 
     return kernel
 

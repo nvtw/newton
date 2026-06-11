@@ -598,10 +598,10 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
         parallel_id: wp.int32,
         sor_boost: wp.float32,
     ):
-        """``num_sweeps`` PGS sweeps on one column with hoisted body
-        velocity/inertia registers. Same-colour cids share no bodies, so
-        inner sweeps before moving on are equivalent to round-robin; the
-        caller's outer loop runs ``num_iterations / num_sweeps`` rounds.
+        """Run one contact column for ``num_sweeps`` local sweeps.
+
+        Callers must preserve global color order when multiple colors are
+        active; local multi-sweeps are only equivalent for single-color worlds.
         """
         b1 = body_pair.b1
         b2 = body_pair.b2

@@ -64,8 +64,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import ContactCont
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
-from newton._src.solvers.phoenx.solver_phoenx_kernels import _FUSED_INNER_SWEEPS, _sync_threads
+from newton._src.solvers.phoenx.solver_phoenx_kernels import _sync_threads
 
+_EXPERIMENTAL_INNER_SWEEPS = 1
 _DEFAULT_BLOCK_WORLD_DIM = 128
 _BLOCK_WORLD_SUBFAMILIES = 10
 _BLOCK_WORLD_SUBFAMILY_STRIDE = _BLOCK_WORLD_SUBFAMILIES + 1
@@ -1116,7 +1117,7 @@ def _color_grid_runner(world: PhoenXWorld, graph: ColorGridDevice, *, block_dim:
     device = world.device
     contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
     idt = wp.float32(1.0 / world.substep_dt)
-    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    inner_sweeps = int(_EXPERIMENTAL_INNER_SWEEPS)
     outer_iters = int(world.solver_iterations) // inner_sweeps
     revolute_only = 1 if bool(world._use_revolute_specialization) else 0
     starts = graph.host.color_starts
@@ -1187,7 +1188,7 @@ def _color_grid_mega_runner(world: PhoenXWorld, graph: ColorGridDevice, *, block
     device = world.device
     contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
     idt = wp.float32(1.0 / world.substep_dt)
-    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    inner_sweeps = int(_EXPERIMENTAL_INNER_SWEEPS)
     outer_iters = int(world.solver_iterations) // inner_sweeps
     revolute_only = 1 if bool(world._use_revolute_specialization) else 0
     total_threads = max(1, int(block_dim) * int(worker_blocks))
@@ -1244,7 +1245,7 @@ def _color_grid_mega_direct_runner(
     device = world.device
     contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
     idt = wp.float32(1.0 / world.substep_dt)
-    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    inner_sweeps = int(_EXPERIMENTAL_INNER_SWEEPS)
     outer_iters = int(world.solver_iterations) // inner_sweeps
     revolute_only = 1 if bool(world._use_revolute_specialization) else 0
     total_threads = max(1, int(block_dim) * int(worker_blocks))
@@ -1298,7 +1299,7 @@ def _block_world_runner(world: PhoenXWorld, *, block_dim: int):
     device = world.device
     contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
     idt = wp.float32(1.0 / world.substep_dt)
-    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    inner_sweeps = int(_EXPERIMENTAL_INNER_SWEEPS)
     outer_iters = int(world.solver_iterations) // inner_sweeps
     revolute_only = 1 if bool(world._use_revolute_specialization) else 0
     dim = max(1, int(world.num_worlds) * int(block_dim))
@@ -1339,7 +1340,7 @@ def _block_world_subfamily_runner(world: PhoenXWorld, graph: BlockWorldSubfamily
     device = world.device
     contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
     idt = wp.float32(1.0 / world.substep_dt)
-    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    inner_sweeps = int(_EXPERIMENTAL_INNER_SWEEPS)
     outer_iters = int(world.solver_iterations) // inner_sweeps
     revolute_only = 1 if bool(world._use_revolute_specialization) else 0
     dim = max(1, int(world.num_worlds) * int(block_dim))
@@ -1380,7 +1381,7 @@ def _color_grid_direct_runner(world: PhoenXWorld, graph: ColorGridDevice, *, blo
     device = world.device
     contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
     idt = wp.float32(1.0 / world.substep_dt)
-    inner_sweeps = int(_FUSED_INNER_SWEEPS)
+    inner_sweeps = int(_EXPERIMENTAL_INNER_SWEEPS)
     outer_iters = int(world.solver_iterations) // inner_sweeps
     revolute_only = 1 if bool(world._use_revolute_specialization) else 0
     max_counts = [int(v) for v in graph.host.color_max_counts]
@@ -1729,7 +1730,7 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
     grid_graph = _upload_color_grid(host_graph, world.device)
     grouped_grid_graph = _upload_color_grid(grouped_host_graph, world.device)
     subfamily_graph = _upload_block_world_subfamily_grid(subfamily_host_graph, world.device)
-    outer_iters = int(world.solver_iterations) // int(_FUSED_INNER_SWEEPS)
+    outer_iters = int(world.solver_iterations) // int(_EXPERIMENTAL_INNER_SWEEPS)
     expected = int(host_graph.color_starts[-1]) * (1 + outer_iters)
 
     if args.mode == "autotune":
