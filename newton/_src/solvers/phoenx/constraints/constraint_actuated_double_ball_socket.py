@@ -3458,11 +3458,8 @@ def _revolute_iterate_at_multi(
     / limit ``acc``) update in registers and are written back at the
     end. Body velocities are written back once.
 
-    Assumes the kernel wraps this in an outer loop that sweeps all
-    colours per outer iteration -- ``num_sweeps`` trades some
-    cross-colour PGS feedback for register caching. ``num_sweeps = 2``
-    keeps 4 outer rounds (at the default ``solver_iterations = 8``)
-    which the current test suite tolerates for joints.
+    Callers must preserve global color order when multiple colors are
+    active; production kernels pass ``num_sweeps = 1``.
     """
     b1 = body_pair.b1
     b2 = body_pair.b2

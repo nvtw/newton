@@ -26,7 +26,7 @@ def _target_from_g1_standing_pose() -> np.ndarray:
     return target
 
 
-def _phoenx_factory(step_layout: str):
+def _phoenx_factory(step_layout: str, multi_world_scheduler: str = "auto"):
     def make(model: newton.Model) -> newton.solvers.SolverPhoenX:
         return newton.solvers.SolverPhoenX(
             model,
@@ -34,6 +34,7 @@ def _phoenx_factory(step_layout: str):
             solver_iterations=16,
             velocity_iterations=1,
             step_layout=step_layout,
+            multi_world_scheduler=multi_world_scheduler,
             prepare_refresh_stride=1,
         )
 
@@ -54,14 +55,6 @@ class TestMultiWorldPgsOrder(unittest.TestCase):
         ankle_r_dof = cfg["mjw_joint_names"].index("right_ankle_pitch_joint")
         target = _target_from_g1_standing_pose()
 
-        _, _, jq_multi = _run_with_contacts(
-            _phoenx_factory("multi_world"),
-            _g1_robot_model,
-            80,
-            1.0 / 200.0,
-            target_pos=target,
-            record_joint_q=True,
-        )
         _, _, jq_single = _run_with_contacts(
             _phoenx_factory("single_world"),
             _g1_robot_model,
@@ -71,23 +64,37 @@ class TestMultiWorldPgsOrder(unittest.TestCase):
             record_joint_q=True,
         )
 
+        variants = (
+            ("fast_tail", _phoenx_factory("multi_world")),
+            ("block_world_64", _phoenx_factory("multi_world", "block_world_64")),
+        )
         window = slice(-20, None)
         tol = math.radians(1.0)
-        for dof, label in (
-            (ankle_l_dof, "left ankle pitch"),
-            (ankle_r_dof, "right ankle pitch"),
-        ):
-            q_multi = float(jq_multi[window, 7 + dof].mean())
-            q_single = float(jq_single[window, 7 + dof].mean())
-            self.assertAlmostEqual(
-                q_multi,
-                q_single,
-                delta=tol,
-                msg=(
-                    f"{label}: multi_world={math.degrees(q_multi):+.2f} deg "
-                    f"single_world={math.degrees(q_single):+.2f} deg"
-                ),
-            )
+        for variant, factory in variants:
+            with self.subTest(variant=variant):
+                _, _, jq_multi = _run_with_contacts(
+                    factory,
+                    _g1_robot_model,
+                    80,
+                    1.0 / 200.0,
+                    target_pos=target,
+                    record_joint_q=True,
+                )
+                for dof, label in (
+                    (ankle_l_dof, "left ankle pitch"),
+                    (ankle_r_dof, "right ankle pitch"),
+                ):
+                    q_multi = float(jq_multi[window, 7 + dof].mean())
+                    q_single = float(jq_single[window, 7 + dof].mean())
+                    self.assertAlmostEqual(
+                        q_multi,
+                        q_single,
+                        delta=tol,
+                        msg=(
+                            f"{label}: {variant}={math.degrees(q_multi):+.2f} deg "
+                            f"single_world={math.degrees(q_single):+.2f} deg"
+                        ),
+                    )
 
 
 if __name__ == "__main__":
