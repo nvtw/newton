@@ -24,6 +24,11 @@ class PickingState:
     pick_max_acceleration: float
 
 
+@wp.func
+def _is_finite_vec3(v: wp.vec3) -> bool:
+    return wp.isfinite(v[0]) and wp.isfinite(v[1]) and wp.isfinite(v[2])
+
+
 @wp.kernel
 def compute_pick_state_kernel(
     body_q: wp.array[wp.transform],
@@ -75,13 +80,17 @@ def apply_picking_force_kernel(
     pick_effective_mass: wp.array[float],
 ):
     pick_body = pick_body_arr[0]
-    if pick_body < 0:
+    if pick_body < 0 or pick_body >= body_q.shape[0]:
+        pick_body_arr[0] = -1
         return
     if body_flags[pick_body] & newton.BodyFlags.KINEMATIC:
         return
 
     pick_pos_local = pick_state[0].picked_point_local
     pick_target_world = pick_state[0].picking_target_world
+    if not (_is_finite_vec3(pick_pos_local) and _is_finite_vec3(pick_target_world)):
+        pick_body_arr[0] = -1
+        return
 
     # world space attachment point
     X_wb = body_q[pick_body]
@@ -116,6 +125,9 @@ def apply_picking_force_kernel(
     # enough force to move the whole chain.
     max_force = pick_state[0].pick_max_acceleration * 9.81 * pick_effective_mass[pick_body]
     force_mag = wp.length(force_at_offset)
+    if not (wp.isfinite(force_mag) and wp.isfinite(max_force)) or max_force <= 0.0:
+        pick_body_arr[0] = -1
+        return
     if force_mag > max_force:
         force_at_offset = force_at_offset * (max_force / force_mag)
 
