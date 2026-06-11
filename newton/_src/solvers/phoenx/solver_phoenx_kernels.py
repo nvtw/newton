@@ -2945,76 +2945,61 @@ def _make_singleworld_rigid_contact_dispatch_func(
     is_cached_prepare: bool,
     use_bias: bool,
 ):
-    @wp.func
-    def _dispatch_rigid_contact(
-        contact_cols: ContactColumnContainer,
-        bodies: BodyContainer,
-        particles: ParticleContainer,
-        cc: ContactContainer,
-        contacts: ContactViews,
-        copy_state: CopyStateContainer,
-        num_bodies: wp.int32,
-        idt: wp.float32,
-        sor_boost: wp.float32,
-        local_cid: wp.int32,
-        parallel_id: wp.int32,
-    ):
-        if wp.static(is_prepare):
-            if wp.static(has_mass_splitting):
-                if wp.static(has_soft_contact_pd):
-                    contact_prepare_for_iteration(
-                        contact_cols,
-                        local_cid,
-                        bodies,
-                        particles,
-                        num_bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        copy_state,
-                        parallel_id,
-                    )
-                else:
-                    contact_prepare_for_iteration_no_soft_pd(
-                        contact_cols,
-                        local_cid,
-                        bodies,
-                        particles,
-                        num_bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        copy_state,
-                        parallel_id,
-                    )
-            else:
-                if wp.static(has_soft_contact_pd):
-                    contact_prepare_for_iteration_lean(
-                        contact_cols,
-                        local_cid,
-                        bodies,
-                        particles,
-                        num_bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        copy_state,
-                        parallel_id,
-                    )
-                else:
-                    contact_prepare_for_iteration_lean_no_soft_pd(
-                        contact_cols,
-                        local_cid,
-                        bodies,
-                        particles,
-                        num_bodies,
-                        idt,
-                        cc,
-                        contacts,
-                        copy_state,
-                        parallel_id,
-                    )
-        elif wp.static(is_cached_prepare):
+    if is_prepare:
+        if has_mass_splitting:
+            prepare_func = (
+                contact_prepare_for_iteration if has_soft_contact_pd else contact_prepare_for_iteration_no_soft_pd
+            )
+        else:
+            prepare_func = (
+                contact_prepare_for_iteration_lean
+                if has_soft_contact_pd
+                else contact_prepare_for_iteration_lean_no_soft_pd
+            )
+
+        @wp.func
+        def _dispatch_rigid_contact(
+            contact_cols: ContactColumnContainer,
+            bodies: BodyContainer,
+            particles: ParticleContainer,
+            cc: ContactContainer,
+            contacts: ContactViews,
+            copy_state: CopyStateContainer,
+            num_bodies: wp.int32,
+            idt: wp.float32,
+            sor_boost: wp.float32,
+            local_cid: wp.int32,
+            parallel_id: wp.int32,
+        ):
+            prepare_func(
+                contact_cols,
+                local_cid,
+                bodies,
+                particles,
+                num_bodies,
+                idt,
+                cc,
+                contacts,
+                copy_state,
+                parallel_id,
+            )
+
+    elif is_cached_prepare:
+
+        @wp.func
+        def _dispatch_rigid_contact(
+            contact_cols: ContactColumnContainer,
+            bodies: BodyContainer,
+            particles: ParticleContainer,
+            cc: ContactContainer,
+            contacts: ContactViews,
+            copy_state: CopyStateContainer,
+            num_bodies: wp.int32,
+            idt: wp.float32,
+            sor_boost: wp.float32,
+            local_cid: wp.int32,
+            parallel_id: wp.int32,
+        ):
             contact_cached_warmstart_lean(
                 contact_cols,
                 local_cid,
@@ -3027,133 +3012,48 @@ def _make_singleworld_rigid_contact_dispatch_func(
                 copy_state,
                 parallel_id,
             )
-        else:
-            if wp.static(has_mass_splitting):
-                if wp.static(has_sleeping):
-                    if wp.static(has_soft_contact_pd):
-                        contact_iterate(
-                            contact_cols,
-                            local_cid,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                            copy_state,
-                            parallel_id,
-                            sor_boost,
-                        )
-                    else:
-                        contact_iterate_no_soft_pd(
-                            contact_cols,
-                            local_cid,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                            copy_state,
-                            parallel_id,
-                            sor_boost,
-                        )
-                else:
-                    if wp.static(has_soft_contact_pd):
-                        contact_iterate_no_sleep(
-                            contact_cols,
-                            local_cid,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                            copy_state,
-                            parallel_id,
-                            sor_boost,
-                        )
-                    else:
-                        contact_iterate_no_sleep_no_soft_pd(
-                            contact_cols,
-                            local_cid,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                            copy_state,
-                            parallel_id,
-                            sor_boost,
-                        )
+
+    else:
+        if has_mass_splitting:
+            if has_sleeping:
+                iterate_func = contact_iterate if has_soft_contact_pd else contact_iterate_no_soft_pd
             else:
-                if wp.static(has_sleeping):
-                    if wp.static(has_soft_contact_pd):
-                        contact_iterate_lean(
-                            contact_cols,
-                            local_cid,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                            copy_state,
-                            parallel_id,
-                            sor_boost,
-                        )
-                    else:
-                        contact_iterate_lean_no_soft_pd(
-                            contact_cols,
-                            local_cid,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                            copy_state,
-                            parallel_id,
-                            sor_boost,
-                        )
-                else:
-                    if wp.static(has_soft_contact_pd):
-                        contact_iterate_lean_no_sleep(
-                            contact_cols,
-                            local_cid,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                            copy_state,
-                            parallel_id,
-                            sor_boost,
-                        )
-                    else:
-                        contact_iterate_lean_no_sleep_no_soft_pd(
-                            contact_cols,
-                            local_cid,
-                            bodies,
-                            particles,
-                            num_bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            use_bias,
-                            copy_state,
-                            parallel_id,
-                            sor_boost,
-                        )
+                iterate_func = contact_iterate_no_sleep if has_soft_contact_pd else contact_iterate_no_sleep_no_soft_pd
+        elif has_sleeping:
+            iterate_func = contact_iterate_lean if has_soft_contact_pd else contact_iterate_lean_no_soft_pd
+        else:
+            iterate_func = (
+                contact_iterate_lean_no_sleep if has_soft_contact_pd else contact_iterate_lean_no_sleep_no_soft_pd
+            )
+
+        @wp.func
+        def _dispatch_rigid_contact(
+            contact_cols: ContactColumnContainer,
+            bodies: BodyContainer,
+            particles: ParticleContainer,
+            cc: ContactContainer,
+            contacts: ContactViews,
+            copy_state: CopyStateContainer,
+            num_bodies: wp.int32,
+            idt: wp.float32,
+            sor_boost: wp.float32,
+            local_cid: wp.int32,
+            parallel_id: wp.int32,
+        ):
+            iterate_func(
+                contact_cols,
+                local_cid,
+                bodies,
+                particles,
+                num_bodies,
+                idt,
+                cc,
+                contacts,
+                use_bias,
+                copy_state,
+                parallel_id,
+                sor_boost,
+            )
 
     return _dispatch_rigid_contact
 
@@ -3465,6 +3365,123 @@ def _make_singleworld_dispatch_func(
 
 
 @functools.cache
+def _make_singleworld_rigid_direct_color_func(
+    *,
+    revolute_only: bool,
+    has_joints: bool,
+    has_contacts: bool,
+    has_mass_splitting: bool,
+    has_sleeping: bool,
+    has_soft_contact_pd: bool,
+    is_prepare: bool,
+    is_cached_prepare: bool,
+    use_bias: bool,
+    enable_column_timers: bool,
+):
+    """Generated rigid-only color dispatch for single-world kernels."""
+
+    _dispatch_rigid_contact = _make_singleworld_rigid_contact_dispatch_func(
+        has_mass_splitting=has_mass_splitting,
+        has_sleeping=has_sleeping,
+        has_soft_contact_pd=has_soft_contact_pd,
+        is_prepare=is_prepare,
+        is_cached_prepare=is_cached_prepare,
+        use_bias=use_bias,
+    )
+    _, _dispatch_prepare_rigid_joint, _ = _make_multiworld_rigid_prepare_dispatch_func(
+        revolute_only=revolute_only,
+        has_joints=has_joints,
+        has_contacts=has_contacts,
+        has_soft_contact_pd=has_soft_contact_pd,
+        cached_prepare=is_cached_prepare,
+        enable_column_timers=enable_column_timers,
+    )
+    _, _dispatch_iterate_rigid_joint, _ = _make_multiworld_rigid_iterate_dispatch_funcs(
+        revolute_only=revolute_only,
+        has_joints=has_joints,
+        has_contacts=has_contacts,
+        has_sleeping=has_sleeping,
+        has_soft_contact_pd=has_soft_contact_pd,
+        enable_column_timers=enable_column_timers,
+        use_bias=use_bias,
+    )
+
+    @wp.func
+    def _dispatch_rigid_direct_color(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        cc: ContactContainer,
+        contacts: ContactViews,
+        copy_state: CopyStateContainer,
+        element_ids_by_color: wp.array[wp.int32],
+        color_family_starts: wp.array[wp.int32],
+        start: wp.int32,
+        count: wp.int32,
+        c: wp.int32,
+        num_joints: wp.int32,
+        num_bodies: wp.int32,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        lane: wp.int32,
+        stride: wp.int32,
+    ):
+        color_end = start + count
+        joint_start = start
+        contact_start = start
+        if wp.static(has_joints and has_contacts):
+            family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
+            joint_start = color_family_starts[family_base]
+            contact_start = color_family_starts[family_base + wp.int32(1)]
+        elif wp.static(has_joints):
+            contact_start = color_end
+
+        if wp.static(has_joints):
+            count_joints = contact_start - joint_start
+            base = lane
+            while base < count_joints:
+                cid = read1d_i32(element_ids_by_color, joint_start + base)
+                if wp.static(is_prepare or is_cached_prepare):
+                    _dispatch_prepare_rigid_joint(constraints, bodies, particles, copy_state, num_bodies, idt, cid)
+                else:
+                    _dispatch_iterate_rigid_joint(
+                        constraints,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        idt,
+                        sor_boost,
+                        cid,
+                        wp.int32(1),
+                    )
+                base = base + stride
+
+        if wp.static(has_contacts):
+            count_contacts = color_end - contact_start
+            base = lane
+            while base < count_contacts:
+                cid = read1d_i32(element_ids_by_color, contact_start + base)
+                _dispatch_rigid_contact(
+                    contact_cols,
+                    bodies,
+                    particles,
+                    cc,
+                    contacts,
+                    copy_state,
+                    num_bodies,
+                    idt,
+                    sor_boost,
+                    cid - num_joints,
+                    wp.int32(0),
+                )
+                base = base + stride
+
+    return _dispatch_rigid_direct_color
+
+
+@functools.cache
 def _make_singleworld_persistent_kernel(
     *,
     phase: str,
@@ -3493,7 +3510,7 @@ def _make_singleworld_persistent_kernel(
     is_iterate = phase == "iterate"
     use_bias = is_iterate  # iterate ON, relax OFF (prepare ignores)
 
-    _dispatch_one_cid, _dispatch_singleworld_rigid_contact = _make_singleworld_dispatch_func(
+    _dispatch_one_cid, _ = _make_singleworld_dispatch_func(
         revolute_only=revolute_only,
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
@@ -3506,22 +3523,17 @@ def _make_singleworld_persistent_kernel(
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
     )
-    _, _dispatch_prepare_rigid_joint, _ = _make_multiworld_rigid_prepare_dispatch_func(
+    _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
         revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
-        has_soft_contact_pd=has_soft_contact_pd,
-        cached_prepare=is_cached_prepare,
-        enable_column_timers=enable_column_timers,
-    )
-    _, _dispatch_iterate_rigid_joint, _ = _make_multiworld_rigid_iterate_dispatch_funcs(
-        revolute_only=revolute_only,
-        has_joints=has_joints,
-        has_contacts=has_contacts,
+        has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
-        enable_column_timers=enable_column_timers,
+        is_prepare=is_prepare,
+        is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
+        enable_column_timers=enable_column_timers,
     )
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -3592,59 +3604,26 @@ def _make_singleworld_persistent_kernel(
 
         if wp.static(rigid_direct):
             if not is_overflow_color:
-                color_end = start + count
-                joint_start = start
-                contact_start = start
-                if wp.static(has_joints and has_contacts):
-                    family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
-                    joint_start = color_family_starts[family_base]
-                    contact_start = color_family_starts[family_base + wp.int32(1)]
-                elif wp.static(has_joints):
-                    contact_start = color_end
-
-                if wp.static(has_joints):
-                    count_joints = contact_start - joint_start
-                    base = tid
-                    while base < count_joints:
-                        cid = read1d_i32(element_ids_by_color, joint_start + base)
-                        if wp.static(is_prepare or is_cached_prepare):
-                            _dispatch_prepare_rigid_joint(
-                                constraints, bodies, particles, copy_state, num_bodies, idt, cid
-                            )
-                        else:
-                            _dispatch_iterate_rigid_joint(
-                                constraints,
-                                bodies,
-                                particles,
-                                copy_state,
-                                num_bodies,
-                                idt,
-                                sor_boost,
-                                cid,
-                                wp.int32(1),
-                            )
-                        base = base + total_num_threads
-
-                if wp.static(has_contacts):
-                    count_contacts = color_end - contact_start
-                    base = tid
-                    while base < count_contacts:
-                        cid = read1d_i32(element_ids_by_color, contact_start + base)
-                        local_cid = cid - num_joints
-                        _dispatch_singleworld_rigid_contact(
-                            contact_cols,
-                            bodies,
-                            particles,
-                            cc,
-                            contacts,
-                            copy_state,
-                            num_bodies,
-                            idt,
-                            sor_boost,
-                            local_cid,
-                            wp.int32(0),
-                        )
-                        base = base + total_num_threads
+                _dispatch_rigid_direct_color(
+                    constraints,
+                    contact_cols,
+                    bodies,
+                    particles,
+                    cc,
+                    contacts,
+                    copy_state,
+                    element_ids_by_color,
+                    color_family_starts,
+                    start,
+                    count,
+                    c,
+                    num_joints,
+                    num_bodies,
+                    idt,
+                    sor_boost,
+                    tid,
+                    total_num_threads,
+                )
                 if tid == 0:
                     color_cursor[0] = cursor - 1
                 return
@@ -3710,7 +3689,7 @@ def _make_singleworld_fused_kernel(
     is_iterate = phase == "iterate"
     use_bias = is_iterate
 
-    _dispatch_one_cid, _dispatch_singleworld_rigid_contact = _make_singleworld_dispatch_func(
+    _dispatch_one_cid, _ = _make_singleworld_dispatch_func(
         revolute_only=revolute_only,
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
@@ -3723,22 +3702,17 @@ def _make_singleworld_fused_kernel(
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
     )
-    _, _dispatch_prepare_rigid_joint, _ = _make_multiworld_rigid_prepare_dispatch_func(
+    _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
         revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
-        has_soft_contact_pd=has_soft_contact_pd,
-        cached_prepare=is_cached_prepare,
-        enable_column_timers=enable_column_timers,
-    )
-    _, _dispatch_iterate_rigid_joint, _ = _make_multiworld_rigid_iterate_dispatch_funcs(
-        revolute_only=revolute_only,
-        has_joints=has_joints,
-        has_contacts=has_contacts,
+        has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
-        enable_column_timers=enable_column_timers,
+        is_prepare=is_prepare,
+        is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
+        enable_column_timers=enable_column_timers,
     )
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -3804,59 +3778,26 @@ def _make_singleworld_fused_kernel(
                 num_units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
             if wp.static(rigid_direct):
                 if not is_overflow_color:
-                    color_end = start + count
-                    joint_start = start
-                    contact_start = start
-                    if wp.static(has_joints and has_contacts):
-                        family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
-                        joint_start = color_family_starts[family_base]
-                        contact_start = color_family_starts[family_base + wp.int32(1)]
-                    elif wp.static(has_joints):
-                        contact_start = color_end
-
-                    if wp.static(has_joints):
-                        count_joints = contact_start - joint_start
-                        base = lane
-                        while base < count_joints:
-                            cid = read1d_i32(element_ids_by_color, joint_start + base)
-                            if wp.static(is_prepare or is_cached_prepare):
-                                _dispatch_prepare_rigid_joint(
-                                    constraints, bodies, particles, copy_state, num_bodies, idt, cid
-                                )
-                            else:
-                                _dispatch_iterate_rigid_joint(
-                                    constraints,
-                                    bodies,
-                                    particles,
-                                    copy_state,
-                                    num_bodies,
-                                    idt,
-                                    sor_boost,
-                                    cid,
-                                    wp.int32(1),
-                                )
-                            base = base + fuse_threshold
-
-                    if wp.static(has_contacts):
-                        count_contacts = color_end - contact_start
-                        base = lane
-                        while base < count_contacts:
-                            cid = read1d_i32(element_ids_by_color, contact_start + base)
-                            local_cid = cid - num_joints
-                            _dispatch_singleworld_rigid_contact(
-                                contact_cols,
-                                bodies,
-                                particles,
-                                cc,
-                                contacts,
-                                copy_state,
-                                num_bodies,
-                                idt,
-                                sor_boost,
-                                local_cid,
-                                wp.int32(0),
-                            )
-                            base = base + fuse_threshold
+                    _dispatch_rigid_direct_color(
+                        constraints,
+                        contact_cols,
+                        bodies,
+                        particles,
+                        cc,
+                        contacts,
+                        copy_state,
+                        element_ids_by_color,
+                        color_family_starts,
+                        start,
+                        count,
+                        c,
+                        num_joints,
+                        num_bodies,
+                        idt,
+                        sor_boost,
+                        lane,
+                        fuse_threshold,
+                    )
                     _sync_threads()
                     cursor = cursor - 1
                     continue
