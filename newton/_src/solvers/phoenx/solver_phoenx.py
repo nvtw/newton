@@ -581,9 +581,8 @@ class PhoenXWorld:
         # soft-tet counts change.
         self._refresh_has_position_level_writers()
         # Soft-tet constraint variant tracker. Stamped by
-        # :meth:`populate_soft_tetrahedra_from_model`; consulted in
-        # :meth:`_singleworld_kernels` to gate the soft_tet_only
-        # specialisation off when the block Neo-Hookean variant is in use.
+        # :meth:`populate_soft_tetrahedra_from_model`; dispatch uses it to
+        # choose the ARAP or block Neo-Hookean soft-tet kernel statically.
         self._soft_tet_uses_neohookean: bool = False
         # Lazily allocate the particle store only when cloth is present;
         # rigid-only scenes pay zero memory for particles.
@@ -3795,26 +3794,11 @@ class PhoenXWorld:
             or self.num_cloth_bending > 0
             or self.num_soft_hexahedra > 0
         )
-        soft_tet_only = (
-            self.num_soft_tetrahedra > 0
-            and not self._soft_tet_uses_neohookean
-            and self.num_joints == 0
-            and self.num_cloth_triangles == 0
-            and self.num_cloth_bending == 0
-            and self.num_soft_hexahedra == 0
-        )
-        cloth_only = (
-            self.num_cloth_triangles > 0
-            and self.num_joints == 0
-            and self.num_soft_tetrahedra == 0
-            and self.num_soft_hexahedra == 0
-        )
         return {
             "revolute_only": bool(self._use_revolute_specialization),
             "cloth_support": cloth_on,
+            "soft_tet_neohookean": bool(self._soft_tet_uses_neohookean),
             "enable_column_timers": self.enable_column_timers,
-            "soft_tet_only": soft_tet_only,
-            "cloth_only": cloth_only,
             "has_joints": self.num_joints > 0,
             "has_sleeping": self._sleeping_enabled,
             "has_soft_contact_pd": bool(self._has_soft_contact_pd),
@@ -3823,10 +3807,8 @@ class PhoenXWorld:
     def _singleworld_kernels(self):
         """Return ``(prepare_head, prepare_fused, iterate_head,
         iterate_fused, relax_head, relax_fused)``. Specialised via
-        compile-time ``revolute_only``, ``cloth_support`` (cloth /
-        soft-tet / soft-hex types in the ctype dispatch) and
-        ``soft_tet_only`` / ``cloth_only`` (skip ctype reads when the
-        container holds only one deformable row family)."""
+        compile-time ``revolute_only``, ``cloth_support``, and the
+        scene-wide soft-tet variant."""
         kw = {
             **self._dispatch_specialization_flags(),
             "has_mass_splitting": self.mass_splitting_enabled,
@@ -3849,8 +3831,7 @@ class PhoenXWorld:
                 revolute_only=True,
                 cloth_support=False,
                 enable_column_timers=self.enable_column_timers,
-                soft_tet_only=False,
-                cloth_only=False,
+                soft_tet_neohookean=False,
                 has_joints=self.num_joints > 0,
                 has_mass_splitting=False,
                 has_sleeping=False,
@@ -3862,8 +3843,7 @@ class PhoenXWorld:
                 revolute_only=True,
                 cloth_support=False,
                 enable_column_timers=self.enable_column_timers,
-                soft_tet_only=False,
-                cloth_only=False,
+                soft_tet_neohookean=False,
                 has_joints=self.num_joints > 0,
                 has_mass_splitting=False,
                 has_sleeping=False,
