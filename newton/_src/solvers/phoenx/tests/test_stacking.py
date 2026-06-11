@@ -689,7 +689,7 @@ class TestPhoenXSolverStacking(unittest.TestCase):
         self.assertLess(float(pos[2]), 0.62)
         self.assertLess(float(np.linalg.norm(vel)), 0.08)
 
-    def test_single_world_rigid_family_split_steps(self) -> None:
+    def test_single_world_rigid_direct_steps(self) -> None:
         """Single-world joint/contact mixes use the typed family path."""
         scene = _PhoenXScene(substeps=2, solver_iterations=2, step_layout="single_world")
         scene.add_ground_plane()
@@ -707,7 +707,8 @@ class TestPhoenXSolverStacking(unittest.TestCase):
         scene.mb.add_articulation([joint])
         scene.finalize()
 
-        self.assertTrue(scene.world._singleworld_family_split())
+        self.assertTrue(scene.world._singleworld_rigid_direct())
+        self.assertTrue(scene.world._singleworld_needs_family_starts())
         for _ in range(3):
             scene.step()
 
@@ -715,6 +716,28 @@ class TestPhoenXSolverStacking(unittest.TestCase):
         vel = scene.body_velocity(body)
         self.assertTrue(np.all(np.isfinite(pos)))
         self.assertTrue(np.all(np.isfinite(vel)))
+
+    def test_multi_world_rigid_family_split_off_by_default(self) -> None:
+        """Robot-style rigid fleets use the faster sorted generic path."""
+        scene = _PhoenXScene(substeps=2, solver_iterations=2, step_layout="multi_world")
+        scene.add_ground_plane()
+        body = scene.mb.add_link(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.22), q=wp.quat_identity()))
+        scene.mb.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2)
+        joint = scene.mb.add_joint_revolute(
+            parent=-1,
+            child=body,
+            parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.22), q=wp.quat_identity()),
+            child_xform=wp.transform_identity(),
+            axis=(0.0, 0.0, 1.0),
+            limit_lower=-0.25,
+            limit_upper=0.25,
+        )
+        scene.mb.add_articulation([joint])
+        scene.finalize()
+
+        self.assertGreater(scene.world.num_joints, 0)
+        self.assertGreater(scene.world.max_contact_columns, 0)
+        self.assertFalse(scene.world._fast_tail_family_split())
 
     # ------------------------------------------------------------------
     # Two-body stack

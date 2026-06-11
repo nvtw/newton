@@ -1208,7 +1208,6 @@ class PhoenXWorld:
             if self._multi_world_scheduler == "block_world" and self._block_world_supported():
                 block_world_kw = {
                     **base_block_world_kw,
-                    "family_split": self._fast_tail_family_split(),
                     "block_dim": self._multi_world_block_dim,
                 }
                 kernels.append(get_block_world_kernel(kind="prepare_plus_iterate", **block_world_kw))
@@ -2543,7 +2542,7 @@ class PhoenXWorld:
         if self._constraint_capacity > 0:
             self._partitioner.reset(self._elements, self._num_active_constraints)
             if self.step_layout == "single_world":
-                compute_family_starts = self._singleworld_family_split()
+                compute_family_starts = self._singleworld_needs_family_starts()
                 if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
                     # In-graph JP fallback if greedy's 64-colour bitmask overflows.
                     self._partitioner.build_csr_greedy_with_jp_fallback(compute_family_starts=compute_family_starts)
@@ -3415,8 +3414,8 @@ class PhoenXWorld:
                 **self._dispatch_specialization_flags(),
                 has_contacts=self.max_contact_columns > 0,
                 fixed_tpw=fixed_tpw,
-                family_split=self._fast_tail_family_split(),
                 guard_tpw=self._tpw_auto,
+                family_split=self._fast_tail_family_split(),
             )
             self._launch_fast_iter(
                 kernel,
@@ -3536,7 +3535,6 @@ class PhoenXWorld:
             has_soft_contact_pd=bool(self._has_soft_contact_pd),
             cached_prepare=bool(cached_prepare),
             enable_column_timers=self.enable_column_timers,
-            family_split=self._fast_tail_family_split(),
             block_dim=block_dim,
         )
         wp.launch(
@@ -3552,7 +3550,6 @@ class PhoenXWorld:
                 wp.float32(self.sor_boost),
                 self._world_element_ids_by_color,
                 self._world_color_starts,
-                self._world_color_family_starts,
                 self._world_csr_offsets,
                 self._world_num_colors,
                 self._contact_container,
@@ -3582,7 +3579,6 @@ class PhoenXWorld:
             has_sleeping=bool(self._sleeping_enabled),
             has_soft_contact_pd=bool(self._has_soft_contact_pd),
             enable_column_timers=self.enable_column_timers,
-            family_split=self._fast_tail_family_split(),
             block_dim=block_dim,
         )
         wp.launch(
@@ -3599,7 +3595,6 @@ class PhoenXWorld:
                 wp.float32(self.sor_boost),
                 self._world_element_ids_by_color,
                 self._world_color_starts,
-                self._world_color_family_starts,
                 self._world_csr_offsets,
                 self._world_num_colors,
                 self._contact_container,
@@ -3814,8 +3809,9 @@ class PhoenXWorld:
         scene-wide soft-tet variant."""
         kw = {
             **self._dispatch_specialization_flags(),
+            "has_contacts": self.max_contact_columns > 0,
             "has_mass_splitting": self.mass_splitting_enabled,
-            "family_split": self._singleworld_family_split(),
+            "rigid_direct": self._singleworld_rigid_direct(),
         }
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),
@@ -3837,10 +3833,11 @@ class PhoenXWorld:
                 enable_column_timers=self.enable_column_timers,
                 soft_tet_neohookean=False,
                 has_joints=self.num_joints > 0,
+                has_contacts=self.max_contact_columns > 0,
                 has_mass_splitting=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
-                family_split=self._singleworld_family_split(),
+                rigid_direct=self._singleworld_rigid_direct(),
             ),
             get_singleworld_kernel(
                 phase="cached_prepare",
@@ -3850,16 +3847,17 @@ class PhoenXWorld:
                 enable_column_timers=self.enable_column_timers,
                 soft_tet_neohookean=False,
                 has_joints=self.num_joints > 0,
+                has_contacts=self.max_contact_columns > 0,
                 has_mass_splitting=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
-                family_split=self._singleworld_family_split(),
+                rigid_direct=self._singleworld_rigid_direct(),
             ),
         )
 
-    def _singleworld_family_split(self) -> bool:
-        """Use solver-family subranges in single-world PGS kernels."""
-        if self.step_layout != "single_world" or self.mass_splitting_enabled or not self._use_greedy_coloring:
+    def _singleworld_rigid_direct(self) -> bool:
+        """Use typed rigid loops in single-world PGS kernels."""
+        if self.step_layout != "single_world" or self.mass_splitting_enabled:
             return False
         if (
             self.num_cloth_triangles > 0
@@ -3868,26 +3866,33 @@ class PhoenXWorld:
             or self.num_soft_hexahedra > 0
         ):
             return False
+        return self.num_joints > 0 or self.max_contact_columns > 0
 
-        return self.num_joints > 0 and self.max_contact_columns > 0
+    def _singleworld_needs_family_starts(self) -> bool:
+        """Mixed rigid scenes need joint/contact subranges."""
+        return self._singleworld_rigid_direct() and self.num_joints > 0 and self.max_contact_columns > 0
 
     def _fast_tail_family_split(self) -> bool:
         """Use solver-family subranges in multi-world fast-tail."""
         if self.step_layout == "single_world" or not self._use_greedy_coloring:
             return False
 
-        family_count = 0
+        deformable_family_count = 0
+        if self.num_cloth_triangles > 0:
+            deformable_family_count += 1
+        if self.num_cloth_bending > 0:
+            deformable_family_count += 1
+        if self.num_soft_tetrahedra > 0:
+            deformable_family_count += 1
+        if self.num_soft_hexahedra > 0:
+            deformable_family_count += 1
+        if deformable_family_count == 0:
+            return False
+
+        family_count = deformable_family_count
         if self.num_joints > 0:
             family_count += 1
         if self.max_contact_columns > 0:
-            family_count += 1
-        if self.num_cloth_triangles > 0:
-            family_count += 1
-        if self.num_cloth_bending > 0:
-            family_count += 1
-        if self.num_soft_tetrahedra > 0:
-            family_count += 1
-        if self.num_soft_hexahedra > 0:
             family_count += 1
         return family_count > 1
 

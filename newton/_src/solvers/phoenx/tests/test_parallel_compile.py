@@ -126,7 +126,6 @@ class TestPreCompileDispatchKernelsFires(unittest.TestCase):
                     "has_sleeping": dispatch_kw["has_sleeping"],
                     "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
                     "enable_column_timers": dispatch_kw["enable_column_timers"],
-                    "family_split": world._fast_tail_family_split(),
                     "block_dim": world._multi_world_block_dim,
                 }
                 expected_modules.add(
