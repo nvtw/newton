@@ -63,6 +63,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                     wp.float32(w.sor_boost),
                     w._partitioner.element_ids_by_color,
                     w._partitioner.color_starts,
+                    w._partitioner.color_family_starts,
                     w._partitioner.num_colors,
                     w._partitioner.color_cursor,
                     w._contact_container,
