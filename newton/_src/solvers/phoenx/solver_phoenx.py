@@ -3236,8 +3236,7 @@ class PhoenXWorld:
             self._num_active_constraints,
         )
 
-        # Per-world JP/greedy. launch_tiled gives (block, lane) for (world, lane).
-        self._per_world_assigned.zero_()
+        # Per-world JP/greedy clears assigned flags for each active world.
         wp.copy(self._world_csr_offsets, self._per_world_element_offsets)
         if self._use_greedy_coloring:
             wp.launch_tiled(
