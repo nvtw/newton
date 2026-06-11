@@ -8,13 +8,9 @@ import warp as wp
 
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
-    VELOCITY_ROWS3_PROJECT_CONTACT_CONE,
-    RigidFrameRows3,
-    RigidFrameRows3State,
     RigidFrameRows3Update,
-    VelocityRows3Op,
-    block_solve_rigid_frame_rows3_contact,
-    block_solve_velocity_rows3_op,
+    block_project_friction_delta_sor_2,
+    block_solve_accumulated_inverse_bounded_1,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -32,6 +28,19 @@ __all__ = [
     "contact_project_velocity_update",
     "contact_project_velocity_update_no_soft_pd",
 ]
+
+
+@wp.func
+def _friction_normal_lambda(
+    lambda_n: wp.float32,
+    eff_n: wp.float32,
+    bias_n: wp.float32,
+    mass_coeff_n: wp.float32,
+    sor_boost: wp.float32,
+) -> wp.float32:
+    """Normal load for Coulomb friction, excluding Baumgarte correction."""
+    load = lambda_n + mass_coeff_n * eff_n * bias_n * sor_boost
+    return wp.clamp(load, wp.float32(0.0), lambda_n)
 
 
 def _make_contact_project_velocity_update(has_soft_contact_pd: bool):
@@ -79,25 +88,52 @@ def _make_contact_project_velocity_update(has_soft_contact_pd: bool):
                 normal_mass_coeff = wp.float32(1.0)
                 normal_impulse_coeff = wp.float32(0.0)
 
-        op = VelocityRows3Op()
-        op.k_inv = wp.vec3f(k_inv_n, eff_t1, eff_t2)
-        op.residual = wp.vec3f(rhs_n, jv_t1 + bias_t1, jv_t2 + bias_t2)
-        op.lambda_old = wp.vec3f(lam_n_old, lam_t1_old, lam_t2_old)
-        op.mass_coeff = wp.vec3f(normal_mass_coeff, wp.float32(1.0), wp.float32(1.0))
-        op.impulse_coeff = wp.vec3f(normal_impulse_coeff, wp.float32(0.0), wp.float32(0.0))
-        op.lambda_min = wp.vec3f(wp.float32(0.0), -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
-        op.lambda_max = wp.vec3f(BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF)
-        op.projection_mode = VELOCITY_ROWS3_PROJECT_CONTACT_CONE
-        op.friction_static = mu_s
-        op.friction_kinetic = mu_k
+        normal_update = block_solve_accumulated_inverse_bounded_1(
+            k_inv_n,
+            rhs_n,
+            lam_n_old,
+            normal_mass_coeff,
+            normal_impulse_coeff,
+            sor_boost,
+            wp.float32(0.0),
+            BLOCK_LAMBDA_INF,
+        )
+        lambda_n_friction = normal_update.lambda_new
+        if wp.static(has_soft_contact_pd):
+            if pd_eff_soft_n <= wp.float32(0.0):
+                lambda_n_friction = _friction_normal_lambda(
+                    normal_update.lambda_new,
+                    k_inv_n,
+                    bias_n,
+                    normal_mass_coeff,
+                    sor_boost,
+                )
+        else:
+            lambda_n_friction = _friction_normal_lambda(
+                normal_update.lambda_new,
+                k_inv_n,
+                bias_n,
+                normal_mass_coeff,
+                sor_boost,
+            )
 
-        projection = block_solve_velocity_rows3_op(op, sor_boost)
+        d_lambda_t1 = -(eff_t1 * (jv_t1 + bias_t1))
+        d_lambda_t2 = -(eff_t2 * (jv_t2 + bias_t2))
+        tangents = block_project_friction_delta_sor_2(
+            lam_t1_old,
+            lam_t2_old,
+            d_lambda_t1,
+            d_lambda_t2,
+            sor_boost,
+            mu_s * lambda_n_friction,
+            mu_k * lambda_n_friction,
+        )
 
-        cc_set_normal_lambda(cc, k, projection.lambda_new[0])
-        cc_set_tangent1_lambda(cc, k, projection.lambda_new[1])
-        cc_set_tangent2_lambda(cc, k, projection.lambda_new[2])
+        cc_set_normal_lambda(cc, k, normal_update.lambda_new)
+        cc_set_tangent1_lambda(cc, k, tangents.lambda_new[0])
+        cc_set_tangent2_lambda(cc, k, tangents.lambda_new[1])
 
-        return projection.delta[0] * normal + projection.delta[1] * tangent1 + projection.delta[2] * tangent2
+        return normal_update.delta * normal + tangents.delta[0] * tangent1 + tangents.delta[1] * tangent2
 
     return impl
 
@@ -151,38 +187,64 @@ def _make_contact_frame_velocity_update(has_soft_contact_pd: bool):
                 normal_mass_coeff = wp.float32(1.0)
                 normal_impulse_coeff = wp.float32(0.0)
 
-        rows = RigidFrameRows3()
-        rows.axis0 = normal
-        rows.axis1 = tangent1
-        rows.axis2 = tangent2
-        rows.r0 = r0
-        rows.r1 = r1
-        rows.mode = wp.vec3f(wp.float32(1.0), wp.float32(1.0), wp.float32(0.0))
-        rows.k_inv = wp.vec3f(k_inv_n, eff_t1, eff_t2)
-        rows.bias = wp.vec3f(normal_bias, bias_t1, bias_t2)
-        rows.lambda_old = wp.vec3f(lam_n_old, lam_t1_old, lam_t2_old)
-        rows.mass_coeff = wp.vec3f(normal_mass_coeff, wp.float32(1.0), wp.float32(1.0))
-        rows.impulse_coeff = wp.vec3f(normal_impulse_coeff, wp.float32(0.0), wp.float32(0.0))
-        rows.lambda_min = wp.vec3f(wp.float32(0.0), -BLOCK_LAMBDA_INF, -BLOCK_LAMBDA_INF)
-        rows.lambda_max = wp.vec3f(BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF, BLOCK_LAMBDA_INF)
-        rows.projection_mode = VELOCITY_ROWS3_PROJECT_CONTACT_CONE
-        rows.friction_static = mu_s
-        rows.friction_kinetic = mu_k
+        rel = v1 - v0 + wp.cross(w1, r1) - wp.cross(w0, r0)
+        jv_n = wp.dot(normal, rel)
+        jv_t1 = wp.dot(tangent1, rel)
+        jv_t2 = wp.dot(tangent2, rel)
 
-        state = RigidFrameRows3State()
-        state.v_a = v0
-        state.w_a = w0
-        state.v_b = v1
-        state.w_b = w1
-        state.inv_m_a = inv_mass0
-        state.inv_m_b = inv_mass1
-        state.inv_i_a = inv_inertia0
-        state.inv_i_b = inv_inertia1
+        normal_update = block_solve_accumulated_inverse_bounded_1(
+            k_inv_n,
+            jv_n + normal_bias,
+            lam_n_old,
+            normal_mass_coeff,
+            normal_impulse_coeff,
+            sor_boost,
+            wp.float32(0.0),
+            BLOCK_LAMBDA_INF,
+        )
+        lambda_n_friction = normal_update.lambda_new
+        if wp.static(has_soft_contact_pd):
+            if pd_eff_soft_n <= wp.float32(0.0):
+                lambda_n_friction = _friction_normal_lambda(
+                    normal_update.lambda_new,
+                    k_inv_n,
+                    bias_n,
+                    normal_mass_coeff,
+                    sor_boost,
+                )
+        else:
+            lambda_n_friction = _friction_normal_lambda(
+                normal_update.lambda_new,
+                k_inv_n,
+                bias_n,
+                normal_mass_coeff,
+                sor_boost,
+            )
 
-        update = block_solve_rigid_frame_rows3_contact(rows, state, sor_boost)
-        cc_set_normal_lambda(cc, k, update.lambda_new[0])
-        cc_set_tangent1_lambda(cc, k, update.lambda_new[1])
-        cc_set_tangent2_lambda(cc, k, update.lambda_new[2])
+        d_lambda_t1 = -(eff_t1 * (jv_t1 + bias_t1))
+        d_lambda_t2 = -(eff_t2 * (jv_t2 + bias_t2))
+        tangents = block_project_friction_delta_sor_2(
+            lam_t1_old,
+            lam_t2_old,
+            d_lambda_t1,
+            d_lambda_t2,
+            sor_boost,
+            mu_s * lambda_n_friction,
+            mu_k * lambda_n_friction,
+        )
+
+        impulse = normal_update.delta * normal + tangents.delta[0] * tangent1 + tangents.delta[1] * tangent2
+        update = RigidFrameRows3Update()
+        update.v_a = v0 - inv_mass0 * impulse
+        update.v_b = v1 + inv_mass1 * impulse
+        update.w_a = w0 - inv_inertia0 @ wp.cross(r0, impulse)
+        update.w_b = w1 + inv_inertia1 @ wp.cross(r1, impulse)
+        update.lambda_new = wp.vec3f(normal_update.lambda_new, tangents.lambda_new[0], tangents.lambda_new[1])
+        update.delta = wp.vec3f(normal_update.delta, tangents.delta[0], tangents.delta[1])
+
+        cc_set_normal_lambda(cc, k, normal_update.lambda_new)
+        cc_set_tangent1_lambda(cc, k, tangents.lambda_new[0])
+        cc_set_tangent2_lambda(cc, k, tangents.lambda_new[1])
         return update
 
     return impl

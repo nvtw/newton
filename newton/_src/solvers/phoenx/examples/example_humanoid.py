@@ -20,6 +20,8 @@ import warp as wp
 import newton
 import newton.examples
 
+DEFAULT_CONTACT_GAP = 0.005
+
 
 class Example:
     def __init__(self, viewer, args):
@@ -42,7 +44,10 @@ class Example:
             if axis_len > 1.0e-6:
                 root_rot = wp.quat_from_axis_angle(wp.vec3(*(axis_np / axis_len)), -wp.pi * 0.5)
 
+        contact_gap = float(args.contact_gap)
+
         articulation_builder = newton.ModelBuilder()
+        articulation_builder.default_shape_cfg.gap = contact_gap
         articulation_builder.add_mjcf(
             newton.examples.get_asset("nv_humanoid.xml"),
             ignore_names=["floor", "ground"],
@@ -55,6 +60,7 @@ class Example:
         articulation_builder.joint_q[:7] = [0.0, 0.0, args.root_height, *root_rot]
 
         builder = newton.ModelBuilder()
+        builder.default_shape_cfg.gap = contact_gap
         for _ in range(self.world_count):
             if args.stress_random_poses:
                 articulation_builder.joint_q[7:] = rng.uniform(
@@ -75,7 +81,7 @@ class Example:
             substeps=args.solver_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
-            prepare_refresh_stride="auto",
+            prepare_refresh_stride=args.prepare_refresh_stride,
         )
         self.contacts = self.model.contacts()
 
@@ -155,10 +161,11 @@ class Example:
         parser.add_argument("--root-height", type=float, default=1.4, help="Root start height [m].")
         parser.add_argument("--self-collisions", action="store_true", help="Enable MJCF self-collisions.")
         parser.add_argument("--show-contacts", action="store_true", help="Draw contact arrows.")
+        parser.add_argument("--contact-gap", type=float, default=DEFAULT_CONTACT_GAP, help="Contact detection gap [m].")
         parser.add_argument(
             "--solver-substeps",
             type=int,
-            default=4,
+            default=10,
             help="PhoenX internal PGS substeps per solver step.",
         )
         parser.add_argument("--solver-iterations", type=int, default=8, help="PhoenX PGS iterations per substep.")
@@ -167,6 +174,12 @@ class Example:
             type=int,
             default=1,
             help="PhoenX TGS-soft velocity-relaxation sweeps per substep.",
+        )
+        parser.add_argument(
+            "--prepare-refresh-stride",
+            type=int,
+            default=1,
+            help="Substep interval for refreshing contact effective masses and bias.",
         )
         parser.set_defaults(world_count=100, num_frames=1000, viewer="gl")
         return parser
