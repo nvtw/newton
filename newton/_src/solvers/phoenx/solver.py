@@ -314,8 +314,8 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
-        # Body-pair grouping pays a sort/gather cost. Auto-enable it
-        # only for single-world compound scenes where it reduces coloring.
+        # Body-pair grouping pays a sort/gather cost. Use it for
+        # single-scene compound contact graphs, not multi-world fleets.
         has_compound_bodies = False
         if model.shape_body is not None and model.shape_count > 0 and model.body_count > 0:
             sb = model.shape_body.numpy()
@@ -343,7 +343,7 @@ class SolverPhoenX(SolverBase):
             threads_per_world=threads_per_world,
             multi_world_scheduler=multi_world_scheduler,
             max_thread_blocks=max_thread_blocks,
-            enable_body_pair_grouping=has_compound_bodies and step_layout == "single_world",
+            enable_body_pair_grouping=has_compound_bodies and (step_layout == "single_world" or num_worlds == 1),
             mass_splitting=mass_splitting,
             max_colored_partitions=max_colored_partitions,
             mass_splitting_batch_size=mass_splitting_batch_size,

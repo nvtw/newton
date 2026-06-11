@@ -129,6 +129,21 @@ def _build_single_shape_scene():
     return model
 
 
+def _build_compound_fleet_scene(world_count: int = 2):
+    """Minimal multi-world compound scene for constructor policy checks."""
+    mb = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    newton.solvers.SolverMuJoCo.register_custom_attributes(mb)
+    box_cfg = mb.ShapeConfig(density=1000.0)
+    for _ in range(world_count):
+        mb.begin_world()
+        body = mb.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.2), q=wp.quat_identity()))
+        mb.add_shape_box(body, xform=wp.transform(p=wp.vec3(-0.06, 0.0, 0.0), q=wp.quat_identity()), cfg=box_cfg)
+        mb.add_shape_box(body, xform=wp.transform(p=wp.vec3(0.06, 0.0, 0.0), q=wp.quat_identity()), cfg=box_cfg)
+        mb.end_world()
+    model = mb.finalize()
+    return model
+
+
 def _make_solver(model, *, step_layout: str = "multi_world"):
     return newton.solvers.SolverPhoenX(
         model,
@@ -171,17 +186,17 @@ class TestCompoundContactGrouping(unittest.TestCase):
             "ingest scratch should have allocated body-pair sort buffers",
         )
 
-    def test_compound_scene_opts_out_for_multi_world(self) -> None:
-        """Multi-world defaults keep robot-style compound scenes on shape-pair ingest."""
-        model = _build_compound_scene()
+    def test_compound_scene_opts_out_for_multi_world_fleet(self) -> None:
+        """Multi-world fleets keep robot-style compound scenes on shape-pair ingest."""
+        model = _build_compound_fleet_scene()
         solver = _make_solver(model)
         self.assertFalse(
             solver.world._enable_body_pair_grouping,
-            "multi-world compound scene should not auto-enable body-pair grouping",
+            "multi-world compound fleets should not auto-enable body-pair grouping",
         )
         self.assertIsNone(
             solver.world._ingest_scratch.body_pair_keys,
-            "multi-world default should not allocate body-pair sort buffers",
+            "multi-world fleet default should not allocate body-pair sort buffers",
         )
 
     def test_single_shape_scene_opts_out(self) -> None:

@@ -848,7 +848,7 @@ class WorldBuilder:
             device=device,
         )
 
-        # Auto body-pair grouping only for single-world compound scenes.
+        # Auto grouping for single-scene compound contact graphs.
         has_compound_bodies = False
         if self._shapes:
             shape_bodies = np.asarray([int(s.body) for s in self._shapes], dtype=np.int32)
@@ -870,7 +870,7 @@ class WorldBuilder:
             default_friction=default_friction,
             num_worlds=self._num_worlds,
             step_layout=step_layout,
-            enable_body_pair_grouping=has_compound_bodies and step_layout == "single_world",
+            enable_body_pair_grouping=has_compound_bodies and (step_layout == "single_world" or self._num_worlds == 1),
             mass_splitting=mass_splitting,
             max_colored_partitions=max_colored_partitions,
             mass_splitting_batch_size=mass_splitting_batch_size,
