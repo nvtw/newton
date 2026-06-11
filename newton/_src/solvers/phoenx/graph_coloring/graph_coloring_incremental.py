@@ -84,6 +84,8 @@ _LOCALITY_EID_BITS = wp.constant(wp.int64(25))
 _LOCALITY_FAMILY_MASK = wp.constant(wp.int64((1 << 4) - 1))
 _LOCALITY_BODY_MIN_MASK = wp.constant(wp.int64((1 << 24) - 1))
 _LOCALITY_EID_MASK = wp.constant(wp.int64((1 << 25) - 1))
+_LOCALITY_FAMILY_COUNT_HOST = 6
+_LOCALITY_FAMILY_COUNT = wp.constant(_LOCALITY_FAMILY_COUNT_HOST)
 
 
 @wp.kernel(enable_backward=False)
@@ -148,6 +150,56 @@ def _locality_writeback_kernel(
     if tid >= num_elements[0]:
         return
     element_ids_by_color[tid] = values[tid]
+
+
+@wp.kernel(enable_backward=False)
+def _zero_color_family_count_kernel(color_family_count: wp.array[wp.int32]):
+    slot = wp.tid()
+    if slot < color_family_count.shape[0]:
+        color_family_count[slot] = wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def _count_color_families_kernel(
+    element_ids_by_color: wp.array[wp.int32],
+    interaction_id_to_partition: wp.array[wp.int32],
+    element_family: wp.array[wp.int32],
+    family_sort_cutoff: wp.int32,
+    num_elements: wp.array[wp.int32],
+    color_family_count: wp.array[wp.int32],
+):
+    tid = wp.tid()
+    if tid >= num_elements[0]:
+        return
+    eid = element_ids_by_color[tid]
+    color = interaction_id_to_partition[eid]
+    if color < wp.int32(0) or color >= wp.int32(MAX_COLORS):
+        return
+    family = element_family[eid]
+    if family_sort_cutoff >= wp.int32(0) and color >= family_sort_cutoff:
+        family = wp.int32(0)
+    if family < wp.int32(0):
+        family = wp.int32(0)
+    if family >= wp.int32(_LOCALITY_FAMILY_COUNT):
+        family = wp.int32(_LOCALITY_FAMILY_COUNT - 1)
+    wp.atomic_add(color_family_count, color * wp.int32(_LOCALITY_FAMILY_COUNT) + family, wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def _scan_color_family_starts_kernel(
+    color_starts: wp.array[wp.int32],
+    color_family_count: wp.array[wp.int32],
+    color_family_starts: wp.array[wp.int32],
+):
+    color = wp.tid()
+    if color >= wp.int32(MAX_COLORS):
+        return
+    base = color * wp.int32(_LOCALITY_FAMILY_COUNT)
+    running = color_starts[color]
+    for family in range(_LOCALITY_FAMILY_COUNT_HOST):
+        slot = base + wp.int32(family)
+        color_family_starts[slot] = running
+        running = running + color_family_count[slot]
 
 
 @wp.kernel(enable_backward=False, module="unique")
@@ -340,6 +392,10 @@ class IncrementalContactPartitioner:
         self._locality_keys = wp.zeros(2 * max_num_interactions, dtype=wp.int64, device=device)
         self._locality_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
         self._locality_family = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+        family_slots = int(MAX_COLORS) * _LOCALITY_FAMILY_COUNT_HOST
+        self._color_family_count = wp.zeros(family_slots, dtype=wp.int32, device=device)
+        self._color_family_starts = wp.zeros(family_slots, dtype=wp.int32, device=device)
+        self._compute_color_family_starts = False
 
         self._current_color = wp.zeros(1, dtype=wp.int32, device=device)
         self._num_remaining = wp.zeros(1, dtype=wp.int32, device=device)
@@ -578,12 +634,13 @@ class IncrementalContactPartitioner:
 
     # Mode B: build coloring once, replay across many sweeps.
 
-    def build_csr(self) -> None:
+    def build_csr(self, *, compute_family_starts: bool = False) -> None:
         """Run JP to completion; write element_ids_by_color, color_starts,
         num_colors. Graph-capture safe via wp.capture_while."""
         assert self._elements is not None and self._num_elements is not None, (
             "reset() must be called before build_csr()"
         )
+        self._compute_color_family_starts = bool(compute_family_starts)
         self._build_csr_inner()
 
         # Surface MAX_COLORS overflow as an exception when not
@@ -664,13 +721,14 @@ class IncrementalContactPartitioner:
 
     # Greedy Mode B: JP-MIS + smallest-free-colour.
 
-    def build_csr_greedy(self) -> None:
+    def build_csr_greedy(self, *, compute_family_starts: bool = False) -> None:
         """Greedy build, capped at :data:`GREEDY_MAX_COLORS` (64) by the int64
         forbidden mask. Raises ``RuntimeError`` on overflow. Prefer
         :meth:`build_csr_greedy_with_jp_fallback` for in-graph fallback."""
         assert self._elements is not None and self._num_elements is not None, (
             "reset() must be called before build_csr_greedy()"
         )
+        self._compute_color_family_starts = bool(compute_family_starts)
         self._build_csr_greedy_inner()
         device = self._overflow_flag.device
         if device.is_cuda and device.is_capturing:
@@ -681,10 +739,11 @@ class IncrementalContactPartitioner:
                 "Use build_csr_greedy_with_jp_fallback or build_csr instead."
             )
 
-    def build_csr_greedy_with_jp_fallback(self) -> None:
+    def build_csr_greedy_with_jp_fallback(self, *, compute_family_starts: bool = False) -> None:
         """Greedy build with in-graph JP fallback on bitmask overflow.
         Uses _fallback_flag (separate from _overflow_flag) so JP body can clear
         it without racing JP's own MAX_COLORS accounting."""
+        self._compute_color_family_starts = bool(compute_family_starts)
         self._build_csr_greedy_inner()
         wp.copy(self._fallback_flag, self._overflow_flag)
         wp.capture_while(self._fallback_flag, self._capture_jp_fallback_step)
@@ -989,6 +1048,34 @@ class IncrementalContactPartitioner:
                 self._element_ids_by_color,
             ],
         )
+        if not self._compute_color_family_starts:
+            return
+        wp.launch(
+            _zero_color_family_count_kernel,
+            dim=self._color_family_count.shape[0],
+            inputs=[self._color_family_count],
+        )
+        wp.launch(
+            _count_color_families_kernel,
+            dim=n,
+            inputs=[
+                self._element_ids_by_color,
+                self._interaction_id_to_partition,
+                self._locality_family,
+                wp.int32(self._max_colored_partitions_kernel_arg),
+                self._num_elements,
+                self._color_family_count,
+            ],
+        )
+        wp.launch(
+            _scan_color_family_starts_kernel,
+            dim=MAX_COLORS,
+            inputs=[
+                self._color_starts,
+                self._color_family_count,
+                self._color_family_starts,
+            ],
+        )
 
     def _capture_jp_fallback_step(self) -> None:
         """Greedy->JP fallback capture_while body. Clears fallback flag so the
@@ -1172,6 +1259,11 @@ class IncrementalContactPartitioner:
     def color_starts(self) -> wp.array:
         """CSR exclusive-prefix offsets. color_starts[num_colors[0]] = total."""
         return self._color_starts
+
+    @property
+    def color_family_starts(self) -> wp.array:
+        """Family starts for each colour, length ``MAX_COLORS * 6``."""
+        return self._color_family_starts
 
     @property
     def num_colors(self) -> wp.array:

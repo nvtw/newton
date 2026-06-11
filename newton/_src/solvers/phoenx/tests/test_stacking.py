@@ -46,6 +46,7 @@ from newton._src.solvers.phoenx.examples.example_common import (
 from newton._src.solvers.phoenx.examples.example_common import (
     phoenx_to_newton_kernel as _phoenx_to_newton_kernel,
 )
+from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.solver_config import (
     PHOENX_CONTACT_MATCHING,
 )
@@ -306,12 +307,10 @@ class _PhoenXScene:
             )
         self.bodies = bodies
 
-        # Joint-only :class:`ConstraintContainer` (the contact-column
-        # storage moved to :class:`ContactColumnContainer` long ago,
-        # so the constraint container only needs a 1-row placeholder
-        # when the scene has no joints).
+        self._adbs = build_adbs_init_arrays(self.model, device=self.device)
+        num_joints = self._adbs.num_joint_columns
         self.constraints = PhoenXWorld.make_constraint_container(
-            num_joints=0,
+            num_joints=num_joints,
             device=self.device,
         )
 
@@ -327,11 +326,15 @@ class _PhoenXScene:
             velocity_iterations=self.velocity_iterations,
             gravity=(0.0, 0.0, -_G),
             rigid_contact_max=rigid_contact_max,
+            num_joints=num_joints,
             default_friction=self.friction,
             step_layout=self.step_layout,
             prepare_refresh_stride=self.prepare_refresh_stride,
             device=self.device,
         )
+
+        if num_joints > 0:
+            self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
 
         # Defer the CUDA graph capture until the first :meth:`step`
         # call. Tests that install materials or change other solver
@@ -685,6 +688,33 @@ class TestPhoenXSolverStacking(unittest.TestCase):
         self.assertGreater(float(pos[2]), 0.43)
         self.assertLess(float(pos[2]), 0.62)
         self.assertLess(float(np.linalg.norm(vel)), 0.08)
+
+    def test_single_world_rigid_family_split_steps(self) -> None:
+        """Single-world joint/contact mixes use the typed family path."""
+        scene = _PhoenXScene(substeps=2, solver_iterations=2, step_layout="single_world")
+        scene.add_ground_plane()
+        body = scene.mb.add_link(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.22), q=wp.quat_identity()))
+        scene.mb.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2)
+        joint = scene.mb.add_joint_revolute(
+            parent=-1,
+            child=body,
+            parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.22), q=wp.quat_identity()),
+            child_xform=wp.transform_identity(),
+            axis=(0.0, 0.0, 1.0),
+            limit_lower=-0.25,
+            limit_upper=0.25,
+        )
+        scene.mb.add_articulation([joint])
+        scene.finalize()
+
+        self.assertTrue(scene.world._singleworld_family_split())
+        for _ in range(3):
+            scene.step()
+
+        pos = scene.body_position(body)
+        vel = scene.body_velocity(body)
+        self.assertTrue(np.all(np.isfinite(pos)))
+        self.assertTrue(np.all(np.isfinite(vel)))
 
     # ------------------------------------------------------------------
     # Two-body stack

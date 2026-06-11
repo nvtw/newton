@@ -2543,11 +2543,12 @@ class PhoenXWorld:
         if self._constraint_capacity > 0:
             self._partitioner.reset(self._elements, self._num_active_constraints)
             if self.step_layout == "single_world":
+                compute_family_starts = self._singleworld_family_split()
                 if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
                     # In-graph JP fallback if greedy's 64-colour bitmask overflows.
-                    self._partitioner.build_csr_greedy_with_jp_fallback()
+                    self._partitioner.build_csr_greedy_with_jp_fallback(compute_family_starts=compute_family_starts)
                 else:
-                    self._partitioner.build_csr()
+                    self._partitioner.build_csr(compute_family_starts=compute_family_starts)
             else:
                 self._build_per_world_coloring()
 
@@ -3634,6 +3635,7 @@ class PhoenXWorld:
                     wp.float32(self.sor_boost),
                     self._partitioner.element_ids_by_color,
                     self._partitioner.color_starts,
+                    self._partitioner.color_family_starts,
                     self._partitioner.num_colors,
                     self._partitioner.color_cursor,
                     self._contact_container,
@@ -3675,6 +3677,7 @@ class PhoenXWorld:
                 wp.float32(self.sor_boost),
                 self._partitioner.element_ids_by_color,
                 self._partitioner.color_starts,
+                self._partitioner.color_family_starts,
                 self._partitioner.num_colors,
                 self._partitioner.color_cursor,
                 self._contact_container,
@@ -3812,6 +3815,7 @@ class PhoenXWorld:
         kw = {
             **self._dispatch_specialization_flags(),
             "has_mass_splitting": self.mass_splitting_enabled,
+            "family_split": self._singleworld_family_split(),
         }
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),
@@ -3836,6 +3840,7 @@ class PhoenXWorld:
                 has_mass_splitting=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
+                family_split=self._singleworld_family_split(),
             ),
             get_singleworld_kernel(
                 phase="cached_prepare",
@@ -3848,8 +3853,23 @@ class PhoenXWorld:
                 has_mass_splitting=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
+                family_split=self._singleworld_family_split(),
             ),
         )
+
+    def _singleworld_family_split(self) -> bool:
+        """Use solver-family subranges in single-world PGS kernels."""
+        if self.step_layout != "single_world" or self.mass_splitting_enabled or not self._use_greedy_coloring:
+            return False
+        if (
+            self.num_cloth_triangles > 0
+            or self.num_cloth_bending > 0
+            or self.num_soft_tetrahedra > 0
+            or self.num_soft_hexahedra > 0
+        ):
+            return False
+
+        return self.num_joints > 0 and self.max_contact_columns > 0
 
     def _fast_tail_family_split(self) -> bool:
         """Use solver-family subranges in multi-world fast-tail."""

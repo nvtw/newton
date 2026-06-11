@@ -3604,6 +3604,7 @@ def _make_singleworld_persistent_kernel(
     has_mass_splitting: bool = True,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
+    family_split: bool = False,
 ):
     """Persistent-grid PGS kernel for the requested phase.
 
@@ -3632,6 +3633,23 @@ def _make_singleworld_persistent_kernel(
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
     )
+    _, _dispatch_prepare_rigid_joint, _dispatch_prepare_rigid_contact = _make_multiworld_rigid_prepare_dispatch_func(
+        revolute_only=revolute_only,
+        has_joints=has_joints,
+        has_contacts=True,
+        has_soft_contact_pd=has_soft_contact_pd,
+        cached_prepare=is_cached_prepare,
+        enable_column_timers=enable_column_timers,
+    )
+    _, _dispatch_iterate_rigid_joint, _dispatch_iterate_rigid_contact = _make_multiworld_rigid_iterate_dispatch_funcs(
+        revolute_only=revolute_only,
+        has_joints=has_joints,
+        has_contacts=True,
+        has_sleeping=has_sleeping,
+        has_soft_contact_pd=has_soft_contact_pd,
+        enable_column_timers=enable_column_timers,
+        use_bias=use_bias,
+    )
 
     @wp.kernel(enable_backward=False, module="unique")
     def kernel(
@@ -3643,6 +3661,7 @@ def _make_singleworld_persistent_kernel(
         sor_boost: wp.float32,
         element_ids_by_color: wp.array[wp.int32],
         color_starts: wp.array[wp.int32],
+        color_family_starts: wp.array[wp.int32],
         num_colors: wp.array[wp.int32],
         color_cursor: wp.array[wp.int32],
         cc: ContactContainer,
@@ -3698,6 +3717,68 @@ def _make_singleworld_persistent_kernel(
             thread_start = tid * ms_batch_size
             stride = total_num_threads * ms_batch_size
 
+        if wp.static(family_split):
+            if not is_overflow_color:
+                family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
+                color_end = start + count
+                joint_start = color_family_starts[family_base]
+                contact_start = color_family_starts[family_base + wp.int32(1)]
+                count_joints = contact_start - joint_start
+                base = tid
+                while base < count_joints:
+                    cid = read1d_i32(element_ids_by_color, joint_start + base)
+                    if wp.static(is_prepare or is_cached_prepare):
+                        _dispatch_prepare_rigid_joint(constraints, bodies, particles, copy_state, num_bodies, idt, cid)
+                    else:
+                        _dispatch_iterate_rigid_joint(
+                            constraints,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            idt,
+                            sor_boost,
+                            cid,
+                            wp.int32(1),
+                        )
+                    base = base + total_num_threads
+
+                count_contacts = color_end - contact_start
+                base = tid
+                while base < count_contacts:
+                    cid = read1d_i32(element_ids_by_color, contact_start + base)
+                    local_cid = cid - num_joints
+                    if wp.static(is_prepare or is_cached_prepare):
+                        _dispatch_prepare_rigid_contact(
+                            contact_cols,
+                            bodies,
+                            particles,
+                            cc,
+                            contacts,
+                            copy_state,
+                            num_bodies,
+                            idt,
+                            local_cid,
+                        )
+                    else:
+                        _dispatch_iterate_rigid_contact(
+                            contact_cols,
+                            bodies,
+                            particles,
+                            cc,
+                            contacts,
+                            copy_state,
+                            num_bodies,
+                            idt,
+                            sor_boost,
+                            local_cid,
+                            wp.int32(1),
+                        )
+                    base = base + total_num_threads
+                if tid == 0:
+                    color_cursor[0] = cursor - 1
+                return
+
         for t in range(thread_start, count, stride):
             inner_end = wp.int32(1)
             if is_overflow_color:
@@ -3749,6 +3830,7 @@ def _make_singleworld_fused_kernel(
     has_mass_splitting: bool = True,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
+    family_split: bool = False,
 ):
     """Single-block tail-fused PGS kernel; same axes as
     :func:`_make_singleworld_persistent_kernel`."""
@@ -3770,6 +3852,23 @@ def _make_singleworld_fused_kernel(
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
     )
+    _, _dispatch_prepare_rigid_joint, _dispatch_prepare_rigid_contact = _make_multiworld_rigid_prepare_dispatch_func(
+        revolute_only=revolute_only,
+        has_joints=has_joints,
+        has_contacts=True,
+        has_soft_contact_pd=has_soft_contact_pd,
+        cached_prepare=is_cached_prepare,
+        enable_column_timers=enable_column_timers,
+    )
+    _, _dispatch_iterate_rigid_joint, _dispatch_iterate_rigid_contact = _make_multiworld_rigid_iterate_dispatch_funcs(
+        revolute_only=revolute_only,
+        has_joints=has_joints,
+        has_contacts=True,
+        has_sleeping=has_sleeping,
+        has_soft_contact_pd=has_soft_contact_pd,
+        enable_column_timers=enable_column_timers,
+        use_bias=use_bias,
+    )
 
     @wp.kernel(enable_backward=False, module="unique")
     def kernel(
@@ -3781,6 +3880,7 @@ def _make_singleworld_fused_kernel(
         sor_boost: wp.float32,
         element_ids_by_color: wp.array[wp.int32],
         color_starts: wp.array[wp.int32],
+        color_family_starts: wp.array[wp.int32],
         num_colors: wp.array[wp.int32],
         color_cursor: wp.array[wp.int32],
         cc: ContactContainer,
@@ -3831,6 +3931,69 @@ def _make_singleworld_fused_kernel(
             if is_overflow_color:
                 inner_steps = ms_batch_size
                 num_units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
+            if wp.static(family_split):
+                if not is_overflow_color:
+                    family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
+                    color_end = start + count
+                    joint_start = color_family_starts[family_base]
+                    contact_start = color_family_starts[family_base + wp.int32(1)]
+                    count_joints = contact_start - joint_start
+                    base = lane
+                    while base < count_joints:
+                        cid = read1d_i32(element_ids_by_color, joint_start + base)
+                        if wp.static(is_prepare or is_cached_prepare):
+                            _dispatch_prepare_rigid_joint(
+                                constraints, bodies, particles, copy_state, num_bodies, idt, cid
+                            )
+                        else:
+                            _dispatch_iterate_rigid_joint(
+                                constraints,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                cid,
+                                wp.int32(1),
+                            )
+                        base = base + fuse_threshold
+
+                    count_contacts = color_end - contact_start
+                    base = lane
+                    while base < count_contacts:
+                        cid = read1d_i32(element_ids_by_color, contact_start + base)
+                        local_cid = cid - num_joints
+                        if wp.static(is_prepare or is_cached_prepare):
+                            _dispatch_prepare_rigid_contact(
+                                contact_cols,
+                                bodies,
+                                particles,
+                                cc,
+                                contacts,
+                                copy_state,
+                                num_bodies,
+                                idt,
+                                local_cid,
+                            )
+                        else:
+                            _dispatch_iterate_rigid_contact(
+                                contact_cols,
+                                bodies,
+                                particles,
+                                cc,
+                                contacts,
+                                copy_state,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                local_cid,
+                                wp.int32(1),
+                            )
+                        base = base + fuse_threshold
+                    _sync_threads()
+                    cursor = cursor - 1
+                    continue
             if lane < num_units:
                 parallel_id = wp.int32(0)
                 if is_overflow_color:
@@ -3885,6 +4048,7 @@ def get_singleworld_kernel(
     has_mass_splitting: bool = True,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
+    family_split: bool = False,
 ):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
@@ -3899,4 +4063,5 @@ def get_singleworld_kernel(
         has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
+        family_split=family_split,
     )
