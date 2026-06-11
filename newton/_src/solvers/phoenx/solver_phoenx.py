@@ -1192,36 +1192,15 @@ class PhoenXWorld:
             # current cloth / soft-tet / joint specialisation.
             kernels.extend(self._singleworld_kernels())
         else:
-            dispatch_kw = self._dispatch_specialization_flags()
-            base_fast_tail_kw = {
-                **dispatch_kw,
-                "has_contacts": self.max_contact_columns > 0,
-            }
-            base_block_world_kw = {
-                "revolute_only": dispatch_kw["revolute_only"],
-                "has_joints": dispatch_kw["has_joints"],
-                "has_contacts": self.max_contact_columns > 0,
-                "has_sleeping": dispatch_kw["has_sleeping"],
-                "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
-                "enable_column_timers": dispatch_kw["enable_column_timers"],
-            }
             if self._multi_world_scheduler == "block_world" and self._block_world_supported():
-                block_world_kw = {
-                    **base_block_world_kw,
-                    "block_dim": self._multi_world_block_dim,
-                }
-                kernels.append(get_block_world_kernel(kind="prepare_plus_iterate", **block_world_kw))
-                kernels.append(get_block_world_kernel(kind="relax", **block_world_kw))
+                kw = self._block_world_kernel_flags(self._multi_world_block_dim)
+                kernels.append(get_block_world_kernel(kind="prepare_plus_iterate", **kw))
+                kernels.append(get_block_world_kernel(kind="relax", **kw))
             else:
                 for fixed_tpw in self._fast_tail_auto_fixed_choices():
-                    fast_tail_kw = {
-                        **base_fast_tail_kw,
-                        "fixed_tpw": fixed_tpw,
-                        "guard_tpw": self._tpw_auto,
-                        "family_split": self._fast_tail_family_split(),
-                    }
-                    kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw))
-                    kernels.append(get_fast_tail_kernel(kind="relax", **fast_tail_kw))
+                    kw = self._fast_tail_kernel_flags(fixed_tpw)
+                    kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **kw))
+                    kernels.append(get_fast_tail_kernel(kind="relax", **kw))
 
         # De-duplicate by module; ``functools.cache`` already collapses
         # identical (axes-tuple) factory calls but cheap to be defensive.
@@ -3363,12 +3342,7 @@ class PhoenXWorld:
         for fixed_tpw in self._fast_tail_auto_fixed_choices():
             kernel = get_fast_tail_kernel(
                 kind="prepare_plus_iterate",
-                **self._dispatch_specialization_flags(),
-                has_contacts=self.max_contact_columns > 0,
-                cached_prepare=bool(cached_prepare),
-                fixed_tpw=fixed_tpw,
-                guard_tpw=self._tpw_auto,
-                family_split=self._fast_tail_family_split(),
+                **self._fast_tail_kernel_flags(fixed_tpw, cached_prepare=bool(cached_prepare)),
             )
             wp.launch(
                 kernel,
@@ -3411,11 +3385,7 @@ class PhoenXWorld:
         for fixed_tpw in self._fast_tail_auto_fixed_choices():
             kernel = get_fast_tail_kernel(
                 kind="relax",
-                **self._dispatch_specialization_flags(),
-                has_contacts=self.max_contact_columns > 0,
-                fixed_tpw=fixed_tpw,
-                guard_tpw=self._tpw_auto,
-                family_split=self._fast_tail_family_split(),
+                **self._fast_tail_kernel_flags(fixed_tpw),
             )
             self._launch_fast_iter(
                 kernel,
@@ -3528,14 +3498,7 @@ class PhoenXWorld:
         cached_prepare = not self._refresh_prepare_this_substep()
         kernel = get_block_world_kernel(
             kind="prepare_plus_iterate",
-            revolute_only=bool(self._use_revolute_specialization),
-            has_joints=self.num_joints > 0,
-            has_contacts=self.max_contact_columns > 0,
-            has_sleeping=bool(self._sleeping_enabled),
-            has_soft_contact_pd=bool(self._has_soft_contact_pd),
-            cached_prepare=bool(cached_prepare),
-            enable_column_timers=self.enable_column_timers,
-            block_dim=block_dim,
+            **self._block_world_kernel_flags(block_dim, cached_prepare=bool(cached_prepare)),
         )
         wp.launch(
             kernel,
@@ -3573,13 +3536,7 @@ class PhoenXWorld:
         contact_views = self._active_contact_views()
         kernel = get_block_world_kernel(
             kind="relax",
-            revolute_only=bool(self._use_revolute_specialization),
-            has_joints=self.num_joints > 0,
-            has_contacts=self.max_contact_columns > 0,
-            has_sleeping=bool(self._sleeping_enabled),
-            has_soft_contact_pd=bool(self._has_soft_contact_pd),
-            enable_column_timers=self.enable_column_timers,
-            block_dim=block_dim,
+            **self._block_world_kernel_flags(block_dim),
         )
         wp.launch(
             kernel,
@@ -3801,6 +3758,35 @@ class PhoenXWorld:
             "has_sleeping": self._sleeping_enabled,
             "has_soft_contact_pd": bool(self._has_soft_contact_pd),
         }
+
+    def _fast_tail_kernel_flags(self, fixed_tpw: int, *, cached_prepare: bool | None = None) -> dict[str, object]:
+        """Factory flags for multi-world fast-tail kernels."""
+        kw: dict[str, object] = {
+            **self._dispatch_specialization_flags(),
+            "has_contacts": self.max_contact_columns > 0,
+            "fixed_tpw": int(fixed_tpw),
+            "guard_tpw": self._tpw_auto,
+            "family_split": self._fast_tail_family_split(),
+        }
+        if cached_prepare is not None:
+            kw["cached_prepare"] = bool(cached_prepare)
+        return kw
+
+    def _block_world_kernel_flags(self, block_dim: int, *, cached_prepare: bool | None = None) -> dict[str, object]:
+        """Factory flags for rigid block-world kernels."""
+        dispatch_kw = self._dispatch_specialization_flags()
+        kw: dict[str, object] = {
+            "revolute_only": dispatch_kw["revolute_only"],
+            "has_joints": dispatch_kw["has_joints"],
+            "has_contacts": self.max_contact_columns > 0,
+            "has_sleeping": dispatch_kw["has_sleeping"],
+            "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
+            "enable_column_timers": dispatch_kw["enable_column_timers"],
+            "block_dim": int(block_dim),
+        }
+        if cached_prepare is not None:
+            kw["cached_prepare"] = bool(cached_prepare)
+        return kw
 
     def _singleworld_kernels(self):
         """Return ``(prepare_head, prepare_fused, iterate_head,
