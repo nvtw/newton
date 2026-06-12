@@ -50,7 +50,7 @@ _ANCHOR2 = (0.0, 0.0, +HALF_EXTENT)
 def _axial_twist(orientation: np.ndarray) -> float:
     """Signed twist of an orientation quat (xyzw) about world ``+z``.
 
-    Mirrors the helper in :mod:`test_actuated_double_ball_socket`:
+    Mirrors the helper in :mod:`test_joint_modes`:
     when the swing component is ~zero (revolute lock about z), the
     twist is ``2 * atan2(z, w)``. The revolute fixture used here
     keeps body 1 static at identity, so this directly gives the
